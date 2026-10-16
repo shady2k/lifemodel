@@ -81,11 +81,14 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
   readonly section = 'inbound';
   private snapshot = emptySnapshot();
   private readonly queuedIds = new Set<string>();
+  private readonly completedDelta = new Set<string>();
 
   constructor(
     private readonly redis: Redis,
     private readonly streamKey = INBOUND_STREAM,
-    private readonly dedupLimit = DEFAULT_DEDUP_LIMIT
+    private readonly dedupLimit = DEFAULT_DEDUP_LIMIT,
+    private readonly onDurableDuplicate?: (messageId: string) => void,
+    private readonly completedInboundKey = 'inbound:completed'
   ) {
     if (!Number.isInteger(dedupLimit) || dedupLimit < 1)
       throw new Error('dedupLimit must be positive');
@@ -133,13 +136,16 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
 
   async readNew(includePhotoReceipts = false): Promise<InboundMessage[]> {
     const rows = await this.redis.xrange(this.streamKey, `(${this.snapshot.readOffset}`, '+');
+    const pending = structuredClone(this.snapshot.pending);
     const known = new Set([
       ...this.snapshot.recentMessageIds,
-      ...this.snapshot.pending.map((message) => message.messageId),
+      ...pending.map((message) => message.messageId),
     ]);
+    let readOffset = this.snapshot.readOffset;
+    const completed: string[] = [];
+    const newlyPending: InboundMessage[] = [];
     for (const [streamId, fields] of rows) {
       const values = this.fields(fields);
-      this.snapshot.readOffset = streamId;
       if (values['type'] !== 'inbound.message')
         throw new Error(`Unexpected inbound event type: ${values['type'] ?? 'missing'}`);
       const messageId = values['messageId'];
@@ -150,16 +156,32 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
       if (signal.type !== 'user_message')
         throw new Error(`Inbound stream payload at ${streamId} is not a user_message`);
       if (known.has(messageId)) {
-        const pending = this.snapshot.pending.find((item) => item.messageId === messageId);
-        const oldData = pending?.signal.data as { pendingPhoto?: unknown } | undefined;
+        const pendingEntry = [...pending, ...newlyPending].find(
+          (item) => item.messageId === messageId
+        );
+        const oldData = pendingEntry?.signal.data as { pendingPhoto?: unknown } | undefined;
         const newData = signal.data as { pendingPhoto?: unknown } | undefined;
-        if (pending && oldData?.pendingPhoto != null && newData?.pendingPhoto == null) {
-          pending.signal = signal;
-        }
+        if (pendingEntry && oldData?.pendingPhoto != null && newData?.pendingPhoto == null)
+          pendingEntry.signal = signal;
+        else if (pendingEntry) pendingEntry.streamId = streamId;
+        readOffset = streamId;
         continue;
       }
-      this.snapshot.pending.push({ streamId, messageId, recipientId, signal });
+      if ((await this.redis.zscore(this.completedInboundKey, messageId)) !== null) {
+        completed.push(messageId);
+        readOffset = streamId;
+        continue;
+      }
+      newlyPending.push({ streamId, messageId, recipientId, signal });
       known.add(messageId);
+      readOffset = streamId;
+    }
+    this.snapshot.pending = [...pending, ...newlyPending];
+    this.snapshot.readOffset = readOffset;
+    if (completed.length) {
+      this.snapshot.recentMessageIds.push(...completed);
+      this.snapshot.recentMessageIds = this.snapshot.recentMessageIds.slice(-this.dedupLimit);
+      for (const id of completed) this.onDurableDuplicate?.(id);
     }
     return this.takeUndelivered(includePhotoReceipts);
   }
@@ -186,6 +208,7 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
       }
       this.snapshot.recipientOffsets[message.recipientId] = message.streamId;
       this.snapshot.recentMessageIds.push(message.messageId);
+      this.completedDelta.add(message.messageId);
       this.snapshot.errorRetries = Object.fromEntries(
         Object.entries(this.snapshot.errorRetries).filter(
           ([messageId]) => messageId !== message.messageId
@@ -195,6 +218,14 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
     }
     this.snapshot.pending = remains;
     this.snapshot.recentMessageIds = this.snapshot.recentMessageIds.slice(-this.dedupLimit);
+  }
+
+  completedSinceSnapshot(): string[] {
+    return [...this.completedDelta];
+  }
+
+  snapshotCommitted(): void {
+    this.completedDelta.clear();
   }
 
   /** Pending entries whose retry budget was exhausted before this process read them. */
@@ -274,7 +305,7 @@ export interface OutboundMessagePayload extends Record<string, unknown> {
 }
 
 /**
- * Retain events until both consumers pass them, except that the oldest events
+ * Retain events until Postgres applies them, except that the oldest events
  * are forcibly discarded after the configured age/length horizon. Events and
  * their idempotency keys share that horizon.
  */
@@ -283,7 +314,6 @@ export async function trimOutboundEvents(
   options: {
     streamKey?: string;
     postgresOffsetKey?: string;
-    deliveryOffsetKey?: string;
     eventKeysKey?: string;
     maxLength?: number;
     maxAgeMs?: number;
@@ -292,7 +322,6 @@ export async function trimOutboundEvents(
 ): Promise<void> {
   const streamKey = options.streamKey ?? OUTBOUND_STREAM;
   const postgresOffsetKey = options.postgresOffsetKey ?? 'outbound:pg-applied';
-  const deliveryOffsetKey = options.deliveryOffsetKey ?? 'outbound:delivery-offset';
   const eventKeysKey =
     options.eventKeysKey ??
     (streamKey === OUTBOUND_STREAM
@@ -303,11 +332,7 @@ export async function trimOutboundEvents(
   if (!Number.isInteger(maxLength) || maxLength < 1 || !Number.isFinite(maxAgeMs) || maxAgeMs < 1) {
     throw new Error('Outbound retention maxLength and maxAgeMs must be positive');
   }
-  const [postgresOffset, deliveryOffset] = await Promise.all([
-    redis.get(postgresOffsetKey),
-    redis.get(deliveryOffsetKey),
-  ]);
-  const passed = minStreamId(postgresOffset ?? '0-0', deliveryOffset ?? '0-0');
+  const passed = (await redis.get(postgresOffsetKey)) ?? '0-0';
   let boundary = passed;
   const ageBoundary = `${String(Math.max(0, Date.now() - maxAgeMs))}-0`;
   if (compareStreamIds(ageBoundary, boundary) > 0) boundary = ageBoundary;
@@ -323,7 +348,7 @@ export async function trimOutboundEvents(
   if (dropped > 0) {
     options.logger?.warn(
       { count: dropped, streamKey, maxLength, maxAgeMs },
-      'Outbound retention bound dropped undelivered events'
+      'Outbound retention bound dropped unapplied events'
     );
   }
 }
@@ -338,18 +363,6 @@ function compareStreamIds(left: string, right: string): number {
   const x = BigInt(leftSeq),
     y = BigInt(rightSeq);
   return x < y ? -1 : x > y ? 1 : 0;
-}
-
-function minStreamId(left: string, right: string): string {
-  const [leftMillisText, leftSequenceText] = left.split('-');
-  const [rightMillisText, rightSequenceText] = right.split('-');
-  if (!leftMillisText || !leftSequenceText || !rightMillisText || !rightSequenceText) {
-    throw new Error('Invalid outbound stream cursor');
-  }
-  const leftMillis = BigInt(leftMillisText);
-  const rightMillis = BigInt(rightMillisText);
-  if (leftMillis !== rightMillis) return leftMillis < rightMillis ? left : right;
-  return BigInt(leftSequenceText) <= BigInt(rightSequenceText) ? left : right;
 }
 
 /** Apply committed outbound message rows in stream order. Replaying a row is safe
@@ -415,7 +428,6 @@ export function startOutboundDelivery(
   let active = true;
   const trimOptions = {
     streamKey,
-    deliveryOffsetKey: offsetKey,
     ...(options.postgresOffsetKey ? { postgresOffsetKey: options.postgresOffsetKey } : {}),
     ...(options.eventKeysKey ? { eventKeysKey: options.eventKeysKey } : {}),
     ...(options.maxLength !== undefined ? { maxLength: options.maxLength } : {}),

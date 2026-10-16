@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import Redis from 'iovalkey';
 import { chmod, mkdir, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +8,8 @@ import { createContainerAsync, type Container } from '../../src/core/container.j
 import { createStoragePrimitive } from '../../src/core/storage-primitive.js';
 import { createTestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
+import { createSnapshotStore } from '../../src/storage/snapshot-store.js';
+import { CREATURE_STATE_KEY } from '../../src/storage/creature-state-store.js';
 
 vi.mock('@huggingface/transformers', () => ({
   env: { cacheDir: '', allowLocalModels: true, allowRemoteModels: true },
@@ -47,8 +50,44 @@ describe('core state homes across restart', () => {
       process.env['NODE_ENV'] = 'production';
       process.env['MOTOR_CORTEX_ENABLED'] = 'false';
 
+      // Force the best-effort initial state EVAL to reject while Postgres
+      // startup awaits are still ahead of logger creation.
+      await stores.redis.hset(CREATURE_STATE_KEY, 'wrong-type', 'value');
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => unhandled.push(reason);
+      process.on('unhandledRejection', onUnhandled);
       active = await createContainerAsync({ logLevel: 'error' });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      process.off('unhandledRejection', onUnhandled);
+      expect(unhandled).toEqual([]);
+      await stores.redis.del(CREATURE_STATE_KEY);
+      await active.shutdown();
+      active = undefined;
+      await stores.redis.set(
+        CREATURE_STATE_KEY,
+        JSON.stringify({ state: 'thinking', epoch: 1, publishedAt: Date.now() })
+      );
+      active = await createContainerAsync({ logLevel: 'error' });
+      expect((await active.creatureState.readCreatureState())?.state).toBe('awake');
       const first = active;
+      const primaryRecipientId = first.recipientRegistry!.lookup('web', 'owner');
+      expect(primaryRecipientId).not.toBeNull();
+      expect(first.userModel?.getUser().id).toBe(primaryRecipientId);
+      first.userModel!.setProperty('restartMarker', 'restored', 0.95, 'user_explicit');
+      const snapshotRedis = new Redis(process.env['LIFEMODEL_VALKEY_URL']!);
+      try {
+        const snapshotStore = createSnapshotStore(snapshotRedis);
+        const epoch = await snapshotStore.currentEpoch();
+        const committed = await snapshotStore.commit(epoch, {
+          version: 1,
+          epoch,
+          tick: 1,
+          sections: { agentState: first.stateManager!.exportSnapshot() },
+        });
+        expect(committed).toBe(true);
+      } finally {
+        await snapshotRedis.quit();
+      }
       const conversationId = 'restart-check';
       await first.conversationManager!.addMessage(conversationId, {
         role: 'user',
@@ -88,6 +127,8 @@ describe('core state homes across restart', () => {
       active = await createContainerAsync({ logLevel: 'error' });
       const restarted = active;
 
+      expect(restarted.userModel?.getUser().id).toBe(primaryRecipientId);
+      expect(restarted.userModel?.getProperty('restartMarker')?.value).toBe('restored');
       expect(
         (await restarted.conversationManager!.getHistory(conversationId)).map((m) => m.content)
       ).toEqual(['remember this conversation across restart', 'I will remember it']);

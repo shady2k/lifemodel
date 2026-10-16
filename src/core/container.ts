@@ -5,6 +5,7 @@ import { Redis } from 'iovalkey';
 import { Pool } from 'pg';
 import type { Metrics, AgentIdentity, AgentState, Channel } from '../types/index.js';
 import type { PluginEventData } from '../types/signal.js';
+import type { CreatureStateReader } from '../ports/creature-state.js';
 import type { EvidenceSource } from '../types/cognition.js';
 import {
   createLogger,
@@ -38,6 +39,7 @@ import {
   createStateManager,
   createConversationManager,
   createSnapshotStore,
+  createCreatureStateStore,
 } from '../storage/index.js';
 import {
   type MergedConfig,
@@ -207,6 +209,8 @@ export interface Container {
   motorCortex: MotorCortex | null;
   /** Durable inbound log (entries leave it on the turn's recorded outcome; lifemodel-ctc.2.1) */
   inboundStream: InboundMessageStream | null;
+  /** Fresh creature state for the web module; no Valkey client crosses this seam. */
+  creatureState: CreatureStateReader;
   /**
    * The step the stop reached ('done' while the agent runs). `src/index.ts`
    * reads it at the stop deadline for the hard exit's error line
@@ -499,10 +503,25 @@ export async function createContainerAsync(
   const rawPostgres = new Pool({ connectionString: databaseUrl });
 
   const snapshotRedis = new Redis(valkeyUrl);
-  const snapshotStore = createSnapshotStore(snapshotRedis, { outboundKey: OUTBOUND_STREAM });
+  const snapshotStore = createSnapshotStore(snapshotRedis, {
+    outboundKey: OUTBOUND_STREAM,
+    completedInboundKey: 'inbound:completed',
+  });
+  const creatureStateStore = createCreatureStateStore(snapshotRedis);
   const busSignalStream = createBusSignalStream(snapshotRedis);
   snapshotStore.register(busSignalStream);
   const snapshotEpoch = await snapshotStore.takeEpoch();
+  // Replace stale thinking state immediately after epoch takeover; this is
+  // best-effort and must not delay startup if the projection store is down.
+  let resolveStartupLogger!: (logger: Logger) => void;
+  const startupLoggerReady = new Promise<Logger>((resolve) => {
+    resolveStartupLogger = resolve;
+  });
+  void creatureStateStore.publishCreatureState('awake', snapshotEpoch).catch((error: unknown) => {
+    void startupLoggerReady.then((logger) => {
+      logger.warn({ err: error }, 'Failed to publish initial creature state');
+    });
+  });
   await rawPostgres.query(
     `INSERT INTO core.active_holder (id, epoch) VALUES (true, $1)
      ON CONFLICT (id) DO UPDATE SET epoch = EXCLUDED.epoch
@@ -525,6 +544,7 @@ export async function createContainerAsync(
 
   // Create logger
   const logger = createLogger(loggerConfig);
+  resolveStartupLogger(logger);
   logger.info({ epoch: snapshotEpoch }, 'Core snapshot epoch acquired');
   logger.info('Loaded configuration');
   if (!mergedConfig.motorCortex.enabled) {
@@ -552,7 +572,15 @@ export async function createContainerAsync(
 
   // Inbound offsets, pending entries and the bounded dedup ring are owned by
   // the Valkey snapshot. Existing stream entries replay from that snapshot.
-  const inboundStream = new InboundMessageStream(snapshotRedis, INBOUND_STREAM);
+  const inboundStream = new InboundMessageStream(
+    snapshotRedis,
+    INBOUND_STREAM,
+    undefined,
+    (messageId) => {
+      logger.warn({ messageId }, 'Inbound retry already has a committed outcome');
+    },
+    'inbound:completed'
+  );
   inboundStream.hydrateSnapshot(
     initialSnapshot?.sections['inbound'] as Parameters<typeof inboundStream.hydrateSnapshot>[0]
   );
@@ -616,61 +644,64 @@ export async function createContainerAsync(
   // Create event bus
   const eventBus = createEventBus(logger);
 
-  const primaryUserChatId: string | null = null;
+  // The web owner is the primary user for all primary-recipient consumers.
+  const recipientRegistry = createPersistentRecipientRegistry(postgres, logger);
+  await recipientRegistry.init();
+  const primaryRecipientId = recipientRegistry.getOrCreate('web', 'owner');
+  await recipientRegistry.flush();
+  logger.info({ count: recipientRegistry.size() }, 'RecipientRegistry configured');
 
-  // Create UserModel if primary user configured
+  // Restore or create the UserModel for the web owner.
   let userModel: UserModel | null = null;
-  if (primaryUserChatId) {
-    // Check if user has beliefs (may be missing from old persisted states)
-    const hasBeliefs = persistedState?.user && 'beliefs' in persistedState.user;
-    if (persistedState?.user?.id === primaryUserChatId && hasBeliefs) {
-      // Restore from persisted state - convert date strings
-      const restoredUser = {
-        ...persistedState.user,
-        lastMentioned:
-          typeof persistedState.user.lastMentioned === 'string'
-            ? new Date(persistedState.user.lastMentioned)
-            : persistedState.user.lastMentioned,
-        beliefs: {
-          energy: {
-            ...persistedState.user.beliefs.energy,
-            updatedAt:
-              typeof persistedState.user.beliefs.energy.updatedAt === 'string'
-                ? new Date(persistedState.user.beliefs.energy.updatedAt)
-                : persistedState.user.beliefs.energy.updatedAt,
-          },
-          mood: {
-            ...persistedState.user.beliefs.mood,
-            updatedAt:
-              typeof persistedState.user.beliefs.mood.updatedAt === 'string'
-                ? new Date(persistedState.user.beliefs.mood.updatedAt)
-                : persistedState.user.beliefs.mood.updatedAt,
-          },
-          availability: {
-            ...persistedState.user.beliefs.availability,
-            updatedAt:
-              typeof persistedState.user.beliefs.availability.updatedAt === 'string'
-                ? new Date(persistedState.user.beliefs.availability.updatedAt)
-                : persistedState.user.beliefs.availability.updatedAt,
-          },
+  // Check if user has beliefs (may be missing from old persisted states)
+  const hasBeliefs = persistedState?.user && 'beliefs' in persistedState.user;
+  if (persistedState?.user?.id === primaryRecipientId && hasBeliefs) {
+    // Restore from persisted state - convert date strings
+    const restoredUser = {
+      ...persistedState.user,
+      lastMentioned:
+        typeof persistedState.user.lastMentioned === 'string'
+          ? new Date(persistedState.user.lastMentioned)
+          : persistedState.user.lastMentioned,
+      beliefs: {
+        energy: {
+          ...persistedState.user.beliefs.energy,
+          updatedAt:
+            typeof persistedState.user.beliefs.energy.updatedAt === 'string'
+              ? new Date(persistedState.user.beliefs.energy.updatedAt)
+              : persistedState.user.beliefs.energy.updatedAt,
         },
-      };
-      userModel = createUserModel(restoredUser, logger);
-      logger.info(
-        {
-          userId: primaryUserChatId,
-          userName: restoredUser.name,
-          language: restoredUser.preferences.language,
+        mood: {
+          ...persistedState.user.beliefs.mood,
+          updatedAt:
+            typeof persistedState.user.beliefs.mood.updatedAt === 'string'
+              ? new Date(persistedState.user.beliefs.mood.updatedAt)
+              : persistedState.user.beliefs.mood.updatedAt,
         },
-        'UserModel restored from persisted state'
-      );
-    } else {
-      const userName = configOverrides.primaryUser?.name ?? mergedConfig.primaryUser.name;
-      const timezoneOffset =
-        configOverrides.primaryUser?.timezoneOffset ?? mergedConfig.primaryUser.timezoneOffset;
-      userModel = createNewUserWithModel(primaryUserChatId, userName, logger, timezoneOffset);
-      logger.info({ userId: primaryUserChatId, userName }, 'UserModel created for primary user');
-    }
+        availability: {
+          ...persistedState.user.beliefs.availability,
+          updatedAt:
+            typeof persistedState.user.beliefs.availability.updatedAt === 'string'
+              ? new Date(persistedState.user.beliefs.availability.updatedAt)
+              : persistedState.user.beliefs.availability.updatedAt,
+        },
+      },
+    };
+    userModel = createUserModel(restoredUser, logger);
+    logger.info(
+      {
+        userId: primaryRecipientId,
+        userName: restoredUser.name,
+        language: restoredUser.preferences.language,
+      },
+      'UserModel restored from persisted state'
+    );
+  } else {
+    const userName = configOverrides.primaryUser?.name ?? mergedConfig.primaryUser.name;
+    const timezoneOffset =
+      configOverrides.primaryUser?.timezoneOffset ?? mergedConfig.primaryUser.timezoneOffset;
+    userModel = createNewUserWithModel(primaryRecipientId, userName, logger, timezoneOffset);
+    logger.info({ userId: primaryRecipientId, userName }, 'UserModel created for primary user');
   }
 
   // Create LLM providers
@@ -840,11 +871,6 @@ export async function createContainerAsync(
 
     logger.info({ hasFetch: true, hasSearch: !!motorSearchFn }, 'Motor Cortex service initialized');
   }
-
-  // Create recipient registry for message routing (with persistence)
-  const recipientRegistry = createPersistentRecipientRegistry(postgres, logger);
-  await recipientRegistry.init();
-  logger.info({ count: recipientRegistry.size() }, 'RecipientRegistry configured');
 
   // Create persistent ack registry for deferrals (must be loaded before use)
   const ackRegistry = new PersistentAckRegistry(logger);
@@ -1074,10 +1100,6 @@ export async function createContainerAsync(
     throw new Error('LIFEMODEL_CORE_STOP_DEADLINE_MS must be a positive integer');
   }
   coreLoopConfig.shutdownDrainTimeoutMs = stopDeadlineMs;
-  if (primaryUserChatId) {
-    coreLoopConfig.primaryUserChatId = primaryUserChatId;
-  }
-
   let shutdown: (() => Promise<void>) | null = null;
   // Create core loop
   const coreLoop = createCoreLoop(agent, eventBus, layers, logger, metrics, coreLoopConfig, {
@@ -1097,6 +1119,8 @@ export async function createContainerAsync(
     initialTickCount: Number(
       initialSnapshot?.sections['tickCounter'] ?? initialSnapshot?.tick ?? 0
     ),
+    creatureStateEpoch: snapshotEpoch,
+    publishCreatureState: (state, epoch) => creatureStateStore.publishCreatureState(state, epoch),
     commitSnapshot: async (tick, outbox) => {
       await snapshotStore.commitOwners(snapshotEpoch, tick, outbox);
       logger.debug({ epoch: snapshotEpoch, tick }, 'Core snapshot committed');
@@ -1277,6 +1301,7 @@ export async function createContainerAsync(
     recipientRegistry,
     motorCortex,
     inboundStream,
+    creatureState: creatureStateStore,
     stopProgress: () => stopProgress.step,
     shutdown,
   };

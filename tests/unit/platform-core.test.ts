@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -78,7 +78,7 @@ describe('core application generation', () => {
     expect(kustomization.resources).toContain('core.yaml');
   });
 
-  it('limits the application applier to the core kinds it must create', () => {
+  it('grants the application applier the kinds used by every lifemodel seed', () => {
     expect(applier.rules).toEqual([
       {
         apiGroups: [''],
@@ -87,10 +87,48 @@ describe('core application generation', () => {
       },
       {
         apiGroups: ['apps'],
-        resources: ['statefulsets'],
+        resources: ['deployments', 'statefulsets'],
         verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'],
       },
     ]);
+    const seedDirectory = fileURLToPath(
+      new URL('../../deploy/platform/applications/lifemodel/', import.meta.url)
+    );
+    const seeded = readdirSync(seedDirectory)
+      .filter((name) => name.endsWith('.yaml') && name !== 'kustomization.yaml')
+      .flatMap((name) =>
+        YAML.parseAllDocuments(readFileSync(join(seedDirectory, name), 'utf8')).map((doc) =>
+          doc.toJSON()
+        )
+      )
+      .filter((resource: any) => resource?.metadata?.namespace === 'lifemodel');
+    const grants = new Set(
+      applier.rules.flatMap((rule: any) =>
+        rule.resources.map((resource: string) => `${rule.apiGroups[0]}/${resource}`)
+      )
+    );
+    for (const resource of seeded) {
+      const group =
+        resource.apiVersion.split('/')[0] === resource.apiVersion
+          ? ''
+          : resource.apiVersion.split('/')[0];
+      expect(
+        grants.has(`${group}/${resource.kind.toLowerCase()}s`),
+        `${resource.kind} in ${resource.metadata.name} must be permitted to lifemodel-applier`
+      ).toBe(true);
+    }
+  });
+
+  it('keeps the core and web build scripts separate', () => {
+    const manifest = JSON.parse(
+      readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url)), 'utf8')
+    ) as {
+      scripts: Record<string, string>;
+    };
+    expect(manifest.scripts.build).not.toContain('build:web');
+    expect(manifest.scripts.build).not.toContain('build:app');
+    expect(manifest.scripts['build:web']).toContain('build:web-server');
+    expect(manifest.scripts['build:web']).toContain('build:app');
   });
 
   it('builds the core image before pinning it in the release workflow', () => {

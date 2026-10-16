@@ -78,59 +78,113 @@ describe('snapshot outbox commit', () => {
     );
     expect(historyRows.rows).toHaveLength(1);
     expect(historyRows.rows[0]?.payload.content).toBe('answer');
-    let resolveDelivered: (() => void) | undefined;
-    const delivered = new Promise<void>((resolve) => {
-      resolveDelivered = resolve;
-    });
-    let deliveryCount = 0;
-    const sendMessage = async () => {
-      deliveryCount += 1;
-      resolveDelivered?.();
-      return { success: true, messageId: 'external-1' };
-    };
-    const worker = startOutboundDelivery(
-      stores.redis,
-      new Map([['test', { sendMessage } as never]]),
-      createTestLogger(),
-      { streamKey: `${prefix}outbound`, offsetKey: `${prefix}delivery-offset` }
-    );
-    await delivered;
-    worker.stop();
-    await worker.done;
-    expect(deliveryCount).toBe(1);
-    const restartedWorker = startOutboundDelivery(
-      stores.redis,
-      new Map([['test', { sendMessage } as never]]),
-      createTestLogger(),
-      { streamKey: `${prefix}outbound`, offsetKey: `${prefix}delivery-offset` }
-    );
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    restartedWorker.stop();
-    await restartedWorker.done;
-    expect(deliveryCount).toBe(1);
+    expect(await stores.redis.xrange(`${prefix}outbound`, '-', '+')).toHaveLength(0);
     await store.takeEpoch();
     await expect(
       store.commitOwners(epoch, 5, [{ ...event, eventId: 'answer:message-2' }])
     ).rejects.toThrow(/epoch mismatch/i);
-    expect(await stores.redis.xrange(`${prefix}outbound`, '-', '+')).toHaveLength(1);
+    expect(await stores.redis.xrange(`${prefix}outbound`, '-', '+')).toHaveLength(0);
   });
-  it('trims only events below the slower Postgres and delivery cursors', async () => {
+  it('does not mark an inbound id complete when outbound preflight fails', async () => {
+    const prefix = `snapshot-preflight:${stores.workerId}:`;
+    const completedKey = `${prefix}completed`;
+    const store = createSnapshotStore(stores.redis, {
+      keyPrefix: prefix,
+      completedInboundKey: completedKey,
+    });
+    const epoch = await store.takeEpoch();
+    const inbound = new InboundMessageStream(
+      stores.redis,
+      `${prefix}inbound`,
+      1,
+      undefined,
+      completedKey
+    );
+    store.register(inbound);
+    const signal = createUserMessageSignal({
+      text: 'retry',
+      recipientId: 'r',
+      channel: 'web',
+      updateId: 'preflight-id',
+    });
+    await inbound.append(signal);
+    const [entry] = await inbound.readNew();
+    inbound.settle([entry!.signal.id]);
+    await stores.redis.set(`${prefix}outbound`, 'wrong type');
+    await expect(
+      store.commitOwners(epoch, 1, [
+        { eventId: 'preflight-event', type: 'send.command', payload: {} },
+      ])
+    ).rejects.toThrow();
+    expect(await stores.redis.zscore(completedKey, 'preflight-id')).toBeNull();
+    await stores.redis.del(`${prefix}outbound`);
+    const restarted = new InboundMessageStream(
+      stores.redis,
+      `${prefix}inbound`,
+      1,
+      undefined,
+      completedKey
+    );
+    expect((await restarted.readNew()).map((message) => message.messageId)).toEqual([
+      'preflight-id',
+    ]);
+    expect((await restarted.readNew()).map((message) => message.messageId)).toEqual([]);
+    restarted.settle([entry!.signal.id]);
+    const restartStore = createSnapshotStore(stores.redis, {
+      keyPrefix: prefix,
+      completedInboundKey: completedKey,
+    });
+    const restartEpoch = await restartStore.takeEpoch();
+    restartStore.register(restarted);
+    await expect(restartStore.commitOwners(restartEpoch, 1)).resolves.toBe(true);
+    expect(await stores.redis.zscore(completedKey, 'preflight-id')).not.toBeNull();
+  });
+
+  it('persists every id settled before one CAS and retains the delta after a failed CAS', async () => {
+    const prefix = `snapshot-large-settle:${stores.workerId}:`;
+    const completedKey = `${prefix}completed`;
+    const store = createSnapshotStore(stores.redis, {
+      keyPrefix: prefix,
+      completedInboundKey: completedKey,
+    });
+    const epoch = await store.takeEpoch();
+    const inbound = new InboundMessageStream(
+      stores.redis,
+      `${prefix}inbound`,
+      1,
+      undefined,
+      completedKey
+    );
+    store.register(inbound);
+    const ids = Array.from({ length: 1_001 }, (_, index) => `settled-${index}`);
+    for (const id of ids)
+      await inbound.append(
+        createUserMessageSignal({ text: id, recipientId: 'r', channel: 'web', updateId: id })
+      );
+    const entries = await inbound.readNew();
+    inbound.settle(entries.map((entry) => entry.signal.id));
+    await store.takeEpoch();
+    await expect(store.commitOwners(epoch, 1)).rejects.toThrow(/epoch mismatch/i);
+    const freshEpoch = await store.takeEpoch();
+    await store.commitOwners(freshEpoch, 2);
+    expect(await stores.redis.zcard(completedKey)).toBe(1_001);
+    for (const id of ids) expect(await stores.redis.zscore(completedKey, id)).not.toBeNull();
+  });
+
+  it('trims through the Postgres apply offset even when no delivery cursor advances', async () => {
     const prefix = `outbound-trim:${stores.workerId}:`;
     const streamKey = `${prefix}events`;
     const postgresOffsetKey = `${prefix}pg-applied`;
-    const deliveryOffsetKey = `${prefix}delivered`;
     const ids: string[] = [];
     for (let i = 0; i < 3; i += 1) {
       const id = await stores.redis.xadd(streamKey, '*', 'eventId', `trim-${i}`);
       if (!id) throw new Error('Valkey returned no outbound stream id');
       ids.push(id);
     }
-    await stores.redis.set(postgresOffsetKey, ids[2]!);
-    await stores.redis.set(deliveryOffsetKey, ids[1]!);
+    await stores.redis.set(postgresOffsetKey, ids[1]!);
     await trimOutboundEvents(stores.redis, {
       streamKey,
       postgresOffsetKey,
-      deliveryOffsetKey,
     });
     expect((await stores.redis.xrange(streamKey, '-', '+')).map(([id]) => id)).toEqual([ids[2]]);
   });
@@ -161,7 +215,6 @@ describe('snapshot outbox commit', () => {
     await trimOutboundEvents(failHdel as never, {
       streamKey,
       postgresOffsetKey: `${prefix}pg`,
-      deliveryOffsetKey: `${prefix}delivery`,
       eventKeysKey,
       maxLength: 2,
       maxAgeMs: 60_000,
@@ -190,7 +243,6 @@ describe('snapshot outbox commit', () => {
       streamKey,
       eventKeysKey,
       postgresOffsetKey: `${prefix}pg`,
-      deliveryOffsetKey: `${prefix}delivery`,
       logger: recordingLogger(createTestLogger(), calls),
     });
     expect(await stores.redis.xlen(streamKey)).toBe(0);
@@ -222,7 +274,6 @@ describe('snapshot outbox commit', () => {
     await trimOutboundEvents(stores.redis, {
       streamKey,
       postgresOffsetKey: `${prefix}pg`,
-      deliveryOffsetKey: `${prefix}delivery`,
       eventKeysKey,
       maxLength: 5,
       maxAgeMs: 60_000,
@@ -239,7 +290,6 @@ describe('snapshot outbox commit', () => {
     await trimOutboundEvents(stores.redis, {
       streamKey,
       postgresOffsetKey: `${prefix}pg`,
-      deliveryOffsetKey: `${prefix}delivery`,
       eventKeysKey,
       maxLength: 5,
       maxAgeMs: 60_000,
@@ -429,7 +479,7 @@ describe('outbound retention with delivery consumers', () => {
     await stores.postgres.end();
   });
 
-  it('keeps long-run stream and event-key growth bounded with a registered delivery channel', async () => {
+  it('trims outbound rows and event keys once Postgres applies them', async () => {
     const prefix = `outbound-consumer-retention:${stores.workerId}:`;
     const streamKey = `${prefix}outbound`;
     const eventKeysKey = `${streamKey}:event-keys`;
@@ -451,39 +501,9 @@ describe('outbound retention with delivery consumers', () => {
       createTestLogger()
     );
     await applyCommittedOutboundEvents(stores.redis, manager, `${prefix}pg`, streamKey);
-    let sends = 0;
-    const worker = startOutboundDelivery(
-      stores.redis,
-      new Map([
-        [
-          'test',
-          {
-            sendMessage: async () => {
-              sends += 1;
-              return { success: true, messageId: `sent-${sends}` };
-            },
-          } as never,
-        ],
-      ]),
-      createTestLogger(),
-      {
-        streamKey,
-        offsetKey: `${prefix}delivery`,
-        postgresOffsetKey: `${prefix}pg`,
-        eventKeysKey,
-        maxLength: 100,
-        maxAgeMs: 60_000,
-      }
-    );
-    const deadline = Date.now() + 5_000;
-    while (sends < events.length && Date.now() < deadline)
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    worker.stop();
-    await worker.done;
-    expect(sends).toBe(events.length);
     expect(await stores.redis.xlen(streamKey)).toBe(0);
     expect(await stores.redis.hlen(eventKeysKey)).toBe(0);
-  }, 15_000);
+  });
 });
 
 describe('inbound message stream', () => {
@@ -516,6 +536,109 @@ describe('inbound message stream', () => {
     await stream.append(receipt);
     await stream.append(completed);
     expect((await stream.readNew()).map((entry) => entry.signal.id)).toEqual([completed.id]);
+  });
+
+  it('does not advance the admission offset when any entry in a batch is invalid', async () => {
+    const key = `inbound-invalid-batch:${stores.workerId}`;
+    const inbound = new InboundMessageStream(stores.redis, key);
+    await stores.redis.xadd(
+      key,
+      '*',
+      'type',
+      'inbound.message',
+      'messageId',
+      'valid',
+      'recipientId',
+      'r',
+      'signal',
+      JSON.stringify(
+        createUserMessageSignal({
+          text: 'valid',
+          recipientId: 'r',
+          channel: 'web',
+          updateId: 'valid',
+        })
+      )
+    );
+    const badId = await stores.redis.xadd(key, '*', 'type', 'unexpected');
+    await expect(inbound.readNew()).rejects.toThrow('Unexpected inbound event type');
+    expect(inbound.exportSnapshot().readOffset).toBe('0-0');
+    await stores.redis.xdel(key, badId);
+    expect((await inbound.readNew()).map((entry) => entry.messageId)).toEqual(['valid']);
+    expect((await inbound.readNew()).map((entry) => entry.messageId)).toEqual([]);
+    const restarted = new InboundMessageStream(stores.redis, key);
+    restarted.hydrateSnapshot(inbound.exportSnapshot());
+    expect((await restarted.readNew()).map((entry) => entry.messageId)).toEqual(['valid']);
+  });
+
+  it('retries the entire multi-entry read after a durable identity lookup fails', async () => {
+    const key = `inbound-lookup-retry:${stores.workerId}`;
+    const signals = ['lookup-a', 'lookup-b'].map((id) =>
+      createUserMessageSignal({ text: id, recipientId: 'r', channel: 'web', updateId: id })
+    );
+    const stream = `${key}:stream`;
+    for (const signal of signals)
+      await new InboundMessageStream(stores.redis, stream).append(signal);
+    let rejectLookup = true;
+    const failingRedis = new Proxy(stores.redis, {
+      get(target, property) {
+        if (property === 'zscore')
+          return async (...args: Parameters<typeof target.zscore>) => {
+            if (rejectLookup) throw new Error('injected completed identity lookup failure');
+            return target.zscore(...args);
+          };
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as typeof stores.redis;
+    const inbound = new InboundMessageStream(failingRedis, stream);
+    await expect(inbound.readNew()).rejects.toThrow('injected completed identity lookup failure');
+    expect(inbound.exportSnapshot().readOffset).toBe('0-0');
+    expect(inbound.exportSnapshot().pending).toEqual([]);
+    rejectLookup = false;
+    expect((await inbound.readNew()).map((entry) => entry.messageId)).toEqual([
+      'lookup-a',
+      'lookup-b',
+    ]);
+    inbound.settle(signals.map((signal) => signal.id));
+    const snapshot = createSnapshotStore(stores.redis, { keyPrefix: `${key}:snapshot:` });
+    const epoch = await snapshot.takeEpoch();
+    snapshot.register(inbound);
+    await snapshot.commitOwners(epoch, 1);
+    const restarted = new InboundMessageStream(stores.redis, stream);
+    restarted.hydrateSnapshot((await snapshot.read())?.sections['inbound'] as never);
+    expect(await restarted.readNew()).toEqual([]);
+  });
+
+  it('deduplicates a committed id after its bounded snapshot ring evicts it', async () => {
+    const key = `inbound-completed:${stores.workerId}`;
+    const completedKey = `${key}:completed`;
+    const snapshot = createSnapshotStore(stores.redis, {
+      keyPrefix: `${key}:`,
+      completedInboundKey: `${key}:completed`,
+    });
+    const epoch = await snapshot.takeEpoch();
+    const inbound = new InboundMessageStream(
+      stores.redis,
+      `${key}:stream`,
+      1,
+      undefined,
+      completedKey
+    );
+    snapshot.register(inbound);
+    const make = (id: string, text = id) =>
+      createUserMessageSignal({ text, recipientId: 'r', channel: 'web', updateId: id });
+    const ids = ['original', ...Array.from({ length: 1_001 }, (_, index) => `later-${index}`)];
+    for (const [index, id] of ids.entries()) {
+      const signal = make(id);
+      await inbound.append(signal);
+      const entries = await inbound.readNew();
+      inbound.settle(entries.map((entry) => entry.signal.id));
+      await snapshot.commitOwners(epoch, index + 1);
+    }
+    expect(inbound.exportSnapshot().recentMessageIds).toEqual(['later-1000']);
+    await inbound.append(make('original', 'conflicting retry text'));
+    expect(await inbound.readNew()).toEqual([]);
   });
 
   it('XADDs one answer and row for a message, drops duplicate IDs, and replays only pre-commit input', async () => {

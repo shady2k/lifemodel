@@ -477,6 +477,11 @@ export class CognitionProcessor implements CognitionLayer {
     // - This follows Design Principle #1 (Energy Conservation) and prevents context confusion
     const loopContext: LoopContext = {
       triggerSignal,
+      additionalTriggerSignals: context.triggerSignals.slice(1).filter((signal) => {
+        if (signal.type !== 'user_message') return false;
+        const data = signal.data as { recipientId?: string } | undefined;
+        return data?.recipientId === recipientId;
+      }),
       agentState: context.agentState,
       agentIdentity: identity
         ? {

@@ -6,6 +6,7 @@
  */
 
 import type { Signal } from '../../../types/signal.js';
+import { renderReplyQuote } from './reply-quote.js';
 import type { LoopContext } from '../agentic-loop-types.js';
 import { isProactiveTrigger } from './runtime-snapshot.js';
 import {
@@ -134,7 +135,8 @@ function buildTriggerSection(signal: Signal, context: LoopContext): string {
 
   if (signal.type === 'user_message' && data) {
     const text = (data['text'] as string | undefined) ?? '';
-    return `<user_input>${text}</user_input>`;
+    const quote = renderReplyQuote(data['replyTo']);
+    return `${quote ? `${quote}\n` : ''}<user_input>${text}</user_input>`;
   }
 
   // Handle contact_urge triggers (proactive contact from ThresholdEngine)

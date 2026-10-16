@@ -22,12 +22,28 @@ export interface SnapshotSectionOwner<T = unknown> {
   readonly section: string;
   exportSnapshot(): T;
   hydrateSnapshot(value: T | undefined): void | Promise<void>;
+  completedSinceSnapshot?(): string[];
+  snapshotCommitted?(): void;
 }
 
 const COMMIT_SCRIPT = `
+local function key_type(key)
+  local result = redis.call('TYPE', key)
+  return type(result) == 'table' and result.ok or result
+end
+local expected = { 'string', 'string', 'stream', 'hash', 'zset' }
+for index, kind in ipairs(expected) do
+  local actual = key_type(KEYS[index])
+  if actual ~= 'none' and actual ~= kind then
+    return redis.error_reply('WRONGTYPE key ' .. KEYS[index] .. ' must be ' .. kind)
+  end
+end
 local current_epoch = redis.call('GET', KEYS[1])
 if current_epoch ~= ARGV[1] then return 0 end
 local events = cjson.decode(ARGV[3])
+local envelope = cjson.decode(ARGV[2])
+local completed_ids = cjson.decode(ARGV[5])
+local now = tonumber(ARGV[4])
 for _, event in ipairs(events) do
   if redis.call('HEXISTS', KEYS[4], event.eventId) == 0 then
     local stream_id = redis.call('XADD', KEYS[3], '*', 'eventId', event.eventId, 'event', cjson.encode(event))
@@ -35,6 +51,10 @@ for _, event in ipairs(events) do
   end
 end
 redis.call('SET', KEYS[2], ARGV[2])
+for _, message_id in ipairs(completed_ids) do
+  redis.call('ZADD', KEYS[5], now, message_id)
+end
+redis.call('ZREMRANGEBYSCORE', KEYS[5], '-inf', now - 90000000)
 return 1
 `;
 
@@ -54,6 +74,8 @@ export interface SnapshotStoreConfig {
   keyPrefix?: string;
   /** Outbound stream shared with the message consumers. */
   outboundKey?: string;
+  /** Durable identity set for committed inbound inputs. */
+  completedInboundKey?: string;
 }
 
 /** Atomic Valkey snapshot and epoch fencing for the core tick writer. */
@@ -62,6 +84,7 @@ export class SnapshotStore {
   private readonly snapshotKey: string;
   private readonly outboundKey: string;
   private readonly outboundKeysKey: string;
+  private readonly completedInboundKey: string;
   private readonly scriptSha: string;
   private readonly owners = new Map<string, SnapshotSectionOwner>();
 
@@ -74,6 +97,7 @@ export class SnapshotStore {
     this.snapshotKey = `${prefix}${SNAPSHOT_KEY}`;
     this.outboundKey = config.outboundKey ?? `${prefix}outbound`;
     this.outboundKeysKey = `${prefix}outbound:event-keys`;
+    this.completedInboundKey = config.completedInboundKey ?? 'inbound:completed';
     this.scriptSha = createHash('sha1').update(COMMIT_SCRIPT).digest('hex');
   }
 
@@ -131,34 +155,51 @@ export class SnapshotStore {
         `Snapshot epoch ${String(envelope.epoch)} does not match committer epoch ${String(epoch)}`
       );
     const serialized = JSON.stringify(envelope);
+    const completedIds = [
+      ...new Set([
+        ...[...this.owners.values()].flatMap((owner) => owner.completedSinceSnapshot?.() ?? []),
+        ...((envelope.sections['inbound'] as { recentMessageIds?: string[] } | undefined)
+          ?.recentMessageIds ?? []),
+      ]),
+    ];
     try {
       const result = await this.redis.evalsha(
         this.scriptSha,
-        4,
+        5,
         this.epochKey,
         this.snapshotKey,
         this.outboundKey,
         this.outboundKeysKey,
+        this.completedInboundKey,
         String(epoch),
         serialized,
-        JSON.stringify(outbox)
+        JSON.stringify(outbox),
+        String(Date.now()),
+        JSON.stringify(completedIds)
       );
-      return Number(result) === 1;
+      const committed = Number(result) === 1;
+      if (committed) for (const owner of this.owners.values()) owner.snapshotCommitted?.();
+      return committed;
     } catch (error) {
       if (!(error instanceof Error) || !error.message.includes('NOSCRIPT')) throw error;
       await this.redis.script('LOAD', COMMIT_SCRIPT);
       const result = await this.redis.evalsha(
         this.scriptSha,
-        4,
+        5,
         this.epochKey,
         this.snapshotKey,
         this.outboundKey,
         this.outboundKeysKey,
+        this.completedInboundKey,
         String(epoch),
         serialized,
-        JSON.stringify(outbox)
+        JSON.stringify(outbox),
+        String(Date.now()),
+        JSON.stringify(completedIds)
       );
-      return Number(result) === 1;
+      const committed = Number(result) === 1;
+      if (committed) for (const owner of this.owners.values()) owner.snapshotCommitted?.();
+      return committed;
     }
   }
 

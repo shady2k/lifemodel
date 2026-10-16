@@ -69,6 +69,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       product: ${{ steps.classify.outputs.product }}
+      web_app: ${{ steps.classify.outputs.web_app }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -130,6 +131,7 @@ jobs:
           verdict=$(scripts/ci-verdict.sh "$out")
           echo "product output: $verdict"
           echo "$verdict" >> "$GITHUB_OUTPUT"
+          if grep -q '^changed: web/app/' "$out"; then echo "web_app=true" >> "$GITHUB_OUTPUT"; else echo "web_app=false" >> "$GITHUB_OUTPUT"; fi
 
   # The product checks, as the one command a person runs before pushing. It is
   # skipped for a change that cannot touch product code and while a pull
@@ -165,6 +167,19 @@ jobs:
       # behind the launcher is the disposable Docker daemon of this runner.
       - name: Typecheck, lint, the format check and the suite, inside the isolated test boundary
         run: node scripts/test-isolated.mjs check
+
+  # Rebuild pinned shadcn add output and compare it with the registry lock and app files.
+  ci-shadcn-provenance:
+    needs: changes
+    if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft && needs.changes.outputs.web_app == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Verify pinned shadcn registry output
+        run: scripts/shadcn-add.sh --check $(node -p "require('./web/app/registry-lock/manifest.json').items.join(' ')")
 
   ci-backlog:
     runs-on: ubuntu-latest
@@ -347,3 +362,46 @@ jobs:
           scripts/build-core-image.sh main "$SHA"
           docker push "ghcr.io/shady2k/lifemodel-core:main"
           docker push "ghcr.io/shady2k/lifemodel-core:$SHA"
+
+  # Build the standalone web image on pull requests without a write token.
+  ci-web-image:
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.product == 'true') && !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build the standalone web image
+        env:
+          SHA: ${{ github.sha }}
+        run: scripts/build-web-image.sh "ci-web-$SHA"
+
+  # Publish the standalone web image on main.
+  ci-web-image-publish:
+    if: ${{ !cancelled() && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Log in to GitHub Container Registry
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -eu
+          printf '%s' "$TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+      - name: Build and publish the standalone web image
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          scripts/build-web-image.sh main "$SHA"
+          docker push "ghcr.io/shady2k/lifemodel-web:main"
+          docker push "ghcr.io/shady2k/lifemodel-web:$SHA"

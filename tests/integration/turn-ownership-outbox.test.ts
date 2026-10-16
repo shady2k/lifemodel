@@ -208,6 +208,13 @@ describe('turn ownership and outbox durability', () => {
         async () => (await stores.redis.xlen(`${prefix}outbound`)) === 1,
         'outbound event committed'
       );
+      const streamRows = await stores.redis.xrange(`${prefix}outbound`, '-', '+');
+      const event = JSON.parse(
+        streamRows[0]![1][streamRows[0]![1].indexOf('event') + 1] ?? 'null'
+      ) as {
+        payload: { recipientId: string; channel: string };
+      };
+      expect(event.payload).toMatchObject({ recipientId, channel: 'walk' });
       await applyCommittedOutboundEvents(
         stores.redis,
         conversation,
@@ -218,14 +225,6 @@ describe('turn ownership and outbox durability', () => {
       expect(rows.filter((row) => row.role === 'assistant').map((row) => row.content)).toEqual([
         'committed answer',
       ]);
-      const streamRows = await stores.redis.xrange(`${prefix}outbound`, '-', '+');
-      const event = JSON.parse(
-        streamRows[0]![1][streamRows[0]![1].indexOf('event') + 1] ?? 'null'
-      ) as {
-        payload: { recipientId: string; channel: string };
-      };
-      expect(event.payload).toMatchObject({ recipientId, channel: 'walk' });
-      expect(streamRows).toHaveLength(1);
     } finally {
       await instance.coreLoop.stop();
       await rmDir(path);

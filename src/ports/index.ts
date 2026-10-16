@@ -108,3 +108,20 @@ export type {
   EventSchema,
 } from './plugin.js';
 export { isValidPluginId } from './plugin.js';
+
+// Creature state port
+export type {
+  CreatureState,
+  CreatureStateSnapshot,
+  CreatureStateReader,
+} from './creature-state.js';
+
+// Owner web-module operations
+export type { IOwnerMessageIntake, OwnerMessageAcceptance } from './owner-message-intake.js';
+
+export type {
+  TranscriptRow,
+  TranscriptPage,
+  ReadTranscriptOptions,
+  TranscriptReader,
+} from './transcript.js';

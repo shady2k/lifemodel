@@ -212,7 +212,6 @@ describe('new mechanism regression boundaries', () => {
         trimOutboundEvents(stores.redis, {
           streamKey,
           postgresOffsetKey: `${prefix}pg`,
-          deliveryOffsetKey: `${prefix}delivery`,
           maxLength: 1,
           maxAgeMs: 60000,
         }),

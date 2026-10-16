@@ -51,7 +51,9 @@ metadata:
   name: lifemodel-dns-egress
   namespace: lifemodel
 spec:
-  podSelector: {}
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: core
   policyTypes: [Egress]
   ingress: []
   egress:
@@ -74,7 +76,9 @@ metadata:
   name: lifemodel-postgres-egress
   namespace: lifemodel
 spec:
-  podSelector: {}
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: core
   policyTypes: [Egress]
   ingress: []
   egress:
@@ -92,7 +96,9 @@ metadata:
   name: lifemodel-valkey-egress
   namespace: lifemodel
 spec:
-  podSelector: {}
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: core
   policyTypes: [Egress]
   ingress: []
   egress:
@@ -149,12 +155,12 @@ metadata:
   name: lifemodel-applier
   namespace: lifemodel
 rules:
-  - apiGroups: [""]
-    resources: ["serviceaccounts", "services"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["apps"]
-    resources: ["statefulsets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ['']
+    resources: ['serviceaccounts', 'services']
+    verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete']
+  - apiGroups: ['apps']
+    resources: ['deployments', 'statefulsets']
+    verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete']
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -191,9 +197,9 @@ metadata:
   name: lifemodel-helm-storage
   namespace: lifemodel-releases
 rules:
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: ['']
+    resources: ['secrets']
+    verbs: ['get', 'list', 'watch', 'create', 'update', 'delete']
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -221,18 +227,18 @@ metadata:
   name: lifemodel-motor-applier
   namespace: lifemodel-motor
 rules:
-  - apiGroups: [""]
-    resources: ["configmaps", "services", "persistentvolumeclaims"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["apps"]
-    resources: ["deployments", "statefulsets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["batch"]
-    resources: ["jobs", "cronjobs"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["ingresses"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ['']
+    resources: ['configmaps', 'services', 'persistentvolumeclaims']
+    verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete']
+  - apiGroups: ['apps']
+    resources: ['deployments', 'statefulsets']
+    verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete']
+  - apiGroups: ['batch']
+    resources: ['jobs', 'cronjobs']
+    verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete']
+  - apiGroups: ['networking.k8s.io']
+    resources: ['ingresses']
+    verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete']
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -269,9 +275,9 @@ metadata:
   name: lifemodel-motor-helm-storage
   namespace: lifemodel-motor-releases
 rules:
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: ['']
+    resources: ['secrets']
+    verbs: ['get', 'list', 'watch', 'create', 'update', 'delete']
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -286,3 +292,59 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: lifemodel-motor-helm-storage
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-access
+  namespace: lifemodel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: web
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-state
+          podSelector:
+            matchLabels:
+              cnpg.io/cluster: lifemodel
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-state
+          podSelector:
+            matchLabels:
+              app: valkey
+      ports:
+        - protocol: TCP
+          port: 6379

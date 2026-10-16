@@ -74,6 +74,8 @@ import type { PluginStatus } from '../layers/cognition/tools/core/manage.js';
 import type { InboundMessageStream } from './message-streams.js';
 import type { SnapshotOutboxEvent } from '../storage/snapshot-store.js';
 import { StaleSnapshotEpochError } from '../storage/snapshot-store.js';
+import type { CreatureState } from '../ports/creature-state.js';
+import { CREATURE_STATE_HEARTBEAT_MS } from '../storage/creature-state-store.js';
 import { StalePostgresEpochError } from '../storage/fenced-postgres.js';
 import type { BusSignalStream } from './bus-stream.js';
 
@@ -96,9 +98,6 @@ export interface CoreLoopConfig {
 
   /** Prune signals every N ticks (default: 10) */
   pruneInterval: number;
-
-  /** Primary user's Telegram chat ID for proactive messages */
-  primaryUserChatId?: string | undefined;
 
   /** System health monitor configuration */
   health?: Partial<SystemHealthConfig>;
@@ -164,6 +163,8 @@ export interface CoreLoopDeps {
   /** Apply projections after the atomic snapshot/outbox commit succeeds. */
   afterSnapshotCommit?: (() => Promise<void>) | undefined;
   initialTickCount?: number | undefined;
+  creatureStateEpoch?: number | undefined;
+  publishCreatureState?: ((state: CreatureState, epoch: number) => Promise<void>) | undefined;
   onStaleSnapshot?:
     | ((error: StaleSnapshotEpochError | StalePostgresEpochError) => void)
     | undefined;
@@ -330,6 +331,10 @@ export class CoreLoop {
 
   private running = false;
   private tickCount = 0;
+  private readonly creatureStateEpoch: number | undefined;
+  private readonly publishCreatureState: CoreLoopDeps['publishCreatureState'];
+  private creatureStateHeartbeat: ReturnType<typeof setInterval> | null = null;
+  private publishedCreatureState: CreatureState | null = null;
   private lastCommitAt = 0;
   private tickTimeout: ReturnType<typeof setTimeout> | null = null;
   /** Promise for the in-flight tick (so stop() can wait for it to settle) */
@@ -476,6 +481,8 @@ export class CoreLoop {
     this.onStaleSnapshot = deps.onStaleSnapshot;
     this.onFatalError = deps.onFatalError;
     this.tickCount = deps.initialTickCount ?? 0;
+    this.creatureStateEpoch = deps.creatureStateEpoch;
+    this.publishCreatureState = deps.publishCreatureState;
     this.metrics = metrics;
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.conversationManager = deps.conversationManager;
@@ -508,13 +515,10 @@ export class CoreLoop {
 
     // Set dependencies on AGGREGATION for conversation-aware proactive contact
     if ('updateDeps' in this.layers.aggregation) {
-      // Convert primaryUserChatId to recipientId if both registry and chatId are available
-      if (this.recipientRegistry && config.primaryUserChatId) {
-        this.primaryRecipientId = this.recipientRegistry.getOrCreate(
-          'telegram',
-          config.primaryUserChatId
-        );
-        // Set global accessor so any part of the system can access it
+      if (this.recipientRegistry) {
+        this.primaryRecipientId =
+          this.recipientRegistry.lookup('web', 'owner') ??
+          this.recipientRegistry.getOrCreate('web', 'owner');
         setPrimaryRecipientId(this.primaryRecipientId);
       }
 
@@ -1037,8 +1041,15 @@ export class CoreLoop {
 
     this.logger.info({ tickInterval: this.config.tickInterval }, 'Core loop started');
 
-    // Schedule first tick immediately
+    // Publish before the first tick without making core progress depend on Valkey.
+    void this.publishCurrentCreatureState(true);
     this.scheduleTick();
+    if (this.publishCreatureState && this.creatureStateEpoch !== undefined) {
+      this.creatureStateHeartbeat = setInterval(() => {
+        if (this.running) void this.publishCurrentCreatureState(true);
+      }, CREATURE_STATE_HEARTBEAT_MS);
+      this.creatureStateHeartbeat.unref?.();
+    }
   }
 
   /**
@@ -1052,11 +1063,13 @@ export class CoreLoop {
   async stop(deadlineMs?: number): Promise<void> {
     const deadline = deadlineMs ?? Date.now() + this.config.shutdownDrainTimeoutMs;
     if (!this.running) {
+      this.clearCreatureStateHeartbeat();
       await this.durableEffects.drain(deadline, this.logger);
       return;
     }
 
     this.running = false;
+    this.clearCreatureStateHeartbeat();
 
     if (this.tickTimeout) {
       clearTimeout(this.tickTimeout);
@@ -1222,6 +1235,7 @@ export class CoreLoop {
    */
   haltForTest(): void {
     this.running = false;
+    this.clearCreatureStateHeartbeat();
     this.deadForTest = true;
     this.lateEffectsFenced = true;
     if (this.tickTimeout) {
@@ -1431,6 +1445,27 @@ export class CoreLoop {
         this.signalStreamIds.set(signal.id, id);
       });
       this.pendingBusWrites.push(write);
+    }
+  }
+
+  private clearCreatureStateHeartbeat(): void {
+    if (this.creatureStateHeartbeat) clearInterval(this.creatureStateHeartbeat);
+    this.creatureStateHeartbeat = null;
+  }
+
+  private async publishCurrentCreatureState(force = false): Promise<void> {
+    if (!this.publishCreatureState || this.creatureStateEpoch === undefined) return;
+    const state: CreatureState = this.pendingCognition
+      ? 'thinking'
+      : this.agent.getAlertnessMode() === 'sleeping'
+        ? 'asleep'
+        : 'awake';
+    if (!force && state === this.publishedCreatureState) return;
+    try {
+      await this.publishCreatureState(state, this.creatureStateEpoch);
+      this.publishedCreatureState = state;
+    } catch (error) {
+      this.logger.warn({ err: error }, 'Failed to publish creature state');
     }
   }
 
@@ -1964,6 +1999,7 @@ export class CoreLoop {
     } catch (error) {
       if (error instanceof SignalNormalizationError) {
         this.running = false;
+        this.clearCreatureStateHeartbeat();
         if (this.tickTimeout) clearTimeout(this.tickTimeout);
         this.tickTimeout = null;
         withTraceContext(tickCtx, () => {
@@ -1989,6 +2025,7 @@ export class CoreLoop {
 
       if (error instanceof StaleSnapshotEpochError || error instanceof StalePostgresEpochError) {
         this.running = false;
+        this.clearCreatureStateHeartbeat();
         if (this.tickTimeout) clearTimeout(this.tickTimeout);
         this.tickTimeout = null;
         withTraceContext(tickCtx, () => {
@@ -2006,11 +2043,13 @@ export class CoreLoop {
         // ahead of durable state. Stop and let restart hydrate the last commit.
         if (this.snapshotCommitStarted) {
           this.running = false;
+          this.clearCreatureStateHeartbeat();
           return;
         }
         this.scheduleTick();
       }
     } finally {
+      void this.publishCurrentCreatureState();
       this.tickInFlight--;
     }
   }
@@ -2191,7 +2230,12 @@ export class CoreLoop {
    */
   private async processUserMessageSignal(signal: Signal): Promise<void> {
     const data = signal.data as
-      | { text?: string; recipientId?: string; sideEffectsApplied?: boolean }
+      | {
+          text?: string;
+          recipientId?: string;
+          sideEffectsApplied?: boolean;
+          replyTo?: { sequence: string; role: 'user' | 'assistant'; excerpt: string };
+        }
       | undefined;
 
     // Idempotency guard: skip if already applied (signal was re-queued after deferral)
@@ -2211,7 +2255,12 @@ export class CoreLoop {
     // Save to conversation history (text only — base64 images are NOT persisted)
     if (this.conversationManager) {
       const data = signal.data as
-        | { text?: string; recipientId?: string; images?: unknown[] }
+        | {
+            text?: string;
+            recipientId?: string;
+            images?: unknown[];
+            replyTo?: { sequence: string; role: 'user' | 'assistant'; excerpt: string };
+          }
         | undefined;
       if (data?.text && data.recipientId) {
         const photoPrefix = data.images?.length
@@ -2223,7 +2272,10 @@ export class CoreLoop {
             role: 'user',
             content: photoPrefix + data.text,
           },
-          { messageId: `inbound:${signal.id}` }
+          {
+            messageId: `inbound:${signal.id}`,
+            ...(data.replyTo ? { replyTo: data.replyTo } : {}),
+          }
         );
       }
     }
@@ -2421,6 +2473,7 @@ export class CoreLoop {
       traceContext,
     };
     this.registerTurnCommit(context.tickId, this.pendingCognition);
+    void this.publishCurrentCreatureState();
 
     promise
       .then(() => {
@@ -2517,12 +2570,14 @@ export class CoreLoop {
         result.intents
       );
       this.pendingCognition = null;
+      void this.publishCurrentCreatureState();
       // The turn is known here and nowhere later (see attributedToTurn): its
       // own result intents leave with their turn's trace.
       return { ...result, intents: this.attributedToTurn(resultIntents, pending) };
     } catch (error) {
       const errorIntents = this.resolveTurnCommit(pending.tickId, 'error', []);
       this.pendingCognition = null;
+      void this.publishCurrentCreatureState();
       if (errorIntents.length > 0) this.applyIntents(errorIntents, pending.traceContext);
       this.markResultApplicationsComplete();
       this.evaluateTurnCommits();

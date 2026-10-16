@@ -58,7 +58,15 @@ export default tseslint.config(
   },
   {
     // `**/dist/` also covers the loader's own build output (loader/dist).
-    ignores: ['**/dist/', 'node_modules/', 'data/'],
+    ignores: [
+      '**/dist/',
+      'node_modules/',
+      'data/',
+      'web/app/src/components/ui/**',
+      'web/app/registry-lock/**',
+      'web/app/src/hooks/use-highlighted-code.ts',
+      'web/app/src/hooks/use-mobile.ts',
+    ],
   },
   eslintConfigPrettier
 );

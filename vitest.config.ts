@@ -1,10 +1,12 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
+  resolve: { alias: { '@': fileURLToPath(new URL('./web/app/src', import.meta.url)) } },
   test: {
     globals: true,
     environment: 'node',
-    include: ['tests/**/*.test.ts'],
+    include: ['tests/**/*.test.{ts,tsx}'],
     // A suite started from a git hook inherits GIT_DIR and friends; no test may
     // act on that repository (lifemodel-q4x.4.2).
     setupFiles: ['tests/setup/scrub-git-env.ts'],

@@ -3,14 +3,23 @@ import { createTestStores, type TestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
 import { createSnapshotStore } from '../../src/storage/snapshot-store.js';
 import { createBusSignalStream } from '../../src/core/bus-stream.js';
-import { InboundMessageStream } from '../../src/core/message-streams.js';
+import {
+  applyCommittedOutboundEvents,
+  InboundMessageStream,
+} from '../../src/core/message-streams.js';
 import { ConversationManager } from '../../src/storage/conversation-manager.js';
 import { PostgresConversationStore } from '../../src/storage/postgres-conversation-store.js';
 import { createTestLogger } from '../helpers/test-logger.js';
+import {
+  PersistentRecipientRegistry,
+  RecipientRegistry,
+} from '../../src/core/recipient-registry.js';
+import { getPrimaryRecipientId, setPrimaryRecipientId } from '../../src/core/globals.js';
 import { startCoreHealthServer } from '../../src/core/health-server.js';
 import { createUserMessageSignal } from '../../src/types/signal.js';
 import {
   startInstance,
+  thoughtSignal,
   makeScratchDir,
   rmDir,
   waitFor,
@@ -42,6 +51,110 @@ describe('inbound user history restart durability', () => {
   afterAll(async () => {
     await stores.redis.quit();
     await stores.postgres.end();
+  });
+
+  it('creates the web owner when the core loop receives a cold registry', async () => {
+    const registry = new RecipientRegistry();
+    const path = await makeScratchDir('web-recipient-cold-');
+    const instance = await startInstance(path, { recipientRegistry: registry });
+    try {
+      const ownerId = registry.lookup('web', 'owner');
+      expect(ownerId).toBeDefined();
+      expect(getPrimaryRecipientId()).toBe(ownerId);
+      expect(instance.aggregation.primaryRecipientId).toBe(ownerId);
+      expect(registry.lookup('test', 'chat-42')).toBe(instance.recipientId);
+    } finally {
+      await instance.coreLoop.stop();
+      await rmDir(path);
+      setPrimaryRecipientId(undefined);
+    }
+  });
+
+  it('records proactive contact in the durable web transcript and reuses it after restart', async () => {
+    const registry = new PersistentRecipientRegistry(stores.postgres, createTestLogger());
+    await registry.init();
+    const recipientId = registry.getOrCreate('web', 'owner');
+    await registry.flush();
+    const path = await makeScratchDir('web-recipient-');
+    const conversation = new ConversationManager(
+      new PostgresConversationStore(stores.postgres),
+      createTestLogger()
+    );
+    const prefix = `web-primary:${stores.workerId}:${Date.now()}:`;
+    const committed = deferred<void>();
+    let transcript: Awaited<ReturnType<typeof conversation.getFullHistory>>;
+    const first = await startInstance(path, {
+      tickIntervalMs: 10,
+      recipientRegistry: registry,
+      conversationManager: conversation,
+      initialCognitionResult: {
+        confidence: 1,
+        intents: [
+          {
+            type: 'SEND_MESSAGE',
+            payload: { recipientId, text: 'I wanted to tell you something.' },
+          },
+        ],
+        response: undefined,
+      },
+      commitSnapshot: async (_tick, events) => {
+        for (const event of events) {
+          await stores.redis.xadd(
+            `${prefix}outbound`,
+            '*',
+            'eventId',
+            event.eventId,
+            'event',
+            JSON.stringify(event)
+          );
+        }
+        if (events.length > 0) committed.resolve();
+      },
+    });
+    try {
+      expect(getPrimaryRecipientId()).toBe(recipientId);
+      expect(first.aggregation.primaryRecipientId).toBe(recipientId);
+      await first.coreLoop.pushInboundSignal(thoughtSignal('proactive contact'));
+      await committed.promise;
+      await applyCommittedOutboundEvents(
+        stores.redis,
+        conversation,
+        `${prefix}pg-applied`,
+        `${prefix}outbound`
+      );
+      transcript = await conversation.getFullHistory(recipientId);
+      expect(transcript.map((row) => ({ role: row.role, content: row.content }))).toEqual([
+        { role: 'assistant', content: 'I wanted to tell you something.' },
+      ]);
+      expect(
+        await stores.postgres.query(
+          "SELECT 1 FROM core.conversation_messages WHERE recipient_id = $1 AND payload->>'role' = $2",
+          [recipientId, 'user']
+        )
+      ).toMatchObject({ rowCount: 0 });
+    } finally {
+      await first.coreLoop.stop();
+      await rmDir(path);
+      setPrimaryRecipientId(undefined);
+    }
+
+    const restartedRegistry = new PersistentRecipientRegistry(stores.postgres, createTestLogger());
+    await restartedRegistry.init();
+    expect(restartedRegistry.lookup('web', 'owner')).toBe(recipientId);
+    const restartPath = await makeScratchDir('web-recipient-restart-');
+    const restarted = await startInstance(restartPath, {
+      tickIntervalMs: 10,
+      recipientRegistry: restartedRegistry,
+      conversationManager: conversation,
+    });
+    try {
+      expect(getPrimaryRecipientId()).toBe(recipientId);
+      expect(await conversation.getFullHistory(recipientId)).toEqual(transcript);
+    } finally {
+      await restarted.coreLoop.stop();
+      await rmDir(restartPath);
+      setPrimaryRecipientId(undefined);
+    }
   });
 
   it('stops unhealthy when normalization rejects and replays every drained input', async () => {
