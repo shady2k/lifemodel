@@ -259,6 +259,30 @@ describe('conversation transcript', () => {
     expect(mutations.length).toBeGreaterThanOrEqual(3);
   });
 
+  it('keeps keyboard focus through a live row and state update', async () => {
+    await i18n.changeLanguage('en');
+    const transport = new FakeTransport([row('1', 'assistant', 'first')]);
+    render(<Conversation transport={transport} />);
+    const user = userEvent.setup();
+    await screen.findByText('first');
+    await user.tab();
+    await user.tab();
+    const reply = screen.getByRole('button', { name: 'Reply to first' });
+    expect(document.activeElement).toBe(reply);
+    act(() => transport.emit(row('2', 'assistant', 'second')));
+    await screen.findByText('second');
+    expect(document.activeElement).toBe(reply);
+    act(() =>
+      transport.emitState({
+        state: 'thinking',
+        epoch: 'epoch-focus',
+        publishedAt: new Date().toISOString(),
+      })
+    );
+    expect(await screen.findByLabelText('thinking…')).toBeTruthy();
+    expect(document.activeElement).toBe(reply);
+  });
+
   it('does not show a read receipt for an accepted 202 until its durable row arrives', async () => {
     await i18n.changeLanguage('en');
     const transport = new FakeTransport([]);
