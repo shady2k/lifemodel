@@ -118,10 +118,14 @@ export default function App() {
   );
   useEffect(() => {
     const media = window.matchMedia('(max-width: 1023px)');
-    const update = () => setShowNowButton(media.matches);
+    const update = () => {
+      setShowNowButton(media.matches);
+    };
     update();
     media.addEventListener('change', update);
-    return () => media.removeEventListener('change', update);
+    return () => {
+      media.removeEventListener('change', update);
+    };
   }, []);
   const [nowOpen, setNowOpen] = useState(false);
   const [navigationOpen, setNavigationOpen] = useState(false);
@@ -153,7 +157,9 @@ export default function App() {
               variant="ghost"
               size="icon-sm"
               aria-label={t('openNavigation')}
-              onClick={() => setNavigationOpen(true)}
+              onClick={() => {
+                setNavigationOpen(true);
+              }}
             >
               <Menu aria-hidden="true" />
             </Button>
@@ -201,7 +207,12 @@ export default function App() {
               <SheetDescription>{t('navigationDescription')}</SheetDescription>
             </SheetHeader>
             <nav aria-label={t('navigation')} className="flex flex-col gap-2 p-4 pt-14">
-              <a href="#conversation" onClick={() => setNavigationOpen(false)}>
+              <a
+                href="#conversation"
+                onClick={() => {
+                  setNavigationOpen(false);
+                }}
+              >
                 {t('conversation')}
               </a>
               <h2 className="mt-4 font-medium">{t('system')}</h2>
