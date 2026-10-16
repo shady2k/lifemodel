@@ -131,7 +131,7 @@ jobs:
           verdict=$(scripts/ci-verdict.sh "$out")
           echo "product output: $verdict"
           echo "$verdict" >> "$GITHUB_OUTPUT"
-          if grep -q '^changed: web/app/' "$out"; then echo "web_app=true" >> "$GITHUB_OUTPUT"; else echo "web_app=false" >> "$GITHUB_OUTPUT"; fi
+          scripts/ci-web-provenance-paths.sh < "$out" >> "$GITHUB_OUTPUT"
 
   # The product checks, as the one command a person runs before pushing. It is
   # skipped for a change that cannot touch product code and while a pull
@@ -168,7 +168,7 @@ jobs:
       - name: Typecheck, lint, the format check and the suite, inside the isolated test boundary
         run: node scripts/test-isolated.mjs check
 
-  # Rebuild pinned shadcn add output and compare it with the registry lock and app files.
+  # Rebuild pinned shadcn add output and compare it with the kit registry lock.
   ci-shadcn-provenance:
     needs: changes
     if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft && needs.changes.outputs.web_app == 'true' }}
@@ -179,7 +179,7 @@ jobs:
         with:
           node-version: '24'
       - name: Verify pinned shadcn registry output
-        run: scripts/shadcn-add.sh --check $(node -p "require('./web/app/registry-lock/manifest.json').items.join(' ')")
+        run: scripts/shadcn-add.sh --check $(node -p "require('./web/kit/registry-lock/manifest.json').items.join(' ')")
 
   ci-backlog:
     runs-on: ubuntu-latest

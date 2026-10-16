@@ -9,7 +9,10 @@ export default defineConfig({
   root: appRoot,
   plugins: [react(), tailwindcss()],
   resolve: {
-    alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
+    alias: {
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
+      '@kit': fileURLToPath(new URL('../kit', import.meta.url)),
+    },
   },
   build: { outDir: 'dist', emptyOutDir: true, assetsInlineLimit: 0 },
 });

@@ -10,22 +10,22 @@ import {
   InputGroupAddon,
   InputGroupButton,
   InputGroupTextarea,
-} from '@/components/ui/input-group';
+} from '@kit/components/ui/input-group';
 import { isExpired, scheduleNotSent } from './send-state';
-import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import { Message } from '@/components/ui/message';
-import { Bubble } from '@/components/ui/bubble';
-import { Marker } from '@/components/ui/marker';
+import { Button } from '@kit/components/ui/button';
+import { Badge } from '@kit/components/ui/badge';
+import { Avatar, AvatarFallback } from '@kit/components/ui/avatar';
+import { Message } from '@kit/components/ui/message';
+import { Bubble } from '@kit/components/ui/bubble';
+import { Marker } from '@kit/components/ui/marker';
 import {
   MessageScroller,
   MessageScrollerContent,
   MessageScrollerProvider,
   MessageScrollerViewport,
-} from '@/components/ui/message-scroller';
-import { CodeBlock, CodeBlockContent, CodeBlockLine } from '@/components/ui/code-block';
-import { useHighlightedCode } from '@/hooks/use-highlighted-code';
+} from '@kit/components/ui/message-scroller';
+import { CodeBlock, CodeBlockContent, CodeBlockLine } from '@kit/components/ui/code-block';
+import { useHighlightedCode } from '@kit/hooks/use-highlighted-code';
 import { freshCreatureState, type CreaturePresenceValue } from './components/CreaturePresence';
 import {
   httpTransport,

@@ -2,8 +2,8 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Menu, Orbit, X } from 'lucide-react';
 import { CreaturePresence, type CreaturePresenceValue } from './components/CreaturePresence';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import { Button } from '@/components/ui/button';
+import { Avatar, AvatarFallback } from '@kit/components/ui/avatar';
+import { Button } from '@kit/components/ui/button';
 import {
   Sidebar,
   SidebarContent,
@@ -16,7 +16,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
-} from '@/components/ui/sidebar';
+} from '@kit/components/ui/sidebar';
 import {
   Sheet,
   SheetContent,
@@ -24,8 +24,8 @@ import {
   SheetDescription,
   SheetHeader,
   SheetTitle,
-} from '@/components/ui/sheet';
-import { useIsMobile } from '@/hooks/use-mobile';
+} from '@kit/components/ui/sheet';
+import { useIsMobile } from '@kit/hooks/use-mobile';
 import i18n, { languageFor } from './i18n';
 import { Conversation } from './Conversation';
 
