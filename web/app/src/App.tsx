@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Orbit } from 'lucide-react';
+import { Menu, Orbit, X } from 'lucide-react';
 import { CreaturePresence, type CreaturePresenceValue } from './components/CreaturePresence';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
@@ -9,23 +9,24 @@ import {
   SidebarContent,
   SidebarGroup,
   SidebarGroupContent,
+  SidebarGroupLabel,
   SidebarHeader,
   SidebarInset,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
-  SidebarTrigger,
 } from '@/components/ui/sidebar';
 import {
   Sheet,
   SheetContent,
+  SheetClose,
   SheetDescription,
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet';
 import { useIsMobile } from '@/hooks/use-mobile';
-import i18n from './i18n';
+import i18n, { languageFor } from './i18n';
 import { Conversation } from './Conversation';
 
 function Creature() {
@@ -41,7 +42,7 @@ function Creature() {
 function Navigation() {
   const { t } = useTranslation();
   return (
-    <Sidebar className="border-r border-sidebar-border">
+    <Sidebar collapsible="none" className="hidden border-r border-sidebar-border md:flex">
       <SidebarHeader className="flex h-14 flex-row items-center gap-2 border-b px-4">
         <Orbit aria-hidden="true" className="size-5 text-primary" />
         <span className="font-semibold tracking-tight">lifemodel</span>
@@ -58,9 +59,26 @@ function Navigation() {
                 </SidebarMenuButton>
               </SidebarMenuItem>
               <SidebarMenuItem>
+                <SidebarGroupLabel>{t('system')}</SidebarGroupLabel>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
                 <SidebarMenuButton asChild>
-                  <a href="#system">
-                    <span>{t('system')}</span>
+                  <a href="http://boot.localhost/" target="_blank" rel="noopener noreferrer">
+                    <span>{t('loader')}</span>
+                  </a>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton asChild>
+                  <a href="http://vault.localhost/" target="_blank" rel="noopener noreferrer">
+                    <span>{t('keys')}</span>
+                  </a>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton asChild>
+                  <a href="http://git.localhost/" target="_blank" rel="noopener noreferrer">
+                    <span>{t('code')}</span>
                   </a>
                 </SidebarMenuButton>
               </SidebarMenuItem>
@@ -95,11 +113,26 @@ function NowPanel({ creature }: { creature?: CreaturePresenceValue }) {
 export default function App() {
   const { t } = useTranslation();
   const isMobile = useIsMobile();
+  const [showNowButton, setShowNowButton] = useState(
+    () => window.matchMedia('(max-width: 1023px)').matches
+  );
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 1023px)');
+    const update = () => {
+      setShowNowButton(media.matches);
+    };
+    update();
+    media.addEventListener('change', update);
+    return () => {
+      media.removeEventListener('change', update);
+    };
+  }, []);
   const [nowOpen, setNowOpen] = useState(false);
+  const [navigationOpen, setNavigationOpen] = useState(false);
   const [creature, setCreature] = useState<CreaturePresenceValue>();
 
   useEffect(() => {
-    const language = navigator.language.toLowerCase().startsWith('ru') ? 'ru' : 'en';
+    const language = languageFor(navigator.language);
     void i18n.changeLanguage(language);
   }, []);
 
@@ -119,13 +152,24 @@ export default function App() {
     <SidebarProvider>
       <div className="flex h-svh min-w-0 flex-1 flex-col overflow-hidden bg-background text-foreground">
         <header className="flex h-14 shrink-0 items-center gap-3 border-b px-4">
-          {isMobile && <SidebarTrigger aria-label={t('openNavigation')} />}
+          {isMobile && (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={t('openNavigation')}
+              onClick={() => {
+                setNavigationOpen(true);
+              }}
+            >
+              <Menu aria-hidden="true" />
+            </Button>
+          )}
           <Creature />
           <div className="flex min-w-0 flex-col">
             <span className="text-sm font-medium leading-tight">lifemodel</span>
             <CreaturePresence value={creature} />
           </div>
-          {isMobile && (
+          {showNowButton && (
             <Button
               className="ml-auto"
               variant="outline"
@@ -156,13 +200,61 @@ export default function App() {
             </aside>
           </SidebarInset>
         </div>
+        <Sheet open={navigationOpen} onOpenChange={setNavigationOpen}>
+          <SheetContent side="left" showCloseButton={false} className="p-0">
+            <SheetHeader className="sr-only">
+              <SheetTitle>{t('navigation')}</SheetTitle>
+              <SheetDescription>{t('navigationDescription')}</SheetDescription>
+            </SheetHeader>
+            <nav aria-label={t('navigation')} className="flex flex-col gap-2 p-4 pt-14">
+              <a
+                href="#conversation"
+                onClick={() => {
+                  setNavigationOpen(false);
+                }}
+              >
+                {t('conversation')}
+              </a>
+              <h2 className="mt-4 font-medium">{t('system')}</h2>
+              <a href="http://boot.localhost/" target="_blank" rel="noopener noreferrer">
+                {t('loader')}
+              </a>
+              <a href="http://vault.localhost/" target="_blank" rel="noopener noreferrer">
+                {t('keys')}
+              </a>
+              <a href="http://git.localhost/" target="_blank" rel="noopener noreferrer">
+                {t('code')}
+              </a>
+            </nav>
+            <SheetClose asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label={t('close')}
+                className="absolute right-3 top-3"
+              >
+                <X aria-hidden="true" />
+              </Button>
+            </SheetClose>
+          </SheetContent>
+        </Sheet>
         <Sheet open={nowOpen} onOpenChange={setNowOpen}>
-          <SheetContent side="right" className="w-full p-0 sm:max-w-sm">
+          <SheetContent side="right" showCloseButton={false} className="w-full p-0 sm:max-w-sm">
             <SheetHeader className="sr-only">
               <SheetTitle>{t('now')}</SheetTitle>
               <SheetDescription>{t('creatureDescription')}</SheetDescription>
             </SheetHeader>
             <NowPanel creature={creature} />
+            <SheetClose asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label={t('close')}
+                className="absolute right-3 top-3"
+              >
+                <X aria-hidden="true" />
+              </Button>
+            </SheetClose>
           </SheetContent>
         </Sheet>
       </div>

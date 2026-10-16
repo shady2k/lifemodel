@@ -1,7 +1,11 @@
 import i18n from 'i18next';
 import { initReactI18next } from 'react-i18next';
 
-const language = navigator.language.toLowerCase().startsWith('ru') ? 'ru' : 'en';
+export function languageFor(browserLanguage: string): 'en' | 'ru' {
+  return new Intl.Locale(browserLanguage).language === 'ru' ? 'ru' : 'en';
+}
+
+const language = languageFor(navigator.language);
 
 void i18n.use(initReactI18next).init({
   resources: {
@@ -9,10 +13,16 @@ void i18n.use(initReactI18next).init({
       translation: {
         conversation: 'Conversation',
         system: 'System',
+        loader: 'Loader',
+        keys: 'Keys',
+        code: 'Code',
+        sidebarDialog: 'Navigation',
+        close: 'Close',
         now: 'Now',
         openNavigation: 'Open navigation',
         openNow: 'Open Now',
         navigation: 'Navigation',
+        navigationDescription: 'App navigation',
         thinking: 'thinking…',
         awake: 'here',
         asleep: 'asleep',
@@ -41,10 +51,16 @@ void i18n.use(initReactI18next).init({
       translation: {
         conversation: 'Разговор',
         system: 'Система',
+        loader: 'Загрузчик',
+        keys: 'Ключи',
+        code: 'Код',
+        sidebarDialog: 'Навигация',
+        close: 'Закрыть',
         now: 'Сейчас',
         openNavigation: 'Открыть навигацию',
         openNow: 'Открыть Сейчас',
         navigation: 'Навигация',
+        navigationDescription: 'Навигация приложения',
         thinking: 'думает…',
         awake: 'на связи',
         asleep: 'спит',

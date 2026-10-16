@@ -154,7 +154,7 @@ describe('conversation transcript', () => {
         publishedAt: new Date().toISOString(),
       });
     });
-    expect(await screen.findByText('thinking…')).toBeTruthy();
+    expect(await screen.findByLabelText('thinking…')).toBeTruthy();
     expect(screen.getByText('•••')).toBeTruthy();
     expect(transport.stateEventsHaveId).toEqual([false]);
   });

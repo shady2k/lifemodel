@@ -1,0 +1,104 @@
+{
+  "cli": "shadcn@4.21.5",
+  "init": "npx -y shadcn@4.21.5 init -t vite -b radix -p nova -n web --no-monorepo -y",
+  "items": [
+    "avatar",
+    "badge",
+    "button",
+    "code-block",
+    "input-group",
+    "input",
+    "message",
+    "message-scroller",
+    "bubble",
+    "marker",
+    "separator",
+    "sheet",
+    "sidebar",
+    "skeleton",
+    "textarea",
+    "tooltip"
+  ],
+  "files": [
+    {
+      "path": "components/ui/avatar.tsx",
+      "sha256": "53d3950f6ac2d1cf2340218631482d0c876c43a25757a416afc0c96c92b4555b"
+    },
+    {
+      "path": "components/ui/badge.tsx",
+      "sha256": "59953420d01d23d172b4e32583426db153ff09226e2d460d53526b9f25282801"
+    },
+    {
+      "path": "components/ui/bubble.tsx",
+      "sha256": "df1e461e33e835b7f69296939c2325e8cd76941b5ec69375d80d639793c5c4e2"
+    },
+    {
+      "path": "components/ui/button.tsx",
+      "sha256": "08e5f87833c5db8436e89337ebde0f776bcdbf649d3de69fb89be6441ca2e366"
+    },
+    {
+      "path": "components/ui/code-block.tsx",
+      "sha256": "48e5c4caa69fd243853d54f6e93bdf1a2d1e8d5d1c1992adec664d87635dec72"
+    },
+    {
+      "path": "components/ui/input-group.tsx",
+      "sha256": "f71e9c0fc3ef6d67ff325f23b245fe472710d2db05153a6e067db3162aae970e"
+    },
+    {
+      "path": "components/ui/input.tsx",
+      "sha256": "75418e030b2a54dd017ac0f4588db4bbdbabca7525e88bbc9d84cb3e18bcb905"
+    },
+    {
+      "path": "components/ui/marker.tsx",
+      "sha256": "036277635df058b8dc6e6dbe5cb738bc595e5035b885be42c60f904263725424"
+    },
+    {
+      "path": "components/ui/message-scroller.tsx",
+      "sha256": "59c562ae19bb1d3ae5e51385f7f957824e94a86b790567ecef4d9e895424a819"
+    },
+    {
+      "path": "components/ui/message.tsx",
+      "sha256": "64e9ae0f9d1e268b0ed7b738a53d374d273fe1e7e2dd7b35ad7417e50a9bbe6c"
+    },
+    {
+      "path": "components/ui/separator.tsx",
+      "sha256": "b5b5460e5337c2d5f361c1512001615b2e5eacb38c7449a4418bb9ddb47c4bba"
+    },
+    {
+      "path": "components/ui/sheet.tsx",
+      "sha256": "549678370096804f5acd0895fcbd58084b45ac80f28197887377038d8266ddd3"
+    },
+    {
+      "path": "components/ui/sidebar.tsx",
+      "sha256": "a0ebdc2eecc0ac620d56b77b30bc059d5a1f3c77e614586e45a73dfc31b55851"
+    },
+    {
+      "path": "components/ui/skeleton.tsx",
+      "sha256": "4c2af7fa9c645358a0fb188779deab6f0b981733b62befc25e18aaebea1350dc"
+    },
+    {
+      "path": "components/ui/textarea.tsx",
+      "sha256": "82601c91ffc6c727d924162c78d7cb853114bcced4e2eb922a68ca12d4239c0f"
+    },
+    {
+      "path": "components/ui/tooltip.tsx",
+      "sha256": "fc4380a53b7c847ff3d692c320f8d889eaaf3d6878dcba1da926ec4ab3a7c037"
+    },
+    {
+      "path": "hooks/use-highlighted-code.ts",
+      "sha256": "52c87d08f21b66b45ae7b724c9e1bd20694dd86ff75ee03e9ff35aa7af5461e0"
+    },
+    {
+      "path": "hooks/use-mobile.ts",
+      "sha256": "ad0936f84f1df79d3697bfbff9c18f8ad58431c1cbaf2359c6a853b0fcc9f28b"
+    },
+    {
+      "path": "lib/highlighter.tsx",
+      "sha256": "ab3cfd4e09735bf90735e851dfe5bc4f17151f3f36b9d4d55e9cd809b1aa2b9c"
+    },
+    {
+      "path": "lib/utils.ts",
+      "sha256": "14300d758170c270c75b057f38fedb3793a5920ea872f0477e29fb131185e8a7"
+    }
+  ]
+}

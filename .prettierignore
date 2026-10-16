@@ -2,3 +2,16 @@ dist/
 node_modules/
 data/
 *.md
+
+# Pinned shadcn registry output; verified byte-for-byte by provenance tests.
+web/app/src/components/ui/
+web/app/registry-lock/
+web/app/src/hooks/use-highlighted-code.ts
+web/app/src/hooks/use-mobile.ts
+web/app/src/lib/highlighter.tsx
+web/app/src/lib/utils.ts
+
+# Additional pinned shadcn registry output.
+web/app/src/hooks/use-highlighted-code.ts
+web/app/src/hooks/use-mobile.ts
+web/app/src/lib/highlighter.tsx
