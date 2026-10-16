@@ -1,15 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  chmodSync,
-  cpSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -18,11 +8,8 @@ import YAML from 'yaml';
 
 const platformRoot = fileURLToPath(new URL('../../deploy/platform/', import.meta.url));
 const installer = fileURLToPath(new URL('../../scripts/install.sh', import.meta.url));
-const nixModule = fileURLToPath(new URL('../../deploy/nixos/default.nix', import.meta.url));
 const rootTemplates = fileURLToPath(new URL('../../deploy/root/', import.meta.url));
-const customOCI = fileURLToPath(
-  new URL('../fixtures/nixos/custom-ocirepository.yaml', import.meta.url)
-);
+const customOCI = fileURLToPath(new URL('../fixtures/nixos/custom-ocirepository.yaml', import.meta.url));
 
 function yamlFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -35,26 +22,14 @@ function parseYamlFiles(files: string[]): Record<string, any>[] {
   return files.flatMap((file) => {
     const documents = YAML.parseAllDocuments(readFileSync(file, 'utf8'));
     expect(documents.flatMap((document) => document.errors)).toEqual([]);
-    return documents.map(
-      (document) =>
-        JSON.parse(
-          JSON.stringify(document.toJSON()).replaceAll('${LIFEMODEL_NAME}', 'lifemodel')
-        ) as Record<string, any>
-    );
+    return documents.map((document) => document.toJSON() as Record<string, any>);
   });
 }
 
 function sourceObjects(): Record<string, any>[] {
   // Helm chart templates are Go templates, not standalone Kubernetes YAML.
   // Render the vendored chart in the Nix platform check instead.
-  return parseYamlFiles(
-    yamlFiles(platformRoot).filter(
-      (file) =>
-        !file.includes('/charts/') &&
-        !file.endsWith('kustomization.yaml') &&
-        !file.endsWith('/b/operator/rendered.yaml')
-    )
-  );
+  return parseYamlFiles(yamlFiles(platformRoot).filter((file) => !file.includes('/charts/') && !file.endsWith('kustomization.yaml') && !file.endsWith('/b/operator/rendered.yaml')));
 }
 
 function object(objects: Record<string, any>[], kind: string): Record<string, any> {
@@ -73,29 +48,21 @@ function assertRestrictedNamespace(namespace: Record<string, any>): void {
 
 function assertAllowedPolicyPorts(policy: Record<string, any>, allowed: number[]): void {
   const ports = [...(policy.spec?.ingress ?? []), ...(policy.spec?.egress ?? [])]
-    .flatMap((rule: any) => rule.ports ?? [])
-    .map((port: any) => port.port);
-  if (JSON.stringify(ports) !== JSON.stringify(allowed))
-    throw new Error('NetworkPolicy ports differ from allowlist');
+    .flatMap((rule: any) => rule.ports ?? []).map((port: any) => port.port);
+  if (JSON.stringify(ports) !== JSON.stringify(allowed)) throw new Error('NetworkPolicy ports differ from allowlist');
 }
 
 function assertRestrictedContainers(podSpec: Record<string, any>): void {
   const pod = podSpec.securityContext ?? {};
-  if (pod.runAsNonRoot !== true)
-    throw new Error('pod security context is not restricted-compatible');
+  if (pod.runAsNonRoot !== true) throw new Error('pod security context is not restricted-compatible');
   for (const container of [...(podSpec.initContainers ?? []), ...(podSpec.containers ?? [])]) {
     const context = container.securityContext ?? {};
     const seccompType = (context.seccompProfile ?? pod.seccompProfile)?.type;
     const runAsUser = context.runAsUser ?? pod.runAsUser;
-    if (
-      (context.runAsNonRoot ?? pod.runAsNonRoot) !== true ||
-      runAsUser === 0 ||
-      context.privileged === true ||
-      context.allowPrivilegeEscalation !== false ||
-      (context.capabilities?.add?.length ?? 0) > 0 ||
-      context.capabilities?.drop?.includes('ALL') !== true ||
-      !['RuntimeDefault', 'Localhost'].includes(seccompType)
-    ) {
+    if ((context.runAsNonRoot ?? pod.runAsNonRoot) !== true || runAsUser === 0 ||
+        context.privileged === true || context.allowPrivilegeEscalation !== false ||
+        (context.capabilities?.add?.length ?? 0) > 0 || context.capabilities?.drop?.includes('ALL') !== true ||
+        !['RuntimeDefault', 'Localhost'].includes(seccompType)) {
       throw new Error(`container ${container.name} is not restricted-compatible`);
     }
   }
@@ -107,36 +74,15 @@ function assertStepANetworkPolicies(objects: Record<string, any>[]): void {
     'lifemodel-git': ['gitea-default-deny'],
   };
   for (const [namespace, names] of Object.entries(expected)) {
-    const actual = objects
-      .filter((item) => item.kind === 'NetworkPolicy' && item.metadata?.namespace === namespace)
-      .map((item) => item.metadata.name)
-      .sort();
+    const actual = objects.filter((item) => item.kind === 'NetworkPolicy' && item.metadata?.namespace === namespace)
+      .map((item) => item.metadata.name).sort();
     if (JSON.stringify(actual) !== JSON.stringify([...names].sort())) {
       throw new Error(`NetworkPolicy inventory differs in ${namespace}`);
     }
   }
 }
 
-function runInstallerHarness(
-  failFlux: boolean,
-  foreign = false,
-  existingRoot?: string,
-  tag = 'v1.0.0',
-  options: {
-    unsupportedNode?: boolean;
-    metacharState?: boolean;
-    digest?: string;
-    owner?: string;
-    sourceDir?: string;
-    stateDir?: string;
-    name?: string;
-    failRoot?: boolean;
-    rootName?: string;
-    identityError?: boolean;
-    existingConfigMap?: boolean;
-    concurrentNames?: [string, string];
-  } = {}
-): { status: number | null; output: string; root: string } {
+function runInstallerHarness(failFlux: boolean, foreign = false, existingRoot?: string, tag = 'v1.0.0', options: { unsupportedNode?: boolean; metacharState?: boolean; digest?: string; owner?: string; sourceDir?: string } = {}): { status: number | null; output: string; root: string } {
   const root = existingRoot ?? mkdtempSync(join(tmpdir(), 'lifemodel-installer-test-'));
   const bin = join(root, 'bin');
   const state = join(root, 'namespace-state');
@@ -150,9 +96,7 @@ function runInstallerHarness(
   };
   command('id', 'echo 0');
   if (options.unsupportedNode) command('node', 'echo 14');
-  command(
-    'k3s',
-    `if [ "$1" = --version ]; then echo 'k3s version v1.35.8+k3s1'; exit 0; fi
+  command('k3s', `if [ "$1" = --version ]; then echo 'k3s version v1.35.8+k3s1'; exit 0; fi
 if [ "$1" != kubectl ] || [ "$2" != --kubeconfig ]; then
   printf 'fake k3s rejected argv:' >&2
   printf ' <%s>' "$@" >&2
@@ -162,7 +106,6 @@ fi
 shift 2
 case "$*" in
   *'get nodes'*) exit 0 ;;
-  *'get configmap lifemodel-instance -o jsonpath='*) [ "$K3S_IDENTITY_ERROR" = 1 ] && { echo 'Forbidden' >&2; exit 1; }; [ "$K3S_CONFIGMAP_EXISTS" = 1 ] && { printf '%s' "$K3S_ROOT_NAME"; exit 0; }; echo 'Error from server (NotFound): configmaps lifemodel-instance not found' >&2; exit 1 ;;
   *'get ocirepository platform'*) printf '{"metadata":{"managedFields":[%s]}}\n' "$K3S_MANAGED_FIELDS" ;;
   *'get namespace flux-system -o jsonpath='*) [ "$K3S_FOREIGN" = 1 ] && echo external || echo lifemodel ;;
   *'get namespace flux-system'*) [ -f "$K3S_STATE" ] ;;
@@ -170,15 +113,12 @@ case "$*" in
   *'--field-manager=lifemodel-bootstrap'*)
     file=''; for arg do file=$arg; done
     echo "root:$*" >> "$K3S_LOG"
-    if grep 'LIFEMODEL_NAME:' "$file" >/dev/null; then grep 'LIFEMODEL_NAME:' "$file" | sed 's/.*: *//' | tr -d '"' > "$K3S_ROOT_NAME_FILE"; fi
-    if [ "$K3S_FAIL_ROOT" = 1 ] && grep 'LIFEMODEL_NAME:' "$file" >/dev/null; then exit 43; fi
     if grep 'tag:' "$file" >/dev/null; then grep 'tag:' "$file" | sed -E "s/.*tag: //; s/[\\\"']//g" > "$K3S_APPLIED_TAG"; fi
     if grep 'digest:' "$file" >/dev/null; then grep 'digest:' "$file" > "$K3S_APPLIED_REF"; fi
     ;;
   *' -f -'*) cat >/dev/null ;;
   *) echo "flux:$*" >> "$K3S_LOG"; if [ "$K3S_FAIL_FLUX" = 1 ] && [ "$(grep -c '^flux:' "$K3S_LOG")" -eq 1 ]; then exit 42; fi ;;
-esac`
-  );
+esac`);
   command('curl', 'for arg do output=$arg; done; printf manifest > "$output"');
   command('sha256sum', 'read expected file; echo "$file: OK"');
   const env = {
@@ -186,357 +126,38 @@ esac`
     PATH: `${bin}:${process.env.PATH}`,
     K3S_STATE: state,
     K3S_LOG: log,
-    K3S_ROOT_NAME: options.rootName ?? '',
-    K3S_IDENTITY_ERROR: options.identityError ? '1' : '0',
-    K3S_CONFIGMAP_EXISTS: options.existingConfigMap ? '1' : '0',
-    K3S_ROOT_NAME_FILE: join(root, 'root-name'),
-    K3S_FAIL_ROOT: options.failRoot ? '1' : '0',
     K3S_APPLIED_TAG: join(root, 'applied-tag'),
     K3S_APPLIED_REF: join(root, 'applied-ref'),
     K3S_FAIL_FLUX: failFlux ? '1' : '0',
     K3S_FOREIGN: foreign ? '1' : '0',
-    K3S_MANAGED_FIELDS: options.owner
-      ? `{\"manager\":\"${options.owner}\",\"fieldsV1\":{\"f:spec\":{\"f:ref\":{\"f:tag\":{}}}}}`
-      : '',
+    K3S_MANAGED_FIELDS: options.owner ? `{\"manager\":\"${options.owner}\",\"fieldsV1\":{\"f:spec\":{\"f:ref\":{\"f:tag\":{}}}}}` : '',
     LIFEMODEL_INSTALL_ROOT: join(root, 'install-root'),
-    LIFEMODEL_STATE_DIR: options.metacharState
-      ? join(root, 'state $(touch SHOULD_NOT_EXIST) `echo nope`')
-      : join(root, 'state'),
+    LIFEMODEL_STATE_DIR: options.metacharState ? join(root, 'state $(touch SHOULD_NOT_EXIST) `echo nope`') : join(root, 'state'),
   };
   delete (env as NodeJS.ProcessEnv).KUBECONFIG;
   const refArgs = options.digest ? ['--digest', options.digest] : ['--tag', tag];
-  const installScript = options.sourceDir
-    ? join(options.sourceDir, 'scripts/install.sh')
-    : installer;
+  const installScript = options.sourceDir ? join(options.sourceDir, 'scripts/install.sh') : installer;
   const templates = options.sourceDir ? join(options.sourceDir, 'deploy/root') : rootTemplates;
-  const args = (name?: string) => [
-    installScript,
-    '--platform-url',
-    'oci://example.test/platform',
-    ...refArgs,
-    '--root-templates',
-    templates,
-    ...(name ? ['--name', name] : []),
-  ];
-  const result = options.concurrentNames
-    ? spawnSync(
-        'sh',
-        [
-          '-c',
-          'sh "$1" --platform-url "$2" --tag "$3" --name "$4" --root-templates "$5" & first=$!; sh "$1" --platform-url "$2" --tag "$3" --name "$6" --root-templates "$5" & second=$!; wait "$first"; first_status=$?; wait "$second"; second_status=$?; printf "statuses:%s,%s\n" "$first_status" "$second_status"',
-          'installer-race',
-          installScript,
-          'oci://example.test/platform',
-          tag,
-          options.concurrentNames[0],
-          templates,
-          options.concurrentNames[1],
-        ],
-        { encoding: 'utf8', env }
-      )
-    : spawnSync('sh', args(options.name), { encoding: 'utf8', env });
+  const result = spawnSync('sh', [installScript, '--platform-url', 'oci://example.test/platform', ...refArgs, '--root-templates', templates], { encoding: 'utf8', env });
   return { status: result.status, output: `${result.stdout}${result.stderr}`, root };
 }
 
 describe('platform manifests', () => {
-  it('checks the Flux substitution boundary and plain-scalar name safety', () => {
-    const instance = YAML.parse(
-      readFileSync(join(platformRoot, 'instance-reconciler.yaml'), 'utf8')
-    ) as any;
-    expect(instance.spec.path).toBe('./instance');
-    expect(instance.spec.postBuild.substituteFrom).toEqual([
-      { kind: 'ConfigMap', name: 'lifemodel-instance', optional: false },
-    ]);
-    const fluxKustomizations = yamlFiles(platformRoot).flatMap((file) =>
-      YAML.parseAllDocuments(readFileSync(file, 'utf8'))
-        .map((doc) => ({ file, value: doc.toJSON() as any }))
-        .filter(
-          ({ value }) =>
-            value?.apiVersion === 'kustomize.toolkit.fluxcd.io/v1' && value.kind === 'Kustomization'
-        )
-    );
-    expect(
-      fluxKustomizations
-        .filter(({ value }) => value.spec?.postBuild)
-        .map(({ file }) => file.replace(platformRoot, ''))
-    ).toEqual(['instance-reconciler.yaml']);
-    for (const { file, value } of fluxKustomizations.filter(
-      ({ file }) => !file.endsWith('instance-reconciler.yaml')
-    ))
-      expect(value.spec?.postBuild, file).toBeUndefined();
-    const source = readFileSync(join(platformRoot, 'instance/configmaps.yaml'), 'utf8');
-    for (const name of ['lifemodel', 'home', 'a0', 'a-1', `a${'x'.repeat(55)}0`]) {
-      const substituted = source.replaceAll('${LIFEMODEL_NAME}', name);
-      for (const doc of YAML.parseAllDocuments(substituted, { version: '1.1' })) {
-        expect(doc.toJSON().data.LIFEMODEL_NAME).toBe(name);
-        expect(typeof doc.toJSON().data.LIFEMODEL_NAME).toBe('string');
-        const normalized = YAML.stringify(doc.toJSON());
-        const reparsed = YAML.parse(normalized, { version: '1.1' });
-        expect(reparsed.data.LIFEMODEL_NAME).toBe(name);
-        expect(typeof reparsed.data.LIFEMODEL_NAME).toBe('string');
-      }
-    }
-    const instanceResources = YAML.parse(
-      readFileSync(join(platformRoot, 'instance/kustomization.yaml'), 'utf8')
-    ) as any;
-    for (const vendored of ['a/openbao/rendered.yaml', 'a/gitea/rendered.yaml'])
-      expect(instanceResources.resources).not.toContain('../' + vendored);
-    expect(instance.spec.postBuild.substituteFrom[0].optional).toBe(false);
-  });
-
-  it.each(['lifemodel', 'home', 'a0', 'x'.repeat(57)])(
-    'keeps accepted instance name %s a string through installer render and YAML 1.1 plain scalar parsing',
-    (name) => {
-      const temporary = mkdtempSync(join(tmpdir(), 'lifemodel-name-render-'));
-      try {
-        const result = spawnSync(
-          'sh',
-          [
-            installer,
-            '--platform-url',
-            'oci://example.test/platform',
-            '--tag',
-            'v1',
-            '--name',
-            name,
-            '--render-only',
-            temporary,
-            '--root-templates',
-            rootTemplates,
-          ],
-          { encoding: 'utf8' }
-        );
-        expect(result.status).toBe(0);
-        const root = YAML.parse(readFileSync(join(temporary, 'instance.yaml'), 'utf8'), {
-          version: '1.1',
-        });
-        expect(root.data.LIFEMODEL_NAME).toBe(name);
-        expect(typeof root.data.LIFEMODEL_NAME).toBe('string');
-        const source = readFileSync(join(platformRoot, 'instance/configmaps.yaml'), 'utf8');
-        const built = source.replaceAll('${LIFEMODEL_NAME}', name);
-        for (const doc of YAML.parseAllDocuments(built, { version: '1.1' })) {
-          expect(doc.toJSON().data.LIFEMODEL_NAME).toBe(name);
-          expect(typeof doc.toJSON().data.LIFEMODEL_NAME).toBe('string');
-        }
-      } finally {
-        rmSync(temporary, { recursive: true, force: true });
-      }
-    }
-  );
-
-  it('accepts the shared DNS-1035 non-reserved name table and rejects YAML scalars in every name entry point', () => {
-    const accepted = ['a', 'home', 'a0', 'a-1', `a${'x'.repeat(55)}0`];
-    const rejected = [
-      'true',
-      '123',
-      'null',
-      '1abc',
-      'y',
-      'n',
-      'yes',
-      'no',
-      'false',
-      'on',
-      'off',
-      '~',
-      '-a',
-      'a-',
-      'A',
-    ];
-    for (const name of accepted) {
-      const output = `data:\n  LIFEMODEL_NAME: ${name}\n`;
-      expect(typeof YAML.parse(output, { version: '1.1' }).data.LIFEMODEL_NAME).toBe('string');
-    }
-    for (const name of rejected) {
-      const result = spawnSync(
-        'sh',
-        [
-          installer,
-          '--platform-url',
-          'oci://example.test/platform',
-          '--tag',
-          'v1',
-          '--name',
-          name,
-          '--render-only',
-          mkdtempSync(join(tmpdir(), 'lifemodel-invalid-')),
-        ],
-        { encoding: 'utf8' }
-      );
-      expect(result.status, name).not.toBe(0);
-    }
-  });
-
-  it('rejects an invalid or too-long instance name in the generic installer', () => {
-    const temporary = mkdtempSync(join(tmpdir(), 'lifemodel-name-check-'));
-    try {
-      for (const name of ['Bad', '-bad', 'bad-', 'x'.repeat(58)]) {
-        const result = spawnSync(
-          'sh',
-          [
-            installer,
-            '--platform-url',
-            'oci://example.test/platform',
-            '--tag',
-            'v1',
-            '--name',
-            name,
-            '--render-only',
-            temporary,
-            '--root-templates',
-            rootTemplates,
-          ],
-          { encoding: 'utf8' }
-        );
-        expect(result.status, name).not.toBe(0);
-        expect(`${result.stdout}${result.stderr}`).toContain('DNS-1035');
-      }
-      const good = spawnSync(
-        'sh',
-        [
-          installer,
-          '--platform-url',
-          'oci://example.test/platform',
-          '--tag',
-          'v1',
-          '--name',
-          'home',
-          '--render-only',
-          temporary,
-          '--root-templates',
-          rootTemplates,
-        ],
-        { encoding: 'utf8' }
-      );
-      expect(good.status).toBe(0);
-      expect(
-        YAML.parse(readFileSync(join(temporary, 'instance.yaml'), 'utf8')).data.LIFEMODEL_NAME
-      ).toBe('home');
-    } finally {
-      rmSync(temporary, { recursive: true, force: true });
-    }
-  });
-
-  it('saves NixOS identity before any name-dependent root apply and recovers it first', () => {
-    const moduleText = readFileSync(nixModule, 'utf8');
-    const begin = moduleText.indexOf("script = ''");
-    const end = moduleText.indexOf("      '';", begin);
-    expect(begin).toBeGreaterThan(-1);
-    expect(end).toBeGreaterThan(begin);
-    const script = moduleText.slice(begin, end);
-    const saveIdentity = script.indexOf(
-      'mv /var/lib/lifemodel/instance-name.tmp /var/lib/lifemodel/instance-name'
-    );
-    const firstRootApply = script.indexOf(
-      '$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$effectiveOCI"'
-    );
-    expect(saveIdentity).toBeGreaterThan(-1);
-    expect(firstRootApply).toBeGreaterThan(-1);
-    expect(saveIdentity).toBeLessThan(firstRootApply);
-    expect(script).toContain("if grep -Fqi '(NotFound)' ");
-    expect(script).toContain('existing lifemodel-instance ConfigMap has no LIFEMODEL_NAME');
-    expect(script).toContain('cannot determine existing instance identity');
-  });
-
-  it('refuses to publish when identity recovery has an API error or an empty existing value', () => {
-    const apiErrorRoot = mkdtempSync(join(tmpdir(), 'lifemodel-identity-api-error-'));
-    try {
-      const apiError = runInstallerHarness(false, false, apiErrorRoot, 'v1', {
-        name: 'other',
-        identityError: true,
-      });
-      expect(apiError.status, apiError.output).not.toBe(0);
-      expect(apiError.output).toContain('cannot determine existing instance identity');
-      expect(readFileSync(join(apiError.root, 'kubectl.log'), 'utf8')).not.toContain('root:');
-    } finally {
-      rmSync(apiErrorRoot, { recursive: true, force: true });
-    }
-    const emptyRoot = mkdtempSync(join(tmpdir(), 'lifemodel-identity-empty-'));
-    try {
-      const empty = runInstallerHarness(false, false, emptyRoot, 'v1', {
-        name: 'other',
-        rootName: '',
-        existingConfigMap: true,
-      });
-      expect(empty.status).not.toBe(0);
-      expect(empty.output).toContain('ConfigMap has no LIFEMODEL_NAME');
-      expect(readFileSync(join(empty.root, 'kubectl.log'), 'utf8')).not.toContain('root:');
-    } finally {
-      rmSync(emptyRoot, { recursive: true, force: true });
-    }
-  });
-
-  it('serializes concurrent first installs with different names', () => {
-    const result = runInstallerHarness(false, false, undefined, 'v1', {
-      concurrentNames: ['home', 'other'],
-    });
-    expect(result.output).toMatch(/statuses:(?:0,1|1,0)/);
-    expect(readFileSync(join(result.root, 'state', 'instance-name'), 'utf8')).toMatch(
-      /^(home|other)\n$/
-    );
-    expect(result.output).toContain('instance name is fixed as');
-    rmSync(result.root, { recursive: true, force: true });
-  });
-
-  it('persists identity before a failed first apply and recovers it from the root ConfigMap', () => {
-    const first = runInstallerHarness(false, false, undefined, 'v1', {
-      name: 'home',
-      failRoot: true,
-    });
-    expect(first.status).not.toBe(0);
-    const stateName = join(first.root, 'state', 'instance-name');
-    expect(readFileSync(stateName, 'utf8')).toBe('home\n');
-    const conflict = runInstallerHarness(false, false, first.root, 'v1', { name: 'other' });
-    expect(conflict.status).not.toBe(0);
-    expect(conflict.output).toContain('instance name is fixed as home');
-
-    const recoveredRoot = mkdtempSync(join(tmpdir(), 'lifemodel-recovered-'));
-    try {
-      const recovered = runInstallerHarness(false, false, recoveredRoot, 'v1', {
-        name: 'home',
-        rootName: 'home',
-      });
-      expect(recovered.status).toBe(0);
-      expect(readFileSync(join(recoveredRoot, 'state', 'instance-name'), 'utf8')).toBe('home\n');
-      const mismatch = runInstallerHarness(false, false, recoveredRoot, 'v1', {
-        name: 'another',
-        rootName: 'home',
-      });
-      expect(mismatch.status).not.toBe(0);
-      expect(mismatch.output).toContain('instance name is fixed as home');
-    } finally {
-      rmSync(recoveredRoot, { recursive: true, force: true });
-    }
-  });
-
   it('does not render Helm hook resources in step A', () => {
     const rendered = parseYamlFiles([
       join(platformRoot, 'a/openbao/rendered.yaml'),
       join(platformRoot, 'a/gitea/rendered.yaml'),
     ]);
-    expect(
-      rendered.filter((item) => item.metadata?.annotations?.['helm.sh/hook'] !== undefined)
-    ).toEqual([]);
+    expect(rendered.filter((item) => item.metadata?.annotations?.['helm.sh/hook'] !== undefined)).toEqual([]);
   });
   it('rejects privileged, added-capability, and root-user containers', () => {
     const rendered = parseYamlFiles([join(platformRoot, 'a/gitea/rendered.yaml')]);
-    const pod = rendered.find(
-      (item) => item.kind === 'Deployment' && item.metadata?.name === 'gitea'
-    )!.spec.template.spec;
+    const pod = rendered.find((item) => item.kind === 'Deployment' && item.metadata?.name === 'gitea')!.spec.template.spec;
     const cases = [
-      (copy: any) => {
-        copy.containers[0].securityContext.privileged = true;
-      },
-      (copy: any) => {
-        copy.containers[0].securityContext.capabilities.add = ['SYS_ADMIN'];
-      },
-      (copy: any) => {
-        copy.containers[0].securityContext.runAsUser = 0;
-      },
-      (copy: any) => {
-        delete copy.containers[0].securityContext.runAsUser;
-        copy.securityContext.runAsUser = 0;
-      },
+      (copy: any) => { copy.containers[0].securityContext.privileged = true; },
+      (copy: any) => { copy.containers[0].securityContext.capabilities.add = ['SYS_ADMIN']; },
+      (copy: any) => { copy.containers[0].securityContext.runAsUser = 0; },
+      (copy: any) => { delete copy.containers[0].securityContext.runAsUser; copy.securityContext.runAsUser = 0; },
     ];
     for (const mutate of cases) {
       const copy = structuredClone(pod);
@@ -551,8 +172,7 @@ describe('platform manifests', () => {
     for (const namespace of ['openbao', 'lifemodel-git']) {
       const mutated = structuredClone(objects);
       mutated.push({
-        apiVersion: 'networking.k8s.io/v1',
-        kind: 'NetworkPolicy',
+        apiVersion: 'networking.k8s.io/v1', kind: 'NetworkPolicy',
         metadata: { name: 'unexpected-allow', namespace },
         spec: { podSelector: {}, policyTypes: ['Ingress'], ingress: [{ from: [{}] }] },
       });
@@ -562,81 +182,35 @@ describe('platform manifests', () => {
 
   it('deploys Gitea with explicit SQLite, admin Secret, persistence, and restricted access', () => {
     const giteaRoot = join(platformRoot, 'a/gitea');
-    const kustomization = YAML.parse(
-      readFileSync(join(platformRoot, 'a/kustomization.yaml'), 'utf8')
-    ) as { resources: string[] };
+    const kustomization = YAML.parse(readFileSync(join(platformRoot, 'a/kustomization.yaml'), 'utf8')) as { resources: string[] };
     expect(kustomization.resources).toContain('gitea');
-    const giteaKustomization = YAML.parse(
-      readFileSync(join(giteaRoot, 'kustomization.yaml'), 'utf8')
-    ) as { resources: string[]; configMapGenerator?: any[] };
+    const giteaKustomization = YAML.parse(readFileSync(join(giteaRoot, 'kustomization.yaml'), 'utf8')) as { resources: string[]; configMapGenerator?: any[] };
     expect(giteaKustomization.resources).toContain('rendered.yaml');
     expect(giteaKustomization.resources).not.toContain('release.yaml');
     expect(giteaKustomization.configMapGenerator).toBeUndefined();
     const rendered = parseYamlFiles([join(giteaRoot, 'rendered.yaml')]);
-    const giteaPodSpec = rendered.find(
-      (item) => item.kind === 'Deployment' && item.metadata?.name === 'gitea'
-    )!.spec.template.spec;
+    const giteaPodSpec = rendered.find((item) => item.kind === 'Deployment' && item.metadata?.name === 'gitea')!.spec.template.spec;
     assertRestrictedContainers(giteaPodSpec);
     expect(rendered.some((item) => item.kind === 'HelmRelease')).toBe(false);
-    expect(
-      rendered.some((item) => item.kind === 'ConfigMap' && item.metadata?.name === 'gitea-values')
-    ).toBe(false);
-    expect(
-      rendered.some((item) => item.kind === 'Deployment' && item.metadata?.name === 'gitea')
-    ).toBe(true);
+    expect(rendered.some((item) => item.kind === 'ConfigMap' && item.metadata?.name === 'gitea-values')).toBe(false);
+    expect(rendered.some((item) => item.kind === 'Deployment' && item.metadata?.name === 'gitea')).toBe(true);
     expect(sourceObjects().some((item) => item.kind === 'HelmRelease')).toBe(false);
-    const values = YAML.parse(readFileSync(join(giteaRoot, 'values.yaml'), 'utf8')) as Record<
-      string,
-      any
-    >;
+    const values = YAML.parse(readFileSync(join(giteaRoot, 'values.yaml'), 'utf8')) as Record<string, any>;
     expect(values).toMatchObject({
       postgresql: { enabled: false },
       'postgresql-ha': { enabled: false },
       valkey: { enabled: false },
       'valkey-cluster': { enabled: false },
       gitea: {
-        admin: {
-          username: '',
-          password: '',
-          existingSecret: 'gitea-admin',
-          passwordMode: 'initialOnlyNoReset',
-        },
-        config: {
-          database: { DB_TYPE: 'sqlite3', PATH: '/data/gitea/gitea.db' },
-          repository: { ROOT: '/data/git/repositories' },
-          queue: { TYPE: 'level' },
-          cache: { ADAPTER: 'memory' },
-          server: {
-            DOMAIN: 'gitea-http.lifemodel-git.svc.cluster.local',
-            SSH_DOMAIN: 'gitea-http.lifemodel-git.svc.cluster.local',
-            ROOT_URL: 'http://gitea-http.lifemodel-git.svc.cluster.local:3000/',
-          },
-        },
+        admin: { username: '', password: '', existingSecret: 'gitea-admin', passwordMode: 'initialOnlyNoReset' },
+        config: { database: { DB_TYPE: 'sqlite3', PATH: '/data/gitea/gitea.db' }, repository: { ROOT: '/data/git/repositories' }, queue: { TYPE: 'level' }, cache: { ADAPTER: 'memory' }, server: { DOMAIN: 'gitea-http.lifemodel-git.svc.cluster.local', SSH_DOMAIN: 'gitea-http.lifemodel-git.svc.cluster.local', ROOT_URL: 'http://gitea-http.lifemodel-git.svc.cluster.local:3000/' } },
       },
-      persistence: {
-        enabled: true,
-        create: true,
-        claimName: 'gitea-shared-storage',
-        annotations: { 'kustomize.toolkit.fluxcd.io/prune': 'disabled' },
-      },
+      persistence: { enabled: true, create: true, claimName: 'gitea-shared-storage', annotations: { 'kustomize.toolkit.fluxcd.io/prune': 'disabled' } },
       ingress: { enabled: false },
-      podSecurityContext: {
-        runAsNonRoot: true,
-        runAsUser: 1000,
-        runAsGroup: 1000,
-        seccompProfile: { type: 'RuntimeDefault' },
-      },
-      containerSecurityContext: {
-        runAsNonRoot: true,
-        allowPrivilegeEscalation: false,
-        capabilities: { drop: ['ALL'] },
-        seccompProfile: { type: 'RuntimeDefault' },
-      },
+      podSecurityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, seccompProfile: { type: 'RuntimeDefault' } },
+      containerSecurityContext: { runAsNonRoot: true, allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] }, seccompProfile: { type: 'RuntimeDefault' } },
     });
-    const namespace = YAML.parse(readFileSync(join(giteaRoot, 'namespace.yaml'), 'utf8')) as Record<
-      string,
-      any
-    >;
+    const namespace = YAML.parse(readFileSync(join(giteaRoot, 'namespace.yaml'), 'utf8')) as Record<string, any>;
     expect(namespace.metadata.name).toBe('lifemodel-git');
     expect(namespace.metadata.annotations['kustomize.toolkit.fluxcd.io/prune']).toBe('disabled');
     expect(namespace.metadata.labels['pod-security.kubernetes.io/enforce']).toBe('restricted');
@@ -647,88 +221,47 @@ describe('platform manifests', () => {
     delete missingEnforce.metadata.labels['pod-security.kubernetes.io/enforce'];
     expect(() => assertRestrictedNamespace(missingEnforce)).toThrow(/enforce/);
     expect(rendered.some((item) => item.kind === 'Ingress')).toBe(false);
-    const inlineConfig = rendered.find(
-      (item) => item.kind === 'Secret' && item.metadata?.name === 'gitea-inline-config'
-    );
-    expect(inlineConfig?.stringData?.server).toContain(
-      'ROOT_URL=http://gitea-http.lifemodel-git.svc.cluster.local:3000/'
-    );
+    const inlineConfig = rendered.find((item) => item.kind === 'Secret' && item.metadata?.name === 'gitea-inline-config');
+    expect(inlineConfig?.stringData?.server).toContain('ROOT_URL=http://gitea-http.lifemodel-git.svc.cluster.local:3000/');
     const pvc = rendered.find((item) => item.kind === 'PersistentVolumeClaim');
     expect(pvc?.metadata.annotations['kustomize.toolkit.fluxcd.io/prune']).toBe('disabled');
-    const policy = YAML.parse(
-      readFileSync(join(giteaRoot, 'network-policy.yaml'), 'utf8')
-    ) as Record<string, any>;
+    const policy = YAML.parse(readFileSync(join(giteaRoot, 'network-policy.yaml'), 'utf8')) as Record<string, any>;
     expect(policy.spec.policyTypes).toEqual(['Ingress', 'Egress']);
     expect(policy.spec.ingress).toHaveLength(2);
-    const admitted = policy.spec.ingress.map(
-      (rule: any) => rule.from[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name']
-    );
+    const admitted = policy.spec.ingress.map((rule: any) => rule.from[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name']);
     expect(admitted).toEqual(['lifemodel-system', 'flux-system']);
     expect(policy.spec.ingress.map((rule: any) => rule.from[0].podSelector.matchLabels)).toEqual([
       { 'app.kubernetes.io/name': 'loader' },
       { app: 'source-controller' },
     ]);
-    expect(policy.spec.ingress.map((rule: any) => rule.ports)).toEqual([
-      [{ protocol: 'TCP', port: 3000 }],
-      [{ protocol: 'TCP', port: 3000 }],
-    ]);
+    expect(policy.spec.ingress.map((rule: any) => rule.ports)).toEqual([[{ protocol: 'TCP', port: 3000 }], [{ protocol: 'TCP', port: 3000 }]]);
     expect(policy.spec).toEqual({
-      podSelector: {},
-      policyTypes: ['Ingress', 'Egress'],
+      podSelector: {}, policyTypes: ['Ingress', 'Egress'],
       ingress: [
-        {
-          from: [
-            {
-              namespaceSelector: {
-                matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' },
-              },
-              podSelector: { matchLabels: { 'app.kubernetes.io/name': 'loader' } },
-            },
-          ],
-          ports: [{ protocol: 'TCP', port: 3000 }],
-        },
-        {
-          from: [
-            {
-              namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'flux-system' } },
-              podSelector: { matchLabels: { app: 'source-controller' } },
-            },
-          ],
-          ports: [{ protocol: 'TCP', port: 3000 }],
-        },
-      ],
-      egress: [],
+        { from: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' } }, podSelector: { matchLabels: { 'app.kubernetes.io/name': 'loader' } } }], ports: [{ protocol: 'TCP', port: 3000 }] },
+        { from: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'flux-system' } }, podSelector: { matchLabels: { app: 'source-controller' } } }], ports: [{ protocol: 'TCP', port: 3000 }] },
+      ], egress: [],
     });
     assertAllowedPolicyPorts(policy, [3000, 3000]);
     const extraPort = structuredClone(policy);
     extraPort.spec.ingress[0].ports.push({ protocol: 'TCP', port: 3001 });
     expect(() => assertAllowedPolicyPorts(extraPort, [3000, 3000])).toThrow(/allowlist/);
-    expect(readFileSync(join(platformRoot, 'charts/gitea/Chart.yaml'), 'utf8')).toContain(
-      'version: 12.7.0'
-    );
+    expect(readFileSync(join(platformRoot, 'charts/gitea/Chart.yaml'), 'utf8')).toContain('version: 12.7.0');
   });
   it('keeps the platform workload confined and digest-pinned', () => {
     const sourceFiles = yamlFiles(platformRoot);
     const objects = sourceObjects();
     expect(objects.length).toBeGreaterThan(0);
-    const deployment = objects.find(
-      (item) => item.kind === 'Deployment' && item.metadata?.name === 'loader'
-    );
+    const deployment = objects.find((item) => item.kind === 'Deployment' && item.metadata?.name === 'loader');
     expect(deployment, 'missing loader Deployment').toBeDefined();
     expect(deployment!.spec.replicas).toBe(1);
+    expect(deployment!.spec.strategy.type).toBe('Recreate');
     const pod = deployment!.spec.template.spec;
     const container = pod.containers[0];
     expect(container.image).toBe('ghcr.io/shady2k/lifemodel-loader:release-placeholder');
     expect(container.ports).toContainEqual(expect.objectContaining({ containerPort: 7000 }));
-    expect(container.env ?? []).not.toContainEqual(
-      expect.objectContaining({ name: 'LIFEMODEL_LOADER_MODE' })
-    );
-    expect(pod.securityContext).toMatchObject({
-      runAsNonRoot: true,
-      runAsUser: 1000,
-      fsGroup: 1000,
-      seccompProfile: { type: 'RuntimeDefault' },
-    });
+    expect(container.env ?? []).not.toContainEqual(expect.objectContaining({ name: 'LIFEMODEL_LOADER_MODE' }));
+    expect(pod.securityContext).toMatchObject({ runAsNonRoot: true, runAsUser: 1000, fsGroup: 1000, seccompProfile: { type: 'RuntimeDefault' } });
     expect(container.securityContext).toMatchObject({
       runAsNonRoot: true,
       runAsUser: 1000,
@@ -737,203 +270,94 @@ describe('platform manifests', () => {
       capabilities: { drop: ['ALL'] },
       seccompProfile: { type: 'RuntimeDefault' },
     });
-    expect(container.volumeMounts).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ name: 'state', mountPath: '/var/lib/loader' }),
-        expect.objectContaining({ name: 'tmp', mountPath: '/tmp' }),
-      ])
-    );
-    expect(pod.volumes).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ name: 'state', persistentVolumeClaim: expect.any(Object) }),
-        expect.objectContaining({ name: 'tmp', emptyDir: expect.any(Object) }),
-      ])
-    );
+    expect(container.volumeMounts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'state', mountPath: '/var/lib/loader' }),
+      expect.objectContaining({ name: 'tmp', mountPath: '/tmp' }),
+    ]));
+    expect(pod.volumes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'state', persistentVolumeClaim: expect.any(Object) }),
+      expect.objectContaining({ name: 'tmp', emptyDir: expect.any(Object) }),
+    ]));
     expect(container.readinessProbe).toBeDefined();
     expect(container.livenessProbe).toBeDefined();
-    const loaderNamespace = objects.find(
-      (item) => item.kind === 'Namespace' && item.metadata?.name === 'lifemodel-system'
-    );
-    expect(loaderNamespace?.metadata.labels['pod-security.kubernetes.io/enforce']).toBe(
-      'restricted'
-    );
+    const loaderNamespace = objects.find((item) => item.kind === 'Namespace' && item.metadata?.name === 'lifemodel-system');
+    expect(loaderNamespace?.metadata.labels['pod-security.kubernetes.io/enforce']).toBe('restricted');
     expect(object(objects, 'PersistentVolumeClaim').spec.storageClassName).toBe('local-path');
-    expect(
-      objects.find(
-        (item) => item.kind === 'ServiceAccount' && item.metadata.namespace === 'lifemodel-system'
-      )?.automountServiceAccountToken
-    ).toBe(true);
-    expect(
-      objects.find(
-        (item) => item.kind === 'ServiceAccount' && item.metadata.namespace === 'openbao'
-      )?.automountServiceAccountToken
-    ).toBe(true);
-    expect(
-      objects.some(
-        (item) =>
-          ['Role', 'RoleBinding'].includes(item.kind) &&
-          item.metadata.namespace === 'lifemodel-system'
-      )
-    ).toBe(true);
-    expect(
-      objects.some(
-        (item) =>
-          item.kind === 'Ingress' &&
-          item.metadata?.name === 'web-auth-handoff' &&
-          item.metadata?.namespace === 'lifemodel-system' &&
-          item.spec.rules[0].host === 'lifemodel.local'
-      )
-    ).toBe(true);
-    expect(
-      objects.some(
-        (item) =>
-          item.kind === 'Ingress' &&
-          item.metadata?.namespace === 'lifemodel-system' &&
-          item.spec.rules.some((rule: any) => rule.host === 'boot-lifemodel.local')
-      )
-    ).toBe(true);
+    expect(objects.find((item) => item.kind === 'ServiceAccount' && item.metadata.namespace === 'lifemodel-system')?.automountServiceAccountToken).toBe(true);
+    expect(objects.find((item) => item.kind === 'ServiceAccount' && item.metadata.namespace === 'openbao')?.automountServiceAccountToken).toBe(true);
+    const loaderRole=objects.find((item)=>item.kind==='Role'&&item.metadata?.name==='loader-bootstrap');
+    expect(loaderRole?.rules).toContainEqual({apiGroups:[''],resources:['secrets'],resourceNames:expect.arrayContaining(['lifemodel-tls']),verbs:['get','update']});
+    expect(loaderRole?.rules).toContainEqual({apiGroups:[''],resources:['configmaps'],resourceNames:['lifemodel-ca'],verbs:['get','update']});
+    expect(objects.some((item) => ['Role', 'RoleBinding'].includes(item.kind) && item.metadata.namespace === 'lifemodel-system')).toBe(true);
+    expect(objects.some((item) => item.kind === 'Ingress' && item.metadata?.name === 'web-auth-handoff' && item.metadata?.namespace === 'lifemodel-system' && item.spec.rules[0].host === 'localhost')).toBe(true);
+    expect(objects.some((item) => item.kind === 'Ingress' && item.metadata?.namespace === 'lifemodel-system' && item.spec.rules.some((rule: any) => rule.host === 'boot.localhost'))).toBe(true);
     expect(objects.some((item) => item.kind === 'ClusterRole')).toBe(false);
     const clusterRoleBindings = objects.filter((item) => item.kind === 'ClusterRoleBinding');
-    expect(clusterRoleBindings).toEqual([
-      expect.objectContaining({
-        metadata: expect.objectContaining({ name: 'openbao-auth-delegator' }),
-        roleRef: {
-          apiGroup: 'rbac.authorization.k8s.io',
-          kind: 'ClusterRole',
-          name: 'system:auth-delegator',
-        },
-      }),
-    ]);
+    expect(clusterRoleBindings).toEqual([expect.objectContaining({
+      metadata: expect.objectContaining({ name: 'openbao-auth-delegator' }),
+      roleRef: { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: 'system:auth-delegator' },
+    })]);
     expect(sourceFiles.some((file) => file.endsWith('/a0/kustomization.yaml'))).toBe(true);
   });
 
   it('protects loader bootstrap Secrets from Flux overwrite and pruning', () => {
     const objects = sourceObjects();
-    const bootstrap = objects.filter(
-      (item) =>
-        item.kind === 'Secret' &&
-        ['loader-bootstrap-state', 'openbao-unseal-custody'].includes(item.metadata?.name)
-    );
-    expect(bootstrap).toHaveLength(2);
+    const bootstrap = objects.filter((item) => item.kind === 'Secret' &&
+      ['loader-bootstrap-state', 'openbao-unseal-custody', 'lifemodel-tls'].includes(item.metadata?.name));
+    expect(bootstrap).toHaveLength(3);
     for (const secret of bootstrap) {
       expect(secret.metadata.namespace).toBe('lifemodel-system');
-      expect(secret.type).toBe('Opaque');
+      expect(secret.type).toBe(secret.metadata.name === 'lifemodel-tls' ? 'kubernetes.io/tls' : 'Opaque');
       expect(secret.data).toBeUndefined();
       expect(secret.metadata.annotations).toMatchObject({
         'kustomize.toolkit.fluxcd.io/ssa': 'IfNotPresent',
         'kustomize.toolkit.fluxcd.io/prune': 'disabled',
       });
     }
-    const a0Kustomization = YAML.parse(
-      readFileSync(join(platformRoot, 'a0/kustomization.yaml'), 'utf8')
-    ) as { resources: string[] };
+    const a0Kustomization = YAML.parse(readFileSync(join(platformRoot, 'a0/kustomization.yaml'), 'utf8')) as { resources: string[] };
     expect(a0Kustomization.resources).toContain('bootstrap-secrets.yaml');
   });
 
   it('bounds platform-a0 health checks with an explicit timeout', () => {
-    const a0 = sourceObjects().find(
-      (item) => item.kind === 'Kustomization' && item.metadata?.name === 'platform-a0'
-    );
+    const a0 = sourceObjects().find((item) => item.kind === 'Kustomization' && item.metadata?.name === 'platform-a0');
     expect(a0, 'missing platform-a0 Kustomization').toBeDefined();
     expect(a0!.spec.timeout).toBe('2m0s');
   });
 
   it('orders OpenBao step A after A0 and applies the committed chart render', () => {
     const objects = sourceObjects();
-    const stepA = objects.find(
-      (item) => item.kind === 'Kustomization' && item.metadata?.name === 'platform-a'
-    );
-    expect(stepA?.spec).toMatchObject({
-      dependsOn: [{ name: 'platform-a0' }],
-      wait: true,
-      timeout: '10m0s',
-    });
-    const kustomization = YAML.parse(
-      readFileSync(join(platformRoot, 'a/kustomization.yaml'), 'utf8')
-    ) as { resources: string[]; configMapGenerator?: any[] };
+    const stepA = objects.find((item) => item.kind === 'Kustomization' && item.metadata?.name === 'platform-a');
+    expect(stepA?.spec).toMatchObject({ dependsOn: [{ name: 'platform-a0' }], wait: true, timeout: '10m0s' });
+    const kustomization = YAML.parse(readFileSync(join(platformRoot, 'a/kustomization.yaml'), 'utf8')) as { resources: string[]; configMapGenerator?: any[] };
     expect(kustomization.resources).toContain('openbao/rendered.yaml');
     expect(kustomization.resources).not.toContain('openbao-release.yaml');
     expect(kustomization.configMapGenerator).toBeUndefined();
     const rendered = parseYamlFiles([join(platformRoot, 'a/openbao/rendered.yaml')]);
-    const openbaoPodSpec = rendered.find(
-      (item) => item.kind === 'StatefulSet' && item.metadata?.name === 'openbao'
-    )!.spec.template.spec;
+    const openbaoPodSpec = rendered.find((item) => item.kind === 'StatefulSet' && item.metadata?.name === 'openbao')!.spec.template.spec;
     assertRestrictedContainers(openbaoPodSpec);
     expect(rendered.some((item) => item.kind === 'HelmRelease')).toBe(false);
-    expect(
-      rendered.some((item) => item.kind === 'ConfigMap' && item.metadata?.name === 'openbao-values')
-    ).toBe(false);
-    expect(
-      rendered.some((item) => item.kind === 'StatefulSet' && item.metadata?.name === 'openbao')
-    ).toBe(true);
-    const statefulSet = rendered.find(
-      (item) => item.kind === 'StatefulSet' && item.metadata?.name === 'openbao'
-    )!;
-    expect(statefulSet.spec.persistentVolumeClaimRetentionPolicy).toEqual({
-      whenDeleted: 'Retain',
-      whenScaled: 'Retain',
-    });
+    expect(rendered.some((item) => item.kind === 'ConfigMap' && item.metadata?.name === 'openbao-values')).toBe(false);
+    expect(rendered.some((item) => item.kind === 'StatefulSet' && item.metadata?.name === 'openbao')).toBe(true);
+    const statefulSet = rendered.find((item) => item.kind === 'StatefulSet' && item.metadata?.name === 'openbao')!;
+    expect(statefulSet.spec.persistentVolumeClaimRetentionPolicy).toEqual({ whenDeleted: 'Retain', whenScaled: 'Retain' });
     expect(statefulSet.spec.persistentVolumeClaimRetentionPolicy.whenDeleted).toBe('Retain');
     expect(statefulSet.spec.persistentVolumeClaimRetentionPolicy.whenScaled).toBe('Retain');
-    const openbaoNamespace = objects.find(
-      (item) => item.kind === 'Namespace' && item.metadata?.name === 'openbao'
-    )!;
+    const openbaoNamespace = objects.find((item) => item.kind === 'Namespace' && item.metadata?.name === 'openbao')!;
     assertRestrictedNamespace(openbaoNamespace);
-    expect(openbaoNamespace.metadata.annotations['kustomize.toolkit.fluxcd.io/prune']).toBe(
-      'disabled'
-    );
+    expect(openbaoNamespace.metadata.annotations['kustomize.toolkit.fluxcd.io/prune']).toBe('disabled');
     assertStepANetworkPolicies(objects);
-    const stepANetworkPolicies = objects.filter(
-      (item) =>
-        item.kind === 'NetworkPolicy' &&
-        ['openbao', 'lifemodel-git'].includes(item.metadata?.namespace)
-    );
-    expect(
-      stepANetworkPolicies.find((item) => item.metadata.name === 'openbao-default-deny')?.spec
-    ).toEqual({ podSelector: {}, policyTypes: ['Ingress', 'Egress'], ingress: [], egress: [] });
-    expect(
-      stepANetworkPolicies.find((item) => item.metadata.name === 'openbao-server-access')?.spec
-    ).toEqual({
-      podSelector: {
-        matchLabels: {
-          'app.kubernetes.io/name': 'openbao',
-          'app.kubernetes.io/instance': 'openbao',
-          component: 'server',
-        },
-      },
+    const stepANetworkPolicies = objects.filter((item) => item.kind === 'NetworkPolicy' && ['openbao', 'lifemodel-git'].includes(item.metadata?.namespace));
+    expect(stepANetworkPolicies.find((item) => item.metadata.name === 'openbao-default-deny')?.spec).toEqual({ podSelector: {}, policyTypes: ['Ingress', 'Egress'], ingress: [], egress: [] });
+    expect(stepANetworkPolicies.find((item) => item.metadata.name === 'openbao-server-access')?.spec).toEqual({
+      podSelector: { matchLabels: { 'app.kubernetes.io/name': 'openbao', 'app.kubernetes.io/instance': 'openbao', component: 'server' } },
       policyTypes: ['Ingress', 'Egress'],
-      ingress: [
-        {
-          from: [
-            {
-              namespaceSelector: {
-                matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' },
-              },
-              podSelector: { matchLabels: { 'app.kubernetes.io/name': 'loader' } },
-            },
-          ],
-          ports: [{ protocol: 'TCP', port: 8200 }],
-        },
-      ],
+      ingress: [{ from: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' } }, podSelector: { matchLabels: { 'app.kubernetes.io/name': 'loader' } } }], ports: [{ protocol: 'TCP', port: 8200 }] }],
       egress: [
-        {
-          to: [
-            {
-              namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } },
-              podSelector: { matchLabels: { 'k8s-app': 'kube-dns' } },
-            },
-          ],
-          ports: [
-            { protocol: 'UDP', port: 53 },
-            { protocol: 'TCP', port: 53 },
-          ],
-        },
+        { to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } }, podSelector: { matchLabels: { 'k8s-app': 'kube-dns' } } }], ports: [{ protocol: 'UDP', port: 53 }, { protocol: 'TCP', port: 53 }] },
         { to: [{ ipBlock: { cidr: '0.0.0.0/0' } }], ports: [{ protocol: 'TCP', port: 6443 }] },
       ],
     });
-    expect(
-      objects.some((item) => item.kind === 'HelmRelease' && item.metadata?.name === 'openbao')
-    ).toBe(false);
+    expect(objects.some((item) => item.kind === 'HelmRelease' && item.metadata?.name === 'openbao')).toBe(false);
   });
 
   it('parses the numeric OCI tag as a string and preserves custom regex text', () => {
@@ -941,8 +365,8 @@ describe('platform manifests', () => {
     expect(parsed.spec.ref.tag).toBe('20261013');
     expect(typeof parsed.spec.ref.tag).toBe('string');
     expect(parsed.spec.verify.matchOIDCIdentity[0]).toEqual({
-      issuer: '^issuer\\.path/\'quoted"$',
-      subject: '^subject\\\\literal/\'quote"$',
+      issuer: "^issuer\\.path/'quoted\"$",
+      subject: "^subject\\\\literal/'quote\"$",
     });
   });
 
@@ -951,19 +375,13 @@ describe('platform manifests', () => {
     try {
       expect(first.status).not.toBe(0);
       expect(readFileSync(join(first.root, 'namespace-state'), 'utf8')).toBe('');
-      expect(readFileSync(join(first.root, 'kubectl.log'), 'utf8').split('\n')[0]).toBe(
-        'namespace'
-      );
+      expect(readFileSync(join(first.root, 'kubectl.log'), 'utf8').split('\n')[0]).toBe('namespace');
       const second = runInstallerHarness(false, false, first.root);
       try {
         expect(second.status, second.output).toBe(0);
         expect(readFileSync(join(second.root, 'kubectl.log'), 'utf8')).toContain('flux');
-        expect(readFileSync(join(second.root, 'state', 'platform-history'), 'utf8')).toBe(
-          'tag=v1.0.0\n'
-        );
-      } finally {
-        /* the shared root is removed by the outer finally */
-      }
+        expect(readFileSync(join(second.root, 'state', 'platform-history'), 'utf8')).toBe('tag=v1.0.0\n');
+      } finally { /* the shared root is removed by the outer finally */ }
     } finally {
       rmSync(first.root, { recursive: true, force: true });
     }
@@ -976,39 +394,16 @@ describe('platform manifests', () => {
       const second = runInstallerHarness(false, false, first.root, 'v2.0.0');
       expect(second.status, second.output).toBe(0);
       const installed = join(second.root, 'install-root/usr/local/bin/lifemodel');
-      const recovery = spawnSync(installed, ['doctor', '--repin', 'previous'], {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          PATH: `${join(second.root, 'bin')}:${process.env.PATH}`,
-          LIFEMODEL_INSTALL_ROOT: join(second.root, 'install-root'),
-          LIFEMODEL_STATE_DIR: join(second.root, 'state'),
-          K3S_STATE: join(second.root, 'namespace-state'),
-          K3S_LOG: join(second.root, 'kubectl.log'),
-          K3S_APPLIED_TAG: join(second.root, 'applied-tag'),
-          K3S_FAIL_FLUX: '0',
-          K3S_FOREIGN: '0',
-        },
-      });
+      const recovery = spawnSync(installed, ['doctor', '--repin', 'previous'], { encoding: 'utf8', env: { ...process.env, PATH: `${join(second.root, 'bin')}:${process.env.PATH}`, LIFEMODEL_INSTALL_ROOT: join(second.root, 'install-root'), LIFEMODEL_STATE_DIR: join(second.root, 'state'), K3S_STATE: join(second.root, 'namespace-state'), K3S_LOG: join(second.root, 'kubectl.log'), K3S_APPLIED_TAG: join(second.root, 'applied-tag'), K3S_FAIL_FLUX: '0', K3S_FOREIGN: '0' } });
       expect(recovery.status, recovery.stderr).toBe(0);
       const log = readFileSync(join(second.root, 'kubectl.log'), 'utf8');
       const rootApplies = log.split('\n').filter((line) => line.startsWith('root:'));
-      expect(rootApplies).toHaveLength(9);
-      expect(
-        rootApplies.every((line) =>
-          line.includes('--server-side --field-manager=lifemodel-bootstrap')
-        )
-      ).toBe(true);
+      expect(rootApplies).toHaveLength(6);
+      expect(rootApplies.every((line) => line.includes('--server-side --field-manager=lifemodel-bootstrap'))).toBe(true);
       expect(readFileSync(join(second.root, 'applied-tag'), 'utf8').trim()).toBe('v1.0.0');
-      expect(readFileSync(join(second.root, 'state', 'platform-history'), 'utf8')).toBe(
-        'tag=v1.0.0\ntag=v2.0.0\n'
-      );
-      expect(
-        JSON.parse(readFileSync(join(second.root, 'state', 'platform-override'), 'utf8'))
-      ).toEqual({ ref: 'tag=v1.0.0', configuredRef: 'tag=v2.0.0' });
-    } finally {
-      rmSync(first.root, { recursive: true, force: true });
-    }
+      expect(readFileSync(join(second.root, 'state', 'platform-history'), 'utf8')).toBe('tag=v1.0.0\ntag=v2.0.0\n');
+      expect(JSON.parse(readFileSync(join(second.root, 'state', 'platform-override'), 'utf8'))).toEqual({ ref: 'tag=v1.0.0', configuredRef: 'tag=v2.0.0' });
+    } finally { rmSync(first.root, { recursive: true, force: true }); }
   });
 
   it('binds the installed CLI to its state directory and quotes metacharacter paths', () => {
@@ -1017,35 +412,23 @@ describe('platform manifests', () => {
       expect(result.status, result.output).toBe(0);
       const bin = join(result.root, 'install-root/usr/local/bin/lifemodel');
       const env = { ...process.env, PATH: `${join(result.root, 'bin')}:${process.env.PATH}` };
-      for (const key of ['LIFEMODEL_STATE_DIR', 'LIFEMODEL_HISTORY', 'LIFEMODEL_INSTALL_ROOT'])
-        delete (env as NodeJS.ProcessEnv)[key];
+      for (const key of ['LIFEMODEL_STATE_DIR', 'LIFEMODEL_HISTORY', 'LIFEMODEL_INSTALL_ROOT']) delete (env as NodeJS.ProcessEnv)[key];
       const record = spawnSync(bin, ['record-applied', 'tag=v2.0.0'], { encoding: 'utf8', env });
       expect(record.status, record.stderr).toBe(0);
-      expect(
-        readFileSync(
-          join(result.root, 'state $(touch SHOULD_NOT_EXIST) `echo nope`', 'platform-history'),
-          'utf8'
-        )
-      ).toBe('tag=v2.0.0\ntag=v1.0.0\n');
+      expect(readFileSync(join(result.root, 'state $(touch SHOULD_NOT_EXIST) `echo nope`', 'platform-history'), 'utf8')).toBe('tag=v2.0.0\ntag=v1.0.0\n');
       expect(existsSync(join(result.root, 'SHOULD_NOT_EXIST'))).toBe(false);
-    } finally {
-      rmSync(result.root, { recursive: true, force: true });
-    }
+    } finally { rmSync(result.root, { recursive: true, force: true }); }
   });
 
   it('refuses a root ref owned by another manager before applying either root object', () => {
-    const result = runInstallerHarness(false, false, undefined, 'v1.0.0', {
-      owner: 'lifemodel-doctor',
-    });
+    const result = runInstallerHarness(false, false, undefined, 'v1.0.0', { owner: 'lifemodel-doctor' });
     try {
       expect(result.status).not.toBe(0);
       expect(result.output).toContain('Root OCIRepository spec.ref is owned by lifemodel-doctor');
       expect(result.output).toContain('delete ocirepository platform');
       const log = readFileSync(join(result.root, 'kubectl.log'), 'utf8');
-      expect(log.split('\n').filter((line) => line.startsWith('root:'))).toHaveLength(0);
-    } finally {
-      rmSync(result.root, { recursive: true, force: true });
-    }
+      expect(log.split('\n').filter(line => line.startsWith('root:'))).toHaveLength(0);
+    } finally { rmSync(result.root, { recursive: true, force: true }); }
   });
 
   it('installs a configured digest through the generic-Linux writer', () => {
@@ -1053,12 +436,8 @@ describe('platform manifests', () => {
     const result = runInstallerHarness(false, false, undefined, 'unused', { digest });
     try {
       expect(result.status, result.output).toBe(0);
-      expect(readFileSync(join(result.root, 'state', 'platform-history'), 'utf8')).toBe(
-        `digest=${digest}\n`
-      );
-    } finally {
-      rmSync(result.root, { recursive: true, force: true });
-    }
+      expect(readFileSync(join(result.root, 'state', 'platform-history'), 'utf8')).toBe(`digest=${digest}\n`);
+    } finally { rmSync(result.root, { recursive: true, force: true }); }
   });
 
   it('reapplies digest overrides and clears back to the configured digest', () => {
@@ -1066,40 +445,17 @@ describe('platform manifests', () => {
     const configuredDigest = `sha256:${'b'.repeat(64)}`;
     const first = runInstallerHarness(false, false, undefined, 'unused', { digest: firstDigest });
     try {
-      const second = runInstallerHarness(false, false, first.root, 'unused', {
-        digest: configuredDigest,
-      });
+      const second = runInstallerHarness(false, false, first.root, 'unused', { digest: configuredDigest });
       expect(second.status, second.output).toBe(0);
       const installed = join(first.root, 'install-root/usr/local/bin/lifemodel');
-      const env = {
-        ...process.env,
-        PATH: `${join(first.root, 'bin')}:${process.env.PATH}`,
-        LIFEMODEL_INSTALL_ROOT: join(first.root, 'install-root'),
-        LIFEMODEL_STATE_DIR: join(first.root, 'state'),
-        K3S_STATE: join(first.root, 'namespace-state'),
-        K3S_LOG: join(first.root, 'kubectl.log'),
-        K3S_APPLIED_TAG: join(first.root, 'applied-tag'),
-        K3S_APPLIED_REF: join(first.root, 'applied-ref'),
-        K3S_FAIL_FLUX: '0',
-        K3S_FOREIGN: '0',
-        K3S_MANAGED_FIELDS: '',
-      };
-      const previous = spawnSync(installed, ['doctor', '--repin', 'previous'], {
-        encoding: 'utf8',
-        env,
-      });
+      const env = { ...process.env, PATH: `${join(first.root, 'bin')}:${process.env.PATH}`, LIFEMODEL_INSTALL_ROOT: join(first.root, 'install-root'), LIFEMODEL_STATE_DIR: join(first.root, 'state'), K3S_STATE: join(first.root, 'namespace-state'), K3S_LOG: join(first.root, 'kubectl.log'), K3S_APPLIED_TAG: join(first.root, 'applied-tag'), K3S_APPLIED_REF: join(first.root, 'applied-ref'), K3S_FAIL_FLUX: '0', K3S_FOREIGN: '0', K3S_MANAGED_FIELDS: '' };
+      const previous = spawnSync(installed, ['doctor', '--repin', 'previous'], { encoding: 'utf8', env });
       expect(previous.status, previous.stderr).toBe(0);
-      expect(readFileSync(join(first.root, 'applied-ref'), 'utf8').trim()).toBe(
-        `digest: ${firstDigest}`
-      );
+      expect(readFileSync(join(first.root, 'applied-ref'), 'utf8').trim()).toBe(`digest: ${firstDigest}`);
       const clear = spawnSync(installed, ['doctor', '--repin', 'clear'], { encoding: 'utf8', env });
       expect(clear.status, clear.stderr).toBe(0);
-      expect(readFileSync(join(first.root, 'applied-ref'), 'utf8').trim()).toBe(
-        `digest: ${configuredDigest}`
-      );
-    } finally {
-      rmSync(first.root, { recursive: true, force: true });
-    }
+      expect(readFileSync(join(first.root, 'applied-ref'), 'utf8').trim()).toBe(`digest: ${configuredDigest}`);
+    } finally { rmSync(first.root, { recursive: true, force: true }); }
   });
 
   it('recovers from the installed bootstrap bundle after its source checkout is removed', () => {
@@ -1109,10 +465,7 @@ describe('platform manifests', () => {
     mkdirSync(join(sourceDir, 'deploy/cli'), { recursive: true });
     cpSync(installer, join(sourceDir, 'scripts/install.sh'));
     cpSync(rootTemplates, join(sourceDir, 'deploy/root'), { recursive: true });
-    cpSync(
-      fileURLToPath(new URL('../../deploy/cli/lifemodel.mjs', import.meta.url)),
-      join(sourceDir, 'deploy/cli/lifemodel.mjs')
-    );
+    cpSync(fileURLToPath(new URL('../../deploy/cli/lifemodel.mjs', import.meta.url)), join(sourceDir, 'deploy/cli/lifemodel.mjs'));
     const first = runInstallerHarness(false, false, root, 'v1.0.0', { sourceDir });
     const second = runInstallerHarness(false, false, root, 'v2.0.0', { sourceDir });
     try {
@@ -1120,45 +473,21 @@ describe('platform manifests', () => {
       expect(second.status, second.output).toBe(0);
       rmSync(sourceDir, { recursive: true, force: true });
       const installed = join(root, 'install-root/usr/local/bin/lifemodel');
-      const recovery = spawnSync(installed, ['doctor', '--repin', 'previous'], {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          PATH: `${join(root, 'bin')}:${process.env.PATH}`,
-          LIFEMODEL_INSTALL_ROOT: join(root, 'install-root'),
-          LIFEMODEL_STATE_DIR: join(root, 'state'),
-          K3S_STATE: join(root, 'namespace-state'),
-          K3S_LOG: join(root, 'kubectl.log'),
-          K3S_APPLIED_TAG: join(root, 'applied-tag'),
-          K3S_FAIL_FLUX: '0',
-          K3S_FOREIGN: '0',
-          K3S_MANAGED_FIELDS: '',
-        },
-      });
+      const recovery = spawnSync(installed, ['doctor', '--repin', 'previous'], { encoding: 'utf8', env: { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, LIFEMODEL_INSTALL_ROOT: join(root, 'install-root'), LIFEMODEL_STATE_DIR: join(root, 'state'), K3S_STATE: join(root, 'namespace-state'), K3S_LOG: join(root, 'kubectl.log'), K3S_APPLIED_TAG: join(root, 'applied-tag'), K3S_FAIL_FLUX: '0', K3S_FOREIGN: '0', K3S_MANAGED_FIELDS: '' } });
       expect(recovery.status, recovery.stderr).toBe(0);
       expect(readFileSync(join(root, 'applied-tag'), 'utf8').trim()).toBe('v1.0.0');
-      expect(readFileSync(join(root, 'state', 'platform-history'), 'utf8')).toBe(
-        'tag=v1.0.0\ntag=v2.0.0\n'
-      );
-      expect(readFileSync(join(root, 'install-root/usr/local/bin/lifemodel'), 'utf8')).toContain(
-        'bootstrap/root'
-      );
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+      expect(readFileSync(join(root, 'state', 'platform-history'), 'utf8')).toBe('tag=v1.0.0\ntag=v2.0.0\n');
+      expect(readFileSync(join(root, 'install-root/usr/local/bin/lifemodel'), 'utf8')).toContain('bootstrap/root');
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   it('rejects an unsupported existing Node runtime before cluster writes', () => {
-    const result = runInstallerHarness(false, false, undefined, 'v1.0.0', {
-      unsupportedNode: true,
-    });
+    const result = runInstallerHarness(false, false, undefined, 'v1.0.0', { unsupportedNode: true });
     try {
       expect(result.status).not.toBe(0);
       expect(result.output).toContain('Node.js 18 or newer is required');
       expect(existsSync(join(result.root, 'kubectl.log'))).toBe(false);
-    } finally {
-      rmSync(result.root, { recursive: true, force: true });
-    }
+    } finally { rmSync(result.root, { recursive: true, force: true }); }
   });
 
   it('still refuses a foreign flux-system namespace', () => {
@@ -1173,35 +502,21 @@ describe('platform manifests', () => {
   });
 
   it('limits loader ingress to Traefik pods in kube-system', () => {
-    const policy = sourceObjects().find(
-      (item) => item.kind === 'NetworkPolicy' && item.metadata.namespace === 'lifemodel-system'
-    );
+    const policy = sourceObjects().find((item) => item.kind === 'NetworkPolicy' && item.metadata.namespace === 'lifemodel-system');
     expect(policy, 'missing loader NetworkPolicy').toBeDefined();
     expect(policy!.spec.podSelector).toEqual({});
     expect(policy!.spec.policyTypes).toEqual(expect.arrayContaining(['Ingress', 'Egress']));
-    expect(policy!.spec.ingress).toEqual([
-      expect.objectContaining({
-        from: [
-          {
-            namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } },
-            podSelector: { matchLabels: { 'app.kubernetes.io/name': 'traefik' } },
-          },
-        ],
-        ports: [expect.objectContaining({ port: 7000 })],
-      }),
-    ]);
+    expect(policy!.spec.ingress).toEqual([expect.objectContaining({
+      from: [{
+        namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } },
+        podSelector: { matchLabels: { 'app.kubernetes.io/name': 'traefik' } },
+      }],
+      ports: [expect.objectContaining({ port: 7000 })],
+    })]);
     expect(policy!.spec.egress).toEqual([
       {
-        to: [
-          {
-            namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } },
-            podSelector: { matchLabels: { 'k8s-app': 'kube-dns' } },
-          },
-        ],
-        ports: [
-          { protocol: 'UDP', port: 53 },
-          { protocol: 'TCP', port: 53 },
-        ],
+        to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } }, podSelector: { matchLabels: { 'k8s-app': 'kube-dns' } } }],
+        ports: [{ protocol: 'UDP', port: 53 }, { protocol: 'TCP', port: 53 }],
       },
       {
         to: [{ ipBlock: { cidr: '0.0.0.0/0' } }],
@@ -1212,30 +527,14 @@ describe('platform manifests', () => {
         ports: [{ protocol: 'TCP', port: 8200 }],
       },
       {
-        to: [
-          {
-            namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-git' } },
-            podSelector: {
-              matchLabels: {
-                'app.kubernetes.io/name': 'gitea',
-                'app.kubernetes.io/instance': 'gitea',
-              },
-            },
-          },
-        ],
+        to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-git' } }, podSelector: { matchLabels: { 'app.kubernetes.io/name': 'gitea', 'app.kubernetes.io/instance': 'gitea' } } }],
         ports: [{ protocol: 'TCP', port: 3000 }],
       },
     ]);
     const yaml = readFileSync(join(platformRoot, 'a0/network-policy.yaml'), 'utf8');
     expect(yaml).toContain('k3s DNATs the in-cluster API Service to the node address');
     expect(yaml).toContain('The API port is the only egress restriction');
-    expect(yaml).toContain(
-      'The Kubernetes API server authenticates the projected ServiceAccount token'
-    );
-    expect(
-      policy!.spec.egress
-        .flatMap((rule: any) => rule.ports.map((port: any) => `${port.protocol}/${port.port}`))
-        .sort()
-    ).toEqual(['TCP/3000', 'TCP/53', 'TCP/6443', 'TCP/8200', 'UDP/53']);
+    expect(yaml).toContain('The Kubernetes API server authenticates the projected ServiceAccount token');
+    expect(policy!.spec.egress.flatMap((rule: any) => rule.ports.map((port: any) => `${port.protocol}/${port.port}`)).sort()).toEqual(['TCP/3000', 'TCP/53', 'TCP/6443', 'TCP/8200', 'UDP/53']);
   });
 });

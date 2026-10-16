@@ -285,13 +285,14 @@ describe('platform bootstrap phases', () => {
       readFile('deploy/platform/a0/service-account.yaml', 'utf8'),
       readFile('deploy/platform/a0/service-account.yaml', 'utf8'),
     ]);
-    expect(role).toContain('resources: ["secrets"]');
+    expect(role).toContain("resources: ['secrets']");
     expect(role).toContain('- loader-bootstrap-state');
     expect(role).toContain('- openbao-unseal-custody');
-    expect(role).not.toMatch(
-      /pods|configmaps|kustomizations|gitrepositories|roles|serviceaccounts/
-    );
-    expect(role).toContain('verbs: ["get", "update"]');
+    expect(role).toContain('- lifemodel-tls');
+    expect(role).toContain('resourceNames:');
+    expect(role).toContain('- lifemodel-ca');
+    expect(role).not.toMatch(/pods|kustomizations|gitrepositories|roles|serviceaccounts/);
+    expect(role).toContain("verbs: ['get', 'update']");
     expect(role).not.toContain('create');
     expect(binding).toContain('kind: ServiceAccount');
     expect(binding).toContain('name: loader');

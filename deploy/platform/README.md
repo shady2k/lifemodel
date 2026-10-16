@@ -138,3 +138,20 @@ array/object schemas (including local `$ref` and composition branches). It is a
 focused CRD resource checker, not a general Kubernetes or full OpenAPI validator;
 it does not validate formats or every Kubernetes extension. Nix fixtures prove it
 rejects both an unknown field and `instances: not-an-integer`.
+
+
+## Back up and restore loader PKI
+
+The loader volume contains the instance CA and identity. Back up the **whole**
+`/var/lib/loader` volume, including `pki/ca.key`, `pki/ca.crt`, and
+`instance.json`, with file ownership and permissions preserved. The CA key is
+private and must remain mode `0600`; never copy it to a Kubernetes Secret or
+log. Keep the backup encrypted and access-controlled.
+
+To restore, stop the loader Deployment, restore the complete volume with its
+original permissions, then start the Deployment. Do not restore only the
+Kubernetes `lifemodel-tls` Secret or regenerate a missing CA when
+`instance.json` exists. Run `lifemodel doctor` and verify that its reported
+CA SHA-256 fingerprint matches the fingerprint recorded with the backup
+before trusting the restored instance. If the volume is lost, reinstalling
+creates a new CA and every client must trust the new certificate.

@@ -4,6 +4,8 @@ metadata:
   name: loader
   namespace: lifemodel-system
 spec:
+  strategy:
+    type: Recreate
   replicas: 1
   selector:
     matchLabels:
@@ -45,11 +47,19 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           readinessProbe:
-            tcpSocket:
+            httpGet:
+              path: /login
               port: http
+              httpHeaders:
+                - name: Host
+                  value: boot-lifemodel.local
           livenessProbe:
-            tcpSocket:
+            httpGet:
+              path: /login
               port: http
+              httpHeaders:
+                - name: Host
+                  value: boot-lifemodel.local
           volumeMounts:
             - name: state
               mountPath: /var/lib/loader

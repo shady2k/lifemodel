@@ -119,10 +119,12 @@ export function verifySession(token: string, record: PasswordRecord, nowMs: numb
 }
 
 /** The hosts the loader answers on. */
-let configuredInstanceName = 'lifemodel';
-export function configureInstanceName(name: string): void {
-  configuredInstanceName = name;
-}
+export const ALLOWED_HOSTS = [
+  'localhost',
+  'boot.localhost',
+  'vault.localhost',
+  '127.0.0.1',
+] as const;
 
 /** The name part of a Host header (or of any `host:port` string), lowercased. */
 export function hostName(host: string): string {
@@ -130,23 +132,24 @@ export function hostName(host: string): string {
 }
 
 /** Is this a Host the loader answers on at all? */
-export function isAllowedHost(host: string | undefined): boolean {
-  const name = hostName(host ?? '');
-  return (
-    host !== undefined &&
-    (name === '127.0.0.1' ||
-      name === `${configuredInstanceName}.local` ||
-      name === `boot-${configuredInstanceName}.local` ||
-      name === `vault-${configuredInstanceName}.local`)
-  );
+export function isAllowedHost(host: string | undefined, instanceName?: string): boolean {
+  if (host === undefined) return false;
+  const name = hostName(host);
+  return instanceName === undefined
+    ? (ALLOWED_HOSTS as readonly string[]).includes(name)
+    : [...instanceHosts(instanceName), '127.0.0.1'].includes(name);
+}
+function instanceHosts(name: string): string[] {
+  return [`${name}.local`, `boot-${name}.local`, `vault-${name}.local`];
 }
 
 /** The hosts a browser reaches: the pinned ones, the CLI's loopback literal excluded. */
-function isBrowserHost(name: string): boolean {
+function isBrowserHost(name: string, instanceName?: string): boolean {
   return (
-    name === `${configuredInstanceName}.local` ||
-    name === `boot-${configuredInstanceName}.local` ||
-    name === `vault-${configuredInstanceName}.local`
+    name !== '127.0.0.1' &&
+    (instanceName === undefined
+      ? (ALLOWED_HOSTS as readonly string[]).includes(name)
+      : instanceHosts(instanceName).includes(name))
   );
 }
 
@@ -164,15 +167,23 @@ function hostPort(host: string): string {
  * browser to a name of its choosing. Null for a host the loader does not
  * answer on (the caller then answers 401).
  */
-export function loginLocation(forwardedHost: string, forwardedUri: string): string | null {
+export function loginLocation(
+  forwardedHost: string,
+  forwardedUri: string,
+  instanceName?: string
+): string | null {
   const name = hostName(forwardedHost);
-  if (!isBrowserHost(name)) return null;
-  const domain = configuredInstanceName;
+  if (!isBrowserHost(name, instanceName)) return null;
+  const domain =
+    instanceName ??
+    (name.startsWith('boot.') || name.startsWith('vault.')
+      ? name.slice(name.indexOf('.') + 1)
+      : name);
   const port = hostPort(forwardedHost);
   const authority = (host: string): string => (port === '' ? host : `${host}:${port}`);
   const path = forwardedUri.startsWith('/') && !forwardedUri.startsWith('//') ? forwardedUri : '/';
-  const next = `http://${authority(name)}${path}`;
-  return `http://${authority(`boot-${domain}.local`)}/login?next=${encodeURIComponent(next)}`;
+  const next = `https://${authority(name)}${path}`;
+  return `https://${authority(`boot-${domain}.local`)}/login?next=${encodeURIComponent(next)}`;
 }
 
 /**
@@ -189,7 +200,11 @@ export function loginLocation(forwardedHost: string, forwardedUri: string): stri
  * reached on is followed, so the login page is never an open redirect to
  * somewhere else, not even another local service.
  */
-export function vettedNext(next: string | undefined, requestHost: string): string | null {
+export function vettedNext(
+  next: string | undefined,
+  requestHost: string,
+  instanceName?: string
+): string | null {
   if (next === undefined || next === '') return null;
   let url: URL;
   try {
@@ -197,10 +212,12 @@ export function vettedNext(next: string | undefined, requestHost: string): strin
   } catch {
     return null;
   }
-  // HTTP remains the platform scheme in this stage.
-  if (url.protocol !== 'http:') return null;
+  // http only: the login itself is served over http in this stage, and an
+  // https URL on the same host has another default port - another service
+  // (rework 3, review round 4 finding 2). HTTPS comes with lifemodel-sd2.
+  if (url.protocol !== 'https:') return null;
   if (url.username !== '' || url.password !== '') return null;
-  if (!isBrowserHost(url.hostname.toLowerCase())) return null;
+  if (!isBrowserHost(url.hostname.toLowerCase(), instanceName)) return null;
   // The same port as the login itself: cookies are not scoped by port, so a
   // `next` on another local port would hand the fresh session to whatever
   // listens there (rework 3, review round 3 finding 3).

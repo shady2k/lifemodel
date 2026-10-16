@@ -2,7 +2,7 @@
 import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import {
-  configureInstanceName,
+  ALLOWED_HOSTS,
   clearSessionCookie,
   HANDOFF_TTL_MS,
   HANDOFF_CODE_BYTES,
@@ -26,13 +26,16 @@ import type { Clock } from './clock.js';
 import { LoaderFatalError } from './errors.js';
 import type { LoaderLogger } from './logger.js';
 import type { LoaderState } from './state.js';
+import type { LoaderConfig } from './config.js';
+import type { PkiManager } from './pki.js';
 import { describe } from './state.js';
 
 export interface LoaderHttpDeps {
   state: LoaderState;
   logger: LoaderLogger;
   clock: Clock;
-  instanceName: string;
+  pki: PkiManager;
+  config: LoaderConfig;
 }
 export interface LoaderHttp {
   server: Server;
@@ -110,8 +113,7 @@ function formPage(
 }
 
 export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
-  const { state, logger, clock, instanceName } = deps;
-  configureInstanceName(instanceName);
+  const { state, logger, clock, pki, config } = deps;
   // Single loader replica: short-lived codes remain process-local by design.
   interface HandoffEntry {
     session: string;
@@ -166,18 +168,14 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     const serviceVerify =
       path === '/_auth/verify' &&
       hostName(req.headers.host ?? '') === 'loader.lifemodel-system.svc.cluster.local';
-    if (!serviceVerify && !isAllowedHost(req.headers.host)) {
+    if (!serviceVerify && !isAllowedHost(req.headers.host, config.instanceName)) {
       sendText(res, 404, 'not found');
       return;
     }
     const requestHost = hostName(req.headers.host ?? '');
-    const bootHost = `boot-${instanceName}.local`;
-    const appHost = `${instanceName}.local`;
-    if (
-      !serviceVerify &&
-      requestHost === appHost &&
-      (path !== '/_auth/handoff' || method !== 'GET')
-    ) {
+    const bootHost = `boot-${config.instanceName}.local`;
+    const appHost = `${config.instanceName}.local`;
+    if (!serviceVerify && requestHost === appHost && (path !== '/_auth/handoff' || method !== 'GET')) {
       sendText(res, 404, 'not found');
       return;
     }
@@ -186,27 +184,27 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       return;
     }
     const bootRouteAllowed =
-      (method === 'GET' &&
-        (path === '/' ||
-          path === '/login' ||
-          path === '/setup' ||
-          path === '/ca.crt' ||
-          path === '/api/state' ||
-          path === '/api/model' ||
-          path.startsWith('/assets/'))) ||
-      (method === 'POST' &&
-        (path === '/login' ||
-          path === '/setup' ||
-          path === '/logout' ||
-          path === '/api/setup' ||
-          path === '/api/login')) ||
+      (method === 'GET' && (path === '/' || path === '/login' || path === '/setup' || path === '/ca.crt' || path === '/api/state' || path === '/api/model' || path.startsWith('/assets/'))) ||
+      (method === 'POST' && (path === '/login' || path === '/setup' || path === '/logout' || path === '/api/setup' || path === '/api/login')) ||
       (['POST', 'PUT', 'DELETE'].includes(method) && path.startsWith('/api/'));
-    if (requestHost === bootHost && !bootRouteAllowed) {
+    if (!serviceVerify && requestHost === bootHost && !bootRouteAllowed) {
       sendText(res, 404, 'not found');
       return;
     }
-    if (requestHost !== bootHost && requestHost !== appHost && !serviceVerify) {
+    if (!serviceVerify && requestHost !== bootHost && requestHost !== appHost) {
       sendText(res, 404, 'not found');
+      return;
+    }
+    if (
+      path === '/ca.crt' &&
+      method === 'GET' &&
+      hostName(req.headers.host ?? '') === `boot-${config.instanceName}.local`
+    ) {
+      res.writeHead(200, {
+        'content-type': 'application/x-pem-file',
+        'cache-control': 'public, max-age=300',
+      });
+      res.end(await pki.caPem());
       return;
     }
     if (path === '/_auth/handoff') {
@@ -222,9 +220,9 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       const nextParam = url.searchParams.get('next');
       const next =
         nextParam?.startsWith('/') && !nextParam.startsWith('//')
-          ? vettedNext(`http://${host}${nextParam}`, host)
+          ? vettedNext(`https://${host}${nextParam}`, host, config.instanceName)
           : null;
-      const boot = `http://boot-${instanceName}.local/login`;
+      const boot = `https://boot-${config.instanceName}.local/login`;
       if (
         entry === undefined ||
         entry.expires <= now ||
@@ -250,7 +248,8 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         forwardedMethod === 'GET' || forwardedMethod === 'HEAD'
           ? loginLocation(
               header(req, 'x-forwarded-host') ?? '',
-              header(req, 'x-forwarded-uri') ?? '/'
+              header(req, 'x-forwarded-uri') ?? '/',
+              config.instanceName
             )
           : null;
       if (next === null) sendText(res, 401, 'no session');
@@ -265,7 +264,11 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       }
       if (method === 'GET') {
         const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
-        const next = vettedNext(query.get('next') ?? undefined, header(req, 'host') ?? '');
+        const next = vettedNext(
+          query.get('next') ?? undefined,
+          header(req, 'host') ?? '',
+          config.instanceName
+        );
         sendHtml(res, 200, formPage('Set loader password', '/setup', 'Password', undefined, next));
         return;
       }
@@ -299,9 +302,9 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         return;
       }
       logger.info({}, "the loader's password is set: platform authentication is ready");
-      const host = req.headers.host ?? '';
+      const host = req.headers.host ?? 'localhost';
       const token = createSession(record, clock.now());
-      const next = vettedNext(setupForm['next'], host);
+      const next = vettedNext(setupForm['next'], host, config.instanceName);
       redirect(res, next === null ? '/' : handoffRedirect(token, next, host), {
         'set-cookie': sessionCookie(token, host),
       });
@@ -316,7 +319,11 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       if (method === 'GET') {
         const active = sessionToken(req, record);
         const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
-        const next = vettedNext(query.get('next') ?? undefined, header(req, 'host') ?? '');
+        const next = vettedNext(
+          query.get('next') ?? undefined,
+          header(req, 'host') ?? '',
+          config.instanceName
+        );
         if (active !== null) {
           redirect(
             res,
@@ -338,7 +345,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       }
       const form = await readForm(req);
       const password = form['password'] ?? '';
-      const next = vettedNext(form['next'], header(req, 'host') ?? '');
+      const next = vettedNext(form['next'], header(req, 'host') ?? '', config.instanceName);
       if (!(await verifyPassword(password, record))) {
         logger.warn(
           { host: req.headers.host ?? 'unknown', remote: req.socket.remoteAddress ?? 'unknown' },
@@ -351,7 +358,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         );
         return;
       }
-      const host = req.headers.host ?? '';
+      const host = req.headers.host ?? 'localhost';
       const issued = await withAuthTransition(async () => {
         const current = await state.readAuth();
         if (current === null || !(await verifyPassword(password, current))) return null;
@@ -411,7 +418,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       }
       logger.info({}, 'the owner logged out');
       redirect(res, '/login', {
-        'set-cookie': clearSessionCookie(req.headers.host ?? ''),
+        'set-cookie': clearSessionCookie(req.headers.host ?? 'localhost'),
       });
       return;
     }

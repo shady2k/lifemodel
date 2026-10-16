@@ -64,7 +64,7 @@ export function createLoaderState({ fs, config, logger }: LoaderStateDeps): Load
     },
     readAuth,
     writeAuth: async (record) =>
-      fs.writeFileAtomic(authPath, `${JSON.stringify(record, null, 2)}\n`, AUTH_MODE),
+      fs.writeFileExclusive(authPath, `${JSON.stringify(record, null, 2)}\n`, AUTH_MODE),
   };
 }
 

@@ -59,6 +59,27 @@ function assertRootOwnership() {
   const owned = (root.metadata?.managedFields || []).filter(entry => entry.manager !== 'lifemodel-bootstrap' && entry.fieldsV1?.['f:spec']?.['f:ref']).map(entry => clean(entry.manager));
   if(owned.length) throw new Error(`Root OCIRepository spec.ref is owned by ${[...new Set(owned)].join(', ')}. To reset ownership, delete the root object and let the writer recreate it: sudo kubectl --kubeconfig ${kubeconfig} delete ocirepository platform -n flux-system (Flux keeps its applied state).`);
 }
+function reportPki() {
+  const volume = process.env.LIFEMODEL_LOADER_VOLUME || '/var/lib/loader';
+  let identity = null, ca = null;
+  try { identity = JSON.parse(readFileSync(`${volume}/instance.json`, 'utf8')); } catch (error) { if (error?.code !== 'ENOENT') console.log('PKI identity: invalid'); }
+  try { ca = readFileSync(`${volume}/pki/ca.crt`, 'utf8'); } catch (error) { if (error?.code !== 'ENOENT') console.log('PKI CA: unreadable'); }
+  let fingerprint = null, matching = false;
+  if (ca) { try { fingerprint = execFileSync('openssl', ['x509', '-in', `${volume}/pki/ca.crt`, '-noout', '-fingerprint', '-sha256'], { encoding:'utf8' }).trim().replace(/^sha256 Fingerprint=/i,'').replaceAll(':','').toLowerCase(); matching = Boolean(identity && identity.version === 1 && identity.fingerprint === fingerprint); } catch { /* malformed CA is reported below */ } }
+  console.log(`PKI identity=${identity ? 'present' : 'missing'} CA=${!ca ? 'missing' : matching ? 'present-matching' : 'mismatch-or-invalid'} fingerprint=${fingerprint || 'unknown'}`);
+  if (identity && !ca) console.log('PKI leaf=unknown (CA missing with identity; do not regenerate)');
+  try {
+    const secret = JSON.parse(runKubectl(['get','secret','lifemodel-tls','-n','lifemodel-system','-o','json']));
+    const cert = Buffer.from(secret.data?.['tls.crt'] || '', 'base64').toString();
+    if (!cert) { console.log('PKI leaf=missing SANs=none'); return; }
+    const decoded = execFileSync('openssl', ['x509','-in','/dev/stdin','-noout','-enddate','-ext','subjectAltName'], { input:cert, encoding:'utf8' });
+    const expiry = decoded.match(/notAfter=(.+)/)?.[1] || 'unknown';
+    const expiryMs=Date.parse(expiry), leafState=!Number.isFinite(expiryMs)?'invalid':expiryMs-Date.now()<=30*24*60*60*1000?'expiring':'valid';
+    const sans = decoded.match(/DNS:[^,\s]+/g)?.map(value=>value.slice(4)) || [];
+    console.log(`PKI leaf=${leafState} notAfter=${clean(expiry)} SANs=${sans.join(',') || 'none'}`);
+  } catch (error) { console.log(`PKI leaf=unavailable (${clean(error?.message)})`); }
+}
+
 function reportOpenBao(failures) {
   let status;
   try { status = JSON.parse(execFileSync(kubectl[0], [...kubectl.slice(1), 'exec', '-n', 'openbao', 'openbao-0', '--', 'bao', 'status', '-format=json'], { encoding: 'utf8' })); }
@@ -91,6 +112,7 @@ function reportCpuRequirement() {
 }
 function report() {
   reportCpuRequirement();
+  reportPki();
   const override = readOverride();
   if (override) console.log(`ACTIVE PLATFORM OVERRIDE: ${override.ref} (recorded against ${override.configuredRef})`);
   const failures = [];

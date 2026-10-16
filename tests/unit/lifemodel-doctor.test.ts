@@ -34,6 +34,7 @@ if [ "$1" = get ]; then
     exit 1
   fi
   case "$2:$3" in
+    secret:lifemodel-tls) file=secret-tls;;
     ocirepositories:*) file=ocirepositories;; ocirepository:*) file=ocirepository;; gitrepositories:*) file=gitrepositories;; kustomizations:*) file=kustomizations;; deployments:*) file=deployments;; statefulsets:*) file=statefulset;; pods:*) file=pods;; events:*) file=events;; secrets:loader-bootstrap-state) file=secret;; secret:*) file=secret;; *) exit 9;;
   esac
   case "$*" in *"-n lifemodel-system "*) :;; *"-n lifemodel-motor "*) file=$file-lifemodel-motor;; *"-n lifemodel-git "*) file=$file-lifemodel-git;; *"-n lifemodel "*) file=$file-lifemodel;; esac
@@ -62,6 +63,7 @@ const healthy = {
   'kustomizations-lifemodel': { items: [{ metadata: { name: 'lifemodel', namespace: 'lifemodel', generation: 1 }, status: { observedGeneration: 1, conditions: [{ type: 'Ready', status: 'True', reason: 'Succeeded' }] } }] },
   'kustomizations-lifemodel-motor': { items: [{ metadata: { name: 'lifemodel-motor', namespace: 'lifemodel-motor', generation: 1 }, status: { observedGeneration: 1, conditions: [{ type: 'Ready', status: 'True', reason: 'Succeeded' }] } }] },
   'deployments-lifemodel-git': { items: [{ metadata: { name: 'gitea', generation: 1 }, spec: { replicas: 1 }, status: { observedGeneration: 1, readyReplicas: 1 } }] },
+  'secret-tls': { data: {} },
   secret: { data: { phase: Buffer.from(JSON.stringify({ phase: 'gitea-application-kustomizations', status: 'complete' })).toString('base64'), custody: Buffer.from('DOCTOR_SECRET_CANARY_CUSTODY').toString('base64'), 'gitea-admin': Buffer.from('DOCTOR_SECRET_CANARY_GITEA_ADMIN').toString('base64'), credentials: Buffer.from('DOCTOR_SECRET_CANARY_CREDENTIALS').toString('base64') } },
   'bao-status': { initialized: true, sealed: false },
 };
@@ -99,6 +101,7 @@ describe('lifemodel doctor', () => {
     expect(run.stdout).toContain('StatefulSet/core ready=yes generationCurrent=yes desiredReplicas=1 restarts=2 revision=core-abc snapshotCommitAge=not-queried');
     expect(run.stdout).toContain('Pod/core-0 phase=Running ready=yes restarts=2');
     expect(readFileSync(env.calls, 'utf8').trim().split('\n')).toEqual([
+      '<get><secret><lifemodel-tls><-n><lifemodel-system><-o><json>',
       '<exec><-n><openbao><openbao-0><--><bao><status><-format=json>',
       '<get><ocirepositories><-n><flux-system><-o><json>',
       '<get><gitrepositories><-n><flux-system><-o><json>',

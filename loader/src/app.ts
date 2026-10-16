@@ -4,6 +4,8 @@ import type { LoaderConfig } from './config.js';
 import type { CommandRunner } from './exec.js';
 import type { FileSystem } from './fs.js';
 import { createLoaderHttp, type LoaderHttp } from './http.js';
+import { createPkiManager, type PkiManager } from './pki.js';
+import { createKubernetesTlsStores } from './pki-kubernetes.js';
 import type { LoaderLogger } from './logger.js';
 import { createLoaderState, describe, type LoaderState } from './state.js';
 import {
@@ -41,6 +43,7 @@ export interface LoaderAppDeps {
   platformGiteaApi?: GiteaApi;
   platformLoaderJwt?: () => Promise<string>;
   platformBootstrap?: { runInitial(): Promise<void>; unsealIfSealed(): Promise<void> };
+  pki?: PkiManager;
 }
 
 export interface LoaderApp {
@@ -54,6 +57,8 @@ export interface LoaderApp {
 export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
   const { config, fs, runner, logger, clock } = deps;
   const state = createLoaderState({ fs, config, logger });
+  const tlsStores = createKubernetesTlsStores();
+  const pki = deps.pki ?? createPkiManager({ config, fs, clock, ...tlsStores });
   const phaseStore = deps.platformPhaseStore ?? createKubernetesPhaseStore();
   const bao = deps.openBao ?? {
     api: createOpenBaoApi({ address: config.openBaoAddress }),
@@ -97,6 +102,19 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
   const stopped = new Promise<void>((resolve) => {
     resolveStop = resolve;
   });
+
+  async function renewPkiUntilStopped(): Promise<void> {
+    while (!stopping) {
+      await Promise.race([clock.sleep(24 * 60 * 60 * 1000), stopped]);
+      if (stopping) return;
+      try {
+        await pki.bootstrap();
+        logger.info({}, 'loader TLS certificate renewal check completed');
+      } catch (error) {
+        logger.error({ error: describe(error) }, 'loader TLS certificate renewal failed');
+      }
+    }
+  }
 
   async function bootstrapUntilStopped(): Promise<void> {
     let delayMs = 1_000;
@@ -144,7 +162,8 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       if (http !== null) return;
       try {
         await state.ensureLayout();
-        http = createLoaderHttp({ state, logger, clock, instanceName: config.instanceName });
+        await pki.bootstrap();
+        http = createLoaderHttp({ state, logger, clock, pki, config });
         await new Promise<void>((resolve, reject) => {
           const server = http?.server;
           if (server === undefined) {
@@ -159,6 +178,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         });
         logger.info({ port: config.httpPort, volume: config.volumeRoot }, 'platform loader is up');
         void bootstrapUntilStopped();
+        void renewPkiUntilStopped();
       } catch (error) {
         logger.error({ error: describe(error) }, 'the platform loader could not start');
         deps.exit(1);
