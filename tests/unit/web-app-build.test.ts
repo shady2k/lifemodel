@@ -41,34 +41,47 @@ describe('production web app output', () => {
       await writeFile(path.join(app, 'main.ts'), "import './index.css';");
       const source = path.join(fixture, 'kit-component.ts');
       await writeFile(source, "export const className = 'outline-offset-13';");
+      const withoutKitCss = "@import 'tailwindcss' source(none);\n.known-rule { color: red; }\n";
       await writeFile(
         path.join(app, 'index.css'),
-        `@import 'tailwindcss';\n@source '${source}';\n`
+        `@import 'tailwindcss' source(none);\n@source '${source}';\n.known-rule { color: red; }\n`
       );
-      const config = {
-        configFile: false as const,
-        root: app,
-        plugins: [tailwindcss()],
-        cacheDir: path.join(fixture, 'cache-with'),
-        build: { outDir: path.join(fixture, 'with-kit'), emptyOutDir: true },
-      };
-      await build(config);
-      const withCss = (await readdir(path.join(fixture, 'with-kit', 'assets'))).find((file) =>
-        file.endsWith('.css')
-      )!;
-      expect(await readFile(path.join(fixture, 'with-kit', 'assets', withCss), 'utf8')).toContain(
-        'outline-offset-13'
-      );
-      await writeFile(
-        path.join(app, 'index.css'),
-        "@import 'tailwindcss';\n@source './main.ts';\nbody { color: red; }\n"
-      );
+      const withOutDir = path.join(fixture, 'with-kit');
       await build({
-        ...config,
-        cacheDir: path.join(fixture, 'cache-without'),
-        build: { outDir: path.join(fixture, 'without-kit'), emptyOutDir: true },
+        configFile: false,
+        root: app,
+        plugins: [react(), tailwindcss()],
+        cacheDir: path.join(fixture, 'cache-with'),
+        build: { outDir: withOutDir, emptyOutDir: true },
       });
-      expect(existsSync(path.join(fixture, 'without-kit', 'assets'))).toBe(false);
+      expect(existsSync(withOutDir)).toBe(true);
+      const withAssets = await readdir(path.join(withOutDir, 'assets'));
+      const withCss = withAssets.find((file) => file.endsWith('.css'));
+      expect(withCss).toBeDefined();
+      const emittedWithKit = await readFile(path.join(withOutDir, 'assets', withCss!), 'utf8');
+      expect(emittedWithKit).toContain('outline-offset-13');
+      expect(emittedWithKit).toContain('.known-rule');
+
+      await writeFile(path.join(app, 'index.css'), withoutKitCss);
+      const withoutOutDir = path.join(fixture, 'without-kit');
+      expect(withoutOutDir).not.toBe(withOutDir);
+      await build({
+        configFile: false,
+        root: app,
+        plugins: [react(), tailwindcss()],
+        cacheDir: path.join(fixture, 'cache-without'),
+        build: { outDir: withoutOutDir, emptyOutDir: true },
+      });
+      expect(existsSync(withoutOutDir)).toBe(true);
+      const withoutAssets = await readdir(path.join(withoutOutDir, 'assets'));
+      const withoutCss = withoutAssets.find((file) => file.endsWith('.css'));
+      expect(withoutCss).toBeDefined();
+      const emittedWithoutKit = await readFile(
+        path.join(withoutOutDir, 'assets', withoutCss!),
+        'utf8'
+      );
+      expect(emittedWithoutKit).toContain('.known-rule');
+      expect(emittedWithoutKit).not.toContain('outline-offset-13');
     } finally {
       await rm(fixture, { recursive: true, force: true });
     }

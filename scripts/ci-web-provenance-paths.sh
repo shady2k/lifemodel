@@ -2,7 +2,13 @@
 # Select the pinned shadcn provenance check for changes that can affect its inputs.
 set -eu
 selected=false
-while IFS= read -r path || [ -n "$path" ]; do
+while IFS= read -r line || [ -n "$line" ]; do
+    # The producer emits `changed: <path>` lines followed by its own verdict.
+    # Ignore the verdict and classify only paths from the producer's contract.
+    case "$line" in
+        "changed: "*) path=${line#"changed: "} ;;
+        *) continue ;;
+    esac
     case "$path" in
         web/kit/*|web/app/*|scripts/shadcn-add.sh|web/app/components.json|web/kit/components.json|web/app/vite.config.*|web/app/vitest.config.*|web/app/tsconfig*.json|vitest.config.*)
             selected=true ;;
