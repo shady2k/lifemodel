@@ -144,26 +144,83 @@ describe('core application generation', () => {
     );
   });
 
-  it('sets the core digest placeholder from the release build output', () => {
-    const directory = mkdtempSync(join(tmpdir(), 'core-digest-'));
+  it('pins core and web digests independently in either release order', () => {
+    const source = readFileSync(
+      fileURLToPath(
+        new URL('../../deploy/platform/applications/lifemodel/kustomization.yaml', import.meta.url)
+      ),
+      'utf8'
+    );
+    const coreDigest = `sha256:${'a'.repeat(64)}`;
+    const webDigest = `sha256:${'b'.repeat(64)}`;
+    const coreScript = fileURLToPath(
+      new URL('../../scripts/release/set-core-digest.sh', import.meta.url)
+    );
+    const webScript = fileURLToPath(
+      new URL('../../scripts/release/set-web-digest.sh', import.meta.url)
+    );
+    const corePlaceholder = `name: ghcr.io/shady2k/lifemodel-core\n    newName: ghcr.io/shady2k/lifemodel-core\n    digest: sha256:${'0'.repeat(64)}`;
+    const webPlaceholder = `name: ghcr.io/shady2k/lifemodel-web\n    newName: ghcr.io/shady2k/lifemodel-web\n    digest: sha256:${'0'.repeat(64)}`;
+
+    for (const order of [
+      [coreScript, webScript],
+      [webScript, coreScript],
+    ]) {
+      const directory = mkdtempSync(join(tmpdir(), 'release-digests-'));
+      try {
+        const file = join(directory, 'kustomization.yaml');
+        writeFileSync(file, source);
+        const digests = new Map([
+          [coreScript, coreDigest],
+          [webScript, webDigest],
+        ]);
+        for (const script of order) {
+          const result = spawnSync('bash', [script, digests.get(script)!, file], {
+            encoding: 'utf8',
+          });
+          expect(result.status, result.stderr).toBe(0);
+        }
+        expect(readFileSync(file, 'utf8')).toBe(
+          source
+            .replace(
+              corePlaceholder,
+              corePlaceholder.replace(`sha256:${'0'.repeat(64)}`, coreDigest)
+            )
+            .replace(webPlaceholder, webPlaceholder.replace(`sha256:${'0'.repeat(64)}`, webDigest))
+        );
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it.each([
+    ['zero core placeholders', 'core', ''],
+    ['two core placeholders', 'core', 'duplicate'],
+    ['zero web placeholders', 'web', ''],
+    ['two web placeholders', 'web', 'duplicate'],
+  ])('refuses %s', (_description, image, variant) => {
+    const directory = mkdtempSync(join(tmpdir(), 'release-digest-invalid-'));
     try {
       const file = join(directory, 'kustomization.yaml');
-      writeFileSync(
-        file,
-        `images:\n  - name: ghcr.io/shady2k/lifemodel-core\n    digest: sha256:${'0'.repeat(64)}\n`
+      const core = `  - name: ghcr.io/shady2k/lifemodel-core\n    digest: sha256:${'0'.repeat(64)}\n`;
+      const web = `  - name: ghcr.io/shady2k/lifemodel-web\n    digest: sha256:${'0'.repeat(64)}\n`;
+      const ownEntry = image === 'core' ? core : web;
+      const otherEntry = image === 'core' ? web : core;
+      writeFileSync(file, `images:\n${variant === 'duplicate' ? ownEntry + ownEntry : otherEntry}`);
+      const script = fileURLToPath(
+        new URL(
+          image === 'core'
+            ? '../../scripts/release/set-core-digest.sh'
+            : '../../scripts/release/set-web-digest.sh',
+          import.meta.url
+        )
       );
-      const digest = `sha256:${'a'.repeat(64)}`;
-      const result = spawnSync(
-        'bash',
-        [
-          fileURLToPath(new URL('../../scripts/release/set-core-digest.sh', import.meta.url)),
-          digest,
-          file,
-        ],
-        { encoding: 'utf8' }
-      );
-      expect(result.status).toBe(0);
-      expect(readFileSync(file, 'utf8')).toContain(`digest: ${digest}`);
+      const result = spawnSync('bash', [script, `sha256:${'c'.repeat(64)}`, file], {
+        encoding: 'utf8',
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`found ${variant === 'duplicate' ? 2 : 0}`);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
