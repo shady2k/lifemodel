@@ -37,7 +37,7 @@ in
 {
   options.services.lifemodel = {
     enable = mkEnableOption "lifemodel GitOps platform bootstrap";
-    name = mkOption { type = types.strMatching "[a-z0-9]([a-z0-9-]{0,55}[a-z0-9])?"; default = "lifemodel"; description = "Fixed one-label instance name (max 57 characters)."; };
+    name = mkOption { type = types.strMatching "[a-z]([a-z0-9-]{0,55}[a-z0-9])?"; default = "lifemodel"; description = "Fixed non-reserved DNS-1035 instance label (max 57 characters)."; };
     platform = {
       url = mkOption { type = types.str; description = "OCI URL of the signed platform artifact."; };
       tag = mkOption { type = types.nullOr types.str; default = null; description = "OCI artifact tag (required unless digest is set)."; };
@@ -61,7 +61,9 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       { assertion = cfg.platform.url != ""; message = "services.lifemodel.platform.url is required"; }
-      { assertion = builtins.stringLength cfg.name <= 57; message = "services.lifemodel.name must be a DNS label of at most 57 characters"; }
+      { assertion = builtins.stringLength cfg.name <= 57
+          && !(builtins.elem (lib.toLower cfg.name) [ "y" "n" "yes" "no" "true" "false" "on" "off" "null" "~" ]);
+        message = "services.lifemodel.name must be a non-reserved DNS-1035 label of at most 57 characters"; }
       { assertion = cfg.platform.digest != null || cfg.platform.tag != null;
         message = "services.lifemodel.platform.tag or services.lifemodel.platform.digest is required"; }
       { assertion = (cfg.platform.tag == null || !(lib.hasInfix "\n" cfg.platform.tag))
@@ -135,14 +137,26 @@ in
         LIFEMODEL_LOCK_FD=9 LIFEMODEL_LOCK_HELD=1 lifemodel assert-root-ownership
         if [ -f /var/lib/lifemodel/instance-name ]; then
           installed_name="$(cat /var/lib/lifemodel/instance-name)"
-          [ "$installed_name" = ${lib.escapeShellArg cfg.name} ] || { echo 'lifemodel instance name is fixed after install' >&2; exit 1; }
+          [ -n "$installed_name" ] || { echo 'saved lifemodel instance name is empty' >&2; exit 1; }
+        else
+          identity_error=$(mktemp)
+          if installed_name=$($KUBECTL -n flux-system get configmap lifemodel-instance -o jsonpath='{.data.LIFEMODEL_NAME}' 2>"$identity_error"); then
+            [ -n "$installed_name" ] || { rm -f "$identity_error"; echo 'existing lifemodel-instance ConfigMap has no LIFEMODEL_NAME' >&2; exit 1; }
+          else
+            if grep -Fqi '(NotFound)' "$identity_error"; then installed_name="";
+            else cat "$identity_error" >&2; rm -f "$identity_error"; echo 'cannot determine existing instance identity' >&2; exit 1; fi
+          fi
+          rm -f "$identity_error"
         fi
-        $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$effectiveOCI"
-        $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f ${renderedInstance}
-        $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f ${renderedKustomization}
+        if [ -n "$installed_name" ] && [ "$installed_name" != ${lib.escapeShellArg cfg.name} ]; then
+          echo 'lifemodel instance name is fixed after install' >&2; exit 1
+        fi
         printf '%s\n' ${lib.escapeShellArg cfg.name} > /var/lib/lifemodel/instance-name.tmp
         chmod 0600 /var/lib/lifemodel/instance-name.tmp
         mv /var/lib/lifemodel/instance-name.tmp /var/lib/lifemodel/instance-name
+        $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$effectiveOCI"
+        $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f ${renderedInstance}
+        $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f ${renderedKustomization}
         LIFEMODEL_LOCK_FD=9 LIFEMODEL_LOCK_HELD=1 lifemodel record-applied "$effectiveRef"
       '';
     };

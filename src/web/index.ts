@@ -19,6 +19,14 @@ async function main(): Promise<void> {
   if (!allowedOrigin) throw new Error('LIFEMODEL_WEB_ALLOWED_ORIGIN is required');
   const instanceName = process.env['LIFEMODEL_NAME'];
   if (!instanceName) throw new Error('LIFEMODEL_NAME is required');
+  if (
+    !/^[a-z](?:[a-z0-9-]{0,55}[a-z0-9])?$/.test(instanceName) ||
+    instanceName.length > 57 ||
+    ['y', 'n', 'yes', 'no', 'true', 'false', 'on', 'off', 'null', '~'].includes(instanceName)
+  )
+    throw new Error(
+      'LIFEMODEL_NAME must be a non-reserved DNS-1035 label of at most 57 characters'
+    );
   const appDirectory = process.env['LIFEMODEL_WEB_APP_DIRECTORY'];
   if (!appDirectory) throw new Error('LIFEMODEL_WEB_APP_DIRECTORY is required');
   const port = requiredPort('LIFEMODEL_WEB_PORT');

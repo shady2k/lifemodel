@@ -39,14 +39,9 @@
       missingKeyFails = !(builtins.tryEval missingKey.config.system.build.toplevel.drvPath).success;
       badInstanceName = evaluate ({ ... }: { services.lifemodel.name = "Bad"; });
       tooLongInstanceName = evaluate ({ ... }: { services.lifemodel.name = "x" + builtins.concatStringsSep "" (builtins.genList (_: "x") 57); });
-      yamlNames = map (name: evaluate ({ ... }: { services.lifemodel.name = name; })) [ "true" "null" "123" ];
-      yamlNamesRenderedAsStrings = pkgs.runCommand "lifemodel-yaml-sensitive-instance-names" {} ''
-        set -eu
-        grep -F "LIFEMODEL_NAME: 'true'" ${(builtins.elemAt yamlNames 0).config.services.lifemodel.generatedRootInstance}
-        grep -F "LIFEMODEL_NAME: 'null'" ${(builtins.elemAt yamlNames 1).config.services.lifemodel.generatedRootInstance}
-        grep -F "LIFEMODEL_NAME: '123'" ${(builtins.elemAt yamlNames 2).config.services.lifemodel.generatedRootInstance}
-        touch $out
-      '';
+      yamlReservedNames = map (name: evaluate ({ ... }: { services.lifemodel.name = name; })) [ "true" "null" "123" "1abc" "y" "n" "yes" "no" "false" "on" "off" "~" ];
+      yamlReservedNamesFail = builtins.all (evaluated: !(builtins.tryEval evaluated.config.system.build.toplevel.drvPath).success) yamlReservedNames;
+      yamlReservedNamesCheck = assert yamlReservedNamesFail; pkgs.runCommand "lifemodel-yaml-reserved-instance-names-rejected" {} "touch $out";
       badInstanceNameFails = !(builtins.tryEval badInstanceName.config.system.build.toplevel.drvPath).success;
       tooLongInstanceNameFails = !(builtins.tryEval tooLongInstanceName.config.system.build.toplevel.drvPath).success;
       keylessOCI = builtins.readFile keyless.config.services.lifemodel.generatedRootOCI;
@@ -112,7 +107,7 @@
       });
       forcedConsumerOverrideFails = !(builtins.tryEval forcedConsumerOverride.config.system.build.toplevel.drvPath).success;
       renderedPlatform = pkgs.runCommand "lifemodel-platform-kustomize-wiring" {
-        nativeBuildInputs = [ pkgs.kustomize pkgs.gnugrep pkgs.coreutils ];
+        nativeBuildInputs = [ pkgs.kustomize pkgs.gnugrep pkgs.coreutils (pkgs.python3.withPackages (ps: [ ps.pyyaml ])) ];
       } ''
         set -eu
         # Flux first applies the parent source, then reconciles its ./a0 path.
@@ -123,6 +118,17 @@
         grep -F 'name: platform-instance' ${./deploy/platform/a0-reconciler.yaml} >/dev/null
         grep -F 'optional: false' ${./deploy/platform/instance-reconciler.yaml} >/dev/null
         kustomize build ${./deploy/platform/instance} > instance.yaml
+        for name in lifemodel home a0; do
+          python -c 'import sys; s=open(sys.argv[1]).read(); open(sys.argv[2], "w").write(s.replace(chr(36)+"{LIFEMODEL_NAME}", sys.argv[3]))' instance.yaml "instance-$name.yaml" "$name"
+          grep -F "LIFEMODEL_NAME: $name" "instance-$name.yaml" >/dev/null
+          python -c 'import yaml,sys; docs=list(yaml.safe_load_all(open(sys.argv[1]))); assert all(type(d["data"]["LIFEMODEL_NAME"]) is str and d["data"]["LIFEMODEL_NAME"] == sys.argv[2] for d in docs if d.get("kind") == "ConfigMap")' "instance-$name.yaml" "$name"
+        done
+        placeholder=$(printf '$%s' '{LIFEMODEL_NAME}')
+        for name in lifemodel home a0; do
+          if grep -F "$placeholder" "instance-$name.yaml" >/dev/null; then
+            echo 'instance post-build output retains LIFEMODEL_NAME placeholder' >&2; exit 1
+          fi
+        done
         grep -F 'name: lifemodel-system' instance.yaml >/dev/null
         grep -F 'name: lifemodel' instance.yaml >/dev/null
         grep -F 'boot-' instance.yaml >/dev/null
@@ -322,7 +328,7 @@
     in {
       nixosModules.default = exportedModule;
       checks.${system} = {
-        yaml-sensitive-instance-names = yamlNamesRenderedAsStrings;
+        yaml-reserved-instance-names = yamlReservedNamesCheck;
         cli-help = cliHelp;
         bootstrap-field-ownership = bootstrapOwnership;
         bootstrap-activation = bootstrapActivationCheck;

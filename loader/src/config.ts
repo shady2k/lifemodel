@@ -28,10 +28,13 @@ export function loadConfig(env: NodeJS.ProcessEnv): LoaderConfig {
   const instanceName = env['LIFEMODEL_NAME'];
   if (
     !instanceName ||
-    !/^[a-z0-9](?:[a-z0-9-]{0,55}[a-z0-9])?$/.test(instanceName) ||
-    instanceName.length > 57
+    !/^[a-z](?:[a-z0-9-]{0,55}[a-z0-9])?$/.test(instanceName) ||
+    instanceName.length > 57 ||
+    ['y', 'n', 'yes', 'no', 'true', 'false', 'on', 'off', 'null', '~'].includes(instanceName)
   )
-    throw new LoaderFatalError('LIFEMODEL_NAME must be a DNS label of at most 57 characters');
+    throw new LoaderFatalError(
+      'LIFEMODEL_NAME must be a non-reserved DNS-1035 label of at most 57 characters'
+    );
   return {
     instanceName,
     volumeRoot,

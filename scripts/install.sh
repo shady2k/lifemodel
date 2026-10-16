@@ -96,10 +96,10 @@ done
 
 [ -n "$PLATFORM_URL" ] || die "--platform-url is required"
 case "$INSTANCE_NAME" in
-  ''|*[!a-z0-9-]*|-*|*-)
-    die "--name must be one lowercase DNS label (letters, digits, hyphens), 1-57 characters" ;;
+  ''|[!a-z]*|*[!a-z0-9-]*|-*|*-|y|n|yes|no|true|false|on|off|null|~)
+    die "--name must be a non-reserved lowercase DNS-1035 label (1-57 characters)" ;;
 esac
-[ "${#INSTANCE_NAME}" -le 57 ] || die "--name must be one lowercase DNS label (letters, digits, hyphens), 1-57 characters"
+[ "${#INSTANCE_NAME}" -le 57 ] || die "--name must be a non-reserved lowercase DNS-1035 label (1-57 characters)"
 LIFEMODEL_STATE_DIR=${LIFEMODEL_STATE_DIR:-/var/lib/lifemodel}
 if [ -n "$PLATFORM_TAG" ] && [ -n "$PLATFORM_DIGEST" ]; then
   die "--tag and --digest are mutually exclusive; pass exactly one"
@@ -284,7 +284,14 @@ installed_name=""
 if [ -f "$LIFEMODEL_STATE_DIR/instance-name" ]; then
   installed_name=$(cat "$LIFEMODEL_STATE_DIR/instance-name")
 else
-  installed_name=$($KUBECTL -n flux-system get configmap lifemodel-instance -o jsonpath='{.data.LIFEMODEL_NAME}' 2>/dev/null || true)
+  identity_error=$(mktemp)
+  if installed_name=$($KUBECTL -n flux-system get configmap lifemodel-instance -o jsonpath='{.data.LIFEMODEL_NAME}' 2>"$identity_error"); then
+    [ -n "$installed_name" ] || { rm -f "$identity_error"; die "existing lifemodel-instance ConfigMap has no LIFEMODEL_NAME"; }
+  else
+    if grep -Fqi '(NotFound)' "$identity_error"; then installed_name="";
+    else cat "$identity_error" >&2; rm -f "$identity_error"; die "cannot determine existing instance identity"; fi
+  fi
+  rm -f "$identity_error"
 fi
 if [ -n "$installed_name" ] && [ "$installed_name" != "$INSTANCE_NAME" ]; then
   die "instance name is fixed as $installed_name; reinstall to change it"

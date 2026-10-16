@@ -76,14 +76,40 @@ describe('platform dependency structure', () => {
         { directory: 'instance', name },
       ]);
     }
-    const owners = new Set(namespaceOwners.map((owner) => owner.name));
+    const ownerDirectory = new Map(namespaceOwners.map(({ name, directory }) => [name, directory]));
+    const reconcilerFiles = readdirSync(root).filter((name) => name.endsWith('-reconciler.yaml'));
+    const reconcilers = new Map(
+      reconcilerFiles.map((name) => {
+        const doc = read(join(root, name));
+        return [doc.metadata.name, doc];
+      })
+    );
+    const dependsOn = (from: string, target: string, seen = new Set<string>()): boolean => {
+      if (from === target) return true;
+      if (seen.has(from)) return false;
+      seen.add(from);
+      return (reconcilers.get(from)?.spec.dependsOn ?? []).some((dep: any) =>
+        dependsOn(dep.name, target, seen)
+      );
+    };
+    const dirOwner = new Map<string, string>([
+      ['instance', 'platform-instance'],
+      ['a0', 'platform-a0'],
+      ['a', 'platform-a'],
+      ['b', 'platform-b'],
+      ['state', 'platform-c'],
+    ]);
     for (const [dir, objects] of objectsByDir)
       for (const obj of objects) {
         const namespace = obj.metadata?.namespace;
         if (!namespace || obj.kind === 'Namespace') continue;
+        const ownerDir = ownerDirectory.get(namespace);
+        const ownerReconciler = ownerDir && dirOwner.get(ownerDir);
+        const currentReconciler = dirOwner.get(dir);
         expect(
-          owners.has(namespace) || owned.get(dir)?.includes(namespace),
-          `${dir}/${obj.kind}/${obj.metadata?.name} namespace ${namespace} must be owned upstream or in this Kustomization`
+          ownerDir === dir ||
+            (ownerReconciler && currentReconciler && dependsOn(currentReconciler, ownerReconciler)),
+          `${dir}/${obj.kind}/${obj.metadata?.name} namespace ${namespace} must be owned in this Kustomization or by a reachable dependency`
         ).toBe(true);
       }
   });

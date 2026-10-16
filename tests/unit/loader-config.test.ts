@@ -29,8 +29,29 @@ describe('platform loader configuration', () => {
       openBaoAddress: 'http://bao.test:8200',
     });
   });
+  it('accepts the shared instance-name table', () => {
+    for (const value of ['a', 'home', 'a0', 'a-1', `a${'x'.repeat(55)}0`])
+      expect(loadConfig({ LIFEMODEL_NAME: value }).instanceName).toBe(value);
+  });
   it('rejects invalid instance DNS labels', () => {
-    for (const value of ['Home', '-home', 'home-', 'x'.repeat(58)])
+    for (const value of [
+      'Home',
+      '1abc',
+      '-home',
+      'home-',
+      'true',
+      '123',
+      'null',
+      'yes',
+      'no',
+      'false',
+      'on',
+      'off',
+      'y',
+      'n',
+      '~',
+      'x'.repeat(58),
+    ])
       expect(() => loadConfig({ LIFEMODEL_NAME: value })).toThrow(LoaderFatalError);
   });
   it('rejects invalid ports instead of silently choosing a fallback', () => {
