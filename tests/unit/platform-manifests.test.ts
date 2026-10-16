@@ -164,6 +164,10 @@ case "$*" in
   *) echo "flux:$*" >> "$K3S_LOG"; if [ "$K3S_FAIL_FLUX" = 1 ] && [ "$(grep -c '^flux:' "$K3S_LOG")" -eq 1 ]; then exit 42; fi ;;
 esac`
   );
+  command('apt-get', 'exit 0');
+  command('ip', 'echo default via 192.0.2.1 dev eth0');
+  command('systemctl', 'exit 0');
+  command('ufw', 'echo Status: inactive');
   command('curl', 'for arg do output=$arg; done; printf manifest > "$output"');
   command('sha256sum', 'read expected file; echo "$file: OK"');
   const env = {
@@ -839,8 +843,14 @@ describe('platform manifests', () => {
     const sourceDir = join(root, 'checkout');
     mkdirSync(join(sourceDir, 'scripts'), { recursive: true });
     mkdirSync(join(sourceDir, 'deploy/cli'), { recursive: true });
+    mkdirSync(join(sourceDir, 'deploy/mdns'), { recursive: true });
     cpSync(installer, join(sourceDir, 'scripts/install.sh'));
     cpSync(rootTemplates, join(sourceDir, 'deploy/root'), { recursive: true });
+    cpSync(
+      fileURLToPath(new URL('../../deploy/mdns/', import.meta.url)),
+      join(sourceDir, 'deploy/mdns'),
+      { recursive: true }
+    );
     cpSync(
       fileURLToPath(new URL('../../deploy/cli/lifemodel.mjs', import.meta.url)),
       join(sourceDir, 'deploy/cli/lifemodel.mjs')

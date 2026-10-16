@@ -1,0 +1,13 @@
+[Unit]
+Description=Publish @NAME@ on LAN with mDNS
+After=avahi-daemon.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@PUBLISHER@ @NAME@ @INTERFACE@
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

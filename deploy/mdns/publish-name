@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 2 ]]; then
+  echo "usage: publish-name NAME.local INTERFACE" >&2
+  exit 2
+fi
+name=$1
+iface=$2
+child=
+monitor_fd=
+cleanup() {
+  [[ -z "$child" ]] || kill "$child" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+address() {
+  ip -o -4 addr show dev "$iface" scope global | awk '{ split($4, a, "/"); print a[1]; exit }'
+}
+
+echo "Waiting for IPv4 address on $iface to publish $name" >&2
+exec {monitor_fd}< <(ip monitor address dev "$iface")
+last=$(address)
+
+publish() {
+  if [[ -n "$child" ]]; then
+    kill "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+    child=
+  fi
+  last=$1
+  if [[ -n "$last" ]]; then
+    echo "Publishing $name at $last on $iface" >&2
+    avahi-publish-address "$name" "$last" &
+    child=$!
+  else
+    echo "No IPv4 address on $iface; waiting to publish $name" >&2
+  fi
+}
+
+if [[ -n "$last" ]]; then publish "$last"; else publish ""; fi
+while :; do
+  if [[ -n "$child" ]] && ! kill -0 "$child" 2>/dev/null; then
+    wait "$child" || { echo "avahi-publish-address failed for $name (possible name collision)" >&2; exit 1; }
+    echo "avahi-publish-address exited unexpectedly for $name" >&2
+    exit 1
+  fi
+  if IFS= read -r -t 1 -u "$monitor_fd" event; then
+    current=$(address)
+    [[ "$current" == "$last" ]] || publish "$current"
+  fi
+done

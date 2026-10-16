@@ -21,6 +21,8 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+MDNS_SOURCE="$SCRIPT_DIR/../deploy/mdns"
+[ -d "$MDNS_SOURCE" ] || MDNS_SOURCE="$SCRIPT_DIR/deploy/mdns"
 ROOT_TEMPLATES=${ROOT_TEMPLATES:-"$SCRIPT_DIR/../deploy/root"}
 
 K3S_VERSION="1.35.8+k3s1"
@@ -38,6 +40,7 @@ SUBJECT_REGEX="^https://github\\.com/shady2k/lifemodel/\\.github/workflows/relea
 INSECURE_REGISTRY=false
 RENDER_ONLY_DIR=""
 INSTANCE_NAME="lifemodel"
+LAN_INTERFACE=""
 KUBECTL=""
 
 usage() {
@@ -57,6 +60,7 @@ Verification (defaults are the NixOS module's defaults):
 
 Cluster:
   --name NAME              instance DNS label (default: lifemodel)
+  --lan-interface IFACE    LAN interface (default: default IPv4 route)
   --insecure-registry      render insecure: true (plain-HTTP registry)
   --render-only DIR        write the rendered root objects to DIR and exit
                            without touching the host
@@ -86,6 +90,7 @@ while [ "$#" -gt 0 ]; do
     --issuer)            require_value "$@"; ISSUER=$2; shift 2 ;;
     --subject-regex)     require_value "$@"; SUBJECT_REGEX=$2; shift 2 ;;
     --name)               require_value "$@"; INSTANCE_NAME=$2; shift 2 ;;
+    --lan-interface)      require_value "$@"; LAN_INTERFACE=$2; shift 2 ;;
     --insecure-registry) INSECURE_REGISTRY=true; shift ;;
     --render-only)       require_value "$@"; RENDER_ONLY_DIR=$2; shift 2 ;;
     --root-templates)    require_value "$@"; ROOT_TEMPLATES=$2; shift 2 ;;
@@ -178,6 +183,19 @@ render_root_objects() {
   done < "$templates_dir/ocirepository.yaml" > "$render_dir/ocirepository.yaml"
   cp "$templates_dir/kustomization.yaml" "$render_dir/kustomization.yaml"
   sed "s/\${LIFEMODEL_NAME}/$INSTANCE_NAME/" "$templates_dir/instance.yaml" > "$render_dir/instance.yaml"
+  interface=$LAN_INTERFACE
+  if [ -z "$interface" ]; then
+    interface=$(ip -4 route show default | awk 'NR==1 {print $5}')
+    case "$interface" in cni*|flannel*|veth*|wg*|tun*|tailscale*) interface="" ;; esac
+  fi
+  [ -n "$interface" ] || interface=eth0
+  mdns_source=$MDNS_SOURCE
+  mkdir -p "$render_dir/systemd"
+  for dns_name in "$INSTANCE_NAME.local" "boot-$INSTANCE_NAME.local" "vault-$INSTANCE_NAME.local"; do
+    unit_name=$(printf '%s' "$dns_name" | tr '.' '-')
+    sed -e "s|@PUBLISHER@|/usr/lib/lifemodel/publish-name|g" -e "s|@NAME@|$dns_name|g" -e "s|@INTERFACE@|$interface|g" "$mdns_source/publisher.service.in" > "$render_dir/systemd/lifemodel-mdns-$unit_name.service"
+  done
+  cp "$mdns_source/publish-name" "$render_dir/publish-name"
 }
 
 # Render-only mode: write the rendered objects and exit, touching nothing.
@@ -192,9 +210,6 @@ fi
 # ---------------------------------------------------------------------------
 
 [ "$(id -u)" -eq 0 ] || die "must run as root (k3s and the Flux bootstrap need it)"
-command -v curl >/dev/null 2>&1 || die "curl is required"
-command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
-command -v flock >/dev/null 2>&1 || die "flock is required"
 if ! command -v node >/dev/null 2>&1; then
   command -v apt-get >/dev/null 2>&1 || die "Node.js is required (install nodejs or use a Debian/Ubuntu host with apt-get)"
   apt-get update
@@ -202,6 +217,52 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 node_major=$(node -p 'Number(process.versions.node.split(".")[0])')
 [ "$node_major" -ge 18 ] || die "Node.js 18 or newer is required; found $(node --version)"
+command -v apt-get >/dev/null 2>&1 || die "apt-get is required to install avahi-daemon and avahi-utils"
+apt-get update
+apt-get install -y avahi-daemon avahi-utils
+lan_interface=$LAN_INTERFACE
+mdns_source=$MDNS_SOURCE
+if [ -z "$lan_interface" ]; then
+  lan_interface=$(ip -4 route show default | awk 'NR==1 {print $5}')
+  case "$lan_interface" in cni*|flannel*|veth*|wg*|tun*|tailscale*) lan_interface="" ;; esac
+fi
+[ -n "$lan_interface" ] || die "cannot determine a usable LAN interface; pass --lan-interface"
+case "$lan_interface" in cni*|flannel*|veth*|wg*|tun*|tailscale*) die "refusing non-LAN interface: $lan_interface" ;; esac
+host_root=${LIFEMODEL_INSTALL_ROOT:-}
+if [ -n "$host_root" ]; then
+  : # Installer harness: render package and unit files without changing the host.
+else
+install -d -m 0755 "$host_root/usr/lib/lifemodel" "$host_root/etc/systemd/system" "$host_root/etc/avahi" "$host_root/etc/avahi/avahi-daemon.conf.d"
+install -m 0755 "$MDNS_SOURCE/publish-name" "$host_root/usr/lib/lifemodel/publish-name"
+for dns_name in "$INSTANCE_NAME.local" "boot-$INSTANCE_NAME.local" "vault-$INSTANCE_NAME.local"; do
+  unit_name=$(printf '%s' "$dns_name" | tr '.' '-')
+  sed -e "s|@PUBLISHER@|/usr/lib/lifemodel/publish-name|g" -e "s|@NAME@|$dns_name|g" -e "s|@INTERFACE@|$lan_interface|g" "$mdns_source/publisher.service.in" > "$host_root/etc/systemd/system/lifemodel-mdns-$unit_name.service"
+done
+if [ -n "$host_root" ]; then
+  printf '[server]\nallow-interfaces=%s\n' "$lan_interface" > "$host_root/etc/avahi/avahi-daemon.conf.d/lifemodel.conf"
+else
+  if grep -q '^allow-interfaces=' /etc/avahi/avahi-daemon.conf; then
+    sed -i "s|^allow-interfaces=.*|allow-interfaces=$lan_interface|" /etc/avahi/avahi-daemon.conf
+  else
+    printf '\n[server]\nallow-interfaces=%s\n' "$lan_interface" >> /etc/avahi/avahi-daemon.conf
+  fi
+fi
+if [ -z "$host_root" ]; then systemctl daemon-reload; systemctl enable --now avahi-daemon.service; fi
+for dns_name in "$INSTANCE_NAME.local" "boot-$INSTANCE_NAME.local" "vault-$INSTANCE_NAME.local"; do
+  unit_name=$(printf '%s' "$dns_name" | tr '.' '-')
+  if [ -z "$host_root" ]; then systemctl enable --now "lifemodel-mdns-$unit_name.service"; fi
+done
+if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
+  ufw allow in on "$lan_interface" to any port 80 proto tcp
+  ufw allow in on "$lan_interface" to any port 443 proto tcp
+  ufw allow in on "$lan_interface" to any port 5353 proto udp
+else
+  echo "NOTE: ensure host firewall allows TCP 80/443 and UDP 5353 on $lan_interface only" >&2
+fi
+fi
+command -v curl >/dev/null 2>&1 || die "curl is required"
+command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
+command -v flock >/dev/null 2>&1 || die "flock is required"
 
 if command -v k3s >/dev/null 2>&1; then
   installed_version=$(k3s --version | awk 'NR==1 {print $3}')
@@ -312,7 +373,7 @@ $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$render_dir
 # Install the recovery CLI and durably retain this successfully applied pin.
 # These roots are configurable so installer tests can exercise the real install
 # path without writing into the host's /usr/local or /var/lib directories.
-cli_lib_dir="$LIFEMODEL_INSTALL_ROOT/usr/local/lib/lifemodel"
+cli_lib_dir="$LIFEMODEL_INSTALL_ROOT/usr/lib/lifemodel"
 cli_bin_dir="$LIFEMODEL_INSTALL_ROOT/usr/local/bin"
 bundle_dir="$cli_lib_dir/bootstrap"
 bundle_templates="$bundle_dir/root"
@@ -332,6 +393,12 @@ if [ "$ROOT_TEMPLATES" != "$bundle_templates" ]; then
   cp "$ROOT_TEMPLATES/ocirepository.yaml" "$bundle_templates/ocirepository.yaml"
   cp "$ROOT_TEMPLATES/kustomization.yaml" "$bundle_templates/kustomization.yaml"
   cp "$ROOT_TEMPLATES/instance.yaml" "$bundle_templates/instance.yaml"
+fi
+mdns_source=$MDNS_SOURCE
+if [ -f "$mdns_source/publish-name" ] && [ "$mdns_source" != "$bundle_dir/deploy/mdns" ]; then
+  install -d -m 0755 "$bundle_dir/deploy/mdns"
+  install -m 0755 "$mdns_source/publish-name" "$bundle_dir/deploy/mdns/publish-name"
+  install -m 0644 "$mdns_source/publisher.service.in" "$bundle_dir/deploy/mdns/publisher.service.in"
 fi
 if [ "$SCRIPT_DIR/install.sh" != "$bundle_script" ]; then install -m 0755 "$SCRIPT_DIR/install.sh" "$bundle_script"; fi
 install -d -m 0755 "$bundle_dir/deploy/cli"
