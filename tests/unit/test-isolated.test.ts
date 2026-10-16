@@ -324,6 +324,7 @@ describe('the disposable launch boundary', () => {
       'tsc',
       'tsc',
       'tsc',
+      'tsc',
       'eslint',
       'prettier',
       'vitest',
@@ -331,13 +332,26 @@ describe('the disposable launch boundary', () => {
     expect(innerSteps('check', [])[0]).toEqual(['tsc', '--noEmit']);
     expect(innerSteps('check', [])[1]).toEqual(['tsc', '-p', 'loader/tsconfig.json', '--noEmit']);
     expect(innerSteps('check', [])[2]).toEqual(['tsc', '-p', 'web/app/tsconfig.json', '--noEmit']);
-    expect(innerSteps('check', [])[3]).toEqual(['eslint', 'src/', 'loader/', 'web/app/']);
+    expect(innerSteps('check', [])[3]).toEqual([
+      'tsc',
+      '-p',
+      'web/loader/tsconfig.json',
+      '--noEmit',
+    ]);
     expect(innerSteps('check', [])[4]).toEqual([
+      'eslint',
+      'src/',
+      'loader/',
+      'web/app/',
+      'web/loader/src/',
+    ]);
+    expect(innerSteps('check', [])[5]).toEqual([
       'prettier',
       '--check',
       'src/**/*.ts',
       'loader/**/*.ts',
       'web/app/**/*.{ts,tsx,css,json,html}',
+      'web/loader/**/*.{ts,tsx,css,json,html}',
       'web/kit/**/*.{ts,tsx,css,json,html}',
     ]);
     expect(innerSteps('test', ['test-file.ts'])[0].at(-1)).toBe('--maxWorkers=2');

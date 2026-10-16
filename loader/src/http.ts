@@ -2,7 +2,6 @@
 import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import {
-  ALLOWED_HOSTS,
   clearSessionCookie,
   configureInstanceName,
   createSession,
@@ -138,7 +137,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       path === '/_auth/verify' &&
       hostName(req.headers.host ?? '') === 'loader.lifemodel-system.svc.cluster.local';
     if (!serviceVerify && !isAllowedHost(req.headers.host, config.instanceName)) {
-      sendText(res, 400, `the loader answers only ${ALLOWED_HOSTS.join(', ')}`);
+      sendText(res, 404, 'not found');
       return;
     }
     const requestHost = hostName(req.headers.host ?? '');
@@ -158,7 +157,11 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     }
     if (!serviceVerify && requestHost === bootHost && path.startsWith('/api/')) {
       const expectedMethod = API_METHODS[path];
-      if (expectedMethod === undefined || method !== expectedMethod) {
+      if (expectedMethod === undefined) {
+        sendText(res, 404, 'not found');
+        return;
+      }
+      if (method !== expectedMethod) {
         sendText(res, 405, 'method not allowed');
         return;
       }
@@ -169,16 +172,21 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           path === '/login' ||
           path === '/setup' ||
           path === '/ca.crt' ||
+          path === '/favicon.svg' ||
           path === '/api/state' ||
           path === '/api/model' ||
           path.startsWith('/assets/'))) ||
       (method === 'POST' &&
-        (path === '/login' ||
-          path === '/setup' ||
-          path === '/logout' ||
-          path === '/api/setup' ||
-          path === '/api/login')) ||
-      (['POST', 'PUT', 'DELETE'].includes(method) && path.startsWith('/api/'));
+        (path === '/api/setup' || path === '/api/login' || path === '/api/logout'));
+    if (
+      !serviceVerify &&
+      requestHost === bootHost &&
+      ['/', '/login', '/setup', '/logout'].includes(path) &&
+      method !== 'GET'
+    ) {
+      sendText(res, 405, 'method not allowed');
+      return;
+    }
     if (!serviceVerify && requestHost === bootHost && !bootRouteAllowed) {
       sendText(res, 404, 'not found');
       return;
@@ -226,16 +234,29 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           res.end('{"error":"origin"}');
           return;
         }
-        let body = '';
+        const chunks: Uint8Array[] = [];
+        let bodyBytes = 0;
         for await (const chunk of req) {
-          body += String(chunk);
-          if (body.length > MAX_FORM_BYTES) break;
+          const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          bodyBytes += bytes.length;
+          if (bodyBytes > MAX_FORM_BYTES) break;
+          chunks.push(new Uint8Array(bytes));
+        }
+        if (bodyBytes > MAX_FORM_BYTES) {
+          res.writeHead(413, { 'content-type': 'application/json; charset=utf-8' });
+          res.end('{"error":"body_too_large"}');
+          return;
         }
         let payload: { password?: unknown; next?: unknown };
         try {
-          payload = JSON.parse(body) as { password?: unknown; next?: unknown };
+          const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
+            throw new Error('invalid object');
+          payload = parsed as { password?: unknown; next?: unknown };
         } catch {
-          payload = {};
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+          res.end('{"error":"invalid_body"}');
+          return;
         }
         const requestHost = req.headers.host ?? '';
         const next =
@@ -361,6 +382,21 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         return;
       }
     }
+    if (requestHost === bootHost && path === '/favicon.svg' && method === 'GET') {
+      try {
+        const bytes = await readFile(resolve(uiRoot, 'favicon.svg'));
+        res.writeHead(200, {
+          'content-type': 'image/svg+xml',
+          'cache-control': 'public, max-age=86400',
+          'content-security-policy': CSP,
+          'x-content-type-options': 'nosniff',
+        });
+        res.end(bytes);
+      } catch {
+        sendText(res, 404, 'not found');
+      }
+      return;
+    }
     if (requestHost === bootHost && path.startsWith('/assets/')) {
       try {
         const relative = path.slice(1);
@@ -370,7 +406,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           return;
         }
         const bytes = await readFile(asset);
-        const immutable = /\.[a-f0-9]{8,}\./i.test(relative);
+        const immutable = /-[A-Za-z0-9_-]{8,}\./.test(relative.split('/').pop() ?? '');
         res.writeHead(200, {
           'content-type': relative.endsWith('.html')
             ? 'text/html; charset=utf-8'
@@ -473,7 +509,15 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         return;
       }
       if (record !== null && sessionToken(req, record) !== null && path !== '/') {
-        redirect(res, '/');
+        const token = sessionToken(req, record);
+        if (token === null) {
+          redirect(res, '/');
+          return;
+        }
+        redirect(
+          res,
+          safeNext === null ? '/' : handoffRedirect(token, safeNext, req.headers.host ?? '')
+        );
         return;
       }
       try {
@@ -489,26 +533,6 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       } catch {
         sendText(res, 503, 'loader interface is unavailable');
       }
-      return;
-    }
-    if (path === '/' && requestHost === bootHost) {
-      try {
-        const bytes = await readFile(resolve(uiRoot, 'index.html'));
-        res.writeHead(200, {
-          'content-type': 'text/html; charset=utf-8',
-          'cache-control': 'no-cache',
-          'content-security-policy': CSP,
-          'x-content-type-options': 'nosniff',
-          'referrer-policy': 'no-referrer',
-        });
-        res.end(bytes);
-      } catch {
-        sendText(res, 503, 'loader interface is unavailable');
-      }
-      return;
-    }
-    if (path === '/setup' || path === '/login' || path === '/logout' || path === '/') {
-      sendText(res, 405, 'method not allowed');
       return;
     }
     if (path === '/panic' || path === '/resume' || path.startsWith('/_api/')) {

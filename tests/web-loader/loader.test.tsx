@@ -66,6 +66,33 @@ describe('loader UI', () => {
       expect(await axe(container)).toHaveNoViolations();
     }
   );
+  it.each([
+    ['en-US', 'Use at least 12 characters.', 'Show password'],
+    ['ru-RU', 'Используйте не менее 12 символов.', 'Показать пароль'],
+  ] as const)('shows password safety guidance in locale %s', async (locale, guidance, show) => {
+    Object.defineProperty(navigator, 'language', { configurable: true, value: locale });
+    const { container } = render(<App />);
+    expect(await screen.findByText(guidance)).toBeTruthy();
+    const input = screen.getByLabelText(locale.startsWith('ru') ? 'Пароль' : 'Password');
+    expect(input).toHaveAttribute('minLength', '12');
+    fireEvent.click(screen.getByRole('button', { name: show }));
+    expect(input).toHaveAttribute('type', 'text');
+  });
+  it('defaults unknown browser languages to English', async () => {
+    Object.defineProperty(navigator, 'language', { configurable: true, value: 'de-DE' });
+    await i18n.changeLanguage('en');
+    render(<App />);
+    expect(await screen.findByRole('heading', { name: 'Set your password' })).toBeTruthy();
+    expect(document.documentElement.lang).toBe('en');
+  });
+  it('shows a translated recovery message when state loading fails', async () => {
+    Object.defineProperty(navigator, 'language', { configurable: true, value: 'ru-RU' });
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) });
+    render(<App />);
+    expect(
+      await screen.findByText('Не удалось завершить настройку. Попробуйте ещё раз.')
+    ).toBeTruthy();
+  });
   it('shows the wrong-password error and accepts the right password', async () => {
     await i18n.changeLanguage('en');
     fetchMock
@@ -86,6 +113,7 @@ describe('loader UI', () => {
     fireEvent.submit(field.closest('form')!);
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
     expect(fetchMock.mock.calls[2]?.[0]).toBe('/api/login');
+    expect(String(fetchMock.mock.calls[2]?.[1]?.body)).toContain('correct');
   });
   it('follows system theme changes live', async () => {
     await i18n.changeLanguage('en');

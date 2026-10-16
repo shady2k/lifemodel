@@ -3,6 +3,3 @@
 @import 'shadcn/tailwind.css';
 @import '@kit/theme.css';
 @source '../../kit/**/*.{ts,tsx}';
-:root {
-  font-family: Onest, ui-sans-serif, system-ui, sans-serif;
-}

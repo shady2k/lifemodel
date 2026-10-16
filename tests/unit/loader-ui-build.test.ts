@@ -27,7 +27,14 @@ describe('loader UI production build', () => {
         ],
         { cwd: process.cwd(), stdio: 'pipe', timeout: 50_000 }
       );
-      expect(readFileSync(join(output, 'index.html'), 'utf8')).toContain('/assets/');
+      const html = readFileSync(join(output, 'index.html'), 'utf8');
+      expect(html).toContain('/assets/');
+      expect(html).toContain('favicon.svg');
+      expect(readFileSync(join(output, 'favicon.svg'), 'utf8')).toContain('<svg');
+      const cssFile = readdirSync(join(output, 'assets')).find((name) => name.endsWith('.css'))!;
+      const css = readFileSync(join(output, 'assets', cssFile), 'utf8');
+      expect(css).not.toMatch(/:root\s*\{[^}]*font-family\s*:/);
+      expect(css).toContain('--font-sans');
       const assets = readdirSync(join(output, 'assets'));
       expect(assets.some((name) => name.endsWith('.js'))).toBe(true);
       expect(assets.some((name) => name.endsWith('.css'))).toBe(true);

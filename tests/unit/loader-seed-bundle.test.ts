@@ -112,6 +112,14 @@ describe('loader image release seed bundle', () => {
     );
     expect(ignore).toContain('!.docker-context');
     expect(ignore).toContain('!.docker-context/**');
+    for (const deny of [
+      '**/.env',
+      '**/.git/**',
+      '**/node_modules/**',
+      '**/dist/**',
+      '**/coverage/**',
+    ])
+      expect(ignore).toContain(deny);
     expect(ignore).not.toContain('docker/instance');
     expect(prepareScript).toContain('git bundle create "$context/seed.bundle" HEAD');
     expect(prepareScript).toContain('commit-tree');
