@@ -24,7 +24,6 @@ function readPort(env: NodeJS.ProcessEnv): number {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv): LoaderConfig {
-  const volumeRoot = env['LIFEMODEL_VOLUME_ROOT'] ?? '/var/lib/loader';
   const instanceName = env['LIFEMODEL_NAME'];
   if (
     !instanceName ||
@@ -35,11 +34,12 @@ export function loadConfig(env: NodeJS.ProcessEnv): LoaderConfig {
     throw new LoaderFatalError(
       'LIFEMODEL_NAME must be a non-reserved DNS-1035 label of at most 57 characters'
     );
+  const volumeRoot = env['LIFEMODEL_VOLUME_ROOT'] ?? '/var/lib/loader';
   return {
-    instanceName,
     volumeRoot,
     loaderDir: join(volumeRoot, 'loader'),
     httpPort: readPort(env),
     openBaoAddress: env['LIFEMODEL_OPENBAO_ADDRESS'] ?? 'http://openbao.openbao.svc:8200',
+    instanceName,
   };
 }

@@ -7,48 +7,13 @@ import { createLoaderApp, type LoaderApp } from '../../loader/src/app.js';
 import { loadConfig } from '../../loader/src/config.js';
 import { systemClock } from '../../loader/src/clock.js';
 import { createNodeFileSystem } from '../../loader/src/fs.js';
+import { createPkiManager } from '../../loader/src/pki.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 
 const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
-function requestWithHost(
-  port: number,
-  path: string,
-  host: string,
-  method = 'GET',
-  body = '',
-  cookie = ''
-): Promise<{ status: number; headers: import('node:http').IncomingHttpHeaders; body: string }> {
-  return new Promise((resolve, reject) => {
-    const request = httpRequest(
-      {
-        hostname: '127.0.0.1',
-        port,
-        path,
-        method,
-        headers: {
-          host,
-          origin: `http://${host}`,
-          ...(body ? { 'content-type': 'application/x-www-form-urlencoded' } : {}),
-          ...(cookie ? { cookie } : {}),
-        },
-      },
-      (response) => {
-        let content = '';
-        response.setEncoding('utf8');
-        response.on('data', (chunk) => (content += chunk));
-        response.on('end', () =>
-          resolve({ status: response.statusCode ?? 0, headers: response.headers, body: content })
-        );
-      }
-    );
-    request.on('error', reject);
-    if (body) request.write(body);
-    request.end();
-  });
-}
 function appFor(
   options: {
     root?: string;
@@ -63,9 +28,9 @@ function appFor(
   return createLoaderApp({
     config: {
       ...loadConfig({
-        LIFEMODEL_NAME: 'lifemodel',
         LIFEMODEL_VOLUME_ROOT: root,
         LIFEMODEL_HTTP_PORT: '0',
+        LIFEMODEL_NAME: 'lifemodel',
       }),
       loaderDir: root,
     },
@@ -74,6 +39,17 @@ function appFor(
     logger: createRecordingLogger(lines),
     clock: systemClock,
     exit: () => {},
+    pki: {
+      bootstrap: async () => {},
+      report: async () => ({
+        identity: 'present',
+        ca: 'present-matching',
+        leaf: 'valid',
+        sans: [],
+        fingerprint: 'x',
+      }),
+      caPem: async () => 'CA',
+    },
     platformBootstrap: {
       runInitial: options.runInitial ?? (async () => {}),
       unsealIfSealed: options.unseal ?? (async () => {}),
@@ -88,34 +64,116 @@ describe('the platform loader', () => {
     const first = appFor({ root });
     await first.start();
     const port = first.port();
-    const setup = await requestWithHost(
-      port,
-      '/setup',
-      'boot-lifemodel.local',
-      'POST',
-      'password=secret'
-    );
+    const setup = await fetch(`http://127.0.0.1:${port}/setup`, {
+      method: 'POST',
+      headers: {
+        origin: `http://127.0.0.1:${port}`,
+        host: `127.0.0.1:${port}`,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: 'password=secret',
+      redirect: 'manual',
+    });
     expect(setup.status).toBe(303);
-    const cookie =
-      (Array.isArray(setup.headers['set-cookie'])
-        ? setup.headers['set-cookie'][0]
-        : setup.headers['set-cookie']
-      )?.split(';')[0] ?? '';
-    const home = await requestWithHost(port, '/', 'boot-lifemodel.local', 'GET', '', cookie);
+    const cookie = setup.headers.get('set-cookie')?.split(';')[0] ?? '';
+    const home = await fetch(`http://127.0.0.1:${port}/`, {
+      headers: { host: 'boot-lifemodel.local', cookie },
+    });
     expect(home.status).toBe(200);
-    expect(home.body).toContain('Platform mode');
+    expect(await home.text()).toContain('Platform mode');
     expect(await first.shutdown('test')).toBe(0);
     const second = appFor({ root });
     await second.start();
-    const login = await requestWithHost(
-      second.port(),
-      '/login',
-      'boot-lifemodel.local',
-      'POST',
-      'password=secret'
-    );
+    const login = await fetch(`http://127.0.0.1:${second.port()}/login`, {
+      method: 'POST',
+      headers: {
+        origin: `http://127.0.0.1:${second.port()}`,
+        host: `127.0.0.1:${second.port()}`,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: 'password=secret',
+      redirect: 'manual',
+    });
     expect(login.status).toBe(303);
     expect(await second.shutdown('test')).toBe(0);
+  });
+
+  it('logs out with real filesystem state and revokes the prior session', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'platform-loader-logout-'));
+    roots.push(root);
+    const app = appFor({ root });
+    await app.start();
+    const port = app.port();
+    const setup = await fetch(`http://127.0.0.1:${port}/setup`, {
+      method: 'POST',
+      headers: {
+        origin: `http://127.0.0.1:${port}`,
+        host: `127.0.0.1:${port}`,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: 'password=secret',
+      redirect: 'manual',
+    });
+    const cookie = setup.headers.get('set-cookie')!.split(';')[0]!;
+    const home = await fetch(`http://127.0.0.1:${port}/`, {
+      headers: { host: `boot-lifemodel.local:${port}`, cookie },
+    });
+    const html = await home.text();
+    const csrf = html.match(/name="csrf" value="([^"]+)"/)![1]!;
+    const logout = await fetch(`http://127.0.0.1:${port}/logout`, {
+      method: 'POST',
+      headers: {
+        origin: `http://127.0.0.1:${port}`,
+        host: `127.0.0.1:${port}`,
+        cookie,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: `csrf=${encodeURIComponent(csrf)}`,
+      redirect: 'manual',
+    });
+    expect(logout.status).toBe(303);
+    const denied = await fetch(`http://127.0.0.1:${port}/`, {
+      headers: { host: `boot-lifemodel.local:${port}`, cookie },
+    });
+    expect(denied.status).toBe(401);
+    expect(await app.shutdown('test')).toBe(0);
+  });
+
+  it('serves the instance CA certificate at /ca.crt on its boot host', async () => {
+    const app = appFor();
+    await app.start();
+    const response = await new Promise<{
+      status: number;
+      headers: Record<string, string | string[] | undefined>;
+      body: string;
+    }>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          hostname: '127.0.0.1',
+          port: app.port(),
+          path: '/ca.crt',
+          headers: { host: `boot-lifemodel.local:${app.port()}` },
+        },
+        (res) => {
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', (chunk) => (body += chunk));
+          res.on('end', () =>
+            resolve({
+              status: res.statusCode ?? 0,
+              headers: res.headers as Record<string, string | string[] | undefined>,
+              body,
+            })
+          );
+        }
+      );
+      req.on('error', reject);
+      req.end();
+    });
+    expect(response.status, response.body).toBe(200);
+    expect(response.headers['content-type']).toContain('pem');
+    expect(response.body).toBe('CA');
+    expect(await app.shutdown('test')).toBe(0);
   });
 
   it('does not expose instance controls or a CLI API', async () => {
@@ -123,29 +181,118 @@ describe('the platform loader', () => {
     await app.start();
     for (const path of ['/panic', '/resume', '/_api/status', '/_api/panic', '/_api/resume']) {
       const response = await fetch(`http://127.0.0.1:${app.port()}${path}`, {
-        headers: { host: 'boot-lifemodel.local' },
+        headers: { host: `boot-lifemodel.local:${app.port()}` },
       });
       expect(response.status, path).toBe(404);
     }
     expect(await app.shutdown('test')).toBe(0);
   });
 
-  it('starts platform bootstrap after the HTTP interface is listening', async () => {
+  it('completes PKI bootstrap before HTTP starts and platform bootstrap runs', async () => {
     let app!: LoaderApp;
     const observed: string[] = [];
-    app = appFor({
-      runInitial: async () => {
-        observed.push(`bootstrap:${app.host()}`);
+    const orderRoot = mkdtempSync(join(tmpdir(), 'pki-order-'));
+    roots.push(orderRoot);
+    app = createLoaderApp({
+      config: {
+        ...loadConfig({
+          LIFEMODEL_NAME: 'lifemodel',
+          LIFEMODEL_HTTP_PORT: '0',
+          LIFEMODEL_VOLUME_ROOT: orderRoot,
+        }),
+        loaderDir: join(orderRoot, 'loader'),
       },
-      unseal: async () => {
-        observed.push(`unseal:${app.host()}`);
+      fs: createNodeFileSystem(),
+      runner: { run: async () => ({ code: 0, stdout: '', stderr: '' }) },
+      logger: createRecordingLogger([]),
+      clock: systemClock,
+      exit: () => {},
+      pki: {
+        bootstrap: async () => {
+          observed.push(`pki:${app.host()}`);
+        },
+        report: async () => ({
+          identity: 'present',
+          ca: 'present-matching',
+          leaf: 'valid',
+          sans: [],
+          fingerprint: 'x',
+        }),
+        caPem: async () => 'CA',
+      },
+      platformBootstrap: {
+        runInitial: async () => {
+          observed.push(`bootstrap:${app.host()}`);
+        },
+        unsealIfSealed: async () => {
+          observed.push(`unseal:${app.host()}`);
+        },
       },
     });
     await app.start();
-    for (let i = 0; i < 20 && observed.length < 2; i++)
+    for (let i = 0; i < 20 && observed.length < 3; i++)
       await new Promise((resolve) => setImmediate(resolve));
-    expect(observed).toEqual(['bootstrap:0.0.0.0', 'unseal:0.0.0.0']);
+    expect(observed).toEqual(['pki:null', 'bootstrap:0.0.0.0', 'unseal:0.0.0.0']);
     expect(await app.shutdown('test')).toBe(0);
+  });
+
+  it('publishes invalid CA status before failing startup and never opens HTTP', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'platform-loader-corrupt-ca-'));
+    roots.push(root);
+    const fs = createNodeFileSystem();
+    const config = {
+      ...loadConfig({
+        LIFEMODEL_VOLUME_ROOT: root,
+        LIFEMODEL_HTTP_PORT: '0',
+        LIFEMODEL_NAME: 'lifemodel',
+      }),
+      loaderDir: root,
+    };
+    let secret: { ca?: string; cert?: string; key?: string } = {};
+    const status = new Map<string, unknown>();
+    const lines: RecordedLine[] = [];
+    const pki = createPkiManager({
+      config,
+      fs,
+      clock: systemClock,
+      secret: {
+        read: async () => secret,
+        write: async (ca, cert, key) => {
+          secret = { ca, cert, key };
+        },
+      },
+      configMap: { read: async () => null, write: async () => {} },
+      status: {
+        write: async (value) => {
+          for (const [key, item] of Object.entries(value)) status.set(key, item);
+        },
+      },
+    });
+    await fs.ensureDir(join(root, 'pki'), 0o700);
+    await pki.bootstrap();
+    await fs.writeFileAtomic(join(root, 'pki/ca.crt'), 'PARTIAL', 0o644);
+    let exitCode: number | undefined;
+    const app = createLoaderApp({
+      config,
+      fs,
+      runner: { run: async () => ({ code: 0, stdout: '', stderr: '' }) },
+      logger: createRecordingLogger(lines),
+      clock: systemClock,
+      exit: (code) => {
+        exitCode = code;
+      },
+      pki,
+      platformBootstrap: { runInitial: async () => {}, unsealIfSealed: async () => {} },
+    });
+    await expect(app.start()).rejects.toThrow();
+    expect(exitCode).toBe(1);
+    expect(status.get('ca')).toBe('invalid');
+    expect(status.get('caFingerprint')).toBeNull();
+    expect(status.get('error')).toBe('invalid CA pair');
+    expect(app.host()).toBeNull();
+    expect(app.port()).toBe(0);
+    expect([...status.values()].join(' ')).not.toContain('PARTIAL');
+    expect(JSON.stringify(lines)).not.toContain('PARTIAL');
   });
 
   it('logs the failed platform phase before retrying', async () => {

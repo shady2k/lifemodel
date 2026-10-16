@@ -14,5 +14,9 @@
   "devDependencies": {
     "@types/node": "^25.0.10",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@peculiar/x509": "2.2.0",
+    "reflect-metadata": "0.2.2"
   }
 }
