@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { X509Certificate } from 'node:crypto';
@@ -67,6 +67,38 @@ describe('loader instance PKI', () => {
       m.readFile(join(s.root, 'pki/ca.key'), 'utf8')
     );
     expect(key).toContain('PRIVATE KEY');
+    expect(statSync(join(s.root, 'pki/ca.key')).mode & 0o777).toBe(0o600);
+  });
+  it('reads back both CA files before identity publication and refuses a failed read-back', async () => {
+    const s = setup();
+    const real = createNodeFileSystem();
+    const events: string[] = [];
+    const instrumented = {
+      ...real,
+      writeFileAtomic: async (path: string, content: string, mode: number) => {
+        events.push(
+          `write:${path.endsWith('ca.key') ? 'key' : path.endsWith('ca.crt') ? 'cert' : 'identity'}`
+        );
+        return real.writeFileAtomic(path, content, mode);
+      },
+      readFile: async (path: string) => {
+        events.push(
+          `read:${path.endsWith('ca.key') ? 'key' : path.endsWith('ca.crt') ? 'cert' : 'other'}`
+        );
+        if (path.endsWith('ca.key')) throw new Error('injected read-back failure');
+        return real.readFile(path);
+      },
+    };
+    const manager = createPkiManager({
+      config: { ...loadConfig({ LIFEMODEL_NAME: 'home', LIFEMODEL_VOLUME_ROOT: s.root }) },
+      fs: instrumented,
+      clock: s.clock,
+      secret: { read: async () => ({}), write: async () => {} },
+      configMap: { read: async () => null, write: async () => {} },
+    });
+    await expect(manager.bootstrap()).rejects.toThrow('injected read-back failure');
+    expect(events).toEqual(['write:key', 'write:cert', 'read:cert', 'read:key']);
+    expect(await real.exists(join(s.root, 'instance.json'))).toBe(false);
   });
   it('reuses CA after restart and reissues deleted leaf under the same CA', async () => {
     const s = setup();
@@ -77,6 +109,33 @@ describe('loader instance PKI', () => {
     await s.manager.bootstrap();
     expect((await s.manager.report()).fingerprint).toBe(fingerprint);
     expect(s.events).toContain('leaf');
+  });
+  it('recovers interrupted first start after CA writes but before identity publication', async () => {
+    const s = setup();
+    const real = createNodeFileSystem();
+    let failed = false;
+    const fs = {
+      ...real,
+      readFile: async (path: string) => {
+        if (!failed && path.endsWith('ca.key')) {
+          failed = true;
+          throw new Error('simulated interruption');
+        }
+        return real.readFile(path);
+      },
+    };
+    const interrupted = createPkiManager({
+      config: { ...loadConfig({ LIFEMODEL_NAME: 'home', LIFEMODEL_VOLUME_ROOT: s.root }) },
+      fs,
+      clock: s.clock,
+      secret: { read: async () => ({}), write: async () => {} },
+      configMap: { read: async () => null, write: async () => {} },
+    });
+    await expect(interrupted.bootstrap()).rejects.toThrow('simulated interruption');
+    expect(await real.exists(join(s.root, 'instance.json'))).toBe(false);
+    await s.manager.bootstrap();
+    expect((await s.manager.report()).identity).toBe('present');
+    expect(await real.exists(join(s.root, 'instance.json'))).toBe(true);
   });
   it('reuses a valid CA left by a crash before identity publication', async () => {
     const s = setup();
@@ -140,12 +199,56 @@ describe('loader instance PKI', () => {
     ) as x509.KeyUsagesExtension;
     expect(constraints.ca).toBe(true);
     expect(constraints.pathLength).toBe(0);
+    expect(constraints.critical).toBe(true);
     expect(caUsage.usages).toBe(x509.KeyUsageFlags.keyCertSign | x509.KeyUsageFlags.cRLSign);
     expect(leaf.validTo).toBeTruthy();
     const ca = new X509Certificate(await s.manager.caPem());
     expect(ca.ca).toBe(true);
     expect(ca.ca).toBe(true);
     expect(ca.raw.length).toBeGreaterThan(0);
+  });
+  it.each(['PARTIAL', 'wrong'])(
+    'fails closed for a corrupt or wrong CA key while a valid leaf exists (%s)',
+    async (badKey) => {
+      const s = setup();
+      await s.manager.bootstrap();
+      const keyPath = join(s.root, 'pki/ca.key');
+      if (badKey === 'wrong') {
+        const other = setup();
+        await other.manager.bootstrap();
+        await import('node:fs/promises').then((m) =>
+          m.copyFile(join(other.root, 'pki/ca.key'), keyPath)
+        );
+      } else await import('node:fs/promises').then((m) => m.writeFile(keyPath, badKey));
+      await expect(s.manager.bootstrap()).rejects.toThrow(/PKI CA/);
+      expect((await s.manager.report()).ca).toBe('invalid');
+    }
+  );
+  it('rejects an invalid CA key even when the leaf is missing', async () => {
+    const s = setup();
+    await s.manager.bootstrap();
+    await import('node:fs/promises').then((m) => m.unlink(join(s.root, 'pki/ca.key')));
+    s.secret.cert = undefined;
+    await expect(s.manager.bootstrap()).rejects.toThrow(/CA is missing/);
+  });
+  it('reissues a same-name foreign leaf under the established CA', async () => {
+    const first = setup(),
+      second = setup();
+    await first.manager.bootstrap();
+    await second.manager.bootstrap();
+    const foreign = second.secret;
+    first.secret.ca = foreign.ca;
+    first.secret.cert = foreign.cert;
+    first.secret.key = foreign.key;
+    const before = new X509Certificate(first.secret.cert!).serialNumber;
+    await first.manager.bootstrap();
+    expect(first.secret.ca).toBe(await first.manager.caPem());
+    expect(new X509Certificate(first.secret.cert!).serialNumber).not.toBe(before);
+    expect(
+      new X509Certificate(first.secret.cert!).verify(
+        new X509Certificate(await first.manager.caPem()).publicKey
+      )
+    ).toBe(true);
   });
   it('derives only the three instance names and rejects malformed names', () => {
     expect(instanceHosts('home')).toEqual(['home.local', 'boot-home.local', 'vault-home.local']);

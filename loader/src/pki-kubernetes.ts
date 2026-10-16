@@ -1,7 +1,7 @@
 /** Narrow Kubernetes API stores for the PKI-owned A0 resources. */
 import { readFile } from 'node:fs/promises';
 import { request as httpsRequest } from 'node:https';
-import type { TlsSecretStore, CaConfigMapStore } from './pki.js';
+import type { TlsSecretStore, CaConfigMapStore, PkiStatusStore } from './pki.js';
 interface ApiOptions {
   apiServer?: string;
   namespace?: string;
@@ -95,9 +95,11 @@ function createApi(options: ApiOptions, resource: string, name: string) {
 export function createKubernetesTlsStores(options: ApiOptions = {}): {
   secret: TlsSecretStore;
   configMap: CaConfigMapStore;
+  status: PkiStatusStore;
 } {
   const sec = createApi(options, 'secrets', 'lifemodel-tls');
   const cm = createApi(options, 'configmaps', 'lifemodel-ca');
+  const statusCm = createApi(options, 'configmaps', 'lifemodel-pki-status');
   async function read(resource: ReturnType<typeof createApi>) {
     const r = await resource.send('GET');
     if (r.status === 404) return null;
@@ -177,6 +179,36 @@ export function createKubernetesTlsStores(options: ApiOptions = {}): {
           throw new Error(`Kubernetes CA ConfigMap update failed (${String(r.status)})`);
         if ((await read(cm))?.data?.['ca.crt'] !== ca)
           throw new Error('Kubernetes CA ConfigMap read-back mismatch');
+      },
+    },
+    status: {
+      write: async (data) => {
+        const old = await read(statusCm);
+        if (!old?.metadata?.resourceVersion)
+          throw new Error('A0 PKI status ConfigMap must exist before loader startup');
+        const r = await statusCm.send('PUT', {
+          apiVersion: 'v1',
+          kind: 'ConfigMap',
+          metadata: {
+            name: 'lifemodel-pki-status',
+            namespace: statusCm.namespace,
+            resourceVersion: old.metadata.resourceVersion,
+            ...(old.metadata.annotations ? { annotations: old.metadata.annotations } : {}),
+            ...(old.metadata.labels ? { labels: old.metadata.labels } : {}),
+          },
+          data: Object.fromEntries(
+            Object.entries(data).map(([key, value]) => [
+              key,
+              typeof value === 'string' ? value : JSON.stringify(value),
+            ])
+          ),
+        });
+        if (r.status !== 200)
+          throw new Error(`Kubernetes PKI status update failed (${String(r.status)})`);
+        const check = await read(statusCm);
+        for (const [key, value] of Object.entries(data))
+          if (check?.data?.[key] !== (typeof value === 'string' ? value : JSON.stringify(value)))
+            throw new Error('Kubernetes PKI status read-back mismatch');
       },
     },
   };

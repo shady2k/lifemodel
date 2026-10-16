@@ -4,3 +4,14 @@ metadata:
   name: lifemodel-ca
   namespace: lifemodel-system
 data: {}
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lifemodel-pki-status
+  namespace: lifemodel-system
+  annotations:
+    kustomize.toolkit.fluxcd.io/ssa: IfNotPresent
+    kustomize.toolkit.fluxcd.io/prune: disabled
+data: {}

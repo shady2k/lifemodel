@@ -13,6 +13,7 @@ export interface LoaderState {
   ensureLayout(): Promise<void>;
   readAuth(): Promise<PasswordRecord | null>;
   writeAuth(record: PasswordRecord): Promise<void>;
+  replaceAuth(record: PasswordRecord): Promise<void>;
 }
 
 export interface LoaderStateDeps {
@@ -65,6 +66,8 @@ export function createLoaderState({ fs, config, logger }: LoaderStateDeps): Load
     readAuth,
     writeAuth: async (record) =>
       fs.writeFileExclusive(authPath, `${JSON.stringify(record, null, 2)}\n`, AUTH_MODE),
+    replaceAuth: async (record) =>
+      fs.writeFileAtomic(authPath, `${JSON.stringify(record, null, 2)}\n`, AUTH_MODE),
   };
 }
 

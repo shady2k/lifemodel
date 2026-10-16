@@ -97,6 +97,47 @@ describe('the platform loader', () => {
     expect(await second.shutdown('test')).toBe(0);
   });
 
+  it('logs out with real filesystem state and revokes the prior session', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'platform-loader-logout-'));
+    roots.push(root);
+    const app = appFor({ root });
+    await app.start();
+    const port = app.port();
+    const setup = await fetch(`http://127.0.0.1:${port}/setup`, {
+      method: 'POST',
+      headers: {
+        origin: `http://127.0.0.1:${port}`,
+        host: `127.0.0.1:${port}`,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: 'password=secret',
+      redirect: 'manual',
+    });
+    const cookie = setup.headers.get('set-cookie')!.split(';')[0]!;
+    const home = await fetch(`http://127.0.0.1:${port}/`, {
+      headers: { host: `boot-lifemodel.local:${port}`, cookie },
+    });
+    const html = await home.text();
+    const csrf = html.match(/name="csrf" value="([^"]+)"/)![1]!;
+    const logout = await fetch(`http://127.0.0.1:${port}/logout`, {
+      method: 'POST',
+      headers: {
+        origin: `http://127.0.0.1:${port}`,
+        host: `127.0.0.1:${port}`,
+        cookie,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: `csrf=${encodeURIComponent(csrf)}`,
+      redirect: 'manual',
+    });
+    expect(logout.status).toBe(303);
+    const denied = await fetch(`http://127.0.0.1:${port}/`, {
+      headers: { host: `boot-lifemodel.local:${port}`, cookie },
+    });
+    expect(denied.status).toBe(401);
+    expect(await app.shutdown('test')).toBe(0);
+  });
+
   it('serves the instance CA certificate at /ca.crt on its boot host', async () => {
     const app = appFor();
     await app.start();

@@ -109,6 +109,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       if (stopping) return;
       try {
         await pki.bootstrap();
+        await pki.report();
         logger.info({}, 'loader TLS certificate renewal check completed');
       } catch (error) {
         logger.error({ error: describe(error) }, 'loader TLS certificate renewal failed');
@@ -162,7 +163,17 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       if (http !== null) return;
       try {
         await state.ensureLayout();
-        await pki.bootstrap();
+        try {
+          await pki.bootstrap();
+          await pki.report();
+        } catch (error) {
+          try {
+            await pki.report();
+          } catch {
+            /* preserve original fail-closed cause */
+          }
+          throw error;
+        }
         http = createLoaderHttp({ state, logger, clock, pki, config });
         await new Promise<void>((resolve, reject) => {
           const server = http?.server;

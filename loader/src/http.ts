@@ -409,7 +409,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         )
           return false;
         current.sessionSecret = randomBytes(32).toString('base64');
-        await state.writeAuth(current);
+        await state.replaceAuth(current);
         return true;
       });
       if (!loggedOut) {

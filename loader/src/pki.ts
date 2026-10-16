@@ -26,12 +26,19 @@ export interface CaConfigMapStore {
   read(): Promise<string | null>;
   write(ca: string): Promise<void>;
 }
+export interface PkiStatusStore {
+  write(status: Record<string, unknown>): Promise<void>;
+}
 export interface PkiReport {
   identity: 'present' | 'missing' | 'invalid';
   ca: 'present-matching' | 'missing' | 'mismatch' | 'invalid';
   leaf: 'valid' | 'missing' | 'invalid' | 'expiring';
   sans: string[];
   fingerprint: string | null;
+  caFingerprint?: string | null;
+  leafNotAfter?: string | null;
+  checkedAt?: string;
+  error?: string;
 }
 export interface PkiManager {
   bootstrap(): Promise<void>;
@@ -57,6 +64,49 @@ function toPem(cert: x509.X509Certificate): string {
 function pemFingerprint(pem: string): string {
   return createHash('sha256').update(new NodeX509Certificate(pem).raw).digest('hex');
 }
+function validateCaPair(ca: CaDisk, now: number): string {
+  const cert = new NodeX509Certificate(ca.cert);
+  let privateKey: ReturnType<typeof createPrivateKey>;
+  try {
+    privateKey = createPrivateKey(ca.keyPem);
+  } catch (error) {
+    throw new Error('PKI CA private key is invalid', { cause: error });
+  }
+  if (
+    privateKey.asymmetricKeyType !== 'ec' ||
+    privateKey.asymmetricKeyDetails?.namedCurve !== 'prime256v1'
+  )
+    throw new Error('PKI CA private key is not P-256');
+  if (
+    createPublicKey(privateKey)
+      .export({ format: 'der', type: 'spki' })
+      .compare(cert.publicKey.export({ format: 'der', type: 'spki' })) !== 0
+  )
+    throw new Error('PKI CA private key does not match its certificate');
+  if (
+    !cert.ca ||
+    !cert.verify(cert.publicKey) ||
+    Date.parse(cert.validFrom) > now ||
+    Date.parse(cert.validTo) <= now
+  )
+    throw new Error('PKI CA certificate is invalid or outside its validity period');
+  const parsed = new x509.X509Certificate(ca.cert);
+  const constraints = parsed.extensions.find((e) => e.type === '2.5.29.19') as
+    | x509.BasicConstraintsExtension
+    | undefined;
+  const usage = parsed.extensions.find((e) => e.type === '2.5.29.15') as
+    | x509.KeyUsagesExtension
+    | undefined;
+  if (
+    !constraints?.ca ||
+    constraints.pathLength !== 0 ||
+    !constraints.critical ||
+    !usage?.critical ||
+    (usage.usages as number) !== (x509.KeyUsageFlags.keyCertSign | x509.KeyUsageFlags.cRLSign)
+  )
+    throw new Error('PKI CA certificate does not match the required profile');
+  return createHash('sha256').update(cert.raw).digest('hex');
+}
 function serial(): string {
   return randomBytes(16).toString('hex').replace(/^0+/, '') || '1';
 }
@@ -81,8 +131,9 @@ export function createPkiManager(options: {
   clock: Clock;
   secret: TlsSecretStore;
   configMap: CaConfigMapStore;
+  status?: PkiStatusStore;
 }): PkiManager {
-  const { config, fs, clock, secret, configMap } = options;
+  const { config, fs, clock, secret, configMap, status } = options;
   const directory = join(config.volumeRoot, 'pki');
   const caPath = join(directory, 'ca.crt');
   const keyPath = join(directory, 'ca.key');
@@ -152,7 +203,11 @@ export function createPkiManager(options: {
       const sans = (cert.subjectAltName ?? '')
         .split(', ')
         .map((value) => value.replace(/^DNS:/, ''));
-      if (hosts.some((host) => !sans.includes(host))) return 'invalid';
+      if (
+        sans.length !== hosts.length ||
+        [...sans].sort().join('\0') !== [...hosts].sort().join('\0')
+      )
+        return 'invalid';
       if (
         !keyPem ||
         !createPrivateKey(keyPem).asymmetricKeyType ||
@@ -161,8 +216,25 @@ export function createPkiManager(options: {
           .compare(cert.publicKey.export({ format: 'der', type: 'spki' })) !== 0
       )
         return 'invalid';
-      if (expectedCa && cert.issuer !== new NodeX509Certificate(expectedCa).subject)
+      const parsedLeaf = new x509.X509Certificate(certPem);
+      const eku = parsedLeaf.extensions.find((extension) => extension.type === '2.5.29.37') as
+        | x509.ExtendedKeyUsageExtension
+        | undefined;
+      const usage = parsedLeaf.extensions.find((extension) => extension.type === '2.5.29.15') as
+        | x509.KeyUsagesExtension
+        | undefined;
+      if (
+        !eku?.critical ||
+        eku.usages.length !== 1 ||
+        eku.usages[0] !== '1.3.6.1.5.5.7.3.1' ||
+        !usage?.critical ||
+        usage.usages !== x509.KeyUsageFlags.digitalSignature
+      )
         return 'invalid';
+      if (expectedCa) {
+        const ca = new NodeX509Certificate(expectedCa);
+        if (cert.issuer !== ca.subject || !cert.verify(ca.publicKey)) return 'invalid';
+      }
       return 'valid';
     } catch {
       return 'invalid';
@@ -185,7 +257,7 @@ export function createPkiManager(options: {
       throw new Error('PKI CA is missing while instance identity exists');
     if (ca) {
       try {
-        const fingerprint = pemFingerprint(ca.cert);
+        const fingerprint = validateCaPair(ca, clock.now());
         if (identity && identity.fingerprint !== fingerprint)
           throw new Error('PKI CA does not match instance identity');
       } catch (error) {
@@ -206,11 +278,14 @@ export function createPkiManager(options: {
         await fs.writeFileAtomic(caPath, ca.cert, 0o644);
         const readbackCert = await fs.readFile(caPath);
         const readbackKey = await fs.readFile(keyPath);
-        if (pemFingerprint(readbackCert) !== pemFingerprint(ca.cert))
+        if (
+          validateCaPair({ cert: readbackCert, keyPem: readbackKey }, clock.now()) !==
+          pemFingerprint(ca.cert)
+        )
           throw new Error('PKI CA read-back did not match');
         ca = { cert: readbackCert, keyPem: readbackKey };
       }
-      const fingerprint = pemFingerprint(ca.cert);
+      const fingerprint = validateCaPair(ca, clock.now());
       if (!identity) {
         identity = { version: 1, fingerprint };
         await fs.writeFileAtomic(identityPath, JSON.stringify(identity) + '\n', 0o600);
@@ -246,21 +321,22 @@ export function createPkiManager(options: {
         const keyPem = (await fs.exists(keyPath)) ? await fs.readFile(keyPath) : null;
         ca = cert && keyPem ? { cert, keyPem } : null;
         if (ca) {
+          const fingerprint = validateCaPair(ca, clock.now());
           caState =
-            identity && pemFingerprint(ca.cert) !== identity.fingerprint
-              ? 'mismatch'
-              : 'present-matching';
+            identity && fingerprint !== identity.fingerprint ? 'mismatch' : 'present-matching';
         }
       } catch {
         caState = 'invalid';
       }
       let leaf: PkiReport['leaf'] = 'missing',
         sans: string[] = [];
+      let leafNotAfter = '';
       try {
         const current = await secret.read();
         leaf = certStatus(current.cert ?? null, current.key, ca?.cert);
         if (current.cert) {
           const cert = new NodeX509Certificate(current.cert);
+          leafNotAfter = cert.validTo;
           sans = (cert.subjectAltName ?? '')
             .split(', ')
             .filter(Boolean)
@@ -270,13 +346,24 @@ export function createPkiManager(options: {
       } catch {
         leaf = 'invalid';
       }
-      return {
+      const result: PkiReport = {
         identity: identityState,
         ca: caState,
         leaf,
         sans,
         fingerprint: ca ? pemFingerprint(ca.cert) : null,
       };
+      await status?.write({
+        identity: identityState,
+        ca: caState,
+        leaf,
+        caFingerprint: result.fingerprint,
+        leafNotAfter,
+        leafSans: sans,
+        checkedAt: new Date(clock.now()).toISOString(),
+        ...(caState === 'invalid' ? { error: 'invalid CA pair' } : {}),
+      });
+      return result;
     },
     caPem: async () => {
       const { ca } = await caAndIdentity();

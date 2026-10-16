@@ -22,6 +22,9 @@ async function start(initialAuth: Awaited<ReturnType<typeof hashPassword>> | nul
     writeAuth: async (record) => {
       auth = structuredClone(record);
     },
+    replaceAuth: async (record) => {
+      auth = structuredClone(record);
+    },
   };
   const clock = createTestClock();
   const loader = createLoaderHttp({
