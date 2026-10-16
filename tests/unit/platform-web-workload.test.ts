@@ -23,7 +23,7 @@ describe('web application generation', () => {
       rollingUpdate: { maxSurge: 1, maxUnavailable: 0 },
     });
     expect(deployment.spec.replicas).toBe(1);
-    expect(container.resources.requests.cpu).toBe('100m');
+    expect(container.resources.requests.cpu).toBe('50m');
     expect(container.resources.limits).toEqual({ cpu: 1, memory: '768Mi' });
     // The repo's platform manifests do not declare node/system workload requests,
     // so the complete 2-vCPU node budget cannot be derived here. Keep the web

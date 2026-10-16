@@ -100,7 +100,8 @@ spec:
             capabilities:
               drop: [ALL]
           resources:
-            requests: { cpu: 100m, memory: 256Mi }
+            # Measured CPU: 1m idle, 6m with one SSE stream, 8m with three.
+            requests: { cpu: 50m, memory: 256Mi }
             limits: { cpu: 1, memory: 768Mi }
           volumeMounts:
             - name: tmp
