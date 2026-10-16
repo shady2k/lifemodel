@@ -7,6 +7,7 @@ import { createLoaderApp, type LoaderApp } from '../../loader/src/app.js';
 import { loadConfig } from '../../loader/src/config.js';
 import { systemClock } from '../../loader/src/clock.js';
 import { createNodeFileSystem } from '../../loader/src/fs.js';
+import { createPkiManager } from '../../loader/src/pki.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 
 const roots: string[] = [];
@@ -233,6 +234,65 @@ describe('the platform loader', () => {
       await new Promise((resolve) => setImmediate(resolve));
     expect(observed).toEqual(['pki:null', 'bootstrap:0.0.0.0', 'unseal:0.0.0.0']);
     expect(await app.shutdown('test')).toBe(0);
+  });
+
+  it('publishes invalid CA status before failing startup and never opens HTTP', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'platform-loader-corrupt-ca-'));
+    roots.push(root);
+    const fs = createNodeFileSystem();
+    const config = {
+      ...loadConfig({
+        LIFEMODEL_VOLUME_ROOT: root,
+        LIFEMODEL_HTTP_PORT: '0',
+        LIFEMODEL_NAME: 'lifemodel',
+      }),
+      loaderDir: root,
+    };
+    let secret: { ca?: string; cert?: string; key?: string } = {};
+    const status = new Map<string, unknown>();
+    const lines: RecordedLine[] = [];
+    const pki = createPkiManager({
+      config,
+      fs,
+      clock: systemClock,
+      secret: {
+        read: async () => secret,
+        write: async (ca, cert, key) => {
+          secret = { ca, cert, key };
+        },
+      },
+      configMap: { read: async () => null, write: async () => {} },
+      status: {
+        write: async (value) => {
+          for (const [key, item] of Object.entries(value)) status.set(key, item);
+        },
+      },
+    });
+    await fs.ensureDir(join(root, 'pki'), 0o700);
+    await pki.bootstrap();
+    await fs.writeFileAtomic(join(root, 'pki/ca.crt'), 'PARTIAL', 0o644);
+    let exitCode: number | undefined;
+    const app = createLoaderApp({
+      config,
+      fs,
+      runner: { run: async () => ({ code: 0, stdout: '', stderr: '' }) },
+      logger: createRecordingLogger(lines),
+      clock: systemClock,
+      exit: (code) => {
+        exitCode = code;
+      },
+      pki,
+      platformBootstrap: { runInitial: async () => {}, unsealIfSealed: async () => {} },
+    });
+    await expect(app.start()).rejects.toThrow();
+    expect(exitCode).toBe(1);
+    expect(status.get('ca')).toBe('invalid');
+    expect(status.get('caFingerprint')).toBeNull();
+    expect(status.get('error')).toBe('invalid CA pair');
+    expect(app.host()).toBeNull();
+    expect(app.port()).toBe(0);
+    expect([...status.values()].join(' ')).not.toContain('PARTIAL');
+    expect(JSON.stringify(lines)).not.toContain('PARTIAL');
   });
 
   it('logs the failed platform phase before retrying', async () => {

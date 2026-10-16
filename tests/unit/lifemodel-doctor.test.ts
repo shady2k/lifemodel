@@ -321,6 +321,7 @@ describe('lifemodel doctor', () => {
     env.env.LIFEMODEL_LOADER_VOLUME = '/path/that/must/not/be/read';
     const run = spawnSync(process.execPath, [cli, 'doctor'], { env: env.env, encoding: 'utf8' });
     expect(run.status).toBe(1);
+    expect(`${run.stdout}${run.stderr}`).toContain('CA=invalid');
     expect(`${run.stdout}${run.stderr}`).toContain('PKI CA (invalid)');
     expect(`${run.stdout}${run.stderr}`).toContain('PKI error=invalid CA pair');
     expect(`${run.stdout}${run.stderr}`).not.toContain('DOCTOR_TLS_KEY_CANARY');

@@ -307,7 +307,8 @@ export function createPkiManager(options: {
     },
     report: async () => {
       let identity: Identity | null = null,
-        ca: CaDisk | null = null;
+        ca: CaDisk | null = null,
+        caFingerprint: string | null = null;
       let identityState: PkiReport['identity'] = 'missing',
         caState: PkiReport['ca'] = 'missing';
       try {
@@ -321,6 +322,7 @@ export function createPkiManager(options: {
         const keyPem = (await fs.exists(keyPath)) ? await fs.readFile(keyPath) : null;
         ca = cert && keyPem ? { cert, keyPem } : null;
         if (ca) {
+          caFingerprint = pemFingerprint(ca.cert);
           const fingerprint = validateCaPair(ca, clock.now());
           caState =
             identity && fingerprint !== identity.fingerprint ? 'mismatch' : 'present-matching';
@@ -351,7 +353,7 @@ export function createPkiManager(options: {
         ca: caState,
         leaf,
         sans,
-        fingerprint: ca ? pemFingerprint(ca.cert) : null,
+        fingerprint: caFingerprint,
       };
       await status?.write({
         identity: identityState,
