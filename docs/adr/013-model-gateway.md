@@ -87,8 +87,9 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
    re-login. Slots are cached 30 s; after 5 min of failed refreshes the cache
    expires and requests fail with `storage_unavailable` until Bao answers
    again. A deleted latest version is "unset"; sealed, unreachable or denied
-   storage is never "unset". After an upstream 401/403 the cache is
-   invalidated and the request retried once only if the reread key differs.
+   storage is never "unset". An upstream 401/403 invalidates the cache for
+   the next inbound request; the current request is not retried in that slot
+   (D4's one attempt per slot holds) [B-02].
    The key is added as `Authorization: Bearer <key>` on the upstream leg only;
    a slot without a key (Ollama) is sent without one. The role and policy are
    provisioned in the loader's bootstrap policy action before root revocation,
@@ -102,9 +103,15 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
    `null` content with `tool_calls` is a valid answer; content that is not
    the core's application JSON is cognition's concern). Another 4xx is the
    caller's error. A stream that already sent its first byte downstream is
-   never switched or replayed. One end-to-end deadline of 110 s (below the
-   core's shortest turn timeout); a stream idle 30 s ends; client disconnect,
-   slot switch and the deadline abort the upstream request. With no reserve,
+   never switched or replayed. One end-to-end deadline of 110 s; a stream
+   idle 30 s ends; client disconnect, slot switch and the deadline abort the
+   upstream request. The gateway's primary/reserve pair is the whole transport
+   failover budget [B-02]: the core's provider makes one HTTP attempt per
+   gateway-backed completion (no transport retries of its own), its timeout
+   aborts that HTTP request through an AbortSignal and no later attempt
+   starts after it reports a timeout; the gateway sees the disconnect and
+   aborts upstream. Cognition's own retries and escalation stay separate,
+   recorded turns. With no reserve,
    the primary's failure is returned as an error. On the primary the
    request's `model` passes through (`default` → the slot's model); on the
    reserve the reserve's model id replaces it, so fast and smart collapse to
@@ -117,10 +124,17 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
      (`{error: {type, code}}`, safe code), keeping the upstream status for
      4xx/429 and 502 otherwise. Response headers are allowlisted
      (Content-Type, `x-lifemodel-slot`, a safe Retry-After). A non-streaming
-     success is buffered (bounded) and refused if it contains the slot key; a
-     stream is inspected frame by frame with a carry-over window of key
-     length − 1 across chunks, and a frame containing the key ends the stream
-     with a safe error. Raw upstream and Bao errors are never logged.
+     success is buffered (bounded), parsed, and refused if the raw bytes or
+     any decoded JSON string value contains the slot key (escapes such as
+     `\u0073k-` are decoded first). A stream is parsed event by event; for
+     each choice and each text field the client reassembles (content, tool
+     call arguments, reasoning) the gateway keeps the reconstructed tail and
+     withholds the part that could still be a prefix of the key, so the
+     fragment that would complete the key is never released: that stream ends
+     with a safe error. The raw chunk guard (carry-over of key length − 1)
+     stays for anything forwarded unparsed. Frames and per-field state are
+     bounded; malformed or oversized input fails closed. The same rule applies
+     on both slots [B-01]. Raw upstream and Bao errors are never logged.
 5. **Destinations and network** [G-07]. Only the two configured endpoints are
    reachable, through the loader's validator (ADR-012 D7: resolve once,
    refuse loopback, link-local and cluster ranges except the named in-cluster
@@ -198,8 +212,13 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
 
 - Gateway tests: key injected upstream only; inbound Authorization dropped;
   the key echoed by an upstream in a 4xx body, a 5xx body, a response header,
-  a success JSON and an SSE stream split across chunks never reaches the core
-  or a log; attempts exactly primary once + reserve once; failover on connect
+  a success JSON, a JSON-escaped success, an SSE stream split across chunks
+  and a key split across two SSE deltas (content and tool-call arguments)
+  never reaches the core or a log; attempts exactly primary once + reserve
+  once, also after a 401 with a rotated key (the rotation serves the next
+  request); through the real core provider: one HTTP attempt per completion,
+  its timeout during each leg aborts the request, and no upstream activity
+  follows the reported timeout; failover on connect
   error, timeout, 5xx, 429 and a malformed body, none on other 4xx, none after
   the first downstream byte; disconnect aborts upstream; `default` and reserve
   model substitution; streaming passthrough; only the declared paths per
