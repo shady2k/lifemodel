@@ -85,6 +85,92 @@ describe('snapshot outbox commit', () => {
     ).rejects.toThrow(/epoch mismatch/i);
     expect(await stores.redis.xrange(`${prefix}outbound`, '-', '+')).toHaveLength(0);
   });
+  it('does not mark an inbound id complete when outbound preflight fails', async () => {
+    const prefix = `snapshot-preflight:${stores.workerId}:`;
+    const completedKey = `${prefix}completed`;
+    const store = createSnapshotStore(stores.redis, {
+      keyPrefix: prefix,
+      completedInboundKey: completedKey,
+    });
+    const epoch = await store.takeEpoch();
+    const inbound = new InboundMessageStream(
+      stores.redis,
+      `${prefix}inbound`,
+      1,
+      undefined,
+      completedKey
+    );
+    store.register(inbound);
+    const signal = createUserMessageSignal({
+      text: 'retry',
+      recipientId: 'r',
+      channel: 'web',
+      updateId: 'preflight-id',
+    });
+    await inbound.append(signal);
+    const [entry] = await inbound.readNew();
+    inbound.settle([entry!.signal.id]);
+    await stores.redis.set(`${prefix}outbound`, 'wrong type');
+    await expect(
+      store.commitOwners(epoch, 1, [
+        { eventId: 'preflight-event', type: 'send.command', payload: {} },
+      ])
+    ).rejects.toThrow();
+    expect(await stores.redis.zscore(completedKey, 'preflight-id')).toBeNull();
+    await stores.redis.del(`${prefix}outbound`);
+    const restarted = new InboundMessageStream(
+      stores.redis,
+      `${prefix}inbound`,
+      1,
+      undefined,
+      completedKey
+    );
+    expect((await restarted.readNew()).map((message) => message.messageId)).toEqual([
+      'preflight-id',
+    ]);
+    expect((await restarted.readNew()).map((message) => message.messageId)).toEqual([]);
+    restarted.settle([entry!.signal.id]);
+    const restartStore = createSnapshotStore(stores.redis, {
+      keyPrefix: prefix,
+      completedInboundKey: completedKey,
+    });
+    const restartEpoch = await restartStore.takeEpoch();
+    restartStore.register(restarted);
+    await expect(restartStore.commitOwners(restartEpoch, 1)).resolves.toBe(true);
+    expect(await stores.redis.zscore(completedKey, 'preflight-id')).not.toBeNull();
+  });
+
+  it('persists every id settled before one CAS and retains the delta after a failed CAS', async () => {
+    const prefix = `snapshot-large-settle:${stores.workerId}:`;
+    const completedKey = `${prefix}completed`;
+    const store = createSnapshotStore(stores.redis, {
+      keyPrefix: prefix,
+      completedInboundKey: completedKey,
+    });
+    const epoch = await store.takeEpoch();
+    const inbound = new InboundMessageStream(
+      stores.redis,
+      `${prefix}inbound`,
+      1,
+      undefined,
+      completedKey
+    );
+    store.register(inbound);
+    const ids = Array.from({ length: 1_001 }, (_, index) => `settled-${index}`);
+    for (const id of ids)
+      await inbound.append(
+        createUserMessageSignal({ text: id, recipientId: 'r', channel: 'web', updateId: id })
+      );
+    const entries = await inbound.readNew();
+    inbound.settle(entries.map((entry) => entry.signal.id));
+    await store.takeEpoch();
+    await expect(store.commitOwners(epoch, 1)).rejects.toThrow(/epoch mismatch/i);
+    const freshEpoch = await store.takeEpoch();
+    await store.commitOwners(freshEpoch, 2);
+    expect(await stores.redis.zcard(completedKey)).toBe(1_001);
+    for (const id of ids) expect(await stores.redis.zscore(completedKey, id)).not.toBeNull();
+  });
+
   it('trims through the Postgres apply offset even when no delivery cursor advances', async () => {
     const prefix = `outbound-trim:${stores.workerId}:`;
     const streamKey = `${prefix}events`;

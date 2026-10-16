@@ -276,24 +276,9 @@ the time inside the UUIDv7 `id`:
 The tab marks a message it could not send within 24 hours as not sent; a
 "повторить" then mints a new id.
 
-**Inside the script**, Valkey does not roll back a runtime error, so:
+**Inside the script**, Valkey does not roll back a runtime error. The script first validates the epoch and the types of the epoch, snapshot, outbound stream, event-key hash and completed-id sorted set, and decodes its inputs before writing. It appends outbound events, writes the snapshot, and only then writes completion ids. Thus a predictable wrong-type failure happens before any write, and a runtime error cannot leave a completion mark without the snapshot. A failed receipt write after the durable append can still leave a duplicate inbound stream row with the same `messageId`; retries are deduplicated once the input settles and commits.
 
-- inputs are validated before the call;
-- the script appends first and writes the receipt second.
-
-If the receipt write fails after the append, the script returns an error
-and the module answers 503. The retry may append a second entry with the same
-`messageId`. The snapshot CAS records every completed inbound id in the Valkey
-sorted set `inbound:completed`, in the same epoch-checked script that commits
-the snapshot and dedup ring. It trims ids older than 25 hours, longer than the
-24-hour acceptance window. Admission treats an id as duplicate if it is in the
-ring or this set. A history row alone is not completion: if receipt creation
-failed and the input has not committed, it replays, even if normalization
-already wrote its history row. Once the first entry settles, a retry is
-absorbed by id even after 1,001 later inputs evict it from the ring. If that
-retry carries different text, the original text wins. This is the documented
-residual of the receipt-write failure; only a misconfigured Valkey (ACL or
-wrong key type) can produce it. A receipt never exists without its entry.
+The epoch-checked CAS writes every id settled since the previous successful CAS to the Valkey sorted set `inbound:completed`, separately from the bounded 1,000-id snapshot ring. It trims ids older than 25 hours, longer than the 24-hour acceptance window. Admission treats an id as duplicate if it is in the ring or this set. A history row alone is not completion: if the input has not committed, it replays, even if normalization already wrote its history row. The settled-id delta is retained across failed CAS attempts and retired only after success. A retry is absorbed even after more than 1,000 later inputs evict it from the ring. If that retry carries different text, the original text wins.
 
 ### 3. The web module and its routes (VHD-03, VHD-10, VHD-11)
 

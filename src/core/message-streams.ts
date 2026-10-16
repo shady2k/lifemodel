@@ -81,6 +81,7 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
   readonly section = 'inbound';
   private snapshot = emptySnapshot();
   private readonly queuedIds = new Set<string>();
+  private readonly completedDelta = new Set<string>();
 
   constructor(
     private readonly redis: Redis,
@@ -207,6 +208,7 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
       }
       this.snapshot.recipientOffsets[message.recipientId] = message.streamId;
       this.snapshot.recentMessageIds.push(message.messageId);
+      this.completedDelta.add(message.messageId);
       this.snapshot.errorRetries = Object.fromEntries(
         Object.entries(this.snapshot.errorRetries).filter(
           ([messageId]) => messageId !== message.messageId
@@ -216,6 +218,14 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
     }
     this.snapshot.pending = remains;
     this.snapshot.recentMessageIds = this.snapshot.recentMessageIds.slice(-this.dedupLimit);
+  }
+
+  completedSinceSnapshot(): string[] {
+    return [...this.completedDelta];
+  }
+
+  snapshotCommitted(): void {
+    this.completedDelta.clear();
   }
 
   /** Pending entries whose retry budget was exhausted before this process read them. */
