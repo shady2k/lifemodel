@@ -218,7 +218,7 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     const session = getSessionKey(request.headers.cookie, request.ip);
     const streamCount = activeStreams.get(session) ?? 0;
     if (streamCount >= MAX_STREAMS_PER_SESSION)
-      return reply.code(429).send({ error: 'too_many_streams' });
+      return await reply.code(429).send({ error: 'too_many_streams' });
     activeStreams.set(session, streamCount + 1);
 
     // The lease and HTTP stream share one deadline starting before lease acquisition.
@@ -228,7 +228,9 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     let handedOff = false;
     const queue = new BoundedQueue<StreamEvent>();
     const admissionDeadline = Date.now() + STREAM_MAX_AGE_MS;
-    const admissionTimer = setTimeout(() => lifecycle.abort(), STREAM_MAX_AGE_MS);
+    const admissionTimer = setTimeout(() => {
+      lifecycle.abort();
+    }, STREAM_MAX_AGE_MS);
     const releaseBounded = async () => {
       if (!leased) return;
       leased = false;
@@ -271,13 +273,13 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
       );
       if (!lease) {
         closeLifecycle();
-        return reply.code(429).send({ error: 'too_many_streams' });
+        return await reply.code(429).send({ error: 'too_many_streams' });
       }
       leased = true;
       // If acquisition settled after disconnect/timeout, immediately retire its lease.
       if (ended || lifecycle.signal.aborted) {
         await releaseBounded();
-        return reply.code(503).send({ error: 'stream_unavailable' });
+        return await reply.code(503).send({ error: 'stream_unavailable' });
       }
       try {
         const latest = await withTimeout(
@@ -293,12 +295,12 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
       }
       if (ended || lifecycle.signal.aborted) {
         closeLifecycle();
-        return reply.code(503).send({ error: 'stream_unavailable' });
+        return await reply.code(503).send({ error: 'stream_unavailable' });
       }
     } catch {
       options.runtimeMetrics.sseLag = 0;
       closeLifecycle();
-      return reply.code(503).send({ error: 'stream_unavailable' });
+      return await reply.code(503).send({ error: 'stream_unavailable' });
     }
     clearTimeout(admissionTimer);
 
@@ -505,8 +507,12 @@ function getSessionKey(cookie: string | undefined, ip: string): string {
 function withTimeout<T>(promise: Promise<T>, signal: AbortSignal, timeoutMs: number): Promise<T> {
   if (signal.aborted || timeoutMs <= 0) return Promise.reject(new Error('operation timed out'));
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('operation timed out')), timeoutMs);
-    const abort = () => reject(new Error('operation timed out'));
+    const timer = setTimeout(() => {
+      reject(new Error('operation timed out'));
+    }, timeoutMs);
+    const abort = () => {
+      reject(new Error('operation timed out'));
+    };
     const cleanup = () => {
       clearTimeout(timer);
       signal.removeEventListener('abort', abort);

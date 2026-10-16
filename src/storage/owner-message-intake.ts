@@ -260,10 +260,9 @@ export function createOwnerMessageIntakeFromEnv(env: NodeJS.ProcessEnv = process
         Promise.race([
           poolEnd,
           new Promise<void>((_, reject) => {
-            timer = setTimeout(
-              () => reject(new Error('Web Postgres pool shutdown timed out')),
-              4_000
-            );
+            timer = setTimeout(() => {
+              reject(new Error('Web Postgres pool shutdown timed out'));
+            }, 4_000);
           }),
         ]).finally(() => {
           if (timer) clearTimeout(timer);
