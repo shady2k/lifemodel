@@ -12,6 +12,13 @@ export interface CreaturePresenceValue {
 
 const FRESHNESS_MS = 15_000;
 
+export function freshCreatureState(
+  value: CreaturePresenceValue | undefined,
+  now: number
+): CreaturePresenceValue | undefined {
+  return value && now - new Date(value.publishedAt).getTime() <= FRESHNESS_MS ? value : undefined;
+}
+
 function formatTime(value: string, language: string): string {
   return new Intl.DateTimeFormat(language, { hour: '2-digit', minute: '2-digit' }).format(
     new Date(value)
@@ -31,23 +38,24 @@ export function CreaturePresence({ value }: { value?: CreaturePresenceValue }) {
     };
   }, []);
 
-  const disconnected = !value || Date.now() - new Date(value.publishedAt).getTime() > FRESHNESS_MS;
+  const current = freshCreatureState(value, Date.now());
+  const disconnected = !current;
   const status = disconnected
     ? t('noConnection', {
         time: value ? formatTime(value.publishedAt, i18n.language) : '--:--',
       })
-    : value.state === 'thinking'
+    : current.state === 'thinking'
       ? t('thinking')
-      : value.state === 'asleep'
-        ? value.asleepUntil
-          ? t('asleepUntil', { time: formatTime(value.asleepUntil, i18n.language) })
+      : current.state === 'asleep'
+        ? current.asleepUntil
+          ? t('asleepUntil', { time: formatTime(current.asleepUntil, i18n.language) })
           : t('asleep')
         : t('awake');
   const Icon = disconnected
     ? WifiOff
-    : value.state === 'thinking'
+    : current.state === 'thinking'
       ? LoaderCircle
-      : value.state === 'asleep'
+      : current.state === 'asleep'
         ? Moon
         : Check;
 

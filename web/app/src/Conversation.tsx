@@ -1,10 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import {
-  QueryClient,
-  QueryClientProvider,
-  useInfiniteQuery,
-  useQueryClient,
-} from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, useInfiniteQuery } from '@tanstack/react-query';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -16,7 +11,7 @@ import {
   InputGroupButton,
   InputGroupTextarea,
 } from '@/components/ui/input-group';
-import { scheduleNotSent } from './send-state';
+import { isExpired, scheduleNotSent } from './send-state';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -31,7 +26,7 @@ import {
 } from '@/components/ui/message-scroller';
 import { CodeBlock, CodeBlockContent, CodeBlockLine } from '@/components/ui/code-block';
 import { useHighlightedCode } from '@/hooks/use-highlighted-code';
-import type { CreaturePresenceValue } from './components/CreaturePresence';
+import { freshCreatureState, type CreaturePresenceValue } from './components/CreaturePresence';
 import {
   httpTransport,
   mergeTranscript,
@@ -139,32 +134,57 @@ function ConversationContent({
   onState?: (state: CreaturePresenceValue) => void;
 }) {
   const { t, i18n } = useTranslation();
-  const client = useQueryClient();
   const scroller = useRef<HTMLDivElement>(null);
   const scrollPosition = useRef<{ height: number; top: number } | undefined>(undefined);
   const didInitialPosition = useRef(false);
   const [creature, setCreature] = useState<CreaturePresenceValue>();
+  const [now, setNow] = useState(Date.now());
+  const [liveTail, setLiveTail] = useState<TranscriptMessage[]>([]);
+  const [hasEarlierByCursor, setHasEarlierByCursor] = useState<Record<string, boolean>>({});
   const [announcement, setAnnouncement] = useState('');
   const [draft, setDraft] = useState('');
-  const [optimistic, setOptimistic] = useState<
-    (TranscriptMessage & { status?: 'sending' | 'failed' })[]
-  >([]);
+  type PendingMessage = TranscriptMessage & {
+    status?: 'sending' | 'failed';
+    mintedAt: number;
+    failureReason?: string;
+  };
+  const [optimistic, setOptimistic] = useState<PendingMessage[]>([]);
   const [reply, setReply] = useState<TranscriptMessage | undefined>();
   const transcript = useInfiniteQuery({
     queryKey: ['transcript'],
     initialPageParam: undefined as string | undefined,
-    queryFn: ({ pageParam }) => transport.readTranscript(pageParam),
+    queryFn: async ({ pageParam }) => {
+      const page = await transport.readTranscript(pageParam);
+      setHasEarlierByCursor((current) => ({
+        ...current,
+        [page.cursor]: page.messages.length === 50,
+      }));
+      return page;
+    },
     getPreviousPageParam: (firstPage) => {
       const oldest = firstPage.messages.at(-1)?.sequence;
-      return firstPage.messages.length === 50 ? oldest : undefined;
+      return hasEarlierByCursor[firstPage.cursor] && oldest ? oldest : undefined;
     },
     getNextPageParam: () => undefined,
   });
-  const messages = useMemo(
+  const durableRows = useMemo(
     () =>
-      sortTranscript([...(transcript.data?.pages.map((page) => page.messages) ?? []), optimistic]),
-    [transcript.data, optimistic]
+      sortTranscript([...(transcript.data?.pages.map((page) => page.messages) ?? []), liveTail]),
+    [transcript.data, liveTail]
   );
+  const messages = useMemo(
+    () => sortTranscript([optimistic, durableRows]),
+    [optimistic, durableRows]
+  );
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1_000);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, []);
+  const freshCreature = freshCreatureState(creature, now);
   const virtualizer = useVirtualizer({
     count: messages.length,
     getScrollElement: () => scroller.current,
@@ -180,25 +200,19 @@ function ConversationContent({
     return transport.subscribe(
       latest.cursor,
       (message) => {
+        setLiveTail((rows) => mergeTranscript(rows, message));
+        if (message.clientId)
+          setOptimistic((rows) => rows.filter((row) => row.clientId !== message.clientId));
         setAnnouncement(
           message.role === 'assistant' ? t('newAssistantMessage') : t('newOwnerMessage')
         );
-        client.setQueryData(['transcript'], (current: typeof transcript.data) => {
-          if (!current) return current;
-          const all = sortTranscript(current.pages.map((page) => page.messages));
-          const merged = mergeTranscript(all, message);
-          return {
-            ...current,
-            pages: [{ ...current.pages[0], messages: merged }, ...current.pages.slice(1)],
-          };
-        });
       },
       (state) => {
         setCreature(state);
         onState?.(state);
       }
     );
-  }, [client, transcript.data?.pages.at(-1)?.cursor, transport, onState, t]);
+  }, [transcript.data?.pages.at(-1)?.cursor, transport, onState, t]);
 
   useLayoutEffect(() => {
     if (!scroller.current || !transcript.data) return;
@@ -223,15 +237,23 @@ function ConversationContent({
     void transcript.fetchPreviousPage();
   };
 
-  const lastOwnerSequence = [...messages]
+  const lastOwnerSequence = [...durableRows]
     .reverse()
     .find((message) => message.role === 'user')?.sequence;
   const virtualItems = scroller.current?.clientHeight
     ? virtualizer.getVirtualItems()
     : messages.map((_, index) => ({ index, start: index * 96 }));
-  const send = async (text: string, replyTo?: TranscriptMessage, retryId?: string) => {
-    const id = retryId ?? uuidV7();
-    const item: TranscriptMessage & { status?: 'sending' | 'failed' } = {
+  const send = async (
+    text: string,
+    replyTo?: TranscriptMessage,
+    retry?: { id: string; mintedAt: number; failureReason?: string }
+  ) => {
+    const id =
+      retry?.failureReason === 'network' && !isExpired(retry.mintedAt, Date.now())
+        ? retry.id
+        : uuidV7();
+    const mintedAt = retry?.id === id ? retry.mintedAt : Date.now();
+    const item: PendingMessage = {
       sequence: String(Date.now()),
       clientId: id,
       role: 'user',
@@ -247,13 +269,16 @@ function ConversationContent({
           }
         : {}),
       status: 'sending',
+      mintedAt,
     };
     setOptimistic((current) =>
       current.some((row) => row.clientId === id) ? current : [...current, item]
     );
     const expiration = scheduleNotSent(window.setTimeout.bind(window), () => {
       setOptimistic((current) =>
-        current.map((row) => (row.clientId === id ? { ...row, status: 'failed' } : row))
+        current.map((row) =>
+          row.clientId === id ? { ...row, status: 'failed', failureReason: 'expired' } : row
+        )
       );
     });
     const submit = () =>
@@ -272,13 +297,19 @@ function ConversationContent({
         );
       } else {
         window.clearTimeout(expiration);
+        const failureReason = result === 'stale' ? 'stale' : 'conflict';
         setOptimistic((current) =>
-          current.map((row) => (row.clientId === id ? { ...row, status: 'failed' } : row))
+          current.map((row) =>
+            row.clientId === id ? { ...row, status: 'failed', failureReason } : row
+          )
         );
       }
     } catch {
+      window.clearTimeout(expiration);
       setOptimistic((current) =>
-        current.map((row) => (row.clientId === id ? { ...row, status: 'failed' } : row))
+        current.map((row) =>
+          row.clientId === id ? { ...row, status: 'failed', failureReason: 'network' } : row
+        )
       );
     }
   };
@@ -429,11 +460,13 @@ function ConversationContent({
                                               text: failed.replyTo.excerpt,
                                               createdAt: failed.createdAt,
                                             }
-                                          : undefined
+                                          : undefined,
+                                        {
+                                          id: failed.clientId ?? '',
+                                          mintedAt: failed.mintedAt,
+                                          failureReason: failed.failureReason,
+                                        }
                                       );
-                                    setOptimistic((rows) =>
-                                      rows.filter((row) => row.clientId !== message.clientId)
-                                    );
                                   }}
                                 >
                                   {t('retry')}
@@ -447,7 +480,7 @@ function ConversationContent({
                   );
                 })}
               </div>
-              {creature?.state === 'thinking' ? (
+              {freshCreature?.state === 'thinking' ? (
                 <Message className="justify-start" aria-label={t('thinking')}>
                   <Avatar className="mt-1">
                     <AvatarFallback>l</AvatarFallback>

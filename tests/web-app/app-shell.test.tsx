@@ -66,6 +66,9 @@ describe('web app shell', () => {
       expect(screen.getAllByText('lifemodel').length).toBeGreaterThan(0);
       expect(document.documentElement.lang).toBe(language);
       expect(document.documentElement.classList.contains('dark')).toBe(dark);
+      expect(
+        container.querySelector('main') || container.querySelector('[data-slot=\"sidebar-inset\"]')
+      ).toBeTruthy();
       expect(await axe(container)).toHaveNoViolations();
     }
   );
@@ -95,17 +98,13 @@ describe('web app shell', () => {
     }
   });
 
-  it('exposes the three external System destinations', () => {
+  it('exposes only the routed Loader destination in System', () => {
     render(<App />);
     expect(screen.getByRole('link', { name: 'Loader' }).getAttribute('href')).toBe(
       'http://boot.localhost/'
     );
-    expect(screen.getByRole('link', { name: 'Keys' }).getAttribute('href')).toBe(
-      'http://vault.localhost/'
-    );
-    expect(screen.getByRole('link', { name: 'Code' }).getAttribute('href')).toBe(
-      'http://git.localhost/'
-    );
+    expect(screen.queryByRole('link', { name: 'Keys' })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Code' })).toBeNull();
   });
 
   it('translates mobile navigation and sheet close labels in Russian', async () => {
@@ -139,6 +138,25 @@ describe('web app shell', () => {
       for (const listener of listeners) listener(new Event('change') as MediaQueryListEvent);
     });
     expect(document.documentElement.classList.contains('dark')).toBe(false);
+  });
+
+  it('opens and closes both mobile sheets with keyboard activation', async () => {
+    const user = (await import('@testing-library/user-event')).default.setup();
+    mobilePreference = true;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    render(<App />);
+    const navigation = await screen.findByRole('button', { name: 'Open navigation' });
+    navigation.focus();
+    await user.keyboard('{enter}');
+    expect(screen.getByRole('dialog', { name: 'Navigation' })).toBeTruthy();
+    await user.keyboard('{escape}');
+    expect(screen.queryByRole('dialog', { name: 'Navigation' })).toBeNull();
+    const now = screen.getByRole('button', { name: 'Open Now' });
+    now.focus();
+    await user.keyboard('{enter}');
+    expect(screen.getByRole('dialog', { name: 'Now' })).toBeTruthy();
+    await user.keyboard('{escape}');
+    expect(screen.queryByRole('dialog', { name: 'Now' })).toBeNull();
   });
 
   it('puts navigation and the Сейчас panel behind buttons on a narrow screen', async () => {

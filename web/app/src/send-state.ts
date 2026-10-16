@@ -8,3 +8,7 @@ export function scheduleNotSent(
 ): ReturnType<typeof setTimeout> {
   return schedule(markNotSent, NOT_SENT_AFTER_MS);
 }
+
+export function isExpired(mintedAt: number, now: number): boolean {
+  return now - mintedAt >= NOT_SENT_AFTER_MS;
+}
