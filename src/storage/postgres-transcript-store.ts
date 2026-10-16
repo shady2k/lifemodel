@@ -218,9 +218,7 @@ export class PostgresTranscriptStore implements TranscriptReader {
     };
   }
 
-  private readonly streamLeases = new Map<string, string[]>();
-
-  async acquireStreamLease(session: string, expiresAt: number): Promise<boolean> {
+  async acquireStreamLease(session: string, expiresAt: number): Promise<string | null> {
     if (!session) throw new Error('Stream session is required');
     if (!Number.isFinite(expiresAt) || expiresAt <= Date.now())
       throw new Error('Stream lease expiry must be in the future');
@@ -235,22 +233,15 @@ export class PostgresTranscriptStore implements TranscriptReader {
       String(expiresAt - Date.now()),
       leaseId
     );
-    if (Number(result) !== 1) return false;
-    const leases = this.streamLeases.get(session) ?? [];
-    leases.push(leaseId);
-    this.streamLeases.set(session, leases);
-    return true;
+    if (Number(result) !== 1) return null;
+    return leaseId;
   }
 
-  async releaseStreamLease(session: string): Promise<void> {
+  async releaseStreamLease(session: string, leaseId: string): Promise<void> {
     if (!session) throw new Error('Stream session is required');
-    const leases = this.streamLeases.get(session);
-    const leaseId = leases?.shift();
-    if (leases?.length === 0) this.streamLeases.delete(session);
-    if (leaseId) {
-      const sessionKey = `web:stream-leases:${createHash('sha256').update(session).digest('hex')}`;
-      await this.redis.eval(RELEASE_STREAM_LEASE_SCRIPT, 1, sessionKey, leaseId);
-    }
+    if (!leaseId) throw new Error('Stream lease id is required');
+    const sessionKey = `web:stream-leases:${createHash('sha256').update(session).digest('hex')}`;
+    await this.redis.eval(RELEASE_STREAM_LEASE_SCRIPT, 1, sessionKey, leaseId);
   }
 
   async *watchTranscript(after: string, signal?: AbortSignal): AsyncIterable<TranscriptRow> {
