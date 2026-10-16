@@ -51,6 +51,19 @@ describe('platform web ingress and egress', () => {
         (rule.http?.paths ?? []).map((path: any) => ({ ingress, host: rule.host, path }))
       )
     );
+    const handoff = privateRoutes.filter(
+      ({ host, path }) =>
+        host === 'localhost' && path.path === '/_auth/handoff' && path.pathType === 'Exact'
+    );
+    expect(handoff).toHaveLength(1);
+    expect(
+      handoff[0]?.ingress.metadata.annotations?.['traefik.ingress.kubernetes.io/router.middlewares']
+    ).toBeUndefined();
+    expect(
+      Number(
+        handoff[0]?.ingress.metadata.annotations?.['traefik.ingress.kubernetes.io/router.priority']
+      )
+    ).toBeGreaterThan(0);
     const bootPublic = privateRoutes.filter(
       ({ host, path }) =>
         host === 'boot.localhost' &&
@@ -59,7 +72,10 @@ describe('platform web ingress and egress', () => {
     );
     expect(bootPublic.map(({ path }) => path.path).sort()).toEqual(['/login', '/setup']);
     for (const { ingress, host, path } of privateRoutes) {
-      if (host === 'boot.localhost' && ['/login', '/setup'].includes(path.path)) {
+      if (
+        (host === 'boot.localhost' && ['/login', '/setup'].includes(path.path)) ||
+        (host === 'localhost' && path.path === '/_auth/handoff')
+      ) {
         expect(
           ingress.metadata.annotations?.['traefik.ingress.kubernetes.io/router.middlewares']
         ).toBeUndefined();
@@ -134,7 +150,7 @@ describe('platform web ingress and egress', () => {
 
     const router = createServer((request, response) => {
       const host = request.headers['x-route-host'] ?? '';
-      const selected = candidatesFor(host, request.url ?? '/')[0];
+      const selected = candidatesFor(host, new URL(request.url ?? '/', 'http://route').pathname)[0];
       if (!selected) {
         response.writeHead(404).end(`${host} ${request.url}`);
         return;
@@ -190,6 +206,9 @@ describe('platform web ingress and egress', () => {
           backend: 'web',
         });
       }
+      expect(
+        await send('localhost', '/_auth/handoff?ticket=x&next=%2F', 'anonymous')
+      ).toMatchObject({ status: 200, backend: 'loader', pathType: 'Exact' });
       for (const path of ['/login', '/setup']) {
         expect(await send('boot.localhost', path, 'anonymous')).toMatchObject({
           status: 200,

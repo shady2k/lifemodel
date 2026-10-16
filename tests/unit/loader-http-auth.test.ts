@@ -19,16 +19,17 @@ async function start(auth: Awaited<ReturnType<typeof hashPassword>> | null) {
     readAuth: async () => auth,
     writeAuth: async () => undefined,
   };
+  const clock = createTestClock();
   const loader = createLoaderHttp({
     state,
     logger: createRecordingLogger([]),
-    clock: createTestClock(),
+    clock,
   });
   servers.push(loader);
   await new Promise<void>((resolve) => loader.server.listen(0, '127.0.0.1', resolve));
   const address = loader.server.address();
   if (address === null || typeof address === 'string') throw new Error('server did not bind');
-  return `http://127.0.0.1:${address.port}`;
+  return { base: `http://127.0.0.1:${address.port}`, clock };
 }
 
 async function request(base: string, path: string, headers: Record<string, string> = {}) {
@@ -56,7 +57,7 @@ async function request(base: string, path: string, headers: Record<string, strin
 describe('loader ForwardAuth verification host', () => {
   it('accepts a valid session only on the exact verification route at its Service host', async () => {
     const record = await hashPassword('owner password');
-    const base = await start(record);
+    const { base } = await start(record);
     const cookie = `lm_session=${createSession(record, Date.now())}`;
 
     const response = await request(base, '/_auth/verify', { cookie });
@@ -78,7 +79,7 @@ describe('loader ForwardAuth verification host', () => {
 
   it('requires a session and never redirects to an unvetted forwarded host', async () => {
     const record = await hashPassword('owner password');
-    const base = await start(record);
+    const { base } = await start(record);
 
     const denied = await request(base, '/_auth/verify', {
       'x-forwarded-method': 'GET',
@@ -98,5 +99,29 @@ describe('loader ForwardAuth verification host', () => {
     expect(browser.headers.location).toBe(
       'http://boot.localhost/login?next=http%3A%2F%2Flocalhost%2Fprivate'
     );
+  });
+
+  it('hands a logged-in session to localhost once, and refuses a replay', async () => {
+    const record = await hashPassword('owner password');
+    const { base, clock } = await start(record);
+    const session = createSession(record, clock.now());
+    const ticket = (await import('../../loader/src/auth.js')).createHandoff(record, {
+      target: 'localhost',
+      session,
+      next: '/private?x=1',
+      expires: clock.now() + 30_000,
+    });
+    const path = `/_auth/handoff?ticket=${encodeURIComponent(ticket)}&next=${encodeURIComponent('/private?x=1')}`;
+    const first = await request(base, path, { host: 'localhost' });
+    expect(first.status).toBe(303);
+    expect(first.headers.location).toBe('/private?x=1');
+    expect(String(first.headers['set-cookie'])).not.toMatch(/domain=/i);
+    const replay = await request(base, path, { host: 'localhost' });
+    expect(replay.status).toBe(303);
+    expect(replay.headers.location).toBe('http://boot.localhost/login');
+    expect(replay.headers['set-cookie']).toBeUndefined();
+    expect(
+      (await request(base, path, { host: 'vault.localhost' })).headers['set-cookie']
+    ).toBeUndefined();
   });
 });

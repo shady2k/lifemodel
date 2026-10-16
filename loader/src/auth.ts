@@ -12,8 +12,6 @@
  */
 import { createHmac, randomBytes, scrypt as scryptKdf, timingSafeEqual } from 'node:crypto';
 
-import { LoaderFatalError } from './errors.js';
-
 /** The name of the one session cookie every host of the instance shares. */
 export const SESSION_COOKIE_NAME = 'lm_session';
 
@@ -120,18 +118,7 @@ export function verifySession(token: string, record: PasswordRecord, nowMs: numb
   return equalDigests(presented, sign(record.sessionSecret, expiresAt));
 }
 
-/**
- * The hosts the loader answers on, and the only ones a cookie may ever be
- * scoped to (rework 2, finding 7). The loader listens on the container's
- * loopback and the only names that reach it are the instance's own: the root
- * host, `boot.` (the loader) and `vault.` (Agent Vault), all under `localhost`
- * today. `127.0.0.1` is the loopback literal `docker exec <c> lifemodel ...`
- * talks to; no browser ever uses it, and no cookie is ever set on it.
- *
- * A configured domain is not part of this stage: it comes with the
- * outside-access idea (lifemodel-sd2), and it will be a configured, vetted
- * value - never a name taken from a request.
- */
+/** The hosts the loader answers on. */
 export const ALLOWED_HOSTS = [
   'localhost',
   'boot.localhost',
@@ -147,22 +134,6 @@ export function hostName(host: string): string {
 /** Is this a Host the loader answers on at all? */
 export function isAllowedHost(host: string | undefined): boolean {
   return host !== undefined && (ALLOWED_HOSTS as readonly string[]).includes(hostName(host));
-}
-
-/**
- * The host every host of the instance shares, or null for a Host the loader
- * does not answer on. `boot.localhost` and `vault.localhost` are both covered
- * by a cookie on `localhost`, which is why the front door's one label is taken
- * off here - but only for a host that is vetted first: a name out of a request
- * never becomes a cookie's Domain.
- */
-export function parentDomain(host: string): string | null {
-  if (!isAllowedHost(host)) return null;
-  const name = hostName(host);
-  for (const label of ['boot.', 'vault.']) {
-    if (name.startsWith(label)) return name.slice(label.length);
-  }
-  return name;
 }
 
 /** The hosts a browser reaches: the pinned ones, the CLI's loopback literal excluded. */
@@ -187,8 +158,10 @@ function hostPort(host: string): string {
 export function loginLocation(forwardedHost: string, forwardedUri: string): string | null {
   const name = hostName(forwardedHost);
   if (!isBrowserHost(name)) return null;
-  const domain = parentDomain(forwardedHost);
-  if (domain === null) return null;
+  const domain =
+    name.startsWith('boot.') || name.startsWith('vault.')
+      ? name.slice(name.indexOf('.') + 1)
+      : name;
   const port = hostPort(forwardedHost);
   const authority = (host: string): string => (port === '' ? host : `${host}:${port}`);
   const path = forwardedUri.startsWith('/') && !forwardedUri.startsWith('//') ? forwardedUri : '/';
@@ -231,27 +204,15 @@ export function vettedNext(next: string | undefined, requestHost: string): strin
   return url.href;
 }
 
-/** The cookie domain of a vetted host; an unvetted one is a programming error. */
-function cookieDomain(host: string): string {
-  const domain = parentDomain(host);
-  if (domain === null) {
-    throw new LoaderFatalError(
-      `the loader does not answer on ${host}: its session cookie is only ever set on ${ALLOWED_HOSTS.join(', ')}`
-    );
-  }
-  return domain;
-}
-
 /** The Set-Cookie header of a fresh login. */
 export function sessionCookie(
   token: string,
-  host: string,
+  _host: string,
   ttlMs: number = DEFAULT_SESSION_TTL_MS
 ): string {
   return [
     `${SESSION_COOKIE_NAME}=${token}`,
     'Path=/',
-    `Domain=${cookieDomain(host)}`,
     `Max-Age=${String(Math.floor(ttlMs / 1000))}`,
     'HttpOnly',
     'SameSite=Lax',
@@ -259,15 +220,48 @@ export function sessionCookie(
 }
 
 /** The Set-Cookie header of a logout: the same cookie, emptied. */
-export function clearSessionCookie(host: string): string {
-  return [
-    `${SESSION_COOKIE_NAME}=`,
-    'Path=/',
-    `Domain=${cookieDomain(host)}`,
-    'Max-Age=0',
-    'HttpOnly',
-    'SameSite=Lax',
-  ].join('; ');
+export function clearSessionCookie(_host: string): string {
+  return [`${SESSION_COOKIE_NAME}=`, 'Path=/', 'Max-Age=0', 'HttpOnly', 'SameSite=Lax'].join('; ');
+}
+
+/** Short-lived signed transfer; replay tracking is in-memory, acceptable for the loader's single replica. */
+export const HANDOFF_TTL_MS = 60_000;
+export interface HandoffTicket {
+  target: string;
+  session: string;
+  next: string;
+  expires: number;
+}
+export function createHandoff(record: PasswordRecord, ticket: HandoffTicket): string {
+  const payload = Buffer.from(JSON.stringify(ticket)).toString('base64url');
+  return `${payload}.${sign(record.sessionSecret, `handoff:${payload}`).toString('base64url')}`;
+}
+export function verifyHandoff(
+  token: string,
+  record: PasswordRecord,
+  now: number
+): HandoffTicket | null {
+  const [payload, signature, extra] = token.split('.');
+  if (!payload || !signature || extra !== undefined) return null;
+  let presented: Buffer;
+  let ticket: HandoffTicket;
+  try {
+    presented = Buffer.from(signature, 'base64url');
+    ticket = JSON.parse(Buffer.from(payload, 'base64url').toString()) as HandoffTicket;
+  } catch {
+    return null;
+  }
+  if (
+    !equalDigests(presented, sign(record.sessionSecret, `handoff:${payload}`)) ||
+    ticket.expires <= now ||
+    ticket.expires > now + HANDOFF_TTL_MS ||
+    !verifySession(ticket.session, record, now) ||
+    !isBrowserHost(hostName(ticket.target)) ||
+    !ticket.next.startsWith('/') ||
+    ticket.next.startsWith('//')
+  )
+    return null;
+  return ticket;
 }
 
 /**

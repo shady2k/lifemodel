@@ -45,7 +45,11 @@ is the milestone's only channel (Telegram is out, owner 2026-10-11).
 **What the platform has.**
 
 - The loader holds the owner's password, a signed 30-day HttpOnly
-  SameSite=Lax session cookie shared by every `*.localhost` host, and
+  SameSite=Lax host-only session cookie. Login transfers it to another allowed
+  browser host through a signed handoff bound to the target host and issuing session, valid
+  for at most 60 seconds and tracked as used in loader memory (acceptable while
+  the loader has one replica); browsers refuse
+  `Domain=localhost`., and
   `/_auth/verify` for Traefik ForwardAuth. The verify route checks the
   request's own Host against `localhost`, `boot.localhost` and
   `vault.localhost`.
@@ -299,7 +303,8 @@ deploy branch):
 |---|---|---|
 | `boot.localhost` `/login`, `/setup` (exact, higher priority) | none: the loader refuses `/setup` once a password exists | loader |
 | `boot.localhost` everything else | ForwardAuth | loader |
-| `localhost` everything (app, assets, `/api/*`) | ForwardAuth | web |
+| `localhost` `/_auth/handoff` (exact, higher priority) | none | loader |
+| `localhost` everything else (app, assets, `/api/*`) | ForwardAuth | web |
 
 - ForwardAuth's address is the loader's in-cluster Service. The loader
   accepts `/_auth/verify` on that Service host only for this path, and it

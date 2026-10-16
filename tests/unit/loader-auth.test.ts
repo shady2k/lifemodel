@@ -13,7 +13,6 @@ import {
   csrfToken,
   hashPassword,
   isAllowedHost,
-  parentDomain,
   parseCookies,
   sameOrigin,
   SESSION_COOKIE_NAME,
@@ -77,38 +76,22 @@ describe('the loader session', () => {
 });
 
 describe('the session cookie', () => {
-  it('is named lm_session and carries the parent domain, HttpOnly, Lax and Path=/', async () => {
+  it('is named lm_session and is host-only, HttpOnly, Lax and Path=/', async () => {
     const record = await hashPassword('right');
     const token = createSession(record, NOW, TTL_MS);
     const cookie = sessionCookie(token, 'boot.localhost', TTL_MS);
 
     expect(cookie).toContain(`${SESSION_COOKIE_NAME}=${token}`);
-    expect(cookie).toContain('Domain=localhost');
+    expect(cookie.toLowerCase()).not.toContain('domain=');
     expect(cookie).toContain('Path=/');
     expect(cookie).toContain('HttpOnly');
     expect(cookie).toContain('SameSite=Lax');
     expect(cookie).toContain(`Max-Age=${TTL_MS / 1000}`);
   });
 
-  it('takes the cookie domain from the host the owner logged in on', () => {
-    expect(parentDomain('boot.localhost')).toBe('localhost');
-    expect(parentDomain('boot.localhost:8080')).toBe('localhost');
-    expect(parentDomain('localhost')).toBe('localhost');
-    expect(parentDomain('vault.localhost')).toBe('localhost');
-    // The loopback literal the command line uses: itself, never `0.0.1`.
-    expect(parentDomain('127.0.0.1:7000')).toBe('127.0.0.1');
-  });
-
-  it('derives no domain at all from a host it does not answer on', () => {
-    // A name out of a request never becomes a cookie's Domain (rework 2,
-    // finding 7): only the instance's own hosts are vetted.
-    expect(parentDomain('boot.example.com')).toBeNull();
-    expect(parentDomain('vault.example.com')).toBeNull();
-    expect(parentDomain('example.com')).toBeNull();
-    expect(parentDomain('lifemodel.example.com:443')).toBeNull();
-    expect(parentDomain('evil.localhost.attacker.test')).toBeNull();
-    expect(() => sessionCookie('a.b', 'boot.example.com')).toThrow(/does not answer on/);
-    expect(() => clearSessionCookie('example.com')).toThrow(/does not answer on/);
+  it('sets host-only cookies for each allowed host', () => {
+    for (const host of ['boot.localhost', 'localhost', 'vault.localhost', '127.0.0.1:7000'])
+      expect(sessionCookie('t', host).toLowerCase()).not.toContain('domain=');
   });
 
   it('answers on its own hosts, with or without a port, and on nothing else', () => {
@@ -126,7 +109,7 @@ describe('the session cookie', () => {
     const cleared = clearSessionCookie('boot.localhost');
 
     expect(cleared).toContain(`${SESSION_COOKIE_NAME}=;`);
-    expect(cleared).toContain('Domain=localhost');
+    expect(cleared.toLowerCase()).not.toContain('domain=');
     expect(cleared).toContain('Max-Age=0');
   });
 });

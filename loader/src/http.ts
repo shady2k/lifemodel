@@ -1,8 +1,12 @@
 /** Authenticated HTTP interface for the platform bootstrap loader. */
+import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import {
   ALLOWED_HOSTS,
   clearSessionCookie,
+  createHandoff,
+  verifyHandoff,
+  HANDOFF_TTL_MS,
   createSession,
   csrfToken,
   hashPassword,
@@ -107,6 +111,7 @@ function formPage(
 
 export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
   const { state, logger, clock } = deps;
+  const usedTickets = new Map<string, number>();
   const header = (req: IncomingMessage, name: string): string | undefined => {
     const value = req.headers[name];
     return typeof value === 'string' ? value : undefined;
@@ -124,6 +129,23 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       ? null
       : 'the request did not come from a page on this host';
   }
+  function handoffRedirect(
+    record: PasswordRecord,
+    session: string,
+    next: string,
+    currentHost: string
+  ): string {
+    const target = new URL(next);
+    const path = `${target.pathname}${target.search}${target.hash}`;
+    if (target.host === currentHost) return next;
+    const ticket = createHandoff(record, {
+      target: target.host,
+      session,
+      next: path,
+      expires: clock.now() + HANDOFF_TTL_MS,
+    });
+    return `${target.origin}/_auth/handoff?ticket=${encodeURIComponent(ticket)}&next=${encodeURIComponent(path)}`;
+  }
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const path = (req.url ?? '/').split('?')[0] ?? '/';
     const method = req.method ?? 'GET';
@@ -132,6 +154,34 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       hostName(req.headers.host ?? '') === 'loader.lifemodel-system.svc.cluster.local';
     if (!serviceVerify && !isAllowedHost(req.headers.host)) {
       sendText(res, 400, `the loader answers only ${ALLOWED_HOSTS.join(', ')}`);
+      return;
+    }
+    if (path === '/_auth/handoff') {
+      const host = req.headers.host ?? '';
+      const url = new URL(req.url ?? '/', `http://${host}`);
+      const ticketText = url.searchParams.get('ticket') ?? '';
+      const record = await state.readAuth();
+      const ticket = record === null ? null : verifyHandoff(ticketText, record, clock.now());
+      const nextParam = url.searchParams.get('next');
+      const next =
+        nextParam?.startsWith('/') && !nextParam.startsWith('//')
+          ? vettedNext(`http://${host}${nextParam}`, host)
+          : null;
+      const boot = `http://boot.localhost/login`;
+      const ticketId = ticketText;
+      for (const [id, expiry] of usedTickets) if (expiry <= clock.now()) usedTickets.delete(id);
+      if (
+        ticket === null ||
+        next === null ||
+        ticket.target !== host.toLowerCase() ||
+        ticket.next !== `${new URL(next).pathname}${new URL(next).search}` ||
+        usedTickets.has(ticketId)
+      ) {
+        redirect(res, boot);
+        return;
+      }
+      usedTickets.set(ticketId, ticket.expires);
+      redirect(res, ticket.next, { 'set-cookie': sessionCookie(ticket.session, host) });
       return;
     }
     if (path === '/_auth/verify') {
@@ -158,7 +208,9 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         return;
       }
       if (method === 'GET') {
-        sendHtml(res, 200, formPage('Set loader password', '/setup', 'Password'));
+        const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+        const next = vettedNext(query.get('next') ?? undefined, header(req, 'host') ?? '');
+        sendHtml(res, 200, formPage('Set loader password', '/setup', 'Password', undefined, next));
         return;
       }
       if (method !== 'POST') {
@@ -170,7 +222,8 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         sendHtml(res, 403, page('Refused', escapeHtml(refusal)));
         return;
       }
-      const password = (await readForm(req))['password'] ?? '';
+      const setupForm = await readForm(req);
+      const password = setupForm['password'] ?? '';
       if (password === '') {
         sendHtml(
           res,
@@ -183,7 +236,11 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       await state.writeAuth(record);
       logger.info({}, "the loader's password is set: platform authentication is ready");
       const host = req.headers.host ?? 'localhost';
-      redirect(res, '/', { 'set-cookie': sessionCookie(createSession(record, clock.now()), host) });
+      const token = createSession(record, clock.now());
+      const next = vettedNext(setupForm['next'], host);
+      redirect(res, next === null ? '/' : handoffRedirect(record, token, next, host), {
+        'set-cookie': sessionCookie(token, host),
+      });
       return;
     }
     if (path === '/login') {
@@ -193,8 +250,16 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         return;
       }
       if (method === 'GET') {
+        const active = sessionToken(req, record);
         const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
         const next = vettedNext(query.get('next') ?? undefined, header(req, 'host') ?? '');
+        if (active !== null) {
+          redirect(
+            res,
+            next === null ? '/' : handoffRedirect(record, active, next, header(req, 'host') ?? '')
+          );
+          return;
+        }
         sendHtml(res, 200, formPage('Loader login', '/login', 'Password', undefined, next));
         return;
       }
@@ -224,8 +289,9 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       }
       const host = req.headers.host ?? 'localhost';
       logger.info({ host }, 'the owner logged in');
-      redirect(res, next ?? '/', {
-        'set-cookie': sessionCookie(createSession(record, clock.now()), host),
+      const token = createSession(record, clock.now());
+      redirect(res, next === null ? '/' : handoffRedirect(record, token, next, host), {
+        'set-cookie': sessionCookie(token, host),
       });
       return;
     }
@@ -250,6 +316,8 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         sendHtml(res, 403, page('Refused', escapeHtml(refusal)));
         return;
       }
+      record.sessionSecret = randomBytes(32).toString('base64');
+      await state.writeAuth(record);
       logger.info({}, 'the owner logged out');
       redirect(res, '/login', {
         'set-cookie': clearSessionCookie(req.headers.host ?? 'localhost'),
