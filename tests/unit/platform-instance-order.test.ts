@@ -107,7 +107,8 @@ describe('platform dependency structure', () => {
         const ownerReconciler = ownerDir && dirOwner.get(ownerDir);
         const currentReconciler = dirOwner.get(dir);
         expect(
-          ownerDir === dir ||
+          namespace === 'kube-system' ||
+            ownerDir === dir ||
             (ownerReconciler && currentReconciler && dependsOn(currentReconciler, ownerReconciler)),
           `${dir}/${obj.kind}/${obj.metadata?.name} namespace ${namespace} must be owned in this Kustomization or by a reachable dependency`
         ).toBe(true);

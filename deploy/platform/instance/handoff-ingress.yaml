@@ -4,9 +4,13 @@ metadata:
   name: web-auth-handoff
   namespace: lifemodel-system
   annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
     traefik.ingress.kubernetes.io/router.priority: '200'
 spec:
   ingressClassName: traefik
+  tls:
+    - hosts:
+        - ${LIFEMODEL_NAME}.local
   rules:
     - host: ${LIFEMODEL_NAME}.local
       http:

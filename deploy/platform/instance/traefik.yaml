@@ -1,0 +1,28 @@
+# k3s v1.35.8+k3s1 embeds Traefik chart 40.1.4+up40.1.0 (based on upstream chart v40.1.0; its values.yaml confirms
+# (manifests/traefik.yaml in the pinned k3s release); the upstream v40.1.0
+# values.yaml confirms ports.web.http.redirections.entryPoint. K3s packages
+# this chart with its +up patch suffix.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    ports:
+      web:
+        http:
+          redirections:
+            entryPoint:
+              to: websecure
+              scheme: https
+              permanent: true
+---
+apiVersion: traefik.io/v1alpha1
+kind: TLSStore
+metadata:
+  name: default
+  namespace: lifemodel-system
+spec:
+  defaultCertificate:
+    secretName: lifemodel-tls

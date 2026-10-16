@@ -151,7 +151,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     return record !== null && sessionToken(req, record) !== null;
   }
   function refuseOrigin(req: IncomingMessage): string | null {
-    return sameOrigin(header(req, 'origin'), header(req, 'referer'), header(req, 'host'))
+    return sameOrigin(header(req, 'origin'), undefined, `boot-${config.instanceName}.local`)
       ? null
       : 'the request did not come from a page on this host';
   }
@@ -187,6 +187,15 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     }
     if (!serviceVerify && requestHost === bootHost && path === '/_auth/handoff') {
       sendText(res, 404, 'not found');
+      return;
+    }
+    if (
+      !serviceVerify &&
+      requestHost === bootHost &&
+      path.startsWith('/api/') &&
+      !['GET', 'POST', 'PUT', 'DELETE'].includes(method)
+    ) {
+      sendText(res, 405, 'method not allowed');
       return;
     }
     const bootRouteAllowed =
@@ -255,10 +264,13 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         record === null ||
         !verifySession(entry.session, record, now)
       ) {
-        redirect(res, boot);
+        redirect(res, boot, { 'referrer-policy': 'no-referrer' });
         return;
       }
-      redirect(res, entry.next, { 'set-cookie': sessionCookie(entry.session, host) });
+      redirect(res, entry.next, {
+        'set-cookie': sessionCookie(entry.session, host),
+        'referrer-policy': 'no-referrer',
+      });
       return;
     }
     if (path === '/_auth/verify') {
@@ -270,7 +282,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       const next =
         forwardedMethod === 'GET' || forwardedMethod === 'HEAD'
           ? loginLocation(
-              header(req, 'x-forwarded-host') ?? '',
+              `${config.instanceName}.local`,
               header(req, 'x-forwarded-uri') ?? '/',
               config.instanceName
             )

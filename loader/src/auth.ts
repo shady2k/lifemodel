@@ -13,7 +13,7 @@
 import { createHmac, randomBytes, scrypt as scryptKdf, timingSafeEqual } from 'node:crypto';
 
 /** The name of the one session cookie every host of the instance shares. */
-export const SESSION_COOKIE_NAME = 'lm_session';
+export const SESSION_COOKIE_NAME = '__Host-lm_session';
 
 /** How long a login lasts: a local instance the owner opens from his own machine. */
 export const DEFAULT_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -233,13 +233,21 @@ export function sessionCookie(
     'Path=/',
     `Max-Age=${String(Math.floor(ttlMs / 1000))}`,
     'HttpOnly',
+    'Secure',
     'SameSite=Lax',
   ].join('; ');
 }
 
 /** The Set-Cookie header of a logout: the same cookie, emptied. */
 export function clearSessionCookie(_host: string): string {
-  return [`${SESSION_COOKIE_NAME}=`, 'Path=/', 'Max-Age=0', 'HttpOnly', 'SameSite=Lax'].join('; ');
+  return [
+    `${SESSION_COOKIE_NAME}=`,
+    'Path=/',
+    'Max-Age=0',
+    'HttpOnly',
+    'Secure',
+    'SameSite=Lax',
+  ].join('; ');
 }
 
 /** Handoff codes live only in the loader process; platform has one replica. */
@@ -271,33 +279,29 @@ export function verifyCsrf(
   return given.length === expected.length && timingSafeEqual(given, expected);
 }
 
-/** The host an Origin or Referer header names, or null when it names none. */
-function originHost(source: string | undefined): string | null {
-  if (source === undefined || source === '') return null;
-  try {
-    return new URL(source).host.toLowerCase();
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Did this request come from a page ON THE HOST IT WAS SENT TO?
- *
- * The browser's `Origin` (a form post always carries one; `Referer` is the
- * fallback) is compared with the request's own Host header, so a form served by
- * the root host - or by any other page on the parent site - cannot drive the
- * loader's own routes. A request that names neither is refused: the loader's
- * forms always come with one.
- */
+/** Compare a write Origin to its configured HTTPS origin, including effective port. */
 export function sameOrigin(
   origin: string | undefined,
-  referer: string | undefined,
+  _referer: string | undefined,
   host: string | undefined
 ): boolean {
-  if (host === undefined || host === '') return false;
-  const named = originHost(origin) ?? originHost(referer);
-  return named !== null && named === host.trim().toLowerCase();
+  if (origin === undefined || host === undefined || host === '') return false;
+  try {
+    const parsedOrigin = new URL(origin);
+    const parsedHost = new URL(`https://${host}`);
+    if (
+      parsedOrigin.origin === 'null' ||
+      parsedOrigin.protocol !== 'https:' ||
+      parsedOrigin.pathname !== '/' ||
+      parsedOrigin.search !== '' ||
+      parsedOrigin.hash !== ''
+    )
+      return false;
+    if (parsedOrigin.username !== '' || parsedOrigin.password !== '') return false;
+    return parsedOrigin.origin === parsedHost.origin;
+  } catch {
+    return false;
+  }
 }
 
 /** The cookies of one request header, by name. */

@@ -16,7 +16,7 @@ const MAX_STREAMS_PER_SESSION = 4;
 const STREAM_MAX_AGE_MS = 15 * 60_000;
 const STATE_POLL_MS = 250;
 const HEARTBEAT_MS = 15_000;
-const SESSION_COOKIE_NAME = 'lm_session';
+const SESSION_COOKIE_NAME = '__Host-lm_session';
 
 export interface WebRuntimeMetrics {
   intakeFailures: number;
@@ -94,10 +94,15 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
   try {
     allowed = new URL(options.allowedOrigin);
   } catch {
-    throw new Error('allowedOrigin must be an absolute HTTP origin');
+    throw new Error('allowedOrigin must be an absolute HTTPS origin');
   }
-  if (allowed.origin !== options.allowedOrigin || allowed.protocol !== 'http:')
-    throw new Error('allowedOrigin must be an exact HTTP origin');
+  if (
+    allowed.origin !== options.allowedOrigin ||
+    options.allowedOrigin !== `https://${options.instanceName}.local` ||
+    allowed.protocol !== 'https:' ||
+    allowed.hostname !== `${options.instanceName}.local`
+  )
+    throw new Error('allowedOrigin must be an exact HTTPS origin');
 
   const server = Fastify({
     bodyLimit: options.bodyLimit ?? 100 * 1024,
@@ -138,7 +143,7 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
   server.get('/api/instance', async (_request, reply) => {
     return reply.code(200).send({
       name: options.instanceName,
-      loaderUrl: `http://boot-${options.instanceName}.local/`,
+      loaderUrl: `https://boot-${options.instanceName}.local/`,
     });
   });
   server.get('/*', async (request, reply) => {

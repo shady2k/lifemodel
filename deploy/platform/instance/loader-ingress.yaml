@@ -4,9 +4,13 @@ metadata:
   name: loader-public
   namespace: lifemodel-system
   annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
     traefik.ingress.kubernetes.io/router.priority: '100'
 spec:
   ingressClassName: traefik
+  tls:
+    - hosts:
+        - boot-${LIFEMODEL_NAME}.local
   rules:
     - host: boot-${LIFEMODEL_NAME}.local
       http:
