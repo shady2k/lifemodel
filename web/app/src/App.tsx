@@ -205,12 +205,6 @@ export default function App() {
               <a href="http://boot.localhost/" target="_blank" rel="noopener noreferrer">
                 {t('loader')}
               </a>
-              <a href="http://vault.localhost/" target="_blank" rel="noopener noreferrer">
-                {t('keys')}
-              </a>
-              <a href="http://git.localhost/" target="_blank" rel="noopener noreferrer">
-                {t('code')}
-              </a>
             </nav>
             <SheetClose asChild>
               <Button

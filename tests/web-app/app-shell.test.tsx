@@ -98,13 +98,27 @@ describe('web app shell', () => {
     }
   });
 
-  it('exposes only the routed Loader destination in System', () => {
+  it('exposes only the routed Loader destination in desktop and mobile System navigation', async () => {
+    await i18n.changeLanguage('en');
     render(<App />);
-    expect(screen.getByRole('link', { name: 'Loader' }).getAttribute('href')).toBe(
+    const desktop = document.querySelector('[data-slot="sidebar"]')!;
+    expect(within(desktop).getByRole('link', { name: 'Loader' }).getAttribute('href')).toBe(
       'http://boot.localhost/'
     );
-    expect(screen.queryByRole('link', { name: 'Keys' })).toBeNull();
-    expect(screen.queryByRole('link', { name: 'Code' })).toBeNull();
+    expect(within(desktop).queryByRole('link', { name: 'Keys' })).toBeNull();
+    expect(within(desktop).queryByRole('link', { name: 'Code' })).toBeNull();
+    cleanup();
+    mobilePreference = true;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    render(<App />);
+    const user = (await import('@testing-library/user-event')).default.setup();
+    await user.click(await screen.findByRole('button', { name: 'Open navigation' }));
+    const sheet = screen.getByRole('dialog', { name: 'Navigation' });
+    expect(within(sheet).getByRole('link', { name: 'Loader' }).getAttribute('href')).toBe(
+      'http://boot.localhost/'
+    );
+    expect(within(sheet).queryByRole('link', { name: 'Keys' })).toBeNull();
+    expect(within(sheet).queryByRole('link', { name: 'Code' })).toBeNull();
   });
 
   it('translates mobile navigation and sheet close labels in Russian', async () => {
