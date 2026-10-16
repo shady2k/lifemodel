@@ -237,6 +237,16 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         } catch {
           payload = {};
         }
+        const requestHost = req.headers.host ?? '';
+        const next =
+          typeof payload.next === 'string'
+            ? vettedNext(payload.next, requestHost, config.instanceName)
+            : null;
+        if (payload.next !== undefined && next === null) {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+          res.end('{"error":"next"}');
+          return;
+        }
         const password = typeof payload.password === 'string' ? payload.password : '';
         if (password.length < (path === '/api/setup' ? 12 : 1) || password.length > 1024) {
           res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
@@ -261,20 +271,15 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
             return;
           }
           const token = createSession(record, clock.now());
-          const next =
-            typeof payload.next === 'string'
-              ? vettedNext(payload.next, req.headers.host ?? '', config.instanceName)
-              : null;
-          const location =
-            next === null ? null : handoffRedirect(token, next, req.headers.host ?? '');
-          res.writeHead(location === null ? 200 : 303, {
-            ...(location === null
-              ? { 'content-type': 'application/json; charset=utf-8' }
-              : { location }),
+          const location = next === null ? null : handoffRedirect(token, next, requestHost);
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
             'set-cookie': sessionCookie(token, req.headers.host ?? ''),
             'cache-control': 'no-store',
           });
-          res.end(location === null ? '{"ok":true}' : undefined);
+          res.end(
+            JSON.stringify({ ok: true, ...(location === null ? {} : { redirectTo: location }) })
+          );
           return;
         }
         const record = await state.readAuth();
@@ -284,20 +289,15 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           return;
         }
         const token = createSession(record, clock.now());
-        const next =
-          typeof payload.next === 'string'
-            ? vettedNext(payload.next, req.headers.host ?? '', config.instanceName)
-            : null;
-        const location =
-          next === null ? null : handoffRedirect(token, next, req.headers.host ?? '');
-        res.writeHead(location === null ? 200 : 303, {
-          ...(location === null
-            ? { 'content-type': 'application/json; charset=utf-8' }
-            : { location }),
+        const location = next === null ? null : handoffRedirect(token, next, requestHost);
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
           'set-cookie': sessionCookie(token, req.headers.host ?? ''),
           'cache-control': 'no-store',
         });
-        res.end(location === null ? '{"ok":true}' : undefined);
+        res.end(
+          JSON.stringify({ ok: true, ...(location === null ? {} : { redirectTo: location }) })
+        );
         return;
       }
       if (path === '/api/model' && method === 'GET') {
@@ -361,9 +361,9 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         return;
       }
     }
-    if (requestHost === bootHost && (path === '/' || path.startsWith('/assets/'))) {
+    if (requestHost === bootHost && path.startsWith('/assets/')) {
       try {
-        const relative = path === '/' ? 'index.html' : path.slice(1);
+        const relative = path.slice(1);
         const asset = resolve(uiRoot, relative);
         if (!asset.startsWith(uiRoot + sep)) {
           sendText(res, 404, 'not found');
@@ -457,18 +457,41 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     }
     if ((path === '/' || path === '/login' || path === '/setup') && requestHost === bootHost) {
       const record = await state.readAuth();
+      const query = new URL(req.url ?? '/', `https://${req.headers.host ?? bootHost}`).searchParams;
+      const safeNext = vettedNext(
+        query.get('next') ?? undefined,
+        req.headers.host ?? '',
+        config.instanceName
+      );
+      const nextQuery = safeNext === null ? '' : `?next=${encodeURIComponent(safeNext)}`;
       if (record === null && path !== '/setup') {
-        redirect(res, '/setup');
+        redirect(res, `/setup${nextQuery}`);
         return;
       }
       if (record !== null && path === '/setup') {
-        redirect(res, '/login');
+        redirect(res, `/login${nextQuery}`);
         return;
       }
-      if (record !== null && sessionToken(req, record) !== null) {
+      if (record !== null && sessionToken(req, record) !== null && path !== '/') {
         redirect(res, '/');
         return;
       }
+      try {
+        const bytes = await readFile(resolve(uiRoot, 'index.html'));
+        res.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'no-cache',
+          'content-security-policy': CSP,
+          'x-content-type-options': 'nosniff',
+          'referrer-policy': 'no-referrer',
+        });
+        res.end(bytes);
+      } catch {
+        sendText(res, 503, 'loader interface is unavailable');
+      }
+      return;
+    }
+    if (path === '/' && requestHost === bootHost) {
       try {
         const bytes = await readFile(resolve(uiRoot, 'index.html'));
         res.writeHead(200, {

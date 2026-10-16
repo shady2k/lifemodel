@@ -74,7 +74,7 @@ describe('loader UI', () => {
         json: async () => ({ setupNeeded: false, loggedIn: false }),
       })
       .mockResolvedValueOnce({ ok: false, status: 401 })
-      .mockResolvedValueOnce({ ok: true, status: 200 });
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ ok: true }) });
     render(<App />);
     const field = await screen.findByLabelText('Password');
     fireEvent.change(field, { target: { value: 'wrong' } });

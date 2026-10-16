@@ -40,13 +40,17 @@ export default function App() {
       const response = await fetch(state?.setupNeeded ? '/api/setup' : '/api/login', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({
+          password,
+          next: new URLSearchParams(window.location.search).get('next') ?? undefined,
+        }),
       });
       if (!response.ok) {
         setError(response.status === 401 ? t('wrong') : t('setupError'));
         return;
       }
-      window.location.assign('/');
+      const result = (await response.json()) as { redirectTo?: string };
+      window.location.assign(result.redirectTo ?? '/');
     } catch {
       setError(t('setupError'));
     } finally {

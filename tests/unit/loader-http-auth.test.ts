@@ -68,25 +68,31 @@ async function request(
   body?: string
 ) {
   const url = new URL(path, base);
-  return new Promise<{ status: number; headers: Record<string, string | string[] | undefined> }>(
-    (resolve, reject) => {
-      const req = httpRequest(
-        {
-          hostname: url.hostname,
-          port: url.port,
-          path: url.pathname + url.search,
-          method,
-          headers: { host: SERVICE_HOST, ...headers },
-        },
-        (res) => {
-          res.resume();
-          res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers }));
-        }
-      );
-      req.on('error', reject);
-      req.end(body);
-    }
-  );
+  return new Promise<{
+    status: number;
+    headers: Record<string, string | string[] | undefined>;
+    body: string;
+  }>((resolve, reject) => {
+    const req = httpRequest(
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname + url.search,
+        method,
+        headers: { host: SERVICE_HOST, ...headers },
+      },
+      (res) => {
+        let responseBody = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => (responseBody += chunk));
+        res.on('end', () =>
+          resolve({ status: res.statusCode ?? 0, headers: res.headers, body: responseBody })
+        );
+      }
+    );
+    req.on('error', reject);
+    req.end(body);
+  });
 }
 
 describe('loader ForwardAuth and JSON authentication API', () => {
@@ -162,8 +168,8 @@ describe('loader ForwardAuth and JSON authentication API', () => {
         next: 'https://lifemodel.local/private?x=1#frag',
       })
     );
-    expect(login.status).toBe(303);
-    const location = String(login.headers.location);
+    expect(login.status).toBe(200);
+    const location = JSON.parse(String(login.body))['redirectTo'] as string;
     expect(location).toContain('/_auth/handoff?code=');
     expect(location).toContain('next=%2Fprivate%3Fx%3D1');
     expect(location).not.toContain('session');
@@ -181,6 +187,43 @@ describe('loader ForwardAuth and JSON authentication API', () => {
     expect(
       (await request(base, path, { host: 'lifemodel.local' })).headers['set-cookie']
     ).toBeUndefined();
+  });
+
+  it('preserves a vetted app destination through first-visit setup and creates its handoff ticket', async () => {
+    const { base } = await start(null);
+    const requested = 'https://lifemodel.local/private?from=setup';
+    const entry = await request(base, `/?next=${encodeURIComponent(requested)}`, {
+      host: 'boot-lifemodel.local',
+    });
+    expect(entry.status).toBe(303);
+    expect(entry.headers.location).toBe(`/setup?next=${encodeURIComponent(requested)}`);
+    const setup = await request(
+      base,
+      '/api/setup',
+      {
+        host: 'boot-lifemodel.local',
+        origin: 'https://boot-lifemodel.local',
+        'content-type': 'application/json',
+      },
+      'POST',
+      JSON.stringify({ password: 'secure owner password', next: requested })
+    );
+    expect(setup.status).toBe(200);
+    const redirectTo = JSON.parse(String(setup.body))['redirectTo'] as string;
+    expect(redirectTo).toMatch(/^https:\/\/lifemodel\.local\/_auth\/handoff\?code=/);
+    expect(redirectTo).toContain(`next=${encodeURIComponent('/private?from=setup')}`);
+    const rejected = await request(
+      base,
+      '/api/setup',
+      {
+        host: 'boot-lifemodel.local',
+        origin: 'https://boot-lifemodel.local',
+        'content-type': 'application/json',
+      },
+      'POST',
+      JSON.stringify({ password: 'another secure password', next: 'https://attacker.example/' })
+    );
+    expect(rejected.status).toBe(400);
   });
 
   it('creates setup once under concurrent requests and rejects wrong content type and Origin', async () => {
@@ -248,7 +291,10 @@ describe('loader ForwardAuth and JSON authentication API', () => {
       'POST',
       JSON.stringify({ password: 'owner password', next: 'https://lifemodel.local/private' })
     );
-    const handoff = new URL(String(login.headers.location), 'https://boot-lifemodel.local');
+    const handoff = new URL(
+      String(JSON.parse(String(login.body))['redirectTo']),
+      'https://boot-lifemodel.local'
+    );
     const out = await request(
       base,
       '/api/logout',
@@ -365,7 +411,7 @@ describe('loader static UI and JSON API', () => {
     writeFileSync(join(fixture, 'index.html'), '<!doctype html><main>loader fixture</main>');
     writeFileSync(join(fixture, 'assets', 'app.12345678.js'), 'void 0');
     const { base } = await start(null, fixture);
-    const shell = await request(base, '/', { host: 'boot-lifemodel.local' });
+    const shell = await request(base, '/setup', { host: 'boot-lifemodel.local' });
     expect(shell.status).toBe(200);
     expect(shell.headers['content-security-policy']).toBeDefined();
     expect(shell.headers['cache-control']).toBe('no-cache');
