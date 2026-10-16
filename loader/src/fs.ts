@@ -1,6 +1,7 @@
 /** The platform loader's small filesystem boundary. */
 import { constants } from 'node:fs';
-import { access, chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { access, chmod, mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 export interface FileSystem {
@@ -27,10 +28,21 @@ export function createNodeFileSystem(): FileSystem {
     readFile: (path) => readFile(path, 'utf8'),
     writeFileAtomic: async (path, contents, mode) => {
       await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-      const temporary = join(dirname(path), `.${String(process.pid)}.${String(Date.now())}.tmp`);
-      await writeFile(temporary, contents, { mode });
-      await rename(temporary, path);
-      await chmod(path, mode);
+      const temporary = join(dirname(path), `.${randomUUID()}.tmp`);
+      let handle: Awaited<ReturnType<typeof open>> | undefined;
+      try {
+        handle = await open(temporary, 'wx', mode);
+        await handle.writeFile(contents, 'utf8');
+        await handle.sync();
+        await handle.close();
+        handle = undefined;
+        await rename(temporary, path);
+        await chmod(path, mode);
+      } catch (error) {
+        await handle?.close().catch(() => undefined);
+        await unlink(temporary).catch(() => undefined);
+        throw error;
+      }
     },
     chmod: (path, mode) => chmod(path, mode),
   };

@@ -1,8 +1,11 @@
 /** Authenticated HTTP interface for the platform bootstrap loader. */
+import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import {
   ALLOWED_HOSTS,
   clearSessionCookie,
+  HANDOFF_TTL_MS,
+  HANDOFF_CODE_BYTES,
   createSession,
   csrfToken,
   hashPassword,
@@ -107,6 +110,28 @@ function formPage(
 
 export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
   const { state, logger, clock } = deps;
+  // Single loader replica: short-lived codes remain process-local by design.
+  interface HandoffEntry {
+    session: string;
+    target: string;
+    next: string;
+    expires: number;
+  }
+  const handoffCodes = new Map<string, HandoffEntry>();
+  let authTransition: Promise<void> = Promise.resolve();
+  async function withAuthTransition<T>(action: () => Promise<T>): Promise<T> {
+    const previous = authTransition;
+    let release!: () => void;
+    authTransition = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release();
+    }
+  }
   const header = (req: IncomingMessage, name: string): string | undefined => {
     const value = req.headers[name];
     return typeof value === 'string' ? value : undefined;
@@ -124,6 +149,15 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       ? null
       : 'the request did not come from a page on this host';
   }
+  function handoffRedirect(session: string, next: string, currentHost: string): string {
+    const target = new URL(next);
+    const path = `${target.pathname}${target.search}`; // URL fragments never reach the server.
+    if (target.host === currentHost) return `${target.origin}${path}`;
+    const code = randomBytes(HANDOFF_CODE_BYTES).toString('base64url');
+    const expires = clock.now() + HANDOFF_TTL_MS;
+    handoffCodes.set(code, { target: target.host, session, next: path, expires });
+    return `${target.origin}/_auth/handoff?code=${encodeURIComponent(code)}&next=${encodeURIComponent(path)}`;
+  }
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const path = (req.url ?? '/').split('?')[0] ?? '/';
     const method = req.method ?? 'GET';
@@ -132,6 +166,37 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       hostName(req.headers.host ?? '') === 'loader.lifemodel-system.svc.cluster.local';
     if (!serviceVerify && !isAllowedHost(req.headers.host)) {
       sendText(res, 400, `the loader answers only ${ALLOWED_HOSTS.join(', ')}`);
+      return;
+    }
+    if (path === '/_auth/handoff') {
+      const host = req.headers.host ?? '';
+      const url = new URL(req.url ?? '/', `http://${host}`);
+      const code = url.searchParams.get('code') ?? '';
+      const entry = handoffCodes.get(code);
+      // Consume synchronously before awaits: concurrent redemption cannot reuse it.
+      if (entry !== undefined) handoffCodes.delete(code);
+      const now = clock.now();
+      for (const [key, value] of handoffCodes) if (value.expires <= now) handoffCodes.delete(key);
+      const record = await state.readAuth();
+      const nextParam = url.searchParams.get('next');
+      const next =
+        nextParam?.startsWith('/') && !nextParam.startsWith('//')
+          ? vettedNext(`http://${host}${nextParam}`, host)
+          : null;
+      const boot = 'http://boot.localhost/login';
+      if (
+        entry === undefined ||
+        entry.expires <= now ||
+        entry.target !== host.toLowerCase() ||
+        next === null ||
+        entry.next !== `${new URL(next).pathname}${new URL(next).search}` ||
+        record === null ||
+        !verifySession(entry.session, record, now)
+      ) {
+        redirect(res, boot);
+        return;
+      }
+      redirect(res, entry.next, { 'set-cookie': sessionCookie(entry.session, host) });
       return;
     }
     if (path === '/_auth/verify') {
@@ -158,7 +223,9 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         return;
       }
       if (method === 'GET') {
-        sendHtml(res, 200, formPage('Set loader password', '/setup', 'Password'));
+        const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+        const next = vettedNext(query.get('next') ?? undefined, header(req, 'host') ?? '');
+        sendHtml(res, 200, formPage('Set loader password', '/setup', 'Password', undefined, next));
         return;
       }
       if (method !== 'POST') {
@@ -170,7 +237,8 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         sendHtml(res, 403, page('Refused', escapeHtml(refusal)));
         return;
       }
-      const password = (await readForm(req))['password'] ?? '';
+      const setupForm = await readForm(req);
+      const password = setupForm['password'] ?? '';
       if (password === '') {
         sendHtml(
           res,
@@ -180,10 +248,22 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         return;
       }
       const record = await hashPassword(password);
-      await state.writeAuth(record);
+      const installed = await withAuthTransition(async () => {
+        if ((await state.readAuth()) !== null) return false;
+        await state.writeAuth(record);
+        return true;
+      });
+      if (!installed) {
+        redirect(res, '/login');
+        return;
+      }
       logger.info({}, "the loader's password is set: platform authentication is ready");
       const host = req.headers.host ?? 'localhost';
-      redirect(res, '/', { 'set-cookie': sessionCookie(createSession(record, clock.now()), host) });
+      const token = createSession(record, clock.now());
+      const next = vettedNext(setupForm['next'], host);
+      redirect(res, next === null ? '/' : handoffRedirect(token, next, host), {
+        'set-cookie': sessionCookie(token, host),
+      });
       return;
     }
     if (path === '/login') {
@@ -193,8 +273,16 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         return;
       }
       if (method === 'GET') {
+        const active = sessionToken(req, record);
         const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
         const next = vettedNext(query.get('next') ?? undefined, header(req, 'host') ?? '');
+        if (active !== null) {
+          redirect(
+            res,
+            next === null ? '/' : handoffRedirect(active, next, header(req, 'host') ?? '')
+          );
+          return;
+        }
         sendHtml(res, 200, formPage('Loader login', '/login', 'Password', undefined, next));
         return;
       }
@@ -223,9 +311,22 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         return;
       }
       const host = req.headers.host ?? 'localhost';
+      const issued = await withAuthTransition(async () => {
+        const current = await state.readAuth();
+        if (current === null || !(await verifyPassword(password, current))) return null;
+        return { record: current, token: createSession(current, clock.now()) };
+      });
+      if (issued === null) {
+        sendHtml(
+          res,
+          401,
+          formPage('Loader login', '/login', 'Password', 'That password does not match.', next)
+        );
+        return;
+      }
       logger.info({ host }, 'the owner logged in');
-      redirect(res, next ?? '/', {
-        'set-cookie': sessionCookie(createSession(record, clock.now()), host),
+      redirect(res, next === null ? '/' : handoffRedirect(issued.token, next, host), {
+        'set-cookie': sessionCookie(issued.token, host),
       });
       return;
     }
@@ -248,6 +349,23 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           : 'the form carried no anti-CSRF token of this session');
       if (refusal !== null) {
         sendHtml(res, 403, page('Refused', escapeHtml(refusal)));
+        return;
+      }
+      const loggedOut = await withAuthTransition(async () => {
+        const current = await state.readAuth();
+        const currentToken = current === null ? null : sessionToken(req, current);
+        if (
+          current === null ||
+          currentToken === null ||
+          !verifyCsrf(form['csrf'] ?? '', current, currentToken)
+        )
+          return false;
+        current.sessionSecret = randomBytes(32).toString('base64');
+        await state.writeAuth(current);
+        return true;
+      });
+      if (!loggedOut) {
+        sendHtml(res, 401, page('Loader login', '<p>Not logged in.</p>'));
         return;
       }
       logger.info({}, 'the owner logged out');

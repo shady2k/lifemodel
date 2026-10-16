@@ -9,6 +9,7 @@ resources:
   - pvc.yaml
   - deployment.yaml
   - service.yaml
+  - handoff-ingress.yaml
   - network-policy.yaml
   - ingress.yaml
 images:

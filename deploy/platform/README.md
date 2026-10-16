@@ -37,8 +37,7 @@ The signed platform artifact owns the Traefik routes. A0 installs the
 `loader-auth` ForwardAuth middleware, pointing at the loader Service's
 `/_auth/verify` endpoint. `boot.localhost` `/login` and `/setup` are exact
 routes with higher priority and no middleware; the rest of `boot.localhost`
-uses ForwardAuth. Step A routes all of `localhost` through the same ForwardAuth
-to the `web` Service on port 8080. The web Service is delivered by
+uses ForwardAuth. Step A routes the exact `localhost/_auth/handoff` path directly to the loader at higher priority, without ForwardAuth; all other `localhost` paths use ForwardAuth to the `web` Service on port 8080. Login cookies are host-only, with a short-lived signed handoff for crossing from `boot.localhost` to `localhost`. Browsers refuse `Domain=localhost`, so cookies cannot safely be shared with that Domain. The web Service is delivered by
 lifemodel-vhd.6.3. The web pod's NetworkPolicy admits Traefik ingress on 8080
 and allows egress only to DNS, Postgres and Valkey. `/api/events` must disable
 response buffering in Traefik if buffering is otherwise enabled for the
