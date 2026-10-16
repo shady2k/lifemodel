@@ -223,7 +223,7 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
 
     // The lease and HTTP stream share one deadline starting before lease acquisition.
     const lifecycle = new AbortController();
-    let leased = false;
+    let leaseId: string | null = null;
     let ended = false;
     let handedOff = false;
     const queue = new BoundedQueue<StreamEvent>();
@@ -232,10 +232,11 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
       lifecycle.abort();
     }, STREAM_MAX_AGE_MS);
     const releaseBounded = async () => {
-      if (!leased) return;
-      leased = false;
+      const heldLeaseId = leaseId;
+      if (!heldLeaseId) return;
+      leaseId = null;
       await withTimeout(
-        options.transcript.releaseStreamLease(session),
+        options.transcript.releaseStreamLease(session, heldLeaseId),
         new AbortController().signal,
         500
       ).catch(() => undefined);
@@ -261,7 +262,7 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
       void acquire
         .then((value) => {
           if (value && (ended || lifecycle.signal.aborted)) {
-            leased = true;
+            leaseId = value;
             void releaseBounded();
           }
         })
@@ -275,7 +276,7 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
         closeLifecycle();
         return await reply.code(429).send({ error: 'too_many_streams' });
       }
-      leased = true;
+      leaseId = lease;
       // If acquisition settled after disconnect/timeout, immediately retire its lease.
       if (ended || lifecycle.signal.aborted) {
         await releaseBounded();

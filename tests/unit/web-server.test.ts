@@ -16,7 +16,7 @@ function setup(result: ReturnType<typeof vi.fn> = vi.fn().mockResolvedValue(acce
     transcript: {
       readTranscript: vi.fn().mockResolvedValue({ rows: [], cursor: null }),
       watchTranscript: vi.fn(),
-      acquireStreamLease: vi.fn().mockResolvedValue(true),
+      acquireStreamLease: vi.fn().mockResolvedValue('lease-id'),
       releaseStreamLease: vi.fn().mockResolvedValue(undefined),
     },
     creatureState: { readCreatureState: vi.fn().mockResolvedValue(null) },
@@ -180,7 +180,7 @@ describe('POST /api/messages', () => {
 
 describe('GET /api/events admission', () => {
   it('passes the single stream deadline to shared lease acquisition', async () => {
-    const acquireStreamLease = vi.fn().mockResolvedValue(true);
+    const acquireStreamLease = vi.fn().mockResolvedValue('lease-id');
     const server = createWebServer({
       allowedOrigin: 'http://localhost',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
@@ -265,7 +265,7 @@ describe('static application', () => {
         watchTranscript: vi.fn(async function* () {
           await new Promise<void>(() => {});
         }),
-        acquireStreamLease: vi.fn().mockResolvedValue(true),
+        acquireStreamLease: vi.fn().mockResolvedValue('lease-id'),
         releaseStreamLease: vi.fn().mockResolvedValue(undefined),
       },
       creatureState: { readCreatureState },

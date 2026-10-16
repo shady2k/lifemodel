@@ -337,22 +337,88 @@ describe('Postgres owner transcript', () => {
         'lease-owner'
       );
       const sessions = 'signed-session-cookie';
-      expect(
-        await Promise.all([
-          firstReplica.acquireStreamLease(sessions, Date.now() + 60_000),
-          secondReplica.acquireStreamLease(sessions, Date.now() + 60_000),
-          firstReplica.acquireStreamLease(sessions, Date.now() + 60_000),
-          secondReplica.acquireStreamLease(sessions, Date.now() + 60_000),
-          firstReplica.acquireStreamLease(sessions, Date.now() + 60_000),
-        ])
-      ).toEqual([true, true, true, true, false]);
-      await firstReplica.releaseStreamLease(sessions);
-      expect(await secondReplica.acquireStreamLease(sessions, Date.now() + 60_000)).toBe(true);
+      const leases = await Promise.all([
+        firstReplica.acquireStreamLease(sessions, Date.now() + 60_000),
+        secondReplica.acquireStreamLease(sessions, Date.now() + 60_000),
+        firstReplica.acquireStreamLease(sessions, Date.now() + 60_000),
+        secondReplica.acquireStreamLease(sessions, Date.now() + 60_000),
+        firstReplica.acquireStreamLease(sessions, Date.now() + 60_000),
+      ]);
+      expect(leases.slice(0, 4).every(Boolean)).toBe(true);
+      expect(leases[4]).toBeNull();
+      await firstReplica.releaseStreamLease(sessions, leases[0]!);
+      expect(await secondReplica.acquireStreamLease(sessions, Date.now() + 60_000)).not.toBeNull();
       await stores.redis.del(
         `web:stream-leases:${(await import('node:crypto')).createHash('sha256').update(sessions).digest('hex')}`
       );
-      expect(await firstReplica.acquireStreamLease(sessions, Date.now() + 60_000)).toBe(true);
+      expect(await firstReplica.acquireStreamLease(sessions, Date.now() + 60_000)).not.toBeNull();
     } finally {
+      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    }
+  });
+
+  it('releases the exact lease when acquisitions complete out of order', async () => {
+    const stores = await createTestStores();
+    const originalNow = Date.now;
+    let now = originalNow();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    let resolveFirst!: (result: unknown) => void;
+    let evalStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      evalStarted = resolve;
+    });
+    const held = new Promise<unknown>((resolve) => {
+      resolveFirst = resolve;
+    });
+    let heldFirst = false;
+    const redis = new Proxy(stores.redis, {
+      get(target, property) {
+        if (property === 'eval')
+          return (...args: Parameters<typeof target.eval>) => {
+            const result = target.eval(...args);
+            if (!heldFirst) {
+              heldFirst = true;
+              evalStarted();
+              return result.then((value) => held.then(() => value));
+            }
+            return result;
+          };
+        const value = Reflect.get(target, property);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    try {
+      const firstReplica = new PostgresTranscriptStore(stores.postgres, redis, 'lease-owner');
+      const secondReplica = new PostgresTranscriptStore(
+        stores.postgres,
+        stores.redis,
+        'lease-owner'
+      );
+      const session = 'out-of-order-session';
+      const timedOutExpiry = now + 1_000;
+      const liveExpiry = now + 60_000;
+      const timedOutPromise = firstReplica.acquireStreamLease(session, timedOutExpiry);
+      await started;
+      const liveLease = await secondReplica.acquireStreamLease(session, liveExpiry);
+      expect(liveLease).not.toBeNull();
+      resolveFirst(undefined);
+      const timedOutLease = await timedOutPromise;
+      expect(timedOutLease).not.toBeNull();
+      await firstReplica.releaseStreamLease(session, timedOutLease!);
+      const sessionKey = `web:stream-leases:${(await import('node:crypto')).createHash('sha256').update(session).digest('hex')}`;
+      expect(Number(await stores.redis.zscore(sessionKey, liveLease!))).toBe(liveExpiry);
+      now += 1_001;
+      expect(
+        await Promise.all([
+          firstReplica.acquireStreamLease(session, now + 60_000),
+          secondReplica.acquireStreamLease(session, now + 60_000),
+          firstReplica.acquireStreamLease(session, now + 60_000),
+          secondReplica.acquireStreamLease(session, now + 60_000),
+        ])
+      ).toEqual([expect.any(String), expect.any(String), expect.any(String), null]);
+      await secondReplica.releaseStreamLease(session, liveLease!);
+    } finally {
+      vi.restoreAllMocks();
       await Promise.all([stores.postgres.end(), stores.redis.quit()]);
     }
   });
