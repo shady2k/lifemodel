@@ -122,6 +122,8 @@ function runInstallerHarness(
     digest?: string;
     owner?: string;
     sourceDir?: string;
+    avahiConfig?: string;
+    ufwActive?: boolean;
   } = {}
 ): { status: number | null; output: string; root: string } {
   const root = existingRoot ?? mkdtempSync(join(tmpdir(), 'lifemodel-installer-test-'));
@@ -164,11 +166,23 @@ case "$*" in
   *) echo "flux:$*" >> "$K3S_LOG"; if [ "$K3S_FAIL_FLUX" = 1 ] && [ "$(grep -c '^flux:' "$K3S_LOG")" -eq 1 ]; then exit 42; fi ;;
 esac`
   );
+  command('apt-get', 'exit 0');
+  command('ip', `if [ "$1" = -j ]; then printf '%s\n' "$ROUTES"; else exit 0; fi`);
+  command('systemctl', 'echo "$*" >> "$SYSTEMCTL_LOG"; exit 0');
+  command(
+    'ufw',
+    `if [ "$1" = status ]; then echo Status: ${options.ufwActive ? 'active' : 'inactive'}; else echo "$*" >> "$UFW_LOG"; fi`
+  );
   command('curl', 'for arg do output=$arg; done; printf manifest > "$output"');
   command('sha256sum', 'read expected file; echo "$file: OK"');
+  if (options.avahiConfig) {
+    mkdirSync(join(root, 'install-root/etc/avahi'), { recursive: true });
+    writeFileSync(join(root, 'install-root/etc/avahi/avahi-daemon.conf'), options.avahiConfig);
+  }
   const env = {
     ...process.env,
     PATH: `${bin}:${process.env.PATH}`,
+    ROUTES: '[{\"dev\":\"eth0\",\"metric\":100}]',
     K3S_STATE: state,
     K3S_IDENTITY: join(root, 'instance-name'),
     K3S_LOG: log,
@@ -176,6 +190,8 @@ esac`
     K3S_APPLIED_REF: join(root, 'applied-ref'),
     K3S_FAIL_FLUX: failFlux ? '1' : '0',
     K3S_FOREIGN: foreign ? '1' : '0',
+    UFW_LOG: join(root, 'ufw.log'),
+    SYSTEMCTL_LOG: join(root, 'systemctl.log'),
     K3S_MANAGED_FIELDS: options.owner
       ? `{\"manager\":\"${options.owner}\",\"fieldsV1\":{\"f:spec\":{\"f:ref\":{\"f:tag\":{}}}}}`
       : '',
@@ -199,6 +215,8 @@ esac`
       ...refArgs,
       '--root-templates',
       templates,
+      '--lan-interface',
+      'eth0',
     ],
     { encoding: 'utf8', env }
   );
@@ -206,6 +224,121 @@ esac`
 }
 
 describe('platform manifests', () => {
+  it('rejects unsafe or forbidden LAN interfaces in render-only and install modes', () => {
+    for (const iface of ['wg0', 'eth&0', 'a'.repeat(16), 'eth0;touch']) {
+      const result = spawnSync(
+        'sh',
+        [
+          installer,
+          '--platform-url',
+          'oci://example.test/platform',
+          '--tag',
+          'v1.0.0',
+          '--lan-interface',
+          iface,
+          '--render-only',
+          join(tmpdir(), `mdns-invalid-${process.pid}`),
+          '--root-templates',
+          rootTemplates,
+        ],
+        { encoding: 'utf8' }
+      );
+      expect(result.status, result.stderr).not.toBe(0);
+    }
+  });
+
+  it('selects the lowest-metric IPv4 default route and refuses missing or forbidden routes', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mdns-route-render-'));
+    const bin = join(root, 'bin');
+    mkdirSync(bin);
+    const ip = join(bin, 'ip');
+    writeFileSync(ip, `#!/bin/sh\nprintf '%s\n' "$ROUTES"\n`);
+    chmodSync(ip, 0o755);
+    const run = (routes: string) =>
+      spawnSync(
+        'sh',
+        [
+          installer,
+          '--platform-url',
+          'oci://example.test/platform',
+          '--tag',
+          'v1.0.0',
+          '--render-only',
+          join(root, 'out'),
+          '--root-templates',
+          rootTemplates,
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ROUTES: routes },
+        }
+      );
+    try {
+      const selected = run(
+        '[{"dev":"wg0","metric":90},{"dev":"eth1","metric":10},{"dev":"eth0","metric":20}]'
+      );
+      expect(selected.status, selected.stderr).toBe(0);
+      expect(
+        readFileSync(join(root, 'out/systemd/lifemodel-mdns-lifemodel-local.service'), 'utf8')
+      ).toContain('lifemodel.local eth1');
+      const forbidden = run('[{"dev":"wg0","metric":1},{"dev":"eth0","metric":10}]');
+      expect(forbidden.status).not.toBe(0);
+      const absent = run('[]');
+      expect(absent.status).not.toBe(0);
+      const overlong = run('[{\"dev\":\"abcdefghijklmnop\",\"metric\":1}]');
+      expect(overlong.status).not.toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('renders interface-scoped active-UFW rules under a fake root', () => {
+    const result = runInstallerHarness(false, false, undefined, 'v1.0.0', { ufwActive: true });
+    try {
+      expect(result.status, result.output).toBe(0);
+      expect(readFileSync(join(result.root, 'ufw.log'), 'utf8').trim().split('\n')).toEqual([
+        'allow in on eth0 to any port 80 proto tcp',
+        'allow in on eth0 to any port 443 proto tcp',
+        'allow in on eth0 to any port 5353 proto udp',
+      ]);
+    } finally {
+      rmSync(result.root, { recursive: true, force: true });
+    }
+  });
+
+  it('normalizes every effective Avahi server key once and is byte-idempotent', () => {
+    const config =
+      '# keep comment\n  [Server]\n  Allow-Interfaces=eth1\n[wide-area]\nenable-wide-area=no\n[server] ; later group\nallow-interfaces=eth2\n[other]\nallow-interfaces=untouched\n';
+    const expected =
+      '# keep comment\n  [Server]\nallow-interfaces=eth0\n[wide-area]\nenable-wide-area=no\n[server] ; later group\n[other]\nallow-interfaces=untouched\n';
+    const result = runInstallerHarness(false, false, undefined, 'v1.0.0', { avahiConfig: config });
+    try {
+      expect(result.status, result.output).toBe(0);
+      const configPath = join(result.root, 'install-root/etc/avahi/avahi-daemon.conf');
+      expect(readFileSync(configPath, 'utf8')).toBe(expected);
+      const firstLog = readFileSync(join(result.root, 'systemctl.log'), 'utf8');
+      expect(firstLog).toContain('restart avahi-daemon.service');
+      const second = runInstallerHarness(false, false, result.root, 'v1.0.0');
+      expect(second.status, second.output).toBe(0);
+      expect(readFileSync(configPath, 'utf8')).toBe(expected);
+      const secondLog = readFileSync(join(result.root, 'systemctl.log'), 'utf8');
+      expect(secondLog.match(/restart avahi-daemon\.service/g)).toHaveLength(1);
+      expect(
+        readFileSync(
+          join(
+            result.root,
+            'install-root/etc/systemd/system/lifemodel-mdns-lifemodel-local.service'
+          ),
+          'utf8'
+        )
+      ).toContain('ExecStart=/usr/lib/lifemodel/publish-name lifemodel.local eth0');
+      expect(existsSync(join(result.root, 'install-root/usr/lib/lifemodel/publish-name'))).toBe(
+        true
+      );
+    } finally {
+      rmSync(result.root, { recursive: true, force: true });
+    }
+  });
   it('does not render Helm hook resources in step A', () => {
     const rendered = parseYamlFiles([
       join(platformRoot, 'a/openbao/rendered.yaml'),
@@ -713,6 +846,7 @@ describe('platform manifests', () => {
         env: {
           ...process.env,
           PATH: `${join(second.root, 'bin')}:${process.env.PATH}`,
+          ROUTES: '[{\"dev\":\"eth0\",\"metric\":100}]',
           LIFEMODEL_INSTALL_ROOT: join(second.root, 'install-root'),
           LIFEMODEL_STATE_DIR: join(second.root, 'state'),
           K3S_STATE: join(second.root, 'namespace-state'),
@@ -806,6 +940,7 @@ describe('platform manifests', () => {
       const env = {
         ...process.env,
         PATH: `${join(first.root, 'bin')}:${process.env.PATH}`,
+        ROUTES: '[{\"dev\":\"eth0\",\"metric\":100}]',
         LIFEMODEL_INSTALL_ROOT: join(first.root, 'install-root'),
         LIFEMODEL_STATE_DIR: join(first.root, 'state'),
         K3S_STATE: join(first.root, 'namespace-state'),
@@ -839,8 +974,14 @@ describe('platform manifests', () => {
     const sourceDir = join(root, 'checkout');
     mkdirSync(join(sourceDir, 'scripts'), { recursive: true });
     mkdirSync(join(sourceDir, 'deploy/cli'), { recursive: true });
+    mkdirSync(join(sourceDir, 'deploy/mdns'), { recursive: true });
     cpSync(installer, join(sourceDir, 'scripts/install.sh'));
     cpSync(rootTemplates, join(sourceDir, 'deploy/root'), { recursive: true });
+    cpSync(
+      fileURLToPath(new URL('../../deploy/mdns/', import.meta.url)),
+      join(sourceDir, 'deploy/mdns'),
+      { recursive: true }
+    );
     cpSync(
       fileURLToPath(new URL('../../deploy/cli/lifemodel.mjs', import.meta.url)),
       join(sourceDir, 'deploy/cli/lifemodel.mjs')
@@ -857,6 +998,7 @@ describe('platform manifests', () => {
         env: {
           ...process.env,
           PATH: `${join(root, 'bin')}:${process.env.PATH}`,
+          ROUTES: '[{\"dev\":\"eth0\",\"metric\":100}]',
           LIFEMODEL_INSTALL_ROOT: join(root, 'install-root'),
           LIFEMODEL_STATE_DIR: join(root, 'state'),
           K3S_STATE: join(root, 'namespace-state'),

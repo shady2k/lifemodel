@@ -33,11 +33,40 @@ let
   platformRef = if cfg.platform.digest != null then "digest=${cfg.platform.digest}" else "tag=${cfg.platform.tag}";
   keyFile = "/run/lifemodel/platform-cosign.pub";
   otherFlux = (config.services.fluxcd.enable or false) || (config.fluxcd.enable or false);
+  publisher = pkgs.writeShellScriptBin "lifemodel-mdns-publish" (builtins.readFile ../mdns/publish-name);
+  mdnsNames = [ "${cfg.name}.local" "boot-${cfg.name}.local" "vault-${cfg.name}.local" ];
+  mdnsUnits = lib.listToAttrs (map (name: {
+    name = "lifemodel-mdns-${lib.replaceStrings [ "." ] [ "-" ] name}";
+    value = {
+      description = "Publish ${name} on the LAN with mDNS";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "avahi-daemon.service" "network-online.target" ];
+      wants = [ "network-online.target" ];
+      path = [ pkgs.iproute2 pkgs.gawk pkgs.coreutils pkgs.bash pkgs.avahi ];
+      serviceConfig = {
+        Type = "simple";
+        ExecStart = "${publisher}/bin/lifemodel-mdns-publish ${lib.escapeShellArg name} ${lib.escapeShellArg cfg.lanInterface}";
+        Restart = "on-failure";
+        RestartSec = 2;
+        User = "avahi";
+        Group = "avahi";
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        CapabilityBoundingSet = "";
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_NETLINK" ];
+        RestrictNamespaces = true;
+        LockPersonality = true;
+      };
+    };
+  }) mdnsNames);
 in
 {
   options.services.lifemodel = {
     enable = mkEnableOption "lifemodel GitOps platform bootstrap";
     name = mkOption { type = types.strMatching "[a-z]([a-z0-9-]{0,55}[a-z0-9])?"; default = "lifemodel"; description = "Fixed non-reserved DNS-1035 instance label (max 57 characters)."; };
+    lanInterface = mkOption { type = types.str; default = if (config.networking.defaultGateway.interface or null) == null then "" else config.networking.defaultGateway.interface; description = "LAN interface for mDNS publication and firewall access; set explicitly when no default gateway interface is declared."; };
     platform = {
       url = mkOption { type = types.str; description = "OCI URL of the signed platform artifact."; };
       tag = mkOption { type = types.nullOr types.str; default = null; description = "OCI artifact tag (required unless digest is set)."; };
@@ -61,6 +90,10 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       { assertion = cfg.platform.url != ""; message = "services.lifemodel.platform.url is required"; }
+      { assertion = cfg.lanInterface != ""; message = "set networking.defaultGateway.interface or services.lifemodel.lanInterface to choose the LAN interface"; }
+      { assertion = builtins.stringLength cfg.lanInterface <= 15 && builtins.match "[A-Za-z0-9_.:-]+" cfg.lanInterface != null; message = "services.lifemodel.lanInterface must be a valid Linux interface name (1-15 safe characters)"; }
+      { assertion = !(lib.any (prefix: lib.hasPrefix prefix cfg.lanInterface) [ "cni" "flannel" "veth" "wg" "tun" "tailscale" ]);
+        message = "services.lifemodel.lanInterface must be a LAN interface, not a cluster, tunnel or VPN interface"; }
       { assertion = builtins.stringLength cfg.name <= 57
           && !(builtins.elem (lib.toLower cfg.name) [ "y" "n" "yes" "no" "true" "false" "on" "off" "null" "~" ]);
         message = "services.lifemodel.name must be a non-reserved DNS-1035 label of at most 57 characters"; }
@@ -81,8 +114,20 @@ in
       clusterInit = true;
       package = lifemodelK3s;
     };
-    environment.systemPackages = [ lifemodelK3s lifemodelCli ];
-    systemd.services.lifemodel-flux-bootstrap = {
+    environment.systemPackages = [ lifemodelK3s lifemodelCli publisher ];
+    services.avahi = {
+      enable = true;
+      publish.enable = true;
+      publish.userServices = true;
+      openFirewall = false;
+      allowInterfaces = [ cfg.lanInterface ];
+    };
+    networking.firewall.interfaces.${cfg.lanInterface} = {
+      allowedTCPPorts = [ 80 443 ];
+      allowedUDPPorts = [ 5353 ];
+    };
+    systemd.services = mdnsUnits // {
+    lifemodel-flux-bootstrap = {
       description = "Install pinned Flux and lifemodel platform root objects";
       restartIfChanged = true;
       wantedBy = [ "multi-user.target" ];
@@ -159,6 +204,7 @@ in
         $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f ${renderedKustomization}
         LIFEMODEL_LOCK_FD=9 LIFEMODEL_LOCK_HELD=1 lifemodel record-applied "$effectiveRef"
       '';
+    };
     };
   };
 }

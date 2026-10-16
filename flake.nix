@@ -24,6 +24,7 @@
           enable = true;
           platform.url = "oci://ghcr.io/shady2k/lifemodel-platform";
           platform.tag = "v1.0.0";
+          lanInterface = "eth0";
         };
       };
       evaluate = extra: lib.nixosSystem { inherit system; modules = [ exportedModule baseModule extra ]; };
@@ -56,15 +57,31 @@
       platformUrl = "oci://ghcr.io/shady2k/lifemodel-platform";
       renderOnly = mode: url: tag: extraArgs:
         pkgs.runCommand "lifemodel-install-sh-render-${mode}-${tag}" { nativeBuildInputs = [ pkgs.busybox ]; } ''
-          mkdir -p $out $TMPDIR/work/scripts $TMPDIR/work/deploy
+          mkdir -p $out $TMPDIR/work/scripts $TMPDIR/work/deploy/mdns
+          cp -r ${./deploy/mdns}/. $TMPDIR/work/deploy/mdns/
           cp ${./scripts/install.sh} $TMPDIR/work/scripts/install.sh
           cp -r ${./deploy/root} $TMPDIR/work/deploy/root
           busybox sh $TMPDIR/work/scripts/install.sh --platform-url ${url} --tag ${lib.escapeShellArg tag} \
-            --verify ${mode} ${lib.optionalString (mode == "key") "--public-key-file ${pkgs.writeText "platform-cosign.pub" verifyKey}"} \
+            --verify ${mode} --lan-interface eth0 ${lib.optionalString (mode == "key") "--public-key-file ${pkgs.writeText "platform-cosign.pub" verifyKey}"} \
             --render-only $out ${extraArgs}
         '';
       scriptKeyless = renderOnly "keyless" platformUrl "v1.0.0" "";
       scriptKey = renderOnly "key" platformUrl "v1.0.0" "";
+      mdnsRendered = renderOnly "keyless" platformUrl "v1.0.0" "--lan-interface eth0";
+      mdnsInstallerUnits = pkgs.runCommand "lifemodel-mdns-installer-unit-render" { nativeBuildInputs = [ pkgs.gnugrep pkgs.diffutils ]; } ''
+        set -eu
+        for name in lifemodel.local boot-lifemodel.local vault-lifemodel.local; do
+          unit=$(printf '%s' "$name" | sed 's/\./-/g')
+          file=${mdnsRendered}/systemd/lifemodel-mdns-$unit.service
+          grep -F "Description=Publish $name on LAN with mDNS" "$file"
+          grep -F "ExecStart=/usr/lib/lifemodel/publish-name $name eth0" "$file"
+          grep -F 'Restart=on-failure' "$file"
+          grep -F 'NoNewPrivileges=true' "$file"
+          grep -F 'ProtectSystem=strict' "$file"
+          grep -F 'RestrictAddressFamilies=AF_UNIX AF_NETLINK' "$file"
+        done
+        touch $out
+      '';
       customTag = "20261013";
       customIssuer = ''^issuer\.path/'quoted"$'';
       customSubject = ''^subject\\literal/'quote"$'';
@@ -311,6 +328,33 @@
         assert lib.hasInfix ''$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$render_dir/kustomization.yaml"'' installScript;
         assert !(lib.hasInfix "--force-conflicts" installScript);
         pkgs.runCommand "lifemodel-bootstrap-field-ownership" {} "touch $out";
+      avahiConfigPath = builtins.elemAt (lib.splitString " " (builtins.elemAt (lib.splitString " -f " keyless.config.systemd.services.avahi-daemon.serviceConfig.ExecStart) 1)) 0;
+      renderedAvahiConfig = builtins.readFile avahiConfigPath;
+      mdnsEvaluation =
+        let names = [ "lifemodel.local" "boot-lifemodel.local" "vault-lifemodel.local" ];
+            units = keyless.config.systemd.services;
+        in assert keyless.config.services.avahi.enable;
+           assert keyless.config.services.avahi.publish.enable;
+           assert keyless.config.services.avahi.publish.userServices;
+           assert lib.hasInfix "disable-publishing=no" renderedAvahiConfig;
+           assert lib.hasInfix "disable-user-service-publishing=no" renderedAvahiConfig;
+           assert lib.hasInfix "allow-interfaces=eth0" renderedAvahiConfig;
+           assert keyless.config.services.avahi.openFirewall == false;
+           assert !(builtins.elem 5353 keyless.config.networking.firewall.allowedUDPPorts);
+           assert !(builtins.elem 80 keyless.config.networking.firewall.allowedTCPPorts);
+           assert !(builtins.elem 443 keyless.config.networking.firewall.allowedTCPPorts);
+           assert keyless.config.services.avahi.allowInterfaces == [ keyless.config.services.lifemodel.lanInterface ];
+           assert keyless.config.networking.firewall.interfaces.${keyless.config.services.lifemodel.lanInterface}.allowedTCPPorts == [ 80 443 ];
+           assert keyless.config.networking.firewall.interfaces.${keyless.config.services.lifemodel.lanInterface}.allowedUDPPorts == [ 5353 ];
+           assert keyless.config.services.avahi.publish.enable;
+           assert keyless.config.services.avahi.publish.userServices;
+           assert keyless.config.systemd.services."lifemodel-mdns-lifemodel-local".serviceConfig.NoNewPrivileges;
+           assert keyless.config.systemd.services."lifemodel-mdns-lifemodel-local".serviceConfig.RestrictAddressFamilies == [ "AF_UNIX" "AF_NETLINK" ];
+
+           assert builtins.all (name: builtins.hasAttr "lifemodel-mdns-${lib.replaceStrings [ "." ] [ "-" ] name}" units) names;
+           assert builtins.all (name: lib.hasInfix "${name}" units."lifemodel-mdns-${lib.replaceStrings [ "." ] [ "-" ] name}".serviceConfig.ExecStart) names;
+           assert !(lib.hasInfix "publish-workstation" (builtins.toJSON keyless.config.services.avahi));
+           pkgs.runCommand "lifemodel-mdns-module-evaluation" {} "touch $out";
       moduleEvaluation = assert toString keyless.config.services.k3s.package
           == toString nixpkgs.legacyPackages.${system}.k3s;
         assert keyless.config.services.k3s.package.version == pkgs.k3s.version;
@@ -338,6 +382,8 @@
           (builtins.readFile keyless.config.services.lifemodel.generatedRootKustomization)
           ./tests/fixtures/nixos/kustomization.yaml;
         module-evaluation = moduleEvaluation;
+        mdns-module-evaluation = mdnsEvaluation;
+        mdns-installer-unit-render = mdnsInstallerUnits;
         platform-kustomize-wiring = renderedPlatform;
         openbao-platform-render = renderedOpenBao;
         cnpg-platform-render = renderedCNPG;
