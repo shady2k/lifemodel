@@ -16,6 +16,7 @@ async function startServer(): Promise<void> {
   saved = 0;
   liveProvider = createReloadableLLMProvider(null);
   server = createSettingsServer({
+    instanceName: 'custom',
     config: {
       readConfig: async () => document,
       writeConfig: async (value) => {
@@ -96,6 +97,13 @@ const endpoint = {
 };
 
 describe('settings server writes its config boundary', () => {
+  it('renders the configured loader name, independent of the Host port', async () => {
+    await startServer();
+    const result = await request('/');
+    expect(result.body).toContain('http://boot-custom.local/');
+    expect(result.body).not.toContain('boot-localhost');
+  });
+
   it('renders an empty Postgres-backed document as unconfigured', async () => {
     await startServer();
     const result = await request('/');

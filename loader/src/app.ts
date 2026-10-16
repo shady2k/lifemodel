@@ -144,7 +144,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       if (http !== null) return;
       try {
         await state.ensureLayout();
-        http = createLoaderHttp({ state, logger, clock });
+        http = createLoaderHttp({ state, logger, clock, instanceName: config.instanceName });
         await new Promise<void>((resolve, reject) => {
           const server = http?.server;
           if (server === undefined) {

@@ -102,6 +102,7 @@ export interface StopTargets {
  * carries its port.
  */
 export interface SettingsStartOptions {
+  instanceName?: string;
   config: SettingsServerOptions['config'];
   onSaved: SettingsServerOptions['onSaved'];
   onConnection?: SettingsServerOptions['onConnection'];
@@ -123,6 +124,7 @@ export async function startSettingsInterface(
 ): Promise<SettingsServer> {
   const server = createSettingsServer({
     config: options.config,
+    instanceName: options.instanceName ?? process.env['LIFEMODEL_NAME'] ?? 'lifemodel',
     logger,
     onSaved: options.onSaved,
     ...(options.port !== undefined && { port: options.port }),

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { axe } from 'jest-axe';
 import { within } from '@testing-library/react';
 import i18n, { languageFor } from '../../web/app/src/i18n';
@@ -16,6 +16,12 @@ beforeEach(() => {
   darkPreference = false;
   mobilePreference = false;
   listeners = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue({
+      json: async () => ({ name: 'lifemodel', loaderUrl: 'http://boot-lifemodel.local/' }),
+    })
+  );
   window.matchMedia = (media) => ({
     get matches() {
       return media.includes('prefers-color-scheme')
@@ -42,6 +48,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   document.documentElement.classList.remove('dark');
+  vi.unstubAllGlobals();
 });
 
 describe('web app shell', () => {
@@ -64,6 +71,13 @@ describe('web app shell', () => {
       expect(screen.getByText(system)).toBeTruthy();
       expect(screen.getByRole('heading', { name: now })).toBeTruthy();
       expect(screen.getAllByText('lifemodel').length).toBeGreaterThan(0);
+      await waitFor(() =>
+        expect(
+          screen
+            .getAllByRole('link')
+            .some((link) => link.getAttribute('href') === 'http://boot-lifemodel.local/')
+        ).toBe(true)
+      );
       expect(document.documentElement.lang).toBe(language);
       expect(document.documentElement.classList.contains('dark')).toBe(dark);
       expect(
@@ -102,8 +116,10 @@ describe('web app shell', () => {
     await i18n.changeLanguage('en');
     render(<App />);
     const desktop = document.querySelector('[data-slot="sidebar"]')!;
-    expect(within(desktop).getByRole('link', { name: 'Loader' }).getAttribute('href')).toBe(
-      'http://boot.localhost/'
+    await waitFor(() =>
+      expect(within(desktop).getByRole('link', { name: 'Loader' }).getAttribute('href')).toBe(
+        'http://boot-lifemodel.local/'
+      )
     );
     expect(within(desktop).queryByRole('link', { name: 'Keys' })).toBeNull();
     expect(within(desktop).queryByRole('link', { name: 'Code' })).toBeNull();
@@ -115,7 +131,7 @@ describe('web app shell', () => {
     await user.click(await screen.findByRole('button', { name: 'Open navigation' }));
     const sheet = screen.getByRole('dialog', { name: 'Navigation' });
     expect(within(sheet).getByRole('link', { name: 'Loader' }).getAttribute('href')).toBe(
-      'http://boot.localhost/'
+      'http://boot-lifemodel.local/'
     );
     expect(within(sheet).queryByRole('link', { name: 'Keys' })).toBeNull();
     expect(within(sheet).queryByRole('link', { name: 'Code' })).toBeNull();
@@ -130,7 +146,7 @@ describe('web app shell', () => {
     expect(screen.getByRole('dialog', { name: 'Навигация' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Закрыть' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Загрузчик' }).getAttribute('href')).toBe(
-      'http://boot.localhost/'
+      'http://boot-lifemodel.local/'
     );
     cleanup();
     render(<App />);

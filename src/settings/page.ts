@@ -25,15 +25,9 @@ export function escapeHtml(value: string): string {
     .replaceAll("'", '&#39;');
 }
 
-/** The loader's address for the same instance: the pinned boot host, same port. */
-export function loaderUrl(host: string | undefined): string {
-  // The port comes from the request (the instance may be published on any
-  // port); the NAME is pinned to `boot.localhost`, never taken from the Host
-  // header - the loader's own login does the same, and a name a request
-  // supplies must never decide a link (docs/features/instance/loader.md).
-  const groups = /:(?<port>\d+)$/.exec(host ?? '')?.groups;
-  const port = groups?.['port'];
-  return port === undefined ? 'http://boot.localhost/' : `http://boot.localhost:${port}/`;
+/** The loader's address is instance-specific and supplied by the web configuration. */
+export function loaderUrl(instanceName = 'lifemodel'): string {
+  return `http://boot-${instanceName}.local/`;
 }
 
 const STYLE = `
@@ -56,8 +50,8 @@ export interface SettingsPageOptions {
   values: SettingsInput;
   /** What is wrong with them; empty on a first render. */
   errors?: SettingsErrors;
-  /** The request's Host header (only its port is used, for the loader's link). */
-  host?: string | undefined;
+  /** Configured instance identity; never inferred from the request Host. */
+  instanceName?: string;
   /** Environment variables that override the saved values, by name only. */
   overriddenBy?: string[];
   /** Set after a save: the page confirms the config is applied. */
@@ -108,7 +102,7 @@ function field(options: SettingsPageOptions, formField: (typeof SETTINGS_FIELDS)
 /** The whole page. */
 export function renderSettingsPage(options: SettingsPageOptions): string {
   const missing = endpointState(options.values);
-  const loader = loaderUrl(options.host);
+  const loader = loaderUrl(options.instanceName);
 
   const missingBlock =
     missing.length === 0

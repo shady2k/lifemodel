@@ -26,6 +26,7 @@ export interface WebRuntimeMetrics {
 
 export interface WebServerOptions {
   allowedOrigin: string;
+  instanceName: string;
   appDirectory: string;
   runtimeMetrics: WebRuntimeMetrics;
   intake: IOwnerMessageIntake;
@@ -86,6 +87,7 @@ class BoundedQueue<T> {
 
 export function createWebServer(options: WebServerOptions): FastifyInstance {
   if (!options.allowedOrigin) throw new Error('allowedOrigin is required');
+  if (!options.instanceName) throw new Error('instanceName is required');
   if (!options.appDirectory) throw new Error('appDirectory is required');
   if (!options.runtimeMetrics) throw new Error('runtimeMetrics is required');
   let allowed: URL;
@@ -132,6 +134,12 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
   server.addHook('onSend', async (_request, reply) => {
     reply.header('Content-Security-Policy', csp);
     if (!reply.hasHeader('Cache-Control')) reply.header('Cache-Control', 'no-store');
+  });
+  server.get('/api/instance', async (_request, reply) => {
+    return reply.code(200).send({
+      name: options.instanceName,
+      loaderUrl: `http://boot-${options.instanceName}.local/`,
+    });
   });
   server.get('/*', async (request, reply) => {
     const requested = request.url.split('?')[0] ?? '/';

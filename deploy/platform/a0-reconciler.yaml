@@ -1,5 +1,5 @@
 # Flux v2.9.6 Kustomization API: path, prune and wait are supported fields;
-# dependsOn is optional, so A0 deliberately has no dependency.
+# A0 waits for instance namespaces and edge objects before deploying loader.
 # https://github.com/fluxcd/kustomize-controller/blob/v1.9.6/docs/spec/v1/kustomizations.md
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
@@ -12,6 +12,8 @@ spec:
   # rollout cannot hold recovery until the 10m reconciliation interval.
   # https://fluxcd.io/flux/components/kustomize/kustomizations/#timeout
   timeout: 2m0s
+  dependsOn:
+    - name: platform-instance
   path: ./a0
   prune: true
   wait: true

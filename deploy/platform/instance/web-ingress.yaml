@@ -18,7 +18,7 @@ metadata:
 spec:
   ingressClassName: traefik
   rules:
-    - host: localhost
+    - host: ${LIFEMODEL_NAME}.local
       http:
         paths:
           - path: /

@@ -37,6 +37,7 @@ ISSUER="^https://token\\.actions\\.githubusercontent\\.com$"
 SUBJECT_REGEX="^https://github\\.com/shady2k/lifemodel/\\.github/workflows/release\\.yml@refs/tags/v.*$"
 INSECURE_REGISTRY=false
 RENDER_ONLY_DIR=""
+INSTANCE_NAME="lifemodel"
 KUBECTL=""
 
 usage() {
@@ -55,6 +56,7 @@ Verification (defaults are the NixOS module's defaults):
   --public-key-file FILE   PEM public key; REQUIRED when --verify key
 
 Cluster:
+  --name NAME              instance DNS label (default: lifemodel)
   --insecure-registry      render insecure: true (plain-HTTP registry)
   --render-only DIR        write the rendered root objects to DIR and exit
                            without touching the host
@@ -83,6 +85,7 @@ while [ "$#" -gt 0 ]; do
     --public-key-file)   require_value "$@"; PUBLIC_KEY_FILE=$2; shift 2 ;;
     --issuer)            require_value "$@"; ISSUER=$2; shift 2 ;;
     --subject-regex)     require_value "$@"; SUBJECT_REGEX=$2; shift 2 ;;
+    --name)               require_value "$@"; INSTANCE_NAME=$2; shift 2 ;;
     --insecure-registry) INSECURE_REGISTRY=true; shift ;;
     --render-only)       require_value "$@"; RENDER_ONLY_DIR=$2; shift 2 ;;
     --root-templates)    require_value "$@"; ROOT_TEMPLATES=$2; shift 2 ;;
@@ -92,6 +95,12 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$PLATFORM_URL" ] || die "--platform-url is required"
+case "$INSTANCE_NAME" in
+  ''|[!a-z]*|*[!a-z0-9-]*|-*|*-|y|n|yes|no|true|false|on|off|null|~)
+    die "--name must be a non-reserved lowercase DNS-1035 label (1-57 characters)" ;;
+esac
+[ "${#INSTANCE_NAME}" -le 57 ] || die "--name must be a non-reserved lowercase DNS-1035 label (1-57 characters)"
+LIFEMODEL_STATE_DIR=${LIFEMODEL_STATE_DIR:-/var/lib/lifemodel}
 if [ -n "$PLATFORM_TAG" ] && [ -n "$PLATFORM_DIGEST" ]; then
   die "--tag and --digest are mutually exclusive; pass exactly one"
 fi
@@ -168,6 +177,7 @@ render_root_objects() {
     esac
   done < "$templates_dir/ocirepository.yaml" > "$render_dir/ocirepository.yaml"
   cp "$templates_dir/kustomization.yaml" "$render_dir/kustomization.yaml"
+  sed "s/\${LIFEMODEL_NAME}/$INSTANCE_NAME/" "$templates_dir/instance.yaml" > "$render_dir/instance.yaml"
 }
 
 # Render-only mode: write the rendered objects and exit, touching nothing.
@@ -257,7 +267,6 @@ if [ "$VERIFY_MODE" = "key" ]; then
 fi
 
 LIFEMODEL_INSTALL_ROOT=${LIFEMODEL_INSTALL_ROOT:-}
-LIFEMODEL_STATE_DIR=${LIFEMODEL_STATE_DIR:-/var/lib/lifemodel}
 # The verified root platform source, rendered from the shared templates.
 render_root_objects "$render_dir"
 mkdir -p "$LIFEMODEL_STATE_DIR"
@@ -269,6 +278,27 @@ else
   LIFEMODEL_LOCK_FD=9
   LIFEMODEL_LOCK_HELD=1
 fi
+# Establish the fixed instance identity before publishing any name-dependent
+# root objects. A local state loss is recovered from the durable root ConfigMap.
+installed_name=""
+if [ -f "$LIFEMODEL_STATE_DIR/instance-name" ]; then
+  installed_name=$(cat "$LIFEMODEL_STATE_DIR/instance-name")
+else
+  identity_error=$(mktemp)
+  if installed_name=$($KUBECTL -n flux-system get configmap lifemodel-instance -o jsonpath='{.data.LIFEMODEL_NAME}' 2>"$identity_error"); then
+    [ -n "$installed_name" ] || { rm -f "$identity_error"; die "existing lifemodel-instance ConfigMap has no LIFEMODEL_NAME"; }
+  else
+    if grep -Fqi '(NotFound)' "$identity_error"; then installed_name="";
+    else cat "$identity_error" >&2; rm -f "$identity_error"; die "cannot determine existing instance identity"; fi
+  fi
+  rm -f "$identity_error"
+fi
+if [ -n "$installed_name" ] && [ "$installed_name" != "$INSTANCE_NAME" ]; then
+  die "instance name is fixed as $installed_name; reinstall to change it"
+fi
+printf '%s\n' "$INSTANCE_NAME" > "$LIFEMODEL_STATE_DIR/instance-name.tmp"
+chmod 0600 "$LIFEMODEL_STATE_DIR/instance-name.tmp"
+mv "$LIFEMODEL_STATE_DIR/instance-name.tmp" "$LIFEMODEL_STATE_DIR/instance-name"
 if [ -n "$PLATFORM_DIGEST" ]; then configured_ref="digest=$PLATFORM_DIGEST"; else configured_ref="tag=$PLATFORM_TAG"; fi
 if [ -f "$SCRIPT_DIR/deploy/cli/lifemodel.mjs" ]; then cli_source="$SCRIPT_DIR/deploy/cli/lifemodel.mjs"; else cli_source="$SCRIPT_DIR/../deploy/cli/lifemodel.mjs"; fi
 effective_oci="$render_dir/ocirepository-effective.yaml"
@@ -276,6 +306,7 @@ LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" LIFEMODEL_LOCK_FD="$LIFEMODEL_LOCK_FD
 effective_ref=$(LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" LIFEMODEL_LOCK_FD="$LIFEMODEL_LOCK_FD" LIFEMODEL_LOCK_HELD=1 node "$cli_source" effective-ref "$configured_ref")
 LIFEMODEL_KUBECTL="$KUBECTL" LIFEMODEL_LOCK_FD="$LIFEMODEL_LOCK_FD" LIFEMODEL_LOCK_HELD=1 LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" node "$cli_source" assert-root-ownership
 $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$effective_oci"
+$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$render_dir/instance.yaml"
 $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$render_dir/kustomization.yaml"
 
 # Install the recovery CLI and durably retain this successfully applied pin.
@@ -300,6 +331,7 @@ install -d -m 0755 "$bundle_dir" "$bundle_templates" "$bundle_dir/verification"
 if [ "$ROOT_TEMPLATES" != "$bundle_templates" ]; then
   cp "$ROOT_TEMPLATES/ocirepository.yaml" "$bundle_templates/ocirepository.yaml"
   cp "$ROOT_TEMPLATES/kustomization.yaml" "$bundle_templates/kustomization.yaml"
+  cp "$ROOT_TEMPLATES/instance.yaml" "$bundle_templates/instance.yaml"
 fi
 if [ "$SCRIPT_DIR/install.sh" != "$bundle_script" ]; then install -m 0755 "$SCRIPT_DIR/install.sh" "$bundle_script"; fi
 install -d -m 0755 "$bundle_dir/deploy/cli"
@@ -307,7 +339,7 @@ if [ "$cli_source" != "$bundle_dir/deploy/cli/lifemodel.mjs" ]; then
   install -m 0644 "$cli_source" "$bundle_dir/deploy/cli/lifemodel.mjs"
 fi
 if [ "$VERIFY_MODE" = "key" ] && [ "$PUBLIC_KEY_FILE" != "$bundle_key" ]; then install -m 0600 "$PUBLIC_KEY_FILE" "$bundle_key"; fi
-apply_args=$(node -e 'const [script,url,tag,digest,mode,issuer,subject,key,insecure,templates]=process.argv.slice(1); const a=[script,"--platform-url",url]; if(digest) a.push("--digest",digest); else a.push("--tag",tag); a.push("--verify",mode); if(mode==="key") a.push("--public-key-file",key); if(mode==="keyless") a.push("--issuer",issuer,"--subject-regex",subject); if(insecure==="true") a.push("--insecure-registry"); a.push("--root-templates",templates); process.stdout.write(JSON.stringify(a));' -- "$bundle_script" "$PLATFORM_URL" "$PLATFORM_TAG" "$PLATFORM_DIGEST" "$VERIFY_MODE" "$ISSUER" "$SUBJECT_REGEX" "$bundle_key" "$INSECURE_REGISTRY" "$bundle_templates")
+apply_args=$(node -e 'const [script,url,name,tag,digest,mode,issuer,subject,key,insecure,templates]=process.argv.slice(1); const a=[script,"--platform-url",url,"--name",name]; if(digest) a.push("--digest",digest); else a.push("--tag",tag); a.push("--verify",mode); if(mode==="key") a.push("--public-key-file",key); if(mode==="keyless") a.push("--issuer",issuer,"--subject-regex",subject); if(insecure==="true") a.push("--insecure-registry"); a.push("--root-templates",templates); process.stdout.write(JSON.stringify(a));' -- "$bundle_script" "$PLATFORM_URL" "$INSTANCE_NAME" "$PLATFORM_TAG" "$PLATFORM_DIGEST" "$VERIFY_MODE" "$ISSUER" "$SUBJECT_REGEX" "$bundle_key" "$INSECURE_REGISTRY" "$bundle_templates")
 quoted_args=$(shell_quote "$apply_args")
 install -d -m 0755 "$cli_lib_dir" "$cli_bin_dir" "$LIFEMODEL_STATE_DIR"
 install -m 0644 "$cli_source" "$cli_lib_dir/lifemodel.mjs"
@@ -318,5 +350,4 @@ EOF
 chmod 0755 "$cli_bin_dir/lifemodel"
 LIFEMODEL_LOCK_FD="$LIFEMODEL_LOCK_FD" LIFEMODEL_LOCK_HELD=1 LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" LIFEMODEL_CONFIGURED_REF="$configured_ref" \
   "$cli_bin_dir/lifemodel" record-applied "$effective_ref"
-
 printf 'install.sh: done (k3s v%s, Flux %s, platform source applied)\n' "$K3S_VERSION" "$FLUX_VERSION"

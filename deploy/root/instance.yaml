@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lifemodel-instance
+  namespace: flux-system
+data:
+  LIFEMODEL_NAME: '${LIFEMODEL_NAME}'

@@ -15,14 +15,14 @@ const docs = (path: string) =>
 describe('per-namespace application topology', () => {
   it('declares isolated target and release namespaces with appliers and local GitRepositories', () => {
     const objects = ['deploy/platform/a/applications.yaml'].flatMap(docs);
+    const instance = docs('deploy/platform/instance/namespace-app.yaml');
     const namespaces = objects.filter((o) => o.kind === 'Namespace').map((o) => o.metadata.name);
+    expect(namespaces).not.toContain('lifemodel');
+    expect(instance.some((o) => o.kind === 'Namespace' && o.metadata.name === 'lifemodel')).toBe(
+      true
+    );
     expect(namespaces).toEqual(
-      expect.arrayContaining([
-        'lifemodel',
-        'lifemodel-motor',
-        'lifemodel-releases',
-        'lifemodel-motor-releases',
-      ])
+      expect.arrayContaining(['lifemodel-motor', 'lifemodel-releases', 'lifemodel-motor-releases'])
     );
     for (const ns of ['lifemodel', 'lifemodel-motor']) {
       expect(objects).toContainEqual(

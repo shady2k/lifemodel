@@ -52,9 +52,9 @@ is the milestone's only channel (Telegram is out, owner 2026-10-11).
   token. Fragments are stripped because they are not sent to the server;
   browsers refuse `Domain=localhost`, and
   `/_auth/verify` for Traefik ForwardAuth. The verify route checks the
-  request's own Host against `localhost`, `boot.localhost` and
-  `vault.localhost`.
-- Traefik routes only `boot.localhost`, without ForwardAuth.
+  request's own Host against `<name>.local`, `boot-<name>.local` and
+  `vault-<name>.local`.
+- Traefik routes only `boot-<name>.local`, without ForwardAuth.
 - The core's primary recipient comes only from a Telegram chat id, which is
   null now, so the core cannot write first to anyone.
 
@@ -302,10 +302,9 @@ deploy branch):
 
 | Host and path | Guard | Target |
 |---|---|---|
-| `boot.localhost` `/login`, `/setup` (exact, higher priority) | none: the loader refuses `/setup` once a password exists | loader |
-| `boot.localhost` everything else | ForwardAuth | loader |
-| `localhost` `/_auth/handoff` (exact, higher priority, in `lifemodel-system` with the loader Service) | none | loader |
-| `localhost` everything else (app, assets, `/api/*`) | ForwardAuth | web |
+| `boot-<name>.local` every path | none; the loader enforces its route table | loader |
+| `<name>.local` `/_auth/handoff` (exact, higher priority, in `lifemodel-system` with the loader Service) | none | loader |
+| `<name>.local` everything else (app, assets, `/api/*`) | ForwardAuth | web |
 
 - ForwardAuth's address is the loader's in-cluster Service. The loader
   accepts `/_auth/verify` on that Service host only for this path, and it
@@ -326,7 +325,7 @@ deploy branch):
 **Security rules:**
 
 - Every state-changing request needs an Origin header that parses to exactly
-  the scheme, host and port `http://localhost`. A missing, `null`,
+  the scheme, host and port `http://<name>.local`. A missing, `null`,
   malformed or sibling-host Origin is refused with 403. No CORS.
 - The JSON body must have a UUIDv7 `id`, non-empty text up to 16 KiB, and
   optionally `replyTo` as a decimal `sequence` string. The
@@ -545,7 +544,7 @@ VM.
   - a route-table test: every route requested without a session through a
     ForwardAuth stub is denied, and `/login` and `/setup` stay reachable;
   - on the VM through real Traefik: first setup, first login, the return to
-    `localhost`, an expired cookie, a tampered cookie, the loader down (fail
+    `<name>.local`, an expired cookie, a tampered cookie, the loader down (fail
     closed), anonymous assets and events, and direct Service reachability
     from another namespace.
 - **S6:** unit tests on the Origin guard: missing, `null`, malformed,
