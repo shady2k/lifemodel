@@ -68,20 +68,6 @@ function Navigation() {
                   </a>
                 </SidebarMenuButton>
               </SidebarMenuItem>
-              <SidebarMenuItem>
-                <SidebarMenuButton asChild>
-                  <a href="http://vault.localhost/" target="_blank" rel="noopener noreferrer">
-                    <span>{t('keys')}</span>
-                  </a>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-              <SidebarMenuItem>
-                <SidebarMenuButton asChild>
-                  <a href="http://git.localhost/" target="_blank" rel="noopener noreferrer">
-                    <span>{t('code')}</span>
-                  </a>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
