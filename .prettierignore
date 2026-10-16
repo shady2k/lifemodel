@@ -4,14 +4,14 @@ data/
 *.md
 
 # Pinned shadcn registry output; verified byte-for-byte by provenance tests.
-web/app/src/components/ui/
-web/app/registry-lock/
-web/app/src/hooks/use-highlighted-code.ts
-web/app/src/hooks/use-mobile.ts
-web/app/src/lib/highlighter.tsx
-web/app/src/lib/utils.ts
+web/kit/components/ui/
+web/kit/registry-lock/
+web/kit/hooks/use-highlighted-code.ts
+web/kit/hooks/use-mobile.ts
+web/kit/lib/highlighter.tsx
+web/kit/lib/utils.ts
 
 # Additional pinned shadcn registry output.
-web/app/src/hooks/use-highlighted-code.ts
-web/app/src/hooks/use-mobile.ts
-web/app/src/lib/highlighter.tsx
+web/kit/hooks/use-highlighted-code.ts
+web/kit/hooks/use-mobile.ts
+web/kit/lib/highlighter.tsx

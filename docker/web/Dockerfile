@@ -6,6 +6,7 @@ COPY package.json package-lock.json .npmrc ./
 RUN npm ci
 COPY src ./src
 COPY web/app ./web/app
+COPY web/kit ./web/kit
 RUN npm run build:web
 
 FROM ${NODE_IMAGE} AS runtime

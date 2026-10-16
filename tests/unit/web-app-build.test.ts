@@ -39,9 +39,11 @@ describe('production web app output', () => {
     expect(css.join('\n')).not.toMatch(/url\(["']?data:font\//i);
     expect(files.some((file) => file.endsWith('.woff2'))).toBe(true);
     const sources = await Promise.all(
-      ['src/Conversation.tsx', 'src/components/ui/code-block.tsx', 'src/lib/highlighter.tsx'].map(
-        (file) => readFile(path.join(appRoot, file), 'utf8')
-      )
+      [
+        'src/Conversation.tsx',
+        '../kit/components/ui/code-block.tsx',
+        '../kit/lib/highlighter.tsx',
+      ].map((file) => readFile(path.join(appRoot, file), 'utf8'))
     );
     expect(sources.join('\n')).not.toContain('dangerouslySetInnerHTML');
   });

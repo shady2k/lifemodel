@@ -38,11 +38,11 @@
     },
     {
       "path": "components/ui/code-block.tsx",
-      "sha256": "48e5c4caa69fd243853d54f6e93bdf1a2d1e8d5d1c1992adec664d87635dec72"
+      "sha256": "d81e234a3977b8dd022e0b9ea6d03b7ae03e4814f8532376894747afc5207f46"
     },
     {
       "path": "components/ui/input-group.tsx",
-      "sha256": "f71e9c0fc3ef6d67ff325f23b245fe472710d2db05153a6e067db3162aae970e"
+      "sha256": "7db32d31c811770ab26e3a7ce75cc5dc157c36eae3656a10ed6e42f9cd7cf414"
     },
     {
       "path": "components/ui/input.tsx",
@@ -54,7 +54,7 @@
     },
     {
       "path": "components/ui/message-scroller.tsx",
-      "sha256": "59c562ae19bb1d3ae5e51385f7f957824e94a86b790567ecef4d9e895424a819"
+      "sha256": "801e36dd7965660ae80ab90ac63162b3cbdf983ea5241d333749686a5d200732"
     },
     {
       "path": "components/ui/message.tsx",
@@ -66,11 +66,11 @@
     },
     {
       "path": "components/ui/sheet.tsx",
-      "sha256": "549678370096804f5acd0895fcbd58084b45ac80f28197887377038d8266ddd3"
+      "sha256": "bcc511451e5a6c82351bc2463a19bbde19069cbd8411ec33251abdde0ea98093"
     },
     {
       "path": "components/ui/sidebar.tsx",
-      "sha256": "a0ebdc2eecc0ac620d56b77b30bc059d5a1f3c77e614586e45a73dfc31b55851"
+      "sha256": "1dcce388db96fd0b66ddb8e976ac56dc5a576cb24d5380240c5ab24c9569d800"
     },
     {
       "path": "components/ui/skeleton.tsx",
@@ -86,7 +86,7 @@
     },
     {
       "path": "hooks/use-highlighted-code.ts",
-      "sha256": "52c87d08f21b66b45ae7b724c9e1bd20694dd86ff75ee03e9ff35aa7af5461e0"
+      "sha256": "5668b3929091fe04bb562723fc3cba6c826dc63b13c30df4e47c5042ea5d49fb"
     },
     {
       "path": "hooks/use-mobile.ts",

@@ -17,9 +17,14 @@
     "noFallthroughCasesInSwitch": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["src/*"],
+      "@kit/*": ["../kit/*"],
+      "@/components/ui/*": ["../kit/components/ui/*"],
+      "@/hooks/*": ["../kit/hooks/*"],
+      "@/lib/utils": ["../kit/lib/utils"],
+      "@/lib/highlighter": ["../kit/lib/highlighter"]
     },
     "types": ["vite/client"]
   },
-  "include": ["src", "vite.config.ts"]
+  "include": ["src", "vite.config.ts", "../kit/**/*.ts", "../kit/**/*.tsx"]
 }
