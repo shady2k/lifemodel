@@ -105,6 +105,9 @@ case "$INSTANCE_NAME" in
     die "--name must be a non-reserved lowercase DNS-1035 label (1-57 characters)" ;;
 esac
 [ "${#INSTANCE_NAME}" -le 57 ] || die "--name must be a non-reserved lowercase DNS-1035 label (1-57 characters)"
+case "$LAN_INTERFACE" in *[!A-Za-z0-9_.:-]* ) die "--lan-interface must contain only safe interface characters" ;; esac
+[ "${#LAN_INTERFACE}" -le 15 ] || die "--lan-interface must be at most 15 characters"
+case "$LAN_INTERFACE" in cni*|flannel*|veth*|wg*|tun*|tailscale*) [ -z "$LAN_INTERFACE" ] || die "refusing non-LAN interface: $LAN_INTERFACE" ;; esac
 LIFEMODEL_STATE_DIR=${LIFEMODEL_STATE_DIR:-/var/lib/lifemodel}
 if [ -n "$PLATFORM_TAG" ] && [ -n "$PLATFORM_DIGEST" ]; then
   die "--tag and --digest are mutually exclusive; pass exactly one"
@@ -185,10 +188,10 @@ render_root_objects() {
   sed "s/\${LIFEMODEL_NAME}/$INSTANCE_NAME/" "$templates_dir/instance.yaml" > "$render_dir/instance.yaml"
   interface=$LAN_INTERFACE
   if [ -z "$interface" ]; then
-    interface=$(ip -4 route show default | awk 'NR==1 {print $5}')
-    case "$interface" in cni*|flannel*|veth*|wg*|tun*|tailscale*) interface="" ;; esac
+    interface=$(ip -j -4 route show default | sed -n 's/.*"dev"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9_.:-]*\)".*/\1/p' | sed -n '1p')
   fi
-  [ -n "$interface" ] || interface=eth0
+  [ -n "$interface" ] || die "cannot determine a usable IPv4 default-route interface; pass --lan-interface"
+  case "$interface" in cni*|flannel*|veth*|wg*|tun*|tailscale*) die "refusing non-LAN interface: $interface" ;; esac
   mdns_source=$MDNS_SOURCE
   mkdir -p "$render_dir/systemd"
   for dns_name in "$INSTANCE_NAME.local" "boot-$INSTANCE_NAME.local" "vault-$INSTANCE_NAME.local"; do
@@ -221,44 +224,55 @@ command -v apt-get >/dev/null 2>&1 || die "apt-get is required to install avahi-
 apt-get update
 apt-get install -y avahi-daemon avahi-utils
 lan_interface=$LAN_INTERFACE
-mdns_source=$MDNS_SOURCE
 if [ -z "$lan_interface" ]; then
-  lan_interface=$(ip -4 route show default | awk 'NR==1 {print $5}')
-  case "$lan_interface" in cni*|flannel*|veth*|wg*|tun*|tailscale*) lan_interface="" ;; esac
+  lan_interface=$(ip -j -4 route show default | sed -n 's/.*"dev"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9_.:-]*\)".*/\1/p' | sed -n '1p')
 fi
-[ -n "$lan_interface" ] || die "cannot determine a usable LAN interface; pass --lan-interface"
+[ -n "$lan_interface" ] || die "cannot determine a usable IPv4 default-route interface; pass --lan-interface"
+case "$lan_interface" in *[!A-Za-z0-9_.:-]*|'') die "invalid LAN interface name" ;; esac
+[ "${#lan_interface}" -le 15 ] || die "LAN interface name exceeds 15 characters"
 case "$lan_interface" in cni*|flannel*|veth*|wg*|tun*|tailscale*) die "refusing non-LAN interface: $lan_interface" ;; esac
 host_root=${LIFEMODEL_INSTALL_ROOT:-}
-if [ -n "$host_root" ]; then
-  : # Installer harness: render package and unit files without changing the host.
-else
-install -d -m 0755 "$host_root/usr/lib/lifemodel" "$host_root/etc/systemd/system" "$host_root/etc/avahi" "$host_root/etc/avahi/avahi-daemon.conf.d"
+mdns_source=$MDNS_SOURCE
+mkdir -p "$host_root/usr/lib/lifemodel" "$host_root/etc/systemd/system" "$host_root/etc/avahi"
 install -m 0755 "$MDNS_SOURCE/publish-name" "$host_root/usr/lib/lifemodel/publish-name"
 for dns_name in "$INSTANCE_NAME.local" "boot-$INSTANCE_NAME.local" "vault-$INSTANCE_NAME.local"; do
   unit_name=$(printf '%s' "$dns_name" | tr '.' '-')
   sed -e "s|@PUBLISHER@|/usr/lib/lifemodel/publish-name|g" -e "s|@NAME@|$dns_name|g" -e "s|@INTERFACE@|$lan_interface|g" "$mdns_source/publisher.service.in" > "$host_root/etc/systemd/system/lifemodel-mdns-$unit_name.service"
 done
-if [ -n "$host_root" ]; then
-  printf '[server]\nallow-interfaces=%s\n' "$lan_interface" > "$host_root/etc/avahi/avahi-daemon.conf.d/lifemodel.conf"
-else
-  if grep -q '^allow-interfaces=' /etc/avahi/avahi-daemon.conf; then
-    sed -i "s|^allow-interfaces=.*|allow-interfaces=$lan_interface|" /etc/avahi/avahi-daemon.conf
-  else
-    printf '\n[server]\nallow-interfaces=%s\n' "$lan_interface" >> /etc/avahi/avahi-daemon.conf
-  fi
+avahi_conf="$host_root/etc/avahi/avahi-daemon.conf"
+[ -n "$host_root" ] || avahi_conf=/etc/avahi/avahi-daemon.conf
+[ -f "$avahi_conf" ] || : > "$avahi_conf"
+updated=$(mktemp)
+awk -v iface="$lan_interface" '
+BEGIN { section=""; seen=0 }
+/^\[[^]]+\][[:space:]]*([#;].*)?$/ {
+  if (section == "server" && !seen) { print "allow-interfaces=" iface; seen=1 }
+  section=substr($0,2,index($0,"]")-2); print; next
+}
+section == "server" && /^[[:space:]]*allow-interfaces[[:space:]]*=/ {
+  if (!seen) { sub(/^[[:space:]]*/, ""); print "allow-interfaces=" iface; seen=1 }
+  next
+}
+{ print }
+END { if (section == "server" && !seen) print "allow-interfaces=" iface; else if (section != "server") { print "[server]"; print "allow-interfaces=" iface } }
+' "$avahi_conf" > "$updated"
+if ! cmp -s "$updated" "$avahi_conf"; then cat "$updated" > "$avahi_conf"; avahi_changed=1; else avahi_changed=0; fi
+rm -f "$updated"
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload
+  systemctl enable avahi-daemon.service
+  if [ "$avahi_changed" -eq 1 ]; then systemctl restart avahi-daemon.service; else systemctl start avahi-daemon.service; fi
+  for dns_name in "$INSTANCE_NAME.local" "boot-$INSTANCE_NAME.local" "vault-$INSTANCE_NAME.local"; do
+    unit_name=$(printf '%s' "$dns_name" | tr '.' '-')
+    systemctl enable --now "lifemodel-mdns-$unit_name.service"
+  done
 fi
-if [ -z "$host_root" ]; then systemctl daemon-reload; systemctl enable --now avahi-daemon.service; fi
-for dns_name in "$INSTANCE_NAME.local" "boot-$INSTANCE_NAME.local" "vault-$INSTANCE_NAME.local"; do
-  unit_name=$(printf '%s' "$dns_name" | tr '.' '-')
-  if [ -z "$host_root" ]; then systemctl enable --now "lifemodel-mdns-$unit_name.service"; fi
-done
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
   ufw allow in on "$lan_interface" to any port 80 proto tcp
   ufw allow in on "$lan_interface" to any port 443 proto tcp
   ufw allow in on "$lan_interface" to any port 5353 proto udp
-else
+elif [ -z "$host_root" ]; then
   echo "NOTE: ensure host firewall allows TCP 80/443 and UDP 5353 on $lan_interface only" >&2
-fi
 fi
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"

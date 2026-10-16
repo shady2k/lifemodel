@@ -48,6 +48,16 @@ let
         ExecStart = "${publisher}/bin/lifemodel-mdns-publish ${lib.escapeShellArg name} ${lib.escapeShellArg cfg.lanInterface}";
         Restart = "on-failure";
         RestartSec = 2;
+        User = "avahi";
+        Group = "avahi";
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        CapabilityBoundingSet = "";
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_NETLINK" ];
+        RestrictNamespaces = true;
+        LockPersonality = true;
       };
     };
   }) mdnsNames);
@@ -56,7 +66,7 @@ in
   options.services.lifemodel = {
     enable = mkEnableOption "lifemodel GitOps platform bootstrap";
     name = mkOption { type = types.strMatching "[a-z]([a-z0-9-]{0,55}[a-z0-9])?"; default = "lifemodel"; description = "Fixed non-reserved DNS-1035 instance label (max 57 characters)."; };
-    lanInterface = mkOption { type = types.str; default = config.networking.defaultGateway.interface or "eth0"; description = "LAN interface for mDNS publication and firewall access."; };
+    lanInterface = mkOption { type = types.str; default = if (config.networking.defaultGateway.interface or null) == null then "" else config.networking.defaultGateway.interface; description = "LAN interface for mDNS publication and firewall access; set explicitly when no default gateway interface is declared."; };
     platform = {
       url = mkOption { type = types.str; description = "OCI URL of the signed platform artifact."; };
       tag = mkOption { type = types.nullOr types.str; default = null; description = "OCI artifact tag (required unless digest is set)."; };
@@ -80,6 +90,8 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       { assertion = cfg.platform.url != ""; message = "services.lifemodel.platform.url is required"; }
+      { assertion = cfg.lanInterface != ""; message = "services.lifemodel.lanInterface must be set when networking.defaultGateway.interface is not configured"; }
+      { assertion = builtins.stringLength cfg.lanInterface <= 15 && builtins.match "[A-Za-z0-9_.:-]+" cfg.lanInterface != null; message = "services.lifemodel.lanInterface must be a valid Linux interface name (1-15 safe characters)"; }
       { assertion = !(lib.any (prefix: lib.hasPrefix prefix cfg.lanInterface) [ "cni" "flannel" "veth" "wg" "tun" "tailscale" ]);
         message = "services.lifemodel.lanInterface must be a LAN interface, not a cluster, tunnel or VPN interface"; }
       { assertion = builtins.stringLength cfg.name <= 57
@@ -105,6 +117,9 @@ in
     environment.systemPackages = [ lifemodelK3s lifemodelCli publisher ];
     services.avahi = {
       enable = true;
+      publish.enable = true;
+      publish.userServices = true;
+      openFirewall = false;
       allowInterfaces = [ cfg.lanInterface ];
     };
     networking.firewall.interfaces.${cfg.lanInterface} = {

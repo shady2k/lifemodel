@@ -122,6 +122,8 @@ function runInstallerHarness(
     digest?: string;
     owner?: string;
     sourceDir?: string;
+    avahiConfig?: string;
+    ufwActive?: boolean;
   } = {}
 ): { status: number | null; output: string; root: string } {
   const root = existingRoot ?? mkdtempSync(join(tmpdir(), 'lifemodel-installer-test-'));
@@ -165,11 +167,18 @@ case "$*" in
 esac`
   );
   command('apt-get', 'exit 0');
-  command('ip', 'echo default via 192.0.2.1 dev eth0');
-  command('systemctl', 'exit 0');
-  command('ufw', 'echo Status: inactive');
+  command('ip', `if [ "$1" = -j ]; then echo '[{\"dev\":\"eth0\"}]'; else exit 0; fi`);
+  command('systemctl', 'echo "$*" >> "$SYSTEMCTL_LOG"; exit 0');
+  command(
+    'ufw',
+    `if [ "$1" = status ]; then echo Status: ${options.ufwActive ? 'active' : 'inactive'}; else echo "$*" >> "$UFW_LOG"; fi`
+  );
   command('curl', 'for arg do output=$arg; done; printf manifest > "$output"');
   command('sha256sum', 'read expected file; echo "$file: OK"');
+  if (options.avahiConfig) {
+    mkdirSync(join(root, 'install-root/etc/avahi'), { recursive: true });
+    writeFileSync(join(root, 'install-root/etc/avahi/avahi-daemon.conf'), options.avahiConfig);
+  }
   const env = {
     ...process.env,
     PATH: `${bin}:${process.env.PATH}`,
@@ -180,6 +189,8 @@ esac`
     K3S_APPLIED_REF: join(root, 'applied-ref'),
     K3S_FAIL_FLUX: failFlux ? '1' : '0',
     K3S_FOREIGN: foreign ? '1' : '0',
+    UFW_LOG: join(root, 'ufw.log'),
+    SYSTEMCTL_LOG: join(root, 'systemctl.log'),
     K3S_MANAGED_FIELDS: options.owner
       ? `{\"manager\":\"${options.owner}\",\"fieldsV1\":{\"f:spec\":{\"f:ref\":{\"f:tag\":{}}}}}`
       : '',
@@ -203,6 +214,8 @@ esac`
       ...refArgs,
       '--root-templates',
       templates,
+      '--lan-interface',
+      'eth0',
     ],
     { encoding: 'utf8', env }
   );
@@ -210,6 +223,69 @@ esac`
 }
 
 describe('platform manifests', () => {
+  it('rejects unsafe or forbidden LAN interfaces in render-only and install modes', () => {
+    for (const iface of ['wg0', 'eth&0', 'a'.repeat(16), 'eth0;touch']) {
+      const result = spawnSync(
+        'sh',
+        [
+          installer,
+          '--platform-url',
+          'oci://example.test/platform',
+          '--tag',
+          'v1.0.0',
+          '--lan-interface',
+          iface,
+          '--render-only',
+          join(tmpdir(), `mdns-invalid-${process.pid}`),
+          '--root-templates',
+          rootTemplates,
+        ],
+        { encoding: 'utf8' }
+      );
+      expect(result.status, result.stderr).not.toBe(0);
+    }
+  });
+
+  it('renders interface-scoped active-UFW rules under a fake root', () => {
+    const result = runInstallerHarness(false, false, undefined, 'v1.0.0', { ufwActive: true });
+    try {
+      expect(result.status, result.output).toBe(0);
+      expect(readFileSync(join(result.root, 'ufw.log'), 'utf8').trim().split('\n')).toEqual([
+        'allow in on eth0 to any port 80 proto tcp',
+        'allow in on eth0 to any port 443 proto tcp',
+        'allow in on eth0 to any port 5353 proto udp',
+      ]);
+    } finally {
+      rmSync(result.root, { recursive: true, force: true });
+    }
+  });
+
+  it('generates mDNS host files in the fake root and edits only the server interface key', () => {
+    const config =
+      '# keep comment\n[other]\nallow-interfaces=untouched\n[server]\n  # preserve\n  allow-interfaces=eth1\n[wide-area]\nenable-wide-area=no\n';
+    const result = runInstallerHarness(false, false, undefined, 'v1.0.0', { avahiConfig: config });
+    try {
+      expect(result.status, result.output).toBe(0);
+      const root = join(result.root, 'install-root');
+      const written = readFileSync(join(root, 'etc/avahi/avahi-daemon.conf'), 'utf8');
+      expect(written).toContain('# keep comment');
+      expect(written).toContain('[other]\nallow-interfaces=untouched');
+      expect(written).toContain('[server]\n  # preserve\nallow-interfaces=eth0');
+      expect(written).toContain('[wide-area]\nenable-wide-area=no');
+      expect(
+        readFileSync(
+          join(root, 'etc/systemd/system/lifemodel-mdns-lifemodel-local.service'),
+          'utf8'
+        )
+      ).toContain('ExecStart=/usr/lib/lifemodel/publish-name lifemodel.local eth0');
+      expect(existsSync(join(root, 'usr/lib/lifemodel/publish-name'))).toBe(true);
+      expect(readFileSync(join(result.root, 'systemctl.log'), 'utf8')).toContain(
+        'restart avahi-daemon.service'
+      );
+    } finally {
+      rmSync(result.root, { recursive: true, force: true });
+    }
+  });
   it('does not render Helm hook resources in step A', () => {
     const rendered = parseYamlFiles([
       join(platformRoot, 'a/openbao/rendered.yaml'),

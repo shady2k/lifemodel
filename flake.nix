@@ -24,6 +24,7 @@
           enable = true;
           platform.url = "oci://ghcr.io/shady2k/lifemodel-platform";
           platform.tag = "v1.0.0";
+          lanInterface = "eth0";
         };
       };
       evaluate = extra: lib.nixosSystem { inherit system; modules = [ exportedModule baseModule extra ]; };
@@ -75,6 +76,9 @@
           grep -F "Description=Publish $name on LAN with mDNS" "$file"
           grep -F "ExecStart=/usr/lib/lifemodel/publish-name $name eth0" "$file"
           grep -F 'Restart=on-failure' "$file"
+          grep -F 'NoNewPrivileges=true' "$file"
+          grep -F 'ProtectSystem=strict' "$file"
+          grep -F 'RestrictAddressFamilies=AF_UNIX AF_NETLINK' "$file"
         done
         touch $out
       '';
@@ -324,13 +328,29 @@
         assert lib.hasInfix ''$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$render_dir/kustomization.yaml"'' installScript;
         assert !(lib.hasInfix "--force-conflicts" installScript);
         pkgs.runCommand "lifemodel-bootstrap-field-ownership" {} "touch $out";
+      avahiConfigPath = builtins.elemAt (lib.splitString " " (builtins.elemAt (lib.splitString " -f " keyless.config.systemd.services.avahi-daemon.serviceConfig.ExecStart) 1)) 0;
+      renderedAvahiConfig = builtins.readFile avahiConfigPath;
       mdnsEvaluation =
         let names = [ "lifemodel.local" "boot-lifemodel.local" "vault-lifemodel.local" ];
             units = keyless.config.systemd.services;
         in assert keyless.config.services.avahi.enable;
+           assert keyless.config.services.avahi.publish.enable;
+           assert keyless.config.services.avahi.publish.userServices;
+           assert lib.hasInfix "disable-publishing=no" renderedAvahiConfig;
+           assert lib.hasInfix "disable-user-service-publishing=no" renderedAvahiConfig;
+           assert lib.hasInfix "allow-interfaces=eth0" renderedAvahiConfig;
+           assert keyless.config.services.avahi.openFirewall == false;
+           assert !(builtins.elem 5353 keyless.config.networking.firewall.allowedUDPPorts);
+           assert !(builtins.elem 80 keyless.config.networking.firewall.allowedTCPPorts);
+           assert !(builtins.elem 443 keyless.config.networking.firewall.allowedTCPPorts);
            assert keyless.config.services.avahi.allowInterfaces == [ keyless.config.services.lifemodel.lanInterface ];
            assert keyless.config.networking.firewall.interfaces.${keyless.config.services.lifemodel.lanInterface}.allowedTCPPorts == [ 80 443 ];
            assert keyless.config.networking.firewall.interfaces.${keyless.config.services.lifemodel.lanInterface}.allowedUDPPorts == [ 5353 ];
+           assert keyless.config.services.avahi.publish.enable;
+           assert keyless.config.services.avahi.publish.userServices;
+           assert keyless.config.systemd.services."lifemodel-mdns-lifemodel-local".serviceConfig.NoNewPrivileges;
+           assert keyless.config.systemd.services."lifemodel-mdns-lifemodel-local".serviceConfig.RestrictAddressFamilies == [ "AF_UNIX" "AF_NETLINK" ];
+
            assert builtins.all (name: builtins.hasAttr "lifemodel-mdns-${lib.replaceStrings [ "." ] [ "-" ] name}" units) names;
            assert builtins.all (name: lib.hasInfix "${name}" units."lifemodel-mdns-${lib.replaceStrings [ "." ] [ "-" ] name}".serviceConfig.ExecStart) names;
            assert !(lib.hasInfix "publish-workstation" (builtins.toJSON keyless.config.services.avahi));

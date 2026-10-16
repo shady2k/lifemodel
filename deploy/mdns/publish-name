@@ -8,19 +8,31 @@ fi
 name=$1
 iface=$2
 child=
+monitor_pid=
 monitor_fd=
+stop=0
 cleanup() {
-  [[ -z "$child" ]] || kill "$child" 2>/dev/null || true
+  trap - EXIT INT TERM
+  if [[ -n "$child" ]]; then kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; fi
+  if [[ -n "$monitor_pid" ]]; then kill "$monitor_pid" 2>/dev/null || true; wait "$monitor_pid" 2>/dev/null || true; fi
+  if [[ -n "$monitor_fd" ]]; then exec {monitor_fd}<&- 2>/dev/null || true; fi
 }
-trap cleanup EXIT INT TERM
+stop_now() { exit 0; }
+trap cleanup EXIT
+trap stop_now INT TERM
 
 address() {
   ip -o -4 addr show dev "$iface" scope global | awk '{ split($4, a, "/"); print a[1]; exit }'
 }
 
+# A missing interface is an operational failure. No address on a present
+# interface is normal and remains a visible wait for DHCP/address assignment.
+ip link show dev "$iface" >/dev/null || { echo "Interface $iface is unavailable" >&2; exit 1; }
 echo "Waiting for IPv4 address on $iface to publish $name" >&2
-exec {monitor_fd}< <(ip monitor address dev "$iface")
-last=$(address)
+coproc MONITOR { ip monitor address dev "$iface"; }
+monitor_pid=$MONITOR_PID
+monitor_fd=${MONITOR[0]}
+last=$(address) || { echo "Cannot read IPv4 address on $iface" >&2; exit 1; }
 
 publish() {
   if [[ -n "$child" ]]; then
@@ -37,16 +49,26 @@ publish() {
     echo "No IPv4 address on $iface; waiting to publish $name" >&2
   fi
 }
-
-if [[ -n "$last" ]]; then publish "$last"; else publish ""; fi
+publish "$last"
 while :; do
+  if ! kill -0 "$monitor_pid" 2>/dev/null; then
+    wait "$monitor_pid" || { echo "Address monitor failed for $iface" >&2; exit 1; }
+    echo "Address monitor ended unexpectedly for $iface" >&2; exit 1
+  fi
   if [[ -n "$child" ]] && ! kill -0 "$child" 2>/dev/null; then
     wait "$child" || { echo "avahi-publish-address failed for $name (possible name collision)" >&2; exit 1; }
-    echo "avahi-publish-address exited unexpectedly for $name" >&2
-    exit 1
+    echo "avahi-publish-address exited unexpectedly for $name" >&2; exit 1
   fi
   if IFS= read -r -t 1 -u "$monitor_fd" event; then
-    current=$(address)
+    ip link show dev "$iface" >/dev/null || { echo "Interface $iface disappeared" >&2; exit 1; }
+    current=$(address) || { echo "Cannot read IPv4 address on $iface" >&2; exit 1; }
     [[ "$current" == "$last" ]] || publish "$current"
+  else
+    read_status=$?
+    if (( read_status < 128 )); then
+      wait "$monitor_pid" 2>/dev/null || { echo "Address monitor failed for $iface" >&2; exit 1; }
+      echo "Address monitor ended unexpectedly for $iface" >&2
+      exit 1
+    fi
   fi
 done

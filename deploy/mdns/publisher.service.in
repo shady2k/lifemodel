@@ -8,6 +8,16 @@ Type=simple
 ExecStart=@PUBLISHER@ @NAME@ @INTERFACE@
 Restart=on-failure
 RestartSec=2
+User=avahi
+Group=avahi
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=true
+LockPersonality=true
 
 [Install]
 WantedBy=multi-user.target
