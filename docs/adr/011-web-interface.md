@@ -397,7 +397,7 @@ deploy branch):
 - The stack, agreed with the owner on 2026-10-15:
   - React 19, TypeScript and Vite, in `web/app/`;
   - TanStack Query for reads, with the EventSource feeding new rows into its
-    cache; TanStack Router for routes; TanStack Virtual for the long list;
+    cache; TanStack Router once the app has a second view; TanStack Virtual for the long list;
   - Radix UI primitives with shadcn/ui components kept in the repository,
     Tailwind CSS v4, and lucide-react icons;
   - code highlighting with Shiki;

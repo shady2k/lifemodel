@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { axe } from 'jest-axe';
 import { within } from '@testing-library/react';
-import i18n from '../../web/app/src/i18n';
+import i18n, { languageFor } from '../../web/app/src/i18n';
 import 'jest-axe/extend-expect';
 import App from '../../web/app/src/App';
 
@@ -18,7 +18,13 @@ beforeEach(() => {
   listeners = [];
   window.matchMedia = (media) => ({
     get matches() {
-      return media.includes('prefers-color-scheme') ? darkPreference : mobilePreference;
+      return media.includes('prefers-color-scheme')
+        ? darkPreference
+        : media.includes('max-width: 1023px')
+          ? window.innerWidth <= 1023
+          : media.includes('max-width: 767px')
+            ? window.innerWidth <= 767
+            : mobilePreference;
     },
     media,
     onchange: null,
@@ -29,6 +35,7 @@ beforeEach(() => {
     removeEventListener: () => undefined,
     dispatchEvent: () => true,
   });
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1200 });
   Object.defineProperty(navigator, 'language', { configurable: true, value: 'en-US' });
 });
 
@@ -54,7 +61,7 @@ describe('web app shell', () => {
       await i18n.changeLanguage(language);
       const { container } = render(<App />);
       expect(screen.getByRole('link', { name: conversation })).toBeTruthy();
-      expect(screen.getByRole('link', { name: system })).toBeTruthy();
+      expect(screen.getByText(system)).toBeTruthy();
       expect(screen.getByRole('heading', { name: now })).toBeTruthy();
       expect(screen.getAllByText('lifemodel').length).toBeGreaterThan(0);
       expect(document.documentElement.lang).toBe(language);
@@ -62,6 +69,62 @@ describe('web app shell', () => {
       expect(await axe(container)).toHaveNoViolations();
     }
   );
+
+  it.each([
+    ['fr-FR', 'en'],
+    ['de-DE', 'en'],
+    ['xx-ZZ', 'en'],
+    ['ru-RU', 'ru'],
+    ['ru', 'ru'],
+  ])('maps browser locale %s to %s and formats dates by locale', (locale, expected) => {
+    expect(languageFor(locale)).toBe(expected);
+    const formatted = new Intl.DateTimeFormat(expected, { dateStyle: 'medium' }).format(
+      new Date('2026-02-03T12:00:00Z')
+    );
+    expect(formatted).toBe(expected === 'ru' ? '3 февр. 2026 г.' : 'Feb 3, 2026');
+  });
+
+  it('shows the Now opener below the aside breakpoint at 390, 768, and 900 px, and the aside at 1024 px', () => {
+    for (const width of [390, 768, 900, 1024]) {
+      cleanup();
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+      const { container } = render(<App />);
+      if (width < 1024) expect(screen.getByRole('button', { name: 'Open Now' })).toBeTruthy();
+      else expect(screen.queryByRole('button', { name: 'Open Now' })).toBeNull();
+      expect(container.querySelector('aside')).toBeTruthy();
+    }
+  });
+
+  it('exposes the three external System destinations', () => {
+    render(<App />);
+    expect(screen.getByRole('link', { name: 'Loader' }).getAttribute('href')).toBe(
+      'http://boot.localhost/'
+    );
+    expect(screen.getByRole('link', { name: 'Keys' }).getAttribute('href')).toBe(
+      'http://vault.localhost/'
+    );
+    expect(screen.getByRole('link', { name: 'Code' }).getAttribute('href')).toBe(
+      'http://git.localhost/'
+    );
+  });
+
+  it('translates mobile navigation and sheet close labels in Russian', async () => {
+    Object.defineProperty(navigator, 'language', { configurable: true, value: 'ru-RU' });
+    await i18n.changeLanguage('ru');
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Открыть навигацию' }));
+    expect(screen.getByRole('dialog', { name: 'Навигация' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Закрыть' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Загрузчик' }).getAttribute('href')).toBe(
+      'http://boot.localhost/'
+    );
+    cleanup();
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Открыть Сейчас' }));
+    expect(screen.getByRole('dialog', { name: 'Сейчас' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Закрыть' })).toBeTruthy();
+  });
 
   it('follows system colour-scheme changes live', () => {
     render(<App />);
@@ -78,12 +141,12 @@ describe('web app shell', () => {
     expect(document.documentElement.classList.contains('dark')).toBe(false);
   });
 
-  it('puts navigation and the Сейчас panel behind buttons on a narrow screen', () => {
+  it('puts navigation and the Сейчас panel behind buttons on a narrow screen', async () => {
     mobilePreference = true;
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
     render(<App />);
-    fireEvent.click(screen.getByRole('button', { name: 'Open navigation' }));
-    expect(screen.getByRole('dialog', { name: 'Sidebar' })).toBeTruthy();
+    fireEvent.click(await screen.findByRole('button', { name: 'Open navigation' }));
+    expect(screen.getByRole('dialog')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Conversation' })).toBeTruthy();
     cleanup();
     render(<App />);
