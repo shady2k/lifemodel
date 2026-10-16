@@ -31,7 +31,7 @@ import {
 } from '@/components/ui/message-scroller';
 import { CodeBlock, CodeBlockContent, CodeBlockLine } from '@/components/ui/code-block';
 import { useHighlightedCode } from '@/hooks/use-highlighted-code';
-import { CreaturePresence, type CreaturePresenceValue } from './components/CreaturePresence';
+import type { CreaturePresenceValue } from './components/CreaturePresence';
 import {
   httpTransport,
   mergeTranscript,
