@@ -131,7 +131,7 @@ jobs:
           verdict=$(scripts/ci-verdict.sh "$out")
           echo "product output: $verdict"
           echo "$verdict" >> "$GITHUB_OUTPUT"
-          if grep -Eq '^changed: (web/app/|web/kit/|scripts/shadcn-add.sh|web/app/components.json|web/kit/components.json)$' "$out"; then echo "web_app=true" >> "$GITHUB_OUTPUT"; else echo "web_app=false" >> "$GITHUB_OUTPUT"; fi
+          scripts/ci-web-provenance-paths.sh < "$out" >> "$GITHUB_OUTPUT"
 
   # The product checks, as the one command a person runs before pushing. It is
   # skipped for a change that cannot touch product code and while a pull

@@ -18,11 +18,7 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"],
-      "@kit/*": ["../kit/*"],
-      "@/components/ui/*": ["../kit/components/ui/*"],
-      "@/hooks/*": ["../kit/hooks/*"],
-      "@/lib/utils": ["../kit/lib/utils"],
-      "@/lib/highlighter": ["../kit/lib/highlighter"]
+      "@kit/*": ["../kit/*"]
     },
     "types": ["vite/client"]
   },
