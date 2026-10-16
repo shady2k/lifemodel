@@ -537,16 +537,13 @@ function withTimeout<T>(promise: Promise<T>, signal: AbortSignal, timeoutMs: num
 }
 
 function isAllowedOrigin(origin: string, allowedOrigin: string): boolean {
+  // Match a serialized HTTPS origin before URL parsing; WHATWG URL repairs malformed slashes.
+  if (!/^https:\/\/[A-Za-z0-9.-]+(?::[0-9]{1,5})?$/.test(origin)) return false;
   try {
     const parsed = new URL(origin);
-    return (
-      parsed.origin === allowedOrigin &&
-      parsed.username === '' &&
-      parsed.password === '' &&
-      parsed.pathname === '/' &&
-      parsed.search === '' &&
-      parsed.hash === ''
-    );
+    const allowed = new URL(allowedOrigin);
+    // Uppercase hosts and explicit :443 are the same canonical origin.
+    return parsed.origin === allowed.origin && parsed.protocol === 'https:';
   } catch {
     return false;
   }

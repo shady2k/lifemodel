@@ -2,8 +2,8 @@
  * The loader's login (lifemodel-q4x.2.1, story S2).
  *
  * The password is kept as a slow-KDF digest in a root-only file, never as
- * text and never in a log; one session cookie on the parent domain opens
- * boot.<host>, <host> and vault.<host>.
+ * text and never in a log; host-only Secure cookies are handed off separately
+ * between the boot, app and vault hosts.
  */
 import { describe, expect, it } from 'vitest';
 
@@ -119,8 +119,12 @@ describe('the session cookie', () => {
   it('clears the cookie the same way it was set', () => {
     const cleared = clearSessionCookie('boot-lifemodel.local');
 
-    expect(cleared).toContain(`${SESSION_COOKIE_NAME}=;`);
+    expect(cleared).toContain('__Host-lm_session=;');
     expect(cleared.toLowerCase()).not.toContain('domain=');
+    expect(cleared).toContain('Path=/');
+    expect(cleared).toContain('HttpOnly');
+    expect(cleared).toContain('Secure');
+    expect(cleared).toContain('SameSite=Lax');
     expect(cleared).toContain('Max-Age=0');
   });
 });
@@ -160,6 +164,11 @@ describe('the Origin of a state-changing request', () => {
       true
     );
     for (const origin of [
+      'https:boot-lifemodel.local',
+      'https:///boot-lifemodel.local',
+      ' https://boot-lifemodel.local ',
+      'https://boot-lifemodel.local/path',
+      'https://user@boot-lifemodel.local',
       'http://boot-lifemodel.local',
       'https://lifemodel.local',
       'https://boot-lifemodel.local:444',
@@ -170,5 +179,8 @@ describe('the Origin of a state-changing request', () => {
       expect(sameOrigin(origin, 'https://boot-lifemodel.local/page', 'boot-lifemodel.local')).toBe(
         false
       );
+    expect(sameOrigin('https://BOOT-LIFEMODEL.local:443', undefined, 'boot-lifemodel.local')).toBe(
+      true
+    );
   });
 });

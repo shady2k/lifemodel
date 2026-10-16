@@ -214,6 +214,7 @@ describe('loader ForwardAuth verification host', () => {
     for (const path of [altered, unknown]) {
       const response = await request(base, path, { host: 'lifemodel.local' });
       expect(response.headers.location).toBe('https://boot-lifemodel.local/login');
+      expect(response.headers['referrer-policy']).toBe('no-referrer');
       expect(response.headers['set-cookie']).toBeUndefined();
     }
     const sessionCookie = String(setup.headers['set-cookie']).split(';')[0]!;
@@ -227,6 +228,7 @@ describe('loader ForwardAuth verification host', () => {
       host: 'lifemodel.local',
     });
     expect(expired.headers.location).toBe('https://boot-lifemodel.local/login');
+    expect(expired.headers['referrer-policy']).toBe('no-referrer');
     expect(expired.headers['set-cookie']).toBeUndefined();
   });
 
@@ -280,7 +282,14 @@ describe('loader ForwardAuth verification host', () => {
     const handoff = await request(base, loginUrl.pathname + loginUrl.search, {
       host: 'lifemodel.local',
     });
-    const appCookie = String(handoff.headers['set-cookie']).split(';')[0]!;
+    const handoffSetCookie = String(handoff.headers['set-cookie']);
+    expect(handoffSetCookie).toContain('__Host-lm_session=');
+    expect(handoffSetCookie).toContain('Path=/');
+    expect(handoffSetCookie).toContain('HttpOnly');
+    expect(handoffSetCookie).toContain('Secure');
+    expect(handoffSetCookie).toContain('SameSite=Lax');
+    expect(handoffSetCookie.toLowerCase()).not.toContain('domain=');
+    const appCookie = handoffSetCookie.split(';')[0]!;
     expect(
       (await request(base, '/_auth/verify', { host: SERVICE_HOST, cookie: appCookie })).status
     ).toBe(200);
@@ -298,6 +307,13 @@ describe('loader ForwardAuth verification host', () => {
       `csrf=${encodeURIComponent(csrf)}`
     );
     expect(logout.status).toBe(303);
+    const logoutCookie = String(logout.headers['set-cookie']);
+    expect(logoutCookie).toContain('__Host-lm_session=;');
+    expect(logoutCookie).toContain('Path=/');
+    expect(logoutCookie).toContain('HttpOnly');
+    expect(logoutCookie).toContain('Secure');
+    expect(logoutCookie).toContain('SameSite=Lax');
+    expect(logoutCookie.toLowerCase()).not.toContain('domain=');
     expect(
       (await request(base, '/_auth/verify', { host: SERVICE_HOST, cookie: appCookie })).status
     ).toBe(401);

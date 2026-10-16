@@ -100,7 +100,7 @@ describe('settings server writes its config boundary', () => {
   it('renders the configured loader name, independent of the Host port', async () => {
     await startServer();
     const result = await request('/');
-    expect(result.body).toContain('http://boot-custom.local/');
+    expect(result.body).toContain('https://boot-custom.local/');
     expect(result.body).not.toContain('boot-localhost');
   });
 

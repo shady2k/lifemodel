@@ -134,9 +134,9 @@ model access, checked) → the chat, answered by the owner's real model
   certificate bootstrap using only A0 resources: create the CA if the loader's
   instance identity (`/var/lib/loader/instance.json`, holding the CA
   fingerprint) does not exist; write and read back the CA, then the identity;
-  issue the leaf; update the Secret and the ConfigMap. The loader is not Ready
-  until the leaf is in place, so Traefik has no endpoint to route to and no
-  setup page is served under Traefik's fallback certificate.
+  issue the leaf; update the Secret and the ConfigMap. The loader is not Ready until its leaf is written. Traefik may still serve
+  its fallback certificate during the asynchronous reload window; the installer's
+  verified wait (lifemodel-3wi9.5.1) keeps the owner from that window.
 - **Repair.** A missing or expiring leaf is reissued from the existing CA. A
   missing or corrupt CA while the identity exists fails the loader visibly
   (doctor says so); it is never silently regenerated. A valid CA found after
@@ -175,8 +175,9 @@ model access, checked) → the chat, answered by the owner's real model
   `trustForwardHeader: false`; redirects are built from the configured hosts,
   never from forwarded headers.
 - Origin checks compare scheme, host and port exactly
-  (`https://boot-<name>.local`, `https://<name>.local`); a missing, `null` or
-  malformed Origin on a write is refused, never rescued by Referer.
+  (`https://boot-<name>.local`, `https://<name>.local`); uppercase host spelling
+  and an explicit default `:443` are accepted as the same canonical origin.
+  A missing, `null` or malformed Origin on a write is refused, never rescued by Referer.
 
 | Host | Path | Method | Admission |
 |---|---|---|---|

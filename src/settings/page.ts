@@ -27,7 +27,7 @@ export function escapeHtml(value: string): string {
 
 /** The loader's address is instance-specific and supplied by the web configuration. */
 export function loaderUrl(instanceName = 'lifemodel'): string {
-  return `http://boot-${instanceName}.local/`;
+  return `https://boot-${instanceName}.local/`;
 }
 
 const STYLE = `

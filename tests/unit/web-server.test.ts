@@ -70,6 +70,16 @@ describe('POST /api/messages', () => {
     ['sibling host', 'https://sibling.localhost'],
     ['other scheme', 'http://lifemodel.local'],
     ['other port', 'https://lifemodel.local:8080'],
+    ['https missing slashes', 'https:boot-lifemodel.local'],
+    ['https extra slash', 'https:///boot-lifemodel.local'],
+    ['surrounding whitespace', ' https://boot-lifemodel.local '],
+    ['path', 'https://boot-lifemodel.local/path'],
+    ['userinfo', 'https://user@boot-lifemodel.local'],
+    ['allowed host missing slashes', 'https:lifemodel.local'],
+    ['allowed host extra slash', 'https:///lifemodel.local'],
+    ['allowed host surrounding whitespace', ' https://lifemodel.local '],
+    ['allowed host path', 'https://lifemodel.local/path'],
+    ['allowed host userinfo', 'https://user@lifemodel.local'],
   ])('refuses %s Origin', async (_name, origin) => {
     const { server, acceptOwnerMessage } = setup();
     const response = await server.inject({
@@ -117,7 +127,7 @@ describe('POST /api/messages', () => {
     const response = await server.inject({
       method: 'POST',
       url: '/api/messages',
-      headers: { origin: 'https://lifemodel.local' },
+      headers: { origin: 'https://LIFEMODEL.local:443' },
       payload: { id, text: 'hello', replyTo: '12' },
     });
     expect(response.statusCode).toBe(202);

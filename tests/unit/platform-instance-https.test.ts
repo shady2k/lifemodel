@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 
 const root = fileURLToPath(new URL('../../deploy/platform/instance/', import.meta.url));
-const docs = ['loader-ingress.yaml', 'web-ingress.yaml', 'handoff-ingress.yaml'].flatMap((file) =>
-  YAML.parseAllDocuments(readFileSync(new URL(file, `file://${root}`), 'utf8'))
+const instanceYamlFiles = readdirSync(root, { recursive: true, withFileTypes: true })
+  .filter((entry) => entry.isFile() && entry.name.endsWith('.yaml'))
+  .map((entry) => {
+    const relative = entry.parentPath ? `${entry.parentPath}/${entry.name}` : entry.name;
+    return new URL(relative, `file://${root}/`);
+  });
+const docs = instanceYamlFiles.flatMap((file) =>
+  YAML.parseAllDocuments(readFileSync(file, 'utf8'))
     .map((doc) => doc.toJSON())
     .filter(Boolean)
 );
