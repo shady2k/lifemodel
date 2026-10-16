@@ -214,13 +214,25 @@ describe('conversation transcript', () => {
     expect(transport.stateEventsHaveId).toEqual([false]);
   });
 
-  it.each(['en', 'ru'])('has no axe violations with a populated transcript in %s', async (language) => {
-    await i18n.changeLanguage(language);
-    document.documentElement.classList.toggle('dark', language === 'ru');
-    const { container } = render(<Conversation transport={new FakeTransport([row('1', 'assistant', 'A populated transcript'), row('2', 'user', 'owner response', 'owner')])} />);
-    await screen.findByText('A populated transcript');
-    expect(await axe(container)).toHaveNoViolations();
-  });
+  it.each(['en', 'ru'])(
+    'has no axe violations with a populated transcript in %s',
+    async (language) => {
+      await i18n.changeLanguage(language);
+      document.documentElement.classList.toggle('dark', language === 'ru');
+      const { container } = render(
+        <Conversation
+          transport={
+            new FakeTransport([
+              row('1', 'assistant', 'A populated transcript'),
+              row('2', 'user', 'owner response', 'owner'),
+            ])
+          }
+        />
+      );
+      await screen.findByText('A populated transcript');
+      expect(await axe(container)).toHaveNoViolations();
+    }
+  );
 
   it('keeps focus through live rows and state updates and announces repeated assistant messages', async () => {
     await i18n.changeLanguage('en');

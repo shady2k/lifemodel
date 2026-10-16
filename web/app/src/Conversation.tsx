@@ -177,8 +177,12 @@ function ConversationContent({
     [optimistic, durableRows]
   );
   useEffect(() => {
-    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(interval);
+    const interval = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1_000);
+    return () => {
+      window.clearInterval(interval);
+    };
   }, []);
   const freshCreature = freshCreatureState(creature, now);
   const virtualizer = useVirtualizer({
@@ -245,10 +249,10 @@ function ConversationContent({
     retry?: { id: string; mintedAt: number; failureReason?: string }
   ) => {
     const id =
-      retry && retry.failureReason === 'network' && !isExpired(retry.mintedAt, Date.now())
+      retry?.failureReason === 'network' && !isExpired(retry.mintedAt, Date.now())
         ? retry.id
         : uuidV7();
-    const mintedAt = retry && id === retry.id ? retry.mintedAt : Date.now();
+    const mintedAt = retry?.id === id ? retry.mintedAt : Date.now();
     const item: PendingMessage = {
       sequence: String(Date.now()),
       clientId: id,
@@ -458,7 +462,7 @@ function ConversationContent({
                                             }
                                           : undefined,
                                         {
-                                          id: failed.clientId!,
+                                          id: failed.clientId ?? '',
                                           mintedAt: failed.mintedAt,
                                           failureReason: failed.failureReason,
                                         }
