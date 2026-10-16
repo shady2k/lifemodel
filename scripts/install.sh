@@ -101,10 +101,6 @@ case "$INSTANCE_NAME" in
 esac
 [ "${#INSTANCE_NAME}" -le 57 ] || die "--name must be one lowercase DNS label (letters, digits, hyphens), 1-57 characters"
 LIFEMODEL_STATE_DIR=${LIFEMODEL_STATE_DIR:-/var/lib/lifemodel}
-if [ -f "$LIFEMODEL_STATE_DIR/instance-name" ]; then
-  installed_name=$(cat "$LIFEMODEL_STATE_DIR/instance-name")
-  [ "$installed_name" = "$INSTANCE_NAME" ] || die "instance name is fixed as $installed_name; reinstall to change it"
-fi
 if [ -n "$PLATFORM_TAG" ] && [ -n "$PLATFORM_DIGEST" ]; then
   die "--tag and --digest are mutually exclusive; pass exactly one"
 fi
@@ -282,6 +278,20 @@ else
   LIFEMODEL_LOCK_FD=9
   LIFEMODEL_LOCK_HELD=1
 fi
+# Establish the fixed instance identity before publishing any name-dependent
+# root objects. A local state loss is recovered from the durable root ConfigMap.
+installed_name=""
+if [ -f "$LIFEMODEL_STATE_DIR/instance-name" ]; then
+  installed_name=$(cat "$LIFEMODEL_STATE_DIR/instance-name")
+else
+  installed_name=$($KUBECTL -n flux-system get configmap lifemodel-instance -o jsonpath='{.data.LIFEMODEL_NAME}' 2>/dev/null || true)
+fi
+if [ -n "$installed_name" ] && [ "$installed_name" != "$INSTANCE_NAME" ]; then
+  die "instance name is fixed as $installed_name; reinstall to change it"
+fi
+printf '%s\n' "$INSTANCE_NAME" > "$LIFEMODEL_STATE_DIR/instance-name.tmp"
+chmod 0600 "$LIFEMODEL_STATE_DIR/instance-name.tmp"
+mv "$LIFEMODEL_STATE_DIR/instance-name.tmp" "$LIFEMODEL_STATE_DIR/instance-name"
 if [ -n "$PLATFORM_DIGEST" ]; then configured_ref="digest=$PLATFORM_DIGEST"; else configured_ref="tag=$PLATFORM_TAG"; fi
 if [ -f "$SCRIPT_DIR/deploy/cli/lifemodel.mjs" ]; then cli_source="$SCRIPT_DIR/deploy/cli/lifemodel.mjs"; else cli_source="$SCRIPT_DIR/../deploy/cli/lifemodel.mjs"; fi
 effective_oci="$render_dir/ocirepository-effective.yaml"
@@ -333,8 +343,4 @@ EOF
 chmod 0755 "$cli_bin_dir/lifemodel"
 LIFEMODEL_LOCK_FD="$LIFEMODEL_LOCK_FD" LIFEMODEL_LOCK_HELD=1 LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" LIFEMODEL_CONFIGURED_REF="$configured_ref" \
   "$cli_bin_dir/lifemodel" record-applied "$effective_ref"
-printf '%s\n' "$INSTANCE_NAME" > "$LIFEMODEL_STATE_DIR/instance-name.tmp"
-chmod 0600 "$LIFEMODEL_STATE_DIR/instance-name.tmp"
-mv "$LIFEMODEL_STATE_DIR/instance-name.tmp" "$LIFEMODEL_STATE_DIR/instance-name"
-
 printf 'install.sh: done (k3s v%s, Flux %s, platform source applied)\n' "$K3S_VERSION" "$FLUX_VERSION"

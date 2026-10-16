@@ -2,8 +2,9 @@
 
 This directory is the root of the signed platform OCI artifact. The root
 `OCIRepository` and `platform` Kustomization apply the artifact in
-`flux-system`. The artifact declares four ordered steps: A0, A, B and C. A0 has no
-`dependsOn`; it deploys the loader and the Gitea namespace first. Step A
+`flux-system`. The artifact declares the platform-instance bootstrap followed by four ordered
+steps: A0, A, B and C. A0 depends on platform-instance, which creates the
+loader namespace, app namespace, identity ConfigMaps and named Ingresses. Step A
 `dependsOn: platform-a0`, so OpenBao and Gitea arrive only after the loader
 can start. Step B installs CloudNativePG with its CRDs in a default-deny operator namespace;
 its only opened routes are DNS, the documented Kubernetes API port, Postgres
@@ -16,7 +17,8 @@ Bao. See [ADR-010](../../docs/adr/010-container-generations.md) for the decision
 
 A0 consumes the `lifemodel-system` namespace owned by `platform-instance` and creates restricted `lifemodel-git`,
 the loader ServiceAccount and its narrowly scoped bootstrap permissions, the
-loader Deployment, Service and `boot-<name>.local` Ingress. The loader image is
+loader Deployment and Service. `platform-instance` owns the `boot-<name>.local`
+Ingress. The loader image is
 pinned by digest in `a0/kustomization.yaml`; its zero digest is a release
 placeholder. The loader Deployment runs non-root with a read-only root
 filesystem. `loader-default-deny` denies ingress and egress except Traefik to
@@ -90,15 +92,14 @@ signature against the pinned release-workflow identity. The `boot-<name>.local`
 loader is reached on a test VM with:
 
 ```sh
-curl http://boot-<name>.local/login
+curl --resolve boot-<name>.local:80:VM_IP http://boot-<name>.local/login
 ```
 
-Replace `VM_IP` with the VM's reachable IP, or map `boot-<name>.local` to that IP
-in the browser host file. Traefik publishes this host to port 7000.
+Replace `VM_IP` in the command with the VM's reachable IP. Traefik publishes
+this host to port 7000.
 
-The A0 reconciler uses the Flux v2.9.6 Kustomization API, which supports
-`path`, `prune` and `wait` but not a required `dependsOn`; it has no dependency.
-Step A uses `dependsOn` to enforce the A0-to-A order. See the [Flux v2.9.6
+The Flux reconcilers use `dependsOn` to enforce platform-instance → A0 → A → B → C.
+The instance ConfigMap is required by the platform-instance post-build substitution. See the [Flux v2.9.6
 API](https://github.com/fluxcd/kustomize-controller/blob/v1.9.6/docs/spec/v1/kustomizations.md)
 and [release notes](https://github.com/fluxcd/flux2/releases/tag/v2.9.6).
 

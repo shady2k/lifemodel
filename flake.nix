@@ -39,6 +39,14 @@
       missingKeyFails = !(builtins.tryEval missingKey.config.system.build.toplevel.drvPath).success;
       badInstanceName = evaluate ({ ... }: { services.lifemodel.name = "Bad"; });
       tooLongInstanceName = evaluate ({ ... }: { services.lifemodel.name = "x" + builtins.concatStringsSep "" (builtins.genList (_: "x") 57); });
+      yamlNames = map (name: evaluate ({ ... }: { services.lifemodel.name = name; })) [ "true" "null" "123" ];
+      yamlNamesRenderedAsStrings = pkgs.runCommand "lifemodel-yaml-sensitive-instance-names" {} ''
+        set -eu
+        grep -F "LIFEMODEL_NAME: 'true'" ${(builtins.elemAt yamlNames 0).config.services.lifemodel.generatedRootInstance}
+        grep -F "LIFEMODEL_NAME: 'null'" ${(builtins.elemAt yamlNames 1).config.services.lifemodel.generatedRootInstance}
+        grep -F "LIFEMODEL_NAME: '123'" ${(builtins.elemAt yamlNames 2).config.services.lifemodel.generatedRootInstance}
+        touch $out
+      '';
       badInstanceNameFails = !(builtins.tryEval badInstanceName.config.system.build.toplevel.drvPath).success;
       tooLongInstanceNameFails = !(builtins.tryEval tooLongInstanceName.config.system.build.toplevel.drvPath).success;
       keylessOCI = builtins.readFile keyless.config.services.lifemodel.generatedRootOCI;
@@ -314,6 +322,7 @@
     in {
       nixosModules.default = exportedModule;
       checks.${system} = {
+        yaml-sensitive-instance-names = yamlNamesRenderedAsStrings;
         cli-help = cliHelp;
         bootstrap-field-ownership = bootstrapOwnership;
         bootstrap-activation = bootstrapActivationCheck;

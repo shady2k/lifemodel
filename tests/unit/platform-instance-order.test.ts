@@ -8,7 +8,7 @@ const root = fileURLToPath(new URL('../../deploy/platform/', import.meta.url));
 const read = (path: string) => YAML.parse(readFileSync(path, 'utf8')) as Record<string, any>;
 const resource = (name: string) => read(join(root, name));
 
-describe('platform cold-start ordering', () => {
+describe('platform dependency structure', () => {
   it('orders platform-instance before A0, A, B and C without a dependency cycle', () => {
     const docs = [
       'instance-reconciler.yaml',
@@ -42,7 +42,7 @@ describe('platform cold-start ordering', () => {
 
   it('gives every namespaced object an upstream namespace or one in the same Kustomization', () => {
     const dirs = ['instance', 'a0', 'a', 'b', 'state'];
-    const owned = new Map<string, Set<string>>();
+    const owned = new Map<string, string[]>();
     const objectsByDir = new Map<string, Record<string, any>[]>();
     const collect = (directory: string): Record<string, any>[] => {
       const absolute = join(root, directory);
@@ -65,18 +65,24 @@ describe('platform cold-start ordering', () => {
       objectsByDir.set(dir, objects);
       owned.set(
         dir,
-        new Set(objects.filter((obj) => obj.kind === 'Namespace').map((obj) => obj.metadata.name))
+        objects.filter((obj) => obj.kind === 'Namespace').map((obj) => obj.metadata.name)
       );
     }
-    const owners = new Set([...owned.values()].flatMap((names) => [...names]));
-    expect(owners.has('lifemodel-system')).toBe(true);
-    expect(owners.has('lifemodel')).toBe(true);
+    const namespaceOwners = [...owned.entries()].flatMap(([directory, names]) =>
+      names.map((name) => ({ directory, name }))
+    );
+    for (const name of ['lifemodel-system', 'lifemodel']) {
+      expect(namespaceOwners.filter((owner) => owner.name === name)).toEqual([
+        { directory: 'instance', name },
+      ]);
+    }
+    const owners = new Set(namespaceOwners.map((owner) => owner.name));
     for (const [dir, objects] of objectsByDir)
       for (const obj of objects) {
         const namespace = obj.metadata?.namespace;
         if (!namespace || obj.kind === 'Namespace') continue;
         expect(
-          owners.has(namespace) || owned.get(dir)?.has(namespace),
+          owners.has(namespace) || owned.get(dir)?.includes(namespace),
           `${dir}/${obj.kind}/${obj.metadata?.name} namespace ${namespace} must be owned upstream or in this Kustomization`
         ).toBe(true);
       }

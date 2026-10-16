@@ -53,6 +53,8 @@ export interface SettingsServerOptions {
   /** The Postgres-backed config document read and written by the page. */
   config: SettingsConfig;
   logger: Logger;
+  /** Configured instance identity used for links; independent of request Host. */
+  instanceName?: string;
   /** Where lifemodel listens; Caddy reaches it here (default 7100). */
   port?: number;
   host?: string;
@@ -96,6 +98,7 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
   const host = options.host ?? '127.0.0.1';
   const port = options.port ?? SETTINGS_PORT;
   const closeGraceMs = options.closeGraceMs ?? 5_000;
+  const instanceName = options.instanceName ?? process.env['LIFEMODEL_NAME'] ?? 'lifemodel';
   const app: FastifyInstance = Fastify({ logger: false });
 
   // Every socket that talks to this interface, kept to be destroyed when the
@@ -125,7 +128,7 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
     }
   );
 
-  app.get('/', async (request, reply) => {
+  app.get('/', async (_request, reply) => {
     const file = await config.readConfig();
     const values = settingsInputFromFile(file);
     // The GET runs the SAVE's rules on what the file holds: a config an older
@@ -137,7 +140,7 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
       renderSettingsPage({
         values,
         errors: validateSettings(values),
-        host: request.headers.host,
+        instanceName,
         overriddenBy: overridingVariables(),
       })
     );
@@ -196,7 +199,7 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
           renderSettingsPage({
             values: input,
             errors,
-            host: request.headers.host,
+            instanceName,
             overriddenBy: overridingVariables(),
           })
         );
@@ -237,7 +240,7 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
         .send(
           renderSettingsPage({
             values: input,
-            host: request.headers.host,
+            instanceName,
             errors: { endpointBaseUrl: 'the settings file could not be written; see the log' },
           })
         );
@@ -263,7 +266,7 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
       .send(
         renderSettingsPage({
           values: input,
-          host: request.headers.host,
+          instanceName,
           saved: true,
         })
       );

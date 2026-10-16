@@ -66,7 +66,7 @@ describe('owner message HTTP route with real Valkey', () => {
     const transcript = new PostgresTranscriptStore(stores.postgres, redis, 'web-owner-recipient');
     intake = new OwnerMessageIntake(redis, 'web-owner-recipient', { transcript });
     server = createWebServer({
-      allowedOrigin: 'http://localhost',
+      allowedOrigin: 'http://lifemodel.local',
       instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
@@ -89,7 +89,7 @@ describe('owner message HTTP route with real Valkey', () => {
       server.inject({
         method: 'POST',
         url: '/api/messages',
-        headers: { origin: 'http://localhost' },
+        headers: { origin: 'http://lifemodel.local' },
         payload: { id: clientId, text },
       });
     const first = await request(id, 'hello');
@@ -186,7 +186,7 @@ describe('owner message HTTP route with real Valkey', () => {
     await resumedReader.cancel().catch(() => undefined);
     await server.close();
     server = createWebServer({
-      allowedOrigin: 'http://localhost',
+      allowedOrigin: 'http://lifemodel.local',
       instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
@@ -210,7 +210,7 @@ describe('owner message HTTP route with real Valkey', () => {
     await write('server-stopped-one', 'while stopped one');
     await write('server-stopped-two', 'while stopped two');
     const restarted = createWebServer({
-      allowedOrigin: 'http://localhost',
+      allowedOrigin: 'http://lifemodel.local',
       instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
@@ -239,7 +239,7 @@ describe('owner message HTTP route with real Valkey', () => {
     await reader.cancel().catch(() => undefined);
     await restarted.close();
     server = createWebServer({
-      allowedOrigin: 'http://localhost',
+      allowedOrigin: 'http://lifemodel.local',
       instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
@@ -267,7 +267,7 @@ describe('owner message HTTP route with real Valkey', () => {
     await write('repeated-drop-three', 'batch three');
 
     const streamServer = createWebServer({
-      allowedOrigin: 'http://localhost',
+      allowedOrigin: 'http://lifemodel.local',
       instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
@@ -308,7 +308,7 @@ describe('owner message HTTP route with real Valkey', () => {
   it('sends state-only updates without SSE ids and limits streams to four per session', async () => {
     const stateStore = new CreatureStateStore(redis);
     const stateServer = createWebServer({
-      allowedOrigin: 'http://localhost',
+      allowedOrigin: 'http://lifemodel.local',
       instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
@@ -355,7 +355,7 @@ describe('owner message HTTP route with real Valkey', () => {
   it('closes the watcher Valkey connection when the HTTP client disconnects', async () => {
     const recipient = 'web-owner-recipient';
     const stateServer = createWebServer({
-      allowedOrigin: 'http://localhost',
+      allowedOrigin: 'http://lifemodel.local',
       instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
@@ -416,7 +416,7 @@ describe('owner message HTTP route with real Valkey', () => {
     const recipient = 'web-owner-recipient';
     const stateStore = new CreatureStateStore(redis);
     const stateServer = createWebServer({
-      allowedOrigin: 'http://localhost',
+      allowedOrigin: 'http://lifemodel.local',
       instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
@@ -469,7 +469,7 @@ describe('owner message HTTP route with real Valkey', () => {
       scriptOverride: `local stream_id = redis.call('XADD', KEYS[1], '*', 'type', 'inbound.message', 'messageId', ARGV[1], 'recipientId', ARGV[2], 'text', ARGV[3], 'timestamp', ARGV[4], 'signal', ARGV[6]); return redis.error_reply('receipt write failed')`,
     });
     const brokenServer = createWebServer({
-      allowedOrigin: 'http://localhost',
+      allowedOrigin: 'http://lifemodel.local',
       instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
@@ -479,7 +479,7 @@ describe('owner message HTTP route with real Valkey', () => {
     const response = await brokenServer.inject({
       method: 'POST',
       url: '/api/messages',
-      headers: { origin: 'http://localhost' },
+      headers: { origin: 'http://lifemodel.local' },
       payload: { id, text: 'retry' },
     });
     expect(response.statusCode).toBe(503);
@@ -488,7 +488,7 @@ describe('owner message HTTP route with real Valkey', () => {
     const retry = await server.inject({
       method: 'POST',
       url: '/api/messages',
-      headers: { origin: 'http://localhost' },
+      headers: { origin: 'http://lifemodel.local' },
       payload: { id, text: 'retry' },
     });
     expect(retry.statusCode).toBe(202);

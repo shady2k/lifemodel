@@ -53,6 +53,7 @@ in
       };
       publicKey = mkOption { type = types.nullOr types.str; default = null; description = "PEM public key used for cosign verification."; };
     };
+    generatedRootInstance = mkOption { type = types.path; readOnly = true; internal = true; default = renderedInstance; };
     generatedRootOCI = mkOption { type = types.path; readOnly = true; internal = true; default = renderedOCI; };
     generatedRootKustomization = mkOption { type = types.path; readOnly = true; internal = true; default = renderedKustomization; };
   };

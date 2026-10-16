@@ -12,7 +12,7 @@ The web module serves the built React application and the owner-facing API on it
 ## Loader outage
 
 1. The loader owns authentication and ForwardAuth. A loader outage must fail closed: the owner may be unable to load the app or open an authenticated stream, but the web module and core must not bypass the guard.
-2. Check loader and Traefik health, then verify the ForwardAuth route and loader `/_auth/verify` service path. Restore the loader before testing access through `localhost`.
+2. Check loader and Traefik health, then verify the ForwardAuth route and loader `/_auth/verify` service path. Restore the loader before testing access through the configured instance host (`<name>.local`).
 3. Confirm the owner can authenticate and reach the app, transcript and event stream. Do not expose the web Service directly as a workaround.
 
 ## Stuck stream

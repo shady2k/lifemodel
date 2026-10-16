@@ -98,6 +98,18 @@ describe('loader ForwardAuth verification host', () => {
     expect((await request(base, '/login', { host: 'boot.localhost' })).status).toBe(404);
     expect((await request(base, '/', { host: 'localhost' })).status).toBe(404);
     expect((await request(base, '/', { host: 'lifemodel.local' })).status).toBe(404);
+    for (const path of ['/', '/login', '/api/unknown', '/_auth/verify']) {
+      expect(
+        (await request(base, path, { host: 'lifemodel.local' })).status,
+        `app host ${path}`
+      ).toBe(404);
+    }
+    for (const path of ['/_auth/handoff', '/api/unknown']) {
+      expect(
+        (await request(base, path, { host: 'boot-lifemodel.local' })).status,
+        `boot host ${path}`
+      ).toBe(404);
+    }
   });
 
   it('requires a session and never redirects to an unvetted forwarded host', async () => {

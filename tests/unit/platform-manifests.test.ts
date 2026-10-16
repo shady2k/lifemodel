@@ -127,6 +127,11 @@ function runInstallerHarness(
     digest?: string;
     owner?: string;
     sourceDir?: string;
+    stateDir?: string;
+    name?: string;
+    failRoot?: boolean;
+    rootName?: string;
+    concurrentNames?: [string, string];
   } = {}
 ): { status: number | null; output: string; root: string } {
   const root = existingRoot ?? mkdtempSync(join(tmpdir(), 'lifemodel-installer-test-'));
@@ -154,6 +159,7 @@ fi
 shift 2
 case "$*" in
   *'get nodes'*) exit 0 ;;
+  *'get configmap lifemodel-instance -o jsonpath='*) [ -n "$K3S_ROOT_NAME" ] && printf '%s' "$K3S_ROOT_NAME" ;;
   *'get ocirepository platform'*) printf '{"metadata":{"managedFields":[%s]}}\n' "$K3S_MANAGED_FIELDS" ;;
   *'get namespace flux-system -o jsonpath='*) [ "$K3S_FOREIGN" = 1 ] && echo external || echo lifemodel ;;
   *'get namespace flux-system'*) [ -f "$K3S_STATE" ] ;;
@@ -161,6 +167,8 @@ case "$*" in
   *'--field-manager=lifemodel-bootstrap'*)
     file=''; for arg do file=$arg; done
     echo "root:$*" >> "$K3S_LOG"
+    if grep 'LIFEMODEL_NAME:' "$file" >/dev/null; then grep 'LIFEMODEL_NAME:' "$file" | sed 's/.*: *//' | tr -d '"' > "$K3S_ROOT_NAME_FILE"; fi
+    if [ "$K3S_FAIL_ROOT" = 1 ] && grep 'LIFEMODEL_NAME:' "$file" >/dev/null; then exit 43; fi
     if grep 'tag:' "$file" >/dev/null; then grep 'tag:' "$file" | sed -E "s/.*tag: //; s/[\\\"']//g" > "$K3S_APPLIED_TAG"; fi
     if grep 'digest:' "$file" >/dev/null; then grep 'digest:' "$file" > "$K3S_APPLIED_REF"; fi
     ;;
@@ -175,6 +183,9 @@ esac`
     PATH: `${bin}:${process.env.PATH}`,
     K3S_STATE: state,
     K3S_LOG: log,
+    K3S_ROOT_NAME: options.rootName ?? '',
+    K3S_ROOT_NAME_FILE: join(root, 'root-name'),
+    K3S_FAIL_ROOT: options.failRoot ? '1' : '0',
     K3S_APPLIED_TAG: join(root, 'applied-tag'),
     K3S_APPLIED_REF: join(root, 'applied-ref'),
     K3S_FAIL_FLUX: failFlux ? '1' : '0',
@@ -193,18 +204,32 @@ esac`
     ? join(options.sourceDir, 'scripts/install.sh')
     : installer;
   const templates = options.sourceDir ? join(options.sourceDir, 'deploy/root') : rootTemplates;
-  const result = spawnSync(
-    'sh',
-    [
-      installScript,
-      '--platform-url',
-      'oci://example.test/platform',
-      ...refArgs,
-      '--root-templates',
-      templates,
-    ],
-    { encoding: 'utf8', env }
-  );
+  const args = (name?: string) => [
+    installScript,
+    '--platform-url',
+    'oci://example.test/platform',
+    ...refArgs,
+    '--root-templates',
+    templates,
+    ...(name ? ['--name', name] : []),
+  ];
+  const result = options.concurrentNames
+    ? spawnSync(
+        'sh',
+        [
+          '-c',
+          'sh "$1" --platform-url "$2" --tag "$3" --name "$4" --root-templates "$5" & first=$!; sh "$1" --platform-url "$2" --tag "$3" --name "$6" --root-templates "$5" & second=$!; wait "$first"; first_status=$?; wait "$second"; second_status=$?; printf "statuses:%s,%s\n" "$first_status" "$second_status"',
+          'installer-race',
+          installScript,
+          'oci://example.test/platform',
+          tag,
+          options.concurrentNames[0],
+          templates,
+          options.concurrentNames[1],
+        ],
+        { encoding: 'utf8', env }
+      )
+    : spawnSync('sh', args(options.name), { encoding: 'utf8', env });
   return { status: result.status, output: `${result.stdout}${result.stderr}`, root };
 }
 
@@ -222,10 +247,81 @@ describe('platform manifests', () => {
       readFileSync(join(rootTemplates, 'instance.yaml'), 'utf8')
     ) as any;
     expect(rootInstance.data.LIFEMODEL_NAME).toBe('${LIFEMODEL_NAME}');
+    expect(readFileSync(join(rootTemplates, 'instance.yaml'), 'utf8')).toContain(
+      "LIFEMODEL_NAME: '${LIFEMODEL_NAME}'"
+    );
     const instanceResources = YAML.parse(
       readFileSync(join(platformRoot, 'instance/kustomization.yaml'), 'utf8')
     ) as any;
     expect(instanceResources.resources).toContain('configmaps.yaml');
+    const reconcilerFiles = yamlFiles(platformRoot).filter((file) =>
+      file.endsWith('-reconciler.yaml')
+    );
+    const owners = reconcilerFiles.filter((file) => {
+      const value = YAML.parse(readFileSync(file, 'utf8')) as any;
+      return value.kind === 'Kustomization' && value.spec?.postBuild !== undefined;
+    });
+    expect(owners.map((file) => file.replace(platformRoot, ''))).toEqual([
+      'instance-reconciler.yaml',
+    ]);
+    for (const file of reconcilerFiles.filter(
+      (path) => !path.endsWith('instance-reconciler.yaml')
+    )) {
+      const value = YAML.parse(readFileSync(file, 'utf8')) as any;
+      expect(value.spec?.postBuild, file).toBeUndefined();
+    }
+    const substitute = (source: string, variables: Record<string, string>) =>
+      source.replace(/\$\{(LIFEMODEL_NAME)\}/g, (_match, key: string) => {
+        if (!(key in variables)) throw new Error(`missing substitution ${key}`);
+        return variables[key]!;
+      });
+    for (const name of ['true', 'null', '123']) {
+      const configDocs = YAML.parseAllDocuments(
+        substitute(readFileSync(join(platformRoot, 'instance/configmaps.yaml'), 'utf8'), {
+          LIFEMODEL_NAME: name,
+        })
+      );
+      for (const doc of configDocs) {
+        const config = doc.toJSON() as any;
+        expect(config.data.LIFEMODEL_NAME).toBe(name);
+        expect(typeof config.data.LIFEMODEL_NAME).toBe('string');
+      }
+    }
+    expect(() => substitute('${LIFEMODEL_NAME}', {})).toThrow(
+      'missing substitution LIFEMODEL_NAME'
+    );
+    expect(instance.spec.postBuild.substituteFrom[0]).toMatchObject({
+      kind: 'ConfigMap',
+      name: 'lifemodel-instance',
+      optional: false,
+    });
+    const applyPostBuild = (configMaps: Record<string, Record<string, string>>) => {
+      const reference = instance.spec.postBuild.substituteFrom[0];
+      const values = configMaps[reference.name];
+      if (!values && reference.optional !== true)
+        throw new Error(`required ConfigMap ${reference.name} is missing`);
+      return values ?? {};
+    };
+    expect(applyPostBuild({ 'lifemodel-instance': { LIFEMODEL_NAME: 'home' } })).toEqual({
+      LIFEMODEL_NAME: 'home',
+    });
+    expect(() => applyPostBuild({})).toThrow('required ConfigMap lifemodel-instance is missing');
+    for (const vendored of ['a/openbao/rendered.yaml', 'a/gitea/rendered.yaml']) {
+      const source = readFileSync(join(platformRoot, vendored));
+      const builtOutput = source;
+      const postBuild = Buffer.from(
+        substitute(builtOutput.toString('utf8'), {
+          LIFEMODEL_NAME: 'home',
+          HOST_IP: 'unchanged',
+          POD_IP: 'unchanged',
+          HOSTNAME: 'unchanged',
+          API_ADDR: 'unchanged',
+          TRANSIT_ADDR: 'unchanged',
+          RAFT_ADDR: 'unchanged',
+        })
+      ); // Flux substitutes only platform-instance; the step-A built output passes through
+      expect(postBuild.equals(source), vendored).toBe(true);
+    }
     const openbao = readFileSync(join(platformRoot, 'a/openbao/rendered.yaml'), 'utf8');
     const gitea = readFileSync(join(platformRoot, 'a/gitea/rendered.yaml'), 'utf8');
     for (const name of ['lifemodel', 'home']) {
@@ -238,13 +334,56 @@ describe('platform manifests', () => {
       expect(loaderRoute).toContain(`boot-${name}.local`);
       expect(appRoute).toContain(`${name}.local`);
       expect(handoffRoute).toContain(`${name}.local`);
-      expect(configs.match(new RegExp(`LIFEMODEL_NAME: ${name}`, 'g'))).toHaveLength(2);
+      expect(configs.match(new RegExp(`LIFEMODEL_NAME: '${name}'`, 'g'))).toHaveLength(2);
       expect(openbao).toBe(readFileSync(join(platformRoot, 'a/openbao/rendered.yaml'), 'utf8'));
       expect(gitea).toBe(readFileSync(join(platformRoot, 'a/gitea/rendered.yaml'), 'utf8'));
     }
     expect(openbao).not.toContain('${LIFEMODEL_NAME}');
     expect(gitea).not.toContain('${LIFEMODEL_NAME}');
   });
+
+  it.each(['true', 'null', '123'])(
+    'keeps YAML-sensitive valid name %s a string through installer render',
+    (name) => {
+      const temporary = mkdtempSync(join(tmpdir(), 'lifemodel-name-render-'));
+      try {
+        const result = spawnSync(
+          'sh',
+          [
+            installer,
+            '--platform-url',
+            'oci://example.test/platform',
+            '--tag',
+            'v1',
+            '--name',
+            name,
+            '--render-only',
+            temporary,
+            '--root-templates',
+            rootTemplates,
+          ],
+          { encoding: 'utf8' }
+        );
+        expect(result.status).toBe(0);
+        const root = YAML.parse(readFileSync(join(temporary, 'instance.yaml'), 'utf8'));
+        expect(root.data.LIFEMODEL_NAME).toBe(name);
+        expect(typeof root.data.LIFEMODEL_NAME).toBe('string');
+        const localDocs = YAML.parseAllDocuments(
+          readFileSync(join(platformRoot, 'instance/configmaps.yaml'), 'utf8').replaceAll(
+            '${LIFEMODEL_NAME}',
+            name
+          )
+        );
+        for (const doc of localDocs) {
+          const local = doc.toJSON() as any;
+          expect(local.data.LIFEMODEL_NAME).toBe(name);
+          expect(typeof local.data.LIFEMODEL_NAME).toBe('string');
+        }
+      } finally {
+        rmSync(temporary, { recursive: true, force: true });
+      }
+    }
+  );
 
   it('rejects an invalid or too-long instance name in the generic installer', () => {
     const temporary = mkdtempSync(join(tmpdir(), 'lifemodel-name-check-'));
@@ -288,11 +427,54 @@ describe('platform manifests', () => {
         { encoding: 'utf8' }
       );
       expect(good.status).toBe(0);
-      expect(readFileSync(join(temporary, 'instance.yaml'), 'utf8')).toContain(
-        'LIFEMODEL_NAME: home'
-      );
+      expect(
+        YAML.parse(readFileSync(join(temporary, 'instance.yaml'), 'utf8')).data.LIFEMODEL_NAME
+      ).toBe('home');
     } finally {
       rmSync(temporary, { recursive: true, force: true });
+    }
+  });
+
+  it('serializes concurrent first installs with different names', () => {
+    const result = runInstallerHarness(false, false, undefined, 'v1', {
+      concurrentNames: ['home', 'other'],
+    });
+    expect(result.output).toMatch(/statuses:(?:0,1|1,0)/);
+    expect(readFileSync(join(result.root, 'state', 'instance-name'), 'utf8')).toMatch(
+      /^(home|other)\n$/
+    );
+    expect(result.output).toContain('instance name is fixed as');
+    rmSync(result.root, { recursive: true, force: true });
+  });
+
+  it('persists identity before a failed first apply and recovers it from the root ConfigMap', () => {
+    const first = runInstallerHarness(false, false, undefined, 'v1', {
+      name: 'home',
+      failRoot: true,
+    });
+    expect(first.status).not.toBe(0);
+    const stateName = join(first.root, 'state', 'instance-name');
+    expect(readFileSync(stateName, 'utf8')).toBe('home\n');
+    const conflict = runInstallerHarness(false, false, first.root, 'v1', { name: 'other' });
+    expect(conflict.status).not.toBe(0);
+    expect(conflict.output).toContain('instance name is fixed as home');
+
+    const recoveredRoot = mkdtempSync(join(tmpdir(), 'lifemodel-recovered-'));
+    try {
+      const recovered = runInstallerHarness(false, false, recoveredRoot, 'v1', {
+        name: 'home',
+        rootName: 'home',
+      });
+      expect(recovered.status).toBe(0);
+      expect(readFileSync(join(recoveredRoot, 'state', 'instance-name'), 'utf8')).toBe('home\n');
+      const mismatch = runInstallerHarness(false, false, recoveredRoot, 'v1', {
+        name: 'another',
+        rootName: 'home',
+      });
+      expect(mismatch.status).not.toBe(0);
+      expect(mismatch.output).toContain('instance name is fixed as home');
+    } finally {
+      rmSync(recoveredRoot, { recursive: true, force: true });
     }
   });
 

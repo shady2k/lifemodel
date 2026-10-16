@@ -53,7 +53,7 @@ is the milestone's only channel (Telegram is out, owner 2026-10-11).
   browsers refuse `Domain=localhost`, and
   `/_auth/verify` for Traefik ForwardAuth. The verify route checks the
   request's own Host against `<name>.local`, `boot-<name>.local` and
-  `vault.<name>.local`.
+  `vault-<name>.local`.
 - Traefik routes only `boot-<name>.local`, without ForwardAuth.
 - The core's primary recipient comes only from a Telegram chat id, which is
   null now, so the core cannot write first to anyone.

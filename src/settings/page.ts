@@ -50,8 +50,8 @@ export interface SettingsPageOptions {
   values: SettingsInput;
   /** What is wrong with them; empty on a first render. */
   errors?: SettingsErrors;
-  /** The request's Host header (only its port is used, for the loader's link). */
-  host?: string | undefined;
+  /** Configured instance identity; never inferred from the request Host. */
+  instanceName?: string;
   /** Environment variables that override the saved values, by name only. */
   overriddenBy?: string[];
   /** Set after a save: the page confirms the config is applied. */
@@ -102,7 +102,7 @@ function field(options: SettingsPageOptions, formField: (typeof SETTINGS_FIELDS)
 /** The whole page. */
 export function renderSettingsPage(options: SettingsPageOptions): string {
   const missing = endpointState(options.values);
-  const loader = loaderUrl(options.host);
+  const loader = loaderUrl(options.instanceName);
 
   const missingBlock =
     missing.length === 0
