@@ -12,7 +12,7 @@ function setup(
   const acceptOwnerMessage = vi.fn(result);
   const info = vi.fn();
   const server = createWebServer({
-    allowedOrigin: `http://${instanceName}.local`,
+    allowedOrigin: `https://${instanceName}.local`,
     instanceName,
     appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
     runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
@@ -31,6 +31,23 @@ function setup(
 
 afterEach(() => vi.restoreAllMocks());
 
+describe('configured web origin', () => {
+  it('accepts only https://<name>.local without a port or other host', async () => {
+    expect(() =>
+      createWebServer({
+        allowedOrigin: 'https://lifemodel.local:8443',
+        instanceName: 'lifemodel',
+        appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
+        runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
+        intake: { acceptOwnerMessage: vi.fn() } as unknown as IOwnerMessageIntake,
+        transcript: {} as any,
+        creatureState: {} as any,
+        logger: { info: vi.fn() },
+      })
+    ).toThrow('allowedOrigin must be an exact HTTPS origin');
+  });
+});
+
 describe('GET /api/instance', () => {
   it('returns the configured instance and a matching loader URL', async () => {
     const { server } = setup(undefined, 'home');
@@ -38,7 +55,7 @@ describe('GET /api/instance', () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({
       name: 'home',
-      loaderUrl: 'http://boot-home.local/',
+      loaderUrl: 'https://boot-home.local/',
     });
     await server.close();
   });
@@ -49,10 +66,20 @@ describe('POST /api/messages', () => {
     ['missing', undefined],
     ['null', 'null'],
     ['malformed', 'not an origin'],
-    ['localhost', 'http://localhost'],
-    ['sibling host', 'http://sibling.localhost'],
-    ['other scheme', 'https://lifemodel.local'],
-    ['other port', 'http://lifemodel.local:8080'],
+    ['localhost', 'https://localhost'],
+    ['sibling host', 'https://sibling.localhost'],
+    ['other scheme', 'http://lifemodel.local'],
+    ['other port', 'https://lifemodel.local:8080'],
+    ['https missing slashes', 'https:boot-lifemodel.local'],
+    ['https extra slash', 'https:///boot-lifemodel.local'],
+    ['surrounding whitespace', ' https://boot-lifemodel.local '],
+    ['path', 'https://boot-lifemodel.local/path'],
+    ['userinfo', 'https://user@boot-lifemodel.local'],
+    ['allowed host missing slashes', 'https:lifemodel.local'],
+    ['allowed host extra slash', 'https:///lifemodel.local'],
+    ['allowed host surrounding whitespace', ' https://lifemodel.local '],
+    ['allowed host path', 'https://lifemodel.local/path'],
+    ['allowed host userinfo', 'https://user@lifemodel.local'],
   ])('refuses %s Origin', async (_name, origin) => {
     const { server, acceptOwnerMessage } = setup();
     const response = await server.inject({
@@ -87,7 +114,7 @@ describe('POST /api/messages', () => {
     const response = await server.inject({
       method: 'POST',
       url: '/api/messages',
-      headers: { origin: 'http://localhost' },
+      headers: { origin: 'https://localhost' },
       payload: { id, text: 'hello' },
     });
     expect(response.statusCode).toBe(403);
@@ -100,7 +127,7 @@ describe('POST /api/messages', () => {
     const response = await server.inject({
       method: 'POST',
       url: '/api/messages',
-      headers: { origin: 'http://lifemodel.local' },
+      headers: { origin: 'https://LIFEMODEL.local:443' },
       payload: { id, text: 'hello', replyTo: '12' },
     });
     expect(response.statusCode).toBe(202);
@@ -127,7 +154,7 @@ describe('POST /api/messages', () => {
     const response = await server.inject({
       method: 'POST',
       url: '/api/messages',
-      headers: { origin: 'http://lifemodel.local' },
+      headers: { origin: 'https://lifemodel.local' },
       payload,
     });
     expect(response.statusCode).toBe(400);
@@ -144,7 +171,7 @@ describe('POST /api/messages', () => {
     const response = await server.inject({
       method: 'POST',
       url: '/api/messages',
-      headers: { origin: 'http://lifemodel.local' },
+      headers: { origin: 'https://lifemodel.local' },
       payload: { id, text: 'hello' },
     });
     expect(response.statusCode).toBe(status);
@@ -155,7 +182,7 @@ describe('POST /api/messages', () => {
   it('maps an invisible reply target to 400 without appending', async () => {
     const acceptOwnerMessage = vi.fn().mockResolvedValue({ status: 'reply_not_found' });
     const server = createWebServer({
-      allowedOrigin: 'http://lifemodel.local',
+      allowedOrigin: 'https://lifemodel.local',
       instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
@@ -170,7 +197,7 @@ describe('POST /api/messages', () => {
     const response = await server.inject({
       method: 'POST',
       url: '/api/messages',
-      headers: { origin: 'http://lifemodel.local' },
+      headers: { origin: 'https://lifemodel.local' },
       payload: { id, text: 'reply', replyTo: '999' },
     });
     expect(response.statusCode).toBe(400);
@@ -184,7 +211,7 @@ describe('POST /api/messages', () => {
     const response = await server.inject({
       method: 'POST',
       url: '/api/messages',
-      headers: { origin: 'http://lifemodel.local' },
+      headers: { origin: 'https://lifemodel.local' },
       payload: { id, text: 'hello' },
     });
     expect(response.statusCode).toBe(503);
@@ -198,7 +225,7 @@ describe('POST /api/messages', () => {
     await server.inject({
       method: 'POST',
       url: '/api/messages',
-      headers: { origin: 'http://lifemodel.local' },
+      headers: { origin: 'https://lifemodel.local' },
       payload: { id, text: secret },
     });
     expect(info).toHaveBeenCalledWith(
@@ -214,7 +241,7 @@ describe('GET /api/events admission', () => {
   it('passes the single stream deadline to shared lease acquisition', async () => {
     const acquireStreamLease = vi.fn().mockResolvedValue('lease-id');
     const server = createWebServer({
-      allowedOrigin: 'http://lifemodel.local',
+      allowedOrigin: 'https://lifemodel.local',
       instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
@@ -256,7 +283,7 @@ describe('GET /api/events admission', () => {
     const config = setup();
     await server.close();
     const unavailable = createWebServer({
-      allowedOrigin: 'http://lifemodel.local',
+      allowedOrigin: 'https://lifemodel.local',
       instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 17, reconnects: 0 },
@@ -290,7 +317,7 @@ describe('static application', () => {
     await server.close();
     const config = setup();
     const stalledServer = createWebServer({
-      allowedOrigin: 'http://lifemodel.local',
+      allowedOrigin: 'https://lifemodel.local',
       instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },

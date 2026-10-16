@@ -84,7 +84,7 @@ describe('loader ForwardAuth verification host', () => {
   it('accepts a valid session only on the exact verification route at its Service host', async () => {
     const record = await hashPassword('owner password');
     const { base } = await start(record);
-    const cookie = `lm_session=${createSession(record, Date.now())}`;
+    const cookie = `__Host-lm_session=${createSession(record, Date.now())}`;
 
     const response = await request(base, '/_auth/verify', { cookie });
     expect(response.status).toBe(200);
@@ -120,8 +120,10 @@ describe('loader ForwardAuth verification host', () => {
       'x-forwarded-host': 'attacker.example',
       'x-forwarded-uri': '/private',
     });
-    expect(denied.status).toBe(401);
-    expect(denied.headers.location).toBeUndefined();
+    expect(denied.status).toBe(303);
+    expect(denied.headers.location).toBe(
+      'https://boot-lifemodel.local/login?next=https%3A%2F%2Flifemodel.local%2Fprivate'
+    );
 
     const browser = await request(base, '/_auth/verify', {
       host: SERVICE_HOST,
@@ -157,10 +159,11 @@ describe('loader ForwardAuth verification host', () => {
     const path = new URL(location).pathname + new URL(location).search;
     const redeemed = await request(base, path, { host: 'lifemodel.local' });
     expect(redeemed.headers.location).toBe('/private?x=1');
+    expect(redeemed.headers['referrer-policy']).toBe('no-referrer');
     const cookie = String(redeemed.headers['set-cookie'] ?? '');
     expect(cookie).not.toBe('');
     expect(cookie).not.toMatch(/domain=/i);
-    const token = cookie.split(';')[0]!.slice('lm_session='.length);
+    const token = cookie.split(';')[0]!.slice('__Host-lm_session='.length);
     expect(verifySession(token, record, clock.now())).toBe(true);
     expect((await request(base, '/_auth/verify', { host: SERVICE_HOST, cookie })).status).toBe(200);
     const replay = await request(base, path, { host: 'lifemodel.local' });
@@ -211,6 +214,7 @@ describe('loader ForwardAuth verification host', () => {
     for (const path of [altered, unknown]) {
       const response = await request(base, path, { host: 'lifemodel.local' });
       expect(response.headers.location).toBe('https://boot-lifemodel.local/login');
+      expect(response.headers['referrer-policy']).toBe('no-referrer');
       expect(response.headers['set-cookie']).toBeUndefined();
     }
     const sessionCookie = String(setup.headers['set-cookie']).split(';')[0]!;
@@ -224,7 +228,45 @@ describe('loader ForwardAuth verification host', () => {
       host: 'lifemodel.local',
     });
     expect(expired.headers.location).toBe('https://boot-lifemodel.local/login');
+    expect(expired.headers['referrer-policy']).toBe('no-referrer');
     expect(expired.headers['set-cookie']).toBeUndefined();
+  });
+
+  it('returns 405 for unsupported methods on the API route namespace', async () => {
+    const { base } = await start(null);
+    for (const path of ['/api/state', '/api/not-real']) {
+      const response = await request(base, path, { host: 'boot-lifemodel.local' }, 'PATCH');
+      expect(response.status).toBe(405);
+    }
+  });
+
+  it('does not let Referer rescue missing, null, or malformed write Origin', async () => {
+    const { base } = await start(null);
+    for (const origin of [
+      undefined,
+      'null',
+      'malformed',
+      'http://boot-lifemodel.local',
+      'https://boot-lifemodel.local:444',
+    ]) {
+      const headers = {
+        host: 'boot-lifemodel.local',
+        referer: 'https://boot-lifemodel.local/page',
+        ...(origin === undefined ? {} : { origin }),
+      };
+      const response = await request(base, '/setup', headers, 'POST', 'password=p');
+      expect(response.status).toBe(403);
+    }
+    const accepted = await request(
+      base,
+      '/setup',
+      { host: 'boot-lifemodel.local', origin: 'https://boot-lifemodel.local' },
+      'POST',
+      'password=p'
+    );
+    expect(accepted.status).toBe(303);
+    expect(String(accepted.headers['set-cookie'])).toContain('__Host-lm_session=');
+    expect(String(accepted.headers['set-cookie'])).toContain('Secure');
   });
 
   it('revokes an app-host session obtained by handoff when logging out', async () => {
@@ -234,13 +276,20 @@ describe('loader ForwardAuth verification host', () => {
     const { csrfToken } = await import('../../loader/src/auth.js');
     const login = await request(base, '/login?next=https%3A%2F%2Flifemodel.local%2F', {
       host: 'boot-lifemodel.local',
-      cookie: `lm_session=${session}`,
+      cookie: `__Host-lm_session=${session}`,
     });
     const loginUrl = new URL(String(login.headers.location));
     const handoff = await request(base, loginUrl.pathname + loginUrl.search, {
       host: 'lifemodel.local',
     });
-    const appCookie = String(handoff.headers['set-cookie']).split(';')[0]!;
+    const handoffSetCookie = String(handoff.headers['set-cookie']);
+    expect(handoffSetCookie).toContain('__Host-lm_session=');
+    expect(handoffSetCookie).toContain('Path=/');
+    expect(handoffSetCookie).toContain('HttpOnly');
+    expect(handoffSetCookie).toContain('Secure');
+    expect(handoffSetCookie).toContain('SameSite=Lax');
+    expect(handoffSetCookie.toLowerCase()).not.toContain('domain=');
+    const appCookie = handoffSetCookie.split(';')[0]!;
     expect(
       (await request(base, '/_auth/verify', { host: SERVICE_HOST, cookie: appCookie })).status
     ).toBe(200);
@@ -250,7 +299,7 @@ describe('loader ForwardAuth verification host', () => {
       '/logout',
       {
         host: 'boot-lifemodel.local',
-        cookie: `lm_session=${session}`,
+        cookie: `__Host-lm_session=${session}`,
         origin: 'https://boot-lifemodel.local',
         'content-type': 'application/x-www-form-urlencoded',
       },
@@ -258,6 +307,13 @@ describe('loader ForwardAuth verification host', () => {
       `csrf=${encodeURIComponent(csrf)}`
     );
     expect(logout.status).toBe(303);
+    const logoutCookie = String(logout.headers['set-cookie']);
+    expect(logoutCookie).toContain('__Host-lm_session=;');
+    expect(logoutCookie).toContain('Path=/');
+    expect(logoutCookie).toContain('HttpOnly');
+    expect(logoutCookie).toContain('Secure');
+    expect(logoutCookie).toContain('SameSite=Lax');
+    expect(logoutCookie.toLowerCase()).not.toContain('domain=');
     expect(
       (await request(base, '/_auth/verify', { host: SERVICE_HOST, cookie: appCookie })).status
     ).toBe(401);
@@ -269,7 +325,7 @@ describe('loader ForwardAuth verification host', () => {
     const session = createSession(record, clock.now());
     const login = await request(base, '/login?next=https%3A%2F%2Flifemodel.local%2Fprivate', {
       host: 'boot-lifemodel.local',
-      cookie: `lm_session=${session}`,
+      cookie: `__Host-lm_session=${session}`,
     });
     const handoffUrl = new URL(String(login.headers.location), 'https://boot-lifemodel.local');
     const csrf = (await import('../../loader/src/auth.js')).csrfToken(record, session);
@@ -278,7 +334,7 @@ describe('loader ForwardAuth verification host', () => {
       '/logout',
       {
         host: 'boot-lifemodel.local',
-        cookie: `lm_session=${session}`,
+        cookie: `__Host-lm_session=${session}`,
         origin: 'https://boot-lifemodel.local',
         'content-type': 'application/x-www-form-urlencoded',
       },
@@ -301,7 +357,7 @@ describe('loader ForwardAuth verification host', () => {
     const csrf = csrfTokenForSession(record, token);
     const headers = {
       host: 'boot-lifemodel.local',
-      cookie: `lm_session=${token}`,
+      cookie: `__Host-lm_session=${token}`,
       origin: 'https://boot-lifemodel.local',
       'content-type': 'application/x-www-form-urlencoded',
     };
@@ -313,8 +369,12 @@ describe('loader ForwardAuth verification host', () => {
     const after = getAuth();
     expect(after).not.toBeNull();
     expect(
-      (await request(base, '/_auth/verify', { host: SERVICE_HOST, cookie: `lm_session=${token}` }))
-        .status
+      (
+        await request(base, '/_auth/verify', {
+          host: SERVICE_HOST,
+          cookie: `__Host-lm_session=${token}`,
+        })
+      ).status
     ).toBe(401);
   });
 
@@ -340,7 +400,7 @@ describe('loader ForwardAuth verification host', () => {
     const logout = await request(
       base,
       '/logout',
-      { ...formHeaders, cookie: `lm_session=${token}` },
+      { ...formHeaders, cookie: `__Host-lm_session=${token}` },
       'POST',
       `csrf=${encodeURIComponent(csrf)}`
     );
@@ -350,7 +410,7 @@ describe('loader ForwardAuth verification host', () => {
     const handoffRecord = authRecord;
     const handoffLogin = await request(base, '/login?next=https%3A%2F%2Flifemodel.local%2F', {
       host: 'boot-lifemodel.local',
-      cookie: `lm_session=${createSession(handoffRecord, clock.now())}`,
+      cookie: `__Host-lm_session=${createSession(handoffRecord, clock.now())}`,
     });
     const handoffUrl = new URL(
       String(handoffLogin.headers.location),

@@ -12,8 +12,8 @@
  */
 import { createHmac, randomBytes, scrypt as scryptKdf, timingSafeEqual } from 'node:crypto';
 
-/** The name of the one session cookie every host of the instance shares. */
-export const SESSION_COOKIE_NAME = 'lm_session';
+/** Host-only session cookie; handoff issues a separate cookie on each HTTPS host. */
+export const SESSION_COOKIE_NAME = '__Host-lm_session';
 
 /** How long a login lasts: a local instance the owner opens from his own machine. */
 export const DEFAULT_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -184,18 +184,8 @@ export function loginLocation(
 }
 
 /**
- * Where the owner signs in to Agent Vault's own interface (lifemodel-q4x.3.2,
- * decision 18): `vault.` on the same host and port the loader was reached on,
- * built from the pinned names only - never from a name a request supplied.
- * Null for a host no browser uses (the loopback literal the command line
- * talks to), where there is no such page to point at.
- */
-
-/**
  * The `next` of a login, or null when it is not an address of this instance.
- * Only an http URL on a pinned browser host AND on the port the login was
- * reached on is followed, so the login page is never an open redirect to
- * somewhere else, not even another local service.
+ * Only an HTTPS URL on a pinned browser host and the login port is followed.
  */
 export function vettedNext(
   next: string | undefined,
@@ -209,9 +199,8 @@ export function vettedNext(
   } catch {
     return null;
   }
-  // http only: the login itself is served over http in this stage, and an
-  // https URL on the same host has another default port - another service
-  // (rework 3, review round 4 finding 2). HTTPS comes with lifemodel-sd2.
+  // The login and every browser destination use HTTPS. Cookies are host-only,
+  // so a valid destination is constrained to this instance and login port.
   if (url.protocol !== 'https:') return null;
   if (url.username !== '' || url.password !== '') return null;
   if (!isBrowserHost(url.hostname.toLowerCase(), instanceName)) return null;
@@ -233,13 +222,21 @@ export function sessionCookie(
     'Path=/',
     `Max-Age=${String(Math.floor(ttlMs / 1000))}`,
     'HttpOnly',
+    'Secure',
     'SameSite=Lax',
   ].join('; ');
 }
 
 /** The Set-Cookie header of a logout: the same cookie, emptied. */
 export function clearSessionCookie(_host: string): string {
-  return [`${SESSION_COOKIE_NAME}=`, 'Path=/', 'Max-Age=0', 'HttpOnly', 'SameSite=Lax'].join('; ');
+  return [
+    `${SESSION_COOKIE_NAME}=`,
+    'Path=/',
+    'Max-Age=0',
+    'HttpOnly',
+    'Secure',
+    'SameSite=Lax',
+  ].join('; ');
 }
 
 /** Handoff codes live only in the loader process; platform has one replica. */
@@ -271,33 +268,37 @@ export function verifyCsrf(
   return given.length === expected.length && timingSafeEqual(given, expected);
 }
 
-/** The host an Origin or Referer header names, or null when it names none. */
-function originHost(source: string | undefined): string | null {
-  if (source === undefined || source === '') return null;
+/** Parse only an RFC 6454 serialized HTTPS origin; URL's repair rules are too permissive. */
+function serializedHttpsOrigin(value: string): URL | null {
+  if (!/^https:\/\/[A-Za-z0-9.-]+(?::[0-9]{1,5})?$/.test(value)) return null;
   try {
-    return new URL(source).host.toLowerCase();
+    const parsed = new URL(value);
+    if (
+      parsed.protocol !== 'https:' ||
+      parsed.username ||
+      parsed.password ||
+      parsed.pathname !== '/' ||
+      parsed.search ||
+      parsed.hash
+    )
+      return null;
+    return parsed;
   } catch {
     return null;
   }
 }
 
-/**
- * Did this request come from a page ON THE HOST IT WAS SENT TO?
- *
- * The browser's `Origin` (a form post always carries one; `Referer` is the
- * fallback) is compared with the request's own Host header, so a form served by
- * the root host - or by any other page on the parent site - cannot drive the
- * loader's own routes. A request that names neither is refused: the loader's
- * forms always come with one.
- */
+/** Compare a serialized write Origin to its configured HTTPS origin, including effective port. */
 export function sameOrigin(
   origin: string | undefined,
-  referer: string | undefined,
+  _referer: string | undefined,
   host: string | undefined
 ): boolean {
-  if (host === undefined || host === '') return false;
-  const named = originHost(origin) ?? originHost(referer);
-  return named !== null && named === host.trim().toLowerCase();
+  if (origin === undefined || host === undefined || host === '') return false;
+  const parsedOrigin = serializedHttpsOrigin(origin);
+  const parsedHost = serializedHttpsOrigin(`https://${host}`);
+  // Host case and an explicit default :443 are canonical-equivalent origins.
+  return parsedOrigin !== null && parsedHost !== null && parsedOrigin.origin === parsedHost.origin;
 }
 
 /** The cookies of one request header, by name. */

@@ -92,11 +92,10 @@ signature against the pinned release-workflow identity. The `boot-<name>.local`
 loader is reached on a test VM with:
 
 ```sh
-curl --resolve boot-<name>.local:80:VM_IP http://boot-<name>.local/login
+curl --resolve boot-<name>.local:443:VM_IP https://boot-<name>.local/login
 ```
 
-Replace `VM_IP` in the command with the VM's reachable IP. Traefik publishes
-this host to port 7000.
+Replace `VM_IP` in the command with the VM's reachable IP. Traefik publishes this host on port 443. Port 80 redirects to HTTPS.
 
 The Flux reconcilers use `dependsOn` to enforce platform-instance → A0 → A → B → C.
 The instance ConfigMap is required by the platform-instance post-build substitution. See the [Flux v2.9.6

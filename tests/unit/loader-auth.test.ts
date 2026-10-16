@@ -2,8 +2,8 @@
  * The loader's login (lifemodel-q4x.2.1, story S2).
  *
  * The password is kept as a slow-KDF digest in a root-only file, never as
- * text and never in a log; one session cookie on the parent domain opens
- * boot.<host>, <host> and vault.<host>.
+ * text and never in a log; host-only Secure cookies are handed off separately
+ * between the boot, app and vault hosts.
  */
 import { describe, expect, it } from 'vitest';
 
@@ -77,7 +77,7 @@ describe('the loader session', () => {
 });
 
 describe('the session cookie', () => {
-  it('is named lm_session and is host-only, HttpOnly, Lax and Path=/', async () => {
+  it('is named __Host-lm_session and is Secure, host-only, HttpOnly, Lax and Path=/', async () => {
     const record = await hashPassword('right');
     const token = createSession(record, NOW, TTL_MS);
     const cookie = sessionCookie(token, 'boot-lifemodel.local', TTL_MS);
@@ -86,6 +86,7 @@ describe('the session cookie', () => {
     expect(cookie.toLowerCase()).not.toContain('domain=');
     expect(cookie).toContain('Path=/');
     expect(cookie).toContain('HttpOnly');
+    expect(cookie).toContain('Secure');
     expect(cookie).toContain('SameSite=Lax');
     expect(cookie).toContain(`Max-Age=${TTL_MS / 1000}`);
   });
@@ -118,17 +119,21 @@ describe('the session cookie', () => {
   it('clears the cookie the same way it was set', () => {
     const cleared = clearSessionCookie('boot-lifemodel.local');
 
-    expect(cleared).toContain(`${SESSION_COOKIE_NAME}=;`);
+    expect(cleared).toContain('__Host-lm_session=;');
     expect(cleared.toLowerCase()).not.toContain('domain=');
+    expect(cleared).toContain('Path=/');
+    expect(cleared).toContain('HttpOnly');
+    expect(cleared).toContain('Secure');
+    expect(cleared).toContain('SameSite=Lax');
     expect(cleared).toContain('Max-Age=0');
   });
 });
 
 describe('the Cookie request header', () => {
   it('reads the named cookie among the others and tolerates an absent header', () => {
-    expect(parseCookies('a=1; lm_session=abc.def; b=2')).toEqual({
+    expect(parseCookies('a=1; __Host-lm_session=abc.def; b=2')).toEqual({
       a: '1',
-      lm_session: 'abc.def',
+      '__Host-lm_session': 'abc.def',
       b: '2',
     });
     expect(parseCookies(undefined)).toEqual({});
@@ -154,39 +159,28 @@ describe('the anti-CSRF token of a form', () => {
 });
 
 describe('the Origin of a state-changing request', () => {
-  it('must name the host the request was sent to', () => {
-    expect(
-      sameOrigin('http://boot-lifemodel.local:8080', undefined, 'boot-lifemodel.local:8080')
-    ).toBe(true);
-    expect(sameOrigin('http://BOOT-LIFEMODEL.local', undefined, 'boot-lifemodel.local')).toBe(true);
-    // The root host's page is another origin: this is the attack (finding 5).
-    expect(sameOrigin('http://lifemodel.local:8080', undefined, 'boot-lifemodel.local:8080')).toBe(
-      false
+  it('requires exact configured HTTPS origin and never uses Referer', () => {
+    expect(sameOrigin('https://boot-lifemodel.local', undefined, 'boot-lifemodel.local')).toBe(
+      true
     );
-    expect(sameOrigin('https://attacker.test', undefined, 'boot-lifemodel.local:8080')).toBe(false);
-    expect(sameOrigin(undefined, undefined, 'boot-lifemodel.local:8080')).toBe(false);
-    expect(sameOrigin('null', undefined, 'boot-lifemodel.local:8080')).toBe(false);
-  });
-
-  it('falls back to the Referer, and only to its host', () => {
-    expect(
-      sameOrigin(
-        undefined,
-        'http://boot-lifemodel.local:8080/panic?x=1',
-        'boot-lifemodel.local:8080'
-      )
-    ).toBe(true);
-    expect(sameOrigin(undefined, 'http://lifemodel.local:8080/', 'boot-lifemodel.local:8080')).toBe(
-      false
+    for (const origin of [
+      'https:boot-lifemodel.local',
+      'https:///boot-lifemodel.local',
+      ' https://boot-lifemodel.local ',
+      'https://boot-lifemodel.local/path',
+      'https://user@boot-lifemodel.local',
+      'http://boot-lifemodel.local',
+      'https://lifemodel.local',
+      'https://boot-lifemodel.local:444',
+      'null',
+      'not a url',
+      undefined,
+    ])
+      expect(sameOrigin(origin, 'https://boot-lifemodel.local/page', 'boot-lifemodel.local')).toBe(
+        false
+      );
+    expect(sameOrigin('https://BOOT-LIFEMODEL.local:443', undefined, 'boot-lifemodel.local')).toBe(
+      true
     );
-    expect(sameOrigin(undefined, 'not a url', 'boot-lifemodel.local:8080')).toBe(false);
-    // Origin wins over Referer when both are there.
-    expect(
-      sameOrigin(
-        'http://lifemodel.local:8080',
-        'http://boot-lifemodel.local:8080/',
-        'boot-lifemodel.local:8080'
-      )
-    ).toBe(false);
   });
 });

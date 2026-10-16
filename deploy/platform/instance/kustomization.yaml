@@ -7,3 +7,4 @@ resources:
   - loader-ingress.yaml
   - web-ingress.yaml
   - handoff-ingress.yaml
+  - traefik.yaml

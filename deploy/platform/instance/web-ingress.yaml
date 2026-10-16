@@ -14,9 +14,13 @@ metadata:
   name: web-private
   namespace: lifemodel
   annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
     traefik.ingress.kubernetes.io/router.middlewares: lifemodel-loader-auth@kubernetescrd
 spec:
   ingressClassName: traefik
+  tls:
+    - hosts:
+        - ${LIFEMODEL_NAME}.local
   rules:
     - host: ${LIFEMODEL_NAME}.local
       http:

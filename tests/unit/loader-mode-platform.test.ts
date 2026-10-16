@@ -57,6 +57,49 @@ function appFor(
   });
 }
 
+async function localRequest(
+  port: number,
+  path: string,
+  method: string,
+  body: string,
+  cookie?: string
+) {
+  return new Promise<{
+    status: number;
+    headers: Record<string, string | string[] | undefined>;
+    body: string;
+  }>((resolve, reject) => {
+    const req = httpRequest(
+      {
+        hostname: '127.0.0.1',
+        port,
+        path,
+        method,
+        headers: {
+          host: 'boot-lifemodel.local',
+          origin: 'https://boot-lifemodel.local',
+          'content-type': 'application/x-www-form-urlencoded',
+          ...(cookie ? { cookie } : {}),
+        },
+      },
+      (res) => {
+        let responseBody = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => (responseBody += chunk));
+        res.on('end', () =>
+          resolve({
+            status: res.statusCode ?? 0,
+            headers: res.headers as Record<string, string | string[] | undefined>,
+            body: responseBody,
+          })
+        );
+      }
+    );
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+
 describe('the platform loader', () => {
   it('sets up authentication and preserves it across a restart', async () => {
     const root = mkdtempSync(join(tmpdir(), 'platform-loader-'));
@@ -64,18 +107,9 @@ describe('the platform loader', () => {
     const first = appFor({ root });
     await first.start();
     const port = first.port();
-    const setup = await fetch(`http://127.0.0.1:${port}/setup`, {
-      method: 'POST',
-      headers: {
-        origin: `http://127.0.0.1:${port}`,
-        host: `127.0.0.1:${port}`,
-        'content-type': 'application/x-www-form-urlencoded',
-      },
-      body: 'password=secret',
-      redirect: 'manual',
-    });
+    const setup = await localRequest(port, '/setup', 'POST', 'password=secret');
     expect(setup.status).toBe(303);
-    const cookie = setup.headers.get('set-cookie')?.split(';')[0] ?? '';
+    const cookie = String(setup.headers['set-cookie'] ?? '').split(';')[0] ?? '';
     const home = await fetch(`http://127.0.0.1:${port}/`, {
       headers: { host: 'boot-lifemodel.local', cookie },
     });
@@ -84,16 +118,7 @@ describe('the platform loader', () => {
     expect(await first.shutdown('test')).toBe(0);
     const second = appFor({ root });
     await second.start();
-    const login = await fetch(`http://127.0.0.1:${second.port()}/login`, {
-      method: 'POST',
-      headers: {
-        origin: `http://127.0.0.1:${second.port()}`,
-        host: `127.0.0.1:${second.port()}`,
-        'content-type': 'application/x-www-form-urlencoded',
-      },
-      body: 'password=secret',
-      redirect: 'manual',
-    });
+    const login = await localRequest(second.port(), '/login', 'POST', 'password=secret');
     expect(login.status).toBe(303);
     expect(await second.shutdown('test')).toBe(0);
   });
@@ -104,36 +129,23 @@ describe('the platform loader', () => {
     const app = appFor({ root });
     await app.start();
     const port = app.port();
-    const setup = await fetch(`http://127.0.0.1:${port}/setup`, {
-      method: 'POST',
-      headers: {
-        origin: `http://127.0.0.1:${port}`,
-        host: `127.0.0.1:${port}`,
-        'content-type': 'application/x-www-form-urlencoded',
-      },
-      body: 'password=secret',
-      redirect: 'manual',
-    });
-    const cookie = setup.headers.get('set-cookie')!.split(';')[0]!;
+    const setup = await localRequest(port, '/setup', 'POST', 'password=secret');
+    const cookie = String(setup.headers['set-cookie'] ?? '').split(';')[0]!;
     const home = await fetch(`http://127.0.0.1:${port}/`, {
-      headers: { host: `boot-lifemodel.local:${port}`, cookie },
+      headers: { host: 'boot-lifemodel.local', cookie },
     });
     const html = await home.text();
     const csrf = html.match(/name="csrf" value="([^"]+)"/)![1]!;
-    const logout = await fetch(`http://127.0.0.1:${port}/logout`, {
-      method: 'POST',
-      headers: {
-        origin: `http://127.0.0.1:${port}`,
-        host: `127.0.0.1:${port}`,
-        cookie,
-        'content-type': 'application/x-www-form-urlencoded',
-      },
-      body: `csrf=${encodeURIComponent(csrf)}`,
-      redirect: 'manual',
-    });
+    const logout = await localRequest(
+      port,
+      '/logout',
+      'POST',
+      `csrf=${encodeURIComponent(csrf)}`,
+      cookie
+    );
     expect(logout.status).toBe(303);
     const denied = await fetch(`http://127.0.0.1:${port}/`, {
-      headers: { host: `boot-lifemodel.local:${port}`, cookie },
+      headers: { host: 'boot-lifemodel.local', cookie },
     });
     expect(denied.status).toBe(401);
     expect(await app.shutdown('test')).toBe(0);
