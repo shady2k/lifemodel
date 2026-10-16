@@ -12,7 +12,6 @@ const MAX_PAGE_SIZE = 50;
 const OUTBOUND_STREAM = 'outbound';
 const WAKE_POLL_MS = 1_000;
 const WAKE_CLOSE_TIMEOUT_MS = 100;
-const STREAM_LEASE_TTL_SECONDS = 15 * 60 + 30;
 const STREAM_LEASE_LIMIT = 4;
 const ACQUIRE_STREAM_LEASE_SCRIPT = `
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[2])
@@ -221,8 +220,10 @@ export class PostgresTranscriptStore implements TranscriptReader {
 
   private readonly streamLeases = new Map<string, string[]>();
 
-  async acquireStreamLease(session: string): Promise<boolean> {
+  async acquireStreamLease(session: string, expiresAt: number): Promise<boolean> {
     if (!session) throw new Error('Stream session is required');
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now())
+      throw new Error('Stream lease expiry must be in the future');
     const sessionKey = `web:stream-leases:${createHash('sha256').update(session).digest('hex')}`;
     const leaseId = randomUUID();
     const result = await this.redis.eval(
@@ -231,7 +232,7 @@ export class PostgresTranscriptStore implements TranscriptReader {
       sessionKey,
       String(STREAM_LEASE_LIMIT),
       String(Date.now()),
-      String(STREAM_LEASE_TTL_SECONDS * 1_000),
+      String(expiresAt - Date.now()),
       leaseId
     );
     if (Number(result) !== 1) return false;

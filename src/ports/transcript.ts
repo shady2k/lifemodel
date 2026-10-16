@@ -24,6 +24,6 @@ export interface ReadTranscriptOptions {
 export interface TranscriptReader {
   readTranscript(options: ReadTranscriptOptions): Promise<TranscriptPage>;
   watchTranscript(after: string, signal?: AbortSignal): AsyncIterable<TranscriptRow>;
-  acquireStreamLease(session: string): Promise<boolean>;
+  acquireStreamLease(session: string, expiresAt: number): Promise<boolean>;
   releaseStreamLease(session: string): Promise<void>;
 }
