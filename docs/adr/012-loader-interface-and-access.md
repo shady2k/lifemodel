@@ -6,8 +6,10 @@ Date: 2026-10-16.
 
 Proposed (lifemodel-3wi9 design, 2026-10-16). Owner decisions of
 2026-10-16 are its frame. Reviewed by gpt-6.1-sol in ATAM manner (round 1:
-BLOCK, findings ADR12-01 to ADR12-15); this revision answers every finding,
-marked in brackets. ADR12-01 changed the names; the owner chose
+BLOCK, findings ADR12-01 to ADR12-15; confirmation round: BLOCK on
+ADR12-C-01 to C-03, comments C-04 to C-07); this revision answers every
+finding, marked in brackets. By the review's convergence rule the C-round
+fixes are checked in the first stage review instead of a third design round. ADR12-01 changed the names; the owner chose
 `boot-<name>.local` (2026-10-16).
 
 It amends ADR-010 (the loader's surface and network, its Bao grants, the
@@ -74,12 +76,18 @@ model access, checked) → the chat, answered by the owner's real model
   `flux-system`, path `./instance` of the same signed artifact, applied first,
   `postBuild.substituteFrom` that ConfigMap, `optional: false`) is the **only**
   Kustomization with substitution. It carries only small hand-written
-  objects: the namespace-local ConfigMaps `lifemodel-instance` in
-  `lifemodel-system` and `lifemodel`, and every public Ingress, Middleware,
-  TLS store and redirect object. Vendored charts (OpenBao, Gitea) and the
-  application Kustomization never pass through substitution. A missing
+  objects: the Namespaces `lifemodel-system` and `lifemodel` (moved here
+  from A0 and A, which no longer own them), the namespace-local ConfigMaps
+  `lifemodel-instance` in both, and every public Ingress, Middleware, TLS
+  store and the Traefik HelmChartConfig. Vendored charts (OpenBao, Gitea) and
+  the application Kustomization never pass through substitution. A missing
   ConfigMap fails the reconciliation; nothing renders with an empty host.
-  Kustomizations whose namespaces the routes need are ordered by `dependsOn`.
+  **Cold-start chain** [ADR12-C-01]: `platform-instance` (no `dependsOn`; its
+  objects need only k3s's own CRDs and become ready at once; an Ingress whose
+  Service has no endpoints yet is ready as an object) → A0 (`dependsOn`
+  `platform-instance`; the loader's certificate bootstrap) → A → B/C. A0 stays
+  independent of Bao, Gitea, the web module and Traefik serving. A check
+  reconciles the chain on an empty k3s cluster, not only renders it.
 - The loader and the web module read `LIFEMODEL_NAME` from their
   namespace-local ConfigMap (`configMapKeyRef`, not optional) and derive every
   host, allowed origin and redirect from it. The chat learns the loader's
@@ -131,8 +139,16 @@ model access, checked) → the chat, answered by the owner's real model
   setup page is served under Traefik's fallback certificate.
 - **Repair.** A missing or expiring leaf is reissued from the existing CA. A
   missing or corrupt CA while the identity exists fails the loader visibly
-  (doctor says so); it is never silently regenerated. Restore is from backup
-  of the loader volume; an explicit reset command is out of scope.
+  (doctor says so); it is never silently regenerated. A valid CA found after
+  a crash before the identity was published is reused; a CA that does not
+  match the identity is refused. Every file is published atomically (write,
+  fsync, rename, fsync the directory); `auth.json` is created exclusively from
+  a fully written temporary file. `lifemodel doctor` reports the PKI state
+  (identity, CA present and matching, leaf validity and SANs). Backup and
+  restore are manual and documented: the whole loader volume, permissions
+  kept, the CA fingerprint verified after restore; losing the volume means a
+  reinstall and new trust on every device. An explicit reset command is out
+  of scope [ADR12-C-04].
 - **Renewal.** The leaf is valid 397 days and reissued when 30 days remain, by
   a daily timer in the loader as well as at start. Traefik reloads the Secret
   live. The CA is valid 10 years; its renewal is a later concern, recorded.
@@ -169,7 +185,9 @@ model access, checked) → the chat, answered by the owner's real model
 | `boot-` | `/api/state` | GET | public; returns `{setupNeeded, loggedIn}` and, only with a session, the wizard step and the CSRF token (`no-store`) |
 | `boot-` | `/api/setup` | POST | only while no password exists; exact Origin + `Content-Type: application/json` |
 | `boot-` | `/api/login` | POST | exact Origin + JSON content type |
-| `boot-` | every other `/api/*` | any | session + CSRF token header + exact Origin |
+| `boot-` | `/api/model` | GET | session; Origin may be absent (same-origin reads carry none) but a present Origin must match exactly; `Sec-Fetch-Site`, when sent, must be `same-origin`; `no-store` [ADR12-C-02] |
+| `boot-` | every `/api/*` write (POST, PUT, DELETE) | as listed in Decision 6 | session + CSRF token header + exact Origin |
+| `boot-` | `/api/*` with another method | | 405 |
 | `boot-` | `/_auth/verify` | — | refused (verify is answered only on the Service host) |
 | `<name>` | `/_auth/handoff` | GET | ticket only; then a clean redirect, `Referrer-Policy: no-referrer` |
 | `<name>` | everything else | any | ForwardAuth → web module |
@@ -238,22 +256,33 @@ safe from cross-site forms before a session exists.
   a key, an upstream body or a URL with a query.
 - **Destinations.** `https` to a public address, or `http`/`https` to a
   private LAN address (RFC 1918) for Ollama on the home network — that
-  plaintext LAN leg is the owner's own network, stated. Refused: URL
+  plaintext LAN leg is the owner's own network, stated. One in-cluster
+  target is allowed by name, for an Ollama module the owner may run in the
+  cluster (lifemodel-2t5 owner decision, 2026-10-15): exactly
+  `http://ollama.ollama.svc.cluster.local:11434`, validated against that
+  Service's resolved address [ADR12-C-03]. Refused: URL
   credentials, other schemes, loopback, link-local (including
-  `169.254.169.254`), the cluster's pod and service ranges, IPv6 and
+  `169.254.169.254`), the cluster's pod and service ranges except that one
+  target, the API server, IPv6 and
   IPv4-mapped literals of those, and names resolving to any of them. The
   checker resolves once, validates every address, connects to the validated
   address with the original host for TLS/SNI, follows no redirect, and bounds
   the whole check at 15 s and 64 KiB; one check per slot at a time.
 - **Network policy:** the loader's NetworkPolicy gains egress to `0.0.0.0/0`
-  except the pod and service CIDRs and `169.254.0.0/16` — a narrow,
-  recorded exception to ADR-010's egress matrix for the trusted loader; the
-  application-level validation above enforces the rest.
+  except the pod and service CIDRs and `169.254.0.0/16`, plus TCP 11434 to
+  pods of namespace `ollama` — a narrow, recorded exception to ADR-010's
+  egress matrix for the trusted loader; the application-level validation
+  above enforces the rest.
 - **OpenBao.** A KV v2 engine mounted at `lifemodel/` and the policy
   `loader-model` (`create`, `update`, `read` on
-  `lifemodel/data/model/*`, `read` on `lifemodel/metadata/model/*`) bound to
-  the loader's Kubernetes-auth role are created by an initial bootstrap phase,
-  before the root token is retired (clean installs only, by the drivers). The
+  `lifemodel/data/model/*`, `read` on `lifemodel/metadata/model/*`, `delete`
+  on exactly `lifemodel/data/model/reserve`) bound to the loader's
+  Kubernetes-auth role are provisioned inside the existing policy action of
+  `openbao.ts`, before its root revocation, idempotently, and verified under
+  the loader role before the root token is revoked (clean installs only, by
+  the drivers). Clearing the reserve is a KV v2 delete of its latest version;
+  a deleted latest version reads as unset, for the loader and the gateway
+  alike [ADR12-C-05]. The
   loader logs in with its service-account token and logs in again when the
   Bao token expires; sealed or unreachable Bao answers `503 storage
   unavailable`, never "not set". The egress gateway's read-only policy is
@@ -261,12 +290,17 @@ safe from cross-site forms before a session exists.
 
 ### 8. The installer finishes for a person [ADR12-14]
 
-- **Release pin.** The release workflow stamps each release's `install.sh`
-  and the flake's module default with that release's platform URL and digest;
-  "latest" is the installer downloaded from the latest GitHub release. The
-  installer persists name and digest in `/etc/lifemodel/instance.env`; a rerun
-  keeps both unless the owner passes another release explicitly. Nix
-  evaluation stays offline and deterministic.
+- **Release pin** [ADR12-C-06]. After pushing and verifying the signed
+  platform, the release workflow publishes a versioned installer bundle as a
+  GitHub release asset: `install.sh`, the root templates and the CLI, with
+  that release's platform URL and digest stamped in (the release job gains
+  `contents: write` only). "Latest" is that asset of the latest release, never
+  the source archive; a clean-directory smoke run checks it. The NixOS module's
+  default is the platform **tag** of the flake's own version (signature
+  verification pins the release workflow's identity, so the tag cannot be
+  re-signed by anyone else); Nix evaluation stays offline. The installer
+  persists name and digest in `/etc/lifemodel/instance.env`; a rerun keeps
+  both unless the owner passes another release explicitly.
 - **Wait.** After applying, the installer waits at most 10 min (each request
   bounded to 10 s) for an anonymous `GET https://boot-<name>.local/api/state`
   answered 200 from the node (`--resolve` to `127.0.0.1`), verified with
