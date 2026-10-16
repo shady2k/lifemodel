@@ -20,8 +20,17 @@ import { scheduleNotSent } from './send-state';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import { Bubble, Marker, Message, MessageScroller } from '@/components/ui/message';
-import { CodeBlock } from '@/components/ui/code-block';
+import { Message } from '@/components/ui/message';
+import { Bubble } from '@/components/ui/bubble';
+import { Marker } from '@/components/ui/marker';
+import {
+  MessageScroller,
+  MessageScrollerContent,
+  MessageScrollerProvider,
+  MessageScrollerViewport,
+} from '@/components/ui/message-scroller';
+import { CodeBlock, CodeBlockContent, CodeBlockLine } from '@/components/ui/code-block';
+import { useHighlightedCode } from '@/hooks/use-highlighted-code';
 import { CreaturePresence, type CreaturePresenceValue } from './components/CreaturePresence';
 import {
   httpTransport,
@@ -53,6 +62,19 @@ function safeHttpUrl(value: string | undefined): string | undefined {
   }
 }
 
+function HighlightedCode({ code, language }: { code: string; language: string }) {
+  const lines = useHighlightedCode(code, language);
+  return (
+    <CodeBlock>
+      <CodeBlockContent>
+        {lines.map((line, index) => (
+          <CodeBlockLine key={index}>{line}</CodeBlockLine>
+        ))}
+      </CodeBlockContent>
+    </CodeBlock>
+  );
+}
+
 function MessageText({ text }: { text: string }) {
   return (
     <ReactMarkdown
@@ -78,7 +100,7 @@ function MessageText({ text }: { text: string }) {
               : '';
           const code = codeText.replace(/\n$/, '');
           return match ? (
-            <CodeBlock code={code} language={match[1]} />
+            <HighlightedCode code={code} language={match[1]} />
           ) : (
             <code className={className} {...props}>
               {children}
@@ -277,169 +299,171 @@ function ConversationContent({
 
   return (
     <div className="flex h-full min-h-0 flex-col" aria-label={t('conversation')}>
-      <header className="flex h-14 shrink-0 items-center gap-3 border-b px-4">
-        <Avatar className="bg-primary text-primary-foreground">
-          <AvatarFallback className="bg-primary text-primary-foreground">l</AvatarFallback>
-        </Avatar>
-        <div className="flex min-w-0 flex-col">
-          <span className="text-sm font-medium">lifemodel</span>
-          <CreaturePresence value={creature} />
-        </div>
-      </header>
-      <MessageScroller
-        ref={scroller}
-        data-testid="transcript-scroller"
-        aria-label={t('conversationMessages')}
-        className="min-h-0 flex-1"
-        onScroll={(event) => {
-          if (event.currentTarget.scrollTop <= 20) readEarlier();
-        }}
-      >
-        {transcript.isPending ? (
-          <p className="p-4 text-sm text-muted-foreground">{t('loading')}</p>
-        ) : null}
-        {transcript.isError ? (
-          <p role="alert" className="p-4">
-            {t('transcriptError')}
-          </p>
-        ) : null}
-        {transcript.isFetchingPreviousPage ? (
-          <p className="p-2 text-center text-xs text-muted-foreground">{t('loadingEarlier')}</p>
-        ) : null}
-        <div style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
-          {virtualItems.map((virtualRow) => {
-            const message = messages[virtualRow.index];
-            if (!message) return null;
-            const previous = messages[virtualRow.index - 1];
-            const owner = message.role === 'user';
-            return (
+      <MessageScrollerProvider>
+        <MessageScroller className="min-h-0 flex-1">
+          <MessageScrollerViewport
+            ref={scroller}
+            data-testid="transcript-scroller"
+            aria-label={t('conversationMessages')}
+            onScroll={(event) => {
+              if (event.currentTarget.scrollTop <= 20) readEarlier();
+            }}
+          >
+            <MessageScrollerContent>
+              {transcript.isPending ? (
+                <p className="p-4 text-sm text-muted-foreground">{t('loading')}</p>
+              ) : null}
+              {transcript.isError ? (
+                <p role="alert" className="p-4">
+                  {t('transcriptError')}
+                </p>
+              ) : null}
+              {transcript.isFetchingPreviousPage ? (
+                <p className="p-2 text-center text-xs text-muted-foreground">
+                  {t('loadingEarlier')}
+                </p>
+              ) : null}
               <div
-                key={message.sequence}
-                data-index={virtualRow.index}
-                ref={virtualizer.measureElement}
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  width: '100%',
-                  transform: `translateY(${String(virtualRow.start)}px)`,
-                }}
+                style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}
               >
-                {!previous || dateLabel(previous) !== dateLabel(message) ? (
-                  <Marker>{dateLabel(message)}</Marker>
-                ) : null}
-                <Message className={`group ${owner ? 'justify-end' : 'justify-start'}`}>
-                  {!owner ? (
-                    <Avatar className="mt-1">
-                      <AvatarFallback>l</AvatarFallback>
-                    </Avatar>
-                  ) : null}
-                  <div className="flex min-w-0 flex-col">
-                    {message.replyTo ? (
-                      <Marker className="justify-start gap-1 border-l-2 pl-2 text-left">
-                        <CornerUpLeft aria-hidden="true" className="size-3" />
-                        {message.replyTo.excerpt}
-                      </Marker>
-                    ) : null}
-                    <Bubble
-                      className={
-                        owner
-                          ? 'bg-accent text-accent-foreground'
-                          : 'bg-secondary text-secondary-foreground'
-                      }
+                {virtualItems.map((virtualRow) => {
+                  const message = messages[virtualRow.index];
+                  if (!message) return null;
+                  const previous = messages[virtualRow.index - 1];
+                  const owner = message.role === 'user';
+                  return (
+                    <div
+                      key={message.sequence}
+                      data-index={virtualRow.index}
+                      ref={virtualizer.measureElement}
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        width: '100%',
+                        transform: `translateY(${String(virtualRow.start)}px)`,
+                      }}
                     >
-                      <MessageText text={message.text} />
-                    </Bubble>
-                    <time
-                      className="px-2 pt-1 text-xs text-muted-foreground"
-                      dateTime={message.createdAt}
-                    >
-                      {new Intl.DateTimeFormat(i18n.language, {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      }).format(new Date(message.createdAt))}
-                    </time>
-                    {owner && message.sequence === lastOwnerSequence ? (
-                      <span
-                        className="px-2 pt-1 text-right text-xs text-muted-foreground"
-                        data-testid="read-receipt"
-                      >
-                        {t('readAt', {
-                          time: new Intl.DateTimeFormat(i18n.language, {
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          }).format(new Date(message.createdAt)),
-                        })}
-                      </span>
-                    ) : null}
-                    <div className="flex items-center gap-2 px-2 pt-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="xs"
-                        aria-label={`${t('replyTo')} ${message.text.slice(0, 80)}`}
-                        onClick={() => {
-                          setReply(message);
-                        }}
-                      >
-                        {t('reply')}
-                      </Button>
-                      {message.clientId &&
-                      optimistic.find((row) => row.clientId === message.clientId)?.status ===
-                        'failed' ? (
-                        <>
-                          <span className="text-xs text-destructive">{t('notSentRetry')}</span>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="xs"
-                            aria-label={t('retrySending')}
-                            onClick={() => {
-                              const failed = optimistic.find(
-                                (row) => row.clientId === message.clientId
-                              );
-                              if (failed)
-                                void send(
-                                  failed.text,
-                                  failed.replyTo
-                                    ? {
-                                        sequence: failed.replyTo.sequence,
-                                        role: failed.replyTo.role,
-                                        text: failed.replyTo.excerpt,
-                                        createdAt: failed.createdAt,
-                                      }
-                                    : undefined
-                                );
-                              setOptimistic((rows) =>
-                                rows.filter((row) => row.clientId !== message.clientId)
-                              );
-                            }}
-                          >
-                            {t('retry')}
-                          </Button>
-                        </>
+                      {!previous || dateLabel(previous) !== dateLabel(message) ? (
+                        <Marker>{dateLabel(message)}</Marker>
                       ) : null}
+                      <Message className={`group ${owner ? 'justify-end' : 'justify-start'}`}>
+                        {!owner ? (
+                          <Avatar className="mt-1">
+                            <AvatarFallback>l</AvatarFallback>
+                          </Avatar>
+                        ) : null}
+                        <div className="flex min-w-0 flex-col">
+                          {message.replyTo ? (
+                            <Marker className="justify-start gap-1 border-l-2 pl-2 text-left">
+                              <CornerUpLeft aria-hidden="true" className="size-3" />
+                              {message.replyTo.excerpt}
+                            </Marker>
+                          ) : null}
+                          <Bubble
+                            className={
+                              owner
+                                ? 'bg-accent text-accent-foreground'
+                                : 'bg-secondary text-secondary-foreground'
+                            }
+                          >
+                            <MessageText text={message.text} />
+                          </Bubble>
+                          <time
+                            className="px-2 pt-1 text-xs text-muted-foreground"
+                            dateTime={message.createdAt}
+                          >
+                            {new Intl.DateTimeFormat(i18n.language, {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            }).format(new Date(message.createdAt))}
+                          </time>
+                          {owner && message.sequence === lastOwnerSequence ? (
+                            <span
+                              className="px-2 pt-1 text-right text-xs text-muted-foreground"
+                              data-testid="read-receipt"
+                            >
+                              {t('readAt', {
+                                time: new Intl.DateTimeFormat(i18n.language, {
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                }).format(new Date(message.createdAt)),
+                              })}
+                            </span>
+                          ) : null}
+                          <div className="flex items-center gap-2 px-2 pt-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="xs"
+                              aria-label={`${t('replyTo')} ${message.text.slice(0, 80)}`}
+                              onClick={() => {
+                                setReply(message);
+                              }}
+                            >
+                              {t('reply')}
+                            </Button>
+                            {message.clientId &&
+                            optimistic.find((row) => row.clientId === message.clientId)?.status ===
+                              'failed' ? (
+                              <>
+                                <span className="text-xs text-destructive">
+                                  {t('notSentRetry')}
+                                </span>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="xs"
+                                  aria-label={t('retrySending')}
+                                  onClick={() => {
+                                    const failed = optimistic.find(
+                                      (row) => row.clientId === message.clientId
+                                    );
+                                    if (failed)
+                                      void send(
+                                        failed.text,
+                                        failed.replyTo
+                                          ? {
+                                              sequence: failed.replyTo.sequence,
+                                              role: failed.replyTo.role,
+                                              text: failed.replyTo.excerpt,
+                                              createdAt: failed.createdAt,
+                                            }
+                                          : undefined
+                                      );
+                                    setOptimistic((rows) =>
+                                      rows.filter((row) => row.clientId !== message.clientId)
+                                    );
+                                  }}
+                                >
+                                  {t('retry')}
+                                </Button>
+                              </>
+                            ) : null}
+                          </div>
+                        </div>
+                      </Message>
                     </div>
-                  </div>
-                </Message>
+                  );
+                })}
               </div>
-            );
-          })}
-        </div>
-        {creature?.state === 'thinking' ? (
-          <Message className="justify-start" aria-label={t('thinking')}>
-            <Avatar className="mt-1">
-              <AvatarFallback>l</AvatarFallback>
-            </Avatar>
-            <Bubble className="bg-secondary text-secondary-foreground" aria-hidden="true">
-              •••
-            </Bubble>
-          </Message>
-        ) : null}
-        <div aria-live="polite" className="sr-only" data-testid="live-announcement">
-          {announcement}
-        </div>
-      </MessageScroller>
+              {creature?.state === 'thinking' ? (
+                <Message className="justify-start" aria-label={t('thinking')}>
+                  <Avatar className="mt-1">
+                    <AvatarFallback>l</AvatarFallback>
+                  </Avatar>
+                  <Bubble className="bg-secondary text-secondary-foreground" aria-hidden="true">
+                    •••
+                  </Bubble>
+                </Message>
+              ) : null}
+              <div aria-live="polite" className="sr-only" data-testid="live-announcement">
+                {announcement}
+              </div>
+            </MessageScrollerContent>
+          </MessageScrollerViewport>
+        </MessageScroller>
+      </MessageScrollerProvider>
       <form
         className="shrink-0 border-t p-3"
         onSubmit={(event) => {

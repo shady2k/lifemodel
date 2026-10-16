@@ -2,3 +2,6 @@ dist/
 node_modules/
 data/
 *.md
+
+# Pinned shadcn registry output; verified byte-for-byte by provenance tests.
+web/app/src/components/ui/
