@@ -41,11 +41,42 @@ function render(directory: string, active = new Set<string>()): Resource[] {
 }
 
 const objects = () => [...render(join(platformRoot, 'a0')), ...render(join(platformRoot, 'a'))];
+const services = () => objects().filter((item) => item.kind === 'Service');
+function assertIngressBackendsResolve(ingresses: Resource[]) {
+  const allServices = [
+    ...services(),
+    ...documents(join(platformRoot, 'applications/lifemodel/web.yaml')).filter(
+      (item) => item.kind === 'Service'
+    ),
+  ];
+  for (const ingress of ingresses) {
+    for (const rule of ingress.spec?.rules ?? [])
+      for (const route of rule.http?.paths ?? []) {
+        const service = allServices.find(
+          (item) =>
+            item.metadata?.namespace === ingress.metadata?.namespace &&
+            item.metadata?.name === route.backend?.service?.name
+        );
+        expect(
+          service,
+          `${ingress.metadata?.namespace}/${ingress.metadata?.name} backend ${route.backend?.service?.name} must exist in namespace`
+        ).toBeDefined();
+        const requested = route.backend?.service?.port;
+        expect(
+          service?.spec?.ports?.some(
+            (port: any) => port.name === requested?.name || port.port === requested?.number
+          ),
+          `${ingress.metadata?.name} backend port must exist`
+        ).toBe(true);
+      }
+  }
+}
 
 describe('platform web ingress and egress', () => {
   it('guards every private route and leaves boot login and setup unguarded', () => {
     const all = objects();
     const ingresses = all.filter((item) => item.kind === 'Ingress');
+    assertIngressBackendsResolve(ingresses);
     const privateRoutes = ingresses.flatMap((ingress) =>
       (ingress.spec?.rules ?? []).flatMap((rule: any) =>
         (rule.http?.paths ?? []).map((path: any) => ({ ingress, host: rule.host, path }))
@@ -56,6 +87,7 @@ describe('platform web ingress and egress', () => {
         host === 'localhost' && path.path === '/_auth/handoff' && path.pathType === 'Exact'
     );
     expect(handoff).toHaveLength(1);
+    expect(handoff[0]?.ingress.metadata.namespace).toBe('lifemodel-system');
     expect(
       handoff[0]?.ingress.metadata.annotations?.['traefik.ingress.kubernetes.io/router.middlewares']
     ).toBeUndefined();
@@ -206,9 +238,11 @@ describe('platform web ingress and egress', () => {
           backend: 'web',
         });
       }
-      expect(
-        await send('localhost', '/_auth/handoff?ticket=x&next=%2F', 'anonymous')
-      ).toMatchObject({ status: 200, backend: 'loader', pathType: 'Exact' });
+      expect(await send('localhost', '/_auth/handoff?code=x&next=%2F', 'anonymous')).toMatchObject({
+        status: 200,
+        backend: 'loader',
+        pathType: 'Exact',
+      });
       for (const path of ['/login', '/setup']) {
         expect(await send('boot.localhost', path, 'anonymous')).toMatchObject({
           status: 200,

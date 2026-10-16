@@ -285,7 +285,8 @@ describe('platform manifests', () => {
     expect(objects.find((item) => item.kind === 'ServiceAccount' && item.metadata.namespace === 'lifemodel-system')?.automountServiceAccountToken).toBe(true);
     expect(objects.find((item) => item.kind === 'ServiceAccount' && item.metadata.namespace === 'openbao')?.automountServiceAccountToken).toBe(true);
     expect(objects.some((item) => ['Role', 'RoleBinding'].includes(item.kind) && item.metadata.namespace === 'lifemodel-system')).toBe(true);
-    expect(objects.find((item) => item.kind === 'Ingress' && item.metadata?.namespace === 'lifemodel-system')?.spec.rules[0].host).toBe('boot.localhost');
+    expect(objects.some((item) => item.kind === 'Ingress' && item.metadata?.name === 'web-auth-handoff' && item.metadata?.namespace === 'lifemodel-system' && item.spec.rules[0].host === 'localhost')).toBe(true);
+    expect(objects.some((item) => item.kind === 'Ingress' && item.metadata?.namespace === 'lifemodel-system' && item.spec.rules.some((rule: any) => rule.host === 'boot.localhost'))).toBe(true);
     expect(objects.some((item) => item.kind === 'ClusterRole')).toBe(false);
     const clusterRoleBindings = objects.filter((item) => item.kind === 'ClusterRoleBinding');
     expect(clusterRoleBindings).toEqual([expect.objectContaining({

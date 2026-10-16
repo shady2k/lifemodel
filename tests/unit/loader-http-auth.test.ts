@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { request as httpRequest } from 'node:http';
 import { createLoaderHttp } from '../../loader/src/http.js';
-import { createSession, hashPassword } from '../../loader/src/auth.js';
+import { createSession, hashPassword, verifySession } from '../../loader/src/auth.js';
 import { createTestClock } from '../../loader/src/clock.js';
 import { createRecordingLogger } from '../../loader/src/logger.js';
 import type { LoaderState } from '../../loader/src/state.js';
@@ -14,12 +14,12 @@ afterEach(async () => {
 });
 
 async function start(initialAuth: Awaited<ReturnType<typeof hashPassword>> | null) {
-  let auth = initialAuth;
+  let auth = initialAuth === null ? null : structuredClone(initialAuth);
   const state: LoaderState = {
     ensureLayout: async () => undefined,
-    readAuth: async () => auth,
+    readAuth: async () => (auth === null ? null : structuredClone(auth)),
     writeAuth: async (record) => {
-      auth = record;
+      auth = structuredClone(record);
     },
   };
   const clock = createTestClock();
@@ -111,76 +111,107 @@ describe('loader ForwardAuth verification host', () => {
     );
   });
 
-  it('hands a logged-in session to localhost once, and refuses a replay', async () => {
+  it('transfers login through a one-time code and requires the returned cookie to verify', async () => {
     const record = await hashPassword('owner password');
     const { base, clock } = await start(record);
-    const session = createSession(record, clock.now());
-    const ticket = (await import('../../loader/src/auth.js')).createHandoff(record, {
-      target: 'localhost',
-      session,
-      next: '/private?x=1',
-      expires: clock.now() + 30_000,
-    });
-    const path = `/_auth/handoff?ticket=${encodeURIComponent(ticket)}&next=${encodeURIComponent('/private?x=1')}`;
-    const first = await request(base, path, { host: 'localhost' });
-    expect(first.status).toBe(303);
-    expect(first.headers.location).toBe('/private?x=1');
-    expect(String(first.headers['set-cookie'])).not.toMatch(/domain=/i);
+    const login = await request(
+      base,
+      '/login?next=http%3A%2F%2Flocalhost%2Fprivate%3Fx%3D1%23frag',
+      {
+        host: 'boot.localhost',
+        origin: 'http://boot.localhost',
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      'POST',
+      'password=owner%20password&next=http%3A%2F%2Flocalhost%2Fprivate%3Fx%3D1%23frag'
+    );
+    expect(login.status).toBe(303);
+    const location = String(login.headers.location);
+    expect(location).toContain('/_auth/handoff?code=');
+    expect(location).toContain('next=%2Fprivate%3Fx%3D1');
+    expect(location).not.toContain('session');
+    const path = new URL(location).pathname + new URL(location).search;
+    const redeemed = await request(base, path, { host: 'localhost' });
+    expect(redeemed.headers.location).toBe('/private?x=1');
+    const cookie = String(redeemed.headers['set-cookie'] ?? '');
+    expect(cookie).not.toBe('');
+    expect(cookie).not.toMatch(/domain=/i);
+    const token = cookie.split(';')[0]!.slice('lm_session='.length);
+    expect(verifySession(token, record, clock.now())).toBe(true);
+    expect((await request(base, '/_auth/verify', { host: SERVICE_HOST, cookie })).status).toBe(200);
     const replay = await request(base, path, { host: 'localhost' });
-    expect(replay.status).toBe(303);
-    expect(replay.headers.location).toBe('http://boot.localhost/login');
     expect(replay.headers['set-cookie']).toBeUndefined();
-    const wrongHostTicket = (await import('../../loader/src/auth.js')).createHandoff(record, {
-      target: 'localhost',
-      session,
-      next: '/other',
-      expires: clock.now() + 30_000,
-    });
-    const wrongHostPath = `/_auth/handoff?ticket=${encodeURIComponent(wrongHostTicket)}&next=%2Fother`;
-    const wrongHostAccepted = await request(base, wrongHostPath, { host: 'boot.localhost' });
-    expect(wrongHostAccepted.headers.location).toBe('http://boot.localhost/login');
-    expect(wrongHostAccepted.headers['set-cookie']).toBeUndefined();
+    expect(replay.headers.location).toBe('http://boot.localhost/login');
   });
 
-  it('rejects expired, tampered, and missing handoff tickets without setting a cookie', async () => {
-    const record = await hashPassword('owner password');
-    const { base, clock } = await start(record);
-    const session = createSession(record, clock.now());
-    const { createHandoff } = await import('../../loader/src/auth.js');
-    const makeTicket = (expires: number) =>
-      createHandoff(record, { target: 'localhost', session, next: '/private', expires });
-    const expired = makeTicket(clock.now() + 1);
-    clock.advance(2);
-    const tampered = `${makeTicket(clock.now() + 30_000)}x`;
-    const paths = [
-      `/_auth/handoff?ticket=${encodeURIComponent(expired)}&next=%2Fprivate`,
-      `/_auth/handoff?ticket=${encodeURIComponent(tampered)}&next=%2Fprivate`,
-      '/_auth/handoff?next=%2Fprivate',
-    ];
-    for (const path of paths) {
+  it('authenticated GET /login and setup both issue handoff redirects', async () => {
+    const { base } = await start(null);
+    const headers = {
+      host: 'boot.localhost',
+      origin: 'http://boot.localhost',
+      'content-type': 'application/x-www-form-urlencoded',
+    };
+    const setup = await request(
+      base,
+      '/setup',
+      headers,
+      'POST',
+      'password=owner%20password&next=http%3A%2F%2Flocalhost%2Fhome'
+    );
+    const setupLocation = String(setup.headers.location);
+    expect(setupLocation).toContain('/_auth/handoff?code=');
+    const login = await request(base, '/login?next=http%3A%2F%2Flocalhost%2Fagain', {
+      host: 'boot.localhost',
+      cookie: String(setup.headers['set-cookie']).split(';')[0]!,
+    });
+    expect(String(login.headers.location)).toContain('/_auth/handoff?code=');
+  });
+
+  it('rejects expired, unknown and altered handoff codes without setting a cookie', async () => {
+    const { base, clock } = await start(null);
+    const setup = await request(
+      base,
+      '/setup',
+      {
+        host: 'boot.localhost',
+        origin: 'http://boot.localhost',
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      'POST',
+      'password=p&next=http%3A%2F%2Flocalhost%2Fx'
+    );
+    const handoffUrl = new URL(String(setup.headers.location));
+    const handoffPath = handoffUrl.pathname + handoffUrl.search;
+    const altered = handoffPath.replace('next=%2Fx', 'next=%2Fother');
+    const unknown = '/_auth/handoff?code=unknown&next=%2Fx';
+    for (const path of [altered, unknown]) {
       const response = await request(base, path, { host: 'localhost' });
-      expect(response.status).toBe(303);
       expect(response.headers.location).toBe('http://boot.localhost/login');
       expect(response.headers['set-cookie']).toBeUndefined();
     }
+    const sessionCookie = String(setup.headers['set-cookie']).split(';')[0]!;
+    const another = await request(base, '/login?next=http%3A%2F%2Flocalhost%2Fx', {
+      host: 'boot.localhost',
+      cookie: sessionCookie,
+    });
+    const expiring = new URL(String(another.headers.location), 'http://boot.localhost');
+    clock.advance(60_001);
+    const expired = await request(base, expiring.pathname + expiring.search, { host: 'localhost' });
+    expect(expired.headers.location).toBe('http://boot.localhost/login');
+    expect(expired.headers['set-cookie']).toBeUndefined();
   });
 
   it('revokes an app-host session obtained by handoff when logging out', async () => {
     const record = await hashPassword('owner password');
     const { base, clock } = await start(record);
     const session = createSession(record, clock.now());
-    const { createHandoff, csrfToken } = await import('../../loader/src/auth.js');
-    const ticket = createHandoff(record, {
-      target: 'localhost',
-      session,
-      next: '/',
-      expires: clock.now() + 30_000,
+    const { csrfToken } = await import('../../loader/src/auth.js');
+    const login = await request(base, '/login?next=http%3A%2F%2Flocalhost%2F', {
+      host: 'boot.localhost',
+      cookie: `lm_session=${session}`,
     });
-    const handoff = await request(
-      base,
-      `/_auth/handoff?ticket=${encodeURIComponent(ticket)}&next=%2F`,
-      { host: 'localhost' }
-    );
+    const loginUrl = new URL(String(login.headers.location));
+    const handoff = await request(base, loginUrl.pathname + loginUrl.search, { host: 'localhost' });
     const appCookie = String(handoff.headers['set-cookie']).split(';')[0]!;
     expect((await request(base, '/_auth/verify', { cookie: appCookie })).status).toBe(200);
     const csrf = csrfToken(record, session);
@@ -198,6 +229,61 @@ describe('loader ForwardAuth verification host', () => {
     );
     expect(logout.status).toBe(303);
     expect((await request(base, '/_auth/verify', { cookie: appCookie })).status).toBe(401);
+  });
+
+  it('refuses a pending handoff code after its issuing session is revoked by logout', async () => {
+    const record = await hashPassword('owner password');
+    const { base, clock } = await start(record);
+    const session = createSession(record, clock.now());
+    const login = await request(base, '/login?next=http%3A%2F%2Flocalhost%2Fprivate', {
+      host: 'boot.localhost',
+      cookie: `lm_session=${session}`,
+    });
+    const handoffUrl = new URL(String(login.headers.location), 'http://boot.localhost');
+    const csrf = (await import('../../loader/src/auth.js')).csrfToken(record, session);
+    const logout = await request(
+      base,
+      '/logout',
+      {
+        host: 'boot.localhost',
+        cookie: `lm_session=${session}`,
+        origin: 'http://boot.localhost',
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      'POST',
+      `csrf=${encodeURIComponent(csrf)}`
+    );
+    expect(logout.status).toBe(303);
+    const redemption = await request(base, handoffUrl.pathname + handoffUrl.search, {
+      host: 'localhost',
+    });
+    expect(redemption.headers.location).toBe('http://boot.localhost/login');
+    expect(redemption.headers['set-cookie']).toBeUndefined();
+  });
+
+  it('serializes simultaneous logouts: one succeeds and the stale session is refused', async () => {
+    const record = await hashPassword('owner password');
+    const { base, clock, getAuth } = await start(record);
+    const token = createSession(record, clock.now());
+    const csrfTokenForSession = (await import('../../loader/src/auth.js')).csrfToken;
+    const csrf = csrfTokenForSession(record, token);
+    const headers = {
+      host: 'boot.localhost',
+      cookie: `lm_session=${token}`,
+      origin: 'http://boot.localhost',
+      'content-type': 'application/x-www-form-urlencoded',
+    };
+    const results = await Promise.all([
+      request(base, '/logout', headers, 'POST', `csrf=${encodeURIComponent(csrf)}`),
+      request(base, '/logout', headers, 'POST', `csrf=${encodeURIComponent(csrf)}`),
+    ]);
+    expect(results.map((result) => result.status).sort()).toEqual([303, 401]);
+    const after = getAuth();
+    expect(after).not.toBeNull();
+    expect(
+      (await request(base, '/_auth/verify', { host: SERVICE_HOST, cookie: `lm_session=${token}` }))
+        .status
+    ).toBe(401);
   });
 
   it('never sets a cookie with a Domain attribute on setup, login, logout, or handoff', async () => {
@@ -230,19 +316,14 @@ describe('loader ForwardAuth verification host', () => {
     expect(String(logout.headers['set-cookie'])).not.toMatch(/domain=/i);
 
     const handoffRecord = authRecord;
-    const session = createSession(handoffRecord, clock.now());
-    const { createHandoff } = await import('../../loader/src/auth.js');
-    const ticket = createHandoff(handoffRecord, {
-      target: 'localhost',
-      session,
-      next: '/',
-      expires: clock.now() + 30_000,
+    const handoffLogin = await request(base, '/login?next=http%3A%2F%2Flocalhost%2F', {
+      host: 'boot.localhost',
+      cookie: `lm_session=${createSession(handoffRecord, clock.now())}`,
     });
-    const handoff = await request(
-      base,
-      `/_auth/handoff?ticket=${encodeURIComponent(ticket)}&next=%2F`,
-      { host: 'localhost' }
-    );
+    const handoffUrl = new URL(String(handoffLogin.headers.location), 'http://boot.localhost');
+    const handoff = await request(base, handoffUrl.pathname + handoffUrl.search, {
+      host: 'localhost',
+    });
     expect(String(handoff.headers['set-cookie'])).not.toMatch(/domain=/i);
   });
 });

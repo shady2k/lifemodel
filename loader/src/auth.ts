@@ -224,45 +224,9 @@ export function clearSessionCookie(_host: string): string {
   return [`${SESSION_COOKIE_NAME}=`, 'Path=/', 'Max-Age=0', 'HttpOnly', 'SameSite=Lax'].join('; ');
 }
 
-/** Short-lived signed transfer; replay tracking is in-memory, acceptable for the loader's single replica. */
+/** Handoff codes live only in the loader process; platform has one replica. */
 export const HANDOFF_TTL_MS = 60_000;
-export interface HandoffTicket {
-  target: string;
-  session: string;
-  next: string;
-  expires: number;
-}
-export function createHandoff(record: PasswordRecord, ticket: HandoffTicket): string {
-  const payload = Buffer.from(JSON.stringify(ticket)).toString('base64url');
-  return `${payload}.${sign(record.sessionSecret, `handoff:${payload}`).toString('base64url')}`;
-}
-export function verifyHandoff(
-  token: string,
-  record: PasswordRecord,
-  now: number
-): HandoffTicket | null {
-  const [payload, signature, extra] = token.split('.');
-  if (!payload || !signature || extra !== undefined) return null;
-  let presented: Buffer;
-  let ticket: HandoffTicket;
-  try {
-    presented = Buffer.from(signature, 'base64url');
-    ticket = JSON.parse(Buffer.from(payload, 'base64url').toString()) as HandoffTicket;
-  } catch {
-    return null;
-  }
-  if (
-    !equalDigests(presented, sign(record.sessionSecret, `handoff:${payload}`)) ||
-    ticket.expires <= now ||
-    ticket.expires > now + HANDOFF_TTL_MS ||
-    !verifySession(ticket.session, record, now) ||
-    !isBrowserHost(hostName(ticket.target)) ||
-    !ticket.next.startsWith('/') ||
-    ticket.next.startsWith('//')
-  )
-    return null;
-  return ticket;
-}
+export const HANDOFF_CODE_BYTES = 32;
 
 /**
  * The anti-CSRF token of the loader's own forms (rework 2, finding 5).

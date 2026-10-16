@@ -11,27 +11,6 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: web-auth-handoff
-  namespace: lifemodel
-  annotations:
-    traefik.ingress.kubernetes.io/router.priority: '200'
-spec:
-  ingressClassName: traefik
-  rules:
-    - host: localhost
-      http:
-        paths:
-          - path: /_auth/handoff
-            pathType: Exact
-            backend:
-              service:
-                name: loader
-                port:
-                  number: 7000
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
   name: web-private
   namespace: lifemodel
   annotations:

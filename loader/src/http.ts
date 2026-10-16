@@ -4,9 +4,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import {
   ALLOWED_HOSTS,
   clearSessionCookie,
-  createHandoff,
-  verifyHandoff,
   HANDOFF_TTL_MS,
+  HANDOFF_CODE_BYTES,
   createSession,
   csrfToken,
   hashPassword,
@@ -111,7 +110,28 @@ function formPage(
 
 export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
   const { state, logger, clock } = deps;
-  const usedTickets = new Map<string, number>();
+  // Single loader replica: short-lived codes remain process-local by design.
+  interface HandoffEntry {
+    session: string;
+    target: string;
+    next: string;
+    expires: number;
+  }
+  const handoffCodes = new Map<string, HandoffEntry>();
+  let authTransition: Promise<void> = Promise.resolve();
+  async function withAuthTransition<T>(action: () => Promise<T>): Promise<T> {
+    const previous = authTransition;
+    let release!: () => void;
+    authTransition = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release();
+    }
+  }
   const header = (req: IncomingMessage, name: string): string | undefined => {
     const value = req.headers[name];
     return typeof value === 'string' ? value : undefined;
@@ -129,22 +149,14 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       ? null
       : 'the request did not come from a page on this host';
   }
-  function handoffRedirect(
-    record: PasswordRecord,
-    session: string,
-    next: string,
-    currentHost: string
-  ): string {
+  function handoffRedirect(session: string, next: string, currentHost: string): string {
     const target = new URL(next);
-    const path = `${target.pathname}${target.search}${target.hash}`;
-    if (target.host === currentHost) return next;
-    const ticket = createHandoff(record, {
-      target: target.host,
-      session,
-      next: path,
-      expires: clock.now() + HANDOFF_TTL_MS,
-    });
-    return `${target.origin}/_auth/handoff?ticket=${encodeURIComponent(ticket)}&next=${encodeURIComponent(path)}`;
+    const path = `${target.pathname}${target.search}`; // URL fragments never reach the server.
+    if (target.host === currentHost) return `${target.origin}${path}`;
+    const code = randomBytes(HANDOFF_CODE_BYTES).toString('base64url');
+    const expires = clock.now() + HANDOFF_TTL_MS;
+    handoffCodes.set(code, { target: target.host, session, next: path, expires });
+    return `${target.origin}/_auth/handoff?code=${encodeURIComponent(code)}&next=${encodeURIComponent(path)}`;
   }
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const path = (req.url ?? '/').split('?')[0] ?? '/';
@@ -159,29 +171,32 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     if (path === '/_auth/handoff') {
       const host = req.headers.host ?? '';
       const url = new URL(req.url ?? '/', `http://${host}`);
-      const ticketText = url.searchParams.get('ticket') ?? '';
+      const code = url.searchParams.get('code') ?? '';
+      const entry = handoffCodes.get(code);
+      // Consume synchronously before awaits: concurrent redemption cannot reuse it.
+      if (entry !== undefined) handoffCodes.delete(code);
+      const now = clock.now();
+      for (const [key, value] of handoffCodes) if (value.expires <= now) handoffCodes.delete(key);
       const record = await state.readAuth();
-      const ticket = record === null ? null : verifyHandoff(ticketText, record, clock.now());
       const nextParam = url.searchParams.get('next');
       const next =
         nextParam?.startsWith('/') && !nextParam.startsWith('//')
           ? vettedNext(`http://${host}${nextParam}`, host)
           : null;
-      const boot = `http://boot.localhost/login`;
-      const ticketId = ticketText;
-      for (const [id, expiry] of usedTickets) if (expiry <= clock.now()) usedTickets.delete(id);
+      const boot = 'http://boot.localhost/login';
       if (
-        ticket === null ||
+        entry === undefined ||
+        entry.expires <= now ||
+        entry.target !== host.toLowerCase() ||
         next === null ||
-        ticket.target !== host.toLowerCase() ||
-        ticket.next !== `${new URL(next).pathname}${new URL(next).search}` ||
-        usedTickets.has(ticketId)
+        entry.next !== `${new URL(next).pathname}${new URL(next).search}` ||
+        record === null ||
+        !verifySession(entry.session, record, now)
       ) {
         redirect(res, boot);
         return;
       }
-      usedTickets.set(ticketId, ticket.expires);
-      redirect(res, ticket.next, { 'set-cookie': sessionCookie(ticket.session, host) });
+      redirect(res, entry.next, { 'set-cookie': sessionCookie(entry.session, host) });
       return;
     }
     if (path === '/_auth/verify') {
@@ -233,12 +248,20 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         return;
       }
       const record = await hashPassword(password);
-      await state.writeAuth(record);
+      const installed = await withAuthTransition(async () => {
+        if ((await state.readAuth()) !== null) return false;
+        await state.writeAuth(record);
+        return true;
+      });
+      if (!installed) {
+        redirect(res, '/login');
+        return;
+      }
       logger.info({}, "the loader's password is set: platform authentication is ready");
       const host = req.headers.host ?? 'localhost';
       const token = createSession(record, clock.now());
       const next = vettedNext(setupForm['next'], host);
-      redirect(res, next === null ? '/' : handoffRedirect(record, token, next, host), {
+      redirect(res, next === null ? '/' : handoffRedirect(token, next, host), {
         'set-cookie': sessionCookie(token, host),
       });
       return;
@@ -256,7 +279,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         if (active !== null) {
           redirect(
             res,
-            next === null ? '/' : handoffRedirect(record, active, next, header(req, 'host') ?? '')
+            next === null ? '/' : handoffRedirect(active, next, header(req, 'host') ?? '')
           );
           return;
         }
@@ -288,10 +311,22 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         return;
       }
       const host = req.headers.host ?? 'localhost';
+      const issued = await withAuthTransition(async () => {
+        const current = await state.readAuth();
+        if (current === null || !(await verifyPassword(password, current))) return null;
+        return { record: current, token: createSession(current, clock.now()) };
+      });
+      if (issued === null) {
+        sendHtml(
+          res,
+          401,
+          formPage('Loader login', '/login', 'Password', 'That password does not match.', next)
+        );
+        return;
+      }
       logger.info({ host }, 'the owner logged in');
-      const token = createSession(record, clock.now());
-      redirect(res, next === null ? '/' : handoffRedirect(record, token, next, host), {
-        'set-cookie': sessionCookie(token, host),
+      redirect(res, next === null ? '/' : handoffRedirect(issued.token, next, host), {
+        'set-cookie': sessionCookie(issued.token, host),
       });
       return;
     }
@@ -316,8 +351,23 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         sendHtml(res, 403, page('Refused', escapeHtml(refusal)));
         return;
       }
-      record.sessionSecret = randomBytes(32).toString('base64');
-      await state.writeAuth(record);
+      const loggedOut = await withAuthTransition(async () => {
+        const current = await state.readAuth();
+        const currentToken = current === null ? null : sessionToken(req, current);
+        if (
+          current === null ||
+          currentToken === null ||
+          !verifyCsrf(form['csrf'] ?? '', current, currentToken)
+        )
+          return false;
+        current.sessionSecret = randomBytes(32).toString('base64');
+        await state.writeAuth(current);
+        return true;
+      });
+      if (!loggedOut) {
+        sendHtml(res, 401, page('Loader login', '<p>Not logged in.</p>'));
+        return;
+      }
       logger.info({}, 'the owner logged out');
       redirect(res, '/login', {
         'set-cookie': clearSessionCookie(req.headers.host ?? 'localhost'),
