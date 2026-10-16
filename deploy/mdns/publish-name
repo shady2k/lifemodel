@@ -29,7 +29,7 @@ address() {
 # interface is normal and remains a visible wait for DHCP/address assignment.
 ip link show dev "$iface" >/dev/null || { echo "Interface $iface is unavailable" >&2; exit 1; }
 echo "Waiting for IPv4 address on $iface to publish $name" >&2
-coproc MONITOR { ip monitor address dev "$iface"; }
+coproc MONITOR { exec ip monitor address dev "$iface"; }
 monitor_pid=$MONITOR_PID
 monitor_fd=${MONITOR[0]}
 last=$(address) || { echo "Cannot read IPv4 address on $iface" >&2; exit 1; }

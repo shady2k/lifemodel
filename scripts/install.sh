@@ -188,9 +188,22 @@ render_root_objects() {
   sed "s/\${LIFEMODEL_NAME}/$INSTANCE_NAME/" "$templates_dir/instance.yaml" > "$render_dir/instance.yaml"
   interface=$LAN_INTERFACE
   if [ -z "$interface" ]; then
-    interface=$(ip -j -4 route show default | sed -n 's/.*"dev"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9_.:-]*\)".*/\1/p' | sed -n '1p')
+    routes=$(ip -j -4 route show default) || die "cannot read IPv4 default routes; pass --lan-interface"
+    interface=$(printf '%s' "$routes" | node -e '
+let data=""; process.stdin.setEncoding("utf8"); process.stdin.on("data", c => data += c); process.stdin.on("end", () => {
+  let routes;
+  try { routes = JSON.parse(data); } catch { process.exit(2); }
+  if (!Array.isArray(routes)) process.exit(2);
+  const candidates = routes.filter(r => r && typeof r.dev === "string" && r.dev.length > 0)
+    .map((r, i) => ({ dev: r.dev, metric: Number.isFinite(r.metric) ? r.metric : 0, i }))
+    .sort((a, b) => a.metric - b.metric || a.i - b.i);
+  if (candidates.length) process.stdout.write(candidates[0].dev);
+});
+' ) || die "cannot parse IPv4 default routes; pass --lan-interface"
   fi
   [ -n "$interface" ] || die "cannot determine a usable IPv4 default-route interface; pass --lan-interface"
+  case "$interface" in *[!A-Za-z0-9_.:-]*) die "invalid LAN interface name" ;; esac
+  [ "${#interface}" -le 15 ] || die "LAN interface name exceeds 15 characters"
   case "$interface" in cni*|flannel*|veth*|wg*|tun*|tailscale*) die "refusing non-LAN interface: $interface" ;; esac
   mdns_source=$MDNS_SOURCE
   mkdir -p "$render_dir/systemd"
@@ -225,7 +238,18 @@ apt-get update
 apt-get install -y avahi-daemon avahi-utils
 lan_interface=$LAN_INTERFACE
 if [ -z "$lan_interface" ]; then
-  lan_interface=$(ip -j -4 route show default | sed -n 's/.*"dev"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9_.:-]*\)".*/\1/p' | sed -n '1p')
+  routes=$(ip -j -4 route show default) || die "cannot read IPv4 default routes; pass --lan-interface"
+  lan_interface=$(printf '%s' "$routes" | node -e '
+let data=""; process.stdin.setEncoding("utf8"); process.stdin.on("data", c => data += c); process.stdin.on("end", () => {
+  let routes;
+  try { routes = JSON.parse(data); } catch { process.exit(2); }
+  if (!Array.isArray(routes)) process.exit(2);
+  const candidates = routes.filter(r => r && typeof r.dev === "string" && r.dev.length > 0)
+    .map((r, i) => ({ dev: r.dev, metric: Number.isFinite(r.metric) ? r.metric : 0, i }))
+    .sort((a, b) => a.metric - b.metric || a.i - b.i);
+  if (candidates.length) process.stdout.write(candidates[0].dev);
+});
+' ) || die "cannot parse IPv4 default routes; pass --lan-interface"
 fi
 [ -n "$lan_interface" ] || die "cannot determine a usable IPv4 default-route interface; pass --lan-interface"
 case "$lan_interface" in *[!A-Za-z0-9_.:-]*|'') die "invalid LAN interface name" ;; esac
@@ -244,18 +268,31 @@ avahi_conf="$host_root/etc/avahi/avahi-daemon.conf"
 [ -f "$avahi_conf" ] || : > "$avahi_conf"
 updated=$(mktemp)
 awk -v iface="$lan_interface" '
-BEGIN { section=""; seen=0 }
-/^\[[^]]+\][[:space:]]*([#;].*)?$/ {
-  if (section == "server" && !seen) { print "allow-interfaces=" iface; seen=1 }
-  section=substr($0,2,index($0,"]")-2); print; next
+function trimleft(value) { sub(/^[[:space:]]+/, "", value); return value }
+function emit_setting() { print "allow-interfaces=" iface; wrote=1 }
+BEGIN { section=""; server_groups=0; wrote=0 }
+{
+  line=$0
+  header=trimleft(line)
+  if (header ~ /^\[[^]]+\]/) {
+    if (tolower(section) == "server" && !wrote) emit_setting()
+    section=substr(header, 2, index(header, "]")-2)
+    section=tolower(section)
+    if (section == "server") server_groups++
+    print line
+    next
+  }
+  if (tolower(section) == "server" && line ~ /^[[:space:]]*[Aa][Ll][Ll][Oo][Ww]-[Ii][Nn][Tt][Ee][Rr][Ff][Aa][Cc][Ee][Ss][[:space:]]*=/) {
+    if (!wrote) emit_setting()
+    next
+  }
+  print line
 }
-section == "server" && /^[[:space:]]*allow-interfaces[[:space:]]*=/ {
-  if (!seen) { sub(/^[[:space:]]*/, ""); print "allow-interfaces=" iface; seen=1 }
-  next
+END {
+  if (tolower(section) == "server" && !wrote) emit_setting()
+  if (server_groups == 0) { print "[server]"; emit_setting() }
 }
-{ print }
-END { if (section == "server" && !seen) print "allow-interfaces=" iface; else if (section != "server") { print "[server]"; print "allow-interfaces=" iface } }
-' "$avahi_conf" > "$updated"
+'  "$avahi_conf" > "$updated"
 if ! cmp -s "$updated" "$avahi_conf"; then cat "$updated" > "$avahi_conf"; avahi_changed=1; else avahi_changed=0; fi
 rm -f "$updated"
 if command -v systemctl >/dev/null 2>&1; then

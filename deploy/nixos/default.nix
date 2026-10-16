@@ -90,7 +90,7 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       { assertion = cfg.platform.url != ""; message = "services.lifemodel.platform.url is required"; }
-      { assertion = cfg.lanInterface != ""; message = "services.lifemodel.lanInterface must be set when networking.defaultGateway.interface is not configured"; }
+      { assertion = cfg.lanInterface != ""; message = "set networking.defaultGateway.interface or services.lifemodel.lanInterface to choose the LAN interface"; }
       { assertion = builtins.stringLength cfg.lanInterface <= 15 && builtins.match "[A-Za-z0-9_.:-]+" cfg.lanInterface != null; message = "services.lifemodel.lanInterface must be a valid Linux interface name (1-15 safe characters)"; }
       { assertion = !(lib.any (prefix: lib.hasPrefix prefix cfg.lanInterface) [ "cni" "flannel" "veth" "wg" "tun" "tailscale" ]);
         message = "services.lifemodel.lanInterface must be a LAN interface, not a cluster, tunnel or VPN interface"; }
