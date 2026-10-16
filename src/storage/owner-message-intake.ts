@@ -162,6 +162,15 @@ export class OwnerMessageIntake implements IOwnerMessageIntake {
 }
 
 /** Build the web module's domain operation from the configured durable stores. */
+export function createWebPool(connectionString: string): Pool {
+  return new Pool({
+    connectionString,
+    max: 5,
+    connectionTimeoutMillis: 2_000,
+    statement_timeout: 3_000,
+  });
+}
+
 export function createOwnerMessageIntakeFromEnv(env: NodeJS.ProcessEnv = process.env): {
   intake: IOwnerMessageIntake;
   transcript: TranscriptReader;
@@ -176,7 +185,7 @@ export function createOwnerMessageIntakeFromEnv(env: NodeJS.ProcessEnv = process
   if (!databaseUrl) throw new Error('LIFEMODEL_DATABASE_URL is required');
   void new URL(databaseUrl);
   const redis = new Redis(valkeyUrl);
-  const pool = new Pool({ connectionString: databaseUrl, max: 5 });
+  const pool = createWebPool(databaseUrl);
   const recipientId = `rcpt_${createHash('sha256').update('web\0owner').digest('hex').slice(0, 16)}`;
   const transcript = new PostgresTranscriptStore(pool, redis, recipientId);
   const creatureState = new CreatureStateStore(redis);
@@ -244,7 +253,22 @@ export function createOwnerMessageIntakeFromEnv(env: NodeJS.ProcessEnv = process
     },
     async close() {
       await closeTranscriptWakeBroker(redis);
-      await Promise.all([redis.quit(), pool.end()]);
+      const poolEnd = pool.end();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.all([
+        redis.quit(),
+        Promise.race([
+          poolEnd,
+          new Promise<void>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error('Web Postgres pool shutdown timed out')),
+              4_000
+            );
+          }),
+        ]).finally(() => {
+          if (timer) clearTimeout(timer);
+        }),
+      ]);
     },
   };
 }

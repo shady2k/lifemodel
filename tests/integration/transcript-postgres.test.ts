@@ -3,7 +3,7 @@ import { PostgresTranscriptStore } from '../../src/storage/postgres-transcript-s
 import { PostgresConversationStore } from '../../src/storage/postgres-conversation-store.js';
 import { createTestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
-import { OwnerMessageIntake } from '../../src/storage/owner-message-intake.js';
+import { OwnerMessageIntake, createWebPool } from '../../src/storage/owner-message-intake.js';
 
 const recipientId = 'transcript-owner-pages';
 const uuidV7 = (): string => {
@@ -18,6 +18,23 @@ const row = (role: string, content: unknown, extra: Record<string, unknown> = {}
 });
 
 describe('Postgres owner transcript', () => {
+  it('server-cancels transcript queries at the web pool statement timeout', async () => {
+    const stores = await createTestStores();
+    try {
+      const webPool = createWebPool(process.env.LIFEMODEL_TEST_DATABASE_URL!);
+      const started = Date.now();
+      await expect(webPool.query('SELECT pg_sleep(10)')).rejects.toMatchObject({ code: '57014' });
+      expect(Date.now() - started).toBeLessThan(8_000);
+      const active = await webPool.query(
+        `SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = current_database() AND query = 'SELECT pg_sleep(10)'`
+      );
+      expect(active.rows[0]?.count).toBe(0);
+      await webPool.end();
+    } finally {
+      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    }
+  });
+
   it('pages visible rows directly by sequence and preserves owner history across clear and compaction', async () => {
     const stores = await createTestStores();
     try {
@@ -322,19 +339,19 @@ describe('Postgres owner transcript', () => {
       const sessions = 'signed-session-cookie';
       expect(
         await Promise.all([
-          firstReplica.acquireStreamLease(sessions),
-          secondReplica.acquireStreamLease(sessions),
-          firstReplica.acquireStreamLease(sessions),
-          secondReplica.acquireStreamLease(sessions),
-          firstReplica.acquireStreamLease(sessions),
+          firstReplica.acquireStreamLease(sessions, Date.now() + 60_000),
+          secondReplica.acquireStreamLease(sessions, Date.now() + 60_000),
+          firstReplica.acquireStreamLease(sessions, Date.now() + 60_000),
+          secondReplica.acquireStreamLease(sessions, Date.now() + 60_000),
+          firstReplica.acquireStreamLease(sessions, Date.now() + 60_000),
         ])
       ).toEqual([true, true, true, true, false]);
       await firstReplica.releaseStreamLease(sessions);
-      expect(await secondReplica.acquireStreamLease(sessions)).toBe(true);
+      expect(await secondReplica.acquireStreamLease(sessions, Date.now() + 60_000)).toBe(true);
       await stores.redis.del(
         `web:stream-leases:${(await import('node:crypto')).createHash('sha256').update(sessions).digest('hex')}`
       );
-      expect(await firstReplica.acquireStreamLease(sessions)).toBe(true);
+      expect(await firstReplica.acquireStreamLease(sessions, Date.now() + 60_000)).toBe(true);
     } finally {
       await Promise.all([stores.postgres.end(), stores.redis.quit()]);
     }

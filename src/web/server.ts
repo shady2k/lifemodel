@@ -216,44 +216,92 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
       return reply.code(400).send({ error: 'invalid_cursor' });
 
     const session = getSessionKey(request.headers.cookie, request.ip);
-    let leased = false;
     const streamCount = activeStreams.get(session) ?? 0;
     if (streamCount >= MAX_STREAMS_PER_SESSION)
       return reply.code(429).send({ error: 'too_many_streams' });
     activeStreams.set(session, streamCount + 1);
-    const admissionAbort = new AbortController();
-    const admissionTimer = setTimeout(() => {
-      admissionAbort.abort();
-    }, STREAM_MAX_AGE_MS);
+
+    // The lease and HTTP stream share one deadline starting before lease acquisition.
+    const lifecycle = new AbortController();
+    let leased = false;
+    let ended = false;
+    let handedOff = false;
+    const queue = new BoundedQueue<StreamEvent>();
+    const admissionDeadline = Date.now() + STREAM_MAX_AGE_MS;
+    const admissionTimer = setTimeout(() => lifecycle.abort(), STREAM_MAX_AGE_MS);
+    const releaseBounded = async () => {
+      if (!leased) return;
+      leased = false;
+      await withTimeout(
+        options.transcript.releaseStreamLease(session),
+        new AbortController().signal,
+        500
+      ).catch(() => undefined);
+    };
+    const closeLifecycle = () => {
+      if (ended) return;
+      ended = true;
+      lifecycle.abort();
+      queue.close();
+      clearTimeout(admissionTimer);
+      const remaining = (activeStreams.get(session) ?? 1) - 1;
+      if (remaining <= 0) activeStreams.delete(session);
+      else activeStreams.set(session, remaining);
+      void releaseBounded();
+    };
+    const onRequestClose = () => {
+      if (!handedOff) closeLifecycle();
+    };
+    reply.raw.once('close', onRequestClose);
+    const remainingAdmission = () => Math.max(0, admissionDeadline - Date.now());
     try {
+      const acquire = options.transcript.acquireStreamLease(session, admissionDeadline);
+      void acquire
+        .then((value) => {
+          if (value && (ended || lifecycle.signal.aborted)) {
+            leased = true;
+            void releaseBounded();
+          }
+        })
+        .catch(() => undefined);
       const lease = await withTimeout(
-        options.transcript.acquireStreamLease(session),
-        admissionAbort.signal
+        acquire,
+        lifecycle.signal,
+        Math.min(1_000, remainingAdmission())
       );
       if (!lease) {
-        activeStreams.set(session, (activeStreams.get(session) ?? 1) - 1);
-        clearTimeout(admissionTimer);
-        return await reply.code(429).send({ error: 'too_many_streams' });
+        closeLifecycle();
+        return reply.code(429).send({ error: 'too_many_streams' });
       }
       leased = true;
-      const latest = await withTimeout(
-        options.transcript.readTranscript({ after, limit: 1 }),
-        admissionAbort.signal
-      );
-      options.runtimeMetrics.sseLag =
-        latest.cursor === null ? 0 : Math.max(0, Number(BigInt(latest.cursor) - BigInt(after)));
-    } catch {
-      options.runtimeMetrics.sseLag = 0;
-      if (admissionAbort.signal.aborted) {
-        if (leased) await options.transcript.releaseStreamLease(session).catch(() => undefined);
-        const remaining = (activeStreams.get(session) ?? 1) - 1;
-        if (remaining <= 0) activeStreams.delete(session);
-        else activeStreams.set(session, remaining);
-        clearTimeout(admissionTimer);
+      // If acquisition settled after disconnect/timeout, immediately retire its lease.
+      if (ended || lifecycle.signal.aborted) {
+        await releaseBounded();
         return reply.code(503).send({ error: 'stream_unavailable' });
       }
+      try {
+        const latest = await withTimeout(
+          options.transcript.readTranscript({ after, limit: 1 }),
+          lifecycle.signal,
+          Math.min(1_000, remainingAdmission())
+        );
+        options.runtimeMetrics.sseLag =
+          latest.cursor === null ? 0 : Math.max(0, Number(BigInt(latest.cursor) - BigInt(after)));
+      } catch {
+        // Lag is optional; it cannot change successful lease admission.
+        options.runtimeMetrics.sseLag = 0;
+      }
+      if (ended || lifecycle.signal.aborted) {
+        closeLifecycle();
+        return reply.code(503).send({ error: 'stream_unavailable' });
+      }
+    } catch {
+      options.runtimeMetrics.sseLag = 0;
+      closeLifecycle();
+      return reply.code(503).send({ error: 'stream_unavailable' });
     }
     clearTimeout(admissionTimer);
+
     reply.hijack();
     const response = reply.raw;
     response.writeHead(200, {
@@ -265,27 +313,21 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     });
     response.flushHeaders();
 
-    const abort = new AbortController();
-    const queue = new BoundedQueue<StreamEvent>();
+    const abort = lifecycle;
     let previousState: string | null = null;
     let stateReadInFlight = false;
     let stateFreshnessTimer: ReturnType<typeof setTimeout> | undefined;
-    let ended = false;
     const cleanup = () => {
       if (ended) return;
-      ended = true;
-      abort.abort();
-      queue.close();
+      closeLifecycle();
       clearInterval(stateTimer);
       clearInterval(heartbeatTimer);
       if (stateFreshnessTimer) clearTimeout(stateFreshnessTimer);
       clearTimeout(maxAgeTimer);
-      const remaining = (activeStreams.get(session) ?? 1) - 1;
-      if (remaining <= 0) activeStreams.delete(session);
-      else activeStreams.set(session, remaining);
-      if (leased) void options.transcript.releaseStreamLease(session).catch(() => undefined);
       if (!response.writableEnded) response.end();
     };
+    handedOff = true;
+    reply.raw.removeListener('close', onRequestClose);
     response.on('close', cleanup);
 
     const publishUnavailable = () => {
@@ -340,7 +382,7 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     const heartbeatTimer = setInterval(() => {
       if (!ended && !response.write(': heartbeat\n\n')) response.once('drain', () => undefined);
     }, HEARTBEAT_MS);
-    const maxAgeTimer = setTimeout(cleanup, STREAM_MAX_AGE_MS);
+    const maxAgeTimer = setTimeout(cleanup, Math.max(0, admissionDeadline - Date.now()));
     void (async () => {
       let iterator: AsyncIterator<TranscriptRow> | undefined;
       try {
@@ -460,16 +502,17 @@ function getSessionKey(cookie: string | undefined, ip: string): string {
   return sessionCookie ?? `client:${ip}`;
 }
 
-function withTimeout<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(new Error('operation timed out'));
+function withTimeout<T>(promise: Promise<T>, signal: AbortSignal, timeoutMs: number): Promise<T> {
+  if (signal.aborted || timeoutMs <= 0) return Promise.reject(new Error('operation timed out'));
   return new Promise<T>((resolve, reject) => {
-    const abort = () => {
-      reject(new Error('operation timed out'));
+    const timer = setTimeout(() => reject(new Error('operation timed out')), timeoutMs);
+    const abort = () => reject(new Error('operation timed out'));
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', abort);
     };
     signal.addEventListener('abort', abort, { once: true });
-    promise.then(resolve, reject).finally(() => {
-      signal.removeEventListener('abort', abort);
-    });
+    promise.then(resolve, reject).finally(cleanup);
   });
 }
 

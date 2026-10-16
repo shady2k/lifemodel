@@ -178,6 +178,72 @@ describe('POST /api/messages', () => {
   });
 });
 
+describe('GET /api/events admission', () => {
+  it('passes the single stream deadline to shared lease acquisition', async () => {
+    const acquireStreamLease = vi.fn().mockResolvedValue(true);
+    const server = createWebServer({
+      allowedOrigin: 'http://localhost',
+      appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
+      runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
+      intake: { acceptOwnerMessage: vi.fn() } as unknown as IOwnerMessageIntake,
+      transcript: {
+        readTranscript: vi.fn().mockResolvedValue({ rows: [], cursor: null }),
+        watchTranscript: vi.fn(async function* () {
+          await new Promise<void>(() => {});
+        }),
+        acquireStreamLease,
+        releaseStreamLease: vi.fn(),
+      },
+      creatureState: { readCreatureState: vi.fn().mockResolvedValue(null) },
+      logger: { info: vi.fn() },
+    });
+    const before = Date.now();
+    const abort = new AbortController();
+    try {
+      await server.listen({ host: '127.0.0.1', port: 0 });
+      const address = server.server.address();
+      if (!address || typeof address === 'string') throw new Error('HTTP listener did not start');
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/events?after=0`, {
+        signal: abort.signal,
+      });
+      const expiry = acquireStreamLease.mock.calls[0]?.[1] as number;
+      expect(response.status).toBe(200);
+      expect(expiry).toBeGreaterThanOrEqual(before + 15 * 60_000);
+      expect(expiry).toBeLessThanOrEqual(Date.now() + 15 * 60_000);
+      abort.abort();
+      await response.body?.cancel().catch(() => undefined);
+    } finally {
+      abort.abort();
+      await server.close();
+    }
+  });
+
+  it('fails closed with 503 when shared lease acquisition rejects', async () => {
+    const { server } = setup();
+    const config = setup();
+    await server.close();
+    const unavailable = createWebServer({
+      allowedOrigin: 'http://localhost',
+      appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
+      runtimeMetrics: { intakeFailures: 0, sseLag: 17, reconnects: 0 },
+      intake: { acceptOwnerMessage: vi.fn() } as unknown as IOwnerMessageIntake,
+      transcript: {
+        readTranscript: vi.fn().mockResolvedValue({ rows: [], cursor: null }),
+        watchTranscript: vi.fn(),
+        acquireStreamLease: vi.fn().mockRejectedValue(new Error('lease unavailable')),
+        releaseStreamLease: vi.fn(),
+      },
+      creatureState: { readCreatureState: vi.fn().mockResolvedValue(null) },
+      logger: { info: vi.fn() },
+    });
+    const response = await unavailable.inject({ method: 'GET', url: '/api/events?after=0' });
+    expect(response.statusCode).toBe(503);
+    expect(response.headers['content-type']).not.toContain('text/event-stream');
+    await unavailable.close();
+    await config.server.close();
+  });
+});
+
 describe('static application', () => {
   it('publishes unavailable when a state read stalls and never starts another read concurrently', async () => {
     let release!: (value: null) => void;
