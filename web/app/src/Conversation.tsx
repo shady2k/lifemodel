@@ -141,7 +141,10 @@ function ConversationContent({
   const [now, setNow] = useState(Date.now());
   const [liveTail, setLiveTail] = useState<TranscriptMessage[]>([]);
   const [hasEarlierByCursor, setHasEarlierByCursor] = useState<Record<string, boolean>>({});
-  const [announcement, setAnnouncement] = useState('');
+  const [announcement, setAnnouncement] = useState<{ text: string; sequence: string }>({
+    text: '',
+    sequence: 'initial',
+  });
   const [draft, setDraft] = useState('');
   type PendingMessage = TranscriptMessage & {
     status?: 'sending' | 'failed';
@@ -203,9 +206,10 @@ function ConversationContent({
         setLiveTail((rows) => mergeTranscript(rows, message));
         if (message.clientId)
           setOptimistic((rows) => rows.filter((row) => row.clientId !== message.clientId));
-        setAnnouncement(
-          message.role === 'assistant' ? t('newAssistantMessage') : t('newOwnerMessage')
-        );
+        setAnnouncement({
+          text: message.role === 'assistant' ? t('newAssistantMessage') : t('newOwnerMessage'),
+          sequence: message.sequence,
+        });
       },
       (state) => {
         setCreature(state);
@@ -271,9 +275,11 @@ function ConversationContent({
       status: 'sending',
       mintedAt,
     };
-    setOptimistic((current) =>
-      current.some((row) => row.clientId === id) ? current : [...current, item]
-    );
+    setOptimistic((current) => {
+      const pending =
+        retry && retry.id !== id ? current.filter((row) => row.clientId !== retry.id) : current;
+      return pending.some((row) => row.clientId === id) ? pending : [...pending, item];
+    });
     const expiration = scheduleNotSent(window.setTimeout.bind(window), () => {
       setOptimistic((current) =>
         current.map((row) =>
@@ -491,7 +497,7 @@ function ConversationContent({
                 </Message>
               ) : null}
               <div aria-live="polite" className="sr-only" data-testid="live-announcement">
-                {announcement}
+                <span key={announcement.sequence}>{announcement.text}</span>
               </div>
             </MessageScrollerContent>
           </MessageScrollerViewport>
