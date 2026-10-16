@@ -22,6 +22,12 @@ describe('web application generation', () => {
       type: 'RollingUpdate',
       rollingUpdate: { maxSurge: 1, maxUnavailable: 0 },
     });
+    expect(deployment.spec.replicas).toBe(1);
+    expect(container.resources.requests.cpu).toBe('50m');
+    expect(container.resources.limits).toEqual({ cpu: 1, memory: '768Mi' });
+    // The repo's platform manifests do not declare node/system workload requests,
+    // so the complete 2-vCPU node budget cannot be derived here. Keep the web
+    // footprint bounded and assert the platform-owned core scheduling priority.
     expect(container.image).toBe('ghcr.io/shady2k/lifemodel-web');
     expect(container.readinessProbe).toMatchObject({
       httpGet: { path: '/readyz', port: 'internal' },
@@ -72,6 +78,27 @@ describe('web application generation', () => {
     expect(workload.find((item: any) => item.kind === 'Service').spec.ports).not.toContainEqual(
       expect.objectContaining({ port: 8081, targetPort: 'internal' })
     );
+  });
+
+  it('keeps the core above web pods through a platform-owned PriorityClass', () => {
+    const platformKustomization = YAML.parse(
+      readFileSync(join(root, 'deploy/platform/a0/kustomization.yaml'), 'utf8')
+    );
+    expect(platformKustomization.resources).toContain('core-priority-class.yaml');
+    const priorityClass = YAML.parse(
+      readFileSync(join(root, 'deploy/platform/a0/core-priority-class.yaml'), 'utf8')
+    );
+    expect(priorityClass).toMatchObject({
+      apiVersion: 'scheduling.k8s.io/v1',
+      kind: 'PriorityClass',
+      metadata: { name: 'lifemodel-core' },
+      value: 1000000,
+      globalDefault: false,
+    });
+    const core = YAML.parseAllDocuments(readFileSync(join(appRoot, 'core.yaml'), 'utf8'))
+      .map((doc) => doc.toJSON())
+      .find((item: any) => item.kind === 'StatefulSet');
+    expect(core.spec.template.spec.priorityClassName).toBe('lifemodel-core');
   });
 
   it('builds the web image in CI and pins its release digest before rendering the seed', () => {

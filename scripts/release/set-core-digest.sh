@@ -18,7 +18,7 @@ if [ ! -f "$file" ]; then
 fi
 
 placeholder='sha256:0000000000000000000000000000000000000000000000000000000000000000'
-count=$(grep -F -c "digest: $placeholder" "$file" || true)
+count=$(awk '/name: ghcr.io\/shady2k\/lifemodel-core$/{core=1; next} core && /digest:/{if ($2 == "'"$placeholder"'") count++; core=0} END{print count+0}' "$file")
 if [ "$count" -ne 1 ]; then
   echo "expected exactly one core digest placeholder in $file; found $count" >&2
   exit 1
@@ -26,5 +26,5 @@ fi
 
 tmp=$(mktemp "${file}.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
-sed "s|digest: $placeholder|digest: $digest|" "$file" > "$tmp"
+sed "/name: ghcr.io\/shady2k\/lifemodel-core$/,/digest:/{s|digest: $placeholder|digest: $digest|;}" "$file" > "$tmp"
 mv "$tmp" "$file"

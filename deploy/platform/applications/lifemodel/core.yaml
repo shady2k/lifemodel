@@ -38,6 +38,7 @@ spec:
       labels:
         app.kubernetes.io/name: core
     spec:
+      priorityClassName: lifemodel-core
       serviceAccountName: core
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 10
