@@ -26,7 +26,7 @@ function fixture(options: { address?: string; absentInterface?: boolean } = {}) 
   writeFileSync(state, options.address ?? '192.0.2.10\n');
   const ip = `#!/bin/bash\nif [[ "$1" == link ]]; then [[ ! -f "${root}/gone" ]]; exit; fi
 if [[ "$1" == monitor ]]; then echo "$$" > "${root}/monitor.pid"; while :; do if [[ -f "${root}/event" ]]; then rm -f "${root}/event"; echo address; fi; sleep .05; done; fi\ncat "${state}" | awk '{print "2: eth0 inet " $1 "/24 brd 192.0.2.255 scope global eth0"}'\n`;
-  const avahi = `#!/bin/bash\nprintf "START %s\n" "$*" >> "${root}/calls"; printf "PID %s\n" "$$" >> "${root}/calls"\nif [[ -f "${root}/collision" ]]; then exit 1; fi\ntrap 'echo STOP >> '${root}/calls'; exit 0' TERM\nwhile :; do sleep .1; done\n`;
+  const avahi = `#!/bin/bash\nprintf "START %s\n" "$*" >> "${root}/calls"; printf "PID %s\n" "$$" >> "${root}/calls"\nif [[ "$1" != "-R" ]]; then echo "Local name collision" >&2; exit 1; fi\nif [[ -f "${root}/collision" ]]; then exit 1; fi\ntrap 'echo STOP >> '${root}/calls'; exit 0' TERM\nwhile :; do sleep .1; done\n`;
   writeFileSync(join(bin, 'ip'), ip);
   writeFileSync(join(bin, 'avahi-publish-address'), avahi);
   chmodSync(join(bin, 'ip'), 0o755);
@@ -68,7 +68,9 @@ describe('mDNS publisher', () => {
     const child = start(f);
     try {
       await waitFor(() => existsSync(join(f.root, 'calls')));
-      expect(readFileSync(join(f.root, 'calls'), 'utf8')).toContain('lifemodel.local 192.0.2.10');
+      expect(readFileSync(join(f.root, 'calls'), 'utf8')).toContain(
+        'START -R lifemodel.local 192.0.2.10'
+      );
       writeFileSync(f.state, '192.0.2.11\n');
       writeFileSync(join(f.root, 'event'), 'change');
       await waitFor(() => readFileSync(join(f.root, 'calls'), 'utf8').includes('192.0.2.11'));

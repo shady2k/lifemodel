@@ -43,7 +43,8 @@ publish() {
   last=$1
   if [[ -n "$last" ]]; then
     echo "Publishing $name at $last on $iface" >&2
-    avahi-publish-address "$name" "$last" &
+    # The host owns the address PTR; several names cannot share it.
+    avahi-publish-address -R "$name" "$last" &
     child=$!
   else
     echo "No IPv4 address on $iface; waiting to publish $name" >&2
