@@ -101,9 +101,13 @@ describe('conversation composer and replies', () => {
     await user.click(screen.getByRole('button', { name: 'Retry sending message' }));
     await waitFor(() => expect(transport.sent).toHaveLength(2));
     expect(transport.sent[1]?.id).not.toBe(firstId);
+    const replacementId = transport.sent[1]!.id;
+    act(() => transport.deliver(persisted('1', 'old message', replacementId)));
+    await waitFor(() => expect(screen.getAllByText('old message')).toHaveLength(1));
+    expect(screen.queryByRole('button', { name: 'Retry sending message' })).toBeNull();
   });
 
-  it('mints a fresh id after an explicit conflict response', async () => {
+  it('mints a fresh identity after an explicit conflict response', async () => {
     await i18n.changeLanguage('en');
     const transport = new SendingTransport();
     transport.outcomes.push(
@@ -113,14 +117,14 @@ describe('conversation composer and replies', () => {
     render(<Conversation transport={transport} />);
     const user = userEvent.setup();
     await user.type(await screen.findByRole('textbox', { name: 'Message' }), 'conflict{enter}');
-    await screen.findByRole('button', { name: 'Retry sending message' });
-    const prior = transport.sent[0]?.id;
-    await user.click(screen.getByRole('button', { name: 'Retry sending message' }));
+    await user.click(await screen.findByRole('button', { name: 'Retry sending message' }));
     await waitFor(() => expect(transport.sent).toHaveLength(2));
-    expect(transport.sent[1]?.id).not.toBe(prior);
+    act(() => transport.deliver(persisted('1', 'conflict', transport.sent[1]!.id)));
+    await waitFor(() => expect(screen.getAllByText('conflict')).toHaveLength(1));
+    expect(screen.queryByRole('button', { name: 'Retry sending message' })).toBeNull();
   });
 
-  it('mints a new identity after the pending message reaches its 24-hour expiry', async () => {
+  it('mints a fresh identity after an expired retry and retires its old control', async () => {
     await i18n.changeLanguage('en');
     const transport = new SendingTransport();
     transport.outcomes.push(
@@ -128,34 +132,25 @@ describe('conversation composer and replies', () => {
       () => Promise.reject(new Error('offline')),
       () => Promise.resolve('accepted')
     );
-    const originalNow = Date.now;
-    let now = originalNow();
+    let now = Date.now();
     vi.spyOn(Date, 'now').mockImplementation(() => now);
     render(<Conversation transport={transport} />);
-    fireEvent.change(screen.getByRole('textbox', { name: 'Message' }), {
-      target: { value: 'expired' },
-    });
-    fireEvent.change(screen.getByRole('textbox', { name: 'Message' }), {
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Message' }), {
       target: { value: 'expired' },
     });
     fireEvent.submit(screen.getByRole('textbox', { name: 'Message' }).closest('form')!);
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(screen.getByRole('button', { name: 'Retry sending message' })).toBeTruthy();
+    await screen.findByRole('button', { name: 'Retry sending message' });
     const id = transport.sent[0]?.id;
     now += 24 * 60 * 60 * 1000;
-    fireEvent.click(screen.getByRole('button', { name: 'Retry sending message' }));
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Retry sending message' }));
+    await waitFor(() => expect(transport.sent).toHaveLength(3));
     expect(transport.sent[2]?.id).not.toBe(id);
+    act(() => transport.deliver(persisted('1', 'expired', transport.sent[2]!.id)));
+    await waitFor(() => expect(screen.getAllByText('expired')).toHaveLength(1));
+    expect(screen.queryByRole('button', { name: 'Retry sending message' })).toBeNull();
   });
 
-  it('keyboard users can activate reply, send, and retry controls', async () => {
+  it('keyboard users can tab to and activate reply, send, and retry controls', async () => {
     await i18n.changeLanguage('en');
     const transport = new SendingTransport();
     transport.outcomes.push(() => Promise.resolve('stale'));
@@ -169,26 +164,25 @@ describe('conversation composer and replies', () => {
         }}
       />
     );
+    const user = userEvent.setup();
     await screen.findByText('old');
-    const reply = screen.getByRole('button', { name: 'Reply to old' });
-    reply.focus();
-    expect(document.activeElement).toBe(reply);
-    fireEvent.keyDown(reply, { key: 'Enter' });
-    fireEvent.click(reply);
-    const composer = screen.getByRole('textbox', { name: 'Message' });
-    composer.focus();
-    await userEvent.setup().type(composer, 'keyboard');
-    const send = screen.getByRole('button', { name: 'Send message' });
-    send.focus();
-    expect(document.activeElement).toBe(send);
-    fireEvent.keyDown(send, { key: 'Enter' });
-    fireEvent.click(send);
-    await screen.findByRole('button', { name: 'Retry sending message' });
-    const retry = screen.getByRole('button', { name: 'Retry sending message' });
-    retry.focus();
+    await user.tab(); // transcript region
+    await user.tab();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Reply to old' }));
+    await user.keyboard('{enter}');
+    await user.tab(); // cancel reply
+    await user.tab();
+    expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Message' }));
+    await user.type(screen.getByRole('textbox', { name: 'Message' }), 'keyboard');
+    await user.tab();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Send message' }));
+    await user.keyboard('{enter}');
+    const retry = await screen.findByRole('button', { name: 'Retry sending message' });
+    for (let index = 0; index < 5 && document.activeElement !== retry; index += 1) {
+      await user.tab();
+    }
     expect(document.activeElement).toBe(retry);
-    fireEvent.keyDown(retry, { key: 'Enter' });
-    fireEvent.click(retry);
+    await user.keyboard('{enter}');
     await waitFor(() => expect(transport.sent).toHaveLength(2));
   });
 

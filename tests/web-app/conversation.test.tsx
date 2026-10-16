@@ -240,20 +240,59 @@ describe('conversation transcript', () => {
     }
   );
 
-  it('keeps focus through live rows and state updates and announces repeated assistant messages', async () => {
+  it('changes the live announcement for each consecutive assistant row without moving focus', async () => {
     await i18n.changeLanguage('en');
     const transport = new FakeTransport([row('1', 'assistant', 'first')]);
     render(<Conversation transport={transport} />);
     await screen.findByText('first');
-    const replyButton = screen.getByRole('button', { name: 'Reply to first' });
-    replyButton.focus();
+    const liveRegion = screen.getByTestId('live-announcement');
+    const mutations: MutationRecord[] = [];
+    const observer = new MutationObserver((records) => mutations.push(...records));
+    observer.observe(liveRegion, { childList: true, characterData: true, subtree: true });
+    for (const sequence of ['2', '3', '4']) {
+      act(() => transport.emit(row(sequence, 'assistant', `reply ${sequence}`)));
+      await screen.findByText(`reply ${sequence}`);
+      await waitFor(() => expect(mutations.length).toBeGreaterThanOrEqual(Number(sequence) - 1));
+    }
+    observer.disconnect();
+    expect(liveRegion.textContent).toBe('New message from lifemodel.');
+    expect(mutations.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('keeps keyboard focus through a live row and state update', async () => {
+    await i18n.changeLanguage('en');
+    const transport = new FakeTransport([row('1', 'assistant', 'first')]);
+    render(<Conversation transport={transport} />);
+    const user = userEvent.setup();
+    await screen.findByText('first');
+    await user.tab();
+    await user.tab();
+    const reply = screen.getByRole('button', { name: 'Reply to first' });
+    expect(document.activeElement).toBe(reply);
     act(() => transport.emit(row('2', 'assistant', 'second')));
-    expect(document.activeElement).toBe(replyButton);
-    expect(screen.getByTestId('live-announcement').textContent).toBe('New message from lifemodel.');
-    act(() => transport.emit(row('3', 'assistant', 'third')));
-    await screen.findByText('third');
-    expect(document.activeElement).toBe(replyButton);
-    expect(screen.getByTestId('live-announcement').textContent).toBe('New message from lifemodel.');
+    await screen.findByText('second');
+    expect(document.activeElement).toBe(reply);
+    act(() =>
+      transport.emitState({
+        state: 'thinking',
+        epoch: 'epoch-focus',
+        publishedAt: new Date().toISOString(),
+      })
+    );
+    expect(await screen.findByLabelText('thinking…')).toBeTruthy();
+    expect(document.activeElement).toBe(reply);
+  });
+
+  it('does not show a read receipt for an accepted 202 until its durable row arrives', async () => {
+    await i18n.changeLanguage('en');
+    const transport = new FakeTransport([]);
+    render(<Conversation transport={transport} />);
+    const user = userEvent.setup();
+    await user.type(await screen.findByRole('textbox', { name: 'Message' }), 'pending{enter}');
+    await waitFor(() => expect(transport.sent).toHaveLength(1));
+    expect(screen.queryByText(/^Read /)).toBeNull();
+    act(() => transport.emit(row('1', 'user', 'pending', transport.sent[0]?.id)));
+    await screen.findByTestId('read-receipt');
   });
 
   it('hides stale thinking after the freshness window passes without another event', async () => {
