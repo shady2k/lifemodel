@@ -120,11 +120,15 @@ export function verifySession(token: string, record: PasswordRecord, nowMs: numb
 
 /** The hosts the loader answers on. */
 export const ALLOWED_HOSTS = [
-  'localhost',
-  'boot.localhost',
-  'vault.localhost',
+  'lifemodel.local',
+  'boot-lifemodel.local',
+  'vault-lifemodel.local',
   '127.0.0.1',
 ] as const;
+let configuredInstanceName = 'lifemodel';
+export function configureInstanceName(name: string): void {
+  configuredInstanceName = name;
+}
 
 /** The name part of a Host header (or of any `host:port` string), lowercased. */
 export function hostName(host: string): string {
@@ -135,22 +139,19 @@ export function hostName(host: string): string {
 export function isAllowedHost(host: string | undefined, instanceName?: string): boolean {
   if (host === undefined) return false;
   const name = hostName(host);
-  return instanceName === undefined
-    ? (ALLOWED_HOSTS as readonly string[]).includes(name)
-    : [...instanceHosts(instanceName), '127.0.0.1'].includes(name);
+  const configured = instanceName ?? configuredInstanceName;
+  return [...instanceHosts(configured), '127.0.0.1'].includes(name);
 }
-function instanceHosts(name: string): string[] {
+export function instanceHosts(name: string): string[] {
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,55}[a-z0-9])?$/.test(name))
+    throw new Error('invalid LIFEMODEL_NAME');
   return [`${name}.local`, `boot-${name}.local`, `vault-${name}.local`];
 }
 
 /** The hosts a browser reaches: the pinned ones, the CLI's loopback literal excluded. */
 function isBrowserHost(name: string, instanceName?: string): boolean {
-  return (
-    name !== '127.0.0.1' &&
-    (instanceName === undefined
-      ? (ALLOWED_HOSTS as readonly string[]).includes(name)
-      : instanceHosts(instanceName).includes(name))
-  );
+  const configured = instanceName ?? configuredInstanceName;
+  return name !== '127.0.0.1' && instanceHosts(configured).includes(name);
 }
 
 /** The port of a `host:port` string, or '' when it names none (or names nonsense). */
@@ -174,11 +175,7 @@ export function loginLocation(
 ): string | null {
   const name = hostName(forwardedHost);
   if (!isBrowserHost(name, instanceName)) return null;
-  const domain =
-    instanceName ??
-    (name.startsWith('boot.') || name.startsWith('vault.')
-      ? name.slice(name.indexOf('.') + 1)
-      : name);
+  const domain = instanceName ?? configuredInstanceName;
   const port = hostPort(forwardedHost);
   const authority = (host: string): string => (port === '' ? host : `${host}:${port}`);
   const path = forwardedUri.startsWith('/') && !forwardedUri.startsWith('//') ? forwardedUri : '/';

@@ -150,6 +150,7 @@ shift 2
 case "$*" in
   *'get nodes'*) exit 0 ;;
   *'get ocirepository platform'*) printf '{"metadata":{"managedFields":[%s]}}\n' "$K3S_MANAGED_FIELDS" ;;
+  *'get configmap lifemodel-instance -o jsonpath='*) [ -f "$K3S_IDENTITY" ] && cat "$K3S_IDENTITY" || { echo '(NotFound)' >&2; exit 1; } ;;
   *'get namespace flux-system -o jsonpath='*) [ "$K3S_FOREIGN" = 1 ] && echo external || echo lifemodel ;;
   *'get namespace flux-system'*) [ -f "$K3S_STATE" ] ;;
   *'--field-manager=lifemodel-namespace'*) cat >/dev/null; echo namespace >> "$K3S_LOG"; touch "$K3S_STATE" ;;
@@ -169,6 +170,7 @@ esac`
     ...process.env,
     PATH: `${bin}:${process.env.PATH}`,
     K3S_STATE: state,
+    K3S_IDENTITY: join(root, 'instance-name'),
     K3S_LOG: log,
     K3S_APPLIED_TAG: join(root, 'applied-tag'),
     K3S_APPLIED_REF: join(root, 'applied-ref'),
@@ -403,8 +405,10 @@ describe('platform manifests', () => {
     );
   });
   it('keeps the platform workload confined and digest-pinned', () => {
+    const instanceName = 'lifemodel';
     const sourceFiles = yamlFiles(platformRoot);
     const objects = sourceObjects();
+    const instanceObjects = parseYamlFiles(yamlFiles(join(platformRoot, 'instance')));
     expect(objects.length).toBeGreaterThan(0);
     const deployment = objects.find(
       (item) => item.kind === 'Deployment' && item.metadata?.name === 'loader'
@@ -493,20 +497,20 @@ describe('platform manifests', () => {
       )
     ).toBe(true);
     expect(
-      objects.some(
+      instanceObjects.some(
         (item) =>
           item.kind === 'Ingress' &&
           item.metadata?.name === 'web-auth-handoff' &&
           item.metadata?.namespace === 'lifemodel-system' &&
-          item.spec.rules[0].host === 'localhost'
+          item.spec.rules[0].host === '${LIFEMODEL_NAME}.local'
       )
     ).toBe(true);
     expect(
-      objects.some(
+      instanceObjects.some(
         (item) =>
           item.kind === 'Ingress' &&
           item.metadata?.namespace === 'lifemodel-system' &&
-          item.spec.rules.some((rule: any) => rule.host === 'boot.localhost')
+          item.spec.rules.some((rule: any) => rule.host === 'boot-${LIFEMODEL_NAME}.local')
       )
     ).toBe(true);
     expect(objects.some((item) => item.kind === 'ClusterRole')).toBe(false);
@@ -721,7 +725,7 @@ describe('platform manifests', () => {
       expect(recovery.status, recovery.stderr).toBe(0);
       const log = readFileSync(join(second.root, 'kubectl.log'), 'utf8');
       const rootApplies = log.split('\n').filter((line) => line.startsWith('root:'));
-      expect(rootApplies).toHaveLength(6);
+      expect(rootApplies).toHaveLength(9);
       expect(
         rootApplies.every((line) =>
           line.includes('--server-side --field-manager=lifemodel-bootstrap')

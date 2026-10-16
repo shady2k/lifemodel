@@ -94,12 +94,16 @@ describe('loader ForwardAuth verification host', () => {
     }
     expect((await request(base, '/_auth/verify')).status).toBe(401);
     expect(
-      (await fetch(`${base}/login`, { headers: { host: 'boot-lifemodel.local' } })).status
+      (
+        await fetch(`${base}/login`, {
+          headers: { host: 'boot-lifemodel.local', origin: 'https://boot-lifemodel.local' },
+        })
+      ).status
     ).toBe(200);
     expect(
       (
         await fetch(`${base}/setup`, {
-          headers: { host: 'boot-lifemodel.local' },
+          headers: { host: 'boot-lifemodel.local', origin: 'https://boot-lifemodel.local' },
           redirect: 'manual',
         })
       ).status
@@ -120,7 +124,7 @@ describe('loader ForwardAuth verification host', () => {
     expect(denied.headers.location).toBeUndefined();
 
     const browser = await request(base, '/_auth/verify', {
-      host: 'boot-lifemodel.local',
+      host: SERVICE_HOST,
       'x-forwarded-method': 'GET',
       'x-forwarded-host': 'lifemodel.local',
       'x-forwarded-uri': '/private',

@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import {
   ALLOWED_HOSTS,
   clearSessionCookie,
+  configureInstanceName,
   HANDOFF_TTL_MS,
   HANDOFF_CODE_BYTES,
   createSession,
@@ -114,6 +115,7 @@ function formPage(
 
 export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
   const { state, logger, clock, pki, config } = deps;
+  configureInstanceName(config.instanceName);
   // Single loader replica: short-lived codes remain process-local by design.
   interface HandoffEntry {
     session: string;
@@ -169,13 +171,17 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       path === '/_auth/verify' &&
       hostName(req.headers.host ?? '') === 'loader.lifemodel-system.svc.cluster.local';
     if (!serviceVerify && !isAllowedHost(req.headers.host, config.instanceName)) {
-      sendText(res, 404, 'not found');
+      sendText(res, 400, `the loader answers only ${ALLOWED_HOSTS.join(', ')}`);
       return;
     }
     const requestHost = hostName(req.headers.host ?? '');
     const bootHost = `boot-${config.instanceName}.local`;
     const appHost = `${config.instanceName}.local`;
-    if (!serviceVerify && requestHost === appHost && (path !== '/_auth/handoff' || method !== 'GET')) {
+    if (
+      !serviceVerify &&
+      requestHost === appHost &&
+      (path !== '/_auth/handoff' || method !== 'GET')
+    ) {
       sendText(res, 404, 'not found');
       return;
     }
@@ -184,14 +190,31 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       return;
     }
     const bootRouteAllowed =
-      (method === 'GET' && (path === '/' || path === '/login' || path === '/setup' || path === '/ca.crt' || path === '/api/state' || path === '/api/model' || path.startsWith('/assets/'))) ||
-      (method === 'POST' && (path === '/login' || path === '/setup' || path === '/logout' || path === '/api/setup' || path === '/api/login')) ||
+      (method === 'GET' &&
+        (path === '/' ||
+          path === '/login' ||
+          path === '/setup' ||
+          path === '/ca.crt' ||
+          path === '/api/state' ||
+          path === '/api/model' ||
+          path.startsWith('/assets/'))) ||
+      (method === 'POST' &&
+        (path === '/login' ||
+          path === '/setup' ||
+          path === '/logout' ||
+          path === '/api/setup' ||
+          path === '/api/login')) ||
       (['POST', 'PUT', 'DELETE'].includes(method) && path.startsWith('/api/'));
     if (!serviceVerify && requestHost === bootHost && !bootRouteAllowed) {
       sendText(res, 404, 'not found');
       return;
     }
-    if (!serviceVerify && requestHost !== bootHost && requestHost !== appHost) {
+    if (
+      !serviceVerify &&
+      requestHost !== bootHost &&
+      requestHost !== appHost &&
+      requestHost !== '127.0.0.1'
+    ) {
       sendText(res, 404, 'not found');
       return;
     }

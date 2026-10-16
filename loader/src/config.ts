@@ -36,7 +36,6 @@ export function loadConfig(env: NodeJS.ProcessEnv): LoaderConfig {
     );
   const volumeRoot = env['LIFEMODEL_VOLUME_ROOT'] ?? '/var/lib/loader';
   return {
-    instanceName,
     volumeRoot,
     loaderDir: join(volumeRoot, 'loader'),
     httpPort: readPort(env),

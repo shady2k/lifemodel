@@ -7,17 +7,14 @@ import * as x509 from '@peculiar/x509';
 import type { Clock } from './clock.js';
 import type { LoaderConfig } from './config.js';
 import type { FileSystem } from './fs.js';
+import { instanceHosts } from './auth.js';
+export { instanceHosts } from './auth.js';
 
 const DAY = 24 * 60 * 60 * 1000;
 const CA_LIFETIME = 3650 * DAY;
 const LEAF_LIFETIME = 397 * DAY;
 const RENEW_WINDOW = 30 * DAY;
 const alg = { name: 'ECDSA', namedCurve: 'P-256', hash: 'SHA-256' } as const;
-export function instanceHosts(name: string): string[] {
-  if (!/^[a-z0-9](?:[a-z0-9-]{0,55}[a-z0-9])?$/.test(name))
-    throw new Error('invalid LIFEMODEL_NAME');
-  return [`${name}.local`, `boot-${name}.local`, `vault-${name}.local`];
-}
 export interface TlsSecretStore {
   read(): Promise<{ ca?: string; cert?: string; key?: string }>;
   write(ca: string, cert: string, key: string): Promise<void>;
