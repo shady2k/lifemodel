@@ -31,7 +31,8 @@
     "build:app": "vite build --config web/app/vite.config.ts",
     "dev:web": "vite --config web/app/vite.config.ts",
     "build:web-server": "esbuild src/web/index.ts --bundle --platform=node --format=cjs --outfile=dist/web/server.cjs",
-    "build:web": "npm run build:web-server && npm run build:app"
+    "build:web": "npm run build:web-server && npm run build:app",
+    "build:loader-ui": "vite build --config web/loader/vite.config.ts"
   },
   "keywords": [
     "ai",

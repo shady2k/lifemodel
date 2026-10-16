@@ -16,16 +16,23 @@
 
 ARG NODE_IMAGE=node:24-bookworm-slim
 
-# The loader is a TypeScript program with its own package.json in loader/
-# (lifemodel-q4x.2.1): it is compiled here, once, with its own manifests, so
-# the runtime stage carries the built dist/ and nothing of the toolchain.
+# Build the browser UI from the root lockfile. The output is the only UI artifact
+# copied to the loader runtime; no project source or toolchain ships there.
+FROM ${NODE_IMAGE} AS ui-build
+WORKDIR /build
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY web/kit ./web/kit
+COPY web/loader ./web/loader
+RUN npm run build:loader-ui -- --emptyOutDir
+
+# Compile the TypeScript loader with its isolated manifests.
 FROM ${NODE_IMAGE} AS build
 WORKDIR /build
 COPY loader/package.json loader/package-lock.json ./
 RUN npm ci
 COPY loader/ ./
-RUN npm run build \
- && npm prune --omit=dev
+RUN npm run build && npm prune --omit=dev
 
 # ----------------------------------------------------------------- runtime --
 FROM ${NODE_IMAGE}
@@ -52,6 +59,7 @@ RUN groupmod --new-name loader node \
 # sources, not the toolchain. Root-owned; the `loader` user runs it and
 # cannot change it.
 COPY --from=build --chown=root:root /build /opt/lifemodel/loader
+COPY --from=ui-build --chown=root:root /build/web/loader/dist /opt/lifemodel/loader-ui
 # Release builds provide this full-history bundle in their build context.
 COPY --chown=root:root .docker-context/seed.bundle /opt/lifemodel/seed.bundle
 
@@ -63,6 +71,7 @@ WORKDIR /var/lib/loader
 # the Kubernetes Service reaches the pod through its IP.
 VOLUME ["/var/lib/loader"]
 ENV LIFEMODEL_VOLUME_ROOT=/var/lib/loader \
+    LIFEMODEL_UI_ROOT=/opt/lifemodel/loader-ui \
     NODE_ENV=production
 
 EXPOSE 7000

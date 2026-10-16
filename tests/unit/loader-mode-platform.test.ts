@@ -62,7 +62,8 @@ async function localRequest(
   path: string,
   method: string,
   body: string,
-  cookie?: string
+  cookie?: string,
+  csrf?: string
 ) {
   return new Promise<{
     status: number;
@@ -78,7 +79,8 @@ async function localRequest(
         headers: {
           host: 'boot-lifemodel.local',
           origin: 'https://boot-lifemodel.local',
-          'content-type': 'application/x-www-form-urlencoded',
+          'content-type': 'application/json',
+          ...(csrf ? { 'x-csrf-token': csrf } : {}),
           ...(cookie ? { cookie } : {}),
         },
       },
@@ -101,26 +103,36 @@ async function localRequest(
 }
 
 describe('the platform loader', () => {
-  it('sets up authentication and preserves it across a restart', async () => {
+  it('sets up authentication and preserves it across a restart through the JSON API', async () => {
     const root = mkdtempSync(join(tmpdir(), 'platform-loader-'));
     roots.push(root);
     const first = appFor({ root });
     await first.start();
     const port = first.port();
-    const setup = await localRequest(port, '/setup', 'POST', 'password=secret');
-    expect(setup.status).toBe(303);
-    const cookie = String(setup.headers['set-cookie'] ?? '').split(';')[0] ?? '';
-    const home = await fetch(`http://127.0.0.1:${port}/`, {
-      headers: { host: 'boot-lifemodel.local', cookie },
-    });
-    expect(home.status).toBe(200);
-    expect(await home.text()).toContain('Platform mode');
-    expect(await first.shutdown('test')).toBe(0);
+    const setup = await localRequest(
+      port,
+      '/api/setup',
+      'POST',
+      JSON.stringify({ password: 'a secure password' })
+    );
+    expect(setup.status).toBe(200);
+    const cookie = String(setup.headers['set-cookie'] ?? '').split(';')[0]!;
+    expect(cookie).toContain('__Host-lm_session=');
+    const state = await localRequest(port, '/api/state', 'GET', '', cookie);
+    expect(state.status).toBe(200);
+    expect(JSON.parse(state.body).loggedIn).toBe(true);
+    await first.shutdown('test');
     const second = appFor({ root });
     await second.start();
-    const login = await localRequest(second.port(), '/login', 'POST', 'password=secret');
-    expect(login.status).toBe(303);
-    expect(await second.shutdown('test')).toBe(0);
+    const login = await localRequest(
+      second.port(),
+      '/api/login',
+      'POST',
+      JSON.stringify({ password: 'a secure password' })
+    );
+    expect(login.status).toBe(200);
+    expect(String(login.headers['set-cookie'])).toContain('__Host-lm_session=');
+    await second.shutdown('test');
   });
 
   it('logs out with real filesystem state and revokes the prior session', async () => {
@@ -129,26 +141,23 @@ describe('the platform loader', () => {
     const app = appFor({ root });
     await app.start();
     const port = app.port();
-    const setup = await localRequest(port, '/setup', 'POST', 'password=secret');
-    const cookie = String(setup.headers['set-cookie'] ?? '').split(';')[0]!;
-    const home = await fetch(`http://127.0.0.1:${port}/`, {
-      headers: { host: 'boot-lifemodel.local', cookie },
-    });
-    const html = await home.text();
-    const csrf = html.match(/name="csrf" value="([^"]+)"/)![1]!;
-    const logout = await localRequest(
+    const setup = await localRequest(
       port,
-      '/logout',
+      '/api/setup',
       'POST',
-      `csrf=${encodeURIComponent(csrf)}`,
-      cookie
+      JSON.stringify({ password: 'a secure password' })
     );
-    expect(logout.status).toBe(303);
-    const denied = await fetch(`http://127.0.0.1:${port}/`, {
-      headers: { host: 'boot-lifemodel.local', cookie },
-    });
-    expect(denied.status).toBe(401);
-    expect(await app.shutdown('test')).toBe(0);
+    const cookie = String(setup.headers['set-cookie'] ?? '').split(';')[0]!;
+    const token = cookie.slice('__Host-lm_session='.length);
+    const auth = JSON.parse(
+      await createNodeFileSystem().readFile(join(root, 'auth.json'))
+    ) as import('../../loader/src/auth.js').PasswordRecord;
+    const csrf = (await import('../../loader/src/auth.js')).csrfToken(auth, token);
+    const logout = await localRequest(port, '/api/logout', 'POST', '', cookie, csrf);
+    expect(logout.status).toBe(200);
+    const denied = await localRequest(port, '/api/state', 'GET', '', cookie);
+    expect(JSON.parse(denied.body).loggedIn).toBe(false);
+    await app.shutdown('test');
   });
 
   it('serves the instance CA certificate at /ca.crt on its boot host', async () => {

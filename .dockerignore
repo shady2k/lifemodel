@@ -5,5 +5,12 @@
 !docker/loader/**
 !loader
 !loader/**
+!package.json
+!package-lock.json
+!web
+!web/kit
+!web/kit/**
+!web/loader
+!web/loader/**
 !.docker-context
 !.docker-context/**
