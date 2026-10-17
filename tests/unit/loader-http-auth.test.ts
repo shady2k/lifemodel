@@ -892,8 +892,10 @@ describe('loader static UI and JSON API', () => {
       'PUT',
       JSON.stringify({ kind: 'openai', baseUrl: 'https://models.example/v1', model: 'kept' })
     );
+    const onboardingBeforeReserve = getOnboardingSaves();
     expect(kept.status).toBe(200);
     expect(saved?.key).toBe('reserve-key');
+    expect(getOnboardingSaves()).toBe(onboardingBeforeReserve);
     const reserveClear = await request(base, '/api/model/reserve', headers, 'DELETE', '{}');
     expect(reserveClear.status).toBe(200);
     expect(saved).toBeNull();
@@ -1217,7 +1219,14 @@ describe('loader static UI and JSON API', () => {
         else badHeaders[key] = value;
       }
       const rejected = await request(base, route, badHeaders, 'POST', '{}');
-      expect([401, 403, 415]).toContain(rejected.status);
+      const expected =
+        ('origin' in change && change.origin === undefined) ||
+        change.origin === 'null' ||
+        change.origin === 'https://sibling.local' ||
+        'x-csrf-token' in change
+          ? 403
+          : 415;
+      expect(rejected.status).toBe(expected);
     }
     expect((await request(base, route, csrfHeaders, 'PUT', '{}')).status).toBe(405);
     expect((await request(base, route, csrfHeaders, 'POST', '{}')).status).toBe(409);
