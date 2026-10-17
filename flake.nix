@@ -14,6 +14,7 @@
         let lockedK3s = nixpkgs.legacyPackages.${pkgs.stdenv.hostPlatform.system}.k3s;
         in {
           imports = [ module ];
+          _module.args.selfVersion = self.rev or "v0.1.0";
           _module.args.lifemodelK3s = lockedK3s;
         };
       baseModule = { ... }: {

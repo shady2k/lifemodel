@@ -13,6 +13,10 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
     steps:
       - name: Check out the tagged source without persisted credentials
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -138,3 +142,24 @@ jobs:
           cosign verify "ghcr.io/$OWNER/lifemodel-platform@$DIGEST"
           --certificate-oidc-issuer-regexp '^https://token\.actions\.githubusercontent\.com$'
           --certificate-identity-regexp '^https://github\.com/shady2k/lifemodel/\.github/workflows/release\.yml@refs/tags/v.*$'
+
+      - name: Prepare and smoke-test the versioned installer bundle
+        env:
+          PLATFORM_DIGEST: ${{ steps.platform.outputs.digest }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          scripts/release/prepare-installer-bundle.sh "$TAG" "$PLATFORM_DIGEST" "$RUNNER_TEMP/installer-bundle"
+          mkdir -p "$RUNNER_TEMP/clean"
+          cp -R "$RUNNER_TEMP/installer-bundle/." "$RUNNER_TEMP/clean/"
+          test -x "$RUNNER_TEMP/clean/scripts/install.sh"
+          grep -F "PLATFORM_TAG=\"$TAG\"" "$RUNNER_TEMP/clean/scripts/install.sh"
+          grep -F "PLATFORM_DIGEST=\"${PLATFORM_DIGEST#sha256:}\"" "$RUNNER_TEMP/clean/scripts/install.sh"
+          (cd "$RUNNER_TEMP/clean" && sh scripts/install.sh --help >/dev/null)
+          gh release upload "$TAG" "$RUNNER_TEMP/installer-bundle/scripts/install.sh" \
+            "$RUNNER_TEMP/installer-bundle/deploy/root/ocirepository.yaml" \
+            "$RUNNER_TEMP/installer-bundle/deploy/root/kustomization.yaml" \
+            "$RUNNER_TEMP/installer-bundle/deploy/root/instance.yaml" \
+            "$RUNNER_TEMP/installer-bundle/deploy/mdns/publish-name" \
+            "$RUNNER_TEMP/installer-bundle/deploy/mdns/publisher.service.in" \
+            "$RUNNER_TEMP/installer-bundle/deploy/cli/lifemodel.mjs" --clobber

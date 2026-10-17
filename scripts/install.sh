@@ -30,9 +30,10 @@ FLUX_VERSION="v2.9.6"
 FLUX_INSTALL_URL="https://github.com/fluxcd/flux2/releases/download/v2.9.6/install.yaml"
 FLUX_INSTALL_SHA256="9c1fda7e401429531ed1478f67ba06b3edff6513b75da7ee47bde9f1c4d4251c"
 
-PLATFORM_URL=""
-PLATFORM_TAG=""
-PLATFORM_DIGEST=""
+PLATFORM_URL="${LIFEMODEL_PLATFORM_URL:-}"
+PLATFORM_TAG="${LIFEMODEL_PLATFORM_TAG:-}"
+PLATFORM_DIGEST="${LIFEMODEL_PLATFORM_DIGEST:-}"
+EXPLICIT_RELEASE=false
 VERIFY_MODE="keyless"
 PUBLIC_KEY_FILE=""
 ISSUER="^https://token\\.actions\\.githubusercontent\\.com$"
@@ -45,12 +46,12 @@ KUBECTL=""
 
 usage() {
   cat <<EOF
-Usage: install.sh --platform-url URL (--tag TAG | --digest DIGEST) [options]
+Usage: install.sh [--platform-url URL] [--tag TAG | --digest DIGEST] [options]
 
-Required:
+Release (defaults are stamped into the release installer):
   --platform-url URL       OCI URL of the signed platform artifact
-  --tag TAG                artifact tag (exactly one of --tag / --digest)
-  --digest DIGEST          artifact digest (exactly one of --tag / --digest)
+  --tag TAG                artifact tag (mutually exclusive with --digest)
+  --digest DIGEST          artifact digest (mutually exclusive with --tag)
 
 Verification (defaults are the NixOS module's defaults):
   --verify MODE            keyless (default) or key
@@ -82,9 +83,9 @@ require_value() {
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --platform-url)      require_value "$@"; PLATFORM_URL=$2; shift 2 ;;
-    --tag)               require_value "$@"; PLATFORM_TAG=$2; shift 2 ;;
-    --digest)            require_value "$@"; PLATFORM_DIGEST=$2; shift 2 ;;
+    --platform-url)      require_value "$@"; PLATFORM_URL=$2; EXPLICIT_RELEASE=true; shift 2 ;;
+    --tag)               require_value "$@"; PLATFORM_TAG=$2; EXPLICIT_RELEASE=true; shift 2 ;;
+    --digest)            require_value "$@"; PLATFORM_DIGEST=$2; EXPLICIT_RELEASE=true; shift 2 ;;
     --verify)            require_value "$@"; VERIFY_MODE=$2; shift 2 ;;
     --public-key-file)   require_value "$@"; PUBLIC_KEY_FILE=$2; shift 2 ;;
     --issuer)            require_value "$@"; ISSUER=$2; shift 2 ;;
@@ -99,7 +100,15 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-[ -n "$PLATFORM_URL" ] || die "--platform-url is required"
+if [ -f "${LIFEMODEL_INSTANCE_ENV:-/etc/lifemodel/instance.env}" ] && [ "$EXPLICIT_RELEASE" = false ]; then
+  . "${LIFEMODEL_INSTANCE_ENV:-/etc/lifemodel/instance.env}"
+  INSTANCE_NAME=${LIFEMODEL_NAME:-lifemodel}
+  PLATFORM_URL=${LIFEMODEL_PLATFORM_URL:-$PLATFORM_URL}
+  PLATFORM_TAG=${LIFEMODEL_PLATFORM_TAG:-$PLATFORM_TAG}
+  PLATFORM_DIGEST=${LIFEMODEL_PLATFORM_DIGEST:-$PLATFORM_DIGEST}
+fi
+[ -n "$PLATFORM_URL" ] || die "this installer has no stamped platform URL"
+
 case "$INSTANCE_NAME" in
   ''|[!a-z]*|*[!a-z0-9-]*|-*|*-|y|n|yes|no|true|false|on|off|null|~)
     die "--name must be a non-reserved lowercase DNS-1035 label (1-57 characters)" ;;
@@ -109,11 +118,12 @@ case "$LAN_INTERFACE" in *[!A-Za-z0-9_.:-]* ) die "--lan-interface must contain 
 [ "${#LAN_INTERFACE}" -le 15 ] || die "--lan-interface must be at most 15 characters"
 case "$LAN_INTERFACE" in cni*|flannel*|veth*|wg*|tun*|tailscale*) [ -z "$LAN_INTERFACE" ] || die "refusing non-LAN interface: $LAN_INTERFACE" ;; esac
 LIFEMODEL_STATE_DIR=${LIFEMODEL_STATE_DIR:-/var/lib/lifemodel}
+shell_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\''/g")"; }
 if [ -n "$PLATFORM_TAG" ] && [ -n "$PLATFORM_DIGEST" ]; then
   die "--tag and --digest are mutually exclusive; pass exactly one"
 fi
 if [ -z "$PLATFORM_TAG" ] && [ -z "$PLATFORM_DIGEST" ]; then
-  die "--tag or --digest is required; pass exactly one"
+  die "this installer has no stamped platform tag or digest"
 fi
 case "$VERIFY_MODE" in
   keyless) ;;
@@ -408,6 +418,20 @@ fi
 if [ -n "$installed_name" ] && [ "$installed_name" != "$INSTANCE_NAME" ]; then
   die "instance name is fixed as $installed_name; reinstall to change it"
 fi
+instance_env=${LIFEMODEL_INSTANCE_ENV:-${LIFEMODEL_INSTALL_ROOT}/etc/lifemodel/instance.env}
+mkdir -p "$(dirname "$instance_env")"
+if [ -f "$instance_env" ] && [ "$EXPLICIT_RELEASE" = true ]; then
+  saved_name=$(sed -n 's/^LIFEMODEL_NAME=//p' "$instance_env" | head -n 1 | tr -d "'\"")
+  [ -z "$saved_name" ] || [ "$saved_name" = "$INSTANCE_NAME" ] || die "instance name is fixed as $saved_name; reinstall to change it"
+fi
+instance_env_tmp="$instance_env.tmp"
+{
+  printf 'LIFEMODEL_NAME=%s\n' "$(shell_quote "$INSTANCE_NAME")"
+  printf 'LIFEMODEL_PLATFORM_URL=%s\n' "$(shell_quote "$PLATFORM_URL")"
+  if [ -n "$PLATFORM_DIGEST" ]; then printf 'LIFEMODEL_PLATFORM_DIGEST=%s\n' "$(shell_quote "$PLATFORM_DIGEST")"; else printf 'LIFEMODEL_PLATFORM_TAG=%s\n' "$(shell_quote "$PLATFORM_TAG")"; fi
+} > "$instance_env_tmp"
+chmod 0600 "$instance_env_tmp"
+mv "$instance_env_tmp" "$instance_env"
 printf '%s\n' "$INSTANCE_NAME" > "$LIFEMODEL_STATE_DIR/instance-name.tmp"
 chmod 0600 "$LIFEMODEL_STATE_DIR/instance-name.tmp"
 mv "$LIFEMODEL_STATE_DIR/instance-name.tmp" "$LIFEMODEL_STATE_DIR/instance-name"
@@ -468,4 +492,25 @@ EOF
 chmod 0755 "$cli_bin_dir/lifemodel"
 LIFEMODEL_LOCK_FD="$LIFEMODEL_LOCK_FD" LIFEMODEL_LOCK_HELD=1 LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" LIFEMODEL_CONFIGURED_REF="$configured_ref" \
   "$cli_bin_dir/lifemodel" record-applied "$effective_ref"
+# Wait for the loader route using the instance CA, never an insecure TLS bypass.
+ca_file=$(mktemp)
+wait_deadline=$(( $(date +%s) + 600 ))
+ready=0
+while [ "$(date +%s)" -lt "$wait_deadline" ]; do
+  ca_json=$($KUBECTL -n lifemodel-system get configmap lifemodel-ca -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)
+  if [ -n "$ca_json" ]; then
+    printf '%s\n' "$ca_json" > "$ca_file"
+    if curl --silent --show-error --fail --max-time 10 --resolve "boot-$INSTANCE_NAME.local:443:127.0.0.1" --cacert "$ca_file" "https://boot-$INSTANCE_NAME.local/api/state" -o /dev/null; then ready=1; break; fi
+  fi
+  sleep 2
+done
+if [ "$ready" -ne 1 ]; then
+  rm -f "$ca_file"
+  echo "lifemodel not ready: route (first-start step unavailable); run lifemodel doctor" >&2
+  exit 1
+fi
+fingerprint=$(openssl x509 -in "$ca_file" -outform DER | sha256sum | awk '{print $1}')
+rm -f "$ca_file"
+printf 'Address: https://%s.local/\n' "$INSTANCE_NAME"
+printf 'SHA-256 fingerprint of the CA certificate (DER): %s\n' "$fingerprint"
 printf 'install.sh: done (k3s v%s, Flux %s, platform source applied)\n' "$K3S_VERSION" "$FLUX_VERSION"

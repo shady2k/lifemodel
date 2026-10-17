@@ -1,4 +1,4 @@
-{ config, lib, pkgs, lifemodelK3s, ... }:
+{ config, lib, pkgs, lifemodelK3s, selfVersion ? "v0.1.0", ... }:
 let
   cfg = config.services.lifemodel;
   inherit (lib) mkEnableOption mkOption types;
@@ -203,6 +203,7 @@ in
         $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f ${renderedInstance}
         $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f ${renderedKustomization}
         LIFEMODEL_LOCK_FD=9 LIFEMODEL_LOCK_HELD=1 lifemodel record-applied "$effectiveRef"
+        lifemodel address || echo 'lifemodel address is not ready yet; run lifemodel doctor' >&2
       '';
     };
     };

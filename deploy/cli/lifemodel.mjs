@@ -24,8 +24,49 @@ const kubectl = (process.env.LIFEMODEL_KUBECTL || `k3s kubectl --kubeconfig ${ku
 );
 const script = fileURLToPath(import.meta.url);
 const validRef = /^(?:tag=[A-Za-z0-9_][A-Za-z0-9._-]{0,127}|digest=sha256:[a-f0-9]{64})$/;
+function address() {
+  let identity, caMap;
+  try {
+    identity = get('configmaps', 'flux-system', 'lifemodel-instance');
+  } catch {
+    console.error('lifemodel address: not installed');
+    return 1;
+  }
+  const name = identity.data?.LIFEMODEL_NAME;
+  if (typeof name !== 'string' || !/^[a-z][a-z0-9-]{0,56}[a-z0-9]?$/.test(name)) {
+    console.error('lifemodel address: not installed');
+    return 1;
+  }
+  try {
+    caMap = get('configmaps', 'lifemodel-system', 'lifemodel-ca');
+  } catch {
+    console.error('lifemodel address: not ready (CA unavailable); run lifemodel doctor');
+    return 1;
+  }
+  const pem = caMap.data?.['ca.crt'] || caMap.data?.['ca.crt.pem'];
+  if (typeof pem !== 'string') {
+    console.error('lifemodel address: not ready (CA unavailable); run lifemodel doctor');
+    return 1;
+  }
+  let fingerprint;
+  try {
+    fingerprint = new X509Certificate(pem).fingerprint256.replaceAll(':', '').toLowerCase();
+  } catch {
+    console.error('lifemodel address: not ready (CA certificate invalid); run lifemodel doctor');
+    return 1;
+  }
+  const status = getOptional('configmaps', 'lifemodel-system', 'lifemodel-pki-status');
+  if (status?.data?.identity !== 'present' || status?.data?.ca !== 'present-matching') {
+    console.error('lifemodel address: not ready; run lifemodel doctor');
+    return 1;
+  }
+  console.log(`Address: https://${name}.local/`);
+  console.log(`SHA-256 fingerprint of the CA certificate (DER): ${fingerprint}`);
+  return 0;
+}
 function help() {
   console.log(`Usage: lifemodel doctor [--repin previous|clear]
+       lifemodel address
        lifemodel --help
 
 Diagnose Flux sources, Kustomizations, the lifemodel loader and core.
@@ -594,6 +635,10 @@ try {
     locked(args);
     renderRef(args[1], args[2]);
     process.exit(0);
+  }
+  if (args.length === 1 && args[0] === 'address') {
+    locked(args);
+    process.exit(address());
   }
   if (args.length === 1 && args[0] === 'doctor') {
     locked(args);
