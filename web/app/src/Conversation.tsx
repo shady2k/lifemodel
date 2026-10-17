@@ -131,7 +131,7 @@ function ConversationContent({
   onState,
 }: {
   transport: WebTransport;
-  onState?: (state: CreaturePresenceValue) => void;
+  onState?: (state: CreaturePresenceValue | undefined) => void;
 }) {
   const { t, i18n } = useTranslation();
   const scroller = useRef<HTMLDivElement>(null);
@@ -160,13 +160,13 @@ function ConversationContent({
       const page = await transport.readTranscript(pageParam);
       setHasEarlierByCursor((current) => ({
         ...current,
-        [page.cursor]: page.messages.length === 50,
+        [page.messages.at(-1)?.sequence ?? 'latest']: page.messages.length === 50,
       }));
       return page;
     },
     getPreviousPageParam: (firstPage) => {
       const oldest = firstPage.messages.at(-1)?.sequence;
-      return hasEarlierByCursor[firstPage.cursor] && oldest ? oldest : undefined;
+      return oldest && hasEarlierByCursor[oldest] ? oldest : undefined;
     },
     getNextPageParam: () => undefined,
   });
@@ -212,8 +212,14 @@ function ConversationContent({
         });
       },
       (state) => {
-        setCreature(state);
-        onState?.(state);
+        if (state === null) {
+          setCreature(undefined);
+          onState?.(undefined);
+          return;
+        }
+        const presence = { state: state.state, publishedAt: state.publishedAt };
+        setCreature(presence);
+        onState?.(presence);
       }
     );
   }, [transcript.data?.pages.at(-1)?.cursor, transport, onState, t]);
@@ -349,6 +355,9 @@ function ConversationContent({
             <MessageScrollerContent>
               {transcript.isPending ? (
                 <p className="p-4 text-sm text-muted-foreground">{t('loading')}</p>
+              ) : null}
+              {transcript.isSuccess && messages.length === 0 ? (
+                <p className="p-4 text-sm text-muted-foreground">{t('emptyConversation')}</p>
               ) : null}
               {transcript.isError ? (
                 <p role="alert" className="p-4">
@@ -568,7 +577,7 @@ export function Conversation({
   onState,
 }: {
   transport?: WebTransport;
-  onState?: (state: CreaturePresenceValue) => void;
+  onState?: (state: CreaturePresenceValue | undefined) => void;
 }) {
   const [client] = useState(
     () => new QueryClient({ defaultOptions: { queries: { retry: false } } })

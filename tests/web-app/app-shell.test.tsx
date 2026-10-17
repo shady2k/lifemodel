@@ -7,6 +7,8 @@ import { within } from '@testing-library/react';
 import i18n, { languageFor } from '../../web/app/src/i18n';
 import 'jest-axe/extend-expect';
 import App from '../../web/app/src/App';
+import { Conversation } from '../../web/app/src/Conversation';
+import type { WebTransport } from '../../web/app/src/transport';
 
 let darkPreference = false;
 let mobilePreference = false;
@@ -155,6 +157,47 @@ describe('web app shell', () => {
     expect(screen.getByRole('button', { name: 'Закрыть' })).toBeTruthy();
   });
 
+  it('clears header and Now presence when state becomes unavailable', async () => {
+    await i18n.changeLanguage('en');
+    const listeners = new Map<string, (event: MessageEvent<string>) => void>();
+    class FakeEventSource {
+      addEventListener(type: string, listener: (event: MessageEvent<string>) => void) {
+        listeners.set(type, listener);
+      }
+      close() {}
+    }
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('/api/instance'))
+          return new Response(
+            JSON.stringify({ name: 'lifemodel', loaderUrl: 'https://boot.local/' })
+          );
+        if (url.startsWith('/api/transcript'))
+          return new Response(JSON.stringify({ messages: [], cursor: null }));
+        throw new Error(`Unexpected request: ${url}`);
+      })
+    );
+    render(<App />);
+    await waitFor(() => expect(listeners.has('state')).toBe(true));
+    act(() =>
+      listeners.get('state')!(
+        new MessageEvent('state', {
+          data: JSON.stringify({
+            state: 'thinking',
+            epoch: '55',
+            publishedAt: new Date().toISOString(),
+          }),
+        })
+      )
+    );
+    expect(await screen.findAllByText('thinking…')).toHaveLength(2);
+    act(() => listeners.get('state')!(new MessageEvent('state', { data: 'null' })));
+    await waitFor(() => expect(screen.getAllByText('no connection since --:--')).toHaveLength(2));
+  });
+
   it('follows system colour-scheme changes live', () => {
     render(<App />);
     expect(document.documentElement.classList.contains('dark')).toBe(false);
@@ -201,5 +244,32 @@ describe('web app shell', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Open Now' }));
     const panel = screen.getByRole('dialog', { name: 'Now' });
     expect(within(panel).getByText('no connection since --:--')).toBeTruthy();
+  });
+});
+
+describe('transcript rendering contract', () => {
+  it.each([
+    [[], 'No messages yet'],
+    [
+      [
+        {
+          sequence: '1',
+          role: 'assistant' as const,
+          text: 'A first answer',
+          createdAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      'A first answer',
+    ],
+  ])('renders transcript rows: %j', async (messages, expected) => {
+    await i18n.changeLanguage('en');
+    const transport: WebTransport = {
+      sendMessage: vi.fn().mockResolvedValue('accepted'),
+      readTranscript: vi.fn().mockResolvedValue({ messages, cursor: messages.length ? '1' : null }),
+      subscribe: vi.fn().mockReturnValue(() => undefined),
+    };
+    render(<Conversation transport={transport} />);
+    if (messages.length) expect(await screen.findByText(expected)).toBeTruthy();
+    else expect(await screen.findByText('No messages yet')).toBeTruthy();
   });
 });
