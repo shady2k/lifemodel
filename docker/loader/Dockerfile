@@ -22,8 +22,17 @@ FROM ${NODE_IMAGE} AS ui-build
 WORKDIR /build
 COPY package.json package-lock.json ./
 RUN npm ci
-COPY web/kit ./web/kit
-COPY web/loader ./web/loader
+# Copy source inputs, not kit metadata, registry snapshots or arbitrary files.
+COPY web/kit/theme.css ./web/kit/theme.css
+COPY web/kit/components/ui/*.tsx ./web/kit/components/ui/
+COPY web/kit/hooks/*.ts ./web/kit/hooks/
+COPY web/kit/lib/*.ts web/kit/lib/*.tsx ./web/kit/lib/
+COPY web/loader/index.html ./web/loader/index.html
+COPY web/loader/vite.config.ts ./web/loader/vite.config.ts
+COPY web/loader/tsconfig.json ./web/loader/tsconfig.json
+COPY web/loader/package.json ./web/loader/package.json
+COPY web/loader/src/ ./web/loader/src/
+COPY web/loader/public/favicon.svg ./web/loader/public/favicon.svg
 RUN npm run build:loader-ui -- --emptyOutDir
 
 # Compile the TypeScript loader with its isolated manifests.

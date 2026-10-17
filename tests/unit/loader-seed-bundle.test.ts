@@ -82,7 +82,7 @@ function runPreparer(options: { commit: boolean; existingContext?: boolean }): {
 }
 
 describe('loader image release seed bundle', () => {
-  it('excludes planted credential files from the real Docker context while admitting build inputs', async () => {
+  it('excludes arbitrary and credential names with the context matcher while admitting build inputs', async () => {
     const source = process.cwd();
     const temporary = mkdtempSync(join(tmpdir(), 'lifemodel-docker-context-'));
     const repo = join(temporary, 'repo');
@@ -92,14 +92,43 @@ describe('loader image release seed bundle', () => {
         filter: (path) =>
           !path.includes('/node_modules') && !path.includes('/.git') && !path.includes('/data'),
       });
-      const planted = [
-        'web/loader/src/.npmrc',
-        'web/loader/src/.env',
-        'web/kit/components/ui/id_rsa',
-        'loader/src/x.pem',
-        'docker/loader/private.key',
-        'web/loader/public/.npmrc',
+      const directories = [
+        '.',
+        'docker',
+        'docker/loader',
+        'loader',
+        'loader/src',
+        'web',
+        'web/kit',
+        'web/kit/components',
+        'web/kit/components/ui',
+        'web/kit/hooks',
+        'web/kit/lib',
+        'web/kit/registry-lock',
+        'web/kit/registry-lock/files',
+        'web/kit/registry-lock/files/components',
+        'web/kit/registry-lock/files/components/ui',
+        'web/kit/registry-lock/files/hooks',
+        'web/kit/registry-lock/files/lib',
+        'web/loader',
+        'web/loader/src',
+        'web/loader/public',
+        '.docker-context',
       ];
+      const names = [
+        '.npmrc',
+        '.env',
+        'id_rsa',
+        'x.pem',
+        'private.key',
+        'notes.txt',
+        'backup.json',
+        'dump.sql',
+      ];
+      const planted = directories.flatMap((directory) => {
+        mkdirSync(join(repo, directory), { recursive: true });
+        return names.map((name) => join(directory, name));
+      });
       for (const path of planted) writeFileSync(join(repo, path), 'SYNTHETIC_CREDENTIAL');
       const filter = dockerignore({ ignorecase: false }).add(
         await readFile(join(repo, '.dockerignore'), 'utf8')
@@ -110,7 +139,17 @@ describe('loader image release seed bundle', () => {
         'web/loader/public/favicon.svg',
         'web/kit/theme.css',
         'web/kit/components/ui/card.tsx',
-        'web/kit/registry-lock/manifest.json',
+        'web/kit/hooks/use-mobile.ts',
+        'web/kit/lib/utils.ts',
+        'web/kit/lib/highlighter.tsx',
+        'web/loader/src/index.css',
+        'web/loader/vite.config.ts',
+        'web/loader/tsconfig.json',
+        'web/loader/package.json',
+        'package.json',
+        'package-lock.json',
+        'loader/package-lock.json',
+        'loader/tsconfig.json',
         'loader/src/http.ts',
         'loader/package.json',
         'docker/loader/Dockerfile',
@@ -130,6 +169,29 @@ describe('loader image release seed bundle', () => {
     } finally {
       rmSync(temporary, { recursive: true, force: true });
     }
+  });
+
+  it('copies only named UI inputs and never a public directory into ui-build', async () => {
+    const dockerfile = await readFile('docker/loader/Dockerfile', 'utf8');
+    const uiBuild = dockerfile.split(' AS ui-build\n')[1].split(/^FROM /m)[0];
+    const sources = [...uiBuild.matchAll(/^COPY (.+) \S+$/gm)].flatMap((match) =>
+      match[1].split(/\s+/)
+    );
+    expect(sources).toEqual([
+      'package.json',
+      'package-lock.json',
+      'web/kit/theme.css',
+      'web/kit/components/ui/*.tsx',
+      'web/kit/hooks/*.ts',
+      'web/kit/lib/*.ts',
+      'web/kit/lib/*.tsx',
+      'web/loader/index.html',
+      'web/loader/vite.config.ts',
+      'web/loader/tsconfig.json',
+      'web/loader/package.json',
+      'web/loader/src/',
+      'web/loader/public/favicon.svg',
+    ]);
   });
 
   it('prepares the full-history bundle before the release workflow builds the loader', async () => {
@@ -167,6 +229,11 @@ describe('loader image release seed bundle', () => {
     for (const deny of ['**/.env', '**/.git*', '**/id_*', '**/*.pem', '**/*.key', '**/.npmrc'])
       expect(ignore).toContain(deny);
     expect(ignore).not.toContain('docker/instance');
+    // Docker re-includes a directory's entire contents; the JS matcher is not authoritative.
+    // Pin this rule directly as well as checking individual candidate paths.
+    expect(ignore.split('\n').filter((line) => line.startsWith('!'))).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/\/$/)])
+    );
     expect(prepareScript).toContain('git bundle create "$context/seed.bundle" HEAD');
     expect(prepareScript).toContain('commit-tree');
     expect(prepareScript).toContain('source_commit');
