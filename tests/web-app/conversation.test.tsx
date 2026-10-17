@@ -22,9 +22,9 @@ class FakeTransport implements WebTransport {
   sent: Array<{ id: string; text: string; replyTo?: string }> = [];
   stateEventsHaveId: boolean[] = [];
   subscriptions: Array<{
-    after: string;
+    after: string | null;
     message: (row: TranscriptMessage) => void;
-    state: (row: CreatureStateEvent) => void;
+    state: (row: CreatureStateEvent | null) => void;
   }> = [];
   onRead?: (before?: string) => void;
   constructor(private readonly rows: TranscriptMessage[]) {}
@@ -42,11 +42,11 @@ class FakeTransport implements WebTransport {
         ? this.rows
         : this.rows.filter((row) => BigInt(row.sequence) < BigInt(before));
     const messages = eligible.slice(-50).reverse();
-    return { messages, cursor: messages[0]?.sequence ?? '0' };
+    return { messages, cursor: this.rows.length ? this.rows.at(-1)!.sequence : null };
   }
 
   subscribe(
-    after: string,
+    after: string | null,
     message: (row: TranscriptMessage) => void,
     state: (row: CreatureStateEvent) => void
   ) {

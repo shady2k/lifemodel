@@ -1,32 +1,52 @@
-export interface TranscriptMessage {
-  sequence: string;
-  clientId?: string;
-  role: 'user' | 'assistant';
-  text: string;
-  createdAt: string;
-  replyTo?: { sequence: string; role: 'user' | 'assistant'; excerpt: string };
+export type {
+  TranscriptMessage,
+  TranscriptPage,
+  CreatureStateEvent,
+} from '../../../src/web/contract.js';
+import type {
+  TranscriptMessage,
+  TranscriptPage,
+  CreatureStateEvent,
+  MessageInput,
+} from '../../../src/web/contract.js';
+
+export function parseCreatureStateEvent(value: unknown): CreatureStateEvent | null {
+  if (value === null) return null;
+  if (!value || typeof value !== 'object') throw new Error('Creature state has an invalid shape');
+  const state = value as Partial<CreatureStateEvent>;
+  if (
+    (state.state !== 'thinking' && state.state !== 'awake' && state.state !== 'asleep') ||
+    typeof state.epoch !== 'string' ||
+    typeof state.publishedAt !== 'string' ||
+    Number.isNaN(Date.parse(state.publishedAt))
+  )
+    throw new Error('Creature state has an invalid shape');
+  return state as CreatureStateEvent;
 }
 
-export interface TranscriptPage {
-  messages: TranscriptMessage[];
-  cursor: string;
-}
-
-export interface CreatureStateEvent {
-  state: 'thinking' | 'awake' | 'asleep';
-  epoch: string;
-  publishedAt: string;
+export function parseTranscriptMessage(value: unknown): TranscriptMessage {
+  if (!value || typeof value !== 'object')
+    throw new Error('Transcript message has an invalid shape');
+  const message = value as Partial<TranscriptMessage>;
+  if (
+    typeof message.sequence !== 'string' ||
+    typeof message.text !== 'string' ||
+    (message.role !== 'user' && message.role !== 'assistant') ||
+    typeof message.createdAt !== 'string'
+  )
+    throw new Error('Transcript message has an invalid shape');
+  return message as TranscriptMessage;
 }
 
 export type SendResult = 'accepted' | 'conflict' | 'stale';
 
 export interface WebTransport {
-  sendMessage(input: { id: string; text: string; replyTo?: string }): Promise<SendResult>;
-  readTranscript(before?: string): Promise<TranscriptPage>;
+  sendMessage(input: MessageInput): Promise<SendResult>;
+  readTranscript(before?: string, after?: string): Promise<TranscriptPage>;
   subscribe(
-    after: string,
+    after: string | null,
     onMessage: (message: TranscriptMessage) => void,
-    onState: (state: CreatureStateEvent) => void
+    onState: (state: CreatureStateEvent | null) => void
   ): () => void;
 }
 
@@ -46,23 +66,28 @@ export const httpTransport: WebTransport = {
     }
     throw new Error(`Message request failed (${String(response.status)})`);
   },
-  async readTranscript(before) {
+  async readTranscript(before, after) {
     const query = new URLSearchParams({ limit: '50' });
     if (before !== undefined) query.set('before', before);
+    if (after !== undefined) query.set('after', after);
     const response = await fetch(`/api/transcript?${query.toString()}`, { cache: 'no-store' });
     if (!response.ok) throw new Error(`Transcript request failed (${String(response.status)})`);
-    return (await response.json()) as TranscriptPage;
+    const page = (await response.json()) as TranscriptPage;
+    if (!Array.isArray(page.messages) || !(page.cursor === null || typeof page.cursor === 'string'))
+      throw new Error('Transcript response has an invalid shape');
+    return page;
   },
 
   subscribe(after, onMessage, onState) {
-    const query = new URLSearchParams({ after });
+    const query = new URLSearchParams();
+    if (after !== null) query.set('after', after);
     const source = new EventSource(`/api/events?${query.toString()}`);
     source.addEventListener('message', (event) => {
-      const message = JSON.parse((event as MessageEvent<string>).data) as TranscriptMessage;
+      const message = parseTranscriptMessage(JSON.parse((event as MessageEvent<string>).data));
       onMessage(message);
     });
     source.addEventListener('state', (event) => {
-      const state = JSON.parse((event as MessageEvent<string>).data) as CreatureStateEvent;
+      const state = parseCreatureStateEvent(JSON.parse((event as MessageEvent<string>).data));
       onState(state);
     });
     return () => {

@@ -4,6 +4,15 @@ import path from 'node:path';
 import type { IOwnerMessageIntake } from '../ports/owner-message-intake.js';
 import type { CreatureStateReader } from '../ports/creature-state.js';
 import type { TranscriptReader, TranscriptRow } from '../ports/transcript.js';
+import type {
+  CreatureStateEvent,
+  InstanceResponse,
+  MessageAcceptedResponse,
+  MessageInput,
+  TranscriptEvent,
+  TranscriptMessage,
+  TranscriptPage as WebTranscriptPage,
+} from './contract.js';
 
 const UUID_V7 =
   '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$';
@@ -36,15 +45,9 @@ export interface WebServerOptions {
   bodyLimit?: number;
 }
 
-interface MessageBody {
-  id: string;
-  text: string;
-  replyTo?: string;
-}
-
 interface StreamEvent {
   event: 'message' | 'state';
-  data: TranscriptRow | Awaited<ReturnType<CreatureStateReader['readCreatureState']>>;
+  data: TranscriptMessage | CreatureStateEvent | null;
   id?: string;
 }
 
@@ -141,10 +144,11 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     if (!reply.hasHeader('Cache-Control')) reply.header('Cache-Control', 'no-store');
   });
   server.get('/api/instance', async (_request, reply) => {
-    return reply.code(200).send({
+    const instance: InstanceResponse = {
       name: options.instanceName,
       loaderUrl: `https://boot-${options.instanceName}.local/`,
-    });
+    };
+    return reply.code(200).send(instance);
   });
   server.get('/*', async (request, reply) => {
     const requested = request.url.split('?')[0] ?? '/';
@@ -193,25 +197,30 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     return reply.send(body);
   });
 
-  server.get<{ Querystring: { before?: string; limit?: string } }>(
+  server.get<{ Querystring: { before?: string; after?: string; limit?: string } }>(
     '/api/transcript',
     async (request, reply) => {
       reply.header('Cache-Control', 'no-store');
       const limit = request.query.limit === undefined ? MAX_PAGE_SIZE : Number(request.query.limit);
       const before = request.query.before;
+      const after = request.query.after;
       if (
         !Number.isInteger(limit) ||
         limit < 1 ||
         limit > MAX_PAGE_SIZE ||
-        (before !== undefined && !/^(0|[1-9][0-9]*)$/.test(before))
+        (before !== undefined && after !== undefined) ||
+        (before !== undefined && !/^(0|[1-9][0-9]*)$/.test(before)) ||
+        (after !== undefined && !/^(0|[1-9][0-9]*)$/.test(after))
       ) {
         return reply.code(400).send({ error: 'invalid_query' });
       }
       try {
-        return await options.transcript.readTranscript({
+        const page = await options.transcript.readTranscript({
           ...(before === undefined ? {} : { before }),
+          ...(after === undefined ? {} : { after }),
           limit,
         });
+        return { messages: page.rows, cursor: page.cursor } satisfies WebTranscriptPage;
       } catch {
         return reply.code(400).send({ error: 'invalid_query' });
       }
@@ -224,9 +233,10 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     if (typeof lastEventId === 'string' && lastEventId.length > 0)
       options.runtimeMetrics.reconnects += 1;
     const after =
-      typeof lastEventId === 'string' && lastEventId.length > 0 ? lastEventId : request.query.after;
-    if (after === undefined || !/^(0|[1-9][0-9]*)$/.test(after))
-      return reply.code(400).send({ error: 'invalid_cursor' });
+      typeof lastEventId === 'string' && lastEventId.length > 0
+        ? lastEventId
+        : (request.query.after ?? '0');
+    if (!/^(0|[1-9][0-9]*)$/.test(after)) return reply.code(400).send({ error: 'invalid_cursor' });
 
     const session = getSessionKey(request.headers.cookie, request.ip);
     const streamCount = activeStreams.get(session) ?? 0;
@@ -370,14 +380,19 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
             publishUnavailable();
             return;
           }
-          const key = JSON.stringify({
+          const webState: CreatureStateEvent = {
             state: state.state,
-            epoch: state.epoch,
-            publishedAt: state.publishedAt,
-          });
+            epoch: String(state.epoch),
+            publishedAt: new Date(state.publishedAt).toISOString(),
+          };
+          const key = JSON.stringify(webState);
           if (key !== previousState) {
             previousState = key;
-            if (!queue.push({ event: 'state', data: state })) cleanup();
+            const stateEvent: Extract<TranscriptEvent, { type: 'state' }> = {
+              type: 'state',
+              data: webState,
+            };
+            if (!queue.push({ event: stateEvent.type, data: stateEvent.data })) cleanup();
           }
         })
         .catch(() => {
@@ -408,7 +423,17 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
         while (!abort.signal.aborted) {
           const next = await iterator.next();
           if (next.done) break;
-          if (!queue.push({ event: 'message', id: next.value.sequence, data: next.value })) {
+          const messageEvent: Extract<TranscriptEvent, { type: 'message' }> = {
+            type: 'message',
+            data: next.value satisfies TranscriptMessage,
+          };
+          if (
+            !queue.push({
+              event: messageEvent.type,
+              id: messageEvent.data.sequence,
+              data: messageEvent.data,
+            })
+          ) {
             cleanup();
             return;
           }
@@ -431,7 +456,7 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     })();
   });
 
-  server.post<{ Body: MessageBody }>('/api/messages', { schema }, async (request, reply) => {
+  server.post<{ Body: MessageInput }>('/api/messages', { schema }, async (request, reply) => {
     const origin = request.headers.origin;
     if (!origin || origin === 'null' || !isAllowedOrigin(origin, options.allowedOrigin)) {
       options.logger.info(
@@ -472,8 +497,10 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
         'Owner message intake'
       );
       reply.header('Cache-Control', 'no-store');
-      if (result.status === 'accepted' || result.status === 'duplicate')
-        return await reply.code(202).send({ streamId: result.streamId });
+      if (result.status === 'accepted' || result.status === 'duplicate') {
+        const accepted: MessageAcceptedResponse = { streamId: result.streamId };
+        return await reply.code(202).send(accepted);
+      }
       if (result.status === 'reply_not_found')
         return await reply.code(400).send({ reason: result.status });
       return await reply.code(409).send({ reason: result.status });
