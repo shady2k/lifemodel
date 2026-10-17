@@ -73,10 +73,14 @@ export default function App() {
     const apply = () => document.documentElement.classList.toggle('dark', preference.matches);
     apply();
     preference.addEventListener('change', apply);
-    return () => preference.removeEventListener('change', apply);
+    return () => {
+      preference.removeEventListener('change', apply);
+    };
   }, []);
   useEffect(() => {
-    void load().catch(() => setError('setupError'));
+    void load().catch(() => {
+      setError('setupError');
+    });
   }, []);
   async function submitPassword(event: SyntheticEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -112,7 +116,8 @@ export default function App() {
       });
       if (!response.ok) {
         const value = (await response.json()) as { error?: string };
-        setError(codes.includes(value.error ?? '') ? `model_${value.error}` : 'setupError');
+        const code = value.error ?? '';
+        setError(codes.includes(code) ? `model_${code}` : 'setupError');
         return;
       }
       setKey('');
@@ -265,7 +270,9 @@ export default function App() {
                   required
                   minLength={state.setupNeeded ? 12 : 1}
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  onChange={(e) => {
+                    setPassword(e.target.value);
+                  }}
                 />
                 {state.setupNeeded && (
                   <p className="text-xs text-muted-foreground">{t('minimumPassword')}</p>
@@ -299,7 +306,9 @@ export default function App() {
                     id="kind"
                     className="flex h-10 w-full rounded-md border border-input bg-background px-3"
                     value={kind}
-                    onChange={(e) => setKind(e.target.value as 'openai' | 'ollama')}
+                    onChange={(e) => {
+                      setKind(e.target.value as 'openai' | 'ollama');
+                    }}
                   >
                     <option value="openai">OpenAI compatible</option>
                     <option value="ollama">Ollama</option>
@@ -311,7 +320,9 @@ export default function App() {
                     id="url"
                     required
                     value={baseUrl}
-                    onChange={(e) => setBaseUrl(e.target.value)}
+                    onChange={(e) => {
+                      setBaseUrl(e.target.value);
+                    }}
                   />
                 </div>
                 <div className="space-y-2">
@@ -320,7 +331,9 @@ export default function App() {
                     id="model"
                     required
                     value={model}
-                    onChange={(e) => setModel(e.target.value)}
+                    onChange={(e) => {
+                      setModel(e.target.value);
+                    }}
                   />
                 </div>
                 <div className="space-y-2">
@@ -331,7 +344,9 @@ export default function App() {
                     autoComplete="new-password"
                     placeholder={slot.keySet ? t('keySet') : ''}
                     value={key}
-                    onChange={(e) => setKey(e.target.value)}
+                    onChange={(e) => {
+                      setKey(e.target.value);
+                    }}
                   />
                   <p className="text-xs text-muted-foreground">
                     {slot.keySet ? t('keySet') : t('keyOptional')}
