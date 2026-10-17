@@ -378,7 +378,9 @@ export default function App() {
                   <Label htmlFor="kind">{t('kind')}</Label>
                   <Select
                     value={kind}
-                    onValueChange={(value) => setKind(value as 'openai' | 'ollama')}
+                    onValueChange={(value) => {
+                      setKind(value as 'openai' | 'ollama');
+                    }}
                   >
                     <SelectTrigger id="kind">
                       <SelectValue />
@@ -434,7 +436,9 @@ export default function App() {
                   type="button"
                   variant="outline"
                   aria-expanded={reserveOpen}
-                  onClick={() => setReserveOpen(!reserveOpen)}
+                  onClick={() => {
+                    setReserveOpen(!reserveOpen);
+                  }}
                 >
                   {t('reserve')}
                 </Button>
@@ -458,7 +462,9 @@ export default function App() {
                         <Label htmlFor="reserve-kind">{t('kind')}</Label>
                         <Select
                           value={reserveKind}
-                          onValueChange={(value) => setReserveKind(value as 'openai' | 'ollama')}
+                          onValueChange={(value) => {
+                            setReserveKind(value as 'openai' | 'ollama');
+                          }}
                         >
                           <SelectTrigger id="reserve-kind">
                             <SelectValue />
