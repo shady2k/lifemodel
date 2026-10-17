@@ -619,7 +619,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
             !onboarding ||
             onboarding.step !== 'device' ||
             onboarding.completedAt !== null ||
-            !state.completeDeviceOnboarding
+            state.completeDeviceOnboarding === undefined
           ) {
             res.writeHead(409);
             res.end('{"error":"step_conflict"}');

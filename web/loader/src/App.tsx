@@ -162,15 +162,18 @@ export default function App() {
     : state.setupNeeded
       ? (state.onboarding?.step ?? 'welcome')
       : 'password';
-  const appUrl = `https://${state.instanceName ?? 'lifemodel'}.local/`;
-  const handoffUrl = `https://boot-${state.instanceName ?? 'lifemodel'}.local/login?next=${encodeURIComponent(appUrl)}`;
+  const instanceName = state.instanceName ?? 'lifemodel';
+  const appUrl = `https://${instanceName}.local/`;
+  const handoffUrl = `https://boot-${instanceName}.local/login?next=${encodeURIComponent(appUrl)}`;
   return (
     <main className="relative grid min-h-svh place-items-center bg-background px-5 py-16 text-foreground">
       <div className="absolute right-5 top-5 flex gap-2">
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => void i18n.changeLanguage('en')}
+          onClick={() => {
+            void i18n.changeLanguage('en');
+          }}
           aria-label={t('en')}
         >
           EN
@@ -178,7 +181,9 @@ export default function App() {
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => void i18n.changeLanguage('ru')}
+          onClick={() => {
+            void i18n.changeLanguage('ru');
+          }}
           aria-label={t('ru')}
         >
           RU
@@ -245,7 +250,12 @@ export default function App() {
             </Button>
           )}
           {step === 'password' && (
-            <form className="mt-8 space-y-5" onSubmit={(e) => void submitPassword(e)}>
+            <form
+              className="mt-8 space-y-5"
+              onSubmit={(e) => {
+                void submitPassword(e);
+              }}
+            >
               <div className="space-y-2">
                 <Label htmlFor="password">{t('password')}</Label>
                 <Input
@@ -277,7 +287,12 @@ export default function App() {
           )}
           {step === 'model' && (
             <>
-              <form className="mt-6 space-y-4" onSubmit={(e) => void saveModel(e)}>
+              <form
+                className="mt-6 space-y-4"
+                onSubmit={(e) => {
+                  void saveModel(e);
+                }}
+              >
                 <div className="space-y-2">
                   <Label htmlFor="kind">{t('kind')}</Label>
                   <select
@@ -352,7 +367,13 @@ export default function App() {
                   </li>
                 ))}
               </ul>
-              <Button className="w-full" disabled={busy} onClick={() => void acknowledge()}>
+              <Button
+                className="w-full"
+                disabled={busy}
+                onClick={() => {
+                  void acknowledge();
+                }}
+              >
                 {t('continue')}
               </Button>
             </div>
@@ -367,7 +388,13 @@ export default function App() {
             </div>
           )}
           {step !== 'welcome' && step !== 'password' && step !== 'done' && (
-            <Button className="mt-8" variant="outline" onClick={() => void logout()}>
+            <Button
+              className="mt-8"
+              variant="outline"
+              onClick={() => {
+                void logout();
+              }}
+            >
               {t('logout')}
             </Button>
           )}
