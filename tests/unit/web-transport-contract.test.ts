@@ -57,4 +57,48 @@ describe('web server and browser transport contract', () => {
       await server.close();
     }
   });
+
+  it('emits SSE message data in the shared browser message shape', async () => {
+    const server = createWebServer({
+      allowedOrigin: 'https://lifemodel.local',
+      instanceName: 'lifemodel',
+      appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
+      runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
+      intake: { acceptOwnerMessage: vi.fn() } as unknown as IOwnerMessageIntake,
+      transcript: {
+        readTranscript: vi.fn().mockResolvedValue({ rows: [], cursor: null }),
+        async *watchTranscript() {
+          yield row;
+        },
+        acquireStreamLease: vi.fn().mockResolvedValue('lease'),
+        releaseStreamLease: vi.fn().mockResolvedValue(undefined),
+      },
+      creatureState: { readCreatureState: vi.fn().mockResolvedValue(null) },
+      logger: { info: vi.fn() },
+    });
+    const address = await server.listen({ host: '127.0.0.1', port: 0 });
+    const controller = new AbortController();
+    try {
+      const response = await fetch(`${address}/api/events?after=0`, { signal: controller.signal });
+      expect(response.status).toBe(200);
+      const reader = response.body!.getReader();
+      let text = '';
+      while (!text.includes('event: message')) {
+        const part = await reader.read();
+        if (part.done) throw new Error('SSE stream ended before the message event');
+        text += new TextDecoder().decode(part.value);
+      }
+      const frame = text.split('\n\n').find((chunk) => chunk.includes('event: message'))!;
+      const json = frame
+        .split('\n')
+        .find((line) => line.startsWith('data: '))!
+        .slice(6);
+      expect(parseTranscriptMessage(JSON.parse(json))).toEqual(row);
+      expect(frame).toContain('id: 7');
+      await reader.cancel();
+    } finally {
+      controller.abort();
+      await server.close();
+    }
+  });
 });
