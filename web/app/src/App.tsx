@@ -28,6 +28,7 @@ import {
 import { useIsMobile } from '@kit/hooks/use-mobile';
 import i18n, { languageFor } from './i18n';
 import { Conversation } from './Conversation';
+import type { InstanceResponse } from '../../contract';
 
 function Creature() {
   return (
@@ -121,8 +122,8 @@ export default function App() {
     let active = true;
     void fetch('/api/instance', { cache: 'no-store' })
       .then((response) => response.json())
-      .then((instance: { loaderUrl?: string }) => {
-        if (active && typeof instance.loaderUrl === 'string') setLoaderUrl(instance.loaderUrl);
+      .then((instance: InstanceResponse) => {
+        if (active) setLoaderUrl(instance.loaderUrl);
       });
     return () => {
       active = false;

@@ -157,7 +157,9 @@ function ConversationContent({
     queryKey: ['transcript'],
     initialPageParam: undefined as string | undefined,
     queryFn: async ({ pageParam }) => {
-      const page = await transport.readTranscript(pageParam);
+      const page = await transport.readTranscript(
+        pageParam === undefined ? undefined : { before: pageParam }
+      );
       setHasEarlierByCursor((current) => ({
         ...current,
         [page.cursor]: page.messages.length === 50,
@@ -212,8 +214,13 @@ function ConversationContent({
         });
       },
       (state) => {
-        setCreature(state);
-        onState?.(state);
+        if (state === null) {
+          setCreature(undefined);
+          return;
+        }
+        const presence = { state: state.state, publishedAt: state.publishedAt };
+        setCreature(presence);
+        onState?.(presence);
       }
     );
   }, [transcript.data?.pages.at(-1)?.cursor, transport, onState, t]);
@@ -349,6 +356,9 @@ function ConversationContent({
             <MessageScrollerContent>
               {transcript.isPending ? (
                 <p className="p-4 text-sm text-muted-foreground">{t('loading')}</p>
+              ) : null}
+              {transcript.isSuccess && messages.length === 0 ? (
+                <p className="p-4 text-sm text-muted-foreground">{t('emptyConversation')}</p>
               ) : null}
               {transcript.isError ? (
                 <p role="alert" className="p-4">

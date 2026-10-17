@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { IOwnerMessageIntake } from '../ports/owner-message-intake.js';
 import type { CreatureStateReader } from '../ports/creature-state.js';
 import type { TranscriptReader, TranscriptRow } from '../ports/transcript.js';
+import type { TranscriptPage as WebTranscriptPage, TranscriptMessage } from '../../web/contract.js';
 
 const UUID_V7 =
   '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$';
@@ -17,6 +18,8 @@ const STREAM_MAX_AGE_MS = 15 * 60_000;
 const STATE_POLL_MS = 250;
 const HEARTBEAT_MS = 15_000;
 const SESSION_COOKIE_NAME = '__Host-lm_session';
+
+type WebState = { state: 'thinking' | 'awake' | 'asleep'; epoch: string; publishedAt: string };
 
 export interface WebRuntimeMetrics {
   intakeFailures: number;
@@ -44,7 +47,7 @@ interface MessageBody {
 
 interface StreamEvent {
   event: 'message' | 'state';
-  data: TranscriptRow | Awaited<ReturnType<CreatureStateReader['readCreatureState']>>;
+  data: TranscriptMessage | WebState | null;
   id?: string;
 }
 
@@ -193,25 +196,30 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     return reply.send(body);
   });
 
-  server.get<{ Querystring: { before?: string; limit?: string } }>(
+  server.get<{ Querystring: { before?: string; after?: string; limit?: string } }>(
     '/api/transcript',
     async (request, reply) => {
       reply.header('Cache-Control', 'no-store');
       const limit = request.query.limit === undefined ? MAX_PAGE_SIZE : Number(request.query.limit);
       const before = request.query.before;
+      const after = request.query.after;
       if (
         !Number.isInteger(limit) ||
         limit < 1 ||
         limit > MAX_PAGE_SIZE ||
-        (before !== undefined && !/^(0|[1-9][0-9]*)$/.test(before))
+        (before !== undefined && after !== undefined) ||
+        (before !== undefined && !/^(0|[1-9][0-9]*)$/.test(before)) ||
+        (after !== undefined && !/^(0|[1-9][0-9]*)$/.test(after))
       ) {
         return reply.code(400).send({ error: 'invalid_query' });
       }
       try {
-        return await options.transcript.readTranscript({
+        const page = await options.transcript.readTranscript({
           ...(before === undefined ? {} : { before }),
+          ...(after === undefined ? {} : { after }),
           limit,
         });
+        return { messages: page.rows, cursor: page.cursor } satisfies WebTranscriptPage;
       } catch {
         return reply.code(400).send({ error: 'invalid_query' });
       }
@@ -224,9 +232,10 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     if (typeof lastEventId === 'string' && lastEventId.length > 0)
       options.runtimeMetrics.reconnects += 1;
     const after =
-      typeof lastEventId === 'string' && lastEventId.length > 0 ? lastEventId : request.query.after;
-    if (after === undefined || !/^(0|[1-9][0-9]*)$/.test(after))
-      return reply.code(400).send({ error: 'invalid_cursor' });
+      typeof lastEventId === 'string' && lastEventId.length > 0
+        ? lastEventId
+        : (request.query.after ?? '0');
+    if (!/^(0|[1-9][0-9]*)$/.test(after)) return reply.code(400).send({ error: 'invalid_cursor' });
 
     const session = getSessionKey(request.headers.cookie, request.ip);
     const streamCount = activeStreams.get(session) ?? 0;
@@ -370,14 +379,15 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
             publishUnavailable();
             return;
           }
-          const key = JSON.stringify({
+          const webState: WebState = {
             state: state.state,
-            epoch: state.epoch,
-            publishedAt: state.publishedAt,
-          });
+            epoch: String(state.epoch),
+            publishedAt: new Date(state.publishedAt).toISOString(),
+          };
+          const key = JSON.stringify(webState);
           if (key !== previousState) {
             previousState = key;
-            if (!queue.push({ event: 'state', data: state })) cleanup();
+            if (!queue.push({ event: 'state', data: webState })) cleanup();
           }
         })
         .catch(() => {
