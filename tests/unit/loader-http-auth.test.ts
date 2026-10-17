@@ -326,14 +326,18 @@ describe('loader ForwardAuth and JSON authentication API', () => {
       origin: 'https://boot-lifemodel.local',
       'content-type': 'application/json',
     };
-    for (const body of ['null', '[]', '"x"', '{', ' '.repeat(8193)]) {
+    for (const body of ['null', '[]', '"x"', '{']) {
       const result = await request(base, '/api/setup', headers, 'POST', body);
-      expect([400, 413]).toContain(result.status);
+      expect(result.status).toBe(400);
       expect(
         await (async () =>
           (await request(base, '/api/state', { host: 'boot-lifemodel.local' })).body)()
       ).toContain('"setupNeeded":true');
     }
+    expect((await request(base, '/api/setup', headers, 'POST', ' '.repeat(8193))).status).toBe(413);
+    const multibyte = JSON.stringify({ password: 'x'.repeat(8188) + '€' });
+    expect(Buffer.byteLength(multibyte, 'utf8')).toBeGreaterThan(8192);
+    expect((await request(base, '/api/setup', headers, 'POST', multibyte)).status).toBe(413);
   });
 
   it('rejects text/plain JSON, a full invalid login Origin matrix, and anonymous CSRF state', async () => {
@@ -488,6 +492,10 @@ describe('loader ForwardAuth and JSON authentication API', () => {
 
   it('applies a per-route method matrix and rejects missing, null or sibling Origin on writes', async () => {
     const { base } = await start(null);
+    for (const path of ['/login', '/setup'])
+      expect((await request(base, path, { host: 'boot-lifemodel.local' }, 'POST')).status).toBe(
+        405
+      );
     for (const [path, allowed] of [
       ['/api/state', 'GET'],
       ['/api/setup', 'POST'],

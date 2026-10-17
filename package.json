@@ -48,6 +48,7 @@
   "author": "",
   "license": "MIT",
   "devDependencies": {
+    "@balena/dockerignore": "^1.0.2",
     "@eslint/js": "^9.39.2",
     "@marcbachmann/cel-js": "8.0.0",
     "@testing-library/dom": "^10.4.1",
