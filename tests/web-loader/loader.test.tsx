@@ -250,6 +250,7 @@ describe('loader UI', () => {
       const title = locale.startsWith('ru') ? 'Подключите модель' : 'Connect model access';
       expect(await screen.findByRole('heading', { name: title })).toBeInTheDocument();
       expect(await screen.findByRole('alert')).toHaveTextContent(explanation);
+      expect(screen.getByRole('alert')).not.toHaveTextContent('storage_unavailable');
       expect(screen.getByRole('heading', { name: title })).toBeInTheDocument();
     }
   );
@@ -281,6 +282,7 @@ describe('loader UI', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'The model rejected the credentials.'
     );
+    expect(screen.getByRole('alert')).not.toHaveTextContent('auth_failed');
     expect(screen.getByRole('heading', { name: 'Connect model access' })).toBeInTheDocument();
   });
   it.each([
