@@ -1077,13 +1077,28 @@ describe('platform manifests', () => {
           { protocol: 'TCP', port: 53 },
         ],
       },
-      {
-        to: [{ ipBlock: { cidr: '0.0.0.0/0' } }],
-        ports: [{ protocol: 'TCP', port: 6443 }],
-      },
+      { to: [{ ipBlock: { cidr: '0.0.0.0/0' } }], ports: [{ protocol: 'TCP', port: 6443 }] },
       {
         to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'openbao' } } }],
         ports: [{ protocol: 'TCP', port: 8200 }],
+      },
+      {
+        to: [
+          {
+            ipBlock: {
+              cidr: '0.0.0.0/0',
+              except: ['10.42.0.0/16', '10.43.0.0/16', '169.254.0.0/16'],
+            },
+          },
+        ],
+        ports: [
+          { protocol: 'TCP', port: 80 },
+          { protocol: 'TCP', port: 443 },
+        ],
+      },
+      {
+        to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'ollama' } } }],
+        ports: [{ protocol: 'TCP', port: 11434 }],
       },
       {
         to: [
@@ -1110,6 +1125,15 @@ describe('platform manifests', () => {
       policy!.spec.egress
         .flatMap((rule: any) => rule.ports.map((port: any) => `${port.protocol}/${port.port}`))
         .sort()
-    ).toEqual(['TCP/3000', 'TCP/53', 'TCP/6443', 'TCP/8200', 'UDP/53']);
+    ).toEqual([
+      'TCP/11434',
+      'TCP/3000',
+      'TCP/443',
+      'TCP/53',
+      'TCP/6443',
+      'TCP/80',
+      'TCP/8200',
+      'UDP/53',
+    ]);
   });
 });

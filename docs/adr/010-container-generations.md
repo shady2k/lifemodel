@@ -1699,7 +1699,10 @@ policies first, with `wait: true`; A0 starts without OpenBao or Gitea and has
 no `dependsOn` on A or B. A applies backing services (OpenBao, Gitea, registry,
 CNPG operator and Agent Vault), has `dependsOn: A0` and `wait: true`; the
 loader's first start initializes/unseals OpenBao and bootstraps Gitea so A's
-readiness completes. B applies the generation operator with `dependsOn: A`
+readiness completes. The loader's A0 egress also permits the model checker to
+reach public HTTP(S) and RFC1918 LAN endpoints, excluding configured pod
+(`10.42.0.0/16`), service (`10.43.0.0/16`) and link-local CIDRs, plus TCP 11434 only to the named `ollama` namespace; its
+application checker validates destinations before connecting. B applies the generation operator with `dependsOn: A`
 and `wait: true`. The loader's bootstrap inventory and dependencies therefore
 have no first-start readiness cycle.
 

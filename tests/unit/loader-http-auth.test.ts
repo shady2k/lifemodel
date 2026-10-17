@@ -7,7 +7,8 @@ import { createLoaderHttp } from '../../loader/src/http.js';
 import { loadConfig } from '../../loader/src/config.js';
 import { createSession, hashPassword, verifySession } from '../../loader/src/auth.js';
 import { createTestClock } from '../../loader/src/clock.js';
-import { createRecordingLogger } from '../../loader/src/logger.js';
+import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
+import { ModelCheckError, type ModelSlots, type ModelSlot } from '../../loader/src/model.js';
 import type { LoaderState } from '../../loader/src/state.js';
 
 const SERVICE_HOST = 'loader.lifemodel-system.svc.cluster.local';
@@ -21,7 +22,12 @@ afterEach(async () => {
 
 async function start(
   initialAuth: Awaited<ReturnType<typeof hashPassword>> | null,
-  uiRoot?: string
+  uiRoot?: string,
+  modelSlots?: import('../../loader/src/model.js').ModelSlots,
+  modelChecker?: (
+    slot: import('../../loader/src/model.js').ModelSlot,
+    slotName?: 'primary' | 'reserve'
+  ) => Promise<void>
 ) {
   let auth = initialAuth === null ? null : structuredClone(initialAuth);
   const state: LoaderState = {
@@ -35,12 +41,15 @@ async function start(
     },
   };
   const clock = createTestClock();
+  const recorded: RecordedLine[] = [];
   const loader = createLoaderHttp({
     state,
-    logger: createRecordingLogger([]),
+    logger: createRecordingLogger(recorded),
     clock,
     config: loadConfig({ LIFEMODEL_NAME: 'lifemodel' }),
     ...(uiRoot === undefined ? {} : { uiRoot }),
+    ...(modelSlots === undefined ? {} : { modelSlots }),
+    ...(modelChecker === undefined ? {} : { modelChecker }),
     pki: {
       bootstrap: async () => {},
       report: async () => ({
@@ -57,7 +66,7 @@ async function start(
   await new Promise<void>((resolve) => loader.server.listen(0, '127.0.0.1', resolve));
   const address = loader.server.address();
   if (address === null || typeof address === 'string') throw new Error('server did not bind');
-  return { base: `http://127.0.0.1:${address.port}`, clock, getAuth: () => auth };
+  return { base: `http://127.0.0.1:${address.port}`, clock, getAuth: () => auth, recorded };
 }
 
 async function request(
@@ -79,7 +88,11 @@ async function request(
         port: url.port,
         path: url.pathname + url.search,
         method,
-        headers: { host: SERVICE_HOST, ...headers },
+        headers: {
+          host: SERVICE_HOST,
+          ...(body === undefined ? {} : { 'content-length': Buffer.byteLength(body) }),
+          ...headers,
+        },
       },
       (res) => {
         let responseBody = '';
@@ -456,7 +469,7 @@ describe('loader ForwardAuth and JSON authentication API', () => {
     expect((await request(base, '/api/model', { host: 'boot-lifemodel.local' })).status).toBe(403);
     expect(
       (await request(base, '/api/model', { host: 'boot-lifemodel.local', cookie })).status
-    ).toBe(501);
+    ).toBe(503);
     for (const headers of [
       { cookie, origin: 'https://boot-sibling.local' },
       { cookie, origin: 'http://boot-lifemodel.local' },
@@ -663,5 +676,143 @@ describe('loader static UI and JSON API', () => {
         )
       ).status
     ).toBe(403);
+  });
+  it('checks and saves model settings only after an accepted write, and never returns stored keys', async () => {
+    const record = await hashPassword('owner password');
+    let saved: import('../../loader/src/model.js').ModelSlot | null = null;
+    const slots: import('../../loader/src/model.js').ModelSlots = {
+      read: async () => (saved === null ? null : structuredClone(saved)),
+      write: async (_slot, slot) => {
+        saved = structuredClone(slot);
+      },
+      clearReserve: async () => {
+        saved = null;
+      },
+    };
+    const { base, clock, recorded } = await start(record, undefined, slots, async (slot) => {
+      if (slot.model === 'bad') throw new ModelCheckError('unreachable');
+    });
+    const cookie = `__Host-lm_session=${createSession(record, clock.now())}`;
+    const csrf = (await request(base, '/api/state', { host: 'boot-lifemodel.local', cookie })).body;
+    const csrfToken = JSON.parse(csrf).csrfToken as string;
+    const headers = {
+      host: 'boot-lifemodel.local',
+      cookie,
+      origin: 'https://boot-lifemodel.local',
+      'content-type': 'application/json',
+      'x-csrf-token': csrfToken,
+    };
+    const candidate = {
+      kind: 'openai',
+      baseUrl: 'https://models.example/v1',
+      model: 'good',
+      key: 'secret-key',
+    };
+    const savedResponse = await request(
+      base,
+      '/api/model/primary',
+      headers,
+      'PUT',
+      JSON.stringify(candidate)
+    );
+    expect(savedResponse.status).toBe(200);
+    expect(savedResponse.body).not.toContain('secret-key');
+    const read = await request(base, '/api/model', { host: 'boot-lifemodel.local', cookie });
+    expect(read.status).toBe(200);
+    expect(read.body).toContain('"keySet":true');
+    expect(read.body).not.toContain('secret-key');
+    const retained = await request(
+      base,
+      '/api/model/primary',
+      headers,
+      'PUT',
+      JSON.stringify({ ...candidate, model: 'retained', key: undefined })
+    );
+    expect(retained.status).toBe(200);
+    expect(saved?.key).toBe('secret-key');
+    const replaced = await request(
+      base,
+      '/api/model/primary',
+      headers,
+      'PUT',
+      JSON.stringify({ ...candidate, key: 'new-secret' })
+    );
+    expect(replaced.status).toBe(200);
+    expect(saved?.key).toBe('new-secret');
+    const failed = await request(
+      base,
+      '/api/model/primary',
+      headers,
+      'PUT',
+      JSON.stringify({ ...candidate, model: 'bad' })
+    );
+    expect(failed.status).toBe(502);
+    expect(saved?.model).toBe('good');
+    expect(failed.body).not.toContain('secret-key');
+    expect(recorded.map((line) => JSON.stringify(line)).join('\n')).not.toContain('secret-key');
+    for (const body of ['null', '[]', '3', '"text"', '{\"unexpected\":true}']) {
+      const response = await request(base, '/api/model/reserve', headers, 'DELETE', body);
+      expect(response.status).toBe(400);
+    }
+    expect((await request(base, '/api/model/primary', headers, 'POST')).status).toBe(405);
+    expect((await request(base, '/api/model/unknown', headers, 'PUT')).status).toBe(404);
+    const reserveDelete = await request(base, '/api/model/reserve', headers, 'DELETE', '{}');
+    expect(reserveDelete.status).toBe(200);
+    for (const invalid of [
+      { cookie, origin: 'https://boot-lifemodel.local', 'content-type': 'application/json' },
+      { cookie, origin: 'null', 'content-type': 'application/json', 'x-csrf-token': csrfToken },
+      {
+        cookie,
+        origin: 'https://sibling.local',
+        'content-type': 'application/json',
+        'x-csrf-token': csrfToken,
+      },
+      {
+        cookie,
+        origin: 'https://boot-lifemodel.local',
+        'content-type': 'text/plain',
+        'x-csrf-token': csrfToken,
+      },
+    ]) {
+      const result = await request(
+        base,
+        '/api/model/reserve',
+        { host: 'boot-lifemodel.local', ...invalid },
+        'DELETE',
+        '{}'
+      );
+      expect(result.status).not.toBe(200);
+    }
+    const acceptedAgain = await request(base, '/api/model/reserve', headers, 'DELETE', '{}');
+    expect(acceptedAgain.status).toBe(200);
+    for (const invalid of [
+      { cookie, 'content-type': 'application/json' },
+      { cookie, origin: 'https://boot-lifemodel.local', 'content-type': 'application/json' },
+      { cookie, origin: 'null', 'content-type': 'application/json', 'x-csrf-token': csrfToken },
+      {
+        cookie,
+        origin: 'https://sibling.local',
+        'content-type': 'application/json',
+        'x-csrf-token': csrfToken,
+      },
+      {
+        cookie,
+        origin: 'https://boot-lifemodel.local',
+        'content-type': 'text/plain',
+        'x-csrf-token': csrfToken,
+      },
+    ]) {
+      expect(
+        (
+          await request(
+            base,
+            '/api/model/primary',
+            { host: 'boot-lifemodel.local', ...invalid },
+            'PUT',
+            JSON.stringify(candidate)
+          )
+        ).status
+      ).not.toBe(200);
+    }
   });
 });
