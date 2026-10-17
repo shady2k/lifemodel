@@ -1077,13 +1077,24 @@ describe('platform manifests', () => {
           { protocol: 'TCP', port: 53 },
         ],
       },
-      {
-        to: [{ ipBlock: { cidr: '0.0.0.0/0' } }],
-        ports: [{ protocol: 'TCP', port: 6443 }],
-      },
+      { to: [{ ipBlock: { cidr: '0.0.0.0/0' } }], ports: [{ protocol: 'TCP', port: 6443 }] },
       {
         to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'openbao' } } }],
         ports: [{ protocol: 'TCP', port: 8200 }],
+      },
+      {
+        to: [
+          {
+            ipBlock: {
+              cidr: '0.0.0.0/0',
+              except: ['10.42.0.0/16', '10.43.0.0/16', '169.254.0.0/16'],
+            },
+          },
+        ],
+      },
+      {
+        to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'ollama' } } }],
+        ports: [{ protocol: 'TCP', port: 11434 }],
       },
       {
         to: [
@@ -1103,13 +1114,28 @@ describe('platform manifests', () => {
     const yaml = readFileSync(join(platformRoot, 'a0/network-policy.yaml'), 'utf8');
     expect(yaml).toContain('k3s DNATs the in-cluster API Service to the node address');
     expect(yaml).toContain('The API port is the only egress restriction');
+    const unrestrictedModelEgress = policy!.spec.egress.find(
+      (rule: any) =>
+        rule.to?.[0]?.ipBlock?.cidr === '0.0.0.0/0' &&
+        rule.to?.[0]?.ipBlock?.except?.includes('10.42.0.0/16')
+    );
+    expect(unrestrictedModelEgress?.ports).toBeUndefined();
+    expect(unrestrictedModelEgress?.to[0].ipBlock.except).toEqual([
+      '10.42.0.0/16',
+      '10.43.0.0/16',
+      '169.254.0.0/16',
+    ]);
+    // No port selector admits LAN Ollama at 192.168.1.20:11434 and custom HTTPS ports.
+    expect(unrestrictedModelEgress?.ports).toBeUndefined();
     expect(yaml).toContain(
       'The Kubernetes API server authenticates the projected ServiceAccount token'
     );
     expect(
       policy!.spec.egress
-        .flatMap((rule: any) => rule.ports.map((port: any) => `${port.protocol}/${port.port}`))
+        .flatMap((rule: any) =>
+          (rule.ports ?? []).map((port: any) => `${port.protocol}/${port.port}`)
+        )
         .sort()
-    ).toEqual(['TCP/3000', 'TCP/53', 'TCP/6443', 'TCP/8200', 'UDP/53']);
+    ).toEqual(['TCP/11434', 'TCP/3000', 'TCP/53', 'TCP/6443', 'TCP/8200', 'UDP/53']);
   });
 });

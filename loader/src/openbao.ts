@@ -2,6 +2,7 @@
 import { request as httpsRequest } from 'node:https';
 import { request as httpRequest } from 'node:http';
 import { readFile } from 'node:fs/promises';
+import type { ModelSlot } from './model.js';
 
 export interface BaoKeys {
   keys: string[];
@@ -18,7 +19,11 @@ export interface BaoApi {
   rootTokenActive(rootToken: string): Promise<boolean>;
   ensureLoaderPolicy(rootToken: string, loaderJwt: string): Promise<void>;
   loginLoader(loaderJwt: string): Promise<void>;
+  ensureModelPolicy?(rootToken: string, loaderJwt: string): Promise<void>;
   revokeRootToken(rootToken: string): Promise<void>;
+  readModelSlot?(slot: 'primary' | 'reserve'): Promise<ModelSlot | null>;
+  writeModelSlot?(slot: 'primary' | 'reserve', value: ModelSlot): Promise<void>;
+  deleteModelReserve?(): Promise<void>;
 }
 export interface BaoCustody {
   read(): Promise<BaoKeys | null>;
@@ -113,6 +118,9 @@ export function createOpenBaoBootstrap(deps: OpenBaoBootstrapDeps): {
     // that cut so a retry can remove the revoked token without using it again.
     if (await bao.rootTokenActive(saved.rootToken)) {
       await bao.ensureLoaderPolicy(saved.rootToken, jwt);
+      if (bao.ensureModelPolicy === undefined)
+        throw new Error('OpenBao model policy provisioner is unavailable');
+      await bao.ensureModelPolicy(saved.rootToken, jwt);
       await bao.revokeRootToken(saved.rootToken);
     }
     if (!(await bao.rootTokenActive(saved.rootToken))) await bao.loginLoader(jwt);
@@ -280,6 +288,12 @@ export function createKubernetesBaoCustody(options: KubernetesSecretStoreOptions
   };
 }
 
+class BaoHttpError extends Error {
+  constructor(readonly status: number) {
+    super(`OpenBao request failed with status ${String(status)}`);
+  }
+}
+
 interface OpenBaoApiOptions {
   address: string;
   timeoutMs?: number;
@@ -348,16 +362,16 @@ export function createOpenBaoApi(options: OpenBaoApiOptions): BaoApi {
     payload?: unknown,
     useLoader = true
   ): Promise<Record<string, unknown>> {
-    const response = await call(
-      new URL(`/v1/${path}`, base),
-      method,
-      token ?? (useLoader ? loaderToken : undefined),
-      payload === undefined ? undefined : JSON.stringify(payload)
-    );
-    if (response.status < 200 || response.status >= 300)
-      throw new Error(
-        `OpenBao ${method} ${path} failed (${String(response.status)}): ${response.body}`
-      );
+    const target = new URL(`/v1/${path}`, base);
+    const body = payload === undefined ? undefined : JSON.stringify(payload);
+    let response = await call(target, method, token ?? (useLoader ? loaderToken : undefined), body);
+    if (response.status === 403 && useLoader && loaderToken !== undefined) {
+      const projectedJwt = (await readFile(`${SA_DIR}/token`, 'utf8')).trim();
+      if (projectedJwt === '') throw new Error('Kubernetes loader ServiceAccount JWT is empty');
+      await loginLoader(projectedJwt);
+      response = await call(target, method, loaderToken, body);
+    }
+    if (response.status < 200 || response.status >= 300) throw new BaoHttpError(response.status);
     return response.body ? (JSON.parse(response.body) as Record<string, unknown>) : {};
   }
   async function loginLoader(loaderJwt: string): Promise<void> {
@@ -458,6 +472,108 @@ export function createOpenBaoApi(options: OpenBaoApiOptions): BaoApi {
       }
     },
     loginLoader,
+    ensureModelPolicy: async (rootToken, loaderJwt) => {
+      const mounts = await api('sys/mounts', 'GET', rootToken, undefined, false);
+      if (mounts['lifemodel/'] === undefined) {
+        await api(
+          'sys/mounts/lifemodel',
+          'POST',
+          rootToken,
+          { type: 'kv', options: { version: '2' } },
+          false
+        );
+      } else {
+        const mount = mounts['lifemodel/'] as Record<string, unknown>;
+        const options = mount['options'] as Record<string, unknown> | undefined;
+        if (mount['type'] !== 'kv' || options?.['version'] !== '2')
+          throw new Error('OpenBao lifemodel mount is not KV v2');
+      }
+      const policy =
+        'path "lifemodel/data/model/*" { capabilities = ["create", "update", "read"] }\npath "lifemodel/data/model/reserve" { capabilities = ["create", "update", "read", "delete"] }\npath "lifemodel/metadata/model/*" { capabilities = ["read"] }';
+      await api('sys/policies/acl/loader-model', 'PUT', rootToken, { policy }, false);
+      await api(
+        'auth/kubernetes/role/loader',
+        'POST',
+        rootToken,
+        {
+          bound_service_account_names: ['loader'],
+          bound_service_account_namespaces: ['lifemodel-system'],
+          policies: ['loader', 'loader-model'],
+          ttl: '1h',
+        },
+        false
+      );
+      await loginLoader(loaderJwt);
+      const capabilities = await api(
+        'sys/capabilities-self',
+        'POST',
+        loaderToken,
+        {
+          paths: [
+            'lifemodel/data/model/primary',
+            'lifemodel/data/model/reserve',
+            'lifemodel/metadata/model/primary',
+            'lifemodel/metadata/model/reserve',
+          ],
+        },
+        false
+      );
+      const primary = capabilities['lifemodel/data/model/primary'] as string[] | undefined;
+      const reserve = capabilities['lifemodel/data/model/reserve'] as string[] | undefined;
+      const metadata = capabilities['lifemodel/metadata/model/reserve'] as string[] | undefined;
+      const primaryMetadata = capabilities['lifemodel/metadata/model/primary'] as
+        | string[]
+        | undefined;
+      if (
+        !primary?.includes('create') ||
+        !primary.includes('update') ||
+        !primary.includes('read') ||
+        primary.includes('delete') ||
+        reserve?.includes('delete') !== true ||
+        !metadata?.includes('read') ||
+        !primaryMetadata?.includes('read')
+      )
+        throw new Error('OpenBao loader-model login did not have expected model capabilities');
+    },
+    readModelSlot: async (slot) => {
+      try {
+        const response = await api(`lifemodel/data/model/${slot}`, 'GET');
+        const data = response['data'] as Record<string, unknown> | undefined;
+        const metadata = data?.['metadata'] as Record<string, unknown> | undefined;
+        if (
+          metadata?.['destroyed'] === true ||
+          (typeof metadata?.['deletion_time'] === 'string' && metadata['deletion_time'] !== '')
+        )
+          return null;
+        const value = data?.['data'] as Record<string, unknown> | undefined;
+        if (
+          value === undefined ||
+          !['openai', 'ollama'].includes(String(value['kind'])) ||
+          typeof value['baseUrl'] !== 'string' ||
+          typeof value['model'] !== 'string' ||
+          (value['key'] !== undefined && typeof value['key'] !== 'string')
+        )
+          throw new Error('invalid model slot');
+        return value as unknown as ModelSlot;
+      } catch (error) {
+        if (error instanceof BaoHttpError && error.status === 404) return null;
+        throw new Error('OpenBao model storage unavailable');
+      }
+    },
+    writeModelSlot: async (slot, value) => {
+      try {
+        await api(`lifemodel/data/model/${slot}`, 'POST', undefined, { data: value });
+      } catch {
+        throw new Error('OpenBao model storage unavailable');
+      }
+    },
+    deleteModelReserve: async () => {
+      try {
+        await api('lifemodel/data/model/reserve', 'DELETE');
+      } catch {
+        throw new Error('OpenBao model storage unavailable');
+      }
+    },
     revokeRootToken: async (rootToken) => {
       await api('auth/token/revoke-self', 'POST', rootToken, {});
     },

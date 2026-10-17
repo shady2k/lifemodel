@@ -27,10 +27,17 @@ import type { LoaderLogger } from './logger.js';
 import type { LoaderState } from './state.js';
 import type { LoaderConfig } from './config.js';
 import type { PkiManager } from './pki.js';
-import { describe } from './state.js';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  createModelChecker,
+  ModelCheckError,
+  publicSlot,
+  type ModelSlot,
+  type ModelSlotName,
+  type ModelSlots,
+} from './model.js';
 
 export interface LoaderHttpDeps {
   state: LoaderState;
@@ -39,6 +46,8 @@ export interface LoaderHttpDeps {
   pki: PkiManager;
   config: LoaderConfig;
   uiRoot?: string;
+  modelSlots?: ModelSlots;
+  modelChecker?: (slot: ModelSlot, slotName?: ModelSlotName) => Promise<void>;
 }
 export interface LoaderHttp {
   server: Server;
@@ -51,6 +60,8 @@ const API_METHODS: Record<string, string> = {
   '/api/login': 'POST',
   '/api/logout': 'POST',
   '/api/model': 'GET',
+  '/api/model/primary': 'PUT',
+  '/api/model/reserve': 'PUT',
 };
 const CSP =
   "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
@@ -72,6 +83,14 @@ function redirect(
 }
 export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
   const { state, logger, clock, pki, config } = deps;
+  const slots: ModelSlots = deps.modelSlots ?? {
+    read: () => Promise.reject(new Error('model storage unavailable')),
+    write: () => Promise.reject(new Error('model storage unavailable')),
+    clearReserve: () => Promise.reject(new Error('model storage unavailable')),
+  };
+  const defaultModelChecker = createModelChecker();
+  const checkModel = deps.modelChecker ?? defaultModelChecker;
+  const modelChecks = new Set<ModelSlotName>();
   const uiRoot = resolve(
     deps.uiRoot ??
       process.env['LIFEMODEL_UI_ROOT'] ??
@@ -161,7 +180,11 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         sendText(res, 404, 'not found');
         return;
       }
-      if (method !== expectedMethod) {
+      const validMethod =
+        path === '/api/model/reserve'
+          ? method === 'PUT' || method === 'DELETE'
+          : method === expectedMethod;
+      if (!validMethod) {
         sendText(res, 405, 'method not allowed');
         return;
       }
@@ -177,7 +200,9 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           path === '/api/model' ||
           path.startsWith('/assets/'))) ||
       (method === 'POST' &&
-        (path === '/api/setup' || path === '/api/login' || path === '/api/logout'));
+        (path === '/api/setup' || path === '/api/login' || path === '/api/logout')) ||
+      (method === 'PUT' && (path === '/api/model/primary' || path === '/api/model/reserve')) ||
+      (method === 'DELETE' && path === '/api/model/reserve');
     if (
       !serviceVerify &&
       requestHost === bootHost &&
@@ -336,8 +361,192 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           res.end();
           return;
         }
-        res.writeHead(501, { 'cache-control': 'no-store' });
-        res.end();
+        try {
+          const [primary, reserve] = await Promise.all([
+            slots.read('primary'),
+            slots.read('reserve'),
+          ]);
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+          });
+          res.end(JSON.stringify({ primary: publicSlot(primary), reserve: publicSlot(reserve) }));
+        } catch {
+          res.writeHead(503, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+          });
+          res.end('{"error":"storage_unavailable"}');
+        }
+        return;
+      }
+      if ((path === '/api/model/primary' || path === '/api/model/reserve') && method === 'PUT') {
+        const slotName = path.endsWith('/primary') ? 'primary' : 'reserve';
+        const record = await state.readAuth();
+        const token = record === null ? null : sessionToken(req, record);
+        if (record === null || token === null) {
+          res.writeHead(401);
+          res.end();
+          return;
+        }
+        if (
+          refuseOrigin(req) !== null ||
+          !verifyCsrf(header(req, 'x-csrf-token') ?? '', record, token)
+        ) {
+          res.writeHead(403);
+          res.end('{"error":"origin_or_csrf"}');
+          return;
+        }
+        if (
+          header(req, 'content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json'
+        ) {
+          res.writeHead(415);
+          res.end('{"error":"content_type"}');
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let size = 0;
+        for await (const chunk of req) {
+          const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          size += part.length;
+          if (size > 16 * 1024) break;
+          chunks.push(Buffer.from(part));
+        }
+        if (size > 16 * 1024) {
+          res.writeHead(413);
+          res.end('{"error":"body_too_large"}');
+          return;
+        }
+        let payload: unknown;
+        try {
+          payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        } catch {
+          res.writeHead(400);
+          res.end('{"error":"invalid_body"}');
+          return;
+        }
+        if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+          res.writeHead(400);
+          res.end('{"error":"invalid_body"}');
+          return;
+        }
+        const value = payload as Record<string, unknown>;
+        if (
+          Object.keys(value).some((key) => !['kind', 'baseUrl', 'model', 'key'].includes(key)) ||
+          (value['kind'] !== 'openai' && value['kind'] !== 'ollama') ||
+          typeof value['baseUrl'] !== 'string' ||
+          typeof value['model'] !== 'string' ||
+          value['model'].length === 0 ||
+          (value['key'] !== undefined && typeof value['key'] !== 'string')
+        ) {
+          res.writeHead(400);
+          res.end('{"error":"invalid_body"}');
+          return;
+        }
+        try {
+          const old = await slots.read(slotName);
+          const candidate: ModelSlot = {
+            kind: value['kind'],
+            baseUrl: value['baseUrl'],
+            model: value['model'],
+            ...(value['key'] === undefined && old?.key !== undefined
+              ? { key: old.key }
+              : value['key'] === undefined
+                ? {}
+                : { key: value['key'] }),
+          };
+          if (modelChecks.has(slotName)) {
+            res.writeHead(409);
+            res.end('{"error":"check_in_progress"}');
+            return;
+          }
+          modelChecks.add(slotName);
+          try {
+            await checkModel(candidate, slotName);
+          } finally {
+            modelChecks.delete(slotName);
+          }
+          await slots.write(slotName, candidate);
+          if (slotName === 'primary') await state.saveModelOnboarding?.();
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+          });
+          res.end(JSON.stringify({ ok: true, slot: publicSlot(candidate) }));
+        } catch (error) {
+          const code = error instanceof ModelCheckError ? error.code : 'storage_unavailable';
+          const status =
+            error instanceof ModelCheckError ? (code === 'blocked_destination' ? 400 : 502) : 503;
+          res.writeHead(status, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+          });
+          res.end(JSON.stringify({ error: code }));
+        }
+        return;
+      }
+      if (path === '/api/model/reserve' && method === 'DELETE') {
+        const record = await state.readAuth();
+        const token = record === null ? null : sessionToken(req, record);
+        if (record === null || token === null) {
+          res.writeHead(401);
+          res.end();
+          return;
+        }
+        if (
+          refuseOrigin(req) !== null ||
+          !verifyCsrf(header(req, 'x-csrf-token') ?? '', record, token)
+        ) {
+          res.writeHead(403);
+          res.end('{"error":"origin_or_csrf"}');
+          return;
+        }
+        if (
+          header(req, 'content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json'
+        ) {
+          res.writeHead(415);
+          res.end('{"error":"content_type"}');
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let size = 0;
+        for await (const chunk of req) {
+          const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          size += part.length;
+          if (size > 16 * 1024) break;
+          chunks.push(Buffer.from(part));
+        }
+        if (size > 16 * 1024) {
+          res.writeHead(413);
+          res.end('{"error":"body_too_large"}');
+          return;
+        }
+        let payload: unknown;
+        try {
+          payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        } catch {
+          res.writeHead(400);
+          res.end('{"error":"invalid_body"}');
+          return;
+        }
+        if (
+          typeof payload !== 'object' ||
+          payload === null ||
+          Array.isArray(payload) ||
+          Object.keys(payload).length !== 0
+        ) {
+          res.writeHead(400);
+          res.end('{"error":"invalid_body"}');
+          return;
+        }
+        try {
+          await slots.clearReserve();
+          res.writeHead(200, { 'cache-control': 'no-store' });
+          res.end();
+        } catch {
+          res.writeHead(503);
+          res.end('{"error":"storage_unavailable"}');
+        }
         return;
       }
       if (path === '/api/logout' && method === 'POST') {
@@ -544,7 +753,11 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
   const server = createServer((req, res) => {
     void route(req, res).catch((error: unknown) => {
       logger.error(
-        { path: req.url ?? '', method: req.method ?? '', error: describe(error) },
+        {
+          path: (req.url ?? '').split('?')[0],
+          method: req.method ?? '',
+          errorType: error instanceof Error ? error.name : 'unknown',
+        },
         'the loader could not answer a request'
       );
       if (!res.headersSent) sendText(res, 500, 'the loader could not answer this request');

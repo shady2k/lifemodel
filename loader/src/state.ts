@@ -20,6 +20,7 @@ export interface LoaderState {
   writeAuth(record: PasswordRecord): Promise<void>;
   replaceAuth(record: PasswordRecord): Promise<void>;
   readOnboarding?(): Promise<OnboardingRecord>;
+  saveModelOnboarding?(): Promise<void>;
 }
 
 export interface LoaderStateDeps {
@@ -76,6 +77,18 @@ export function createLoaderState({ fs, config, logger }: LoaderStateDeps): Load
       fs.writeFileExclusive(authPath, `${JSON.stringify(record, null, 2)}\n`, AUTH_MODE),
     replaceAuth: async (record) =>
       fs.writeFileAtomic(authPath, `${JSON.stringify(record, null, 2)}\n`, AUTH_MODE),
+    saveModelOnboarding: async () => {
+      const current = await (async () => {
+        if (!(await fs.exists(onboardingPath))) return initialOnboarding;
+        return JSON.parse(await fs.readFile(onboardingPath)) as OnboardingRecord;
+      })();
+      if (current.step === 'model')
+        await fs.writeFileAtomic(
+          onboardingPath,
+          `${JSON.stringify({ ...current, step: 'device' }, null, 2)}\n`,
+          AUTH_MODE
+        );
+    },
     readOnboarding: async () => {
       if (!(await fs.exists(onboardingPath))) {
         await fs

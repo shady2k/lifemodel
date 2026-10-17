@@ -1671,8 +1671,14 @@ local sources. Gitea authority is limited to admin bootstrap, release
 seeding, branch protection, and creation/verification of the read-only
 deploy-source credential. Bao
 authority is limited to initialization, seal status/unseal and bootstrap
-`sys/`/auth/policy paths, followed by its own steady-state role. No loader
-route grants a generation writer platform authority, and no loader route
+`sys/`/auth/policy paths, followed by its own steady-state role. The
+`loader-model` policy grants create/update/read on
+`lifemodel/data/model/primary`, create/update/read/delete only on
+`lifemodel/data/model/reserve`, and read-only model metadata; it is provisioned
+and verified before root revocation. Loader model-check egress is `0.0.0.0/0`
+except pod CIDR `10.42.0.0/16`, Service CIDR `10.43.0.0/16`, and
+`169.254.0.0/16`, without port restrictions; TCP 11434 to namespace `ollama`
+is the only in-cluster model exception. No loader route grants a generation writer platform authority, and no loader route
 creates or edits RBAC.
 
 ### Gitea chart and root-source ownership (R7-03, R7-04)
@@ -1699,7 +1705,10 @@ policies first, with `wait: true`; A0 starts without OpenBao or Gitea and has
 no `dependsOn` on A or B. A applies backing services (OpenBao, Gitea, registry,
 CNPG operator and Agent Vault), has `dependsOn: A0` and `wait: true`; the
 loader's first start initializes/unseals OpenBao and bootstraps Gitea so A's
-readiness completes. B applies the generation operator with `dependsOn: A`
+readiness completes. The loader's A0 egress also permits the model checker to
+reach public HTTP(S) and RFC1918 LAN endpoints, excluding configured pod
+(`10.42.0.0/16`), service (`10.43.0.0/16`) and link-local CIDRs, plus TCP 11434 only to the named `ollama` namespace; its
+application checker validates destinations before connecting. B applies the generation operator with `dependsOn: A`
 and `wait: true`. The loader's bootstrap inventory and dependencies therefore
 have no first-start readiness cycle.
 

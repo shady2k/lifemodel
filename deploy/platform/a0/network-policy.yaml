@@ -51,6 +51,24 @@ spec:
         - protocol: TCP
           port: 8200
 
+    # Model checks may reach public endpoints and RFC1918 LAN Ollama; application validation blocks pod/service and metadata ranges.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.42.0.0/16
+              - 10.43.0.0/16
+              - 169.254.0.0/16
+    # No port restriction: owner endpoints may use LAN Ollama 11434 or custom HTTPS ports.
+    # The one approved in-cluster Ollama destination.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ollama
+      ports:
+        - protocol: TCP
+          port: 11434
+
     # The platform loader's only Gitea route: its HTTP API and Git over HTTP.
     - to:
         - namespaceSelector:

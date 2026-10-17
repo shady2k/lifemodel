@@ -41,4 +41,35 @@ describe('durable loader first writer', () => {
       'hash'
     );
   });
+  it('advances onboarding to device only after a primary model save while in the model step', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'loader-onboarding-'));
+    roots.push(root);
+    const fs = createNodeFileSystem();
+    const config = {
+      ...loadConfig({ LIFEMODEL_VOLUME_ROOT: root, LIFEMODEL_NAME: 'lifemodel' }),
+      loaderDir: join(root, 'loader'),
+    };
+    const state = createLoaderState({ fs, config, logger: createRecordingLogger([]) });
+    await state.ensureLayout();
+    expect(await state.readOnboarding?.()).toEqual({
+      version: 1,
+      step: 'welcome',
+      completedAt: null,
+    });
+    await state.saveModelOnboarding?.();
+    expect((await state.readOnboarding?.())?.step).toBe('welcome');
+    const onboardingPath = join(root, 'loader', 'onboarding.json');
+    await fs.writeFileAtomic(
+      onboardingPath,
+      JSON.stringify({ version: 1, step: 'model', completedAt: null }),
+      0o600
+    );
+    await state.saveModelOnboarding?.();
+    expect((await state.readOnboarding?.())?.step).toBe('device');
+    expect(JSON.parse(readFileSync(onboardingPath, 'utf8'))).toEqual({
+      version: 1,
+      step: 'device',
+      completedAt: null,
+    });
+  });
 });
