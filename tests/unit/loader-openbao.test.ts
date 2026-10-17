@@ -253,6 +253,27 @@ describe('OpenBao bootstrap', () => {
     );
   });
 
+  it('reads model slots through the HTTP API and treats deleted KV v2 latest version as unset', async () => {
+    const paths: string[] = [];
+    const api = createOpenBaoApi({
+      address: 'http://openbao.test:8200',
+      request: async (url) => {
+        paths.push(url.pathname);
+        return {
+          status: 200,
+          body: JSON.stringify({
+            data: {
+              data: { key: 'private-key' },
+              metadata: { destroyed: false, deletion_time: '2026-10-17T00:00:00Z' },
+            },
+          }),
+        };
+      },
+    });
+    await expect(api.readModelSlot?.('reserve')).resolves.toBeNull();
+    expect(paths).toEqual(['/v1/lifemodel/data/model/reserve']);
+  });
+
   it('aborts a request whose server accepts but never completes the response', async () => {
     const server = createServer((_request, _response) => {});
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));

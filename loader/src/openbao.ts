@@ -539,6 +539,12 @@ export function createOpenBaoApi(options: OpenBaoApiOptions): BaoApi {
       try {
         const response = await api(`lifemodel/data/model/${slot}`, 'GET');
         const data = response['data'] as Record<string, unknown> | undefined;
+        const metadata = data?.['metadata'] as Record<string, unknown> | undefined;
+        if (
+          metadata?.['destroyed'] === true ||
+          (typeof metadata?.['deletion_time'] === 'string' && metadata['deletion_time'] !== '')
+        )
+          return null;
         const value = data?.['data'] as Record<string, unknown> | undefined;
         if (
           value === undefined ||
