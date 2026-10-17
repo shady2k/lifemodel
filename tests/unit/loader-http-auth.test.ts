@@ -1070,6 +1070,52 @@ describe('loader static UI and JSON API', () => {
     expect(response.body).toBe('{"error":"storage_unavailable"}');
     expect(getOnboardingSaves()).toBe(0);
   });
+  it('maps Bao failures behind model GET, PUT, and DELETE to safe 503 responses', async () => {
+    const record = await hashPassword('owner password');
+    const slots: ModelSlots = {
+      read: async () => {
+        throw new Error('sealed/unreachable Bao');
+      },
+      write: async () => {
+        throw new Error('sealed/unreachable Bao');
+      },
+      clearReserve: async () => {
+        throw new Error('sealed/unreachable Bao');
+      },
+    };
+    const { base, clock } = await start(record, undefined, slots, async () => {});
+    const cookie = `__Host-lm_session=${createSession(record, clock.now())}`;
+    const csrf = JSON.parse(
+      (await request(base, '/api/state', { host: 'boot-lifemodel.local', cookie })).body
+    ).csrfToken as string;
+    const read = await request(base, '/api/model', {
+      host: 'boot-lifemodel.local',
+      cookie,
+      origin: 'https://boot-lifemodel.local',
+    });
+    expect(read.status).toBe(503);
+    expect(read.body).toBe('{"error":"storage_unavailable"}');
+    const headers = {
+      host: 'boot-lifemodel.local',
+      cookie,
+      origin: 'https://boot-lifemodel.local',
+      'content-type': 'application/json',
+      'x-csrf-token': csrf,
+    };
+    const put = await request(
+      base,
+      '/api/model/primary',
+      headers,
+      'PUT',
+      JSON.stringify({ kind: 'openai', baseUrl: 'https://models.example/v1', model: 'm' })
+    );
+    expect(put.status).toBe(503);
+    expect(put.body).toBe('{"error":"storage_unavailable"}');
+    const del = await request(base, '/api/model/reserve', headers, 'DELETE', '{}');
+    expect(del.status).toBe(503);
+    expect(del.body).toBe('{"error":"storage_unavailable"}');
+  });
+
   it('advances real onboarding through the route only after primary persistence succeeds', async () => {
     const root = mkdtempSync(join(tmpdir(), 'loader-model-route-'));
     roots.push(root);
