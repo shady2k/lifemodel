@@ -1,10 +1,14 @@
-export type { TranscriptMessage, TranscriptPage, CreatureStateEvent } from '../../contract.js';
+export type {
+  TranscriptMessage,
+  TranscriptPage,
+  CreatureStateEvent,
+} from '../../../src/web/contract.js';
 import type {
   TranscriptMessage,
   TranscriptPage,
   CreatureStateEvent,
   MessageInput,
-} from '../../contract.js';
+} from '../../../src/web/contract.js';
 
 export function parseTranscriptMessage(value: unknown): TranscriptMessage {
   if (!value || typeof value !== 'object')
@@ -24,7 +28,7 @@ export type SendResult = 'accepted' | 'conflict' | 'stale';
 
 export interface WebTransport {
   sendMessage(input: MessageInput): Promise<SendResult>;
-  readTranscript(options?: { before?: string; after?: string }): Promise<TranscriptPage>;
+  readTranscript(before?: string, after?: string): Promise<TranscriptPage>;
   subscribe(
     after: string | null,
     onMessage: (message: TranscriptMessage) => void,
@@ -48,10 +52,10 @@ export const httpTransport: WebTransport = {
     }
     throw new Error(`Message request failed (${String(response.status)})`);
   },
-  async readTranscript(options = {}) {
+  async readTranscript(before, after) {
     const query = new URLSearchParams({ limit: '50' });
-    if (options.before !== undefined) query.set('before', options.before);
-    if (options.after !== undefined) query.set('after', options.after);
+    if (before !== undefined) query.set('before', before);
+    if (after !== undefined) query.set('after', after);
     const response = await fetch(`/api/transcript?${query.toString()}`, { cache: 'no-store' });
     if (!response.ok) throw new Error(`Transcript request failed (${String(response.status)})`);
     const page = (await response.json()) as TranscriptPage;

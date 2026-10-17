@@ -157,18 +157,16 @@ function ConversationContent({
     queryKey: ['transcript'],
     initialPageParam: undefined as string | undefined,
     queryFn: async ({ pageParam }) => {
-      const page = await transport.readTranscript(
-        pageParam === undefined ? undefined : { before: pageParam }
-      );
+      const page = await transport.readTranscript(pageParam);
       setHasEarlierByCursor((current) => ({
         ...current,
-        [page.cursor]: page.messages.length === 50,
+        [page.messages.at(-1)?.sequence ?? 'latest']: page.messages.length === 50,
       }));
       return page;
     },
     getPreviousPageParam: (firstPage) => {
       const oldest = firstPage.messages.at(-1)?.sequence;
-      return hasEarlierByCursor[firstPage.cursor] && oldest ? oldest : undefined;
+      return oldest && hasEarlierByCursor[oldest] ? oldest : undefined;
     },
     getNextPageParam: () => undefined,
   });

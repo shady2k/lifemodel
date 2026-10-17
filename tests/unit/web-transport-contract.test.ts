@@ -16,7 +16,8 @@ describe('web server and browser transport contract', () => {
     const readTranscript = vi
       .fn()
       .mockResolvedValueOnce({ rows: [], cursor: null })
-      .mockResolvedValueOnce({ rows: [row], cursor: '7' });
+      .mockResolvedValueOnce({ rows: [row], cursor: '7' })
+      .mockResolvedValueOnce({ rows: [], cursor: null });
     const server = createWebServer({
       allowedOrigin: 'https://lifemodel.local',
       instanceName: 'lifemodel',
@@ -45,12 +46,17 @@ describe('web server and browser transport contract', () => {
     vi.stubGlobal('fetch', fetcher);
     try {
       expect(await httpTransport.readTranscript()).toEqual({ messages: [], cursor: null });
-      expect(await httpTransport.readTranscript({ before: '9' })).toEqual({
+      expect(await httpTransport.readTranscript('9')).toEqual({
         messages: [row],
         cursor: '7',
       });
       expect(readTranscript).toHaveBeenNthCalledWith(1, { limit: 50 });
       expect(readTranscript).toHaveBeenNthCalledWith(2, { before: '9', limit: 50 });
+      expect(await httpTransport.readTranscript(undefined, '3')).toEqual({
+        messages: [],
+        cursor: null,
+      });
+      expect(readTranscript).toHaveBeenNthCalledWith(3, { after: '3', limit: 50 });
       expect(parseTranscriptMessage(row)).toEqual(row);
     } finally {
       vi.unstubAllGlobals();

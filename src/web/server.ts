@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { IOwnerMessageIntake } from '../ports/owner-message-intake.js';
 import type { CreatureStateReader } from '../ports/creature-state.js';
 import type { TranscriptReader, TranscriptRow } from '../ports/transcript.js';
-import type { TranscriptPage as WebTranscriptPage, TranscriptMessage } from '../../web/contract.js';
+import type { TranscriptPage as WebTranscriptPage, TranscriptMessage } from './contract.js';
 
 const UUID_V7 =
   '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$';
@@ -19,7 +19,11 @@ const STATE_POLL_MS = 250;
 const HEARTBEAT_MS = 15_000;
 const SESSION_COOKIE_NAME = '__Host-lm_session';
 
-type WebState = { state: 'thinking' | 'awake' | 'asleep'; epoch: string; publishedAt: string };
+interface WebState {
+  state: 'thinking' | 'awake' | 'asleep';
+  epoch: string;
+  publishedAt: string;
+}
 
 export interface WebRuntimeMetrics {
   intakeFailures: number;

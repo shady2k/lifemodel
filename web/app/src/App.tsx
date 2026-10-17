@@ -28,7 +28,7 @@ import {
 import { useIsMobile } from '@kit/hooks/use-mobile';
 import i18n, { languageFor } from './i18n';
 import { Conversation } from './Conversation';
-import type { InstanceResponse } from '../../contract';
+import type { InstanceResponse } from '../../../src/web/contract.js';
 
 function Creature() {
   return (
