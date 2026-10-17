@@ -121,6 +121,60 @@ async function request(
   });
 }
 
+describe('real boot-host onboarding redirects', () => {
+  it.each([
+    '/setup?next=https%3A%2F%2Flifemodel.local%2F',
+    '/login?next=https%3A%2F%2Flifemodel.local%2F',
+  ])('serves the wizard for unfinished authenticated onboarding at %s', async (path) => {
+    const record = await hashPassword('owner password');
+    let step = 'model';
+    const uiRoot = mkdtempSync(join(tmpdir(), 'loader-ui-'));
+    roots.push(uiRoot);
+    writeFileSync(join(uiRoot, 'index.html'), '<div id="root"></div>');
+    const { base } = await start(record, uiRoot, undefined, undefined, {
+      ensureLayout: async () => {},
+      readAuth: async () => record,
+      writeAuth: async () => {},
+      replaceAuth: async () => {},
+      readOnboarding: async () => ({ version: 1, step, completedAt: null }),
+      reconcilePasswordOnboarding: async () => {},
+    });
+    const response = await request(base, path, {
+      host: 'boot-lifemodel.local',
+      cookie: `__Host-lm_session=${createSession(record, Date.now())}`,
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.location).toBeUndefined();
+    expect(response.body).toContain('<div id="root">');
+    step = 'done';
+  });
+});
+
+describe('completed boot-host onboarding redirects', () => {
+  it('hands a completed boot session to its vetted app destination', async () => {
+    const record = await hashPassword('owner password');
+    const uiRoot = mkdtempSync(join(tmpdir(), 'loader-ui-done-'));
+    roots.push(uiRoot);
+    writeFileSync(join(uiRoot, 'index.html'), '<div id="root"></div>');
+    const { base } = await start(record, uiRoot, undefined, undefined, {
+      ensureLayout: async () => {},
+      readAuth: async () => record,
+      writeAuth: async () => {},
+      replaceAuth: async () => {},
+      readOnboarding: async () => ({ version: 1, step: 'done', completedAt: 'now' }),
+      reconcilePasswordOnboarding: async () => {},
+    });
+    const cookie = `__Host-lm_session=${createSession(record, Date.now())}`;
+    const response = await request(base, '/login?next=https%3A%2F%2Flifemodel.local%2Fchat', {
+      host: 'boot-lifemodel.local',
+      cookie,
+    });
+    expect(response.status).toBe(303);
+    expect(response.headers.location).toMatch(/^https:\/\/lifemodel\.local\/_auth\/handoff\?code=/);
+    expect(String(response.headers.location)).toContain('next=%2Fchat');
+  });
+});
+
 describe('loader ForwardAuth and JSON authentication API', () => {
   it('accepts a valid session only on the exact service verification route', async () => {
     const record = await hashPassword('owner password');
@@ -1232,7 +1286,7 @@ describe('loader static UI and JSON API', () => {
     }
     expect((await request(base, route, csrfHeaders, 'PUT', '{}')).status).toBe(405);
     expect((await request(base, route, csrfHeaders, 'POST', '{}')).status).toBe(409);
-    expect((await realState.readOnboarding?.())?.step).toBe('welcome');
+    expect((await realState.readOnboarding?.())?.step).toBe('model');
     expect((await request(base, route, csrfHeaders, 'POST', 'null')).status).toBe(400);
     await realState.savePasswordOnboarding?.();
     for (const step of ['password', 'model'] as const) {

@@ -236,6 +236,9 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       if (path === '/api/state' && method === 'GET') {
         const record = await state.readAuth();
         const token = record === null ? null : sessionToken(req, record);
+        if (token !== null && record !== null) {
+          await state.reconcilePasswordOnboarding?.();
+        }
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
         res.end(
           JSON.stringify({
@@ -344,6 +347,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           res.end('{"error":"invalid_credentials"}');
           return;
         }
+        await state.reconcilePasswordOnboarding?.();
         const token = createSession(record, clock.now());
         const location = next === null ? null : handoffRedirect(token, next, requestHost);
         res.writeHead(200, {
@@ -801,10 +805,34 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         return;
       }
       if (record !== null && path === '/setup') {
-        redirect(res, `/login${nextQuery}`);
-        return;
+        await state.reconcilePasswordOnboarding?.();
+        const onboarding = await state.readOnboarding?.();
+        if (onboarding !== undefined && onboarding.step !== 'done') {
+          // Keep authenticated unfinished onboarding in the app shell.
+        } else {
+          redirect(res, `/login${nextQuery}`);
+          return;
+        }
       }
       if (record !== null && sessionToken(req, record) !== null && path !== '/') {
+        await state.reconcilePasswordOnboarding?.();
+        const onboarding = await state.readOnboarding?.();
+        if (onboarding !== undefined && onboarding.step !== 'done') {
+          try {
+            const bytes = await readFile(resolve(uiRoot, 'index.html'));
+            res.writeHead(200, {
+              'content-type': 'text/html; charset=utf-8',
+              'cache-control': 'no-cache',
+              'content-security-policy': CSP,
+              'x-content-type-options': 'nosniff',
+              'referrer-policy': 'no-referrer',
+            });
+            res.end(bytes);
+          } catch {
+            sendText(res, 503, 'loader interface is unavailable');
+          }
+          return;
+        }
         const token = sessionToken(req, record);
         if (token === null) {
           redirect(res, '/');

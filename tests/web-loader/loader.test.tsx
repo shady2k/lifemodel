@@ -5,7 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { axe } from 'jest-axe';
 import '@testing-library/jest-dom/vitest';
 import 'jest-axe/extend-expect';
-import i18n from '../../web/loader/src/i18n';
+import i18n, { resources } from '../../web/loader/src/i18n';
 import App from '../../web/loader/src/App';
 let dark = false;
 let listeners: Array<(event: MediaQueryListEvent) => void> = [];
@@ -86,6 +86,16 @@ describe('loader UI', () => {
     expect(input).toHaveAttribute('minLength', '12');
     fireEvent.click(screen.getByRole('button', { name: show }));
     expect(input).toHaveAttribute('type', 'text');
+  });
+
+  it('keeps English and Russian translation keys complete and exact device guidance localized', () => {
+    expect(Object.keys(resources.en.translation).sort()).toEqual(
+      Object.keys(resources.ru.translation).sort()
+    );
+    expect(resources.en.translation.deviceTitle).toBe('Set up this device');
+    expect(resources.ru.translation.deviceTitle).toBe('Настройте это устройство');
+    expect(resources.en.translation.macosSteps).toContain('Always Trust');
+    expect(resources.ru.translation.macosSteps).toContain('Всегда доверять');
   });
   it('allows switching the wizard language to Russian', async () => {
     await i18n.changeLanguage('en');
@@ -188,8 +198,59 @@ describe('loader UI', () => {
           const { container } = render(<App />);
           await screen.findByRole('heading');
           expect(await axe(container)).toHaveNoViolations();
+          if (step === 'model') {
+            expect(
+              screen.getByText(
+                language === 'ru'
+                  ? 'Укажите обязательную основную модель. Здесь также можно настроить необязательную резервную модель.'
+                  : 'Set the required primary model. You can also configure an optional reserve model here.'
+              )
+            ).toBeInTheDocument();
+            await waitFor(() =>
+              expect(
+                screen.getByLabelText(language === 'ru' ? 'Ключ API' : 'API key', {
+                  selector: '#key',
+                })
+              ).toHaveValue('')
+            );
+            fireEvent.click(
+              screen.getByRole('button', {
+                name:
+                  language === 'ru'
+                    ? 'Резервная модель (необязательно)'
+                    : 'Reserve model (optional)',
+              })
+            );
+            await waitFor(() => expect(container.querySelector('#reserve-key')).toHaveValue(''));
+          }
           if (step === 'device') expect(screen.getByText(/SHA-256/)).toBeTruthy();
         }
+    }
+  );
+  it.each([
+    ['en-US', 'Secure storage is unavailable.'],
+    ['ru-RU', 'Защищённое хранилище недоступно.'],
+  ] as const)(
+    'shows a localized model-load error without leaving the model step (%s)',
+    async (locale, explanation) => {
+      Object.defineProperty(navigator, 'language', { configurable: true, value: locale });
+      fetchMock.mockImplementation(async (url: string) =>
+        url === '/api/state'
+          ? {
+              ok: true,
+              json: async () => ({
+                setupNeeded: false,
+                loggedIn: true,
+                onboarding: { step: 'model', completedAt: null },
+              }),
+            }
+          : { ok: false, json: async () => ({ error: 'storage_unavailable' }) }
+      );
+      render(<App />);
+      const title = locale.startsWith('ru') ? 'Подключите модель' : 'Connect model access';
+      expect(await screen.findByRole('heading', { name: title })).toBeInTheDocument();
+      expect(await screen.findByRole('alert')).toHaveTextContent(explanation);
+      expect(screen.getByRole('heading', { name: title })).toBeInTheDocument();
     }
   );
   it('keeps the model step and shows the safe check error when endpoint check fails', async () => {
@@ -217,7 +278,9 @@ describe('loader UI', () => {
       target: { value: 'unit' },
     });
     fireEvent.submit(screen.getByLabelText('Model name', { selector: '#model' }).closest('form')!);
-    expect(await screen.findByRole('alert')).toHaveTextContent(/auth_failed/);
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The model rejected the credentials.'
+    );
     expect(screen.getByRole('heading', { name: 'Connect model access' })).toBeInTheDocument();
   });
   it.each([
@@ -291,7 +354,11 @@ describe('loader UI', () => {
         })
         .closest('form')!
     );
-    expect(await screen.findByRole('alert')).toHaveTextContent(/auth_failed/);
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      locale.startsWith('ru')
+        ? 'Модель отклонила учётные данные.'
+        : 'The model rejected the credentials.'
+    );
     expect(screen.getByRole('heading')).toBeInTheDocument();
     expect(
       fetchMock.mock.calls.some(

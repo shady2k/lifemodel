@@ -110,4 +110,23 @@ describe('durable loader first writer', () => {
       completedAt: null,
     });
   });
+
+  it('reconciles durable password auth to model onboarding after an interrupted setup', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'loader-recovery-'));
+    roots.push(root);
+    const fs = createNodeFileSystem();
+    const config = {
+      ...loadConfig({ LIFEMODEL_VOLUME_ROOT: root, LIFEMODEL_NAME: 'lifemodel' }),
+      loaderDir: join(root, 'loader'),
+    };
+    const first = createLoaderState({ fs, config, logger: createRecordingLogger([]) });
+    await first.ensureLayout();
+    await first.writeAuth(await hashPassword('secure owner password'));
+    expect((await first.readOnboarding?.())?.step).toBe('welcome');
+    const reopened = createLoaderState({ fs, config, logger: createRecordingLogger([]) });
+    await reopened.reconcilePasswordOnboarding?.();
+    expect((await reopened.readOnboarding?.())?.step).toBe('model');
+    await reopened.saveModelOnboarding?.();
+    expect((await reopened.readOnboarding?.())?.step).toBe('device');
+  });
 });

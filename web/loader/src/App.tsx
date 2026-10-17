@@ -6,6 +6,14 @@ import { Input } from '@kit/components/ui/input';
 import { Card, CardContent } from '@kit/components/ui/card';
 import { Label } from '@kit/components/ui/label';
 import { Alert, AlertDescription } from '@kit/components/ui/alert';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@kit/components/ui/select';
+
 import i18n, { languageFor } from './i18n';
 interface Slot {
   kind: 'openai' | 'ollama';
@@ -40,6 +48,7 @@ export default function App() {
   const [showPassword, setShowPassword] = useState(false);
   const [slot, setSlot] = useState<Slot>({ kind: 'openai', baseUrl: '', model: '', keySet: false });
   const [reserve, setReserve] = useState<Slot | null>(null);
+  const [reserveOpen, setReserveOpen] = useState(false);
   const [reserveError, setReserveError] = useState('');
   const [reserveKind, setReserveKind] = useState<'openai' | 'ollama'>('openai');
   const [reserveBaseUrl, setReserveBaseUrl] = useState('');
@@ -58,7 +67,11 @@ export default function App() {
     setState(value);
     if (value.loggedIn) {
       const models = await fetch('/api/model', { cache: 'no-store' });
-      if (models.ok) {
+      if (!models.ok) {
+        const body = (await models.json().catch(() => ({}))) as { error?: string };
+        const code = body.error ?? '';
+        setError(codes.includes(code) ? `model_${code}` : 'setupError');
+      } else {
         const data = (await models.json()) as { primary: Slot | null; reserve: Slot | null };
         if (data.primary) {
           setSlot(data.primary);
@@ -363,17 +376,18 @@ export default function App() {
               >
                 <div className="space-y-2">
                   <Label htmlFor="kind">{t('kind')}</Label>
-                  <select
-                    id="kind"
-                    className="flex h-10 w-full rounded-md border border-input bg-background px-3"
+                  <Select
                     value={kind}
-                    onChange={(e) => {
-                      setKind(e.target.value as 'openai' | 'ollama');
-                    }}
+                    onValueChange={(value) => setKind(value as 'openai' | 'ollama')}
                   >
-                    <option value="openai">OpenAI compatible</option>
-                    <option value="ollama">Ollama</option>
-                  </select>
+                    <SelectTrigger id="kind">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="openai">OpenAI compatible</SelectItem>
+                      <SelectItem value="ollama">Ollama</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="url">{t('baseUrl')}</Label>
@@ -415,87 +429,101 @@ export default function App() {
                 </div>
                 <Button disabled={busy}>{busy ? t('checking') : t('checkSave')}</Button>
               </form>
-              <details className="mt-8">
-                <summary className="cursor-pointer">{t('reserve')}</summary>
-                <p className="mt-2 text-sm">{reserve ? t('reserveSet') : t('reserveOptional')}</p>
-                {reserveError && (
-                  <Alert className="mt-4" variant="destructive" role="alert">
-                    <AlertDescription>{t(reserveError)}</AlertDescription>
-                  </Alert>
-                )}
-                <form
-                  className="mt-4 space-y-4"
-                  onSubmit={(e) => {
-                    void saveReserve(e);
-                  }}
+              <div className="mt-8">
+                <Button
+                  type="button"
+                  variant="outline"
+                  aria-expanded={reserveOpen}
+                  onClick={() => setReserveOpen(!reserveOpen)}
                 >
-                  <div className="space-y-2">
-                    <Label htmlFor="reserve-kind">{t('kind')}</Label>
-                    <select
-                      id="reserve-kind"
-                      className="flex h-10 w-full rounded-md border border-input bg-background px-3"
-                      value={reserveKind}
-                      onChange={(e) => {
-                        setReserveKind(e.target.value as 'openai' | 'ollama');
-                      }}
-                    >
-                      <option value="openai">OpenAI compatible</option>
-                      <option value="ollama">Ollama</option>
-                    </select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="reserve-url">{t('baseUrl')}</Label>
-                    <Input
-                      id="reserve-url"
-                      required
-                      value={reserveBaseUrl}
-                      onChange={(e) => {
-                        setReserveBaseUrl(e.target.value);
-                      }}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="reserve-model">{t('model')}</Label>
-                    <Input
-                      id="reserve-model"
-                      required
-                      value={reserveModel}
-                      onChange={(e) => {
-                        setReserveModel(e.target.value);
-                      }}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="reserve-key">{t('key')}</Label>
-                    <Input
-                      id="reserve-key"
-                      type="password"
-                      autoComplete="new-password"
-                      placeholder={reserve?.keySet ? t('keySet') : ''}
-                      value={reserveKey}
-                      onChange={(e) => {
-                        setReserveKey(e.target.value);
-                      }}
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      {reserve?.keySet ? t('keySet') : t('keyOptional')}
+                  {t('reserve')}
+                </Button>
+                {reserveOpen && (
+                  <div>
+                    <p className="mt-2 text-sm">
+                      {reserve ? t('reserveSet') : t('reserveOptional')}
                     </p>
-                  </div>
-                  <Button disabled={busy}>{busy ? t('checking') : t('checkSave')}</Button>
-                  {reserve && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      disabled={busy}
-                      onClick={() => {
-                        void removeReserve();
+                    {reserveError && (
+                      <Alert className="mt-4" variant="destructive" role="alert">
+                        <AlertDescription>{t(reserveError)}</AlertDescription>
+                      </Alert>
+                    )}
+                    <form
+                      className="mt-4 space-y-4"
+                      onSubmit={(e) => {
+                        void saveReserve(e);
                       }}
                     >
-                      {t('removeReserve')}
-                    </Button>
-                  )}
-                </form>
-              </details>
+                      <div className="space-y-2">
+                        <Label htmlFor="reserve-kind">{t('kind')}</Label>
+                        <Select
+                          value={reserveKind}
+                          onValueChange={(value) => setReserveKind(value as 'openai' | 'ollama')}
+                        >
+                          <SelectTrigger id="reserve-kind">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="openai">OpenAI compatible</SelectItem>
+                            <SelectItem value="ollama">Ollama</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="reserve-url">{t('baseUrl')}</Label>
+                        <Input
+                          id="reserve-url"
+                          required
+                          value={reserveBaseUrl}
+                          onChange={(e) => {
+                            setReserveBaseUrl(e.target.value);
+                          }}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="reserve-model">{t('model')}</Label>
+                        <Input
+                          id="reserve-model"
+                          required
+                          value={reserveModel}
+                          onChange={(e) => {
+                            setReserveModel(e.target.value);
+                          }}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="reserve-key">{t('key')}</Label>
+                        <Input
+                          id="reserve-key"
+                          type="password"
+                          autoComplete="new-password"
+                          placeholder={reserve?.keySet ? t('keySet') : ''}
+                          value={reserveKey}
+                          onChange={(e) => {
+                            setReserveKey(e.target.value);
+                          }}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          {reserve?.keySet ? t('keySet') : t('keyOptional')}
+                        </p>
+                      </div>
+                      <Button disabled={busy}>{busy ? t('checking') : t('checkSave')}</Button>
+                      {reserve && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          disabled={busy}
+                          onClick={() => {
+                            void removeReserve();
+                          }}
+                        >
+                          {t('removeReserve')}
+                        </Button>
+                      )}
+                    </form>
+                  </div>
+                )}
+              </div>
             </>
           )}
           {step === 'device' && (
@@ -510,9 +538,11 @@ export default function App() {
                   {state.caFingerprint ?? t('fingerprintUnavailable')}
                 </code>
               </p>
-              <a className="underline" href="/ca.crt" download>
-                {t('downloadCa')}
-              </a>
+              <Button asChild variant="link">
+                <a href="/ca.crt" download>
+                  {t('downloadCa')}
+                </a>
+              </Button>
               <ul className="list-disc space-y-1 pl-5 text-sm">
                 {(['windows', 'macos', 'linux', 'ios', 'android'] as const).map((os) => (
                   <li key={os}>
