@@ -49,7 +49,10 @@ describe('loader model endpoint checker', () => {
   it('accepts the named in-cluster Ollama service after validating its resolved service address', async () => {
     let target: URL | undefined;
     const check = createModelChecker({
-      resolveHost: async () => ['10.43.3.4'],
+      resolveHost: async (hostname) => {
+        expect(hostname).toBe('ollama.ollama.svc.cluster.local');
+        return ['10.44.6.2'];
+      },
       request: async (url) => {
         target = url;
         return { status: 200, body: JSON.stringify({ choices: [{ message: { content: 'OK' } }] }) };
@@ -64,6 +67,19 @@ describe('loader model endpoint checker', () => {
     ).resolves.toBeUndefined();
     expect(target?.pathname).toBe('/v1/chat/completions');
   });
+  it('refuses another cluster Service even when its address is private', async () => {
+    const check = createModelChecker({
+      resolveHost: async () => ['10.44.6.2'],
+      request: async () => ({ status: 200, body: '{"choices":[]}' }),
+    });
+    await expect(
+      check({
+        kind: 'ollama',
+        baseUrl: 'http://other.ollama.svc.cluster.local:11434/v1',
+        model: 'm',
+      })
+    ).rejects.toMatchObject({ code: 'blocked_destination' });
+  });
   it('refuses public plaintext and mapped IPv6 destinations before connecting', async () => {
     const check = createModelChecker({ resolveHost: async () => ['::ffff:10.0.0.1'] });
     await expect(
@@ -73,6 +89,45 @@ describe('loader model endpoint checker', () => {
       check({ kind: 'openai', baseUrl: 'https://[::ffff:10.0.0.1]/v1', model: 'm' })
     ).rejects.toBeInstanceOf(ModelCheckError);
   });
+  it('blocks IPv6, mapped IPv6, and metadata literals before a request', async () => {
+    const check = createModelChecker({
+      request: async () => {
+        throw new Error('must not connect');
+      },
+    });
+    for (const baseUrl of [
+      'https://[::1]/v1',
+      'https://[fe80::1]/v1',
+      'https://[::ffff:169.254.169.254]/v1',
+      'http://169.254.1.2/v1',
+    ]) {
+      await expect(check({ kind: 'openai', baseUrl, model: 'm' })).rejects.toMatchObject({
+        code: 'blocked_destination',
+      });
+    }
+  });
+
+  it('never exposes an echoed key from a real endpoint on success or error', async () => {
+    for (const status of [200, 500]) {
+      const secret = 'real-upstream-secret';
+      const server = await listen((req, res) => {
+        expect(req.headers.authorization).toBe(`Bearer ${secret}`);
+        res.writeHead(status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ message: secret }));
+      });
+      const check = createModelChecker();
+      let failure: unknown;
+      try {
+        await check({ kind: 'ollama', baseUrl: server.url, model: 'tiny', key: secret });
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(ModelCheckError);
+      expect(JSON.stringify(failure)).not.toContain(secret);
+      expect((failure as Error).message).not.toContain(secret);
+    }
+  });
+
   it('allows RFC1918 HTTP Ollama endpoints but rejects cluster and link-local resolutions', async () => {
     const accepted = createModelChecker({
       resolveHost: async () => ['192.168.1.20'],

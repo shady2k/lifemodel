@@ -468,7 +468,13 @@ describe('loader ForwardAuth and JSON authentication API', () => {
     const cookie = `__Host-lm_session=${createSession(record, clock.now())}`;
     expect((await request(base, '/api/model', { host: 'boot-lifemodel.local' })).status).toBe(403);
     expect(
-      (await request(base, '/api/model', { host: 'boot-lifemodel.local', cookie })).status
+      (
+        await request(base, '/api/model', {
+          host: 'boot-lifemodel.local',
+          cookie,
+          origin: 'https://boot-lifemodel.local',
+        })
+      ).status
     ).toBe(503);
     for (const headers of [
       { cookie, origin: 'https://boot-sibling.local' },
@@ -677,6 +683,112 @@ describe('loader static UI and JSON API', () => {
       ).status
     ).toBe(403);
   });
+  it('applies the admission and exact JSON body matrix to every model route', async () => {
+    const record = await hashPassword('owner password');
+    const saved: Record<string, ModelSlot | null> = { primary: null, reserve: null };
+    const slots: ModelSlots = {
+      read: async (slot) => saved[slot],
+      write: async (slot, value) => {
+        saved[slot] = value;
+      },
+      clearReserve: async () => {
+        saved.reserve = null;
+      },
+    };
+    const { base, clock } = await start(record, undefined, slots, async () => {});
+    const token = createSession(record, clock.now());
+    const cookie = `__Host-lm_session=${token}`;
+    const csrf = JSON.parse(
+      (await request(base, '/api/state', { host: 'boot-lifemodel.local', cookie })).body
+    ).csrfToken as string;
+    const good = {
+      host: 'boot-lifemodel.local',
+      cookie,
+      origin: 'https://boot-lifemodel.local',
+      'content-type': 'application/json',
+      'x-csrf-token': csrf,
+    };
+    const writes = [
+      {
+        path: '/api/model/primary',
+        method: 'PUT',
+        body: JSON.stringify({ kind: 'openai', baseUrl: 'https://models.example/v1', model: 'm' }),
+      },
+      {
+        path: '/api/model/reserve',
+        method: 'PUT',
+        body: JSON.stringify({ kind: 'openai', baseUrl: 'https://models.example/v1', model: 'm' }),
+      },
+      { path: '/api/model/reserve', method: 'DELETE', body: '{}' },
+    ];
+    for (const route of writes) {
+      expect(
+        (
+          await request(
+            base,
+            route.path,
+            {
+              host: 'boot-lifemodel.local',
+              'content-type': 'application/json',
+              origin: 'https://boot-lifemodel.local',
+              'x-csrf-token': csrf,
+            },
+            route.method,
+            route.body
+          )
+        ).status
+      ).toBe(401);
+      for (const change of [
+        { origin: undefined },
+        { origin: 'null' },
+        { origin: 'https://sibling.local' },
+        { 'content-type': 'text/plain' },
+        { 'x-csrf-token': undefined },
+      ]) {
+        const headers: Record<string, string> = { ...good };
+        for (const [k, v] of Object.entries(change)) {
+          if (v === undefined) delete headers[k];
+          else headers[k] = v;
+        }
+        expect(
+          (await request(base, route.path, headers, route.method, route.body)).status
+        ).not.toBe(200);
+      }
+      expect((await request(base, route.path, good, route.method, route.body)).status).toBe(200);
+      for (const body of [
+        'null',
+        '[]',
+        '3',
+        '"text"',
+        '{"kind":3,"baseUrl":"https://models.example","model":"m"}',
+      ]) {
+        expect((await request(base, route.path, good, route.method, body)).status).toBe(400);
+      }
+      expect(
+        (await request(base, route.path, good, route.method, ' '.repeat(16 * 1024 + 1))).status
+      ).toBe(413);
+    }
+    for (const route of ['/api/model', '/api/model/primary', '/api/model/reserve']) {
+      const method = route === '/api/model' ? 'GET' : 'PUT';
+      expect(
+        (await request(base, route, { host: 'boot-lifemodel.local' }, method, '{}')).status
+      ).toBe(route === '/api/model' ? 403 : 401);
+    }
+    expect((await request(base, '/api/model/other', good, 'PUT', '{}')).status).toBe(404);
+    expect((await request(base, '/api/model/primary', good, 'POST', '{}')).status).toBe(405);
+    expect((await request(base, '/api/model', good, 'POST')).status).toBe(405);
+    expect(
+      (
+        await request(
+          base,
+          '/api/model',
+          { ...good, origin: 'https://boot-lifemodel.local' },
+          'GET'
+        )
+      ).status
+    ).toBe(200);
+  });
+
   it('checks and saves model settings only after an accepted write, and never returns stored keys', async () => {
     const record = await hashPassword('owner password');
     let saved: import('../../loader/src/model.js').ModelSlot | null = null;
@@ -717,7 +829,11 @@ describe('loader static UI and JSON API', () => {
     );
     expect(savedResponse.status).toBe(200);
     expect(savedResponse.body).not.toContain('secret-key');
-    const read = await request(base, '/api/model', { host: 'boot-lifemodel.local', cookie });
+    const read = await request(base, '/api/model', {
+      host: 'boot-lifemodel.local',
+      cookie,
+      origin: 'https://boot-lifemodel.local',
+    });
     expect(read.status).toBe(200);
     expect(read.body).toContain('"keySet":true');
     expect(read.body).not.toContain('secret-key');
@@ -739,6 +855,31 @@ describe('loader static UI and JSON API', () => {
     );
     expect(replaced.status).toBe(200);
     expect(saved?.key).toBe('new-secret');
+    const reserveSaved: ModelSlot = {
+      kind: 'openai',
+      baseUrl: 'https://models.example/v1',
+      model: 'reserve',
+      key: 'reserve-key',
+    };
+    saved = reserveSaved;
+    const kept = await request(
+      base,
+      '/api/model/reserve',
+      headers,
+      'PUT',
+      JSON.stringify({ kind: 'openai', baseUrl: 'https://models.example/v1', model: 'kept' })
+    );
+    expect(kept.status).toBe(200);
+    expect(saved?.key).toBe('reserve-key');
+    const reserveClear = await request(base, '/api/model/reserve', headers, 'DELETE', '{}');
+    expect(reserveClear.status).toBe(200);
+    expect(saved).toBeNull();
+    saved = {
+      kind: 'openai',
+      baseUrl: 'https://models.example/v1',
+      model: 'good',
+      key: 'secret-key',
+    };
     const failed = await request(
       base,
       '/api/model/primary',

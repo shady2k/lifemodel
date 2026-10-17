@@ -38,7 +38,6 @@ const MAX_RESPONSE = 64 * 1024;
 const TIMEOUT_MS = 15_000;
 const OLLAMA = 'http://ollama.ollama.svc.cluster.local:11434';
 const PRIVATE_V4 = [/^10\./, /^192\.168\./, /^172\.(1[6-9]|2[0-9]|3[01])\./];
-const SERVICE_V4_PREFIX = '10.43.';
 const CLUSTER_V4 = [/^10\.42\./, /^10\.43\./];
 function deniedAddress(address: string): boolean {
   if (address.includes(':')) return true;
@@ -70,16 +69,19 @@ function validateUrl(input: string): URL {
     !url.hostname
   )
     throw new ModelCheckError('blocked_destination');
+  const hostname = url.hostname.replace(/^\[|\]$/g, '');
+  if (hostname.endsWith('.svc.cluster.local') && url.origin !== OLLAMA)
+    throw new ModelCheckError('blocked_destination');
   if (url.origin === OLLAMA) return url;
   if (
     url.protocol === 'http:' &&
     url.origin !== OLLAMA &&
-    isIP(url.hostname) === 4 &&
-    !PRIVATE_V4.some((pattern) => pattern.test(url.hostname))
+    isIP(hostname) === 4 &&
+    !PRIVATE_V4.some((pattern) => pattern.test(hostname))
   )
     throw new ModelCheckError('blocked_destination');
-  if (isIP(url.hostname)) {
-    if (deniedAddress(url.hostname)) throw new ModelCheckError('blocked_destination');
+  if (isIP(hostname)) {
+    if (deniedAddress(hostname)) throw new ModelCheckError('blocked_destination');
   }
   return url;
 }
@@ -113,7 +115,9 @@ export function createModelChecker(
       addresses.length === 0 ||
       addresses.some((address) =>
         special
-          ? isIP(address) !== 4 || !address.startsWith(SERVICE_V4_PREFIX)
+          ? isIP(address) !== 4 ||
+            !PRIVATE_V4.some((pattern) => pattern.test(address)) ||
+            deniedAddress(address)
           : deniedAddress(address) ||
             (url.protocol === 'http:' && !PRIVATE_V4.some((pattern) => pattern.test(address)))
       )
