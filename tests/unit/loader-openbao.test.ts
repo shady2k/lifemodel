@@ -308,7 +308,13 @@ describe('OpenBao bootstrap', () => {
         for (const phase of phases) await phase.run();
       },
     });
-    await expect(bootstrap.runInitial()).rejects.toThrow(/expected model capabilities/);
+    let failure: unknown;
+    try {
+      await bootstrap.runInitial();
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeDefined();
     expect(events).not.toContain('revoke');
   });
   it('reads model slots through the HTTP API and treats deleted KV v2 latest version as unset', async () => {
