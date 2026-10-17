@@ -1184,6 +1184,8 @@ describe('loader static UI and JSON API', () => {
     await realState.writeAuth(record);
     const { base, clock } = await start(record, undefined, undefined, undefined, realState);
     const cookie = `__Host-lm_session=${createSession(record, clock.now())}`;
+    const anonymousState = await request(base, '/api/state', { host: 'boot-lifemodel.local' });
+    expect(JSON.parse(anonymousState.body)).toEqual({ setupNeeded: false, loggedIn: false });
     const headers = {
       host: 'boot-lifemodel.local',
       cookie,
@@ -1231,6 +1233,7 @@ describe('loader static UI and JSON API', () => {
     expect((await request(base, route, csrfHeaders, 'PUT', '{}')).status).toBe(405);
     expect((await request(base, route, csrfHeaders, 'POST', '{}')).status).toBe(409);
     expect((await realState.readOnboarding?.())?.step).toBe('welcome');
+    expect((await request(base, route, csrfHeaders, 'POST', 'null')).status).toBe(400);
     await realState.savePasswordOnboarding?.();
     for (const step of ['password', 'model'] as const) {
       writeFileSync(

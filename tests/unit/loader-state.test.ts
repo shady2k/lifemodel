@@ -41,6 +41,36 @@ describe('durable loader first writer', () => {
       'hash'
     );
   });
+  it('records completedAt only when device onboarding is completed and persists done state', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'loader-complete-'));
+    roots.push(root);
+    const fs = createNodeFileSystem();
+    const config = {
+      ...loadConfig({ LIFEMODEL_VOLUME_ROOT: root, LIFEMODEL_NAME: 'lifemodel' }),
+      loaderDir: join(root, 'loader'),
+    };
+    const state = createLoaderState({ fs, config, logger: createRecordingLogger([]) });
+    await state.ensureLayout();
+    await state.readOnboarding?.();
+    const path = join(root, 'loader', 'onboarding.json');
+    await fs.writeFileAtomic(
+      path,
+      JSON.stringify({ version: 1, step: 'device', completedAt: null }),
+      0o600
+    );
+    await state.completeDeviceOnboarding?.('2026-10-19T12:00:00.000Z');
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({
+      version: 1,
+      step: 'done',
+      completedAt: '2026-10-19T12:00:00.000Z',
+    });
+    const reopened = createLoaderState({ fs, config, logger: createRecordingLogger([]) });
+    expect(await reopened.readOnboarding?.()).toEqual({
+      version: 1,
+      step: 'done',
+      completedAt: '2026-10-19T12:00:00.000Z',
+    });
+  });
   it('advances onboarding to device only after a primary model save while in the model step', async () => {
     const root = mkdtempSync(join(tmpdir(), 'loader-onboarding-'));
     roots.push(root);
