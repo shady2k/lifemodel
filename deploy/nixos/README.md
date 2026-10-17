@@ -8,8 +8,8 @@ Add this flake as an input and enable `services.lifemodel` on the dedicated VM:
   services.lifemodel = {
     enable = true;
     name = "lifemodel"; # one DNS label, at most 57 characters
-    platform.url = "oci://ghcr.io/shady2k/lifemodel-platform";
-    platform.tag = "v1.0.0";
+    # The platform URL and tag default to this flake's own release.
+    # Pin the flake input to a versioned release before deploying it.
   };
 }
 ```
@@ -21,7 +21,13 @@ with embedded etcd and its bundled Traefik, installs Flux v2.9.6, and applies
 the verified platform source, the instance ConfigMap, and root Kustomization. Set `services.lifemodel.name` before installation; it fixes `<name>.local` and `boot-<name>.local`. The bootstrap is a systemd
 oneshot: an unchanged switch does not rerun it. Changing the configured platform
 ref changes its unit script, so NixOS restarts the unit during the switch; a
-failed bootstrap makes the switch fail. To re-apply without changing the
+failed bootstrap makes the switch fail. After applying, the unit waits up to
+10 minutes for the loader's anonymous HTTPS state endpoint, with the instance CA
+and loopback address resolution. Each request has a 10-second limit. Only then
+does it log the address and the SHA-256 fingerprint of the CA certificate (DER).
+Read these with `journalctl -u lifemodel-flux-bootstrap` or run
+`sudo lifemodel address`. A timeout names the first unready step and points to
+`lifemodel doctor`. To re-apply without changing the
 configuration, run `sudo systemctl restart lifemodel-flux-bootstrap` or
 `sudo lifemodel doctor --repin clear`. Keyless verification is the default. The
 recovery CLI requires Node.js 18 or newer; the generic installer checks this

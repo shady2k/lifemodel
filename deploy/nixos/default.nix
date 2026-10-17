@@ -1,4 +1,4 @@
-{ config, lib, pkgs, lifemodelK3s, selfVersion ? "v0.1.0", ... }:
+{ config, lib, pkgs, lifemodelK3s, selfVersion, ... }:
 let
   cfg = config.services.lifemodel;
   inherit (lib) mkEnableOption mkOption types;
@@ -68,8 +68,8 @@ in
     name = mkOption { type = types.strMatching "[a-z]([a-z0-9-]{0,55}[a-z0-9])?"; default = "lifemodel"; description = "Fixed non-reserved DNS-1035 instance label (max 57 characters)."; };
     lanInterface = mkOption { type = types.str; default = if (config.networking.defaultGateway.interface or null) == null then "" else config.networking.defaultGateway.interface; description = "LAN interface for mDNS publication and firewall access; set explicitly when no default gateway interface is declared."; };
     platform = {
-      url = mkOption { type = types.str; description = "OCI URL of the signed platform artifact."; };
-      tag = mkOption { type = types.nullOr types.str; default = null; description = "OCI artifact tag (required unless digest is set)."; };
+      url = mkOption { type = types.str; default = "oci://ghcr.io/shady2k/lifemodel-platform"; description = "OCI URL of the signed platform artifact."; };
+      tag = mkOption { type = types.nullOr types.str; default = selfVersion; description = "OCI artifact tag; defaults to the flake release version."; };
       digest = mkOption { type = types.nullOr types.str; default = null; description = "Optional immutable OCI artifact digest."; };
       insecureRegistry = mkOption { type = types.bool; default = false; description = "Allow a VM-local plain HTTP OCI registry."; };
     };
@@ -138,7 +138,7 @@ in
         Type = "oneshot";
         RemainAfterExit = true;
       };
-      path = [ pkgs.coreutils pkgs.gnugrep pkgs.util-linux lifemodelK3s lifemodelCli ];
+      path = [ pkgs.coreutils pkgs.gnugrep pkgs.util-linux pkgs.nodejs pkgs.curl lifemodelK3s lifemodelCli ];
       script = ''
         set -euo pipefail
         KUBECTL='${kubectl}'
@@ -203,7 +203,10 @@ in
         $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f ${renderedInstance}
         $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f ${renderedKustomization}
         LIFEMODEL_LOCK_FD=9 LIFEMODEL_LOCK_HELD=1 lifemodel record-applied "$effectiveRef"
-        lifemodel address || echo 'lifemodel address is not ready yet; run lifemodel doctor' >&2
+        # Readiness is CA-verified before logging an address the owner can use.
+        LIFEMODEL_NAME=${lib.escapeShellArg cfg.name} LIFEMODEL_KUBECTL="$KUBECTL" \
+          node ${../cli/wait-ready.mjs}
+        lifemodel address
       '';
     };
     };
