@@ -266,14 +266,38 @@ describe('loader model endpoint checker', () => {
     const slow = await listen((_req, _res) => {});
     // Keep this test fast while exercising the same checker deadline via a controllable timer is not possible;
     // the request is destroyed by the checker's 15-second hard bound.
+    const exact = await listen((_req, res) => {
+      const prefix = '{"choices":[],"padding":"';
+      const suffix = '"}';
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        prefix +
+          'x'.repeat(64 * 1024 - Buffer.byteLength(prefix) - Buffer.byteLength(suffix)) +
+          suffix
+      );
+    });
+    let oversizedClosed = false;
+    let closed!: () => void;
+    const oversizedClose = new Promise<void>((resolve) => {
+      closed = resolve;
+    });
     const oversized = await listen((_req, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ choices: [], padding: 'x'.repeat(65 * 1024) }));
+      res.on('close', () => {
+        oversizedClosed = true;
+        closed();
+      });
+      res.write('{"choices":[],"padding":"' + 'x'.repeat(65 * 1024));
     });
     const bounded = createModelChecker();
     await expect(
+      bounded({ kind: 'ollama', baseUrl: exact.url, model: 'tiny' })
+    ).resolves.toBeUndefined();
+    await expect(
       bounded({ kind: 'ollama', baseUrl: oversized.url, model: 'tiny' })
     ).rejects.toMatchObject({ code: 'bad_response' });
+    await expect(oversizedClose).resolves.toBeUndefined();
+    expect(oversizedClosed).toBe(true);
     // The slow listener is intentionally never completed; closeAllConnections prevents a dangling test handle.
     await expect(
       bounded({ kind: 'ollama', baseUrl: slow.url, model: 'tiny' })

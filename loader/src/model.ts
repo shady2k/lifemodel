@@ -118,7 +118,7 @@ export function createModelChecker(
       addresses.some((address) =>
         special
           ? isIP(address) !== 4 ||
-            !PRIVATE_V4.some((pattern) => pattern.test(address)) ||
+            !/^10\.43\./.test(address) ||
             address.startsWith('169.254.') ||
             address.startsWith('127.')
           : deniedAddress(address) ||
