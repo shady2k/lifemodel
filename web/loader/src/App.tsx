@@ -242,14 +242,14 @@ export default function App() {
           {step === 'welcome' && (
             <Button
               className="mt-6 w-full"
-              onClick={() =>
+              onClick={() => {
                 setState({
                   ...state,
                   setupNeeded: true,
                   loggedIn: false,
                   onboarding: { step: 'password', completedAt: null },
-                })
-              }
+                });
+              }}
             >
               {t('begin')}
             </Button>
@@ -282,7 +282,9 @@ export default function App() {
                   variant="ghost"
                   size="sm"
                   aria-pressed={showPassword}
-                  onClick={() => setShowPassword(!showPassword)}
+                  onClick={() => {
+                    setShowPassword(!showPassword);
+                  }}
                 >
                   {t(showPassword ? 'hidePassword' : 'showPassword')}
                 </Button>
