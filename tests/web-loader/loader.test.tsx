@@ -214,6 +214,24 @@ describe('loader UI', () => {
     expect(screen.getByRole('heading', { name: 'Connect model access' })).toBeInTheDocument();
   });
   it.each([
+    ['en-US', 'Get started', 'Set your password'],
+    ['ru-RU', 'Начать', 'Создайте пароль'],
+  ] as const)('welcome progresses to password in %s', async (locale, begin, passwordTitle) => {
+    Object.defineProperty(navigator, 'language', { configurable: true, value: locale });
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        setupNeeded: true,
+        loggedIn: false,
+        onboarding: { step: 'welcome', completedAt: null },
+      }),
+    });
+    render(<App />);
+    expect(await screen.findByRole('heading')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: begin }));
+    expect(screen.getByRole('heading', { name: passwordTitle })).toBeInTheDocument();
+  });
+  it.each([
     ['en-US', 'Reserve model (optional)', 'auth_failed'],
     ['ru-RU', 'Резервная модель (необязательно)', 'auth_failed'],
   ] as const)('reserve check failure stays on model step (%s)', async (locale, summary) => {
