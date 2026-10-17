@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request as httpRequest } from 'node:http';
 import { createLoaderHttp } from '../../loader/src/http.js';
+import { createNodeFileSystem } from '../../loader/src/fs.js';
+import { createLoaderState } from '../../loader/src/state.js';
 import { loadConfig } from '../../loader/src/config.js';
 import { createSession, hashPassword, verifySession } from '../../loader/src/auth.js';
 import { createTestClock } from '../../loader/src/clock.js';
@@ -27,11 +29,12 @@ async function start(
   modelChecker?: (
     slot: import('../../loader/src/model.js').ModelSlot,
     slotName?: 'primary' | 'reserve'
-  ) => Promise<void>
+  ) => Promise<void>,
+  customState?: LoaderState
 ) {
   let auth = initialAuth === null ? null : structuredClone(initialAuth);
   let onboardingSaves = 0;
-  const state: LoaderState = {
+  const state: LoaderState = customState ?? {
     ensureLayout: async () => undefined,
     readAuth: async () => (auth === null ? null : structuredClone(auth)),
     writeAuth: async (record) => {
@@ -101,7 +104,7 @@ async function request(
         headers: {
           host: SERVICE_HOST,
           ...(body === undefined ? {} : { 'content-length': Buffer.byteLength(body) }),
-          ...headers,
+          ...Object.fromEntries(Object.entries(headers).filter(([, value]) => value !== undefined)),
         },
       },
       (res) => {
@@ -705,7 +708,12 @@ describe('loader static UI and JSON API', () => {
         saved.reserve = null;
       },
     };
-    const { base, clock } = await start(record, undefined, slots, async () => {});
+    const { base, clock, getOnboardingSaves } = await start(
+      record,
+      undefined,
+      slots,
+      async () => {}
+    );
     const token = createSession(record, clock.now());
     const cookie = `__Host-lm_session=${token}`;
     const csrf = JSON.parse(
@@ -811,9 +819,14 @@ describe('loader static UI and JSON API', () => {
         saved = null;
       },
     };
-    const { base, clock, recorded } = await start(record, undefined, slots, async (slot) => {
-      if (slot.model === 'bad') throw new ModelCheckError('unreachable');
-    });
+    const { base, clock, recorded, getOnboardingSaves } = await start(
+      record,
+      undefined,
+      slots,
+      async (slot) => {
+        if (slot.model === 'bad') throw new ModelCheckError('unreachable');
+      }
+    );
     const cookie = `__Host-lm_session=${createSession(record, clock.now())}`;
     const csrf = (await request(base, '/api/state', { host: 'boot-lifemodel.local', cookie })).body;
     const csrfToken = JSON.parse(csrf).csrfToken as string;
@@ -890,6 +903,7 @@ describe('loader static UI and JSON API', () => {
       model: 'good',
       key: 'secret-key',
     };
+    const onboardingBeforeFailedCheck = getOnboardingSaves();
     const failed = await request(
       base,
       '/api/model/primary',
@@ -899,6 +913,7 @@ describe('loader static UI and JSON API', () => {
     );
     expect(failed.status).toBe(502);
     expect(saved?.model).toBe('good');
+    expect(getOnboardingSaves()).toBe(onboardingBeforeFailedCheck);
     expect(failed.body).not.toContain('secret-key');
     expect(recorded.map((line) => JSON.stringify(line)).join('\n')).not.toContain('secret-key');
     for (const body of ['null', '[]', '3', '"text"', '{\"unexpected\":true}']) {
@@ -1028,7 +1043,12 @@ describe('loader static UI and JSON API', () => {
       },
       clearReserve: async () => {},
     };
-    const { base, clock } = await start(record, undefined, slots, async () => {});
+    const { base, clock, getOnboardingSaves } = await start(
+      record,
+      undefined,
+      slots,
+      async () => {}
+    );
     const cookie = `__Host-lm_session=${createSession(record, clock.now())}`;
     const csrf = JSON.parse(
       (await request(base, '/api/state', { host: 'boot-lifemodel.local', cookie })).body
@@ -1048,5 +1068,58 @@ describe('loader static UI and JSON API', () => {
     );
     expect(response.status).toBe(503);
     expect(response.body).toBe('{"error":"storage_unavailable"}');
+    expect(getOnboardingSaves()).toBe(0);
+  });
+  it('advances real onboarding through the route only after primary persistence succeeds', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'loader-model-route-'));
+    roots.push(root);
+    const config = {
+      ...loadConfig({ LIFEMODEL_VOLUME_ROOT: root, LIFEMODEL_NAME: 'lifemodel' }),
+      loaderDir: join(root, 'loader'),
+    };
+    const state = createLoaderState({
+      fs: createNodeFileSystem(),
+      config,
+      logger: createRecordingLogger([]),
+    });
+    const fs = createNodeFileSystem();
+    await state.ensureLayout();
+    await fs.writeFileAtomic(
+      join(root, 'loader', 'onboarding.json'),
+      JSON.stringify({ version: 1, step: 'model', completedAt: null }),
+      0o600
+    );
+    const record = await hashPassword('owner password');
+    const slots: ModelSlots = {
+      read: async () => null,
+      write: async () => {},
+      clearReserve: async () => {},
+    };
+    const routedState: LoaderState = {
+      ...state,
+      readAuth: async () => record,
+      writeAuth: async () => {},
+      replaceAuth: async () => {},
+    };
+    const { base, clock } = await start(record, undefined, slots, async () => {}, routedState);
+    const cookie = `__Host-lm_session=${createSession(record, clock.now())}`;
+    const csrf = JSON.parse(
+      (await request(base, '/api/state', { host: 'boot-lifemodel.local', cookie })).body
+    ).csrfToken as string;
+    const response = await request(
+      base,
+      '/api/model/primary',
+      {
+        host: 'boot-lifemodel.local',
+        cookie,
+        origin: 'https://boot-lifemodel.local',
+        'content-type': 'application/json',
+        'x-csrf-token': csrf,
+      },
+      'PUT',
+      JSON.stringify({ kind: 'openai', baseUrl: 'https://models.example/v1', model: 'm' })
+    );
+    expect(response.status).toBe(200);
+    expect((await state.readOnboarding?.())?.step).toBe('device');
   });
 });

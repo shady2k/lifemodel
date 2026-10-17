@@ -83,6 +83,21 @@ describe('loader model endpoint checker', () => {
       })
     ).rejects.toMatchObject({ code: 'blocked_destination' });
   });
+  it('refuses an unrelated cluster Service resolving inside the Service CIDR before connecting', async () => {
+    const request = vi.fn(async () => ({ status: 200, body: '{"choices":[]}' }));
+    const check = createModelChecker({
+      resolveHost: async () => ['10.43.6.2'],
+      request,
+    });
+    await expect(
+      check({
+        kind: 'ollama',
+        baseUrl: 'http://other.ollama.svc.cluster.local:11434/v1',
+        model: 'm',
+      })
+    ).rejects.toMatchObject({ code: 'blocked_destination' });
+    expect(request).not.toHaveBeenCalled();
+  });
   it('refuses public plaintext and mapped IPv6 destinations before connecting', async () => {
     const check = createModelChecker({ resolveHost: async () => ['::ffff:10.0.0.1'] });
     await expect(
@@ -232,6 +247,48 @@ describe('loader model endpoint checker', () => {
     expect(seenSni).toBe('model.test');
   });
 
+  it('rejects trusted wrong-host and untrusted certificates before sending HTTP or the key', async () => {
+    let requests = 0;
+    const server = createHttpsServer(
+      {
+        key: readFileSync(join(process.cwd(), 'tests/fixtures/model-test.key')),
+        cert: readFileSync(join(process.cwd(), 'tests/fixtures/model-test.crt')),
+      },
+      (_req, res) => {
+        requests += 1;
+        res.end(validReply);
+      }
+    );
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '0.0.0.0', resolve));
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('server did not bind');
+    const tlsCa = readFileSync(join(process.cwd(), 'tests/fixtures/model-test.crt'));
+    for (const [hostname, trusted] of [
+      ['wrong.test', true],
+      ['model.test', false],
+    ] as const) {
+      const check = createModelChecker({
+        ...(trusted ? { tlsCa } : {}),
+        resolveHost: async () => [localPrivateAddress()],
+      });
+      let failure: unknown;
+      try {
+        await check({
+          kind: 'openai',
+          baseUrl: `https://${hostname}:${address.port}/v1`,
+          model: 'tiny',
+          key: 'must-not-reach-server',
+        });
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toMatchObject({ code: 'tls' });
+      expect(JSON.stringify(failure)).not.toContain('must-not-reach-server');
+    }
+    expect(requests).toBe(0);
+  });
+
   it('refuses a rebinding result and redirect to a private target before following it', async () => {
     let requests = 0;
     const server = await listen((_req, res) => {
@@ -260,6 +317,42 @@ describe('loader model endpoint checker', () => {
     await expect(
       check({ kind: 'ollama', baseUrl: 'http://model.test/v1', model: 'tiny' })
     ).rejects.toMatchObject({ code: 'timeout' });
+  });
+
+  it('shares one deadline across DNS and transport', async () => {
+    const server = await listen((_req, res) => {
+      setTimeout(() => res.end(validReply), 35);
+    });
+    const check = createModelChecker({
+      timeoutMs: 60,
+      resolveHost: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 35));
+        return [localPrivateAddress()];
+      },
+    });
+    const target = new URL(server.url);
+    target.hostname = 'model.test';
+    await expect(
+      check({ kind: 'ollama', baseUrl: target.toString(), model: 'm' })
+    ).rejects.toMatchObject({
+      code: 'timeout',
+    });
+  });
+
+  it('does not start a request when DNS resolves after the check deadline', async () => {
+    const request = vi.fn(async () => ({ status: 200, body: validReply }));
+    const check = createModelChecker({
+      timeoutMs: 20,
+      resolveHost: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return [localPrivateAddress()];
+      },
+      request,
+    });
+    await expect(
+      check({ kind: 'ollama', baseUrl: 'http://model.test/v1', model: 'm' })
+    ).rejects.toMatchObject({ code: 'timeout' });
+    expect(request).not.toHaveBeenCalled();
   });
 
   it('bounds real local response time and response size', async () => {

@@ -259,8 +259,7 @@ describe('OpenBao bootstrap', () => {
 
   it('refuses root retirement when loader capabilities include primary delete', async () => {
     const events: string[] = [];
-    const f = fixture();
-    // Policy verification must reject any capability beyond the exact contract.
+    let retired = false;
     const api = createOpenBaoApi({
       address: 'http://openbao.test:8200',
       request: async (url, _method, token) => {
@@ -274,6 +273,7 @@ describe('OpenBao bootstrap', () => {
               'lifemodel/data/model/primary': ['create', 'update', 'read', 'delete'],
               'lifemodel/data/model/reserve': ['create', 'update', 'read', 'delete'],
               'lifemodel/metadata/model/reserve': ['read'],
+              'lifemodel/metadata/model/primary': ['read'],
             }),
           };
         }
@@ -285,10 +285,31 @@ describe('OpenBao bootstrap', () => {
         return { status: 204, body: '' };
       },
     });
-    await expect(api.ensureModelPolicy('root', 'jwt')).rejects.toThrow();
-    events.push('verified-failure');
-    expect(events).toEqual(['verified-failure']);
-    expect(f.events).not.toContain('revoke');
+    const bootstrap = createOpenBaoBootstrap({
+      bao: {
+        status: async () => ({ initialized: true, sealed: false }),
+        init: async () => ({ keys: ['key'], rootToken: 'root' }),
+        unseal: async () => {},
+        rootTokenActive: async () => !retired,
+        ensureLoaderPolicy: async () => {},
+        ensureModelPolicy: (root, jwt) => api.ensureModelPolicy!(root, jwt),
+        loginLoader: (jwt) => api.loginLoader(jwt),
+        revokeRootToken: async () => {
+          events.push('revoke');
+          retired = true;
+        },
+      },
+      custody: {
+        read: async () => ({ keys: ['key'], rootToken: 'root' }),
+        write: async () => {},
+      },
+      loaderJwt: async () => 'projected-jwt',
+      runPhases: async (phases) => {
+        for (const phase of phases) await phase.run();
+      },
+    });
+    await expect(bootstrap.runInitial()).rejects.toThrow(/expected model capabilities/);
+    expect(events).not.toContain('revoke');
   });
   it('reads model slots through the HTTP API and treats deleted KV v2 latest version as unset', async () => {
     const paths: string[] = [];
