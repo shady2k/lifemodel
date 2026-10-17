@@ -87,6 +87,13 @@ describe('loader UI', () => {
     fireEvent.click(screen.getByRole('button', { name: show }));
     expect(input).toHaveAttribute('type', 'text');
   });
+  it('allows switching the wizard language to Russian', async () => {
+    await i18n.changeLanguage('en');
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Set your password' });
+    fireEvent.click(screen.getByRole('button', { name: 'Русский' }));
+    expect(await screen.findByRole('heading', { name: 'Создайте пароль' })).toBeInTheDocument();
+  });
   it('defaults unknown browser languages to English', async () => {
     Object.defineProperty(navigator, 'language', { configurable: true, value: 'de-DE' });
     await i18n.changeLanguage('en');
