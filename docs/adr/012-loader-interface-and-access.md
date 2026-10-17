@@ -101,9 +101,15 @@ model access, checked) → the chat, answered by the owner's real model
   cluster: Avahi restricted (`allow-interfaces`) to the LAN interface, and a
   publisher unit per name that watches netlink address events
   (`ip monitor address`), withdraws the old record and republishes on change.
-  The LAN interface is `services.lifemodel.lanInterface` / `--lan-interface`,
-  or by default the interface of the default IPv4 route, never
-  `cni*`, `flannel*`, `veth*`, `wg*`, `tun*`, `tailscale*`. IPv4 records only
+  The LAN interface is `services.lifemodel.lanInterface` / `--lan-interface`.
+  On NixOS it must be declared by `networking.defaultGateway.interface` or
+  `services.lifemodel.lanInterface`; evaluation fails and names both options
+  when neither is set, because the declarative firewall must be scoped to a
+  known interface. The generic Linux installer selects the lowest-metric
+  interface from the structurally parsed IPv4 default routes, unless
+  `--lan-interface` is explicit. Both paths refuse `cni*`, `flannel*`, `veth*`,
+  `wg*`, `tun*`, `tailscale*`; no default route means the installer fails and
+  asks for `--lan-interface`. IPv4 records only
   in this feature. No address: the unit waits and says so. A name collision
   fails the unit visibly; Avahi never renames silently.
 - The NixOS module enables it; `install.sh` installs `avahi-daemon`,
