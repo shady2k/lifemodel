@@ -423,7 +423,12 @@ export default function App() {
                     <AlertDescription>{t(reserveError)}</AlertDescription>
                   </Alert>
                 )}
-                <form className="mt-4 space-y-4" onSubmit={(e) => void saveReserve(e)}>
+                <form
+                  className="mt-4 space-y-4"
+                  onSubmit={(e) => {
+                    void saveReserve(e);
+                  }}
+                >
                   <div className="space-y-2">
                     <Label htmlFor="reserve-kind">{t('kind')}</Label>
                     <select
@@ -474,7 +479,9 @@ export default function App() {
                       type="button"
                       variant="outline"
                       disabled={busy}
-                      onClick={() => void removeReserve()}
+                      onClick={() => {
+                        void removeReserve();
+                      }}
                     >
                       {t('removeReserve')}
                     </Button>
