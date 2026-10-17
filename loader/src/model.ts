@@ -38,7 +38,7 @@ const MAX_RESPONSE = 64 * 1024;
 const TIMEOUT_MS = 15_000;
 const OLLAMA = 'http://ollama.ollama.svc.cluster.local:11434';
 const PRIVATE_V4 = [/^10\./, /^192\.168\./, /^172\.(1[6-9]|2[0-9]|3[01])\./];
-const SERVICE_V4 = /^10\.43\./;
+const SERVICE_V4_PREFIX = '10.43.';
 const CLUSTER_V4 = [/^10\.42\./, /^10\.43\./];
 function deniedAddress(address: string): boolean {
   if (address.includes(':')) return true;
@@ -113,7 +113,7 @@ export function createModelChecker(
       addresses.length === 0 ||
       addresses.some((address) =>
         special
-          ? isIP(address) !== 4 || !SERVICE_V4.test(address)
+          ? isIP(address) !== 4 || !address.startsWith(SERVICE_V4_PREFIX)
           : deniedAddress(address) ||
             (url.protocol === 'http:' && !PRIVATE_V4.some((pattern) => pattern.test(address)))
       )
