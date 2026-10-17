@@ -151,6 +151,38 @@ describe('real boot-host onboarding redirects', () => {
   });
 });
 
+describe('completed onboarding never serves the wizard', () => {
+  it.each(['/', '/setup', '/login?next=%2F'])(
+    'keeps completed setup out of the wizard at %s',
+    async (path) => {
+      const record = await hashPassword('owner password');
+      const uiRoot = mkdtempSync(join(tmpdir(), 'loader-ui-completed-'));
+      roots.push(uiRoot);
+      writeFileSync(join(uiRoot, 'index.html'), '<main>settings shell</main>');
+      const { base, clock } = await start(record, uiRoot, undefined, undefined, {
+        ensureLayout: async () => {},
+        readAuth: async () => record,
+        writeAuth: async () => {},
+        replaceAuth: async () => {},
+        readOnboarding: async () => ({ version: 1, step: 'done', completedAt: 'now' }),
+        reconcilePasswordOnboarding: async () => {},
+      });
+      const response = await request(base, path, {
+        host: 'boot-lifemodel.local',
+        cookie: `__Host-lm_session=${createSession(record, clock.now())}`,
+      });
+      if (path === '/') {
+        expect(response.status).toBe(200);
+        expect(response.body).toContain('settings shell');
+      } else {
+        expect(response.status).toBe(303);
+        expect(String(response.headers.location)).not.toContain('/setup');
+      }
+      expect(response.body).not.toContain('wizard');
+    }
+  );
+});
+
 describe('completed boot-host onboarding redirects', () => {
   it('hands a completed boot session to its vetted app destination', async () => {
     const record = await hashPassword('owner password');
@@ -705,6 +737,79 @@ describe('loader password change', () => {
       await (
         await import('../../loader/src/auth.js')
       ).verifyPassword('a brand new secure password', getAuth()!)
+    ).toBe(true);
+  });
+
+  it('persists a password rotation through the real loader file system', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'loader-auth-durable-'));
+    roots.push(root);
+    const config = loadConfig({ LIFEMODEL_NAME: 'lifemodel', LIFEMODEL_VOLUME_ROOT: root });
+    const fs = createNodeFileSystem();
+    const logger = createRecordingLogger([]);
+    const state = createLoaderState({ fs, config, logger });
+    await state.ensureLayout();
+    const record = await hashPassword('owner password');
+    await state.writeAuth(record);
+    const clock = createTestClock();
+    const loader = createLoaderHttp({
+      state,
+      logger,
+      clock,
+      config,
+      pki: {
+        bootstrap: async () => {},
+        report: async () => ({
+          identity: 'present',
+          ca: 'present-matching',
+          leaf: 'valid',
+          sans: [],
+          fingerprint: 'x',
+        }),
+        caPem: async () => 'CA',
+      },
+    });
+    servers.push(loader);
+    await new Promise<void>((resolve) => loader.server.listen(0, '127.0.0.1', resolve));
+    const address = loader.server.address();
+    if (!address || typeof address === 'string') throw new Error('server did not bind');
+    const base = `http://127.0.0.1:${address.port}`;
+    const oldToken = createSession(record, clock.now());
+    const csrf = (await import('../../loader/src/auth.js')).csrfToken(record, oldToken);
+    const response = await request(
+      base,
+      '/api/password',
+      {
+        host: 'boot-lifemodel.local',
+        cookie: `__Host-lm_session=${oldToken}`,
+        origin: 'https://boot-lifemodel.local',
+        'content-type': 'application/json',
+        'x-csrf-token': csrf,
+      },
+      'POST',
+      JSON.stringify({ currentPassword: 'owner password', newPassword: 'durable new password' })
+    );
+    expect(response.status).toBe(200);
+    const persisted = await state.readAuth();
+    expect(persisted).not.toBeNull();
+    expect(persisted?.sessionSecret).not.toBe(record.sessionSecret);
+    expect(
+      await (
+        await import('../../loader/src/auth.js')
+      ).verifyPassword('durable new password', persisted!)
+    ).toBe(true);
+    expect(verifySession(oldToken, persisted!, clock.now())).toBe(false);
+    const reloaded = await createLoaderState({
+      fs: createNodeFileSystem(),
+      config,
+      logger,
+    }).readAuth();
+    expect(reloaded?.sessionSecret).toBe(persisted?.sessionSecret);
+    expect(
+      verifySession(
+        String(response.headers['set-cookie']).split(';')[0]!.split('=')[1]!,
+        reloaded!,
+        clock.now()
+      )
     ).toBe(true);
   });
 
