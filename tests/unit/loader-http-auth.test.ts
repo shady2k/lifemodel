@@ -1191,27 +1191,60 @@ describe('loader static UI and JSON API', () => {
     const csrf = JSON.parse(
       (await request(base, '/api/state', { host: headers.host, cookie })).body
     ).csrfToken as string;
-    const rejected = await request(
-      base,
-      '/api/onboarding/device',
-      { ...headers, 'x-csrf-token': csrf },
-      'POST',
-      '{}'
-    );
-    expect(rejected.status).toBe(409);
+    const route = '/api/onboarding/device';
+    const csrfHeaders = { ...headers, 'x-csrf-token': csrf };
+    expect(
+      (
+        await request(
+          base,
+          route,
+          { host: headers.host, origin: headers.origin, 'content-type': 'application/json' },
+          'POST',
+          '{}'
+        )
+      ).status
+    ).toBe(401);
+    for (const change of [
+      { origin: undefined },
+      { origin: 'null' },
+      { origin: 'https://sibling.local' },
+      { 'content-type': 'text/plain' },
+      { 'x-csrf-token': undefined },
+    ]) {
+      const badHeaders: Record<string, string> = { ...csrfHeaders };
+      for (const [key, value] of Object.entries(change)) {
+        if (value === undefined) delete badHeaders[key];
+        else badHeaders[key] = value;
+      }
+      const rejected = await request(base, route, badHeaders, 'POST', '{}');
+      expect([401, 403, 415]).toContain(rejected.status);
+    }
+    expect((await request(base, route, csrfHeaders, 'PUT', '{}')).status).toBe(405);
+    expect((await request(base, route, csrfHeaders, 'POST', '{}')).status).toBe(409);
     expect((await realState.readOnboarding?.())?.step).toBe('welcome');
     await realState.savePasswordOnboarding?.();
+    for (const step of ['password', 'model'] as const) {
+      writeFileSync(
+        join(root, 'loader', 'onboarding.json'),
+        JSON.stringify({ version: 1, step, completedAt: null })
+      );
+      expect((await request(base, route, csrfHeaders, 'POST', '{}')).status).toBe(409);
+    }
     await realState.saveModelOnboarding?.();
     expect((await realState.readOnboarding?.())?.step).toBe('device');
-    const accepted = await request(
-      base,
-      '/api/onboarding/device',
-      { ...headers, 'x-csrf-token': csrf },
-      'POST',
-      '{}'
-    );
+    for (const body of ['null', '[]', '1', '"text"', '{"unexpected":true}']) {
+      expect((await request(base, route, csrfHeaders, 'POST', body)).status).toBe(400);
+    }
+    expect((await request(base, route, csrfHeaders, 'POST', ' '.repeat(8193))).status).toBe(413);
+    const accepted = await request(base, route, csrfHeaders, 'POST', '{}');
     expect(accepted.status).toBe(200);
     expect((await realState.readOnboarding?.())?.step).toBe('done');
     expect((await realState.readOnboarding?.())?.completedAt).toBeTruthy();
+    expect((await request(base, route, csrfHeaders, 'POST', '{}')).status).toBe(409);
+    writeFileSync(
+      join(root, 'loader', 'onboarding.json'),
+      JSON.stringify({ version: 1, step: 'done', completedAt: 'earlier' })
+    );
+    expect((await request(base, route, csrfHeaders, 'POST', '{}')).status).toBe(409);
   });
 });

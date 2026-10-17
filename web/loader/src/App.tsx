@@ -40,6 +40,11 @@ export default function App() {
   const [showPassword, setShowPassword] = useState(false);
   const [slot, setSlot] = useState<Slot>({ kind: 'openai', baseUrl: '', model: '', keySet: false });
   const [reserve, setReserve] = useState<Slot | null>(null);
+  const [reserveError, setReserveError] = useState('');
+  const [reserveKind, setReserveKind] = useState<'openai' | 'ollama'>('openai');
+  const [reserveBaseUrl, setReserveBaseUrl] = useState('');
+  const [reserveModel, setReserveModel] = useState('');
+  const [reserveKey, setReserveKey] = useState('');
   const [kind, setKind] = useState<'openai' | 'ollama'>('openai');
   const [baseUrl, setBaseUrl] = useState('');
   const [model, setModel] = useState('');
@@ -62,6 +67,11 @@ export default function App() {
           setModel(data.primary.model);
         }
         setReserve(data.reserve);
+        if (data.reserve) {
+          setReserveKind(data.reserve.kind);
+          setReserveBaseUrl(data.reserve.baseUrl);
+          setReserveModel(data.reserve.model);
+        }
       }
     }
   }
@@ -124,6 +134,55 @@ export default function App() {
       await load();
     } catch {
       setError(t('setupError'));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function saveReserve(event: SyntheticEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setReserveError('');
+    try {
+      const response = await fetch('/api/model/reserve', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json', 'x-csrf-token': state?.csrfToken ?? '' },
+        body: JSON.stringify({
+          kind: reserveKind,
+          baseUrl: reserveBaseUrl,
+          model: reserveModel,
+          ...(reserveKey ? { key: reserveKey } : {}),
+        }),
+      });
+      if (!response.ok) {
+        const value = (await response.json()) as { error?: string };
+        const code = value.error ?? '';
+        setReserveError(codes.includes(code) ? `model_${code}` : 'setupError');
+        return;
+      }
+      setReserveKey('');
+      await load();
+    } catch {
+      setReserveError(t('setupError'));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function removeReserve() {
+    setBusy(true);
+    setReserveError('');
+    try {
+      const response = await fetch('/api/model/reserve', {
+        method: 'DELETE',
+        headers: { 'content-type': 'application/json', 'x-csrf-token': state?.csrfToken ?? '' },
+        body: '{}',
+      });
+      if (!response.ok) {
+        setReserveError(t('setupError'));
+        return;
+      }
+      await load();
+    } catch {
+      setReserveError(t('setupError'));
     } finally {
       setBusy(false);
     }
@@ -359,6 +418,68 @@ export default function App() {
               <details className="mt-8">
                 <summary className="cursor-pointer">{t('reserve')}</summary>
                 <p className="mt-2 text-sm">{reserve ? t('reserveSet') : t('reserveOptional')}</p>
+                {reserveError && (
+                  <Alert className="mt-4" variant="destructive" role="alert">
+                    <AlertDescription>{t(reserveError)}</AlertDescription>
+                  </Alert>
+                )}
+                <form className="mt-4 space-y-4" onSubmit={(e) => void saveReserve(e)}>
+                  <div className="space-y-2">
+                    <Label htmlFor="reserve-kind">{t('kind')}</Label>
+                    <select
+                      id="reserve-kind"
+                      className="flex h-10 w-full rounded-md border border-input bg-background px-3"
+                      value={reserveKind}
+                      onChange={(e) => setReserveKind(e.target.value as 'openai' | 'ollama')}
+                    >
+                      <option value="openai">OpenAI compatible</option>
+                      <option value="ollama">Ollama</option>
+                    </select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="reserve-url">{t('baseUrl')}</Label>
+                    <Input
+                      id="reserve-url"
+                      required
+                      value={reserveBaseUrl}
+                      onChange={(e) => setReserveBaseUrl(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="reserve-model">{t('model')}</Label>
+                    <Input
+                      id="reserve-model"
+                      required
+                      value={reserveModel}
+                      onChange={(e) => setReserveModel(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="reserve-key">{t('key')}</Label>
+                    <Input
+                      id="reserve-key"
+                      type="password"
+                      autoComplete="new-password"
+                      placeholder={reserve?.keySet ? t('keySet') : ''}
+                      value={reserveKey}
+                      onChange={(e) => setReserveKey(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {reserve?.keySet ? t('keySet') : t('keyOptional')}
+                    </p>
+                  </div>
+                  <Button disabled={busy}>{busy ? t('checking') : t('checkSave')}</Button>
+                  {reserve && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() => void removeReserve()}
+                    >
+                      {t('removeReserve')}
+                    </Button>
+                  )}
+                </form>
               </details>
             </>
           )}

@@ -203,13 +203,76 @@ describe('loader UI', () => {
     );
     render(<App />);
     await screen.findByRole('heading', { name: 'Connect model access' });
-    fireEvent.change(await screen.findByLabelText('Base URL'), {
+    fireEvent.change(await screen.findByLabelText('Base URL', { selector: '#url' }), {
       target: { value: 'https://example.com' },
     });
-    fireEvent.change(screen.getByLabelText('Model name'), { target: { value: 'unit' } });
-    fireEvent.submit(screen.getByLabelText('Model name').closest('form')!);
+    fireEvent.change(screen.getByLabelText('Model name', { selector: '#model' }), {
+      target: { value: 'unit' },
+    });
+    fireEvent.submit(screen.getByLabelText('Model name', { selector: '#model' }).closest('form')!);
     expect(await screen.findByRole('alert')).toHaveTextContent(/auth_failed/);
     expect(screen.getByRole('heading', { name: 'Connect model access' })).toBeInTheDocument();
+  });
+  it.each([
+    ['en-US', 'Reserve model (optional)', 'auth_failed'],
+    ['ru-RU', 'Резервная модель (необязательно)', 'auth_failed'],
+  ] as const)('reserve check failure stays on model step (%s)', async (locale, summary) => {
+    Object.defineProperty(navigator, 'language', { configurable: true, value: locale });
+    fetchMock.mockImplementation(async (url: string) =>
+      url === '/api/state'
+        ? {
+            ok: true,
+            json: async () => ({
+              setupNeeded: false,
+              loggedIn: true,
+              csrfToken: 'csrf',
+              onboarding: { step: 'model', completedAt: null },
+            }),
+          }
+        : url === '/api/model'
+          ? {
+              ok: true,
+              json: async () => ({
+                primary: {
+                  kind: 'openai',
+                  baseUrl: 'https://primary.example',
+                  model: 'p',
+                  keySet: true,
+                },
+                reserve: null,
+              }),
+            }
+          : { ok: false, json: async () => ({ error: 'auth_failed' }) }
+    );
+    render(<App />);
+    expect(await screen.findByRole('heading')).toBeInTheDocument();
+    fireEvent.click(screen.getByText(summary));
+    fireEvent.change(
+      screen.getByLabelText(locale.startsWith('ru') ? 'Базовый URL' : 'Base URL', {
+        selector: '#reserve-url',
+      }),
+      { target: { value: 'https://reserve.example' } }
+    );
+    fireEvent.change(
+      screen.getByLabelText(locale.startsWith('ru') ? 'Название модели' : 'Model name', {
+        selector: '#reserve-model',
+      }),
+      { target: { value: 'reserve' } }
+    );
+    fireEvent.submit(
+      screen
+        .getByLabelText(locale.startsWith('ru') ? 'Название модели' : 'Model name', {
+          selector: '#reserve-model',
+        })
+        .closest('form')!
+    );
+    expect(await screen.findByRole('alert')).toHaveTextContent(/auth_failed/);
+    expect(screen.getByRole('heading')).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(
+        ([url, options]) => url === '/api/model/reserve' && options?.method === 'PUT'
+      )
+    ).toBe(true);
   });
   it('resumes the device step from server state after reload and done uses the app handoff URL', async () => {
     fetchMock.mockImplementation(async (url: string) =>
