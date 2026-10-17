@@ -34,6 +34,8 @@ PLATFORM_URL="${LIFEMODEL_PLATFORM_URL:-}"
 PLATFORM_TAG="${LIFEMODEL_PLATFORM_TAG:-}"
 PLATFORM_DIGEST="${LIFEMODEL_PLATFORM_DIGEST:-}"
 EXPLICIT_RELEASE=false
+EXPLICIT_TAG=false
+EXPLICIT_DIGEST=false
 VERIFY_MODE="keyless"
 PUBLIC_KEY_FILE=""
 ISSUER="^https://token\\.actions\\.githubusercontent\\.com$"
@@ -41,6 +43,7 @@ SUBJECT_REGEX="^https://github\\.com/shady2k/lifemodel/\\.github/workflows/relea
 INSECURE_REGISTRY=false
 RENDER_ONLY_DIR=""
 INSTANCE_NAME="lifemodel"
+EXPLICIT_NAME=false
 LAN_INTERFACE=""
 KUBECTL=""
 
@@ -84,13 +87,13 @@ require_value() {
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --platform-url)      require_value "$@"; PLATFORM_URL=$2; EXPLICIT_RELEASE=true; shift 2 ;;
-    --tag)               require_value "$@"; PLATFORM_TAG=$2; EXPLICIT_RELEASE=true; shift 2 ;;
-    --digest)            require_value "$@"; PLATFORM_DIGEST=$2; EXPLICIT_RELEASE=true; shift 2 ;;
+    --tag)               require_value "$@"; PLATFORM_TAG=$2; PLATFORM_DIGEST=""; EXPLICIT_RELEASE=true; EXPLICIT_TAG=true; shift 2 ;;
+    --digest)            require_value "$@"; PLATFORM_DIGEST=$2; PLATFORM_TAG=""; EXPLICIT_RELEASE=true; EXPLICIT_DIGEST=true; shift 2 ;;
     --verify)            require_value "$@"; VERIFY_MODE=$2; shift 2 ;;
     --public-key-file)   require_value "$@"; PUBLIC_KEY_FILE=$2; shift 2 ;;
     --issuer)            require_value "$@"; ISSUER=$2; shift 2 ;;
     --subject-regex)     require_value "$@"; SUBJECT_REGEX=$2; shift 2 ;;
-    --name)               require_value "$@"; INSTANCE_NAME=$2; shift 2 ;;
+    --name)               require_value "$@"; INSTANCE_NAME=$2; EXPLICIT_NAME=true; shift 2 ;;
     --lan-interface)      require_value "$@"; LAN_INTERFACE=$2; shift 2 ;;
     --insecure-registry) INSECURE_REGISTRY=true; shift ;;
     --render-only)       require_value "$@"; RENDER_ONLY_DIR=$2; shift 2 ;;
@@ -100,12 +103,20 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-if [ -f "${LIFEMODEL_INSTANCE_ENV:-/etc/lifemodel/instance.env}" ] && [ "$EXPLICIT_RELEASE" = false ]; then
-  . "${LIFEMODEL_INSTANCE_ENV:-/etc/lifemodel/instance.env}"
-  INSTANCE_NAME=${LIFEMODEL_NAME:-lifemodel}
-  PLATFORM_URL=${LIFEMODEL_PLATFORM_URL:-$PLATFORM_URL}
-  PLATFORM_TAG=${LIFEMODEL_PLATFORM_TAG:-$PLATFORM_TAG}
-  PLATFORM_DIGEST=${LIFEMODEL_PLATFORM_DIGEST:-$PLATFORM_DIGEST}
+instance_env=${LIFEMODEL_INSTANCE_ENV:-${LIFEMODEL_INSTALL_ROOT:-}/etc/lifemodel/instance.env}
+if [ -f "$instance_env" ]; then
+  requested_name=$INSTANCE_NAME
+  # Read the root-owned installer record without overwriting requested flags.
+  saved_name=$( ( . "$instance_env"; printf '%s' "$LIFEMODEL_NAME" ) )
+  if [ "$EXPLICIT_NAME" = true ] && [ "$requested_name" != "$saved_name" ]; then
+    die "instance name is fixed as $saved_name; reinstall to change it"
+  fi
+  INSTANCE_NAME=$saved_name
+  if [ "$EXPLICIT_RELEASE" = false ]; then
+    PLATFORM_URL=$( ( . "$instance_env"; printf '%s' "$LIFEMODEL_PLATFORM_URL" ) )
+    PLATFORM_TAG=$( ( . "$instance_env"; printf '%s' "${LIFEMODEL_PLATFORM_TAG:-}" ) )
+    PLATFORM_DIGEST=$( ( . "$instance_env"; printf '%s' "${LIFEMODEL_PLATFORM_DIGEST:-}" ) )
+  fi
 fi
 [ -n "$PLATFORM_URL" ] || die "this installer has no stamped platform URL"
 
@@ -118,13 +129,20 @@ case "$LAN_INTERFACE" in *[!A-Za-z0-9_.:-]* ) die "--lan-interface must contain 
 [ "${#LAN_INTERFACE}" -le 15 ] || die "--lan-interface must be at most 15 characters"
 case "$LAN_INTERFACE" in cni*|flannel*|veth*|wg*|tun*|tailscale*) [ -z "$LAN_INTERFACE" ] || die "refusing non-LAN interface: $LAN_INTERFACE" ;; esac
 LIFEMODEL_STATE_DIR=${LIFEMODEL_STATE_DIR:-/var/lib/lifemodel}
-shell_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\''/g")"; }
-if [ -n "$PLATFORM_TAG" ] && [ -n "$PLATFORM_DIGEST" ]; then
+shell_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+if { [ "$EXPLICIT_TAG" = true ] && [ "$EXPLICIT_DIGEST" = true ]; } || { [ -n "$PLATFORM_TAG" ] && [ -n "$PLATFORM_DIGEST" ]; }; then
   die "--tag and --digest are mutually exclusive; pass exactly one"
 fi
 if [ -z "$PLATFORM_TAG" ] && [ -z "$PLATFORM_DIGEST" ]; then
   die "this installer has no stamped platform tag or digest"
 fi
+case "$PLATFORM_DIGEST" in
+  "") ;;
+  sha256:*) hex=${PLATFORM_DIGEST#sha256:}; case "$hex" in *[!a-f0-9]*|'') die "invalid platform digest" ;; esac; [ "${#hex}" -eq 64 ] || die "invalid platform digest" ;;
+  *) die "invalid platform digest" ;;
+esac
+case "$PLATFORM_TAG" in *[!A-Za-z0-9_.-]*) die "invalid platform tag" ;; esac
+case "$PLATFORM_URL" in *[!A-Za-z0-9_./:@-]*) die "invalid platform URL" ;; esac
 case "$VERIFY_MODE" in
   keyless) ;;
   key)
@@ -418,12 +436,7 @@ fi
 if [ -n "$installed_name" ] && [ "$installed_name" != "$INSTANCE_NAME" ]; then
   die "instance name is fixed as $installed_name; reinstall to change it"
 fi
-instance_env=${LIFEMODEL_INSTANCE_ENV:-${LIFEMODEL_INSTALL_ROOT}/etc/lifemodel/instance.env}
 mkdir -p "$(dirname "$instance_env")"
-if [ -f "$instance_env" ] && [ "$EXPLICIT_RELEASE" = true ]; then
-  saved_name=$(sed -n 's/^LIFEMODEL_NAME=//p' "$instance_env" | head -n 1 | tr -d "'\"")
-  [ -z "$saved_name" ] || [ "$saved_name" = "$INSTANCE_NAME" ] || die "instance name is fixed as $saved_name; reinstall to change it"
-fi
 instance_env_tmp="$instance_env.tmp"
 {
   printf 'LIFEMODEL_NAME=%s\n' "$(shell_quote "$INSTANCE_NAME")"
@@ -454,7 +467,6 @@ bundle_dir="$cli_lib_dir/bootstrap"
 bundle_templates="$bundle_dir/root"
 bundle_script="$bundle_dir/install.sh"
 bundle_key="$bundle_dir/verification/public-key.pem"
-shell_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 newline='
 '
 case "$LIFEMODEL_STATE_DIR" in *"$newline"*) die 'state directory must not contain a newline' ;; esac
@@ -480,6 +492,10 @@ install -d -m 0755 "$bundle_dir/deploy/cli"
 if [ "$cli_source" != "$bundle_dir/deploy/cli/lifemodel.mjs" ]; then
   install -m 0644 "$cli_source" "$bundle_dir/deploy/cli/lifemodel.mjs"
 fi
+wait_source="$(dirname "$cli_source")/wait-ready.mjs"
+if [ "$wait_source" != "$bundle_dir/deploy/cli/wait-ready.mjs" ]; then
+  install -m 0644 "$wait_source" "$bundle_dir/deploy/cli/wait-ready.mjs"
+fi
 if [ "$VERIFY_MODE" = "key" ] && [ "$PUBLIC_KEY_FILE" != "$bundle_key" ]; then install -m 0600 "$PUBLIC_KEY_FILE" "$bundle_key"; fi
 apply_args=$(node -e 'const [script,url,name,tag,digest,mode,issuer,subject,key,insecure,templates]=process.argv.slice(1); const a=[script,"--platform-url",url,"--name",name]; if(digest) a.push("--digest",digest); else a.push("--tag",tag); a.push("--verify",mode); if(mode==="key") a.push("--public-key-file",key); if(mode==="keyless") a.push("--issuer",issuer,"--subject-regex",subject); if(insecure==="true") a.push("--insecure-registry"); a.push("--root-templates",templates); process.stdout.write(JSON.stringify(a));' -- "$bundle_script" "$PLATFORM_URL" "$INSTANCE_NAME" "$PLATFORM_TAG" "$PLATFORM_DIGEST" "$VERIFY_MODE" "$ISSUER" "$SUBJECT_REGEX" "$bundle_key" "$INSECURE_REGISTRY" "$bundle_templates")
 quoted_args=$(shell_quote "$apply_args")
@@ -492,25 +508,6 @@ EOF
 chmod 0755 "$cli_bin_dir/lifemodel"
 LIFEMODEL_LOCK_FD="$LIFEMODEL_LOCK_FD" LIFEMODEL_LOCK_HELD=1 LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" LIFEMODEL_CONFIGURED_REF="$configured_ref" \
   "$cli_bin_dir/lifemodel" record-applied "$effective_ref"
-# Wait for the loader route using the instance CA, never an insecure TLS bypass.
-ca_file=$(mktemp)
-wait_deadline=$(( $(date +%s) + 600 ))
-ready=0
-while [ "$(date +%s)" -lt "$wait_deadline" ]; do
-  ca_json=$($KUBECTL -n lifemodel-system get configmap lifemodel-ca -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)
-  if [ -n "$ca_json" ]; then
-    printf '%s\n' "$ca_json" > "$ca_file"
-    if curl --silent --show-error --fail --max-time 10 --resolve "boot-$INSTANCE_NAME.local:443:127.0.0.1" --cacert "$ca_file" "https://boot-$INSTANCE_NAME.local/api/state" -o /dev/null; then ready=1; break; fi
-  fi
-  sleep 2
-done
-if [ "$ready" -ne 1 ]; then
-  rm -f "$ca_file"
-  echo "lifemodel not ready: route (first-start step unavailable); run lifemodel doctor" >&2
-  exit 1
-fi
-fingerprint=$(openssl x509 -in "$ca_file" -outform DER | sha256sum | awk '{print $1}')
-rm -f "$ca_file"
-printf 'Address: https://%s.local/\n' "$INSTANCE_NAME"
-printf 'SHA-256 fingerprint of the CA certificate (DER): %s\n' "$fingerprint"
+# Trust only the CA published by this instance; share the verified wait with NixOS.
+LIFEMODEL_NAME="$INSTANCE_NAME" LIFEMODEL_KUBECTL="$KUBECTL" node "$(dirname "$cli_source")/wait-ready.mjs"
 printf 'install.sh: done (k3s v%s, Flux %s, platform source applied)\n' "$K3S_VERSION" "$FLUX_VERSION"

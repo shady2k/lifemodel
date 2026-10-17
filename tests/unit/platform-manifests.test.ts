@@ -124,6 +124,8 @@ function runInstallerHarness(
     sourceDir?: string;
     avahiConfig?: string;
     ufwActive?: boolean;
+    name?: string;
+    savedRelease?: boolean;
   } = {}
 ): { status: number | null; output: string; root: string } {
   const root = existingRoot ?? mkdtempSync(join(tmpdir(), 'lifemodel-installer-test-'));
@@ -139,6 +141,12 @@ function runInstallerHarness(
   };
   command('id', 'echo 0');
   if (options.unsupportedNode) command('node', 'echo 14');
+  else
+    command(
+      'node',
+      `case "$1" in */wait-ready.mjs) exit 0;; esac
+exec ${JSON.stringify(process.execPath)} "$@"`
+    );
   command(
     'k3s',
     `if [ "$1" = --version ]; then echo 'k3s version v1.35.8+k3s1'; exit 0; fi
@@ -201,7 +209,11 @@ esac`
       : join(root, 'state'),
   };
   delete (env as NodeJS.ProcessEnv).KUBECONFIG;
-  const refArgs = options.digest ? ['--digest', options.digest] : ['--tag', tag];
+  const refArgs = options.savedRelease
+    ? []
+    : options.digest
+      ? ['--digest', options.digest]
+      : ['--tag', tag];
   const installScript = options.sourceDir
     ? join(options.sourceDir, 'scripts/install.sh')
     : installer;
@@ -210,20 +222,62 @@ esac`
     'sh',
     [
       installScript,
-      '--platform-url',
-      'oci://example.test/platform',
+      ...(options.savedRelease ? [] : ['--platform-url', 'oci://example.test/platform']),
       ...refArgs,
+      ...(options.name ? ['--name', options.name] : []),
       '--root-templates',
       templates,
       '--lan-interface',
       'eth0',
     ],
-    { encoding: 'utf8', env }
+    { encoding: 'utf8', env, timeout: 30000 }
   );
   return { status: result.status, output: `${result.stdout}${result.stderr}`, root };
 }
 
 describe('platform manifests', () => {
+  it('persists the custom name and digest in etc and keeps them on a parameter-free rerun', () => {
+    const digest = `sha256:${'a'.repeat(64)}`;
+    const first = runInstallerHarness(false, false, undefined, 'unused', { digest, name: 'home' });
+    try {
+      expect(first.status, first.output).toBe(0);
+      const envPath = join(first.root, 'install-root/etc/lifemodel/instance.env');
+      expect(readFileSync(envPath, 'utf8')).toContain(`LIFEMODEL_NAME='home'`);
+      expect(readFileSync(envPath, 'utf8')).toContain(`LIFEMODEL_PLATFORM_DIGEST='${digest}'`);
+      const second = runInstallerHarness(false, false, first.root, 'unused', {
+        savedRelease: true,
+      });
+      expect(second.status, second.output).toBe(0);
+      expect(readFileSync(join(first.root, 'applied-ref'), 'utf8').trim()).toBe(
+        `digest: ${digest}`
+      );
+      expect(readFileSync(envPath, 'utf8')).toContain(`LIFEMODEL_NAME='home'`);
+      const nextDigest = `sha256:${'b'.repeat(64)}`;
+      const next = runInstallerHarness(false, false, first.root, 'unused', { digest: nextDigest });
+      expect(next.status, next.output).toBe(0);
+      expect(readFileSync(envPath, 'utf8')).toContain(`LIFEMODEL_NAME='home'`);
+      expect(readFileSync(envPath, 'utf8')).toContain(`LIFEMODEL_PLATFORM_DIGEST='${nextDigest}'`);
+    } finally {
+      rmSync(first.root, { recursive: true, force: true });
+    }
+  });
+  it('refuses another name even without an explicit release and before host changes', () => {
+    const first = runInstallerHarness(false, false, undefined, 'v1.0.0', { name: 'home' });
+    try {
+      expect(first.status, first.output).toBe(0);
+      const before = readFileSync(join(first.root, 'kubectl.log'), 'utf8');
+      const second = runInstallerHarness(false, false, first.root, 'unused', {
+        name: 'other',
+        savedRelease: true,
+      });
+      expect(second.status).not.toBe(0);
+      expect(second.output).toContain('instance name is fixed as home');
+      expect(readFileSync(join(first.root, 'kubectl.log'), 'utf8')).toBe(before);
+    } finally {
+      rmSync(first.root, { recursive: true, force: true });
+    }
+  });
+
   it('rejects unsafe or forbidden LAN interfaces in render-only and install modes', () => {
     for (const iface of ['wg0', 'eth&0', 'a'.repeat(16), 'eth0;touch']) {
       const result = spawnSync(
@@ -985,6 +1039,10 @@ describe('platform manifests', () => {
     cpSync(
       fileURLToPath(new URL('../../deploy/cli/lifemodel.mjs', import.meta.url)),
       join(sourceDir, 'deploy/cli/lifemodel.mjs')
+    );
+    cpSync(
+      fileURLToPath(new URL('../../deploy/cli/wait-ready.mjs', import.meta.url)),
+      join(sourceDir, 'deploy/cli/wait-ready.mjs')
     );
     const first = runInstallerHarness(false, false, root, 'v1.0.0', { sourceDir });
     const second = runInstallerHarness(false, false, root, 'v2.0.0', { sourceDir });
