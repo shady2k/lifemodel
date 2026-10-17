@@ -360,13 +360,13 @@ fi
 
 cluster_ready=0
 for attempt in $(seq 1 60); do
-  if $KUBECTL get nodes >/dev/null 2>&1; then
+  if $KUBECTL --request-timeout=10s get nodes >/dev/null 2>&1; then
     cluster_ready=1
     break
   fi
   sleep 2
 done
-[ "$cluster_ready" -eq 1 ] || die "k3s did not become ready"
+[ "$cluster_ready" -eq 1 ] || die "lifemodel not ready: k3s; run lifemodel doctor"
 
 # Refuse an unlabelled existing flux-system exactly like the module does.
 if $KUBECTL get namespace flux-system >/dev/null 2>&1; then

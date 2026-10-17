@@ -13,7 +13,8 @@ function execute(command, args, timeout) {
     const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'ignore'] });
     let stdout = '';
     child.stdout.on('data', (data) => {
-      if (stdout.length < 1048576) stdout += data;
+      if (stdout.length + data.length > 1048576) child.kill('SIGKILL');
+      else stdout += data;
     });
     const timer = setTimeout(() => child.kill('SIGKILL'), timeout);
     child.on('error', () => {
@@ -100,6 +101,7 @@ export async function waitReady({ name, kubectl, timeoutMs = 600000, pollMs = 20
                 const result = await execute(
                   'curl',
                   [
+                    '--disable',
                     '--silent',
                     '--show-error',
                     '--noproxy',
@@ -112,6 +114,8 @@ export async function waitReady({ name, kubectl, timeoutMs = 600000, pollMs = 20
                     `boot-${name}.local:443:127.0.0.1`,
                     '--cacert',
                     caFile,
+                    '--capath',
+                    dir,
                     '--output',
                     '/dev/null',
                     '--write-out',
