@@ -24,7 +24,7 @@ class FakeTransport implements WebTransport {
   subscriptions: Array<{
     after: string | null;
     message: (row: TranscriptMessage) => void;
-    state: (row: CreatureStateEvent) => void;
+    state: (row: CreatureStateEvent | null) => void;
   }> = [];
   onRead?: (before?: string) => void;
   constructor(private readonly rows: TranscriptMessage[]) {}

@@ -10,6 +10,20 @@ import type {
   MessageInput,
 } from '../../../src/web/contract.js';
 
+export function parseCreatureStateEvent(value: unknown): CreatureStateEvent | null {
+  if (value === null) return null;
+  if (!value || typeof value !== 'object') throw new Error('Creature state has an invalid shape');
+  const state = value as Partial<CreatureStateEvent>;
+  if (
+    (state.state !== 'thinking' && state.state !== 'awake' && state.state !== 'asleep') ||
+    typeof state.epoch !== 'string' ||
+    typeof state.publishedAt !== 'string' ||
+    Number.isNaN(Date.parse(state.publishedAt))
+  )
+    throw new Error('Creature state has an invalid shape');
+  return state as CreatureStateEvent;
+}
+
 export function parseTranscriptMessage(value: unknown): TranscriptMessage {
   if (!value || typeof value !== 'object')
     throw new Error('Transcript message has an invalid shape');
@@ -32,7 +46,7 @@ export interface WebTransport {
   subscribe(
     after: string | null,
     onMessage: (message: TranscriptMessage) => void,
-    onState: (state: CreatureStateEvent) => void
+    onState: (state: CreatureStateEvent | null) => void
   ): () => void;
 }
 
@@ -73,7 +87,7 @@ export const httpTransport: WebTransport = {
       onMessage(message);
     });
     source.addEventListener('state', (event) => {
-      const state = JSON.parse((event as MessageEvent<string>).data) as CreatureStateEvent;
+      const state = parseCreatureStateEvent(JSON.parse((event as MessageEvent<string>).data));
       onState(state);
     });
     return () => {

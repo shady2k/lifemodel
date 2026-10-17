@@ -131,7 +131,7 @@ function ConversationContent({
   onState,
 }: {
   transport: WebTransport;
-  onState?: (state: CreaturePresenceValue) => void;
+  onState?: (state: CreaturePresenceValue | undefined) => void;
 }) {
   const { t, i18n } = useTranslation();
   const scroller = useRef<HTMLDivElement>(null);
@@ -214,6 +214,7 @@ function ConversationContent({
       (state) => {
         if (state === null) {
           setCreature(undefined);
+          onState?.(undefined);
           return;
         }
         const presence = { state: state.state, publishedAt: state.publishedAt };
@@ -576,7 +577,7 @@ export function Conversation({
   onState,
 }: {
   transport?: WebTransport;
-  onState?: (state: CreaturePresenceValue) => void;
+  onState?: (state: CreaturePresenceValue | undefined) => void;
 }) {
   const [client] = useState(
     () => new QueryClient({ defaultOptions: { queries: { retry: false } } })

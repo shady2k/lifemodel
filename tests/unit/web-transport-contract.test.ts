@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { createWebServer } from '../../src/web/server.js';
 import type { IOwnerMessageIntake } from '../../src/ports/owner-message-intake.js';
 import type { TranscriptRow } from '../../src/ports/transcript.js';
-import { httpTransport, parseTranscriptMessage } from '../../web/app/src/transport.js';
+import {
+  httpTransport,
+  parseCreatureStateEvent,
+  parseTranscriptMessage,
+} from '../../web/app/src/transport.js';
 
 const row: TranscriptRow = {
   sequence: '7',
@@ -60,6 +64,61 @@ describe('web server and browser transport contract', () => {
       expect(parseTranscriptMessage(row)).toEqual(row);
     } finally {
       vi.unstubAllGlobals();
+      await server.close();
+    }
+  });
+
+  it('emits non-null state frames in the shared browser state shape', async () => {
+    const publishedAt = '2026-01-01T00:00:00.000Z';
+    const server = createWebServer({
+      allowedOrigin: 'https://lifemodel.local',
+      instanceName: 'lifemodel',
+      appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
+      runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
+      intake: { acceptOwnerMessage: vi.fn() } as unknown as IOwnerMessageIntake,
+      transcript: {
+        readTranscript: vi.fn().mockResolvedValue({ rows: [], cursor: null }),
+        watchTranscript: vi.fn(() => new Promise<never>(() => undefined)),
+        acquireStreamLease: vi.fn().mockResolvedValue('lease'),
+        releaseStreamLease: vi.fn().mockResolvedValue(undefined),
+      } as never,
+      creatureState: {
+        readCreatureState: vi
+          .fn()
+          .mockResolvedValue({
+            state: 'thinking',
+            epoch: 55,
+            publishedAt: Date.parse(publishedAt),
+          }),
+      },
+      logger: { info: vi.fn() },
+    });
+    const address = await server.listen({ host: '127.0.0.1', port: 0 });
+    const controller = new AbortController();
+    try {
+      const response = await fetch(`${address}/api/events?after=0`, { signal: controller.signal });
+      const reader = response.body!.getReader();
+      let text = '';
+      while (!text.includes('event: state')) {
+        const part = await reader.read();
+        if (part.done) throw new Error('SSE stream ended before the state event');
+        text += new TextDecoder().decode(part.value);
+      }
+      const frame = text.split('\n\n').find((chunk) => chunk.includes('event: state'))!;
+      expect(frame).not.toContain('id:');
+      const json = frame
+        .split('\n')
+        .find((line) => line.startsWith('data: '))!
+        .slice(6);
+      expect(parseCreatureStateEvent(JSON.parse(json))).toEqual({
+        state: 'thinking',
+        epoch: '55',
+        publishedAt,
+      });
+      expect(parseCreatureStateEvent(null)).toBeNull();
+      await reader.cancel();
+    } finally {
+      controller.abort();
       await server.close();
     }
   });
