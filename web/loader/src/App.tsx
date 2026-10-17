@@ -435,7 +435,9 @@ export default function App() {
                       id="reserve-kind"
                       className="flex h-10 w-full rounded-md border border-input bg-background px-3"
                       value={reserveKind}
-                      onChange={(e) => setReserveKind(e.target.value as 'openai' | 'ollama')}
+                      onChange={(e) => {
+                        setReserveKind(e.target.value as 'openai' | 'ollama');
+                      }}
                     >
                       <option value="openai">OpenAI compatible</option>
                       <option value="ollama">Ollama</option>
@@ -447,7 +449,9 @@ export default function App() {
                       id="reserve-url"
                       required
                       value={reserveBaseUrl}
-                      onChange={(e) => setReserveBaseUrl(e.target.value)}
+                      onChange={(e) => {
+                        setReserveBaseUrl(e.target.value);
+                      }}
                     />
                   </div>
                   <div className="space-y-2">
@@ -456,7 +460,9 @@ export default function App() {
                       id="reserve-model"
                       required
                       value={reserveModel}
-                      onChange={(e) => setReserveModel(e.target.value)}
+                      onChange={(e) => {
+                        setReserveModel(e.target.value);
+                      }}
                     />
                   </div>
                   <div className="space-y-2">
@@ -467,7 +473,9 @@ export default function App() {
                       autoComplete="new-password"
                       placeholder={reserve?.keySet ? t('keySet') : ''}
                       value={reserveKey}
-                      onChange={(e) => setReserveKey(e.target.value)}
+                      onChange={(e) => {
+                        setReserveKey(e.target.value);
+                      }}
                     />
                     <p className="text-xs text-muted-foreground">
                       {reserve?.keySet ? t('keySet') : t('keyOptional')}

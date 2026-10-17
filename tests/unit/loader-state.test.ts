@@ -53,6 +53,14 @@ describe('durable loader first writer', () => {
     await state.ensureLayout();
     await state.readOnboarding?.();
     const path = join(root, 'loader', 'onboarding.json');
+    await expect(state.completeDeviceOnboarding?.('2026-10-19T12:00:00.000Z')).rejects.toThrow(
+      'onboarding step conflict'
+    );
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({
+      version: 1,
+      step: 'welcome',
+      completedAt: null,
+    });
     await fs.writeFileAtomic(
       path,
       JSON.stringify({ version: 1, step: 'device', completedAt: null }),
