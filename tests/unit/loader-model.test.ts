@@ -252,6 +252,16 @@ describe('loader model endpoint checker', () => {
     ).rejects.toMatchObject({ code: 'blocked_destination' });
     expect(requests).toBe(1);
   });
+  it('applies the whole-check deadline to stalled DNS resolution', async () => {
+    const check = createModelChecker({
+      timeoutMs: 25,
+      resolveHost: async () => new Promise<string[]>(() => {}),
+    });
+    await expect(
+      check({ kind: 'ollama', baseUrl: 'http://model.test/v1', model: 'tiny' })
+    ).rejects.toMatchObject({ code: 'timeout' });
+  });
+
   it('bounds real local response time and response size', async () => {
     const slow = await listen((_req, _res) => {});
     // Keep this test fast while exercising the same checker deadline via a controllable timer is not possible;

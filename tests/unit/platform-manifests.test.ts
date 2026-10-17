@@ -1120,6 +1120,13 @@ describe('platform manifests', () => {
         rule.to?.[0]?.ipBlock?.except?.includes('10.42.0.0/16')
     );
     expect(unrestrictedModelEgress?.ports).toBeUndefined();
+    expect(unrestrictedModelEgress?.to[0].ipBlock.except).toEqual([
+      '10.42.0.0/16',
+      '10.43.0.0/16',
+      '169.254.0.0/16',
+    ]);
+    // No port selector admits LAN Ollama at 192.168.1.20:11434 and custom HTTPS ports.
+    expect(unrestrictedModelEgress?.ports).toBeUndefined();
     expect(yaml).toContain(
       'The Kubernetes API server authenticates the projected ServiceAccount token'
     );
