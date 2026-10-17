@@ -405,7 +405,11 @@
             effective-ref) echo "$2" ;;
             assert-root-ownership) : ;;
             record-applied) echo applied >> "$BOOTSTRAP_LOG" ;;
-            address) echo address >> "$BOOTSTRAP_LOG" ;;
+            address)
+              [ "$LIFEMODEL_LOCK_FD" = 9 ] && [ "$LIFEMODEL_LOCK_HELD" = 1 ] || exit 1
+              # The child must inherit the writer's open lock, not reacquire it.
+              test -e /proc/self/fd/9 || exit 1
+              echo address >> "$BOOTSTRAP_LOG" ;;
             *) exit 1 ;;
           esac
           EOF

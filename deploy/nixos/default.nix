@@ -206,7 +206,7 @@ in
         # Readiness is CA-verified before logging an address the owner can use.
         LIFEMODEL_NAME=${lib.escapeShellArg cfg.name} LIFEMODEL_KUBECTL="$KUBECTL" \
           node ${../cli/wait-ready.mjs}
-        lifemodel address
+        LIFEMODEL_LOCK_FD=9 LIFEMODEL_LOCK_HELD=1 lifemodel address
       '';
     };
     };
