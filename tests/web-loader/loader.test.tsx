@@ -363,7 +363,24 @@ describe('loader UI', () => {
                 : { ok: true, json: async () => ({}) }
           );
           const { container } = render(<App />);
-          await screen.findByRole('heading');
+          await screen.findByRole('heading', {
+            name:
+              step === 'done'
+                ? language === 'ru'
+                  ? 'Настройки'
+                  : 'Settings'
+                : step === 'welcome'
+                  ? language === 'ru'
+                    ? 'Добро пожаловать в lifemodel'
+                    : 'Welcome to lifemodel'
+                  : step === 'model'
+                    ? language === 'ru'
+                      ? 'Подключите модель'
+                      : 'Connect model access'
+                    : language === 'ru'
+                      ? 'Настройте это устройство'
+                      : 'Set up this device',
+          });
           expect(await axe(container)).toHaveNoViolations();
           if (step === 'model') {
             expect(
@@ -392,7 +409,7 @@ describe('loader UI', () => {
           }
           if (step === 'device') expect(screen.getByText(/SHA-256/)).toBeTruthy();
           if (step === 'done') {
-            expect(fetchMock.mock.calls.some(([url]) => url === '/api/model')).toBe(false);
+            expect(fetchMock.mock.calls.some(([url]) => url === '/api/model')).toBe(true);
             expect(container.textContent).not.toContain(
               language === 'ru' ? 'Защищённое хранилище' : 'Secure storage'
             );
@@ -427,6 +444,97 @@ describe('loader UI', () => {
       expect(screen.getByRole('heading', { name: title })).toBeInTheDocument();
     }
   );
+  it('renders completed settings and keeps a failed model edit unsaved', async () => {
+    const stored = {
+      kind: 'openai',
+      baseUrl: 'https://saved.example',
+      model: 'saved-model',
+      keySet: true,
+    };
+    fetchMock.mockImplementation(async (url: string, options?: RequestInit) => {
+      if (url === '/api/state')
+        return {
+          ok: true,
+          json: async () => ({
+            setupNeeded: false,
+            loggedIn: true,
+            csrfToken: 'csrf',
+            onboarding: { step: 'done', completedAt: 'now' },
+            instanceName: 'lifemodel',
+            caFingerprint: 'fingerprint',
+          }),
+        };
+      if (url === '/api/model')
+        return { ok: true, json: async () => ({ primary: stored, reserve: null }) };
+      if (url === '/api/model/primary' && options?.method === 'PUT')
+        return { ok: false, status: 502, json: async () => ({ error: 'auth_failed' }) };
+      return { ok: true, json: async () => ({}) };
+    });
+    const { container } = render(<App />);
+    expect(await screen.findByRole('heading', { name: 'Settings' })).toBeInTheDocument();
+    expect(await screen.findByLabelText('Base URL', { selector: '#url' })).toHaveValue(
+      stored.baseUrl
+    );
+    expect(screen.getByText('fingerprint')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open the chat', selector: 'a' })).toHaveAttribute(
+      'href',
+      'https://boot-lifemodel.local/login?next=https%3A%2F%2Flifemodel.local%2F'
+    );
+    fireEvent.change(screen.getByLabelText('Base URL', { selector: '#url' }), {
+      target: { value: 'https://changed.example' },
+    });
+    fireEvent.submit(screen.getByLabelText('Base URL', { selector: '#url' }).closest('form')!);
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The model rejected the credentials.'
+    );
+    expect(screen.getByLabelText('Base URL', { selector: '#url' })).toHaveValue(
+      'https://changed.example'
+    );
+    expect(
+      fetchMock.mock.calls.filter(
+        ([url, options]) => url === '/api/model/primary' && options?.method === 'PUT'
+      )
+    ).toHaveLength(1);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('changes the password through the settings form and reports a wrong current password', async () => {
+    fetchMock.mockImplementation(async (url: string, options?: RequestInit) => {
+      if (url === '/api/state')
+        return {
+          ok: true,
+          json: async () => ({
+            setupNeeded: false,
+            loggedIn: true,
+            csrfToken: 'csrf',
+            onboarding: { step: 'done', completedAt: 'now' },
+          }),
+        };
+      if (url === '/api/model')
+        return { ok: true, json: async () => ({ primary: null, reserve: null }) };
+      if (url === '/api/password')
+        return String(options?.body).includes('wrong')
+          ? { ok: false, status: 401 }
+          : { ok: true, json: async () => ({ ok: true }) };
+      return { ok: true, json: async () => ({}) };
+    });
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Settings' });
+    fireEvent.change(screen.getByLabelText('Current password'), { target: { value: 'wrong' } });
+    fireEvent.change(screen.getByLabelText('New password'), {
+      target: { value: 'a new secure password' },
+    });
+    fireEvent.submit(screen.getByLabelText('New password').closest('form')!);
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The current password is incorrect.'
+    );
+    expect(
+      fetchMock.mock.calls.some(
+        ([url, options]) => url === '/api/password' && options?.method === 'POST'
+      )
+    ).toBe(true);
+  });
+
   it('keeps the model step and shows the safe check error when endpoint check fails', async () => {
     fetchMock.mockImplementation(async (url: string) =>
       url === '/api/state'
@@ -577,7 +685,9 @@ describe('loader UI', () => {
           : { ok: true, json: async () => ({}) }
     );
     render(<App />);
-    expect(await screen.findByRole('link', { name: 'Open the chat' })).toHaveAttribute(
+    expect(
+      await screen.findByRole('link', { name: 'Open the chat', selector: 'a' })
+    ).toHaveAttribute(
       'href',
       'https://boot-lifemodel.local/login?next=https%3A%2F%2Flifemodel.local%2F'
     );
