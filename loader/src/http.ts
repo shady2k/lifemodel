@@ -616,9 +616,8 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         try {
           const onboarding = await state.readOnboarding?.();
           if (
-            !onboarding ||
-            onboarding.step !== 'device' ||
-            onboarding.completedAt !== null ||
+            onboarding?.step !== 'device' ||
+            onboarding?.completedAt !== null ||
             !state.completeDeviceOnboarding
           ) {
             res.writeHead(409);
