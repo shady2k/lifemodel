@@ -46,6 +46,7 @@ async function start(
     saveModelOnboarding: async () => {
       onboardingSaves += 1;
     },
+    readOnboarding: async () => ({ version: 1, step: 'done', completedAt: 'now' }),
   };
   const clock = createTestClock();
   const recorded: RecordedLine[] = [];
@@ -231,6 +232,41 @@ describe('loader ForwardAuth and JSON authentication API', () => {
     );
   });
 
+  it.each(['/api/setup', '/api/login'] as const)(
+    'does not issue a handoff from %s while onboarding is unfinished',
+    async (path) => {
+      const record = path === '/api/login' ? await hashPassword('owner password') : null;
+      const { base } = await start(record, undefined, undefined, undefined, {
+        ensureLayout: async () => {},
+        readAuth: async () => record,
+        writeAuth: async () => {},
+        replaceAuth: async () => {},
+        savePasswordOnboarding: async () => {},
+        readOnboarding: async () => ({ version: 1, step: 'model', completedAt: null }),
+      });
+      const result = await request(
+        base,
+        path,
+        {
+          host: 'boot-lifemodel.local',
+          origin: 'https://boot-lifemodel.local',
+          'content-type': 'application/json',
+        },
+        'POST',
+        JSON.stringify({
+          password: path === '/api/setup' ? 'secure owner password' : 'owner password',
+          next: 'https://lifemodel.local/private',
+        })
+      );
+      expect(result.status).toBe(200);
+      expect(JSON.parse(result.body)).toEqual({ ok: true });
+      if (path === '/api/login') {
+        const token = String(result.headers['set-cookie']).split(';')[0]!;
+        expect((await request(base, '/_auth/verify', { cookie: token })).status).toBe(200);
+      }
+    }
+  );
+
   it('transfers login through a one-time handoff ticket and the cookie verifies', async () => {
     const record = await hashPassword('owner password');
     const { base, clock } = await start(record);
@@ -269,7 +305,7 @@ describe('loader ForwardAuth and JSON authentication API', () => {
     ).toBeUndefined();
   });
 
-  it('preserves a vetted app destination through first-visit setup and creates its handoff ticket', async () => {
+  it('does not issue a handoff before onboarding is complete during first-visit setup', async () => {
     const { base } = await start(null);
     const requested = 'https://lifemodel.local/private?from=setup';
     const entry = await request(base, `/?next=${encodeURIComponent(requested)}`, {
@@ -289,9 +325,7 @@ describe('loader ForwardAuth and JSON authentication API', () => {
       JSON.stringify({ password: 'secure owner password', next: requested })
     );
     expect(setup.status).toBe(200);
-    const redirectTo = JSON.parse(String(setup.body))['redirectTo'] as string;
-    expect(redirectTo).toMatch(/^https:\/\/lifemodel\.local\/_auth\/handoff\?code=/);
-    expect(redirectTo).toContain(`next=${encodeURIComponent('/private?from=setup')}`);
+    expect(JSON.parse(String(setup.body))).toEqual({ ok: true });
     const rejected = await request(
       base,
       '/api/setup',

@@ -13,6 +13,7 @@ let fetchMock: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   dark = false;
   listeners = [];
+  HTMLElement.prototype.scrollIntoView = vi.fn();
   window.matchMedia = (media) => ({
     get matches() {
       return media.includes('prefers-color-scheme') ? dark : false;
@@ -141,6 +142,172 @@ describe('loader UI', () => {
     expect(fetchMock.mock.calls[2]?.[0]).toBe('/api/login');
     expect(String(fetchMock.mock.calls[2]?.[1]?.body)).toContain('correct');
   });
+  it('uses the kit provider Select controls and supports choosing both providers', async () => {
+    await i18n.changeLanguage('en');
+    fetchMock.mockImplementation(async (url: string) =>
+      url === '/api/state'
+        ? {
+            ok: true,
+            json: async () => ({
+              setupNeeded: false,
+              loggedIn: true,
+              onboarding: { step: 'model', completedAt: null },
+            }),
+          }
+        : { ok: true, json: async () => ({ primary: null, reserve: null }) }
+    );
+    const { container } = render(<App />);
+    await screen.findByRole('heading', { name: 'Connect model access' });
+    expect(container.querySelector('[data-slot=select-trigger]')).toBeInTheDocument();
+    expect(container.querySelector('#kind')).not.toBeInstanceOf(HTMLSelectElement);
+    expect(container.querySelector('#kind')).toHaveAttribute('role', 'combobox');
+    fireEvent.click(screen.getByRole('combobox'));
+    expect(await screen.findByRole('option', { name: 'Ollama' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('option', { name: 'Ollama' }));
+    expect(screen.getByRole('combobox').textContent).toContain('Ollama');
+    fireEvent.click(screen.getByRole('button', { name: 'Reserve model (optional)' }));
+    const combos = screen.getAllByRole('combobox');
+    expect(combos).toHaveLength(2);
+    expect(combos[1]).not.toBeInstanceOf(HTMLSelectElement);
+    fireEvent.click(combos[1]!);
+    expect(await screen.findByRole('option', { name: 'OpenAI compatible' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('option', { name: 'OpenAI compatible' }));
+    expect(combos[1]?.textContent).toContain('OpenAI compatible');
+  });
+  it.each([
+    ['en-US', 'Reserve model (optional)', 'The model rejected the credentials.'],
+    ['ru-RU', 'Резервная модель (необязательно)', 'Модель отклонила учётные данные.'],
+  ] as const)(
+    'does not prefill either stored API key and shows exact reserve errors (%s)',
+    async (locale, summary, explanation) => {
+      Object.defineProperty(navigator, 'language', { configurable: true, value: locale });
+      fetchMock.mockImplementation(async (url: string) =>
+        url === '/api/state'
+          ? {
+              ok: true,
+              json: async () => ({
+                setupNeeded: false,
+                loggedIn: true,
+                csrfToken: 'csrf',
+                onboarding: { step: 'model', completedAt: null },
+              }),
+            }
+          : url === '/api/model'
+            ? {
+                ok: true,
+                json: async () => ({
+                  primary: {
+                    kind: 'openai',
+                    baseUrl: 'https://primary.example',
+                    model: 'primary',
+                    keySet: true,
+                  },
+                  reserve: {
+                    kind: 'ollama',
+                    baseUrl: 'https://reserve.example',
+                    model: 'reserve',
+                    keySet: true,
+                  },
+                }),
+              }
+            : { ok: false, json: async () => ({ error: 'auth_failed' }) }
+      );
+      const { container } = render(<App />);
+      await screen.findByRole('heading', {
+        name: locale.startsWith('ru') ? 'Подключите модель' : 'Connect model access',
+      });
+      await waitFor(() => {
+        expect(
+          screen.getByLabelText(locale.startsWith('ru') ? 'Ключ API' : 'API key', {
+            selector: '#key',
+          })
+        ).toHaveValue('');
+        expect(
+          screen.getByLabelText(locale.startsWith('ru') ? 'Ключ API' : 'API key', {
+            selector: '#key',
+          })
+        ).toHaveAttribute(
+          'placeholder',
+          locale.startsWith('ru')
+            ? 'Ключ задан; оставьте поле пустым, чтобы сохранить его.'
+            : 'Key is set; leave blank to keep it.'
+        );
+      });
+      fireEvent.click(screen.getByRole('button', { name: summary }));
+      await waitFor(() => {
+        expect(container.querySelector('#reserve-key')).toHaveValue('');
+        expect(container.querySelector('#reserve-key')).toHaveAttribute(
+          'placeholder',
+          locale.startsWith('ru')
+            ? 'Ключ задан; оставьте поле пустым, чтобы сохранить его.'
+            : 'Key is set; leave blank to keep it.'
+        );
+      });
+      fireEvent.change(
+        screen.getByLabelText(locale.startsWith('ru') ? 'Базовый URL' : 'Base URL', {
+          selector: '#reserve-url',
+        }),
+        { target: { value: 'https://reserve.example' } }
+      );
+      fireEvent.change(
+        screen.getByLabelText(locale.startsWith('ru') ? 'Название модели' : 'Model name', {
+          selector: '#reserve-model',
+        }),
+        { target: { value: 'reserve' } }
+      );
+      fireEvent.submit(
+        screen
+          .getByLabelText(locale.startsWith('ru') ? 'Название модели' : 'Model name', {
+            selector: '#reserve-model',
+          })
+          .closest('form')!
+      );
+      const alert = await screen.findByRole('alert');
+      expect(alert.textContent).toBe(explanation);
+      expect(alert.textContent).not.toContain('auth_failed');
+      expect(
+        screen.getByRole('heading', {
+          name: locale.startsWith('ru') ? 'Подключите модель' : 'Connect model access',
+        })
+      ).toBeInTheDocument();
+    }
+  );
+  it('logs in to the server-authorized next handoff after onboarding is done', async () => {
+    const next = 'https://lifemodel.local/private';
+    window.history.replaceState({}, '', `/login?next=${encodeURIComponent(next)}`);
+    const assign = vi.fn();
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...window.location, search: `?next=${encodeURIComponent(next)}`, assign },
+    });
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ setupNeeded: false, loggedIn: false }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          redirectTo: 'https://lifemodel.local/_auth/handoff?code=opaque&next=%2Fprivate',
+        }),
+      });
+    render(<App />);
+    const field = await screen.findByLabelText('Password');
+    fireEvent.change(field, { target: { value: 'correct' } });
+    fireEvent.submit(field.closest('form')!);
+    await waitFor(() =>
+      expect(assign).toHaveBeenCalledWith(
+        'https://lifemodel.local/_auth/handoff?code=opaque&next=%2Fprivate'
+      )
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+      password: 'correct',
+      next,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
   it('follows system theme changes live', async () => {
     await i18n.changeLanguage('en');
     render(<App />);
@@ -224,6 +391,12 @@ describe('loader UI', () => {
             await waitFor(() => expect(container.querySelector('#reserve-key')).toHaveValue(''));
           }
           if (step === 'device') expect(screen.getByText(/SHA-256/)).toBeTruthy();
+          if (step === 'done') {
+            expect(fetchMock.mock.calls.some(([url]) => url === '/api/model')).toBe(false);
+            expect(container.textContent).not.toContain(
+              language === 'ru' ? 'Защищённое хранилище' : 'Secure storage'
+            );
+          }
         }
     }
   );

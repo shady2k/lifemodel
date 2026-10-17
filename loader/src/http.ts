@@ -330,7 +330,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           }
           await state.savePasswordOnboarding?.();
           const token = createSession(record, clock.now());
-          const location = next === null ? null : handoffRedirect(token, next, requestHost);
+          const location = null;
           res.writeHead(200, {
             'content-type': 'application/json; charset=utf-8',
             'set-cookie': sessionCookie(token, req.headers.host ?? ''),
@@ -349,7 +349,11 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         }
         await state.reconcilePasswordOnboarding?.();
         const token = createSession(record, clock.now());
-        const location = next === null ? null : handoffRedirect(token, next, requestHost);
+        const onboarding = await state.readOnboarding?.();
+        const location =
+          next === null || onboarding?.step !== 'done'
+            ? null
+            : handoffRedirect(token, next, requestHost);
         res.writeHead(200, {
           'content-type': 'application/json; charset=utf-8',
           'set-cookie': sessionCookie(token, req.headers.host ?? ''),

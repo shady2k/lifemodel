@@ -65,7 +65,7 @@ export default function App() {
     if (typeof value.setupNeeded !== 'boolean' || typeof value.loggedIn !== 'boolean')
       throw new Error('state');
     setState(value);
-    if (value.loggedIn) {
+    if (value.loggedIn && value.onboarding?.step !== 'done') {
       const models = await fetch('/api/model', { cache: 'no-store' });
       if (!models.ok) {
         const body = (await models.json().catch(() => ({}))) as { error?: string };
@@ -110,13 +110,19 @@ export default function App() {
     setBusy(true);
     setError('');
     try {
+      const next = new URLSearchParams(window.location.search).get('next');
       const response = await fetch(state?.setupNeeded ? '/api/setup' : '/api/login', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({ password, ...(next ? { next } : {}) }),
       });
       if (!response.ok) {
         setError(response.status === 401 ? t('wrong') : t('setupError'));
+        return;
+      }
+      const result = (await response.json().catch(() => ({}))) as { redirectTo?: string };
+      if (result.redirectTo) {
+        window.location.assign(result.redirectTo);
         return;
       }
       await load();
