@@ -584,7 +584,9 @@ export default function App() {
                       autoComplete="current-password"
                       required
                       value={currentPassword}
-                      onChange={(e) => setCurrentPassword(e.target.value)}
+                      onChange={(e) => {
+                        setCurrentPassword(e.target.value);
+                      }}
                     />
                   </div>
                   <div className="space-y-2">
@@ -596,7 +598,9 @@ export default function App() {
                       minLength={12}
                       required
                       value={newPassword}
-                      onChange={(e) => setNewPassword(e.target.value)}
+                      onChange={(e) => {
+                        setNewPassword(e.target.value);
+                      }}
                     />
                     <p className="text-xs text-muted-foreground">{t('minimumPassword')}</p>
                   </div>
