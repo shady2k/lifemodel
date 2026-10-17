@@ -353,8 +353,8 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         const token = record === null ? null : sessionToken(req, record);
         if (
           token === null ||
-          origin === undefined ||
-          !sameOrigin(origin, undefined, `boot-${config.instanceName}.local`) ||
+          (origin !== undefined &&
+            !sameOrigin(origin, undefined, `boot-${config.instanceName}.local`)) ||
           (fetchSite !== undefined && fetchSite !== 'same-origin')
         ) {
           res.writeHead(403);
