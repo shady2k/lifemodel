@@ -20,7 +20,8 @@
     "tooltip",
     "card",
     "label",
-    "alert"
+    "alert",
+    "select"
   ],
   "files": [
     {
@@ -49,11 +50,11 @@
     },
     {
       "path": "components/ui/code-block.tsx",
-      "sha256": "e1f0b81a059229c8867d8645b2e27fafc4df738ba2fb6cb2e37b55f6797815bd"
+      "sha256": "d81e234a3977b8dd022e0b9ea6d03b7ae03e4814f8532376894747afc5207f46"
     },
     {
       "path": "components/ui/input-group.tsx",
-      "sha256": "10119ab7b3a14dff23f7840d169b8c298c37a5e6d8c4e9058d3088e827a43dd2"
+      "sha256": "7db32d31c811770ab26e3a7ce75cc5dc157c36eae3656a10ed6e42f9cd7cf414"
     },
     {
       "path": "components/ui/input.tsx",
@@ -69,11 +70,15 @@
     },
     {
       "path": "components/ui/message-scroller.tsx",
-      "sha256": "1b46c2b678c6cdfe3501fa4ccfbbf20ef62d6b56369b25f2c0ccee027ee0e1ba"
+      "sha256": "801e36dd7965660ae80ab90ac63162b3cbdf983ea5241d333749686a5d200732"
     },
     {
       "path": "components/ui/message.tsx",
       "sha256": "64e9ae0f9d1e268b0ed7b738a53d374d273fe1e7e2dd7b35ad7417e50a9bbe6c"
+    },
+    {
+      "path": "components/ui/select.tsx",
+      "sha256": "d0ea3b62332be501636ac37920eb457afa5201e57a9f090eb1fc8effe14d7fc3"
     },
     {
       "path": "components/ui/separator.tsx",
@@ -81,11 +86,11 @@
     },
     {
       "path": "components/ui/sheet.tsx",
-      "sha256": "b3a72b81a850c595e13362dca52eefef2f97e1ac7cbe06dbde15ef9805f9b9fd"
+      "sha256": "bcc511451e5a6c82351bc2463a19bbde19069cbd8411ec33251abdde0ea98093"
     },
     {
       "path": "components/ui/sidebar.tsx",
-      "sha256": "942e3e9800040ca4a7222751ef902a6b3fb7df85e3e508d5abbe91f9e216d53d"
+      "sha256": "1dcce388db96fd0b66ddb8e976ac56dc5a576cb24d5380240c5ab24c9569d800"
     },
     {
       "path": "components/ui/skeleton.tsx",

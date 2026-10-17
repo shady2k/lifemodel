@@ -46,6 +46,7 @@ async function start(
     saveModelOnboarding: async () => {
       onboardingSaves += 1;
     },
+    readOnboarding: async () => ({ version: 1, step: 'done', completedAt: 'now' }),
   };
   const clock = createTestClock();
   const recorded: RecordedLine[] = [];
@@ -121,6 +122,60 @@ async function request(
   });
 }
 
+describe('real boot-host onboarding redirects', () => {
+  it.each([
+    '/setup?next=https%3A%2F%2Flifemodel.local%2F',
+    '/login?next=https%3A%2F%2Flifemodel.local%2F',
+  ])('serves the wizard for unfinished authenticated onboarding at %s', async (path) => {
+    const record = await hashPassword('owner password');
+    let step = 'model';
+    const uiRoot = mkdtempSync(join(tmpdir(), 'loader-ui-'));
+    roots.push(uiRoot);
+    writeFileSync(join(uiRoot, 'index.html'), '<div id="root"></div>');
+    const { base } = await start(record, uiRoot, undefined, undefined, {
+      ensureLayout: async () => {},
+      readAuth: async () => record,
+      writeAuth: async () => {},
+      replaceAuth: async () => {},
+      readOnboarding: async () => ({ version: 1, step, completedAt: null }),
+      reconcilePasswordOnboarding: async () => {},
+    });
+    const response = await request(base, path, {
+      host: 'boot-lifemodel.local',
+      cookie: `__Host-lm_session=${createSession(record, Date.now())}`,
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.location).toBeUndefined();
+    expect(response.body).toContain('<div id="root">');
+    step = 'done';
+  });
+});
+
+describe('completed boot-host onboarding redirects', () => {
+  it('hands a completed boot session to its vetted app destination', async () => {
+    const record = await hashPassword('owner password');
+    const uiRoot = mkdtempSync(join(tmpdir(), 'loader-ui-done-'));
+    roots.push(uiRoot);
+    writeFileSync(join(uiRoot, 'index.html'), '<div id="root"></div>');
+    const { base } = await start(record, uiRoot, undefined, undefined, {
+      ensureLayout: async () => {},
+      readAuth: async () => record,
+      writeAuth: async () => {},
+      replaceAuth: async () => {},
+      readOnboarding: async () => ({ version: 1, step: 'done', completedAt: 'now' }),
+      reconcilePasswordOnboarding: async () => {},
+    });
+    const cookie = `__Host-lm_session=${createSession(record, Date.now())}`;
+    const response = await request(base, '/login?next=https%3A%2F%2Flifemodel.local%2Fchat', {
+      host: 'boot-lifemodel.local',
+      cookie,
+    });
+    expect(response.status).toBe(303);
+    expect(response.headers.location).toMatch(/^https:\/\/lifemodel\.local\/_auth\/handoff\?code=/);
+    expect(String(response.headers.location)).toContain('next=%2Fchat');
+  });
+});
+
 describe('loader ForwardAuth and JSON authentication API', () => {
   it('accepts a valid session only on the exact service verification route', async () => {
     const record = await hashPassword('owner password');
@@ -177,6 +232,41 @@ describe('loader ForwardAuth and JSON authentication API', () => {
     );
   });
 
+  it.each(['/api/setup', '/api/login'] as const)(
+    'does not issue a handoff from %s while onboarding is unfinished',
+    async (path) => {
+      const record = path === '/api/login' ? await hashPassword('owner password') : null;
+      const { base } = await start(record, undefined, undefined, undefined, {
+        ensureLayout: async () => {},
+        readAuth: async () => record,
+        writeAuth: async () => {},
+        replaceAuth: async () => {},
+        savePasswordOnboarding: async () => {},
+        readOnboarding: async () => ({ version: 1, step: 'model', completedAt: null }),
+      });
+      const result = await request(
+        base,
+        path,
+        {
+          host: 'boot-lifemodel.local',
+          origin: 'https://boot-lifemodel.local',
+          'content-type': 'application/json',
+        },
+        'POST',
+        JSON.stringify({
+          password: path === '/api/setup' ? 'secure owner password' : 'owner password',
+          next: 'https://lifemodel.local/private',
+        })
+      );
+      expect(result.status).toBe(200);
+      expect(JSON.parse(result.body)).toEqual({ ok: true });
+      if (path === '/api/login') {
+        const token = String(result.headers['set-cookie']).split(';')[0]!;
+        expect((await request(base, '/_auth/verify', { cookie: token })).status).toBe(200);
+      }
+    }
+  );
+
   it('transfers login through a one-time handoff ticket and the cookie verifies', async () => {
     const record = await hashPassword('owner password');
     const { base, clock } = await start(record);
@@ -215,7 +305,7 @@ describe('loader ForwardAuth and JSON authentication API', () => {
     ).toBeUndefined();
   });
 
-  it('preserves a vetted app destination through first-visit setup and creates its handoff ticket', async () => {
+  it('does not issue a handoff before onboarding is complete during first-visit setup', async () => {
     const { base } = await start(null);
     const requested = 'https://lifemodel.local/private?from=setup';
     const entry = await request(base, `/?next=${encodeURIComponent(requested)}`, {
@@ -235,9 +325,7 @@ describe('loader ForwardAuth and JSON authentication API', () => {
       JSON.stringify({ password: 'secure owner password', next: requested })
     );
     expect(setup.status).toBe(200);
-    const redirectTo = JSON.parse(String(setup.body))['redirectTo'] as string;
-    expect(redirectTo).toMatch(/^https:\/\/lifemodel\.local\/_auth\/handoff\?code=/);
-    expect(redirectTo).toContain(`next=${encodeURIComponent('/private?from=setup')}`);
+    expect(JSON.parse(String(setup.body))).toEqual({ ok: true });
     const rejected = await request(
       base,
       '/api/setup',
@@ -892,8 +980,10 @@ describe('loader static UI and JSON API', () => {
       'PUT',
       JSON.stringify({ kind: 'openai', baseUrl: 'https://models.example/v1', model: 'kept' })
     );
+    const onboardingBeforeReserve = getOnboardingSaves();
     expect(kept.status).toBe(200);
     expect(saved?.key).toBe('reserve-key');
+    expect(getOnboardingSaves()).toBe(onboardingBeforeReserve);
     const reserveClear = await request(base, '/api/model/reserve', headers, 'DELETE', '{}');
     expect(reserveClear.status).toBe(200);
     expect(saved).toBeNull();
@@ -1167,5 +1257,94 @@ describe('loader static UI and JSON API', () => {
     );
     expect(response.status).toBe(200);
     expect((await state.readOnboarding?.())?.step).toBe('device');
+  });
+  it('acknowledges the device only from the device step and records completion', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'loader-device-'));
+    roots.push(root);
+    const config = loadConfig({ LIFEMODEL_NAME: 'lifemodel', LIFEMODEL_VOLUME: root });
+    const realState = createLoaderState({
+      fs: createNodeFileSystem(),
+      config: { ...config, volumeRoot: root, loaderDir: join(root, 'loader') },
+      logger: createRecordingLogger([]),
+    });
+    await realState.ensureLayout();
+    const record = await hashPassword('owner password');
+    await realState.writeAuth(record);
+    const { base, clock } = await start(record, undefined, undefined, undefined, realState);
+    const cookie = `__Host-lm_session=${createSession(record, clock.now())}`;
+    const anonymousState = await request(base, '/api/state', { host: 'boot-lifemodel.local' });
+    expect(JSON.parse(anonymousState.body)).toEqual({ setupNeeded: false, loggedIn: false });
+    const headers = {
+      host: 'boot-lifemodel.local',
+      cookie,
+      origin: 'https://boot-lifemodel.local',
+      'content-type': 'application/json',
+    };
+    const csrf = JSON.parse(
+      (await request(base, '/api/state', { host: headers.host, cookie })).body
+    ).csrfToken as string;
+    const route = '/api/onboarding/device';
+    const csrfHeaders = { ...headers, 'x-csrf-token': csrf };
+    expect(
+      (
+        await request(
+          base,
+          route,
+          { host: headers.host, origin: headers.origin, 'content-type': 'application/json' },
+          'POST',
+          '{}'
+        )
+      ).status
+    ).toBe(401);
+    for (const change of [
+      { origin: undefined },
+      { origin: 'null' },
+      { origin: 'https://sibling.local' },
+      { 'content-type': 'text/plain' },
+      { 'x-csrf-token': undefined },
+    ]) {
+      const badHeaders: Record<string, string> = { ...csrfHeaders };
+      for (const [key, value] of Object.entries(change)) {
+        if (value === undefined) delete badHeaders[key];
+        else badHeaders[key] = value;
+      }
+      const rejected = await request(base, route, badHeaders, 'POST', '{}');
+      const expected =
+        ('origin' in change && change.origin === undefined) ||
+        change.origin === 'null' ||
+        change.origin === 'https://sibling.local' ||
+        'x-csrf-token' in change
+          ? 403
+          : 415;
+      expect(rejected.status).toBe(expected);
+    }
+    expect((await request(base, route, csrfHeaders, 'PUT', '{}')).status).toBe(405);
+    expect((await request(base, route, csrfHeaders, 'POST', '{}')).status).toBe(409);
+    expect((await realState.readOnboarding?.())?.step).toBe('model');
+    expect((await request(base, route, csrfHeaders, 'POST', 'null')).status).toBe(400);
+    await realState.savePasswordOnboarding?.();
+    for (const step of ['password', 'model'] as const) {
+      writeFileSync(
+        join(root, 'loader', 'onboarding.json'),
+        JSON.stringify({ version: 1, step, completedAt: null })
+      );
+      expect((await request(base, route, csrfHeaders, 'POST', '{}')).status).toBe(409);
+    }
+    await realState.saveModelOnboarding?.();
+    expect((await realState.readOnboarding?.())?.step).toBe('device');
+    for (const body of ['null', '[]', '1', '"text"', '{"unexpected":true}']) {
+      expect((await request(base, route, csrfHeaders, 'POST', body)).status).toBe(400);
+    }
+    expect((await request(base, route, csrfHeaders, 'POST', ' '.repeat(8193))).status).toBe(413);
+    const accepted = await request(base, route, csrfHeaders, 'POST', '{}');
+    expect(accepted.status).toBe(200);
+    expect((await realState.readOnboarding?.())?.step).toBe('done');
+    expect((await realState.readOnboarding?.())?.completedAt).toBeTruthy();
+    expect((await request(base, route, csrfHeaders, 'POST', '{}')).status).toBe(409);
+    writeFileSync(
+      join(root, 'loader', 'onboarding.json'),
+      JSON.stringify({ version: 1, step: 'done', completedAt: 'earlier' })
+    );
+    expect((await request(base, route, csrfHeaders, 'POST', '{}')).status).toBe(409);
   });
 });
