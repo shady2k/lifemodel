@@ -59,6 +59,7 @@ const API_METHODS: Record<string, string> = {
   '/api/setup': 'POST',
   '/api/login': 'POST',
   '/api/logout': 'POST',
+  '/api/onboarding/device': 'POST',
   '/api/model': 'GET',
   '/api/model/primary': 'PUT',
   '/api/model/reserve': 'PUT',
@@ -200,7 +201,10 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           path === '/api/model' ||
           path.startsWith('/assets/'))) ||
       (method === 'POST' &&
-        (path === '/api/setup' || path === '/api/login' || path === '/api/logout')) ||
+        (path === '/api/setup' ||
+          path === '/api/login' ||
+          path === '/api/logout' ||
+          path === '/api/onboarding/device')) ||
       (method === 'PUT' && (path === '/api/model/primary' || path === '/api/model/reserve')) ||
       (method === 'DELETE' && path === '/api/model/reserve');
     if (
@@ -239,7 +243,12 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
             loggedIn: token !== null,
             ...(record !== null && token !== null ? { csrfToken: csrfToken(record, token) } : {}),
             ...(token !== null && state.readOnboarding !== undefined
-              ? { onboarding: await state.readOnboarding() }
+              ? {
+                  onboarding: await state.readOnboarding(),
+                  instanceName: config.instanceName,
+                  caFingerprint:
+                    (await pki.report()).caFingerprint ?? (await pki.report()).fingerprint,
+                }
               : {}),
           })
         );
@@ -316,6 +325,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
             res.end('{"error":"already_setup"}');
             return;
           }
+          await state.savePasswordOnboarding?.();
           const token = createSession(record, clock.now());
           const location = next === null ? null : handoffRedirect(token, next, requestHost);
           res.writeHead(200, {
@@ -546,6 +556,84 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         } catch {
           res.writeHead(503);
           res.end('{"error":"storage_unavailable"}');
+        }
+        return;
+      }
+      if (path === '/api/onboarding/device' && method === 'POST') {
+        const record = await state.readAuth();
+        const token = record === null ? null : sessionToken(req, record);
+        if (record === null || token === null) {
+          res.writeHead(401);
+          res.end();
+          return;
+        }
+        if (
+          refuseOrigin(req) !== null ||
+          !verifyCsrf(header(req, 'x-csrf-token') ?? '', record, token)
+        ) {
+          res.writeHead(403);
+          res.end('{"error":"origin_or_csrf"}');
+          return;
+        }
+        if (
+          header(req, 'content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json'
+        ) {
+          res.writeHead(415);
+          res.end('{"error":"content_type"}');
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let size = 0;
+        for await (const chunk of req) {
+          const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          size += part.length;
+          if (size > MAX_FORM_BYTES) break;
+          chunks.push(Buffer.from(part));
+        }
+        if (size > MAX_FORM_BYTES) {
+          res.writeHead(413);
+          res.end('{"error":"body_too_large"}');
+          return;
+        }
+        let payload: unknown;
+        try {
+          payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        } catch {
+          res.writeHead(400);
+          res.end('{"error":"invalid_body"}');
+          return;
+        }
+        if (
+          typeof payload !== 'object' ||
+          payload === null ||
+          Array.isArray(payload) ||
+          Object.keys(payload).length !== 0
+        ) {
+          res.writeHead(400);
+          res.end('{"error":"invalid_body"}');
+          return;
+        }
+        try {
+          const onboarding = await state.readOnboarding?.();
+          if (
+            !onboarding ||
+            onboarding.step !== 'device' ||
+            onboarding.completedAt !== null ||
+            !state.completeDeviceOnboarding
+          ) {
+            res.writeHead(409);
+            res.end('{"error":"step_conflict"}');
+            return;
+          }
+          await state.completeDeviceOnboarding(new Date(clock.now()).toISOString());
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+          });
+          res.end('{"ok":true}');
+        } catch {
+          res.writeHead(409);
+          res.end('{"error":"step_conflict"}');
         }
         return;
       }

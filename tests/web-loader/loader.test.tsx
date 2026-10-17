@@ -25,9 +25,14 @@ beforeEach(() => {
     removeEventListener: () => {},
     dispatchEvent: () => true,
   });
-  fetchMock = vi
-    .fn()
-    .mockResolvedValue({ ok: true, json: async () => ({ setupNeeded: true, loggedIn: false }) });
+  fetchMock = vi.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      setupNeeded: true,
+      loggedIn: false,
+      onboarding: { step: 'password', completedAt: null },
+    }),
+  });
   vi.stubGlobal('fetch', fetchMock);
   Object.defineProperty(navigator, 'language', { configurable: true, value: 'en-US' });
 });
@@ -57,7 +62,11 @@ describe('loader UI', () => {
       await i18n.changeLanguage(language);
       fetchMock.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ setupNeeded, loggedIn: false }),
+        json: async () => ({
+          setupNeeded,
+          loggedIn: false,
+          onboarding: { step: 'password', completedAt: null },
+        }),
       });
       const { container } = render(<App />);
       expect(await screen.findByRole('heading', { name: title })).toBeTruthy();
@@ -124,5 +133,123 @@ describe('loader UI', () => {
       listeners.forEach((listener) => listener(new Event('change') as MediaQueryListEvent))
     );
     expect(document.documentElement.classList.contains('dark')).toBe(true);
+  });
+  it.each(['welcome', 'model', 'device', 'done'] as const)(
+    'renders wizard step %s in English and Russian in both themes without axe violations',
+    async (step) => {
+      for (const language of ['en', 'ru'] as const)
+        for (const isDark of [false, true]) {
+          cleanup();
+          dark = isDark;
+          Object.defineProperty(navigator, 'language', {
+            configurable: true,
+            value: language === 'ru' ? 'ru-RU' : 'en-US',
+          });
+          await i18n.changeLanguage(language);
+          const loggedIn = step !== 'welcome';
+          fetchMock.mockImplementation(async (url: string) =>
+            url === '/api/state'
+              ? {
+                  ok: true,
+                  json: async () => ({
+                    setupNeeded: step === 'welcome',
+                    loggedIn,
+                    csrfToken: 'csrf',
+                    onboarding: {
+                      step,
+                      completedAt: step === 'done' ? '2026-10-17T00:00:00.000Z' : null,
+                    },
+                    instanceName: 'lifemodel',
+                    caFingerprint: 'abc123',
+                  }),
+                }
+              : url === '/api/model'
+                ? {
+                    ok: true,
+                    json: async () => ({
+                      primary: {
+                        kind: 'openai',
+                        baseUrl: 'https://model.example',
+                        model: 'model',
+                        keySet: true,
+                      },
+                      reserve: null,
+                    }),
+                  }
+                : { ok: true, json: async () => ({}) }
+          );
+          const { container } = render(<App />);
+          await screen.findByRole('heading');
+          expect(await axe(container)).toHaveNoViolations();
+          if (step === 'device') expect(screen.getByText(/SHA-256/)).toBeTruthy();
+        }
+    }
+  );
+  it('keeps the model step and shows the safe check error when endpoint check fails', async () => {
+    fetchMock.mockImplementation(async (url: string) =>
+      url === '/api/state'
+        ? {
+            ok: true,
+            json: async () => ({
+              setupNeeded: false,
+              loggedIn: true,
+              csrfToken: 'csrf',
+              onboarding: { step: 'model', completedAt: null },
+            }),
+          }
+        : url === '/api/model'
+          ? { ok: true, json: async () => ({ primary: null, reserve: null }) }
+          : { ok: false, json: async () => ({ error: 'auth_failed' }) }
+    );
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Connect model access' });
+    fireEvent.change(await screen.findByLabelText('Base URL'), {
+      target: { value: 'https://example.com' },
+    });
+    fireEvent.change(screen.getByLabelText('Model name'), { target: { value: 'unit' } });
+    fireEvent.submit(screen.getByLabelText('Model name').closest('form')!);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/auth_failed/);
+    expect(screen.getByRole('heading', { name: 'Connect model access' })).toBeInTheDocument();
+  });
+  it('resumes the device step from server state after reload and done uses the app handoff URL', async () => {
+    fetchMock.mockImplementation(async (url: string) =>
+      url === '/api/state'
+        ? {
+            ok: true,
+            json: async () => ({
+              setupNeeded: false,
+              loggedIn: true,
+              onboarding: { step: 'device', completedAt: null },
+              instanceName: 'lifemodel',
+              caFingerprint: 'fingerprint',
+            }),
+          }
+        : url === '/api/model'
+          ? { ok: true, json: async () => ({ primary: null, reserve: null }) }
+          : { ok: true, json: async () => ({}) }
+    );
+    const { unmount } = render(<App />);
+    expect(await screen.findByRole('heading', { name: 'Set up this device' })).toBeInTheDocument();
+    unmount();
+    fetchMock.mockImplementation(async (url: string) =>
+      url === '/api/state'
+        ? {
+            ok: true,
+            json: async () => ({
+              setupNeeded: false,
+              loggedIn: true,
+              onboarding: { step: 'done', completedAt: 'now' },
+              instanceName: 'lifemodel',
+            }),
+          }
+        : url === '/api/model'
+          ? { ok: true, json: async () => ({ primary: null, reserve: null }) }
+          : { ok: true, json: async () => ({}) }
+    );
+    render(<App />);
+    expect(await screen.findByRole('link', { name: 'Open the chat' })).toHaveAttribute(
+      'href',
+      'https://boot-lifemodel.local/login?next=https%3A%2F%2Flifemodel.local%2F'
+    );
   });
 });

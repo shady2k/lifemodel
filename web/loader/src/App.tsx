@@ -7,12 +7,30 @@ import { Card, CardContent } from '@kit/components/ui/card';
 import { Label } from '@kit/components/ui/label';
 import { Alert, AlertDescription } from '@kit/components/ui/alert';
 import i18n, { languageFor } from './i18n';
+interface Slot {
+  kind: 'openai' | 'ollama';
+  baseUrl: string;
+  model: string;
+  keySet: boolean;
+}
 interface State {
   setupNeeded: boolean;
   loggedIn: boolean;
   csrfToken?: string;
   onboarding?: { step: string; completedAt: string | null };
+  instanceName?: string;
+  caFingerprint?: string;
 }
+const codes = [
+  'unreachable',
+  'tls',
+  'timeout',
+  'auth_failed',
+  'model_not_found',
+  'bad_response',
+  'blocked_destination',
+  'storage_unavailable',
+];
 export default function App() {
   const { t } = useTranslation();
   const [state, setState] = useState<State | null>(null);
@@ -20,6 +38,33 @@ export default function App() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [slot, setSlot] = useState<Slot>({ kind: 'openai', baseUrl: '', model: '', keySet: false });
+  const [reserve, setReserve] = useState<Slot | null>(null);
+  const [kind, setKind] = useState<'openai' | 'ollama'>('openai');
+  const [baseUrl, setBaseUrl] = useState('');
+  const [model, setModel] = useState('');
+  const [key, setKey] = useState('');
+  async function load() {
+    const r = await fetch('/api/state', { cache: 'no-store' });
+    if (!r.ok) throw new Error('state');
+    const value = (await r.json()) as State;
+    if (typeof value.setupNeeded !== 'boolean' || typeof value.loggedIn !== 'boolean')
+      throw new Error('state');
+    setState(value);
+    if (value.loggedIn) {
+      const models = await fetch('/api/model', { cache: 'no-store' });
+      if (models.ok) {
+        const data = (await models.json()) as { primary: Slot | null; reserve: Slot | null };
+        if (data.primary) {
+          setSlot(data.primary);
+          setKind(data.primary.kind);
+          setBaseUrl(data.primary.baseUrl);
+          setModel(data.primary.model);
+        }
+        setReserve(data.reserve);
+      }
+    }
+  }
   useEffect(() => {
     void i18n.changeLanguage(languageFor(navigator.language));
   }, []);
@@ -28,31 +73,12 @@ export default function App() {
     const apply = () => document.documentElement.classList.toggle('dark', preference.matches);
     apply();
     preference.addEventListener('change', apply);
-    return () => {
-      preference.removeEventListener('change', apply);
-    };
+    return () => preference.removeEventListener('change', apply);
   }, []);
   useEffect(() => {
-    void fetch('/api/state', { cache: 'no-store' })
-      .then(async (r): Promise<unknown> => {
-        if (!r.ok) throw new Error('state');
-        return (await r.json()) as unknown;
-      })
-      .then((value: unknown) => {
-        if (
-          typeof value !== 'object' ||
-          value === null ||
-          typeof (value as State).setupNeeded !== 'boolean' ||
-          typeof (value as State).loggedIn !== 'boolean'
-        )
-          throw new Error('state');
-        setState(value as State);
-      })
-      .catch(() => {
-        setError('setupError');
-      });
+    void load().catch(() => setError('setupError'));
   }, []);
-  async function submit(event: SyntheticEvent<HTMLFormElement>) {
+  async function submitPassword(event: SyntheticEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
     setError('');
@@ -60,66 +86,91 @@ export default function App() {
       const response = await fetch(state?.setupNeeded ? '/api/setup' : '/api/login', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          password,
-          next: new URLSearchParams(window.location.search).get('next') ?? undefined,
-        }),
+        body: JSON.stringify({ password }),
       });
       if (!response.ok) {
         setError(response.status === 401 ? t('wrong') : t('setupError'));
         return;
       }
-      const result = (await response.json()) as { redirectTo?: string };
-      window.location.assign(result.redirectTo ?? '/');
+      await load();
+      setPassword('');
     } catch {
       setError(t('setupError'));
     } finally {
       setBusy(false);
     }
   }
-  if (state?.loggedIn)
-    return (
-      <main className="grid min-h-svh place-items-center bg-background px-5 text-foreground">
-        <Card className="w-full max-w-md">
-          <CardContent className="p-8">
-            <h1 className="text-2xl font-semibold">{t('settingsTitle')}</h1>
-            <p className="mt-2 text-sm text-muted-foreground">{t('settingsDescription')}</p>
-            <Button
-              className="mt-6"
-              onClick={() => {
-                void (async () => {
-                  await fetch('/api/logout', {
-                    method: 'POST',
-                    headers: {
-                      'x-csrf-token': state.csrfToken ?? '',
-                      'content-type': 'application/json',
-                    },
-                  });
-                  window.location.reload();
-                })();
-              }}
-            >
-              {t('logout')}
-            </Button>
-          </CardContent>
-        </Card>
-      </main>
-    );
+  async function saveModel(event: SyntheticEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError('');
+    try {
+      const response = await fetch('/api/model/primary', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json', 'x-csrf-token': state?.csrfToken ?? '' },
+        body: JSON.stringify({ kind, baseUrl, model, ...(key ? { key } : {}) }),
+      });
+      if (!response.ok) {
+        const value = (await response.json()) as { error?: string };
+        setError(codes.includes(value.error ?? '') ? `model_${value.error}` : 'setupError');
+        return;
+      }
+      setKey('');
+      await load();
+    } catch {
+      setError(t('setupError'));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function acknowledge() {
+    setBusy(true);
+    setError('');
+    try {
+      const response = await fetch('/api/onboarding/device', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-csrf-token': state?.csrfToken ?? '' },
+        body: '{}',
+      });
+      if (!response.ok) {
+        setError(t('setupError'));
+        return;
+      }
+      await load();
+    } catch {
+      setError(t('setupError'));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function logout() {
+    await fetch('/api/logout', {
+      method: 'POST',
+      headers: { 'x-csrf-token': state?.csrfToken ?? '', 'content-type': 'application/json' },
+      body: '{}',
+    });
+    window.location.reload();
+  }
   if (!state)
     return (
       <main className="grid min-h-svh place-items-center text-muted-foreground" aria-live="polite">
         {error ? t(error) : t('loading')}
       </main>
     );
+  const step = state.loggedIn
+    ? (state.onboarding?.step ?? 'done')
+    : state.setupNeeded
+      ? (state.onboarding?.step ?? 'welcome')
+      : 'password';
+  const appUrl = `https://${state.instanceName ?? 'lifemodel'}.local/`;
+  const handoffUrl = `https://boot-${state.instanceName ?? 'lifemodel'}.local/login?next=${encodeURIComponent(appUrl)}`;
   return (
-    <main className="relative grid min-h-svh place-items-center bg-background px-5 text-foreground">
+    <main className="relative grid min-h-svh place-items-center bg-background px-5 py-16 text-foreground">
       <div className="absolute right-5 top-5 flex gap-2">
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => {
-            void i18n.changeLanguage('en');
-          }}
+          onClick={() => void i18n.changeLanguage('en')}
           aria-label={t('en')}
         >
           EN
@@ -127,15 +178,13 @@ export default function App() {
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => {
-            void i18n.changeLanguage('ru');
-          }}
+          onClick={() => void i18n.changeLanguage('ru')}
           aria-label={t('ru')}
         >
           RU
         </Button>
       </div>
-      <Card className="w-full max-w-md">
+      <Card className="w-full max-w-xl">
         <CardContent className="p-8 sm:p-10">
           <div className="mb-8 flex items-center gap-3">
             <span className="grid size-11 place-items-center rounded-xl bg-primary text-primary-foreground">
@@ -144,53 +193,184 @@ export default function App() {
             <span className="text-lg font-semibold tracking-tight">{t('brand')}</span>
           </div>
           <h1 className="text-2xl font-semibold tracking-tight">
-            {state.setupNeeded ? t('setupTitle') : t('loginTitle')}
+            {t(
+              step === 'welcome'
+                ? 'welcomeTitle'
+                : step === 'password'
+                  ? state.setupNeeded
+                    ? 'setupTitle'
+                    : 'loginTitle'
+                  : step === 'model'
+                    ? 'modelTitle'
+                    : step === 'device'
+                      ? 'deviceTitle'
+                      : step === 'done'
+                        ? 'doneTitle'
+                        : 'settingsTitle'
+            )}
           </h1>
-          <p className="mt-2 text-sm text-muted-foreground">{t('description')}</p>
-          <form
-            className="mt-8 space-y-5"
-            onSubmit={(event) => {
-              void submit(event);
-            }}
-          >
-            <div className="space-y-2">
-              <Label htmlFor="password">{t('password')}</Label>
-              <Input
-                id="password"
-                name="password"
-                type={showPassword ? 'text' : 'password'}
-                autoComplete={state.setupNeeded ? 'new-password' : 'current-password'}
-                required
-                minLength={state.setupNeeded ? 12 : 1}
-                value={password}
-                onChange={(e) => {
-                  setPassword(e.target.value);
-                }}
-              />
-              {state.setupNeeded && (
-                <p className="text-xs text-muted-foreground">{t('minimumPassword')}</p>
-              )}
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                aria-pressed={showPassword}
-                onClick={() => {
-                  setShowPassword(!showPassword);
-                }}
-              >
-                {t(showPassword ? 'hidePassword' : 'showPassword')}
+          <p className="mt-2 text-sm text-muted-foreground">
+            {t(
+              step === 'welcome'
+                ? 'welcomeDescription'
+                : step === 'password'
+                  ? 'description'
+                  : step === 'model'
+                    ? 'modelDescription'
+                    : step === 'device'
+                      ? 'deviceDescription'
+                      : step === 'done'
+                        ? 'doneDescription'
+                        : 'settingsDescription'
+            )}
+          </p>
+          {error && (
+            <Alert className="mt-5" variant="destructive" role="alert">
+              <AlertDescription>{t(error)}</AlertDescription>
+            </Alert>
+          )}
+          {step === 'welcome' && (
+            <Button
+              className="mt-6 w-full"
+              onClick={() =>
+                setState({
+                  ...state,
+                  setupNeeded: true,
+                  loggedIn: false,
+                  onboarding: { step: 'password', completedAt: null },
+                })
+              }
+            >
+              {t('begin')}
+            </Button>
+          )}
+          {step === 'password' && (
+            <form className="mt-8 space-y-5" onSubmit={(e) => void submitPassword(e)}>
+              <div className="space-y-2">
+                <Label htmlFor="password">{t('password')}</Label>
+                <Input
+                  id="password"
+                  type={showPassword ? 'text' : 'password'}
+                  autoComplete={state.setupNeeded ? 'new-password' : 'current-password'}
+                  required
+                  minLength={state.setupNeeded ? 12 : 1}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                />
+                {state.setupNeeded && (
+                  <p className="text-xs text-muted-foreground">{t('minimumPassword')}</p>
+                )}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  aria-pressed={showPassword}
+                  onClick={() => setShowPassword(!showPassword)}
+                >
+                  {t(showPassword ? 'hidePassword' : 'showPassword')}
+                </Button>
+              </div>
+              <Button className="w-full" disabled={busy}>
+                {busy ? t('loading') : t('confirm')}
+              </Button>
+            </form>
+          )}
+          {step === 'model' && (
+            <>
+              <form className="mt-6 space-y-4" onSubmit={(e) => void saveModel(e)}>
+                <div className="space-y-2">
+                  <Label htmlFor="kind">{t('kind')}</Label>
+                  <select
+                    id="kind"
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-3"
+                    value={kind}
+                    onChange={(e) => setKind(e.target.value as 'openai' | 'ollama')}
+                  >
+                    <option value="openai">OpenAI compatible</option>
+                    <option value="ollama">Ollama</option>
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="url">{t('baseUrl')}</Label>
+                  <Input
+                    id="url"
+                    required
+                    value={baseUrl}
+                    onChange={(e) => setBaseUrl(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="model">{t('model')}</Label>
+                  <Input
+                    id="model"
+                    required
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="key">{t('key')}</Label>
+                  <Input
+                    id="key"
+                    type="password"
+                    autoComplete="new-password"
+                    placeholder={slot.keySet ? t('keySet') : ''}
+                    value={key}
+                    onChange={(e) => setKey(e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {slot.keySet ? t('keySet') : t('keyOptional')}
+                  </p>
+                </div>
+                <Button disabled={busy}>{busy ? t('checking') : t('checkSave')}</Button>
+              </form>
+              <details className="mt-8">
+                <summary className="cursor-pointer">{t('reserve')}</summary>
+                <p className="mt-2 text-sm">{reserve ? t('reserveSet') : t('reserveOptional')}</p>
+              </details>
+            </>
+          )}
+          {step === 'device' && (
+            <div className="mt-6 space-y-4">
+              <p>
+                <strong>{t('address')}: </strong>
+                <code>{appUrl}</code>
+              </p>
+              <p>
+                <strong>{t('fingerprint')}: </strong>
+                <code className="break-all">
+                  {state.caFingerprint ?? t('fingerprintUnavailable')}
+                </code>
+              </p>
+              <a className="underline" href="/ca.crt" download>
+                {t('downloadCa')}
+              </a>
+              <ul className="list-disc space-y-1 pl-5 text-sm">
+                {(['windows', 'macos', 'linux', 'ios', 'android'] as const).map((os) => (
+                  <li key={os}>
+                    <strong>{t(os)}:</strong> {t(`${os}Steps`)}
+                  </li>
+                ))}
+              </ul>
+              <Button className="w-full" disabled={busy} onClick={() => void acknowledge()}>
+                {t('continue')}
               </Button>
             </div>
-            {error && (
-              <Alert variant="destructive" role="alert">
-                <AlertDescription>{error}</AlertDescription>
-              </Alert>
-            )}
-            <Button className="w-full" disabled={busy}>
-              {busy ? t('loading') : t('confirm')}
+          )}
+          {step === 'done' && (
+            <div className="mt-6">
+              <a href={handoffUrl}>
+                <Button asChild>
+                  <span>{t('openChat')}</span>
+                </Button>
+              </a>
+            </div>
+          )}
+          {step !== 'welcome' && step !== 'password' && step !== 'done' && (
+            <Button className="mt-8" variant="outline" onClick={() => void logout()}>
+              {t('logout')}
             </Button>
-          </form>
+          )}
         </CardContent>
       </Card>
     </main>

@@ -1168,4 +1168,50 @@ describe('loader static UI and JSON API', () => {
     expect(response.status).toBe(200);
     expect((await state.readOnboarding?.())?.step).toBe('device');
   });
+  it('acknowledges the device only from the device step and records completion', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'loader-device-'));
+    roots.push(root);
+    const config = loadConfig({ LIFEMODEL_NAME: 'lifemodel', LIFEMODEL_VOLUME: root });
+    const realState = createLoaderState({
+      fs: createNodeFileSystem(),
+      config: { ...config, volumeRoot: root, loaderDir: join(root, 'loader') },
+      logger: createRecordingLogger([]),
+    });
+    await realState.ensureLayout();
+    const record = await hashPassword('owner password');
+    await realState.writeAuth(record);
+    const { base, clock } = await start(record, undefined, undefined, undefined, realState);
+    const cookie = `__Host-lm_session=${createSession(record, clock.now())}`;
+    const headers = {
+      host: 'boot-lifemodel.local',
+      cookie,
+      origin: 'https://boot-lifemodel.local',
+      'content-type': 'application/json',
+    };
+    const csrf = JSON.parse(
+      (await request(base, '/api/state', { host: headers.host, cookie })).body
+    ).csrfToken as string;
+    const rejected = await request(
+      base,
+      '/api/onboarding/device',
+      { ...headers, 'x-csrf-token': csrf },
+      'POST',
+      '{}'
+    );
+    expect(rejected.status).toBe(409);
+    expect((await realState.readOnboarding?.())?.step).toBe('welcome');
+    await realState.savePasswordOnboarding?.();
+    await realState.saveModelOnboarding?.();
+    expect((await realState.readOnboarding?.())?.step).toBe('device');
+    const accepted = await request(
+      base,
+      '/api/onboarding/device',
+      { ...headers, 'x-csrf-token': csrf },
+      'POST',
+      '{}'
+    );
+    expect(accepted.status).toBe(200);
+    expect((await realState.readOnboarding?.())?.step).toBe('done');
+    expect((await realState.readOnboarding?.())?.completedAt).toBeTruthy();
+  });
 });
