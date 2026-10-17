@@ -220,6 +220,10 @@ describe('OpenBao bootstrap', () => {
     expect(policy).toContain(
       'path "lifemodel/data/model/reserve" { capabilities = ["create", "update", "read", "delete"] }'
     );
+    expect(policy).toContain(
+      'path "lifemodel/data/model/*" { capabilities = ["create", "update", "read"] }'
+    );
+    expect(policy).not.toMatch(/path "lifemodel\/data\/model\/(?:\*|primary)"[^}]*delete/);
     expect(policy).toContain('path "lifemodel/metadata/model/*" { capabilities = ["read"] }');
     expect(
       calls.find((call) => call.path.endsWith('/auth/kubernetes/role/loader'))?.body
@@ -253,6 +257,39 @@ describe('OpenBao bootstrap', () => {
     );
   });
 
+  it('refuses root retirement when loader capabilities include primary delete', async () => {
+    const events: string[] = [];
+    const f = fixture();
+    // Policy verification must reject any capability beyond the exact contract.
+    const api = createOpenBaoApi({
+      address: 'http://openbao.test:8200',
+      request: async (url, _method, token) => {
+        if (url.pathname.endsWith('/auth/kubernetes/login'))
+          return { status: 200, body: JSON.stringify({ auth: { client_token: 'loader-token' } }) };
+        if (url.pathname.endsWith('/sys/capabilities-self')) {
+          expect(token).toBe('loader-token');
+          return {
+            status: 200,
+            body: JSON.stringify({
+              'lifemodel/data/model/primary': ['create', 'update', 'read', 'delete'],
+              'lifemodel/data/model/reserve': ['create', 'update', 'read', 'delete'],
+              'lifemodel/metadata/model/reserve': ['read'],
+            }),
+          };
+        }
+        if (url.pathname.endsWith('/sys/mounts'))
+          return {
+            status: 200,
+            body: JSON.stringify({ 'lifemodel/': { type: 'kv', options: { version: '2' } } }),
+          };
+        return { status: 204, body: '' };
+      },
+    });
+    await expect(api.ensureModelPolicy('root', 'jwt')).rejects.toThrow();
+    events.push('verified-failure');
+    expect(events).toEqual(['verified-failure']);
+    expect(f.events).not.toContain('revoke');
+  });
   it('reads model slots through the HTTP API and treats deleted KV v2 latest version as unset', async () => {
     const paths: string[] = [];
     const api = createOpenBaoApi({

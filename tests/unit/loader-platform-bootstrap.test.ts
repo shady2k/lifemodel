@@ -271,19 +271,16 @@ describe('platform bootstrap phases', () => {
     expect(parsed.spec.egress).toHaveLength(6);
     expect(
       parsed.spec.egress
-        .flatMap((rule: any) => rule.ports.map((port: any) => `${port.protocol}/${port.port}`))
+        .flatMap((rule: any) =>
+          (rule.ports ?? []).map((port: any) => `${port.protocol}/${port.port}`)
+        )
         .sort()
-    ).toEqual([
-      'TCP/11434',
-      'TCP/3000',
-      'TCP/443',
-      'TCP/53',
-      'TCP/6443',
-      'TCP/80',
-      'TCP/8200',
-      'UDP/53',
-    ]);
-    expect(egress).not.toMatch(/port: (?!53\b|6443\b|8200\b|3000\b|80\b|443\b|11434\b)\d+/);
+    ).toEqual(['TCP/11434', 'TCP/3000', 'TCP/53', 'TCP/6443', 'TCP/8200', 'UDP/53']);
+    expect(egress).toContain(
+      '# No port restriction: owner endpoints may use LAN Ollama 11434 or custom HTTPS ports.'
+    );
+    expect(parsed.spec.egress[3].ports).toBeUndefined();
+    expect(parsed.spec.egress[3].to[0].ipBlock.except).toContain('169.254.0.0/16');
     expect(parsed.spec.egress[1].to).toEqual([{ ipBlock: { cidr: '0.0.0.0/0' } }]);
     expect(parsed.spec.egress[3].to[0].ipBlock.except).toEqual([
       '10.42.0.0/16',

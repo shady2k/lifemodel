@@ -1,7 +1,7 @@
 /** Safe model endpoint validation and slot operations (ADR-012 D7, ADR-013 D2). */
 import { lookup } from 'node:dns/promises';
-import { request as httpRequest } from 'node:http';
-import { request as httpsRequest } from 'node:https';
+import { request as httpRequest, Agent as HttpAgent } from 'node:http';
+import { request as httpsRequest, Agent as HttpsAgent } from 'node:https';
 import { isIP } from 'node:net';
 import type { ClientRequest } from 'node:http';
 import { modelEndpointUrl } from './model-url.js';
@@ -88,6 +88,8 @@ function validateUrl(input: string): URL {
 
 export interface ModelCheckerOptions {
   resolveHost?: (hostname: string) => Promise<string[]>;
+  tlsCa?: string | Buffer;
+  timeoutMs?: number;
   request?: (
     url: URL,
     address: string,
@@ -104,20 +106,21 @@ export function createModelChecker(
       (await lookup(hostname, { all: true, verbatim: true })).map((item) => item.address));
   const active = new Set<ModelSlotName>();
   const check = async (slot: ModelSlot): Promise<void> => {
+    const deadline = Date.now() + (options.timeoutMs ?? TIMEOUT_MS);
     const url = validateUrl(slot.baseUrl);
     const special = url.origin === OLLAMA;
-    const addresses = special
-      ? await resolveHost(url.hostname)
-      : isIP(url.hostname)
-        ? [url.hostname]
-        : await resolveHost(url.hostname);
+    const addresses = await withDeadline(
+      isIP(url.hostname) ? Promise.resolve([url.hostname]) : resolveHost(url.hostname),
+      deadline
+    );
     if (
       addresses.length === 0 ||
       addresses.some((address) =>
         special
           ? isIP(address) !== 4 ||
             !PRIVATE_V4.some((pattern) => pattern.test(address)) ||
-            deniedAddress(address)
+            address.startsWith('169.254.') ||
+            address.startsWith('127.')
           : deniedAddress(address) ||
             (url.protocol === 'http:' && !PRIVATE_V4.some((pattern) => pattern.test(address)))
       )
@@ -134,7 +137,7 @@ export function createModelChecker(
     });
     const result = options.request
       ? await options.request(endpoint, address, payload, slot.key)
-      : await requestBounded(endpoint, address, payload, slot.key);
+      : await requestBounded(endpoint, address, payload, slot.key, deadline, options.tlsCa);
     if (result.status === 401 || result.status === 403) throw new ModelCheckError('auth_failed');
     if (result.status === 404) throw new ModelCheckError('model_not_found');
     if (result.status < 200 || result.status >= 300) throw new ModelCheckError('bad_response');
@@ -169,11 +172,30 @@ export function createModelChecker(
     }
   };
 }
+function withDeadline<T>(promise: Promise<T>, deadline: number): Promise<T> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return Promise.reject(new Error('request timeout exceeded'));
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('request timeout exceeded')), remaining);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
 function requestBounded(
   url: URL,
   address: string,
   body: string,
-  key?: string
+  key: string | undefined,
+  deadline: number,
+  tlsCa?: string | Buffer
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -182,11 +204,14 @@ function requestBounded(
       url,
       {
         method: 'POST',
-        ...(url.protocol === 'https:' ? { servername: url.hostname } : {}),
-        lookup: (_hostname, _opts, callback) => {
-          callback(null, address, isIP(address));
-        },
+        hostname: address,
+        port: url.port || (url.protocol === 'https:' ? 443 : 80),
+        path: url.pathname + url.search,
+        ...(url.protocol === 'https:'
+          ? { servername: url.hostname, ...(tlsCa === undefined ? {} : { ca: tlsCa }) }
+          : {}),
         headers: {
+          host: url.host,
           'content-type': 'application/json',
           accept: 'application/json',
           ...(key === undefined ? {} : { authorization: `Bearer ${key}` }),
@@ -223,7 +248,10 @@ function requestBounded(
         reject(error);
       }
     };
-    const timer = setTimeout(() => req.destroy(new Error('request timeout exceeded')), TIMEOUT_MS);
+    const timer = setTimeout(
+      () => req.destroy(new Error('request timeout exceeded')),
+      Math.max(1, deadline - Date.now())
+    );
     req.on('error', (error) => {
       finish(error);
     });

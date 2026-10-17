@@ -1091,10 +1091,6 @@ describe('platform manifests', () => {
             },
           },
         ],
-        ports: [
-          { protocol: 'TCP', port: 80 },
-          { protocol: 'TCP', port: 443 },
-        ],
       },
       {
         to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'ollama' } } }],
@@ -1118,22 +1114,21 @@ describe('platform manifests', () => {
     const yaml = readFileSync(join(platformRoot, 'a0/network-policy.yaml'), 'utf8');
     expect(yaml).toContain('k3s DNATs the in-cluster API Service to the node address');
     expect(yaml).toContain('The API port is the only egress restriction');
+    const unrestrictedModelEgress = policy!.spec.egress.find(
+      (rule: any) =>
+        rule.to?.[0]?.ipBlock?.cidr === '0.0.0.0/0' &&
+        rule.to?.[0]?.ipBlock?.except?.includes('10.42.0.0/16')
+    );
+    expect(unrestrictedModelEgress?.ports).toBeUndefined();
     expect(yaml).toContain(
       'The Kubernetes API server authenticates the projected ServiceAccount token'
     );
     expect(
       policy!.spec.egress
-        .flatMap((rule: any) => rule.ports.map((port: any) => `${port.protocol}/${port.port}`))
+        .flatMap((rule: any) =>
+          (rule.ports ?? []).map((port: any) => `${port.protocol}/${port.port}`)
+        )
         .sort()
-    ).toEqual([
-      'TCP/11434',
-      'TCP/3000',
-      'TCP/443',
-      'TCP/53',
-      'TCP/6443',
-      'TCP/80',
-      'TCP/8200',
-      'UDP/53',
-    ]);
+    ).toEqual(['TCP/11434', 'TCP/3000', 'TCP/53', 'TCP/6443', 'TCP/8200', 'UDP/53']);
   });
 });

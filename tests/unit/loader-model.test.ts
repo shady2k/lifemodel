@@ -1,10 +1,13 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
+import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { networkInterfaces } from 'node:os';
 import { createModelChecker, ModelCheckError } from '../../loader/src/model.js';
 import { modelEndpointUrl } from '../../loader/src/model-url.js';
 
-const servers: Server[] = [];
+const servers: Array<Server | HttpsServer> = [];
 afterEach(async () => {
   await Promise.all(
     servers.splice(0).map(
@@ -51,7 +54,7 @@ describe('loader model endpoint checker', () => {
     const check = createModelChecker({
       resolveHost: async (hostname) => {
         expect(hostname).toBe('ollama.ollama.svc.cluster.local');
-        return ['10.44.6.2'];
+        return ['10.43.6.2'];
       },
       request: async (url) => {
         target = url;
@@ -113,7 +116,11 @@ describe('loader model endpoint checker', () => {
       const server = await listen((req, res) => {
         expect(req.headers.authorization).toBe(`Bearer ${secret}`);
         res.writeHead(status, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ message: secret }));
+        res.end(
+          status === 200
+            ? JSON.stringify({ choices: [], echo: secret })
+            : JSON.stringify({ message: secret })
+        );
       });
       const check = createModelChecker();
       let failure: unknown;
@@ -122,9 +129,10 @@ describe('loader model endpoint checker', () => {
       } catch (error) {
         failure = error;
       }
-      expect(failure).toBeInstanceOf(ModelCheckError);
-      expect(JSON.stringify(failure)).not.toContain(secret);
-      expect((failure as Error).message).not.toContain(secret);
+      if (status === 200) expect(failure).toBeUndefined();
+      else expect(failure).toBeInstanceOf(ModelCheckError);
+      expect(JSON.stringify(failure ?? {})).not.toContain(secret);
+      if (failure instanceof Error) expect(failure.message).not.toContain(secret);
     }
   });
 
@@ -162,6 +170,68 @@ describe('loader model endpoint checker', () => {
     ).resolves.toBeUndefined();
     expect(requests).toBe(1);
   });
+
+  it('resolves a real HTTP hostname once, pins the peer, and preserves Host', async () => {
+    let calls = 0;
+    let seenHost: string | undefined;
+    let peer: string | undefined;
+    const server = await listen((req, res) => {
+      seenHost = req.headers.host;
+      peer = req.socket.remoteAddress;
+      res.end(validReply);
+    });
+    const port = new URL(server.url).port;
+    const check = createModelChecker({
+      resolveHost: async (hostname) => {
+        calls += 1;
+        expect(hostname).toBe('model.test');
+        return calls === 1 ? [localPrivateAddress()] : ['169.254.169.254'];
+      },
+    });
+    await expect(
+      check({ kind: 'ollama', baseUrl: `http://model.test:${port}/v1`, model: 'tiny' })
+    ).resolves.toBeUndefined();
+    expect(calls).toBe(1);
+    expect(seenHost).toBe(`model.test:${port}`);
+    expect(peer).toBeDefined();
+  });
+
+  it('resolves a real HTTPS hostname once, pins the peer, and preserves Host and SNI', async () => {
+    let calls = 0;
+    let seenHost: string | undefined;
+    let seenSni: string | undefined;
+    const server = createHttpsServer(
+      {
+        key: readFileSync(join(process.cwd(), 'tests/fixtures/model-test.key')),
+        cert: readFileSync(join(process.cwd(), 'tests/fixtures/model-test.crt')),
+      },
+      (req, res) => {
+        seenHost = req.headers.host;
+        seenSni = req.socket.servername;
+        res.end(validReply);
+      }
+    );
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '0.0.0.0', resolve));
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('server did not bind');
+    const cert = readFileSync(join(process.cwd(), 'tests/fixtures/model-test.crt'));
+    const check = createModelChecker({
+      tlsCa: cert,
+      resolveHost: async (hostname) => {
+        calls += 1;
+        expect(hostname).toBe('model.test');
+        return calls === 1 ? [localPrivateAddress()] : ['169.254.169.254'];
+      },
+    });
+    await expect(
+      check({ kind: 'openai', baseUrl: `https://model.test:${address.port}/v1`, model: 'tiny' })
+    ).resolves.toBeUndefined();
+    expect(calls).toBe(1);
+    expect(seenHost).toBe(`model.test:${address.port}`);
+    expect(seenSni).toBe('model.test');
+  });
+
   it('refuses a rebinding result and redirect to a private target before following it', async () => {
     let requests = 0;
     const server = await listen((_req, res) => {
@@ -187,8 +257,8 @@ describe('loader model endpoint checker', () => {
     // Keep this test fast while exercising the same checker deadline via a controllable timer is not possible;
     // the request is destroyed by the checker's 15-second hard bound.
     const oversized = await listen((_req, res) => {
-      res.writeHead(200);
-      res.end('x'.repeat(65 * 1024));
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [], padding: 'x'.repeat(65 * 1024) }));
     });
     const bounded = createModelChecker();
     await expect(
@@ -198,5 +268,5 @@ describe('loader model endpoint checker', () => {
     await expect(
       bounded({ kind: 'ollama', baseUrl: slow.url, model: 'tiny' })
     ).rejects.toMatchObject({ code: 'timeout' }, { timeout: 17000 });
-  }, 20_000);
+  }, 35_000);
 });

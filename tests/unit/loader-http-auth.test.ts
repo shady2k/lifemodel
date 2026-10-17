@@ -30,6 +30,7 @@ async function start(
   ) => Promise<void>
 ) {
   let auth = initialAuth === null ? null : structuredClone(initialAuth);
+  let onboardingSaves = 0;
   const state: LoaderState = {
     ensureLayout: async () => undefined,
     readAuth: async () => (auth === null ? null : structuredClone(auth)),
@@ -38,6 +39,9 @@ async function start(
     },
     replaceAuth: async (record) => {
       auth = structuredClone(record);
+    },
+    saveModelOnboarding: async () => {
+      onboardingSaves += 1;
     },
   };
   const clock = createTestClock();
@@ -66,7 +70,13 @@ async function start(
   await new Promise<void>((resolve) => loader.server.listen(0, '127.0.0.1', resolve));
   const address = loader.server.address();
   if (address === null || typeof address === 'string') throw new Error('server did not bind');
-  return { base: `http://127.0.0.1:${address.port}`, clock, getAuth: () => auth, recorded };
+  return {
+    base: `http://127.0.0.1:${address.port}`,
+    clock,
+    getAuth: () => auth,
+    recorded,
+    getOnboardingSaves: () => onboardingSaves,
+  };
 }
 
 async function request(
@@ -955,5 +965,88 @@ describe('loader static UI and JSON API', () => {
         ).status
       ).not.toBe(200);
     }
+  });
+
+  it('rejects only the concurrent check for the same slot and advances onboarding only for saved primary', async () => {
+    const record = await hashPassword('owner password');
+    const saved: Record<string, ModelSlot | null> = { primary: null, reserve: null };
+    const slots: ModelSlots = {
+      read: async (slot) => saved[slot],
+      write: async (slot, value) => {
+        saved[slot] = value;
+      },
+      clearReserve: async () => {
+        saved.reserve = null;
+      },
+    };
+    let release!: () => void;
+    let checks = 0;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { base, clock, getOnboardingSaves } = await start(
+      record,
+      undefined,
+      slots,
+      async (_slot, name) => {
+        checks += 1;
+        if (name === 'primary' && checks === 1) await held;
+      }
+    );
+    const cookie = `__Host-lm_session=${createSession(record, clock.now())}`;
+    const csrf = JSON.parse(
+      (await request(base, '/api/state', { host: 'boot-lifemodel.local', cookie })).body
+    ).csrfToken as string;
+    const headers = {
+      host: 'boot-lifemodel.local',
+      cookie,
+      origin: 'https://boot-lifemodel.local',
+      'content-type': 'application/json',
+      'x-csrf-token': csrf,
+    };
+    const candidate = JSON.stringify({
+      kind: 'openai',
+      baseUrl: 'https://models.example/v1',
+      model: 'm',
+    });
+    const first = request(base, '/api/model/primary', headers, 'PUT', candidate);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect((await request(base, '/api/model/primary', headers, 'PUT', candidate)).status).toBe(409);
+    expect((await request(base, '/api/model/reserve', headers, 'PUT', candidate)).status).toBe(200);
+    expect(getOnboardingSaves()).toBe(0);
+    release();
+    expect((await first).status).toBe(200);
+    expect(getOnboardingSaves()).toBe(1);
+  });
+
+  it('returns 503 for a Bao write failure without claiming the model was saved', async () => {
+    const record = await hashPassword('owner password');
+    const slots: ModelSlots = {
+      read: async () => null,
+      write: async () => {
+        throw new Error('sealed/unreachable Bao');
+      },
+      clearReserve: async () => {},
+    };
+    const { base, clock } = await start(record, undefined, slots, async () => {});
+    const cookie = `__Host-lm_session=${createSession(record, clock.now())}`;
+    const csrf = JSON.parse(
+      (await request(base, '/api/state', { host: 'boot-lifemodel.local', cookie })).body
+    ).csrfToken as string;
+    const response = await request(
+      base,
+      '/api/model/primary',
+      {
+        host: 'boot-lifemodel.local',
+        cookie,
+        origin: 'https://boot-lifemodel.local',
+        'content-type': 'application/json',
+        'x-csrf-token': csrf,
+      },
+      'PUT',
+      JSON.stringify({ kind: 'openai', baseUrl: 'https://models.example/v1', model: 'm' })
+    );
+    expect(response.status).toBe(503);
+    expect(response.body).toBe('{"error":"storage_unavailable"}');
   });
 });

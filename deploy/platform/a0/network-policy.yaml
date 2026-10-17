@@ -59,11 +59,7 @@ spec:
               - 10.42.0.0/16
               - 10.43.0.0/16
               - 169.254.0.0/16
-      ports:
-        - protocol: TCP
-          port: 80
-        - protocol: TCP
-          port: 443
+    # No port restriction: owner endpoints may use LAN Ollama 11434 or custom HTTPS ports.
     # The one approved in-cluster Ollama destination.
     - to:
         - namespaceSelector:

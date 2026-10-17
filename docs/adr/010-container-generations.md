@@ -1671,8 +1671,14 @@ local sources. Gitea authority is limited to admin bootstrap, release
 seeding, branch protection, and creation/verification of the read-only
 deploy-source credential. Bao
 authority is limited to initialization, seal status/unseal and bootstrap
-`sys/`/auth/policy paths, followed by its own steady-state role. No loader
-route grants a generation writer platform authority, and no loader route
+`sys/`/auth/policy paths, followed by its own steady-state role. The
+`loader-model` policy grants create/update/read on
+`lifemodel/data/model/primary`, create/update/read/delete only on
+`lifemodel/data/model/reserve`, and read-only model metadata; it is provisioned
+and verified before root revocation. Loader model-check egress is `0.0.0.0/0`
+except pod CIDR `10.42.0.0/16`, Service CIDR `10.43.0.0/16`, and
+`169.254.0.0/16`, without port restrictions; TCP 11434 to namespace `ollama`
+is the only in-cluster model exception. No loader route grants a generation writer platform authority, and no loader route
 creates or edits RBAC.
 
 ### Gitea chart and root-source ownership (R7-03, R7-04)
