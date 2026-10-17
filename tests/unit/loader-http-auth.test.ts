@@ -657,6 +657,156 @@ describe('loader ForwardAuth and JSON authentication API', () => {
   });
 });
 
+describe('loader password change', () => {
+  it('refuses a wrong current password and atomically rotates sessions on success', async () => {
+    const record = await hashPassword('owner password');
+    const { base, clock, getAuth } = await start(record);
+    const oldSession = createSession(record, clock.now());
+    const csrf = (await import('../../loader/src/auth.js')).csrfToken(record, oldSession);
+    const headers = {
+      host: 'boot-lifemodel.local',
+      cookie: `__Host-lm_session=${oldSession}`,
+      origin: 'https://boot-lifemodel.local',
+      'content-type': 'application/json',
+      'x-csrf-token': csrf,
+    };
+    const wrong = await request(
+      base,
+      '/api/password',
+      headers,
+      'POST',
+      JSON.stringify({
+        currentPassword: 'wrong password',
+        newPassword: 'a brand new secure password',
+      })
+    );
+    expect(wrong.status).toBe(401);
+    expect(getAuth()?.sessionSecret).toBe(record.sessionSecret);
+    const changed = await request(
+      base,
+      '/api/password',
+      headers,
+      'POST',
+      JSON.stringify({
+        currentPassword: 'owner password',
+        newPassword: 'a brand new secure password',
+      })
+    );
+    expect(changed.status).toBe(200);
+    const cookie = String(changed.headers['set-cookie']).split(';')[0]!;
+    const freshToken = cookie.slice('__Host-lm_session='.length);
+    expect(cookie).toContain('__Host-lm_session=');
+    expect(verifySession(freshToken, getAuth()!, clock.now())).toBe(true);
+    expect(
+      (await request(base, '/_auth/verify', { cookie: `__Host-lm_session=${oldSession}` })).status
+    ).toBe(401);
+    expect((await request(base, '/_auth/verify', { cookie })).status).toBe(200);
+    expect(
+      await (
+        await import('../../loader/src/auth.js')
+      ).verifyPassword('a brand new secure password', getAuth()!)
+    ).toBe(true);
+  });
+
+  it('applies the write admission rules and validates exact password JSON shape', async () => {
+    const record = await hashPassword('owner password');
+    const { base, clock } = await start(record);
+    const token = createSession(record, clock.now());
+    const csrf = (await import('../../loader/src/auth.js')).csrfToken(record, token);
+    const valid = { currentPassword: 'owner password', newPassword: 'a brand new secure password' };
+    const baseHeaders = {
+      host: 'boot-lifemodel.local',
+      cookie: `__Host-lm_session=${token}`,
+      'x-csrf-token': csrf,
+    };
+    for (const origin of [undefined, 'null', 'https://boot-other.local']) {
+      const result = await request(
+        base,
+        '/api/password',
+        {
+          ...baseHeaders,
+          'content-type': 'application/json',
+          ...(origin === undefined ? {} : { origin }),
+        },
+        'POST',
+        JSON.stringify(valid)
+      );
+      expect(result.status).toBe(403);
+    }
+    expect(
+      (
+        await request(
+          base,
+          '/api/password',
+          { ...baseHeaders, origin: 'https://boot-lifemodel.local', 'content-type': 'text/plain' },
+          'POST',
+          JSON.stringify(valid)
+        )
+      ).status
+    ).toBe(415);
+    expect(
+      (
+        await request(
+          base,
+          '/api/password',
+          {
+            host: baseHeaders.host,
+            cookie: baseHeaders.cookie,
+            origin: 'https://boot-lifemodel.local',
+            'content-type': 'application/json',
+          },
+          'POST',
+          JSON.stringify(valid)
+        )
+      ).status
+    ).toBe(403);
+    for (const body of [
+      'null',
+      '[]',
+      '"x"',
+      '{}',
+      JSON.stringify({ ...valid, extra: true }),
+      JSON.stringify({ currentPassword: 'owner password', newPassword: 'short' }),
+    ]) {
+      const result = await request(
+        base,
+        '/api/password',
+        {
+          ...baseHeaders,
+          origin: 'https://boot-lifemodel.local',
+          'content-type': 'application/json',
+          'x-csrf-token': csrf,
+        },
+        'POST',
+        body
+      );
+      expect(result.status).toBe(400);
+    }
+    expect(
+      (
+        await request(
+          base,
+          '/api/password',
+          {
+            ...baseHeaders,
+            origin: 'https://boot-lifemodel.local',
+            'content-type': 'application/json',
+            'x-csrf-token': csrf,
+          },
+          'POST',
+          ' '.repeat(8193)
+        )
+      ).status
+    ).toBe(413);
+    expect(
+      (await request(base, '/api/password', { host: 'boot-lifemodel.local' }, 'GET')).status
+    ).toBe(405);
+    expect((await request(base, '/api/not-real', { host: 'boot-lifemodel.local' })).status).toBe(
+      404
+    );
+  });
+});
+
 describe('loader static UI and JSON API', () => {
   it('serves the built app and anonymous state without core or web dependencies', async () => {
     const fixture = mkdtempSync(join(tmpdir(), 'loader-ui-fixture-'));
