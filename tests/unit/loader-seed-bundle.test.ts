@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import dockerignore from '@balena/dockerignore';
 
 const preparerPath = fileURLToPath(
   new URL('../../scripts/release/prepare-loader-context.sh', import.meta.url)
@@ -81,6 +82,118 @@ function runPreparer(options: { commit: boolean; existingContext?: boolean }): {
 }
 
 describe('loader image release seed bundle', () => {
+  it('excludes arbitrary and credential names with the context matcher while admitting build inputs', async () => {
+    const source = process.cwd();
+    const temporary = mkdtempSync(join(tmpdir(), 'lifemodel-docker-context-'));
+    const repo = join(temporary, 'repo');
+    try {
+      cpSync(source, repo, {
+        recursive: true,
+        filter: (path) =>
+          !path.includes('/node_modules') && !path.includes('/.git') && !path.includes('/data'),
+      });
+      const directories = [
+        '.',
+        'docker',
+        'docker/loader',
+        'loader',
+        'loader/src',
+        'web',
+        'web/kit',
+        'web/kit/components',
+        'web/kit/components/ui',
+        'web/kit/hooks',
+        'web/kit/lib',
+        'web/kit/registry-lock',
+        'web/kit/registry-lock/files',
+        'web/kit/registry-lock/files/components',
+        'web/kit/registry-lock/files/components/ui',
+        'web/kit/registry-lock/files/hooks',
+        'web/kit/registry-lock/files/lib',
+        'web/loader',
+        'web/loader/src',
+        'web/loader/public',
+        '.docker-context',
+      ];
+      const names = [
+        '.npmrc',
+        '.env',
+        'id_rsa',
+        'x.pem',
+        'private.key',
+        'notes.txt',
+        'backup.json',
+        'dump.sql',
+      ];
+      const planted = directories.flatMap((directory) => {
+        mkdirSync(join(repo, directory), { recursive: true });
+        return names.map((name) => join(directory, name));
+      });
+      for (const path of planted) writeFileSync(join(repo, path), 'SYNTHETIC_CREDENTIAL');
+      const filter = dockerignore({ ignorecase: false }).add(
+        await readFile(join(repo, '.dockerignore'), 'utf8')
+      );
+      const candidates = [
+        'web/loader/src/App.tsx',
+        'web/loader/index.html',
+        'web/loader/public/favicon.svg',
+        'web/kit/theme.css',
+        'web/kit/components/ui/card.tsx',
+        'web/kit/hooks/use-mobile.ts',
+        'web/kit/lib/utils.ts',
+        'web/kit/lib/highlighter.tsx',
+        'web/loader/src/index.css',
+        'web/loader/vite.config.ts',
+        'web/loader/tsconfig.json',
+        'web/loader/package.json',
+        'package.json',
+        'package-lock.json',
+        'loader/package-lock.json',
+        'loader/tsconfig.json',
+        'loader/src/http.ts',
+        'loader/package.json',
+        'docker/loader/Dockerfile',
+        '.docker-context/seed.bundle',
+      ];
+      const admitted = (path: string) => !filter.ignores(path);
+      for (const path of candidates) expect(admitted(path), path).toBe(true);
+      for (const path of planted) expect(admitted(path), path).toBe(false);
+      expect(admitted('web/loader/public/.npmrc')).toBe(false);
+      expect(admitted('.docker-context/seed.bundle')).toBe(true);
+      expect(admitted('.docker-context/other-file')).toBe(false);
+      const publicFiles = readdirSync(join(repo, 'web/loader/public'));
+      expect(publicFiles).toContain('favicon.svg');
+      expect(publicFiles.filter((name) => admitted(`web/loader/public/${name}`))).toEqual([
+        'favicon.svg',
+      ]);
+    } finally {
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  });
+
+  it('copies only named UI inputs and never a public directory into ui-build', async () => {
+    const dockerfile = await readFile('docker/loader/Dockerfile', 'utf8');
+    const uiBuild = dockerfile.split(' AS ui-build\n')[1].split(/^FROM /m)[0];
+    const sources = [...uiBuild.matchAll(/^COPY (.+) \S+$/gm)].flatMap((match) =>
+      match[1].split(/\s+/)
+    );
+    expect(sources).toEqual([
+      'package.json',
+      'package-lock.json',
+      'web/kit/theme.css',
+      'web/kit/components/ui/*.tsx',
+      'web/kit/hooks/*.ts',
+      'web/kit/lib/*.ts',
+      'web/kit/lib/*.tsx',
+      'web/loader/index.html',
+      'web/loader/vite.config.ts',
+      'web/loader/tsconfig.json',
+      'web/loader/package.json',
+      'web/loader/src/',
+      'web/loader/public/favicon.svg',
+    ]);
+  });
+
   it('prepares the full-history bundle before the release workflow builds the loader', async () => {
     const workflow = await readFile('.github/workflows/release.yml', 'utf8');
     const prepare = workflow.indexOf('scripts/release/prepare-loader-context.sh');
@@ -111,8 +224,16 @@ describe('loader image release seed bundle', () => {
       'COPY --chown=root:root .docker-context/seed.bundle /opt/lifemodel/seed.bundle'
     );
     expect(ignore).toContain('!.docker-context');
-    expect(ignore).toContain('!.docker-context/**');
+    expect(ignore).toContain('!.docker-context/seed.bundle');
+    expect(ignore).not.toContain('!.docker-context/**');
+    for (const deny of ['**/.env', '**/.git*', '**/id_*', '**/*.pem', '**/*.key', '**/.npmrc'])
+      expect(ignore).toContain(deny);
     expect(ignore).not.toContain('docker/instance');
+    // Docker re-includes a directory's entire contents; the JS matcher is not authoritative.
+    // Pin this rule directly as well as checking individual candidate paths.
+    expect(ignore.split('\n').filter((line) => line.startsWith('!'))).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/\/$/)])
+    );
     expect(prepareScript).toContain('git bundle create "$context/seed.bundle" HEAD');
     expect(prepareScript).toContain('commit-tree');
     expect(prepareScript).toContain('source_commit');

@@ -2,13 +2,12 @@
 import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import {
-  ALLOWED_HOSTS,
   clearSessionCookie,
   configureInstanceName,
-  HANDOFF_TTL_MS,
-  HANDOFF_CODE_BYTES,
   createSession,
   csrfToken,
+  HANDOFF_CODE_BYTES,
+  HANDOFF_TTL_MS,
   hashPassword,
   hostName,
   isAllowedHost,
@@ -24,12 +23,14 @@ import {
   vettedNext,
 } from './auth.js';
 import type { Clock } from './clock.js';
-import { LoaderFatalError } from './errors.js';
 import type { LoaderLogger } from './logger.js';
 import type { LoaderState } from './state.js';
 import type { LoaderConfig } from './config.js';
 import type { PkiManager } from './pki.js';
 import { describe } from './state.js';
+import { readFile } from 'node:fs/promises';
+import { resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export interface LoaderHttpDeps {
   state: LoaderState;
@@ -37,29 +38,23 @@ export interface LoaderHttpDeps {
   clock: Clock;
   pki: PkiManager;
   config: LoaderConfig;
+  uiRoot?: string;
 }
 export interface LoaderHttp {
   server: Server;
   close(): Promise<void>;
 }
 const MAX_FORM_BYTES = 8192;
+const API_METHODS: Record<string, string> = {
+  '/api/state': 'GET',
+  '/api/setup': 'POST',
+  '/api/login': 'POST',
+  '/api/logout': 'POST',
+  '/api/model': 'GET',
+};
+const CSP =
+  "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
-function page(title: string, body: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><style>body{font-family:system-ui,sans-serif;margin:3rem auto;max-width:34rem;line-height:1.5;color:#1a1a1a}h1{font-size:1.4rem}h2{font-size:1.1rem}form{margin-top:1rem}button,input{font:inherit;padding:.4rem}.bad{color:#a00}</style></head><body><h1>lifemodel platform loader</h1>${body}</body></html>`;
-}
-function sendHtml(
-  res: ServerResponse,
-  status: number,
-  body: string,
-  headers: Record<string, string> = {}
-): void {
-  res.writeHead(status, {
-    'content-type': 'text/html; charset=utf-8',
-    'cache-control': 'no-store',
-    ...headers,
-  });
-  res.end(body);
-}
 function sendText(res: ServerResponse, status: number, body: string): void {
   res.writeHead(status, {
     'content-type': 'text/plain; charset=utf-8',
@@ -75,46 +70,13 @@ function redirect(
   res.writeHead(303, { location, 'cache-control': 'no-store', ...headers });
   res.end();
 }
-async function readForm(req: IncomingMessage): Promise<Record<string, string>> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    const buffer = chunk as Buffer;
-    size += buffer.length;
-    if (size > MAX_FORM_BYTES) throw new LoaderFatalError('the form is too large');
-    chunks.push(buffer);
-  }
-  const form: Record<string, string> = {};
-  for (const [name, value] of new URLSearchParams(Buffer.concat(chunks).toString('utf8')))
-    form[name] = value;
-  return form;
-}
-function escapeHtml(text: string): string {
-  return text
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;');
-}
-function formPage(
-  title: string,
-  action: string,
-  label: string,
-  message?: string,
-  next?: string | null
-): string {
-  const hiddenNext =
-    next === undefined || next === null
-      ? ''
-      : `<input type="hidden" name="next" value="${escapeHtml(next)}">`;
-  return page(
-    title,
-    `${message === undefined ? '' : `<p class="bad">${escapeHtml(message)}</p>`}<form method="post" action="${action}">${hiddenNext}<label for="password">${label}</label><input id="password" name="password" type="password" autocomplete="current-password" autofocus><p><button type="submit">Continue</button></p></form>`
-  );
-}
-
 export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
   const { state, logger, clock, pki, config } = deps;
+  const uiRoot = resolve(
+    deps.uiRoot ??
+      process.env['LIFEMODEL_UI_ROOT'] ??
+      fileURLToPath(new URL('../../web/loader/dist/', import.meta.url))
+  );
   configureInstanceName(config.instanceName);
   // Single loader replica: short-lived codes remain process-local by design.
   interface HandoffEntry {
@@ -157,11 +119,15 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
   }
   function handoffRedirect(session: string, next: string, currentHost: string): string {
     const target = new URL(next);
-    const path = `${target.pathname}${target.search}`; // URL fragments never reach the server.
+    const path = `${target.pathname}${target.search}`;
     if (target.host === currentHost) return `${target.origin}${path}`;
     const code = randomBytes(HANDOFF_CODE_BYTES).toString('base64url');
-    const expires = clock.now() + HANDOFF_TTL_MS;
-    handoffCodes.set(code, { target: target.host, session, next: path, expires });
+    handoffCodes.set(code, {
+      target: target.host,
+      session,
+      next: path,
+      expires: clock.now() + HANDOFF_TTL_MS,
+    });
     return `${target.origin}/_auth/handoff?code=${encodeURIComponent(code)}&next=${encodeURIComponent(path)}`;
   }
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -171,7 +137,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       path === '/_auth/verify' &&
       hostName(req.headers.host ?? '') === 'loader.lifemodel-system.svc.cluster.local';
     if (!serviceVerify && !isAllowedHost(req.headers.host, config.instanceName)) {
-      sendText(res, 400, `the loader answers only ${ALLOWED_HOSTS.join(', ')}`);
+      sendText(res, 404, 'not found');
       return;
     }
     const requestHost = hostName(req.headers.host ?? '');
@@ -189,14 +155,16 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       sendText(res, 404, 'not found');
       return;
     }
-    if (
-      !serviceVerify &&
-      requestHost === bootHost &&
-      path.startsWith('/api/') &&
-      !['GET', 'POST', 'PUT', 'DELETE'].includes(method)
-    ) {
-      sendText(res, 405, 'method not allowed');
-      return;
+    if (!serviceVerify && requestHost === bootHost && path.startsWith('/api/')) {
+      const expectedMethod = API_METHODS[path];
+      if (expectedMethod === undefined) {
+        sendText(res, 404, 'not found');
+        return;
+      }
+      if (method !== expectedMethod) {
+        sendText(res, 405, 'method not allowed');
+        return;
+      }
     }
     const bootRouteAllowed =
       (method === 'GET' &&
@@ -204,16 +172,21 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           path === '/login' ||
           path === '/setup' ||
           path === '/ca.crt' ||
+          path === '/favicon.svg' ||
           path === '/api/state' ||
           path === '/api/model' ||
           path.startsWith('/assets/'))) ||
       (method === 'POST' &&
-        (path === '/login' ||
-          path === '/setup' ||
-          path === '/logout' ||
-          path === '/api/setup' ||
-          path === '/api/login')) ||
-      (['POST', 'PUT', 'DELETE'].includes(method) && path.startsWith('/api/'));
+        (path === '/api/setup' || path === '/api/login' || path === '/api/logout'));
+    if (
+      !serviceVerify &&
+      requestHost === bootHost &&
+      ['/', '/login', '/setup', '/logout'].includes(path) &&
+      method !== 'GET'
+    ) {
+      sendText(res, 405, 'method not allowed');
+      return;
+    }
     if (!serviceVerify && requestHost === bootHost && !bootRouteAllowed) {
       sendText(res, 404, 'not found');
       return;
@@ -226,6 +199,233 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     ) {
       sendText(res, 404, 'not found');
       return;
+    }
+    if (requestHost === bootHost && path.startsWith('/api/')) {
+      res.setHeader('cache-control', 'no-store');
+      res.setHeader('content-security-policy', CSP);
+      res.setHeader('x-content-type-options', 'nosniff');
+      if (path === '/api/state' && method === 'GET') {
+        const record = await state.readAuth();
+        const token = record === null ? null : sessionToken(req, record);
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(
+          JSON.stringify({
+            setupNeeded: record === null,
+            loggedIn: token !== null,
+            ...(record !== null && token !== null ? { csrfToken: csrfToken(record, token) } : {}),
+            ...(token !== null && state.readOnboarding !== undefined
+              ? { onboarding: await state.readOnboarding() }
+              : {}),
+          })
+        );
+        return;
+      }
+      if (path === '/api/setup' || path === '/api/login') {
+        if (
+          header(req, 'content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json'
+        ) {
+          res.writeHead(415, { 'content-type': 'application/json; charset=utf-8' });
+          res.end('{"error":"content_type"}');
+          return;
+        }
+        const refusal = refuseOrigin(req);
+        if (refusal !== null) {
+          res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' });
+          res.end('{"error":"origin"}');
+          return;
+        }
+        const chunks: Uint8Array[] = [];
+        let bodyBytes = 0;
+        for await (const chunk of req) {
+          const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          bodyBytes += bytes.length;
+          if (bodyBytes > MAX_FORM_BYTES) break;
+          chunks.push(new Uint8Array(bytes));
+        }
+        if (bodyBytes > MAX_FORM_BYTES) {
+          res.writeHead(413, { 'content-type': 'application/json; charset=utf-8' });
+          res.end('{"error":"body_too_large"}');
+          return;
+        }
+        let payload: { password?: unknown; next?: unknown };
+        try {
+          const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
+            throw new Error('invalid object');
+          payload = parsed as { password?: unknown; next?: unknown };
+        } catch {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+          res.end('{"error":"invalid_body"}');
+          return;
+        }
+        const requestHost = req.headers.host ?? '';
+        const next =
+          typeof payload.next === 'string'
+            ? vettedNext(payload.next, requestHost, config.instanceName)
+            : null;
+        if (payload.next !== undefined && next === null) {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+          res.end('{"error":"next"}');
+          return;
+        }
+        const password = typeof payload.password === 'string' ? payload.password : '';
+        if (password.length < (path === '/api/setup' ? 12 : 1) || password.length > 1024) {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+          res.end('{"error":"password"}');
+          return;
+        }
+        if (path === '/api/setup') {
+          if ((await state.readAuth()) !== null) {
+            res.writeHead(409, { 'content-type': 'application/json; charset=utf-8' });
+            res.end('{"error":"already_setup"}');
+            return;
+          }
+          const record = await hashPassword(password);
+          const installed = await withAuthTransition(async () => {
+            if ((await state.readAuth()) !== null) return false;
+            await state.writeAuth(record);
+            return true;
+          });
+          if (!installed) {
+            res.writeHead(409, { 'content-type': 'application/json; charset=utf-8' });
+            res.end('{"error":"already_setup"}');
+            return;
+          }
+          const token = createSession(record, clock.now());
+          const location = next === null ? null : handoffRedirect(token, next, requestHost);
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'set-cookie': sessionCookie(token, req.headers.host ?? ''),
+            'cache-control': 'no-store',
+          });
+          res.end(
+            JSON.stringify({ ok: true, ...(location === null ? {} : { redirectTo: location }) })
+          );
+          return;
+        }
+        const record = await state.readAuth();
+        if (record === null || !(await verifyPassword(password, record))) {
+          res.writeHead(401, { 'content-type': 'application/json; charset=utf-8' });
+          res.end('{"error":"invalid_credentials"}');
+          return;
+        }
+        const token = createSession(record, clock.now());
+        const location = next === null ? null : handoffRedirect(token, next, requestHost);
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'set-cookie': sessionCookie(token, req.headers.host ?? ''),
+          'cache-control': 'no-store',
+        });
+        res.end(
+          JSON.stringify({ ok: true, ...(location === null ? {} : { redirectTo: location }) })
+        );
+        return;
+      }
+      if (path === '/api/model' && method === 'GET') {
+        const origin = header(req, 'origin');
+        const fetchSite = header(req, 'sec-fetch-site');
+        const record = await state.readAuth();
+        const token = record === null ? null : sessionToken(req, record);
+        if (
+          token === null ||
+          (origin !== undefined &&
+            !sameOrigin(origin, undefined, `boot-${config.instanceName}.local`)) ||
+          (fetchSite !== undefined && fetchSite !== 'same-origin')
+        ) {
+          res.writeHead(403);
+          res.end();
+          return;
+        }
+        res.writeHead(501, { 'cache-control': 'no-store' });
+        res.end();
+        return;
+      }
+      if (path === '/api/logout' && method === 'POST') {
+        const record = await state.readAuth();
+        const token = record === null ? null : sessionToken(req, record);
+        if (record === null || token === null) {
+          res.writeHead(401);
+          res.end();
+          return;
+        }
+        if (
+          refuseOrigin(req) !== null ||
+          !verifyCsrf(header(req, 'x-csrf-token') ?? '', record, token)
+        ) {
+          res.writeHead(403);
+          res.end();
+          return;
+        }
+        const loggedOut = await withAuthTransition(async () => {
+          const current = await state.readAuth();
+          const currentToken = current === null ? null : sessionToken(req, current);
+          if (
+            current === null ||
+            currentToken === null ||
+            !verifyCsrf(header(req, 'x-csrf-token') ?? '', current, currentToken)
+          )
+            return false;
+          current.sessionSecret = randomBytes(32).toString('base64');
+          await state.replaceAuth(current);
+          return true;
+        });
+        if (!loggedOut) {
+          res.writeHead(401);
+          res.end();
+          return;
+        }
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'set-cookie': clearSessionCookie(req.headers.host ?? ''),
+        });
+        res.end('{"ok":true}');
+        return;
+      }
+    }
+    if (requestHost === bootHost && path === '/favicon.svg' && method === 'GET') {
+      try {
+        const bytes = await readFile(resolve(uiRoot, 'favicon.svg'));
+        res.writeHead(200, {
+          'content-type': 'image/svg+xml',
+          'cache-control': 'public, max-age=86400',
+          'content-security-policy': CSP,
+          'x-content-type-options': 'nosniff',
+        });
+        res.end(bytes);
+      } catch {
+        sendText(res, 404, 'not found');
+      }
+      return;
+    }
+    if (requestHost === bootHost && path.startsWith('/assets/')) {
+      try {
+        const relative = path.slice(1);
+        const asset = resolve(uiRoot, relative);
+        if (!asset.startsWith(uiRoot + sep)) {
+          sendText(res, 404, 'not found');
+          return;
+        }
+        const bytes = await readFile(asset);
+        const immutable = /-[A-Za-z0-9_-]{8,}\./.test(relative.split('/').pop() ?? '');
+        res.writeHead(200, {
+          'content-type': relative.endsWith('.html')
+            ? 'text/html; charset=utf-8'
+            : relative.endsWith('.css')
+              ? 'text/css; charset=utf-8'
+              : relative.endsWith('.js')
+                ? 'text/javascript; charset=utf-8'
+                : 'font/woff2',
+          'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
+          'content-security-policy': CSP,
+          'x-content-type-options': 'nosniff',
+          'referrer-policy': 'no-referrer',
+        });
+        res.end(bytes);
+        return;
+      } catch {
+        sendText(res, 404, 'not found');
+        return;
+      }
     }
     if (
       path === '/ca.crt' &&
@@ -291,201 +491,48 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       else redirect(res, next);
       return;
     }
-    if (path === '/setup') {
-      const existing = await state.readAuth();
-      if (existing !== null) {
-        redirect(res, '/login');
-        return;
-      }
-      if (method === 'GET') {
-        const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
-        const next = vettedNext(
-          query.get('next') ?? undefined,
-          header(req, 'host') ?? '',
-          config.instanceName
-        );
-        sendHtml(res, 200, formPage('Set loader password', '/setup', 'Password', undefined, next));
-        return;
-      }
-      if (method !== 'POST') {
-        sendText(res, 405, 'the loader takes GET or POST here');
-        return;
-      }
-      const refusal = refuseOrigin(req);
-      if (refusal !== null) {
-        sendHtml(res, 403, page('Refused', escapeHtml(refusal)));
-        return;
-      }
-      const setupForm = await readForm(req);
-      const password = setupForm['password'] ?? '';
-      if (password === '') {
-        sendHtml(
-          res,
-          400,
-          formPage('Set loader password', '/setup', 'Password', 'A password is needed.')
-        );
-        return;
-      }
-      const record = await hashPassword(password);
-      const installed = await withAuthTransition(async () => {
-        if ((await state.readAuth()) !== null) return false;
-        await state.writeAuth(record);
-        return true;
-      });
-      if (!installed) {
-        redirect(res, '/login');
-        return;
-      }
-      logger.info({}, "the loader's password is set: platform authentication is ready");
-      const host = req.headers.host ?? 'localhost';
-      const token = createSession(record, clock.now());
-      const next = vettedNext(setupForm['next'], host, config.instanceName);
-      redirect(res, next === null ? '/' : handoffRedirect(token, next, host), {
-        'set-cookie': sessionCookie(token, host),
-      });
-      return;
-    }
-    if (path === '/login') {
+    if ((path === '/' || path === '/login' || path === '/setup') && requestHost === bootHost) {
       const record = await state.readAuth();
-      if (record === null) {
-        redirect(res, '/setup');
+      const query = new URL(req.url ?? '/', `https://${req.headers.host ?? bootHost}`).searchParams;
+      const safeNext = vettedNext(
+        query.get('next') ?? undefined,
+        req.headers.host ?? '',
+        config.instanceName
+      );
+      const nextQuery = safeNext === null ? '' : `?next=${encodeURIComponent(safeNext)}`;
+      if (record === null && path !== '/setup') {
+        redirect(res, `/setup${nextQuery}`);
         return;
       }
-      if (method === 'GET') {
-        const active = sessionToken(req, record);
-        const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
-        const next = vettedNext(
-          query.get('next') ?? undefined,
-          header(req, 'host') ?? '',
-          config.instanceName
-        );
-        if (active !== null) {
-          redirect(
-            res,
-            next === null ? '/' : handoffRedirect(active, next, header(req, 'host') ?? '')
-          );
+      if (record !== null && path === '/setup') {
+        redirect(res, `/login${nextQuery}`);
+        return;
+      }
+      if (record !== null && sessionToken(req, record) !== null && path !== '/') {
+        const token = sessionToken(req, record);
+        if (token === null) {
+          redirect(res, '/');
           return;
         }
-        sendHtml(res, 200, formPage('Loader login', '/login', 'Password', undefined, next));
-        return;
-      }
-      if (method !== 'POST') {
-        sendText(res, 405, 'the loader takes GET or POST here');
-        return;
-      }
-      const refusal = refuseOrigin(req);
-      if (refusal !== null) {
-        sendHtml(res, 403, page('Refused', escapeHtml(refusal)));
-        return;
-      }
-      const form = await readForm(req);
-      const password = form['password'] ?? '';
-      const next = vettedNext(form['next'], header(req, 'host') ?? '', config.instanceName);
-      if (!(await verifyPassword(password, record))) {
-        logger.warn(
-          { host: req.headers.host ?? 'unknown', remote: req.socket.remoteAddress ?? 'unknown' },
-          'login refused: the password does not match'
-        );
-        sendHtml(
+        redirect(
           res,
-          401,
-          formPage('Loader login', '/login', 'Password', 'That password does not match.', next)
+          safeNext === null ? '/' : handoffRedirect(token, safeNext, req.headers.host ?? '')
         );
         return;
       }
-      const host = req.headers.host ?? 'localhost';
-      const issued = await withAuthTransition(async () => {
-        const current = await state.readAuth();
-        if (current === null || !(await verifyPassword(password, current))) return null;
-        return { record: current, token: createSession(current, clock.now()) };
-      });
-      if (issued === null) {
-        sendHtml(
-          res,
-          401,
-          formPage('Loader login', '/login', 'Password', 'That password does not match.', next)
-        );
-        return;
+      try {
+        const bytes = await readFile(resolve(uiRoot, 'index.html'));
+        res.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'no-cache',
+          'content-security-policy': CSP,
+          'x-content-type-options': 'nosniff',
+          'referrer-policy': 'no-referrer',
+        });
+        res.end(bytes);
+      } catch {
+        sendText(res, 503, 'loader interface is unavailable');
       }
-      logger.info({ host }, 'the owner logged in');
-      redirect(res, next === null ? '/' : handoffRedirect(issued.token, next, host), {
-        'set-cookie': sessionCookie(issued.token, host),
-      });
-      return;
-    }
-    if (path === '/logout') {
-      if (method !== 'POST') {
-        sendText(res, 405, 'logging out is a POST from the loader page');
-        return;
-      }
-      const record = await state.readAuth();
-      const token = record === null ? null : sessionToken(req, record);
-      if (record === null || token === null) {
-        sendHtml(res, 401, page('Loader login', '<p>Not logged in.</p>'));
-        return;
-      }
-      const form = await readForm(req);
-      const refusal =
-        refuseOrigin(req) ??
-        (verifyCsrf(form['csrf'] ?? '', record, token)
-          ? null
-          : 'the form carried no anti-CSRF token of this session');
-      if (refusal !== null) {
-        sendHtml(res, 403, page('Refused', escapeHtml(refusal)));
-        return;
-      }
-      const loggedOut = await withAuthTransition(async () => {
-        const current = await state.readAuth();
-        const currentToken = current === null ? null : sessionToken(req, current);
-        if (
-          current === null ||
-          currentToken === null ||
-          !verifyCsrf(form['csrf'] ?? '', current, currentToken)
-        )
-          return false;
-        current.sessionSecret = randomBytes(32).toString('base64');
-        await state.replaceAuth(current);
-        return true;
-      });
-      if (!loggedOut) {
-        sendHtml(res, 401, page('Loader login', '<p>Not logged in.</p>'));
-        return;
-      }
-      logger.info({}, 'the owner logged out');
-      redirect(res, '/login', {
-        'set-cookie': clearSessionCookie(req.headers.host ?? 'localhost'),
-      });
-      return;
-    }
-    if (path === '/' && method !== 'POST') {
-      const record = await state.readAuth();
-      const token = record === null ? null : sessionToken(req, record);
-      if (record === null || token === null) {
-        sendHtml(
-          res,
-          401,
-          page(
-            'Loader login',
-            '<p class="bad">Not logged in.</p><p><a href="/login">Log in</a></p>'
-          )
-        );
-        return;
-      }
-      const csrf = csrfToken(record, token);
-      sendHtml(
-        res,
-        200,
-        page(
-          'Platform loader',
-          '<h2>Platform mode</h2><p>This loader provides authentication and resumable platform bootstrap. It does not run a lifemodel instance.</p><form method="post" action="/logout"><input type="hidden" name="csrf" value="' +
-            csrf +
-            '"><button type="submit">Log out</button></form>'
-        )
-      );
-      return;
-    }
-    if (path === '/' && method === 'POST') {
-      sendText(res, 405, 'there is no action at /');
       return;
     }
     if (path === '/panic' || path === '/resume' || path.startsWith('/_api/')) {

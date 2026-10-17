@@ -1,9 +1,37 @@
-# The platform loader build context needs its sources and prepared git seed only.
+# Loader build context: files required by the loader image build only.
 *
-!docker
-!docker/loader
-!docker/loader/**
-!loader
-!loader/**
-!.docker-context
-!.docker-context/**
+!docker/loader/Dockerfile
+!loader/package.json
+!loader/package-lock.json
+!loader/tsconfig.json
+!loader/src/**/*.ts
+!package.json
+!package-lock.json
+!web/kit/theme.css
+!web/kit/components/ui/**/*.ts
+!web/kit/components/ui/**/*.tsx
+!web/kit/hooks/**/*.ts
+!web/kit/hooks/**/*.tsx
+!web/kit/lib/**/*.ts
+!web/kit/lib/**/*.tsx
+!web/loader/src/**/*.ts
+!web/loader/src/**/*.tsx
+!web/loader/src/**/*.css
+!web/loader/index.html
+!web/loader/vite.config.ts
+!web/loader/tsconfig.json
+!web/loader/package.json
+!web/loader/public/favicon.svg
+!.docker-context/seed.bundle
+.docker-context/*
+!.docker-context/seed.bundle
+# Exclude credential and local configuration names even when their parent is admitted.
+**/.npmrc
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/.git*
+**/id_*
+**/secrets/**
+**/.dockerignore

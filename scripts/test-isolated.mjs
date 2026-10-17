@@ -151,8 +151,8 @@ export function innerSteps(mode, args) {
   // The loader and web app are separate TypeScript projects: typecheck all three,
   // then lint and format source, then the suite last.
   return mode === 'check'
-    ? [['tsc', '--noEmit'], ['tsc', '-p', 'loader/tsconfig.json', '--noEmit'], ['tsc', '-p', 'web/app/tsconfig.json', '--noEmit'],
-      ['eslint', 'src/', 'loader/', 'web/app/'], ['prettier', '--check', 'src/**/*.ts', 'loader/**/*.ts', 'web/app/**/*.{ts,tsx,css,json,html}', 'web/kit/**/*.{ts,tsx,css,json,html}'], suite]
+    ? [['tsc', '--noEmit'], ['tsc', '-p', 'loader/tsconfig.json', '--noEmit'], ['tsc', '-p', 'web/app/tsconfig.json', '--noEmit'], ['tsc', '-p', 'web/loader/tsconfig.json', '--noEmit'],
+      ['eslint', 'src/', 'loader/', 'web/app/', 'web/loader/src/'], ['prettier', '--check', 'src/**/*.ts', 'loader/**/*.ts', 'web/app/**/*.{ts,tsx,css,json,html}', 'web/loader/**/*.{ts,tsx,css,json,html}', 'web/kit/**/*.{ts,tsx,css,json,html}'], suite]
     : [suite];
 }
 

@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { request as httpRequest } from 'node:http';
 import { createLoaderHttp } from '../../loader/src/http.js';
 import { loadConfig } from '../../loader/src/config.js';
@@ -9,12 +12,17 @@ import type { LoaderState } from '../../loader/src/state.js';
 
 const SERVICE_HOST = 'loader.lifemodel-system.svc.cluster.local';
 const servers: Array<ReturnType<typeof createLoaderHttp>> = [];
+const roots: string[] = [];
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map(({ close }) => close()));
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-async function start(initialAuth: Awaited<ReturnType<typeof hashPassword>> | null) {
+async function start(
+  initialAuth: Awaited<ReturnType<typeof hashPassword>> | null,
+  uiRoot?: string
+) {
   let auth = initialAuth === null ? null : structuredClone(initialAuth);
   const state: LoaderState = {
     ensureLayout: async () => undefined,
@@ -32,6 +40,7 @@ async function start(initialAuth: Awaited<ReturnType<typeof hashPassword>> | nul
     logger: createRecordingLogger([]),
     clock,
     config: loadConfig({ LIFEMODEL_NAME: 'lifemodel' }),
+    ...(uiRoot === undefined ? {} : { uiRoot }),
     pki: {
       bootstrap: async () => {},
       report: async () => ({
@@ -59,62 +68,46 @@ async function request(
   body?: string
 ) {
   const url = new URL(path, base);
-  return new Promise<{ status: number; headers: Record<string, string | string[] | undefined> }>(
-    (resolve, reject) => {
-      const req = httpRequest(
-        {
-          hostname: url.hostname,
-          port: url.port,
-          path: url.pathname + url.search,
-          method,
-          headers: { host: SERVICE_HOST, ...headers },
-        },
-        (res) => {
-          res.resume();
-          res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers }));
-        }
-      );
-      req.on('error', reject);
-      req.end(body);
-    }
-  );
+  return new Promise<{
+    status: number;
+    headers: Record<string, string | string[] | undefined>;
+    body: string;
+  }>((resolve, reject) => {
+    const req = httpRequest(
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname + url.search,
+        method,
+        headers: { host: SERVICE_HOST, ...headers },
+      },
+      (res) => {
+        let responseBody = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => (responseBody += chunk));
+        res.on('end', () =>
+          resolve({ status: res.statusCode ?? 0, headers: res.headers, body: responseBody })
+        );
+      }
+    );
+    req.on('error', reject);
+    req.end(body);
+  });
 }
 
-describe('loader ForwardAuth verification host', () => {
-  it('accepts a valid session only on the exact verification route at its Service host', async () => {
+describe('loader ForwardAuth and JSON authentication API', () => {
+  it('accepts a valid session only on the exact service verification route', async () => {
     const record = await hashPassword('owner password');
     const { base } = await start(record);
     const cookie = `__Host-lm_session=${createSession(record, Date.now())}`;
-
-    const response = await request(base, '/_auth/verify', { cookie });
-    expect(response.status).toBe(200);
-
-    for (const path of ['/login', '/setup', '/anything']) {
-      expect((await request(base, path)).status, path).toBe(400);
-    }
+    expect((await request(base, '/_auth/verify', { cookie })).status).toBe(200);
+    expect((await request(base, '/_auth/verify/extra', { cookie })).status).toBe(404);
     expect((await request(base, '/_auth/verify')).status).toBe(401);
-    expect(
-      (
-        await fetch(`${base}/login`, {
-          headers: { host: 'boot-lifemodel.local', origin: 'https://boot-lifemodel.local' },
-        })
-      ).status
-    ).toBe(200);
-    expect(
-      (
-        await fetch(`${base}/setup`, {
-          headers: { host: 'boot-lifemodel.local', origin: 'https://boot-lifemodel.local' },
-          redirect: 'manual',
-        })
-      ).status
-    ).toBe(303);
-    expect((await request(base, '/_auth/verify/extra', { cookie })).status).toBe(400);
   });
 
-  it('requires a session and never redirects to an unvetted forwarded host', async () => {
+  it('requires a session and does not redirect to an unvetted forwarded host', async () => {
     const record = await hashPassword('owner password');
     const { base } = await start(record);
-
     const denied = await request(base, '/_auth/verify', {
       'x-forwarded-method': 'GET',
       'x-forwarded-host': 'attacker.example',
@@ -124,35 +117,59 @@ describe('loader ForwardAuth verification host', () => {
     expect(denied.headers.location).toBe(
       'https://boot-lifemodel.local/login?next=https%3A%2F%2Flifemodel.local%2Fprivate'
     );
+  });
 
-    const browser = await request(base, '/_auth/verify', {
-      host: SERVICE_HOST,
-      'x-forwarded-method': 'GET',
-      'x-forwarded-host': 'lifemodel.local',
-      'x-forwarded-uri': '/private',
-    });
-    expect(browser.status).toBe(303);
-    expect(browser.headers.location).toBe(
-      'https://boot-lifemodel.local/login?next=https%3A%2F%2Flifemodel.local%2Fprivate'
+  it('refuses a wrong password and issues a verifying host-only cookie for the right password', async () => {
+    const record = await hashPassword('owner password');
+    const { base, clock } = await start(record);
+    const headers = {
+      host: 'boot-lifemodel.local',
+      origin: 'https://boot-lifemodel.local',
+      'content-type': 'application/json',
+    };
+    expect(
+      (await request(base, '/api/login', headers, 'POST', JSON.stringify({ password: 'wrong' })))
+        .status
+    ).toBe(401);
+    const good = await request(
+      base,
+      '/api/login',
+      headers,
+      'POST',
+      JSON.stringify({ password: 'owner password' })
+    );
+    expect(good.status).toBe(200);
+    const cookie = String(good.headers['set-cookie']);
+    expect(cookie).toContain('__Host-lm_session=');
+    expect(cookie).toContain('Secure');
+    expect(cookie).toContain('HttpOnly');
+    expect(cookie.toLowerCase()).not.toContain('domain=');
+    const token = cookie.split(';')[0]!.slice('__Host-lm_session='.length);
+    expect(verifySession(token, record, clock.now())).toBe(true);
+    expect((await request(base, '/_auth/verify', { cookie: cookie.split(';')[0]! })).status).toBe(
+      200
     );
   });
 
-  it('transfers login through a one-time code and requires the returned cookie to verify', async () => {
+  it('transfers login through a one-time handoff ticket and the cookie verifies', async () => {
     const record = await hashPassword('owner password');
     const { base, clock } = await start(record);
     const login = await request(
       base,
-      '/login?next=https%3A%2F%2Flifemodel.local%2Fprivate%3Fx%3D1%23frag',
+      '/api/login',
       {
         host: 'boot-lifemodel.local',
         origin: 'https://boot-lifemodel.local',
-        'content-type': 'application/x-www-form-urlencoded',
+        'content-type': 'application/json',
       },
       'POST',
-      'password=owner%20password&next=https%3A%2F%2Flifemodel.local%2Fprivate%3Fx%3D1%23frag'
+      JSON.stringify({
+        password: 'owner password',
+        next: 'https://lifemodel.local/private?x=1#frag',
+      })
     );
-    expect(login.status).toBe(303);
-    const location = String(login.headers.location);
+    expect(login.status).toBe(200);
+    const location = JSON.parse(String(login.body))['redirectTo'] as string;
     expect(location).toContain('/_auth/handoff?code=');
     expect(location).toContain('next=%2Fprivate%3Fx%3D1');
     expect(location).not.toContain('session');
@@ -160,265 +177,491 @@ describe('loader ForwardAuth verification host', () => {
     const redeemed = await request(base, path, { host: 'lifemodel.local' });
     expect(redeemed.headers.location).toBe('/private?x=1');
     expect(redeemed.headers['referrer-policy']).toBe('no-referrer');
-    const cookie = String(redeemed.headers['set-cookie'] ?? '');
-    expect(cookie).not.toBe('');
-    expect(cookie).not.toMatch(/domain=/i);
+    const cookie = String(redeemed.headers['set-cookie']);
+    expect(cookie).toContain('__Host-lm_session=');
     const token = cookie.split(';')[0]!.slice('__Host-lm_session='.length);
     expect(verifySession(token, record, clock.now())).toBe(true);
-    expect((await request(base, '/_auth/verify', { host: SERVICE_HOST, cookie })).status).toBe(200);
-    const replay = await request(base, path, { host: 'lifemodel.local' });
-    expect(replay.headers['set-cookie']).toBeUndefined();
-    expect(replay.headers.location).toBe('https://boot-lifemodel.local/login');
+    expect((await request(base, '/_auth/verify', { cookie: cookie.split(';')[0]! })).status).toBe(
+      200
+    );
+    expect(
+      (await request(base, path, { host: 'lifemodel.local' })).headers['set-cookie']
+    ).toBeUndefined();
   });
 
-  it('authenticated GET /login and setup both issue handoff redirects', async () => {
+  it('preserves a vetted app destination through first-visit setup and creates its handoff ticket', async () => {
+    const { base } = await start(null);
+    const requested = 'https://lifemodel.local/private?from=setup';
+    const entry = await request(base, `/?next=${encodeURIComponent(requested)}`, {
+      host: 'boot-lifemodel.local',
+    });
+    expect(entry.status).toBe(303);
+    expect(entry.headers.location).toBe(`/setup?next=${encodeURIComponent(requested)}`);
+    const setup = await request(
+      base,
+      '/api/setup',
+      {
+        host: 'boot-lifemodel.local',
+        origin: 'https://boot-lifemodel.local',
+        'content-type': 'application/json',
+      },
+      'POST',
+      JSON.stringify({ password: 'secure owner password', next: requested })
+    );
+    expect(setup.status).toBe(200);
+    const redirectTo = JSON.parse(String(setup.body))['redirectTo'] as string;
+    expect(redirectTo).toMatch(/^https:\/\/lifemodel\.local\/_auth\/handoff\?code=/);
+    expect(redirectTo).toContain(`next=${encodeURIComponent('/private?from=setup')}`);
+    const rejected = await request(
+      base,
+      '/api/setup',
+      {
+        host: 'boot-lifemodel.local',
+        origin: 'https://boot-lifemodel.local',
+        'content-type': 'application/json',
+      },
+      'POST',
+      JSON.stringify({ password: 'another secure password', next: 'https://attacker.example/' })
+    );
+    expect(rejected.status).toBe(400);
+  });
+
+  it('creates setup once under concurrent requests and rejects wrong content type and Origin', async () => {
     const { base } = await start(null);
     const headers = {
       host: 'boot-lifemodel.local',
       origin: 'https://boot-lifemodel.local',
-      'content-type': 'application/x-www-form-urlencoded',
+      'content-type': 'application/json',
     };
-    const setup = await request(
-      base,
-      '/setup',
-      headers,
-      'POST',
-      'password=owner%20password&next=https%3A%2F%2Flifemodel.local%2Fhome'
-    );
-    const setupLocation = String(setup.headers.location);
-    expect(setupLocation).toContain('/_auth/handoff?code=');
-    const login = await request(base, '/login?next=https%3A%2F%2Flifemodel.local%2Fagain', {
+    const [a, b] = await Promise.all([
+      request(
+        base,
+        '/api/setup',
+        headers,
+        'POST',
+        JSON.stringify({ password: 'secure owner password' })
+      ),
+      request(
+        base,
+        '/api/setup',
+        headers,
+        'POST',
+        JSON.stringify({ password: 'other secure password' })
+      ),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    const anonymousAfterSetup = await request(base, '/api/state', {
       host: 'boot-lifemodel.local',
-      cookie: String(setup.headers['set-cookie']).split(';')[0]!,
+      cookie: '__Host-lm_session=expired.invalid',
     });
-    expect(String(login.headers.location)).toContain('/_auth/handoff?code=');
+    expect(JSON.parse(anonymousAfterSetup.body)).toEqual({ setupNeeded: false, loggedIn: false });
+    expect(anonymousAfterSetup.body).not.toContain('csrfToken');
+    expect(anonymousAfterSetup.body).not.toContain('onboarding');
+    expect(
+      (
+        await request(
+          base,
+          '/api/setup',
+          { ...headers, 'content-type': 'application/x-www-form-urlencoded' },
+          'POST',
+          'password=x'
+        )
+      ).status
+    ).toBe(415);
+    expect(
+      (
+        await request(
+          base,
+          '/api/setup',
+          { host: 'boot-lifemodel.local', 'content-type': 'application/json' },
+          'POST',
+          JSON.stringify({ password: 'secure owner password' })
+        )
+      ).status
+    ).toBe(403);
   });
 
-  it('rejects expired, unknown and altered handoff codes without setting a cookie', async () => {
-    const { base, clock } = await start(null);
-    const setup = await request(
+  it('rejects invalid next destinations and only issues a ticket for the exact app host', async () => {
+    const record = await hashPassword('owner password');
+    const { base } = await start(record);
+    for (const next of [
+      'https://evil.example/',
+      'https://lifemodel.local\\private',
+      '//evil.example/',
+      'https://vault-lifemodel.local/',
+    ]) {
+      const response = await request(
+        base,
+        '/api/login',
+        {
+          host: 'boot-lifemodel.local',
+          origin: 'https://boot-lifemodel.local',
+          'content-type': 'application/json',
+        },
+        'POST',
+        JSON.stringify({ password: 'owner password', next })
+      );
+      expect(response.status).toBe(400);
+      expect(response.headers['set-cookie']).toBeUndefined();
+    }
+    const relative = await request(
       base,
-      '/setup',
+      '/api/login',
       {
         host: 'boot-lifemodel.local',
         origin: 'https://boot-lifemodel.local',
-        'content-type': 'application/x-www-form-urlencoded',
+        'content-type': 'application/json',
       },
       'POST',
-      'password=p&next=https%3A%2F%2Flifemodel.local%2Fx'
+      JSON.stringify({ password: 'owner password', next: '/settings' })
     );
-    const handoffUrl = new URL(String(setup.headers.location));
-    const handoffPath = handoffUrl.pathname + handoffUrl.search;
-    const altered = handoffPath.replace('next=%2Fx', 'next=%2Fother');
-    const unknown = '/_auth/handoff?code=unknown&next=%2Fx';
-    for (const path of [altered, unknown]) {
-      const response = await request(base, path, { host: 'lifemodel.local' });
-      expect(response.headers.location).toBe('https://boot-lifemodel.local/login');
-      expect(response.headers['referrer-policy']).toBe('no-referrer');
-      expect(response.headers['set-cookie']).toBeUndefined();
-    }
-    const sessionCookie = String(setup.headers['set-cookie']).split(';')[0]!;
-    const another = await request(base, '/login?next=https%3A%2F%2Flifemodel.local%2Fx', {
+    expect(relative.status).toBe(200);
+    expect(JSON.parse(relative.body).redirectTo).toContain('/settings');
+  });
+
+  it('requires a JSON object and rejects invalid or oversized request bodies', async () => {
+    const { base } = await start(null);
+    const headers = {
       host: 'boot-lifemodel.local',
-      cookie: sessionCookie,
-    });
-    const expiring = new URL(String(another.headers.location), 'https://boot-lifemodel.local');
-    clock.advance(60_001);
-    const expired = await request(base, expiring.pathname + expiring.search, {
-      host: 'lifemodel.local',
-    });
-    expect(expired.headers.location).toBe('https://boot-lifemodel.local/login');
-    expect(expired.headers['referrer-policy']).toBe('no-referrer');
-    expect(expired.headers['set-cookie']).toBeUndefined();
-  });
-
-  it('returns 405 for unsupported methods on the API route namespace', async () => {
-    const { base } = await start(null);
-    for (const path of ['/api/state', '/api/not-real']) {
-      const response = await request(base, path, { host: 'boot-lifemodel.local' }, 'PATCH');
-      expect(response.status).toBe(405);
+      origin: 'https://boot-lifemodel.local',
+      'content-type': 'application/json',
+    };
+    for (const body of ['null', '[]', '"x"', '{']) {
+      const result = await request(base, '/api/setup', headers, 'POST', body);
+      expect(result.status).toBe(400);
+      expect(
+        await (async () =>
+          (await request(base, '/api/state', { host: 'boot-lifemodel.local' })).body)()
+      ).toContain('"setupNeeded":true');
     }
+    expect((await request(base, '/api/setup', headers, 'POST', ' '.repeat(8193))).status).toBe(413);
+    const multibyte = JSON.stringify({ password: 'x'.repeat(8188) + '€' });
+    expect(Buffer.byteLength(multibyte, 'utf8')).toBeGreaterThan(8192);
+    expect((await request(base, '/api/setup', headers, 'POST', multibyte)).status).toBe(413);
   });
 
-  it('does not let Referer rescue missing, null, or malformed write Origin', async () => {
+  it('rejects text/plain JSON, a full invalid login Origin matrix, and anonymous CSRF state', async () => {
     const { base } = await start(null);
+    const body = JSON.stringify({ password: 'secure owner password' });
+    expect(
+      (
+        await request(
+          base,
+          '/api/setup',
+          {
+            host: 'boot-lifemodel.local',
+            origin: 'https://boot-lifemodel.local',
+            'content-type': 'text/plain',
+          },
+          'POST',
+          body
+        )
+      ).status
+    ).toBe(415);
+    const loginRecord = await hashPassword('secure owner password');
+    const setupServer = await start(loginRecord);
     for (const origin of [
       undefined,
       'null',
       'malformed',
       'http://boot-lifemodel.local',
+      'https://boot-sibling.local',
       'https://boot-lifemodel.local:444',
     ]) {
-      const headers = {
-        host: 'boot-lifemodel.local',
-        referer: 'https://boot-lifemodel.local/page',
-        ...(origin === undefined ? {} : { origin }),
-      };
-      const response = await request(base, '/setup', headers, 'POST', 'password=p');
+      const response = await request(
+        setupServer.base,
+        '/api/login',
+        {
+          host: 'boot-lifemodel.local',
+          'content-type': 'application/json',
+          referer: 'https://boot-lifemodel.local/',
+          ...(origin === undefined ? {} : { origin }),
+        },
+        'POST',
+        body
+      );
       expect(response.status).toBe(403);
+      expect(response.headers['set-cookie']).toBeUndefined();
     }
-    const accepted = await request(
-      base,
-      '/setup',
-      { host: 'boot-lifemodel.local', origin: 'https://boot-lifemodel.local' },
-      'POST',
-      'password=p'
-    );
-    expect(accepted.status).toBe(303);
-    expect(String(accepted.headers['set-cookie'])).toContain('__Host-lm_session=');
-    expect(String(accepted.headers['set-cookie'])).toContain('Secure');
+    expect(
+      JSON.parse((await request(base, '/api/state', { host: 'boot-lifemodel.local' })).body)
+    ).toEqual({ setupNeeded: true, loggedIn: false });
+    const state = await request(setupServer.base, '/api/state', { host: 'boot-lifemodel.local' });
+    expect(JSON.parse(state.body)).toEqual({ setupNeeded: false, loggedIn: false });
+    expect(state.body).not.toContain('csrfToken');
+    expect(state.body).not.toContain('onboarding');
   });
 
-  it('revokes an app-host session obtained by handoff when logging out', async () => {
+  it('keeps a valid boot session return destination through login navigation', async () => {
     const record = await hashPassword('owner password');
     const { base, clock } = await start(record);
-    const session = createSession(record, clock.now());
-    const { csrfToken } = await import('../../loader/src/auth.js');
-    const login = await request(base, '/login?next=https%3A%2F%2Flifemodel.local%2F', {
+    const cookie = `__Host-lm_session=${createSession(record, clock.now())}`;
+    const response = await request(base, '/login?next=https%3A%2F%2Flifemodel.local%2F', {
       host: 'boot-lifemodel.local',
-      cookie: `__Host-lm_session=${session}`,
+      cookie,
     });
-    const loginUrl = new URL(String(login.headers.location));
-    const handoff = await request(base, loginUrl.pathname + loginUrl.search, {
-      host: 'lifemodel.local',
-    });
-    const handoffSetCookie = String(handoff.headers['set-cookie']);
-    expect(handoffSetCookie).toContain('__Host-lm_session=');
-    expect(handoffSetCookie).toContain('Path=/');
-    expect(handoffSetCookie).toContain('HttpOnly');
-    expect(handoffSetCookie).toContain('Secure');
-    expect(handoffSetCookie).toContain('SameSite=Lax');
-    expect(handoffSetCookie.toLowerCase()).not.toContain('domain=');
-    const appCookie = handoffSetCookie.split(';')[0]!;
-    expect(
-      (await request(base, '/_auth/verify', { host: SERVICE_HOST, cookie: appCookie })).status
-    ).toBe(200);
-    const csrf = csrfToken(record, session);
-    const logout = await request(
-      base,
-      '/logout',
-      {
-        host: 'boot-lifemodel.local',
-        cookie: `__Host-lm_session=${session}`,
-        origin: 'https://boot-lifemodel.local',
-        'content-type': 'application/x-www-form-urlencoded',
-      },
-      'POST',
-      `csrf=${encodeURIComponent(csrf)}`
-    );
-    expect(logout.status).toBe(303);
-    const logoutCookie = String(logout.headers['set-cookie']);
-    expect(logoutCookie).toContain('__Host-lm_session=;');
-    expect(logoutCookie).toContain('Path=/');
-    expect(logoutCookie).toContain('HttpOnly');
-    expect(logoutCookie).toContain('Secure');
-    expect(logoutCookie).toContain('SameSite=Lax');
-    expect(logoutCookie.toLowerCase()).not.toContain('domain=');
-    expect(
-      (await request(base, '/_auth/verify', { host: SERVICE_HOST, cookie: appCookie })).status
-    ).toBe(401);
+    expect(response.status).toBe(303);
+    expect(response.headers.location).toMatch(/^https:\/\/lifemodel\.local\/_auth\/handoff\?code=/);
   });
 
-  it('refuses a pending handoff code after its issuing session is revoked by logout', async () => {
+  it('logout rotates the secret, clearing every session and pending handoff', async () => {
     const record = await hashPassword('owner password');
     const { base, clock } = await start(record);
-    const session = createSession(record, clock.now());
-    const login = await request(base, '/login?next=https%3A%2F%2Flifemodel.local%2Fprivate', {
-      host: 'boot-lifemodel.local',
-      cookie: `__Host-lm_session=${session}`,
-    });
-    const handoffUrl = new URL(String(login.headers.location), 'https://boot-lifemodel.local');
-    const csrf = (await import('../../loader/src/auth.js')).csrfToken(record, session);
-    const logout = await request(
-      base,
-      '/logout',
-      {
-        host: 'boot-lifemodel.local',
-        cookie: `__Host-lm_session=${session}`,
-        origin: 'https://boot-lifemodel.local',
-        'content-type': 'application/x-www-form-urlencoded',
-      },
-      'POST',
-      `csrf=${encodeURIComponent(csrf)}`
-    );
-    expect(logout.status).toBe(303);
-    const redemption = await request(base, handoffUrl.pathname + handoffUrl.search, {
-      host: 'lifemodel.local',
-    });
-    expect(redemption.headers.location).toBe('https://boot-lifemodel.local/login');
-    expect(redemption.headers['set-cookie']).toBeUndefined();
-  });
-
-  it('serializes simultaneous logouts: one succeeds and the stale session is refused', async () => {
-    const record = await hashPassword('owner password');
-    const { base, clock, getAuth } = await start(record);
     const token = createSession(record, clock.now());
-    const csrfTokenForSession = (await import('../../loader/src/auth.js')).csrfToken;
-    const csrf = csrfTokenForSession(record, token);
-    const headers = {
-      host: 'boot-lifemodel.local',
-      cookie: `__Host-lm_session=${token}`,
-      origin: 'https://boot-lifemodel.local',
-      'content-type': 'application/x-www-form-urlencoded',
-    };
-    const results = await Promise.all([
-      request(base, '/logout', headers, 'POST', `csrf=${encodeURIComponent(csrf)}`),
-      request(base, '/logout', headers, 'POST', `csrf=${encodeURIComponent(csrf)}`),
-    ]);
-    expect(results.map((result) => result.status).sort()).toEqual([303, 401]);
-    const after = getAuth();
-    expect(after).not.toBeNull();
-    expect(
-      (
-        await request(base, '/_auth/verify', {
-          host: SERVICE_HOST,
-          cookie: `__Host-lm_session=${token}`,
-        })
-      ).status
-    ).toBe(401);
-  });
-
-  it('never sets a cookie with a Domain attribute on setup, login, logout, or handoff', async () => {
-    const { base, clock, getAuth } = await start(null);
-    const formHeaders = {
-      host: 'boot-lifemodel.local',
-      origin: 'https://boot-lifemodel.local',
-      'content-type': 'application/x-www-form-urlencoded',
-    };
-    const setup = await request(base, '/setup', formHeaders, 'POST', 'password=owner%20password');
-    expect(setup.status).toBe(303);
-    expect(String(setup.headers['set-cookie'])).not.toMatch(/domain=/i);
-
-    const login = await request(base, '/login', formHeaders, 'POST', 'password=owner%20password');
-    expect(login.status).toBe(303);
-    expect(String(login.headers['set-cookie'])).not.toMatch(/domain=/i);
-
-    const authRecord = getAuth();
-    if (authRecord === null) throw new Error('setup did not save auth');
-    const token = createSession(authRecord, clock.now());
-    const csrf = (await import('../../loader/src/auth.js')).csrfToken(authRecord, token);
-    const logout = await request(
+    const csrf = (await import('../../loader/src/auth.js')).csrfToken(record, token);
+    const login = await request(
       base,
-      '/logout',
-      { ...formHeaders, cookie: `__Host-lm_session=${token}` },
+      '/api/login',
+      {
+        host: 'boot-lifemodel.local',
+        cookie: `__Host-lm_session=${token}`,
+        origin: 'https://boot-lifemodel.local',
+        'content-type': 'application/json',
+      },
       'POST',
-      `csrf=${encodeURIComponent(csrf)}`
+      JSON.stringify({ password: 'owner password', next: 'https://lifemodel.local/private' })
     );
-    expect(logout.status).toBe(303);
-    expect(String(logout.headers['set-cookie'])).not.toMatch(/domain=/i);
-
-    const handoffRecord = authRecord;
-    const handoffLogin = await request(base, '/login?next=https%3A%2F%2Flifemodel.local%2F', {
-      host: 'boot-lifemodel.local',
-      cookie: `__Host-lm_session=${createSession(handoffRecord, clock.now())}`,
-    });
-    const handoffUrl = new URL(
-      String(handoffLogin.headers.location),
+    const handoff = new URL(
+      String(JSON.parse(String(login.body))['redirectTo']),
       'https://boot-lifemodel.local'
     );
-    const handoff = await request(base, handoffUrl.pathname + handoffUrl.search, {
+    const out = await request(
+      base,
+      '/api/logout',
+      {
+        host: 'boot-lifemodel.local',
+        cookie: `__Host-lm_session=${token}`,
+        origin: 'https://boot-lifemodel.local',
+        'x-csrf-token': csrf,
+      },
+      'POST'
+    );
+    expect(out.status).toBe(200);
+    expect(String(out.headers['set-cookie'])).toContain('__Host-lm_session=;');
+    expect(
+      (await request(base, '/_auth/verify', { cookie: `__Host-lm_session=${token}` })).status
+    ).toBe(401);
+    const redeemed = await request(base, handoff.pathname + handoff.search, {
       host: 'lifemodel.local',
     });
-    expect(String(handoff.headers['set-cookie'])).not.toMatch(/domain=/i);
+    expect(redeemed.status).toBe(303);
+    expect(redeemed.headers.location).toBe('https://boot-lifemodel.local/login');
+    expect(redeemed.headers['set-cookie']).toBeUndefined();
+  });
+
+  it('admits GET /api/model only with a session and same-origin Fetch Metadata', async () => {
+    const record = await hashPassword('owner password');
+    const { base, clock } = await start(record);
+    const cookie = `__Host-lm_session=${createSession(record, clock.now())}`;
+    expect((await request(base, '/api/model', { host: 'boot-lifemodel.local' })).status).toBe(403);
+    expect(
+      (await request(base, '/api/model', { host: 'boot-lifemodel.local', cookie })).status
+    ).toBe(501);
+    for (const headers of [
+      { cookie, origin: 'https://boot-sibling.local' },
+      { cookie, origin: 'http://boot-lifemodel.local' },
+      { cookie, origin: 'https://boot-lifemodel.local:444' },
+      { cookie, origin: 'garbage' },
+      { cookie, 'sec-fetch-site': 'same-site' },
+    ])
+      expect(
+        (await request(base, '/api/model', { host: 'boot-lifemodel.local', ...headers })).status
+      ).toBe(403);
+  });
+
+  it('requires a CSRF token for logout', async () => {
+    const record = await hashPassword('owner password');
+    const { base, clock } = await start(record);
+    const token = createSession(record, clock.now());
+    const response = await request(
+      base,
+      '/api/logout',
+      {
+        host: 'boot-lifemodel.local',
+        cookie: `__Host-lm_session=${token}`,
+        origin: 'https://boot-lifemodel.local',
+        'content-type': 'application/json',
+      },
+      'POST'
+    );
+    expect(response.status).toBe(403);
+    expect(
+      (await request(base, '/_auth/verify', { cookie: `__Host-lm_session=${token}` })).status
+    ).toBe(200);
+  });
+
+  it('applies a per-route method matrix and rejects missing, null or sibling Origin on writes', async () => {
+    const { base } = await start(null);
+    for (const path of ['/login', '/setup'])
+      expect((await request(base, path, { host: 'boot-lifemodel.local' }, 'POST')).status).toBe(
+        405
+      );
+    for (const [path, allowed] of [
+      ['/api/state', 'GET'],
+      ['/api/setup', 'POST'],
+      ['/api/login', 'POST'],
+      ['/api/logout', 'POST'],
+    ] as const) {
+      for (const method of ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+        if (method !== allowed)
+          expect(
+            (await request(base, path, { host: 'boot-lifemodel.local' }, method)).status,
+            path + method
+          ).toBe(405);
+    }
+    for (const origin of [
+      undefined,
+      'null',
+      'malformed',
+      'http://boot-lifemodel.local',
+      'https://boot-sibling.local',
+      'https://boot-lifemodel.local:444',
+    ]) {
+      expect(
+        (
+          await request(
+            base,
+            '/api/setup',
+            {
+              host: 'boot-lifemodel.local',
+              'content-type': 'application/json',
+              referer: 'https://boot-lifemodel.local/',
+              ...(origin === undefined ? {} : { origin }),
+            },
+            'POST',
+            JSON.stringify({ password: 'secure owner password' })
+          )
+        ).status
+      ).toBe(403);
+    }
+  });
+});
+
+describe('loader static UI and JSON API', () => {
+  it('serves the built app and anonymous state without core or web dependencies', async () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'loader-ui-fixture-'));
+    roots.push(fixture);
+    mkdirSync(join(fixture, 'assets'));
+    writeFileSync(join(fixture, 'index.html'), '<!doctype html><main>loader fixture</main>');
+    writeFileSync(join(fixture, 'favicon.svg'), '<svg/>');
+    writeFileSync(join(fixture, 'assets', 'index-BCR7Kdqf.js'), 'void 0');
+    const { base } = await start(null, fixture);
+    const shell = await request(base, '/setup', { host: 'boot-lifemodel.local' });
+    expect(shell.status).toBe(200);
+    expect(shell.headers['content-security-policy']).toBeDefined();
+    expect(shell.headers['cache-control']).toBe('no-cache');
+    const favicon = await request(base, '/favicon.svg', { host: 'boot-lifemodel.local' });
+    expect(favicon.status).toBe(200);
+    expect(favicon.headers['content-type']).toContain('image/svg+xml');
+    expect(favicon.body).toContain('<svg');
+    expect(
+      (await request(base, '/assets/index-BCR7Kdqf.js', { host: 'boot-lifemodel.local' })).headers[
+        'cache-control'
+      ]
+    ).toContain('immutable');
+    const state = await request(base, '/api/state', { host: 'boot-lifemodel.local' });
+    expect(state.status).toBe(200);
+    expect(state.headers['cache-control']).toBe('no-store');
+    expect(JSON.parse(state.body)).toEqual({ setupNeeded: true, loggedIn: false });
+    expect((await request(base, '/api/unknown', { host: 'boot-lifemodel.local' })).status).toBe(
+      404
+    );
+    expect((await request(base, '/', { host: 'unknown.local' })).status).toBe(404);
+  });
+
+  it('returns strict method errors and creates a password once under concurrent setup', async () => {
+    const { base } = await start(null);
+    for (const [path, method] of [
+      ['/api/state', 'POST'],
+      ['/api/setup', 'GET'],
+      ['/api/login', 'DELETE'],
+      ['/api/logout', 'PUT'],
+    ] as const) {
+      expect((await request(base, path, { host: 'boot-lifemodel.local' }, method)).status).toBe(
+        405
+      );
+    }
+    const headers = {
+      host: 'boot-lifemodel.local',
+      origin: 'https://boot-lifemodel.local',
+      'content-type': 'application/json',
+    };
+    const [first, second] = await Promise.all([
+      request(
+        base,
+        '/api/setup',
+        headers,
+        'POST',
+        JSON.stringify({ password: 'secure owner password' })
+      ),
+      request(
+        base,
+        '/api/setup',
+        headers,
+        'POST',
+        JSON.stringify({ password: 'another secure password' })
+      ),
+    ]);
+    expect([first.status, second.status].sort()).toEqual([200, 409]);
+    const winner = first.status === 200 ? first : second;
+    const cookie = String(winner.headers['set-cookie'] ?? '');
+    expect(cookie).toContain('__Host-lm_session=');
+    expect(cookie).toContain('Secure');
+    expect(cookie).toContain('HttpOnly');
+    expect(
+      (
+        await request(base, '/api/state', {
+          host: 'boot-lifemodel.local',
+          cookie: cookie.split(';')[0]!,
+        })
+      ).status
+    ).toBe(200);
+  });
+
+  it('rejects non-JSON login content type before checking credentials', async () => {
+    const record = await hashPassword('owner password');
+    const { base } = await start(record);
+    const response = await request(
+      base,
+      '/api/login',
+      {
+        host: 'boot-lifemodel.local',
+        origin: 'https://boot-lifemodel.local',
+        'content-type': 'text/plain',
+      },
+      'POST',
+      JSON.stringify({ password: 'owner password' })
+    );
+    expect(response.status).toBe(415);
+  });
+
+  it('rejects form content type and missing Origin for setup', async () => {
+    const { base } = await start(null);
+    expect(
+      (
+        await request(
+          base,
+          '/api/setup',
+          {
+            host: 'boot-lifemodel.local',
+            'content-type': 'application/x-www-form-urlencoded',
+            origin: 'https://boot-lifemodel.local',
+          },
+          'POST',
+          'password=secure'
+        )
+      ).status
+    ).toBe(415);
+    expect(
+      (
+        await request(
+          base,
+          '/api/setup',
+          { host: 'boot-lifemodel.local', 'content-type': 'application/json' },
+          'POST',
+          JSON.stringify({ password: 'secure owner password' })
+        )
+      ).status
+    ).toBe(403);
   });
 });

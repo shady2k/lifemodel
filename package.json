@@ -11,12 +11,12 @@
     "build": "tsc && cp -r src/runtime/builtin-skills dist/runtime/builtin-skills",
     "build:loader": "tsc -p loader/tsconfig.json",
     "start": "node dist/index.js",
-    "lint": "eslint src/ loader/ web/app/",
-    "lint:fix": "eslint src/ loader/ web/app/ --fix",
+    "lint": "eslint src/ loader/ web/app/ web/loader/src/",
+    "lint:fix": "eslint src/ loader/ web/app/ web/loader/src/ --fix",
     "typecheck": "tsc --noEmit",
     "typecheck:loader": "tsc -p loader/tsconfig.json --noEmit",
-    "format": "prettier --write \"src/**/*.ts\" \"loader/**/*.ts\" \"web/app/**/*.{ts,tsx,css,json,html}\" \"web/kit/**/*.{ts,tsx,css,json,html}\"",
-    "format:check": "prettier --check \"src/**/*.ts\" \"loader/**/*.ts\" \"web/app/**/*.{ts,tsx,css,json,html}\" \"web/kit/**/*.{ts,tsx,css,json,html}\"",
+    "format": "prettier --write \"src/**/*.ts\" \"loader/**/*.ts\" \"web/app/**/*.{ts,tsx,css,json,html}\" \"web/kit/**/*.{ts,tsx,css,json,html}\" \"web/loader/**/*.{ts,tsx,css,json,html}\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"loader/**/*.ts\" \"web/app/**/*.{ts,tsx,css,json,html}\" \"web/kit/**/*.{ts,tsx,css,json,html}\" \"web/loader/**/*.{ts,tsx,css,json,html}\"",
     "test": "node scripts/test-isolated.mjs test",
     "test:docker": "node scripts/test-isolated.mjs docker",
     "test:watch": "echo 'test:watch is unsupported: the isolated launcher runs the suite one-shot and bounded and has no watch option yet, and watch on the host is forbidden by the test entrypoint policy; run one bounded suite instead: node scripts/test-isolated.mjs test -- <path>' >&2 && exit 1",
@@ -31,7 +31,9 @@
     "build:app": "vite build --config web/app/vite.config.ts",
     "dev:web": "vite --config web/app/vite.config.ts",
     "build:web-server": "esbuild src/web/index.ts --bundle --platform=node --format=cjs --outfile=dist/web/server.cjs",
-    "build:web": "npm run build:web-server && npm run build:app"
+    "build:web": "npm run build:web-server && npm run build:app",
+    "build:loader-ui": "vite build --config web/loader/vite.config.ts",
+    "typecheck:loader-ui": "tsc -p web/loader/tsconfig.json --noEmit"
   },
   "keywords": [
     "ai",
@@ -46,6 +48,7 @@
   "author": "",
   "license": "MIT",
   "devDependencies": {
+    "@balena/dockerignore": "^1.0.2",
     "@eslint/js": "^9.39.2",
     "@marcbachmann/cel-js": "8.0.0",
     "@testing-library/dom": "^10.4.1",

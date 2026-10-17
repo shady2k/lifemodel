@@ -8,12 +8,18 @@ import type { LoaderLogger } from './logger.js';
 
 const AUTH_MODE = 0o600;
 const LOADER_DIR_MODE = 0o700;
+export interface OnboardingRecord {
+  version: 1;
+  step: string;
+  completedAt: string | null;
+}
 
 export interface LoaderState {
   ensureLayout(): Promise<void>;
   readAuth(): Promise<PasswordRecord | null>;
   writeAuth(record: PasswordRecord): Promise<void>;
   replaceAuth(record: PasswordRecord): Promise<void>;
+  readOnboarding?(): Promise<OnboardingRecord>;
 }
 
 export interface LoaderStateDeps {
@@ -24,6 +30,8 @@ export interface LoaderStateDeps {
 
 export function createLoaderState({ fs, config, logger }: LoaderStateDeps): LoaderState {
   const authPath = join(config.loaderDir, 'auth.json');
+  const onboardingPath = join(config.loaderDir, 'onboarding.json');
+  const initialOnboarding: OnboardingRecord = { version: 1, step: 'welcome', completedAt: null };
   async function readAuth(): Promise<PasswordRecord | null> {
     if (!(await fs.exists(authPath))) return null;
     let text: string;
@@ -68,6 +76,36 @@ export function createLoaderState({ fs, config, logger }: LoaderStateDeps): Load
       fs.writeFileExclusive(authPath, `${JSON.stringify(record, null, 2)}\n`, AUTH_MODE),
     replaceAuth: async (record) =>
       fs.writeFileAtomic(authPath, `${JSON.stringify(record, null, 2)}\n`, AUTH_MODE),
+    readOnboarding: async () => {
+      if (!(await fs.exists(onboardingPath))) {
+        await fs
+          .writeFileExclusive(
+            onboardingPath,
+            `${JSON.stringify(initialOnboarding, null, 2)}\n`,
+            AUTH_MODE
+          )
+          .catch(async () => {
+            if (!(await fs.exists(onboardingPath)))
+              throw new LoaderFatalError('cannot create onboarding state');
+          });
+      }
+      let value: unknown;
+      try {
+        value = JSON.parse(await fs.readFile(onboardingPath)) as unknown;
+      } catch (error) {
+        throw new LoaderFatalError(`cannot read onboarding state: ${describe(error)}`, {
+          cause: error,
+        });
+      }
+      const record = value as Partial<OnboardingRecord>;
+      if (
+        record.version !== 1 ||
+        typeof record.step !== 'string' ||
+        !(record.completedAt === null || typeof record.completedAt === 'string')
+      )
+        throw new LoaderFatalError('onboarding.json does not hold valid onboarding state');
+      return record as OnboardingRecord;
+    },
   };
 }
 

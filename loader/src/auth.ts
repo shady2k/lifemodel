@@ -192,23 +192,32 @@ export function vettedNext(
   requestHost: string,
   instanceName?: string
 ): string | null {
-  if (next === undefined || next === '') return null;
-  let url: URL;
+  if (next === undefined || next === '' || next.includes('\\')) return null;
+  const domain = instanceName ?? configuredInstanceName;
+  const appHost = `${domain}.local`;
+  const requestPort = hostPort(requestHost);
   try {
-    url = new URL(next);
+    // Relative destinations are restricted to a single-host path. Reject URL
+    // repair hazards before invoking WHATWG URL parsing.
+    if (next.startsWith('/') && !next.startsWith('//')) {
+      const relative = new URL(
+        next,
+        `https://boot-${domain}.local${requestPort ? `:${requestPort}` : ''}`
+      );
+      return relative.origin ===
+        `https://boot-${domain}.local${requestPort ? `:${requestPort}` : ''}`
+        ? relative.href
+        : null;
+    }
+    if (!/^https:\/\//i.test(next)) return null;
+    const url = new URL(next);
+    if (url.protocol !== 'https:' || url.username !== '' || url.password !== '') return null;
+    if (url.hostname.toLowerCase() !== appHost) return null;
+    if (url.port !== requestPort) return null;
+    return url.href;
   } catch {
     return null;
   }
-  // The login and every browser destination use HTTPS. Cookies are host-only,
-  // so a valid destination is constrained to this instance and login port.
-  if (url.protocol !== 'https:') return null;
-  if (url.username !== '' || url.password !== '') return null;
-  if (!isBrowserHost(url.hostname.toLowerCase(), instanceName)) return null;
-  // The same port as the login itself: cookies are not scoped by port, so a
-  // `next` on another local port would hand the fresh session to whatever
-  // listens there (rework 3, review round 3 finding 3).
-  if (url.port !== hostPort(requestHost)) return null;
-  return url.href;
 }
 
 /** The Set-Cookie header of a fresh login. */
