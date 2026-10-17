@@ -1,7 +1,7 @@
 /** Safe model endpoint validation and slot operations (ADR-012 D7, ADR-013 D2). */
 import { lookup } from 'node:dns/promises';
-import { request as httpRequest, Agent as HttpAgent } from 'node:http';
-import { request as httpsRequest, Agent as HttpsAgent } from 'node:https';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
 import type { ClientRequest } from 'node:http';
 import { modelEndpointUrl } from './model-url.js';
@@ -176,7 +176,9 @@ function withDeadline<T>(promise: Promise<T>, deadline: number): Promise<T> {
   const remaining = deadline - Date.now();
   if (remaining <= 0) return Promise.reject(new Error('request timeout exceeded'));
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('request timeout exceeded')), remaining);
+    const timer = setTimeout(() => {
+      reject(new Error('request timeout exceeded'));
+    }, remaining);
     promise.then(
       (value) => {
         clearTimeout(timer);
@@ -184,7 +186,7 @@ function withDeadline<T>(promise: Promise<T>, deadline: number): Promise<T> {
       },
       (error: unknown) => {
         clearTimeout(timer);
-        reject(error);
+        reject(error instanceof Error ? error : new Error('DNS resolution failed'));
       }
     );
   });
