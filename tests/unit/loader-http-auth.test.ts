@@ -1780,6 +1780,7 @@ describe('real Bao storage behind the loader model HTTP routes', () => {
     const jwtFile = join(root, 'jwt');
     writeFileSync(jwtFile, 'projected-first');
     let status = 200,
+      loginStatus = 200,
       rejectNext = false;
     const logins: Array<{ role: string; jwt: string }> = [];
     const tokens: string[] = [];
@@ -1788,6 +1789,11 @@ describe('real Bao storage behind the loader model HTTP routes', () => {
         let body = '';
         for await (const chunk of req) body += String(chunk);
         logins.push(JSON.parse(body));
+        if (loginStatus !== 200) {
+          res.writeHead(loginStatus);
+          res.end('PRIVATE BODY');
+          return;
+        }
         res.end(
           JSON.stringify({
             auth: { client_token: `private-bao-token-${logins.length}`, lease_duration: 3600 },
@@ -1862,6 +1868,9 @@ describe('real Bao storage behind the loader model HTTP routes', () => {
       set status(value: number) {
         status = value;
       },
+      set loginStatus(value: number) {
+        loginStatus = value;
+      },
       reject() {
         rejectNext = true;
       },
@@ -1877,7 +1886,7 @@ describe('real Bao storage behind the loader model HTTP routes', () => {
     ['PUT', '/api/model/reserve'],
     ['DELETE', '/api/model/reserve'],
   ] as const;
-  it.each(['sealed', 'denied', 'unreachable'] as const)(
+  it.each(['sealed', 'denied', 'unreachable', 'missing_auth'] as const)(
     'returns only storage_unavailable for %s Bao on every route',
     async (mode) => {
       const f = await baoFixture();
@@ -1894,6 +1903,7 @@ describe('real Bao storage behind the loader model HTTP routes', () => {
           'content-type': 'application/json',
         };
         f.status = mode === 'sealed' ? 503 : 403;
+        if (mode === 'missing_auth') f.loginStatus = 404;
         if (mode === 'unreachable') await stopBao(f.bao);
         for (const [method, path] of routes) {
           const response = await request(

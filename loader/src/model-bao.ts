@@ -41,6 +41,7 @@ export function createRoleBaoClient(options: RoleBaoOptions) {
   let refreshAt = 0;
   let renewable = false;
   let authentication: Promise<void> | undefined;
+  let loginGeneration = 0;
   const transport =
     options.request ??
     ((url, method, activeToken, body) =>
@@ -114,7 +115,7 @@ export function createRoleBaoClient(options: RoleBaoOptions) {
         const code: BaoErrorCode =
           response.status === 401 || response.status === 403
             ? 'denied'
-            : response.status === 404
+            : response.status === 404 && !path.startsWith('auth/')
               ? 'not_found'
               : response.status === 503
                 ? 'sealed'
@@ -156,10 +157,16 @@ export function createRoleBaoClient(options: RoleBaoOptions) {
     }
     if (!jwt) throw failure('denied');
     acceptAuth(await send('auth/kubernetes/login', 'POST', undefined, { role: options.role, jwt }));
+    loginGeneration++;
   }
-  async function authenticate(forceLogin = false): Promise<void> {
-    // Both listeners and bootstrap can share the same client without parallel logins.
-    if (authentication !== undefined) return authentication;
+  async function authenticate(forceLogin = false, generation = loginGeneration): Promise<void> {
+    // A forced recovery may join a login, but renewal alone cannot satisfy it.
+    if (authentication !== undefined) {
+      await authentication;
+      if (!forceLogin || loginGeneration > generation) return;
+      return authenticate(true, generation);
+    }
+    if (forceLogin && loginGeneration > generation) return;
     authentication = (async () => {
       if (!forceLogin && token !== undefined && now() < refreshAt) return;
       if (!forceLogin && token !== undefined && renewable && now() < expiresAt) {

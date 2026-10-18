@@ -135,6 +135,80 @@ async function fixture() {
   };
 }
 describe('shared role Bao client over real HTTP', () => {
+  it('re-logs in after rejection even when proactive renewal is in flight', async () => {
+    const f = await fixture();
+    await f.client.readSlot('primary');
+    await writeFile(f.jwtFile, 'jwt-rotated');
+    let rejectOld!: () => void;
+    let finishRenewal!: () => void;
+    let oldStarted!: () => void;
+    let renewalStarted!: () => void;
+    const oldEntered = new Promise<void>((r) => {
+      oldStarted = r;
+    });
+    const renewalEntered = new Promise<void>((r) => {
+      renewalStarted = r;
+    });
+    let heldOld = false;
+    f.onRequest = (req, res) => {
+      if (req.url?.includes('/data/') && !heldOld) {
+        heldOld = true;
+        rejectOld = () => {
+          res.writeHead(403);
+          res.end('PRIVATE BODY');
+        };
+        oldStarted();
+        return true;
+      }
+      if (req.url?.endsWith('/renew-self')) {
+        finishRenewal = () =>
+          res.end(
+            JSON.stringify({
+              auth: { client_token: 'bao-token-1', lease_duration: 100, renewable: true },
+            })
+          );
+        renewalStarted();
+        return true;
+      }
+      return false;
+    };
+    const oldRequest = f.client.readSlot('primary');
+    await oldEntered;
+    f.time = 70_000;
+    const refreshingRequest = f.client.readSlot('reserve');
+    await renewalEntered;
+    const rejected = new Promise<void>((resolve) => {
+      const push = f.lines.push.bind(f.lines);
+      f.lines.push = (...lines) => {
+        const length = push(...lines);
+        if (lines.some((line) => line.fields['code'] === 'denied')) resolve();
+        return length;
+      };
+    });
+    rejectOld();
+    await rejected;
+    finishRenewal();
+    await Promise.all([oldRequest, refreshingRequest]);
+    expect(f.logins.map((l) => l.jwt)).toEqual(['jwt-first', 'jwt-rotated']);
+    expect(f.tokens.at(-1)).toBe('bao-token-2');
+  });
+  it('never treats missing authentication endpoints as an unset model slot', async () => {
+    const f = await fixture();
+    f.loginStatus = 404;
+    await expect(f.client.readSlot('primary')).rejects.toMatchObject({ code: 'unreachable' });
+    f.loginStatus = 200;
+    await f.client.readSlot('primary');
+    f.onRequest = (req, res) => {
+      if (req.url?.endsWith('/renew-self')) {
+        res.writeHead(404);
+        res.end('PRIVATE BODY');
+        return true;
+      }
+      return false;
+    };
+    f.time = 70_000;
+    await expect(f.client.readSlot('primary')).rejects.toMatchObject({ code: 'unreachable' });
+  });
   it('falls back to one fresh login when renewal is rejected', async () => {
     const f = await fixture();
     await f.client.readSlot('primary');
