@@ -119,8 +119,7 @@ export function parseModelStatus(value: unknown): ModelStatusEvent | null {
   return {
     state,
     outageSince: since,
-    lastErrorCode:
-      typeof lastErrorCode === 'string' ? safeModelErrorCode(lastErrorCode) : null,
+    lastErrorCode: typeof lastErrorCode === 'string' ? safeModelErrorCode(lastErrorCode) : null,
   };
 }
 

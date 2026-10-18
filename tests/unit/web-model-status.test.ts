@@ -81,7 +81,10 @@ describe('the safe fields of the gateway status (ADR-013 D6)', () => {
       'a down state with an unparseable outage start',
       { state: 'down', outageSince: 'yesterday', lastErrorCode: 'timeout' },
     ],
-    ['a non-string error code', { state: 'down', outageSince: '2026-10-16T11:03:00.000Z', lastErrorCode: 7 }],
+    [
+      'a non-string error code',
+      { state: 'down', outageSince: '2026-10-16T11:03:00.000Z', lastErrorCode: 7 },
+    ],
   ])('refuses %s', (_name, value) => {
     expect(parseModelStatus(value)).toBeNull();
   });
@@ -133,9 +136,9 @@ describe('what the owner sees', () => {
 
   it('hides an ok or unknown status and shows an outage for down', () => {
     expect(modelStatusView(null, 'en', now)).toEqual({ kind: 'unavailable' });
-    expect(modelStatusView({ state: 'ok', outageSince: null, lastErrorCode: null }, 'en', now)).toEqual(
-      { kind: 'hidden' }
-    );
+    expect(
+      modelStatusView({ state: 'ok', outageSince: null, lastErrorCode: null }, 'en', now)
+    ).toEqual({ kind: 'hidden' });
     expect(
       modelStatusView({ state: 'unknown', outageSince: null, lastErrorCode: null }, 'en', now)
     ).toEqual({ kind: 'hidden' });
@@ -175,7 +178,11 @@ describe('what the owner sees', () => {
       'en',
       now
     );
-    expect(sameDay).toEqual({ kind: 'outage', time: '22:05', errorKey: 'modelErrorUpstreamServer' });
+    expect(sameDay).toEqual({
+      kind: 'outage',
+      time: '22:05',
+      errorKey: 'modelErrorUpstreamServer',
+    });
   });
 
   it('formats the time with 24-hour local hours in both languages', () => {
@@ -316,9 +323,7 @@ describe('the bounded status poll', () => {
 
   it('adopts a fetch that was in flight across a stop and a restart', async () => {
     let answer!: (response: Response) => void;
-    const fetchMock = vi.fn(
-      async () => new Promise<Response>((resolve) => (answer = resolve))
-    );
+    const fetchMock = vi.fn(async () => new Promise<Response>((resolve) => (answer = resolve)));
     const poller = new ModelStatusPoller({
       url: STATUS_URL,
       pollMs: 5_000,

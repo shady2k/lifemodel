@@ -99,10 +99,13 @@ export class ModelStatusPoller implements ModelStatusSource {
 
   /** The attempt this period shares; a period never starts a second one. */
   private poll(): Promise<void> {
-    this.attempt ??= this.attemptOnce().finally(() => {
-      this.attempt = undefined;
-    });
-    return this.attempt;
+    const started =
+      this.attempt ??
+      this.attemptOnce().finally(() => {
+        this.attempt = undefined;
+      });
+    this.attempt = started;
+    return started;
   }
 
   private async attemptOnce(): Promise<void> {

@@ -91,9 +91,7 @@ async function openStream(
   // The whole raw frame, exactly as the wire carries it: an `id:` line before
   // `event:` is part of the frame and must stay visible to the assertions.
   const frames = (event: string): string[] =>
-    text
-      .split('\n\n')
-      .filter((chunk) => chunk.split('\n').includes(`event: ${event}`));
+    text.split('\n\n').filter((chunk) => chunk.split('\n').includes(`event: ${event}`));
   const waitFor = async (event: string, count: number, timeoutMs = 2_000): Promise<string[]> => {
     const deadline = Date.now() + timeoutMs;
     while (frames(event).length < count) {
@@ -154,7 +152,11 @@ describe('the model status in the event stream (ADR-013 D6)', () => {
     const stream = await openStream(server);
     try {
       const first = await stream.waitFor('model', 1);
-      expect(statusData(first[0]!)).toEqual({ state: 'ok', outageSince: null, lastErrorCode: null });
+      expect(statusData(first[0]!)).toEqual({
+        state: 'ok',
+        outageSince: null,
+        lastErrorCode: null,
+      });
       expect(first[0]).not.toContain('id:');
       source.set({
         state: 'down',

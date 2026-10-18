@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { MODEL_STATUS_ERROR_KEYS, modelErrorKey, parseModelStatus } from '../../src/web/model-status.js';
+import {
+  MODEL_STATUS_ERROR_KEYS,
+  modelErrorKey,
+  parseModelStatus,
+} from '../../src/web/model-status.js';
 import { parseLoaderModelStatus } from '../../loader/src/model-status.js';
 import { GATEWAY_ERROR_CODES } from '../../loader/src/model-error-codes.js';
 import {
@@ -28,13 +32,22 @@ describe('both parsers project the gateway status alike', () => {
 
       it('keeps every owned gateway code and normalizes everything else', () => {
         for (const code of GATEWAY_ERROR_CODES)
-          expect(parse({ state: 'down', outageSince: '2026-10-16T11:03:00.000Z', lastErrorCode: code }))
-            .toEqual({
-              state: 'down',
-              outageSince: '2026-10-16T11:03:00.000Z',
-              lastErrorCode: code,
-            });
-        for (const code of ['wat', 'UPSTREAM_500', 'upstream-500', ' upstream_500', '', 'tls', 'auth_failed'])
+          expect(
+            parse({ state: 'down', outageSince: '2026-10-16T11:03:00.000Z', lastErrorCode: code })
+          ).toEqual({
+            state: 'down',
+            outageSince: '2026-10-16T11:03:00.000Z',
+            lastErrorCode: code,
+          });
+        for (const code of [
+          'wat',
+          'UPSTREAM_500',
+          'upstream-500',
+          ' upstream_500',
+          '',
+          'tls',
+          'auth_failed',
+        ])
           expect(
             parse({ state: 'down', outageSince: '2026-10-16T11:03:00.000Z', lastErrorCode: code }),
             code
@@ -54,7 +67,9 @@ describe('both parsers project the gateway status alike', () => {
 
 describe('the two safe-code lists agree', () => {
   it('holds the gateway code list the web module maps to words', () => {
-    expect([...Object.keys(MODEL_STATUS_ERROR_KEYS)].sort()).toEqual([...GATEWAY_ERROR_CODES].sort());
+    expect([...Object.keys(MODEL_STATUS_ERROR_KEYS)].sort()).toEqual(
+      [...GATEWAY_ERROR_CODES].sort()
+    );
   });
 
   it.each(['constructor', 'toString', '__proto__', 'valueOf', 'hasOwnProperty'])(

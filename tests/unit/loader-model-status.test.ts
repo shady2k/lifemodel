@@ -64,7 +64,9 @@ async function startLoader(modelStatus?: { read(): Promise<unknown> }): Promise<
     config: loadConfig({ LIFEMODEL_NAME: 'lifemodel' }),
     ...(modelStatus === undefined
       ? {}
-      : { modelStatus: modelStatus as import('../../loader/src/model-status.js').ModelStatusReader }),
+      : {
+          modelStatus: modelStatus as import('../../loader/src/model-status.js').ModelStatusReader,
+        }),
     pki: {
       bootstrap: async () => {},
       report: async () => ({
@@ -92,7 +94,11 @@ async function get(
   base: string,
   path: string,
   headers: Record<string, string>
-): Promise<{ status: number; body: string; headers: Record<string, string | string[] | undefined> }> {
+): Promise<{
+  status: number;
+  body: string;
+  headers: Record<string, string | string[] | undefined>;
+}> {
   const url = new URL(path, base);
   return new Promise((resolve, reject) => {
     const req = httpRequest(
@@ -101,9 +107,7 @@ async function get(
         let body = '';
         res.setEncoding('utf8');
         res.on('data', (chunk) => (body += chunk));
-        res.on('end', () =>
-          resolve({ status: res.statusCode ?? 0, body, headers: res.headers })
-        );
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body, headers: res.headers }));
       }
     );
     req.on('error', reject);
@@ -175,10 +179,18 @@ describe('the loader reads the gateway status for its settings', () => {
   it.each([201, 202, 206])('reads a %s answer as unavailable, never an outage', async (status) => {
     const reader = createModelStatusReader({
       url: GATEWAY_STATUS_URL,
-      fetch: vi.fn(async () =>
-        new Response(JSON.stringify({ state: 'down', outageSince: '2026-10-16T11:03:00.000Z', lastErrorCode: 'timeout' }), {
-          status,
-        })
+      fetch: vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              state: 'down',
+              outageSince: '2026-10-16T11:03:00.000Z',
+              lastErrorCode: 'timeout',
+            }),
+            {
+              status,
+            }
+          )
       ) as unknown as typeof fetch,
     });
     expect(await reader.read()).toBeNull();
