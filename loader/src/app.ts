@@ -5,6 +5,7 @@ import type { CommandRunner } from './exec.js';
 import type { FileSystem } from './fs.js';
 import { createLoaderHttp, type LoaderHttp } from './http.js';
 import type { ModelSlots } from './model.js';
+import { createRoleBaoClient } from './model-bao.js';
 import { createPkiManager, type PkiManager } from './pki.js';
 import { createKubernetesTlsStores } from './pki-kubernetes.js';
 import type { LoaderLogger } from './logger.js';
@@ -97,20 +98,11 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       };
     })();
 
+  const modelBao = createRoleBaoClient({ address: config.openBaoAddress, role: 'loader' });
   const modelSlots: ModelSlots = {
-    read: async (slot) => {
-      if (bao.api.readModelSlot === undefined) throw new Error('OpenBao model store unavailable');
-      return bao.api.readModelSlot(slot);
-    },
-    write: async (slot, value) => {
-      if (bao.api.writeModelSlot === undefined) throw new Error('OpenBao model store unavailable');
-      return bao.api.writeModelSlot(slot, value);
-    },
-    clearReserve: async () => {
-      if (bao.api.deleteModelReserve === undefined)
-        throw new Error('OpenBao model store unavailable');
-      return bao.api.deleteModelReserve();
-    },
+    read: (slot) => modelBao.readSlot(slot),
+    write: (slot, value) => modelBao.writeSlot(slot, value),
+    clearReserve: () => modelBao.deleteReserve(),
   };
   let http: LoaderHttp | null = null;
   let stopping = false;
