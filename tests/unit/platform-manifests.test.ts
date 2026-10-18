@@ -1289,11 +1289,17 @@ describe('platform manifests', () => {
     mkdirSync(join(sourceDir, 'scripts'), { recursive: true });
     mkdirSync(join(sourceDir, 'deploy/cli'), { recursive: true });
     mkdirSync(join(sourceDir, 'deploy/mdns'), { recursive: true });
+    mkdirSync(join(sourceDir, 'deploy/k3s'), { recursive: true });
     cpSync(installer, join(sourceDir, 'scripts/install.sh'));
     cpSync(rootTemplates, join(sourceDir, 'deploy/root'), { recursive: true });
     cpSync(
       fileURLToPath(new URL('../../deploy/mdns/', import.meta.url)),
       join(sourceDir, 'deploy/mdns'),
+      { recursive: true }
+    );
+    cpSync(
+      fileURLToPath(new URL('../../deploy/k3s/', import.meta.url)),
+      join(sourceDir, 'deploy/k3s'),
       { recursive: true }
     );
     cpSync(

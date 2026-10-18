@@ -1,0 +1,21 @@
+[Unit]
+Description=Write the resolv.conf k3s gives the kubelet and CoreDNS
+# k3s is pointed at this file, so it has to exist before k3s starts
+# (lifemodel-s9v5.1.5). The host's DNS is reachable by then on a normal boot.
+Before=k3s.service
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+# Not RemainAfterExit: the unit has to run again on every trigger of the path
+# unit, and a start job on an already-active unit would do nothing.
+Type=oneshot
+# node and k3s live in the standard system directories on a generic Linux host.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# /etc/resolv.conf first and systemd-resolved's real upstream list second: the
+# order k3s itself chooses from, since the resolved stub holds only 127.0.0.53.
+ExecStart=@RESOLV_SH@ @RESOLV_MJS@ @RESOLV_CONF@ /etc/resolv.conf /run/systemd/resolve/resolv.conf
+
+[Install]
+WantedBy=multi-user.target

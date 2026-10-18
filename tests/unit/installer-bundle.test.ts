@@ -34,6 +34,7 @@ function fixture() {
     'deploy/root',
     'deploy/mdns',
     'deploy/cli',
+    'deploy/k3s',
     'deploy/nixos',
   ]) {
     mkdirSync(join(source, directory), { recursive: true });
