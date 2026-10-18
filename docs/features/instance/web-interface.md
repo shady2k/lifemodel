@@ -145,11 +145,11 @@ messages, because the assistant has nowhere else to put progress.
 
 ## Built so far
 
-The first module (lifemodel-vhd, ADR-011) is in progress. The built React app is served by the web module at `/` with same-origin hashed assets and a restrictive Content-Security-Policy. The module provides owner-message intake, transcript and SSE routes, plus an internal-only operations listener for store-based readiness and Prometheus metrics. The English/Russian shell, virtualized transcript, owner and lifemodel bubbles, safe Markdown rendering and history-based "Прочитано" receipt are in place. The storage-failure, loader-outage and stuck-stream runbook is in [web-module.md](web-module.md).
+The first module (lifemodel-vhd, ADR-011) was accepted by the owner on 2026-10-19 after a combined test on a fresh VM. The built React app is served by the web module at `/` with same-origin hashed assets and a restrictive Content-Security-Policy. The module provides owner-message intake, transcript and SSE routes, plus an internal-only operations listener for store-based readiness and Prometheus metrics. The English/Russian shell, virtualized transcript, the composer, "↩ Ответить", safe Markdown rendering and history-based "Прочитано" receipt are in place. Messages render as tinted blocks, not yet as the bubbles described above; the bubbles and the rest of the design pass wait in lifemodel-bnhq (deferred by the owner). The storage-failure, loader-outage and stuck-stream runbook is in [web-module.md](web-module.md).
 
 The "Сейчас" panel also carries the model's own connection: the module polls the platform gateway's `/status` (bounded, once for all its clients, and its answer and period survive a reconnect) into its own stream envelope, and the panel shows "Нет связи с моделью с HH:MM — <ошибка словами>" for an outage, nothing while the model answers, and a quieter "Статус модели недоступен" when no status could be read (ADR-013 D6). The loader's settings show the same line from its own read of `/status`.
 
-The composer and "↩ Ответить" (binding layer 2 for messages) remain to be built. Login through the loader password and post-onboarding loader settings (model access, password change, CA certificate and logout) are implemented by ADR-012. Binding to tasks and "@" come with tasks.
+Login through the loader password and post-onboarding loader settings (model access, password change, CA certificate and logout) are implemented by ADR-012. Binding to tasks and "@" come with tasks.
 
 Task chips and the drawer, Stop, "@", reactions, projects, memory and
 settings come with the features that create tasks and projects
