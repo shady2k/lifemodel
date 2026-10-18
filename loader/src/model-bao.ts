@@ -270,6 +270,9 @@ export function createCachedSlotReader(
   const pending = new Map<ModelSlotName, Promise<ModelSlot | null>>();
   const generations = new Map<ModelSlotName, number>();
   return {
+    keys(): string[] {
+      return [...cache.values()].flatMap(({ value }) => (value?.key ? [value.key] : []));
+    },
     invalidate(slot: ModelSlotName) {
       cache.delete(slot);
       generations.set(slot, (generations.get(slot) ?? 0) + 1);

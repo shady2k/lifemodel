@@ -25,11 +25,16 @@ function containsKey(value: unknown, key: string, depth = 0): boolean {
     )
   );
 }
-export function parseSafe(text: string, key?: string): unknown {
+export function serializeSafe(value: unknown, keys: readonly string[]): string {
+  const text = JSON.stringify(value);
+  if (keys.some((key) => text.includes(key))) throw new GatewayError('unsafe_response');
+  return text;
+}
+export function parseSafe(text: string, keys: readonly string[]): unknown {
   if (Buffer.byteLength(text) > MAX_BODY) throw new GatewayError('bad_response');
   try {
     const value: unknown = JSON.parse(text);
-    if (key && (text.includes(key) || containsKey(value, key)))
+    if (keys.some((key) => text.includes(key) || containsKey(value, key)))
       throw new GatewayError('unsafe_response');
     return value;
   } catch (error) {
@@ -132,7 +137,7 @@ export class SafeEventStream {
   private carry = '';
   private seenCompletion = false;
   done = false;
-  constructor(private readonly key?: string) {}
+  constructor(private readonly keys: () => readonly string[]) {}
   frame(raw: string): string {
     if (this.done || Buffer.byteLength(raw) > MAX_BODY) throw new GatewayError('bad_response');
     const data = raw
@@ -148,7 +153,7 @@ export class SafeEventStream {
       this.done = true;
       return this.flush() + 'data: [DONE]\n\n';
     }
-    const value = parseSafe(data, this.key);
+    const value = parseSafe(data, this.keys());
     const object = record(value);
     if (typeof object?.['model'] !== 'string' || !Array.isArray(object['choices']))
       throw new GatewayError('bad_response');
@@ -223,25 +228,27 @@ export class SafeEventStream {
         state.finished = true;
       }
     }
-    const frame = `data: ${JSON.stringify(value)}\n\n`;
+    const keys = this.keys();
+    const frame = `data: ${serializeSafe(value, keys)}\n\n`;
     // Raw carry-over also covers text outside the reconstructed delta fields.
-    if (this.key) {
-      const joined = this.carry + frame;
-      if (joined.includes(this.key)) throw new GatewayError('unsafe_response');
-      this.carry = joined.slice(-(this.key.length - 1 || 1));
-    }
+    const joined = this.carry + frame;
+    if (keys.some((key) => joined.includes(key))) throw new GatewayError('unsafe_response');
+    const carryLength = Math.max(0, ...keys.map((key) => key.length - 1));
+    this.carry = carryLength ? joined.slice(-carryLength) : '';
     this.queued.push(frame);
     this.queuedBytes += Buffer.byteLength(frame);
     if (this.queuedBytes > MAX_BODY) throw new GatewayError('bad_response');
     return [...this.tails.values()].some((tail) => tail !== '') ? '' : this.flush();
   }
   private inspect(value: string, path: string): void {
-    if (!this.key) return;
-    const joined = (this.tails.get(path) ?? '') + value;
-    if (joined.includes(this.key)) throw new GatewayError('unsafe_response');
-    let length = Math.min(joined.length, this.key.length - 1);
-    while (length > 0 && !joined.endsWith(this.key.slice(0, length))) length--;
-    this.tails.set(path, length ? joined.slice(-length) : '');
+    for (const key of this.keys()) {
+      const field = JSON.stringify([key, path]);
+      const joined = (this.tails.get(field) ?? '') + value;
+      if (joined.includes(key)) throw new GatewayError('unsafe_response');
+      let length = Math.min(joined.length, key.length - 1);
+      while (length > 0 && !joined.endsWith(key.slice(0, length))) length--;
+      this.tails.set(field, length ? joined.slice(-length) : '');
+    }
     if (this.tails.size > 1024) throw new GatewayError('bad_response');
   }
   private flush(): string {

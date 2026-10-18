@@ -16,10 +16,17 @@ import {
   MAX_BODY,
   parseSafe,
   record,
+  serializeSafe,
   SafeEventStream,
   validateResponse,
 } from './model-gateway-response.js';
 
+export const GATEWAY_LIMITS = {
+  connect: 5_000,
+  firstByte: 45_000,
+  overall: 110_000,
+  idle: 30_000,
+} as const;
 interface Timeouts {
   connect?: number;
   firstByte?: number;
@@ -30,9 +37,11 @@ export interface GatewayOptions {
   slots: {
     read(slot: ModelSlotName): Promise<ModelSlot | null>;
     invalidate(slot: ModelSlotName): void;
+    keys(): readonly string[];
   };
   logger: LoaderLogger;
   timeouts?: Timeouts;
+  timers?: { set: typeof setTimeout; clear: typeof clearTimeout };
   resolveHost?: (hostname: string) => Promise<string[]>;
   tlsCa?: string | Buffer;
 }
@@ -126,24 +135,26 @@ function returnHeaders(
   upstream: IncomingMessage,
   slot: ModelSlotName,
   stream: boolean,
-  key?: string
+  keys: readonly string[]
 ): Record<string, string> {
   const headers: Record<string, string> = {
     'content-type': stream ? 'text/event-stream' : 'application/json',
     'x-lifemodel-slot': slot,
   };
   const retry = upstream.headers['retry-after'];
-  if (typeof retry === 'string' && /^\d{1,6}$/.test(retry) && (!key || !retry.includes(key)))
+  if (
+    typeof retry === 'string' &&
+    /^\d{1,6}$/.test(retry) &&
+    !keys.some((key) => retry.includes(key))
+  )
     headers['retry-after'] = retry;
   return headers;
 }
 export function createModelGateway(options: GatewayOptions) {
-  const limits = {
-    connect: 5_000,
-    firstByte: 45_000,
-    overall: 110_000,
-    idle: 30_000,
-    ...options.timeouts,
+  const limits = { ...GATEWAY_LIMITS, ...options.timeouts };
+  const { set: schedule, clear: cancel } = options.timers ?? {
+    set: setTimeout,
+    clear: clearTimeout,
   };
   const health: Health = {
     state: 'unknown',
@@ -213,11 +224,11 @@ export function createModelGateway(options: GatewayOptions) {
     req.on('error', () => {
       /* Consumed by the response wait or the response iterator. */
     });
-    const connectTimer = setTimeout(timeout, Math.max(1, connectDeadline - Date.now()));
-    const byteTimer = setTimeout(timeout, Math.max(1, startedAt + limits.firstByte - Date.now()));
+    const connectTimer = schedule(timeout, Math.max(1, connectDeadline - Date.now()));
+    const byteTimer = schedule(timeout, Math.max(1, startedAt + limits.firstByte - Date.now()));
     req.on('socket', (socket) =>
       socket.once(url.protocol === 'https:' ? 'secureConnect' : 'connect', () => {
-        clearTimeout(connectTimer);
+        cancel(connectTimer);
       })
     );
     try {
@@ -237,10 +248,10 @@ export function createModelGateway(options: GatewayOptions) {
       upstream.on('data', () => {
         if (first) {
           first = false;
-          clearTimeout(byteTimer);
+          cancel(byteTimer);
         }
-        clearTimeout(idleTimer);
-        idleTimer = setTimeout(timeout, limits.idle);
+        cancel(idleTimer);
+        idleTimer = schedule(timeout, limits.idle);
       });
       const stream = payload?.['stream'] === true;
       if (stream && !upstream.headers['content-type']?.startsWith('text/event-stream'))
@@ -257,13 +268,14 @@ export function createModelGateway(options: GatewayOptions) {
         active.throwIfAborted();
         const value = parseSafe(
           new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)),
-          slot.key
+          options.slots.keys()
         );
         validateResponse(value, payload === undefined);
-        res.writeHead(200, returnHeaders(upstream, name, false, slot.key));
-        res.end(JSON.stringify(value));
+        const output = serializeSafe(value, options.slots.keys());
+        res.writeHead(200, returnHeaders(upstream, name, false, options.slots.keys()));
+        res.end(output);
       } else {
-        const inspector = new SafeEventStream(slot.key);
+        const inspector = new SafeEventStream(() => options.slots.keys());
         const decoder = new TextDecoder('utf-8', { fatal: true });
         let pending = '';
         let previousCR = false;
@@ -286,7 +298,7 @@ export function createModelGateway(options: GatewayOptions) {
             const output = inspector.frame(frame);
             if (output) {
               if (!res.headersSent)
-                res.writeHead(200, returnHeaders(upstream, name, true, slot.key));
+                res.writeHead(200, returnHeaders(upstream, name, true, options.slots.keys()));
               if (!res.write(output)) await once(res, 'drain', { signal: active });
             }
           }
@@ -300,9 +312,9 @@ export function createModelGateway(options: GatewayOptions) {
       if (active.aborted) throw active.reason;
       throw safeError(error);
     } finally {
-      clearTimeout(connectTimer);
-      clearTimeout(byteTimer);
-      clearTimeout(idleTimer);
+      cancel(connectTimer);
+      cancel(byteTimer);
+      cancel(idleTimer);
       // Includes slot switch, malformed responses and success; never leaves a live upstream.
       req.destroy();
     }
@@ -320,7 +332,7 @@ export function createModelGateway(options: GatewayOptions) {
       return;
     }
     const controller = new AbortController();
-    const timer = setTimeout(() => {
+    const timer = schedule(() => {
       controller.abort(new GatewayError('timeout'));
     }, limits.overall);
     const disconnect = () => {
@@ -328,7 +340,7 @@ export function createModelGateway(options: GatewayOptions) {
     };
     res.on('close', disconnect);
     const signal = controller.signal;
-    health.lastAttemptAt = new Date().toISOString();
+    const requestStartedAt = new Date().toISOString();
     let last = new GatewayError('not_configured');
     let activeSlot: ModelSlotName = 'primary';
     try {
@@ -351,23 +363,28 @@ export function createModelGateway(options: GatewayOptions) {
       for (const name of ['primary', 'reserve'] as const) {
         signal.throwIfAborted();
         activeSlot = name;
-        const slot = await wait(options.slots.read(name), signal);
-        if (!slot) {
-          if (name === 'primary') throw last;
-          break;
-        }
         try {
+          const slot = await wait(options.slots.read(name), signal);
+          if (!slot) {
+            if (name === 'reserve') break;
+            throw new GatewayError('not_configured');
+          }
           await attempt(slot, name, payload, res, signal);
+          health.lastAttemptAt = requestStartedAt;
           health.state = 'ok';
           health.outageSince = null;
           health.lastSuccessAt = new Date().toISOString();
           health.lastErrorCode = null;
           return;
         } catch (error) {
-          last = safeError(error);
+          last = safeError(signal.aborted ? signal.reason : error);
+          if (last.code === 'client_disconnected') throw last;
+          health.lastAttemptAt = requestStartedAt;
           health[name] = { lastErrorCode: last.code, lastErrorAt: new Date().toISOString() };
           if (
             signal.aborted ||
+            last.code === 'not_configured' ||
+            last.code === 'storage_unavailable' ||
             res.headersSent ||
             (last.status >= 400 && last.status < 500 && last.status !== 429)
           )
@@ -376,11 +393,22 @@ export function createModelGateway(options: GatewayOptions) {
       }
       throw last;
     } catch (error) {
-      const failure = safeError(error);
-      health.state = 'down';
-      health.outageSince ??= new Date().toISOString();
-      health.lastErrorCode = failure.code;
-      options.logger.warn({ code: failure.code, slot: activeSlot }, 'Model gateway request failed');
+      const failure = safeError(signal.aborted ? signal.reason : error);
+      const callerOutcome = [
+        'client_disconnected',
+        'invalid_request',
+        'request_too_large',
+      ].includes(failure.code);
+      if (!callerOutcome) {
+        health.lastAttemptAt = requestStartedAt;
+        health.state = 'down';
+        health.outageSince ??= new Date().toISOString();
+        health.lastErrorCode = failure.code;
+        options.logger.warn(
+          { code: failure.code, slot: activeSlot },
+          'Model gateway request failed'
+        );
+      }
       if (!req.complete) {
         res.setHeader('connection', 'close');
         res.once('finish', () => {
@@ -389,7 +417,7 @@ export function createModelGateway(options: GatewayOptions) {
       }
       ownedError(res, failure, activeSlot);
     } finally {
-      clearTimeout(timer);
+      cancel(timer);
       res.removeListener('close', disconnect);
     }
   }

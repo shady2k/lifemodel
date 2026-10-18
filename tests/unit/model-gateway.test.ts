@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { networkInterfaces } from 'node:os';
-import { createModelGateway } from '../../loader/src/model-gateway-app.js';
+import { createModelGateway, GATEWAY_LIMITS } from '../../loader/src/model-gateway-app.js';
+import { connect } from 'node:net';
 import { createRoleBaoClient, createCachedSlotReader } from '../../loader/src/model-bao.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 import type { ModelSlot, ModelSlotName } from '../../loader/src/model.js';
@@ -39,7 +40,10 @@ const answer = (model = 'upstream-model', content: string | null = 'OK') => ({
   choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
 });
 type Handler = (req: IncomingMessage, res: ServerResponse, body: Record<string, unknown>) => void;
-async function fixture(options: Parameters<typeof createModelGateway>[0]['timeouts'] = {}) {
+async function fixture(
+  options?: Parameters<typeof createModelGateway>[0]['timeouts'],
+  timers?: Parameters<typeof createModelGateway>[0]['timers']
+) {
   const attempts: Array<{
     slot: ModelSlotName;
     body: Record<string, unknown>;
@@ -103,7 +107,12 @@ async function fixture(options: Parameters<typeof createModelGateway>[0]['timeou
     logger,
   });
   const cache = createCachedSlotReader(client.readSlot);
-  const app = createModelGateway({ slots: cache, logger, timeouts: options });
+  const app = createModelGateway({
+    slots: cache,
+    logger,
+    ...(options ? { timeouts: options } : {}),
+    ...(timers ? { timers } : {}),
+  });
   const url = await listen(app.api);
   const statusUrl = await listen(app.status);
   const post = (
@@ -819,4 +828,423 @@ describe('model gateway terminal stream validation', () => {
       expect(await (await fetch(`${f.statusUrl}/status`)).json()).toMatchObject({ state: 'down' });
     }
   );
+});
+
+describe('model gateway review regressions', () => {
+  it.each(['completion', 'models', 'stream'] as const)(
+    'scans final serialized %s bytes for numeric keys on both slots',
+    async (kind) => {
+      const f = await fixture();
+      for (const name of ['primary', 'reserve'] as const) {
+        f.slots[name]!.key = '12345';
+        f.handlers[name] = (_req, res) => {
+          if (kind === 'stream') {
+            res.writeHead(200, { 'content-type': 'text/event-stream' });
+            res.end(event('ok').replace('"id":"stream-1"', '"usage":1.2345e4') + endStream());
+          } else {
+            const value = kind === 'models' ? { data: [{ id: 'm' }] } : answer();
+            res.end(JSON.stringify(value).replace(/}$/, ',"usage":1.2345e4}'));
+          }
+        };
+      }
+      const response =
+        kind === 'models'
+          ? await fetch(`${f.url}/v1/models`)
+          : await f.post(kind === 'stream' ? streamPayload : undefined);
+      expect(response.status).toBe(502);
+      const text = await response.text();
+      expect(text).toContain('unsafe_response');
+      expect(text).not.toContain('12345');
+      expect(f.attempts.map((a) => a.slot)).toEqual(['primary', 'reserve']);
+    }
+  );
+  it.each(['completion', 'models', 'stream', 'split stream'] as const)(
+    'refuses a cached primary key echoed by reserve in %s',
+    async (kind) => {
+      const f = await fixture();
+      f.handlers.primary = (_req, res) => {
+        res.writeHead(500);
+        res.end();
+      };
+      f.handlers.reserve = (_req, res) => {
+        if (kind.includes('stream')) {
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          res.end(
+            (kind === 'split stream'
+              ? event('primary-SUPER-') + event('SECRET')
+              : event('primary-SUPER-SECRET')) + endStream()
+          );
+        } else
+          res.end(
+            JSON.stringify(
+              kind === 'models'
+                ? { data: [{ id: 'primary-SUPER-SECRET' }] }
+                : answer('m', 'primary-SUPER-SECRET')
+            )
+          );
+      };
+      const response =
+        kind === 'models'
+          ? await fetch(`${f.url}/v1/models`)
+          : await f.post(kind.includes('stream') ? streamPayload : undefined);
+      expect(response.status).toBe(502);
+      expect(await response.text()).not.toContain('SECRET');
+      expect(JSON.stringify(f.lines)).not.toContain('SECRET');
+    }
+  );
+  it.each([false, true])(
+    'caller rejections preserve all health fields, healthy=%s',
+    async (healthy) => {
+      const f = await fixture();
+      if (healthy) await (await f.post()).text();
+      const before = await (await fetch(`${f.statusUrl}/status`)).json();
+      const warnBefore = f.lines.filter((line) => line.level === 'warn');
+      for (const body of [
+        {},
+        { model: 42, messages: [] },
+        { model: 'default', messages: 'wrong' },
+        { model: 'default', messages: [{ content: 'x'.repeat(1024 * 1024) }] },
+      ]) {
+        const response = await f.post(body);
+        expect([400, 413]).toContain(response.status);
+        await response.text();
+        expect(await (await fetch(`${f.statusUrl}/status`)).json()).toEqual(before);
+      }
+      const malformed = await fetch(`${f.url}/v1/chat/completions`, {
+        method: 'POST',
+        body: 'not-json',
+      });
+      expect(malformed.status).toBe(400);
+      await malformed.text();
+      expect(await (await fetch(`${f.statusUrl}/status`)).json()).toEqual(before);
+      expect(f.lines.filter((line) => line.level === 'warn')).toEqual(warnBefore);
+      expect(f.attempts).toHaveLength(healthy ? 1 : 0);
+    }
+  );
+  it.each([false, true])(
+    'client disconnect preserves model health, healthy=%s',
+    async (healthy) => {
+      const f = await fixture();
+      if (healthy) await (await f.post()).text();
+      const before = await (await fetch(`${f.statusUrl}/status`)).json();
+      const closed = latch();
+      f.handlers.primary = (_req, res) => {
+        res.on('close', closed.resolve);
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write(event('visible'));
+      };
+      const controller = new AbortController();
+      const response = await fetch(`${f.url}/v1/chat/completions`, {
+        method: 'POST',
+        body: JSON.stringify(streamPayload),
+        signal: controller.signal,
+      });
+      await response.body!.getReader().read();
+      controller.abort();
+      await closed.promise;
+      expect(await (await fetch(`${f.statusUrl}/status`)).json()).toEqual(before);
+      expect(f.lines.filter((line) => line.level === 'warn')).toEqual([]);
+    }
+  );
+  it('disconnect after a primary failure records only that slot failure', async () => {
+    const f = await fixture();
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(500);
+      res.end();
+    };
+    const entered = latch();
+    const closed = latch();
+    f.handlers.reserve = (_req, res) => {
+      res.on('close', closed.resolve);
+      entered.resolve();
+    };
+    const controller = new AbortController();
+    const pending = fetch(`${f.url}/v1/chat/completions`, {
+      method: 'POST',
+      body: JSON.stringify({ model: 'default', messages: [] }),
+      signal: controller.signal,
+    }).catch(() => undefined);
+    await entered.promise;
+    controller.abort();
+    await pending;
+    await closed.promise;
+    expect(await (await fetch(`${f.statusUrl}/status`)).json()).toMatchObject({
+      state: 'unknown',
+      outageSince: null,
+      lastSuccessAt: null,
+      lastErrorCode: null,
+      primary: { lastErrorCode: 'upstream_500' },
+      reserve: { lastErrorCode: null, lastErrorAt: null },
+    });
+    expect(f.lines.filter((line) => line.level === 'warn')).toEqual([]);
+  });
+  it.each(['blocked', 'unset', 'storage'] as const)(
+    'platform %s failure reports down before any success',
+    async (failure) => {
+      const f = await fixture();
+      if (failure === 'blocked') f.slots.primary!.baseUrl = 'http://127.0.0.1:1/v1';
+      if (failure === 'unset') {
+        f.slots.primary = null;
+        f.slots.reserve = null;
+      }
+      if (failure === 'storage') f.baoStatus = 503;
+      f.handlers.reserve = (_req, res) => {
+        res.writeHead(500);
+        res.end();
+      };
+      expect((await f.post()).status).toBe(502);
+      const status = await (await fetch(`${f.statusUrl}/status`)).json();
+      expect(status.state).toBe('down');
+      expect(status.outageSince).not.toBeNull();
+      expect(status.lastAttemptAt).not.toBeNull();
+      expect(status.lastErrorCode).toBe(
+        failure === 'blocked'
+          ? 'upstream_500'
+          : failure === 'storage'
+            ? 'storage_unavailable'
+            : 'not_configured'
+      );
+      expect(f.attempts.map((a) => a.slot)).toEqual(failure === 'blocked' ? ['reserve'] : []);
+    }
+  );
+
+  it.each(['blocked', 'unset', 'storage'] as const)(
+    'platform %s failure reports down after healthy traffic',
+    async (failure) => {
+      const f = await fixture();
+      await (await f.post()).text();
+      const healthy = await (await fetch(`${f.statusUrl}/status`)).json();
+      if (failure === 'blocked') f.slots.primary!.baseUrl = 'http://127.0.0.1:1/v1';
+      if (failure === 'unset') f.slots.primary = null;
+      if (failure === 'storage') f.baoStatus = 503;
+      f.cache.invalidate('primary');
+      f.handlers.reserve = (_req, res) => {
+        res.writeHead(500);
+        res.end();
+      };
+      await (await f.post()).text();
+      const status = await (await fetch(`${f.statusUrl}/status`)).json();
+      expect(status.state).toBe('down');
+      expect(status.outageSince).not.toBeNull();
+      expect(status.lastSuccessAt).toBe(healthy.lastSuccessAt);
+      expect(status.lastErrorCode).toBe(
+        failure === 'blocked'
+          ? 'upstream_500'
+          : failure === 'unset'
+            ? 'not_configured'
+            : 'storage_unavailable'
+      );
+      if (failure === 'blocked')
+        expect(status).toMatchObject({
+          primary: { lastErrorCode: 'blocked_destination' },
+          reserve: { lastErrorCode: 'upstream_500' },
+        });
+    }
+  );
+  it('primary refuses a reserve key already held in the cache', async () => {
+    const f = await fixture();
+    await f.cache.read('reserve');
+    f.handlers.primary = (_req, res) =>
+      res.end(JSON.stringify(answer('m', 'reserve-SUPER-SECRET')));
+    f.handlers.reserve = (_req, res) =>
+      res.end(JSON.stringify(answer('m', 'primary-SUPER-SECRET')));
+    const response = await f.post();
+    expect(response.status).toBe(502);
+    expect(await response.text()).not.toContain('SECRET');
+  });
+  it('rotation removes old keys from the inspected cache set', async () => {
+    const f = await fixture();
+    await (await f.post()).text();
+    f.slots.primary!.key = 'new-credential';
+    f.cache.invalidate('primary');
+    f.handlers.primary = (_req, res) =>
+      res.end(JSON.stringify(answer('m', 'primary-SUPER-SECRET')));
+    const response = await f.post();
+    expect(response.status).toBe(200);
+    expect((await response.json()).choices[0].message.content).toBe('primary-SUPER-SECRET');
+    expect(f.cache.keys()).toEqual(['new-credential']);
+  });
+  it('guards escaped decoded model-list strings on both slots', async () => {
+    const f = await fixture();
+    for (const name of ['primary', 'reserve'] as const)
+      f.handlers[name] = (_req, res) =>
+        res.end(
+          JSON.stringify({ data: [{ id: `${name}-SUPER-SECRET` }] }).replaceAll('S', '\u0053')
+        );
+    const response = await fetch(`${f.url}/v1/models`);
+    expect(response.status).toBe(502);
+    expect(await response.text()).not.toContain('SECRET');
+    expect(f.attempts.map((a) => a.slot)).toEqual(['primary', 'reserve']);
+  });
+  it('status has exact safe key sets after a primary failure', async () => {
+    const f = await fixture();
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(500);
+      res.end('PRIVATE');
+    };
+    await (await f.post()).text();
+    const status = await (await fetch(`${f.statusUrl}/status`)).json();
+    expect(Object.keys(status).sort()).toEqual(
+      [
+        'state',
+        'outageSince',
+        'lastAttemptAt',
+        'lastSuccessAt',
+        'lastErrorCode',
+        'primary',
+        'reserve',
+      ].sort()
+    );
+    for (const name of ['primary', 'reserve'] as const) {
+      expect(Object.keys(status[name]).sort()).toEqual(['lastErrorAt', 'lastErrorCode']);
+      expect(JSON.stringify(status)).not.toContain(f.slots[name]!.key);
+      expect(JSON.stringify(status)).not.toContain(f.slots[name]!.baseUrl);
+    }
+    expect(JSON.stringify(status)).not.toContain('http');
+    expect(JSON.stringify(status)).not.toContain('PRIVATE');
+  });
+  it.each([false, true])(
+    'validates a live reserve destination including after invalidation=%s',
+    async (rotated) => {
+      const f = await fixture();
+      if (rotated) {
+        f.handlers.primary = (_req, res) => {
+          res.writeHead(500);
+          res.end();
+        };
+        await (await f.post()).text();
+        f.attempts.length = 0;
+      }
+      const blocked = new URL(f.slots.reserve!.baseUrl);
+      blocked.hostname = '127.0.0.1';
+      f.slots.reserve!.baseUrl = blocked.toString();
+      f.cache.invalidate('reserve');
+      f.handlers.primary = (_req, res) => {
+        res.writeHead(500);
+        res.end();
+      };
+      const response = await f.post();
+      expect(response.status).toBe(502);
+      expect(await response.text()).toContain('blocked_destination');
+      expect(f.attempts.map((a) => a.slot)).toEqual(['primary']);
+    }
+  );
+});
+
+describe('model gateway production timer and inbound boundaries', () => {
+  it('pins the production connect, first-byte, overall and idle budgets', () => {
+    expect(GATEWAY_LIMITS).toEqual({
+      connect: 5000,
+      firstByte: 45000,
+      overall: 110000,
+      idle: 30000,
+    });
+  });
+  it('enforces the default overall 110-second deadline across slots with no timeout override', async () => {
+    // A controlled timer queue advances only gateway timers. Real HTTP uses the event loop normally.
+    let now = 0;
+    let sequence = 0;
+    const scheduled = new Map<number, { at: number; callback: () => void }>();
+    const timers = {
+      set: ((callback: () => void, ms: number) => {
+        const id = ++sequence;
+        scheduled.set(id, { at: now + ms, callback });
+        return id;
+      }) as unknown as typeof setTimeout,
+      clear: ((id: number) => {
+        scheduled.delete(id);
+      }) as unknown as typeof clearTimeout,
+    };
+    const advance = (ms: number) => {
+      now += ms;
+      for (const [id, timer] of [...scheduled])
+        if (timer.at <= now) {
+          scheduled.delete(id);
+          timer.callback();
+        }
+    };
+    const f = await fixture(undefined, timers);
+    const primaryEntered = latch();
+    const primaryClosed = latch();
+    const reserveEntered = latch();
+    const reserveClosed = latch();
+    let sendFrame!: () => void;
+    f.handlers.primary = (_req, res) => {
+      res.on('close', primaryClosed.resolve);
+      primaryEntered.resolve();
+    };
+    f.handlers.reserve = (_req, res) => {
+      res.on('close', reserveClosed.resolve);
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(event('visible'));
+      reserveEntered.resolve();
+      sendFrame = () => {
+        res.write(event('still active'));
+      };
+    };
+    const pending = f.post(streamPayload);
+    await primaryEntered.promise;
+    advance(45000);
+    const response = await pending;
+    await reserveEntered.promise;
+    await primaryClosed.promise;
+    const reader = response.body!.getReader();
+    await reader.read();
+    // Keep the stream active: neither first-byte nor idle can cause the final cut.
+    for (const ms of [20000, 20000, 20000, 4999]) {
+      advance(ms);
+      sendFrame();
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain('still active');
+    }
+    expect(now).toBe(109999);
+    expect([...scheduled.values()].some((timer) => timer.at === 110000)).toBe(true);
+    expect(f.attempts.map((a) => a.slot)).toEqual(['primary', 'reserve']);
+    advance(1);
+    let text = '';
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      text += new TextDecoder().decode(part.value);
+    }
+    expect(text).toContain('timeout');
+    await reserveClosed.promise;
+    expect(f.attempts.map((a) => a.slot)).toEqual(['primary', 'reserve']);
+    expect(scheduled.size).toBe(0);
+  });
+  it('ignores a spoofed inbound slot header', async () => {
+    const f = await fixture();
+    const response = await fetch(`${f.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'x-lifemodel-slot': 'reserve' },
+      body: JSON.stringify({ model: 'default', messages: [] }),
+    });
+    expect(response.headers.get('x-lifemodel-slot')).toBe('primary');
+    await response.text();
+    expect(f.attempts.map((a) => a.slot)).toEqual(['primary']);
+    expect(f.attempts[0]!.headers['x-lifemodel-slot']).toBeUndefined();
+  });
+  it.each([
+    'Content-Length: 2\r\nContent-Length: 2',
+    'Content-Length: 2\r\nTransfer-Encoding: chunked',
+  ])('rejects ambiguous inbound framing %s without an upstream request', async (headers) => {
+    const f = await fixture();
+    const url = new URL(f.url);
+    const text = await new Promise<string>((resolve, reject) => {
+      const socket = connect(Number(url.port), url.hostname);
+      let text = '';
+      socket.on('error', reject);
+      socket.on('data', (chunk) => {
+        text += String(chunk);
+      });
+      socket.on('end', () => resolve(text));
+      socket.on('connect', () =>
+        socket.end(
+          `POST /v1/chat/completions HTTP/1.1\r\nHost: gateway\r\n${headers}\r\nConnection: close\r\n\r\n{}`
+        )
+      );
+    });
+    expect(text).toContain('400 Bad Request');
+    expect(f.attempts).toEqual([]);
+    expect(f.reads).toEqual([]);
+  });
 });
