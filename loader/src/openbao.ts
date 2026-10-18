@@ -302,8 +302,9 @@ export function createOpenBaoApi(
    * needs the gateway's projected JWT, which the loader does not have: the
    * policy is therefore checked through a bounded token that carries that
    * policy alone, and the role's binding to the gateway ServiceAccount is
-   * checked by reading the role back. Every write is idempotent, so a phase
-   * re-entered after a crash repeats it safely.
+   * checked by reading the role back. Policy and role writes repeat safely.
+   * Token creation is not idempotent: a lost response can leave a parented,
+   * nonrenewable token alive until its 60s TTL or root retirement.
    */
   const ensureModelGatewayIdentity = async (rootToken: string): Promise<void> => {
     // No metadata, no delete, no write: the gateway reads slots and nothing else.
@@ -313,12 +314,17 @@ export function createOpenBaoApi(
       bound_service_account_names: ['model-gateway'],
       bound_service_account_namespaces: ['lifemodel-system'],
       policies: ['model-gateway'],
+      token_no_default_policy: true,
       ttl: '1h',
     });
-    const recorded = await asToken(rootToken, 'auth/kubernetes/role/model-gateway', 'GET');
-    const serviceAccounts = recorded['bound_service_account_names'];
-    const namespaces = recorded['bound_service_account_namespaces'];
-    const policies = recorded['policies'];
+    const response = await asToken(rootToken, 'auth/kubernetes/role/model-gateway', 'GET');
+    const recorded = response['data'];
+    if (recorded === null || typeof recorded !== 'object' || Array.isArray(recorded))
+      throw new Error('OpenBao model-gateway role response has no data object');
+    const role = recorded as Record<string, unknown>;
+    const serviceAccounts = role['bound_service_account_names'];
+    const namespaces = role['bound_service_account_namespaces'];
+    const policies = role['policies'];
     if (
       !Array.isArray(serviceAccounts) ||
       serviceAccounts.length !== 1 ||
@@ -328,7 +334,8 @@ export function createOpenBaoApi(
       namespaces[0] !== 'lifemodel-system' ||
       !Array.isArray(policies) ||
       policies.length !== 1 ||
-      policies[0] !== 'model-gateway'
+      policies[0] !== 'model-gateway' ||
+      role['token_no_default_policy'] !== true
     )
       throw new Error(
         'OpenBao model-gateway role is not bound to the gateway ServiceAccount alone'
@@ -337,14 +344,22 @@ export function createOpenBaoApi(
       policies: ['model-gateway'],
       ttl: '60s',
       renewable: false,
-      no_parent: true,
+      no_default_policy: true,
     });
     const auth = minted['auth'] as Record<string, unknown> | undefined;
     const verificationToken = auth?.['client_token'];
     if (typeof verificationToken !== 'string' || verificationToken === '')
       throw new Error('OpenBao issued no token for the model-gateway capability check');
     try {
-      const capabilities = await asToken(verificationToken, 'sys/capabilities-self', 'POST', {
+      const tokenPolicies = auth?.['policies'];
+      if (
+        !Array.isArray(tokenPolicies) ||
+        tokenPolicies.length !== 1 ||
+        tokenPolicies[0] !== 'model-gateway'
+      )
+        throw new Error('OpenBao verification token must carry the model-gateway policy alone');
+      const capabilities = await asToken(rootToken, 'sys/capabilities', 'POST', {
+        token: verificationToken,
         paths: [
           'lifemodel/data/model/primary',
           'lifemodel/data/model/reserve',
@@ -363,7 +378,7 @@ export function createOpenBaoApi(
         throw new Error('OpenBao model-gateway policy reaches beyond the model slots it reads');
     } finally {
       // The check's token is bounded anyway; revoke it so no credential outlives the check.
-      await asToken(verificationToken, 'auth/token/revoke-self', 'POST', {}).catch(() => undefined);
+      await asToken(rootToken, 'auth/token/revoke', 'POST', { token: verificationToken });
     }
   };
   return {

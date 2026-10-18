@@ -93,7 +93,16 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
    The key is added as `Authorization: Bearer <key>` on the upstream leg only;
    a slot without a key (Ollama) is sent without one. The role and policy are
    provisioned in the loader's bootstrap policy action before root revocation,
-   beside `loader-model` (ADR-012 D7).
+   beside `loader-model` (ADR-012 D7). The role excludes the default policy.
+   Bootstrap verifies a parented, nonrenewable token carrying only
+   `model-gateway`, with an explicit 60 s TTL and no default policy. Root
+   checks that target token through `sys/capabilities` and revokes it through
+   `auth/token/revoke`; failed cleanup rejects the phase and keeps root.
+   Policy and role writes repeat safely; token creation is not idempotent.
+   A crash or lost create response can leave an unknown token alive until its
+   TTL expires (at most 60 s), or until its parent root is retired. Re-entry
+   repeats verification before root retirement; this bounded residual is not
+   an exactly-once token-creation guarantee.
 4. **Routing and failover** [G-04, G-05]. Each inbound request makes at most
    one attempt at the primary and one at the reserve; no retries inside a
    slot. Failover is at-least-once generation and may bill twice; the gateway
