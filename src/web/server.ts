@@ -252,6 +252,13 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     if (streamCount >= MAX_STREAMS_PER_SESSION)
       return await reply.code(429).send({ error: 'too_many_streams' });
     activeStreams.set(session, streamCount + 1);
+    let statusReaderReleased = false;
+    const releaseStatusReader = () => {
+      if (statusReaderReleased) return;
+      statusReaderReleased = true;
+      statusReaders = Math.max(0, statusReaders - 1);
+      if (statusReaders === 0) options.modelStatus.stop();
+    };
     statusReaders += 1;
     if (statusReaders === 1) options.modelStatus.start();
 
@@ -284,8 +291,7 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
       const remaining = (activeStreams.get(session) ?? 1) - 1;
       if (remaining <= 0) activeStreams.delete(session);
       else activeStreams.set(session, remaining);
-      statusReaders = Math.max(0, statusReaders - 1);
-      if (statusReaders === 0) options.modelStatus.stop();
+      releaseStatusReader();
       void releaseBounded();
     };
     const onRequestClose = () => {
@@ -315,6 +321,7 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
       leaseId = lease;
       // If acquisition settled after disconnect/timeout, immediately retire its lease.
       if (ended || lifecycle.signal.aborted) {
+        closeLifecycle();
         await releaseBounded();
         return await reply.code(503).send({ error: 'stream_unavailable' });
       }
