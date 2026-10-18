@@ -47,6 +47,135 @@ afterEach(() => {
 });
 
 describe('versioned release installer', () => {
+  it('documents the release asset, root zero-parameter invocation, flags and persisted identity/pin', () => {
+    const guide = readFileSync('deploy/nixos/README.md', 'utf8');
+    expect(guide).toContain("not GitHub's automatically generated source archive");
+    expect(guide).toContain("--pattern 'lifemodel-installer-*.tar.gz'");
+    expect(guide).toContain('tar -xzf lifemodel-installer-*.tar.gz');
+    expect(guide).toMatch(/^sudo sh scripts\/install\.sh$/m);
+    expect(guide).toContain('no required parameters');
+    for (const flag of [
+      '--name',
+      '--lan-interface',
+      '--platform-url',
+      '--tag',
+      '--digest',
+      '--verify',
+      '--public-key-file',
+      '--issuer',
+      '--subject-regex',
+      '--insecure-registry',
+      '--render-only',
+      '--root-templates',
+    ]) {
+      expect(guide).toContain(flag);
+    }
+    expect(guide).toContain('/etc/lifemodel/instance.env');
+    expect(guide).toContain('even from a newer installer bundle');
+    expect(guide).toContain('before any host change');
+  });
+
+  it('publishes an immutable versioned asset: first upload, same-pin retry, different-pin refusal', () => {
+    const { root, source, output } = fixture();
+    const bin = join(root, 'bin');
+    const remote = join(root, 'release');
+    mkdirSync(bin);
+    mkdirSync(remote);
+    const gh = join(bin, 'gh');
+    writeFileSync(
+      gh,
+      `#!${process.execPath}
+const fs = require('node:fs');
+const path = require('node:path');
+const args = process.argv.slice(2);
+const root = process.env.FAKE_RELEASE;
+fs.appendFileSync(path.join(root, 'calls'), JSON.stringify(args) + '\\n');
+const asset = path.join(root, 'lifemodel-installer-${tag}.tar.gz');
+const release = path.join(root, 'exists');
+if (args[0] !== 'release' || args[2] !== '${tag}') process.exit(64);
+switch (args[1]) {
+  case 'view':
+    if (!fs.existsSync(release)) process.exit(1);
+    if (args.includes('--json') && fs.existsSync(asset)) console.log(path.basename(asset));
+    break;
+  case 'create':
+    if (fs.existsSync(release)) process.exit(1);
+    fs.writeFileSync(release, 'release');
+    break;
+  case 'upload':
+    if (fs.existsSync(asset) && !args.includes('--clobber')) process.exit(1);
+    fs.copyFileSync(args[3], asset);
+    break;
+  case 'download':
+    fs.copyFileSync(asset, path.join(args[args.indexOf('--dir') + 1], path.basename(asset)));
+    break;
+  default: process.exit(64);
+}
+`
+    );
+    chmodSync(gh, 0o755);
+    const prepare = (pin: string) =>
+      command('sh', [
+        join(source, 'scripts/release/prepare-installer-bundle.sh'),
+        tag,
+        pin,
+        output,
+      ]);
+    expect(prepare(digest).status).toBe(0);
+    const asset = join(output, `lifemodel-installer-${tag}.tar.gz`);
+    // Run the actual workflow publication boundary, not a parallel test implementation.
+    const workflow = YAML.parse(readFileSync('.github/workflows/release.yml', 'utf8'));
+    const publish = workflow.jobs['installer-release'].steps.find(
+      (step: any) => step.name === 'Publish the versioned installer asset'
+    );
+    const runner = join(root, 'runner');
+    mkdirSync(join(runner, 'installer'), { recursive: true });
+    const publishRun = (pin: string) => {
+      cpSync(asset, join(runner, 'installer', `lifemodel-installer-${tag}.tar.gz`));
+      return spawnSync('bash', ['-c', publish.run], {
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          TAG: tag,
+          PLATFORM_DIGEST: pin,
+          RUNNER_TEMP: runner,
+          FAKE_RELEASE: remote,
+          GH_TOKEN: 'fake-local-token',
+          GH_REPO: 'local/fixture',
+        },
+      });
+    };
+    const first = publishRun(digest);
+    expect(first.status, first.stderr).toBe(0);
+    const remoteAsset = join(remote, `lifemodel-installer-${tag}.tar.gz`);
+    const original = readFileSync(remoteAsset);
+    expect(original).toEqual(readFileSync(asset));
+    // Different bundle bytes, same verified pin: retry must not replace original.
+    writeFileSync(join(source, 'deploy/cli/lifemodel.mjs'), '// rebuilt same pin\n', { flag: 'a' });
+    rmSync(asset);
+    expect(prepare(digest).status).toBe(0);
+    expect(readFileSync(asset)).not.toEqual(original);
+    const retry = publishRun(digest);
+    expect(retry.status, retry.stderr).toBe(0);
+    expect(readFileSync(remoteAsset)).toEqual(original);
+    rmSync(asset);
+    const otherDigest = `sha256:${'b'.repeat(64)}`;
+    expect(prepare(otherDigest).status).toBe(0);
+    const different = publishRun(otherDigest);
+    expect(different.status, different.stderr).not.toBe(0);
+    expect(different.stderr).toContain('different platform pin');
+    expect(readFileSync(remoteAsset)).toEqual(original);
+    const calls = readFileSync(join(remote, 'calls'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as string[]);
+    expect(calls.filter((args) => args[1] === 'upload')).toHaveLength(1);
+    expect(calls.some((args) => args.includes('--clobber'))).toBe(false);
+    expect(calls.filter((args) => args[1] === 'create')).toHaveLength(1);
+  }, 60_000);
+
   it('extracts into a clean directory and renders the stamped digest without release or identity arguments', () => {
     const { root, source, output } = fixture();
     const result = command('sh', [
@@ -169,11 +298,15 @@ printf '[{"dev":"eth0"}]\\n'
     });
     expect(prepare.run).toContain('smoke-installer-bundle.sh');
     expect(prepare.run).not.toContain('--help');
-    const publish = upload.steps.find((step: any) => step.run?.includes('gh release upload'));
+    const publish = upload.steps.find((step: any) =>
+      step.run?.includes('publish-installer-bundle.sh')
+    );
     expect(publish.env.GH_TOKEN).toBe('${{ github.token }}');
-    expect(publish.run).toContain('gh release create');
+    expect(publish.env.PLATFORM_DIGEST).toBe('${{ needs.release.outputs.platform-digest }}');
+    const publisher = readFileSync('scripts/release/publish-installer-bundle.sh', 'utf8');
+    expect(publisher).toContain('gh release create');
     expect(publish.run).toContain('lifemodel-installer-$TAG.tar.gz');
-    expect(publish.run).toContain('gh release upload');
+    expect(publisher).toContain('gh release upload');
     const verifyIndex = build.steps.findIndex((step: any) => step.run?.includes('cosign verify'));
     expect(verifyIndex).toBeGreaterThan(
       build.steps.findIndex((step: any) => step.id === 'platform')

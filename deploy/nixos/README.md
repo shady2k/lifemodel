@@ -1,4 +1,62 @@
-# lifemodel NixOS module
+# lifemodel platform installation
+
+## Generic Linux (Debian/Ubuntu)
+
+Use a dedicated host with an x86-64-v2 CPU or newer. Download the **installer
+release asset**, not GitHub's automatically generated source archive. The
+latest release provides an asset named `lifemodel-installer-v<VERSION>.tar.gz`.
+The bundle contains `scripts/install.sh`, root templates, mDNS units and the
+recovery CLI. Its platform URL and verified platform digest are already stamped.
+
+With the GitHub CLI installed, download and extract the latest installer in a
+clean directory:
+
+```sh
+mkdir lifemodel-install
+cd lifemodel-install
+gh release download --repo shady2k/lifemodel --pattern 'lifemodel-installer-*.tar.gz'
+tar -xzf lifemodel-installer-*.tar.gz
+sudo sh scripts/install.sh
+```
+
+There are **no required parameters**. The default name is `lifemodel`; the LAN
+interface comes from the lowest-metric IPv4 default route. To select a specific
+release rather than latest, add its tag (for example `v1.0.0`) to the
+`gh release download` command and download that release's installer asset.
+Never run `scripts/install.sh` from the source archive expecting a release pin.
+
+Optional flags (run `sh scripts/install.sh --help` for all flags):
+
+- `--name home` sets the instance DNS label on first installation.
+- `--lan-interface eth0` selects the LAN interface explicitly.
+- `--platform-url oci://REGISTRY/PATH` selects another platform source.
+- `--digest sha256:<64 lowercase hex characters>` explicitly selects another
+  release by digest; `--tag v1.0.0` selects a tag instead. These are mutually
+  exclusive. Signature verification remains enabled.
+- `--verify key --public-key-file FILE` selects trusted-key verification instead
+  of the default keyless verification. `--issuer` and `--subject-regex` tune the
+  keyless identity. `--insecure-registry` is only for a VM-local HTTP registry.
+- `--render-only DIR` writes the rendered manifests without installing anything;
+  `--root-templates DIR` overrides the packaged root templates.
+
+The installer runs as root, installs k3s, Flux and LAN name publication, then
+waits for verified HTTPS before printing the address and
+"SHA-256 fingerprint of the CA certificate (DER)". If it times out, it names the
+first unready step and points to `lifemodel doctor`. Later, run
+`sudo lifemodel address` to print the established address and CA fingerprint.
+
+The name and selected digest (or explicitly chosen tag) persist in
+`/etc/lifemodel/instance.env`. Rerunning the installer without release flags
+keeps that saved name and digest, **even from a newer installer bundle**. To
+change the release, pass `--digest` or `--tag` explicitly (and `--platform-url`
+if needed). The established name cannot change: a different `--name` is refused
+before any host change. The installer also recovers identity from
+`/var/lib/lifemodel/instance-name` and the cluster's `lifemodel-instance`
+ConfigMap, and refuses conflicts between surviving records. Do not edit the
+saved record as shell code; only validated literal assignments are accepted.
+
+## NixOS
+
 
 Add this flake as an input and enable `services.lifemodel` on the dedicated VM:
 
