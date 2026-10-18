@@ -252,7 +252,7 @@ describe('platform bootstrap phases', () => {
     expect(record).toEqual({ phase: 'bao', status: 'complete' });
   });
 
-  it('allows DNS, port-restricted k3s API, OpenBao, and Gitea only', async () => {
+  it('allows DNS, k3s API, OpenBao, gateway status, model checks and Gitea only', async () => {
     const policy = await readFile('deploy/platform/a0/network-policy.yaml', 'utf8');
     const egress = policy.split('  egress:\n')[1] ?? '';
     expect(egress).toContain('k8s-app: kube-dns');
@@ -268,33 +268,33 @@ describe('platform bootstrap phases', () => {
     expect(egress).toContain('kubernetes.io/metadata.name: openbao');
     expect(egress).toContain('port: 8200');
     const parsed = YAML.parse(policy);
-    expect(parsed.spec.egress).toHaveLength(6);
+    expect(parsed.spec.egress).toHaveLength(7);
     expect(
       parsed.spec.egress
         .flatMap((rule: any) =>
           (rule.ports ?? []).map((port: any) => `${port.protocol}/${port.port}`)
         )
         .sort()
-    ).toEqual(['TCP/11434', 'TCP/3000', 'TCP/53', 'TCP/6443', 'TCP/8200', 'UDP/53']);
+    ).toEqual(['TCP/11434', 'TCP/3000', 'TCP/53', 'TCP/6443', 'TCP/8081', 'TCP/8200', 'UDP/53']);
     expect(egress).toContain(
       '# No port restriction: owner endpoints may use LAN Ollama 11434 or custom HTTPS ports.'
     );
-    expect(parsed.spec.egress[3].ports).toBeUndefined();
-    expect(parsed.spec.egress[3].to[0].ipBlock.except).toEqual([
+    expect(parsed.spec.egress[4].ports).toBeUndefined();
+    expect(parsed.spec.egress[4].to[0].ipBlock.except).toEqual([
       '10.42.0.0/16',
       '10.43.0.0/16',
       '169.254.0.0/16',
     ]);
     // The unported rule admits 192.168.1.20:11434; its exceptions deny cluster and metadata ranges.
-    expect(parsed.spec.egress[3].to[0].ipBlock.except).toContain('169.254.0.0/16');
+    expect(parsed.spec.egress[4].to[0].ipBlock.except).toContain('169.254.0.0/16');
     expect(parsed.spec.egress[1].to).toEqual([{ ipBlock: { cidr: '0.0.0.0/0' } }]);
-    expect(parsed.spec.egress[3].to[0].ipBlock.except).toEqual([
+    expect(parsed.spec.egress[4].to[0].ipBlock.except).toEqual([
       '10.42.0.0/16',
       '10.43.0.0/16',
       '169.254.0.0/16',
     ]);
     expect(
-      parsed.spec.egress[4].to[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name']
+      parsed.spec.egress[5].to[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name']
     ).toBe('ollama');
     expect(parsed.spec.egress[1].ports).toEqual([{ protocol: 'TCP', port: 6443 }]);
   });

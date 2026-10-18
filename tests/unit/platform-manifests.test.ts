@@ -1415,6 +1415,17 @@ describe('platform manifests', () => {
       {
         to: [
           {
+            namespaceSelector: {
+              matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' },
+            },
+            podSelector: { matchLabels: { 'app.kubernetes.io/name': 'model-gateway' } },
+          },
+        ],
+        ports: [{ protocol: 'TCP', port: 8081 }],
+      },
+      {
+        to: [
+          {
             ipBlock: {
               cidr: '0.0.0.0/0',
               except: ['10.42.0.0/16', '10.43.0.0/16', '169.254.0.0/16'],
@@ -1466,6 +1477,6 @@ describe('platform manifests', () => {
           (rule.ports ?? []).map((port: any) => `${port.protocol}/${port.port}`)
         )
         .sort()
-    ).toEqual(['TCP/11434', 'TCP/3000', 'TCP/53', 'TCP/6443', 'TCP/8200', 'UDP/53']);
+    ).toEqual(['TCP/11434', 'TCP/3000', 'TCP/53', 'TCP/6443', 'TCP/8081', 'TCP/8200', 'UDP/53']);
   });
 });
