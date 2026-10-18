@@ -78,7 +78,7 @@ the repository's installation, and each person's plugin and hooks are their own.
 - **Rules:** `.backlog/rules/check.mjs` with `time-format.mjs` beside it,
   `check-commits.mjs`, `check-docs.mjs`, `check-product.mjs`, and `check-present.mjs` with
   `document-format.mjs` beside it — byte-for-byte copies of shady2k-skills
-  0.107.3's `skills/backlog/setup-shady2k-skills/` at setup version 0.45.0,
+  0.115.0's `skills/backlog/setup-shady2k-skills/` at setup version 0.46.0,
   never edited here. Their `--version` is the installation. Proving it: `cmp`
   each against the plugin copy.
 - **Present documents:** the config's `presentDocuments` — `AGENTS.md`,
@@ -277,13 +277,15 @@ the repository's installation, and each person's plugin and hooks are their own.
   tests went red. Meaningful survivors are filed as tasks. Mutation evidence
   reports test strength, not a correctness verdict, and does not block the
   change. A skipped check is recorded as skipped, never as passed.
-- **Reviewer:** `openai-codex/gpt-6-sol` (another model), at stage
-  acceptance, in its own prime-agent session:
-  `prime-agent --provider openai-codex --model gpt-6-sol`. Its brief must
+- **Reviewer:** `shady2k-gateway/gpt-6.1-sol` (another model than the
+  workers), at stage acceptance, in its own prime-agent session:
+  `prime-agent --provider shady2k-gateway --model gpt-6.1-sol` (the
+  `openai-codex` provider has no key since 2026-10-15). Its brief must
   explicitly allow writing its report file (told "read-only", it wrote none).
-  The fallback is a same-model independent session (a fresh glm-5.3-flash
-  session), disclosed as the same model. Independent review is required for
-  acceptance.
+  At most two model review rounds per task; after that the coordinator
+  verifies the fixes itself (owner, 2026-10-16). The fallback is a
+  same-model independent session, disclosed as the same model. Independent
+  review is required for acceptance.
 - **Parallel execution:** one git worktree per worker (herdr worktrees for
   prime-agent worker sessions), up to the config's `maxWorkers`. Claims are
   atomic and exclusive (`claim_exclusive` in `.beads/config.yaml`) through
@@ -293,9 +295,11 @@ the repository's installation, and each person's plugin and hooks are their own.
   Generated files and `package-lock.json` count as collisions. The stage's
   coordinator merges and records `implemented`.
 - **Starting a worker:** `prime-agent --provider shady2k-gateway --model
-  glm-5.3-flash` in the worker's herdr pane, then check the pane footer before
-  dispatching. A bare `--model glm-5.3-flash` resolves to the `opencode`
-  provider, which has no key here, and the worker never starts. A brief says
+  gpt-6-luna` in the worker's herdr pane (a worker that is not coping is
+  restarted on `gpt-6.1-sol`; `deepseek-v4.1-flash-auto` is on trial since
+  2026-10-18), then check the pane footer before dispatching. Always name
+  `--provider shady2k-gateway`: a bare `--model` may resolve to a provider
+  with no key here, and the worker never starts. A brief says
   that the owner's rules in `AGENTS.md` are not reworded to fit the code: a
   violation is filed as a finding and the rule stays (a worker once weakened
   Plugin Isolation that way). A brief also carries the tracker claim
