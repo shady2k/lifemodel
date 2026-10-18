@@ -18,8 +18,9 @@ configuration are not part of the current core.
 | `POST /settings` | Validates and stores the submitted settings, then reloads the endpoint in the running core. |
 
 The endpoint base URL must be HTTP or HTTPS, with no URL credentials, query or
-fragment. If any endpoint field is set, the base URL and all three model names
-must be present. A blank endpoint is valid. Invalid input returns `400` and
+fragment. Without `LIFEMODEL_MODEL_BASE_URL`, if any endpoint field is set,
+the base URL and all three model names must be present. An unpinned role with
+no model is refused, not sent as `default`. A blank endpoint is valid. Invalid input returns `400` and
 writes nothing. Cross-origin or origin-less writes return `403`. A failed
 Postgres write returns `500`; a save during shutdown returns `503`.
 

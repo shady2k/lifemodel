@@ -58,6 +58,8 @@ function withoutAuthorization(headers: HeadersInit | undefined): Headers {
 export interface VercelAIEndpointConfig {
   /** Base URL of the endpoint (e.g., http://localhost:1234/v1) */
   baseUrl: string;
+  /** Set only by platform-pinned gateway wiring: blank roles use the slot model. */
+  useGatewayDefault?: boolean;
   /** The model for the fast role (classification) */
   fastModel?: string;
   /** The model for the smart role (composition, reasoning) */
@@ -125,9 +127,8 @@ export class VercelAIProvider extends BaseLLMProvider {
   /**
    * Check if provider is configured.
    *
-   * A base URL is the whole of it: the models are optional, and a role the
-   * endpoint names none for asks for `default`, which the platform's gateway
-   * maps to the configured slot's own model (ADR-013 D2).
+   * A base URL is needed. Only the platform-pinned gateway may supply
+   * defaults for blank role models (ADR-013 D2).
    */
   isAvailable(): boolean {
     return Boolean(this.config.baseUrl);
@@ -142,24 +143,20 @@ export class VercelAIProvider extends BaseLLMProvider {
       return request.model;
     }
 
-    // The endpoint uses the model its configuration names for THIS role
-    // (lifemodel-q4x.4.1); a role it names none for asks for `default`
-    // (ADR-013 D2), which the platform's gateway maps to the slot's own model.
-    const forRole: Record<'fast' | 'smart' | 'motor', string | undefined> = {
-      fast: this.config.fastModel,
-      smart: this.config.smartModel,
-      motor: this.config.motorModel,
+    const forRole = {
+      fast: this.config.fastModel?.trim(),
+      smart: this.config.smartModel?.trim(),
+      motor: this.config.motorModel?.trim(),
     };
-    if (request.role === undefined) {
-      // No role asked for: the general model, the smart one when it is named.
-      return (
-        this.config.smartModel ??
-        this.config.fastModel ??
-        this.config.motorModel ??
-        DEFAULT_ROLE_MODEL
-      );
-    }
-    return forRole[request.role] ?? DEFAULT_ROLE_MODEL;
+    const model =
+      request.role === undefined
+        ? forRole.smart || forRole.fast || forRole.motor
+        : forRole[request.role];
+    if (model) return model;
+    if (this.config.useGatewayDefault) return DEFAULT_ROLE_MODEL;
+    throw new LLMError(`The endpoint names no ${request.role ?? 'default'} role model`, this.name, {
+      retryable: false,
+    });
   }
 
   /**
@@ -599,10 +596,7 @@ export class VercelAIProvider extends BaseLLMProvider {
     const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT;
     const attempt = new AbortController();
     let timedOut = false;
-    const timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      attempt.abort(new Error(`The model endpoint did not answer within ${String(timeoutMs)} ms`));
-    }, timeoutMs);
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
 
     // Apply model param overrides
     const overrides = resolveModelParams(modelId);
@@ -702,7 +696,7 @@ export class VercelAIProvider extends BaseLLMProvider {
       ...(overrides.topP !== undefined && overrides.topP !== null && { topP: overrides.topP }),
       ...(request.maxTokens !== undefined && { maxOutputTokens: request.maxTokens }),
       ...(request.stop && { stopSequences: request.stop }),
-      // Disable AI SDK's built-in retry (we handle it ourselves)
+      // The gateway owns the transport failover budget; no SDK retry.
       maxRetries: 0,
       // Step-finished callback for lean debug logging (fires even for single-step calls)
       onStepFinish: (
@@ -771,6 +765,12 @@ export class VercelAIProvider extends BaseLLMProvider {
     };
 
     try {
+      timeoutTimer = setTimeout(() => {
+        timedOut = true;
+        attempt.abort(
+          new Error(`The model endpoint did not answer within ${String(timeoutMs)} ms`)
+        );
+      }, timeoutMs);
       // Call generateText with type validation
       const result = await generateText(generateOptions as Parameters<typeof generateText>[0]);
 

@@ -1,17 +1,3 @@
-import type { CircuitState } from '../core/circuit-breaker.js';
-
-/**
- * Circuit breaker statistics.
- */
-export interface CircuitStats {
-  /** Current circuit state */
-  state: CircuitState;
-  /** Number of consecutive failures */
-  failures: number;
-  /** Timestamp of last failure (null if none) */
-  lastFailureTime: number | null;
-}
-
 /**
  * Result of sending a message.
  */
@@ -91,10 +77,4 @@ export interface Channel {
    * separate intake may omit it; the core falls back to stop().
    */
   stopIntake?(): Promise<void>;
-
-  /**
-   * Get circuit breaker statistics.
-   * Optional - for monitoring channel health.
-   */
-  getCircuitStats?(): CircuitStats;
 }

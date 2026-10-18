@@ -9,7 +9,7 @@
  * activity after a reported timeout.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { VercelAIProvider } from '../../../src/plugins/providers/vercel-ai-provider.js';
 import { DEFAULT_ROLE_MODEL, LLMError } from '../../../src/llm/provider.js';
 import { createTestLogger } from '../../helpers/test-logger.js';
@@ -124,6 +124,37 @@ const REQUEST = {
 };
 
 describe('the core provider in front of the model gateway', () => {
+  it('refuses an unpinned blank role before sending HTTP', async () => {
+    const gateway = await gatewayWith(answerOnce('hello'));
+    const provider = new VercelAIProvider({ baseUrl: gateway.baseUrl }, createTestLogger('silent'));
+    await expect(provider.complete({ ...REQUEST, role: 'smart' })).rejects.toThrow(/smart.*model/i);
+    expect(gateway.requests).toHaveLength(0);
+  });
+
+  it('rejects duplicate tool-call ids immediately with zero HTTP requests and zero timers', async () => {
+    const gateway = await gatewayWith(answerOnce('hello'));
+    const provider = providerFor(gateway.baseUrl);
+    vi.useFakeTimers();
+    try {
+      const call = {
+        id: 'duplicate',
+        type: 'function' as const,
+        function: { name: 'test', arguments: '{}' },
+      };
+      await expect(
+        provider.complete({
+          ...REQUEST,
+          messages: [{ role: 'assistant', content: null, tool_calls: [call, call] }],
+        })
+      ).rejects.toThrow(/Duplicate tool_call.id/);
+      expect(gateway.requests).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it('makes exactly one HTTP attempt per completion and sends no Authorization', async () => {
     const gateway = await gatewayWith(answerOnce('hello'));
     const provider = providerFor(gateway.baseUrl);
@@ -144,12 +175,15 @@ describe('the core provider in front of the model gateway', () => {
     expect(JSON.parse(request?.body ?? '{}').stream).not.toBe(true);
   });
 
-  it('asks the gateway for `default` on a role no model is named for', async () => {
+  it('asks the pinned gateway for `default` on a role no model is named for', async () => {
     const gateway = await gatewayWith(answerOnce('hello'));
     for (const name of ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'ALL_PROXY'])
       delete process.env[name];
     // A base URL alone: the settings name no model for any role (ADR-013 D2).
-    const provider = new VercelAIProvider({ baseUrl: gateway.baseUrl }, createTestLogger('silent'));
+    const provider = new VercelAIProvider(
+      { baseUrl: gateway.baseUrl, useGatewayDefault: true },
+      createTestLogger('silent')
+    );
 
     await provider.complete({ ...REQUEST, role: 'smart' });
 

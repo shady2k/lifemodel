@@ -1,4 +1,5 @@
 import type { Logger } from 'pino';
+import { pinnedModelBaseUrl } from '../config/model-endpoint.js';
 import type { PersistableState } from '../storage/persistable-state.js';
 import type { PersistedAckRegistryState } from '../layers/aggregation/ack-registry.js';
 import { Redis } from 'iovalkey';
@@ -410,30 +411,28 @@ export interface LLMProviderConfig {
  * role, and no key (lifemodel-q4x.4.1). In the cluster that endpoint is the
  * platform's `model-gateway`, pinned by `LIFEMODEL_MODEL_BASE_URL`, and the
  * gateway injects the owner's key from OpenBao on the way upstream: lifemodel
- * holds none. A role the endpoint names no model for asks for `default`, which
- * the gateway maps to the configured slot's own model (ADR-013 D2); there is NO
- * second endpoint and no fallback.
+ * holds none. Only with the platform pin does a blank role ask for `default`
+ * (ADR-013 D2). Without the pin, a role with no model is refused; there is
+ * no second endpoint and no fallback.
  */
 export function createLLMProvider(
   config: LLMProviderConfig | undefined,
   logger: Logger
 ): LLMProvider | null {
+  const pinned = pinnedModelBaseUrl();
   const endpoint: ModelEndpoint = {
-    baseUrl: config?.endpoint?.baseUrl ?? null,
+    baseUrl: pinned ?? config?.endpoint?.baseUrl ?? null,
     fastModel: config?.endpoint?.fastModel ?? null,
     smartModel: config?.endpoint?.smartModel ?? null,
     motorModel: config?.endpoint?.motorModel ?? null,
   };
 
-  // Create the endpoint provider if an endpoint is configured - a base URL is
-  // the whole of it. A role it names no model for asks for `default`
-  // (ADR-013 D2): the platform's gateway answers it with the configured slot's
-  // own model, so an instance whose settings leave the models unset still
-  // reaches the owner's model.
+  // Only a platform pin lets the gateway supply blank role models.
   if (endpoint.baseUrl) {
     const provider = createVercelAIProvider(
       {
         baseUrl: endpoint.baseUrl,
+        useGatewayDefault: pinned !== null,
         ...(endpoint.fastModel && { fastModel: endpoint.fastModel }),
         ...(endpoint.smartModel && { smartModel: endpoint.smartModel }),
         ...(endpoint.motorModel && { motorModel: endpoint.motorModel }),

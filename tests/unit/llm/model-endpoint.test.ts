@@ -85,7 +85,8 @@ describe('createLLMProvider: the endpoint and the roles', () => {
     expect(mocks.createOpenAI.mock.calls.at(-1)?.[0]?.baseURL).toBe('http://127.0.0.1:1234/v1');
   });
 
-  it('asks for `default` on a role the endpoint names no model for', async () => {
+  it('asks the pinned gateway for `default` on a role the endpoint names no model for', async () => {
+    process.env['LIFEMODEL_MODEL_BASE_URL'] = COMPLETE.baseUrl;
     // A config file written by hand, naming only the fast model (ADR-013 D2:
     // the platform's gateway maps `default` to the configured slot's model).
     const provider = createLLMProvider(
@@ -99,14 +100,19 @@ describe('createLLMProvider: the endpoint and the roles', () => {
     expect(await modelFor(provider as LLMProvider, 'motor')).toBe(DEFAULT_ROLE_MODEL);
   });
 
-  it('is built from a base URL alone, every role asking for `default`', async () => {
-    const provider = createLLMProvider(
-      { endpoint: { baseUrl: 'http://127.0.0.1:1234/v1' } },
-      logger()
-    );
+  it('is built from a platform pin alone, every role asking for `default`', async () => {
+    process.env['LIFEMODEL_MODEL_BASE_URL'] = COMPLETE.baseUrl;
+    const provider = createLLMProvider({ endpoint: {} }, logger());
     expect(provider).not.toBeNull();
     expect(await modelFor(provider as LLMProvider, 'fast')).toBe(DEFAULT_ROLE_MODEL);
     expect(await modelFor(provider as LLMProvider, 'smart')).toBe(DEFAULT_ROLE_MODEL);
+  });
+
+  it('refuses an unpinned role with no named model', async () => {
+    const provider = createLLMProvider({ endpoint: { ...COMPLETE, smartModel: null } }, logger());
+    expect(provider).not.toBeNull();
+    await expect(modelFor(provider as LLMProvider, 'smart')).rejects.toThrow(/smart.*model/i);
+    expect(await modelFor(provider as LLMProvider, 'fast')).toBe('fast-small');
   });
 
   it('starts without a provider when nothing is configured (the first start)', () => {

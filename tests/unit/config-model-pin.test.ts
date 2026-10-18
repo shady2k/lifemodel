@@ -51,6 +51,16 @@ describe('the platform-pinned model endpoint', () => {
     ).toEqual({ baseUrl: 'http://x/v1', fastModel: null, smartModel: null, motorModel: null });
   });
 
+  it('requires all role names only when unpinned', () => {
+    const input = { endpointBaseUrl: GATEWAY, fastModel: '', smartModel: '', motorModel: '' };
+    expect(Object.keys(validateSettings(input)).sort()).toEqual([
+      'fastModel',
+      'motorModel',
+      'smartModel',
+    ]);
+    expect(validateSettings(input, { pinnedBaseUrl: GATEWAY })).toEqual({});
+  });
+
   it('overrides the endpoint the settings document holds', async () => {
     process.env[PINNED_MODEL_BASE_URL_ENV] = GATEWAY;
     const config = await loaderFor(document('http://owner.example:1234/v1')).load();
