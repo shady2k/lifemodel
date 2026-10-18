@@ -235,11 +235,16 @@ describe('the model status in the event stream (ADR-013 D6)', () => {
     expect(calls.length).toBe(0);
     try {
       streams.push(await openStream(server), await openStream(server), await openStream(server));
+      // The first fetch starts the one shared poll; measure what three clients
+      // cost over three periods: one poll each, never one per client.
       const deadline = Date.now() + 2_000;
-      while (calls.length < 3 && Date.now() < deadline)
+      while (calls.length < 1 && Date.now() < deadline)
         await new Promise((resolve) => setTimeout(resolve, 20));
-      expect(calls.length).toBeGreaterThanOrEqual(3);
-      expect(calls.length).toBeLessThanOrEqual(4);
+      const baseline = calls.length;
+      await new Promise((resolve) => setTimeout(resolve, 950));
+      const observed = calls.length - baseline;
+      expect(observed).toBeGreaterThanOrEqual(2);
+      expect(observed).toBeLessThanOrEqual(4);
     } finally {
       await Promise.all(streams.map((stream) => stream.close()));
     }
