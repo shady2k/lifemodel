@@ -15,6 +15,9 @@ export const UNSAFE_MODEL_ERROR_CODE = 'unknown_error';
 /** An ISO 8601 instant with its offset, the only timestamp shape accepted. */
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 
+/** The most a status body may be; a larger answer is not a status. */
+const MAX_STATUS_BODY_BYTES = 4 * 1024;
+
 export interface LoaderModelStatus {
   state: 'unknown' | 'ok' | 'down';
   outageSince: string | null;
@@ -92,8 +95,10 @@ export function createModelStatusReader(options: ModelStatusReaderOptions): Mode
         resolve('expired');
       }, timeoutMs);
     });
+    let response: Response | null = null;
+    let reading = false;
     try {
-      const response = await Promise.race([
+      const answer = await Promise.race([
         fetchStatus(options.url, {
           signal: controller.signal,
           headers: { accept: 'application/json' },
@@ -101,8 +106,15 @@ export function createModelStatusReader(options: ModelStatusReaderOptions): Mode
         }).catch(() => null),
         expired,
       ]);
-      if (response === 'expired' || response?.ok !== true) return null;
-      const body = await Promise.race([response.text().catch(() => null), expired]);
+      if (answer === 'expired' || answer === null) return null;
+      response = answer;
+      // Exactly one answer is a status body; another 2xx is not one.
+      if (response.status !== 200) return null;
+      reading = true;
+      const body = await Promise.race([
+        readBoundedBody(response, MAX_STATUS_BODY_BYTES, controller.signal),
+        expired,
+      ]);
       if (body === 'expired' || body === null) return null;
       try {
         return parseLoaderModelStatus(JSON.parse(body));
@@ -113,6 +125,12 @@ export function createModelStatusReader(options: ModelStatusReaderOptions): Mode
       return null;
     } finally {
       if (timer !== undefined) clearTimeout(timer);
+      // The body reader owns the cancel once it holds the stream; every other
+      // path aborts the request and cancels what it did not consume.
+      if (response !== null && !reading) {
+        controller.abort();
+        await response.body?.cancel().catch(() => undefined);
+      }
     }
   }
 
@@ -131,4 +149,43 @@ export function createModelStatusReader(options: ModelStatusReaderOptions): Mode
       return inFlight;
     },
   };
+}
+
+/**
+ * The status body up to `limit` bytes; `null` when it overflows or cannot be
+ * read. The reader is cancelled on every path that does not consume it,
+ * including an abort while a read is pending.
+ */
+async function readBoundedBody(
+  response: Response,
+  limit: number,
+  signal: AbortSignal
+): Promise<string | null> {
+  const body = response.body;
+  if (body === null) return null;
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  const cancel = (): void => {
+    void reader.cancel().catch(() => undefined);
+  };
+  signal.addEventListener('abort', cancel, { once: true });
+  let size = 0;
+  let text = '';
+  let ended = false;
+  try {
+    for (;;) {
+      const part = await reader.read();
+      if (part.done) {
+        ended = true;
+        break;
+      }
+      size += part.value.byteLength;
+      if (size > limit) return null;
+      text += decoder.decode(part.value, { stream: true });
+    }
+    return text + decoder.decode();
+  } finally {
+    signal.removeEventListener('abort', cancel);
+    if (!ended) await reader.cancel().catch(() => undefined);
+  }
 }

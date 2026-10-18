@@ -5,6 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createLoaderHttp, type LoaderHttp } from '../../loader/src/http.js';
 import { createModelStatusReader } from '../../loader/src/model-status.js';
+import {
+  abortTrackingFetch,
+  neverEndingResponse,
+  overlongResponse,
+  stallingResponse,
+} from '../helpers/model-status-fetch.js';
 import { createSession, hashPassword } from '../../loader/src/auth.js';
 import { createTestClock } from '../../loader/src/clock.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
@@ -153,6 +159,64 @@ describe('the loader reads the gateway status for its settings', () => {
     expect(await hanging.read()).toBeNull();
   });
 
+  it('cancels the response body it rejects, so no connection stays open', async () => {
+    const body = neverEndingResponse(503);
+    const tracking = abortTrackingFetch(async () => body.response);
+    const reader = createModelStatusReader({
+      url: GATEWAY_STATUS_URL,
+      timeoutMs: 60,
+      fetch: tracking.fetch,
+    });
+    expect(await reader.read()).toBeNull();
+    await until(() => body.cancelled() || tracking.aborted());
+  });
+
+  it.each([201, 202, 206])('reads a %s answer as unavailable, never an outage', async (status) => {
+    const reader = createModelStatusReader({
+      url: GATEWAY_STATUS_URL,
+      fetch: vi.fn(async () =>
+        new Response(JSON.stringify({ state: 'down', outageSince: '2026-10-16T11:03:00.000Z', lastErrorCode: 'timeout' }), {
+          status,
+        })
+      ) as unknown as typeof fetch,
+    });
+    expect(await reader.read()).toBeNull();
+  });
+
+  it('reads an empty 204 answer as unavailable', async () => {
+    const reader = createModelStatusReader({
+      url: GATEWAY_STATUS_URL,
+      fetch: vi.fn(async () => new Response(null, { status: 204 })) as unknown as typeof fetch,
+    });
+    expect(await reader.read()).toBeNull();
+  });
+
+  it('refuses a body past its byte bound and cancels it', async () => {
+    const body = overlongResponse(200, 1_024, 16);
+    const tracking = abortTrackingFetch(async () => body.response);
+    const reader = createModelStatusReader({
+      url: GATEWAY_STATUS_URL,
+      timeoutMs: 500,
+      fetch: tracking.fetch,
+    });
+    expect(await reader.read()).toBeNull();
+    await until(() => body.cancelled() || tracking.aborted());
+  });
+
+  it('gives up on a body that stalls after its first part, within the bound', async () => {
+    const body = stallingResponse(200, '{"state":"do');
+    const tracking = abortTrackingFetch(async () => body.response);
+    const reader = createModelStatusReader({
+      url: GATEWAY_STATUS_URL,
+      timeoutMs: 40,
+      fetch: tracking.fetch,
+    });
+    const startedAt = Date.now();
+    expect(await reader.read()).toBeNull();
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(body.cancelled() || tracking.aborted()).toBe(true);
+  });
+
   it('asks the gateway once per cache window however many callers wait', async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ state: 'ok' }));
     let now = 1_000;
@@ -222,6 +286,21 @@ describe('the loader reads the gateway status for its settings', () => {
     });
     expect(second.status).toBe(200);
     expect(second.body).toBe('null');
+  });
+
+  it('answers null for a down status that carries no usable outage start', async () => {
+    for (const outageSince of [null, 'yesterday', 'https://endpoint.example/v1?key=sk-secret']) {
+      const { base, cookie } = await startLoader({
+        read: async () => ({ state: 'down', outageSince, lastErrorCode: 'timeout' }),
+      });
+      const status = await get(base, '/api/model-status', {
+        host: BOOT_HOST,
+        cookie,
+        'sec-fetch-site': 'same-origin',
+      });
+      expect(status.status, String(outageSince)).toBe(200);
+      expect(status.body, String(outageSince)).toBe('null');
+    }
   });
 
   it('leaves the status route unreachable from the chat host and unknown paths', async () => {
