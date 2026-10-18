@@ -179,9 +179,12 @@ async function readBoundedBody(
         ended = true;
         break;
       }
-      size += part.value.byteLength;
+      // The loader's library types the body reader loosely; these are the
+      // response's own bytes.
+      const chunk = part.value as Uint8Array;
+      size += chunk.byteLength;
       if (size > limit) return null;
-      text += decoder.decode(part.value, { stream: true });
+      text += decoder.decode(chunk, { stream: true });
     }
     return text + decoder.decode();
   } finally {
