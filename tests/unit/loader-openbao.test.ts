@@ -117,6 +117,8 @@ function gatewayBoundary(
     failRevokeOnce?: boolean;
     crashAt?: string;
     loaderPrimaryDelete?: boolean;
+    /** Raw HTTP body for the Kubernetes role read-back (malformed shapes). */
+    roleReadBack?: string;
   } = {}
 ) {
   const revoked: string[] = [];
@@ -142,12 +144,14 @@ function gatewayBoundary(
           body: JSON.stringify({ auth: { client_token: 'loader', lease_duration: 3600 } }),
         };
       if (path.endsWith('/auth/kubernetes/role/model-gateway') && method === 'GET')
-        return data({
-          bound_service_account_names: ['model-gateway'],
-          bound_service_account_namespaces: ['lifemodel-system'],
-          policies: ['model-gateway'],
-          token_no_default_policy: true,
-        });
+        return options.roleReadBack === undefined
+          ? data({
+              bound_service_account_names: ['model-gateway'],
+              bound_service_account_namespaces: ['lifemodel-system'],
+              policies: ['model-gateway'],
+              token_no_default_policy: true,
+            })
+          : { status: 200, body: options.roleReadBack };
       if (path.endsWith('/auth/token/create')) {
         mints++;
         expect(token).toBe('root');
@@ -290,6 +294,63 @@ describe('OpenBao bootstrap', () => {
       // A lost create response cannot be revoked by its unknown token. The
       // parented, nonrenewable 60s lease bounds this explicit residual.
       expect(f.revoked).toEqual(cut === 'mint' ? ['check-2'] : ['check-1', 'check-2']);
+    }
+  );
+
+  // A flattened role response is the exact mutation `response['data'] ?? response`
+  // would accept: the gateway fields sit at the top level with no data envelope.
+  // The read-back must be judged strictly, before any verification token exists.
+  const malformedRoleReadBacks: [string, string][] = [
+    [
+      'the gateway fields at the top level with no data envelope',
+      JSON.stringify({
+        bound_service_account_names: ['model-gateway'],
+        bound_service_account_namespaces: ['lifemodel-system'],
+        policies: ['model-gateway'],
+        token_no_default_policy: true,
+      }),
+    ],
+    [
+      'a null data field beside the gateway fields',
+      JSON.stringify({
+        bound_service_account_names: ['model-gateway'],
+        bound_service_account_namespaces: ['lifemodel-system'],
+        policies: ['model-gateway'],
+        token_no_default_policy: true,
+        data: null,
+      }),
+    ],
+    ['an array data field', JSON.stringify({ data: [] })],
+    ['a string data field', JSON.stringify({ data: 'model-gateway' })],
+  ];
+
+  it.each(malformedRoleReadBacks)(
+    'refuses a role read-back with %s before minting any check token or retiring root',
+    async (_description, roleReadBack) => {
+      const f = gatewayBoundary({ roleReadBack });
+      await expect(f.api.ensureModelPolicy('root')).rejects.toThrow(
+        /role response has no data object/
+      );
+      expect(f.mints).toBe(0);
+      expect(f.rootRetired).toBe(false);
+
+      // The same rejection must stop the bootstrap phase: a malformed read-back
+      // can never be followed by a minted check token or a retired root token.
+      const bootstrap = createOpenBaoBootstrap({
+        bao: f.api,
+        custody: {
+          read: async () => ({ keys: ['key'], rootToken: 'root' }),
+          write: async () => {
+            throw new Error('a rejected role read-back must not retire root');
+          },
+        },
+        runPhases: async (phases) => {
+          for (const phase of phases) await phase.run();
+        },
+      });
+      await expect(bootstrap.runInitial()).rejects.toThrow(/role response has no data object/);
+      expect(f.mints).toBe(0);
+      expect(f.rootRetired).toBe(false);
     }
   );
 
