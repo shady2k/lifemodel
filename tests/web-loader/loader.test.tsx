@@ -201,6 +201,7 @@ describe('loader UI', () => {
                     baseUrl: 'https://primary.example',
                     model: 'primary',
                     keySet: true,
+                    key: 'SECRET-API-KEY',
                   },
                   reserve: {
                     kind: 'ollama',

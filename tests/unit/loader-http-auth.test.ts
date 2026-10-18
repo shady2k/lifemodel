@@ -730,30 +730,43 @@ describe('loader ForwardAuth and JSON authentication API', () => {
 });
 
 describe('loader password change', () => {
-  it('rejects a login with the old password queued behind a committed password rotation', async () => {
+  it('rejects an old-password login racing a committed password rotation', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'loader-auth-race-'));
+    roots.push(root);
+    const config = loadConfig({ LIFEMODEL_NAME: 'lifemodel', LIFEMODEL_VOLUME_ROOT: root });
+    const logger = createRecordingLogger([]);
+    const realState = createLoaderState({ fs: createNodeFileSystem(), config, logger });
+    await realState.ensureLayout();
     const oldRecord = await hashPassword('owner password');
-    let auth = structuredClone(oldRecord);
+    await realState.writeAuth(oldRecord);
+
     let enteredReplace!: () => void;
     let releaseReplace!: () => void;
+    let reportRead!: () => void;
     const replacing = new Promise<void>((resolve) => {
       enteredReplace = resolve;
     });
     const paused = new Promise<void>((resolve) => {
       releaseReplace = resolve;
     });
+    const loginRead = new Promise<void>((resolve) => {
+      reportRead = resolve;
+    });
+    let firstReplace = true;
     const state: LoaderState = {
-      ensureLayout: async () => {},
-      readAuth: async () => structuredClone(auth),
-      writeAuth: async (record) => {
-        auth = structuredClone(record);
+      ...realState,
+      readAuth: async () => {
+        reportRead();
+        return realState.readAuth();
       },
       replaceAuth: async (record) => {
-        enteredReplace();
-        await paused;
-        auth = structuredClone(record);
+        if (firstReplace) {
+          firstReplace = false;
+          enteredReplace();
+          await paused;
+        }
+        await realState.replaceAuth(record);
       },
-      readOnboarding: async () => ({ version: 1, step: 'done', completedAt: 'now' }),
-      reconcilePasswordOnboarding: async () => {},
     };
     const { base, clock } = await start(oldRecord, undefined, undefined, undefined, state);
     const headers = {
@@ -781,12 +794,24 @@ describe('loader password change', () => {
       'POST',
       JSON.stringify({ password: 'owner password' })
     );
+    await Promise.race([loginRead, new Promise<void>((resolve) => setTimeout(resolve, 300))]);
     releaseReplace();
     const [rotation, login] = await Promise.all([rotationPromise, loginPromise]);
     expect(rotation.status).toBe(200);
     expect(login.status).toBe(401);
     expect(login.headers['set-cookie']).toBeUndefined();
-    expect((await request(base, '/_auth/verify', { cookie: '' })).status).toBe(401);
+
+    const accepted = await request(
+      base,
+      '/api/login',
+      headers,
+      'POST',
+      JSON.stringify({ password: 'brand new secure password' })
+    );
+    expect(accepted.status).toBe(200);
+    const cookie = String(accepted.headers['set-cookie']).split(';')[0]!;
+    expect(cookie).toBeTruthy();
+    expect((await request(base, '/_auth/verify', { cookie })).status).toBe(200);
   });
 
   it('refuses a wrong current password and atomically rotates sessions on success', async () => {
