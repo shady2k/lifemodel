@@ -201,6 +201,24 @@ describe('the model status in the event stream (ADR-013 D6)', () => {
     }
   });
 
+  it('shows unavailable when the status never answers within its bound', async () => {
+    const poller = new ModelStatusPoller({
+      url: GATEWAY_STATUS_URL,
+      pollMs: 50,
+      timeoutMs: 100,
+      fetch: vi.fn(() => new Promise<Response>(() => undefined)),
+    });
+    const server = createServer({ modelStatus: poller });
+    const stream = await openStream(server);
+    try {
+      const frames = await stream.waitFor('model', 1, 2_000);
+      expect(statusData(frames[0]!)).toBeNull();
+      expect(stream.text()).not.toContain('outageSince');
+    } finally {
+      await stream.close();
+    }
+  });
+
   it('polls once per period however many clients watch, and only while one does', async () => {
     const calls: number[] = [];
     const poller = new ModelStatusPoller({

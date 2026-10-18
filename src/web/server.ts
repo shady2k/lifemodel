@@ -543,7 +543,7 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     }
   });
 
-  server.addHook('onClose', async () => {
+  server.addHook('onClose', () => {
     // Safety net: no stream may leave the shared poll running after the module stops.
     options.modelStatus.stop();
   });

@@ -73,7 +73,7 @@ export function createModelStatusReader(options: ModelStatusReaderOptions): Mode
         }).catch(() => null),
         expired,
       ]);
-      if (response === 'expired' || response === null || !response.ok) return null;
+      if (response === 'expired' || response?.ok !== true) return null;
       const body = await Promise.race([response.text().catch(() => null), expired]);
       if (body === 'expired' || body === null) return null;
       try {
