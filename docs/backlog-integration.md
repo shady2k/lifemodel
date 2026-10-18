@@ -295,9 +295,11 @@ the repository's installation, and each person's plugin and hooks are their own.
   Generated files and `package-lock.json` count as collisions. The stage's
   coordinator merges and records `implemented`.
 - **Starting a worker:** `prime-agent --provider shady2k-gateway --model
-  gpt-6-luna` in the worker's herdr pane (a worker that is not coping is
-  restarted on `gpt-6.1-sol`; `deepseek-v4.1-flash-auto` is on trial since
-  2026-10-18), then check the pane footer before dispatching. Always name
+  deepseek-v4.1-flash-auto` in the worker's herdr pane (the default since
+  2026-10-18, owner; the most security-critical code, and a worker that is
+  not coping, go to `gpt-6.1-sol`; deepseek gives a second review opinion on
+  security-heavy work, never on its own), then check the pane footer before
+  dispatching. Always name
   `--provider shady2k-gateway`: a bare `--model` may resolve to a provider
   with no key here, and the worker never starts. A brief says
   that the owner's rules in `AGENTS.md` are not reworded to fit the code: a

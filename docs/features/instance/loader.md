@@ -37,6 +37,23 @@ Each phase is persisted in the platform-created `loader-bootstrap-state`
 Secret. On restart, the loader resumes from the recorded phase. Failures remain
 visible and retry with backoff while the interface stays available.
 
+## Interface
+
+The loader serves its own kit app on the boot host (`boot-<name>.local`),
+accepted by the owner on 2026-10-19 (lifemodel-3wi9, ADR-012):
+
+- **First start, a wizard:** welcome, password (whoever opens it first sets
+  it), model access (an OpenAI-compatible or Ollama endpoint checked safely and
+  saved to OpenBao in the same request), and "this device" (the chat address,
+  the CA certificate's SHA-256 fingerprint and its download), then the chat.
+- **Afterwards, settings:** the primary and the optional reserve model, the
+  model's connection line from the gateway's `/status` (ADR-013 D6), password
+  change, the CA certificate and logout.
+
+The design pass on the wizard and settings (focus, the device step fitting the
+screen, step progress and Back, header actions, sections) waits in
+lifemodel-bnhq, deferred by the owner.
+
 ## Authentication
 
 The loader stores its password digest and session secret in its platform-owned
