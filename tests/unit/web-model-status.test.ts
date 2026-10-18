@@ -349,7 +349,8 @@ describe('the bounded status poll', () => {
     poller.start();
     await until(() => poller.settled());
     expect(poller.read()).toBeNull();
-    await until(() => body.cancelled() || tracking.aborted(), 500);
+    await until(() => body.cancelled(), 500);
+    expect(tracking.aborted()).toBe(true);
     poller.stop();
   });
 
@@ -391,7 +392,7 @@ describe('the bounded status poll', () => {
     poller.start();
     await until(() => poller.settled(), 1_000);
     expect(poller.read()).toBeNull();
-    await until(() => body.cancelled() || tracking.aborted(), 500);
+    await until(() => body.cancelled(), 500);
     poller.stop();
   });
 
@@ -409,7 +410,8 @@ describe('the bounded status poll', () => {
     await until(() => poller.settled(), 1_000);
     expect(Date.now() - startedAt).toBeLessThan(1_000);
     expect(poller.read()).toBeNull();
-    expect(body.cancelled() || tracking.aborted()).toBe(true);
+    expect(body.cancelled()).toBe(true);
+    expect(tracking.aborted()).toBe(true);
     poller.stop();
   });
 });

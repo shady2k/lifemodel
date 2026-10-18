@@ -168,7 +168,8 @@ describe('the loader reads the gateway status for its settings', () => {
       fetch: tracking.fetch,
     });
     expect(await reader.read()).toBeNull();
-    await until(() => body.cancelled() || tracking.aborted());
+    await until(() => body.cancelled());
+    expect(tracking.aborted()).toBe(true);
   });
 
   it.each([201, 202, 206])('reads a %s answer as unavailable, never an outage', async (status) => {
@@ -200,7 +201,7 @@ describe('the loader reads the gateway status for its settings', () => {
       fetch: tracking.fetch,
     });
     expect(await reader.read()).toBeNull();
-    await until(() => body.cancelled() || tracking.aborted());
+    await until(() => body.cancelled());
   });
 
   it('gives up on a body that stalls after its first part, within the bound', async () => {
@@ -214,7 +215,8 @@ describe('the loader reads the gateway status for its settings', () => {
     const startedAt = Date.now();
     expect(await reader.read()).toBeNull();
     expect(Date.now() - startedAt).toBeLessThan(1_000);
-    expect(body.cancelled() || tracking.aborted()).toBe(true);
+    expect(body.cancelled()).toBe(true);
+    expect(tracking.aborted()).toBe(true);
   });
 
   it('asks the gateway once per cache window however many callers wait', async () => {
