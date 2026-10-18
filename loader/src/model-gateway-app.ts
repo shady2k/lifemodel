@@ -80,32 +80,61 @@ function wait<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 async function readBody(req: IncomingMessage, signal: AbortSignal): Promise<string> {
-  return wait(
-    (async () => {
-      const chunks: Buffer[] = [];
-      let size = 0;
-      for await (const value of req) {
-        const chunk = Buffer.isBuffer(value) ? value : Buffer.from(String(value));
-        size += chunk.length;
-        if (size > MAX_BODY) throw new GatewayError('request_too_large', 413);
-        chunks.push(chunk);
+  signal.throwIfAborted();
+  return new Promise<string>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    function cleanup(): void {
+      req.pause();
+      req.removeListener('data', data);
+      req.removeListener('end', end);
+      req.removeListener('error', error);
+      signal.removeEventListener('abort', abort);
+    }
+    function error(): void {
+      cleanup();
+      reject(new GatewayError('invalid_request', 400));
+    }
+    function abort(): void {
+      cleanup();
+      reject(new GatewayError('timeout'));
+    }
+    function data(chunk: Buffer): void {
+      size += chunk.length;
+      if (size > MAX_BODY) {
+        cleanup();
+        reject(new GatewayError('request_too_large', 413));
+        return;
       }
-      return Buffer.concat(chunks).toString('utf8');
-    })(),
-    signal
-  );
+      chunks.push(chunk);
+    }
+    function end(): void {
+      cleanup();
+      try {
+        resolve(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
+      } catch {
+        reject(new GatewayError('invalid_request', 400));
+      }
+    }
+    req.on('data', data);
+    req.once('end', end);
+    req.once('error', error);
+    signal.addEventListener('abort', abort, { once: true });
+  });
 }
 function returnHeaders(
   upstream: IncomingMessage,
   slot: ModelSlotName,
-  stream: boolean
+  stream: boolean,
+  key?: string
 ): Record<string, string> {
   const headers: Record<string, string> = {
     'content-type': stream ? 'text/event-stream' : 'application/json',
     'x-lifemodel-slot': slot,
   };
   const retry = upstream.headers['retry-after'];
-  if (typeof retry === 'string' && /^\d{1,6}$/.test(retry)) headers['retry-after'] = retry;
+  if (typeof retry === 'string' && /^\d{1,6}$/.test(retry) && (!key || !retry.includes(key)))
+    headers['retry-after'] = retry;
   return headers;
 }
 export function createModelGateway(options: GatewayOptions) {
@@ -133,8 +162,10 @@ export function createModelGateway(options: GatewayOptions) {
     res: ServerResponse,
     signal: AbortSignal
   ): Promise<void> {
+    const startedAt = Date.now();
+    const connectDeadline = startedAt + limits.connect;
     const resolved = await wait(
-      resolveModelDestination(slot.baseUrl, Date.now() + limits.connect, options.resolveHost),
+      resolveModelDestination(slot.baseUrl, connectDeadline, options.resolveHost),
       signal
     ).catch((error: unknown) => {
       if (signal.aborted) throw signal.reason;
@@ -143,6 +174,7 @@ export function createModelGateway(options: GatewayOptions) {
       throw new GatewayError('blocked_destination');
     });
     signal.throwIfAborted();
+    if (Date.now() >= connectDeadline) throw new GatewayError('timeout');
     const url = modelEndpointUrl(slot.baseUrl, payload ? 'chat/completions' : 'models');
     const body = payload
       ? JSON.stringify({
@@ -181,8 +213,8 @@ export function createModelGateway(options: GatewayOptions) {
     req.on('error', () => {
       /* Consumed by the response wait or the response iterator. */
     });
-    const connectTimer = setTimeout(timeout, limits.connect);
-    const byteTimer = setTimeout(timeout, limits.firstByte);
+    const connectTimer = setTimeout(timeout, Math.max(1, connectDeadline - Date.now()));
+    const byteTimer = setTimeout(timeout, Math.max(1, startedAt + limits.firstByte - Date.now()));
     req.on('socket', (socket) =>
       socket.once(url.protocol === 'https:' ? 'secureConnect' : 'connect', () => {
         clearTimeout(connectTimer);
@@ -223,18 +255,29 @@ export function createModelGateway(options: GatewayOptions) {
           chunks.push(chunk);
         }
         active.throwIfAborted();
-        const value = parseSafe(Buffer.concat(chunks).toString('utf8'), slot.key);
+        const value = parseSafe(
+          new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)),
+          slot.key
+        );
         validateResponse(value, payload === undefined);
-        res.writeHead(200, returnHeaders(upstream, name, false));
+        res.writeHead(200, returnHeaders(upstream, name, false, slot.key));
         res.end(JSON.stringify(value));
       } else {
         const inspector = new SafeEventStream(slot.key);
         const decoder = new TextDecoder('utf-8', { fatal: true });
         let pending = '';
+        let previousCR = false;
         for await (const value of upstream) {
           active.throwIfAborted();
-          pending += decoder.decode(value as Uint8Array, { stream: true });
-          pending = pending.replaceAll('\r\n', '\n');
+          const decoded = decoder.decode(value as Uint8Array, { stream: true });
+          for (const character of decoded) {
+            if (character === '\n' && previousCR) {
+              previousCR = false;
+              continue;
+            }
+            pending += character === '\r' ? '\n' : character;
+            previousCR = character === '\r';
+          }
           if (Buffer.byteLength(pending) > MAX_BODY) throw new GatewayError('bad_response');
           let end: number;
           while ((end = pending.indexOf('\n\n')) !== -1) {
@@ -242,7 +285,8 @@ export function createModelGateway(options: GatewayOptions) {
             pending = pending.slice(end + 2);
             const output = inspector.frame(frame);
             if (output) {
-              if (!res.headersSent) res.writeHead(200, returnHeaders(upstream, name, true));
+              if (!res.headersSent)
+                res.writeHead(200, returnHeaders(upstream, name, true, slot.key));
               if (!res.write(output)) await once(res, 'drain', { signal: active });
             }
           }
@@ -337,6 +381,12 @@ export function createModelGateway(options: GatewayOptions) {
       health.outageSince ??= new Date().toISOString();
       health.lastErrorCode = failure.code;
       options.logger.warn({ code: failure.code, slot: activeSlot }, 'Model gateway request failed');
+      if (!req.complete) {
+        res.setHeader('connection', 'close');
+        res.once('finish', () => {
+          req.destroy();
+        });
+      }
       ownedError(res, failure, activeSlot);
     } finally {
       clearTimeout(timer);

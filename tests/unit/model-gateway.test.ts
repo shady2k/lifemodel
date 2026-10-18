@@ -620,3 +620,163 @@ describe('model gateway deadlines and bounds', () => {
     expect(f.attempts).toHaveLength(0);
   });
 });
+
+describe('model gateway adversarial stream paths', () => {
+  it('cannot reset a tool argument key prefix through an aliased arbitrary field', async () => {
+    const f = await fixture();
+    f.slots.primary!.key = 'sk-secret';
+    f.slots.reserve = null;
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(
+        event('sk-', 'arguments') +
+          event('X', 'tool_calls:0:function:arguments') +
+          event('secret', 'arguments') +
+          'data: [DONE]\n\n'
+      );
+    };
+    const response = await f.post(streamPayload);
+    const text = await response.text();
+    const args = text
+      .split('\n')
+      .filter((line) => line.startsWith('data: {'))
+      .map((line) => JSON.parse(line.slice(6)))
+      .flatMap((frame) => frame.choices ?? [])
+      .flatMap((choice) => choice.delta?.tool_calls ?? [])
+      .map((call) => call.function?.arguments ?? '')
+      .join('');
+    expect(args).not.toContain('sk-secret');
+    expect(text).not.toContain('[DONE]');
+  });
+});
+
+describe('model gateway configuration and storage boundaries', () => {
+  it.each(['/v1', '/v1/', '/prefix/v1'])(
+    'joins the complete API base %s for both endpoints',
+    async (prefix) => {
+      const f = await fixture();
+      const target = new URL(f.slots.primary!.baseUrl);
+      target.pathname = prefix;
+      f.slots.primary!.baseUrl = target.toString();
+      expect((await f.post()).status).toBe(200);
+      f.handlers.primary = (_req, res) => res.end('{"data":[]}');
+      expect((await fetch(`${f.url}/v1/models`)).status).toBe(200);
+      expect(f.attempts.map((a) => a.path)).toEqual([
+        `${prefix.replace(/\/$/, '')}/chat/completions`,
+        `${prefix.replace(/\/$/, '')}/models`,
+      ]);
+    }
+  );
+  it('validates the slot destination before sending credentials', async () => {
+    const f = await fixture();
+    f.slots.primary!.baseUrl = 'http://127.0.0.1:1/v1';
+    f.slots.reserve = null;
+    const response = await f.post();
+    expect(response.status).toBe(502);
+    expect(await response.text()).toContain('blocked_destination');
+    expect(f.attempts).toHaveLength(0);
+  });
+  it.each(['echo', 'escaped'])('guards model listings against an %s key', async (encoding) => {
+    const f = await fixture();
+    f.slots.reserve = null;
+    f.handlers.primary = (_req, res) => {
+      let text = JSON.stringify({ data: [{ id: 'real', owned_by: 'primary-SUPER-SECRET' }] });
+      if (encoding === 'escaped') text = text.replaceAll('S', '\\u0053');
+      res.end(text);
+    };
+    const response = await fetch(`${f.url}/v1/models`);
+    expect(response.status).toBe(502);
+    expect(await response.text()).not.toContain('SECRET');
+  });
+});
+
+describe('model gateway protocol validation', () => {
+  it.each([
+    { model: 'm', choices: [{ message: { content: null, tool_calls: [123] } }] },
+    { model: 'm', choices: [{ message: { content: 'OK', tool_calls: [123] } }] },
+    { model: 'm', choices: [{ message: { content: null } }] },
+  ])('fails over on malformed completion message %j', async (reply) => {
+    const f = await fixture();
+    f.handlers.primary = (_req, res) => res.end(JSON.stringify(reply));
+    const response = await f.post();
+    expect(response.headers.get('x-lifemodel-slot')).toBe('reserve');
+    expect(f.attempts).toHaveLength(2);
+  });
+  it.each([
+    'data: [DONE]\n\n',
+    'data: {"choices":[]}\n\ndata: [DONE]\n\n',
+    'data: {"choices":[{"index":0,"delta":{"nonsense":true}}]}\n\ndata: [DONE]\n\n',
+  ])('fails over on an invalid initial SSE completion %s', async (text) => {
+    const f = await fixture();
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(text);
+    };
+    f.handlers.reserve = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(event('reserve') + 'data: [DONE]\n\n');
+    };
+    const response = await f.post(streamPayload);
+    expect(response.headers.get('x-lifemodel-slot')).toBe('reserve');
+    expect(await response.text()).toContain('reserve');
+  });
+  it('refuses malformed UTF-8 instead of replacing it in success JSON', async () => {
+    const f = await fixture();
+    f.handlers.primary = (_req, res) => {
+      const [before, after] = JSON.stringify(answer()).split('OK');
+      res.end(Buffer.concat([Buffer.from(before!), Buffer.from([0xff]), Buffer.from(after!)]));
+    };
+    const response = await f.post();
+    expect(response.headers.get('x-lifemodel-slot')).toBe('reserve');
+  });
+});
+
+describe('model gateway strict streaming transport', () => {
+  it('does not withhold static role metadata that happens to end in a key prefix', async () => {
+    const f = await fixture({ firstByte: 100, idle: 100 });
+    const finish = latch();
+    f.slots.primary!.key = 't-secret';
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const role = {
+        model: 'm',
+        choices: [{ index: 0, delta: { role: 'assistant', content: '' } }],
+      };
+      res.write(`data: ${JSON.stringify(role)}\n\n` + event('hello'));
+      void finish.promise.then(() => res.end('data: [DONE]\n\n'));
+    };
+    const response = await f.post(streamPayload);
+    const reader = response.body!.getReader();
+    const first = new TextDecoder().decode((await reader.read()).value);
+    expect(first).toContain('hello');
+    expect(first).not.toContain('timeout');
+    finish.resolve();
+    await reader.cancel();
+  });
+  it('accepts CR-only SSE frames and split CRLF sequences', async () => {
+    const f = await fixture();
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const frame = event('hello').replaceAll('\n', '\r');
+      res.write(frame);
+      res.end('data: [DONE]\r\r');
+    };
+    const response = await f.post(streamPayload);
+    expect(await response.text()).toContain('[DONE]');
+    expect(f.attempts).toHaveLength(1);
+  });
+  it('accepts a final usage-only event after a valid completion', async () => {
+    const f = await fixture();
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(
+        event('hello') +
+          'data: {"model":"m","choices":[],"usage":{"total_tokens":2}}\n\ndata: [DONE]\n\n'
+      );
+    };
+    const response = await f.post(streamPayload);
+    const text = await response.text();
+    expect(text).toContain('total_tokens');
+    expect(text).toContain('[DONE]');
+  });
+});

@@ -4,7 +4,7 @@ import { createModelGateway } from './model-gateway-app.js';
 import { createStdoutLogger } from './logger.js';
 
 const logger = createStdoutLogger((line) => process.stdout.write(`${line}\n`));
-const address = process.env['BAO_ADDR'];
+const address = process.env['LIFEMODEL_OPENBAO_ADDRESS'];
 if (!address) {
   logger.error({ code: 'missing_bao_address' }, 'Model gateway cannot start');
   process.exit(1);

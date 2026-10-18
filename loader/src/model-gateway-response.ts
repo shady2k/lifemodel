@@ -37,6 +37,44 @@ export function parseSafe(text: string, key?: string): unknown {
     throw new GatewayError('bad_response');
   }
 }
+function toolCall(value: unknown, partial: boolean): boolean {
+  const call = record(value);
+  if (!call) return false;
+  const fn = record(call['function']);
+  if (!partial)
+    return (
+      typeof call['id'] === 'string' &&
+      call['type'] === 'function' &&
+      fn !== undefined &&
+      typeof fn['name'] === 'string' &&
+      typeof fn['arguments'] === 'string'
+    );
+  return (
+    Number.isSafeInteger(call['index']) &&
+    Number(call['index']) >= 0 &&
+    Object.keys(call).every((key) => ['index', 'id', 'type', 'function'].includes(key)) &&
+    (call['id'] === undefined || typeof call['id'] === 'string') &&
+    (call['type'] === undefined || call['type'] === 'function') &&
+    (call['function'] === undefined ||
+      (fn !== undefined &&
+        Object.keys(fn).every((key) => ['name', 'arguments'].includes(key)) &&
+        (fn['name'] === undefined || typeof fn['name'] === 'string') &&
+        (fn['arguments'] === undefined || typeof fn['arguments'] === 'string')))
+  );
+}
+const TEXT_FIELDS = ['content', 'reasoning', 'reasoning_content', 'refusal'];
+function validateDelta(delta: Record<string, unknown>): void {
+  for (const [field, value] of Object.entries(delta)) {
+    if (TEXT_FIELDS.includes(field)) {
+      if (value !== null && typeof value !== 'string') throw new GatewayError('bad_response');
+    } else if (field === 'role') {
+      if (value !== 'assistant') throw new GatewayError('bad_response');
+    } else if (field === 'tool_calls') {
+      if (!Array.isArray(value) || !value.every((call: unknown) => toolCall(call, true)))
+        throw new GatewayError('bad_response');
+    } else throw new GatewayError('bad_response');
+  }
+}
 export function validateResponse(value: unknown, models: boolean): void {
   const object = record(value);
   if (models) {
@@ -54,12 +92,16 @@ export function validateResponse(value: unknown, models: boolean): void {
     choices.length === 0 ||
     !choices.every((choice: unknown) => {
       const message = record(record(choice)?.['message']);
+      if (!message) return false;
+      const tools = message['tool_calls'];
+      if (
+        tools !== undefined &&
+        (!Array.isArray(tools) || !tools.every((call: unknown) => toolCall(call, false)))
+      )
+        return false;
       return (
-        message !== undefined &&
-        (typeof message['content'] === 'string' ||
-          (message['content'] === null &&
-            Array.isArray(message['tool_calls']) &&
-            message['tool_calls'].length > 0))
+        typeof message['content'] === 'string' ||
+        (message['content'] === null && Array.isArray(tools) && tools.length > 0)
       );
     })
   )
@@ -75,6 +117,7 @@ export class SafeEventStream {
   private queued: string[] = [];
   private queuedBytes = 0;
   private carry = '';
+  private seenCompletion = false;
   done = false;
   constructor(private readonly key?: string) {}
   frame(raw: string): string {
@@ -87,19 +130,44 @@ export class SafeEventStream {
     // Comments/heartbeats are not forwarded unparsed.
     if (!data) return '';
     if (data === '[DONE]') {
+      if (!this.seenCompletion) throw new GatewayError('bad_response');
       this.done = true;
       return this.flush() + 'data: [DONE]\n\n';
     }
     const value = parseSafe(data, this.key);
     const object = record(value);
-    if (!Array.isArray(object?.['choices'])) throw new GatewayError('bad_response');
+    if (typeof object?.['model'] !== 'string' || !Array.isArray(object['choices']))
+      throw new GatewayError('bad_response');
+    if (object['choices'].length === 0 && (!this.seenCompletion || !record(object['usage'])))
+      throw new GatewayError('bad_response');
     for (const choice of object['choices'] as unknown[]) {
       const item = record(choice);
-      if (!Number.isSafeInteger(item?.['index']) || Number(item?.['index']) < 0)
-        throw new GatewayError('bad_response');
+      const index = item?.['index'];
+      if (!Number.isSafeInteger(index) || Number(index) < 0) throw new GatewayError('bad_response');
       const delta = record(item?.['delta']);
       if (!delta) throw new GatewayError('bad_response');
-      this.inspect(delta, `choice:${String(item?.['index'])}`);
+      validateDelta(delta);
+      if (!this.seenCompletion && Object.keys(delta).length === 0)
+        throw new GatewayError('bad_response');
+      this.seenCompletion = true;
+      // Typed tuples cannot alias through attacker-controlled field names.
+      for (const field of TEXT_FIELDS) {
+        const text = delta[field];
+        if (typeof text === 'string') this.inspect(text, JSON.stringify([index, field]));
+      }
+      if (Array.isArray(delta['tool_calls']))
+        for (const value of delta['tool_calls'] as unknown[]) {
+          const call = record(value);
+          const fn = record(call?.['function']);
+          const id = call?.['id'];
+          if (typeof id === 'string')
+            this.inspect(id, JSON.stringify([index, 'tool_calls', call?.['index'], 'id']));
+          for (const field of ['name', 'arguments']) {
+            const text = fn?.[field];
+            if (typeof text === 'string')
+              this.inspect(text, JSON.stringify([index, 'tool_calls', call?.['index'], field]));
+          }
+        }
     }
     const frame = `data: ${JSON.stringify(value)}\n\n`;
     // Raw carry-over also covers text outside the reconstructed delta fields.
@@ -113,33 +181,14 @@ export class SafeEventStream {
     if (this.queuedBytes > MAX_BODY) throw new GatewayError('bad_response');
     return [...this.tails.values()].some((tail) => tail !== '') ? '' : this.flush();
   }
-  private inspect(value: unknown, path: string, depth = 0): void {
-    if (depth > 32) throw new GatewayError('bad_response');
-    if (typeof value === 'string') {
-      if (!this.key) return;
-      const joined = (this.tails.get(path) ?? '') + value;
-      if (joined.includes(this.key)) throw new GatewayError('unsafe_response');
-      let length = Math.min(joined.length, this.key.length - 1);
-      while (length > 0 && !joined.endsWith(this.key.slice(0, length))) length--;
-      this.tails.set(path, length ? joined.slice(-length) : '');
-      if (this.tails.size > 1024) throw new GatewayError('bad_response');
-    } else if (Array.isArray(value)) {
-      for (const [index, item] of value.entries()) {
-        const explicit = record(item)?.['index'];
-        if (explicit !== undefined && (!Number.isSafeInteger(explicit) || Number(explicit) < 0))
-          throw new GatewayError('bad_response');
-        this.inspect(
-          item,
-          `${path}:${String(typeof explicit === 'number' ? explicit : index)}`,
-          depth + 1
-        );
-      }
-    } else {
-      const object = record(value);
-      if (object)
-        for (const [name, item] of Object.entries(object))
-          this.inspect(item, `${path}:${name}`, depth + 1);
-    }
+  private inspect(value: string, path: string): void {
+    if (!this.key) return;
+    const joined = (this.tails.get(path) ?? '') + value;
+    if (joined.includes(this.key)) throw new GatewayError('unsafe_response');
+    let length = Math.min(joined.length, this.key.length - 1);
+    while (length > 0 && !joined.endsWith(this.key.slice(0, length))) length--;
+    this.tails.set(path, length ? joined.slice(-length) : '');
+    if (this.tails.size > 1024) throw new GatewayError('bad_response');
   }
   private flush(): string {
     const frames = this.queued.join('');
