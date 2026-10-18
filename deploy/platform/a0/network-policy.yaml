@@ -47,7 +47,7 @@ spec:
       ports:
         - protocol: TCP
           port: 6443
-    # OpenBao is the only permitted application service egress.
+    # OpenBao bootstrap and model-slot storage.
     - to:
         - namespaceSelector:
             matchLabels:
@@ -55,6 +55,18 @@ spec:
       ports:
         - protocol: TCP
           port: 8200
+
+    # The loader reads the platform gateway's status, not its model API.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: model-gateway
+      ports:
+        - protocol: TCP
+          port: 8081
 
     # Model checks may reach public endpoints and RFC1918 LAN Ollama; application validation blocks pod/service and metadata ranges.
     - to:

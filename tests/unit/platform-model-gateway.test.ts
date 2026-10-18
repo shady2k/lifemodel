@@ -7,10 +7,10 @@
  * sides of the network rules that make it the core's only model egress, and the
  * one pushed loader digest the release flow writes to A0 and step A alike.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
+import { join, dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -18,6 +18,29 @@ import { afterEach, describe, expect, it } from 'vitest';
 const platformRoot = fileURLToPath(new URL('../../deploy/platform/', import.meta.url));
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 const loaderImage = 'ghcr.io/shady2k/lifemodel-loader';
+
+/** Follow local Kustomize resources and Flux reconciler paths, not a source inventory. */
+function appliedResources(path: string, seen = new Set<string>()): Set<string> {
+  const file = statSync(path).isDirectory() ? join(path, 'kustomization.yaml') : path;
+  if (seen.has(file)) return seen;
+  seen.add(file);
+  for (const doc of documents(file)) {
+    if (!doc) continue;
+    if (doc.kind === 'Kustomization' && doc.apiVersion.startsWith('kustomize.config.')) {
+      for (const resource of doc.resources ?? [])
+        appliedResources(resolve(dirname(file), resource), seen);
+    } else if (
+      doc.kind === 'Kustomization' &&
+      doc.apiVersion.startsWith('kustomize.toolkit.') &&
+      doc.spec?.path &&
+      doc.spec.sourceRef?.kind === 'OCIRepository' &&
+      doc.spec.sourceRef?.name === 'platform'
+    ) {
+      appliedResources(resolve(platformRoot, doc.spec.path), seen);
+    }
+  }
+  return seen;
+}
 
 function documents(path: string): Record<string, any>[] {
   return YAML.parseAllDocuments(readFileSync(path, 'utf8')).map(
@@ -71,6 +94,44 @@ const modelException = {
 };
 
 describe('the platform model gateway', () => {
+  it('applies default deny and every checked policy through the platform resource graph', () => {
+    const applied = appliedResources(join(platformRoot, 'kustomization.yaml'));
+    for (const file of [
+      'a0/namespace-default-deny.yaml',
+      'a0/network-policy.yaml',
+      'a/network-policy.yaml',
+      'a/applications.yaml',
+    ])
+      expect([...applied].map((path) => relative(platformRoot, path))).toContain(file);
+  });
+
+  it.each([
+    ['loader', 'lifemodel-system', 8081],
+    ['web', 'lifemodel', 8081],
+    ['core', 'lifemodel', 8080],
+  ])('permits both ends of %s in %s to gateway TCP %s', (source, namespace, port) => {
+    const sourcePolicy =
+      source === 'loader'
+        ? byName(a0Policies, 'loader-access')
+        : byName(applications, source === 'web' ? 'web-access' : 'lifemodel-model-egress');
+    expect(sourcePolicy?.spec.egress).toContainEqual({
+      to: [
+        {
+          namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' } },
+          podSelector: { matchLabels: { 'app.kubernetes.io/name': 'model-gateway' } },
+        },
+      ],
+      ports: [{ protocol: 'TCP', port }],
+    });
+    const ingress = gatewayAccess?.spec.ingress.find((rule: any) =>
+      rule.ports.some((p: any) => p.protocol === 'TCP' && p.port === port)
+    );
+    expect(ingress?.from).toContainEqual({
+      namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': namespace } },
+      podSelector: { matchLabels: { 'app.kubernetes.io/name': source } },
+    });
+  });
+
   it('runs the loader image entry point under its own ServiceAccount', () => {
     expect(deployment?.metadata).toMatchObject({
       name: 'model-gateway',
@@ -388,7 +449,7 @@ describe('the platform model gateway', () => {
       );
       expect(result.status).toBe(1);
       expect(result.stderr).toContain('expected exactly one loader digest placeholder');
-      // Nothing was rewritten: the run is all or nothing.
+      // Input validation finished before any rewrite; write failures are not transactional.
       expect(readFileSync(a0, 'utf8')).toBe(before);
     } finally {
       rmSync(directory, { recursive: true, force: true });

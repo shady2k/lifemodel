@@ -30,8 +30,10 @@ for file in "$@"; do
   fi
 done
 
-# Validate every file before rewriting any of them: a refused run leaves the
-# platform manifests exactly as they were.
+# Validate all inputs before rewriting any file. Validation failures leave
+# files unchanged; a later write failure can leave earlier files changed.
+# This is not a multi-file transaction; the fail-fast release step prevents
+# publication when any rewrite fails.
 for file in "$@"; do
   tmp=$(mktemp "${file}.XXXXXX")
   trap 'rm -f "$tmp"' EXIT
