@@ -32,8 +32,10 @@ export const MODEL_STATUS_OUTAGE_KEY = 'modelOutage';
 export const MODEL_STATUS_UNKNOWN_ERROR_KEY = 'modelErrorUnknown';
 
 /**
- * The gateway's safe codes in words (see `loader/src/model-gateway-app.ts`).
- * A code has one phrase per language, never the raw code.
+ * The gateway's safe codes in words (see `loader/src/model-error-codes.ts` and
+ * `loader/src/model-gateway-app.ts`). A code has one phrase per language,
+ * never the raw code. This map is also the web module's list of the codes the
+ * gateway owns; a test keeps it equal to the loader's list.
  */
 export const MODEL_STATUS_ERROR_KEYS: Record<string, string> = {
   unreachable: 'modelErrorUnreachable',
@@ -48,10 +50,38 @@ export const MODEL_STATUS_ERROR_KEYS: Record<string, string> = {
   client_disconnected: 'modelErrorDisconnected',
 };
 
+/** The fixed value every code the gateway does not own becomes. */
+export const MODEL_STATUS_UNSAFE_ERROR_CODE = 'unknown_error';
+
+/** The one upstream shape the gateway passes through: `upstream_<3 digits>`. */
+const UPSTREAM_STATUS = /^upstream_(\d{3})$/;
+/** An ISO 8601 instant with its offset, the only timestamp shape accepted. */
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/** Whether the gateway itself owns this code (the map's own keys, never a prototype's). */
+function isOwnedErrorCode(code: string): boolean {
+  return Object.hasOwn(MODEL_STATUS_ERROR_KEYS, code);
+}
+
+/**
+ * A code a browser may hold: one the gateway owns, or an upstream status. Any
+ * other string — a URL, a secret, a prototype name — becomes one fixed value.
+ */
+export function safeModelErrorCode(code: string): string {
+  if (isOwnedErrorCode(code) || UPSTREAM_STATUS.test(code)) return code;
+  return MODEL_STATUS_UNSAFE_ERROR_CODE;
+}
+
+/** The outage's start as the gateway wrote it, or `null` for anything else. */
+function safeInstant(value: unknown): string | null {
+  if (typeof value !== 'string' || !ISO_INSTANT.test(value)) return null;
+  return Number.isFinite(Date.parse(value)) ? value : null;
+}
+
 /** The i18n key for a safe gateway error code; unknown codes get one phrase. */
 export function modelErrorKey(code: string | null): string {
   if (code === null) return MODEL_STATUS_UNKNOWN_ERROR_KEY;
-  const known = MODEL_STATUS_ERROR_KEYS[code];
+  const known = isOwnedErrorCode(code) ? MODEL_STATUS_ERROR_KEYS[code] : undefined;
   if (known !== undefined) return known;
   const upstream = /^upstream_(\d{3})$/.exec(code);
   if (upstream === null) return MODEL_STATUS_UNKNOWN_ERROR_KEY;
@@ -82,11 +112,15 @@ export function parseModelStatus(value: unknown): ModelStatusEvent | null {
     return null;
   if (lastErrorCode !== undefined && lastErrorCode !== null && typeof lastErrorCode !== 'string')
     return null;
-  if (state === 'down' && !isInstant(outageSince)) return null;
+  // Only `down` carries the moment the outage began: another state drops it,
+  // and a `down` without a usable instant is not an outage at all.
+  const since = state === 'down' ? safeInstant(outageSince) : null;
+  if (state === 'down' && since === null) return null;
   return {
     state,
-    outageSince: outageSince ?? null,
-    lastErrorCode: lastErrorCode ?? null,
+    outageSince: since,
+    lastErrorCode:
+      typeof lastErrorCode === 'string' ? safeModelErrorCode(lastErrorCode) : null,
   };
 }
 

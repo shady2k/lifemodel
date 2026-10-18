@@ -4,8 +4,17 @@
  * The loader reads `/status` itself, server side, with a bounded fetch and a
  * short cache, and hands the browser only the safe fields. This mirrors
  * `src/web/model-status.ts`; the loader is a separate TypeScript project
- * (`rootDir: ./src`), so the two cannot share the module.
+ * (`rootDir: ./src`), so the two cannot share the module and each keeps the
+ * safe-code list beside its own projection (a test keeps them equal).
  */
+import { isOwnedGatewayErrorCode, isUpstreamErrorCode } from './model-error-codes.js';
+
+/** The fixed value every code the gateway does not own becomes. */
+export const UNSAFE_MODEL_ERROR_CODE = 'unknown_error';
+
+/** An ISO 8601 instant with its offset, the only timestamp shape accepted. */
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+
 export interface LoaderModelStatus {
   state: 'unknown' | 'ok' | 'down';
   outageSince: string | null;
@@ -27,8 +36,20 @@ export interface ModelStatusReaderOptions {
   now?: () => number;
 }
 
-function isInstant(value: unknown): value is string {
-  return typeof value === 'string' && Number.isFinite(Date.parse(value));
+/** The outage's start as the gateway wrote it, or `null` for anything else. */
+function safeInstant(value: unknown): string | null {
+  if (typeof value !== 'string' || !ISO_INSTANT.test(value)) return null;
+  return Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+/**
+ * A code a browser may hold: one the gateway owns, or an upstream status. Any
+ * other string — a URL, a secret, a prototype name — becomes one fixed value.
+ */
+export function safeModelErrorCode(code: string): string {
+  return isOwnedGatewayErrorCode(code) || isUpstreamErrorCode(code)
+    ? code
+    : UNSAFE_MODEL_ERROR_CODE;
 }
 
 /** Reads exactly the safe fields; anything else is unavailable, never an outage. */
@@ -43,8 +64,15 @@ export function parseLoaderModelStatus(value: unknown): LoaderModelStatus | null
     return null;
   if (lastErrorCode !== undefined && lastErrorCode !== null && typeof lastErrorCode !== 'string')
     return null;
-  if (state === 'down' && !isInstant(outageSince)) return null;
-  return { state, outageSince: outageSince ?? null, lastErrorCode: lastErrorCode ?? null };
+  // Only `down` carries the moment the outage began: another state drops it,
+  // and a `down` without a usable instant is not an outage at all.
+  const since = state === 'down' ? safeInstant(outageSince) : null;
+  if (state === 'down' && since === null) return null;
+  return {
+    state,
+    outageSince: since,
+    lastErrorCode: typeof lastErrorCode === 'string' ? safeModelErrorCode(lastErrorCode) : null,
+  };
 }
 
 export function createModelStatusReader(options: ModelStatusReaderOptions): ModelStatusReader {
