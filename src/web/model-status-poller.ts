@@ -12,6 +12,11 @@
  * browser that reconnects inside the period reuses the answer and waits out
  * the rest of the period, and an attempt already in flight answers the reader
  * that reconnected during it.
+ *
+ * Exactly one scheduler owns the next tick. A reconnect clears the timer the
+ * previous run armed, and a tick that resumes after a stop and a restart arms
+ * nothing, so a reconnect inside an in-flight fetch cannot leave a second
+ * polling chain behind.
  */
 import type { ModelStatusEvent } from './contract.js';
 import {
@@ -37,6 +42,8 @@ export class ModelStatusPoller implements ModelStatusSource {
   private readonly timeoutMs: number;
   private readonly fetchStatus: typeof fetch;
   private running = false;
+  /** Bumped by each start, so a tick from an earlier run cannot re-arm. */
+  private generation = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private attempt: Promise<void> | undefined;
   private current: ModelStatusEvent | null = null;
@@ -54,17 +61,15 @@ export class ModelStatusPoller implements ModelStatusSource {
   start(): void {
     if (this.running) return;
     this.running = true;
+    this.generation += 1;
     const delay = this.untilNextAttempt();
-    if (delay === 0) void this.tick();
+    if (delay === 0) void this.tick(this.generation);
     else this.arm(delay);
   }
 
   stop(): void {
     this.running = false;
-    if (this.timer !== undefined) {
-      clearTimeout(this.timer);
-      this.timer = undefined;
-    }
+    this.clearTimer();
   }
 
   read(): ModelStatusEvent | null {
@@ -81,19 +86,35 @@ export class ModelStatusPoller implements ModelStatusSource {
     return Math.max(0, this.lastAttemptAt + this.pollMs - Date.now());
   }
 
+  /**
+   * Arm the next tick. A single scheduler owns it: the timer already armed is
+   * cleared first, so an arm can never leave a second chain behind.
+   */
   private arm(delay: number): void {
+    this.clearTimer();
+    const generation = this.generation;
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      void this.tick();
+      void this.tick(generation);
     }, delay);
     (this.timer as { unref?: () => void }).unref?.();
   }
 
-  /** One period: attempt, then arm the next one; a stop ends the chain. */
-  private async tick(): Promise<void> {
-    if (!this.running) return;
+  private clearTimer(): void {
+    if (this.timer === undefined) return;
+    clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+
+  /**
+   * One period: attempt, then arm the next one; a stop ends the chain. A tick
+   * that resumes after a stop and a restart belongs to the run that ended, so
+   * it arms nothing — the run that replaced it already owns the next tick.
+   */
+  private async tick(generation: number): Promise<void> {
+    if (!this.running || generation !== this.generation) return;
     await this.poll();
-    if (!this.running) return;
+    if (!this.running || generation !== this.generation) return;
     this.arm(this.untilNextAttempt());
   }
 

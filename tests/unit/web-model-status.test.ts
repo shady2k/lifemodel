@@ -342,6 +342,116 @@ describe('the bounded status poll', () => {
     poller.stop();
   });
 
+  it('keeps one polling chain after adopting an answer across a reconnect', async () => {
+    vi.useFakeTimers();
+    let answer!: (response: Response) => void;
+    let calls = 0;
+    const poller = new ModelStatusPoller({
+      url: STATUS_URL,
+      pollMs: 80,
+      timeoutMs: 500,
+      fetch: (async () => {
+        calls += 1;
+        if (calls === 1) return new Promise<Response>((resolve) => (answer = resolve));
+        return jsonResponse({ state: 'ok' });
+      }) as unknown as typeof fetch,
+    });
+    try {
+      poller.start();
+      expect(calls).toBe(1);
+      poller.stop();
+      poller.start();
+      answer(jsonResponse({ state: 'ok' }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(poller.settled()).toBe(true);
+      expect(calls).toBe(1);
+      await vi.advanceTimersByTimeAsync(80);
+      expect(calls).toBe(2);
+      poller.stop();
+      await vi.advanceTimersByTimeAsync(160);
+      expect(calls).toBe(2);
+    } finally {
+      poller.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it('holds one fetch per period after three reconnects inside in-flight fetches', async () => {
+    vi.useFakeTimers();
+    const answers: Array<(response: Response) => void> = [];
+    let calls = 0;
+    const poller = new ModelStatusPoller({
+      url: STATUS_URL,
+      pollMs: 80,
+      timeoutMs: 500,
+      fetch: (async () => {
+        calls += 1;
+        return new Promise<Response>((resolve) => answers.push(resolve));
+      }) as unknown as typeof fetch,
+    });
+    try {
+      poller.start();
+      expect(calls).toBe(1);
+      for (let cycle = 0; cycle < 3; cycle += 1) {
+        poller.stop();
+        poller.start();
+        expect(calls).toBe(1);
+        answers[answers.length - 1](jsonResponse({ state: 'ok' }));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(poller.settled()).toBe(true);
+        expect(calls).toBe(1);
+        // Still one scheduler after the reconnect: one tick is armed, not two.
+        expect(vi.getTimerCount()).toBe(1);
+      }
+      for (let period = 0; period < 3; period += 1) {
+        await vi.advanceTimersByTimeAsync(80);
+        expect(calls).toBe(period + 2);
+        answers[answers.length - 1](jsonResponse({ state: 'ok' }));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(calls).toBe(period + 2);
+        expect(vi.getTimerCount()).toBe(1);
+      }
+    } finally {
+      poller.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it('arms no second timer and fetches nothing after a stop inside a revived period', async () => {
+    vi.useFakeTimers();
+    let answer!: (response: Response) => void;
+    let calls = 0;
+    const poller = new ModelStatusPoller({
+      url: STATUS_URL,
+      pollMs: 80,
+      timeoutMs: 500,
+      fetch: (async () => {
+        calls += 1;
+        return new Promise<Response>((resolve) => (answer = resolve));
+      }) as unknown as typeof fetch,
+    });
+    try {
+      poller.start();
+      poller.stop();
+      poller.start();
+      expect(calls).toBe(1);
+      answer(jsonResponse({ state: 'ok' }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(poller.settled()).toBe(true);
+      expect(calls).toBe(1);
+      // One scheduler owns the next tick, so exactly one timer is armed here.
+      expect(vi.getTimerCount()).toBe(1);
+      poller.stop();
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(calls).toBe(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      poller.stop();
+      vi.useRealTimers();
+    }
+  });
+
   it('cancels the response body it rejects, so no connection stays open', async () => {
     const body = neverEndingResponse(503);
     const tracking = abortTrackingFetch(async () => body.response);
