@@ -1,32 +1,7 @@
 #!/usr/bin/env node
-// The resolv.conf k3s gives the kubelet and CoreDNS (lifemodel-s9v5.1.5).
-//
-// k3s points the kubelet at one resolv.conf (`--resolv-conf`). The kubelet
-// reads that file every time it builds a pod's DNS configuration, so the file
-// decides which upstream resolver the cluster's own DNS uses: the CoreDNS pods
-// run with `dnsPolicy: Default` and forward to the nameservers copied into them
-// from this file, and every other pod asks the cluster DNS, which is CoreDNS.
-//
-// k3s's own choice of that file rejects a host file unless every `nameserver`
-// line is a global unicast address. One link-local address with a zone, or a
-// loopback one, makes k3s discard the whole file and use 8.8.8.8, which hides
-// the owner's LAN resolver from every pod: a LAN-only model endpoint stops
-// resolving inside the cluster.
-//
-// This script writes the file k3s is pointed at: the host's usable nameserver
-// lines, the host's other lines unchanged, and k3s's own fallback nameservers
-// when none of them is usable. It adds no per-domain rules: the pods ask the
-// host's resolvers themselves.
-//
-// Usage: resolv-conf.mjs TARGET SOURCE [SOURCE...]
-//   Writes TARGET (creating its directory) from the first SOURCE that has a
-//   usable nameserver, and from the first SOURCE that can be read when none has
-//   one - the order k3s itself uses to choose a file, with the host's own
-//   resolv.conf first and systemd-resolved's list of real upstream servers
-//   second (its stub file holds only 127.0.0.53). Prints "changed" when TARGET's
-//   bytes changed and "unchanged" otherwise, so the caller can decide whether
-//   the pods that copied the old nameservers have to be recreated. A SOURCE
-//   that cannot be read is reported on stderr and skipped.
+// Write only canonical, validated resolver records. Never copy host lines.
+// SOURCE order matches k3s: /etc/resolv.conf, then resolved's upstream list.
+// The output is kubelet's resolver base; CoreDNS uses dnsPolicy Default.
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { dirname } from 'node:path';
@@ -41,8 +16,10 @@ function usableIpv4(address) {
   if (octets.length !== 4) return false;
   if (octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return false;
   const [first, second] = octets;
-  if (first === 0 || first === 127) return false; // "this network", loopback
-  if (first >= 224) return false; // multicast, reserved, broadcast
+  // Go net.IP.IsGlobalUnicast excludes unspecified, loopback, multicast,
+  // link-local and the limited broadcast; it DOES accept 0/8 and 240/4.
+  if (address === '0.0.0.0' || address === '255.255.255.255') return false;
+  if (first === 127 || (first >= 224 && first <= 239)) return false;
   if (first === 169 && second === 254) return address === INSTANCE_METADATA; // link-local
   return true;
 }
@@ -89,6 +66,7 @@ function usableIpv6(address) {
 // k3s keeps the whole file only when every nameserver in it is a global unicast
 // address, so an entry k3s would reject has to leave the file it is given.
 function usableNameserver(address) {
+  if (address.includes('%') || /[^\x21-\x7e]/.test(address)) return false;
   const version = isIP(address);
   if (version === 4) return usableIpv4(address);
   if (version === 6) return usableIpv6(address);
@@ -101,43 +79,57 @@ function hostLines(text) {
   return lines;
 }
 
-// The host's usable nameserver lines, every other line as the host wrote it.
+// Discard controls (including CR and tabs), non-ASCII and Unicode whitespace
+// before classification. Go Fields recognizes U+0085; JS \s does not. None of
+// that input can survive, even when it disguises a nameserver keyword.
 function usableLines(hostText) {
-  const kept = [];
-  let foundNameserver = false;
+  const nameservers = [];
+  let search = null;
   for (const line of hostLines(hostText)) {
-    const [keyword, address] = line.trim().split(/\s+/);
-    if (keyword === 'nameserver') {
-      if (address === undefined || !usableNameserver(address)) continue;
-      foundNameserver = true;
+    if (/[^\x20-\x7e]/.test(line)) continue;
+    const fields = line.split('#', 1)[0].trim().split(/ +/);
+    const [keyword, ...values] = fields;
+    if (keyword === 'nameserver' && values.length === 1 && usableNameserver(values[0])) {
+      if (nameservers.length < 3) nameservers.push(`nameserver ${values[0]}`);
+    } else if (keyword === 'search') {
+      const domains = values.map((domain) => domain.toLowerCase());
+      const valid =
+        domains.length > 0 &&
+        domains.length <= 6 &&
+        domains.join(' ').length <= 256 &&
+        domains.every((domain) =>
+          domain
+            .split('.')
+            .every(
+              (label) =>
+                label.length >= 1 &&
+                label.length <= 63 &&
+                /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)
+            )
+        );
+      if (valid) search = `search ${domains.join(' ')}`;
     }
-    kept.push(line);
   }
-  return { kept, foundNameserver };
+  return { nameservers, search };
 }
 
 function resolvConfFor(sources) {
   const read = sources.map((source) => {
     try {
-      return readFileSync(source, 'utf8');
+      return usableLines(readFileSync(source, 'utf8'));
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      process.stderr.write(`resolv-conf: cannot read ${source}: ${reason}\n`);
+      process.stderr.write(`resolv-conf: cannot read ${source}: ${error.message}\n`);
       return null;
     }
   });
-  const firstUsable = read.find((text) => text !== null && usableLines(text).foundNameserver);
-  // Nothing usable anywhere: k3s's own fallback nameservers, beside whatever the
-  // host did set (its search list, its options).
-  const chosen = firstUsable ?? read.find((text) => text !== null);
-  if (chosen === undefined || chosen === null) {
-    return `${FALLBACK_NAMESERVERS.map((address) => `nameserver ${address}`).join('\n')}\n`;
-  }
-  const { kept, foundNameserver } = usableLines(chosen);
-  const lines = foundNameserver
-    ? kept
-    : [...kept, ...FALLBACK_NAMESERVERS.map((address) => `nameserver ${address}`)];
-  return `${lines.join('\n')}\n`;
+  const chosen =
+    read.find((source) => source !== null && source.nameservers.length > 0) ??
+    read.find((source) => source !== null);
+  const nameservers =
+    chosen?.nameservers.length > 0
+      ? chosen.nameservers
+      : FALLBACK_NAMESERVERS.map((address) => `nameserver ${address}`);
+  return `${[...nameservers, ...(chosen?.search ? [chosen.search] : [])].join('\n')}\n`;
 }
 
 function writeIfChanged(target, content) {
