@@ -34,6 +34,17 @@ export interface MessageAcceptedResponse {
   streamId: string;
 }
 
+/**
+ * The gateway's own health, reduced to the fields the owner's screen may see
+ * (ADR-013 D6): safe codes only, no URL, no key, never an upstream body.
+ */
+export interface ModelStatusEvent {
+  state: 'unknown' | 'ok' | 'down';
+  outageSince: string | null;
+  lastErrorCode: string | null;
+}
+
 export type TranscriptEvent =
   | { type: 'message'; data: TranscriptMessage }
-  | { type: 'state'; data: CreatureStateEvent | null };
+  | { type: 'state'; data: CreatureStateEvent | null }
+  | { type: 'model'; data: ModelStatusEvent | null };

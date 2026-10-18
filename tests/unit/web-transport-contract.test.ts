@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createWebServer } from '../../src/web/server.js';
+import { silentModelStatus } from '../helpers/model-status.js';
 import type { IOwnerMessageIntake } from '../../src/ports/owner-message-intake.js';
 import type { TranscriptRow } from '../../src/ports/transcript.js';
 import {
@@ -35,6 +36,7 @@ describe('web server and browser transport contract', () => {
         releaseStreamLease: vi.fn(),
       } as never,
       creatureState: { readCreatureState: vi.fn().mockResolvedValue(null) },
+      modelStatus: silentModelStatus(),
       logger: { info: vi.fn() },
     });
     const fetcher = vi.fn(async (input: RequestInfo | URL) => {
@@ -91,6 +93,7 @@ describe('web server and browser transport contract', () => {
             publishedAt: Date.parse(publishedAt),
           }),
       },
+      modelStatus: silentModelStatus(),
       logger: { info: vi.fn() },
     });
     const address = await server.listen({ host: '127.0.0.1', port: 0 });
@@ -139,6 +142,7 @@ describe('web server and browser transport contract', () => {
         releaseStreamLease: vi.fn().mockResolvedValue(undefined),
       },
       creatureState: { readCreatureState: vi.fn().mockResolvedValue(null) },
+      modelStatus: silentModelStatus(),
       logger: { info: vi.fn() },
     });
     const address = await server.listen({ host: '127.0.0.1', port: 0 });
