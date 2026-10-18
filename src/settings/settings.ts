@@ -9,7 +9,13 @@
  * for future requests from the running core.
  */
 import { CONFIG_FILE_VERSION, type AgentConfigFile } from '../config/config-schema.js';
-import { endpointGaps, isEndpointFieldSet, type ModelEndpoint } from '../config/model-endpoint.js';
+import {
+  endpointGaps,
+  isEndpointFieldSet,
+  withPinnedBaseUrl,
+  PINNED_MODEL_BASE_URL_ENV,
+  type ModelEndpoint,
+} from '../config/model-endpoint.js';
 
 /** What the form holds, as it arrives (every field a string, possibly empty). */
 export interface SettingsInput {
@@ -110,11 +116,20 @@ export function settingsEndpoint(input: SettingsInput): ModelEndpoint {
  * (a model without a base URL is refused by the field it is missing, and an
  * empty model with a base URL by its own).
  */
-export function validateSettings(input: SettingsInput): SettingsErrors {
+export function validateSettings(
+  input: SettingsInput,
+  options: { pinnedBaseUrl?: string | null } = {}
+): SettingsErrors {
   const errors: SettingsErrors = {};
-  const endpoint = settingsEndpoint(input);
+  const pinned = options.pinnedBaseUrl ?? null;
+  const endpoint = withPinnedBaseUrl(settingsEndpoint(input), pinned);
 
-  if (endpoint.baseUrl !== null) {
+  // A platform-pinned endpoint is the platform's to change (ADR-013 D2). A new
+  // value here is refused by its field, never stored and never silently
+  // replaced by the pin.
+  if (pinned !== null && input.endpointBaseUrl.trim() !== '' && input.endpointBaseUrl !== pinned) {
+    errors.endpointBaseUrl = `the endpoint base URL is set by this platform (${PINNED_MODEL_BASE_URL_ENV}) and cannot be edited here`;
+  } else if (endpoint.baseUrl !== null) {
     if (!isHttpUrl(endpoint.baseUrl)) {
       errors.endpointBaseUrl = 'the endpoint base URL must be an http or https URL';
     } else if (hasUrlCredentials(endpoint.baseUrl)) {
@@ -151,11 +166,18 @@ export function settingsInputFromBody(body: Record<string, unknown>): SettingsIn
   };
 }
 
-/** The form's values as the configuration document holds them (what the page renders). */
-export function settingsInputFromFile(file: AgentConfigFile | null): SettingsInput {
+/**
+ * The form's values as the configuration document holds them (what the page
+ * renders). A platform-pinned base URL is shown as it is: the page says what
+ * lifemodel actually talks to, not what the document happens to carry.
+ */
+export function settingsInputFromFile(
+  file: AgentConfigFile | null,
+  pinnedBaseUrl: string | null = null
+): SettingsInput {
   const endpoint = file?.llm?.endpoint;
   return {
-    endpointBaseUrl: endpoint?.baseUrl ?? '',
+    endpointBaseUrl: pinnedBaseUrl ?? endpoint?.baseUrl ?? '',
     fastModel: endpoint?.fastModel ?? '',
     smartModel: endpoint?.smartModel ?? '',
     motorModel: endpoint?.motorModel ?? '',
@@ -167,7 +189,11 @@ export function settingsInputFromFile(file: AgentConfigFile | null): SettingsInp
  * file kept exactly as it was: the owner's identity, plugin configuration and
  * anything a later version adds are not this interface's to drop.
  */
-export function applySettings(file: AgentConfigFile | null, input: SettingsInput): AgentConfigFile {
+export function applySettings(
+  file: AgentConfigFile | null,
+  input: SettingsInput,
+  pinnedBaseUrl: string | null = null
+): AgentConfigFile {
   const endpoint = settingsEndpoint(input);
   const primaryUser = { ...(file?.primaryUser ?? {}) };
   return {
@@ -180,7 +206,9 @@ export function applySettings(file: AgentConfigFile | null, input: SettingsInput
         // a later version adds) are not this interface's to drop, only the
         // four here are.
         ...(file?.llm?.endpoint ?? {}),
-        baseUrl: endpoint.baseUrl,
+        // A platform-pinned base URL is not lifemodel's to write down: the
+        // document carries none while the platform names the endpoint.
+        baseUrl: pinnedBaseUrl === null ? endpoint.baseUrl : null,
         fastModel: endpoint.fastModel,
         smartModel: endpoint.smartModel,
         motorModel: endpoint.motorModel,

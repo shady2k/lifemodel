@@ -18,6 +18,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import type { Socket } from 'node:net';
 import type { Logger } from '../types/index.js';
 import type { AgentConfigFile } from '../config/config-schema.js';
+import { PINNED_MODEL_BASE_URL_ENV, pinnedModelBaseUrl } from '../config/model-endpoint.js';
 import {
   applySettings,
   redactEndpointUrl,
@@ -43,6 +44,7 @@ export const SETTINGS_PORT = 7100;
 
 /** The environment variables that would override what the page saves. */
 const OVERRIDING_VARIABLES = [
+  PINNED_MODEL_BASE_URL_ENV,
   'LLM_ENDPOINT_BASE_URL',
   'LLM_ENDPOINT_FAST_MODEL',
   'LLM_ENDPOINT_SMART_MODEL',
@@ -130,7 +132,10 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
 
   app.get('/', async (_request, reply) => {
     const file = await config.readConfig();
-    const values = settingsInputFromFile(file);
+    // The platform's pin, read per request: it is an input of this instance,
+    // not a value the settings document decides (ADR-013 D2).
+    const pinnedBaseUrl = pinnedModelBaseUrl();
+    const values = settingsInputFromFile(file, pinnedBaseUrl);
     // The GET runs the SAVE's rules on what the file holds: a config an older
     // interface (or a hand edit) wrote is REFUSED with its field named and
     // shown redacted - never migrated silently behind the owner's back, and
@@ -139,9 +144,10 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
     return reply.type('text/html; charset=utf-8').send(
       renderSettingsPage({
         values,
-        errors: validateSettings(values),
+        errors: validateSettings(values, { pinnedBaseUrl }),
         instanceName,
         overriddenBy: overridingVariables(),
+        pinnedBaseUrl,
       })
     );
   });
@@ -188,7 +194,8 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
     }
     const body = (request.body ?? {}) as Record<string, unknown>;
     const input = settingsInputFromBody(body);
-    const errors = validateSettings(input);
+    const pinnedBaseUrl = pinnedModelBaseUrl();
+    const errors = validateSettings(input, { pinnedBaseUrl });
 
     if (Object.keys(errors).length > 0) {
       logger.warn({ fields: Object.keys(errors) }, 'Settings refused: a field is not valid');
@@ -201,6 +208,7 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
             errors,
             instanceName,
             overriddenBy: overridingVariables(),
+            pinnedBaseUrl,
           })
         );
     }
@@ -210,7 +218,9 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
       // The write carries the interface's one stop signal: an abandoned
       // close has it aborted, and the writer stops at its publication point
       // instead of publishing under a process that is leaving (finding A).
-      await config.writeConfig(applySettings(existing, input), { signal: stopSignal.signal });
+      await config.writeConfig(applySettings(existing, input, pinnedBaseUrl), {
+        signal: stopSignal.signal,
+      });
     } catch (error) {
       // Nothing was published (the write is atomic, and its publication point
       // is one rename it did not reach or did not pass): the owner is told,
@@ -241,6 +251,7 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
           renderSettingsPage({
             values: input,
             instanceName,
+            pinnedBaseUrl,
             errors: { endpointBaseUrl: 'the settings file could not be written; see the log' },
           })
         );
@@ -268,6 +279,7 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
           values: input,
           instanceName,
           saved: true,
+          pinnedBaseUrl,
         })
       );
   };

@@ -56,6 +56,11 @@ export interface SettingsPageOptions {
   overriddenBy?: string[];
   /** Set after a save: the page confirms the config is applied. */
   saved?: boolean;
+  /**
+   * The endpoint the platform pins (ADR-013 D2), or null. Shown as it is and
+   * not editable: swapping the model endpoint is the platform's act.
+   */
+  pinnedBaseUrl?: string | null;
 }
 
 /** What the endpoint is missing, in the page's words (empty when configured). */
@@ -78,12 +83,14 @@ function endpointState(values: SettingsInput): string[] {
 function field(options: SettingsPageOptions, formField: (typeof SETTINGS_FIELDS)[number]): string {
   const { field, label } = formField;
   const error = options.errors?.[field];
+  const pinned = field === 'endpointBaseUrl' && (options.pinnedBaseUrl ?? null) !== null;
   // Endpoint URLs are rendered in a redacted form.
   const value =
     field === 'endpointBaseUrl' ? redactEndpointUrl(options.values[field]) : options.values[field];
   const hints: Partial<Record<typeof field, string>> = {
-    endpointBaseUrl:
-      'The OpenAI-compatible endpoint lifemodel talks to, e.g. http://127.0.0.1:1234/v1',
+    endpointBaseUrl: pinned
+      ? 'This platform sets the model endpoint; it is not editable here. lifemodel talks to it and holds no key.'
+      : 'The OpenAI-compatible endpoint lifemodel talks to, e.g. http://127.0.0.1:1234/v1',
     fastModel: 'The model for classification and quick decisions',
     smartModel: 'The model for reasoning and composing messages',
     motorModel: 'The model for Motor Cortex runs',
@@ -91,7 +98,7 @@ function field(options: SettingsPageOptions, formField: (typeof SETTINGS_FIELDS)
   const hint = hints[field];
   return [
     `      <label for="${field}">${escapeHtml(label.charAt(0).toUpperCase() + label.slice(1))}</label>`,
-    `      <input id="${field}" name="${field}" value="${escapeHtml(value)}" />`,
+    `      <input id="${field}" name="${field}" value="${escapeHtml(value)}"${pinned ? ' readonly' : ''} />`,
     ...(hint === undefined ? [] : [`      <p class="hint">${escapeHtml(hint)}</p>`]),
     ...(error === undefined
       ? []

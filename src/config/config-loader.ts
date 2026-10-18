@@ -1,6 +1,7 @@
 import type { Pool } from 'pg';
 import type { AgentConfigFile, MergedConfig } from './config-schema.js';
 import { DEFAULT_CONFIG } from './config-schema.js';
+import { PINNED_MODEL_BASE_URL_ENV, pinnedModelBaseUrl } from './model-endpoint.js';
 import { PostgresConfigStore } from './postgres-config-store.js';
 import type { Logger } from '../types/logger.js';
 import { join } from 'node:path';
@@ -151,6 +152,19 @@ export class ConfigLoader {
     const endpointBaseUrl = process.env['LLM_ENDPOINT_BASE_URL'];
     if (endpointBaseUrl !== undefined) {
       config.llm.endpoint.baseUrl = endpointBaseUrl;
+    }
+
+    // The platform pins the endpoint (ADR-013 D2): the pin overrides the
+    // settings document and is not editable there. Two different endpoints
+    // named at once is a contradiction, not a preference.
+    const pinnedBaseUrl = pinnedModelBaseUrl();
+    if (pinnedBaseUrl !== null) {
+      if (endpointBaseUrl !== undefined && endpointBaseUrl !== pinnedBaseUrl) {
+        throw new Error(
+          `LLM_ENDPOINT_BASE_URL and ${PINNED_MODEL_BASE_URL_ENV} name two different model endpoints; the platform pins one`
+        );
+      }
+      config.llm.endpoint.baseUrl = pinnedBaseUrl;
     }
 
     const endpointFastModel = process.env['LLM_ENDPOINT_FAST_MODEL'];

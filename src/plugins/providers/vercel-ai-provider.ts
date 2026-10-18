@@ -6,8 +6,6 @@
  */
 
 import type { Logger } from '../../types/index.js';
-import type { CircuitBreaker } from '../../core/circuit-breaker.js';
-import { createCircuitBreaker } from '../../core/circuit-breaker.js';
 import type {
   CompletionRequest,
   CompletionResponse,
@@ -30,6 +28,22 @@ import { resolve4 } from 'node:dns/promises';
  * JSON object type for tool arguments.
  */
 type JsonObject = Record<string, unknown>;
+
+/**
+ * The caller's headers without `Authorization`, whichever shape the AI SDK
+ * handed over. lifemodel sends no credential to the model endpoint: the
+ * platform's model gateway injects the key from OpenBao on the upstream leg,
+ * and nothing of it reaches this process (ADR-013 D2/D3).
+ */
+function withoutAuthorization(headers: HeadersInit | undefined): Headers {
+  const kept = new Headers();
+  if (headers !== undefined) {
+    new Headers(headers).forEach((value, key) => {
+      if (key.toLowerCase() !== 'authorization') kept.set(key, value);
+    });
+  }
+  return kept;
+}
 
 /**
  * An OpenAI-compatible endpoint, with the model this instance uses for each
@@ -57,10 +71,12 @@ export interface VercelAIEndpointConfig {
  */
 export type VercelAIProviderConfig = VercelAIEndpointConfig;
 
-const DEFAULT_TIMEOUT = 180_000; // 3 minutes (a local endpoint needs more time)
-const DEFAULT_MAX_RETRIES = 3;
-const DEFAULT_RETRY_DELAY = 1000;
-const DEFAULT_CIRCUIT_RESET_TIMEOUT = 60_000;
+/**
+ * How long one completion may take. The model gateway in front of the endpoint
+ * finishes its own 110 s deadline first and answers with its error; this bound
+ * is lifemodel's own backstop for a gateway that never answers at all.
+ */
+const DEFAULT_TIMEOUT = 180_000;
 
 /**
  * Vercel AI SDK LLM provider.
@@ -68,13 +84,20 @@ const DEFAULT_CIRCUIT_RESET_TIMEOUT = 60_000;
  * Uses Vercel AI SDK's generateText() for non-streaming completions with:
  * - Automatic tool call parsing and repair
  * - Provider-specific message transforms
- * - Our retry/circuit breaker logic (AI SDK's retry is disabled)
+ *
+ * ONE HTTP attempt per completion (ADR-013 D4/B-02): the model gateway in
+ * front of this endpoint is the whole transport failover budget - it makes one
+ * attempt at the primary and one at the reserve - so this provider neither
+ * retries a request nor wraps one in a circuit breaker. Its timeout aborts the
+ * HTTP request itself through an AbortSignal, so the gateway sees the
+ * disconnect and aborts upstream; no attempt starts after a reported timeout.
+ * Cognition's own retries and escalation stay where they are, as separate
+ * recorded turns.
  */
 export class VercelAIProvider extends BaseLLMProvider {
   readonly name: string;
   private readonly config: VercelAIProviderConfig;
   private readonly providerLogger?: Logger | undefined;
-  private readonly circuitBreaker: CircuitBreaker;
   /** Reasoning content extracted from the endpoint's responses via custom fetch */
   private lastReasoningContent: string | null = null;
   /** Raw tools to inject via fetch interceptor (workaround for AI SDK schema stripping) */
@@ -86,21 +109,6 @@ export class VercelAIProvider extends BaseLLMProvider {
     this.config = config;
     this.name = 'endpoint';
     this.providerLogger = logger?.child({ component: 'vercel-ai-provider' });
-
-    const circuitConfig: Parameters<typeof createCircuitBreaker>[0] = {
-      name: 'vercel-ai-provider',
-      maxFailures: 3,
-      resetTimeout: DEFAULT_CIRCUIT_RESET_TIMEOUT,
-      timeout: DEFAULT_TIMEOUT,
-      // Only count retryable errors (500, timeout) toward the circuit breaker threshold.
-      // Non-retryable errors (401, 403, schema validation) are request-specific failures,
-      // not indications that the service is down.
-      shouldCountFailure: (error: unknown) => !(error instanceof LLMError) || error.retryable,
-    };
-    if (this.providerLogger) {
-      circuitConfig.logger = this.providerLogger;
-    }
-    this.circuitBreaker = createCircuitBreaker(circuitConfig);
 
     this.providerLogger?.info(
       {
@@ -167,7 +175,7 @@ export class VercelAIProvider extends BaseLLMProvider {
    * replace the broken tools in the JSON body.
    * See: https://github.com/vercel/ai/issues/9761
    */
-  private createEndpointFetch(): typeof globalThis.fetch {
+  private createEndpointFetch(signal: AbortSignal): typeof globalThis.fetch {
     return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       // Fix outgoing request: replace broken tool schemas with raw tools
       let modifiedInit = init;
@@ -182,6 +190,14 @@ export class VercelAIProvider extends BaseLLMProvider {
           // Parse failed — send original body
         }
       }
+      // This attempt's own signal (the timeout aborts the HTTP request itself)
+      // and no Authorization header: lifemodel holds no key, and the platform's
+      // model gateway injects the real one on its way upstream (ADR-013 D2/D4).
+      modifiedInit = {
+        ...(modifiedInit ?? {}),
+        signal,
+        headers: withoutAuthorization(modifiedInit?.headers),
+      };
 
       // Out through the environment's proxy the way curl reaches an http
       // endpoint: the absolute-form forward-proxy path for a plain-HTTP
@@ -216,16 +232,22 @@ export class VercelAIProvider extends BaseLLMProvider {
    * parsing internally on this endpoint. addCacheControl is skipped separately
    * to avoid multipart system messages that @ai-sdk/openai rejects.
    */
-  private getModel(modelId: string): LanguageModel {
+  private getModel(modelId: string, signal: AbortSignal): LanguageModel {
     return createOpenAI({
       baseURL: this.config.baseUrl,
-      apiKey: 'no-key-required',
-      fetch: this.createEndpointFetch(),
+      // The SDK insists on a key and lifemodel has none to give: the empty
+      // value only satisfies its own guard, and the fetch wrapper above drops
+      // the header it builds, so no credential leaves this process.
+      apiKey: '',
+      fetch: this.createEndpointFetch(signal),
     }).chat(modelId);
   }
 
   /**
    * Generate a completion (called by BaseLLMProvider.complete with logging).
+   *
+   * Exactly ONE HTTP attempt: no retry loop, no circuit-breaker race, no
+   * second request after the first one reported a timeout (ADR-013 D4).
    */
   protected async doComplete(request: CompletionRequest): Promise<CompletionResponse> {
     if (!this.isAvailable()) {
@@ -234,103 +256,7 @@ export class VercelAIProvider extends BaseLLMProvider {
 
     const modelId = this.getModelId(request);
 
-    return this.circuitBreaker.execute(async () => {
-      return this.executeWithRetry(async () => {
-        return this.executeRequest(request, modelId);
-      });
-    });
-  }
-
-  /**
-   * Calculate backoff delay with exponential scaling for 429 rate limits.
-   */
-  private calculateBackoff(attempt: number, isRateLimit: boolean): number {
-    if (isRateLimit) {
-      // Exponential backoff for 429: 2s, 4s, 8s, 16s...
-      return 2000 * Math.pow(2, attempt);
-    }
-    // Linear backoff for other errors: 1s, 2s, 3s...
-    return DEFAULT_RETRY_DELAY * (attempt + 1);
-  }
-
-  /**
-   * Check if error is a 429 rate limit error.
-   */
-  private isRateLimitError(error: unknown): boolean {
-    return error instanceof LLMError && error.statusCode === 429;
-  }
-
-  /**
-   * Execute with retry logic.
-   */
-  private async executeWithRetry<T>(operation: () => Promise<T>): Promise<T> {
-    let lastError: Error | null = null;
-
-    for (let attempt = 0; attempt <= DEFAULT_MAX_RETRIES; attempt++) {
-      try {
-        return await operation();
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error));
-
-        const errorInfo = this.extractErrorInfo(error);
-        const isRateLimit = this.isRateLimitError(error);
-
-        if (error instanceof LLMError && !error.retryable) {
-          this.providerLogger?.error(errorInfo, 'Non-retryable LLM error');
-          throw error;
-        }
-
-        if (attempt < DEFAULT_MAX_RETRIES) {
-          const backoffMs = this.calculateBackoff(attempt, isRateLimit);
-          this.providerLogger?.warn(
-            {
-              attempt: attempt + 1,
-              maxRetries: DEFAULT_MAX_RETRIES,
-              backoffMs,
-              backoffReason: isRateLimit ? 'rate_limit_exponential' : 'linear',
-              ...errorInfo,
-            },
-            'Retrying after transient error'
-          );
-          await this.sleep(backoffMs);
-        } else {
-          this.providerLogger?.error(
-            {
-              attempts: DEFAULT_MAX_RETRIES + 1,
-              ...errorInfo,
-            },
-            'All retry attempts exhausted'
-          );
-        }
-      }
-    }
-
-    throw lastError ?? new Error('Unknown error');
-  }
-
-  /**
-   * Extract error information for logging.
-   */
-  private extractErrorInfo(error: unknown): Record<string, unknown> {
-    if (error instanceof LLMError) {
-      return {
-        errorType: 'LLMError',
-        message: error.message,
-        statusCode: error.statusCode,
-        retryable: error.retryable,
-        ...(error.upstreamProvider && { upstreamProvider: error.upstreamProvider }),
-      };
-    }
-    if (error instanceof Error) {
-      return {
-        errorType: error.name,
-        message: error.message,
-      };
-    }
-    return {
-      errorType: 'unknown',
-      message: String(error),
-    };
+    return this.executeRequest(request, modelId);
   }
 
   /**
@@ -670,6 +596,17 @@ export class VercelAIProvider extends BaseLLMProvider {
     request: CompletionRequest,
     modelId: string
   ): Promise<CompletionResponse> {
+    // ONE attempt, bounded by its own signal: the timer aborts the HTTP request
+    // itself, so a gateway waiting upstream sees the disconnect, and nothing
+    // starts a second attempt after this one reports a timeout (ADR-013 D4).
+    const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT;
+    const attempt = new AbortController();
+    let timedOut = false;
+    const timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      attempt.abort(new Error(`The model endpoint did not answer within ${String(timeoutMs)} ms`));
+    }, timeoutMs);
+
     // Apply model param overrides
     const overrides = resolveModelParams(modelId);
 
@@ -711,7 +648,7 @@ export class VercelAIProvider extends BaseLLMProvider {
     }
 
     // Get the model
-    const model = this.getModel(modelId);
+    const model = this.getModel(modelId, attempt.signal);
 
     // Debug logging
     this.providerLogger?.debug(
@@ -796,7 +733,8 @@ export class VercelAIProvider extends BaseLLMProvider {
         );
       },
       ...(providerOptions && { providerOptions }),
-      ...(request.timeoutMs && { timeout: request.timeoutMs }),
+      // The attempt's own signal: the timeout aborts this HTTP request.
+      abortSignal: attempt.signal,
       // Add tools and repair callback if tools are present
       ...(hasTools && {
         tools: aiTools,
@@ -877,6 +815,20 @@ export class VercelAIProvider extends BaseLLMProvider {
     } catch (error) {
       const duration = Date.now() - startTime;
 
+      // A timeout this provider caused is reported as itself, never as an
+      // upstream protocol error: the request it aborted is the only one that ran.
+      if (timedOut) {
+        this.providerLogger?.error(
+          { durationMs: duration, model: modelId, timeoutMs },
+          "The model endpoint did not answer before this provider's timeout"
+        );
+        throw new LLMError(
+          `The model endpoint did not answer within ${String(timeoutMs)} ms; the request was aborted`,
+          this.name,
+          { retryable: true }
+        );
+      }
+
       // Extract response body from AI SDK APICallError for debugging
       const responseBody =
         error instanceof Error && 'responseBody' in error
@@ -948,6 +900,8 @@ export class VercelAIProvider extends BaseLLMProvider {
       // Map AI SDK errors to LLMError
       this.pendingRawTools = null;
       throw this.mapAIErrorToLLMError(error);
+    } finally {
+      clearTimeout(timeoutTimer);
     }
   }
 
@@ -1223,20 +1177,6 @@ export class VercelAIProvider extends BaseLLMProvider {
     }
     // Strip standalone channel/constrain tokens if <|message|> is absent
     return content.replace(/<\|(?:channel|constrain|return|call)\|>\S*/g, '').trim();
-  }
-
-  /**
-   * Sleep for the specified duration.
-   */
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  /**
-   * Get circuit breaker stats.
-   */
-  getCircuitStats(): ReturnType<CircuitBreaker['getStats']> {
-    return this.circuitBreaker.getStats();
   }
 }
 

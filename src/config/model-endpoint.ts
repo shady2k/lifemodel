@@ -59,3 +59,25 @@ export function endpointGaps(
 export function isEndpointComplete(endpoint: ModelEndpoint): boolean {
   return isEndpointFieldSet(endpoint) && endpointGaps(endpoint).length === 0;
 }
+
+/**
+ * The platform's own pin on the endpoint (ADR-013 D2).
+ *
+ * In the cluster the model endpoint is the platform's `model-gateway`, and the
+ * platform names it by this environment variable. The value overrides what the
+ * settings document holds and is not lifemodel's to edit: swapping the endpoint
+ * is the platform's act, and the core keeps one endpoint either way. It carries
+ * no key - the gateway injects the key from OpenBao on the upstream leg.
+ */
+export const PINNED_MODEL_BASE_URL_ENV = 'LIFEMODEL_MODEL_BASE_URL';
+
+/** The pinned base URL, or null when the platform pins none. */
+export function pinnedModelBaseUrl(env: NodeJS.ProcessEnv = process.env): string | null {
+  const value = (env[PINNED_MODEL_BASE_URL_ENV] ?? '').trim();
+  return value === '' ? null : value;
+}
+
+/** The endpoint with the platform's pin applied (a pin wins over the document). */
+export function withPinnedBaseUrl(endpoint: ModelEndpoint, pinned: string | null): ModelEndpoint {
+  return pinned === null ? endpoint : { ...endpoint, baseUrl: pinned };
+}
