@@ -6,6 +6,7 @@ import type { CreatureStateReader } from '../../src/ports/creature-state.js';
 import type { ModelStatusSource } from '../../src/web/model-status.js';
 import type { ModelStatusEvent } from '../../src/web/contract.js';
 import { ModelStatusPoller } from '../../src/web/model-status-poller.js';
+import type { TranscriptRow } from '../../src/ports/transcript.js';
 import { silentModelStatus, stubModelStatus } from '../helpers/model-status.js';
 
 const GATEWAY_STATUS_URL = 'http://model-gateway.lifemodel-system.svc:8081/status';
@@ -29,6 +30,10 @@ function creatureState(state: 'thinking' | 'awake' | 'asleep'): CreatureStateRea
 function createServer(options: {
   modelStatus: ModelStatusSource;
   creature?: CreatureStateReader;
+  /** A transcript row the stream carries, if any. */
+  message?: TranscriptRow;
+  /** Receives the `after` cursor every watch starts from. */
+  watchedAfter?: string[];
 }): FastifyInstance {
   const server = createWebServer({
     allowedOrigin: 'https://lifemodel.local',
@@ -38,7 +43,9 @@ function createServer(options: {
     intake: { acceptOwnerMessage: vi.fn() } as unknown as IOwnerMessageIntake,
     transcript: {
       readTranscript: vi.fn().mockResolvedValue({ rows: [], cursor: null }),
-      watchTranscript: vi.fn(async function* () {
+      watchTranscript: vi.fn(async function* (after: string) {
+        options.watchedAfter?.push(after);
+        if (options.message !== undefined) yield options.message;
         await new Promise<void>(() => undefined);
       }),
       acquireStreamLease: vi.fn().mockResolvedValue('lease'),
@@ -69,19 +76,24 @@ async function baseOf(server: FastifyInstance): Promise<string> {
   return address;
 }
 
-async function openStream(server: FastifyInstance): Promise<OpenStream> {
+async function openStream(
+  server: FastifyInstance,
+  headers: Record<string, string> = {}
+): Promise<OpenStream> {
   const controller = new AbortController();
   const response = await fetch(`${await baseOf(server)}/api/events?after=0`, {
     signal: controller.signal,
+    headers,
   });
   const reader = response.body!.getReader();
   const decoder = new TextDecoder();
   let text = '';
+  // The whole raw frame, exactly as the wire carries it: an `id:` line before
+  // `event:` is part of the frame and must stay visible to the assertions.
   const frames = (event: string): string[] =>
     text
       .split('\n\n')
-      .filter((chunk) => chunk.includes(`event: ${event}\n`))
-      .map((chunk) => chunk.slice(chunk.indexOf('event: ')));
+      .filter((chunk) => chunk.split('\n').includes(`event: ${event}`));
   const waitFor = async (event: string, count: number, timeoutMs = 2_000): Promise<string[]> => {
     const deadline = Date.now() + timeoutMs;
     while (frames(event).length < count) {
@@ -112,6 +124,19 @@ async function openStream(server: FastifyInstance): Promise<OpenStream> {
       await reader.cancel().catch(() => undefined);
     },
   };
+}
+
+/**
+ * The cursor a browser's EventSource would resume from after reading `text`: the
+ * value of the last `id:` line it saw, across frames of every kind (ADR-011 D6).
+ */
+function resumeCursor(text: string): string | null {
+  let cursor: string | null = null;
+  for (const frame of text.split('\n\n')) {
+    const line = frame.split('\n').find((part) => part.startsWith('id:'));
+    if (line !== undefined) cursor = line.slice('id:'.length).trim();
+  }
+  return cursor;
 }
 
 function statusData(frame: string): unknown {
@@ -251,6 +276,40 @@ describe('the model status in the event stream (ADR-013 D6)', () => {
     const afterClose = calls.length;
     await new Promise((resolve) => setTimeout(resolve, 500));
     expect(calls.length).toBe(afterClose);
+  });
+
+  it('leaves the resume cursor on the last message when a model frame arrives', async () => {
+    const row: TranscriptRow = {
+      sequence: '7',
+      role: 'assistant',
+      text: 'hello',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    };
+    const watchedAfter: string[] = [];
+    const source = stubModelStatus(null);
+    const server = createServer({ modelStatus: source, message: row, watchedAfter });
+    const stream = await openStream(server);
+    let cursor: string | null;
+    try {
+      await stream.waitFor('message', 1);
+      source.set({ state: 'ok', outageSince: null, lastErrorCode: null });
+      const modelFrames = await stream.waitFor('model', 1);
+      // A model event is not a transcript row: the browser must not resume past it.
+      expect(modelFrames[0]).not.toMatch(/^id:/m);
+      cursor = resumeCursor(stream.text());
+      expect(cursor).toBe('7');
+    } finally {
+      await stream.close();
+    }
+    // The cursor a reconnecting browser sends asks for what follows row 7.
+    watchedAfter.length = 0;
+    const resumed = await openStream(server, { 'last-event-id': cursor });
+    try {
+      await resumed.waitFor('state', 1);
+    } finally {
+      await resumed.close();
+    }
+    expect(watchedAfter).toEqual(['7']);
   });
 
   it('stays quiet about a source that has not answered yet', async () => {
