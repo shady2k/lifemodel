@@ -354,6 +354,71 @@ describe('OpenBao bootstrap', () => {
     }
   );
 
+  // One wrong field at a time, in the real `{data:{...}}` envelope the OpenBao
+  // role read-back returns: every other field the read-back judges stays
+  // correct, so each entry pins one clause of the binding check. Each of them
+  // must be refused before a check token is minted or root is retired.
+  const completeRole = (): Record<string, unknown> => ({
+    bound_service_account_names: ['model-gateway'],
+    bound_service_account_namespaces: ['lifemodel-system'],
+    policies: ['model-gateway'],
+    token_no_default_policy: true,
+  });
+  const withoutDefaultPolicyClause = (): Record<string, unknown> => {
+    const role = completeRole();
+    delete role['token_no_default_policy'];
+    return role;
+  };
+  const wrongRoleReadBacks: [string, Record<string, unknown>][] = [
+    ['token_no_default_policy is false', { ...completeRole(), token_no_default_policy: false }],
+    ['token_no_default_policy is absent', withoutDefaultPolicyClause()],
+    [
+      'policies adds the default policy',
+      { ...completeRole(), policies: ['model-gateway', 'default'] },
+    ],
+    [
+      'bound_service_account_names adds a second ServiceAccount',
+      { ...completeRole(), bound_service_account_names: ['model-gateway', 'loader'] },
+    ],
+    [
+      'bound_service_account_namespaces names another namespace',
+      { ...completeRole(), bound_service_account_namespaces: ['lifemodel'] },
+    ],
+  ];
+
+  it.each(wrongRoleReadBacks)(
+    'refuses a role read-back where %s before minting any check token or retiring root',
+    async (_description, role) => {
+      const f = gatewayBoundary({ roleReadBack: JSON.stringify({ data: role }) });
+      await expect(f.api.ensureModelPolicy('root')).rejects.toThrow(
+        /not bound to the gateway ServiceAccount alone/
+      );
+      expect(f.mints).toBe(0);
+      expect(f.rootRetired).toBe(false);
+
+      // The same rejection must stop the bootstrap phase: a role the gateway
+      // could share with another identity can never be followed by a minted
+      // check token or a retired root token.
+      const bootstrap = createOpenBaoBootstrap({
+        bao: f.api,
+        custody: {
+          read: async () => ({ keys: ['key'], rootToken: 'root' }),
+          write: async () => {
+            throw new Error('a wrongly bound role must not retire root');
+          },
+        },
+        runPhases: async (phases) => {
+          for (const phase of phases) await phase.run();
+        },
+      });
+      await expect(bootstrap.runInitial()).rejects.toThrow(
+        /not bound to the gateway ServiceAccount alone/
+      );
+      expect(f.mints).toBe(0);
+      expect(f.rootRetired).toBe(false);
+    }
+  );
+
   it('uses the OpenBao HTTP API shapes for 1-of-1 init, policy, role and self-revocation', async () => {
     const calls: Array<{
       path: string;
