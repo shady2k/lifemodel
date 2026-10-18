@@ -1,10 +1,15 @@
+# The loader's OWN permits. The namespace-wide default deny is its own object
+# (namespace-default-deny.yaml), so a second platform workload in this namespace
+# - the model gateway - inherits none of these routes (ADR-013 D5).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: loader-default-deny
+  name: loader-access
   namespace: lifemodel-system
 spec:
-  podSelector: {}
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: loader
   policyTypes:
     - Ingress
     - Egress
@@ -42,7 +47,7 @@ spec:
       ports:
         - protocol: TCP
           port: 6443
-    # OpenBao is the only permitted application service egress.
+    # OpenBao bootstrap and model-slot storage.
     - to:
         - namespaceSelector:
             matchLabels:
@@ -50,6 +55,18 @@ spec:
       ports:
         - protocol: TCP
           port: 8200
+
+    # The loader reads the platform gateway's status, not its model API.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: model-gateway
+      ports:
+        - protocol: TCP
+          port: 8081
 
     # Model checks may reach public endpoints and RFC1918 LAN Ollama; application validation blocks pod/service and metadata ranges.
     - to:

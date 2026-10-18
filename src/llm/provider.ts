@@ -60,6 +60,16 @@ export interface Message {
 export type ModelRole = 'fast' | 'smart' | 'motor';
 
 /**
+ * The model a role asks for when the configured endpoint names none for it
+ * (ADR-013 D2).
+ *
+ * The platform's `model-gateway` maps it to the configured slot's own model id,
+ * so an instance whose settings name no models still reaches the owner's model;
+ * a role the owner later names passes through on the primary.
+ */
+export const DEFAULT_ROLE_MODEL = 'default';
+
+/**
  * JSON Schema definition for structured output.
  */
 export interface JsonSchemaDefinition {

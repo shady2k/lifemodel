@@ -21,9 +21,12 @@ loader Deployment and Service. `platform-instance` owns the `boot-<name>.local`
 Ingress. The loader image is
 pinned by digest in `a0/kustomization.yaml`; its zero digest is a release
 placeholder. The loader Deployment runs non-root with a read-only root
-filesystem. `loader-default-deny` denies ingress and egress except Traefik to
-port 7000, DNS, the Kubernetes API on TCP 6443, OpenBao on TCP 8200 and Gitea
-on TCP 3000.
+filesystem. `lifemodel-system-default-deny` denies all ingress and egress in the
+namespace as its own object, and `loader-access` is the loader's own permit list
+on top of it: Traefik to port 7000, DNS, the Kubernetes API on TCP 6443, OpenBao
+on TCP 8200, Gitea on TCP 3000 and the model endpoints. A second platform
+workload in this namespace inherits none of it; the model gateway gets its own
+policy in step A.
 
 A0 also creates two Flux-prune-protected Secrets for durable loader phase
 records and OpenBao key custody. Its ValidatingAdmissionPolicies fail closed:
@@ -66,6 +69,26 @@ use those credentials. The loader then creates the two application
 Kustomizations with their matching restricted appliers. Phase progress is
 stored and read back after each durable phase; failures are recorded and
 retried by the loader while its interface remains available.
+
+## Step A: the model gateway
+
+`model-gateway` is a Deployment and Service in `lifemodel-system`, part of the
+signed platform and applied after OpenBao: the loader image with its command
+overridden to `node /opt/lifemodel/loader/dist/model-gateway.js`, its own
+ServiceAccount, no loader volume, custody Secret or PKI, a read-only root
+filesystem and `GET /status` as readiness (a first start with no model slots is
+ready). `a/kustomization.yaml` pins the same loader image name, and the release
+flow writes the pushed loader digest into `a0/kustomization.yaml` and
+`a/kustomization.yaml` in one run. The Service publishes 8080 (the
+OpenAI-compatible API) and 8081 (`/status`); `model-gateway-access` admits 8080
+only from core pods and 8081 only from web and loader pods, and lets the
+gateway reach DNS, OpenBao and the loader's model exception. OpenBao admits the
+gateway on 8200 beside the loader. The core's `lifemodel-model-egress` allows
+the gateway's 8080 and nothing else for the model, and the web module reads the
+gateway's `/status`. The gateway logs in to OpenBao with role `model-gateway`,
+policy `read` on `lifemodel/data/model/*` only, provisioned and verified by the
+loader's bootstrap before the root token is retired. The core's endpoint comes
+from `LIFEMODEL_MODEL_BASE_URL` and carries no key.
 
 The `gitea-admin` Secret remains while the chart references it. Its Bao-held
 retirement is lifemodel-2t5.2. The Gitea and OpenBao charts are vendored at

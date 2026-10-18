@@ -18,10 +18,19 @@ configuration are not part of the current core.
 | `POST /settings` | Validates and stores the submitted settings, then reloads the endpoint in the running core. |
 
 The endpoint base URL must be HTTP or HTTPS, with no URL credentials, query or
-fragment. If any endpoint field is set, the base URL and all three model names
-must be present. A blank endpoint is valid. Invalid input returns `400` and
+fragment. Without `LIFEMODEL_MODEL_BASE_URL`, if any endpoint field is set,
+the base URL and all three model names must be present. An unpinned role with
+no model is refused, not sent as `default`. A blank endpoint is valid. Invalid input returns `400` and
 writes nothing. Cross-origin or origin-less writes return `403`. A failed
 Postgres write returns `500`; a save during shutdown returns `503`.
+
+Where the platform pins the endpoint with `LIFEMODEL_MODEL_BASE_URL` — the
+cluster, where the endpoint is the platform's model gateway — the base URL
+field is shown read-only and a different submitted value is refused by that
+field. The models stay the owner's to set and are optional there: a role left
+blank asks the gateway for the model `default`, which it maps to the model
+configured for the slot it uses (ADR-013 D2). A save writes no base URL into
+the configuration document while the platform names the endpoint.
 
 Endpoint URLs are redacted before rendering. Model credentials are provided
 through the platform's credential path and are never stored in the settings

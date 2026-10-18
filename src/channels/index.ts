@@ -1,1 +1,1 @@
-export type { Channel, CircuitStats, SendOptions } from './channel.js';
+export type { Channel, SendOptions } from './channel.js';

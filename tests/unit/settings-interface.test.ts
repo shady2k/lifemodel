@@ -139,6 +139,33 @@ describe('settings server writes its config boundary', () => {
     expect(saved).toBe(0);
   });
 
+  it('shows the platform-pinned endpoint and refuses to edit it', async () => {
+    process.env['LIFEMODEL_MODEL_BASE_URL'] = 'http://model-gateway.lifemodel-system.svc:8080/v1';
+    try {
+      await startServer();
+      const page = await request('/');
+      expect(page.body).toContain('http://model-gateway.lifemodel-system.svc:8080/v1');
+      expect(page.body).toMatch(/id="endpointBaseUrl"[^>]*readonly/);
+      const refused = await request('/settings', endpoint);
+      expect(refused.status).toBe(400);
+      expect(refused.body).toContain('LIFEMODEL_MODEL_BASE_URL');
+      expect(document).toBeNull();
+      const accepted = await request('/settings', {
+        ...endpoint,
+        endpointBaseUrl: 'http://model-gateway.lifemodel-system.svc:8080/v1',
+      });
+      expect(accepted.status).toBe(200);
+      expect(document?.llm?.endpoint).toMatchObject({
+        baseUrl: null,
+        fastModel: 'fast-v2',
+        smartModel: 'smart-v2',
+        motorModel: 'motor-v2',
+      });
+    } finally {
+      delete process.env['LIFEMODEL_MODEL_BASE_URL'];
+    }
+  });
+
   it('refuses cross-origin and missing-origin writes', async () => {
     await startServer();
     const port = Number(server.address().split(':').at(-1));

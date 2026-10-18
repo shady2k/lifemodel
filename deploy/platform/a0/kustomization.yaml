@@ -9,6 +9,10 @@ resources:
   - pvc.yaml
   - deployment.yaml
   - service.yaml
+  # The namespace-wide default deny is its own object, applied before the
+  # loader's own permits: another platform workload in lifemodel-system
+  # inherits only what step A allows it (ADR-013 D5).
+  - namespace-default-deny.yaml
   - network-policy.yaml
 images:
   - name: ghcr.io/shady2k/lifemodel-loader

@@ -1,30 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -ne 2 ]; then
-  echo "usage: $0 sha256:<64 lowercase hex digits> <kustomization-file>" >&2
+# Pin the loader image's immutable digest in every kustomization that deploys
+# that image: A0 runs the loader itself, step A runs the platform's
+# model-gateway from the same image (ADR-013 D1/D8), so both must name the
+# same pushed digest.
+if [ "$#" -lt 2 ]; then
+  echo "usage: $0 sha256:<64 lowercase hex digits> <kustomization-file>..." >&2
   exit 2
 fi
 
 digest=$1
-file=$2
+shift
 if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
   echo "invalid loader image digest: expected sha256:<64 lowercase hex digits>" >&2
   exit 2
 fi
-if [ ! -f "$file" ]; then
-  echo "kustomization file not found: $file" >&2
-  exit 2
-fi
 
 placeholder='sha256:0000000000000000000000000000000000000000000000000000000000000000'
-count=$(grep -F -c "digest: $placeholder" "$file" || true)
-if [ "$count" -ne 1 ]; then
-  echo "expected exactly one loader digest placeholder in $file; found $count" >&2
-  exit 1
-fi
+for file in "$@"; do
+  if [ ! -f "$file" ]; then
+    echo "kustomization file not found: $file" >&2
+    exit 2
+  fi
+  count=$(grep -F -c "digest: $placeholder" "$file" || true)
+  if [ "$count" -ne 1 ]; then
+    echo "expected exactly one loader digest placeholder in $file; found $count" >&2
+    exit 1
+  fi
+done
 
-tmp=$(mktemp "${file}.XXXXXX")
-trap 'rm -f "$tmp"' EXIT
-sed "s|digest: $placeholder|digest: $digest|" "$file" > "$tmp"
-mv "$tmp" "$file"
+# Validate all inputs before rewriting any file. Validation failures leave
+# files unchanged; a later write failure can leave earlier files changed.
+# This is not a multi-file transaction; the fail-fast release step prevents
+# publication when any rewrite fails.
+for file in "$@"; do
+  tmp=$(mktemp "${file}.XXXXXX")
+  trap 'rm -f "$tmp"' EXIT
+  sed "s|digest: $placeholder|digest: $digest|" "$file" > "$tmp"
+  mv "$tmp" "$file"
+done

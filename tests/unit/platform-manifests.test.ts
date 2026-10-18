@@ -99,6 +99,9 @@ function assertStepANetworkPolicies(objects: Record<string, any>[]): void {
   const expected = {
     openbao: ['openbao-default-deny', 'openbao-server-access'],
     'lifemodel-git': ['gitea-default-deny'],
+    // The namespace default deny, the loader's own permits and the model
+    // gateway's own routes: three separate objects (ADR-013 D5).
+    'lifemodel-system': ['lifemodel-system-default-deny', 'loader-access', 'model-gateway-access'],
   };
   for (const [namespace, names] of Object.entries(expected)) {
     const actual = objects
@@ -683,7 +686,7 @@ describe('platform manifests', () => {
   it('rejects extra step-A NetworkPolicies in either protected namespace', () => {
     const objects = sourceObjects();
     expect(() => assertStepANetworkPolicies(objects)).not.toThrow();
-    for (const namespace of ['openbao', 'lifemodel-git']) {
+    for (const namespace of ['openbao', 'lifemodel-git', 'lifemodel-system']) {
       const mutated = structuredClone(objects);
       mutated.push({
         apiVersion: 'networking.k8s.io/v1',
@@ -1081,6 +1084,12 @@ describe('platform manifests', () => {
               },
               podSelector: { matchLabels: { 'app.kubernetes.io/name': 'loader' } },
             },
+            {
+              namespaceSelector: {
+                matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' },
+              },
+              podSelector: { matchLabels: { 'app.kubernetes.io/name': 'model-gateway' } },
+            },
           ],
           ports: [{ protocol: 'TCP', port: 8200 }],
         },
@@ -1356,11 +1365,23 @@ describe('platform manifests', () => {
   });
 
   it('limits loader ingress to Traefik pods in kube-system', () => {
-    const policy = sourceObjects().find(
+    const policies = sourceObjects().filter(
       (item) => item.kind === 'NetworkPolicy' && item.metadata.namespace === 'lifemodel-system'
     );
+    // The namespace default deny is its own object, so a second platform
+    // workload there inherits none of the loader's permits (ADR-013 D5).
+    const denyAll = policies.find((item) => item.metadata.name === 'lifemodel-system-default-deny');
+    expect(denyAll?.spec).toEqual({
+      podSelector: {},
+      policyTypes: ['Ingress', 'Egress'],
+      ingress: [],
+      egress: [],
+    });
+    const policy = policies.find((item) => item.metadata.name === 'loader-access');
     expect(policy, 'missing loader NetworkPolicy').toBeDefined();
-    expect(policy!.spec.podSelector).toEqual({});
+    expect(policy!.spec.podSelector).toEqual({
+      matchLabels: { 'app.kubernetes.io/name': 'loader' },
+    });
     expect(policy!.spec.policyTypes).toEqual(expect.arrayContaining(['Ingress', 'Egress']));
     expect(policy!.spec.ingress).toEqual([
       expect.objectContaining({
@@ -1390,6 +1411,17 @@ describe('platform manifests', () => {
       {
         to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'openbao' } } }],
         ports: [{ protocol: 'TCP', port: 8200 }],
+      },
+      {
+        to: [
+          {
+            namespaceSelector: {
+              matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' },
+            },
+            podSelector: { matchLabels: { 'app.kubernetes.io/name': 'model-gateway' } },
+          },
+        ],
+        ports: [{ protocol: 'TCP', port: 8081 }],
       },
       {
         to: [
@@ -1445,6 +1477,6 @@ describe('platform manifests', () => {
           (rule.ports ?? []).map((port: any) => `${port.protocol}/${port.port}`)
         )
         .sort()
-    ).toEqual(['TCP/11434', 'TCP/3000', 'TCP/53', 'TCP/6443', 'TCP/8200', 'UDP/53']);
+    ).toEqual(['TCP/11434', 'TCP/3000', 'TCP/53', 'TCP/6443', 'TCP/8081', 'TCP/8200', 'UDP/53']);
   });
 });

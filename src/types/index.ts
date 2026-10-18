@@ -74,7 +74,7 @@ export { createRule } from './rule.js';
 export { createDefaultInterests } from './user/interests.js';
 
 // Channel types (re-exported from channels module)
-export type { Channel, CircuitStats, SendOptions, SendResult } from '../channels/channel.js';
+export type { Channel, SendOptions, SendResult } from '../channels/channel.js';
 
 /**
  * Round a number to 3 decimal places.

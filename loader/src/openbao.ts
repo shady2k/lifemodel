@@ -292,6 +292,95 @@ export function createOpenBaoApi(
     client.call(path, method, payload, { anonymous: true });
   const asToken = (token: string, path: string, method: string, payload?: unknown) =>
     client.call(path, method, payload, { token });
+
+  /**
+   * The model gateway's own identity (ADR-013 D3), provisioned beside
+   * `loader-model` and verified before the root token is retired.
+   *
+   * The gateway logs in with its own ServiceAccount, so it holds the policy
+   * `read` on the model slots and nothing else. Its Kubernetes-auth login
+   * needs the gateway's projected JWT, which the loader does not have: the
+   * policy is therefore checked through a bounded token that carries that
+   * policy alone, and the role's binding to the gateway ServiceAccount is
+   * checked by reading the role back. Policy and role writes repeat safely.
+   * Token creation is not idempotent: a lost response can leave a parented,
+   * nonrenewable token alive until its 60s TTL or root retirement.
+   */
+  const ensureModelGatewayIdentity = async (rootToken: string): Promise<void> => {
+    // No metadata, no delete, no write: the gateway reads slots and nothing else.
+    const policy = 'path "lifemodel/data/model/*" { capabilities = ["read"] }';
+    await asToken(rootToken, 'sys/policies/acl/model-gateway', 'PUT', { policy });
+    await asToken(rootToken, 'auth/kubernetes/role/model-gateway', 'POST', {
+      bound_service_account_names: ['model-gateway'],
+      bound_service_account_namespaces: ['lifemodel-system'],
+      policies: ['model-gateway'],
+      token_no_default_policy: true,
+      ttl: '1h',
+    });
+    const response = await asToken(rootToken, 'auth/kubernetes/role/model-gateway', 'GET');
+    const recorded = response['data'];
+    if (recorded === null || typeof recorded !== 'object' || Array.isArray(recorded))
+      throw new Error('OpenBao model-gateway role response has no data object');
+    const role = recorded as Record<string, unknown>;
+    const serviceAccounts = role['bound_service_account_names'];
+    const namespaces = role['bound_service_account_namespaces'];
+    const policies = role['policies'];
+    if (
+      !Array.isArray(serviceAccounts) ||
+      serviceAccounts.length !== 1 ||
+      serviceAccounts[0] !== 'model-gateway' ||
+      !Array.isArray(namespaces) ||
+      namespaces.length !== 1 ||
+      namespaces[0] !== 'lifemodel-system' ||
+      !Array.isArray(policies) ||
+      policies.length !== 1 ||
+      policies[0] !== 'model-gateway' ||
+      role['token_no_default_policy'] !== true
+    )
+      throw new Error(
+        'OpenBao model-gateway role is not bound to the gateway ServiceAccount alone'
+      );
+    const minted = await asToken(rootToken, 'auth/token/create', 'POST', {
+      policies: ['model-gateway'],
+      ttl: '60s',
+      renewable: false,
+      no_default_policy: true,
+    });
+    const auth = minted['auth'] as Record<string, unknown> | undefined;
+    const verificationToken = auth?.['client_token'];
+    if (typeof verificationToken !== 'string' || verificationToken === '')
+      throw new Error('OpenBao issued no token for the model-gateway capability check');
+    try {
+      const tokenPolicies = auth?.['policies'];
+      if (
+        !Array.isArray(tokenPolicies) ||
+        tokenPolicies.length !== 1 ||
+        tokenPolicies[0] !== 'model-gateway'
+      )
+        throw new Error('OpenBao verification token must carry the model-gateway policy alone');
+      const capabilities = await asToken(rootToken, 'sys/capabilities', 'POST', {
+        token: verificationToken,
+        paths: [
+          'lifemodel/data/model/primary',
+          'lifemodel/data/model/reserve',
+          'lifemodel/metadata/model/primary',
+        ],
+      });
+      for (const slot of ['lifemodel/data/model/primary', 'lifemodel/data/model/reserve']) {
+        const granted = capabilities[slot] as string[] | undefined;
+        if (granted?.length !== 1 || granted[0] !== 'read')
+          throw new Error(
+            'OpenBao model-gateway policy does not grant read on every model slot and nothing more'
+          );
+      }
+      const unrelated = capabilities['lifemodel/metadata/model/primary'] as string[] | undefined;
+      if (unrelated?.length !== 1 || unrelated[0] !== 'deny')
+        throw new Error('OpenBao model-gateway policy reaches beyond the model slots it reads');
+    } finally {
+      // The check's token is bounded anyway; revoke it so no credential outlives the check.
+      await asToken(rootToken, 'auth/token/revoke', 'POST', { token: verificationToken });
+    }
+  };
   return {
     status: async () => {
       const data = await asAnonymous('sys/seal-status', 'GET');
@@ -379,6 +468,7 @@ export function createOpenBaoApi(
         policies: ['loader', 'loader-model'],
         ttl: '1h',
       });
+      await ensureModelGatewayIdentity(rootToken);
       await client.login();
       const capabilities = await asRole('sys/capabilities-self', 'POST', {
         paths: [

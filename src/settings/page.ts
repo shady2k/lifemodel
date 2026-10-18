@@ -3,8 +3,8 @@
  * like the loader's own pages.
  *
  * It says what is set, what is missing, and where the keys and panic live. It
- * never contains a secret: the bot token field holds the Agent Vault
- * placeholder, and no key of the endpoint is lifemodel's to show.
+ * never contains a secret: no key of the endpoint is lifemodel's to show, and
+ * the platform's model gateway injects it from OpenBao on the upstream leg.
  */
 import { isEndpointComplete, isEndpointFieldSet } from '../config/model-endpoint.js';
 import {
@@ -56,6 +56,11 @@ export interface SettingsPageOptions {
   overriddenBy?: string[];
   /** Set after a save: the page confirms the config is applied. */
   saved?: boolean;
+  /**
+   * The endpoint the platform pins (ADR-013 D2), or null. Shown as it is and
+   * not editable: swapping the model endpoint is the platform's act.
+   */
+  pinnedBaseUrl?: string | null;
 }
 
 /** What the endpoint is missing, in the page's words (empty when configured). */
@@ -78,12 +83,14 @@ function endpointState(values: SettingsInput): string[] {
 function field(options: SettingsPageOptions, formField: (typeof SETTINGS_FIELDS)[number]): string {
   const { field, label } = formField;
   const error = options.errors?.[field];
+  const pinned = field === 'endpointBaseUrl' && (options.pinnedBaseUrl ?? null) !== null;
   // Endpoint URLs are rendered in a redacted form.
   const value =
     field === 'endpointBaseUrl' ? redactEndpointUrl(options.values[field]) : options.values[field];
   const hints: Partial<Record<typeof field, string>> = {
-    endpointBaseUrl:
-      'The OpenAI-compatible endpoint lifemodel talks to, e.g. http://127.0.0.1:1234/v1',
+    endpointBaseUrl: pinned
+      ? 'This platform sets the model endpoint; it is not editable here. lifemodel talks to it and holds no key.'
+      : 'The OpenAI-compatible endpoint lifemodel talks to, e.g. http://127.0.0.1:1234/v1',
     fastModel: 'The model for classification and quick decisions',
     smartModel: 'The model for reasoning and composing messages',
     motorModel: 'The model for Motor Cortex runs',
@@ -91,7 +98,7 @@ function field(options: SettingsPageOptions, formField: (typeof SETTINGS_FIELDS)
   const hint = hints[field];
   return [
     `      <label for="${field}">${escapeHtml(label.charAt(0).toUpperCase() + label.slice(1))}</label>`,
-    `      <input id="${field}" name="${field}" value="${escapeHtml(value)}" />`,
+    `      <input id="${field}" name="${field}" value="${escapeHtml(value)}"${pinned ? ' readonly' : ''} />`,
     ...(hint === undefined ? [] : [`      <p class="hint">${escapeHtml(hint)}</p>`]),
     ...(error === undefined
       ? []
@@ -101,7 +108,9 @@ function field(options: SettingsPageOptions, formField: (typeof SETTINGS_FIELDS)
 
 /** The whole page. */
 export function renderSettingsPage(options: SettingsPageOptions): string {
-  const missing = endpointState(options.values);
+  // A platform-pinned endpoint is configured by definition; the models are
+  // optional beside it (a role left blank asks for `default`).
+  const missing = (options.pinnedBaseUrl ?? null) === null ? endpointState(options.values) : [];
   const loader = loaderUrl(options.instanceName);
 
   const missingBlock =
@@ -116,6 +125,13 @@ export function renderSettingsPage(options: SettingsPageOptions): string {
       ? `      <p class="missing"><strong>Saved.</strong> lifemodel is using these
       settings for future model requests. Reload this page in a moment to see them at work.</p>`
       : '';
+
+  const pinnedBlock =
+    (options.pinnedBaseUrl ?? null) === null
+      ? ''
+      : `      <p class="hint">This platform sets the model endpoint. A model left blank is
+      asked for as <code>default</code>, and the gateway answers with the model configured
+      for the endpoint it uses.</p>`;
 
   const overrideBlock =
     (options.overriddenBy ?? []).length === 0
@@ -136,10 +152,10 @@ export function renderSettingsPage(options: SettingsPageOptions): string {
     <p>These settings belong to this lifemodel instance, and they are its own: the model
     endpoint below. Saving them writes the instance's configuration to Postgres and
     applies the new model endpoint and models to the running core.</p>
-    <p>Keys are not kept here. Put them into Agent Vault, reached through the loader
-    (<a href="${escapeHtml(loader)}">${escapeHtml(loader)}</a>) - the same place panic and resume live.
-    lifemodel holds no key.</p>
-${savedBlock}${missingBlock}${overrideBlock}
+    <p>Keys are not kept here. Put the endpoint and its key into the loader
+    (<a href="${escapeHtml(loader)}">${escapeHtml(loader)}</a>): the platform keeps the key in
+    OpenBao and its model gateway adds it on the way out. lifemodel holds no key.</p>
+${savedBlock}${missingBlock}${pinnedBlock}${overrideBlock}
     <h2>The model endpoint</h2>
     <p>One OpenAI-compatible endpoint, with the model for each role. lifemodel holds no key:
     the key is injected on the way out.</p>
