@@ -831,19 +831,26 @@ describe('model gateway terminal stream validation', () => {
 });
 
 describe('model gateway review regressions', () => {
-  it.each(['completion', 'models', 'stream'] as const)(
-    'scans final serialized %s bytes for numeric keys on both slots',
-    async (kind) => {
+  it.each([
+    ['completion', '12345', '1.2345e4'],
+    ['models', '12345', '1.2345e4'],
+    ['stream', '12345', '1.2345e4'],
+    ['completion', '12346', '12345.9999999999999'],
+    ['models', '12346', '12345.9999999999999'],
+    ['stream', '12346', '12345.9999999999999'],
+  ] as const)(
+    'scans final serialized %s bytes for numeric key %s from %s on both slots',
+    async (kind, key, numeric) => {
       const f = await fixture();
       for (const name of ['primary', 'reserve'] as const) {
-        f.slots[name]!.key = '12345';
+        f.slots[name]!.key = key;
         f.handlers[name] = (_req, res) => {
           if (kind === 'stream') {
             res.writeHead(200, { 'content-type': 'text/event-stream' });
-            res.end(event('ok').replace('"id":"stream-1"', '"usage":1.2345e4') + endStream());
+            res.end(event('ok').replace('"id":"stream-1"', `"usage":${numeric}`) + endStream());
           } else {
             const value = kind === 'models' ? { data: [{ id: 'm' }] } : answer();
-            res.end(JSON.stringify(value).replace(/}$/, ',"usage":1.2345e4}'));
+            res.end(JSON.stringify(value).replace(/}$/, `,"usage":${numeric}}`));
           }
         };
       }
@@ -854,7 +861,7 @@ describe('model gateway review regressions', () => {
       expect(response.status).toBe(502);
       const text = await response.text();
       expect(text).toContain('unsafe_response');
-      expect(text).not.toContain('12345');
+      expect(text).not.toContain(key);
       expect(f.attempts.map((a) => a.slot)).toEqual(['primary', 'reserve']);
     }
   );
@@ -1238,7 +1245,7 @@ describe('model gateway production timer and inbound boundaries', () => {
       });
       socket.on('end', () => resolve(text));
       socket.on('connect', () =>
-        socket.end(
+        socket.write(
           `POST /v1/chat/completions HTTP/1.1\r\nHost: gateway\r\n${headers}\r\nConnection: close\r\n\r\n{}`
         )
       );
