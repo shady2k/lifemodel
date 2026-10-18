@@ -14,6 +14,7 @@
         let lockedK3s = nixpkgs.legacyPackages.${pkgs.stdenv.hostPlatform.system}.k3s;
         in {
           imports = [ module ];
+          _module.args.selfVersion = lib.removeSuffix "\n" (builtins.readFile ./deploy/nixos/release-tag);
           _module.args.lifemodelK3s = lockedK3s;
         };
       baseModule = { ... }: {
@@ -355,6 +356,91 @@
            assert builtins.all (name: lib.hasInfix "${name}" units."lifemodel-mdns-${lib.replaceStrings [ "." ] [ "-" ] name}".serviceConfig.ExecStart) names;
            assert !(lib.hasInfix "publish-workstation" (builtins.toJSON keyless.config.services.avahi));
            pkgs.runCommand "lifemodel-mdns-module-evaluation" {} "touch $out";
+      releaseDefaults = lib.nixosSystem {
+        inherit system;
+        modules = [ exportedModule ({ ... }: {
+          system.stateVersion = "26.05";
+          fileSystems."/" = { device = "/dev/disk/by-label/nixos"; fsType = "ext4"; };
+          boot.loader.grub.devices = [ "nodev" ];
+          services.lifemodel.enable = true;
+          services.lifemodel.lanInterface = "eth0";
+        }) ];
+      };
+      releaseTag = lib.removeSuffix "\n" (builtins.readFile ./deploy/nixos/release-tag);
+      releaseDefaultsCheck =
+        assert releaseDefaults.config.services.lifemodel.platform.url == platformUrl;
+        assert releaseDefaults.config.services.lifemodel.platform.tag == releaseTag;
+        assert releaseDefaults.config.services.lifemodel.platform.digest == null;
+        assert lib.hasInfix "tag: '${releaseTag}'" (builtins.readFile releaseDefaults.config.services.lifemodel.generatedRootOCI);
+        assert builtins.match "v[0-9][A-Za-z0-9._-]*" releaseTag != null;
+        pkgs.runCommand "lifemodel-flake-own-release-default" {} "touch $out";
+      bootstrapWaitCheck =
+        assert lib.hasInfix "wait-ready.mjs" bootstrapScript;
+        assert !(lib.hasInfix "lifemodel address ||" bootstrapScript);
+        assert builtins.elem pkgs.nodejs keyless.config.systemd.services.lifemodel-flux-bootstrap.path;
+        assert builtins.elem pkgs.curl keyless.config.systemd.services.lifemodel-flux-bootstrap.path;
+        pkgs.runCommand "lifemodel-bootstrap-verified-address" {
+          nativeBuildInputs = [ pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.util-linux ];
+        } ''
+          set -eu
+          mkdir bin state
+          export BOOTSTRAP_LOG="$PWD/bootstrap.log"
+          export BOOTSTRAP_STATE="$PWD/state"
+          export BOOTSTRAP_WAIT_EXIT=0
+          cat > bin/kubectl <<'EOF'
+          #!${pkgs.runtimeShell}
+          case "$*" in
+            'get nodes') exit 0 ;;
+            'get namespace flux-system') exit 1 ;;
+            *'get configmap lifemodel-instance'*) echo '(NotFound)' >&2; exit 1 ;;
+            *' -f -') cat >/dev/null ;;
+            *'apply '*) : ;;
+            *) echo "unexpected kubectl call: $*" >&2; exit 1 ;;
+          esac
+          EOF
+          cat > bin/lifemodel <<'EOF'
+          #!${pkgs.runtimeShell}
+          case "$1" in
+            render-ref) printf '%s\n' rendered-root ;;
+            effective-ref) echo "$2" ;;
+            assert-root-ownership) : ;;
+            record-applied) echo applied >> "$BOOTSTRAP_LOG" ;;
+            address)
+              [ "$LIFEMODEL_LOCK_FD" = 9 ] && [ "$LIFEMODEL_LOCK_HELD" = 1 ] || exit 1
+              # The child must inherit the writer's open lock, not reacquire it.
+              test -e /proc/self/fd/9 || exit 1
+              echo address >> "$BOOTSTRAP_LOG" ;;
+            *) exit 1 ;;
+          esac
+          EOF
+          cat > bin/node <<'EOF'
+          #!${pkgs.runtimeShell}
+          case "$1" in *wait-ready.mjs) ;; *) exit 1 ;; esac
+          [ "$LIFEMODEL_NAME" = lifemodel ] || exit 1
+          [ "$LIFEMODEL_KUBECTL" = "$PWD/bin/kubectl" ] || exit 1
+          echo wait >> "$BOOTSTRAP_LOG"
+          exit "$BOOTSTRAP_WAIT_EXIT"
+          EOF
+          chmod +x bin/*
+          export PATH="$PWD/bin:$PATH"
+          cp ${pkgs.writeText "bootstrap-test.sh" (builtins.unsafeDiscardStringContext (builtins.replaceStrings
+            [ kubectlPlaceholder "/var/lib/lifemodel" ]
+            [ "__TEST_KUBECTL__" "__TEST_STATE__" ] bootstrapScript))} bootstrap.in
+          sed -e "s|__TEST_KUBECTL__|$PWD/bin/kubectl|g" \
+              -e "s|__TEST_STATE__|$PWD/state|g" bootstrap.in > bootstrap.sh
+          bash bootstrap.sh
+          printf 'applied\nwait\naddress\n' > expected
+          cmp expected "$BOOTSTRAP_LOG"
+          : > "$BOOTSTRAP_LOG"
+          export BOOTSTRAP_WAIT_EXIT=7
+          if bash bootstrap.sh; then
+            echo 'bootstrap ignored failed verified readiness' >&2; exit 1
+          fi
+          printf 'applied\nwait\n' > expected
+          cmp expected "$BOOTSTRAP_LOG"
+          touch $out
+        '';
+      kubectlPlaceholder = "${keyless.config.services.k3s.package}/bin/k3s kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml";
       moduleEvaluation = assert toString keyless.config.services.k3s.package
           == toString nixpkgs.legacyPackages.${system}.k3s;
         assert keyless.config.services.k3s.package.version == pkgs.k3s.version;
@@ -382,6 +468,8 @@
           (builtins.readFile keyless.config.services.lifemodel.generatedRootKustomization)
           ./tests/fixtures/nixos/kustomization.yaml;
         module-evaluation = moduleEvaluation;
+        release-defaults = releaseDefaultsCheck;
+        bootstrap-verified-address = bootstrapWaitCheck;
         mdns-module-evaluation = mdnsEvaluation;
         mdns-installer-unit-render = mdnsInstallerUnits;
         platform-kustomize-wiring = renderedPlatform;

@@ -279,7 +279,7 @@ export async function run(argv, dependencies = {}) {
       const inspect = await docker(['image', 'inspect', BASE_IMAGE, '--format', '{{.Id}}/{{.Architecture}}'], { mustSucceed: false, timeoutMs: 20_000 });
       if (inspect.code) await docker(['pull', BASE_IMAGE], { live: true });
       const base = inspect.code ? await docker(['image', 'inspect', BASE_IMAGE, '--format', '{{.Id}}/{{.Architecture}}']) : inspect;
-      const hash = createHash('sha256').update('recipe-v2\0' + base.stdout)
+      const hash = createHash('sha256').update('recipe-v3-curl\0' + base.stdout)
         .update(fs.readFileSync(path.join(snapshot, 'package.json')))
         .update(fs.readFileSync(path.join(snapshot, 'package-lock.json')))
         .update(fs.existsSync(path.join(snapshot, '.npmrc')) ? fs.readFileSync(path.join(snapshot, '.npmrc')) : '').digest('hex').slice(0, 24);
@@ -290,7 +290,7 @@ export async function run(argv, dependencies = {}) {
         owned.add(prep); // Before creation: even a timed-out create must be reaped.
         await docker([...containerArgs(prep, BASE_IMAGE, false), 'sleep', 'infinity']);
         await docker(['start', prep]);
-        await docker(['exec', prep, 'sh', '-ec', 'mkdir -p /opt/deps /snapshot; apt-get update -qq; apt-get install -y -qq --no-install-recommends git ca-certificates; chown node:node /opt/deps'], { live: true });
+        await docker(['exec', prep, 'sh', '-ec', 'mkdir -p /opt/deps /snapshot; apt-get update -qq; apt-get install -y -qq --no-install-recommends git ca-certificates curl; chown node:node /opt/deps'], { live: true });
         for (const file of ['package.json', 'package-lock.json', ...(fs.existsSync(path.join(snapshot, '.npmrc')) ? ['.npmrc'] : [])]) await docker(['cp', path.join(snapshot, file), `${prep}:/opt/deps/${file}`]);
         await docker(['exec', '-u', 'node', '-w', '/opt/deps', '-e', 'HUSKY=0', '-e', 'HOME=/home/node', prep, 'npm', 'ci', '--no-audit', '--no-fund'], { live: true });
         await docker(['commit', prep, image], { live: true });

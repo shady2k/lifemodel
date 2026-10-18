@@ -30,9 +30,12 @@ FLUX_VERSION="v2.9.6"
 FLUX_INSTALL_URL="https://github.com/fluxcd/flux2/releases/download/v2.9.6/install.yaml"
 FLUX_INSTALL_SHA256="9c1fda7e401429531ed1478f67ba06b3edff6513b75da7ee47bde9f1c4d4251c"
 
-PLATFORM_URL=""
-PLATFORM_TAG=""
-PLATFORM_DIGEST=""
+PLATFORM_URL="${LIFEMODEL_PLATFORM_URL:-}"
+PLATFORM_TAG="${LIFEMODEL_PLATFORM_TAG:-}"
+PLATFORM_DIGEST="${LIFEMODEL_PLATFORM_DIGEST:-}"
+EXPLICIT_RELEASE=false
+EXPLICIT_TAG=false
+EXPLICIT_DIGEST=false
 VERIFY_MODE="keyless"
 PUBLIC_KEY_FILE=""
 ISSUER="^https://token\\.actions\\.githubusercontent\\.com$"
@@ -40,17 +43,18 @@ SUBJECT_REGEX="^https://github\\.com/shady2k/lifemodel/\\.github/workflows/relea
 INSECURE_REGISTRY=false
 RENDER_ONLY_DIR=""
 INSTANCE_NAME="lifemodel"
+EXPLICIT_NAME=false
 LAN_INTERFACE=""
 KUBECTL=""
 
 usage() {
   cat <<EOF
-Usage: install.sh --platform-url URL (--tag TAG | --digest DIGEST) [options]
+Usage: install.sh [--platform-url URL] [--tag TAG | --digest DIGEST] [options]
 
-Required:
+Release (defaults are stamped into the release installer):
   --platform-url URL       OCI URL of the signed platform artifact
-  --tag TAG                artifact tag (exactly one of --tag / --digest)
-  --digest DIGEST          artifact digest (exactly one of --tag / --digest)
+  --tag TAG                artifact tag (mutually exclusive with --digest)
+  --digest DIGEST          artifact digest (mutually exclusive with --tag)
 
 Verification (defaults are the NixOS module's defaults):
   --verify MODE            keyless (default) or key
@@ -82,14 +86,14 @@ require_value() {
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --platform-url)      require_value "$@"; PLATFORM_URL=$2; shift 2 ;;
-    --tag)               require_value "$@"; PLATFORM_TAG=$2; shift 2 ;;
-    --digest)            require_value "$@"; PLATFORM_DIGEST=$2; shift 2 ;;
+    --platform-url)      require_value "$@"; PLATFORM_URL=$2; EXPLICIT_RELEASE=true; shift 2 ;;
+    --tag)               require_value "$@"; PLATFORM_TAG=$2; PLATFORM_DIGEST=""; EXPLICIT_RELEASE=true; EXPLICIT_TAG=true; shift 2 ;;
+    --digest)            require_value "$@"; PLATFORM_DIGEST=$2; PLATFORM_TAG=""; EXPLICIT_RELEASE=true; EXPLICIT_DIGEST=true; shift 2 ;;
     --verify)            require_value "$@"; VERIFY_MODE=$2; shift 2 ;;
     --public-key-file)   require_value "$@"; PUBLIC_KEY_FILE=$2; shift 2 ;;
     --issuer)            require_value "$@"; ISSUER=$2; shift 2 ;;
     --subject-regex)     require_value "$@"; SUBJECT_REGEX=$2; shift 2 ;;
-    --name)               require_value "$@"; INSTANCE_NAME=$2; shift 2 ;;
+    --name)               require_value "$@"; INSTANCE_NAME=$2; EXPLICIT_NAME=true; shift 2 ;;
     --lan-interface)      require_value "$@"; LAN_INTERFACE=$2; shift 2 ;;
     --insecure-registry) INSECURE_REGISTRY=true; shift ;;
     --render-only)       require_value "$@"; RENDER_ONLY_DIR=$2; shift 2 ;;
@@ -99,7 +103,79 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-[ -n "$PLATFORM_URL" ] || die "--platform-url is required"
+# The saved record is data, never a shell program. Parse only literal known
+# assignments; validate the whole record even when explicit flags override it.
+valid_name() {
+  case "$1" in
+    ''|[!a-z]*|*[!a-z0-9-]*|*-|y|n|yes|no|true|false|on|off|null|~) return 1 ;;
+  esac
+  [ "${#1}" -le 57 ]
+}
+valid_release() {
+  [ -n "$1" ] || return 1
+  case "$1" in oci://?*) ;; *) return 1 ;; esac
+  case "$1" in *[!A-Za-z0-9_./:@-]*) return 1 ;; esac
+  case "$2" in *[!A-Za-z0-9_.-]*) return 1 ;; esac
+  if [ -n "$3" ]; then
+    [ -z "$2" ] || return 1
+    case "$3" in sha256:*) ;; *) return 1 ;; esac
+    hex=${3#sha256:}
+    case "$hex" in *[!a-f0-9]*|'') return 1 ;; esac
+    [ "${#hex}" -eq 64 ] || return 1
+  else
+    [ -n "$2" ] || return 1
+  fi
+}
+requested_name=$INSTANCE_NAME
+installed_name=""
+accept_identity() {
+  valid_name "$1" || die "invalid established instance name"
+  if [ -n "$installed_name" ] && [ "$installed_name" != "$1" ]; then
+    die "instance name is fixed as $installed_name; conflicting established identity"
+  fi
+  if [ "$EXPLICIT_NAME" = true ] && [ "$requested_name" != "$1" ]; then
+    die "instance name is fixed as $1; reinstall to change it"
+  fi
+  installed_name=$1
+  INSTANCE_NAME=$1
+}
+instance_env=${LIFEMODEL_INSTANCE_ENV:-${LIFEMODEL_INSTALL_ROOT:-}/etc/lifemodel/instance.env}
+if [ -f "$instance_env" ]; then
+  saved_name="" saved_url="" saved_tag="" saved_digest="" seen=" "
+  while IFS= read -r record_line || [ -n "$record_line" ]; do
+    case "$record_line" in
+      LIFEMODEL_NAME=*|LIFEMODEL_PLATFORM_URL=*|LIFEMODEL_PLATFORM_TAG=*|LIFEMODEL_PLATFORM_DIGEST=*) ;;
+      *) die "invalid installer record assignment" ;;
+    esac
+    record_key=${record_line%%=*}
+    case "$seen" in *" $record_key "*) die "duplicate installer record key" ;; esac
+    seen="$seen$record_key "
+    record_value=${record_line#*=}
+    case "$record_value" in
+      *'$'*|*'`'*|*'\'*|*'"'*) die "installer record must contain only literal values" ;;
+    esac
+    case "$record_value" in
+      \'*\') record_value=${record_value#\'}; record_value=${record_value%\'} ;;
+    esac
+    case "$record_value" in *"'"*) die "malformed installer record quoting" ;; esac
+    case "$record_key" in
+      LIFEMODEL_NAME) saved_name=$record_value ;;
+      LIFEMODEL_PLATFORM_URL) saved_url=$record_value ;;
+      LIFEMODEL_PLATFORM_TAG) saved_tag=$record_value ;;
+      LIFEMODEL_PLATFORM_DIGEST) saved_digest=$record_value ;;
+    esac
+  done < "$instance_env"
+  valid_name "$saved_name" || die "invalid saved instance name"
+  valid_release "$saved_url" "$saved_tag" "$saved_digest" || die "invalid saved platform release"
+  accept_identity "$saved_name"
+  if [ "$EXPLICIT_RELEASE" = false ]; then
+    PLATFORM_URL=$saved_url
+    PLATFORM_TAG=$saved_tag
+    PLATFORM_DIGEST=$saved_digest
+  fi
+fi
+[ -n "$PLATFORM_URL" ] || die "this installer has no stamped platform URL"
+
 case "$INSTANCE_NAME" in
   ''|[!a-z]*|*[!a-z0-9-]*|-*|*-|y|n|yes|no|true|false|on|off|null|~)
     die "--name must be a non-reserved lowercase DNS-1035 label (1-57 characters)" ;;
@@ -109,12 +185,20 @@ case "$LAN_INTERFACE" in *[!A-Za-z0-9_.:-]* ) die "--lan-interface must contain 
 [ "${#LAN_INTERFACE}" -le 15 ] || die "--lan-interface must be at most 15 characters"
 case "$LAN_INTERFACE" in cni*|flannel*|veth*|wg*|tun*|tailscale*) [ -z "$LAN_INTERFACE" ] || die "refusing non-LAN interface: $LAN_INTERFACE" ;; esac
 LIFEMODEL_STATE_DIR=${LIFEMODEL_STATE_DIR:-/var/lib/lifemodel}
-if [ -n "$PLATFORM_TAG" ] && [ -n "$PLATFORM_DIGEST" ]; then
+shell_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+if { [ "$EXPLICIT_TAG" = true ] && [ "$EXPLICIT_DIGEST" = true ]; } || { [ -n "$PLATFORM_TAG" ] && [ -n "$PLATFORM_DIGEST" ]; }; then
   die "--tag and --digest are mutually exclusive; pass exactly one"
 fi
 if [ -z "$PLATFORM_TAG" ] && [ -z "$PLATFORM_DIGEST" ]; then
-  die "--tag or --digest is required; pass exactly one"
+  die "this installer has no stamped platform tag or digest"
 fi
+case "$PLATFORM_DIGEST" in
+  "") ;;
+  sha256:*) hex=${PLATFORM_DIGEST#sha256:}; case "$hex" in *[!a-f0-9]*|'') die "invalid platform digest" ;; esac; [ "${#hex}" -eq 64 ] || die "invalid platform digest" ;;
+  *) die "invalid platform digest" ;;
+esac
+case "$PLATFORM_TAG" in *[!A-Za-z0-9_.-]*) die "invalid platform tag" ;; esac
+case "$PLATFORM_URL" in *[!A-Za-z0-9_./:@-]*) die "invalid platform URL" ;; esac
 case "$VERIFY_MODE" in
   keyless) ;;
   key)
@@ -225,6 +309,28 @@ fi
 # Host installation (render-only mode exited above).
 # ---------------------------------------------------------------------------
 
+# Recover every surviving identity before packages, files, services, firewall or
+# cluster writes. A known local mismatch fails without even contacting k3s.
+if [ -f "$LIFEMODEL_STATE_DIR/instance-name" ]; then
+  local_name=$(cat "$LIFEMODEL_STATE_DIR/instance-name") || die "cannot read established instance identity"
+  accept_identity "$local_name"
+fi
+if [ -n "${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
+  KUBECTL="k3s kubectl --kubeconfig $KUBECONFIG"
+else
+  KUBECTL="k3s kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
+fi
+if command -v k3s >/dev/null 2>&1; then
+  if cluster_name=$($KUBECTL --request-timeout=10s -n flux-system get configmap lifemodel-instance -o jsonpath='{.data.LIFEMODEL_NAME}' 2>&1); then
+    accept_identity "$cluster_name"
+  else
+    case "$cluster_name" in
+      *'(NotFound)'*) ;;
+      *) die "cannot determine existing instance identity; run lifemodel doctor" ;;
+    esac
+  fi
+fi
+
 [ "$(id -u)" -eq 0 ] || die "must run as root (k3s and the Flux bootstrap need it)"
 if ! command -v node >/dev/null 2>&1; then
   command -v apt-get >/dev/null 2>&1 || die "Node.js is required (install nodejs or use a Debian/Ubuntu host with apt-get)"
@@ -324,21 +430,15 @@ else
   curl -fsSL https://get.k3s.io | INSTALL_K3S_VERSION="v$K3S_VERSION" sh -s - server --cluster-init
 fi
 
-if [ -n "${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
-  KUBECTL="k3s kubectl --kubeconfig $KUBECONFIG"
-else
-  KUBECTL="k3s kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
-fi
-
 cluster_ready=0
 for attempt in $(seq 1 60); do
-  if $KUBECTL get nodes >/dev/null 2>&1; then
+  if $KUBECTL --request-timeout=10s get nodes >/dev/null 2>&1; then
     cluster_ready=1
     break
   fi
   sleep 2
 done
-[ "$cluster_ready" -eq 1 ] || die "k3s did not become ready"
+[ "$cluster_ready" -eq 1 ] || die "lifemodel not ready: k3s; run lifemodel doctor"
 
 # Refuse an unlabelled existing flux-system exactly like the module does.
 if $KUBECTL get namespace flux-system >/dev/null 2>&1; then
@@ -390,24 +490,16 @@ else
   LIFEMODEL_LOCK_FD=9
   LIFEMODEL_LOCK_HELD=1
 fi
-# Establish the fixed instance identity before publishing any name-dependent
-# root objects. A local state loss is recovered from the durable root ConfigMap.
-installed_name=""
-if [ -f "$LIFEMODEL_STATE_DIR/instance-name" ]; then
-  installed_name=$(cat "$LIFEMODEL_STATE_DIR/instance-name")
-else
-  identity_error=$(mktemp)
-  if installed_name=$($KUBECTL -n flux-system get configmap lifemodel-instance -o jsonpath='{.data.LIFEMODEL_NAME}' 2>"$identity_error"); then
-    [ -n "$installed_name" ] || { rm -f "$identity_error"; die "existing lifemodel-instance ConfigMap has no LIFEMODEL_NAME"; }
-  else
-    if grep -Fqi '(NotFound)' "$identity_error"; then installed_name="";
-    else cat "$identity_error" >&2; rm -f "$identity_error"; die "cannot determine existing instance identity"; fi
-  fi
-  rm -f "$identity_error"
-fi
-if [ -n "$installed_name" ] && [ "$installed_name" != "$INSTANCE_NAME" ]; then
-  die "instance name is fixed as $installed_name; reinstall to change it"
-fi
+# All established identities were validated before any host mutation above.
+mkdir -p "$(dirname "$instance_env")"
+instance_env_tmp="$instance_env.tmp"
+{
+  printf 'LIFEMODEL_NAME=%s\n' "$(shell_quote "$INSTANCE_NAME")"
+  printf 'LIFEMODEL_PLATFORM_URL=%s\n' "$(shell_quote "$PLATFORM_URL")"
+  if [ -n "$PLATFORM_DIGEST" ]; then printf 'LIFEMODEL_PLATFORM_DIGEST=%s\n' "$(shell_quote "$PLATFORM_DIGEST")"; else printf 'LIFEMODEL_PLATFORM_TAG=%s\n' "$(shell_quote "$PLATFORM_TAG")"; fi
+} > "$instance_env_tmp"
+chmod 0600 "$instance_env_tmp"
+mv "$instance_env_tmp" "$instance_env"
 printf '%s\n' "$INSTANCE_NAME" > "$LIFEMODEL_STATE_DIR/instance-name.tmp"
 chmod 0600 "$LIFEMODEL_STATE_DIR/instance-name.tmp"
 mv "$LIFEMODEL_STATE_DIR/instance-name.tmp" "$LIFEMODEL_STATE_DIR/instance-name"
@@ -430,7 +522,6 @@ bundle_dir="$cli_lib_dir/bootstrap"
 bundle_templates="$bundle_dir/root"
 bundle_script="$bundle_dir/install.sh"
 bundle_key="$bundle_dir/verification/public-key.pem"
-shell_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 newline='
 '
 case "$LIFEMODEL_STATE_DIR" in *"$newline"*) die 'state directory must not contain a newline' ;; esac
@@ -456,6 +547,10 @@ install -d -m 0755 "$bundle_dir/deploy/cli"
 if [ "$cli_source" != "$bundle_dir/deploy/cli/lifemodel.mjs" ]; then
   install -m 0644 "$cli_source" "$bundle_dir/deploy/cli/lifemodel.mjs"
 fi
+wait_source="$(dirname "$cli_source")/wait-ready.mjs"
+if [ "$wait_source" != "$bundle_dir/deploy/cli/wait-ready.mjs" ]; then
+  install -m 0644 "$wait_source" "$bundle_dir/deploy/cli/wait-ready.mjs"
+fi
 if [ "$VERIFY_MODE" = "key" ] && [ "$PUBLIC_KEY_FILE" != "$bundle_key" ]; then install -m 0600 "$PUBLIC_KEY_FILE" "$bundle_key"; fi
 apply_args=$(node -e 'const [script,url,name,tag,digest,mode,issuer,subject,key,insecure,templates]=process.argv.slice(1); const a=[script,"--platform-url",url,"--name",name]; if(digest) a.push("--digest",digest); else a.push("--tag",tag); a.push("--verify",mode); if(mode==="key") a.push("--public-key-file",key); if(mode==="keyless") a.push("--issuer",issuer,"--subject-regex",subject); if(insecure==="true") a.push("--insecure-registry"); a.push("--root-templates",templates); process.stdout.write(JSON.stringify(a));' -- "$bundle_script" "$PLATFORM_URL" "$INSTANCE_NAME" "$PLATFORM_TAG" "$PLATFORM_DIGEST" "$VERIFY_MODE" "$ISSUER" "$SUBJECT_REGEX" "$bundle_key" "$INSECURE_REGISTRY" "$bundle_templates")
 quoted_args=$(shell_quote "$apply_args")
@@ -468,4 +563,6 @@ EOF
 chmod 0755 "$cli_bin_dir/lifemodel"
 LIFEMODEL_LOCK_FD="$LIFEMODEL_LOCK_FD" LIFEMODEL_LOCK_HELD=1 LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" LIFEMODEL_CONFIGURED_REF="$configured_ref" \
   "$cli_bin_dir/lifemodel" record-applied "$effective_ref"
+# Trust only the CA published by this instance; share the verified wait with NixOS.
+LIFEMODEL_NAME="$INSTANCE_NAME" LIFEMODEL_KUBECTL="$KUBECTL" node "$(dirname "$cli_source")/wait-ready.mjs"
 printf 'install.sh: done (k3s v%s, Flux %s, platform source applied)\n' "$K3S_VERSION" "$FLUX_VERSION"
