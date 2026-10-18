@@ -103,19 +103,75 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+# The saved record is data, never a shell program. Parse only literal known
+# assignments; validate the whole record even when explicit flags override it.
+valid_name() {
+  case "$1" in
+    ''|[!a-z]*|*[!a-z0-9-]*|*-|y|n|yes|no|true|false|on|off|null|~) return 1 ;;
+  esac
+  [ "${#1}" -le 57 ]
+}
+valid_release() {
+  [ -n "$1" ] || return 1
+  case "$1" in oci://?*) ;; *) return 1 ;; esac
+  case "$1" in *[!A-Za-z0-9_./:@-]*) return 1 ;; esac
+  case "$2" in *[!A-Za-z0-9_.-]*) return 1 ;; esac
+  if [ -n "$3" ]; then
+    [ -z "$2" ] || return 1
+    case "$3" in sha256:*) ;; *) return 1 ;; esac
+    hex=${3#sha256:}
+    case "$hex" in *[!a-f0-9]*|'') return 1 ;; esac
+    [ "${#hex}" -eq 64 ] || return 1
+  else
+    [ -n "$2" ] || return 1
+  fi
+}
+requested_name=$INSTANCE_NAME
+installed_name=""
+accept_identity() {
+  valid_name "$1" || die "invalid established instance name"
+  if [ -n "$installed_name" ] && [ "$installed_name" != "$1" ]; then
+    die "instance name is fixed as $installed_name; conflicting established identity"
+  fi
+  if [ "$EXPLICIT_NAME" = true ] && [ "$requested_name" != "$1" ]; then
+    die "instance name is fixed as $1; reinstall to change it"
+  fi
+  installed_name=$1
+  INSTANCE_NAME=$1
+}
 instance_env=${LIFEMODEL_INSTANCE_ENV:-${LIFEMODEL_INSTALL_ROOT:-}/etc/lifemodel/instance.env}
 if [ -f "$instance_env" ]; then
-  requested_name=$INSTANCE_NAME
-  # Read the root-owned installer record without overwriting requested flags.
-  saved_name=$( ( . "$instance_env"; printf '%s' "$LIFEMODEL_NAME" ) )
-  if [ "$EXPLICIT_NAME" = true ] && [ "$requested_name" != "$saved_name" ]; then
-    die "instance name is fixed as $saved_name; reinstall to change it"
-  fi
-  INSTANCE_NAME=$saved_name
+  saved_name="" saved_url="" saved_tag="" saved_digest="" seen=" "
+  while IFS= read -r record_line || [ -n "$record_line" ]; do
+    case "$record_line" in
+      LIFEMODEL_NAME=*|LIFEMODEL_PLATFORM_URL=*|LIFEMODEL_PLATFORM_TAG=*|LIFEMODEL_PLATFORM_DIGEST=*) ;;
+      *) die "invalid installer record assignment" ;;
+    esac
+    record_key=${record_line%%=*}
+    case "$seen" in *" $record_key "*) die "duplicate installer record key" ;; esac
+    seen="$seen$record_key "
+    record_value=${record_line#*=}
+    case "$record_value" in
+      *'$'*|*'`'*|*'\'*|*'"'*) die "installer record must contain only literal values" ;;
+    esac
+    case "$record_value" in
+      \'*\') record_value=${record_value#\'}; record_value=${record_value%\'} ;;
+    esac
+    case "$record_value" in *"'"*) die "malformed installer record quoting" ;; esac
+    case "$record_key" in
+      LIFEMODEL_NAME) saved_name=$record_value ;;
+      LIFEMODEL_PLATFORM_URL) saved_url=$record_value ;;
+      LIFEMODEL_PLATFORM_TAG) saved_tag=$record_value ;;
+      LIFEMODEL_PLATFORM_DIGEST) saved_digest=$record_value ;;
+    esac
+  done < "$instance_env"
+  valid_name "$saved_name" || die "invalid saved instance name"
+  valid_release "$saved_url" "$saved_tag" "$saved_digest" || die "invalid saved platform release"
+  accept_identity "$saved_name"
   if [ "$EXPLICIT_RELEASE" = false ]; then
-    PLATFORM_URL=$( ( . "$instance_env"; printf '%s' "$LIFEMODEL_PLATFORM_URL" ) )
-    PLATFORM_TAG=$( ( . "$instance_env"; printf '%s' "${LIFEMODEL_PLATFORM_TAG:-}" ) )
-    PLATFORM_DIGEST=$( ( . "$instance_env"; printf '%s' "${LIFEMODEL_PLATFORM_DIGEST:-}" ) )
+    PLATFORM_URL=$saved_url
+    PLATFORM_TAG=$saved_tag
+    PLATFORM_DIGEST=$saved_digest
   fi
 fi
 [ -n "$PLATFORM_URL" ] || die "this installer has no stamped platform URL"
@@ -253,6 +309,28 @@ fi
 # Host installation (render-only mode exited above).
 # ---------------------------------------------------------------------------
 
+# Recover every surviving identity before packages, files, services, firewall or
+# cluster writes. A known local mismatch fails without even contacting k3s.
+if [ -f "$LIFEMODEL_STATE_DIR/instance-name" ]; then
+  local_name=$(cat "$LIFEMODEL_STATE_DIR/instance-name") || die "cannot read established instance identity"
+  accept_identity "$local_name"
+fi
+if [ -n "${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
+  KUBECTL="k3s kubectl --kubeconfig $KUBECONFIG"
+else
+  KUBECTL="k3s kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
+fi
+if command -v k3s >/dev/null 2>&1; then
+  if cluster_name=$($KUBECTL --request-timeout=10s -n flux-system get configmap lifemodel-instance -o jsonpath='{.data.LIFEMODEL_NAME}' 2>&1); then
+    accept_identity "$cluster_name"
+  else
+    case "$cluster_name" in
+      *'(NotFound)'*) ;;
+      *) die "cannot determine existing instance identity; run lifemodel doctor" ;;
+    esac
+  fi
+fi
+
 [ "$(id -u)" -eq 0 ] || die "must run as root (k3s and the Flux bootstrap need it)"
 if ! command -v node >/dev/null 2>&1; then
   command -v apt-get >/dev/null 2>&1 || die "Node.js is required (install nodejs or use a Debian/Ubuntu host with apt-get)"
@@ -352,12 +430,6 @@ else
   curl -fsSL https://get.k3s.io | INSTALL_K3S_VERSION="v$K3S_VERSION" sh -s - server --cluster-init
 fi
 
-if [ -n "${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
-  KUBECTL="k3s kubectl --kubeconfig $KUBECONFIG"
-else
-  KUBECTL="k3s kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
-fi
-
 cluster_ready=0
 for attempt in $(seq 1 60); do
   if $KUBECTL --request-timeout=10s get nodes >/dev/null 2>&1; then
@@ -418,24 +490,7 @@ else
   LIFEMODEL_LOCK_FD=9
   LIFEMODEL_LOCK_HELD=1
 fi
-# Establish the fixed instance identity before publishing any name-dependent
-# root objects. A local state loss is recovered from the durable root ConfigMap.
-installed_name=""
-if [ -f "$LIFEMODEL_STATE_DIR/instance-name" ]; then
-  installed_name=$(cat "$LIFEMODEL_STATE_DIR/instance-name")
-else
-  identity_error=$(mktemp)
-  if installed_name=$($KUBECTL -n flux-system get configmap lifemodel-instance -o jsonpath='{.data.LIFEMODEL_NAME}' 2>"$identity_error"); then
-    [ -n "$installed_name" ] || { rm -f "$identity_error"; die "existing lifemodel-instance ConfigMap has no LIFEMODEL_NAME"; }
-  else
-    if grep -Fqi '(NotFound)' "$identity_error"; then installed_name="";
-    else cat "$identity_error" >&2; rm -f "$identity_error"; die "cannot determine existing instance identity"; fi
-  fi
-  rm -f "$identity_error"
-fi
-if [ -n "$installed_name" ] && [ "$installed_name" != "$INSTANCE_NAME" ]; then
-  die "instance name is fixed as $installed_name; reinstall to change it"
-fi
+# All established identities were validated before any host mutation above.
 mkdir -p "$(dirname "$instance_env")"
 instance_env_tmp="$instance_env.tmp"
 {
