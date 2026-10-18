@@ -543,7 +543,10 @@ describe('OpenBao bootstrap', () => {
         },
       },
       custody: {
-        read: async () => ({ keys: ['key'], rootToken: 'root-token' }),
+        read: async () => ({
+          keys: ['key'],
+          rootToken: retiredAt.length > 0 ? null : 'root-token',
+        }),
         write: async () => {},
       },
       runPhases: async (phases) => {
@@ -553,7 +556,7 @@ describe('OpenBao bootstrap', () => {
     await bootstrap.runInitial();
     const gatewayPolicy = paths.indexOf('/v1/sys/policies/acl/model-gateway');
     const gatewayRole = paths.indexOf('/v1/auth/kubernetes/role/model-gateway');
-    const gatewayCheck = paths.indexOf('/v1/sys/capabilities-self');
+    const gatewayCheck = paths.indexOf('/v1/sys/capabilities-self', gatewayRole);
     expect(gatewayPolicy).toBeGreaterThanOrEqual(0);
     expect(gatewayRole).toBeGreaterThan(gatewayPolicy);
     expect(gatewayCheck).toBeGreaterThan(gatewayRole);
@@ -562,7 +565,9 @@ describe('OpenBao bootstrap', () => {
     // fixed by the loader again (ADR-013 D3).
     expect(retiredAt).toHaveLength(1);
     expect(retiredAt[0]).toBeGreaterThan(gatewayCheck);
-    expect(paths.indexOf('/v1/auth/token/revoke-self')).toBe(retiredAt[0]);
+    // The retirement is the LAST revoke-self of the phase: the capability
+    // check's own bounded token was revoked inside the verification above.
+    expect(paths.lastIndexOf('/v1/auth/token/revoke-self')).toBe(retiredAt[0]);
   });
 
   it('re-enters the policy phase after a crash before the gateway identity is verified', async () => {

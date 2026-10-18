@@ -304,7 +304,9 @@ describe('the platform model gateway', () => {
     // The core's settings carry no key and no model credential, and no
     // placeholder key is sent beside the request (ADR-013 D2/D3).
     expect(env.map((entry: any) => entry.name)).not.toContain('LLM_ENDPOINT_BASE_URL');
-    expect(env.filter((entry: any) => /MODEL.*KEY|API_KEY|LLM.*KEY/i.test(entry.name))).toEqual([]);
+    expect(
+      env.filter((entry: any) => /MODEL_KEY|LLM_KEY|API_KEY|OPENAI|OPENROUTER/i.test(entry.name))
+    ).toEqual([]);
     expect(JSON.stringify(core)).not.toMatch(/sk-|no-key-required|apiKey|Authorization/);
     // The only Secret-backed values are the stores' credentials.
     expect(

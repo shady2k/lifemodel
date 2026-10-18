@@ -154,7 +154,7 @@ describe('platform web ingress and egress', () => {
     }
   });
 
-  it('limits web pod egress to Valkey, Postgres and DNS', () => {
+  it('limits web pod egress to Valkey, Postgres, DNS and the model status', () => {
     const policies = objects().filter(
       (item) => item.kind === 'NetworkPolicy' && item.metadata?.namespace === 'lifemodel'
     );
@@ -182,6 +182,13 @@ describe('platform web ingress and egress', () => {
         ports: ['TCP/5432'],
       },
       { namespace: 'lifemodel-state', pod: { app: 'valkey' }, ports: ['TCP/6379'] },
+      // The model's health, and nothing else of the gateway (ADR-013 D6): the
+      // web module reads /status on 8081, never the model API on 8080.
+      {
+        namespace: 'lifemodel-system',
+        pod: { 'app.kubernetes.io/name': 'model-gateway' },
+        ports: ['TCP/8081'],
+      },
     ]);
   });
 });
