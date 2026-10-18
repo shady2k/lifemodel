@@ -5,7 +5,7 @@ import type { CommandRunner } from './exec.js';
 import type { FileSystem } from './fs.js';
 import { createLoaderHttp, type LoaderHttp } from './http.js';
 import type { ModelSlots } from './model.js';
-import { createRoleBaoClient } from './model-bao.js';
+import { BaoStorageError } from './model-bao.js';
 import { createPkiManager, type PkiManager } from './pki.js';
 import { createKubernetesTlsStores } from './pki-kubernetes.js';
 import type { LoaderLogger } from './logger.js';
@@ -43,7 +43,6 @@ export interface LoaderAppDeps {
   platformPhaseStore?: PlatformPhaseStore;
   platformGiteaPhases?: PlatformPhase[];
   platformGiteaApi?: GiteaApi;
-  platformLoaderJwt?: () => Promise<string>;
   platformBootstrap?: { runInitial(): Promise<void>; unsealIfSealed(): Promise<void> };
   pki?: PkiManager;
 }
@@ -63,7 +62,12 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
   const pki = deps.pki ?? createPkiManager({ config, fs, clock, ...tlsStores });
   const phaseStore = deps.platformPhaseStore ?? createKubernetesPhaseStore();
   const bao = deps.openBao ?? {
-    api: createOpenBaoApi({ address: config.openBaoAddress }),
+    api: createOpenBaoApi({
+      address: config.openBaoAddress,
+      role: 'loader',
+      logger,
+      now: () => clock.now(),
+    }),
     custody: createKubernetesBaoCustody(),
   };
   const giteaApi = deps.platformGiteaApi ?? {
@@ -90,7 +94,6 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
           createKubernetesPostgresSecretPhase(),
           createKubernetesValkeySecretPhase(),
         ],
-        ...(deps.platformLoaderJwt === undefined ? {} : { loaderJwt: deps.platformLoaderJwt }),
       });
       return {
         runInitial: () => bootstrap.runInitial(),
@@ -98,11 +101,13 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       };
     })();
 
-  const modelBao = createRoleBaoClient({ address: config.openBaoAddress, role: 'loader' });
   const modelSlots: ModelSlots = {
-    read: (slot) => modelBao.readSlot(slot),
-    write: (slot, value) => modelBao.writeSlot(slot, value),
-    clearReserve: () => modelBao.deleteReserve(),
+    read: (slot) =>
+      bao.api.readModelSlot?.(slot) ?? Promise.reject(new BaoStorageError('unreachable')),
+    write: (slot, value) =>
+      bao.api.writeModelSlot?.(slot, value) ?? Promise.reject(new BaoStorageError('unreachable')),
+    clearReserve: () =>
+      bao.api.deleteModelReserve?.() ?? Promise.reject(new BaoStorageError('unreachable')),
   };
   let http: LoaderHttp | null = null;
   let stopping = false;

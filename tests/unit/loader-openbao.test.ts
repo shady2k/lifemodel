@@ -54,7 +54,7 @@ function fixture(
     ensureModelPolicy: async (_token) => {
       events.push('model-policy');
     },
-    loginLoader: async () => {
+    login: async () => {
       events.push('login');
     },
     revokeRootToken: async (_token) => {
@@ -72,7 +72,6 @@ function fixture(
   const bootstrap = createOpenBaoBootstrap({
     bao,
     custody,
-    loaderJwt: async () => 'loader-jwt',
     runPhases: createPlatformPhaseRunner(store),
   });
   return {
@@ -109,12 +108,19 @@ describe('OpenBao bootstrap', () => {
     }> = [];
     const api = createOpenBaoApi({
       address: 'http://openbao.test:8200',
+      role: 'loader',
+      readJwt: async () => 'loader-jwt',
       request: async (url, method, token, body) => {
         calls.push({ path: url.pathname, method, token, body });
         if (url.pathname.endsWith('/auth/token/lookup-self')) return { status: 200, body: '{}' };
         if (url.pathname.endsWith('/sys/auth')) return { status: 200, body: '{}' };
         if (url.pathname.endsWith('/auth/kubernetes/login'))
-          return { status: 200, body: JSON.stringify({ auth: { client_token: 'loader-token' } }) };
+          return {
+            status: 200,
+            body: JSON.stringify({
+              auth: { client_token: 'loader-token', lease_duration: 3600, renewable: true },
+            }),
+          };
         if (url.pathname.endsWith('/sys/capabilities-self'))
           return {
             status: 200,
@@ -138,8 +144,8 @@ describe('OpenBao bootstrap', () => {
     await api.status();
     expect(await api.init()).toEqual({ keys: ['key'], rootToken: 'root' });
     expect(await api.rootTokenActive('root')).toBe(true);
-    await api.ensureLoaderPolicy('root', 'loader-jwt');
-    await api.ensureModelPolicy('root', 'loader-jwt');
+    await api.ensureLoaderPolicy('root');
+    await api.ensureModelPolicy('root');
     await api.revokeRootToken('root');
     expect(calls.map(({ path, method }) => [path, method])).toEqual([
       ['/v1/sys/seal-status', 'GET'],
@@ -191,6 +197,8 @@ describe('OpenBao bootstrap', () => {
     const calls: Array<{ path: string; method: string; body?: string }> = [];
     const api = createOpenBaoApi({
       address: 'http://openbao.test:8200',
+      role: 'loader',
+      readJwt: async () => 'loader-jwt',
       request: async (url, method, _token, body) => {
         calls.push({ path: url.pathname, method, ...(body === undefined ? {} : { body }) });
         if (url.pathname.endsWith('/sys/mounts'))
@@ -199,7 +207,12 @@ describe('OpenBao bootstrap', () => {
             body: JSON.stringify({ 'lifemodel/': { type: 'kv', options: { version: '2' } } }),
           };
         if (url.pathname.endsWith('/auth/kubernetes/login'))
-          return { status: 200, body: JSON.stringify({ auth: { client_token: 'loader-token' } }) };
+          return {
+            status: 200,
+            body: JSON.stringify({
+              auth: { client_token: 'loader-token', lease_duration: 3600, renewable: true },
+            }),
+          };
         if (url.pathname.endsWith('/sys/capabilities-self'))
           return {
             status: 200,
@@ -213,7 +226,7 @@ describe('OpenBao bootstrap', () => {
         return { status: 204, body: '' };
       },
     });
-    await api.ensureModelPolicy('root-token', 'projected-jwt');
+    await api.ensureModelPolicy('root-token');
     const policy = JSON.parse(
       calls.find((call) => call.path.endsWith('/loader-model'))?.body ?? '{}'
     ).policy as string;
@@ -234,9 +247,16 @@ describe('OpenBao bootstrap', () => {
   it('refuses to retire root when the authenticated loader lacks its required capabilities', async () => {
     const api = createOpenBaoApi({
       address: 'http://openbao.test:8200',
+      role: 'loader',
+      readJwt: async () => 'loader-jwt',
       request: async (url, _method, token) => {
         if (url.pathname.endsWith('/auth/kubernetes/login')) {
-          return { status: 200, body: JSON.stringify({ auth: { client_token: 'loader-token' } }) };
+          return {
+            status: 200,
+            body: JSON.stringify({
+              auth: { client_token: 'loader-token', lease_duration: 3600, renewable: true },
+            }),
+          };
         }
         if (url.pathname.endsWith('/sys/capabilities-self')) {
           expect(token).toBe('loader-token');
@@ -252,7 +272,7 @@ describe('OpenBao bootstrap', () => {
         return { status: 204, body: '' };
       },
     });
-    await expect(api.ensureLoaderPolicy('root', 'projected-loader-jwt')).rejects.toThrow(
+    await expect(api.ensureLoaderPolicy('root')).rejects.toThrow(
       /minimal permitted and denied capabilities/
     );
   });
@@ -262,9 +282,16 @@ describe('OpenBao bootstrap', () => {
     let retired = false;
     const api = createOpenBaoApi({
       address: 'http://openbao.test:8200',
+      role: 'loader',
+      readJwt: async () => 'loader-jwt',
       request: async (url, _method, token) => {
         if (url.pathname.endsWith('/auth/kubernetes/login'))
-          return { status: 200, body: JSON.stringify({ auth: { client_token: 'loader-token' } }) };
+          return {
+            status: 200,
+            body: JSON.stringify({
+              auth: { client_token: 'loader-token', lease_duration: 3600, renewable: true },
+            }),
+          };
         if (url.pathname.endsWith('/sys/capabilities-self')) {
           expect(token).toBe('loader-token');
           return {
@@ -292,8 +319,8 @@ describe('OpenBao bootstrap', () => {
         unseal: async () => {},
         rootTokenActive: async () => !retired,
         ensureLoaderPolicy: async () => {},
-        ensureModelPolicy: (root, jwt) => api.ensureModelPolicy!(root, jwt),
-        loginLoader: (jwt) => api.loginLoader(jwt),
+        ensureModelPolicy: (root) => api.ensureModelPolicy!(root),
+        login: () => api.login(),
         revokeRootToken: async () => {
           events.push('revoke');
           retired = true;
@@ -303,7 +330,6 @@ describe('OpenBao bootstrap', () => {
         read: async () => ({ keys: ['key'], rootToken: 'root' }),
         write: async () => {},
       },
-      loaderJwt: async () => 'projected-jwt',
       runPhases: async (phases) => {
         for (const phase of phases) await phase.run();
       },
@@ -321,8 +347,15 @@ describe('OpenBao bootstrap', () => {
     const paths: string[] = [];
     const api = createOpenBaoApi({
       address: 'http://openbao.test:8200',
+      role: 'loader',
+      readJwt: async () => 'loader-jwt',
       request: async (url) => {
         paths.push(url.pathname);
+        if (url.pathname.endsWith('/login'))
+          return {
+            status: 200,
+            body: JSON.stringify({ auth: { client_token: 'token', lease_duration: 3600 } }),
+          };
         return {
           status: 200,
           body: JSON.stringify({
@@ -335,7 +368,7 @@ describe('OpenBao bootstrap', () => {
       },
     });
     await expect(api.readModelSlot?.('reserve')).resolves.toBeNull();
-    expect(paths).toEqual(['/v1/lifemodel/data/model/reserve']);
+    expect(paths).toEqual(['/v1/auth/kubernetes/login', '/v1/lifemodel/data/model/reserve']);
   });
 
   it('aborts a request whose server accepts but never completes the response', async () => {
@@ -348,8 +381,9 @@ describe('OpenBao bootstrap', () => {
       const api = createOpenBaoApi({
         address: `http://127.0.0.1:${String(address.port)}`,
         timeoutMs: 30,
+        role: 'loader',
       });
-      await expect(api.status()).rejects.toThrow(/exceeded 30 ms/);
+      await expect(api.status()).rejects.toMatchObject({ code: 'unreachable' });
     } finally {
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve()))
@@ -426,7 +460,7 @@ describe('OpenBao bootstrap', () => {
       ensureLoaderPolicy: async () => {
         throw new Error('must not reprovision');
       },
-      loginLoader: async () => {
+      login: async () => {
         events.push('login');
       },
       revokeRootToken: async () => {
@@ -449,7 +483,6 @@ describe('OpenBao bootstrap', () => {
     const bootstrap = createOpenBaoBootstrap({
       bao,
       custody,
-      loaderJwt: async () => 'loader-jwt',
       runPhases: createPlatformPhaseRunner(store),
     });
     await bootstrap.runInitial();

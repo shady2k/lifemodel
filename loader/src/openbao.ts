@@ -1,8 +1,8 @@
 /** Restart-safe OpenBao initialization and unseal custody (ADR-010 R7-02). */
 import { request as httpsRequest } from 'node:https';
-import { request as httpRequest } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import type { ModelSlot } from './model.js';
+import { createRoleBaoClient, BaoStorageError, type RoleBaoOptions } from './model-bao.js';
 
 export interface BaoKeys {
   keys: string[];
@@ -17,9 +17,9 @@ export interface BaoApi {
   init(): Promise<{ keys: string[]; rootToken: string }>;
   unseal(key: string): Promise<void>;
   rootTokenActive(rootToken: string): Promise<boolean>;
-  ensureLoaderPolicy(rootToken: string, loaderJwt: string): Promise<void>;
-  loginLoader(loaderJwt: string): Promise<void>;
-  ensureModelPolicy?(rootToken: string, loaderJwt: string): Promise<void>;
+  ensureLoaderPolicy(rootToken: string): Promise<void>;
+  login(): Promise<void>;
+  ensureModelPolicy?(rootToken: string): Promise<void>;
   revokeRootToken(rootToken: string): Promise<void>;
   readModelSlot?(slot: 'primary' | 'reserve'): Promise<ModelSlot | null>;
   writeModelSlot?(slot: 'primary' | 'reserve', value: ModelSlot): Promise<void>;
@@ -35,7 +35,6 @@ export interface OpenBaoBootstrapDeps {
   runPhases(phases: { name: string; run(): Promise<void> }[]): Promise<void>;
   /** Later first-start work shares this durable phase plan and store. */
   extraPhases?: { name: string; run(): Promise<void> }[];
-  loaderJwt?(): Promise<string>;
 }
 
 function assertKeys(value: BaoKeys | null): asserts value is BaoKeys {
@@ -59,10 +58,6 @@ export function createOpenBaoBootstrap(deps: OpenBaoBootstrapDeps): {
   unsealIfSealed(): Promise<void>;
 } {
   const { bao, custody } = deps;
-  const loaderJwt = async (): Promise<string> =>
-    deps.loaderJwt === undefined
-      ? (await readFile(`${SA_DIR}/token`, 'utf8')).trim()
-      : deps.loaderJwt();
   const initialize = async (): Promise<void> => {
     const status = await bao.status();
     if (!status.initialized) {
@@ -100,30 +95,26 @@ export function createOpenBaoBootstrap(deps: OpenBaoBootstrapDeps): {
     assertKeys(saved);
     if (status.sealed) await unseal();
     if (saved.rootToken === null) {
-      const jwt = await loaderJwt();
-      if (jwt === '') throw new Error('Kubernetes loader ServiceAccount JWT is empty');
-      await bao.loginLoader(jwt);
+      await bao.login();
     }
   };
   const provisionAndRetire = async (): Promise<void> => {
     const saved = await custody.read();
     assertKeys(saved);
-    const jwt = await loaderJwt();
-    if (jwt === '') throw new Error('Kubernetes loader ServiceAccount JWT is empty');
     if (saved.rootToken === null) {
-      await bao.loginLoader(jwt);
+      await bao.login();
       return; // root already retired; restore the steady-state identity
     }
     // A crash can land after revoke-self but before the Secret update. Detect
     // that cut so a retry can remove the revoked token without using it again.
     if (await bao.rootTokenActive(saved.rootToken)) {
-      await bao.ensureLoaderPolicy(saved.rootToken, jwt);
+      await bao.ensureLoaderPolicy(saved.rootToken);
       if (bao.ensureModelPolicy === undefined)
         throw new Error('OpenBao model policy provisioner is unavailable');
-      await bao.ensureModelPolicy(saved.rootToken, jwt);
+      await bao.ensureModelPolicy(saved.rootToken);
       await bao.revokeRootToken(saved.rootToken);
     }
-    if (!(await bao.rootTokenActive(saved.rootToken))) await bao.loginLoader(jwt);
+    if (!(await bao.rootTokenActive(saved.rootToken))) await bao.login();
     await custody.write({ keys: saved.keys, rootToken: null });
     const verified = await custody.read();
     assertKeys(verified);
@@ -288,104 +279,24 @@ export function createKubernetesBaoCustody(options: KubernetesSecretStoreOptions
   };
 }
 
-class BaoHttpError extends Error {
-  constructor(readonly status: number) {
-    super(`OpenBao request failed with status ${String(status)}`);
-  }
-}
-
-interface OpenBaoApiOptions {
-  address: string;
-  timeoutMs?: number;
-  request?: (
-    url: URL,
-    method: string,
-    token: string | undefined,
-    body: string | undefined
-  ) => Promise<{ status: number; body: string }>;
-}
-/** OpenBao HTTP API client. The address is configuration, not a hard-coded route. */
-export function createOpenBaoApi(options: OpenBaoApiOptions): BaoApi {
-  const base = new URL(options.address);
-  let loaderToken: string | undefined;
-  const timeoutMs = options.timeoutMs ?? 10_000;
-  const call =
-    options.request ??
-    ((url, method, token, body) =>
-      new Promise<{ status: number; body: string }>((resolve, reject) => {
-        const request = url.protocol === 'https:' ? httpsRequest : httpRequest;
-        const req = request(
-          url,
-          {
-            method,
-            headers: {
-              ...(token === undefined ? {} : { 'x-vault-token': token }),
-              ...(body === undefined
-                ? {}
-                : {
-                    'content-type': 'application/json',
-                    'content-length': Buffer.byteLength(body),
-                  }),
-            },
-          },
-          (res) => {
-            let response = '';
-            res.setEncoding('utf8');
-            res.on('data', (chunk: string) => {
-              response += chunk;
-            });
-            res.on('end', () => {
-              clearTimeout(timer);
-              resolve({ status: res.statusCode ?? 0, body: response });
-            });
-            res.on('aborted', () => {
-              clearTimeout(timer);
-              reject(new Error('OpenBao response was truncated'));
-            });
-          }
-        );
-        const timer = setTimeout(
-          () => req.destroy(new Error(`OpenBao request exceeded ${String(timeoutMs)} ms`)),
-          timeoutMs
-        );
-        req.on('error', (error) => {
-          clearTimeout(timer);
-          reject(error);
-        });
-        if (body !== undefined) req.write(body);
-        req.end();
-      }));
+/** Bootstrap operations and model routes share this one workload client. */
+export function createOpenBaoApi(
+  options: Omit<RoleBaoOptions, 'role'> & { role: 'loader' }
+): BaoApi {
+  const client = createRoleBaoClient(options);
   async function api(
     path: string,
     method: string,
     token?: string,
     payload?: unknown,
-    useLoader = true
+    useRole = true
   ): Promise<Record<string, unknown>> {
-    const target = new URL(`/v1/${path}`, base);
-    const body = payload === undefined ? undefined : JSON.stringify(payload);
-    let response = await call(target, method, token ?? (useLoader ? loaderToken : undefined), body);
-    if (response.status === 403 && useLoader && loaderToken !== undefined) {
-      const projectedJwt = (await readFile(`${SA_DIR}/token`, 'utf8')).trim();
-      if (projectedJwt === '') throw new Error('Kubernetes loader ServiceAccount JWT is empty');
-      await loginLoader(projectedJwt);
-      response = await call(target, method, loaderToken, body);
-    }
-    if (response.status < 200 || response.status >= 300) throw new BaoHttpError(response.status);
-    return response.body ? (JSON.parse(response.body) as Record<string, unknown>) : {};
-  }
-  async function loginLoader(loaderJwt: string): Promise<void> {
-    const response = await api(
-      'auth/kubernetes/login',
-      'POST',
-      undefined,
-      { role: 'loader', jwt: loaderJwt },
-      false
+    return client.call(
+      path,
+      method,
+      payload,
+      token !== undefined ? { token } : useRole ? undefined : { anonymous: true }
     );
-    const auth = response['auth'] as Record<string, unknown> | undefined;
-    if (typeof auth?.['client_token'] !== 'string' || auth['client_token'] === '')
-      throw new Error('OpenBao Kubernetes auth login returned no client token');
-    loaderToken = auth['client_token'];
   }
   return {
     status: async () => {
@@ -393,10 +304,16 @@ export function createOpenBaoApi(options: OpenBaoApiOptions): BaoApi {
       return { initialized: data['initialized'] === true, sealed: data['sealed'] === true };
     },
     init: async () => {
-      const response = await api('sys/init', 'POST', undefined, {
-        secret_shares: 1,
-        secret_threshold: 1,
-      });
+      const response = await api(
+        'sys/init',
+        'POST',
+        undefined,
+        {
+          secret_shares: 1,
+          secret_threshold: 1,
+        },
+        false
+      );
       const keys = response['keys'] ?? response['keys_base64'];
       if (!Array.isArray(keys) || typeof response['root_token'] !== 'string')
         throw new Error('OpenBao sys/init response has no key shares or root token');
@@ -406,19 +323,15 @@ export function createOpenBaoApi(options: OpenBaoApiOptions): BaoApi {
       await api('sys/unseal', 'POST', undefined, { key }, false);
     },
     rootTokenActive: async (rootToken) => {
-      const response = await call(
-        new URL('/v1/auth/token/lookup-self', base),
-        'GET',
-        rootToken,
-        undefined
-      );
-      if (response.status === 200) return true;
-      if (response.status === 403) return false;
-      throw new Error(
-        `OpenBao GET auth/token/lookup-self failed (${String(response.status)}): ${response.body}`
-      );
+      try {
+        await client.call('auth/token/lookup-self', 'GET', undefined, { token: rootToken });
+        return true;
+      } catch (error) {
+        if (error instanceof BaoStorageError && error.code === 'denied') return false;
+        throw error;
+      }
     },
-    ensureLoaderPolicy: async (rootToken, loaderJwt) => {
+    ensureLoaderPolicy: async (rootToken) => {
       const policy =
         'path "sys/seal-status" { capabilities = ["read"] }\npath "sys/unseal" { capabilities = ["update"] }';
       await api('sys/policies/acl/loader', 'PUT', rootToken, { policy }, false);
@@ -447,16 +360,10 @@ export function createOpenBaoApi(options: OpenBaoApiOptions): BaoApi {
         },
         false
       );
-      await loginLoader(loaderJwt);
-      const capabilities = await api(
-        'sys/capabilities-self',
-        'POST',
-        loaderToken,
-        {
-          paths: ['sys/seal-status', 'sys/unseal', 'sys/init'],
-        },
-        false
-      );
+      await client.login();
+      const capabilities = await api('sys/capabilities-self', 'POST', undefined, {
+        paths: ['sys/seal-status', 'sys/unseal', 'sys/init'],
+      });
       const result = capabilities['sys/seal-status'] as string[] | undefined;
       const unseal = capabilities['sys/unseal'] as string[] | undefined;
       const init = capabilities['sys/init'] as string[] | undefined;
@@ -471,8 +378,8 @@ export function createOpenBaoApi(options: OpenBaoApiOptions): BaoApi {
         );
       }
     },
-    loginLoader,
-    ensureModelPolicy: async (rootToken, loaderJwt) => {
+    login: client.login,
+    ensureModelPolicy: async (rootToken) => {
       const mounts = await api('sys/mounts', 'GET', rootToken, undefined, false);
       if (mounts['lifemodel/'] === undefined) {
         await api(
@@ -503,21 +410,15 @@ export function createOpenBaoApi(options: OpenBaoApiOptions): BaoApi {
         },
         false
       );
-      await loginLoader(loaderJwt);
-      const capabilities = await api(
-        'sys/capabilities-self',
-        'POST',
-        loaderToken,
-        {
-          paths: [
-            'lifemodel/data/model/primary',
-            'lifemodel/data/model/reserve',
-            'lifemodel/metadata/model/primary',
-            'lifemodel/metadata/model/reserve',
-          ],
-        },
-        false
-      );
+      await client.login();
+      const capabilities = await api('sys/capabilities-self', 'POST', undefined, {
+        paths: [
+          'lifemodel/data/model/primary',
+          'lifemodel/data/model/reserve',
+          'lifemodel/metadata/model/primary',
+          'lifemodel/metadata/model/reserve',
+        ],
+      });
       const primary = capabilities['lifemodel/data/model/primary'] as string[] | undefined;
       const reserve = capabilities['lifemodel/data/model/reserve'] as string[] | undefined;
       const metadata = capabilities['lifemodel/metadata/model/reserve'] as string[] | undefined;
@@ -535,47 +436,11 @@ export function createOpenBaoApi(options: OpenBaoApiOptions): BaoApi {
       )
         throw new Error('OpenBao loader-model login did not have expected model capabilities');
     },
-    readModelSlot: async (slot) => {
-      try {
-        const response = await api(`lifemodel/data/model/${slot}`, 'GET');
-        const data = response['data'] as Record<string, unknown> | undefined;
-        const metadata = data?.['metadata'] as Record<string, unknown> | undefined;
-        if (
-          metadata?.['destroyed'] === true ||
-          (typeof metadata?.['deletion_time'] === 'string' && metadata['deletion_time'] !== '')
-        )
-          return null;
-        const value = data?.['data'] as Record<string, unknown> | undefined;
-        if (
-          value === undefined ||
-          !['openai', 'ollama'].includes(String(value['kind'])) ||
-          typeof value['baseUrl'] !== 'string' ||
-          typeof value['model'] !== 'string' ||
-          (value['key'] !== undefined && typeof value['key'] !== 'string')
-        )
-          throw new Error('invalid model slot');
-        return value as unknown as ModelSlot;
-      } catch (error) {
-        if (error instanceof BaoHttpError && error.status === 404) return null;
-        throw new Error('OpenBao model storage unavailable');
-      }
-    },
-    writeModelSlot: async (slot, value) => {
-      try {
-        await api(`lifemodel/data/model/${slot}`, 'POST', undefined, { data: value });
-      } catch {
-        throw new Error('OpenBao model storage unavailable');
-      }
-    },
-    deleteModelReserve: async () => {
-      try {
-        await api('lifemodel/data/model/reserve', 'DELETE');
-      } catch {
-        throw new Error('OpenBao model storage unavailable');
-      }
-    },
+    readModelSlot: client.readSlot,
+    writeModelSlot: client.writeSlot,
+    deleteModelReserve: client.deleteReserve,
     revokeRootToken: async (rootToken) => {
-      await api('auth/token/revoke-self', 'POST', rootToken, {});
+      await api('auth/token/revoke-self', 'POST', rootToken, {}, false);
     },
   };
 }
