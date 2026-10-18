@@ -43,6 +43,8 @@ export default function App() {
   const { t } = useTranslation();
   const [state, setState] = useState<State | null>(null);
   const [password, setPassword] = useState('');
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
@@ -50,6 +52,7 @@ export default function App() {
   const [reserve, setReserve] = useState<Slot | null>(null);
   const [reserveOpen, setReserveOpen] = useState(false);
   const [reserveError, setReserveError] = useState('');
+  const [passwordStatus, setPasswordStatus] = useState('');
   const [reserveKind, setReserveKind] = useState<'openai' | 'ollama'>('openai');
   const [reserveBaseUrl, setReserveBaseUrl] = useState('');
   const [reserveModel, setReserveModel] = useState('');
@@ -65,7 +68,7 @@ export default function App() {
     if (typeof value.setupNeeded !== 'boolean' || typeof value.loggedIn !== 'boolean')
       throw new Error('state');
     setState(value);
-    if (value.loggedIn && value.onboarding?.step !== 'done') {
+    if (value.loggedIn) {
       const models = await fetch('/api/model', { cache: 'no-store' });
       if (!models.ok) {
         const body = (await models.json().catch(() => ({}))) as { error?: string };
@@ -179,6 +182,11 @@ export default function App() {
         return;
       }
       setReserveKey('');
+      setReserve(null);
+      setReserveKind('openai');
+      setReserveBaseUrl('');
+      setReserveModel('');
+      setReserveKey('');
       await load();
     } catch {
       setReserveError(t('setupError'));
@@ -199,6 +207,11 @@ export default function App() {
         setReserveError(t('setupError'));
         return;
       }
+      setReserve(null);
+      setReserveKind('openai');
+      setReserveBaseUrl('');
+      setReserveModel('');
+      setReserveKey('');
       await load();
     } catch {
       setReserveError(t('setupError'));
@@ -220,6 +233,30 @@ export default function App() {
         return;
       }
       await load();
+    } catch {
+      setError(t('setupError'));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function changePassword(event: SyntheticEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setPasswordStatus('');
+    try {
+      const response = await fetch('/api/password', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-csrf-token': state?.csrfToken ?? '' },
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+      if (!response.ok) {
+        setPasswordStatus(response.status === 401 ? 'wrongCurrentPassword' : 'setupError');
+        return;
+      }
+      setCurrentPassword('');
+      setNewPassword('');
+      await load();
+      setPasswordStatus('passwordChanged');
     } catch {
       setError(t('setupError'));
     } finally {
@@ -372,8 +409,11 @@ export default function App() {
               </Button>
             </form>
           )}
-          {step === 'model' && (
+          {(step === 'model' || step === 'done') && (
             <>
+              {step === 'done' && (
+                <h2 className="mt-8 text-lg font-semibold">{t('modelAccess')}</h2>
+              )}
               <form
                 className="mt-6 space-y-4"
                 onSubmit={(e) => {
@@ -538,6 +578,97 @@ export default function App() {
               </div>
             </>
           )}
+          {step === 'done' && (
+            <>
+              <section className="mt-8 space-y-4" aria-labelledby="model-access-title">
+                <h2 id="model-access-title" className="text-lg font-semibold">
+                  {t('modelAccess')}
+                </h2>
+              </section>
+              <section className="mt-8 space-y-4" aria-labelledby="password-change-title">
+                <h2 id="password-change-title" className="text-lg font-semibold">
+                  {t('changePassword')}
+                </h2>
+                {passwordStatus && (
+                  <Alert
+                    className="mb-4"
+                    variant={passwordStatus === 'passwordChanged' ? 'default' : 'destructive'}
+                    role="status"
+                  >
+                    <AlertDescription>{t(passwordStatus)}</AlertDescription>
+                  </Alert>
+                )}
+                <form
+                  className="space-y-4"
+                  onSubmit={(e) => {
+                    void changePassword(e);
+                  }}
+                >
+                  <div className="space-y-2">
+                    <Label htmlFor="current-password">{t('currentPassword')}</Label>
+                    <Input
+                      id="current-password"
+                      type="password"
+                      autoComplete="current-password"
+                      required
+                      value={currentPassword}
+                      onChange={(e) => {
+                        setCurrentPassword(e.target.value);
+                      }}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="new-password">{t('newPassword')}</Label>
+                    <Input
+                      id="new-password"
+                      type="password"
+                      autoComplete="new-password"
+                      minLength={12}
+                      required
+                      value={newPassword}
+                      onChange={(e) => {
+                        setNewPassword(e.target.value);
+                      }}
+                    />
+                    <p className="text-xs text-muted-foreground">{t('minimumPassword')}</p>
+                  </div>
+                  <Button disabled={busy}>{busy ? t('loading') : t('changePassword')}</Button>
+                </form>
+              </section>
+              <section className="mt-8 space-y-3" aria-labelledby="certificate-title">
+                <h2 id="certificate-title" className="text-lg font-semibold">
+                  {t('certificate')}
+                </h2>
+                <p className="text-sm">
+                  <strong>{t('fingerprint')}: </strong>
+                  <code className="break-all">
+                    {state.caFingerprint ?? t('fingerprintUnavailable')}
+                  </code>
+                </p>
+                <Button asChild variant="link">
+                  <a href="/ca.crt" download>
+                    {t('downloadCa')}
+                  </a>
+                </Button>
+              </section>
+              <div className="mt-6">
+                <a href={handoffUrl}>
+                  <Button asChild variant="outline">
+                    <span>{t('openChat')}</span>
+                  </Button>
+                </a>
+              </div>
+              <Button
+                className="mt-4"
+                variant="outline"
+                onClick={() => {
+                  void logout();
+                }}
+              >
+                {t('logout')}
+              </Button>
+            </>
+          )}
           {step === 'device' && (
             <div className="mt-6 space-y-4">
               <p>
@@ -571,15 +702,6 @@ export default function App() {
               >
                 {t('continue')}
               </Button>
-            </div>
-          )}
-          {step === 'done' && (
-            <div className="mt-6">
-              <a href={handoffUrl}>
-                <Button asChild>
-                  <span>{t('openChat')}</span>
-                </Button>
-              </a>
             </div>
           )}
           {step !== 'welcome' && step !== 'password' && step !== 'done' && (

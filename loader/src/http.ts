@@ -58,6 +58,7 @@ const API_METHODS: Record<string, string> = {
   '/api/state': 'GET',
   '/api/setup': 'POST',
   '/api/login': 'POST',
+  '/api/password': 'POST',
   '/api/logout': 'POST',
   '/api/onboarding/device': 'POST',
   '/api/model': 'GET',
@@ -203,6 +204,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       (method === 'POST' &&
         (path === '/api/setup' ||
           path === '/api/login' ||
+          path === '/api/password' ||
           path === '/api/logout' ||
           path === '/api/onboarding/device')) ||
       (method === 'PUT' && (path === '/api/model/primary' || path === '/api/model/reserve')) ||
@@ -341,27 +343,131 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           );
           return;
         }
-        const record = await state.readAuth();
-        if (record === null || !(await verifyPassword(password, record))) {
+        const login = await withAuthTransition(async () => {
+          const record = await state.readAuth();
+          if (record === null || !(await verifyPassword(password, record))) return null;
+          await state.reconcilePasswordOnboarding?.();
+          const token = createSession(record, clock.now());
+          const onboarding = await state.readOnboarding?.();
+          const location =
+            next === null || onboarding?.step !== 'done'
+              ? null
+              : handoffRedirect(token, next, requestHost);
+          return { token, location };
+        });
+        if (login === null) {
           res.writeHead(401, { 'content-type': 'application/json; charset=utf-8' });
           res.end('{"error":"invalid_credentials"}');
           return;
         }
-        await state.reconcilePasswordOnboarding?.();
-        const token = createSession(record, clock.now());
-        const onboarding = await state.readOnboarding?.();
-        const location =
-          next === null || onboarding?.step !== 'done'
-            ? null
-            : handoffRedirect(token, next, requestHost);
         res.writeHead(200, {
           'content-type': 'application/json; charset=utf-8',
-          'set-cookie': sessionCookie(token, req.headers.host ?? ''),
+          'set-cookie': sessionCookie(login.token, req.headers.host ?? ''),
           'cache-control': 'no-store',
         });
         res.end(
-          JSON.stringify({ ok: true, ...(location === null ? {} : { redirectTo: location }) })
+          JSON.stringify({
+            ok: true,
+            ...(login.location === null ? {} : { redirectTo: login.location }),
+          })
         );
+        return;
+      }
+      if (path === '/api/password' && method === 'POST') {
+        const initial = await state.readAuth();
+        const token = initial === null ? null : sessionToken(req, initial);
+        if (initial === null || token === null) {
+          res.writeHead(401);
+          res.end();
+          return;
+        }
+        if (
+          refuseOrigin(req) !== null ||
+          !verifyCsrf(header(req, 'x-csrf-token') ?? '', initial, token)
+        ) {
+          res.writeHead(403);
+          res.end('{"error":"origin_or_csrf"}');
+          return;
+        }
+        if (
+          header(req, 'content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json'
+        ) {
+          res.writeHead(415);
+          res.end('{"error":"content_type"}');
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let size = 0;
+        for await (const chunk of req) {
+          const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          size += part.length;
+          if (size > MAX_FORM_BYTES) break;
+          chunks.push(Buffer.from(part));
+        }
+        if (size > MAX_FORM_BYTES) {
+          res.writeHead(413);
+          res.end('{"error":"body_too_large"}');
+          return;
+        }
+        let payload: unknown;
+        try {
+          payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        } catch {
+          res.writeHead(400);
+          res.end('{"error":"invalid_body"}');
+          return;
+        }
+        if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+          res.writeHead(400);
+          res.end('{"error":"invalid_body"}');
+          return;
+        }
+        const value = payload as Record<string, unknown>;
+        if (
+          Object.keys(value).length !== 2 ||
+          Object.keys(value).some((key) => !['currentPassword', 'newPassword'].includes(key)) ||
+          typeof value['currentPassword'] !== 'string' ||
+          value['currentPassword'].length < 1 ||
+          value['currentPassword'].length > 1024 ||
+          typeof value['newPassword'] !== 'string' ||
+          value['newPassword'].length < 12 ||
+          value['newPassword'].length > 1024
+        ) {
+          res.writeHead(400);
+          res.end('{"error":"invalid_body"}');
+          return;
+        }
+        const replacement = await withAuthTransition(async () => {
+          const current = await state.readAuth();
+          const currentToken = current === null ? null : sessionToken(req, current);
+          if (
+            current === null ||
+            currentToken === null ||
+            !verifyCsrf(header(req, 'x-csrf-token') ?? '', current, currentToken)
+          )
+            return null;
+          if (!(await verifyPassword(value['currentPassword'] as string, current))) return false;
+          const updated = await hashPassword(value['newPassword'] as string);
+          await state.replaceAuth(updated);
+          return updated;
+        });
+        if (replacement === false) {
+          res.writeHead(401);
+          res.end('{"error":"invalid_credentials"}');
+          return;
+        }
+        if (replacement === null) {
+          res.writeHead(401);
+          res.end();
+          return;
+        }
+        const fresh = createSession(replacement, clock.now());
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'set-cookie': sessionCookie(fresh, req.headers.host ?? ''),
+          'cache-control': 'no-store',
+        });
+        res.end('{"ok":true}');
         return;
       }
       if (path === '/api/model' && method === 'GET') {
