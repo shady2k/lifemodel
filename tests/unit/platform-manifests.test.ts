@@ -168,8 +168,8 @@ case "$*" in
   *'--field-manager=lifemodel-bootstrap'*)
     file=''; for arg do file=$arg; done
     echo "root:$*" >> "$K3S_LOG"
-    if grep 'tag:' "$file" >/dev/null; then grep 'tag:' "$file" | sed -E "s/.*tag: //; s/[\\\"']//g" > "$K3S_APPLIED_TAG"; fi
-    if grep 'digest:' "$file" >/dev/null; then grep 'digest:' "$file" > "$K3S_APPLIED_REF"; fi
+    if grep 'tag:' "$file" >/dev/null; then rm -f "$K3S_APPLIED_REF"; grep 'tag:' "$file" | sed -E "s/.*tag: //; s/[\\\"']//g" > "$K3S_APPLIED_TAG"; fi
+    if grep 'digest:' "$file" >/dev/null; then rm -f "$K3S_APPLIED_TAG"; grep 'digest:' "$file" > "$K3S_APPLIED_REF"; fi
     ;;
   *' -f -'*) cat >/dev/null ;;
   *) echo "flux:$*" >> "$K3S_LOG"; if [ "$K3S_FAIL_FLUX" = 1 ] && [ "$(grep -c '^flux:' "$K3S_LOG")" -eq 1 ]; then exit 42; fi ;;
@@ -415,6 +415,58 @@ describe('platform manifests', () => {
     }
   );
 
+  it.each([
+    ['LIFEMODEL_NAME', "'Bad'"],
+    ['LIFEMODEL_NAME', "''"],
+    ['LIFEMODEL_NAME', "'null'"],
+    ['LIFEMODEL_PLATFORM_URL', "'https://bad&url'"],
+    ['LIFEMODEL_PLATFORM_URL', "''"],
+    ['LIFEMODEL_PLATFORM_TAG', "'v1;touch marker'"],
+    ['LIFEMODEL_PLATFORM_TAG', "'unterminated"],
+    ['LIFEMODEL_PLATFORM_TAG', '`printf v1`'],
+    ['LIFEMODEL_PLATFORM_TAG', '$HOME'],
+    ['LIFEMODEL_PLATFORM_TAG', "'v1' trailing"],
+    ['LIFEMODEL_PLATFORM_TAG', '"v1"'],
+    ['LIFEMODEL_PLATFORM_TAG', "''"],
+  ])('validates saved value %s=%s even with an explicit release override', (key, value) => {
+    const first = runInstallerHarness(false, false);
+    try {
+      expect(first.status, first.output).toBe(0);
+      const envPath = join(first.root, 'install-root/etc/lifemodel/instance.env');
+      const record = readFileSync(envPath, 'utf8').replace(
+        new RegExp(`^${key}=.*$`, 'm'),
+        `${key}=${value}`
+      );
+      writeFileSync(envPath, record);
+      const before = hostSnapshot(first.root);
+      const second = runInstallerHarness(false, false, first.root);
+      expect(second.status, second.output).not.toBe(0);
+      expect(hostSnapshot(first.root)).toEqual(before);
+    } finally {
+      rmSync(first.root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an invalid saved digest even with an explicit release override', () => {
+    const first = runInstallerHarness(false, false, undefined, 'unused', {
+      digest: `sha256:${'a'.repeat(64)}`,
+    });
+    try {
+      expect(first.status, first.output).toBe(0);
+      const envPath = join(first.root, 'install-root/etc/lifemodel/instance.env');
+      writeFileSync(
+        envPath,
+        readFileSync(envPath, 'utf8').replace(/sha256:[a-f0-9]{64}/, 'sha256:bad')
+      );
+      const before = hostSnapshot(first.root);
+      const second = runInstallerHarness(false, false, first.root);
+      expect(second.status, second.output).not.toBe(0);
+      expect(hostSnapshot(first.root)).toEqual(before);
+    } finally {
+      rmSync(first.root, { recursive: true, force: true });
+    }
+  });
+
   it('accepts literal unquoted and single-quoted saved assignments without a final newline', () => {
     const first = runInstallerHarness(false, false);
     try {
@@ -449,6 +501,8 @@ describe('platform manifests', () => {
         `digest: ${digest}`
       );
       expect(readFileSync(envPath, 'utf8')).toContain(`LIFEMODEL_NAME='home'`);
+      expect(readFileSync(envPath, 'utf8')).toContain(`LIFEMODEL_PLATFORM_DIGEST='${digest}'`);
+      expect(readFileSync(envPath, 'utf8')).not.toContain('LIFEMODEL_PLATFORM_TAG=');
       const nextDigest = `sha256:${'b'.repeat(64)}`;
       const next = runInstallerHarness(false, false, first.root, 'unused', { digest: nextDigest });
       expect(next.status, next.output).toBe(0);
