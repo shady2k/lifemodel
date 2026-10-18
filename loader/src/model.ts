@@ -86,6 +86,37 @@ function validateUrl(input: string): URL {
   return url;
 }
 
+/** Resolve and validate once; transports must connect to this pinned address. */
+export async function resolveModelDestination(
+  baseUrl: string,
+  deadline: number,
+  resolveHost: (hostname: string) => Promise<string[]> = async (hostname) =>
+    (await lookup(hostname, { all: true, verbatim: true })).map((item) => item.address)
+): Promise<{ url: URL; address: string }> {
+  const url = validateUrl(baseUrl);
+  const special = url.origin === OLLAMA;
+  const addresses = await withDeadline(
+    isIP(url.hostname) ? Promise.resolve([url.hostname]) : resolveHost(url.hostname),
+    deadline
+  );
+  if (
+    addresses.length === 0 ||
+    addresses.some((address) =>
+      special
+        ? isIP(address) !== 4 ||
+          !address.startsWith('10.43.') ||
+          address.startsWith('169.254.') ||
+          address.startsWith('127.')
+        : deniedAddress(address) ||
+          (url.protocol === 'http:' && !PRIVATE_V4.some((pattern) => pattern.test(address)))
+    )
+  )
+    throw new ModelCheckError('blocked_destination');
+  const address = addresses[0];
+  if (!address) throw new ModelCheckError('blocked_destination');
+  return { url, address };
+}
+
 export interface ModelCheckerOptions {
   resolveHost?: (hostname: string) => Promise<string[]>;
   tlsCa?: string | Buffer;
@@ -107,27 +138,7 @@ export function createModelChecker(
   const active = new Set<ModelSlotName>();
   const check = async (slot: ModelSlot): Promise<void> => {
     const deadline = Date.now() + (options.timeoutMs ?? TIMEOUT_MS);
-    const url = validateUrl(slot.baseUrl);
-    const special = url.origin === OLLAMA;
-    const addresses = await withDeadline(
-      isIP(url.hostname) ? Promise.resolve([url.hostname]) : resolveHost(url.hostname),
-      deadline
-    );
-    if (
-      addresses.length === 0 ||
-      addresses.some((address) =>
-        special
-          ? isIP(address) !== 4 ||
-            !address.startsWith('10.43.') ||
-            address.startsWith('169.254.') ||
-            address.startsWith('127.')
-          : deniedAddress(address) ||
-            (url.protocol === 'http:' && !PRIVATE_V4.some((pattern) => pattern.test(address)))
-      )
-    )
-      throw new ModelCheckError('blocked_destination');
-    const address = addresses[0];
-    if (!address) throw new ModelCheckError('blocked_destination');
+    const { address } = await resolveModelDestination(slot.baseUrl, deadline, resolveHost);
     const endpoint = modelEndpointUrl(slot.baseUrl);
     const payload = JSON.stringify({
       model: slot.model,
