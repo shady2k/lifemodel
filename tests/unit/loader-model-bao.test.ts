@@ -324,6 +324,33 @@ describe('shared role Bao client over real HTTP', () => {
       expect(JSON.stringify(lines)).not.toContain('jwt-');
     }
   });
+  it('coalesces twenty rejections of the same stale token into one additional login', async () => {
+    const f = await fixture();
+    await f.client.readSlot('primary');
+    await writeFile(f.jwtFile, 'jwt-rotated');
+    const releases: Array<() => void> = [];
+    let allHeld!: () => void;
+    const allHeldPromise = new Promise<void>((r) => {
+      allHeld = r;
+    });
+    f.onRequest = (req, res) => {
+      if (req.url?.includes('/data/') && releases.length < 20) {
+        releases.push(() => {
+          res.writeHead(403);
+          res.end('PRIVATE BODY');
+        });
+        if (releases.length === 20) allHeld();
+        return true;
+      }
+      return false;
+    };
+    const requests = Array.from({ length: 20 }, () => f.client.readSlot('reserve'));
+    await allHeldPromise;
+    for (const release of releases) release();
+    await expect(Promise.all(requests)).resolves.toHaveLength(20);
+    expect(f.logins.map((l) => l.jwt)).toEqual(['jwt-first', 'jwt-rotated']);
+    expect(f.tokens.at(-1)).toBe('bao-token-2');
+  });
   it('never treats missing authentication endpoints as an unset model slot', async () => {
     const f = await fixture();
     f.loginStatus = 404;
