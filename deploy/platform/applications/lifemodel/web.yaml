@@ -81,6 +81,10 @@ spec:
               value: '8081'
             - name: LIFEMODEL_WEB_APP_DIRECTORY
               value: /opt/lifemodel/web/app
+            # The gateway's health listener (ADR-013 D5/D6): the web module
+            # polls /status for the chat's "Сейчас" panel, never the model API.
+            - name: LIFEMODEL_MODEL_GATEWAY_STATUS_URL
+              value: http://model-gateway.lifemodel-system.svc:8081/status
             - name: LIFEMODEL_VALKEY_URL
               value: redis://:$(LIFEMODEL_VALKEY_PASSWORD)@valkey.lifemodel-state.svc.cluster.local:6379
             - name: LIFEMODEL_DATABASE_URL

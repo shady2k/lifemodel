@@ -15,6 +15,13 @@ The web module serves the built React application and the owner-facing API on it
 2. Check loader and Traefik health, then verify the ForwardAuth route and loader `/_auth/verify` service path. Restore the loader before testing access through the configured instance host (`<name>.local`).
 3. Confirm the owner can authenticate and reach the app, transcript and event stream. Do not expose the web Service directly as a workaround.
 
+## Model status
+
+1. The web module polls the platform gateway's `/status` on 8081 once for all its clients, at most every 5 s, with a 2 s bound on each fetch (ADR-013 D6). The gateway URL is `LIFEMODEL_MODEL_GATEWAY_STATUS_URL`, defaulting to `http://model-gateway.lifemodel-system.svc:8081/status`.
+2. The latest answer travels in the stream's own `model` envelope; a status change alone pushes an update, and it never moves the browser's resume cursor. Only the safe fields leave the module: `state`, `outageSince` and `lastErrorCode`.
+3. When no status can be read — the gateway is unreachable, the fetch times out, or the body is not a status — the owner sees "Model status unavailable", never an outage. A hanging `/status` never delays the message or creature-state stream.
+4. With both model slots stopped, `/status` reports `state: down` with `outageSince` and the safe error code, and the chat's "Сейчас" panel and the loader's settings show "No connection to the model since HH:MM — …". Check the gateway pod's log and the loader's settings for the same line.
+
 ## Stuck stream
 
 1. Check `/metrics` for SSE lag, reconnects and creature-state freshness. Check web logs for stream termination and store failures; logs must not include message text or credentials.

@@ -38,6 +38,12 @@ import {
   type ModelSlotName,
   type ModelSlots,
 } from './model.js';
+import {
+  createModelStatusReader,
+  parseLoaderModelStatus,
+  type LoaderModelStatus,
+  type ModelStatusReader,
+} from './model-status.js';
 
 export interface LoaderHttpDeps {
   state: LoaderState;
@@ -47,6 +53,7 @@ export interface LoaderHttpDeps {
   config: LoaderConfig;
   uiRoot?: string;
   modelSlots?: ModelSlots;
+  modelStatus?: ModelStatusReader;
   modelChecker?: (slot: ModelSlot, slotName?: ModelSlotName) => Promise<void>;
 }
 export interface LoaderHttp {
@@ -62,6 +69,7 @@ const API_METHODS: Record<string, string> = {
   '/api/logout': 'POST',
   '/api/onboarding/device': 'POST',
   '/api/model': 'GET',
+  '/api/model-status': 'GET',
   '/api/model/primary': 'PUT',
   '/api/model/reserve': 'PUT',
 };
@@ -92,6 +100,8 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
   };
   const defaultModelChecker = createModelChecker();
   const checkModel = deps.modelChecker ?? defaultModelChecker;
+  const modelStatus: ModelStatusReader =
+    deps.modelStatus ?? createModelStatusReader({ url: config.modelStatusUrl });
   const modelChecks = new Set<ModelSlotName>();
   const uiRoot = resolve(
     deps.uiRoot ??
@@ -200,6 +210,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           path === '/favicon.svg' ||
           path === '/api/state' ||
           path === '/api/model' ||
+          path === '/api/model-status' ||
           path.startsWith('/assets/'))) ||
       (method === 'POST' &&
         (path === '/api/setup' ||
@@ -502,6 +513,37 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           });
           res.end('{"error":"storage_unavailable"}');
         }
+        return;
+      }
+      if (path === '/api/model-status' && method === 'GET') {
+        const origin = header(req, 'origin');
+        const fetchSite = header(req, 'sec-fetch-site');
+        const record = await state.readAuth();
+        const token = record === null ? null : sessionToken(req, record);
+        if (
+          token === null ||
+          (origin !== undefined &&
+            !sameOrigin(origin, undefined, `boot-${config.instanceName}.local`)) ||
+          (fetchSite !== undefined && fetchSite !== 'same-origin')
+        ) {
+          res.writeHead(403);
+          res.end();
+          return;
+        }
+        // ADR-013 D6: the safe fields only — the reader's own value is
+        // re-projected at the browser boundary — and an unreadable status is a
+        // plain "unavailable" for the settings page, never an error page.
+        let status: LoaderModelStatus | null = null;
+        try {
+          status = parseLoaderModelStatus(await modelStatus.read());
+        } catch {
+          status = null;
+        }
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        });
+        res.end(JSON.stringify(status));
         return;
       }
       if ((path === '/api/model/primary' || path === '/api/model/reserve') && method === 'PUT') {

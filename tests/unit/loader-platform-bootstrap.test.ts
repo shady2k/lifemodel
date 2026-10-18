@@ -320,5 +320,10 @@ describe('platform bootstrap phases', () => {
     const deployment = YAML.parse(await readFile('deploy/platform/a0/deployment.yaml', 'utf8'));
     expect(deployment.spec.template.spec.serviceAccountName).toBe('loader');
     expect(deployment.spec.template.spec.automountServiceAccountToken).not.toBe(false);
+    // The settings read the gateway's own health listener (ADR-013 D5/D6).
+    expect(deployment.spec.template.spec.containers[0].env).toContainEqual({
+      name: 'LIFEMODEL_MODEL_GATEWAY_STATUS_URL',
+      value: 'http://model-gateway.lifemodel-system.svc:8081/status',
+    });
   });
 });

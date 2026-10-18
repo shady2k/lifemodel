@@ -33,6 +33,7 @@ import {
   type TranscriptMessage,
   type WebTransport,
 } from './transport';
+import type { ModelStatusEvent } from '../../../src/web/contract.js';
 
 function uuidV7(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -129,9 +130,11 @@ function sortTranscript(pages: TranscriptMessage[][]): TranscriptMessage[] {
 function ConversationContent({
   transport,
   onState,
+  onModelStatus,
 }: {
   transport: WebTransport;
   onState?: (state: CreaturePresenceValue | undefined) => void;
+  onModelStatus?: (status: ModelStatusEvent | null) => void;
 }) {
   const { t, i18n } = useTranslation();
   const scroller = useRef<HTMLDivElement>(null);
@@ -220,9 +223,12 @@ function ConversationContent({
         const presence = { state: state.state, publishedAt: state.publishedAt };
         setCreature(presence);
         onState?.(presence);
+      },
+      (status) => {
+        onModelStatus?.(status);
       }
     );
-  }, [transcript.data?.pages.at(-1)?.cursor, transport, onState, t]);
+  }, [transcript.data?.pages.at(-1)?.cursor, transport, onState, onModelStatus, t]);
 
   useLayoutEffect(() => {
     if (!scroller.current || !transcript.data) return;
@@ -575,16 +581,18 @@ function ConversationContent({
 export function Conversation({
   transport = httpTransport,
   onState,
+  onModelStatus,
 }: {
   transport?: WebTransport;
   onState?: (state: CreaturePresenceValue | undefined) => void;
+  onModelStatus?: (status: ModelStatusEvent | null) => void;
 }) {
   const [client] = useState(
     () => new QueryClient({ defaultOptions: { queries: { retry: false } } })
   );
   return (
     <QueryClientProvider client={client}>
-      <ConversationContent transport={transport} onState={onState} />
+      <ConversationContent transport={transport} onState={onState} onModelStatus={onModelStatus} />
     </QueryClientProvider>
   );
 }

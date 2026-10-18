@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Menu, Orbit, X } from 'lucide-react';
 import { CreaturePresence, type CreaturePresenceValue } from './components/CreaturePresence';
+import { ModelStatus } from './components/ModelStatus';
 import { Avatar, AvatarFallback } from '@kit/components/ui/avatar';
 import { Button } from '@kit/components/ui/button';
 import {
@@ -28,7 +29,7 @@ import {
 import { useIsMobile } from '@kit/hooks/use-mobile';
 import i18n, { languageFor } from './i18n';
 import { Conversation } from './Conversation';
-import type { InstanceResponse } from '../../../src/web/contract.js';
+import type { InstanceResponse, ModelStatusEvent } from '../../../src/web/contract.js';
 
 function Creature() {
   return (
@@ -77,7 +78,13 @@ function Navigation({ loaderUrl }: { loaderUrl: string | null }) {
   );
 }
 
-function NowPanel({ creature }: { creature?: CreaturePresenceValue }) {
+function NowPanel({
+  creature,
+  modelStatus,
+}: {
+  creature?: CreaturePresenceValue;
+  modelStatus?: ModelStatusEvent | null;
+}) {
   const { t } = useTranslation();
   return (
     <section aria-labelledby="now-title" className="flex h-full min-h-0 flex-col bg-sidebar">
@@ -93,6 +100,11 @@ function NowPanel({ creature }: { creature?: CreaturePresenceValue }) {
           <CreaturePresence value={creature} />
         </div>
       </div>
+      {modelStatus !== undefined && (
+        <div className="px-4 pb-4">
+          <ModelStatus value={modelStatus} />
+        </div>
+      )}
     </section>
   );
 }
@@ -117,6 +129,8 @@ export default function App() {
   const [nowOpen, setNowOpen] = useState(false);
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [creature, setCreature] = useState<CreaturePresenceValue>();
+  // Undefined until the stream has spoken about the model: nothing is claimed before that.
+  const [modelStatus, setModelStatus] = useState<ModelStatusEvent | null>();
   const [loaderUrl, setLoaderUrl] = useState<string | null>(null);
   useEffect(() => {
     let active = true;
@@ -192,10 +206,10 @@ export default function App() {
               aria-label={t('conversation')}
               className="min-h-0 min-w-0 flex-1"
             >
-              <Conversation onState={setCreature} />
+              <Conversation onState={setCreature} onModelStatus={setModelStatus} />
             </section>
             <aside aria-label={t('now')} className="hidden w-80 shrink-0 border-l lg:block">
-              <NowPanel creature={creature} />
+              <NowPanel creature={creature} modelStatus={modelStatus} />
             </aside>
           </SidebarInset>
         </div>
@@ -237,7 +251,7 @@ export default function App() {
               <SheetTitle>{t('now')}</SheetTitle>
               <SheetDescription>{t('creatureDescription')}</SheetDescription>
             </SheetHeader>
-            <NowPanel creature={creature} />
+            <NowPanel creature={creature} modelStatus={modelStatus} />
             <SheetClose asChild>
               <Button
                 variant="ghost"
