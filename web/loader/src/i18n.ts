@@ -35,6 +35,7 @@ export const resources = {
         'lifemodel is your proactive AI companion. This loader securely sets your password, connects a model, and prepares this device. Next: password, model access, then device trust.',
       begin: 'Get started',
       modelTitle: 'Connect model access',
+      modelAccess: 'Model access',
       modelDescription:
         'Set the required primary model. You can also configure an optional reserve model here.',
       kind: 'Provider',
@@ -112,6 +113,7 @@ export const resources = {
         'lifemodel — ваш проактивный ИИ-компаньон. Загрузчик безопасно задаст пароль, подключит модель и подготовит устройство. Далее: пароль, модель и доверие устройства.',
       begin: 'Начать',
       modelTitle: 'Подключите модель',
+      modelAccess: 'Доступ к модели',
       modelDescription:
         'Укажите обязательную основную модель. Здесь также можно настроить необязательную резервную модель.',
       kind: 'Провайдер',

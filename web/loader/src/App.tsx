@@ -52,6 +52,7 @@ export default function App() {
   const [reserve, setReserve] = useState<Slot | null>(null);
   const [reserveOpen, setReserveOpen] = useState(false);
   const [reserveError, setReserveError] = useState('');
+  const [passwordStatus, setPasswordStatus] = useState('');
   const [reserveKind, setReserveKind] = useState<'openai' | 'ollama'>('openai');
   const [reserveBaseUrl, setReserveBaseUrl] = useState('');
   const [reserveModel, setReserveModel] = useState('');
@@ -181,6 +182,11 @@ export default function App() {
         return;
       }
       setReserveKey('');
+      setReserve(null);
+      setReserveKind('openai');
+      setReserveBaseUrl('');
+      setReserveModel('');
+      setReserveKey('');
       await load();
     } catch {
       setReserveError(t('setupError'));
@@ -201,6 +207,11 @@ export default function App() {
         setReserveError(t('setupError'));
         return;
       }
+      setReserve(null);
+      setReserveKind('openai');
+      setReserveBaseUrl('');
+      setReserveModel('');
+      setReserveKey('');
       await load();
     } catch {
       setReserveError(t('setupError'));
@@ -231,7 +242,7 @@ export default function App() {
   async function changePassword(event: SyntheticEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
-    setError('');
+    setPasswordStatus('');
     try {
       const response = await fetch('/api/password', {
         method: 'POST',
@@ -239,13 +250,13 @@ export default function App() {
         body: JSON.stringify({ currentPassword, newPassword }),
       });
       if (!response.ok) {
-        setError(response.status === 401 ? 'wrongCurrentPassword' : 'setupError');
+        setPasswordStatus(response.status === 401 ? 'wrongCurrentPassword' : 'setupError');
         return;
       }
       setCurrentPassword('');
       setNewPassword('');
       await load();
-      setError('passwordChanged');
+      setPasswordStatus('passwordChanged');
     } catch {
       setError(t('setupError'));
     } finally {
@@ -400,6 +411,9 @@ export default function App() {
           )}
           {(step === 'model' || step === 'done') && (
             <>
+              {step === 'done' && (
+                <h2 className="mt-8 text-lg font-semibold">{t('modelAccess')}</h2>
+              )}
               <form
                 className="mt-6 space-y-4"
                 onSubmit={(e) => {
@@ -566,10 +580,24 @@ export default function App() {
           )}
           {step === 'done' && (
             <>
+              <section className="mt-8 space-y-4" aria-labelledby="model-access-title">
+                <h2 id="model-access-title" className="text-lg font-semibold">
+                  {t('modelAccess')}
+                </h2>
+              </section>
               <section className="mt-8 space-y-4" aria-labelledby="password-change-title">
                 <h2 id="password-change-title" className="text-lg font-semibold">
                   {t('changePassword')}
                 </h2>
+                {passwordStatus && (
+                  <Alert
+                    className="mb-4"
+                    variant={passwordStatus === 'passwordChanged' ? 'default' : 'destructive'}
+                    role="status"
+                  >
+                    <AlertDescription>{t(passwordStatus)}</AlertDescription>
+                  </Alert>
+                )}
                 <form
                   className="space-y-4"
                   onSubmit={(e) => {

@@ -337,6 +337,46 @@ describe('loader ForwardAuth and JSON authentication API', () => {
     ).toBeUndefined();
   });
 
+  it('invalidates a handoff ticket minted before password rotation', async () => {
+    const record = await hashPassword('owner password');
+    const { base, clock, getAuth } = await start(record);
+    const headers = {
+      host: 'boot-lifemodel.local',
+      origin: 'https://boot-lifemodel.local',
+      'content-type': 'application/json',
+    };
+    const login = await request(
+      base,
+      '/api/login',
+      headers,
+      'POST',
+      JSON.stringify({ password: 'owner password', next: 'https://lifemodel.local/private' })
+    );
+    expect(login.status).toBe(200);
+    const location = JSON.parse(login.body).redirectTo as string;
+    const handoffPath = new URL(location).pathname + new URL(location).search;
+    const ticket = new URL(location).searchParams.get('code');
+    expect(ticket).toBeTruthy();
+    const token = String(login.headers['set-cookie']).split(';')[0]!;
+    const csrf = (await import('../../loader/src/auth.js')).csrfToken(record, token.split('=')[1]!);
+    const changed = await request(
+      base,
+      '/api/password',
+      { ...headers, cookie: token, 'x-csrf-token': csrf },
+      'POST',
+      JSON.stringify({
+        currentPassword: 'owner password',
+        newPassword: 'brand new secure password',
+      })
+    );
+    expect(changed.status).toBe(200);
+    expect(verifySession(token.split('=')[1]!, getAuth()!, clock.now())).toBe(false);
+    const redeemed = await request(base, handoffPath, { host: 'lifemodel.local' });
+    expect(redeemed.status).toBe(303);
+    expect(redeemed.headers.location).toBe('https://boot-lifemodel.local/login');
+    expect(redeemed.headers['set-cookie']).toBeUndefined();
+  });
+
   it('does not issue a handoff before onboarding is complete during first-visit setup', async () => {
     const { base } = await start(null);
     const requested = 'https://lifemodel.local/private?from=setup';
@@ -690,6 +730,65 @@ describe('loader ForwardAuth and JSON authentication API', () => {
 });
 
 describe('loader password change', () => {
+  it('rejects a login with the old password queued behind a committed password rotation', async () => {
+    const oldRecord = await hashPassword('owner password');
+    let auth = structuredClone(oldRecord);
+    let enteredReplace!: () => void;
+    let releaseReplace!: () => void;
+    const replacing = new Promise<void>((resolve) => {
+      enteredReplace = resolve;
+    });
+    const paused = new Promise<void>((resolve) => {
+      releaseReplace = resolve;
+    });
+    const state: LoaderState = {
+      ensureLayout: async () => {},
+      readAuth: async () => structuredClone(auth),
+      writeAuth: async (record) => {
+        auth = structuredClone(record);
+      },
+      replaceAuth: async (record) => {
+        enteredReplace();
+        await paused;
+        auth = structuredClone(record);
+      },
+      readOnboarding: async () => ({ version: 1, step: 'done', completedAt: 'now' }),
+      reconcilePasswordOnboarding: async () => {},
+    };
+    const { base, clock } = await start(oldRecord, undefined, undefined, undefined, state);
+    const headers = {
+      host: 'boot-lifemodel.local',
+      origin: 'https://boot-lifemodel.local',
+      'content-type': 'application/json',
+    };
+    const oldToken = createSession(oldRecord, clock.now());
+    const csrf = (await import('../../loader/src/auth.js')).csrfToken(oldRecord, oldToken);
+    const rotationPromise = request(
+      base,
+      '/api/password',
+      { ...headers, cookie: `__Host-lm_session=${oldToken}`, 'x-csrf-token': csrf },
+      'POST',
+      JSON.stringify({
+        currentPassword: 'owner password',
+        newPassword: 'brand new secure password',
+      })
+    );
+    await replacing;
+    const loginPromise = request(
+      base,
+      '/api/login',
+      headers,
+      'POST',
+      JSON.stringify({ password: 'owner password' })
+    );
+    releaseReplace();
+    const [rotation, login] = await Promise.all([rotationPromise, loginPromise]);
+    expect(rotation.status).toBe(200);
+    expect(login.status).toBe(401);
+    expect(login.headers['set-cookie']).toBeUndefined();
+    expect((await request(base, '/_auth/verify', { cookie: '' })).status).toBe(401);
+  });
+
   it('refuses a wrong current password and atomically rotates sessions on success', async () => {
     const record = await hashPassword('owner password');
     const { base, clock, getAuth } = await start(record);
@@ -811,6 +910,50 @@ describe('loader password change', () => {
         clock.now()
       )
     ).toBe(true);
+  });
+
+  it('keeps the complete auth record and old cookie when atomic auth replacement fails', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'loader-auth-atomic-failure-'));
+    roots.push(root);
+    const config = loadConfig({ LIFEMODEL_NAME: 'lifemodel', LIFEMODEL_VOLUME_ROOT: root });
+    const realFs = createNodeFileSystem();
+    const logger = createRecordingLogger([]);
+    const record = await hashPassword('owner password');
+    const initialState = createLoaderState({ fs: realFs, config, logger });
+    await initialState.ensureLayout();
+    await initialState.writeAuth(record);
+    const fileBefore = await realFs.readFile(join(config.loaderDir, 'auth.json'));
+    const failingFs = {
+      ...realFs,
+      writeFileAtomic: async (path: string, contents: string, mode: number) => {
+        if (path.endsWith('/auth.json')) throw new Error('injected rename failure');
+        await realFs.writeFileAtomic(path, contents, mode);
+      },
+    };
+    const state = createLoaderState({ fs: failingFs, config, logger });
+    const { base, clock } = await start(record, undefined, undefined, undefined, state);
+    const token = createSession(record, clock.now());
+    const csrf = (await import('../../loader/src/auth.js')).csrfToken(record, token);
+    const response = await request(
+      base,
+      '/api/password',
+      {
+        host: 'boot-lifemodel.local',
+        cookie: `__Host-lm_session=${token}`,
+        origin: 'https://boot-lifemodel.local',
+        'content-type': 'application/json',
+        'x-csrf-token': csrf,
+      },
+      'POST',
+      JSON.stringify({
+        currentPassword: 'owner password',
+        newPassword: 'brand new secure password',
+      })
+    );
+    expect(response.status).toBe(500);
+    expect(await realFs.readFile(join(config.loaderDir, 'auth.json'))).toBe(fileBefore);
+    const verify = await request(base, '/_auth/verify', { cookie: `__Host-lm_session=${token}` });
+    expect(verify.status).toBe(200);
   });
 
   it('applies the write admission rules and validates exact password JSON shape', async () => {

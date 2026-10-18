@@ -343,26 +343,33 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           );
           return;
         }
-        const record = await state.readAuth();
-        if (record === null || !(await verifyPassword(password, record))) {
+        const login = await withAuthTransition(async () => {
+          const record = await state.readAuth();
+          if (record === null || !(await verifyPassword(password, record))) return null;
+          await state.reconcilePasswordOnboarding?.();
+          const token = createSession(record, clock.now());
+          const onboarding = await state.readOnboarding?.();
+          const location =
+            next === null || onboarding?.step !== 'done'
+              ? null
+              : handoffRedirect(token, next, requestHost);
+          return { token, location };
+        });
+        if (login === null) {
           res.writeHead(401, { 'content-type': 'application/json; charset=utf-8' });
           res.end('{"error":"invalid_credentials"}');
           return;
         }
-        await state.reconcilePasswordOnboarding?.();
-        const token = createSession(record, clock.now());
-        const onboarding = await state.readOnboarding?.();
-        const location =
-          next === null || onboarding?.step !== 'done'
-            ? null
-            : handoffRedirect(token, next, requestHost);
         res.writeHead(200, {
           'content-type': 'application/json; charset=utf-8',
-          'set-cookie': sessionCookie(token, req.headers.host ?? ''),
+          'set-cookie': sessionCookie(login.token, req.headers.host ?? ''),
           'cache-control': 'no-store',
         });
         res.end(
-          JSON.stringify({ ok: true, ...(location === null ? {} : { redirectTo: location }) })
+          JSON.stringify({
+            ok: true,
+            ...(login.location === null ? {} : { redirectTo: login.location }),
+          })
         );
         return;
       }

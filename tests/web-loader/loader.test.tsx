@@ -465,7 +465,10 @@ describe('loader UI', () => {
           }),
         };
       if (url === '/api/model')
-        return { ok: true, json: async () => ({ primary: stored, reserve: null }) };
+        return {
+          ok: true,
+          json: async () => ({ primary: { ...stored, key: 'SECRET-API-KEY' }, reserve: null }),
+        };
       if (url === '/api/model/primary' && options?.method === 'PUT')
         return { ok: false, status: 502, json: async () => ({ error: 'auth_failed' }) };
       return { ok: true, json: async () => ({}) };
@@ -475,6 +478,7 @@ describe('loader UI', () => {
     expect(await screen.findByLabelText('Base URL', { selector: '#url' })).toHaveValue(
       stored.baseUrl
     );
+    expect(screen.getByLabelText('API key', { selector: '#key' })).toHaveValue('');
     expect(screen.getByText('fingerprint')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Open the chat', selector: 'a' })).toHaveAttribute(
       'href',
@@ -487,6 +491,36 @@ describe('loader UI', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'The model rejected the credentials.'
     );
+    fetchMock.mockImplementation(async (url: string, options?: RequestInit) => {
+      if (url === '/api/state')
+        return {
+          ok: true,
+          json: async () => ({
+            setupNeeded: false,
+            loggedIn: true,
+            csrfToken: 'csrf',
+            onboarding: { step: 'done', completedAt: 'now' },
+          }),
+        };
+      if (url === '/api/model')
+        return { ok: false, json: async () => ({ error: 'storage_unavailable' }) };
+      if (url === '/api/password') return { ok: true, json: async () => ({ ok: true }) };
+      return { ok: true, json: async () => ({}) };
+    });
+    fireEvent.change(screen.getByLabelText('Current password'), {
+      target: { value: 'current password' },
+    });
+    fireEvent.change(screen.getByLabelText('New password'), {
+      target: { value: 'new secure password' },
+    });
+    fireEvent.submit(screen.getByLabelText('New password').closest('form')!);
+    expect(
+      await screen.findByText('Password changed. Other sessions have been logged out.')
+    ).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('Secure storage is unavailable.');
+    expect(
+      screen.getByText('Password changed. Other sessions have been logged out.')
+    ).toBeInTheDocument();
     expect(screen.getByLabelText('Base URL', { selector: '#url' })).toHaveValue(
       'https://changed.example'
     );
@@ -525,7 +559,7 @@ describe('loader UI', () => {
       target: { value: 'a new secure password' },
     });
     fireEvent.submit(screen.getByLabelText('New password').closest('form')!);
-    expect(await screen.findByRole('alert')).toHaveTextContent(
+    expect(await screen.findByRole('status')).toHaveTextContent(
       'The current password is incorrect.'
     );
     expect(
@@ -649,6 +683,55 @@ describe('loader UI', () => {
       )
     ).toBe(true);
   });
+  it('clears every reserve candidate field, including the key, after removal', async () => {
+    let removed = false;
+    fetchMock.mockImplementation(async (url: string, options?: RequestInit) => {
+      if (url === '/api/state')
+        return {
+          ok: true,
+          json: async () => ({
+            setupNeeded: false,
+            loggedIn: true,
+            csrfToken: 'csrf',
+            onboarding: { step: 'done', completedAt: 'now' },
+          }),
+        };
+      if (url === '/api/model')
+        return {
+          ok: true,
+          json: async () => ({
+            primary: null,
+            reserve: removed
+              ? null
+              : { kind: 'openai', baseUrl: 'https://saved.example', model: 'saved', keySet: true },
+          }),
+        };
+      if (url === '/api/model/reserve' && options?.method === 'DELETE') {
+        removed = true;
+        return { ok: true, json: async () => ({ ok: true }) };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Settings' });
+    fireEvent.click(screen.getByRole('button', { name: 'Reserve model (optional)' }));
+    fireEvent.change(screen.getByLabelText('Base URL', { selector: '#reserve-url' }), {
+      target: { value: 'https://typed.example' },
+    });
+    fireEvent.change(screen.getByLabelText('Model name', { selector: '#reserve-model' }), {
+      target: { value: 'typed-model' },
+    });
+    fireEvent.change(screen.getByLabelText('API key', { selector: '#reserve-key' }), {
+      target: { value: 'candidate-secret' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Remove reserve model' }));
+    await waitFor(() =>
+      expect(screen.getByLabelText('API key', { selector: '#reserve-key' })).toHaveValue('')
+    );
+    expect(screen.getByLabelText('Base URL', { selector: '#reserve-url' })).toHaveValue('');
+    expect(screen.getByLabelText('Model name', { selector: '#reserve-model' })).toHaveValue('');
+  });
+
   it('resumes the device step from server state after reload and done uses the app handoff URL', async () => {
     fetchMock.mockImplementation(async (url: string) =>
       url === '/api/state'
