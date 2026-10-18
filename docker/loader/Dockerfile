@@ -33,6 +33,9 @@ COPY web/loader/tsconfig.json ./web/loader/tsconfig.json
 COPY web/loader/package.json ./web/loader/package.json
 COPY web/loader/src/ ./web/loader/src/
 COPY web/loader/public/favicon.svg ./web/loader/public/favicon.svg
+# The loader UI reads the shared status projection and its wire contract (ADR-013 D6).
+COPY src/web/model-status.ts ./src/web/model-status.ts
+COPY src/web/contract.ts ./src/web/contract.ts
 RUN npm run build:loader-ui -- --emptyOutDir
 
 # Compile the TypeScript loader with its isolated manifests.

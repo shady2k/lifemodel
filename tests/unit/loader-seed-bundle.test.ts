@@ -153,12 +153,18 @@ describe('loader image release seed bundle', () => {
         'loader/src/http.ts',
         'loader/package.json',
         'docker/loader/Dockerfile',
+        'src/web/model-status.ts',
+        'src/web/contract.ts',
         '.docker-context/seed.bundle',
       ];
       const admitted = (path: string) => !filter.ignores(path);
       for (const path of candidates) expect(admitted(path), path).toBe(true);
       for (const path of planted) expect(admitted(path), path).toBe(false);
       expect(admitted('web/loader/public/.npmrc')).toBe(false);
+      // The loader UI admits only the two shared modules it imports, by name.
+      expect(admitted('src/web/index.ts')).toBe(false);
+      expect(admitted('src/web/server.ts')).toBe(false);
+      expect(admitted('src/web/model-status-poller.ts')).toBe(false);
       expect(admitted('.docker-context/seed.bundle')).toBe(true);
       expect(admitted('.docker-context/other-file')).toBe(false);
       const publicFiles = readdirSync(join(repo, 'web/loader/public'));
@@ -191,6 +197,8 @@ describe('loader image release seed bundle', () => {
       'web/loader/package.json',
       'web/loader/src/',
       'web/loader/public/favicon.svg',
+      'src/web/model-status.ts',
+      'src/web/contract.ts',
     ]);
   });
 
