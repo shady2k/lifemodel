@@ -397,3 +397,22 @@ describe('loader model endpoint checker', () => {
     ).rejects.toMatchObject({ code: 'timeout' }, { timeout: 17000 });
   }, 35_000);
 });
+
+describe('complete model API bases', () => {
+  it.each([
+    ['https://models.example/v1', '/v1/'],
+    ['https://models.example/v1/', '/v1/'],
+    ['https://models.example/prefix/v1', '/prefix/v1/'],
+    ['https://models.example', '/'],
+    ['https://models.example/prefix/v1///', '/prefix/v1/'],
+    ['https://models.example/prefix//v1/', '/prefix//v1/'],
+    ['https://models.example/v1?x=1#frag', '/v1/'],
+    ['https://models.example?x=1#frag', '/'],
+  ])('preserves %s and normalizes its trailing slash', (base, prefix) => {
+    for (const endpoint of ['chat/completions', 'models'] as const) {
+      expect(modelEndpointUrl(base, endpoint).href).toBe(
+        `https://models.example${prefix}${endpoint}`
+      );
+    }
+  });
+});

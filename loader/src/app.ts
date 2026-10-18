@@ -42,7 +42,6 @@ export interface LoaderAppDeps {
   platformPhaseStore?: PlatformPhaseStore;
   platformGiteaPhases?: PlatformPhase[];
   platformGiteaApi?: GiteaApi;
-  platformLoaderJwt?: () => Promise<string>;
   platformBootstrap?: { runInitial(): Promise<void>; unsealIfSealed(): Promise<void> };
   pki?: PkiManager;
 }
@@ -62,7 +61,12 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
   const pki = deps.pki ?? createPkiManager({ config, fs, clock, ...tlsStores });
   const phaseStore = deps.platformPhaseStore ?? createKubernetesPhaseStore();
   const bao = deps.openBao ?? {
-    api: createOpenBaoApi({ address: config.openBaoAddress }),
+    api: createOpenBaoApi({
+      address: config.openBaoAddress,
+      role: 'loader',
+      logger,
+      now: () => clock.now(),
+    }),
     custody: createKubernetesBaoCustody(),
   };
   const giteaApi = deps.platformGiteaApi ?? {
@@ -89,7 +93,6 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
           createKubernetesPostgresSecretPhase(),
           createKubernetesValkeySecretPhase(),
         ],
-        ...(deps.platformLoaderJwt === undefined ? {} : { loaderJwt: deps.platformLoaderJwt }),
       });
       return {
         runInitial: () => bootstrap.runInitial(),
@@ -98,19 +101,9 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
     })();
 
   const modelSlots: ModelSlots = {
-    read: async (slot) => {
-      if (bao.api.readModelSlot === undefined) throw new Error('OpenBao model store unavailable');
-      return bao.api.readModelSlot(slot);
-    },
-    write: async (slot, value) => {
-      if (bao.api.writeModelSlot === undefined) throw new Error('OpenBao model store unavailable');
-      return bao.api.writeModelSlot(slot, value);
-    },
-    clearReserve: async () => {
-      if (bao.api.deleteModelReserve === undefined)
-        throw new Error('OpenBao model store unavailable');
-      return bao.api.deleteModelReserve();
-    },
+    read: (slot) => bao.api.readModelSlot(slot),
+    write: (slot, value) => bao.api.writeModelSlot(slot, value),
+    clearReserve: () => bao.api.deleteModelReserve(),
   };
   let http: LoaderHttp | null = null;
   let stopping = false;

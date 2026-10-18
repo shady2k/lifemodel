@@ -3,8 +3,8 @@ export function modelEndpointUrl(
   baseUrl: string,
   endpoint: 'chat/completions' | 'models' = 'chat/completions'
 ): URL {
-  const url = new URL(baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`);
-  url.pathname = `${url.pathname}${endpoint}`.replace(/\/{2,}/g, '/');
+  const url = new URL(baseUrl);
+  url.pathname = `${url.pathname.replace(/\/+$/, '')}/${endpoint}`;
   url.search = '';
   url.hash = '';
   return url;

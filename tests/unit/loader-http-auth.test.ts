@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { request as httpRequest } from 'node:http';
+import { request as httpRequest, createServer, type Server } from 'node:http';
+import { createOpenBaoApi } from '../../loader/src/openbao.js';
 import { createLoaderHttp } from '../../loader/src/http.js';
 import { createNodeFileSystem } from '../../loader/src/fs.js';
 import { createLoaderState } from '../../loader/src/state.js';
@@ -1769,5 +1770,222 @@ describe('loader static UI and JSON API', () => {
       JSON.stringify({ version: 1, step: 'done', completedAt: 'earlier' })
     );
     expect((await request(base, route, csrfHeaders, 'POST', '{}')).status).toBe(409);
+  });
+});
+
+describe('real Bao storage behind the loader model HTTP routes', () => {
+  async function baoFixture() {
+    const root = mkdtempSync(join(tmpdir(), 'loader-bao-http-'));
+    roots.push(root);
+    const jwtFile = join(root, 'jwt');
+    writeFileSync(jwtFile, 'projected-first');
+    let status = 200,
+      loginStatus = 200,
+      rejectNext = false;
+    const logins: Array<{ role: string; jwt: string }> = [];
+    const tokens: string[] = [];
+    const bao = createServer(async (req, res) => {
+      if (req.url?.endsWith('/login')) {
+        let body = '';
+        for await (const chunk of req) body += String(chunk);
+        logins.push(JSON.parse(body));
+        if (loginStatus !== 200) {
+          res.writeHead(loginStatus);
+          res.end('PRIVATE BODY');
+          return;
+        }
+        res.end(
+          JSON.stringify({
+            auth: { client_token: `private-bao-token-${logins.length}`, lease_duration: 3600 },
+          })
+        );
+        return;
+      }
+      tokens.push(String(req.headers['x-vault-token']));
+      if (rejectNext) {
+        rejectNext = false;
+        res.writeHead(403);
+        res.end('PRIVATE BODY');
+        return;
+      }
+      if (status !== 200) {
+        res.writeHead(status);
+        res.end('PRIVATE BODY private-bao-token-1 projected-first');
+        return;
+      }
+      if (req.method === 'GET')
+        res.end(
+          JSON.stringify({
+            data: {
+              data: {
+                kind: 'openai',
+                baseUrl: 'https://model.example/v1',
+                model: 'm',
+                key: 'private-model-key',
+              },
+              metadata: {},
+            },
+          })
+        );
+      else {
+        res.writeHead(204);
+        res.end();
+      }
+    });
+    await new Promise<void>((resolve) => bao.listen(0, '127.0.0.1', resolve));
+    const address = bao.address();
+    if (!address || typeof address === 'string') throw new Error('no Bao listener');
+    const lines: RecordedLine[] = [];
+    const api = createOpenBaoApi({
+      address: `http://127.0.0.1:${address.port}`,
+      role: 'loader',
+      jwtFile,
+      logger: createRecordingLogger(lines),
+    });
+    // The same authenticated bootstrap facade serves model storage, not a second client.
+    await api.login();
+    const slots: ModelSlots = {
+      read: (slot) => api.readModelSlot(slot),
+      write: (slot, value) => api.writeModelSlot(slot, value),
+      clearReserve: () => api.deleteModelReserve(),
+    };
+    return {
+      bao,
+      slots,
+      jwtFile,
+      logins,
+      tokens,
+      lines,
+      set status(value: number) {
+        status = value;
+      },
+      set loginStatus(value: number) {
+        loginStatus = value;
+      },
+      reject() {
+        rejectNext = true;
+      },
+    };
+  }
+  async function stopBao(server: Server) {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+  const routes = [
+    ['GET', '/api/model'],
+    ['PUT', '/api/model/primary'],
+    ['PUT', '/api/model/reserve'],
+    ['DELETE', '/api/model/reserve'],
+  ] as const;
+  it.each(['sealed', 'denied', 'unreachable', 'missing_auth'] as const)(
+    'returns only storage_unavailable for %s Bao on every route',
+    async (mode) => {
+      const f = await baoFixture();
+      try {
+        const record = await hashPassword('owner password');
+        const loader = await start(record, undefined, f.slots, async () => {});
+        const session = createSession(record, loader.clock.now());
+        const csrf = (await import('../../loader/src/auth.js')).csrfToken(record, session);
+        const headers = {
+          host: 'boot-lifemodel.local',
+          origin: 'https://boot-lifemodel.local',
+          cookie: `__Host-lm_session=${session}`,
+          'x-csrf-token': csrf,
+          'content-type': 'application/json',
+        };
+        f.status = mode === 'sealed' ? 503 : 403;
+        if (mode === 'missing_auth') f.loginStatus = 404;
+        if (mode === 'unreachable') await stopBao(f.bao);
+        for (const [method, path] of routes) {
+          const response = await request(
+            loader.base,
+            path,
+            headers,
+            method,
+            method === 'PUT'
+              ? JSON.stringify({
+                  kind: 'openai',
+                  baseUrl: 'https://model.example/v1',
+                  model: 'm',
+                  key: 'private-model-key',
+                })
+              : method === 'DELETE'
+                ? '{}'
+                : undefined
+          );
+          expect(response.status).toBe(503);
+          expect(JSON.parse(response.body)).toEqual({ error: 'storage_unavailable' });
+          for (const secret of [
+            'PRIVATE BODY',
+            'private-bao-token',
+            'projected-first',
+            'private-model-key',
+          ]) {
+            expect(response.body).not.toContain(secret);
+            expect(JSON.stringify([...loader.recorded, ...f.lines])).not.toContain(secret);
+          }
+        }
+      } finally {
+        await stopBao(f.bao);
+      }
+    }
+  );
+  it('re-reads the rotated token file and retries once through each real model route', async () => {
+    const f = await baoFixture();
+    try {
+      const record = await hashPassword('owner password');
+      const loader = await start(record, undefined, f.slots, async () => {});
+      const session = createSession(record, loader.clock.now());
+      const csrf = (await import('../../loader/src/auth.js')).csrfToken(record, session);
+      const headers = {
+        host: 'boot-lifemodel.local',
+        origin: 'https://boot-lifemodel.local',
+        cookie: `__Host-lm_session=${session}`,
+        'x-csrf-token': csrf,
+        'content-type': 'application/json',
+      };
+      for (const [index, [method, path]] of routes.entries()) {
+        writeFileSync(f.jwtFile, `projected-rotated-${index}`);
+        f.reject();
+        const before = f.tokens.length;
+        const response = await request(
+          loader.base,
+          path,
+          headers,
+          method,
+          method === 'PUT'
+            ? JSON.stringify({
+                kind: 'openai',
+                baseUrl: 'https://model.example/v1',
+                model: 'm',
+                key: 'private-model-key',
+              })
+            : method === 'DELETE'
+              ? '{}'
+              : undefined
+        );
+        expect(response.status).toBe(200);
+        expect(f.logins).toHaveLength(index + 2);
+        expect(f.logins.at(-1)).toEqual({ role: 'loader', jwt: `projected-rotated-${index}` });
+        expect(f.tokens.slice(before)).toEqual(
+          method === 'GET'
+            ? [
+                `private-bao-token-${index + 1}`,
+                `private-bao-token-${index + 1}`,
+                `private-bao-token-${index + 2}`,
+              ]
+            : method === 'PUT'
+              ? [
+                  `private-bao-token-${index + 1}`,
+                  `private-bao-token-${index + 2}`,
+                  `private-bao-token-${index + 2}`,
+                ]
+              : [`private-bao-token-${index + 1}`, `private-bao-token-${index + 2}`]
+        );
+        expect(response.body).not.toContain('private-model-key');
+      }
+    } finally {
+      await stopBao(f.bao);
+    }
   });
 });
