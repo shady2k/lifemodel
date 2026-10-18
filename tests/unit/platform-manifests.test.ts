@@ -124,6 +124,8 @@ function runInstallerHarness(
     sourceDir?: string;
     avahiConfig?: string;
     ufwActive?: boolean;
+    name?: string;
+    savedRelease?: boolean;
   } = {}
 ): { status: number | null; output: string; root: string } {
   const root = existingRoot ?? mkdtempSync(join(tmpdir(), 'lifemodel-installer-test-'));
@@ -139,6 +141,12 @@ function runInstallerHarness(
   };
   command('id', 'echo 0');
   if (options.unsupportedNode) command('node', 'echo 14');
+  else
+    command(
+      'node',
+      `case "$1" in */wait-ready.mjs) exit 0;; esac
+exec ${JSON.stringify(process.execPath)} "$@"`
+    );
   command(
     'k3s',
     `if [ "$1" = --version ]; then echo 'k3s version v1.35.8+k3s1'; exit 0; fi
@@ -148,7 +156,8 @@ if [ "$1" != kubectl ] || [ "$2" != --kubeconfig ]; then
   printf '\n' >&2
   exit 64
 fi
-shift 2
+shift 3
+printf '%s\n' "$*" >> "$K3S_CALLS"
 case "$*" in
   *'get nodes'*) exit 0 ;;
   *'get ocirepository platform'*) printf '{"metadata":{"managedFields":[%s]}}\n' "$K3S_MANAGED_FIELDS" ;;
@@ -159,14 +168,14 @@ case "$*" in
   *'--field-manager=lifemodel-bootstrap'*)
     file=''; for arg do file=$arg; done
     echo "root:$*" >> "$K3S_LOG"
-    if grep 'tag:' "$file" >/dev/null; then grep 'tag:' "$file" | sed -E "s/.*tag: //; s/[\\\"']//g" > "$K3S_APPLIED_TAG"; fi
-    if grep 'digest:' "$file" >/dev/null; then grep 'digest:' "$file" > "$K3S_APPLIED_REF"; fi
+    if grep 'tag:' "$file" >/dev/null; then rm -f "$K3S_APPLIED_REF"; grep 'tag:' "$file" | sed -E "s/.*tag: //; s/[\\\"']//g" > "$K3S_APPLIED_TAG"; fi
+    if grep 'digest:' "$file" >/dev/null; then rm -f "$K3S_APPLIED_TAG"; grep 'digest:' "$file" > "$K3S_APPLIED_REF"; fi
     ;;
   *' -f -'*) cat >/dev/null ;;
   *) echo "flux:$*" >> "$K3S_LOG"; if [ "$K3S_FAIL_FLUX" = 1 ] && [ "$(grep -c '^flux:' "$K3S_LOG")" -eq 1 ]; then exit 42; fi ;;
 esac`
   );
-  command('apt-get', 'exit 0');
+  command('apt-get', 'echo "$*" >> "$APT_LOG"; exit 0');
   command('ip', `if [ "$1" = -j ]; then printf '%s\n' "$ROUTES"; else exit 0; fi`);
   command('systemctl', 'echo "$*" >> "$SYSTEMCTL_LOG"; exit 0');
   command(
@@ -183,6 +192,8 @@ esac`
     ...process.env,
     PATH: `${bin}:${process.env.PATH}`,
     ROUTES: '[{\"dev\":\"eth0\",\"metric\":100}]',
+    APT_LOG: join(root, 'apt.log'),
+    K3S_CALLS: join(root, 'kubectl-calls.log'),
     K3S_STATE: state,
     K3S_IDENTITY: join(root, 'instance-name'),
     K3S_LOG: log,
@@ -201,7 +212,11 @@ esac`
       : join(root, 'state'),
   };
   delete (env as NodeJS.ProcessEnv).KUBECONFIG;
-  const refArgs = options.digest ? ['--digest', options.digest] : ['--tag', tag];
+  const refArgs = options.savedRelease
+    ? []
+    : options.digest
+      ? ['--digest', options.digest]
+      : ['--tag', tag];
   const installScript = options.sourceDir
     ? join(options.sourceDir, 'scripts/install.sh')
     : installer;
@@ -210,20 +225,310 @@ esac`
     'sh',
     [
       installScript,
-      '--platform-url',
-      'oci://example.test/platform',
+      ...(options.savedRelease ? [] : ['--platform-url', 'oci://example.test/platform']),
       ...refArgs,
+      ...(options.name ? ['--name', options.name] : []),
       '--root-templates',
       templates,
       '--lan-interface',
       'eth0',
     ],
-    { encoding: 'utf8', env }
+    { encoding: 'utf8', env, timeout: 30000 }
   );
   return { status: result.status, output: `${result.stdout}${result.stderr}`, root };
 }
 
 describe('platform manifests', () => {
+  // Snapshot actual host files, package/service/firewall logs and release state.
+  // Read-only cluster identity discovery is asserted separately below.
+  function hostSnapshot(root: string): Record<string, string> {
+    const files = [
+      'apt.log',
+      'systemctl.log',
+      'ufw.log',
+      'kubectl.log',
+      'applied-tag',
+      'applied-ref',
+    ];
+    for (const directory of ['install-root', 'state']) {
+      const walk = (relative: string): void => {
+        if (!existsSync(join(root, relative))) return;
+        for (const entry of readdirSync(join(root, relative), { withFileTypes: true })) {
+          const child = join(relative, entry.name);
+          if (entry.isDirectory()) walk(child);
+          else files.push(child);
+        }
+      };
+      walk(directory);
+    }
+    return Object.fromEntries(
+      files
+        .sort()
+        .filter((file) => existsSync(join(root, file)))
+        .map((file) => [file, readFileSync(join(root, file)).toString('base64')])
+    );
+  }
+
+  it('review: never executes shell syntax from a saved installer record', () => {
+    const first = runInstallerHarness(false, false);
+    try {
+      expect(first.status, first.output).toBe(0);
+      const envPath = join(first.root, 'install-root/etc/lifemodel/instance.env');
+      const marker = join(first.root, 'injected');
+      writeFileSync(
+        envPath,
+        `LIFEMODEL_NAME=$(touch "${marker}"; printf lifemodel)\nLIFEMODEL_PLATFORM_URL='oci://example.test/platform'\nLIFEMODEL_PLATFORM_TAG='v1.0.0'\n`
+      );
+      runInstallerHarness(false, false, first.root, 'unused', { savedRelease: true });
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(first.root, { recursive: true, force: true });
+    }
+  });
+  it('review: refuses a changed name before host changes if only established state survives', () => {
+    const first = runInstallerHarness(false, false, undefined, 'v1.0.0', { name: 'home' });
+    try {
+      expect(first.status, first.output).toBe(0);
+      rmSync(join(first.root, 'install-root/etc/lifemodel/instance.env'));
+      const before = readFileSync(join(first.root, 'systemctl.log'), 'utf8');
+      const second = runInstallerHarness(false, false, first.root, 'v1.0.0', { name: 'other' });
+      expect(second.status).not.toBe(0);
+      expect(second.output).toContain('instance name is fixed as home');
+      expect(readFileSync(join(first.root, 'systemctl.log'), 'utf8')).toBe(before);
+    } finally {
+      rmSync(first.root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['local', 'cluster'])(
+    'refuses another name before any host write with only %s identity surviving',
+    (source) => {
+      const first = runInstallerHarness(false, false, undefined, 'unused', {
+        name: 'home',
+        digest: `sha256:${'a'.repeat(64)}`,
+        ufwActive: true,
+      });
+      try {
+        expect(first.status, first.output).toBe(0);
+        const envPath = join(first.root, 'install-root/etc/lifemodel/instance.env');
+        rmSync(envPath);
+        if (source === 'cluster') {
+          rmSync(join(first.root, 'state/instance-name'));
+          writeFileSync(join(first.root, 'instance-name'), 'home');
+        }
+        const before = hostSnapshot(first.root);
+        const calls = readFileSync(join(first.root, 'kubectl-calls.log'), 'utf8');
+        const second = runInstallerHarness(false, false, first.root, 'unused', {
+          name: 'other',
+          digest: `sha256:${'b'.repeat(64)}`,
+          ufwActive: true,
+        });
+        expect(second.status, second.output).not.toBe(0);
+        expect(second.output).toContain('instance name is fixed as home');
+        expect(existsSync(envPath)).toBe(false);
+        expect(hostSnapshot(first.root)).toEqual(before);
+        expect(readFileSync(join(first.root, 'kubectl-calls.log'), 'utf8')).toBe(
+          calls +
+            (source === 'cluster'
+              ? '--request-timeout=10s -n flux-system get configmap lifemodel-instance -o jsonpath={.data.LIFEMODEL_NAME}\n'
+              : '')
+        );
+      } finally {
+        rmSync(first.root, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it.each(['local', 'cluster'])(
+    'recovers the established %s identity on a default-name rerun',
+    (source) => {
+      const first = runInstallerHarness(false, false, undefined, 'v1.0.0', { name: 'home' });
+      try {
+        expect(first.status, first.output).toBe(0);
+        const envPath = join(first.root, 'install-root/etc/lifemodel/instance.env');
+        rmSync(envPath);
+        if (source === 'cluster') {
+          rmSync(join(first.root, 'state/instance-name'));
+          writeFileSync(join(first.root, 'instance-name'), 'home');
+        }
+        const second = runInstallerHarness(false, false, first.root);
+        expect(second.status, second.output).toBe(0);
+        expect(readFileSync(envPath, 'utf8')).toContain("LIFEMODEL_NAME='home'");
+      } finally {
+        rmSync(first.root, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it.each(['local', 'cluster'])(
+    'refuses conflicting %s identity even when the env record survives',
+    (source) => {
+      const first = runInstallerHarness(false, false, undefined, 'v1.0.0', {
+        name: 'home',
+        ufwActive: true,
+      });
+      try {
+        expect(first.status, first.output).toBe(0);
+        writeFileSync(
+          join(first.root, source === 'local' ? 'state/instance-name' : 'instance-name'),
+          'other'
+        );
+        const before = hostSnapshot(first.root);
+        const second = runInstallerHarness(false, false, first.root, 'unused', {
+          savedRelease: true,
+          ufwActive: true,
+        });
+        expect(second.status, second.output).not.toBe(0);
+        expect(second.output).toContain('instance name is fixed');
+        expect(hostSnapshot(first.root)).toEqual(before);
+      } finally {
+        rmSync(first.root, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it.each([
+    "UNKNOWN='value'\n",
+    "LIFEMODEL_NAME='home'\n",
+    "LIFEMODEL_PLATFORM_TAG='unterminated\n",
+    'LIFEMODEL_PLATFORM_TAG=`printf v1`\n',
+    'LIFEMODEL_PLATFORM_TAG=$HOME\n',
+    "LIFEMODEL_PLATFORM_TAG='v1'; touch marker\n",
+    "LIFEMODEL_PLATFORM_DIGEST='sha256:bad'\n",
+    "LIFEMODEL_PLATFORM_URL='https://bad&url'\n",
+    "LIFEMODEL_NAME='Bad'\n",
+  ])(
+    'rejects malformed saved records before writes, including when release flags override them: %j',
+    (line) => {
+      const first = runInstallerHarness(false, false);
+      try {
+        expect(first.status, first.output).toBe(0);
+        const envPath = join(first.root, 'install-root/etc/lifemodel/instance.env');
+        writeFileSync(envPath, readFileSync(envPath, 'utf8') + line);
+        const before = hostSnapshot(first.root);
+        const second = runInstallerHarness(false, false, first.root);
+        expect(second.status, second.output).not.toBe(0);
+        expect(hostSnapshot(first.root)).toEqual(before);
+      } finally {
+        rmSync(first.root, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it.each([
+    ['LIFEMODEL_NAME', "'Bad'"],
+    ['LIFEMODEL_NAME', "''"],
+    ['LIFEMODEL_NAME', "'null'"],
+    ['LIFEMODEL_PLATFORM_URL', "'https://bad&url'"],
+    ['LIFEMODEL_PLATFORM_URL', "''"],
+    ['LIFEMODEL_PLATFORM_TAG', "'v1;touch marker'"],
+    ['LIFEMODEL_PLATFORM_TAG', "'unterminated"],
+    ['LIFEMODEL_PLATFORM_TAG', '`printf v1`'],
+    ['LIFEMODEL_PLATFORM_TAG', '$HOME'],
+    ['LIFEMODEL_PLATFORM_TAG', "'v1' trailing"],
+    ['LIFEMODEL_PLATFORM_TAG', '"v1"'],
+    ['LIFEMODEL_PLATFORM_TAG', "''"],
+  ])('validates saved value %s=%s even with an explicit release override', (key, value) => {
+    const first = runInstallerHarness(false, false);
+    try {
+      expect(first.status, first.output).toBe(0);
+      const envPath = join(first.root, 'install-root/etc/lifemodel/instance.env');
+      const record = readFileSync(envPath, 'utf8').replace(
+        new RegExp(`^${key}=.*$`, 'm'),
+        `${key}=${value}`
+      );
+      writeFileSync(envPath, record);
+      const before = hostSnapshot(first.root);
+      const second = runInstallerHarness(false, false, first.root);
+      expect(second.status, second.output).not.toBe(0);
+      expect(hostSnapshot(first.root)).toEqual(before);
+    } finally {
+      rmSync(first.root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an invalid saved digest even with an explicit release override', () => {
+    const first = runInstallerHarness(false, false, undefined, 'unused', {
+      digest: `sha256:${'a'.repeat(64)}`,
+    });
+    try {
+      expect(first.status, first.output).toBe(0);
+      const envPath = join(first.root, 'install-root/etc/lifemodel/instance.env');
+      writeFileSync(
+        envPath,
+        readFileSync(envPath, 'utf8').replace(/sha256:[a-f0-9]{64}/, 'sha256:bad')
+      );
+      const before = hostSnapshot(first.root);
+      const second = runInstallerHarness(false, false, first.root);
+      expect(second.status, second.output).not.toBe(0);
+      expect(hostSnapshot(first.root)).toEqual(before);
+    } finally {
+      rmSync(first.root, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts literal unquoted and single-quoted saved assignments without a final newline', () => {
+    const first = runInstallerHarness(false, false);
+    try {
+      expect(first.status, first.output).toBe(0);
+      writeFileSync(
+        join(first.root, 'install-root/etc/lifemodel/instance.env'),
+        "LIFEMODEL_NAME=lifemodel\nLIFEMODEL_PLATFORM_URL='oci://example.test/platform'\nLIFEMODEL_PLATFORM_TAG=v1.0.0"
+      );
+      const second = runInstallerHarness(false, false, first.root, 'unused', {
+        savedRelease: true,
+      });
+      expect(second.status, second.output).toBe(0);
+      expect(readFileSync(join(first.root, 'applied-tag'), 'utf8').trim()).toBe('v1.0.0');
+    } finally {
+      rmSync(first.root, { recursive: true, force: true });
+    }
+  });
+
+  it('persists the custom name and digest in etc and keeps them on a parameter-free rerun', () => {
+    const digest = `sha256:${'a'.repeat(64)}`;
+    const first = runInstallerHarness(false, false, undefined, 'unused', { digest, name: 'home' });
+    try {
+      expect(first.status, first.output).toBe(0);
+      const envPath = join(first.root, 'install-root/etc/lifemodel/instance.env');
+      expect(readFileSync(envPath, 'utf8')).toContain(`LIFEMODEL_NAME='home'`);
+      expect(readFileSync(envPath, 'utf8')).toContain(`LIFEMODEL_PLATFORM_DIGEST='${digest}'`);
+      const second = runInstallerHarness(false, false, first.root, 'unused', {
+        savedRelease: true,
+      });
+      expect(second.status, second.output).toBe(0);
+      expect(readFileSync(join(first.root, 'applied-ref'), 'utf8').trim()).toBe(
+        `digest: ${digest}`
+      );
+      expect(readFileSync(envPath, 'utf8')).toContain(`LIFEMODEL_NAME='home'`);
+      expect(readFileSync(envPath, 'utf8')).toContain(`LIFEMODEL_PLATFORM_DIGEST='${digest}'`);
+      expect(readFileSync(envPath, 'utf8')).not.toContain('LIFEMODEL_PLATFORM_TAG=');
+      const nextDigest = `sha256:${'b'.repeat(64)}`;
+      const next = runInstallerHarness(false, false, first.root, 'unused', { digest: nextDigest });
+      expect(next.status, next.output).toBe(0);
+      expect(readFileSync(envPath, 'utf8')).toContain(`LIFEMODEL_NAME='home'`);
+      expect(readFileSync(envPath, 'utf8')).toContain(`LIFEMODEL_PLATFORM_DIGEST='${nextDigest}'`);
+    } finally {
+      rmSync(first.root, { recursive: true, force: true });
+    }
+  });
+  it('refuses another name even without an explicit release and before host changes', () => {
+    const first = runInstallerHarness(false, false, undefined, 'v1.0.0', { name: 'home' });
+    try {
+      expect(first.status, first.output).toBe(0);
+      const before = readFileSync(join(first.root, 'kubectl.log'), 'utf8');
+      const second = runInstallerHarness(false, false, first.root, 'unused', {
+        name: 'other',
+        savedRelease: true,
+      });
+      expect(second.status).not.toBe(0);
+      expect(second.output).toContain('instance name is fixed as home');
+      expect(readFileSync(join(first.root, 'kubectl.log'), 'utf8')).toBe(before);
+    } finally {
+      rmSync(first.root, { recursive: true, force: true });
+    }
+  });
+
   it('rejects unsafe or forbidden LAN interfaces in render-only and install modes', () => {
     for (const iface of ['wg0', 'eth&0', 'a'.repeat(16), 'eth0;touch']) {
       const result = spawnSync(
@@ -985,6 +1290,10 @@ describe('platform manifests', () => {
     cpSync(
       fileURLToPath(new URL('../../deploy/cli/lifemodel.mjs', import.meta.url)),
       join(sourceDir, 'deploy/cli/lifemodel.mjs')
+    );
+    cpSync(
+      fileURLToPath(new URL('../../deploy/cli/wait-ready.mjs', import.meta.url)),
+      join(sourceDir, 'deploy/cli/wait-ready.mjs')
     );
     const first = runInstallerHarness(false, false, root, 'v1.0.0', { sourceDir });
     const second = runInstallerHarness(false, false, root, 'v2.0.0', { sourceDir });
