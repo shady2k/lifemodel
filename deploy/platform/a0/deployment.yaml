@@ -32,6 +32,10 @@ spec:
                 configMapKeyRef:
                   name: lifemodel-instance
                   key: LIFEMODEL_NAME
+            # The gateway's health listener (ADR-013 D5/D6): the loader's
+            # settings read /status, never the model API.
+            - name: LIFEMODEL_MODEL_GATEWAY_STATUS_URL
+              value: http://model-gateway.lifemodel-system.svc:8081/status
           ports:
             - name: http
               containerPort: 7000

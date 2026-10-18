@@ -5,6 +5,7 @@ import { createTestStores, testStoreUrls, type TestStores } from '../helpers/tes
 import { OwnerMessageIntake } from '../../src/storage/owner-message-intake.js';
 import { InboundMessageStream } from '../../src/core/message-streams.js';
 import { createWebServer } from '../../src/web/server.js';
+import { silentModelStatus } from '../helpers/model-status.js';
 import { PostgresConversationStore } from '../../src/storage/postgres-conversation-store.js';
 import { PostgresTranscriptStore } from '../../src/storage/postgres-transcript-store.js';
 import { CreatureStateStore } from '../../src/storage/creature-state-store.js';
@@ -73,6 +74,7 @@ describe('owner message HTTP route with real Valkey', () => {
       intake,
       transcript,
       creatureState: new CreatureStateStore(redis),
+      modelStatus: silentModelStatus(),
       logger: { info: vi.fn() },
     });
   });
@@ -193,6 +195,7 @@ describe('owner message HTTP route with real Valkey', () => {
       intake,
       transcript: new PostgresTranscriptStore(stores.postgres, redis, recipient),
       creatureState: new CreatureStateStore(redis),
+      modelStatus: silentModelStatus(),
       logger: { info: vi.fn() },
     });
   });
@@ -217,6 +220,7 @@ describe('owner message HTTP route with real Valkey', () => {
       intake,
       transcript: new PostgresTranscriptStore(stores.postgres, redis, recipient),
       creatureState: new CreatureStateStore(redis),
+      modelStatus: silentModelStatus(),
       logger: { info: vi.fn() },
     });
     await restarted.listen({ host: '127.0.0.1', port: 0 });
@@ -246,6 +250,7 @@ describe('owner message HTTP route with real Valkey', () => {
       intake,
       transcript: new PostgresTranscriptStore(stores.postgres, redis, recipient),
       creatureState: new CreatureStateStore(redis),
+      modelStatus: silentModelStatus(),
       logger: { info: vi.fn() },
     });
   });
@@ -274,6 +279,7 @@ describe('owner message HTTP route with real Valkey', () => {
       intake,
       transcript: new PostgresTranscriptStore(stores.postgres, redis, recipient),
       creatureState: new CreatureStateStore(redis),
+      modelStatus: silentModelStatus(),
       logger: { info: vi.fn() },
     });
     await streamServer.listen({ host: '127.0.0.1', port: 0 });
@@ -315,6 +321,7 @@ describe('owner message HTTP route with real Valkey', () => {
       intake,
       transcript: new PostgresTranscriptStore(stores.postgres, redis, 'web-owner-recipient'),
       creatureState: stateStore,
+      modelStatus: silentModelStatus(),
       logger: { info: vi.fn() },
     });
     await stateServer.listen({ host: '127.0.0.1', port: 0 });
@@ -367,6 +374,7 @@ describe('owner message HTTP route with real Valkey', () => {
       intake,
       transcript: new PostgresTranscriptStore(stores.postgres, redis, recipient),
       creatureState: new CreatureStateStore(redis),
+      modelStatus: silentModelStatus(),
       logger: { info: vi.fn() },
     });
     await stateServer.listen({ host: '127.0.0.1', port: 0 });
@@ -428,6 +436,7 @@ describe('owner message HTTP route with real Valkey', () => {
       intake,
       transcript: new PostgresTranscriptStore(stores.postgres, redis, recipient),
       creatureState: stateStore,
+      modelStatus: silentModelStatus(),
       logger: { info: vi.fn() },
     });
     // Model a core killed just before state expiry, without waiting a full TTL in the suite.
@@ -479,6 +488,7 @@ describe('owner message HTTP route with real Valkey', () => {
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
       intake: broken,
+      modelStatus: silentModelStatus(),
       logger: { info: vi.fn() },
     });
     const response = await brokenServer.inject({

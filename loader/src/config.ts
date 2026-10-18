@@ -11,6 +11,29 @@ export interface LoaderConfig {
   instanceName: string;
   /** OpenBao HTTP API endpoint used during platform bootstrap. */
   openBaoAddress: string;
+  /** The platform gateway's health listener, read by the settings page (ADR-013 D6). */
+  modelStatusUrl: string;
+}
+
+/** The gateway's own listener on its Service, pinned by ADR-013 D5/D6. */
+const DEFAULT_MODEL_STATUS_URL = 'http://model-gateway.lifemodel-system.svc:8081/status';
+
+function readModelStatusUrl(env: NodeJS.ProcessEnv): string {
+  const raw = env['LIFEMODEL_MODEL_GATEWAY_STATUS_URL'];
+  if (raw === undefined || raw === '') return DEFAULT_MODEL_STATUS_URL;
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new LoaderFatalError(
+      `LIFEMODEL_MODEL_GATEWAY_STATUS_URL must be an HTTP URL, got "${raw}"`
+    );
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
+    throw new LoaderFatalError(
+      `LIFEMODEL_MODEL_GATEWAY_STATUS_URL must be an HTTP URL, got "${raw}"`
+    );
+  return parsed.href;
 }
 
 function readPort(env: NodeJS.ProcessEnv): number {
@@ -40,6 +63,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): LoaderConfig {
     loaderDir: join(volumeRoot, 'loader'),
     httpPort: readPort(env),
     openBaoAddress: env['LIFEMODEL_OPENBAO_ADDRESS'] ?? 'http://openbao.openbao.svc:8200',
+    modelStatusUrl: readModelStatusUrl(env),
     instanceName,
   };
 }

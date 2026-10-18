@@ -15,6 +15,9 @@ import {
 } from '@kit/components/ui/select';
 
 import i18n, { languageFor } from './i18n';
+import { ModelStatus } from './ModelStatus';
+import { parseModelStatus } from '../../../src/web/model-status.js';
+import type { ModelStatusEvent } from '../../../src/web/contract.js';
 interface Slot {
   kind: 'openai' | 'ollama';
   baseUrl: string;
@@ -61,6 +64,7 @@ export default function App() {
   const [baseUrl, setBaseUrl] = useState('');
   const [model, setModel] = useState('');
   const [key, setKey] = useState('');
+  const [modelStatus, setModelStatus] = useState<ModelStatusEvent | null>();
   async function load() {
     const r = await fetch('/api/state', { cache: 'no-store' });
     if (!r.ok) throw new Error('state');
@@ -94,6 +98,29 @@ export default function App() {
   useEffect(() => {
     void i18n.changeLanguage(languageFor(navigator.language));
   }, []);
+  useEffect(() => {
+    if (state?.loggedIn !== true) return;
+    let active = true;
+    const read = async () => {
+      try {
+        const response = await fetch('/api/model-status', { cache: 'no-store' });
+        if (!response.ok) throw new Error('status');
+        const value: unknown = await response.json();
+        if (active) setModelStatus(parseModelStatus(value));
+      } catch {
+        // No status is readable: the settings show the quiet unavailable line.
+        if (active) setModelStatus(null);
+      }
+    };
+    void read();
+    const timer = window.setInterval(() => {
+      void read();
+    }, 10_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [state?.loggedIn]);
   useEffect(() => {
     const preference = window.matchMedia('(prefers-color-scheme: dark)');
     const apply = () => document.documentElement.classList.toggle('dark', preference.matches);
@@ -584,6 +611,7 @@ export default function App() {
                 <h2 id="model-access-title" className="text-lg font-semibold">
                   {t('modelAccess')}
                 </h2>
+                {modelStatus !== undefined && <ModelStatus value={modelStatus} />}
               </section>
               <section className="mt-8 space-y-4" aria-labelledby="password-change-title">
                 <h2 id="password-change-title" className="text-lg font-semibold">

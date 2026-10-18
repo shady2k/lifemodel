@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createWebServer } from '../../src/web/server.js';
+import { silentModelStatus } from '../helpers/model-status.js';
 import type { IOwnerMessageIntake } from '../../src/ports/owner-message-intake.js';
 
 const id = '0199aabb-ccdd-7eef-8abc-0123456789ab';
@@ -24,6 +25,7 @@ function setup(
       releaseStreamLease: vi.fn().mockResolvedValue(undefined),
     },
     creatureState: { readCreatureState: vi.fn().mockResolvedValue(null) },
+    modelStatus: silentModelStatus(),
     logger: { info },
   });
   return { server, acceptOwnerMessage, info };
@@ -42,6 +44,7 @@ describe('configured web origin', () => {
         intake: { acceptOwnerMessage: vi.fn() } as unknown as IOwnerMessageIntake,
         transcript: {} as any,
         creatureState: {} as any,
+        modelStatus: silentModelStatus(),
         logger: { info: vi.fn() },
       })
     ).toThrow('allowedOrigin must be an exact HTTPS origin');
@@ -192,6 +195,7 @@ describe('POST /api/messages', () => {
         watchTranscript: vi.fn(),
       },
       creatureState: { readCreatureState: vi.fn().mockResolvedValue(null) },
+      modelStatus: silentModelStatus(),
       logger: { info: vi.fn() },
     });
     const response = await server.inject({
@@ -255,6 +259,7 @@ describe('GET /api/events admission', () => {
         releaseStreamLease: vi.fn(),
       },
       creatureState: { readCreatureState: vi.fn().mockResolvedValue(null) },
+      modelStatus: silentModelStatus(),
       logger: { info: vi.fn() },
     });
     const before = Date.now();
@@ -295,6 +300,7 @@ describe('GET /api/events admission', () => {
         releaseStreamLease: vi.fn(),
       },
       creatureState: { readCreatureState: vi.fn().mockResolvedValue(null) },
+      modelStatus: silentModelStatus(),
       logger: { info: vi.fn() },
     });
     const response = await unavailable.inject({ method: 'GET', url: '/api/events?after=0' });
@@ -331,6 +337,7 @@ describe('static application', () => {
         releaseStreamLease: vi.fn().mockResolvedValue(undefined),
       },
       creatureState: { readCreatureState },
+      modelStatus: silentModelStatus(),
       logger: { info: vi.fn() },
     });
     const abort = new AbortController();

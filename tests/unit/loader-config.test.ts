@@ -9,6 +9,7 @@ describe('platform loader configuration', () => {
       loaderDir: '/var/lib/loader/loader',
       httpPort: 7000,
       openBaoAddress: 'http://openbao.openbao.svc:8200',
+      modelStatusUrl: 'http://model-gateway.lifemodel-system.svc:8081/status',
       instanceName: 'lifemodel',
     });
   });
@@ -25,12 +26,28 @@ describe('platform loader configuration', () => {
       loaderDir: '/tmp/loader/loader',
       httpPort: 7100,
       openBaoAddress: 'http://bao.test:8200',
+      modelStatusUrl: 'http://model-gateway.lifemodel-system.svc:8081/status',
       instanceName: 'home',
     });
   });
   it('requires a valid instance name', () => {
     expect(() => loadConfig({})).toThrow(LoaderFatalError);
     expect(() => loadConfig({ LIFEMODEL_NAME: 'bad.name' })).toThrow(LoaderFatalError);
+  });
+  it('reads the gateway status URL and refuses a value that is not HTTP', () => {
+    expect(
+      loadConfig({
+        LIFEMODEL_NAME: 'home',
+        LIFEMODEL_MODEL_GATEWAY_STATUS_URL: 'http://gateway.test:8081/status',
+      }).modelStatusUrl
+    ).toBe('http://gateway.test:8081/status');
+    expect(
+      loadConfig({ LIFEMODEL_NAME: 'home', LIFEMODEL_MODEL_GATEWAY_STATUS_URL: '' }).modelStatusUrl
+    ).toBe('http://model-gateway.lifemodel-system.svc:8081/status');
+    for (const value of ['gateway.test:8081/status', 'ftp://gateway.test/status'])
+      expect(() =>
+        loadConfig({ LIFEMODEL_NAME: 'home', LIFEMODEL_MODEL_GATEWAY_STATUS_URL: value })
+      ).toThrow(LoaderFatalError);
   });
   it('rejects invalid ports instead of silently choosing a fallback', () => {
     for (const value of ['soon', '-1', '65536'])

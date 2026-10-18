@@ -46,6 +46,10 @@ describe('web application generation', () => {
         { name: 'LIFEMODEL_WEB_PORT', value: '8080' },
         { name: 'LIFEMODEL_WEB_INTERNAL_PORT', value: '8081' },
         { name: 'LIFEMODEL_WEB_APP_DIRECTORY', value: '/opt/lifemodel/web/app' },
+        {
+          name: 'LIFEMODEL_MODEL_GATEWAY_STATUS_URL',
+          value: 'http://model-gateway.lifemodel-system.svc:8081/status',
+        },
         expect.objectContaining({
           name: 'LIFEMODEL_DB_USERNAME',
           valueFrom: { secretKeyRef: { name: 'lifemodel-db-credentials', key: 'username' } },

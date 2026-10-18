@@ -2,13 +2,16 @@ export type {
   TranscriptMessage,
   TranscriptPage,
   CreatureStateEvent,
+  ModelStatusEvent,
 } from '../../../src/web/contract.js';
 import type {
   TranscriptMessage,
   TranscriptPage,
   CreatureStateEvent,
+  ModelStatusEvent,
   MessageInput,
 } from '../../../src/web/contract.js';
+import { parseModelStatus } from '../../../src/web/model-status.js';
 
 export function parseCreatureStateEvent(value: unknown): CreatureStateEvent | null {
   if (value === null) return null;
@@ -38,6 +41,19 @@ export function parseTranscriptMessage(value: unknown): TranscriptMessage {
   return message as TranscriptMessage;
 }
 
+/**
+ * A model status frame. Anything the browser cannot read — a malformed frame,
+ * a status without its safe fields — is "status unavailable", never an outage
+ * (ADR-013 D6).
+ */
+export function parseModelStatusFrame(data: string): ModelStatusEvent | null {
+  try {
+    return parseModelStatus(JSON.parse(data) as unknown);
+  } catch {
+    return null;
+  }
+}
+
 export type SendResult = 'accepted' | 'conflict' | 'stale';
 
 export interface WebTransport {
@@ -46,7 +62,8 @@ export interface WebTransport {
   subscribe(
     after: string | null,
     onMessage: (message: TranscriptMessage) => void,
-    onState: (state: CreatureStateEvent | null) => void
+    onState: (state: CreatureStateEvent | null) => void,
+    onModelStatus: (status: ModelStatusEvent | null) => void
   ): () => void;
 }
 
@@ -78,7 +95,7 @@ export const httpTransport: WebTransport = {
     return page;
   },
 
-  subscribe(after, onMessage, onState) {
+  subscribe(after, onMessage, onState, onModelStatus) {
     const query = new URLSearchParams();
     if (after !== null) query.set('after', after);
     const source = new EventSource(`/api/events?${query.toString()}`);
@@ -89,6 +106,9 @@ export const httpTransport: WebTransport = {
     source.addEventListener('state', (event) => {
       const state = parseCreatureStateEvent(JSON.parse((event as MessageEvent<string>).data));
       onState(state);
+    });
+    source.addEventListener('model', (event) => {
+      onModelStatus(parseModelStatusFrame((event as MessageEvent<string>).data));
     });
     return () => {
       source.close();

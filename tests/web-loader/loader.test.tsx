@@ -560,9 +560,8 @@ describe('loader UI', () => {
       target: { value: 'a new secure password' },
     });
     fireEvent.submit(screen.getByLabelText('New password').closest('form')!);
-    expect(await screen.findByRole('status')).toHaveTextContent(
-      'The current password is incorrect.'
-    );
+    // The settings page also carries the quiet model-status live region.
+    expect(await screen.findByText('The current password is incorrect.')).toBeInTheDocument();
     expect(
       fetchMock.mock.calls.some(
         ([url, options]) => url === '/api/password' && options?.method === 'POST'

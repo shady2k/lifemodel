@@ -9,10 +9,12 @@ import type {
   InstanceResponse,
   MessageAcceptedResponse,
   MessageInput,
+  ModelStatusEvent,
   TranscriptEvent,
   TranscriptMessage,
   TranscriptPage as WebTranscriptPage,
 } from './contract.js';
+import type { ModelStatusSource } from './model-status.js';
 
 const UUID_V7 =
   '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$';
@@ -41,13 +43,19 @@ export interface WebServerOptions {
   intake: IOwnerMessageIntake;
   transcript: TranscriptReader;
   creatureState: CreatureStateReader;
+  /**
+   * The gateway's health, polled once for every client of this module
+   * (ADR-013 D6). It is independent of the core's snapshot and is part of the
+   * stream's change key, so a status change alone pushes an update.
+   */
+  modelStatus: ModelStatusSource;
   logger: Pick<FastifyBaseLogger, 'info'>;
   bodyLimit?: number;
 }
 
 interface StreamEvent {
-  event: 'message' | 'state';
-  data: TranscriptMessage | CreatureStateEvent | null;
+  event: 'message' | 'state' | 'model';
+  data: TranscriptMessage | CreatureStateEvent | ModelStatusEvent | null;
   id?: string;
 }
 
@@ -114,6 +122,7 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
   const appDirectory = path.resolve(options.appDirectory);
   const rates = new Map<string, { start: number; count: number }>();
   const activeStreams = new Map<string, number>();
+  let statusReaders = 0;
   const schema = {
     body: {
       type: 'object',
@@ -243,6 +252,15 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     if (streamCount >= MAX_STREAMS_PER_SESSION)
       return await reply.code(429).send({ error: 'too_many_streams' });
     activeStreams.set(session, streamCount + 1);
+    let statusReaderReleased = false;
+    const releaseStatusReader = () => {
+      if (statusReaderReleased) return;
+      statusReaderReleased = true;
+      statusReaders = Math.max(0, statusReaders - 1);
+      if (statusReaders === 0) options.modelStatus.stop();
+    };
+    statusReaders += 1;
+    if (statusReaders === 1) options.modelStatus.start();
 
     // The lease and HTTP stream share one deadline starting before lease acquisition.
     const lifecycle = new AbortController();
@@ -273,6 +291,7 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
       const remaining = (activeStreams.get(session) ?? 1) - 1;
       if (remaining <= 0) activeStreams.delete(session);
       else activeStreams.set(session, remaining);
+      releaseStatusReader();
       void releaseBounded();
     };
     const onRequestClose = () => {
@@ -302,6 +321,7 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
       leaseId = lease;
       // If acquisition settled after disconnect/timeout, immediately retire its lease.
       if (ended || lifecycle.signal.aborted) {
+        closeLifecycle();
         await releaseBounded();
         return await reply.code(503).send({ error: 'stream_unavailable' });
       }
@@ -356,6 +376,17 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     reply.raw.removeListener('close', onRequestClose);
     response.on('close', cleanup);
 
+    let previousModelStatus: string | null = null;
+    const publishModelStatus = () => {
+      // The status is read from the poller's cache, so a hanging gateway can
+      // never delay this loop; nothing is sent before the first answer.
+      if (!options.modelStatus.settled()) return;
+      const status = options.modelStatus.read();
+      const key = JSON.stringify(status);
+      if (key === previousModelStatus) return;
+      previousModelStatus = key;
+      if (!queue.push({ event: 'model', data: status })) cleanup();
+    };
     const publishUnavailable = () => {
       previousState = 'unavailable';
       if (!queue.push({ event: 'state', data: null })) cleanup();
@@ -409,6 +440,7 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     };
     const stateTimer = setInterval(() => {
       void publishState();
+      publishModelStatus();
     }, STATE_POLL_MS);
     const heartbeatTimer = setInterval(() => {
       if (!ended && !response.write(': heartbeat\n\n')) response.once('drain', () => undefined);
@@ -419,6 +451,7 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
       try {
         await publishState();
         if (ended) return;
+        publishModelStatus();
         iterator = options.transcript.watchTranscript(after, abort.signal)[Symbol.asyncIterator]();
         while (!abort.signal.aborted) {
           const next = await iterator.next();
@@ -515,6 +548,11 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
         .header('Cache-Control', 'no-store')
         .send({ error: 'intake_unavailable' });
     }
+  });
+
+  server.addHook('onClose', () => {
+    // Safety net: no stream may leave the shared poll running after the module stops.
+    options.modelStatus.stop();
   });
 
   server.setErrorHandler((error: unknown, request, reply) => {
