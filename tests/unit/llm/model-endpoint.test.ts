@@ -13,7 +13,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createLLMProvider } from '../../../src/core/container.js';
 import { createReloadableLLMProvider } from '../../../src/core/reloadable-llm-provider.js';
-import { LLMError, type LLMProvider, type ModelRole } from '../../../src/llm/provider.js';
+import { DEFAULT_ROLE_MODEL, type LLMProvider, type ModelRole } from '../../../src/llm/provider.js';
 import { createTestLogger, recordingLogger, type RecordedLog } from '../../helpers/test-logger.js';
 
 // The endpoint's client, captured: which model was asked for, and on which
@@ -69,6 +69,8 @@ describe('createLLMProvider: the endpoint and the roles', () => {
     vi.clearAllMocks();
     lines = [];
     delete process.env['OPENROUTER_API_KEY'];
+    // The platform pin would override the endpoint every case here configures.
+    delete process.env['LIFEMODEL_MODEL_BASE_URL'];
   });
 
   it('builds the endpoint provider and asks it for the model of the role', async () => {
@@ -83,29 +85,28 @@ describe('createLLMProvider: the endpoint and the roles', () => {
     expect(mocks.createOpenAI.mock.calls.at(-1)?.[0]?.baseURL).toBe('http://127.0.0.1:1234/v1');
   });
 
-  it('names the role it cannot serve instead of guessing a model', async () => {
-    // A config file written by hand, naming only the fast model. The endpoint
-    // serves that role; the settings interface would never save this shape.
+  it('asks for `default` on a role the endpoint names no model for', async () => {
+    // A config file written by hand, naming only the fast model (ADR-013 D2:
+    // the platform's gateway maps `default` to the configured slot's model).
     const provider = createLLMProvider(
       { endpoint: { ...COMPLETE, smartModel: null, motorModel: null } },
       logger()
     );
     expect(provider).not.toBeNull();
 
-    await expect(
-      (provider as LLMProvider).complete({
-        messages: [{ role: 'user', content: 'hello' }],
-        role: 'smart',
-      })
-    ).rejects.toThrow(LLMError);
+    expect(await modelFor(provider as LLMProvider, 'fast')).toBe('fast-small');
+    expect(await modelFor(provider as LLMProvider, 'smart')).toBe(DEFAULT_ROLE_MODEL);
+    expect(await modelFor(provider as LLMProvider, 'motor')).toBe(DEFAULT_ROLE_MODEL);
   });
 
-  it('is not built at all when the endpoint has a base URL and no model', () => {
+  it('is built from a base URL alone, every role asking for `default`', async () => {
     const provider = createLLMProvider(
       { endpoint: { baseUrl: 'http://127.0.0.1:1234/v1' } },
       logger()
     );
-    expect(provider).toBeNull();
+    expect(provider).not.toBeNull();
+    expect(await modelFor(provider as LLMProvider, 'fast')).toBe(DEFAULT_ROLE_MODEL);
+    expect(await modelFor(provider as LLMProvider, 'smart')).toBe(DEFAULT_ROLE_MODEL);
   });
 
   it('starts without a provider when nothing is configured (the first start)', () => {

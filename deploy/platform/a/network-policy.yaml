@@ -26,6 +26,8 @@ spec:
     - Ingress
     - Egress
   ingress:
+    # The loader bootstraps Bao; the model gateway logs in with its own
+    # ServiceAccount and reads the model slots (ADR-013 D3/D5).
     - from:
         - namespaceSelector:
             matchLabels:
@@ -33,6 +35,12 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: loader
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: model-gateway
       ports:
         - protocol: TCP
           port: 8200
@@ -55,3 +63,86 @@ spec:
       ports:
         - protocol: TCP
           port: 6443
+---
+# The model gateway's own routes (ADR-013 D5). It inherits nothing from the
+# loader: the namespace default deny is separate, and this policy is the whole
+# of what it may do.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: model-gateway-access
+  namespace: lifemodel-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: model-gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # 8080 is the core's API: no other pod may call the model through it.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: core
+      ports:
+        - protocol: TCP
+          port: 8080
+    # /status is read by the web module and by the loader's settings.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: web
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: loader
+      ports:
+        - protocol: TCP
+          port: 8081
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Its own login and the model slots it reads; never the loader's identity.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openbao
+      ports:
+        - protocol: TCP
+          port: 8200
+    # The loader's model exception: the owner's endpoints may be public or on
+    # the RFC 1918 LAN, while pod, service and link-local ranges stay refused.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.42.0.0/16
+              - 10.43.0.0/16
+              - 169.254.0.0/16
+      # No port restriction: owner endpoints may use LAN Ollama 11434 or custom HTTPS ports.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ollama
+      ports:
+        - protocol: TCP
+          port: 11434

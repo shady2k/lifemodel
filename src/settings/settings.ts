@@ -53,7 +53,8 @@ function isHttpUrl(value: string): boolean {
  * Does the URL carry credentials (`user:password@` before the host)? Such a
  * URL would put a secret into the configuration document, the settings page and the log -
  * and the fetch-based provider refuses it anyway (the AI SDK rejects URL
- * userinfo). The key belongs in Agent Vault, never in this field.
+ * userinfo). The key belongs in the loader's model settings, which keep it in
+ * OpenBao, never in this field.
  */
 function hasUrlCredentials(value: string): boolean {
   try {
@@ -67,9 +68,10 @@ function hasUrlCredentials(value: string): boolean {
 /**
  * A query string or fragment in the endpoint base URL: parts a URL can carry
  * a secret in (`?key=...`, `#...`) that this interface does not accept, while
- * it does not manage the endpoint's own authentication (the key goes through
- * Agent Vault on the way out). The redactor below strips both from any echo,
- * page or log, and validation refuses them in a NEW submission.
+ * it does not manage the endpoint's own authentication (the platform's model
+ * gateway adds the key from OpenBao on the way out). The redactor below strips
+ * both from any echo, page or log, and validation refuses them in a NEW
+ * submission.
  */
 function hasUrlQueryOrFragment(value: string): boolean {
   try {
@@ -126,15 +128,21 @@ export function validateSettings(
 
   // A platform-pinned endpoint is the platform's to change (ADR-013 D2). A new
   // value here is refused by its field, never stored and never silently
-  // replaced by the pin.
-  if (pinned !== null && input.endpointBaseUrl.trim() !== '' && input.endpointBaseUrl !== pinned) {
-    errors.endpointBaseUrl = `the endpoint base URL is set by this platform (${PINNED_MODEL_BASE_URL_ENV}) and cannot be edited here`;
-  } else if (endpoint.baseUrl !== null) {
+  // replaced by the pin; and the models are optional then, because a role the
+  // platform's gateway names no model for is answered with `default`.
+  if (pinned !== null) {
+    if (input.endpointBaseUrl.trim() !== '' && input.endpointBaseUrl !== pinned) {
+      errors.endpointBaseUrl = `the endpoint base URL is set by this platform (${PINNED_MODEL_BASE_URL_ENV}) and cannot be edited here`;
+    }
+    return errors;
+  }
+
+  if (endpoint.baseUrl !== null) {
     if (!isHttpUrl(endpoint.baseUrl)) {
       errors.endpointBaseUrl = 'the endpoint base URL must be an http or https URL';
     } else if (hasUrlCredentials(endpoint.baseUrl)) {
       errors.endpointBaseUrl =
-        'the endpoint base URL must not carry credentials (a user name or password before the @); keys go through Agent Vault';
+        'the endpoint base URL must not carry credentials (a user name or password before the @); the key belongs in the loader, which keeps it in OpenBao';
     } else if (hasUrlQueryOrFragment(endpoint.baseUrl)) {
       errors.endpointBaseUrl =
         'the endpoint base URL must not carry a query string or fragment (?... or #...); a URL part this interface does not manage is refused, and a key in one never reaches this server';

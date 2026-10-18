@@ -41,12 +41,7 @@ import {
   createSnapshotStore,
   createCreatureStateStore,
 } from '../storage/index.js';
-import {
-  type MergedConfig,
-  createConfigLoader,
-  endpointGaps,
-  type ModelEndpoint,
-} from '../config/index.js';
+import { type MergedConfig, createConfigLoader, type ModelEndpoint } from '../config/index.js';
 import { getEffectiveTimezone } from '../utils/date.js';
 import { MemoryProviderImpl } from '../storage/memory-provider.js';
 import { PostgresConversationStore } from '../storage/postgres-conversation-store.js';
@@ -412,13 +407,12 @@ export interface LLMProviderConfig {
  * tests/unit/llm/model-endpoint.test.ts).
  *
  * The model configuration is ONE OpenAI-compatible endpoint with a model per
- * role, and no key (lifemodel-q4x.4.1). OpenRouter stays reachable as one more
- * OpenAI-compatible endpoint: the key arrives injected from Agent Vault
- * (lifemodel-q4x.3.*), so lifemodel never holds it, and the endpoint points at
- * OpenRouter like at any other server. There is NO second endpoint and no
- * fallback: a role the endpoint does not name is answered with an error naming
- * the role (the provider's own, at use time), never with another role's model
- * or another endpoint's.
+ * role, and no key (lifemodel-q4x.4.1). In the cluster that endpoint is the
+ * platform's `model-gateway`, pinned by `LIFEMODEL_MODEL_BASE_URL`, and the
+ * gateway injects the owner's key from OpenBao on the way upstream: lifemodel
+ * holds none. A role the endpoint names no model for asks for `default`, which
+ * the gateway maps to the configured slot's own model (ADR-013 D2); there is NO
+ * second endpoint and no fallback.
  */
 export function createLLMProvider(
   config: LLMProviderConfig | undefined,
@@ -431,22 +425,12 @@ export function createLLMProvider(
     motorModel: config?.endpoint?.motorModel ?? null,
   };
 
-  // Create the endpoint provider if an endpoint is configured - that is, if it
-  // has a base URL and at least one model. The settings interface refuses to
-  // save a half-written endpoint; a config file written by hand may still hold
-  // one, and then the roles it does not name are reported and refused with
-  // their own names at use time - never guessed at.
-  if (endpoint.baseUrl && (endpoint.fastModel ?? endpoint.smartModel ?? endpoint.motorModel)) {
-    const gaps = endpointGaps(endpoint);
-    if (gaps.length > 0) {
-      logger.warn(
-        {
-          missing: gaps.map((gap) => gap.label),
-          advisedTo: `set the endpoint and its models in lifemodel's settings interface`,
-        },
-        'The model endpoint names no model for every role: those roles are refused with an error naming the role'
-      );
-    }
+  // Create the endpoint provider if an endpoint is configured - a base URL is
+  // the whole of it. A role it names no model for asks for `default`
+  // (ADR-013 D2): the platform's gateway answers it with the configured slot's
+  // own model, so an instance whose settings leave the models unset still
+  // reaches the owner's model.
+  if (endpoint.baseUrl) {
     const provider = createVercelAIProvider(
       {
         baseUrl: endpoint.baseUrl,

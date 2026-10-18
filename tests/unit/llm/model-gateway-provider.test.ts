@@ -11,7 +11,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { afterEach, describe, expect, it } from 'vitest';
 import { VercelAIProvider } from '../../../src/plugins/providers/vercel-ai-provider.js';
-import { LLMError } from '../../../src/llm/provider.js';
+import { DEFAULT_ROLE_MODEL, LLMError } from '../../../src/llm/provider.js';
 import { createTestLogger } from '../../helpers/test-logger.js';
 
 interface SeenRequest {
@@ -142,6 +142,19 @@ describe('the core provider in front of the model gateway', () => {
     });
     // Not a streaming request: one request, one complete JSON answer.
     expect(JSON.parse(request?.body ?? '{}').stream).not.toBe(true);
+  });
+
+  it('asks the gateway for `default` on a role no model is named for', async () => {
+    const gateway = await gatewayWith(answerOnce('hello'));
+    for (const name of ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'ALL_PROXY'])
+      delete process.env[name];
+    // A base URL alone: the settings name no model for any role (ADR-013 D2).
+    const provider = new VercelAIProvider({ baseUrl: gateway.baseUrl }, createTestLogger('silent'));
+
+    await provider.complete({ ...REQUEST, role: 'smart' });
+
+    expect(JSON.parse(gateway.requests[0]?.body ?? '{}').model).toBe(DEFAULT_ROLE_MODEL);
+    expect(DEFAULT_ROLE_MODEL).toBe('default');
   });
 
   it('does not retry a failed completion: one attempt, one error', async () => {

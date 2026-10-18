@@ -12,7 +12,7 @@ import type {
   Message,
   ToolCall,
 } from '../../llm/provider.js';
-import { BaseLLMProvider, LLMError } from '../../llm/provider.js';
+import { BaseLLMProvider, DEFAULT_ROLE_MODEL, LLMError } from '../../llm/provider.js';
 import { toStrictSchema } from '../../llm/tool-schema.js';
 import { resolveModelParams } from './model-params.js';
 import { compileTranscript, resolveTranscriptPolicy } from './transcript-compiler.js';
@@ -124,12 +124,13 @@ export class VercelAIProvider extends BaseLLMProvider {
 
   /**
    * Check if provider is configured.
+   *
+   * A base URL is the whole of it: the models are optional, and a role the
+   * endpoint names none for asks for `default`, which the platform's gateway
+   * maps to the configured slot's own model (ADR-013 D2).
    */
   isAvailable(): boolean {
-    return Boolean(
-      this.config.baseUrl &&
-      (this.config.fastModel ?? this.config.smartModel ?? this.config.motorModel)
-    );
+    return Boolean(this.config.baseUrl);
   }
 
   /**
@@ -142,9 +143,8 @@ export class VercelAIProvider extends BaseLLMProvider {
     }
 
     // The endpoint uses the model its configuration names for THIS role
-    // (lifemodel-q4x.4.1); a role it does not name is not sent to the endpoint
-    // at all (`createLLMProvider` routes it to the other provider), so reaching
-    // here without a model is a mistake worth an error, not a guess.
+    // (lifemodel-q4x.4.1); a role it names none for asks for `default`
+    // (ADR-013 D2), which the platform's gateway maps to the slot's own model.
     const forRole: Record<'fast' | 'smart' | 'motor', string | undefined> = {
       fast: this.config.fastModel,
       smart: this.config.smartModel,
@@ -152,17 +152,14 @@ export class VercelAIProvider extends BaseLLMProvider {
     };
     if (request.role === undefined) {
       // No role asked for: the general model, the smart one when it is named.
-      const general = this.config.smartModel ?? this.config.fastModel ?? this.config.motorModel;
-      if (general === undefined) {
-        throw new LLMError('The endpoint names no model at all', this.name);
-      }
-      return general;
+      return (
+        this.config.smartModel ??
+        this.config.fastModel ??
+        this.config.motorModel ??
+        DEFAULT_ROLE_MODEL
+      );
     }
-    const model = forRole[request.role];
-    if (model === undefined) {
-      throw new LLMError(`The endpoint names no model for the ${request.role} role`, this.name);
-    }
-    return model;
+    return forRole[request.role] ?? DEFAULT_ROLE_MODEL;
   }
 
   /**

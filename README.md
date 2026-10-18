@@ -150,11 +150,15 @@ settings: they are set in lifemodel's settings interface (`docs/features/instanc
 | `LLM_ENDPOINT_FAST_MODEL` | The model for the *fast* role (classification) |
 | `LLM_ENDPOINT_SMART_MODEL` | The model for the *smart* role (reasoning, composition) |
 | `LLM_ENDPOINT_MOTOR_MODEL` | The model for the *motor* role (Motor Cortex) |
+| `LIFEMODEL_MODEL_BASE_URL` | The platform's own pin on the endpoint (the cluster's model gateway). It overrides the saved value and cannot be edited in the settings interface |
 
 There is no second endpoint and no fallback: a role the endpoint does not name
 is refused with an error naming that role, never answered with a different
-endpoint or another role's model. No key is ever set here — a server that needs
-one is reached through Agent Vault, which injects it.
+endpoint or another role's model. No key is ever set here: lifemodel sends no
+`Authorization` header at all — in the cluster the platform's model gateway
+injects the owner's key from OpenBao on the upstream leg, and no key reaches
+lifemodel's process, settings or logs (ADR-013). A completion is one HTTP
+attempt; the gateway holds the primary/reserve failover.
 
 </details>
 

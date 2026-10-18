@@ -151,6 +151,8 @@
         grep -F 'name: lifemodel' instance.yaml >/dev/null
         grep -F 'boot-' instance.yaml >/dev/null
         kustomize build ${./deploy/platform/a0} > a0.yaml
+        grep -F 'name: lifemodel-system-default-deny' a0.yaml >/dev/null
+        grep -F 'name: loader-access' a0.yaml >/dev/null
         validate_a0() {
           for kind in ServiceAccount PersistentVolumeClaim Deployment Service NetworkPolicy; do
             grep -F "kind: $kind" "$1" >/dev/null || return 1
@@ -201,6 +203,10 @@
         fi
         grep -F 'name: openbao-default-deny' step-a.yaml >/dev/null
         grep -F 'name: openbao-server-access' step-a.yaml >/dev/null
+        grep -F 'name: model-gateway' step-a.yaml >/dev/null
+        grep -F 'name: model-gateway-access' step-a.yaml >/dev/null
+        grep -F '/opt/lifemodel/loader/dist/model-gateway.js' step-a.yaml >/dev/null
+        grep -E 'image: ghcr.io/shady2k/lifemodel-loader@sha256:[a-f0-9]{64}' step-a.yaml >/dev/null
         grep -F 'kind: NetworkPolicy' step-a.yaml >/dev/null
         grep -F 'kind: Namespace' step-a.yaml >/dev/null
         grep -F 'kustomize.toolkit.fluxcd.io/prune: disabled' step-a.yaml >/dev/null

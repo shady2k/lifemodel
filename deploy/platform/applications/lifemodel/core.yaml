@@ -104,6 +104,11 @@ spec:
               value: '5000'
             - name: MOTOR_CORTEX_ENABLED
               value: 'false'
+            # The platform pins the model endpoint to its own gateway (ADR-013
+            # D2/D7): the core holds no key, and this value overrides
+            # core.settings and cannot be edited there.
+            - name: LIFEMODEL_MODEL_BASE_URL
+              value: http://model-gateway.lifemodel-system.svc:8080/v1
             - name: LIFEMODEL_MODEL_DIR
               value: /opt/model-cache
           startupProbe:

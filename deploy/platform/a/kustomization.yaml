@@ -7,5 +7,14 @@ resources:
   - service-account.yaml
   - auth-delegator.yaml
   - openbao/rendered.yaml
+  # The model gateway arrives after OpenBao it logs in to (ADR-013 D1/D8).
+  - model-gateway-service-account.yaml
+  - model-gateway.yaml
   - gitea
   - network-policy.yaml
+images:
+  # The gateway runs the loader's image (its own entry point); the release flow
+  # pins this digest to the same pushed loader digest A0 uses (ADR-013 D8).
+  - name: ghcr.io/shady2k/lifemodel-loader
+    newName: ghcr.io/shady2k/lifemodel-loader
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

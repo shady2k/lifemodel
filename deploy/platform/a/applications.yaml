@@ -64,6 +64,31 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  name: lifemodel-model-egress
+  namespace: lifemodel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: core
+  policyTypes: [Egress]
+  ingress: []
+  egress:
+    # The core reaches NO model endpoint of its own: the platform's gateway is
+    # its only model egress, and it holds no key (ADR-013 D7).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: model-gateway
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
   name: lifemodel-postgres-egress
   namespace: lifemodel
 spec:
@@ -339,3 +364,15 @@ spec:
       ports:
         - protocol: TCP
           port: 6379
+    # The model's health: the web module reads the gateway's /status and shows
+    # "no connection to the model since HH:MM" (ADR-013 D6).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: model-gateway
+      ports:
+        - protocol: TCP
+          port: 8081

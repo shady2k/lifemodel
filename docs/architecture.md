@@ -223,7 +223,29 @@ with per-choice/per-field key-prefix withholding. Each request has at most
 one primary and one reserve attempt, never switches after output starts, and
 aborts model transport on disconnect or deadline. The shared loader validator
 resolves and pins each destination. See [ADR-013](adr/013-model-gateway.md).
-Deployment, network policy and core-provider wiring are separate work.
+Step A deploys it as `model-gateway` in `lifemodel-system`: the loader image
+with the command overridden to `/opt/lifemodel/loader/dist/model-gateway.js`,
+its own ServiceAccount and no loader volume, custody Secret or PKI, a read-only
+root filesystem, and readiness on `/status` alone, so missing slots before
+onboarding never hold the step. The release flow pins step A to the same pushed
+loader digest as A0. Its Service publishes 8080 (the API) and 8081 (`/status`);
+the core is admitted to 8080 only, the web module and the loader to 8081 only,
+and the core's own model egress is the gateway's 8080 — DNS, Postgres and Valkey
+stay as they were. Its egress is the loader's model exception plus DNS and
+OpenBao; the loader's API-server and Gitea routes are the loader's alone,
+because the namespace default deny is a separate object from the loader's
+permits. The loader's bootstrap policy phase provisions the gateway's Bao
+identity beside `loader-model` before the root token is retired: policy `read`
+on `lifemodel/data/model/*` only and Kubernetes-auth role `model-gateway` bound
+to the gateway's ServiceAccount, verified as that policy would be held.
+
+The core's endpoint comes from `LIFEMODEL_MODEL_BASE_URL`, which the platform
+sets and lifemodel's settings interface cannot edit; it overrides
+`core.settings` and carries no key. The core sends no `Authorization` header,
+its role models unset in settings default to `default`, and its provider makes
+one HTTP attempt per completion whose timeout aborts the request through an
+`AbortSignal` — the gateway's primary/reserve pair is the whole transport
+failover budget. See [ADR-013](adr/013-model-gateway.md).
 
 ## Platform deployment and loader first start
 

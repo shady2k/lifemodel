@@ -472,6 +472,99 @@ describe('OpenBao bootstrap', () => {
     await expect(api.ensureModelPolicy('root-token')).rejects.toThrow(/model-gateway/);
   });
 
+  it('provisions and verifies the gateway identity before the root token is retired', async () => {
+    const paths: string[] = [];
+    const api = createOpenBaoApi({
+      address: 'http://openbao.test:8200',
+      role: 'loader',
+      readJwt: async () => 'loader-jwt',
+      request: async (url, method, token) => {
+        paths.push(url.pathname);
+        if (url.pathname.endsWith('/sys/seal-status'))
+          return { status: 200, body: JSON.stringify({ initialized: true, sealed: false }) };
+        if (url.pathname.endsWith('/sys/mounts'))
+          return { status: 200, body: '{"lifemodel/":{"type":"kv","options":{"version":"2"}}}' };
+        if (url.pathname.endsWith('/auth/token/lookup-self')) return { status: 200, body: '{}' };
+        if (url.pathname.endsWith('/auth/kubernetes/login'))
+          return {
+            status: 200,
+            body: JSON.stringify({
+              auth: { client_token: 'loader-token', lease_duration: 3600, renewable: true },
+            }),
+          };
+        if (url.pathname.endsWith('/auth/kubernetes/role/model-gateway') && method === 'GET')
+          return {
+            status: 200,
+            body: JSON.stringify({
+              bound_service_account_names: ['model-gateway'],
+              bound_service_account_namespaces: ['lifemodel-system'],
+              policies: ['model-gateway'],
+            }),
+          };
+        if (url.pathname.endsWith('/auth/token/create'))
+          return {
+            status: 200,
+            body: JSON.stringify({
+              auth: { client_token: 'gateway-check-token', lease_duration: 60, renewable: false },
+            }),
+          };
+        if (url.pathname.endsWith('/sys/capabilities-self'))
+          return {
+            status: 200,
+            body: JSON.stringify(
+              token === 'gateway-check-token'
+                ? {
+                    'lifemodel/data/model/primary': ['read'],
+                    'lifemodel/data/model/reserve': ['read'],
+                    'lifemodel/metadata/model/primary': ['deny'],
+                  }
+                : {
+                    'sys/seal-status': ['read'],
+                    'sys/unseal': ['update'],
+                    'sys/init': ['deny'],
+                    'lifemodel/data/model/primary': ['create', 'update', 'read'],
+                    'lifemodel/data/model/reserve': ['create', 'update', 'read', 'delete'],
+                    'lifemodel/metadata/model/reserve': ['read'],
+                    'lifemodel/metadata/model/primary': ['read'],
+                  }
+            ),
+          };
+        return { status: 204, body: '' };
+      },
+    });
+    // Where the bootstrap retired the root token, in the same call order.
+    const retiredAt: number[] = [];
+    const bootstrap = createOpenBaoBootstrap({
+      bao: {
+        ...api,
+        revokeRootToken: async (rootToken) => {
+          retiredAt.push(paths.length);
+          await api.revokeRootToken(rootToken);
+        },
+      },
+      custody: {
+        read: async () => ({ keys: ['key'], rootToken: 'root-token' }),
+        write: async () => {},
+      },
+      runPhases: async (phases) => {
+        for (const phase of phases) await phase.run();
+      },
+    });
+    await bootstrap.runInitial();
+    const gatewayPolicy = paths.indexOf('/v1/sys/policies/acl/model-gateway');
+    const gatewayRole = paths.indexOf('/v1/auth/kubernetes/role/model-gateway');
+    const gatewayCheck = paths.indexOf('/v1/sys/capabilities-self');
+    expect(gatewayPolicy).toBeGreaterThanOrEqual(0);
+    expect(gatewayRole).toBeGreaterThan(gatewayPolicy);
+    expect(gatewayCheck).toBeGreaterThan(gatewayRole);
+    // The root token is retired only after the gateway's identity was written
+    // AND verified: a role provisioned after the retirement could never be
+    // fixed by the loader again (ADR-013 D3).
+    expect(retiredAt).toHaveLength(1);
+    expect(retiredAt[0]).toBeGreaterThan(gatewayCheck);
+    expect(paths.indexOf('/v1/auth/token/revoke-self')).toBe(retiredAt[0]);
+  });
+
   it('re-enters the policy phase after a crash before the gateway identity is verified', async () => {
     const events: string[] = [];
     let attempts = 0;
