@@ -31,10 +31,8 @@ export type BaoAuth = { token: string } | { anonymous: true };
 export function createRoleBaoClient(options: RoleBaoOptions) {
   const base = new URL(options.address);
   const now = options.now ?? Date.now;
-  const readJwt =
-    options.readJwt ??
-    (() =>
-      readFile(options.jwtFile ?? '/var/run/secrets/kubernetes.io/serviceaccount/token', 'utf8'));
+  const jwtFile = options.jwtFile ?? '/var/run/secrets/kubernetes.io/serviceaccount/token';
+  const readJwt = options.readJwt ?? (() => readFile(jwtFile, 'utf8'));
   const timeoutMs = options.timeoutMs ?? 10_000;
   let token: string | undefined;
   let expiresAt = 0;
@@ -94,8 +92,16 @@ export function createRoleBaoClient(options: RoleBaoOptions) {
         });
         req.end(body);
       }));
-  function failure(code: BaoErrorCode): BaoStorageError {
-    options.logger?.error({ code }, 'OpenBao request failed');
+  /**
+   * An absent path (an unset slot) is a normal state, never an error worth a
+   * log line at error level. Every other code is logged, without a body.
+   */
+  function failure(
+    code: BaoErrorCode,
+    message = 'OpenBao request failed',
+    fields: Record<string, unknown> = {}
+  ): BaoStorageError {
+    if (code !== 'not_found') options.logger?.error({ code, ...fields }, message);
     return new BaoStorageError(code);
   }
   async function send(
@@ -153,9 +159,12 @@ export function createRoleBaoClient(options: RoleBaoOptions) {
     try {
       jwt = (await readJwt()).trim();
     } catch {
-      throw failure('unreachable');
+      throw failure('unreachable', 'OpenBao projected JWT file is unreadable', { file: jwtFile });
     }
-    if (!jwt) throw failure('denied');
+    if (!jwt)
+      throw failure('denied', 'OpenBao projected JWT file is empty', {
+        file: jwtFile,
+      });
     acceptAuth(await send('auth/kubernetes/login', 'POST', undefined, { role: options.role, jwt }));
     loginGeneration++;
   }

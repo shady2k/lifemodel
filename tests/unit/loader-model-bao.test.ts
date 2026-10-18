@@ -192,6 +192,138 @@ describe('shared role Bao client over real HTTP', () => {
     expect(f.logins.map((l) => l.jwt)).toEqual(['jwt-first', 'jwt-rotated']);
     expect(f.tokens.at(-1)).toBe('bao-token-2');
   });
+  it('ignores a stale rejection that arrives after another request already re-logged in', async () => {
+    const f = await fixture();
+    await f.client.readSlot('primary');
+    await writeFile(f.jwtFile, 'jwt-rotated');
+    let releaseFirst!: () => void;
+    let releaseStale!: () => void;
+    let enteredFirst!: () => void;
+    let enteredStale!: () => void;
+    const firstEntered = new Promise<void>((r) => {
+      enteredFirst = r;
+    });
+    const staleEntered = new Promise<void>((r) => {
+      enteredStale = r;
+    });
+    const heldTokens: Array<string | undefined> = [];
+    f.onRequest = (req, res) => {
+      const reject = () => {
+        res.writeHead(403);
+        res.end('PRIVATE BODY');
+      };
+      if (req.url?.includes('/data/') && heldTokens.length < 2) {
+        const token = req.headers['x-vault-token'];
+        heldTokens.push(typeof token === 'string' ? token : undefined);
+        if (heldTokens.length === 1) {
+          releaseFirst = reject;
+          enteredFirst();
+        } else {
+          releaseStale = reject;
+          enteredStale();
+        }
+        return true;
+      }
+      return false;
+    };
+    const first = f.client.readSlot('primary');
+    await firstEntered;
+    const stale = f.client.readSlot('reserve');
+    await staleEntered;
+    // Both requests were sent with the same token the server now refuses.
+    expect(heldTokens).toEqual(['bao-token-1', 'bao-token-1']);
+    releaseFirst();
+    await expect(first).resolves.toEqual(slot());
+    // The second rejection is already stale: it must not force another login.
+    releaseStale();
+    await expect(stale).resolves.toEqual(slot());
+    expect(f.logins.map((l) => l.jwt)).toEqual(['jwt-first', 'jwt-rotated']);
+    // Two held requests plus exactly one retry each: no request is attempted a third time.
+    expect(f.paths.filter((path) => path.includes('/data/'))).toHaveLength(5);
+    expect(f.tokens.at(-1)).toBe('bao-token-2');
+  });
+  it('re-logs in once when a renewal held past the server lease returns an already rejected token', async () => {
+    const f = await fixture();
+    await f.client.readSlot('primary');
+    await writeFile(f.jwtFile, 'jwt-rotated');
+    let finishRenewal!: () => void;
+    let renewalStarted!: () => void;
+    const renewalEntered = new Promise<void>((r) => {
+      renewalStarted = r;
+    });
+    let rejectOldToken = false;
+    f.onRequest = (req, res) => {
+      if (req.url?.endsWith('/renew-self')) {
+        finishRenewal = () =>
+          res.end(
+            JSON.stringify({
+              auth: { client_token: 'bao-token-1', lease_duration: 100, renewable: true },
+            })
+          );
+        renewalStarted();
+        return true;
+      }
+      if (req.url?.includes('/data/') && rejectOldToken) {
+        if (req.headers['x-vault-token'] === 'bao-token-1') {
+          res.writeHead(403);
+          res.end('PRIVATE BODY');
+          return true;
+        }
+      }
+      return false;
+    };
+    f.time = 70_000;
+    const request = f.client.readSlot('primary');
+    await renewalEntered;
+    // The renewal response arrives after the token's server-side lease has run out.
+    f.time = 200_000;
+    rejectOldToken = true;
+    finishRenewal();
+    await expect(request).resolves.toEqual(slot());
+    expect(f.logins.map((l) => l.jwt)).toEqual(['jwt-first', 'jwt-rotated']);
+    expect(f.paths.filter((path) => path.endsWith('/renew-self'))).toHaveLength(1);
+    expect(f.tokens.at(-1)).toBe('bao-token-2');
+  });
+  it('reads an unset reserve as a normal state without logging a storage error', async () => {
+    const f = await fixture();
+    f.status = 404;
+    await expect(f.client.readSlot('reserve')).resolves.toBeNull();
+    expect(f.lines.filter((line) => line.level === 'error')).toEqual([]);
+    f.status = 503;
+    await expect(f.client.readSlot('reserve')).rejects.toMatchObject({ code: 'sealed' });
+    expect(f.lines.filter((line) => line.level === 'error')).not.toHaveLength(0);
+    expect(JSON.stringify(f.lines)).not.toContain('PRIVATE BODY');
+  });
+  it('names an unreadable or empty projected JWT file in its log without its contents', async () => {
+    for (const [state, code, message] of [
+      ['missing', 'unreachable', /unreadable/],
+      ['empty', 'denied', /empty/],
+    ] as const) {
+      const root = await mkdtemp(join(tmpdir(), 'bao-credential-'));
+      roots.push(root);
+      const jwtFile = join(root, 'token');
+      if (state === 'empty') await writeFile(jwtFile, '  \n');
+      const lines: RecordedLine[] = [];
+      const client = createRoleBaoClient({
+        address: 'http://127.0.0.1:1',
+        role: 'loader',
+        jwtFile,
+        logger: createRecordingLogger(lines),
+      });
+      let failure: unknown;
+      try {
+        await client.readSlot('primary');
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(BaoStorageError);
+      expect(failure).toMatchObject({ code });
+      const line = lines.find((entry) => message.test(entry.message));
+      expect(line?.fields['file']).toBe(jwtFile);
+      expect(line?.level).toBe('error');
+      expect(JSON.stringify(lines)).not.toContain('jwt-');
+    }
+  });
   it('never treats missing authentication endpoints as an unset model slot', async () => {
     const f = await fixture();
     f.loginStatus = 404;
