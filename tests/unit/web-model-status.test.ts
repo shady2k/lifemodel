@@ -8,13 +8,26 @@ import {
 } from '../../src/web/model-status.js';
 import { ModelStatusPoller } from '../../src/web/model-status-poller.js';
 import type { ModelStatusEvent } from '../../src/web/contract.js';
+import {
+  abortTrackingFetch,
+  neverEndingResponse,
+  overlongResponse,
+  stallingResponse,
+} from '../helpers/model-status-fetch.js';
 
-function jsonResponse(value: unknown): Response {
+function jsonResponse(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
-    status: 200,
+    status,
     headers: { 'content-type': 'application/json' },
   });
 }
+
+const STATUS_URL = 'http://model-gateway.lifemodel-system.svc:8081/status';
+const DOWN = {
+  state: 'down',
+  outageSince: '2026-10-16T11:03:00.000Z',
+  lastErrorCode: 'timeout',
+};
 
 async function until(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -260,5 +273,143 @@ describe('the bounded status poll', () => {
     const settledCalls = fetchMock.mock.calls.length;
     await new Promise((resolve) => setTimeout(resolve, 60));
     expect(fetchMock.mock.calls.length).toBe(settledCalls);
+  });
+
+  it('reuses the settled status across reconnects inside one period', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ state: 'ok' }));
+    const poller = new ModelStatusPoller({
+      url: STATUS_URL,
+      pollMs: 5_000,
+      timeoutMs: 50,
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    poller.start();
+    await until(() => poller.settled());
+    for (let reconnect = 0; reconnect < 5; reconnect += 1) {
+      poller.stop();
+      poller.start();
+      await until(() => poller.settled());
+    }
+    poller.stop();
+    expect(fetchMock.mock.calls.length).toBe(1);
+    expect(poller.read()).toEqual(ok);
+  });
+
+  it('fetches at once when a reconnect finds the answer older than one period', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ state: 'ok' }));
+    const poller = new ModelStatusPoller({
+      url: STATUS_URL,
+      pollMs: 60,
+      timeoutMs: 20,
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const startedAt = Date.now();
+    poller.start();
+    await until(() => poller.settled());
+    poller.stop();
+    await until(() => Date.now() >= startedAt + 80, 500);
+    const before = fetchMock.mock.calls.length;
+    poller.start();
+    await until(() => fetchMock.mock.calls.length > before, 500);
+    poller.stop();
+  });
+
+  it('adopts a fetch that was in flight across a stop and a restart', async () => {
+    let answer!: (response: Response) => void;
+    const fetchMock = vi.fn(
+      async () => new Promise<Response>((resolve) => (answer = resolve))
+    );
+    const poller = new ModelStatusPoller({
+      url: STATUS_URL,
+      pollMs: 5_000,
+      timeoutMs: 5_000,
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    poller.start();
+    await until(() => fetchMock.mock.calls.length === 1);
+    poller.stop();
+    poller.start();
+    expect(poller.settled()).toBe(false);
+    answer(jsonResponse({ state: 'ok' }));
+    await until(() => poller.settled(), 500);
+    expect(poller.read()).toEqual(ok);
+    expect(fetchMock.mock.calls.length).toBe(1);
+    poller.stop();
+  });
+
+  it('cancels the response body it rejects, so no connection stays open', async () => {
+    const body = neverEndingResponse(503);
+    const tracking = abortTrackingFetch(async () => body.response);
+    const poller = new ModelStatusPoller({
+      url: STATUS_URL,
+      pollMs: 30,
+      timeoutMs: 60,
+      fetch: tracking.fetch,
+    });
+    poller.start();
+    await until(() => poller.settled());
+    expect(poller.read()).toBeNull();
+    await until(() => body.cancelled() || tracking.aborted(), 500);
+    poller.stop();
+  });
+
+  it.each([201, 202, 206])('reads a %s answer as unavailable, never an outage', async (status) => {
+    const poller = new ModelStatusPoller({
+      url: STATUS_URL,
+      pollMs: 5_000,
+      timeoutMs: 50,
+      fetch: vi.fn(async () => jsonResponse(DOWN, status)) as unknown as typeof fetch,
+    });
+    poller.start();
+    await until(() => poller.settled());
+    expect(poller.read()).toBeNull();
+    poller.stop();
+  });
+
+  it('reads an empty 204 answer as unavailable', async () => {
+    const poller = new ModelStatusPoller({
+      url: STATUS_URL,
+      pollMs: 5_000,
+      timeoutMs: 50,
+      fetch: vi.fn(async () => new Response(null, { status: 204 })) as unknown as typeof fetch,
+    });
+    poller.start();
+    await until(() => poller.settled());
+    expect(poller.read()).toBeNull();
+    poller.stop();
+  });
+
+  it('refuses a body past its byte bound and cancels it', async () => {
+    const body = overlongResponse(200, 1_024, 16);
+    const tracking = abortTrackingFetch(async () => body.response);
+    const poller = new ModelStatusPoller({
+      url: STATUS_URL,
+      pollMs: 5_000,
+      timeoutMs: 500,
+      fetch: tracking.fetch,
+    });
+    poller.start();
+    await until(() => poller.settled(), 1_000);
+    expect(poller.read()).toBeNull();
+    await until(() => body.cancelled() || tracking.aborted(), 500);
+    poller.stop();
+  });
+
+  it('gives up on a body that stalls after its first part, within the bound', async () => {
+    const body = stallingResponse(200, '{"state":"do');
+    const tracking = abortTrackingFetch(async () => body.response);
+    const poller = new ModelStatusPoller({
+      url: STATUS_URL,
+      pollMs: 5_000,
+      timeoutMs: 40,
+      fetch: tracking.fetch,
+    });
+    const startedAt = Date.now();
+    poller.start();
+    await until(() => poller.settled(), 1_000);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(poller.read()).toBeNull();
+    expect(body.cancelled() || tracking.aborted()).toBe(true);
+    poller.stop();
   });
 });
