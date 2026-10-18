@@ -406,6 +406,8 @@ describe('complete model API bases', () => {
     ['https://models.example', '/'],
     ['https://models.example/prefix/v1///', '/prefix/v1/'],
     ['https://models.example/prefix//v1/', '/prefix//v1/'],
+    ['https://models.example/v1?x=1#frag', '/v1/'],
+    ['https://models.example?x=1#frag', '/'],
   ])('preserves %s and normalizes its trailing slash', (base, prefix) => {
     for (const endpoint of ['chat/completions', 'models'] as const) {
       expect(modelEndpointUrl(base, endpoint).href).toBe(
