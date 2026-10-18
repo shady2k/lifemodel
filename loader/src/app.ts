@@ -5,7 +5,6 @@ import type { CommandRunner } from './exec.js';
 import type { FileSystem } from './fs.js';
 import { createLoaderHttp, type LoaderHttp } from './http.js';
 import type { ModelSlots } from './model.js';
-import { BaoStorageError } from './model-bao.js';
 import { createPkiManager, type PkiManager } from './pki.js';
 import { createKubernetesTlsStores } from './pki-kubernetes.js';
 import type { LoaderLogger } from './logger.js';
@@ -102,12 +101,9 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
     })();
 
   const modelSlots: ModelSlots = {
-    read: (slot) =>
-      bao.api.readModelSlot?.(slot) ?? Promise.reject(new BaoStorageError('unreachable')),
-    write: (slot, value) =>
-      bao.api.writeModelSlot?.(slot, value) ?? Promise.reject(new BaoStorageError('unreachable')),
-    clearReserve: () =>
-      bao.api.deleteModelReserve?.() ?? Promise.reject(new BaoStorageError('unreachable')),
+    read: (slot) => bao.api.readModelSlot(slot),
+    write: (slot, value) => bao.api.writeModelSlot(slot, value),
+    clearReserve: () => bao.api.deleteModelReserve(),
   };
   let http: LoaderHttp | null = null;
   let stopping = false;

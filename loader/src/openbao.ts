@@ -21,9 +21,9 @@ export interface BaoApi {
   login(): Promise<void>;
   ensureModelPolicy?(rootToken: string): Promise<void>;
   revokeRootToken(rootToken: string): Promise<void>;
-  readModelSlot?(slot: 'primary' | 'reserve'): Promise<ModelSlot | null>;
-  writeModelSlot?(slot: 'primary' | 'reserve', value: ModelSlot): Promise<void>;
-  deleteModelReserve?(): Promise<void>;
+  readModelSlot(slot: 'primary' | 'reserve'): Promise<ModelSlot | null>;
+  writeModelSlot(slot: 'primary' | 'reserve', value: ModelSlot): Promise<void>;
+  deleteModelReserve(): Promise<void>;
 }
 export interface BaoCustody {
   read(): Promise<BaoKeys | null>;
@@ -284,47 +284,35 @@ export function createOpenBaoApi(
   options: Omit<RoleBaoOptions, 'role'> & { role: 'loader' }
 ): BaoApi {
   const client = createRoleBaoClient(options);
-  async function api(
-    path: string,
-    method: string,
-    token?: string,
-    payload?: unknown,
-    useRole = true
-  ): Promise<Record<string, unknown>> {
-    return client.call(
-      path,
-      method,
-      payload,
-      token !== undefined ? { token } : useRole ? undefined : { anonymous: true }
-    );
-  }
+  // Every request states its identity: the workload token, an explicit root
+  // token, or none at all. No default, so no call can borrow the wrong one.
+  const asRole = (path: string, method: string, payload?: unknown) =>
+    client.call(path, method, payload);
+  const asAnonymous = (path: string, method: string, payload?: unknown) =>
+    client.call(path, method, payload, { anonymous: true });
+  const asToken = (token: string, path: string, method: string, payload?: unknown) =>
+    client.call(path, method, payload, { token });
   return {
     status: async () => {
-      const data = await api('sys/seal-status', 'GET', undefined, undefined, false);
+      const data = await asAnonymous('sys/seal-status', 'GET');
       return { initialized: data['initialized'] === true, sealed: data['sealed'] === true };
     },
     init: async () => {
-      const response = await api(
-        'sys/init',
-        'POST',
-        undefined,
-        {
-          secret_shares: 1,
-          secret_threshold: 1,
-        },
-        false
-      );
+      const response = await asAnonymous('sys/init', 'POST', {
+        secret_shares: 1,
+        secret_threshold: 1,
+      });
       const keys = response['keys'] ?? response['keys_base64'];
       if (!Array.isArray(keys) || typeof response['root_token'] !== 'string')
         throw new Error('OpenBao sys/init response has no key shares or root token');
       return { keys: keys as string[], rootToken: response['root_token'] };
     },
     unseal: async (key) => {
-      await api('sys/unseal', 'POST', undefined, { key }, false);
+      await asAnonymous('sys/unseal', 'POST', { key });
     },
     rootTokenActive: async (rootToken) => {
       try {
-        await client.call('auth/token/lookup-self', 'GET', undefined, { token: rootToken });
+        await asToken(rootToken, 'auth/token/lookup-self', 'GET');
         return true;
       } catch (error) {
         if (error instanceof BaoStorageError && error.code === 'denied') return false;
@@ -334,34 +322,24 @@ export function createOpenBaoApi(
     ensureLoaderPolicy: async (rootToken) => {
       const policy =
         'path "sys/seal-status" { capabilities = ["read"] }\npath "sys/unseal" { capabilities = ["update"] }';
-      await api('sys/policies/acl/loader', 'PUT', rootToken, { policy }, false);
-      const mounts = await api('sys/auth', 'GET', rootToken, undefined, false);
+      await asToken(rootToken, 'sys/policies/acl/loader', 'PUT', { policy });
+      const mounts = await asToken(rootToken, 'sys/auth', 'GET');
       const auth = mounts['kubernetes/'];
       if (auth === undefined)
-        await api('sys/auth/kubernetes', 'POST', rootToken, { type: 'kubernetes' }, false);
+        await asToken(rootToken, 'sys/auth/kubernetes', 'POST', { type: 'kubernetes' });
       // OpenBao uses its own pod ServiceAccount token for TokenReview when
       // token_reviewer_jwt is omitted (https://openbao.org/docs/auth/kubernetes/).
-      await api(
-        'auth/kubernetes/config',
-        'POST',
-        rootToken,
-        { kubernetes_host: 'https://kubernetes.default.svc:443' },
-        false
-      );
-      await api(
-        'auth/kubernetes/role/loader',
-        'POST',
-        rootToken,
-        {
-          bound_service_account_names: ['loader'],
-          bound_service_account_namespaces: ['lifemodel-system'],
-          policies: ['loader'],
-          ttl: '1h',
-        },
-        false
-      );
+      await asToken(rootToken, 'auth/kubernetes/config', 'POST', {
+        kubernetes_host: 'https://kubernetes.default.svc:443',
+      });
+      await asToken(rootToken, 'auth/kubernetes/role/loader', 'POST', {
+        bound_service_account_names: ['loader'],
+        bound_service_account_namespaces: ['lifemodel-system'],
+        policies: ['loader'],
+        ttl: '1h',
+      });
       await client.login();
-      const capabilities = await api('sys/capabilities-self', 'POST', undefined, {
+      const capabilities = await asRole('sys/capabilities-self', 'POST', {
         paths: ['sys/seal-status', 'sys/unseal', 'sys/init'],
       });
       const result = capabilities['sys/seal-status'] as string[] | undefined;
@@ -380,15 +358,12 @@ export function createOpenBaoApi(
     },
     login: client.login,
     ensureModelPolicy: async (rootToken) => {
-      const mounts = await api('sys/mounts', 'GET', rootToken, undefined, false);
+      const mounts = await asToken(rootToken, 'sys/mounts', 'GET');
       if (mounts['lifemodel/'] === undefined) {
-        await api(
-          'sys/mounts/lifemodel',
-          'POST',
-          rootToken,
-          { type: 'kv', options: { version: '2' } },
-          false
-        );
+        await asToken(rootToken, 'sys/mounts/lifemodel', 'POST', {
+          type: 'kv',
+          options: { version: '2' },
+        });
       } else {
         const mount = mounts['lifemodel/'] as Record<string, unknown>;
         const options = mount['options'] as Record<string, unknown> | undefined;
@@ -397,21 +372,15 @@ export function createOpenBaoApi(
       }
       const policy =
         'path "lifemodel/data/model/*" { capabilities = ["create", "update", "read"] }\npath "lifemodel/data/model/reserve" { capabilities = ["create", "update", "read", "delete"] }\npath "lifemodel/metadata/model/*" { capabilities = ["read"] }';
-      await api('sys/policies/acl/loader-model', 'PUT', rootToken, { policy }, false);
-      await api(
-        'auth/kubernetes/role/loader',
-        'POST',
-        rootToken,
-        {
-          bound_service_account_names: ['loader'],
-          bound_service_account_namespaces: ['lifemodel-system'],
-          policies: ['loader', 'loader-model'],
-          ttl: '1h',
-        },
-        false
-      );
+      await asToken(rootToken, 'sys/policies/acl/loader-model', 'PUT', { policy });
+      await asToken(rootToken, 'auth/kubernetes/role/loader', 'POST', {
+        bound_service_account_names: ['loader'],
+        bound_service_account_namespaces: ['lifemodel-system'],
+        policies: ['loader', 'loader-model'],
+        ttl: '1h',
+      });
       await client.login();
-      const capabilities = await api('sys/capabilities-self', 'POST', undefined, {
+      const capabilities = await asRole('sys/capabilities-self', 'POST', {
         paths: [
           'lifemodel/data/model/primary',
           'lifemodel/data/model/reserve',
@@ -440,7 +409,7 @@ export function createOpenBaoApi(
     writeModelSlot: client.writeSlot,
     deleteModelReserve: client.deleteReserve,
     revokeRootToken: async (rootToken) => {
-      await api('auth/token/revoke-self', 'POST', rootToken, {}, false);
+      await asToken(rootToken, 'auth/token/revoke-self', 'POST', {});
     },
   };
 }

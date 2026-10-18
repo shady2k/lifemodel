@@ -1845,18 +1845,9 @@ describe('real Bao storage behind the loader model HTTP routes', () => {
     // The same authenticated bootstrap facade serves model storage, not a second client.
     await api.login();
     const slots: ModelSlots = {
-      read: (slot) => {
-        if (!api.readModelSlot) throw new Error('missing slot reader');
-        return api.readModelSlot(slot);
-      },
-      write: (slot, value) => {
-        if (!api.writeModelSlot) throw new Error('missing slot writer');
-        return api.writeModelSlot(slot, value);
-      },
-      clearReserve: () => {
-        if (!api.deleteModelReserve) throw new Error('missing slot delete');
-        return api.deleteModelReserve();
-      },
+      read: (slot) => api.readModelSlot(slot),
+      write: (slot, value) => api.writeModelSlot(slot, value),
+      clearReserve: () => api.deleteModelReserve(),
     };
     return {
       bao,

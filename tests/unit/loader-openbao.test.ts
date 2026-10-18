@@ -62,6 +62,15 @@ function fixture(
       tokenActive = false;
       failNextCustodyWrite = crashAfterRevoke;
     },
+    readModelSlot: async () => {
+      throw new Error('bootstrap never reads a model slot');
+    },
+    writeModelSlot: async () => {
+      throw new Error('bootstrap never writes a model slot');
+    },
+    deleteModelReserve: async () => {
+      throw new Error('bootstrap never deletes the reserve');
+    },
   };
   const store: PlatformPhaseStore = {
     read: async () => record,
@@ -191,6 +200,50 @@ describe('OpenBao bootstrap', () => {
     expect(calls.find(({ path }) => path.endsWith('/sys/capabilities-self'))?.token).toBe(
       'loader-token'
     );
+  });
+
+  it('sends no token on anonymous bootstrap calls and keeps the workload token across root calls', async () => {
+    const calls: Array<{ path: string; token: string | undefined }> = [];
+    const api = createOpenBaoApi({
+      address: 'http://openbao.test:8200',
+      role: 'loader',
+      readJwt: async () => 'loader-jwt',
+      request: async (url, _method, token) => {
+        calls.push({ path: url.pathname, token });
+        if (url.pathname.endsWith('/auth/kubernetes/login'))
+          return {
+            status: 200,
+            body: JSON.stringify({
+              auth: { client_token: 'loader-token', lease_duration: 3600, renewable: true },
+            }),
+          };
+        if (url.pathname.endsWith('/sys/seal-status'))
+          return { status: 200, body: JSON.stringify({ initialized: true, sealed: true }) };
+        if (url.pathname.endsWith('/lifemodel/data/model/primary'))
+          return {
+            status: 200,
+            body: JSON.stringify({
+              data: {
+                data: { kind: 'openai', baseUrl: 'https://model.example/v1', model: 'm' },
+                metadata: {},
+              },
+            }),
+          };
+        return { status: 204, body: '' };
+      },
+    });
+    // A workload login happens first, so the token is available to borrow.
+    await api.login();
+    await expect(api.status()).resolves.toEqual({ initialized: true, sealed: true });
+    await api.unseal('share-1');
+    await api.revokeRootToken('root-token-1');
+    await expect(api.readModelSlot('primary')).resolves.toMatchObject({ model: 'm' });
+    const tokenFor = (suffix: string) => calls.find((call) => call.path.endsWith(suffix))?.token;
+    expect(tokenFor('/sys/seal-status')).toBeUndefined();
+    expect(tokenFor('/sys/unseal')).toBeUndefined();
+    expect(tokenFor('/auth/token/revoke-self')).toBe('root-token-1');
+    // An explicit root call never replaces the workload identity.
+    expect(tokenFor('/lifemodel/data/model/primary')).toBe('loader-token');
   });
 
   it('provisions idempotent KV v2 and the least-privilege model policy before loader-role verification', async () => {
@@ -367,7 +420,7 @@ describe('OpenBao bootstrap', () => {
         };
       },
     });
-    await expect(api.readModelSlot?.('reserve')).resolves.toBeNull();
+    await expect(api.readModelSlot('reserve')).resolves.toBeNull();
     expect(paths).toEqual(['/v1/auth/kubernetes/login', '/v1/lifemodel/data/model/reserve']);
   });
 
@@ -465,6 +518,15 @@ describe('OpenBao bootstrap', () => {
       },
       revokeRootToken: async () => {
         throw new Error('must not revoke');
+      },
+      readModelSlot: async () => {
+        throw new Error('must not read a model slot');
+      },
+      writeModelSlot: async () => {
+        throw new Error('must not write a model slot');
+      },
+      deleteModelReserve: async () => {
+        throw new Error('must not delete the reserve');
       },
     };
     const custody: BaoCustody = {
