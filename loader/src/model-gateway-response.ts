@@ -112,8 +112,21 @@ export function validateResponse(value: unknown, models: boolean): void {
  * frames whenever any reconstructed string ends in a possible credential prefix.
  * This preserves frame order and tool metadata without inventing synthetic deltas.
  */
+interface StreamTool {
+  id: boolean;
+  type: boolean;
+  name: boolean;
+  arguments: boolean;
+}
+interface StreamChoice {
+  finished: boolean;
+  hasText: boolean;
+  tools: Map<number, StreamTool>;
+}
 export class SafeEventStream {
   private readonly tails = new Map<string, string>();
+  private readonly choices = new Map<number, StreamChoice>();
+  private toolCount = 0;
   private queued: string[] = [];
   private queuedBytes = 0;
   private carry = '';
@@ -130,7 +143,8 @@ export class SafeEventStream {
     // Comments/heartbeats are not forwarded unparsed.
     if (!data) return '';
     if (data === '[DONE]') {
-      if (!this.seenCompletion) throw new GatewayError('bad_response');
+      if (!this.seenCompletion || [...this.choices.values()].some((choice) => !choice.finished))
+        throw new GatewayError('bad_response');
       this.done = true;
       return this.flush() + 'data: [DONE]\n\n';
     }
@@ -150,15 +164,41 @@ export class SafeEventStream {
       if (!this.seenCompletion && Object.keys(delta).length === 0)
         throw new GatewayError('bad_response');
       this.seenCompletion = true;
+      const choiceIndex = Number(index);
+      const state = this.choices.get(choiceIndex) ?? {
+        finished: false,
+        hasText: false,
+        tools: new Map<number, StreamTool>(),
+      };
+      if (state.finished) throw new GatewayError('bad_response');
+      this.choices.set(choiceIndex, state);
+      if (this.choices.size > 128) throw new GatewayError('bad_response');
       // Typed tuples cannot alias through attacker-controlled field names.
       for (const field of TEXT_FIELDS) {
         const text = delta[field];
-        if (typeof text === 'string') this.inspect(text, JSON.stringify([index, field]));
+        if (typeof text === 'string') {
+          state.hasText = true;
+          this.inspect(text, JSON.stringify([index, field]));
+        }
       }
       if (Array.isArray(delta['tool_calls']))
         for (const value of delta['tool_calls'] as unknown[]) {
           const call = record(value);
           const fn = record(call?.['function']);
+          const toolIndex = Number(call?.['index']);
+          const tool = state.tools.get(toolIndex) ?? {
+            id: false,
+            type: false,
+            name: false,
+            arguments: false,
+          };
+          if (!state.tools.has(toolIndex) && ++this.toolCount > 1024)
+            throw new GatewayError('bad_response');
+          tool.id ||= typeof call?.['id'] === 'string' && call['id'].length > 0;
+          tool.type ||= call?.['type'] === 'function';
+          tool.name ||= typeof fn?.['name'] === 'string' && fn['name'].length > 0;
+          tool.arguments ||= typeof fn?.['arguments'] === 'string';
+          state.tools.set(toolIndex, tool);
           const id = call?.['id'];
           if (typeof id === 'string')
             this.inspect(id, JSON.stringify([index, 'tool_calls', call?.['index'], 'id']));
@@ -168,6 +208,20 @@ export class SafeEventStream {
               this.inspect(text, JSON.stringify([index, 'tool_calls', call?.['index'], field]));
           }
         }
+      const finish = item?.['finish_reason'];
+      if (finish !== undefined && finish !== null) {
+        if (
+          typeof finish !== 'string' ||
+          !['stop', 'tool_calls', 'length', 'content_filter'].includes(finish) ||
+          (!state.hasText && state.tools.size === 0 && finish !== 'content_filter') ||
+          [...state.tools.values()].some(
+            (tool) => !tool.id || !tool.type || !tool.name || !tool.arguments
+          ) ||
+          (finish === 'tool_calls' && state.tools.size === 0)
+        )
+          throw new GatewayError('bad_response');
+        state.finished = true;
+      }
     }
     const frame = `data: ${JSON.stringify(value)}\n\n`;
     // Raw carry-over also covers text outside the reconstructed delta fields.

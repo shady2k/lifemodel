@@ -206,6 +206,25 @@ src/
 └── settings/       # lifemodel's own web settings (the root host), and the restart code
 ```
 
+## Platform model gateway
+
+The loader package also builds `loader/src/model-gateway.ts` as a separate
+process entry point (`node /opt/lifemodel/loader/dist/model-gateway.js` in the
+loader image). It does not start the loader or read its bootstrap state.
+`LIFEMODEL_OPENBAO_ADDRESS` is required; the projected service-account JWT is
+read from the standard Kubernetes token path. The gateway uses the
+`model-gateway` Bao role and the shared in-memory slot cache.
+
+Its API listener, 8080, exposes only `POST /v1/chat/completions` and
+`GET /v1/models`. Its status listener, 8081, exposes only `GET /status`.
+Upstream credentials never cross the return boundary: the gateway owns error
+bodies and return headers, buffers and inspects JSON, and parses SSE frames
+with per-choice/per-field key-prefix withholding. Each request has at most
+one primary and one reserve attempt, never switches after output starts, and
+aborts model transport on disconnect or deadline. The shared loader validator
+resolves and pins each destination. See [ADR-013](adr/013-model-gateway.md).
+Deployment, network policy and core-provider wiring are separate work.
+
 ## Platform deployment and loader first start
 
 The platform artifact is a signed OCI source applied by Flux. Its root

@@ -339,11 +339,23 @@ describe('model gateway buffered HTTP contract', () => {
 function event(content: string, field = 'content', choice = 0, tool = 0): string {
   const delta =
     field === 'arguments'
-      ? { tool_calls: [{ index: tool, function: { arguments: content } }] }
+      ? {
+          tool_calls: [
+            {
+              index: tool,
+              id: `call-${tool}`,
+              type: 'function',
+              function: { name: 'tool', arguments: content },
+            },
+          ],
+        }
       : { [field]: content };
   return `data: ${JSON.stringify({ id: 'stream-1', model: 'stream-real', choices: [{ index: choice, delta }] })}\n\n`;
 }
 const streamPayload = { model: 'default', messages: [], stream: true };
+function endStream(indices = [0]): string {
+  return `data: ${JSON.stringify({ model: 'stream-real', choices: indices.map((index) => ({ index, delta: {}, finish_reason: 'stop' })) })}\n\ndata: [DONE]\n\n`;
+}
 function latch() {
   let resolve!: () => void;
   const promise = new Promise<void>((r) => {
@@ -362,7 +374,7 @@ describe('model gateway event stream boundary', () => {
         'x-secret': 'primary-SUPER-SECRET',
       });
       res.write(event('hello '));
-      void finish.promise.then(() => res.end(event('{}', 'arguments') + 'data: [DONE]\n\n'));
+      void finish.promise.then(() => res.end(event('{}', 'arguments') + endStream()));
     };
     const response = await f.post(streamPayload);
     expect(response.status).toBe(200);
@@ -394,7 +406,7 @@ describe('model gateway event stream boundary', () => {
         res.write(event('safe initial'));
         void finish.promise.then(() => {
           res.write(event('primary-SUPER-', field));
-          res.end(event('SECRET', field) + 'data: [DONE]\n\n');
+          res.end(event('SECRET', field) + endStream());
         });
       };
       const response = await f.post(streamPayload);
@@ -426,7 +438,7 @@ describe('model gateway event stream boundary', () => {
           let frame = event(`${name}-SUPER-SECRET`);
           if (encoding === 'escaped') frame = frame.replaceAll('S', '\\u0053');
           res.write(frame.slice(0, 50));
-          setImmediate(() => res.end(frame.slice(50) + 'data: [DONE]\n\n'));
+          setImmediate(() => res.end(frame.slice(50) + endStream()));
         };
       const response = await f.post(streamPayload);
       expect(response.status).toBe(502);
@@ -443,7 +455,7 @@ describe('model gateway event stream boundary', () => {
         event('primary-SUPER-', 'arguments', 0, 0) +
           event('SECRET', 'arguments', 0, 1) +
           event('SECRET', 'content', 1) +
-          'data: [DONE]\n\n'
+          endStream([0, 1])
       );
     };
     const response = await f.post(streamPayload);
@@ -513,7 +525,7 @@ describe('model gateway event stream boundary', () => {
     };
     f.handlers.reserve = (_req, res) => {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
-      res.end(event('reserve good') + 'data: [DONE]\n\n');
+      res.end(event('reserve good') + endStream());
     };
     const response = await f.post(streamPayload);
     expect(response.headers.get('x-lifemodel-slot')).toBe('reserve');
@@ -524,7 +536,7 @@ describe('model gateway event stream boundary', () => {
     const f = await fixture();
     f.handlers.primary = (_req, res) => {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
-      const bytes = Buffer.from((event('Привет') + 'data: [DONE]\n\n').replaceAll('\n', '\r\n'));
+      const bytes = Buffer.from((event('Привет') + endStream()).replaceAll('\n', '\r\n'));
       const split = bytes.indexOf(Buffer.from('П')) + 1;
       res.write(bytes.subarray(0, split));
       setImmediate(() => res.end(bytes.subarray(split)));
@@ -632,7 +644,7 @@ describe('model gateway adversarial stream paths', () => {
         event('sk-', 'arguments') +
           event('X', 'tool_calls:0:function:arguments') +
           event('secret', 'arguments') +
-          'data: [DONE]\n\n'
+          endStream()
       );
     };
     const response = await f.post(streamPayload);
@@ -714,7 +726,7 @@ describe('model gateway protocol validation', () => {
     };
     f.handlers.reserve = (_req, res) => {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
-      res.end(event('reserve') + 'data: [DONE]\n\n');
+      res.end(event('reserve') + endStream());
     };
     const response = await f.post(streamPayload);
     expect(response.headers.get('x-lifemodel-slot')).toBe('reserve');
@@ -743,7 +755,7 @@ describe('model gateway strict streaming transport', () => {
         choices: [{ index: 0, delta: { role: 'assistant', content: '' } }],
       };
       res.write(`data: ${JSON.stringify(role)}\n\n` + event('hello'));
-      void finish.promise.then(() => res.end('data: [DONE]\n\n'));
+      void finish.promise.then(() => res.end(endStream()));
     };
     const response = await f.post(streamPayload);
     const reader = response.body!.getReader();
@@ -759,7 +771,7 @@ describe('model gateway strict streaming transport', () => {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const frame = event('hello').replaceAll('\n', '\r');
       res.write(frame);
-      res.end('data: [DONE]\r\r');
+      res.end(endStream().replaceAll('\n', '\r'));
     };
     const response = await f.post(streamPayload);
     expect(await response.text()).toContain('[DONE]');
@@ -771,7 +783,10 @@ describe('model gateway strict streaming transport', () => {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       res.end(
         event('hello') +
-          'data: {"model":"m","choices":[],"usage":{"total_tokens":2}}\n\ndata: [DONE]\n\n'
+          endStream().replace(
+            'data: [DONE]',
+            'data: {"model":"m","choices":[],"usage":{"total_tokens":2}}\n\ndata: [DONE]'
+          )
       );
     };
     const response = await f.post(streamPayload);
@@ -779,4 +794,29 @@ describe('model gateway strict streaming transport', () => {
     expect(text).toContain('total_tokens');
     expect(text).toContain('[DONE]');
   });
+});
+
+describe('model gateway terminal stream validation', () => {
+  it.each(['tools', 'role'])(
+    'ends an incomplete %s stream with a safe error and down status',
+    async (kind) => {
+      const f = await fixture();
+      f.handlers.primary = (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        const delta =
+          kind === 'tools'
+            ? { tool_calls: [{ index: 0, function: { arguments: '{}' } }] }
+            : { role: 'assistant' };
+        res.end(
+          `data: ${JSON.stringify({ model: 'm', choices: [{ index: 0, delta }] })}\n\ndata: [DONE]\n\n`
+        );
+      };
+      const response = await f.post(streamPayload);
+      const text = await response.text();
+      expect(text).toContain('bad_response');
+      expect(text).not.toContain('[DONE]');
+      expect(f.attempts).toHaveLength(1);
+      expect(await (await fetch(`${f.statusUrl}/status`)).json()).toMatchObject({ state: 'down' });
+    }
+  );
 });
