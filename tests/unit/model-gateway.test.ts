@@ -1857,7 +1857,7 @@ describe('model gateway custom slot headers', () => {
     expect(JSON.stringify(f.lines)).not.toContain('HEADER-SUPER-SECRET');
   });
 
-  it.each(['buffered', 'stream'] as const)(
+  it.each(['buffered', 'stream', 'split'] as const)(
     'refuses an upstream answer that echoes the rendered value a %s attempt sent',
     async (mode) => {
       const f = await fixture();
@@ -1872,11 +1872,15 @@ describe('model gateway custom slot headers', () => {
         if (mode === 'stream') {
           res.writeHead(200, { 'content-type': 'text/event-stream' });
           res.end(event(sentValue) + endStream());
+        } else if (mode === 'split') {
+          // The rendered value split across two SSE deltas of one field.
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          res.end(event(sentValue.slice(0, 8)) + event(sentValue.slice(8)) + endStream());
         } else {
           res.end(JSON.stringify(answer('real', sentValue)));
         }
       };
-      const response = await f.post(mode === 'stream' ? streamPayload : undefined, {
+      const response = await f.post(mode === 'buffered' ? undefined : streamPayload, {
         'x-lifemodel-session': 'conv-1',
       });
       expect(sentValue).toBe('RENDERED-HEADER-SECRET-conv-1');
