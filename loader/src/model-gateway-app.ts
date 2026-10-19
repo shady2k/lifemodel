@@ -24,6 +24,7 @@ import { modelEndpointUrl } from './model-url.js';
 import { SlotStorageUnavailableError } from './model-bao.js';
 import type { LoaderLogger } from './logger.js';
 import {
+  badResponse,
   GatewayError,
   MAX_BODY,
   parseSafe,
@@ -475,10 +476,12 @@ export function createModelGateway(options: GatewayOptions) {
       const status = upstream.statusCode ?? 502;
       if (status === 401 || status === 403) options.slots.invalidate(name);
       if (status < 200 || status >= 300)
-        throw new GatewayError(
-          status >= 400 ? `upstream_${String(status)}` : 'bad_response',
-          status >= 400 && status < 500 ? status : 502
-        );
+        throw status >= 400
+          ? new GatewayError(
+              `upstream_${String(status)}`,
+              status >= 400 && status < 500 ? status : 502
+            )
+          : badResponse('upstream_status', '');
       let first = true;
       upstream.on('data', () => {
         if (first) {
@@ -490,14 +493,14 @@ export function createModelGateway(options: GatewayOptions) {
       });
       const stream = payload?.['stream'] === true;
       if (stream && !upstream.headers['content-type']?.startsWith('text/event-stream'))
-        throw new GatewayError('bad_response');
+        throw badResponse('stream_content_type', '');
       if (!stream) {
         const chunks: Buffer[] = [];
         let size = 0;
         for await (const value of upstream) {
           const chunk = Buffer.isBuffer(value) ? value : Buffer.from(String(value));
           size += chunk.length;
-          if (size > MAX_BODY) throw new GatewayError('bad_response');
+          if (size > MAX_BODY) throw badResponse('body_size', '');
           chunks.push(chunk);
         }
         active.throwIfAborted();
@@ -539,7 +542,7 @@ export function createModelGateway(options: GatewayOptions) {
           }
         }
         pending += decoder.decode();
-        if (pending.trim() || !inspector.done) throw new GatewayError('bad_response');
+        if (pending.trim() || !inspector.done) throw badResponse('stream_truncated', '');
         active.throwIfAborted();
         res.end();
       }
@@ -614,7 +617,6 @@ export function createModelGateway(options: GatewayOptions) {
       }
       for (const name of slotNames) {
         signal.throwIfAborted();
-        activeSlot = name;
         let identity: SlotIdentity | undefined;
         try {
           const read = await wait(options.slots.read(name), signal);
@@ -627,6 +629,9 @@ export function createModelGateway(options: GatewayOptions) {
             throw new GatewayError('not_configured');
           }
           if (name === 'reserve') reserveAbsent = false;
+          // The failure names the slot that was really attempted, never one
+          // whose read only came back absent.
+          activeSlot = name;
           await attempt(read.slot, name, payload, res, signal, session);
           failureRevisions[name]++;
           outcomeRevision++;
@@ -665,7 +670,7 @@ export function createModelGateway(options: GatewayOptions) {
         health.outageSince ??= new Date().toISOString();
         health.lastErrorCode = failure.code;
         options.logger.warn(
-          { code: failure.code, slot: activeSlot },
+          { code: failure.code, slot: activeSlot, reason: failure.reason },
           'Model gateway request failed'
         );
       }

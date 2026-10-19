@@ -1923,3 +1923,174 @@ describe('model gateway custom slot headers', () => {
     ]);
   });
 });
+
+describe('model gateway null tool_calls, slot attribution and safe reasons', () => {
+  /** A converting endpoint's text answer: null encodes "no tool calls". */
+  const textAnswer = (message: Record<string, unknown>) => ({
+    id: 'chat-1',
+    object: 'chat.completion',
+    model: 'upstream-model',
+    choices: [{ index: 0, message, finish_reason: 'stop' }],
+  });
+  const failed = 'Model gateway request failed';
+
+  it('passes a buffered text answer whose tool_calls is null to the caller', async () => {
+    const f = await fixture();
+    const reply = textAnswer({
+      role: 'assistant',
+      content: 'plain text',
+      reasoning_content: null,
+      tool_calls: null,
+    });
+    f.handlers.primary = (_req, res) => res.end(JSON.stringify(reply));
+    const response = await f.post();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(reply);
+    expect(response.headers.get('x-lifemodel-slot')).toBe('primary');
+    expect(f.attempts).toHaveLength(1);
+  });
+
+  it('passes a stream whose tool_calls delta is null to the caller', async () => {
+    const f = await fixture();
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(
+        `data: ${JSON.stringify({
+          model: 'stream-real',
+          choices: [
+            { index: 0, delta: { role: 'assistant', reasoning_content: null, tool_calls: null } },
+          ],
+        })}\n\n` +
+          event('hello') +
+          endStream()
+      );
+    };
+    const response = await f.post(streamPayload);
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).toContain('hello');
+    expect(text).toContain('[DONE]');
+    expect(f.attempts).toHaveLength(1);
+  });
+
+  it('still refuses a buffered non-array, non-null tool_calls with bad_response', async () => {
+    const f = await fixture();
+    f.slots.reserve = null;
+    f.handlers.primary = (_req, res) =>
+      res.end(
+        JSON.stringify(
+          textAnswer({
+            role: 'assistant',
+            content: 'UPSTREAM-CANARY-TOOLS',
+            tool_calls: 'UPSTREAM-CANARY-TOOLS',
+          })
+        )
+      );
+    const response = await f.post();
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      error: { type: 'gateway_error', code: 'bad_response' },
+    });
+    expect(f.attempts).toHaveLength(1);
+  });
+
+  it('still refuses a stream delta whose tool_calls is not an array or null', async () => {
+    const f = await fixture();
+    f.slots.reserve = null;
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(
+        `data: ${JSON.stringify({
+          model: 'm',
+          choices: [
+            { index: 0, delta: { role: 'assistant', tool_calls: 'UPSTREAM-CANARY-TOOLS' } },
+          ],
+        })}\n\n` + endStream()
+      );
+    };
+    const response = await f.post(streamPayload);
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      error: { type: 'gateway_error', code: 'bad_response' },
+    });
+  });
+
+  it('still refuses a null content whose tool_calls is null too', async () => {
+    const f = await fixture();
+    f.slots.reserve = null;
+    f.handlers.primary = (_req, res) =>
+      res.end(JSON.stringify(textAnswer({ role: 'assistant', content: null, tool_calls: null })));
+    const response = await f.post();
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      error: { type: 'gateway_error', code: 'bad_response' },
+    });
+  });
+
+  it('names the primary in the warn line, the error and /status when it fails with no reserve', async () => {
+    const f = await fixture();
+    f.slots.reserve = null;
+    f.handlers.primary = (_req, res) =>
+      res.end(JSON.stringify(textAnswer({ role: 'assistant', content: null })));
+    const response = await f.post();
+    expect(response.status).toBe(502);
+    expect(response.headers.get('x-lifemodel-slot')).toBe('primary');
+    const warns = f.lines.filter((line) => line.message === failed);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]!.fields).toMatchObject({ code: 'bad_response', slot: 'primary' });
+    expect(await (await fetch(`${f.statusUrl}/status`)).json()).toMatchObject({
+      state: 'down',
+      lastErrorCode: 'bad_response',
+      primary: { lastErrorCode: 'bad_response' },
+      reserve: { lastErrorCode: null },
+    });
+  });
+
+  it('names the reserve when a configured reserve fails too', async () => {
+    const f = await fixture();
+    const fail = (_req: IncomingMessage, res: ServerResponse) => {
+      res.writeHead(500);
+      res.end();
+    };
+    f.handlers.primary = fail;
+    f.handlers.reserve = fail;
+    const response = await f.post();
+    expect(response.status).toBe(502);
+    expect(response.headers.get('x-lifemodel-slot')).toBe('reserve');
+    const warns = f.lines.filter((line) => line.message === failed);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]!.fields).toMatchObject({ code: 'upstream_500', slot: 'reserve' });
+    expect(await (await fetch(`${f.statusUrl}/status`)).json()).toMatchObject({
+      state: 'down',
+      primary: { lastErrorCode: 'upstream_500' },
+      reserve: { lastErrorCode: 'upstream_500' },
+    });
+  });
+
+  it('logs a safe rejection reason and never a string from the body', async () => {
+    const f = await fixture();
+    f.slots.reserve = null;
+    f.handlers.primary = (_req, res) =>
+      res.end(
+        JSON.stringify(
+          textAnswer({
+            role: 'assistant',
+            content: 'UPSTREAM-CANARY-CONTENT',
+            tool_calls: 'UPSTREAM-CANARY-TOOLS',
+          })
+        )
+      );
+    const response = await f.post();
+    expect(response.status).toBe(502);
+    const warns = f.lines.filter((line) => line.message === failed);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]!.fields).toMatchObject({
+      code: 'bad_response',
+      slot: 'primary',
+      reason: { check: 'tool_calls_type', path: 'choices[0].message.tool_calls', got: 'string' },
+    });
+    const logged = JSON.stringify(f.lines);
+    expect(logged).toContain('tool_calls_type');
+    expect(logged).not.toContain('CANARY');
+  });
+});
