@@ -20,7 +20,8 @@ archive="$out/lifemodel-installer-$tag.tar.gz"
 [ ! -e "$archive" ] || { echo 'installer asset already exists' >&2; exit 1; }
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT HUP INT TERM
-mkdir -p "$stage/scripts" "$stage/deploy/root" "$stage/deploy/mdns" "$stage/deploy/cli"
+mkdir -p "$stage/scripts" "$stage/deploy/root" "$stage/deploy/mdns" "$stage/deploy/cli" \
+  "$stage/deploy/k3s/config.yaml.d" "$stage/deploy/k3s/k3s.service.d"
 sed -e 's|^PLATFORM_URL=.*|PLATFORM_URL="oci://ghcr.io/shady2k/lifemodel-platform"|' \
     -e 's|^PLATFORM_TAG=.*|PLATFORM_TAG=""|' \
     -e "s|^PLATFORM_DIGEST=.*|PLATFORM_DIGEST=\"$digest\"|" "$root/scripts/install.sh" > "$stage/scripts/install.sh"
@@ -28,5 +29,10 @@ chmod 0755 "$stage/scripts/install.sh"
 cp "$root/deploy/root/"*.yaml "$stage/deploy/root/"
 cp "$root/deploy/mdns/publish-name" "$root/deploy/mdns/publisher.service.in" "$stage/deploy/mdns/"
 cp "$root/deploy/cli/lifemodel.mjs" "$root/deploy/cli/wait-ready.mjs" "$stage/deploy/cli/"
+cp "$root/deploy/k3s/resolv-conf.mjs" "$root/deploy/k3s/k3s-resolv.sh" \
+  "$root/deploy/k3s/k3s-dns-apply.sh" "$root/deploy/k3s/lifemodel-k3s-dns-apply.service.in" \
+  "$root/deploy/k3s/lifemodel-k3s-resolv.service.in" "$root/deploy/k3s/lifemodel-k3s-resolv.path.in" "$stage/deploy/k3s/"
+cp "$root/deploy/k3s/config.yaml.d/lifemodel-resolv-conf.yaml" "$stage/deploy/k3s/config.yaml.d/"
+cp "$root/deploy/k3s/k3s.service.d/lifemodel-resolv.conf" "$stage/deploy/k3s/k3s.service.d/"
 tar -czf "$archive" -C "$stage" scripts deploy
 printf '%s\n' "$archive"

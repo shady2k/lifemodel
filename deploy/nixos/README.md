@@ -45,6 +45,45 @@ waits for verified HTTPS before printing the address and
 first unready step and points to `lifemodel doctor`. Later, run
 `sudo lifemodel address` to print the established address and CA fingerprint.
 
+k3s reads one `resolv.conf` for the kubelet, and the CoreDNS pods forward
+through the nameservers it holds. The installer writes that file itself
+(`/run/lifemodel/k3s-resolv.conf`): the host's nameservers that k3s accepts, and
+k3s's own fallback nameservers when the host has none (a loopback or link-local
+entry makes k3s drop the whole host file and use 8.8.8.8, which hides a LAN
+resolver from every pod). It reads the host's `/etc/resolv.conf` first and
+systemd-resolved's `/run/systemd/resolve/resolv.conf` second, because the
+resolved stub holds only 127.0.0.53. It names the file to k3s in
+`/etc/rancher/k3s/config.yaml.d/lifemodel-resolv-conf.yaml`, and the
+`lifemodel-k3s-resolv.path` unit regenerates it whenever the host's DNS changes.
+The generator is local-only, bounded to 30 seconds, and a required prerequisite
+of k3s. A k3s pre-start check also refuses a missing or empty file. The generated
+file contains at most three validated global-unicast nameservers (plus the k3s
+metadata-address exception) and an optional bounded search list. Host comments,
+options, zones and control characters are never copied.
+
+`lifemodel-k3s-dns-apply.service` reconciles CoreDNS after k3s starts, including
+on an installer upgrade: k3s restarts alone do not replace surviving pods. It
+waits for the API with bounded requests, rolls CoreDNS out, waits for readiness,
+and checks that every CoreDNS pod is Running and Ready and was created strictly
+after the desired resolver was published. It also checks that the deployment
+controller observed the current generation. Kubelet reads `--resolv-conf` when
+creating a pod, so this proves the new pods use the published resolver without
+executing tools inside the distroless CoreDNS image.
+
+The generator records the write time (epoch milliseconds) and desired SHA-256
+in `/run/lifemodel/k3s-resolv.written`. Each file is published by atomic rename;
+the hash-bound record is published after the resolver. A crash between those
+two renames cannot falsely verify a different resolver. The next generation
+repairs an absent or stale record. Unchanged generation preserves the time.
+Only after verification does the reconciler write
+`/run/lifemodel/k3s-resolv.applied` and preserves the verified publication in
+`/run/lifemodel/k3s-resolv.applied-written`. Both must match to skip apply, so
+an interrupted A→B→A change cannot reuse the first A proof. Failed or interrupted updates stay pending;
+the 180-second service retries after 30 seconds. Both install paths enable it
+at boot; the installer waits up to 390 seconds across failed starts and retries.
+The generator requests a nonblocking restart, not a coalescible start, so a DNS
+change during an activating apply queues a new invocation.
+
 The name and selected digest (or explicitly chosen tag) persist in
 `/etc/lifemodel/instance.env`. Rerunning the installer without release flags
 keeps that saved name and digest, **even from a newer installer bundle**. To
@@ -76,7 +115,14 @@ The core image requires an x86-64-v2 CPU or newer for memory search. For a VM, c
 
 Then run `sudo nixos-rebuild switch --flake .#HOST`. The module starts k3s
 with embedded etcd and its bundled Traefik, installs Flux v2.9.6, and applies
-the verified platform source, the instance ConfigMap, and root Kustomization. Set `services.lifemodel.name` before installation; it fixes `<name>.local` and `boot-<name>.local`. The bootstrap is a systemd
+the verified platform source, the instance ConfigMap, and root Kustomization. It
+also points k3s at `/run/lifemodel/k3s-resolv.conf` with `--resolv-conf`: the
+host's nameservers k3s accepts from `/etc/resolv.conf`, or from
+systemd-resolved's `/run/systemd/resolve/resolv.conf` when the host file is only
+the resolved stub. It is written before k3s starts and rewritten by
+`lifemodel-k3s-resolv.path` when the host's DNS changes (k3s's own choice of the
+host file falls back to 8.8.8.8 whenever it holds a loopback or link-local
+nameserver, which hides a LAN resolver from every pod). Set `services.lifemodel.name` before installation; it fixes `<name>.local` and `boot-<name>.local`. The bootstrap is a systemd
 oneshot: an unchanged switch does not rerun it. Changing the configured platform
 ref changes its unit script, so NixOS restarts the unit during the switch; a
 failed bootstrap makes the switch fail. After applying, the unit waits up to

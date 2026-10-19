@@ -32,6 +32,16 @@ let
   '';
   platformRef = if cfg.platform.digest != null then "digest=${cfg.platform.digest}" else "tag=${cfg.platform.tag}";
   keyFile = "/run/lifemodel/platform-cosign.pub";
+  # k3s takes the resolv.conf it is pointed at as given, and the kubelet hands it
+  # to CoreDNS and to every pod. The host's own file cannot be used: one
+  # link-local or loopback nameserver makes k3s drop the whole file and use
+  # 8.8.8.8, which hides the LAN's resolver from the cluster
+  # (lifemodel-s9v5.1.5). The shared script writes the file k3s reads, out of
+  # the host's usable nameservers, and the path unit rewrites it when the host's
+  # DNS changes.
+  k3sResolvConf = "/run/lifemodel/k3s-resolv.conf";
+  k3sResolvScript = ../k3s/k3s-resolv.sh;
+  k3sResolvGenerator = ../k3s/resolv-conf.mjs;
   otherFlux = (config.services.fluxcd.enable or false) || (config.fluxcd.enable or false);
   publisher = pkgs.writeShellScriptBin "lifemodel-mdns-publish" (builtins.readFile ../mdns/publish-name);
   mdnsNames = [ "${cfg.name}.local" "boot-${cfg.name}.local" "vault-${cfg.name}.local" ];
@@ -113,6 +123,7 @@ in
       role = "server";
       clusterInit = true;
       package = lifemodelK3s;
+      extraFlags = [ "--resolv-conf ${k3sResolvConf}" ];
     };
     environment.systemPackages = [ lifemodelK3s lifemodelCli publisher ];
     services.avahi = {
@@ -126,7 +137,46 @@ in
       allowedTCPPorts = [ 80 443 ];
       allowedUDPPorts = [ 5353 ];
     };
+    systemd.paths."lifemodel-k3s-resolv" = {
+      wantedBy = [ "multi-user.target" ];
+      pathConfig = {
+        # Both sources the service reads: a host with systemd-resolved puts its
+        # real upstream servers in the second one and leaves the stub at 127.0.0.53.
+        PathChanged = [ "/etc/resolv.conf" "/run/systemd/resolve/resolv.conf" ];
+        Unit = "lifemodel-k3s-resolv.service";
+      };
+    };
     systemd.services = mdnsUnits // {
+    lifemodel-k3s-resolv = {
+      description = "Write the resolv.conf k3s gives the kubelet and CoreDNS";
+      wantedBy = [ "multi-user.target" ];
+      before = [ "k3s.service" ];
+      path = [ pkgs.nodejs pkgs.coreutils pkgs.systemd pkgs.util-linux ];
+      unitConfig.StartLimitIntervalSec = 0;
+      # No RemainAfterExit: the path unit starts this unit again on every change,
+      # and starting an already-active unit would do nothing.
+      serviceConfig = { Type = "oneshot"; TimeoutStartSec = 30; };
+      script = "exec ${k3sResolvScript} ${k3sResolvGenerator} ${k3sResolvConf} /etc/resolv.conf /run/systemd/resolve/resolv.conf";
+    };
+    k3s = {
+      requires = [ "lifemodel-k3s-resolv.service" ];
+      after = [ "lifemodel-k3s-resolv.service" ];
+      serviceConfig.ExecStartPre = "${pkgs.coreutils}/bin/test -s ${k3sResolvConf}";
+    };
+    lifemodel-k3s-dns-apply = {
+      description = "Reconcile CoreDNS with the desired host resolver";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "k3s.service" ];
+      path = [ pkgs.nodejs pkgs.coreutils pkgs.util-linux lifemodelK3s ];
+      unitConfig.StartLimitIntervalSec = 0;
+      serviceConfig = {
+        Type = "oneshot";
+        TimeoutStartSec = 180;
+        Restart = "on-failure";
+        RestartSec = 30;
+      };
+      script = "exec ${../k3s/k3s-dns-apply.sh} ${k3sResolvConf} ${k3sResolvGenerator} /etc/resolv.conf /run/systemd/resolve/resolv.conf";
+    };
     lifemodel-flux-bootstrap = {
       description = "Install pinned Flux and lifemodel platform root objects";
       restartIfChanged = true;

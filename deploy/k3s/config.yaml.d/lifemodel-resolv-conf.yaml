@@ -1,0 +1,5 @@
+# Written by the lifemodel installer and its NixOS module: k3s passes this file
+# to the kubelet as the resolver base for CoreDNS and every pod
+# (lifemodel-s9v5.1.5). Reinstalling rewrites it; edit the host's resolv.conf
+# instead. The file it names holds only the host's nameservers that k3s accepts.
+resolv-conf: /run/lifemodel/k3s-resolv.conf

@@ -12,6 +12,11 @@
 #      with the SAME substitutions as deploy/nixos/default.nix
 #      (@PLATFORM_URL@ @PLATFORM_INSECURE@ @REF_BLOCK@ @VERIFY_BLOCK@),
 #      applied as the OCIRepository and the root Kustomization.
+#   4. The resolv.conf k3s reads for the kubelet: only the host's nameservers
+#      k3s accepts (a link-local or loopback entry makes k3s drop the whole file
+#      and use 8.8.8.8, which hides a LAN resolver from every pod), written
+#      before k3s starts and rewritten by lifemodel-k3s-resolv.path whenever
+#      the host's DNS changes.
 #
 # POSIX sh, set -eu. An existing flux-system namespace that is not labelled
 # app.kubernetes.io/managed-by=lifemodel is refused, exactly like the module.
@@ -24,6 +29,19 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 MDNS_SOURCE="$SCRIPT_DIR/../deploy/mdns"
 [ -d "$MDNS_SOURCE" ] || MDNS_SOURCE="$SCRIPT_DIR/deploy/mdns"
 ROOT_TEMPLATES=${ROOT_TEMPLATES:-"$SCRIPT_DIR/../deploy/root"}
+K3S_RESOLV_SOURCE="$SCRIPT_DIR/../deploy/k3s"
+[ -d "$K3S_RESOLV_SOURCE" ] || K3S_RESOLV_SOURCE="$SCRIPT_DIR/deploy/k3s"
+
+# k3s reads one resolv.conf as the kubelet's resolver base and takes it as given
+# when the platform names it, so the platform writes that file itself, out of the
+# host's usable nameservers. The unit of the same name rewrites it whenever the
+# host's DNS changes.
+K3S_RESOLV_CONF="/run/lifemodel/k3s-resolv.conf"
+K3S_RESOLV_UNIT="lifemodel-k3s-resolv"
+LIFEMODEL_RESOLV_SH="/usr/lib/lifemodel/k3s-resolv.sh"
+LIFEMODEL_RESOLV_MJS="/usr/lib/lifemodel/resolv-conf.mjs"
+LIFEMODEL_DNS_APPLY_SH="/usr/lib/lifemodel/k3s-dns-apply.sh"
+K3S_RESOLV_DROPIN="/etc/rancher/k3s/config.yaml.d/lifemodel-resolv-conf.yaml"
 
 K3S_VERSION="1.35.8+k3s1"
 FLUX_VERSION="v2.9.6"
@@ -298,10 +316,43 @@ let data=""; process.stdin.setEncoding("utf8"); process.stdin.on("data", c => da
   cp "$mdns_source/publish-name" "$render_dir/publish-name"
 }
 
+# The resolv.conf k3s reads for the kubelet, and the unit that keeps it current.
+# Rendered here so --render-only and a real install write the same bytes.
+render_k3s_resolv_files() {
+  render_dir=$1
+  for template in resolv-conf.mjs k3s-resolv.sh k3s-dns-apply.sh lifemodel-k3s-resolv.service.in \
+      lifemodel-k3s-dns-apply.service.in k3s.service.d/lifemodel-resolv.conf \
+      lifemodel-k3s-resolv.path.in config.yaml.d/lifemodel-resolv-conf.yaml; do
+    [ -f "$K3S_RESOLV_SOURCE/$template" ] || die "missing template: $K3S_RESOLV_SOURCE/$template"
+  done
+  install -d -m 0755 "$render_dir/resolv" "$render_dir/systemd" "$render_dir/systemd/k3s.service.d" "$render_dir/k3s/config.yaml.d"
+  install -m 0755 "$K3S_RESOLV_SOURCE/resolv-conf.mjs" "$render_dir/resolv/resolv-conf.mjs"
+  install -m 0755 "$K3S_RESOLV_SOURCE/k3s-resolv.sh" "$render_dir/resolv/k3s-resolv.sh"
+  install -m 0755 "$K3S_RESOLV_SOURCE/k3s-dns-apply.sh" "$render_dir/resolv/k3s-dns-apply.sh"
+  cp "$K3S_RESOLV_SOURCE/k3s.service.d/lifemodel-resolv.conf" "$render_dir/systemd/k3s.service.d/lifemodel-resolv.conf"
+  sed -e "s|@DNS_APPLY_SH@|$LIFEMODEL_DNS_APPLY_SH|g" \
+      -e "s|@RESOLV_MJS@|$LIFEMODEL_RESOLV_MJS|g" \
+      -e "s|@RESOLV_CONF@|$K3S_RESOLV_CONF|g" \
+      "$K3S_RESOLV_SOURCE/lifemodel-k3s-dns-apply.service.in" \
+      > "$render_dir/systemd/lifemodel-k3s-dns-apply.service"
+
+  sed -e "s|@RESOLV_SH@|$LIFEMODEL_RESOLV_SH|g" \
+      -e "s|@RESOLV_MJS@|$LIFEMODEL_RESOLV_MJS|g" \
+      -e "s|@RESOLV_CONF@|$K3S_RESOLV_CONF|g" \
+      "$K3S_RESOLV_SOURCE/lifemodel-k3s-resolv.service.in" \
+      > "$render_dir/systemd/$K3S_RESOLV_UNIT.service"
+  sed -e "s|@RESOLV_UNIT@|$K3S_RESOLV_UNIT|g" \
+      "$K3S_RESOLV_SOURCE/lifemodel-k3s-resolv.path.in" \
+      > "$render_dir/systemd/$K3S_RESOLV_UNIT.path"
+  cp "$K3S_RESOLV_SOURCE/config.yaml.d/lifemodel-resolv-conf.yaml" \
+    "$render_dir/k3s/config.yaml.d/lifemodel-resolv-conf.yaml"
+}
+
 # Render-only mode: write the rendered objects and exit, touching nothing.
 if [ -n "$RENDER_ONLY_DIR" ]; then
   mkdir -p "$RENDER_ONLY_DIR"
   render_root_objects "$RENDER_ONLY_DIR"
+  render_k3s_resolv_files "$RENDER_ONLY_DIR"
   exit 0
 fi
 
@@ -421,13 +472,86 @@ command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
 command -v flock >/dev/null 2>&1 || die "flock is required"
 
+# k3s reads the file this installer names as the kubelet's resolver base, so the
+# file, the k3s config drop-in that names it, and the unit that keeps it current
+# all exist before k3s can start. The drop-in (not a command-line argument) also
+# reaches an installation this installer finds already running.
+resolv_render=$(mktemp -d)
+trap 'rm -rf "$resolv_render"' EXIT HUP INT TERM
+render_k3s_resolv_files "$resolv_render"
+install -d -m 0755 "$host_root/usr/lib/lifemodel" "$host_root/etc/systemd/system" \
+  "$host_root/etc/rancher/k3s/config.yaml.d" "$host_root/run/lifemodel" \
+  "$host_root/etc/systemd/system/k3s.service.d"
+install -m 0755 "$resolv_render/resolv/resolv-conf.mjs" "$host_root$LIFEMODEL_RESOLV_MJS"
+install -m 0755 "$resolv_render/resolv/k3s-resolv.sh" "$host_root$LIFEMODEL_RESOLV_SH"
+install -m 0755 "$resolv_render/resolv/k3s-dns-apply.sh" "$host_root$LIFEMODEL_DNS_APPLY_SH"
+for unit in "$K3S_RESOLV_UNIT.service" "$K3S_RESOLV_UNIT.path" "lifemodel-k3s-dns-apply.service"; do
+  install -m 0644 "$resolv_render/systemd/$unit" "$host_root/etc/systemd/system/$unit"
+done
+k3s_resolv_changed=0
+if ! cmp -s "$resolv_render/systemd/k3s.service.d/lifemodel-resolv.conf" \
+    "$host_root/etc/systemd/system/k3s.service.d/lifemodel-resolv.conf" 2>/dev/null; then
+  install -m 0644 "$resolv_render/systemd/k3s.service.d/lifemodel-resolv.conf" \
+    "$host_root/etc/systemd/system/k3s.service.d/lifemodel-resolv.conf"
+  k3s_resolv_changed=1
+fi
+
+if ! cmp -s "$resolv_render/k3s/config.yaml.d/lifemodel-resolv-conf.yaml" \
+    "$host_root$K3S_RESOLV_DROPIN" 2>/dev/null; then
+  install -m 0644 "$resolv_render/k3s/config.yaml.d/lifemodel-resolv-conf.yaml" \
+    "$host_root$K3S_RESOLV_DROPIN"
+  k3s_resolv_changed=1
+fi
+# The same two sources and order the unit names, so the file k3s reads at
+# install time is the one it would read after a boot.
+resolv_result=$(flock "$host_root/run/lifemodel/k3s-resolv.lock" node "$resolv_render/resolv/resolv-conf.mjs" "$host_root$K3S_RESOLV_CONF" \
+  /etc/resolv.conf /run/systemd/resolve/resolv.conf)
+if [ "$resolv_result" = changed ]; then k3s_resolv_changed=1; fi
+[ -s "$host_root$K3S_RESOLV_CONF" ] || die "k3s resolver missing or empty"
+# Load prerequisites before either an upstream first start or our restart.
+systemctl daemon-reload
+
+
+k3s_installed_before=0
 if command -v k3s >/dev/null 2>&1; then
+  k3s_installed_before=1
   installed_version=$(k3s --version | awk 'NR==1 {print $3}')
   if [ "$installed_version" != "v$K3S_VERSION" ]; then
     die "k3s $installed_version is installed but this installer pins v$K3S_VERSION; refusing to change it"
   fi
 else
   curl -fsSL https://get.k3s.io | INSTALL_K3S_VERSION="v$K3S_VERSION" sh -s - server --cluster-init
+fi
+
+# k3s reads config drop-ins at start; its workload containers survive a restart.
+# Restart k3s for changed configuration, then explicitly reconcile CoreDNS.
+if [ "$k3s_installed_before" -eq 1 ] && [ "$k3s_resolv_changed" -eq 1 ] \
+    && command -v systemctl >/dev/null 2>&1; then
+  systemctl restart k3s.service
+fi
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload
+  # The service runs at boot, before k3s; the path unit re-runs it on a change.
+  systemctl enable "$K3S_RESOLV_UNIT.service"
+  systemctl enable --now "$K3S_RESOLV_UNIT.path"
+  systemctl enable lifemodel-k3s-dns-apply.service
+  # Retry a failed/cancelled start job and wait for verified convergence, not
+  # just a successful systemctl client. This total budget includes all starts
+  # (each service start is itself bounded to 180s) and retry pauses.
+  command -v timeout >/dev/null 2>&1 || die "timeout is required for bounded DNS apply"
+  timeout --kill-after=5s 390s sh -c '
+    target=$1
+    marker="$(dirname "$target")/k3s-resolv.applied"
+    while :; do
+      if systemctl start lifemodel-k3s-dns-apply.service; then
+        desired=$(node -p "require(\"node:crypto\").createHash(\"sha256\").update(require(\"node:fs\").readFileSync(process.argv[1])).digest(\"hex\")" "$target")
+        applied=$(cat "$marker" 2>/dev/null || true)
+        [ "$desired" != "$applied" ] || exit 0
+      fi
+      sleep 30
+    done
+  ' sh "$host_root$K3S_RESOLV_CONF" || die "CoreDNS resolver apply did not converge; run lifemodel doctor"
+
 fi
 
 cluster_ready=0
@@ -451,7 +575,7 @@ fi
 # Pinned Flux: same URL, same sha256 as the module's pkgs.fetchurl.
 flux_manifest=$(mktemp)
 render_dir=$(mktemp -d)
-trap 'rm -rf "$flux_manifest" "$render_dir"' EXIT INT TERM
+trap 'rm -rf "$flux_manifest" "$render_dir" "$resolv_render"' EXIT INT TERM
 curl -fsSL "$FLUX_INSTALL_URL" -o "$flux_manifest"
 printf '%s  %s\n' "$FLUX_INSTALL_SHA256" "$flux_manifest" | sha256sum -c - >/dev/null \
   || die "Flux manifest sha256 mismatch for $FLUX_INSTALL_URL (expected $FLUX_INSTALL_SHA256)"
@@ -541,6 +665,19 @@ if [ -f "$mdns_source/publish-name" ] && [ "$mdns_source" != "$bundle_dir/deploy
   install -d -m 0755 "$bundle_dir/deploy/mdns"
   install -m 0755 "$mdns_source/publish-name" "$bundle_dir/deploy/mdns/publish-name"
   install -m 0644 "$mdns_source/publisher.service.in" "$bundle_dir/deploy/mdns/publisher.service.in"
+fi
+if [ -d "$K3S_RESOLV_SOURCE" ] && [ "$K3S_RESOLV_SOURCE" != "$bundle_dir/deploy/k3s" ]; then
+  install -d -m 0755 "$bundle_dir/deploy/k3s/config.yaml.d" "$bundle_dir/deploy/k3s/k3s.service.d"
+  install -m 0755 "$K3S_RESOLV_SOURCE/resolv-conf.mjs" "$bundle_dir/deploy/k3s/resolv-conf.mjs"
+  install -m 0755 "$K3S_RESOLV_SOURCE/k3s-resolv.sh" "$bundle_dir/deploy/k3s/k3s-resolv.sh"
+  install -m 0755 "$K3S_RESOLV_SOURCE/k3s-dns-apply.sh" "$bundle_dir/deploy/k3s/k3s-dns-apply.sh"
+  install -m 0644 "$K3S_RESOLV_SOURCE/lifemodel-k3s-dns-apply.service.in" "$bundle_dir/deploy/k3s/lifemodel-k3s-dns-apply.service.in"
+  install -m 0644 "$K3S_RESOLV_SOURCE/k3s.service.d/lifemodel-resolv.conf" "$bundle_dir/deploy/k3s/k3s.service.d/lifemodel-resolv.conf"
+
+  install -m 0644 "$K3S_RESOLV_SOURCE/lifemodel-k3s-resolv.service.in" "$bundle_dir/deploy/k3s/lifemodel-k3s-resolv.service.in"
+  install -m 0644 "$K3S_RESOLV_SOURCE/lifemodel-k3s-resolv.path.in" "$bundle_dir/deploy/k3s/lifemodel-k3s-resolv.path.in"
+  install -m 0644 "$K3S_RESOLV_SOURCE/config.yaml.d/lifemodel-resolv-conf.yaml" \
+    "$bundle_dir/deploy/k3s/config.yaml.d/lifemodel-resolv-conf.yaml"
 fi
 if [ "$SCRIPT_DIR/install.sh" != "$bundle_script" ]; then install -m 0755 "$SCRIPT_DIR/install.sh" "$bundle_script"; fi
 install -d -m 0755 "$bundle_dir/deploy/cli"

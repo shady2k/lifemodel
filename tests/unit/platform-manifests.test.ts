@@ -163,6 +163,9 @@ shift 3
 printf '%s\n' "$*" >> "$K3S_CALLS"
 case "$*" in
   *'get nodes'*) exit 0 ;;
+  *'get deploy/coredns -o json'*) printf '%s' '{"metadata":{"generation":2},"status":{"observedGeneration":2}}'; exit 0 ;;
+  *'get pods -l k8s-app=kube-dns -o json'*) printf '%s' '{"items":[{"metadata":{"creationTimestamp":"2999-01-01T00:00:00Z","labels":{"k8s-app":"kube-dns"}},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'; exit 0 ;;
+  *'get --raw=/readyz'*|*'rollout restart deploy/coredns'*|*'rollout status deploy/coredns'*) exit 0 ;;
   *'get ocirepository platform'*) printf '{"metadata":{"managedFields":[%s]}}\n' "$K3S_MANAGED_FIELDS" ;;
   *'get configmap lifemodel-instance -o jsonpath='*) [ -f "$K3S_IDENTITY" ] && cat "$K3S_IDENTITY" || { echo '(NotFound)' >&2; exit 1; } ;;
   *'get namespace flux-system -o jsonpath='*) [ "$K3S_FOREIGN" = 1 ] && echo external || echo lifemodel ;;
@@ -180,7 +183,14 @@ esac`
   );
   command('apt-get', 'echo "$*" >> "$APT_LOG"; exit 0');
   command('ip', `if [ "$1" = -j ]; then printf '%s\n' "$ROUTES"; else exit 0; fi`);
-  command('systemctl', 'echo "$*" >> "$SYSTEMCTL_LOG"; exit 0');
+  command(
+    'systemctl',
+    `echo "$*" >> "$SYSTEMCTL_LOG"
+if [ "$*" = 'start lifemodel-k3s-dns-apply.service' ]; then
+  exec sh "$LIFEMODEL_INSTALL_ROOT/usr/lib/lifemodel/k3s-dns-apply.sh" "$LIFEMODEL_INSTALL_ROOT/run/lifemodel/k3s-resolv.conf" "$LIFEMODEL_INSTALL_ROOT/usr/lib/lifemodel/resolv-conf.mjs" /etc/resolv.conf /run/systemd/resolve/resolv.conf
+fi
+exit 0`
+  );
   command(
     'ufw',
     `if [ "$1" = status ]; then echo Status: ${options.ufwActive ? 'active' : 'inactive'}; else echo "$*" >> "$UFW_LOG"; fi`
@@ -1289,11 +1299,17 @@ describe('platform manifests', () => {
     mkdirSync(join(sourceDir, 'scripts'), { recursive: true });
     mkdirSync(join(sourceDir, 'deploy/cli'), { recursive: true });
     mkdirSync(join(sourceDir, 'deploy/mdns'), { recursive: true });
+    mkdirSync(join(sourceDir, 'deploy/k3s'), { recursive: true });
     cpSync(installer, join(sourceDir, 'scripts/install.sh'));
     cpSync(rootTemplates, join(sourceDir, 'deploy/root'), { recursive: true });
     cpSync(
       fileURLToPath(new URL('../../deploy/mdns/', import.meta.url)),
       join(sourceDir, 'deploy/mdns'),
+      { recursive: true }
+    );
+    cpSync(
+      fileURLToPath(new URL('../../deploy/k3s/', import.meta.url)),
+      join(sourceDir, 'deploy/k3s'),
       { recursive: true }
     );
     cpSync(

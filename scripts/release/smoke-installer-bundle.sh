@@ -23,6 +23,8 @@ chmod 0755 "$work/bin/ip"
   test -x scripts/install.sh
   test -f deploy/cli/lifemodel.mjs
   test -f deploy/cli/wait-ready.mjs
+  test -x deploy/k3s/k3s-resolv.sh
+  test -f deploy/k3s/config.yaml.d/lifemodel-resolv-conf.yaml
   sh scripts/install.sh --render-only "$work/rendered"
 )
 grep -Fx "    digest: $digest" "$work/rendered/ocirepository.yaml"
@@ -30,6 +32,12 @@ grep -Fx '  url: "oci://ghcr.io/shady2k/lifemodel-platform"' "$work/rendered/oci
 grep -Fx '    provider: cosign' "$work/rendered/ocirepository.yaml"
 grep -Fx "  LIFEMODEL_NAME: 'lifemodel'" "$work/rendered/instance.yaml"
 grep -F 'boot-lifemodel.local eth0' "$work/rendered/systemd/lifemodel-mdns-boot-lifemodel-local.service"
+grep -F 'ExecStart=/usr/lib/lifemodel/k3s-resolv.sh /usr/lib/lifemodel/resolv-conf.mjs /run/lifemodel/k3s-resolv.conf /etc/resolv.conf /run/systemd/resolve/resolv.conf' "$work/rendered/systemd/lifemodel-k3s-resolv.service"
+grep -F 'PathChanged=/etc/resolv.conf' "$work/rendered/systemd/lifemodel-k3s-resolv.path"
+grep -F 'PathChanged=/run/systemd/resolve/resolv.conf' "$work/rendered/systemd/lifemodel-k3s-resolv.path"
+grep -F 'Requires=lifemodel-k3s-resolv.service' "$work/rendered/systemd/k3s.service.d/lifemodel-resolv.conf"
+grep -F 'TimeoutStartSec=180' "$work/rendered/systemd/lifemodel-k3s-dns-apply.service"
+grep -Fx 'resolv-conf: /run/lifemodel/k3s-resolv.conf' "$work/rendered/k3s/config.yaml.d/lifemodel-resolv-conf.yaml"
 if grep -v '^[[:space:]]*#' "$work/rendered/ocirepository.yaml" | grep -E '@[A-Z_]+@' || grep -F '${LIFEMODEL_NAME}' "$work/rendered/instance.yaml"; then
   echo 'installer left an unresolved template value' >&2; exit 1
 fi

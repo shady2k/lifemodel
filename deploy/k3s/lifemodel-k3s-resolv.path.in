@@ -1,0 +1,12 @@
+[Unit]
+Description=Regenerate the k3s resolv.conf when the host's DNS changes
+
+[Path]
+# Both sources the service reads: a host with systemd-resolved puts its real
+# upstream servers in the second one and leaves the stub at 127.0.0.53.
+PathChanged=/etc/resolv.conf
+PathChanged=/run/systemd/resolve/resolv.conf
+Unit=@RESOLV_UNIT@.service
+
+[Install]
+WantedBy=multi-user.target
