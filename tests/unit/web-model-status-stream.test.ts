@@ -49,6 +49,7 @@ function createServer(options: {
         await new Promise<void>(() => undefined);
       }),
       acquireStreamLease: vi.fn().mockResolvedValue('lease'),
+      renewStreamLease: vi.fn().mockResolvedValue(true),
       releaseStreamLease: vi.fn().mockResolvedValue(undefined),
     } as never,
     creatureState: options.creature ?? creatureState('thinking'),

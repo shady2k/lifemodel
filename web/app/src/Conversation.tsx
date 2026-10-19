@@ -33,6 +33,7 @@ import {
   type TranscriptMessage,
   type WebTransport,
 } from './transport';
+import { leaveForLogin, saveDraft, takeDraft } from './session';
 import type { ModelStatusEvent } from '../../../src/web/contract.js';
 
 function uuidV7(): string {
@@ -149,6 +150,8 @@ function ConversationContent({
     sequence: 'initial',
   });
   const [draft, setDraft] = useState('');
+  /** The draft as it is now, for the session's redirect, which reads it once. */
+  const draftRef = useRef('');
   type PendingMessage = TranscriptMessage & {
     status?: 'sending' | 'failed';
     mintedAt: number;
@@ -190,6 +193,23 @@ function ConversationContent({
       window.clearInterval(interval);
     };
   }, []);
+  useEffect(() => {
+    // The page came back from the loader's login: what the owner had typed
+    // before it left is still theirs to send.
+    const saved = takeDraft();
+    if (saved !== undefined) {
+      draftRef.current = saved;
+      setDraft(saved);
+    }
+  }, []);
+  useEffect(
+    () =>
+      transport.onSessionExpired(() => {
+        saveDraft(draftRef.current);
+        leaveForLogin();
+      }),
+    [transport]
+  );
   const freshCreature = freshCreatureState(creature, now);
   const virtualizer = useVirtualizer({
     count: messages.length,
@@ -335,6 +355,7 @@ function ConversationContent({
   const submitDraft = () => {
     const text = draft.trim();
     if (!text) return;
+    draftRef.current = '';
     setDraft('');
     const binding = reply;
     setReply(undefined);
@@ -549,6 +570,7 @@ function ConversationContent({
             placeholder={t('writeMessage')}
             value={draft}
             onChange={(event) => {
+              draftRef.current = event.currentTarget.value;
               setDraft(event.currentTarget.value);
             }}
             onKeyDown={(event) => {

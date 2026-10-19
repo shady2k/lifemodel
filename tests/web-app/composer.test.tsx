@@ -23,6 +23,9 @@ class SendingTransport implements WebTransport {
     const outcome = this.outcomes.shift();
     return outcome ? outcome() : 'accepted';
   }
+  onSessionExpired(): () => void {
+    return () => undefined;
+  }
   deliver(message: TranscriptMessage) {
     for (const callback of this.callbacks) callback(message);
   }
@@ -161,6 +164,7 @@ describe('conversation composer and replies', () => {
           readTranscript: async () => ({ messages: [persisted('1', 'old', 'fixed')], cursor: '1' }),
           subscribe: transport.subscribe.bind(transport),
           sendMessage: transport.sendMessage.bind(transport),
+          onSessionExpired: transport.onSessionExpired.bind(transport),
         }}
       />
     );
@@ -199,6 +203,7 @@ describe('conversation composer and replies', () => {
       sendMessage: transport.sendMessage.bind(transport),
       readTranscript: async () => ({ messages: [target], cursor: '7' }),
       subscribe: transport.subscribe.bind(transport),
+      onSessionExpired: transport.onSessionExpired.bind(transport),
     };
     render(<Conversation transport={populated} />);
     const user = userEvent.setup();

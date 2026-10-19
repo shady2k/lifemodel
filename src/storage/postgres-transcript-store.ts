@@ -14,14 +14,30 @@ const WAKE_POLL_MS = 1_000;
 const WAKE_CLOSE_TIMEOUT_MS = 100;
 const STREAM_LEASE_LIMIT = 4;
 const ACQUIRE_STREAM_LEASE_SCRIPT = `
-redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[2])
+local now = tonumber(ARGV[2])
+local ttl = tonumber(ARGV[3])
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
 local count = redis.call('ZCARD', KEYS[1])
 if count >= tonumber(ARGV[1]) then return 0 end
-redis.call('ZADD', KEYS[1], tonumber(ARGV[2]) + tonumber(ARGV[3]), ARGV[4])
-redis.call('EXPIRE', KEYS[1], math.ceil(tonumber(ARGV[3]) / 1000))
+redis.call('ZADD', KEYS[1], now + ttl, ARGV[5])
+redis.call('PEXPIRE', KEYS[1], ttl + tonumber(ARGV[4]))
 return 1
 `;
 const RELEASE_STREAM_LEASE_SCRIPT = `redis.call('ZREM', KEYS[1], ARGV[1]); return 1`;
+const RENEW_STREAM_LEASE_SCRIPT = `
+local score = redis.call('ZSCORE', KEYS[1], ARGV[1])
+if score == false then return 0 end
+-- A lease whose score has passed is gone: it is not renewed back into life.
+if tonumber(score) <= tonumber(ARGV[2]) then return 0 end
+redis.call('ZADD', KEYS[1], tonumber(ARGV[3]), ARGV[1])
+redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[4]))
+return 1
+`;
+/**
+ * The lease key outlives its longest lease by this much, so a renewal never
+ * races the key's own expiry; the score prune in acquisition keeps it exact.
+ */
+const LEASE_KEY_SLACK_MS = 60_000;
 
 function boundedStoreCall<T>(
   operation: Promise<T>,
@@ -224,17 +240,40 @@ export class PostgresTranscriptStore implements TranscriptReader {
       throw new Error('Stream lease expiry must be in the future');
     const sessionKey = `web:stream-leases:${createHash('sha256').update(session).digest('hex')}`;
     const leaseId = randomUUID();
+    const now = Date.now();
     const result = await this.redis.eval(
       ACQUIRE_STREAM_LEASE_SCRIPT,
       1,
       sessionKey,
       String(STREAM_LEASE_LIMIT),
-      String(Date.now()),
-      String(expiresAt - Date.now()),
+      String(now),
+      String(expiresAt - now),
+      String(LEASE_KEY_SLACK_MS),
       leaseId
     );
     if (Number(result) !== 1) return null;
     return leaseId;
+  }
+
+  async renewStreamLease(session: string, leaseId: string, expiresAt: number): Promise<boolean> {
+    if (!session) throw new Error('Stream session is required');
+    if (!leaseId) throw new Error('Stream lease id is required');
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now())
+      throw new Error('Stream lease expiry must be in the future');
+    const sessionKey = `web:stream-leases:${createHash('sha256').update(session).digest('hex')}`;
+    // One clock for the whole operation: the same `now` decides whether the
+    // lease is still alive and how long the key outlives it.
+    const now = Date.now();
+    const result = await this.redis.eval(
+      RENEW_STREAM_LEASE_SCRIPT,
+      1,
+      sessionKey,
+      leaseId,
+      String(now),
+      String(expiresAt),
+      String(expiresAt - now + LEASE_KEY_SLACK_MS)
+    );
+    return Number(result) === 1;
   }
 
   async releaseStreamLease(session: string, leaseId: string): Promise<void> {

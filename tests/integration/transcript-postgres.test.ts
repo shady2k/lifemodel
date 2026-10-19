@@ -357,6 +357,43 @@ describe('Postgres owner transcript', () => {
     }
   });
 
+  it('frees the slot of a stream that stopped renewing its lease', async () => {
+    const stores = await createTestStores();
+    try {
+      const store = new PostgresTranscriptStore(stores.postgres, stores.redis, 'lease-expiry');
+      const session = 'crashed-module-session';
+      for (let index = 0; index < 4; index += 1)
+        expect(await store.acquireStreamLease(session, Date.now() + 300)).not.toBeNull();
+      expect(await store.acquireStreamLease(session, Date.now() + 60_000)).toBeNull();
+      // The module that held them is gone and released nothing: only expiry frees the slots.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(await store.acquireStreamLease(session, Date.now() + 60_000)).not.toBeNull();
+    } finally {
+      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    }
+  });
+
+  it('keeps a renewed lease counted past its first expiry and reports a lease it lost', async () => {
+    const stores = await createTestStores();
+    try {
+      const store = new PostgresTranscriptStore(stores.postgres, stores.redis, 'lease-renewal');
+      const session = 'renewed-session';
+      const lease = await store.acquireStreamLease(session, Date.now() + 300);
+      if (!lease) throw new Error('the test could not take a lease');
+      expect(await store.renewStreamLease(session, lease, Date.now() + 5_000)).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      // Still counted after its first expiry: the live stream keeps its slot.
+      for (let index = 0; index < 3; index += 1)
+        expect(await store.acquireStreamLease(session, Date.now() + 60_000)).not.toBeNull();
+      expect(await store.acquireStreamLease(session, Date.now() + 60_000)).toBeNull();
+      expect(await store.renewStreamLease(session, 'not-a-held-lease', Date.now() + 5_000)).toBe(
+        false
+      );
+    } finally {
+      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    }
+  });
+
   it('releases the exact lease when acquisitions complete out of order', async () => {
     const stores = await createTestStores();
     const originalNow = Date.now;
