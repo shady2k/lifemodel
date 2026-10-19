@@ -1563,8 +1563,11 @@ describe('model gateway clears a stale outage on a slot change', () => {
     expect((await statusOf(f)).state).toBe('down');
     const readCount = f.reads.length - reads;
     // Drain the held responses before asserting, including when a mutation fails.
+    // Any next batch fails; only the expired replies carry the changed versions.
+    f.baoStatus = 503;
     replies.forEach((reply) => reply());
     f.interceptRead = undefined;
+    expect((await statusOf(f)).state).toBe('down');
     expect(readCount).toBe(2);
   });
 
