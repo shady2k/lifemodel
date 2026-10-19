@@ -9,7 +9,7 @@ import type {
 import { PostgresTranscriptStore } from '../../src/storage/postgres-transcript-store.js';
 import { createTestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
-import { startWebModule, stopWebModule } from '../helpers/web-live-page.js';
+import { insertRow, startWebModule, stopWebModule } from '../helpers/web-live-page.js';
 import { waitUntil } from '../helpers/browser-event-source.js';
 
 const COOKIE = '__Host-lm_session=lease-walk-session';
@@ -156,6 +156,36 @@ describe('a stream lease only lasts while the store confirms it', () => {
       await Promise.all([stores.postgres.end(), stores.redis.quit()]);
     }
   });
+
+  it('keeps a renewing stream alive across several lease lives', async () => {
+    const stores = await createTestStores();
+    await applyTestMigrations(stores.postgres);
+    const store = new PostgresTranscriptStore(
+      stores.postgres,
+      stores.redis,
+      'lease-renewing-owner'
+    );
+    const module = await startWebModule(store, { streamLeaseTtlMs: 600 });
+    const streams: LiveStream[] = [];
+    try {
+      const stream = await openStream(module.base);
+      streams.push(stream);
+      expect(stream.status).toBe(200);
+      await waitUntil(() => stream.frames().includes('event: state'), 'the stream to open');
+      // Liveness across a stretch of time is the property here, so the test
+      // waits it out: several lease lives pass (a 600 ms lease renewed every
+      // 200 ms), and every renewal the store answered moved the deadline.
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      expect(stream.live()).toBe(true);
+      await insertRow(stores, 'lease-renewing-owner', 'channel:web:renewed', 'assistant', 'ответ');
+      await waitUntil(() => stream.frames().includes('ответ'), 'the reply on the renewing stream');
+    } finally {
+      for (const stream of streams) stream.stop();
+      await waitFor(async () => (await stores.redis.zcard(LEASE_KEY)) === 0, 'the lease release');
+      await stopWebModule(module);
+      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    }
+  }, 30_000);
 
   it('ends a stream whose renewals fail past its lease deadline', async () => {
     const stores = await createTestStores();

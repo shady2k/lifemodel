@@ -454,8 +454,8 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
         }
         holdLeaseDeadline(expiresAt);
       } catch {
-        // A store that cannot answer keeps the stream only to the lease the
-        // store last confirmed: past that deadline the stream ends below.
+        // A store that cannot answer keeps the stream only to the lease it last
+        // confirmed: the deadline timer ends the stream when that runs out.
       }
     };
     renewTimer = setInterval(() => {
