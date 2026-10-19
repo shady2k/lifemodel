@@ -406,3 +406,17 @@ These are requirements, not suggestions.
 6. **Stop Conditions Handle Gaps** — Stop on exact match with the last seen
    id, never on `<=`. IDs may have gaps from deletions.
    (`getMaxPublishedAt` in `src/plugins/news/index.ts`)
+7. **Secrets Are Never Printed Whole** — Never print an environment, a
+   Kubernetes Secret or a settings dump to find one value: a filter by a
+   loose word catches unrelated secrets. Print names only, or test for
+   presence (`printenv | cut -d= -f1`, `kubectl get secret -o
+   jsonpath='{.data}' | jq keys`).
+
+## Practices
+
+Written answers to repeated failures, one file each under `docs/practices/`
+(about ten active at most):
+
+- PRA-001 — an interface is accepted on screenshots of the deployed build in
+  real Chromium and Firefox, compared with each claim of its feature document
+  (`docs/practices/PRA-001-interface-accepted-on-screen.md`).
