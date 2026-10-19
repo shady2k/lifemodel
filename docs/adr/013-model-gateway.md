@@ -293,6 +293,26 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
   The sentence "The slot contract is Bearer-only; an endpoint needing other
   secret headers needs a recorded extension first" is superseded: this is that
   extension.
+- **D4, null tool calls, slot attribution and the rejection reason (2026-10-19, lifemodel-mx6r).**
+  A converting OpenAI-compatible endpoint answers a text reply with `tool_calls: null`, so the
+  gateway treats a message whose `tool_calls` is `null` as an answer with no tool calls (its
+  `content` must then be a string) and a delta whose `tool_calls` is `null` as carrying none; a
+  non-array, non-null `tool_calls`, and a `null` content without tool calls, still fail closed on
+  both paths, and the caller still receives the upstream's answer, re-serialized. A request
+  failure names the slot that was really attempted: the active slot moves to a slot only when its
+  attempt starts, so with the primary failing and no reserve configured, the warn line, the
+  `x-lifemodel-slot` error header and `/status` name `primary`, and with a configured reserve
+  failing they name `reserve`; a slot read that fails is attributed to the slot whose read failed,
+  so a reserve read that comes back unavailable after a primary attempt failure names `reserve`
+  on every surface. When an upstream answer is refused as `bad_response` or
+  `unsafe_response`, the warn line also carries a safe reason: a fixed check code, a JSON path
+  with array indexes into the answer, and, when the check is about a type, only the JSON type name
+  that was found (for example `{check: "tool_calls_type", path: "choices[0].message.tool_calls",
+  got: "string"}`) — never a value, a key or any other string from the body, and never in
+  `/status`, whose safe shape is unchanged. A stream reason names the choice's array position in
+  the frame being checked, with `.delta` between the choice and its fields; accumulated answer or
+  tool state keeps the position where it first appeared; a model-listing id failure ends in
+  `.id`.
 - ADR-010: model requests leave through the platform-owned `model-gateway`
   over synchronous HTTP, not through `cmd.egress` events and Agent Vault;
   the egress gateway of ADR-010 remains the design for tool and Motor egress
