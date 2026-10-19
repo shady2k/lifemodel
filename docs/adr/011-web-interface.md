@@ -354,6 +354,17 @@ deploy branch):
 - An event stream closes after 15 minutes. The browser reconnects, which
   sends a new ForwardAuth check, so an expired session stops streaming.
   Logout closes the tab's stream and clears its cached transcript.
+- A page whose session has ended goes to the login (lifemodel-hf2k.1, the
+  owner's decision of 2026-10-19). The loader answers a GET without a session
+  with the login redirect and another method with 401, so the tab asks its
+  catch-up read not to follow a redirect: an `opaqueredirect` — or the 3xx
+  itself, as a fetch outside a browser reports it — and a 401 both mean the
+  owner is no longer signed in. The tab then saves the unsent draft in
+  `sessionStorage` inside a try/catch, so a browser that refuses storage
+  still leaves, and reloads its own address; the loader takes that reload to
+  the login, `next` brings it back, and the draft waits in the restored page.
+  A 5xx — the loader or the module behind the proxy is down — or a network
+  failure is not an ended session: the tab keeps retrying in silence.
 - Logs carry the request id, the client id, the intake result and the resume
   cursor; never message text, cookies or credentials.
 - Residuals, said rather than claimed away:

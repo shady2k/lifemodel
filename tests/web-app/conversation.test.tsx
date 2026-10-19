@@ -54,6 +54,10 @@ class FakeTransport implements WebTransport {
     return () => undefined;
   }
 
+  onSessionExpired(): () => void {
+    return () => undefined;
+  }
+
   emit(message: TranscriptMessage) {
     this.messageEventIds.push(message.sequence);
     for (const sub of this.subscriptions) sub.message(message);

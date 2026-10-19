@@ -156,7 +156,9 @@ unavailable or has ended, the page resubscribes after a short, growing delay
 and reads the transcript from the last message it has, so a reply appears
 without a reload (lifemodel-hf2k.1). A stream slot is leased only while its
 stream renews it, so a tab or a web module that died does not keep the owner
-waiting for one.
+waiting for one. When the session itself has ended, the page leaves for the
+loader's login instead of showing an error, and the draft the owner was
+writing comes back with it after the login.
 
 Task chips and the drawer, Stop, "@", reactions, projects, memory and
 settings come with the features that create tasks and projects

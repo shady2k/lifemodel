@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
-import { afterEach, describe, expect, it } from 'vitest';
-import { render, screen, cleanup, waitFor } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { axe } from 'jest-axe';
 import 'jest-axe/extend-expect';
 import i18n from '../../web/app/src/i18n';
@@ -10,6 +10,8 @@ import { httpTransport } from '../../web/app/src/transport';
 import { createWebServer } from '../../src/web/server.js';
 import { silentModelStatus } from '../helpers/model-status.js';
 import { installBrowserFetch, waitUntil } from '../helpers/browser-event-source.js';
+import { createForwardAuthProxy } from '../helpers/forward-auth-proxy.js';
+import * as session from '../../web/app/src/session';
 import type {
   ReadTranscriptOptions,
   TranscriptPage,
@@ -83,6 +85,8 @@ class MemoryTranscript implements TranscriptReader {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
+  window.sessionStorage.clear();
 });
 
 describe('the open page and its event stream', () => {
@@ -135,4 +139,47 @@ describe('the open page and its event stream', () => {
       await server.close();
     }
   }, 120_000);
+
+  it("sends the page to the loader's login when its session ended, keeping the draft", async () => {
+    const leave = vi.spyOn(session, 'leaveForLogin').mockImplementation(() => undefined);
+    const transcript = new MemoryTranscript();
+    transcript.append('assistant', 'старое сообщение');
+    const server = createWebServer({
+      allowedOrigin: 'https://lifemodel.local',
+      instanceName: 'lifemodel',
+      appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
+      runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
+      intake: {
+        acceptOwnerMessage: async () => ({ status: 'accepted', streamId: '1-0' }),
+      } as never,
+      transcript,
+      creatureState: { readCreatureState: async () => null },
+      modelStatus: silentModelStatus(),
+      logger: { info: () => undefined },
+    });
+    await server.listen({ host: '127.0.0.1', port: 0 });
+    const address = server.server.address();
+    if (!address || typeof address === 'string') throw new Error('the test server has no address');
+    const proxy = await createForwardAuthProxy(address.port);
+    const browser = installBrowserFetch(proxy.base);
+    try {
+      await i18n.changeLanguage('en');
+      render(<Conversation transport={httpTransport} />);
+      const composer = await screen.findByRole('textbox', { name: 'Message' });
+      await screen.findByText('старое сообщение');
+      fireEvent.change(composer, { target: { value: 'черновик' } });
+      // The session ended: the ingress now answers a read the way the loader's
+      // ForwardAuth answers a GET without a session, with its login redirect.
+      proxy.redirectToLogin = true;
+      proxy.dropConnections();
+      await waitUntil(() => leave.mock.calls.length > 0, 'the page to leave for the login', 30_000);
+      // What the owner was writing survives the round trip to the login.
+      expect(window.sessionStorage.getItem('lifemodel.web.draft')).toBe('черновик');
+    } finally {
+      browser.restore();
+      await proxy.close();
+      await server.server.closeAllConnections?.();
+      await server.close();
+    }
+  }, 60_000);
 });

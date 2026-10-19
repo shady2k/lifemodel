@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { httpTransport } from '../../web/app/src/transport.js';
 import { waitUntil } from '../helpers/browser-event-source.js';
 import { SESSION, exactlyOnce, insertRow, openPage } from '../helpers/web-live-page.js';
 
@@ -88,6 +89,8 @@ describe('a reply reaches an open page through the real web server', () => {
   }, 60_000);
 
   it("shows the reply after a loader rollout refused the page's reconnect", async () => {
+    const onSessionExpired = vi.fn();
+    const unsubscribe = httpTransport.onSessionExpired(onSessionExpired);
     const page = await openPage('web-live-forward-auth', { forwardAuth: true });
     try {
       const first = await page.transcript.readTranscript({ limit: 50 });
@@ -98,15 +101,17 @@ describe('a reply reaches an open page through the real web server', () => {
         'the first live row'
       );
       // The loader pod is replaced: the open stream drops, and the ingress
-      // answers the page's reconnect with ForwardAuth's non-200.
+      // answers the page's reconnect with its own 5xx while no loader answers.
       const proxy = page.proxy;
       if (!proxy) throw new Error('the page has no proxy');
       proxy.refuse = true;
       proxy.dropConnections();
       await waitUntil(
-        () => page.browser.sources().some((source) => source.lastStatus === 401),
+        () => page.browser.sources().some((source) => source.lastStatus === 503),
         "the page's reconnect to be refused by ForwardAuth"
       );
+      // A module or a loader that is down is not an ended session: no login.
+      expect(onSessionExpired).not.toHaveBeenCalled();
       await insertRow(page.stores, page.recipientId, 'channel:web:auth', 'assistant', 'ответ');
       // The page recovers when the new loader pod answers: no reload, no action.
       proxy.refuse = false;
@@ -117,6 +122,7 @@ describe('a reply reaches an open page through the real web server', () => {
       );
       exactlyOnce(page.received);
     } finally {
+      unsubscribe();
       await page.close();
     }
   }, 90_000);

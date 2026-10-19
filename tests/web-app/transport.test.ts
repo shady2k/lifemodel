@@ -36,11 +36,36 @@ const row = (sequence: string, text: string) => ({
   createdAt: '2026-10-15T12:00:00Z',
 });
 
+/** Response-like stand-ins for the catch-up read, most useful for its failures. */
+function stubFetchResponses(responses: Array<{ type?: string; status?: number }>) {
+  const calls: string[] = [];
+  const fetch = vi.fn(async (input: RequestInfo | URL) => {
+    calls.push(String(input));
+    const next = responses.shift() ?? { type: 'basic', status: 200 };
+    return {
+      type: next.type ?? 'basic',
+      status: next.status ?? 200,
+      ok: (next.status ?? 200) === 200,
+      json: async () => ({ messages: [], cursor: null }),
+    };
+  });
+  vi.stubGlobal('fetch', fetch);
+  return calls;
+}
+
+/** The loader's ForwardAuth answer to a GET without a session: a login redirect. */
+const LOGIN_REDIRECT = { type: 'opaqueredirect', status: 0 };
+
 function stubFetch(pages: TranscriptPage[]) {
   const calls: string[] = [];
   const fetch = vi.fn(async (input: RequestInfo | URL) => {
     calls.push(String(input));
-    return { ok: true, json: async () => pages.shift() ?? { messages: [], cursor: null } };
+    return {
+      type: 'basic',
+      status: 200,
+      ok: true,
+      json: async () => pages.shift() ?? { messages: [], cursor: null },
+    };
   });
   vi.stubGlobal('fetch', fetch);
   return calls;
@@ -60,10 +85,15 @@ afterEach(() => {
 describe('web transport contract', () => {
   it('reads pages with the ADR cursor and the fixed page limit', async () => {
     const page = { messages: [], cursor: '91' };
-    const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => page });
+    const fetch = vi
+      .fn()
+      .mockResolvedValue({ type: 'basic', status: 200, ok: true, json: async () => page });
     vi.stubGlobal('fetch', fetch);
     expect(await httpTransport.readTranscript('42')).toEqual(page);
-    expect(fetch).toHaveBeenCalledWith('/api/transcript?limit=50&before=42', { cache: 'no-store' });
+    expect(fetch).toHaveBeenCalledWith('/api/transcript?limit=50&before=42', {
+      cache: 'no-store',
+      redirect: 'manual',
+    });
   });
 
   it('subscribes after the page cursor and separates message ids from state data', async () => {
@@ -346,6 +376,107 @@ describe('web transport contract', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(FakeEventSource.instances).toHaveLength(0);
     expect(onMessage).not.toHaveBeenCalled();
+  });
+
+  it('leaves for the login page when the catch-up read is redirected', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const calls = stubFetchResponses([LOGIN_REDIRECT]);
+    const onSessionExpired = vi.fn();
+    const unsubscribe = httpTransport.onSessionExpired(onSessionExpired);
+    const onMessage = vi.fn();
+    const close = httpTransport.subscribe(
+      '1',
+      onMessage,
+      () => undefined,
+      () => undefined
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    // The read is asked not to follow the redirect: the answer itself is the
+    // news that the session is gone.
+    expect(calls).toEqual(['/api/transcript?limit=50&after=1']);
+    expect(onSessionExpired).toHaveBeenCalledOnce();
+    // Retrying would only meet the same redirect: the page is leaving.
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(FakeEventSource.instances).toHaveLength(0);
+    expect(onMessage).not.toHaveBeenCalled();
+    unsubscribe();
+    close();
+  });
+
+  it('treats a 401 answer to the catch-up read as an ended session', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    stubFetchResponses([{ status: 401 }]);
+    const onSessionExpired = vi.fn();
+    const unsubscribe = httpTransport.onSessionExpired(onSessionExpired);
+    const close = httpTransport.subscribe(
+      '1',
+      () => undefined,
+      () => undefined,
+      () => undefined
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onSessionExpired).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(FakeEventSource.instances).toHaveLength(0);
+    unsubscribe();
+    close();
+  });
+
+  it('keeps retrying silently while the catch-up read fails with a server error', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    stubFetchResponses([{ status: 503 }, { status: 503 }, { status: 502 }]);
+    const onSessionExpired = vi.fn();
+    const unsubscribe = httpTransport.onSessionExpired(onSessionExpired);
+    const close = httpTransport.subscribe(
+      '1',
+      () => undefined,
+      () => undefined,
+      () => undefined
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    FakeEventSource.instances[0]?.refuse();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    FakeEventSource.instances[1]?.refuse();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(FakeEventSource.instances).toHaveLength(3);
+    // A module or a proxy that is down is not an ended session: no navigation.
+    expect(onSessionExpired).not.toHaveBeenCalled();
+    unsubscribe();
+    close();
+  });
+
+  it('keeps retrying silently while the catch-up read cannot reach the module', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const fetch = vi.fn(async () => {
+      throw new TypeError('Failed to fetch');
+    });
+    vi.stubGlobal('fetch', fetch);
+    const onSessionExpired = vi.fn();
+    const unsubscribe = httpTransport.onSessionExpired(onSessionExpired);
+    const close = httpTransport.subscribe(
+      '1',
+      () => undefined,
+      () => undefined,
+      () => undefined
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    FakeEventSource.instances[0]?.refuse();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(onSessionExpired).not.toHaveBeenCalled();
+    unsubscribe();
+    close();
   });
 
   it('stops retrying when the page unsubscribes', async () => {

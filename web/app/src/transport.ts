@@ -56,6 +56,38 @@ export function parseModelStatusFrame(data: string): ModelStatusEvent | null {
 
 export type SendResult = 'accepted' | 'conflict' | 'stale';
 
+/**
+ * A read proved the owner's session is gone: the loader's ForwardAuth answers
+ * a GET without a session with a redirect to its login page, and a request
+ * that is not a GET with a 401 (ADR-011 D6).
+ */
+export class SessionExpiredError extends Error {
+  constructor() {
+    super('The owner session has ended');
+    this.name = 'SessionExpiredError';
+  }
+}
+
+const sessionExpiredListeners = new Set<() => void>();
+
+function reportSessionExpired(): void {
+  for (const listener of [...sessionExpiredListeners]) listener();
+}
+
+/**
+ * A redirect the read was told not to follow (the browser reports it as an
+ * `opaqueredirect`, another fetch implementation as the 3xx itself), or a 401,
+ * is an ended session. A 5xx or a network failure is a module that is
+ * unavailable, which the page keeps retrying in silence.
+ */
+function isSessionExpired(response: { type: string; status: number }): boolean {
+  return (
+    response.type === 'opaqueredirect' ||
+    response.status === 401 ||
+    (response.status >= 300 && response.status < 400)
+  );
+}
+
 async function readTranscriptPage(
   before: string | undefined,
   after: string | undefined
@@ -63,7 +95,16 @@ async function readTranscriptPage(
   const query = new URLSearchParams({ limit: String(CATCH_UP_PAGE_SIZE) });
   if (before !== undefined) query.set('before', before);
   if (after !== undefined) query.set('after', after);
-  const response = await fetch(`/api/transcript?${query.toString()}`, { cache: 'no-store' });
+  const response = await fetch(`/api/transcript?${query.toString()}`, {
+    cache: 'no-store',
+    // The login redirect is the page's own business: it leaves with its draft
+    // saved, and a login page must never be read as a transcript.
+    redirect: 'manual',
+  });
+  if (isSessionExpired(response)) {
+    reportSessionExpired();
+    throw new SessionExpiredError();
+  }
   if (!response.ok) throw new Error(`Transcript request failed (${String(response.status)})`);
   const page = (await response.json()) as TranscriptPage;
   if (!Array.isArray(page.messages) || !(page.cursor === null || typeof page.cursor === 'string'))
@@ -83,6 +124,13 @@ const HEALTHY_STREAM_MS = 1_000;
 export interface WebTransport {
   sendMessage(input: MessageInput): Promise<SendResult>;
   readTranscript(before?: string, after?: string): Promise<TranscriptPage>;
+  /**
+   * Registers what the page does when a read proves the owner's session has
+   * ended (ADR-011 D6): the transport stops retrying and the page leaves for
+   * the loader's login, which brings it back to where it was. Returns the way
+   * to unregister.
+   */
+  onSessionExpired(listener: () => void): () => void;
   subscribe(
     after: string | null,
     onMessage: (message: TranscriptMessage) => void,
@@ -109,6 +157,12 @@ export const httpTransport: WebTransport = {
   },
   async readTranscript(before, after) {
     return await readTranscriptPage(before, after);
+  },
+  onSessionExpired(listener) {
+    sessionExpiredListeners.add(listener);
+    return () => {
+      sessionExpiredListeners.delete(listener);
+    };
   },
 
   /**
@@ -196,7 +250,14 @@ export const httpTransport: WebTransport = {
 
     const attempt = async () => {
       if (closed) return;
-      await catchUp().catch(() => undefined);
+      try {
+        await catchUp();
+      } catch (error) {
+        // An ended session is not a failed stream to retry: the page is
+        // already leaving for the login, and a retry would meet the same
+        // redirect.
+        if (error instanceof SessionExpiredError) return;
+      }
       if (closed) return;
       open();
     };

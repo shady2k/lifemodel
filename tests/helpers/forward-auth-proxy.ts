@@ -1,16 +1,27 @@
-import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http';
+import {
+  createServer,
+  request as httpRequest,
+  type IncomingMessage,
+  type ServerResponse,
+} from 'node:http';
 import type { Socket } from 'node:net';
 
 /**
  * A stand-in for the platform ingress with ForwardAuth in front of the web
- * module (ADR-011 D3, ADR-012). While `refuse` is set it answers every
- * request with a non-200 — what the owner's browser gets from Traefik while
- * the loader pod that answers `/_auth/verify` is being replaced — and it can
- * drop the connections it holds, as replacing the upstream does.
+ * module (ADR-011 D3, ADR-012).
+ *
+ * - While `refuse` is set it answers a 503, what the owner's browser gets from
+ *   Traefik while the loader pod that answers `/_auth/verify` is being
+ *   replaced: the module is not the problem, the answer is nobody's.
+ * - While `redirectToLogin` is set it answers the loader's own answer to a GET
+ *   without a session: a 303 to the login page, carrying where it was going
+ *   (`loader/src/auth.ts` `loginLocation`). The session is gone.
+ * - It can drop the connections it holds, as replacing the upstream does.
  */
 export interface ForwardAuthProxy {
   base: string;
   refuse: boolean;
+  redirectToLogin: boolean;
   /** Ends every open connection: the rolled-out upstream is gone. */
   dropConnections(): void;
   close(): Promise<void>;
@@ -22,6 +33,7 @@ export async function createForwardAuthProxy(targetPort: number): Promise<Forwar
   const proxy: ForwardAuthProxy = {
     base: '',
     refuse: false,
+    redirectToLogin: false,
     dropConnections: () => {
       for (const socket of [...sockets, ...upstreams]) socket.destroy();
       sockets.clear();
@@ -34,8 +46,16 @@ export async function createForwardAuthProxy(targetPort: number): Promise<Forwar
   };
   const server = createServer((incoming: IncomingMessage, outgoing: ServerResponse) => {
     if (proxy.refuse) {
-      outgoing.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' });
-      outgoing.end('<html><body>Invalid authentication credentials</body></html>');
+      outgoing.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8' });
+      outgoing.end('<html><body>Service Unavailable</body></html>');
+      return;
+    }
+    if (proxy.redirectToLogin && incoming.method === 'GET') {
+      const location = new URL(
+        'https://boot-lifemodel.local/login?next=https%3A%2F%2Flifemodel.local%2F'
+      );
+      outgoing.writeHead(303, { Location: location.toString(), 'Cache-Control': 'no-store' });
+      outgoing.end();
       return;
     }
     const upstream = httpRequest(

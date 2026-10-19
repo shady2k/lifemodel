@@ -267,6 +267,7 @@ describe('transcript rendering contract', () => {
       sendMessage: vi.fn().mockResolvedValue('accepted'),
       readTranscript: vi.fn().mockResolvedValue({ messages, cursor: messages.length ? '1' : null }),
       subscribe: vi.fn().mockReturnValue(() => undefined),
+      onSessionExpired: vi.fn().mockReturnValue(() => undefined),
     };
     render(<Conversation transport={transport} />);
     if (messages.length) expect(await screen.findByText(expected)).toBeTruthy();
