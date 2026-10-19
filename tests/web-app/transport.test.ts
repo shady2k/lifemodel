@@ -163,6 +163,191 @@ describe('web transport contract', () => {
     close();
   });
 
+  it('catches up from the start of the transcript when the page had no rows', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const calls = stubFetch([{ messages: [row('2', 'the question')], cursor: '2' }]);
+    const onMessage = vi.fn();
+    const close = httpTransport.subscribe(
+      null,
+      onMessage,
+      () => undefined,
+      () => undefined
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    // An empty page has no cursor: the catch-up reads the transcript ascending
+    // from its start, never the store's newest-first latest page.
+    expect(calls).toEqual(['/api/transcript?limit=50&after=0']);
+    expect(onMessage).toHaveBeenCalledWith(row('2', 'the question'));
+    // The row the catch-up read is the resume cursor of the stream that follows.
+    expect(FakeEventSource.instances[0]?.url).toBe('/api/events?after=2');
+    close();
+  });
+
+  it('doubles the retry wait to a 15 s cap, with half of it as jitter', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    stubFetch([]);
+    const close = httpTransport.subscribe(
+      '1',
+      () => undefined,
+      () => undefined,
+      () => undefined
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    // Half of each step is fixed and half is jitter: with random at 0.5 the
+    // wait is three quarters of the step.
+    for (const step of [500, 1_000, 2_000, 4_000, 8_000, 15_000, 15_000, 15_000]) {
+      const before = FakeEventSource.instances.length;
+      FakeEventSource.instances.at(-1)?.refuse();
+      const wait = (step * 3) / 4;
+      await vi.advanceTimersByTimeAsync(wait - 1);
+      expect(FakeEventSource.instances).toHaveLength(before);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(FakeEventSource.instances).toHaveLength(before + 1);
+    }
+    close();
+  });
+
+  it('uses the whole step as the jitter range', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.spyOn(Math, 'random').mockReturnValue(0.999);
+    stubFetch([]);
+    const close = httpTransport.subscribe(
+      '1',
+      () => undefined,
+      () => undefined,
+      () => undefined
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    FakeEventSource.instances.at(-1)?.refuse();
+    // Just under the whole 500 ms step, and past its half.
+    await vi.advanceTimersByTimeAsync(498);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(2);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    close();
+  });
+
+  it('keeps the grown wait when a stream fails immediately after opening', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    stubFetch([]);
+    const close = httpTransport.subscribe(
+      '1',
+      () => undefined,
+      () => undefined,
+      () => undefined
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    for (const step of [500, 1_000, 2_000]) {
+      FakeEventSource.instances.at(-1)?.refuse();
+      await vi.advanceTimersByTimeAsync(step / 2);
+    }
+    // The fourth stream opens and fails inside the healthy interval: a flapping
+    // server must not fall back to the base rate. Three failures put the step
+    // at 4 s, so this retry waits its half of the step, 2 s.
+    const fourth = FakeEventSource.instances.at(-1);
+    expect(FakeEventSource.instances).toHaveLength(4);
+    fourth?.open();
+    await vi.advanceTimersByTimeAsync(10);
+    fourth?.refuse();
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(FakeEventSource.instances).toHaveLength(4);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(FakeEventSource.instances).toHaveLength(5);
+    close();
+  });
+
+  it('starts the retry wait over after a stream stayed healthy', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    stubFetch([]);
+    const close = httpTransport.subscribe(
+      '1',
+      () => undefined,
+      () => undefined,
+      () => undefined
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    for (const step of [500, 1_000, 2_000]) {
+      FakeEventSource.instances.at(-1)?.refuse();
+      await vi.advanceTimersByTimeAsync(step / 2);
+    }
+    const healthy = FakeEventSource.instances.at(-1);
+    expect(FakeEventSource.instances).toHaveLength(4);
+    healthy?.open();
+    // A stream that stayed open past the healthy interval proves the server
+    // admits streams again, so the grown wait starts over at its base.
+    await vi.advanceTimersByTimeAsync(1_000);
+    healthy?.refuse();
+    await vi.advanceTimersByTimeAsync(249);
+    expect(FakeEventSource.instances).toHaveLength(4);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(FakeEventSource.instances).toHaveLength(5);
+    close();
+  });
+
+  it('drops the pending retry the moment the page unsubscribes', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    stubFetch([]);
+    const onMessage = vi.fn();
+    const close = httpTransport.subscribe(
+      '1',
+      onMessage,
+      () => undefined,
+      () => undefined
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(0);
+    FakeEventSource.instances.at(-1)?.refuse();
+    // The retry is scheduled, and nothing else in the page's transport is.
+    expect(vi.getTimerCount()).toBe(1);
+    close();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(onMessage).not.toHaveBeenCalled();
+  });
+
+  it('abandons an in-flight catch-up when the page unsubscribes', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    let answer!: (page: TranscriptPage) => void;
+    const pending = new Promise<TranscriptPage>((resolve) => {
+      answer = resolve;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, json: async () => await pending }))
+    );
+    const onMessage = vi.fn();
+    const close = httpTransport.subscribe(
+      '1',
+      onMessage,
+      () => undefined,
+      () => undefined
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(FakeEventSource.instances).toHaveLength(0);
+    close();
+    // The page has gone: the answer it was waiting for must not open a stream
+    // or render a row.
+    answer({ messages: [row('2', 'late')], cursor: '2' });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(FakeEventSource.instances).toHaveLength(0);
+    expect(onMessage).not.toHaveBeenCalled();
+  });
+
   it('stops retrying when the page unsubscribes', async () => {
     vi.useFakeTimers();
     vi.stubGlobal('EventSource', FakeEventSource);
