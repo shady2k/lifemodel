@@ -5,6 +5,8 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { AgenticLoop } from '../../../src/layers/cognition/agentic-loop.js';
+import { CognitionProcessor } from '../../../src/layers/cognition/processor.js';
+import type { SimpleCompletionRequest } from '../../../src/layers/cognition/agentic-loop-types.js';
 import { buildRequest } from '../../../src/layers/cognition/loop-orchestrator.js';
 import { createLLMAdapter } from '../../../src/layers/cognition/llm-adapter.js';
 import type {
@@ -82,6 +84,74 @@ describe('the conversation a model request names', () => {
     await loop.run(makeContext({ recipientId: 'rcpt_ab12cd34' }));
     expect(llm.completeWithTools).toHaveBeenCalledTimes(1);
     expect(vi.mocked(llm.completeWithTools).mock.calls[0]?.[0].sessionId).toBe('rcpt_ab12cd34');
+  });
+
+  it('hands a simple completion session to the provider and leaves a request without one alone', async () => {
+    const seen: CompletionRequest[] = [];
+    const provider: LLMProvider = {
+      name: 'capture',
+      isAvailable: () => true,
+      complete: (request: CompletionRequest): Promise<CompletionResponse> => {
+        seen.push(request);
+        return Promise.resolve({ content: 'OK', model: 'm' });
+      },
+    };
+    const adapter = createLLMAdapter(provider, makeLogger(), { role: 'fast' });
+    await adapter.complete(
+      { systemPrompt: 's', userPrompt: 'u', sessionId: 'rcpt_ab12cd34' },
+      { maxTokens: 16 }
+    );
+    await adapter.complete({ systemPrompt: 's', userPrompt: 'u' }, { maxTokens: 16 });
+    expect(seen[0]?.sessionId).toBe('rcpt_ab12cd34');
+    expect(seen[1]?.sessionId).toBeUndefined();
+  });
+
+  it('names the compacted conversation on its summary request', async () => {
+    const completions: SimpleCompletionRequest[] = [];
+    const llm = {
+      complete: (request: SimpleCompletionRequest): Promise<string> => {
+        completions.push(request);
+        return Promise.resolve('- the owner asked how the day went');
+      },
+      completeWithTools: () => Promise.reject(new Error('the loop is not used here')),
+    };
+    const conversationManager = {
+      needsCompaction: () => Promise.resolve(true),
+      getCompactionSnapshot: () =>
+        Promise.resolve({
+          messagesToCompact: [
+            { role: 'user', content: 'hi' },
+            { role: 'assistant', content: 'hello' },
+          ],
+          totalMessageCount: 2,
+        }),
+      compactMessages: () => Promise.resolve(true),
+      getHistory: () => Promise.resolve([]),
+      getStatus: () => Promise.resolve({ status: 'idle', lastMessageAt: new Date() }),
+      getLastUserMessageTime: () => Promise.resolve(null),
+      addCompletedAction: () => Promise.resolve(undefined),
+      getRecentActions: () => Promise.resolve([]),
+    };
+    const memoryProvider = {
+      getLatestByKind: () => Promise.resolve(null),
+      save: () => Promise.resolve('mem-1'),
+    };
+    const processor = new CognitionProcessor(
+      makeLogger() as never,
+      {},
+      {
+        cognitionLLM: llm as never,
+        conversationManager: conversationManager as never,
+        memoryProvider: memoryProvider as never,
+      }
+    );
+    // The compaction check is the processor's own non-blocking step; this test
+    // drives it directly so its request can be asserted.
+    await (
+      processor as unknown as { triggerCompactionIfNeeded(id: string): Promise<void> }
+    ).triggerCompactionIfNeeded('rcpt_ab12cd34');
+    expect(completions).toHaveLength(1);
+    expect(completions[0]?.sessionId).toBe('rcpt_ab12cd34');
   });
 
   it('hands the request session to the provider and leaves a request without one alone', async () => {

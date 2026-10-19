@@ -800,6 +800,8 @@ Rules:
 - Source attribution: only attribute goals, projects, or plans to the user if they explicitly stated them. Do not attribute external content (news digests, feed items, third-party posts) as user goals or intentions.
 - Output 6-10 short bullet lines. Plain text only, no markdown headers.`,
           userPrompt,
+          // The summary belongs to this conversation: it names it upstream too.
+          sessionId: chatId,
         },
         { maxTokens: 320, temperature: 0.2 }
       );

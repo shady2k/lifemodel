@@ -93,6 +93,7 @@ export class LLMAdapter implements CognitionLLM {
         maxTokens: options?.maxTokens ?? 5000,
         temperature: options?.temperature ?? this.config.temperature,
         ...(options?.timeoutMs !== undefined && { timeoutMs: options.timeoutMs }),
+        ...(request.sessionId !== undefined && { sessionId: request.sessionId }),
       };
 
       // Select model based on useSmart flag

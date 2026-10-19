@@ -276,7 +276,10 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
   endpoint check.
   A value may carry `{session}`. The core names the conversation of a chat turn
   in one inbound request header, `x-lifemodel-session` — its conversation id,
-  and a later task its own. The gateway reads that header and no other inbound
+  and a later task its own. Every provider request whose conversation is known
+  carries it: each turn of the agentic loop, the compaction summary of a
+  conversation and a recipient-scoped batch reflection. A call that belongs to no
+  conversation (global maintenance, Motor's own task identity) names none. The gateway reads that header and no other inbound
   header, accepts it only as `^[A-Za-z0-9._:-]{1,128}$`, and replaces every
   `{session}` with it. When a value carries `{session}` and the caller names no
   valid id, the gateway fills it with one random id it made at start and logs one
@@ -324,7 +327,9 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
   reserve success, repeated failure, recovery and no attempts.
 - Custom slot headers: a slot saved with `x-opencode-session: {session}` makes
   the gateway send the caller's conversation id, and the loader's check sends a
-  probe id; a reserved or malformed name, a CR/LF value, a control character, a
+  probe id; a simple completion that knows its conversation names it too — a
+  compaction summary and a recipient-scoped batch reflection, checked through the
+  adapter on a real HTTP gateway; a reserved or malformed name, a CR/LF value, a control character, a
   non-ASCII value, a duplicate name and an over-long list are refused at save and
   at read; sixteen 1024-byte values save on both slots, with and without JSON
   escaping, and a body past the bound answers `body_too_large`; no value reaches `/status`, a

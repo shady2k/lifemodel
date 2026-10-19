@@ -67,6 +67,8 @@ export interface SimpleCompletionRequest {
   systemPrompt: string;
   /** User prompt */
   userPrompt: string;
+  /** The conversation this request belongs to (see CompletionRequest) */
+  sessionId?: string;
 }
 
 /**
