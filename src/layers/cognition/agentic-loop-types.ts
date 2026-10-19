@@ -40,6 +40,9 @@ export interface ToolCompletionRequest {
 
   /** Response format (JSON mode for structured output when toolChoice is 'none') */
   responseFormat?: ResponseFormat;
+
+  /** The conversation this request belongs to (see CompletionRequest) */
+  sessionId?: string;
 }
 
 /**
@@ -64,6 +67,8 @@ export interface SimpleCompletionRequest {
   systemPrompt: string;
   /** User prompt */
   userPrompt: string;
+  /** The conversation this request belongs to (see CompletionRequest) */
+  sessionId?: string;
 }
 
 /**

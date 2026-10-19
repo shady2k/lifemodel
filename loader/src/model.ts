@@ -7,14 +7,22 @@ import type { ClientRequest } from 'node:http';
 import { modelEndpointUrl } from './model-url.js';
 
 export type ModelSlotName = 'primary' | 'reserve';
+/** One additional header the slot sends upstream, in the owner's own order. */
+export interface ModelSlotHeader {
+  name: string;
+  value: string;
+}
 export interface ModelSlot {
   kind: 'openai' | 'ollama';
   baseUrl: string;
   model: string;
   key?: string;
+  headers?: ModelSlotHeader[];
 }
-export interface ModelSlotView extends Omit<ModelSlot, 'key'> {
+export interface ModelSlotView extends Omit<ModelSlot, 'key' | 'headers'> {
   keySet: boolean;
+  /** The stored header names only: a header value never leaves the slot store. */
+  headerNames: string[];
 }
 /** The slot's own KV v2 identity: the version that holds it, or its absence. */
 export type SlotIdentity = { version: number } | 'absent';
@@ -27,10 +35,154 @@ export type SlotRead = { state: 'present'; slot: ModelSlot; version: number } | 
 export function slotIdentity(read: SlotRead): SlotIdentity {
   return read.state === 'present' ? { version: read.version } : 'absent';
 }
+/**
+ * The shortest static part — the value with every `{session}` removed — that
+ * D4's response inspectors treat as credential material (ADR-013, the
+ * custom-headers amendment). A shorter value (`1`, `true`, a version, a bare
+ * `{session}`) collides with ordinary replies, so it is not matched: the guard
+ * is a heuristic against echo, not proof of secrecy.
+ */
+export const MIN_HEADER_SECRET_BYTES = 16;
 export interface ModelSlots {
   read(slot: ModelSlotName): Promise<ModelSlot | null>;
   write(slot: ModelSlotName, value: ModelSlot): Promise<void>;
   clearReserve(): Promise<void>;
+}
+/** At most this many additional headers on a slot. */
+export const MAX_SLOT_HEADERS = 16;
+/** The longest accepted header name, in characters. */
+export const MAX_SLOT_HEADER_NAME = 64;
+/** The longest accepted header value, in bytes. */
+export const MAX_SLOT_HEADER_VALUE = 1024;
+/**
+ * The largest slot save body the declared maxima can produce: sixteen entries
+ * whose value is 1024 bytes of quote or backslash characters, which JSON escapes
+ * to 2048, with room for the name, the entry envelope and the slot's own fields
+ * (ADR-013, the custom-headers amendment).
+ */
+export const MAX_SLOT_BODY =
+  MAX_SLOT_HEADERS * (MAX_SLOT_HEADER_NAME + 2 * MAX_SLOT_HEADER_VALUE + 64) + 8 * 1024;
+/** An RFC 9110 token: the only shape a header name may have. */
+const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+/**
+ * What Node can put in an outgoing header value: HTAB and printable US-ASCII.
+ * A non-ASCII value is refused rather than encoded — Node rejects it before the
+ * wire, and a UTF-8 secret sent as Latin-1 would not be the same secret.
+ */
+const HEADER_VALUE = /^[\t\x20-\x7e]*$/;
+/**
+ * Names the gateway sets itself, and the hop-by-hop and cookie headers a
+ * request must never carry from a slot: a custom header can never replace
+ * `host`, `content-type`, `accept`, `authorization` or `content-length`.
+ */
+const RESERVED_HEADERS = new Set([
+  'host',
+  'authorization',
+  'proxy-authorization',
+  'content-length',
+  'content-type',
+  'accept',
+  'connection',
+  'keep-alive',
+  'transfer-encoding',
+  'te',
+  'trailer',
+  'upgrade',
+  'expect',
+  'cookie',
+]);
+export type SlotHeaderErrorCode =
+  | 'header_shape_invalid'
+  | 'header_name_invalid'
+  | 'header_name_reserved'
+  | 'header_value_invalid'
+  | 'header_duplicate'
+  | 'header_too_many';
+/** A refused header list, named by the rule it broke. */
+export class SlotHeaderError extends Error {
+  constructor(readonly code: SlotHeaderErrorCode) {
+    super(code);
+    this.name = 'SlotHeaderError';
+  }
+}
+/**
+ * The header list a slot may carry, or the rule it breaks (ADR-013, the
+ * custom-headers amendment). Enforced where the slot is saved and again where
+ * the gateway reads it: a slot that breaks a rule is refused, never trimmed.
+ */
+export function validateSlotHeaders(input: unknown): ModelSlotHeader[] {
+  if (!Array.isArray(input)) throw new SlotHeaderError('header_shape_invalid');
+  if (input.length > MAX_SLOT_HEADERS) throw new SlotHeaderError('header_too_many');
+  const seen = new Set<string>();
+  const headers: ModelSlotHeader[] = [];
+  for (const item of input) {
+    if (typeof item !== 'object' || item === null || Array.isArray(item))
+      throw new SlotHeaderError('header_shape_invalid');
+    const entry = item as Record<string, unknown>;
+    if (
+      Object.keys(entry).some((field) => field !== 'name' && field !== 'value') ||
+      typeof entry['name'] !== 'string' ||
+      typeof entry['value'] !== 'string'
+    )
+      throw new SlotHeaderError('header_shape_invalid');
+    const name = entry['name'];
+    const value = entry['value'];
+    if (name.length > MAX_SLOT_HEADER_NAME || !HEADER_NAME.test(name))
+      throw new SlotHeaderError('header_name_invalid');
+    const lower = name.toLowerCase();
+    if (RESERVED_HEADERS.has(lower) || lower.startsWith('proxy-'))
+      throw new SlotHeaderError('header_name_reserved');
+    if (seen.has(lower)) throw new SlotHeaderError('header_duplicate');
+    if (!HEADER_VALUE.test(value) || Buffer.byteLength(value, 'utf8') > MAX_SLOT_HEADER_VALUE)
+      throw new SlotHeaderError('header_value_invalid');
+    seen.add(lower);
+    headers.push({ name, value });
+  }
+  return headers;
+}
+/** The request header the core names its session in (ADR-013 amendment). */
+export const SESSION_HEADER = 'x-lifemodel-session';
+/** The placeholder a slot value may carry in place of the session id. */
+export const SESSION_PLACEHOLDER = '{session}';
+/** The session id the loader's own model check sends in place of a caller's. */
+export const CHECK_SESSION_ID = 'lifemodel-model-check';
+const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+/** The caller's session id, or nothing when the header is missing or malformed. */
+export function validSessionId(value: unknown): string | undefined {
+  return typeof value === 'string' && SESSION_ID.test(value) ? value : undefined;
+}
+/** A header value with every `{session}` filled from the caller's session id. */
+export function renderHeaderValue(value: string, sessionId: string): string {
+  return value.split(SESSION_PLACEHOLDER).join(sessionId);
+}
+/**
+ * One render of the slot's own headers, each `{session}` filled from this
+ * session id, in the owner's order: the map sent upstream and the rendered
+ * values that answer may never echo (ADR-013, the custom-headers amendment). A
+ * caller sets its own host, content type, accept, authorization and content
+ * length over the map, so a value can never replace one of those.
+ *
+ * The map has no prototype, so every accepted token is an own property: a token
+ * named `__proto__` would otherwise reach Object.prototype's legacy setter
+ * instead of the wire.
+ */
+export function renderAttemptHeaders(
+  slot: ModelSlot,
+  sessionId: string
+): { headers: Record<string, string>; secrets: string[] } {
+  const headers = Object.create(null) as Record<string, string>;
+  const secrets: string[] = [];
+  for (const header of slot.headers ?? []) {
+    const value = renderHeaderValue(header.value, sessionId);
+    headers[header.name] = value;
+    const staticPart = header.value.split(SESSION_PLACEHOLDER).join('');
+    if (Buffer.byteLength(staticPart, 'utf8') >= MIN_HEADER_SECRET_BYTES) secrets.push(value);
+  }
+  return { headers, secrets };
+}
+/** The slot's own headers for this session id, without the echo guard's material. */
+export function renderSlotHeaders(slot: ModelSlot, sessionId: string): Record<string, string> {
+  return renderAttemptHeaders(slot, sessionId).headers;
 }
 export type ModelErrorCode =
   | 'unreachable'
@@ -136,7 +288,8 @@ export interface ModelCheckerOptions {
     url: URL,
     address: string,
     body: string,
-    key?: string
+    key?: string,
+    headers?: Record<string, string>
   ) => Promise<{ status: number; body: string }>;
 }
 export function createModelChecker(
@@ -157,9 +310,21 @@ export function createModelChecker(
       max_tokens: 4,
       stream: false,
     });
+    // The check sends the slot's own headers too, with `{session}` filled from
+    // a fixed probe id: the endpoint may need the same header the gateway will
+    // send later (ADR-013, the custom-headers amendment).
+    const headers = renderSlotHeaders(slot, CHECK_SESSION_ID);
     const result = options.request
-      ? await options.request(endpoint, address, payload, slot.key)
-      : await requestBounded(endpoint, address, payload, slot.key, deadline, options.tlsCa);
+      ? await options.request(endpoint, address, payload, slot.key, headers)
+      : await requestBounded(
+          endpoint,
+          address,
+          payload,
+          slot.key,
+          headers,
+          deadline,
+          options.tlsCa
+        );
     if (result.status === 401 || result.status === 403) throw new ModelCheckError('auth_failed');
     if (result.status === 404) throw new ModelCheckError('model_not_found');
     if (result.status < 200 || result.status >= 300) throw new ModelCheckError('bad_response');
@@ -218,6 +383,7 @@ function requestBounded(
   address: string,
   body: string,
   key: string | undefined,
+  custom: Record<string, string>,
   deadline: number,
   tlsCa?: string | Buffer
 ): Promise<{ status: number; body: string }> {
@@ -235,6 +401,7 @@ function requestBounded(
           ? { servername: url.hostname, ...(tlsCa === undefined ? {} : { ca: tlsCa }) }
           : {}),
         headers: {
+          ...custom,
           host: url.host,
           'content-type': 'application/json',
           accept: 'application/json',
@@ -285,6 +452,10 @@ function requestBounded(
 }
 export function publicSlot(slot: ModelSlot | null): ModelSlotView | null {
   if (slot === null) return null;
-  const { key, ...safe } = slot;
-  return { ...safe, keySet: key !== undefined };
+  const { key, headers, ...safe } = slot;
+  return {
+    ...safe,
+    keySet: key !== undefined,
+    headerNames: (headers ?? []).map((header) => header.name),
+  };
 }

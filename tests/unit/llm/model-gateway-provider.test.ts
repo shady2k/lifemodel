@@ -11,6 +11,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { VercelAIProvider } from '../../../src/plugins/providers/vercel-ai-provider.js';
+import { createLLMAdapter } from '../../../src/layers/cognition/llm-adapter.js';
 import { DEFAULT_ROLE_MODEL, LLMError } from '../../../src/llm/provider.js';
 import { createTestLogger } from '../../helpers/test-logger.js';
 
@@ -242,5 +243,36 @@ describe('the core provider in front of the model gateway', () => {
     // Nothing new arrives on the gateway: the reported timeout ended the turn.
     expect(gateway.requests).toHaveLength(1);
     expect(gateway.requests[0]?.path).toBe('/v1/chat/completions');
+  });
+
+  it('names a simple completion conversation through the adapter on the wire', async () => {
+    const gateway = await gatewayWith(answerOnce('hello'));
+    const provider = providerFor(gateway.baseUrl);
+    const adapter = createLLMAdapter(provider, createTestLogger('silent'), { role: 'fast' });
+
+    const answer = await adapter.complete(
+      { systemPrompt: 's', userPrompt: 'u', sessionId: 'rcpt_ab12cd34' },
+      { maxTokens: 16 }
+    );
+    await adapter.complete({ systemPrompt: 's', userPrompt: 'u' }, { maxTokens: 16 });
+
+    expect(answer).toBe('hello');
+    expect(gateway.requests[0]?.headers['x-lifemodel-session']).toBe('rcpt_ab12cd34');
+    expect(gateway.requests[1]?.headers['x-lifemodel-session']).toBeUndefined();
+    // A simple completion sends no tools and no Authorization.
+    expect(JSON.parse(gateway.requests[0]?.body ?? '{}').tools).toBeUndefined();
+  });
+
+  it('names the turn conversation in one request header and none when it has none', async () => {
+    const gateway = await gatewayWith(answerOnce('hello'));
+    const provider = providerFor(gateway.baseUrl);
+
+    await provider.complete({ ...REQUEST, sessionId: 'rcpt_ab12cd34' });
+    await provider.complete(REQUEST);
+
+    expect(gateway.requests).toHaveLength(2);
+    expect(gateway.requests[0]?.headers['x-lifemodel-session']).toBe('rcpt_ab12cd34');
+    expect(gateway.requests[1]?.headers['x-lifemodel-session']).toBeUndefined();
+    expect(gateway.requests[0]?.headers['authorization']).toBeUndefined();
   });
 });

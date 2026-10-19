@@ -71,6 +71,15 @@ export function isEndpointComplete(endpoint: ModelEndpoint): boolean {
  */
 export const PINNED_MODEL_BASE_URL_ENV = 'LIFEMODEL_MODEL_BASE_URL';
 
+/**
+ * The request header the core names its conversation in (ADR-013, the
+ * custom-headers amendment). The platform's model gateway reads this one
+ * inbound header and fills a slot header value's `{session}` placeholder with
+ * it; the core names the conversation of a chat turn, and a later task passes
+ * its own. The gateway keeps its rule of forwarding no other inbound header.
+ */
+export const MODEL_SESSION_HEADER = 'x-lifemodel-session';
+
 /** The pinned base URL, or null when the platform pins none. */
 export function pinnedModelBaseUrl(env: NodeJS.ProcessEnv = process.env): string | null {
   const value = (env[PINNED_MODEL_BASE_URL_ENV] ?? '').trim();

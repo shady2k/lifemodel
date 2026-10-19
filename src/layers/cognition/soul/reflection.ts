@@ -801,6 +801,10 @@ export async function processBatchReflection(
       return;
     }
 
+    // The batch belongs to one conversation: its request names it upstream too
+    // (ADR-013, the custom-headers amendment).
+    const conversationId = items[0]?.recipientId;
+
     // Call LLM with batch + conversation context
     const result = await callBatchReflectionLLM(
       llm,
@@ -809,6 +813,7 @@ export async function processBatchReflection(
       existingRules,
       conversationContext,
       log,
+      conversationId,
       deps.agentIdentity
     );
 
@@ -899,6 +904,7 @@ async function callBatchReflectionLLM(
   existingRules: { id: string; rule: string }[],
   conversationContext: ConversationMessage[],
   logger: Logger,
+  conversationId: string | undefined,
   agentIdentity?: { name: string; gender: string }
 ): Promise<BatchReflectionResult> {
   // Build compact self-model summary (truncated to 500 chars)
@@ -972,7 +978,14 @@ ${responseList}
 Score each response's dissonance.`;
 
   try {
-    const response = await llm.complete({ systemPrompt, userPrompt }, { maxTokens: 8192 });
+    const response = await llm.complete(
+      {
+        systemPrompt,
+        userPrompt,
+        ...(conversationId !== undefined && { sessionId: conversationId }),
+      },
+      { maxTokens: 8192 }
+    );
     return parseBatchReflectionResponse(response, items, existingRules, logger);
   } catch (error) {
     logger.warn(

@@ -683,4 +683,43 @@ describe('gateway slot cache', () => {
     fails = true;
     await expect(cache.read('primary')).resolves.toEqual(present());
   });
+
+  it('reads a stored header list and refuses a slot whose headers break the rule', async () => {
+    const f = await fixture();
+    const headers = [{ name: 'x-opencode-session', value: '{session}' }];
+    f.reply = { data: { data: { ...slot(), headers }, metadata: { version: 3 } } };
+    await expect(f.client.readSlot('primary')).resolves.toEqual({
+      state: 'present',
+      slot: { ...slot(), headers },
+      version: 3,
+    });
+    for (const refused of [
+      [{ name: 'authorization', value: 'Bearer x' }],
+      [{ name: 'x-a', value: 'line\r\nbreak' }],
+      [{ name: 'x-a', value: 'Привет' }],
+      [{ name: 'x-a', value: 'del\u007f' }],
+      [
+        { name: 'x-a', value: '1' },
+        { name: 'X-A', value: '2' },
+      ],
+      [{ name: 'x-a', value: 'v', extra: true }],
+      'not-a-list',
+      [{ name: 'x-a' }],
+    ]) {
+      f.reply = { data: { data: { ...slot(), headers: refused }, metadata: { version: 3 } } };
+      await expect(f.client.readSlot('primary')).rejects.toMatchObject({ code: 'unreachable' });
+    }
+  });
+  it('offers only the key: a header value is rendered and pinned by its own attempt', async () => {
+    const cache = createCachedSlotReader(async () => ({
+      state: 'present' as const,
+      slot: {
+        ...slot(),
+        headers: [{ name: 'x-a', value: 'the-header-value' }],
+      },
+      version: 1,
+    }));
+    await cache.read('primary');
+    expect(cache.keys()).toEqual(['slot-secret']);
+  });
 });

@@ -144,6 +144,14 @@ export interface CompletionRequest {
 
   /** Per-request timeout override in ms (provider uses its default if omitted) */
   timeoutMs?: number;
+
+  /**
+   * The conversation this request belongs to, named to the platform's model
+   * gateway in the `x-lifemodel-session` header, which fills a slot's
+   * `{session}` placeholder from it (ADR-013, the custom-headers amendment).
+   * Absent when the caller belongs to no conversation.
+   */
+  sessionId?: string;
 }
 
 /**

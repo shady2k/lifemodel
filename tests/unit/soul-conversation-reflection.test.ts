@@ -170,6 +170,28 @@ describe('conversation-aware batch reflection', () => {
     });
   });
 
+  it('names the batch conversation on its single LLM request', async () => {
+    const items = [createPendingItem({ recipientId: 'user-42' })];
+    const deps = buildDeps(items, {
+      conversationManager: createMockConversationManager([]),
+    });
+
+    await processBatchReflection(deps);
+
+    const llmCall = deps._llm.complete.mock.calls[0]![0] as { sessionId?: string };
+    expect(llmCall.sessionId).toBe('user-42');
+  });
+
+  it('names the batch conversation even without a conversation manager', async () => {
+    const items = [createPendingItem({ recipientId: 'user-7' })];
+    const deps = buildDeps(items);
+
+    await processBatchReflection(deps);
+
+    const llmCall = deps._llm.complete.mock.calls[0]![0] as { sessionId?: string };
+    expect(llmCall.sessionId).toBe('user-7');
+  });
+
   it('works without conversationManager (graceful degradation)', async () => {
     const items = [createPendingItem()];
     const deps = buildDeps(items); // no conversationManager

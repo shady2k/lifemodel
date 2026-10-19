@@ -732,6 +732,139 @@ describe('loader UI', () => {
     expect(screen.getByLabelText('Model name', { selector: '#reserve-model' })).toHaveValue('');
   });
 
+  it.each([
+    ['en-US', 'Additional headers', 'Saved headers'],
+    ['ru-RU', 'Дополнительные заголовки', 'Сохранённые заголовки'],
+  ] as const)(
+    'shows the additional headers section in %s, masked and axe clean',
+    async (locale, section, stored) => {
+      Object.defineProperty(navigator, 'language', { configurable: true, value: locale });
+      fetchMock.mockImplementation(async (url: string) =>
+        url === '/api/state'
+          ? {
+              ok: true,
+              json: async () => ({
+                setupNeeded: false,
+                loggedIn: true,
+                csrfToken: 'csrf',
+                onboarding: { step: 'model', completedAt: null },
+              }),
+            }
+          : url === '/api/model'
+            ? {
+                ok: true,
+                json: async () => ({
+                  primary: {
+                    kind: 'openai',
+                    baseUrl: 'https://primary.example',
+                    model: 'p',
+                    keySet: true,
+                    headerNames: ['x-opencode-session'],
+                  },
+                  reserve: null,
+                }),
+              }
+            : { ok: true, json: async () => ({}) }
+      );
+      const { container } = render(<App />);
+      const toggle = await screen.findByRole('button', { name: section });
+      expect(toggle).toHaveAttribute('aria-expanded', 'false');
+      const list = screen.getByRole('list', { name: stored });
+      expect(list.textContent).toContain('x-opencode-session');
+      expect(list.textContent).toContain('\u2022\u2022\u2022\u2022\u2022\u2022');
+      expect(list.textContent).not.toContain('{session}');
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute('aria-expanded', 'true');
+      const hint = screen.getByText(/\{session\}/);
+      expect(hint.textContent).toContain('{session}');
+      expect(
+        screen.getByRole('button', {
+          name: locale.startsWith('ru') ? 'Добавить заголовок' : 'Add header',
+        })
+      ).toBeTruthy();
+      expect(await axe(container)).toHaveNoViolations();
+    }
+  );
+
+  it('sends the rows typed, keeps stored headers when untouched and clears them on removal', async () => {
+    const puts: string[] = [];
+    fetchMock.mockImplementation(async (url: string, options?: RequestInit) => {
+      if (url === '/api/state')
+        return {
+          ok: true,
+          json: async () => ({
+            setupNeeded: false,
+            loggedIn: true,
+            csrfToken: 'csrf',
+            onboarding: { step: 'done', completedAt: 'now' },
+          }),
+        };
+      if (url === '/api/model')
+        return {
+          ok: true,
+          json: async () => ({
+            primary: {
+              kind: 'openai',
+              baseUrl: 'https://primary.example',
+              model: 'p',
+              keySet: true,
+              headerNames: ['x-opencode-session'],
+            },
+            reserve: null,
+          }),
+        };
+      if (url === '/api/model/primary' && options?.method === 'PUT') {
+        puts.push(String(options.body));
+        return { ok: true, json: async () => ({ ok: true }) };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Settings' });
+    const submit = () =>
+      fireEvent.submit(
+        screen.getByLabelText('Model name', { selector: '#model' }).closest('form')!
+      );
+    // Untouched: no header list is sent, so the stored one is kept.
+    await act(async () => {
+      submit();
+    });
+    await waitFor(() => expect(puts).toHaveLength(1));
+    expect(JSON.parse(puts[0]!)).toEqual({
+      kind: 'openai',
+      baseUrl: 'https://primary.example',
+      model: 'p',
+    });
+    // A row typed by the owner is sent as is, `{session}` included.
+    fireEvent.click(screen.getByRole('button', { name: 'Additional headers' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add header' }));
+    fireEvent.change(screen.getByLabelText('Header name 1'), {
+      target: { value: 'x-opencode-session' },
+    });
+    fireEvent.change(screen.getByLabelText('Header value 1'), {
+      target: { value: '{session}' },
+    });
+    await act(async () => {
+      submit();
+    });
+    await waitFor(() => expect(puts).toHaveLength(2));
+    expect(JSON.parse(puts[1]!).headers).toEqual([
+      { name: 'x-opencode-session', value: '{session}' },
+    ]);
+    // The stored headers can be cleared explicitly, and only explicitly.
+    fireEvent.click(screen.getByRole('button', { name: 'Clear saved headers' }));
+    await act(async () => {
+      submit();
+    });
+    await waitFor(() => expect(puts).toHaveLength(3));
+    expect(JSON.parse(puts[2]!).headers).toEqual([]);
+    // A row can be added and removed again.
+    fireEvent.click(screen.getByRole('button', { name: 'Add header' }));
+    expect(screen.getByLabelText('Header name 1')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove header 1' }));
+    expect(screen.queryByLabelText('Header name 1')).toBeNull();
+  });
+
   it('resumes the device step from server state after reload and done uses the app handoff URL', async () => {
     fetchMock.mockImplementation(async (url: string) =>
       url === '/api/state'

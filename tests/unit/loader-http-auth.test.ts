@@ -11,7 +11,15 @@ import { loadConfig } from '../../loader/src/config.js';
 import { createSession, hashPassword, verifySession } from '../../loader/src/auth.js';
 import { createTestClock } from '../../loader/src/clock.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
-import { ModelCheckError, type ModelSlots, type ModelSlot } from '../../loader/src/model.js';
+import {
+  MAX_SLOT_BODY,
+  MAX_SLOT_HEADER_VALUE,
+  MAX_SLOT_HEADERS,
+  ModelCheckError,
+  type ModelSlots,
+  type ModelSlot,
+  type ModelSlotHeader,
+} from '../../loader/src/model.js';
 import type { LoaderState } from '../../loader/src/state.js';
 
 const SERVICE_HOST = 'loader.lifemodel-system.svc.cluster.local';
@@ -1295,7 +1303,7 @@ describe('loader static UI and JSON API', () => {
         expect((await request(base, route.path, good, route.method, body)).status).toBe(400);
       }
       expect(
-        (await request(base, route.path, good, route.method, ' '.repeat(16 * 1024 + 1))).status
+        (await request(base, route.path, good, route.method, ' '.repeat(MAX_SLOT_BODY + 1))).status
       ).toBe(413);
     }
     for (const route of ['/api/model', '/api/model/primary', '/api/model/reserve']) {
@@ -1494,6 +1502,290 @@ describe('loader static UI and JSON API', () => {
         ).status
       ).not.toBe(200);
     }
+  });
+
+  it('saves, keeps and explicitly clears slot headers, and refuses each broken rule', async () => {
+    const record = await hashPassword('owner password');
+    let saved: ModelSlot | null = null;
+    const slots: ModelSlots = {
+      read: async () => (saved === null ? null : structuredClone(saved)),
+      write: async (_slot, slot) => {
+        saved = structuredClone(slot);
+      },
+      clearReserve: async () => {
+        saved = null;
+      },
+    };
+    const checked: ModelSlot[] = [];
+    const { base, clock } = await start(record, undefined, slots, async (slot) => {
+      checked.push(structuredClone(slot));
+    });
+    const cookie = `__Host-lm_session=${createSession(record, clock.now())}`;
+    const csrf = JSON.parse(
+      (await request(base, '/api/state', { host: 'boot-lifemodel.local', cookie })).body
+    ).csrfToken as string;
+    const headers = {
+      host: 'boot-lifemodel.local',
+      cookie,
+      origin: 'https://boot-lifemodel.local',
+      'content-type': 'application/json',
+      'x-csrf-token': csrf,
+    };
+    const candidate = {
+      kind: 'openai',
+      baseUrl: 'https://models.example/v1',
+      model: 'good',
+      key: 'secret-key',
+      headers: [
+        { name: 'x-opencode-session', value: '{session}' },
+        { name: 'x-static', value: 'static-value' },
+      ],
+    };
+    const savedResponse = await request(
+      base,
+      '/api/model/primary',
+      headers,
+      'PUT',
+      JSON.stringify(candidate)
+    );
+    expect(savedResponse.status).toBe(200);
+    expect(saved?.headers).toEqual(candidate.headers);
+    expect(checked.at(-1)?.headers).toEqual(candidate.headers);
+    const read = await request(base, '/api/model', {
+      host: 'boot-lifemodel.local',
+      cookie,
+      origin: 'https://boot-lifemodel.local',
+    });
+    for (const body of [savedResponse.body, read.body]) {
+      expect(body).toContain('x-opencode-session');
+      expect(body).toContain('x-static');
+      expect(body).not.toContain('{session}');
+      expect(body).not.toContain('static-value');
+      expect(body).not.toContain('secret-key');
+    }
+    const kept = await request(
+      base,
+      '/api/model/primary',
+      headers,
+      'PUT',
+      JSON.stringify({ kind: 'openai', baseUrl: 'https://models.example/v1', model: 'kept' })
+    );
+    expect(kept.status).toBe(200);
+    expect(saved?.headers).toEqual(candidate.headers);
+    expect(saved?.key).toBe('secret-key');
+    // A value Node really sends: a tab and printable US-ASCII are accepted.
+    const tabbed = await request(
+      base,
+      '/api/model/primary',
+      headers,
+      'PUT',
+      JSON.stringify({ ...candidate, headers: [{ name: 'x-tab', value: 'a\tb' }] })
+    );
+    expect(tabbed.status).toBe(200);
+    expect(saved?.headers).toEqual([{ name: 'x-tab', value: 'a\tb' }]);
+    const cleared = await request(
+      base,
+      '/api/model/primary',
+      headers,
+      'PUT',
+      JSON.stringify({ ...candidate, headers: [] })
+    );
+    expect(cleared.status).toBe(200);
+    expect(saved?.headers).toEqual([]);
+    const refused: Array<[unknown, string]> = [
+      [[{ name: 'authorization', value: 'Bearer override' }], 'header_name_reserved'],
+      [[{ name: 'Host', value: 'other.example' }], 'header_name_reserved'],
+      [[{ name: 'proxy-x', value: 'v' }], 'header_name_reserved'],
+      [[{ name: ':path', value: '/v1' }], 'header_name_invalid'],
+      [[{ name: 'bad name', value: 'v' }], 'header_name_invalid'],
+      [[{ name: 'a'.repeat(65), value: 'v' }], 'header_name_invalid'],
+      [[{ name: 'x-a', value: 'line\r\nbreak' }], 'header_value_invalid'],
+      [[{ name: 'x-a', value: 'Привет' }], 'header_value_invalid'],
+      [[{ name: 'x-a', value: 'a\u0001b' }], 'header_value_invalid'],
+      [[{ name: 'x-a', value: 'del\u007f' }], 'header_value_invalid'],
+      [[{ name: 'x-a', value: 'a'.repeat(1025) }], 'header_value_invalid'],
+      [
+        [
+          { name: 'x-a', value: '1' },
+          { name: 'X-A', value: '2' },
+        ],
+        'header_duplicate',
+      ],
+      [
+        Array.from({ length: 17 }, (_, index) => ({ name: `x-h-${String(index)}`, value: 'v' })),
+        'header_too_many',
+      ],
+      ['not-a-list', 'header_shape_invalid'],
+      [[{ name: 'x-a' }], 'header_shape_invalid'],
+    ];
+    for (const [list, code] of refused) {
+      const response = await request(
+        base,
+        '/api/model/primary',
+        headers,
+        'PUT',
+        JSON.stringify({ ...candidate, headers: list })
+      );
+      expect(response.status).toBe(400);
+      expect(JSON.parse(response.body)).toEqual({ error: code });
+      expect(response.body).not.toContain('secret-key');
+    }
+    expect(saved?.headers).toEqual([]);
+  });
+
+  it('keeps the reserve headers when a save omits them and through a key change', async () => {
+    const record = await hashPassword('owner password');
+    const saved: Record<'primary' | 'reserve', ModelSlot | null> = { primary: null, reserve: null };
+    const slots: ModelSlots = {
+      read: async (slot) => saved[slot],
+      write: async (slot, value) => {
+        saved[slot] = structuredClone(value);
+      },
+      clearReserve: async () => {
+        saved.reserve = null;
+      },
+    };
+    const { base, clock } = await start(record, undefined, slots, async () => {});
+    const cookie = `__Host-lm_session=${createSession(record, clock.now())}`;
+    const csrf = JSON.parse(
+      (await request(base, '/api/state', { host: 'boot-lifemodel.local', cookie })).body
+    ).csrfToken as string;
+    const headers = {
+      host: 'boot-lifemodel.local',
+      cookie,
+      origin: 'https://boot-lifemodel.local',
+      'content-type': 'application/json',
+      'x-csrf-token': csrf,
+    };
+    const reserveHeaders: ModelSlotHeader[] = [
+      { name: 'x-opencode-session', value: '{session}' },
+      { name: 'x-tenant', value: 'tenant-a' },
+    ];
+    const saved1 = await request(
+      base,
+      '/api/model/reserve',
+      headers,
+      'PUT',
+      JSON.stringify({
+        kind: 'openai',
+        baseUrl: 'https://models.example/v1',
+        model: 'reserve-model',
+        key: 'reserve-key',
+        headers: reserveHeaders,
+      })
+    );
+    expect(saved1.status).toBe(200);
+    expect(saved.reserve?.headers).toEqual(reserveHeaders);
+    // An omitted list keeps the stored one, and the new key replaces the old.
+    const keyChanged = await request(
+      base,
+      '/api/model/reserve',
+      headers,
+      'PUT',
+      JSON.stringify({
+        kind: 'openai',
+        baseUrl: 'https://models.example/v1',
+        model: 'reserve-model',
+        key: 'rotated-reserve-key',
+      })
+    );
+    expect(keyChanged.status).toBe(200);
+    expect(saved.reserve?.headers).toEqual(reserveHeaders);
+    expect(saved.reserve?.key).toBe('rotated-reserve-key');
+    // The same omission keeps a cleared list cleared.
+    expect(
+      (
+        await request(
+          base,
+          '/api/model/reserve',
+          headers,
+          'PUT',
+          JSON.stringify({
+            kind: 'openai',
+            baseUrl: 'https://models.example/v1',
+            model: 'reserve-model',
+            headers: [],
+          })
+        )
+      ).status
+    ).toBe(200);
+    expect(saved.reserve?.headers).toEqual([]);
+    expect(saved.reserve?.key).toBe('rotated-reserve-key');
+    expect(
+      (
+        await request(
+          base,
+          '/api/model/reserve',
+          headers,
+          'PUT',
+          JSON.stringify({
+            kind: 'openai',
+            baseUrl: 'https://models.example/v1',
+            model: 'reserve-model',
+          })
+        )
+      ).status
+    ).toBe(200);
+    expect(saved.reserve?.headers).toEqual([]);
+    expect(saved.reserve?.key).toBe('rotated-reserve-key');
+  });
+
+  it('saves a header list at the declared maxima on both slots, JSON escaping included', async () => {
+    const record = await hashPassword('owner password');
+    const saved: Record<'primary' | 'reserve', ModelSlot | null> = { primary: null, reserve: null };
+    const slots: ModelSlots = {
+      read: async (slot) => saved[slot],
+      write: async (slot, value) => {
+        saved[slot] = structuredClone(value);
+      },
+      clearReserve: async () => {
+        saved.reserve = null;
+      },
+    };
+    const checked: ModelSlot[] = [];
+    const { base, clock } = await start(record, undefined, slots, async (slot) => {
+      checked.push(structuredClone(slot));
+    });
+    const cookie = `__Host-lm_session=${createSession(record, clock.now())}`;
+    const csrf = JSON.parse(
+      (await request(base, '/api/state', { host: 'boot-lifemodel.local', cookie })).body
+    ).csrfToken as string;
+    const headers = {
+      host: 'boot-lifemodel.local',
+      cookie,
+      origin: 'https://boot-lifemodel.local',
+      'content-type': 'application/json',
+      'x-csrf-token': csrf,
+    };
+    const lists: ModelSlotHeader[][] = [
+      // Sixteen values at the byte bound.
+      Array.from({ length: MAX_SLOT_HEADERS }, (_, index) => ({
+        name: `x-header-${String(index)}`,
+        value: 'a'.repeat(MAX_SLOT_HEADER_VALUE),
+      })),
+      // Sixteen values of quotes and backslashes: their JSON text is twice as large.
+      Array.from({ length: MAX_SLOT_HEADERS }, (_, index) => ({
+        name: `x-escaped-${String(index)}`,
+        value: '"\\'.repeat(MAX_SLOT_HEADER_VALUE / 2),
+      })),
+    ];
+    for (const list of lists)
+      for (const route of ['/api/model/primary', '/api/model/reserve'] as const) {
+        const body = JSON.stringify({
+          kind: 'openai',
+          baseUrl: 'https://models.example/v1',
+          model: 'm',
+          key: 'secret-key',
+          headers: list,
+        });
+        // The declared maxima are exactly what a save must accept.
+        expect(Buffer.byteLength(body)).toBeGreaterThan(16 * 1024);
+        expect(Buffer.byteLength(body)).toBeLessThanOrEqual(MAX_SLOT_BODY);
+        const response = await request(base, route, headers, 'PUT', body);
+        expect(response.status).toBe(200);
+        expect(saved[route.endsWith('/primary') ? 'primary' : 'reserve']?.headers).toEqual(list);
+      }
+    expect(checked.at(-1)?.headers).toEqual(lists[1]);
   });
 
   it('rejects only the concurrent check for the same slot and advances onboarding only for saved primary', async () => {

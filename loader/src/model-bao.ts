@@ -4,7 +4,9 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import {
   slotIdentity,
+  validateSlotHeaders,
   type ModelSlot,
+  type ModelSlotHeader,
   type ModelSlotName,
   type SlotIdentity,
   type SlotRead,
@@ -254,7 +256,21 @@ export function createRoleBaoClient(options: RoleBaoOptions) {
       version < 1
     )
       throw failure('unreachable');
-    return { state: 'present', slot: value as unknown as ModelSlot, version };
+    // A stored header list that breaks the rule is refused here too: a slot
+    // written before it could not be written now never reaches an upstream.
+    let headers: ModelSlotHeader[] | undefined;
+    if (value['headers'] !== undefined) {
+      try {
+        headers = validateSlotHeaders(value['headers']);
+      } catch {
+        throw failure('unreachable');
+      }
+    }
+    return {
+      state: 'present',
+      slot: { ...(value as unknown as ModelSlot), ...(headers ? { headers } : {}) },
+      version,
+    };
   }
   return {
     call,
@@ -286,9 +302,14 @@ export function createCachedSlotReader(
   const pending = new Map<ModelSlotName, Promise<SlotRead>>();
   const generations = new Map<ModelSlotName, number>();
   return {
+    /**
+     * The cached slots' keys: material no response may contain. A header value
+     * is rendered for the attempt that sends it and pinned by that attempt, so
+     * the cache cannot offer it without a session id.
+     */
     keys(): string[] {
       return [...cache.values()].flatMap(({ value }) =>
-        value.state === 'present' && value.slot.key ? [value.slot.key] : []
+        value.state === 'present' && value.slot.key !== undefined ? [value.slot.key] : []
       );
     },
     invalidate(slot: ModelSlotName) {

@@ -46,6 +46,10 @@ accepted by the owner on 2026-10-19 (lifemodel-3wi9, ADR-012):
   it), model access (an OpenAI-compatible or Ollama endpoint checked safely and
   saved to OpenBao in the same request), and "this device" (the chat address,
   the CA certificate's SHA-256 fingerprint and its download), then the chat.
+  A slot may also carry additional headers: a collapsed section of name and
+  value rows, where `{session}` in a value reaches the endpoint as the
+  conversation id. A saved header is shown by its name with the value masked,
+  because a value is secret like the key (ADR-013, custom headers).
 - **Afterwards, settings:** the primary and the optional reserve model, the
   model's connection line from the gateway's `/status` (ADR-013 D6) — including
   "model saved — waiting for the first request" while the state is `unknown`
