@@ -90,7 +90,12 @@ async function fixture(primary: Behavior, reserve: Behavior) {
   const callbacks: Array<() => void> = [];
   const active = new Set<ReturnType<typeof setTimeout>>();
   const app = createModelGateway({
-    slots: { read: async (name) => slots[name], invalidate: () => {}, keys: () => [] },
+    slots: {
+      read: async (name) => ({ state: 'present', slot: slots[name]!, version: 1 }),
+      identity: async () => ({ version: 1 }),
+      invalidate: () => {},
+      keys: () => [],
+    },
     logger: createRecordingLogger([]),
     timers: {
       set: ((fn: () => void) => {
