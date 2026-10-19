@@ -238,12 +238,13 @@ export function createModelGateway(options: GatewayOptions) {
       recheck.bound
     );
     if (current === undefined) return;
-    const changed = failing.filter((name, index) => {
+    const changed: ModelSlotName[] = [];
+    for (const [index, name] of failing.entries()) {
       const before = recorded[index];
       const after = current[index];
-      if (before === undefined || after === undefined) return false;
-      return !sameIdentity(before, after);
-    });
+      if (before === undefined || after === undefined) continue;
+      if (!sameIdentity(before, after)) changed.push(name);
+    }
     for (const name of changed) {
       health[name] = { lastErrorCode: null, lastErrorAt: null };
       identities[name] = undefined;
