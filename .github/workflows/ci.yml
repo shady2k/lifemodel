@@ -7,7 +7,9 @@
 # publishes only that core image on every push to main and is the only job that
 # asks for packages: write. The platform loader image is built by the release
 # workflow and, without pushing it, by `ci-loader-image` on pull requests that
-# touch its inputs. There is no Docker-run instance image or host-side test
+# touch its inputs. `ci-nix` runs `nix flake check` on pull requests that touch
+# what the flake reads, so a broken platform resource list cannot merge green
+# (lifemodel-lut.3.6). There is no Docker-run instance image or host-side test
 # exception.
 #
 # `--no-renames` in the first job is not a detail: `git diff --name-only`
@@ -73,6 +75,7 @@ jobs:
       product: ${{ steps.classify.outputs.product }}
       web_app: ${{ steps.classify.outputs.web_app }}
       loader_image: ${{ steps.classify.outputs.loader_image }}
+      nix_flake_check: ${{ steps.classify.outputs.nix_flake_check }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -136,6 +139,7 @@ jobs:
           echo "$verdict" >> "$GITHUB_OUTPUT"
           scripts/ci-web-provenance-paths.sh < "$out" >> "$GITHUB_OUTPUT"
           scripts/ci-loader-paths.sh < "$out" >> "$GITHUB_OUTPUT"
+          scripts/ci-nix-paths.sh < "$out" >> "$GITHUB_OUTPUT"
 
   # The product checks, as the one command a person runs before pushing. It is
   # skipped for a change that cannot touch product code and while a pull
@@ -452,3 +456,33 @@ jobs:
       - name: Remove the temporary loader build context
         if: always()
         run: rm -rf .docker-context
+
+  # Run `nix flake check` on pull requests whose changes reach what the flake
+  # reads, so a broken platform resource list fails here instead of passing
+  # green until the next local stage acceptance (lifemodel-lut.3.6; the
+  # owner's yes, 2026-10-19). Like ci-loader-image it asks for no write token,
+  # publishes nothing, and runs only when a selector says the change owes it:
+  # scripts/ci-nix-paths.sh reads the same classification the other selectors
+  # read, so the job stays rare — a change to anything the flake never reads
+  # skips it.
+  #
+  # The Nix installer is third-party code with the runner's whole trust, so it
+  # is pinned to a full commit SHA, with the release named beside it. No cache
+  # action: the check's builds are small evaluations and manifest renders, the
+  # job holds no cache token to write with, and a skipped job cannot come back
+  # to haunt a later required run.
+  ci-nix:
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.nix_flake_check == 'true') && !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Nix
+        uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31
+      - name: Check the flake with the build logs of its checks
+        run: nix flake check --print-build-logs

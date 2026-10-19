@@ -120,6 +120,31 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
     expect(job).not.toContain('packages: write');
   });
 
+  it('the nix check job runs the flake check without publishing or a write token', () => {
+    const ci = readFileSync(join(repoRoot, '.github/workflows/ci.yml'), 'utf8');
+    const start = ci.indexOf('\n  ci-nix:');
+    expect(start).toBeGreaterThan(0);
+    // The job body reaches to the next job header, or to the end of the file.
+    const job = ci.slice(start + 1).split(/\n(?=  [a-z][a-z0-9-]*:\n)/)[0];
+    expect(job).toContain('needs: changes');
+    expect(job).toContain("github.event_name == 'pull_request'");
+    expect(job).toContain("needs.changes.result != 'success'");
+    expect(job).toContain("needs.changes.outputs.nix_flake_check == 'true'");
+    expect(job).toContain('!github.event.pull_request.draft');
+    // The Nix installer is third-party: pinned to a full commit SHA, version
+    // named beside it, and the job holds no credential and no write authority.
+    expect(job).toMatch(/uses: cachix\/install-nix-action@[0-9a-f]{40} # v\d+/);
+    expect(job).toContain('persist-credentials: false');
+    expect(job).toContain('timeout-minutes:');
+    // The one command the job exists for: the flake's own checks with the
+    // build logs printed, nothing impure, nothing published.
+    expect(job).toContain('nix flake check --print-build-logs');
+    expect(job).not.toContain('--impure');
+    expect(job).not.toMatch(/docker login/);
+    expect(job).not.toContain('docker push');
+    expect(job).not.toContain('packages: write');
+  });
+
   it('puts pinned migration lint inside the required backlog job', () => {
     const ci = readFileSync(join(repoRoot, '.github/workflows/ci.yml'), 'utf8');
     const backlogStart = ci.indexOf('  ci-backlog:');

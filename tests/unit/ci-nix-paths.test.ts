@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const script = fileURLToPath(new URL('../../scripts/ci-nix-paths.sh', import.meta.url));
@@ -58,5 +59,42 @@ describe('nix flake check CI path classification', () => {
     // No records: no path was readable, so no path is evidence of safety —
     // the same rule the producer applies to its own empty input.
     expect(selectProducerOutput()).toBe('nix_flake_check=true');
+  });
+  it('selects the nix check for the unknown-range fallback the workflow runs', () => {
+    const workflow = readFileSync(
+      fileURLToPath(new URL('../../.github/workflows/ci.yml', import.meta.url)),
+      'utf8'
+    );
+    // The no-range branch writes the producer's output to the same file the
+    // selector reads, so what the fallback writes is exactly what the selector
+    // must classify.
+    expect(workflow).toContain('scripts/ci-product-paths.sh < /dev/null > "$out"');
+    expect(workflow).toContain('scripts/ci-nix-paths.sh < "$out" >> "$GITHUB_OUTPUT"');
+    // The real producer on no input — what the fallback writes — carries no
+    // records and a product verdict, and the real selector answers true on it.
+    const fallback = execFileSync('sh', [producer], { input: '', encoding: 'utf8' });
+    expect(fallback).not.toMatch(/^changed: /m);
+    expect(fallback).toMatch(/product=true\n$/);
+    expect(execFileSync('sh', [script], { input: fallback, encoding: 'utf8' }).trim()).toBe(
+      'nix_flake_check=true'
+    );
+  });
+  it('keeps the workflow producer-to-selector command contract intact', () => {
+    const workflow = readFileSync(
+      fileURLToPath(new URL('../../.github/workflows/ci.yml', import.meta.url)),
+      'utf8'
+    );
+    expect(workflow).toContain('scripts/ci-changed-paths.sh "$range" > "$out"');
+    expect(workflow).toContain('scripts/ci-product-paths.sh < /dev/null > "$out"');
+    expect(workflow).toContain('scripts/ci-nix-paths.sh < "$out" >> "$GITHUB_OUTPUT"');
+    expect(workflow).toContain('nix_flake_check: ${{ steps.classify.outputs.nix_flake_check }}');
+  });
+  it('gates the ci-nix job on the selector verdict', () => {
+    const workflow = readFileSync(
+      fileURLToPath(new URL('../../.github/workflows/ci.yml', import.meta.url)),
+      'utf8'
+    );
+    expect(workflow).toContain('  ci-nix:');
+    expect(workflow).toContain("needs.changes.outputs.nix_flake_check == 'true'");
   });
 });
