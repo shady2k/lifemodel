@@ -7,9 +7,14 @@ import {
 } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { once } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import {
+  renderHeaderValue,
   resolveModelDestination,
+  SESSION_HEADER,
+  SESSION_PLACEHOLDER,
   slotIdentity,
+  validSessionId,
   type ModelSlot,
   type ModelSlotName,
   type SlotIdentity,
@@ -207,6 +212,41 @@ export function createModelGateway(options: GatewayOptions) {
   const failingSlots = (): ModelSlotName[] =>
     slotNames.filter((name) => health[name].lastErrorCode !== null);
 
+  /**
+   * The upstream header set: the slot's own headers first, in the owner's
+   * order, each with every `{session}` filled from the caller; the gateway's
+   * own host, content type, accept, authorization and content length are then
+   * set over them, so a custom header can never replace one of those. A value
+   * that had to fall back to this process's own id is named in one log line,
+   * never with its value (ADR-013, the custom-headers amendment).
+   */
+  function upstreamHeaders(
+    slot: ModelSlot,
+    session: { id: string; callerNamed: boolean },
+    url: URL,
+    payload: Record<string, unknown> | undefined,
+    body: string | undefined
+  ): Record<string, string> {
+    const headers: Record<string, string> = {};
+    const fellBack: string[] = [];
+    for (const header of slot.headers ?? []) {
+      headers[header.name] = renderHeaderValue(header.value, session.id);
+      if (!session.callerNamed && header.value.includes(SESSION_PLACEHOLDER))
+        fellBack.push(header.name);
+    }
+    headers['host'] = url.host;
+    headers['content-type'] = 'application/json';
+    headers['accept'] = payload?.['stream'] === true ? 'text/event-stream' : 'application/json';
+    if (slot.key) headers['authorization'] = `Bearer ${slot.key}`;
+    if (body !== undefined) headers['content-length'] = String(Buffer.byteLength(body));
+    if (fellBack.length > 0)
+      options.logger.warn(
+        { headers: fellBack },
+        'Model gateway filled the session placeholder with its own process id'
+      );
+    return headers;
+  }
+
   /** Bound each caller's wait, not the lifetime of the shared Bao read batch. */
   function within(promise: Promise<void>): Promise<void> {
     return new Promise<void>((resolve) => {
@@ -290,6 +330,12 @@ export function createModelGateway(options: GatewayOptions) {
     return within(rechecking);
   }
 
+  /**
+   * The caller's session, as this request names it: the id it sent, or the one
+   * fixed id this process made at start (ADR-013, the custom-headers
+   * amendment). A value carrying `{session}` is filled from here.
+   */
+  const processSessionId = randomUUID();
   // Concurrent attempts retain their keys independently of cache eviction.
   const activeKeys = new Map<string, number>();
   const inspectedKeys = () => [...options.slots.keys(), ...activeKeys.keys()];
@@ -298,11 +344,12 @@ export function createModelGateway(options: GatewayOptions) {
     name: ModelSlotName,
     payload: Record<string, unknown> | undefined,
     res: ServerResponse,
-    signal: AbortSignal
+    signal: AbortSignal,
+    session: { id: string; callerNamed: boolean }
   ): Promise<void> {
     if (slot.key) activeKeys.set(slot.key, (activeKeys.get(slot.key) ?? 0) + 1);
     try {
-      await sendAttempt(slot, name, payload, res, signal);
+      await sendAttempt(slot, name, payload, res, signal, session);
     } finally {
       if (slot.key) {
         const remaining = (activeKeys.get(slot.key) ?? 1) - 1;
@@ -317,7 +364,8 @@ export function createModelGateway(options: GatewayOptions) {
     name: ModelSlotName,
     payload: Record<string, unknown> | undefined,
     res: ServerResponse,
-    signal: AbortSignal
+    signal: AbortSignal,
+    session: { id: string; callerNamed: boolean }
   ): Promise<void> {
     const startedAt = Date.now();
     const connectDeadline = startedAt + limits.connect;
@@ -358,13 +406,7 @@ export function createModelGateway(options: GatewayOptions) {
             ...(options.tlsCa === undefined ? {} : { ca: options.tlsCa }),
           }
         : {}),
-      headers: {
-        host: url.host,
-        'content-type': 'application/json',
-        accept: payload?.['stream'] === true ? 'text/event-stream' : 'application/json',
-        ...(slot.key ? { authorization: `Bearer ${slot.key}` } : {}),
-        ...(body === undefined ? {} : { 'content-length': Buffer.byteLength(body) }),
-      },
+      headers: upstreamHeaders(slot, session, url, payload, body),
     });
     // A permanent safe listener also handles destruction after the response event.
     req.on('error', () => {
@@ -487,6 +529,11 @@ export function createModelGateway(options: GatewayOptions) {
     };
     res.on('close', disconnect);
     const signal = controller.signal;
+    // The caller's session, read from this one inbound header and no other:
+    // an id it names only when it is well formed, otherwise this process's own
+    // fixed id (ADR-013, the custom-headers amendment).
+    const named = validSessionId(req.headers[SESSION_HEADER]);
+    const session = { id: named ?? processSessionId, callerNamed: named !== undefined };
     const requestStartedAt = new Date().toISOString();
     const recordFailure = (
       name: ModelSlotName,
@@ -533,7 +580,7 @@ export function createModelGateway(options: GatewayOptions) {
             throw new GatewayError('not_configured');
           }
           if (name === 'reserve') reserveAbsent = false;
-          await attempt(read.slot, name, payload, res, signal);
+          await attempt(read.slot, name, payload, res, signal, session);
           failureRevisions[name]++;
           outcomeRevision++;
           health.lastAttemptAt = requestStartedAt;

@@ -129,7 +129,8 @@ async function fixture(
   const url = await listen(app.api);
   const statusUrl = await listen(app.status);
   const post = (
-    payload: unknown = { model: 'default', messages: [{ role: 'user', content: 'Hi' }] }
+    payload: unknown = { model: 'default', messages: [{ role: 'user', content: 'Hi' }] },
+    extra: Record<string, string> = {}
   ) =>
     fetch(`${url}/v1/chat/completions`, {
       method: 'POST',
@@ -138,6 +139,7 @@ async function fixture(
         authorization: 'Bearer INBOUND-PRIVATE',
         cookie: 'PRIVATE-COOKIE',
         'x-forwarded-for': 'PRIVATE-FORWARDED',
+        ...extra,
       },
       body: JSON.stringify(payload),
     });
@@ -1606,5 +1608,119 @@ describe('model gateway clears a stale outage on a slot change', () => {
     const f = await fixture(undefined, undefined, { cache: 0 });
     expect(await statusOf(f)).toMatchObject({ state: 'unknown' });
     expect(f.reads).toEqual([]);
+  });
+});
+
+describe('model gateway custom slot headers', () => {
+  it('fills {session} from the caller and sends a static value as is, copying no other inbound header', async () => {
+    const f = await fixture();
+    f.slots.primary = {
+      ...f.slots.primary!,
+      headers: [
+        { name: 'x-opencode-session', value: '{session}' },
+        { name: 'x-static', value: 'static-value' },
+      ],
+    };
+    const response = await f.post(undefined, { 'x-lifemodel-session': 'conv-1' });
+    expect(response.status).toBe(200);
+    expect(f.attempts).toHaveLength(1);
+    expect(f.attempts[0]?.headers['x-opencode-session']).toBe('conv-1');
+    expect(f.attempts[0]?.headers['x-static']).toBe('static-value');
+    expect(f.attempts[0]?.headers['x-lifemodel-session']).toBeUndefined();
+    expect(f.attempts[0]?.headers['x-forwarded-for']).toBeUndefined();
+    expect(f.attempts[0]?.headers['cookie']).toBeUndefined();
+  });
+
+  it('never lets a custom header replace the gateway own host, content type, accept, authorization or length', async () => {
+    const f = await fixture();
+    await (await f.post()).text();
+    const first = f.attempts[0]?.headers ?? {};
+    const baseline = Object.keys(first).sort();
+    expect(first['authorization']).toBe('Bearer primary-SUPER-SECRET');
+    f.slots.primary = {
+      ...f.slots.primary!,
+      headers: [{ name: 'x-custom-a', value: '1' }],
+    };
+    f.cache.invalidate('primary');
+    await (await f.post()).text();
+    const headers = f.attempts[1]?.headers;
+    expect(headers?.['authorization']).toBe('Bearer primary-SUPER-SECRET');
+    expect(headers?.['content-type']).toBe('application/json');
+    expect(headers?.['accept']).toBe('application/json');
+    expect(String(headers?.['content-length'])).toBe(String(first['content-length']));
+    expect(headers?.['x-custom-a']).toBe('1');
+    expect(Object.keys(headers ?? {}).sort()).toEqual([...baseline, 'x-custom-a'].sort());
+  });
+
+  it('refuses a slot whose stored headers name a reserved header: nothing reaches an upstream', async () => {
+    const f = await fixture();
+    for (const name of ['primary', 'reserve'] as const)
+      f.slots[name] = {
+        ...f.slots[name]!,
+        headers: [{ name: 'Authorization', value: 'Bearer override' }],
+      };
+    const response = await f.post();
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      error: { type: 'gateway_error', code: 'storage_unavailable' },
+    });
+    expect(f.attempts).toEqual([]);
+    expect(f.attempts[0]?.headers['authorization']).toBeUndefined();
+  });
+
+  it('sends one fixed process id when the caller names none or a malformed one, logging without it', async () => {
+    const f = await fixture();
+    f.slots.primary = {
+      ...f.slots.primary!,
+      headers: [{ name: 'x-opencode-session', value: 'id-{session}' }],
+    };
+    expect((await f.post()).status).toBe(200);
+    expect((await f.post(undefined, { 'x-lifemodel-session': 'not a session id!' })).status).toBe(
+      200
+    );
+    expect((await f.post(undefined, { 'x-lifemodel-session': 'conv-1' })).status).toBe(200);
+    const fallback = f.attempts[0]?.headers['x-opencode-session'];
+    expect(fallback).toMatch(/^id-[0-9a-f-]{36}$/);
+    expect(f.attempts[1]?.headers['x-opencode-session']).toBe(fallback);
+    expect(f.attempts[2]?.headers['x-opencode-session']).toBe('id-conv-1');
+    const logged = JSON.stringify(f.lines);
+    expect(logged).not.toContain(String(fallback));
+    expect(logged).toContain('session placeholder');
+    // Only the two requests that had to fall back log the line.
+    expect(
+      f.lines.filter((line) => line.message.includes('session placeholder'))
+    ).toHaveLength(2);
+    expect(f.lines.map((line) => line.fields['header'])).not.toContain('id-conv-1');
+  });
+
+  it('never puts a header value in the status answer, a log line or a response', async () => {
+    const f = await fixture();
+    for (const name of ['primary', 'reserve'] as const) {
+      f.slots[name] = {
+        ...f.slots[name]!,
+        headers: [{ name: 'x-opencode-session', value: 'HEADER-SUPER-SECRET' }],
+      };
+      f.handlers[name] = (_req, res) =>
+        res.end(JSON.stringify(answer(name, 'echo HEADER-SUPER-SECRET')));
+    }
+    const response = await f.post();
+    expect(response.status).toBe(502);
+    expect(await response.text()).not.toContain('HEADER-SUPER-SECRET');
+    const status = await (await fetch(`${f.statusUrl}/status`)).text();
+    expect(status).not.toContain('HEADER-SUPER-SECRET');
+    expect(JSON.stringify(f.lines)).not.toContain('HEADER-SUPER-SECRET');
+  });
+
+  it('sends exactly the headers of today for a slot that carries none', async () => {
+    const f = await fixture();
+    await (await f.post()).text();
+    expect(Object.keys(f.attempts[0]?.headers ?? {}).sort()).toEqual([
+      'accept',
+      'authorization',
+      'connection',
+      'content-length',
+      'content-type',
+      'host',
+    ]);
   });
 });
