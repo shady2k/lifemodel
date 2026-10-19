@@ -74,6 +74,24 @@ owner direction of an initialized candidate promoted inside the same container
 "refuse when uncertain" carries over. The channel of this milestone is a web
 interface; Telegram comes later.
 
+## Closed 2026-10-19
+
+Closed by the owner on what it delivered ("веха перегружена", "Закрыть на
+сделанном"): **Your own instance you can talk to.** Accepted: outcomes 1-3
+(lifemodel-nwu, -ctc, -ggc); outcome 4 (lifemodel-q4x), walked again on k3s;
+the parts of outcome 5 built so far: the platform by one command (lifemodel-lut),
+the loader's first start with OpenBao and Gitea (lifemodel-ryr), the core
+without state of its own (lifemodel-avy), the model gateway (lifemodel-s9v5);
+outcome 8, the web chat (lifemodel-vhd) with the loader's interface
+(lifemodel-3wi9). Findings: 10 of 10.
+
+Moved: Motor Cortex and task execution (outcome 6) to `motor-1`
+(`docs/charters/motor-1.md`); generations, rollback and panic (the rest of
+outcome 5: lifemodel-pwe, -u8t, -b0r) to `generations-1`; self-change on
+request (outcome 7, lifemodel-n6r) to `self-change-1`. Deferred: the rest of
+lifemodel-2t5, lifemodel-e64 and the open findings not carried over. The text
+below is the charter as it stood.
+
 ## Outcomes
 
 Each outcome is one feature issue labelled `instance-1`, except outcome 5,
