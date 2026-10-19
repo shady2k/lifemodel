@@ -1496,6 +1496,122 @@ describe('loader static UI and JSON API', () => {
     }
   });
 
+  it('saves, keeps and explicitly clears slot headers, and refuses each broken rule', async () => {
+    const record = await hashPassword('owner password');
+    let saved: ModelSlot | null = null;
+    const slots: ModelSlots = {
+      read: async () => (saved === null ? null : structuredClone(saved)),
+      write: async (_slot, slot) => {
+        saved = structuredClone(slot);
+      },
+      clearReserve: async () => {
+        saved = null;
+      },
+    };
+    const checked: ModelSlot[] = [];
+    const { base, clock } = await start(record, undefined, slots, async (slot) => {
+      checked.push(structuredClone(slot));
+    });
+    const cookie = `__Host-lm_session=${createSession(record, clock.now())}`;
+    const csrf = JSON.parse(
+      (await request(base, '/api/state', { host: 'boot-lifemodel.local', cookie })).body
+    ).csrfToken as string;
+    const headers = {
+      host: 'boot-lifemodel.local',
+      cookie,
+      origin: 'https://boot-lifemodel.local',
+      'content-type': 'application/json',
+      'x-csrf-token': csrf,
+    };
+    const candidate = {
+      kind: 'openai',
+      baseUrl: 'https://models.example/v1',
+      model: 'good',
+      key: 'secret-key',
+      headers: [
+        { name: 'x-opencode-session', value: '{session}' },
+        { name: 'x-static', value: 'static-value' },
+      ],
+    };
+    const savedResponse = await request(
+      base,
+      '/api/model/primary',
+      headers,
+      'PUT',
+      JSON.stringify(candidate)
+    );
+    expect(savedResponse.status).toBe(200);
+    expect(saved?.headers).toEqual(candidate.headers);
+    expect(checked.at(-1)?.headers).toEqual(candidate.headers);
+    const read = await request(base, '/api/model', {
+      host: 'boot-lifemodel.local',
+      cookie,
+      origin: 'https://boot-lifemodel.local',
+    });
+    for (const body of [savedResponse.body, read.body]) {
+      expect(body).toContain('x-opencode-session');
+      expect(body).toContain('x-static');
+      expect(body).not.toContain('{session}');
+      expect(body).not.toContain('static-value');
+      expect(body).not.toContain('secret-key');
+    }
+    const kept = await request(
+      base,
+      '/api/model/primary',
+      headers,
+      'PUT',
+      JSON.stringify({ kind: 'openai', baseUrl: 'https://models.example/v1', model: 'kept' })
+    );
+    expect(kept.status).toBe(200);
+    expect(saved?.headers).toEqual(candidate.headers);
+    expect(saved?.key).toBe('secret-key');
+    const cleared = await request(
+      base,
+      '/api/model/primary',
+      headers,
+      'PUT',
+      JSON.stringify({ ...candidate, headers: [] })
+    );
+    expect(cleared.status).toBe(200);
+    expect(saved?.headers).toEqual([]);
+    const refused: Array<[unknown, string]> = [
+      [[{ name: 'authorization', value: 'Bearer override' }], 'header_name_reserved'],
+      [[{ name: 'Host', value: 'other.example' }], 'header_name_reserved'],
+      [[{ name: 'proxy-x', value: 'v' }], 'header_name_reserved'],
+      [[{ name: ':path', value: '/v1' }], 'header_name_invalid'],
+      [[{ name: 'bad name', value: 'v' }], 'header_name_invalid'],
+      [[{ name: 'a'.repeat(65), value: 'v' }], 'header_name_invalid'],
+      [[{ name: 'x-a', value: 'line\r\nbreak' }], 'header_value_invalid'],
+      [[{ name: 'x-a', value: 'a'.repeat(1025) }], 'header_value_invalid'],
+      [
+        [
+          { name: 'x-a', value: '1' },
+          { name: 'X-A', value: '2' },
+        ],
+        'header_duplicate',
+      ],
+      [
+        Array.from({ length: 17 }, (_, index) => ({ name: `x-h-${String(index)}`, value: 'v' })),
+        'header_too_many',
+      ],
+      ['not-a-list', 'header_shape_invalid'],
+      [[{ name: 'x-a' }], 'header_shape_invalid'],
+    ];
+    for (const [list, code] of refused) {
+      const response = await request(
+        base,
+        '/api/model/primary',
+        headers,
+        'PUT',
+        JSON.stringify({ ...candidate, headers: list })
+      );
+      expect(response.status).toBe(400);
+      expect(JSON.parse(response.body)).toEqual({ error: code });
+      expect(response.body).not.toContain('secret-key');
+    }
+    expect(saved?.headers).toEqual([]);
+  });
+
   it('rejects only the concurrent check for the same slot and advances onboarding only for saved primary', async () => {
     const record = await hashPassword('owner password');
     const saved: Record<string, ModelSlot | null> = { primary: null, reserve: null };

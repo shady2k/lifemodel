@@ -9,7 +9,7 @@ import { request as httpsRequest } from 'node:https';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import {
-  renderHeaderValue,
+  renderSlotHeaders,
   resolveModelDestination,
   SESSION_HEADER,
   SESSION_PLACEHOLDER,
@@ -227,13 +227,12 @@ export function createModelGateway(options: GatewayOptions) {
     payload: Record<string, unknown> | undefined,
     body: string | undefined
   ): Record<string, string> {
-    const headers: Record<string, string> = {};
-    const fellBack: string[] = [];
-    for (const header of slot.headers ?? []) {
-      headers[header.name] = renderHeaderValue(header.value, session.id);
-      if (!session.callerNamed && header.value.includes(SESSION_PLACEHOLDER))
-        fellBack.push(header.name);
-    }
+    const headers = renderSlotHeaders(slot, session.id);
+    const fellBack = session.callerNamed
+      ? []
+      : (slot.headers ?? [])
+          .filter((header) => header.value.includes(SESSION_PLACEHOLDER))
+          .map((header) => header.name);
     headers['host'] = url.host;
     headers['content-type'] = 'application/json';
     headers['accept'] = payload?.['stream'] === true ? 'text/event-stream' : 'application/json';

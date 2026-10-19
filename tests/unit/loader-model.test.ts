@@ -4,7 +4,11 @@ import { createServer as createHttpsServer, type Server as HttpsServer } from 'n
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { networkInterfaces } from 'node:os';
-import { createModelChecker, ModelCheckError } from '../../loader/src/model.js';
+import {
+  CHECK_SESSION_ID,
+  createModelChecker,
+  ModelCheckError,
+} from '../../loader/src/model.js';
 import { modelEndpointUrl } from '../../loader/src/model-url.js';
 
 const servers: Array<Server | HttpsServer> = [];
@@ -414,5 +418,75 @@ describe('complete model API bases', () => {
         `https://models.example${prefix}${endpoint}`
       );
     }
+  });
+  it('sends the slot custom headers upstream with a probe session id', async () => {
+    const seen: Array<Record<string, string | string[] | undefined>> = [];
+    const server = await listen((req, res) => {
+      seen.push(req.headers);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(validReply);
+    });
+    const check = createModelChecker();
+    await expect(
+      check({
+        kind: 'openai',
+        baseUrl: server.url,
+        model: 'm',
+        headers: [
+          { name: 'x-opencode-session', value: '{session}' },
+          { name: 'x-static', value: 'static-value' },
+        ],
+      })
+    ).resolves.toBeUndefined();
+    expect(seen[0]?.['x-opencode-session']).toBe(CHECK_SESSION_ID);
+    expect(seen[0]?.['x-static']).toBe('static-value');
+  });
+  it('sets its own host, content type, accept and authorization over the custom headers', async () => {
+    let seen: Record<string, string | string[] | undefined> = {};
+    const server = await listen((req, res) => {
+      seen = req.headers;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(validReply);
+    });
+    const check = createModelChecker();
+    await expect(
+      check({
+        kind: 'openai',
+        baseUrl: server.url,
+        model: 'm',
+        key: 'the-key',
+        headers: [
+          { name: 'host', value: 'other.example' },
+          { name: 'content-type', value: 'text/plain' },
+          { name: 'accept', value: 'text/plain' },
+          { name: 'authorization', value: 'Bearer override' },
+          { name: 'x-ok', value: 'yes' },
+        ],
+      })
+    ).resolves.toBeUndefined();
+    expect(seen['content-type']).toBe('application/json');
+    expect(seen['accept']).toBe('application/json');
+    expect(seen['authorization']).toBe('Bearer the-key');
+    expect(seen['x-ok']).toBe('yes');
+    expect(JSON.stringify(seen['host'])).toContain(new URL(server.url).hostname);
+  });
+  it('hands an injected request the rendered custom headers and the fixed probe id', async () => {
+    let received: Record<string, string> | undefined;
+    const check = createModelChecker({
+      resolveHost: async () => ['192.168.1.20'],
+      request: async (_url, _address, _body, _key, headers) => {
+        received = headers;
+        return { status: 200, body: validReply };
+      },
+    });
+    await expect(
+      check({
+        kind: 'openai',
+        baseUrl: 'http://models.lan/v1',
+        model: 'm',
+        headers: [{ name: 'x-opencode-session', value: '{session}' }],
+      })
+    ).resolves.toBeUndefined();
+    expect(received).toEqual({ 'x-opencode-session': CHECK_SESSION_ID });
   });
 });

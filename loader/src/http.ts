@@ -34,7 +34,10 @@ import {
   createModelChecker,
   ModelCheckError,
   publicSlot,
+  SlotHeaderError,
+  validateSlotHeaders,
   type ModelSlot,
+  type ModelSlotHeader,
   type ModelSlotName,
   type ModelSlots,
 } from './model.js';
@@ -598,7 +601,9 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         }
         const value = payload as Record<string, unknown>;
         if (
-          Object.keys(value).some((key) => !['kind', 'baseUrl', 'model', 'key'].includes(key)) ||
+          Object.keys(value).some(
+            (key) => !['kind', 'baseUrl', 'model', 'key', 'headers'].includes(key)
+          ) ||
           (value['kind'] !== 'openai' && value['kind'] !== 'ollama') ||
           typeof value['baseUrl'] !== 'string' ||
           typeof value['model'] !== 'string' ||
@@ -608,6 +613,26 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           res.writeHead(400);
           res.end('{"error":"invalid_body"}');
           return;
+        }
+        // A header list that breaks a rule is refused with the rule's own
+        // code, before the endpoint is checked (ADR-013, custom headers). An
+        // omitted list keeps the stored one, like the key; `[]` clears it.
+        let headers: ModelSlotHeader[] | undefined;
+        if (value['headers'] !== undefined) {
+          try {
+            headers = validateSlotHeaders(value['headers']);
+          } catch (error) {
+            res.writeHead(400, {
+              'content-type': 'application/json; charset=utf-8',
+              'cache-control': 'no-store',
+            });
+            res.end(
+              JSON.stringify({
+                error: error instanceof SlotHeaderError ? error.code : 'invalid_body',
+              })
+            );
+            return;
+          }
         }
         try {
           const old = await slots.read(slotName);
@@ -620,6 +645,11 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
               : value['key'] === undefined
                 ? {}
                 : { key: value['key'] }),
+            ...(headers !== undefined
+              ? { headers }
+              : old?.headers !== undefined
+                ? { headers: old.headers }
+                : {}),
           };
           if (modelChecks.has(slotName)) {
             res.writeHead(409);

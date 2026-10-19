@@ -144,6 +144,18 @@ export function validSessionId(value: unknown): string | undefined {
 export function renderHeaderValue(value: string, sessionId: string): string {
   return value.split(SESSION_PLACEHOLDER).join(sessionId);
 }
+/**
+ * The slot's own headers, each `{session}` filled from this session id, in the
+ * owner's order. A caller sets its own host, content type, accept,
+ * authorization and content length over them: a value can never replace one of
+ * those (ADR-013, the custom-headers amendment).
+ */
+export function renderSlotHeaders(slot: ModelSlot, sessionId: string): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const header of slot.headers ?? [])
+    headers[header.name] = renderHeaderValue(header.value, sessionId);
+  return headers;
+}
 export type ModelErrorCode =
   | 'unreachable'
   | 'tls'
@@ -248,7 +260,8 @@ export interface ModelCheckerOptions {
     url: URL,
     address: string,
     body: string,
-    key?: string
+    key?: string,
+    headers?: Record<string, string>
   ) => Promise<{ status: number; body: string }>;
 }
 export function createModelChecker(
@@ -269,9 +282,21 @@ export function createModelChecker(
       max_tokens: 4,
       stream: false,
     });
+    // The check sends the slot's own headers too, with `{session}` filled from
+    // a fixed probe id: the endpoint may need the same header the gateway will
+    // send later (ADR-013, the custom-headers amendment).
+    const headers = renderSlotHeaders(slot, CHECK_SESSION_ID);
     const result = options.request
-      ? await options.request(endpoint, address, payload, slot.key)
-      : await requestBounded(endpoint, address, payload, slot.key, deadline, options.tlsCa);
+      ? await options.request(endpoint, address, payload, slot.key, headers)
+      : await requestBounded(
+          endpoint,
+          address,
+          payload,
+          slot.key,
+          headers,
+          deadline,
+          options.tlsCa
+        );
     if (result.status === 401 || result.status === 403) throw new ModelCheckError('auth_failed');
     if (result.status === 404) throw new ModelCheckError('model_not_found');
     if (result.status < 200 || result.status >= 300) throw new ModelCheckError('bad_response');
@@ -330,6 +355,7 @@ function requestBounded(
   address: string,
   body: string,
   key: string | undefined,
+  custom: Record<string, string>,
   deadline: number,
   tlsCa?: string | Buffer
 ): Promise<{ status: number; body: string }> {
@@ -347,6 +373,7 @@ function requestBounded(
           ? { servername: url.hostname, ...(tlsCa === undefined ? {} : { ca: tlsCa }) }
           : {}),
         headers: {
+          ...custom,
           host: url.host,
           'content-type': 'application/json',
           accept: 'application/json',
