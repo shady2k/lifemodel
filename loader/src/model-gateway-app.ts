@@ -528,7 +528,7 @@ export function createModelGateway(options: GatewayOptions) {
             pending += character === '\r' ? '\n' : character;
             previousCR = character === '\r';
           }
-          if (Buffer.byteLength(pending) > MAX_BODY) throw new GatewayError('bad_response');
+          if (Buffer.byteLength(pending) > MAX_BODY) throw badResponse('frame_size', '');
           let end: number;
           while ((end = pending.indexOf('\n\n')) !== -1) {
             const frame = pending.slice(0, end);
@@ -585,6 +585,10 @@ export function createModelGateway(options: GatewayOptions) {
     const named = validSessionId(req.headers[SESSION_HEADER]);
     const session = { id: named ?? processSessionId, callerNamed: named !== undefined };
     const requestStartedAt = new Date().toISOString();
+    // The slot whose read or attempt a recorded failure came from: a slot read
+    // that fails belongs to that slot, not to the last one attempted (ADR-013
+    // D4). Optional absence never records a failure and never moves this.
+    let failureSlot: ModelSlotName | undefined;
     const recordFailure = (
       name: ModelSlotName,
       code: string,
@@ -595,6 +599,7 @@ export function createModelGateway(options: GatewayOptions) {
       // The identity this failure names, for the change the re-check looks for.
       identities[name] = identity;
       failureRevisions[name]++;
+      failureSlot = name;
     };
     let last = new GatewayError('not_configured');
     let activeSlot: ModelSlotName = 'primary';
@@ -670,7 +675,7 @@ export function createModelGateway(options: GatewayOptions) {
         health.outageSince ??= new Date().toISOString();
         health.lastErrorCode = failure.code;
         options.logger.warn(
-          { code: failure.code, slot: activeSlot, reason: failure.reason },
+          { code: failure.code, slot: failureSlot ?? activeSlot, reason: failure.reason },
           'Model gateway request failed'
         );
       }
@@ -680,7 +685,7 @@ export function createModelGateway(options: GatewayOptions) {
           req.destroy();
         });
       }
-      ownedError(res, failure, activeSlot);
+      ownedError(res, failure, failureSlot ?? activeSlot);
     } finally {
       activeRequests--;
       cancel(timer);

@@ -302,12 +302,17 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
   failure names the slot that was really attempted: the active slot moves to a slot only when its
   attempt starts, so with the primary failing and no reserve configured, the warn line, the
   `x-lifemodel-slot` error header and `/status` name `primary`, and with a configured reserve
-  failing they name `reserve`. When an upstream answer is refused as `bad_response` or
+  failing they name `reserve`; a slot read that fails is attributed to the slot whose read failed,
+  so a reserve read that comes back unavailable after a primary attempt failure names `reserve`
+  on every surface. When an upstream answer is refused as `bad_response` or
   `unsafe_response`, the warn line also carries a safe reason: a fixed check code, a JSON path
   with array indexes into the answer, and, when the check is about a type, only the JSON type name
   that was found (for example `{check: "tool_calls_type", path: "choices[0].message.tool_calls",
   got: "string"}`) — never a value, a key or any other string from the body, and never in
-  `/status`, whose safe shape is unchanged.
+  `/status`, whose safe shape is unchanged. A stream reason names the choice's array position in
+  the frame being checked, with `.delta` between the choice and its fields; accumulated answer or
+  tool state keeps the position where it first appeared; a model-listing id failure ends in
+  `.id`.
 - ADR-010: model requests leave through the platform-owned `model-gateway`
   over synchronous HTTP, not through `cmd.egress` events and Agent Vault;
   the egress gateway of ADR-010 remains the design for tool and Motor egress

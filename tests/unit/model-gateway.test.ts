@@ -2094,3 +2094,241 @@ describe('model gateway null tool_calls, slot attribution and safe reasons', () 
     expect(logged).not.toContain('CANARY');
   });
 });
+
+describe('model gateway review round 2: safe reasons, stream positions, slot attribution', () => {
+  const failed = 'Model gateway request failed';
+  /** The fields of the one warn line a failed request leaves. */
+  function failureOf(f: Awaited<ReturnType<typeof fixture>>): Record<string, unknown> {
+    const warns = f.lines.filter((line) => line.message === failed);
+    expect(warns).toHaveLength(1);
+    return warns[0]!.fields as Record<string, unknown>;
+  }
+  const stream = (frames: string) => (_req: IncomingMessage, res: ServerResponse) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(frames);
+  };
+  /** A text answer with one choice, for refusals. */
+  const textAnswer = (message: Record<string, unknown>) => ({
+    id: 'chat-1',
+    object: 'chat.completion',
+    model: 'upstream-model',
+    choices: [{ index: 0, message, finish_reason: 'stop' }],
+  });
+
+  it('names frame_size when an SSE event passes the body bound before its blank line', async () => {
+    const f = await fixture();
+    f.slots.reserve = null;
+    f.handlers.primary = stream(`data: ${'A'.repeat(1024 * 1024 + 16)}\n\n`);
+    const response = await f.post(streamPayload);
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      error: { type: 'gateway_error', code: 'bad_response' },
+    });
+    expect(failureOf(f)).toMatchObject({
+      code: 'bad_response',
+      slot: 'primary',
+      reason: { check: 'frame_size', path: '' },
+    });
+  });
+
+  it('points a stream delta reason at the real array position, not the logical choice index', async () => {
+    const f = await fixture();
+    f.slots.reserve = null;
+    f.handlers.primary = stream(
+      `data: ${JSON.stringify({
+        model: 'm',
+        choices: [{ index: 7, delta: { role: 'assistant', tool_calls: 'UPSTREAM-CANARY-TOOLS' } }],
+      })}\n\n`
+    );
+    const response = await f.post(streamPayload);
+    expect(response.status).toBe(502);
+    expect(failureOf(f)).toMatchObject({
+      code: 'bad_response',
+      slot: 'primary',
+      reason: { check: 'tool_calls_type', path: 'choices[0].delta.tool_calls', got: 'string' },
+    });
+    expect(JSON.stringify(f.lines)).not.toContain('CANARY');
+  });
+
+  it('points a stream tool-shape reason at the enumerated tool position', async () => {
+    const f = await fixture();
+    f.slots.reserve = null;
+    f.handlers.primary = stream(
+      `data: ${JSON.stringify({
+        model: 'm',
+        choices: [
+          {
+            index: 3,
+            delta: {
+              tool_calls: [
+                { index: 5, id: 'call-1', type: 'function', function: { name: 't', arguments: 9 } },
+              ],
+            },
+          },
+        ],
+      })}\n\n`
+    );
+    const response = await f.post(streamPayload);
+    expect(response.status).toBe(502);
+    expect(failureOf(f)).toMatchObject({
+      code: 'bad_response',
+      slot: 'primary',
+      reason: { check: 'tool_call_shape', path: 'choices[0].delta.tool_calls[0]', got: 'object' },
+    });
+  });
+
+  it('keeps the origin position for accumulated stream tool state', async () => {
+    const f = await fixture();
+    f.slots.reserve = null;
+    // The choice first appears at position 0 (logical index 7) with logical
+    // tool index 5, then finishes two frames later from another position.
+    f.handlers.primary = stream(
+      `data: ${JSON.stringify({
+        model: 'm',
+        choices: [
+          {
+            index: 7,
+            delta: {
+              tool_calls: [
+                { index: 5, type: 'function', function: { name: 'UPSTREAM-CANARY-NAME' } },
+              ],
+            },
+          },
+        ],
+      })}\n\n` +
+        `data: ${JSON.stringify({
+          model: 'm',
+          choices: [
+            { index: 3, delta: {} },
+            { index: 7, delta: {}, finish_reason: 'stop' },
+          ],
+        })}\n\n` +
+        'data: [DONE]\n\n'
+    );
+    const response = await f.post(streamPayload);
+    // The first frame was valid and already sent downstream: no switch or
+    // replay after the first byte, so the refusal arrives as a stream error.
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('bad_response');
+    expect(failureOf(f)).toMatchObject({
+      code: 'bad_response',
+      slot: 'primary',
+      reason: { check: 'incomplete_tool_call', path: 'choices[0].delta.tool_calls[0]' },
+    });
+    expect(JSON.stringify(f.lines)).not.toContain('CANARY');
+  });
+
+  it('ends a models-listing id reason in .id', async () => {
+    const f = await fixture();
+    f.slots.reserve = null;
+    f.handlers.primary = (_req, res) =>
+      res.end(JSON.stringify({ object: 'list', data: [{ id: 9 }] }));
+    const response = await fetch(`${f.url}/v1/models`);
+    expect(response.status).toBe(502);
+    expect(failureOf(f)).toMatchObject({
+      code: 'bad_response',
+      slot: 'primary',
+      reason: { check: 'model_id_type', path: 'data[0].id', got: 'number' },
+    });
+  });
+
+  it('names the reserve when its slot read fails after a primary attempt failure', async () => {
+    const f = await fixture();
+    f.baoStatuses.reserve = 503;
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(500);
+      res.end();
+    };
+    const response = await f.post();
+    expect(response.status).toBe(502);
+    expect(response.headers.get('x-lifemodel-slot')).toBe('reserve');
+    expect(failureOf(f)).toMatchObject({ code: 'storage_unavailable', slot: 'reserve' });
+    expect(await (await fetch(`${f.statusUrl}/status`)).json()).toMatchObject({
+      state: 'down',
+      primary: { lastErrorCode: 'upstream_500' },
+      reserve: { lastErrorCode: 'storage_unavailable' },
+    });
+  });
+
+  it('never names an unknown delta field in a reason or any other surface', async () => {
+    const f = await fixture();
+    f.slots.reserve = null;
+    const canary = 'UPSTREAM-CANARY-FIELD';
+    f.handlers.primary = stream(
+      `data: ${JSON.stringify({
+        model: 'm',
+        choices: [{ index: 0, delta: { role: 'assistant', [canary]: 'x' } }],
+      })}\n\n`
+    );
+    const response = await f.post(streamPayload);
+    expect(response.status).toBe(502);
+    expect(await response.text()).not.toContain(canary);
+    for (const [name, value] of [...response.headers.entries()])
+      expect(`${name}: ${value}`).not.toContain(canary);
+    expect(failureOf(f)).toMatchObject({
+      code: 'bad_response',
+      slot: 'primary',
+      // The fixed enclosing path: the unknown field's own name is body data.
+      reason: { check: 'delta_field', path: 'choices[0].delta', got: 'string' },
+    });
+    expect(JSON.stringify(f.lines)).not.toContain(canary);
+    expect(await (await fetch(`${f.statusUrl}/status`)).text()).not.toContain(canary);
+  });
+
+  /** The exact safe caller surfaces after a reason-bearing refusal. */
+  async function expectExactShapes(
+    f: Awaited<ReturnType<typeof fixture>>,
+    code: string
+  ): Promise<void> {
+    const response = await f.post();
+    expect(response.status).toBe(502);
+    expect([...response.headers.keys()].sort()).toEqual([
+      'connection',
+      'content-type',
+      'date',
+      'keep-alive',
+      'transfer-encoding',
+      'x-lifemodel-slot',
+    ]);
+    expect(response.headers.get('x-lifemodel-slot')).toBe('primary');
+    expect(await response.json()).toEqual({ error: { type: 'gateway_error', code } });
+    const status = await (await fetch(`${f.statusUrl}/status`)).json();
+    expect(Object.keys(status).sort()).toEqual(
+      [
+        'state',
+        'outageSince',
+        'lastAttemptAt',
+        'lastSuccessAt',
+        'lastErrorCode',
+        'primary',
+        'reserve',
+      ].sort()
+    );
+    for (const name of ['primary', 'reserve'] as const)
+      expect(Object.keys(status[name]).sort()).toEqual(['lastErrorAt', 'lastErrorCode']);
+    expect(status.state).toBe('down');
+    expect(status.lastErrorCode).toBe(code);
+    expect(status.primary.lastErrorCode).toBe(code);
+    expect(status.reserve.lastErrorCode).toBeNull();
+    const text = JSON.stringify(status);
+    expect(text).not.toContain('reason');
+    expect(text).not.toContain('choices');
+    expect(text).not.toContain('delta');
+  }
+
+  it('keeps the exact caller and status shapes after a bad_response', async () => {
+    const f = await fixture();
+    f.slots.reserve = null;
+    f.handlers.primary = (_req, res) =>
+      res.end(JSON.stringify(textAnswer({ role: 'assistant', content: 5 })));
+    await expectExactShapes(f, 'bad_response');
+  });
+
+  it('keeps the exact caller and status shapes after an unsafe_response', async () => {
+    const f = await fixture();
+    f.slots.reserve = null;
+    f.handlers.primary = (_req, res) =>
+      res.end(JSON.stringify(textAnswer({ role: 'assistant', content: f.slots.primary!.key })));
+    await expectExactShapes(f, 'unsafe_response');
+  });
+});

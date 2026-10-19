@@ -138,7 +138,7 @@ export function validateResponse(value: unknown, models: boolean): void {
     if (index >= 0)
       throw badResponse(
         'model_id_type',
-        `data[${String(index)}]`,
+        `data[${String(index)}].id`,
         jsonType(record(data[index])?.['id'])
       );
     return;
@@ -190,12 +190,16 @@ export function validateResponse(value: unknown, models: boolean): void {
  * This preserves frame order and tool metadata without inventing synthetic deltas.
  */
 interface StreamTool {
+  /** The tool's array position in the frame that first mentioned it. */
+  origin: number;
   id: boolean;
   type: boolean;
   name: boolean;
   arguments: boolean;
 }
 interface StreamChoice {
+  /** The choice's array position in the frame that first mentioned it. */
+  origin: number;
   finished: boolean;
   hasText: boolean;
   tools: Map<number, StreamTool>;
@@ -245,17 +249,18 @@ export class SafeEventStream {
           `choices[${String(position)}].delta`,
           jsonType(item?.['delta'])
         );
-      validateDelta(delta, `choices[${String(Number(index))}].delta`);
+      validateDelta(delta, `choices[${String(position)}].delta`);
       if (!this.seenCompletion && Object.keys(delta).length === 0)
-        throw badResponse('empty_delta', `choices[${String(Number(index))}].delta`);
+        throw badResponse('empty_delta', `choices[${String(position)}].delta`);
       this.seenCompletion = true;
       const choiceIndex = Number(index);
       const state = this.choices.get(choiceIndex) ?? {
+        origin: position,
         finished: false,
         hasText: false,
         tools: new Map<number, StreamTool>(),
       };
-      if (state.finished) throw badResponse('finished_choice', `choices[${String(choiceIndex)}]`);
+      if (state.finished) throw badResponse('finished_choice', `choices[${String(position)}]`);
       this.choices.set(choiceIndex, state);
       if (this.choices.size > 128) throw badResponse('choice_count', 'choices');
       // Typed tuples cannot alias through attacker-controlled field names.
@@ -267,18 +272,22 @@ export class SafeEventStream {
         }
       }
       if (Array.isArray(delta['tool_calls']))
-        for (const value of delta['tool_calls'] as unknown[]) {
+        for (const [toolPosition, value] of (delta['tool_calls'] as unknown[]).entries()) {
           const call = record(value);
           const fn = record(call?.['function']);
           const toolIndex = Number(call?.['index']);
           const tool = state.tools.get(toolIndex) ?? {
+            origin: toolPosition,
             id: false,
             type: false,
             name: false,
             arguments: false,
           };
           if (!state.tools.has(toolIndex) && ++this.toolCount > 1024)
-            throw badResponse('tool_call_count', `choices[${String(choiceIndex)}].tool_calls`);
+            throw badResponse(
+              'tool_call_count',
+              `choices[${String(state.origin)}].delta.tool_calls`
+            );
           tool.id ||= typeof call?.['id'] === 'string' && call['id'].length > 0;
           tool.type ||= call?.['type'] === 'function';
           tool.name ||= typeof fn?.['name'] === 'string' && fn['name'].length > 0;
@@ -301,21 +310,21 @@ export class SafeEventStream {
         )
           throw badResponse(
             'finish_reason',
-            `choices[${String(choiceIndex)}].finish_reason`,
+            `choices[${String(position)}].finish_reason`,
             jsonType(finish)
           );
         if (!state.hasText && state.tools.size === 0 && finish !== 'content_filter')
-          throw badResponse('empty_answer', `choices[${String(choiceIndex)}]`);
+          throw badResponse('empty_answer', `choices[${String(state.origin)}]`);
         const incomplete = [...state.tools.entries()].find(
           ([, tool]) => !tool.id || !tool.type || !tool.name || !tool.arguments
         );
         if (incomplete !== undefined)
           throw badResponse(
             'incomplete_tool_call',
-            `choices[${String(choiceIndex)}].tool_calls[${String(incomplete[0])}]`
+            `choices[${String(state.origin)}].delta.tool_calls[${String(incomplete[1].origin)}]`
           );
         if (finish === 'tool_calls' && state.tools.size === 0)
-          throw badResponse('tool_calls_finish', `choices[${String(choiceIndex)}].finish_reason`);
+          throw badResponse('tool_calls_finish', `choices[${String(position)}].finish_reason`);
         state.finished = true;
       }
     }
