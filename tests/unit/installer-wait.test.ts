@@ -172,12 +172,18 @@ describe('installer verified wait', () => {
     };
     command('id', 'echo 0');
     command('apt-get', 'exit 0');
-    command('systemctl', 'exit 0');
+    command(
+      'systemctl',
+      `if [ "$*" = 'start lifemodel-k3s-dns-apply.service' ]; then
+  exec sh "$LIFEMODEL_INSTALL_ROOT/usr/lib/lifemodel/k3s-dns-apply.sh" "$LIFEMODEL_INSTALL_ROOT/run/lifemodel/k3s-resolv.conf"
+fi
+exit 0`
+    );
     command('ip', `printf '%s' '[{"dev":"eth0"}]'`);
     command('ufw', 'echo "Status: inactive"');
     command(
       'k3s',
-      `if [ "$1" = --version ]; then echo 'k3s version v1.35.8+k3s1'; exit 0; fi\nshift\nif [ "$1" = --kubeconfig ]; then shift 2; fi\ncase "$*" in\n*'get namespace flux-system -o jsonpath='*) echo lifemodel; exit 0;;\n*'get namespace flux-system'*) exit 0;;\n*'get configmap lifemodel-instance -o jsonpath='*) echo '(NotFound)' >&2; exit 1;;\n*'get ocirepository platform'*'--show-managed-fields'*) echo '{"metadata":{"managedFields":[]}}'; exit 0;;\n*apply*) for arg do last=$arg; done; if [ "$last" = - ]; then cat >/dev/null; fi; exit 0;;\nesac\nexec ${JSON.stringify(f.kubectl)} "$@"`
+      `if [ "$1" = --version ]; then echo 'k3s version v1.35.8+k3s1'; exit 0; fi\nshift\nif [ "$1" = --kubeconfig ]; then shift 2; fi\ncase "$*" in\n*'get --raw=/readyz'*|*'rollout restart deploy/coredns'*|*'rollout status deploy/coredns'*) exit 0;;\n*'exec deploy/coredns -- cat /etc/resolv.conf'*) cat "$LIFEMODEL_INSTALL_ROOT/run/lifemodel/k3s-resolv.conf"; exit 0;;\n*'get namespace flux-system -o jsonpath='*) echo lifemodel; exit 0;;\n*'get namespace flux-system'*) exit 0;;\n*'get configmap lifemodel-instance -o jsonpath='*) echo '(NotFound)' >&2; exit 1;;\n*'get ocirepository platform'*'--show-managed-fields'*) echo '{"metadata":{"managedFields":[]}}'; exit 0;;\n*apply*) for arg do last=$arg; done; if [ "$last" = - ]; then cat >/dev/null; fi; exit 0;;\nesac\nexec ${JSON.stringify(f.kubectl)} "$@"`
     );
     const realCurl = spawnSync('sh', ['-c', 'command -v curl'], {
       encoding: 'utf8',
