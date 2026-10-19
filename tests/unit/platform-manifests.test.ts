@@ -163,7 +163,8 @@ shift 3
 printf '%s\n' "$*" >> "$K3S_CALLS"
 case "$*" in
   *'get nodes'*) exit 0 ;;
-  *'exec deploy/coredns -- cat /etc/resolv.conf'*) cat "$LIFEMODEL_INSTALL_ROOT/run/lifemodel/k3s-resolv.conf"; exit 0 ;;
+  *'get deploy/coredns -o json'*) printf '%s' '{"metadata":{"generation":2},"status":{"observedGeneration":2}}'; exit 0 ;;
+  *'get pods -l k8s-app=kube-dns -o json'*) printf '%s' '{"items":[{"metadata":{"creationTimestamp":"2999-01-01T00:00:00Z","labels":{"k8s-app":"kube-dns"}},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'; exit 0 ;;
   *'get --raw=/readyz'*|*'rollout restart deploy/coredns'*|*'rollout status deploy/coredns'*) exit 0 ;;
   *'get ocirepository platform'*) printf '{"metadata":{"managedFields":[%s]}}\n' "$K3S_MANAGED_FIELDS" ;;
   *'get configmap lifemodel-instance -o jsonpath='*) [ -f "$K3S_IDENTITY" ] && cat "$K3S_IDENTITY" || { echo '(NotFound)' >&2; exit 1; } ;;

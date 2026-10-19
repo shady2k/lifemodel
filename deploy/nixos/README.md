@@ -64,20 +64,25 @@ options, zones and control characters are never copied.
 `lifemodel-k3s-dns-apply.service` reconciles CoreDNS after k3s starts, including
 on an installer upgrade: k3s restarts alone do not replace surviving pods. It
 waits for the API with bounded requests, rolls CoreDNS out, waits for readiness,
-and checks the pod's nameservers. Only then does it write the content hash to
-`/run/lifemodel/k3s-resolv.applied`. Failed or interrupted updates stay pending;
-the 180-second service retries after 30 seconds. An unchanged resolver does not
-clear a pending update. Both install paths enable this service at boot; the
-installer waits up to 390 seconds across failed starts and retries after
-restarting k3s. The generator requests a nonblocking restart of the apply
-service, not a coalescible start, so a DNS change during an activating apply
-queues a new invocation.
+and checks that every CoreDNS pod is Running and Ready and was created strictly
+after the desired resolver was published. It also checks that the deployment
+controller observed the current generation. Kubelet reads `--resolv-conf` when
+creating a pod, so this proves the new pods use the published resolver without
+executing tools inside the distroless CoreDNS image.
 
-**DNS reconciliation is not ready for deployment:** the current verification
-executes `cat` inside CoreDNS. The pinned k3s CoreDNS 1.14.6 image is distroless
-and does not include `cat`. Until a supported verification method is selected,
-apply fails closed with no applied marker and the installer reaches its bounded
-failure. Command-boundary tests do not prove this image can execute the check.
+The generator records the write time (epoch milliseconds) and desired SHA-256
+in `/run/lifemodel/k3s-resolv.written`. Each file is published by atomic rename;
+the hash-bound record is published after the resolver. A crash between those
+two renames cannot falsely verify a different resolver. The next generation
+repairs an absent or stale record. Unchanged generation preserves the time.
+Only after verification does the reconciler write
+`/run/lifemodel/k3s-resolv.applied` and preserves the verified publication in
+`/run/lifemodel/k3s-resolv.applied-written`. Both must match to skip apply, so
+an interrupted A→B→A change cannot reuse the first A proof. Failed or interrupted updates stay pending;
+the 180-second service retries after 30 seconds. Both install paths enable it
+at boot; the installer waits up to 390 seconds across failed starts and retries.
+The generator requests a nonblocking restart, not a coalescible start, so a DNS
+change during an activating apply queues a new invocation.
 
 The name and selected digest (or explicitly chosen tag) persist in
 `/etc/lifemodel/instance.env`. Rerunning the installer without release flags

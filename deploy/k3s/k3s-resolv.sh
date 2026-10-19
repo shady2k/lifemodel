@@ -13,7 +13,8 @@ change=$(node "$generator" "$target" "$@")
 desired=$(node -e 'const fs=require("node:fs"); process.stdout.write(require("node:crypto").createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex"))' "$target")
 marker="$(dirname "$target")/k3s-resolv.applied"
 applied=$(cat "$marker" 2>/dev/null || true)
-if [ "$change" = changed ] || [ "$desired" != "$applied" ]; then
+if [ "$change" = changed ] || [ "$desired" != "$applied" ] ||
+    ! cmp -s "$(dirname "$target")/k3s-resolv.written" "$(dirname "$target")/k3s-resolv.applied-written"; then
   # restart, not start: start would coalesce with an activating apply and
   # lose an update published after its final hash check. This queues a new job.
   systemctl restart --no-block lifemodel-k3s-dns-apply.service

@@ -149,6 +149,8 @@ describe('the installer hands k3s a resolv.conf it accepts', () => {
       first.systemctl.indexOf('restart k3s.service')
     );
     expect(first.calls).toContain('rollout restart deploy/coredns -n kube-system');
+    expect(first.calls).toContain('get pods -l k8s-app=kube-dns -o json');
+    expect(first.calls).not.toContain(' exec ');
     expect(existsSync(join(root, 'install-root/run/lifemodel/k3s-resolv.applied'))).toBe(true);
     // The service has to run at every boot, before k3s: /run is empty then.
     expect(first.systemctl).toContain('enable lifemodel-k3s-resolv.service');
@@ -265,7 +267,8 @@ if [ "$1" != kubectl ]; then echo "unexpected k3s call: $*" >&2; exit 64; fi
 printf '%s\\n' "$*" >> "$K3S_CALLS"
 case "$*" in
   *'get nodes'*) exit 0 ;;
-  *'exec deploy/coredns -- cat /etc/resolv.conf'*) cat "$LIFEMODEL_INSTALL_ROOT/run/lifemodel/k3s-resolv.conf" ;;
+  *'get deploy/coredns -o json'*) printf '%s' '{"metadata":{"generation":2},"status":{"observedGeneration":2}}'; exit 0 ;;
+  *'get pods -l k8s-app=kube-dns -o json'*) printf '%s' '{"items":[{"metadata":{"creationTimestamp":"2999-01-01T00:00:00Z","labels":{"k8s-app":"kube-dns"}},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'; exit 0 ;;
   *'get namespace flux-system -o jsonpath='*) echo lifemodel ;;
   *'get namespace flux-system'*) exit 1 ;;
   *'get ocirepository platform'*) printf '{"metadata":{"managedFields":[]}}\\n' ;;

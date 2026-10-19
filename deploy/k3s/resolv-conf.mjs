@@ -3,6 +3,7 @@
 // SOURCE order matches k3s: /etc/resolv.conf, then resolved's upstream list.
 // The output is kubelet's resolver base; CoreDNS uses dnsPolicy Default.
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import { dirname } from 'node:path';
 
@@ -133,17 +134,39 @@ function resolvConfFor(sources) {
 }
 
 function writeIfChanged(target, content) {
+  const sha256 = createHash('sha256').update(content).digest('hex');
+  const writtenPath = `${dirname(target)}/k3s-resolv.written`;
   let current = null;
+  let record = null;
   try {
     current = readFileSync(target, 'utf8');
+    record = JSON.parse(readFileSync(writtenPath, 'utf8'));
   } catch {
-    current = null;
+    // Missing or interrupted pair: republish and record a conservative time.
   }
-  if (current === content) return false;
+  if (
+    current === content &&
+    record?.sha256 === sha256 &&
+    Number.isSafeInteger(record.writtenAt) &&
+    record.writtenAt > 0
+  )
+    return false;
   mkdirSync(dirname(target), { recursive: true });
   const temporary = `${target}.${process.pid}.tmp`;
+  const writtenTemporary = `${writtenPath}.${process.pid}.tmp`;
   writeFileSync(temporary, content, { mode: 0o644 });
   renameSync(temporary, target);
+  // Two paths cannot be renamed in one transaction. Publish each atomically,
+  // file first, then a hash-bound commit record. The timestamp is AFTER the
+  // file rename, so a crash or mismatched pair fails verification closed.
+  writeFileSync(
+    writtenTemporary,
+    `${JSON.stringify({ sha256, writtenAt: Math.max(Date.now(), Number.isSafeInteger(record?.writtenAt) ? record.writtenAt + 1 : 0) })}\n`,
+    {
+      mode: 0o644,
+    }
+  );
+  renameSync(writtenTemporary, writtenPath);
   return true;
 }
 

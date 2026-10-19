@@ -32,7 +32,17 @@ function fixture() {
   const state = join(root, 'state');
   const pod = join(root, 'pod');
   writeFileSync(source, 'nameserver 192.168.0.30\n');
-  writeFileSync(pod, 'nameserver 192.168.0.30\nsearch kube-system.svc.cluster.local\n');
+  const goodPod = {
+    metadata: { creationTimestamp: '2999-01-01T00:00:00Z', labels: { 'k8s-app': 'kube-dns' } },
+    status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }] },
+  };
+  const setPods = (items = [goodPod]) => writeFileSync(pod, JSON.stringify({ items }));
+  setPods();
+  const deployment = join(root, 'deployment');
+  writeFileSync(
+    deployment,
+    JSON.stringify({ metadata: { generation: 2 }, status: { observedGeneration: 2 } })
+  );
   writeFileSync(state, 'active');
   writeFileSync(calls, '');
   function fake(name: string, body: string) {
@@ -62,9 +72,8 @@ case "$*" in
     esac ;;
   *'rollout restart'*)
     if [ -f "$FAIL_ONCE" ]; then rm "$FAIL_ONCE"; exit 1; fi ;;
-  *'exec deploy/coredns -- cat /etc/resolv.conf'*)
-    if [ "$(cat "$STATE")" = no-cat ]; then echo 'exec: cat: executable file not found' >&2; exit 127; fi
-    cat "$POD" ;;
+  *'get pods -l k8s-app=kube-dns -o json'*) cat "$POD" ;;
+  *'get deploy/coredns -o json'*) cat "$DEPLOYMENT" ;;
 esac
 exit 0`
   );
@@ -74,6 +83,7 @@ exit 0`
     CALLS: calls,
     STATE: state,
     POD: pod,
+    DEPLOYMENT: deployment,
     FAIL_ONCE: join(root, 'fail-once'),
   };
   function run(script: string, args: string[]) {
@@ -89,6 +99,9 @@ exit 0`
     calls,
     state,
     pod,
+    deployment,
+    goodPod,
+    setPods,
     env,
     generate: () => run(generateScript, [generator, target, source]),
     apply: () => run(applyScript, [target]),
@@ -108,6 +121,27 @@ describe('bounded generation and durable CoreDNS reconciliation', () => {
     expect(existsSync(host.marker)).toBe(false);
   });
 
+  it('records the desired hash and write time atomically and preserves it on unchanged generation', () => {
+    const host = fixture();
+    const before = Date.now();
+    expect(host.generate().status).toBe(0);
+    const sidecar = join(host.root, 'k3s-resolv.written');
+    const first = readFileSync(sidecar, 'utf8');
+    const record = JSON.parse(first);
+    expect(record.sha256).toBe(host.hash());
+    expect(record.writtenAt).toBeGreaterThanOrEqual(before);
+    expect(record.writtenAt).toBeLessThanOrEqual(Date.now());
+    host.generate();
+    expect(readFileSync(sidecar, 'utf8')).toBe(first);
+    // Crash between file and sidecar publication fails closed until generation
+    // repairs the record; stale metadata never verifies different bytes.
+    writeFileSync(sidecar, JSON.stringify({ ...record, sha256: 'stale' }));
+    expect(host.apply().status).not.toBe(0);
+    expect(existsSync(host.marker)).toBe(false);
+    host.generate();
+    expect(JSON.parse(readFileSync(sidecar, 'utf8')).sha256).toBe(host.hash());
+  });
+
   it('retries failed apply with unchanged desired bytes, then leaves applied pods alone', () => {
     const host = fixture();
     host.generate();
@@ -120,7 +154,9 @@ describe('bounded generation and durable CoreDNS reconciliation', () => {
     expect(retry.calls).toContain('--request-timeout=10s');
     expect(retry.calls).toContain('rollout restart deploy/coredns -n kube-system');
     expect(retry.calls).toContain('rollout status deploy/coredns -n kube-system --timeout=90s');
-    expect(retry.calls).toContain('exec deploy/coredns -- cat /etc/resolv.conf');
+    expect(retry.calls).toContain('get pods -l k8s-app=kube-dns -o json');
+    expect(retry.calls).toContain('get deploy/coredns -o json');
+    expect(retry.calls).not.toContain(' exec ');
     expect(readFileSync(host.marker, 'utf8')).toBe(`${host.hash()}\n`);
     expect(host.generate().calls).toBe('');
     expect(host.apply().calls).not.toContain('rollout restart');
@@ -136,17 +172,93 @@ describe('bounded generation and durable CoreDNS reconciliation', () => {
     expect(readFileSync(host.marker, 'utf8')).toBe(`${host.hash()}\n`);
   });
 
-  it('does not mark a rollout applied when the surviving pod has different nameservers', () => {
+  it('leaves the marker unwritten if even one CoreDNS pod predates the resolver write', () => {
     const host = fixture();
     host.generate();
-    writeFileSync(host.pod, 'nameserver 8.8.8.8\n');
-    const mismatch = host.apply();
-    expect(mismatch.status).not.toBe(0);
+    host.setPods([
+      host.goodPod,
+      {
+        ...host.goodPod,
+        metadata: { ...host.goodPod.metadata, creationTimestamp: '2000-01-01T00:00:00Z' },
+      },
+    ]);
+    expect(host.apply().status).not.toBe(0);
     expect(existsSync(host.marker)).toBe(false);
     expect(host.generate().calls).toContain('restart --no-block');
-    writeFileSync(host.pod, 'nameserver 192.168.0.30\n');
+    host.setPods([host.goodPod, host.goodPod]);
     expect(host.apply().status).toBe(0);
     expect(readFileSync(host.marker, 'utf8')).toBe(`${host.hash()}\n`);
+  });
+
+  it('does not reuse an old A proof after interrupted B and republished A', () => {
+    const host = fixture();
+    host.generate();
+    expect(host.apply().status).toBe(0);
+    // Simulate pods created from B before its interrupted apply wrote a marker.
+    writeFileSync(host.source, 'nameserver 10.0.0.53\n');
+    host.generate();
+    host.setPods([
+      {
+        ...host.goodPod,
+        metadata: { ...host.goodPod.metadata, creationTimestamp: '2000-01-01T00:00:00Z' },
+      },
+    ]);
+    writeFileSync(host.source, 'nameserver 192.168.0.30\n');
+    host.generate();
+    expect(host.generate().calls).toContain('restart --no-block');
+    const interrupted = host.apply();
+    expect(interrupted.calls).toContain('rollout restart');
+    expect(interrupted.status).not.toBe(0);
+    host.setPods();
+    const retry = host.apply();
+    expect(retry.status, retry.stderr).toBe(0);
+    expect(retry.calls).toContain('rollout restart');
+  });
+
+  it('requires every CoreDNS pod to be Running and Ready, not just one', () => {
+    const host = fixture();
+    host.generate();
+    for (const status of [
+      { phase: 'Running', conditions: [{ type: 'Ready', status: 'False' }] },
+      { phase: 'Pending', conditions: [{ type: 'Ready', status: 'True' }] },
+      { phase: 'Running', conditions: [] },
+    ]) {
+      host.setPods([host.goodPod, { ...host.goodPod, status }]);
+      expect(host.apply().status).not.toBe(0);
+      expect(existsSync(host.marker)).toBe(false);
+    }
+  });
+
+  it('rejects missing pods and an unobserved deployment generation', () => {
+    const host = fixture();
+    host.generate();
+    host.setPods([]);
+    expect(host.apply().status).not.toBe(0);
+    expect(existsSync(host.marker)).toBe(false);
+    host.setPods();
+    writeFileSync(
+      host.deployment,
+      JSON.stringify({ metadata: { generation: 3 }, status: { observedGeneration: 2 } })
+    );
+    expect(host.apply().status).not.toBe(0);
+    expect(existsSync(host.marker)).toBe(false);
+  });
+
+  it('requires creation strictly after the recorded write time', () => {
+    const host = fixture();
+    host.generate();
+    const written = JSON.parse(readFileSync(join(host.root, 'k3s-resolv.written'), 'utf8'));
+    host.setPods([
+      {
+        ...host.goodPod,
+        metadata: {
+          ...host.goodPod.metadata,
+          creationTimestamp: new Date(written.writtenAt).toISOString(),
+        },
+      },
+    ]);
+    expect(host.apply().status).not.toBe(0);
+    expect(existsSync(host.marker)).toBe(false);
   });
 
   it('queues a replacement job rather than coalescing with an activating apply', () => {
@@ -161,19 +273,9 @@ describe('bounded generation and durable CoreDNS reconciliation', () => {
     expect(generated.status, generated.stderr).toBe(0);
     expect(generated.calls).toBe('systemctl restart --no-block lifemodel-k3s-dns-apply.service\n');
     expect(readFileSync(host.state, 'utf8').trim()).toBe('replacement-queued');
-    writeFileSync(host.pod, 'nameserver 10.0.0.53\n');
+    host.setPods();
     expect(host.apply().status).toBe(0);
     expect(readFileSync(host.marker, 'utf8')).toBe(`${host.hash()}\n`);
-  });
-
-  it('keeps the update pending if the CoreDNS image cannot execute cat', () => {
-    const host = fixture();
-    host.generate();
-    writeFileSync(host.state, 'no-cat');
-    const result = host.apply();
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain('executable file not found');
-    expect(existsSync(host.marker)).toBe(false);
   });
 
   it('bounds API unavailability and keeps the desired update pending', () => {
