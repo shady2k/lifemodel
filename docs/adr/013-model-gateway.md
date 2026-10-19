@@ -328,19 +328,22 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
 - Custom slot headers: a slot saved with `x-opencode-session: {session}` makes
   the gateway send the caller's conversation id, and the loader's check sends a
   probe id; a simple completion that knows its conversation names it too — a
-  compaction summary and a recipient-scoped batch reflection, checked through the
-  adapter on a real HTTP gateway; a reserved or malformed name, a CR/LF value, a control character, a
-  non-ASCII value, a duplicate name and an over-long list are refused at save and
-  at read; sixteen 1024-byte values save on both slots, with and without JSON
-  escaping, and a body past the bound answers `body_too_large`; no value reaches `/status`, a
-  log line, the core or a response; a slot without headers sends what it sent
-  before. A rendered value of 16 static bytes or more echoed by an upstream in a
-  buffered answer or an SSE frame is refused, also after a status re-check
-  invalidated the slot cache while that answer was in flight, and a one-character
-  value in an ordinary answer is not; the session fallback is logged once per
-  slot configuration. A slot handed to the gateway with reserved names in mixed
-  case cannot replace its host, content type, accept, authorization or content
-  length, on a POST or a bodyless GET, with or without a key.
+  compaction summary and a recipient-scoped batch reflection, checked through
+  the adapter on a real HTTP gateway; a reserved or malformed name, a CR/LF
+  value, a control character, a non-ASCII value, a duplicate name and an
+  over-long list are refused at save and at read; sixteen 1024-byte values save
+  on both slots, with and without JSON escaping, and a body past the bound
+  answers `body_too_large`; a reserve save that omits the list keeps it, also
+  across a key change; no value reaches `/status`, a log line, the core or a
+  response; a slot without headers sends what it sent before. A rendered value
+  of 16 static bytes or more echoed by an upstream in a buffered answer, an SSE
+  frame or two SSE deltas of one field is refused, also after a status re-check
+  invalidated the slot cache while that answer was in flight, and a
+  one-character value in an ordinary answer is not; the session fallback is
+  logged once per slot configuration. A slot handed to the gateway with
+  reserved names in mixed case cannot replace its host, content type, accept,
+  authorization or content length, on a POST or a bodyless GET, with or without
+  a key.
 - Bao: the `model-gateway` role reads the slots and is denied writes and
   unrelated paths (real role, on the VM).
 - On the test VM from a clean snapshot, with the LAN fixtures saved through
