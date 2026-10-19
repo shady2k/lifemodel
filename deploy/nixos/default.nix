@@ -151,7 +151,7 @@ in
       description = "Write the resolv.conf k3s gives the kubelet and CoreDNS";
       wantedBy = [ "multi-user.target" ];
       before = [ "k3s.service" ];
-      path = [ pkgs.nodejs pkgs.coreutils pkgs.systemd ];
+      path = [ pkgs.nodejs pkgs.coreutils pkgs.systemd pkgs.util-linux ];
       unitConfig.StartLimitIntervalSec = 0;
       # No RemainAfterExit: the path unit starts this unit again on every change,
       # and starting an already-active unit would do nothing.
@@ -167,7 +167,7 @@ in
       description = "Reconcile CoreDNS with the desired host resolver";
       wantedBy = [ "multi-user.target" ];
       after = [ "k3s.service" ];
-      path = [ pkgs.nodejs pkgs.coreutils lifemodelK3s ];
+      path = [ pkgs.nodejs pkgs.coreutils pkgs.util-linux lifemodelK3s ];
       unitConfig.StartLimitIntervalSec = 0;
       serviceConfig = {
         Type = "oneshot";
@@ -175,7 +175,7 @@ in
         Restart = "on-failure";
         RestartSec = 30;
       };
-      script = "exec ${../k3s/k3s-dns-apply.sh} ${k3sResolvConf}";
+      script = "exec ${../k3s/k3s-dns-apply.sh} ${k3sResolvConf} ${k3sResolvGenerator} /etc/resolv.conf /run/systemd/resolve/resolv.conf";
     };
     lifemodel-flux-bootstrap = {
       description = "Install pinned Flux and lifemodel platform root objects";

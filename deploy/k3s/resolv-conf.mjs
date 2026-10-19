@@ -1,8 +1,18 @@
 #!/usr/bin/env node
 // Write only canonical, validated resolver records. Never copy host lines.
 // SOURCE order matches k3s: /etc/resolv.conf, then resolved's upstream list.
+// Caller must hold /run/lifemodel/k3s-resolv.lock for the whole invocation.
 // The output is kubelet's resolver base; CoreDNS uses dnsPolicy Default.
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import { dirname } from 'node:path';
@@ -154,8 +164,28 @@ function writeIfChanged(target, content) {
   mkdirSync(dirname(target), { recursive: true });
   const temporary = `${target}.${process.pid}.tmp`;
   const writtenTemporary = `${writtenPath}.${process.pid}.tmp`;
+  const sync = (path) => {
+    const fd = openSync(path, 'r');
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  };
   writeFileSync(temporary, content, { mode: 0o644 });
+  sync(temporary);
+  // Invalidate proof AND publication identity before changing resolver bytes.
+  // In particular, interrupted A -> B -> A must never revive A's old record.
+  for (const name of ['k3s-resolv.applied', 'k3s-resolv.applied-written', 'k3s-resolv.written']) {
+    try {
+      unlinkSync(`${dirname(target)}/${name}`);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  }
+  sync(dirname(target));
   renameSync(temporary, target);
+  sync(dirname(target));
   // Two paths cannot be renamed in one transaction. Publish each atomically,
   // file first, then a hash-bound commit record. The timestamp is AFTER the
   // file rename, so a crash or mismatched pair fails verification closed.
@@ -166,7 +196,9 @@ function writeIfChanged(target, content) {
       mode: 0o644,
     }
   );
+  sync(writtenTemporary);
   renameSync(writtenTemporary, writtenPath);
+  sync(dirname(target));
   return true;
 }
 

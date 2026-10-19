@@ -7,6 +7,8 @@ StartLimitIntervalSec=0
 # Must be inactive after exit so path triggers can regenerate again.
 Type=oneshot
 TimeoutStartSec=30
+# Host-Commands: node mkdir flock cat rm cp mv sleep k3s systemctl
+# Requires Node.js, coreutils, util-linux, k3s and systemd in the PATH below.
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=@RESOLV_SH@ @RESOLV_MJS@ @RESOLV_CONF@ /etc/resolv.conf /run/systemd/resolve/resolv.conf
 

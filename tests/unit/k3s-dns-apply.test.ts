@@ -36,8 +36,12 @@ function fixture() {
     metadata: { creationTimestamp: '2999-01-01T00:00:00Z', labels: { 'k8s-app': 'kube-dns' } },
     status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }] },
   };
+  const oldPod = {
+    ...goodPod,
+    metadata: { ...goodPod.metadata, creationTimestamp: '2000-01-01T00:00:00Z' },
+  };
   const setPods = (items = [goodPod]) => writeFileSync(pod, JSON.stringify({ items }));
-  setPods();
+  setPods([oldPod]);
   const deployment = join(root, 'deployment');
   writeFileSync(
     deployment,
@@ -71,12 +75,19 @@ case "$*" in
       unavailable) exit 1 ;;
     esac ;;
   *'rollout restart'*)
-    if [ -f "$FAIL_ONCE" ]; then rm "$FAIL_ONCE"; exit 1; fi ;;
+    if [ -f "$FAIL_ONCE" ]; then rm "$FAIL_ONCE"; exit 1; fi
+    node -e 'const fs=require("node:fs"); const p=JSON.parse(fs.readFileSync(process.env.DEPLOYMENT)); p.spec={template:{metadata:{annotations:{"kubectl.kubernetes.io/restartedAt":new Date().toISOString()}}}}; fs.writeFileSync(process.env.DEPLOYMENT, JSON.stringify(p));' ;;
+  *'rollout status'*)
+    if [ -f "$FAIL_AFTER" ]; then rm "$FAIL_AFTER"; exit 1; fi
+    if [ -f "$AUTO_READY" ]; then cp "$GOOD_PODS" "$POD"; fi ;;
   *'get pods -l k8s-app=kube-dns -o json'*) cat "$POD" ;;
   *'get deploy/coredns -o json'*) cat "$DEPLOYMENT" ;;
 esac
 exit 0`
   );
+  const goodPods = join(root, 'good-pods');
+  writeFileSync(goodPods, JSON.stringify({ items: [goodPod] }));
+  writeFileSync(join(root, 'auto-ready'), '');
   const env = {
     ...process.env,
     PATH: `${bin}:${process.env.PATH}`,
@@ -85,6 +96,9 @@ exit 0`
     POD: pod,
     DEPLOYMENT: deployment,
     FAIL_ONCE: join(root, 'fail-once'),
+    FAIL_AFTER: join(root, 'fail-after'),
+    AUTO_READY: join(root, 'auto-ready'),
+    GOOD_PODS: goodPods,
   };
   function run(script: string, args: string[]) {
     const before = readFileSync(calls, 'utf8').length;
@@ -101,14 +115,108 @@ exit 0`
     pod,
     deployment,
     goodPod,
-    setPods,
+    setPods: (items = [goodPod]) => {
+      rmSync(env.AUTO_READY, { force: true });
+      setPods(items);
+    },
     env,
     generate: () => run(generateScript, [generator, target, source]),
-    apply: () => run(applyScript, [target]),
+    apply: () => run(applyScript, [target, generator, source]),
     hash: () => createHash('sha256').update(readFileSync(target)).digest('hex'),
   };
 }
 describe('bounded generation and durable CoreDNS reconciliation', () => {
+  it('accepts existing creation/Ready/generation proof without a rollout', () => {
+    const host = fixture();
+    host.generate();
+    host.setPods();
+    const result = host.apply();
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.calls).toContain('get pods');
+    expect(result.calls).not.toContain('rollout restart');
+    expect(existsSync(host.marker)).toBe(true);
+  });
+
+  it('retries verification after a failure after rollout with exactly one restart', () => {
+    const host = fixture();
+    host.generate();
+    writeFileSync(host.env.FAIL_AFTER, '');
+    expect(host.apply().status).not.toBe(0);
+    expect(existsSync(host.marker)).toBe(false);
+    const retry = host.apply();
+    expect(retry.status, retry.stderr).toBe(0);
+    expect(retry.calls).not.toContain('rollout restart');
+    expect(readFileSync(host.calls, 'utf8').match(/rollout restart/g)).toHaveLength(1);
+  });
+
+  it.each(['renameSync(temporary, target);', 'renameSync(writtenTemporary, writtenPath);'])(
+    'invalidates old applied proof durably before interrupted ABA at %s',
+    (boundary) => {
+      const host = fixture();
+      host.generate();
+      expect(host.apply().status).toBe(0);
+      const crash = join(host.root, 'crash.mjs');
+      writeFileSync(
+        crash,
+        readFileSync(generator, 'utf8').replace(boundary, `${boundary} process.exit(75);`)
+      );
+      for (const address of ['10.0.0.53', '192.168.0.30']) {
+        writeFileSync(host.source, `nameserver ${address}\n`);
+        const result = spawnSync(
+          'flock',
+          [join(host.root, 'k3s-resolv.lock'), process.execPath, crash, host.target, host.source],
+          { encoding: 'utf8' }
+        );
+        expect(result.status, result.stderr).toBe(75);
+        expect(readFileSync(host.target, 'utf8')).toBe(`nameserver ${address}\n`);
+        expect(existsSync(host.marker)).toBe(false);
+        expect(existsSync(join(host.root, 'k3s-resolv.applied-written'))).toBe(false);
+      }
+      host.generate();
+      const applied = host.apply();
+      expect(applied.status, applied.stderr).toBe(0);
+      expect(applied.calls).toContain('get pods');
+      expect(existsSync(host.marker)).toBe(true);
+      const source = readFileSync(generator, 'utf8');
+      expect(source.indexOf('sync(dirname(target));')).toBeLessThan(
+        source.indexOf('renameSync(temporary, target);')
+      );
+    }
+  );
+
+  it('repairs the nested-generator overlap pair under the apply lock', () => {
+    const host = fixture();
+    host.generate();
+    expect(host.apply().status).toBe(0);
+    writeFileSync(host.source, 'nameserver 10.0.0.53\n');
+    const overlap = join(host.root, 'overlap.mjs');
+    writeFileSync(
+      overlap,
+      readFileSync(generator, 'utf8')
+        .replace(
+          "import { dirname } from 'node:path';",
+          "import { dirname } from 'node:path'; import { spawnSync } from 'node:child_process';"
+        )
+        .replace(
+          'renameSync(temporary, target);',
+          `renameSync(temporary, target);
+        writeFileSync(${JSON.stringify(host.source)}, 'nameserver 10.0.0.54\\n');
+        const nested = spawnSync(process.execPath, [${JSON.stringify(generator)}, target, ${JSON.stringify(host.source)}]);
+        if (nested.status !== 0) process.exit(70);`
+        )
+    );
+    const generated = spawnSync(process.execPath, [overlap, host.target, host.source], {
+      encoding: 'utf8',
+    });
+    expect(generated.status, generated.stderr).toBe(0);
+    const applied = host.apply();
+    expect(applied.status, applied.stderr).toBe(0);
+    expect(readFileSync(host.target, 'utf8')).toBe('nameserver 10.0.0.54\n');
+    expect(JSON.parse(readFileSync(join(host.root, 'k3s-resolv.written'), 'utf8')).sha256).toBe(
+      host.hash()
+    );
+  });
+
   it('generates locally without probing the network and queues pending apply even if unchanged', () => {
     const host = fixture();
     writeFileSync(host.state, 'unavailable');
@@ -136,8 +244,8 @@ describe('bounded generation and durable CoreDNS reconciliation', () => {
     // Crash between file and sidecar publication fails closed until generation
     // repairs the record; stale metadata never verifies different bytes.
     writeFileSync(sidecar, JSON.stringify({ ...record, sha256: 'stale' }));
-    expect(host.apply().status).not.toBe(0);
-    expect(existsSync(host.marker)).toBe(false);
+    expect(host.apply().status).toBe(0);
+    expect(existsSync(host.marker)).toBe(true);
     host.generate();
     expect(JSON.parse(readFileSync(sidecar, 'utf8')).sha256).toBe(host.hash());
   });
@@ -206,13 +314,17 @@ describe('bounded generation and durable CoreDNS reconciliation', () => {
     writeFileSync(host.source, 'nameserver 192.168.0.30\n');
     host.generate();
     expect(host.generate().calls).toContain('restart --no-block');
+    writeFileSync(
+      host.deployment,
+      JSON.stringify({ metadata: { generation: 2 }, status: { observedGeneration: 2 } })
+    );
     const interrupted = host.apply();
     expect(interrupted.calls).toContain('rollout restart');
     expect(interrupted.status).not.toBe(0);
     host.setPods();
     const retry = host.apply();
     expect(retry.status, retry.stderr).toBe(0);
-    expect(retry.calls).toContain('rollout restart');
+    expect(retry.calls).not.toContain('rollout restart');
   });
 
   it('requires every CoreDNS pod to be Running and Ready, not just one', () => {

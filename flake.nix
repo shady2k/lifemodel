@@ -196,7 +196,14 @@
         # Both install paths name the same file to k3s.
         assert lib.hasInfix (lib.concatStrings [ "K3S_RESOLV_CONF=" "\"" k3sResolvConf "\"" ]) installScript;
         assert lib.hasInfix "resolv-conf: ${k3sResolvConf}" (builtins.readFile ./deploy/k3s/config.yaml.d/lifemodel-resolv-conf.yaml);
-        pkgs.runCommand "lifemodel-k3s-resolv-module-evaluation" {} "touch $out";
+        pkgs.runCommand "lifemodel-k3s-resolv-module-evaluation" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
+          mkdir -p scripts deploy/k3s
+          cp ${./scripts/check-k3s-commands.mjs} scripts/check-k3s-commands.mjs
+          cp ${./deploy/k3s}/*.sh deploy/k3s/
+          node scripts/check-k3s-commands.mjs --path ${lib.makeBinPath keyless.config.systemd.services.lifemodel-k3s-resolv.path} k3s-resolv.sh
+          node scripts/check-k3s-commands.mjs --path ${lib.makeBinPath keyless.config.systemd.services.lifemodel-k3s-dns-apply.path} k3s-dns-apply.sh
+          touch $out
+        '';
       customTag = "20261013";
       customIssuer = ''^issuer\.path/'quoted"$'';
       customSubject = ''^subject\\literal/'quote"$'';

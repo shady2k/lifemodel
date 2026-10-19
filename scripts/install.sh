@@ -503,7 +503,7 @@ if ! cmp -s "$resolv_render/k3s/config.yaml.d/lifemodel-resolv-conf.yaml" \
 fi
 # The same two sources and order the unit names, so the file k3s reads at
 # install time is the one it would read after a boot.
-resolv_result=$(node "$resolv_render/resolv/resolv-conf.mjs" "$host_root$K3S_RESOLV_CONF" \
+resolv_result=$(flock "$host_root/run/lifemodel/k3s-resolv.lock" node "$resolv_render/resolv/resolv-conf.mjs" "$host_root$K3S_RESOLV_CONF" \
   /etc/resolv.conf /run/systemd/resolve/resolv.conf)
 if [ "$resolv_result" = changed ]; then k3s_resolv_changed=1; fi
 [ -s "$host_root$K3S_RESOLV_CONF" ] || die "k3s resolver missing or empty"

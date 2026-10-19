@@ -148,7 +148,7 @@ describe('the installer hands k3s a resolv.conf it accepts', () => {
     expect(first.systemctl.indexOf('start lifemodel-k3s-dns-apply.service')).toBeGreaterThan(
       first.systemctl.indexOf('restart k3s.service')
     );
-    expect(first.calls).toContain('rollout restart deploy/coredns -n kube-system');
+    expect(first.calls).not.toContain('rollout restart deploy/coredns -n kube-system');
     expect(first.calls).toContain('get pods -l k8s-app=kube-dns -o json');
     expect(first.calls).not.toContain(' exec ');
     expect(existsSync(join(root, 'install-root/run/lifemodel/k3s-resolv.applied'))).toBe(true);
@@ -200,6 +200,13 @@ describe('the installer hands k3s a resolv.conf it accepts', () => {
     120_000
   );
 
+  it('serializes installer publication against overlapping path/apply generators', () => {
+    const root = workspace('overlap');
+    const result = install(root);
+    expect(result.status, result.output).toBe(0);
+    expect(existsSync(join(root, 'install-root/run/lifemodel/k3s-resolv.applied'))).toBe(true);
+  });
+
   it('waits through a failed first apply and a successful retry within the installer bound', () => {
     const root = workspace('retry-install');
     mkdirSync(join(root, 'install-root'), { recursive: true });
@@ -236,7 +243,7 @@ describe('the installer hands k3s a resolv.conf it accepts', () => {
       writeFake(join(bin, 'id'), `#!/bin/sh\necho 0\n`);
       writeFake(
         join(bin, 'node'),
-        `#!/bin/sh\ncase "$1" in */wait-ready.mjs) exit 0 ;; esac\nexec ${JSON.stringify(process.execPath)} "$@"\n`
+        `#!/bin/sh\ncase "$1" in */wait-ready.mjs) exit 0 ;; */resolv-conf.mjs) if flock -n "$LIFEMODEL_INSTALL_ROOT/run/lifemodel/k3s-resolv.lock" true; then echo "installer generator overlaps publication without lock" >&2; exit 73; fi ;; esac\nexec ${JSON.stringify(process.execPath)} "$@"\n`
       );
       writeFake(join(bin, 'apt-get'), `#!/bin/sh\necho "$*" >> "$APT_LOG"\nexit 0\n`);
       writeFake(
@@ -249,7 +256,7 @@ describe('the installer hands k3s a resolv.conf it accepts', () => {
 printf '%s\\n' "$*" >> "$SYSTEMCTL_LOG"
 if [ "$*" = 'start lifemodel-k3s-dns-apply.service' ]; then
   if [ -f "$LIFEMODEL_INSTALL_ROOT/fail-apply-once" ]; then rm "$LIFEMODEL_INSTALL_ROOT/fail-apply-once"; exit 1; fi
-  exec sh "$LIFEMODEL_INSTALL_ROOT/usr/lib/lifemodel/k3s-dns-apply.sh" "$LIFEMODEL_INSTALL_ROOT/run/lifemodel/k3s-resolv.conf"
+  exec sh "$LIFEMODEL_INSTALL_ROOT/usr/lib/lifemodel/k3s-dns-apply.sh" "$LIFEMODEL_INSTALL_ROOT/run/lifemodel/k3s-resolv.conf" "$LIFEMODEL_INSTALL_ROOT/usr/lib/lifemodel/resolv-conf.mjs" /etc/resolv.conf /run/systemd/resolve/resolv.conf
 fi
 exit 0
 `
