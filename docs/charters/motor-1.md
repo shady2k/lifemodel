@@ -71,7 +71,14 @@ for `generations-1`, where the deploy branch they concern is built on.
 
 No target date: none was set from outside the work.
 
-## Next milestone: `generations-1` — A commit becomes a generation, and a broken one reverts itself
+## Next milestone: `observability-1` — The owner sees what every part of the platform did
+
+Owner, 2026-10-19: observability is the next milestone, before `generations-1`
+(lifemodel-vbog). Logs of every module are collected and kept on the machine
+across restarts and searched in the loader's interface; failures carry safe
+reasons; basic metrics; one request id from the chat to the model gateway.
+
+Then `generations-1` — A commit becomes a generation, and a broken one reverts itself:
 
 - A commit becomes a generation: changed modules are built in the cluster and
   replaced one by one (lifemodel-pwe; zot registry with password push, TLS
