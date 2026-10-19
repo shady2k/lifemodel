@@ -4,7 +4,10 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import {
   slotIdentity,
+  slotSecrets,
+  validateSlotHeaders,
   type ModelSlot,
+  type ModelSlotHeader,
   type ModelSlotName,
   type SlotIdentity,
   type SlotRead,
@@ -254,7 +257,21 @@ export function createRoleBaoClient(options: RoleBaoOptions) {
       version < 1
     )
       throw failure('unreachable');
-    return { state: 'present', slot: value as unknown as ModelSlot, version };
+    // A stored header list that breaks the rule is refused here too: a slot
+    // written before it could not be written now never reaches an upstream.
+    let headers: ModelSlotHeader[] | undefined;
+    if (value['headers'] !== undefined) {
+      try {
+        headers = validateSlotHeaders(value['headers']);
+      } catch {
+        throw failure('unreachable');
+      }
+    }
+    return {
+      state: 'present',
+      slot: { ...(value as unknown as ModelSlot), ...(headers ? { headers } : {}) },
+      version,
+    };
   }
   return {
     call,
@@ -286,9 +303,10 @@ export function createCachedSlotReader(
   const pending = new Map<ModelSlotName, Promise<SlotRead>>();
   const generations = new Map<ModelSlotName, number>();
   return {
+    /** The key and every header value: material no response may contain. */
     keys(): string[] {
       return [...cache.values()].flatMap(({ value }) =>
-        value.state === 'present' && value.slot.key ? [value.slot.key] : []
+        value.state === 'present' ? slotSecrets(value.slot) : []
       );
     },
     invalidate(slot: ModelSlotName) {

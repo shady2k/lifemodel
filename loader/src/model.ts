@@ -7,14 +7,22 @@ import type { ClientRequest } from 'node:http';
 import { modelEndpointUrl } from './model-url.js';
 
 export type ModelSlotName = 'primary' | 'reserve';
+/** One additional header the slot sends upstream, in the owner's own order. */
+export interface ModelSlotHeader {
+  name: string;
+  value: string;
+}
 export interface ModelSlot {
   kind: 'openai' | 'ollama';
   baseUrl: string;
   model: string;
   key?: string;
+  headers?: ModelSlotHeader[];
 }
-export interface ModelSlotView extends Omit<ModelSlot, 'key'> {
+export interface ModelSlotView extends Omit<ModelSlot, 'key' | 'headers'> {
   keySet: boolean;
+  /** The stored header names only: a header value never leaves the slot store. */
+  headerNames: string[];
 }
 /** The slot's own KV v2 identity: the version that holds it, or its absence. */
 export type SlotIdentity = { version: number } | 'absent';
@@ -27,10 +35,114 @@ export type SlotRead = { state: 'present'; slot: ModelSlot; version: number } | 
 export function slotIdentity(read: SlotRead): SlotIdentity {
   return read.state === 'present' ? { version: read.version } : 'absent';
 }
+/**
+ * Everything a slot stores that is secret: its key and every header value
+ * (ADR-013, the custom-headers amendment). Nothing else may be logged, put in
+ * a status answer, sent to the core or returned in a response.
+ */
+export function slotSecrets(slot: ModelSlot): string[] {
+  return [
+    ...(slot.key ? [slot.key] : []),
+    ...(slot.headers ?? []).flatMap((header) => (header.value === '' ? [] : [header.value])),
+  ];
+}
 export interface ModelSlots {
   read(slot: ModelSlotName): Promise<ModelSlot | null>;
   write(slot: ModelSlotName, value: ModelSlot): Promise<void>;
   clearReserve(): Promise<void>;
+}
+/** At most this many additional headers on a slot. */
+export const MAX_SLOT_HEADERS = 16;
+/** The longest accepted header name, in characters. */
+export const MAX_SLOT_HEADER_NAME = 64;
+/** The longest accepted header value, in bytes. */
+export const MAX_SLOT_HEADER_VALUE = 1024;
+/** An RFC 9110 token: the only shape a header name may have. */
+const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+/**
+ * Names the gateway sets itself, and the hop-by-hop and cookie headers a
+ * request must never carry from a slot: a custom header can never replace
+ * `host`, `content-type`, `accept`, `authorization` or `content-length`.
+ */
+const RESERVED_HEADERS = new Set([
+  'host',
+  'authorization',
+  'proxy-authorization',
+  'content-length',
+  'content-type',
+  'accept',
+  'connection',
+  'keep-alive',
+  'transfer-encoding',
+  'te',
+  'trailer',
+  'upgrade',
+  'expect',
+  'cookie',
+]);
+export type SlotHeaderErrorCode =
+  | 'header_shape_invalid'
+  | 'header_name_invalid'
+  | 'header_name_reserved'
+  | 'header_value_invalid'
+  | 'header_duplicate'
+  | 'header_too_many';
+/** A refused header list, named by the rule it broke. */
+export class SlotHeaderError extends Error {
+  constructor(readonly code: SlotHeaderErrorCode) {
+    super(code);
+    this.name = 'SlotHeaderError';
+  }
+}
+/**
+ * The header list a slot may carry, or the rule it breaks (ADR-013, the
+ * custom-headers amendment). Enforced where the slot is saved and again where
+ * the gateway reads it: a slot that breaks a rule is refused, never trimmed.
+ */
+export function validateSlotHeaders(input: unknown): ModelSlotHeader[] {
+  if (!Array.isArray(input)) throw new SlotHeaderError('header_shape_invalid');
+  if (input.length > MAX_SLOT_HEADERS) throw new SlotHeaderError('header_too_many');
+  const seen = new Set<string>();
+  const headers: ModelSlotHeader[] = [];
+  for (const item of input) {
+    if (typeof item !== 'object' || item === null || Array.isArray(item))
+      throw new SlotHeaderError('header_shape_invalid');
+    const entry = item as Record<string, unknown>;
+    if (
+      Object.keys(entry).some((field) => field !== 'name' && field !== 'value') ||
+      typeof entry['name'] !== 'string' ||
+      typeof entry['value'] !== 'string'
+    )
+      throw new SlotHeaderError('header_shape_invalid');
+    const name = entry['name'];
+    const value = entry['value'];
+    if (name.length > MAX_SLOT_HEADER_NAME || !HEADER_NAME.test(name))
+      throw new SlotHeaderError('header_name_invalid');
+    const lower = name.toLowerCase();
+    if (RESERVED_HEADERS.has(lower) || lower.startsWith('proxy-'))
+      throw new SlotHeaderError('header_name_reserved');
+    if (seen.has(lower)) throw new SlotHeaderError('header_duplicate');
+    if (/[\r\n\0]/.test(value) || Buffer.byteLength(value, 'utf8') > MAX_SLOT_HEADER_VALUE)
+      throw new SlotHeaderError('header_value_invalid');
+    seen.add(lower);
+    headers.push({ name, value });
+  }
+  return headers;
+}
+/** The request header the core names its session in (ADR-013 amendment). */
+export const SESSION_HEADER = 'x-lifemodel-session';
+/** The placeholder a slot value may carry in place of the session id. */
+export const SESSION_PLACEHOLDER = '{session}';
+/** The session id the loader's own model check sends in place of a caller's. */
+export const CHECK_SESSION_ID = 'lifemodel-model-check';
+const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+/** The caller's session id, or nothing when the header is missing or malformed. */
+export function validSessionId(value: unknown): string | undefined {
+  return typeof value === 'string' && SESSION_ID.test(value) ? value : undefined;
+}
+/** A header value with every `{session}` filled from the caller's session id. */
+export function renderHeaderValue(value: string, sessionId: string): string {
+  return value.split(SESSION_PLACEHOLDER).join(sessionId);
 }
 export type ModelErrorCode =
   | 'unreachable'
@@ -285,6 +397,10 @@ function requestBounded(
 }
 export function publicSlot(slot: ModelSlot | null): ModelSlotView | null {
   if (slot === null) return null;
-  const { key, ...safe } = slot;
-  return { ...safe, keySet: key !== undefined };
+  const { key, headers, ...safe } = slot;
+  return {
+    ...safe,
+    keySet: key !== undefined,
+    headerNames: (headers ?? []).map((header) => header.name),
+  };
 }
