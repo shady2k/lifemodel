@@ -323,7 +323,10 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
   before. A rendered value of 16 static bytes or more echoed by an upstream in a
   buffered answer or an SSE frame is refused, also after a status re-check
   invalidated the slot cache while that answer was in flight, and a one-character
-  value in an ordinary answer is not.
+  value in an ordinary answer is not; the session fallback is logged once per
+  slot configuration. A slot handed to the gateway with reserved names in mixed
+  case cannot replace its host, content type, accept, authorization or content
+  length, on a POST or a bodyless GET, with or without a key.
 - Bao: the `model-gateway` role reads the slots and is denied writes and
   unrelated paths (real role, on the VM).
 - On the test VM from a clean snapshot, with the LAN fixtures saved through

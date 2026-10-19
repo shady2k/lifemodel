@@ -66,6 +66,16 @@ export interface GatewayOptions {
   resolveHost?: (hostname: string) => Promise<string[]>;
   tlsCa?: string | Buffer;
 }
+/** The header names the gateway owns: a slot's own header may never set one. */
+const GATEWAY_HEADERS = ['host', 'content-type', 'accept', 'authorization', 'content-length'];
+/**
+ * Set one of the gateway's own headers over the slot's, whatever casing the slot
+ * used for that name: two casings of one name would arrive upstream twice.
+ */
+function setOwnHeader(headers: Record<string, string>, name: string, value: string): void {
+  for (const key of Object.keys(headers)) if (key.toLowerCase() === name) delete headers[key];
+  headers[name] = value;
+}
 interface SlotHealth {
   lastErrorCode: string | null;
   lastErrorAt: string | null;
@@ -217,13 +227,15 @@ export function createModelGateway(options: GatewayOptions) {
    * order, each already rendered with the caller's session; the gateway's own
    * host, content type, accept, authorization and content length are then set
    * over them, so a custom header can never replace one of those. A value that
-   * had to fall back to this process's own id is named in one log line, never
-   * with its value (ADR-013, the custom-headers amendment).
+   * had to fall back to this process's own id is named once per slot
+   * configuration in one log line, never with its value (ADR-013, the
+   * custom-headers amendment).
    */
   function upstreamHeaders(
     slot: ModelSlot,
     custom: Record<string, string>,
     session: { id: string; callerNamed: boolean },
+    slotName: ModelSlotName,
     target: { host: string; stream: boolean; contentLength: number | undefined }
   ): Record<string, string> {
     const fellBack = session.callerNamed
@@ -231,16 +243,32 @@ export function createModelGateway(options: GatewayOptions) {
       : (slot.headers ?? [])
           .filter((header) => header.value.includes(SESSION_PLACEHOLDER))
           .map((header) => header.name);
-    custom['host'] = target.host;
-    custom['content-type'] = 'application/json';
-    custom['accept'] = target.stream ? 'text/event-stream' : 'application/json';
-    if (slot.key) custom['authorization'] = `Bearer ${slot.key}`;
-    if (target.contentLength !== undefined) custom['content-length'] = String(target.contentLength);
-    if (fellBack.length > 0)
-      options.logger.warn(
-        { headers: fellBack },
-        'Model gateway filled the session placeholder with its own process id'
-      );
+    const own = new Map<string, string>([
+      ['host', target.host],
+      ['content-type', 'application/json'],
+      ['accept', target.stream ? 'text/event-stream' : 'application/json'],
+    ]);
+    if (slot.key) own.set('authorization', `Bearer ${slot.key}`);
+    if (target.contentLength !== undefined) own.set('content-length', String(target.contentLength));
+    // A name the gateway sets for this request wins in any casing a slot used;
+    // one it does not set (authorization without a key, content-length on a GET)
+    // is dropped from the slot's own list, so it cannot become the gateway's.
+    for (const name of GATEWAY_HEADERS) {
+      for (const key of Object.keys(custom))
+        if (key.toLowerCase() === name && !own.has(name)) delete custom[key];
+      const value = own.get(name);
+      if (value !== undefined) setOwnHeader(custom, name, value);
+    }
+    if (fellBack.length > 0) {
+      const signature = `${slotName}:${fellBack.join(',')}`;
+      if (!fallbackLogged.has(signature)) {
+        fallbackLogged.add(signature);
+        options.logger.warn(
+          { headers: fellBack },
+          'Model gateway filled the session placeholder with its own process id'
+        );
+      }
+    }
     return custom;
   }
 
@@ -338,6 +366,8 @@ export function createModelGateway(options: GatewayOptions) {
   // against what that attempt really sent.
   const activeKeys = new Map<string, number>();
   const activeHeaderSecrets = new Map<string, number>();
+  // One warning per slot and placeholder header set, not one per request.
+  const fallbackLogged = new Set<string>();
   const inspectedKeys = () => [
     ...options.slots.keys(),
     ...activeKeys.keys(),
@@ -418,7 +448,7 @@ export function createModelGateway(options: GatewayOptions) {
             ...(options.tlsCa === undefined ? {} : { ca: options.tlsCa }),
           }
         : {}),
-      headers: upstreamHeaders(slot, custom, session, {
+      headers: upstreamHeaders(slot, custom, session, name, {
         host: url.host,
         stream: payload?.['stream'] === true,
         contentLength: body === undefined ? undefined : Buffer.byteLength(body),

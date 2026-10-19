@@ -48,7 +48,9 @@ async function fixture(
   const attempts: Array<{
     slot: ModelSlotName;
     body: Record<string, unknown>;
+    text: string;
     headers: IncomingMessage['headers'];
+    rawHeaders: string[];
     path: string;
   }> = [];
   const handlers: Record<ModelSlotName, Handler> = {
@@ -62,7 +64,14 @@ async function fixture(
         let text = '';
         for await (const chunk of req) text += String(chunk);
         const body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
-        attempts.push({ slot: name, body, headers: req.headers, path: req.url ?? '' });
+        attempts.push({
+          slot: name,
+          body,
+          text,
+          headers: req.headers,
+          rawHeaders: req.rawHeaders,
+          path: req.url ?? '',
+        });
         handlers[name](req, res, body);
       })
     );
@@ -387,6 +396,13 @@ function event(content: string, field = 'content', choice = 0, tool = 0): string
 const streamPayload = { model: 'default', messages: [], stream: true };
 function endStream(indices = [0]): string {
   return `data: ${JSON.stringify({ model: 'stream-real', choices: indices.map((index) => ({ index, delta: {}, finish_reason: 'stop' })) })}\n\ndata: [DONE]\n\n`;
+}
+/** How many times one name reached the upstream wire, in any casing. */
+function wireCount(attempt: { rawHeaders: string[] }, name: string): number {
+  let count = 0;
+  for (let index = 0; index < attempt.rawHeaders.length; index += 2)
+    if (attempt.rawHeaders[index]?.toLowerCase() === name) count++;
+  return count;
 }
 function latch() {
   let resolve!: () => void;
@@ -1700,6 +1716,74 @@ describe('model gateway custom slot headers', () => {
     expect(Object.keys(headers ?? {}).sort()).toEqual([...baseline, 'x-custom-a'].sort());
   });
 
+  it.each([{ keyed: true }, { keyed: false }])(
+    'keeps the gateway own headers when the boundary hands it reserved names in mixed case (keyed=$keyed)',
+    async ({ keyed }) => {
+      // Validation is bypassed at the seam on purpose: a slot object arrives
+      // with names the save rule refuses, and the header layering must still
+      // hold. A keyless slot carries no authorization at all.
+      const f = await fixture();
+      f.handlers.primary = (req, res) =>
+        res.end(
+          JSON.stringify(
+            req.url?.endsWith('/models') ? { data: [{ id: 'upstream-model' }] } : answer()
+          )
+        );
+      const slot: ModelSlot = {
+        kind: 'openai',
+        baseUrl: f.slots.primary!.baseUrl,
+        model: 'primary-model',
+        ...(keyed ? { key: 'primary-SUPER-SECRET' } : {}),
+        headers: [
+          { name: 'Host', value: 'attacker.example' },
+          { name: 'CONTENT-Type', value: 'text/plain' },
+          { name: 'Accept', value: 'text/html' },
+          { name: 'AuThOrIzAtIoN', value: 'Bearer OVERRIDE-SECRET' },
+          { name: 'Content-Length', value: '1' },
+          { name: 'x-kept', value: 'yes' },
+        ],
+      };
+      const url = await listen(
+        createModelGateway({
+          slots: {
+            read: async () => ({ state: 'present', slot, version: 1 }),
+            identity: async () => ({ version: 1 }),
+            invalidate: () => {},
+            keys: () => [],
+          },
+          logger: createRecordingLogger([]),
+        }).api
+      );
+      const response = await fetch(`${url}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'default', messages: [] }),
+      });
+      expect(response.status).toBe(200);
+      const sent = f.attempts[0]!;
+      const upstreamHost = new URL(slot.baseUrl).host;
+      expect(wireCount(sent, 'host')).toBe(1);
+      expect(sent.headers['host']).toBe(upstreamHost);
+      expect(wireCount(sent, 'content-type')).toBe(1);
+      expect(sent.headers['content-type']).toBe('application/json');
+      expect(wireCount(sent, 'accept')).toBe(1);
+      expect(sent.headers['accept']).toBe('application/json');
+      expect(wireCount(sent, 'authorization')).toBe(keyed ? 1 : 0);
+      expect(sent.headers['authorization']).toBe(keyed ? 'Bearer primary-SUPER-SECRET' : undefined);
+      expect(wireCount(sent, 'content-length')).toBe(1);
+      expect(sent.headers['content-length']).toBe(String(Buffer.byteLength(sent.text)));
+      expect(sent.headers['x-kept']).toBe('yes');
+      // A bodyless GET carries no content-length and never an authorization.
+      const models = await fetch(`${url}/v1/models`);
+      expect(models.status).toBe(200);
+      const list = f.attempts[1]!;
+      expect(wireCount(list, 'content-length')).toBe(0);
+      expect(wireCount(list, 'authorization')).toBe(keyed ? 1 : 0);
+      expect(list.headers['host']).toBe(upstreamHost);
+      expect(list.headers['content-type']).toBe('application/json');
+    }
+  );
+
   it('refuses a slot whose stored headers name a reserved header: nothing reaches an upstream', async () => {
     const f = await fixture();
     for (const name of ['primary', 'reserve'] as const)
@@ -1722,6 +1806,8 @@ describe('model gateway custom slot headers', () => {
       ...f.slots.primary!,
       headers: [{ name: 'x-opencode-session', value: 'id-{session}' }],
     };
+    const fallbackLines = () =>
+      f.lines.filter((line) => line.message.includes('session placeholder'));
     expect((await f.post()).status).toBe(200);
     expect((await f.post(undefined, { 'x-lifemodel-session': 'not a session id!' })).status).toBe(
       200
@@ -1733,10 +1819,24 @@ describe('model gateway custom slot headers', () => {
     expect(f.attempts[2]?.headers['x-opencode-session']).toBe('id-conv-1');
     const logged = JSON.stringify(f.lines);
     expect(logged).not.toContain(String(fallback));
-    expect(logged).toContain('session placeholder');
-    // Only the two requests that had to fall back log the line.
-    expect(f.lines.filter((line) => line.message.includes('session placeholder'))).toHaveLength(2);
-    expect(f.lines.map((line) => line.fields['header'])).not.toContain('id-conv-1');
+    // Both requests that had to fall back, and no request after them, log the
+    // line: one warning per slot configuration, named by its header names.
+    expect(fallbackLines()).toHaveLength(1);
+    expect(fallbackLines()[0]?.fields['headers']).toEqual(['x-opencode-session']);
+    // A changed configuration is a new fact and is named once again.
+    f.slots.primary = {
+      ...f.slots.primary!,
+      headers: [
+        { name: 'x-opencode-session', value: 'id-{session}' },
+        { name: 'x-tenant', value: 'tenant-{session}' },
+      ],
+    };
+    f.cache.invalidate('primary');
+    expect((await f.post()).status).toBe(200);
+    expect((await f.post()).status).toBe(200);
+    expect(fallbackLines()).toHaveLength(2);
+    expect(fallbackLines()[1]?.fields['headers']).toEqual(['x-opencode-session', 'x-tenant']);
+    expect(JSON.stringify(f.lines)).not.toContain('id-conv-1');
   });
 
   it('never puts a header value in the status answer, a log line or a response', async () => {
