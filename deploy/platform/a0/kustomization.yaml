@@ -18,3 +18,4 @@ images:
   - name: ghcr.io/shady2k/lifemodel-loader
     newName: ghcr.io/shady2k/lifemodel-loader
     digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+# probe: harmless edit (lifemodel-lut.3.6)
