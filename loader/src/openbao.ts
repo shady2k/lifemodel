@@ -495,7 +495,10 @@ export function createOpenBaoApi(
       )
         throw new Error('OpenBao loader-model login did not have expected model capabilities');
     },
-    readModelSlot: client.readSlot,
+    readModelSlot: async (slot) => {
+      const read = await client.readSlot(slot);
+      return read.state === 'present' ? read.slot : null;
+    },
     writeModelSlot: client.writeSlot,
     deleteModelReserve: client.deleteReserve,
     revokeRootToken: async (rootToken) => {

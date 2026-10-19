@@ -65,6 +65,8 @@ export default function App() {
   const [model, setModel] = useState('');
   const [key, setKey] = useState('');
   const [modelStatus, setModelStatus] = useState<ModelStatusEvent | null>();
+  // A slot saved in this page session: an `unknown` state then says so.
+  const [slotSaved, setSlotSaved] = useState(false);
   async function load() {
     const r = await fetch('/api/state', { cache: 'no-store' });
     if (!r.ok) throw new Error('state');
@@ -106,7 +108,12 @@ export default function App() {
         const response = await fetch('/api/model-status', { cache: 'no-store' });
         if (!response.ok) throw new Error('status');
         const value: unknown = await response.json();
-        if (active) setModelStatus(parseModelStatus(value));
+        if (!active) return;
+        const parsed = parseModelStatus(value);
+        setModelStatus(parsed);
+        // The projection has no lastSuccessAt: even an ok poll can describe a
+        // pre-save request. Keep the save fact for this page session; only an
+        // unknown state displays it, never ok/down/unavailable.
       } catch {
         // No status is readable: the settings show the quiet unavailable line.
         if (active) setModelStatus(null);
@@ -180,6 +187,7 @@ export default function App() {
         return;
       }
       setKey('');
+      setSlotSaved(true);
       await load();
     } catch {
       setError(t('setupError'));
@@ -214,6 +222,7 @@ export default function App() {
       setReserveBaseUrl('');
       setReserveModel('');
       setReserveKey('');
+      setSlotSaved(true);
       await load();
     } catch {
       setReserveError(t('setupError'));
@@ -611,7 +620,7 @@ export default function App() {
                 <h2 id="model-access-title" className="text-lg font-semibold">
                   {t('modelAccess')}
                 </h2>
-                {modelStatus !== undefined && <ModelStatus value={modelStatus} />}
+                {modelStatus !== undefined && <ModelStatus value={modelStatus} saved={slotSaved} />}
               </section>
               <section className="mt-8 space-y-4" aria-labelledby="password-change-title">
                 <h2 id="password-change-title" className="text-lg font-semibold">

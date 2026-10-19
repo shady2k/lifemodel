@@ -42,7 +42,8 @@ const answer = (model = 'upstream-model', content: string | null = 'OK') => ({
 type Handler = (req: IncomingMessage, res: ServerResponse, body: Record<string, unknown>) => void;
 async function fixture(
   options?: Parameters<typeof createModelGateway>[0]['timeouts'],
-  timers?: Parameters<typeof createModelGateway>[0]['timers']
+  timers?: Parameters<typeof createModelGateway>[0]['timers'],
+  recheck?: Parameters<typeof createModelGateway>[0]['recheck']
 ) {
   const attempts: Array<{
     slot: ModelSlotName;
@@ -73,6 +74,10 @@ async function fixture(
     };
   }
   let baoStatus = 200;
+  let holdReads = false;
+  let interceptRead: ((name: ModelSlotName, reply: () => void) => boolean) | undefined;
+  const baoStatuses: Partial<Record<ModelSlotName, number>> = {};
+  const versions: Record<ModelSlotName, number> = { primary: 1, reserve: 1 };
   const reads: string[] = [];
   const logins: unknown[] = [];
   const bao = await listen(
@@ -89,13 +94,20 @@ async function fixture(
         return;
       }
       reads.push(req.url ?? '');
-      const slot = req.url?.endsWith('/reserve') ? slots.reserve : slots.primary;
-      res.writeHead(baoStatus === 200 && !slot ? 404 : baoStatus);
-      res.end(
-        baoStatus === 200
-          ? JSON.stringify({ data: { data: slot, metadata: {} } })
-          : 'PRIVATE BAO BODY'
-      );
+      // A held read answers nothing: the re-check's own bound must end the wait.
+      if (holdReads) return;
+      const name: ModelSlotName = req.url?.endsWith('/reserve') ? 'reserve' : 'primary';
+      const slot = slots[name];
+      const status = baoStatuses[name] ?? baoStatus;
+      const body =
+        status === 200
+          ? JSON.stringify({ data: { data: slot, metadata: { version: versions[name] } } })
+          : 'PRIVATE BAO BODY';
+      const reply = () => {
+        res.writeHead(status === 200 && !slot ? 404 : status);
+        res.end(body);
+      };
+      if (!interceptRead?.(name, reply)) reply();
     })
   );
   const lines: RecordedLine[] = [];
@@ -112,6 +124,7 @@ async function fixture(
     logger,
     ...(options ? { timeouts: options } : {}),
     ...(timers ? { timers } : {}),
+    ...(recheck ? { recheck } : {}),
   });
   const url = await listen(app.api);
   const statusUrl = await listen(app.status);
@@ -140,8 +153,16 @@ async function fixture(
     logins,
     lines,
     cache,
+    versions,
+    baoStatuses,
+    set interceptRead(value: typeof interceptRead) {
+      interceptRead = value;
+    },
     set baoStatus(value: number) {
       baoStatus = value;
+    },
+    set holdReads(value: boolean) {
+      holdReads = value;
     },
   };
 }
@@ -1252,6 +1273,338 @@ describe('model gateway production timer and inbound boundaries', () => {
     });
     expect(text).toContain('400 Bad Request');
     expect(f.attempts).toEqual([]);
+    expect(f.reads).toEqual([]);
+  });
+});
+
+describe('model gateway clears a stale outage on a slot change', () => {
+  const statusOf = async (f: Awaited<ReturnType<typeof fixture>>) =>
+    (await fetch(`${f.statusUrl}/status`)).json();
+  const failing = (_req: IncomingMessage, res: ServerResponse) => {
+    res.writeHead(503);
+    res.end();
+  };
+
+  it('turns down/not_configured into unknown once the absent primary is saved', async () => {
+    const f = await fixture(undefined, undefined, { cache: 0 });
+    const saved = { ...f.slots.primary! };
+    f.slots.primary = null;
+    expect((await f.post()).status).toBe(502);
+    expect(await statusOf(f)).toMatchObject({
+      state: 'down',
+      lastErrorCode: 'not_configured',
+    });
+    // The owner saves the primary: the slot now exists at a new version.
+    f.slots.primary = saved;
+    f.versions.primary = 2;
+    expect(await statusOf(f)).toMatchObject({
+      state: 'unknown',
+      outageSince: null,
+      lastErrorCode: null,
+      primary: { lastErrorCode: null, lastErrorAt: null },
+    });
+  });
+
+  it('turns down/upstream_503 into unknown when both failing slots changed', async () => {
+    const f = await fixture(undefined, undefined, { cache: 0 });
+    f.handlers.primary = failing;
+    f.handlers.reserve = failing;
+    expect((await f.post()).status).toBe(502);
+    const down = await statusOf(f);
+    expect(down).toMatchObject({ state: 'down', lastErrorCode: 'upstream_503' });
+    expect(down.outageSince).not.toBeNull();
+    f.versions.primary = 2;
+    f.versions.reserve = 2;
+    expect(await statusOf(f)).toMatchObject({
+      state: 'unknown',
+      outageSince: null,
+      lastErrorCode: null,
+      primary: { lastErrorCode: null, lastErrorAt: null },
+      reserve: { lastErrorCode: null, lastErrorAt: null },
+    });
+  });
+
+  it('keeps the outage while the slots keep their versions', async () => {
+    const f = await fixture(undefined, undefined, { cache: 0 });
+    f.handlers.primary = failing;
+    f.handlers.reserve = failing;
+    await (await f.post()).text();
+    const first = await statusOf(f);
+    expect(first.state).toBe('down');
+    const outage = {
+      state: 'down',
+      outageSince: first.outageSince,
+      lastErrorCode: 'upstream_503',
+      primary: { lastErrorCode: 'upstream_503' },
+      reserve: { lastErrorCode: 'upstream_503' },
+    };
+    expect(await statusOf(f)).toMatchObject(outage);
+    // A request still fails on the unchanged slots and shows the same outage.
+    await (await f.post()).text();
+    expect(await statusOf(f)).toMatchObject(outage);
+  });
+
+  it('answers within the bound while the re-check read does not answer', async () => {
+    const f = await fixture(undefined, undefined, { cache: 0 });
+    f.handlers.primary = failing;
+    f.handlers.reserve = failing;
+    await (await f.post()).text();
+    f.holdReads = true;
+    const startedAt = Date.now();
+    const body = await statusOf(f);
+    expect(Date.now() - startedAt).toBeLessThan(1_500);
+    expect(body.state).toBe('down');
+    expect(body.outageSince).not.toBeNull();
+  });
+
+  it('changes nothing when Bao refuses the re-check read', async () => {
+    const f = await fixture(undefined, undefined, { cache: 0 });
+    f.handlers.primary = failing;
+    f.handlers.reserve = failing;
+    await (await f.post()).text();
+    const down = await statusOf(f);
+    expect(down.state).toBe('down');
+    // A saved slot behind a Bao error is not a change the gateway can see.
+    f.versions.primary = 2;
+    f.baoStatus = 503;
+    expect(await statusOf(f)).toEqual(down);
+  });
+
+  it('re-reads the failing slots at most once per cache window', async () => {
+    const f = await fixture();
+    f.handlers.primary = failing;
+    f.handlers.reserve = failing;
+    await (await f.post()).text();
+    const reads = f.reads.length;
+    expect((await statusOf(f)).state).toBe('down');
+    expect(f.reads.length - reads).toBe(2);
+    // The same answer serves the next poll: no second read inside the window.
+    expect((await statusOf(f)).state).toBe('down');
+    expect(f.reads.length - reads).toBe(2);
+  });
+
+  it('keeps the request down when only one failing slot changed', async () => {
+    const f = await fixture(undefined, undefined, { cache: 0 });
+    f.handlers.primary = failing;
+    f.handlers.reserve = failing;
+    await (await f.post()).text();
+    f.versions.primary = 2;
+    const body = await statusOf(f);
+    expect(body.state).toBe('down');
+    expect(body.outageSince).not.toBeNull();
+    expect(body.primary).toEqual({ lastErrorCode: null, lastErrorAt: null });
+    expect(body.reserve.lastErrorCode).toBe('upstream_503');
+  });
+
+  it('shows down again when the saved slot really fails', async () => {
+    const f = await fixture(undefined, undefined, { cache: 0 });
+    const saved = { ...f.slots.primary! };
+    f.slots.primary = null;
+    await (await f.post()).text();
+    f.slots.primary = saved;
+    f.versions.primary = 2;
+    expect(await statusOf(f)).toMatchObject({ state: 'unknown' });
+    f.handlers.primary = failing;
+    f.handlers.reserve = failing;
+    await (await f.post()).text();
+    // The reset dropped the cached absence: the request reached the upstream again.
+    expect(f.attempts.map((attempt) => attempt.slot)).toEqual(['primary', 'reserve']);
+    expect(await statusOf(f)).toMatchObject({
+      state: 'down',
+      lastErrorCode: 'upstream_503',
+    });
+    expect((await statusOf(f)).outageSince).not.toBeNull();
+  });
+
+  function holdRead(f: Awaited<ReturnType<typeof fixture>>, slot: ModelSlotName = 'primary') {
+    const entered = latch();
+    let release!: () => void;
+    f.interceptRead = (name, reply) => {
+      if (name !== slot) return false;
+      f.interceptRead = undefined;
+      release = reply;
+      entered.resolve();
+      return true;
+    };
+    return { entered: entered.promise, release: () => release() };
+  }
+
+  it.each(['buffered', 'stream', 'header'] as const)(
+    'pins active credentials across a status reset for %s responses (F1)',
+    async (mode) => {
+      const f = await fixture(undefined, undefined, { cache: 0 });
+      // Numeric credentials can also fit the only forwarded header's syntax.
+      f.slots.primary!.key = '123456';
+      f.slots.reserve = null;
+      f.handlers.primary = failing;
+      await (await f.post()).text();
+      const entered = latch();
+      let release!: () => void;
+      f.handlers.primary = (_req, res) => {
+        release = () => {
+          if (mode === 'stream') {
+            res.writeHead(200, { 'content-type': 'text/event-stream' });
+            res.end(event('123456') + endStream());
+          } else {
+            res.writeHead(200, { 'retry-after': '123456' });
+            res.end(JSON.stringify(answer('real', mode === 'header' ? 'safe' : '123456')));
+          }
+        };
+        entered.resolve();
+      };
+      const pending = f.post(mode === 'stream' ? streamPayload : undefined);
+      await entered.promise;
+      f.slots.primary = { ...f.slots.primary!, key: 'new-key' };
+      f.versions.primary = 2;
+      const reset = await statusOf(f);
+      const keys = f.cache.keys();
+      release();
+      const response = await pending;
+      expect(reset).toMatchObject({ primary: { lastErrorCode: null } });
+      expect(keys).not.toContain('123456');
+      expect(await response.text()).not.toContain('123456');
+      expect(response.headers.get('retry-after')).toBeNull();
+      expect(response.status).toBe(mode === 'header' ? 200 : 502);
+      expect(JSON.stringify(f.lines)).not.toContain('123456');
+    }
+  );
+
+  it.each(['failure', 'success', 'in-flight'] as const)(
+    'does not overwrite a newer %s during a re-check (F2)',
+    async (outcome) => {
+      const f = await fixture(undefined, undefined, { cache: 0, bound: 500 });
+      f.handlers.primary = failing;
+      f.handlers.reserve = failing;
+      await (await f.post()).text();
+      f.versions.primary = 2;
+      f.versions.reserve = 2;
+      const held = holdRead(f);
+      const pendingStatus = statusOf(f);
+      await held.entered;
+      const entered = latch();
+      let finish!: () => void;
+      f.handlers.primary = (_req, res) => {
+        finish = () => {
+          res.writeHead(outcome === 'success' ? 200 : 401);
+          res.end(outcome === 'success' ? JSON.stringify(answer()) : 'private');
+        };
+        entered.resolve();
+        if (outcome !== 'in-flight') finish();
+      };
+      const pendingRequest = f.post();
+      await entered.promise;
+      if (outcome !== 'in-flight') await (await pendingRequest).text();
+      held.release();
+      const status = await pendingStatus;
+      if (outcome === 'in-flight') {
+        finish();
+        await (await pendingRequest).text();
+      }
+      expect(status.state).toBe(outcome === 'success' ? 'ok' : 'down');
+      if (outcome === 'failure') {
+        expect(status.lastErrorCode).toBe('upstream_401');
+        expect(status.primary.lastErrorCode).toBe('upstream_401');
+      }
+    }
+  );
+
+  it('resets a repaired primary without an optional reserve (F3)', async () => {
+    const f = await fixture(undefined, undefined, { cache: 0 });
+    f.slots.reserve = null;
+    f.handlers.primary = failing;
+    await (await f.post()).text();
+    expect(await statusOf(f)).toMatchObject({
+      state: 'down',
+      reserve: { lastErrorCode: null, lastErrorAt: null },
+    });
+    f.versions.primary = 2;
+    expect(await statusOf(f)).toMatchObject({ state: 'unknown', outageSince: null });
+  });
+
+  it('treats an appearing reserve as recovery, not a prior failure (F3)', async () => {
+    const f = await fixture(undefined, undefined, { cache: 0 });
+    const reserve = f.slots.reserve;
+    f.slots.reserve = null;
+    f.handlers.primary = failing;
+    await (await f.post()).text();
+    const down = await statusOf(f);
+    f.slots.reserve = reserve;
+    expect(await statusOf(f)).toMatchObject({
+      state: 'unknown',
+      outageSince: null,
+      primary: down.primary,
+      reserve: { lastErrorCode: null, lastErrorAt: null },
+    });
+    const response = await f.post();
+    expect(response.headers.get('x-lifemodel-slot')).toBe('reserve');
+    await response.text();
+  });
+
+  it('shares unsettled Bao reads across overlapping and after-bound polls (F4)', async () => {
+    const f = await fixture(undefined, undefined, { cache: 0, bound: 40 });
+    f.handlers.primary = failing;
+    f.handlers.reserve = failing;
+    await (await f.post()).text();
+    const reads = f.reads.length;
+    f.versions.primary = 2;
+    f.versions.reserve = 2;
+    const both = latch();
+    const replies: Array<() => void> = [];
+    f.interceptRead = (_name, reply) => {
+      replies.push(reply);
+      if (replies.length === 2) both.resolve();
+      return true;
+    };
+    const first = statusOf(f);
+    await both.promise;
+    const second = statusOf(f);
+    expect((await first).state).toBe('down');
+    expect((await second).state).toBe('down');
+    expect((await statusOf(f)).state).toBe('down');
+    const readCount = f.reads.length - reads;
+    // Drain the held responses before asserting, including when a mutation fails.
+    // Any next batch fails; only the expired replies carry the changed versions.
+    f.baoStatus = 503;
+    replies.forEach((reply) => reply());
+    f.interceptRead = undefined;
+    expect((await statusOf(f)).state).toBe('down');
+    expect(readCount).toBe(2);
+  });
+
+  it('skips only the identity-less failure and invalidates a changed known slot (F5)', async () => {
+    const f = await fixture(undefined, undefined, { cache: 0 });
+    f.handlers.primary = failing;
+    f.baoStatuses.reserve = 503;
+    await (await f.post()).text();
+    f.versions.primary = 2;
+    expect(await statusOf(f)).toMatchObject({
+      state: 'down',
+      lastErrorCode: 'storage_unavailable',
+      primary: { lastErrorCode: null, lastErrorAt: null },
+      reserve: { lastErrorCode: 'storage_unavailable' },
+    });
+    f.slots.primary = { ...f.slots.primary!, key: 'new-primary-key' };
+    f.handlers.primary = (_req, res) => res.end(JSON.stringify(answer()));
+    await (await f.post()).text();
+    expect(f.attempts.at(-1)?.headers.authorization).toBe('Bearer new-primary-key');
+  });
+
+  it('never re-checks ok even with a changed retained failure (F7)', async () => {
+    const f = await fixture(undefined, undefined, { cache: 0 });
+    f.handlers.primary = failing;
+    await (await f.post()).text();
+    const reads = f.reads.length;
+    f.versions.primary = 2;
+    expect(await statusOf(f)).toMatchObject({
+      state: 'ok',
+      primary: { lastErrorCode: 'upstream_503' },
+    });
+    expect(f.reads.length).toBe(reads);
+  });
+
+  it('never reads Bao for initial unknown (F7)', async () => {
+    const f = await fixture(undefined, undefined, { cache: 0 });
+    expect(await statusOf(f)).toMatchObject({ state: 'unknown' });
     expect(f.reads).toEqual([]);
   });
 });

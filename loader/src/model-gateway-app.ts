@@ -7,7 +7,14 @@ import {
 } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { once } from 'node:events';
-import { resolveModelDestination, type ModelSlot, type ModelSlotName } from './model.js';
+import {
+  resolveModelDestination,
+  slotIdentity,
+  type ModelSlot,
+  type ModelSlotName,
+  type SlotIdentity,
+  type SlotRead,
+} from './model.js';
 import { modelEndpointUrl } from './model-url.js';
 import { SlotStorageUnavailableError } from './model-bao.js';
 import type { LoaderLogger } from './logger.js';
@@ -27,6 +34,11 @@ export const GATEWAY_LIMITS = {
   overall: 110_000,
   idle: 30_000,
 } as const;
+/**
+ * A `/status` answer may re-read the failing slots' versions, bounded and no
+ * more often than this (ADR-013 D6). The answer itself never waits past `bound`.
+ */
+export const STATUS_RECHECK = { bound: 1_000, cache: 5_000 } as const;
 interface Timeouts {
   connect?: number;
   firstByte?: number;
@@ -35,12 +47,16 @@ interface Timeouts {
 }
 export interface GatewayOptions {
   slots: {
-    read(slot: ModelSlotName): Promise<ModelSlot | null>;
+    read(slot: ModelSlotName): Promise<SlotRead>;
+    /** The slot's identity read afresh, for the stale-outage re-check. */
+    identity(slot: ModelSlotName): Promise<SlotIdentity>;
     invalidate(slot: ModelSlotName): void;
     keys(): readonly string[];
   };
   logger: LoaderLogger;
   timeouts?: Timeouts;
+  /** The stale-outage re-check's bounds; tests narrow them. */
+  recheck?: { bound?: number; cache?: number };
   timers?: { set: typeof setTimeout; clear: typeof clearTimeout };
   resolveHost?: (hostname: string) => Promise<string[]>;
   tlsCa?: string | Buffer;
@@ -48,6 +64,11 @@ export interface GatewayOptions {
 interface SlotHealth {
   lastErrorCode: string | null;
   lastErrorAt: string | null;
+}
+/** A slot changed when its version moved, appeared or vanished. */
+function sameIdentity(before: SlotIdentity, after: SlotIdentity): boolean {
+  if (before === 'absent' || after === 'absent') return before === after;
+  return before.version === after.version;
 }
 interface Health {
   state: 'unknown' | 'ok' | 'down';
@@ -152,6 +173,7 @@ function returnHeaders(
 }
 export function createModelGateway(options: GatewayOptions) {
   const limits = { ...GATEWAY_LIMITS, ...options.timeouts };
+  const recheck = { ...STATUS_RECHECK, ...options.recheck };
   const { set: schedule, clear: cancel } = options.timers ?? {
     set: setTimeout,
     clear: clearTimeout,
@@ -165,8 +187,132 @@ export function createModelGateway(options: GatewayOptions) {
     primary: { lastErrorCode: null, lastErrorAt: null },
     reserve: { lastErrorCode: null, lastErrorAt: null },
   };
+  /**
+   * The identity each slot's recorded failure names: the KV version its read
+   * returned, or its absence. Never part of the `/status` body.
+   */
+  const identities: Record<ModelSlotName, SlotIdentity | undefined> = {
+    primary: undefined,
+    reserve: undefined,
+  };
+  const slotNames: readonly ModelSlotName[] = ['primary', 'reserve'];
+  const failureRevisions: Record<ModelSlotName, number> = { primary: 0, reserve: 0 };
+  let outcomeRevision = 0;
+  let activeRequests = 0;
+  // Optional absence is a recovery candidate, never a slot failure.
+  let reserveAbsent = false;
+  let recheckedAt = 0;
+  let rechecking: Promise<void> | undefined;
 
+  const failingSlots = (): ModelSlotName[] =>
+    slotNames.filter((name) => health[name].lastErrorCode !== null);
+
+  /** Bound each caller's wait, not the lifetime of the shared Bao read batch. */
+  function within(promise: Promise<void>): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const timer = schedule(resolve, recheck.bound);
+      void promise.finally(() => {
+        cancel(timer);
+        resolve();
+      });
+    });
+  }
+
+  async function recheckOutage(): Promise<void> {
+    if (health.state !== 'down') return;
+    const revision = outcomeRevision;
+    const deadline = Date.now() + recheck.bound;
+    const candidate = reserveAbsent;
+    const observed = slotNames.map((name) => ({
+      name,
+      identity: identities[name],
+      revision: failureRevisions[name],
+      failing: health[name].lastErrorCode !== null,
+    }));
+    const current = await Promise.all(
+      observed.map(async ({ name, identity, failing }) => {
+        // A storage error has no identity. Skip it, not the other slots.
+        if (!(failing && identity !== undefined) && !(name === 'reserve' && candidate))
+          return undefined;
+        return options.slots.identity(name).catch(() => undefined);
+      })
+    );
+    // Late results are discarded, but the single-flight handle lived until now.
+    if (Date.now() >= deadline || health.state !== 'down') return;
+    let reserveAppeared = false;
+    for (const [index, before] of observed.entries()) {
+      const after = current[index];
+      if (after === undefined || failureRevisions[before.name] !== before.revision) continue;
+      if (
+        before.failing &&
+        before.identity !== undefined &&
+        !sameIdentity(before.identity, after)
+      ) {
+        health[before.name] = { lastErrorCode: null, lastErrorAt: null };
+        identities[before.name] = undefined;
+        failureRevisions[before.name]++;
+        options.slots.invalidate(before.name);
+      }
+      if (before.name === 'reserve' && candidate && reserveAbsent && after !== 'absent') {
+        reserveAppeared = true;
+        options.slots.invalidate('reserve');
+      }
+    }
+    const remaining = failingSlots();
+    const unidentified = remaining.some((name) => identities[name] === undefined);
+    if (
+      outcomeRevision === revision &&
+      activeRequests === 0 &&
+      (remaining.length === 0 || (reserveAppeared && !unidentified))
+    ) {
+      health.state = 'unknown';
+      health.outageSince = null;
+      health.lastErrorCode = null;
+      outcomeRevision++;
+      if (reserveAppeared) reserveAbsent = false;
+    }
+  }
+
+  /** Retain the actual read handle until Bao settles, even after callers time out. */
+  function recheckIfStale(): Promise<void> {
+    if (health.state !== 'down') return Promise.resolve();
+    if (rechecking !== undefined) return within(rechecking);
+    const startedAt = Date.now();
+    if (startedAt - recheckedAt < recheck.cache) return Promise.resolve();
+    recheckedAt = startedAt;
+    rechecking = recheckOutage()
+      .catch(() => {
+        // A re-check that cannot read changes nothing.
+      })
+      .finally(() => {
+        rechecking = undefined;
+      });
+    return within(rechecking);
+  }
+
+  // Concurrent attempts retain their keys independently of cache eviction.
+  const activeKeys = new Map<string, number>();
+  const inspectedKeys = () => [...options.slots.keys(), ...activeKeys.keys()];
   async function attempt(
+    slot: ModelSlot,
+    name: ModelSlotName,
+    payload: Record<string, unknown> | undefined,
+    res: ServerResponse,
+    signal: AbortSignal
+  ): Promise<void> {
+    if (slot.key) activeKeys.set(slot.key, (activeKeys.get(slot.key) ?? 0) + 1);
+    try {
+      await sendAttempt(slot, name, payload, res, signal);
+    } finally {
+      if (slot.key) {
+        const remaining = (activeKeys.get(slot.key) ?? 1) - 1;
+        if (remaining === 0) activeKeys.delete(slot.key);
+        else activeKeys.set(slot.key, remaining);
+      }
+    }
+  }
+
+  async function sendAttempt(
     slot: ModelSlot,
     name: ModelSlotName,
     payload: Record<string, unknown> | undefined,
@@ -268,14 +414,14 @@ export function createModelGateway(options: GatewayOptions) {
         active.throwIfAborted();
         const value = parseSafe(
           new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)),
-          options.slots.keys()
+          inspectedKeys()
         );
         validateResponse(value, payload === undefined);
-        const output = serializeSafe(value, options.slots.keys());
-        res.writeHead(200, returnHeaders(upstream, name, false, options.slots.keys()));
+        const output = serializeSafe(value, inspectedKeys());
+        res.writeHead(200, returnHeaders(upstream, name, false, inspectedKeys()));
         res.end(output);
       } else {
-        const inspector = new SafeEventStream(() => options.slots.keys());
+        const inspector = new SafeEventStream(() => inspectedKeys());
         const decoder = new TextDecoder('utf-8', { fatal: true });
         let pending = '';
         let previousCR = false;
@@ -298,7 +444,7 @@ export function createModelGateway(options: GatewayOptions) {
             const output = inspector.frame(frame);
             if (output) {
               if (!res.headersSent)
-                res.writeHead(200, returnHeaders(upstream, name, true, options.slots.keys()));
+                res.writeHead(200, returnHeaders(upstream, name, true, inspectedKeys()));
               if (!res.write(output)) await once(res, 'drain', { signal: active });
             }
           }
@@ -331,6 +477,7 @@ export function createModelGateway(options: GatewayOptions) {
       res.end();
       return;
     }
+    activeRequests++;
     const controller = new AbortController();
     const timer = schedule(() => {
       controller.abort(new GatewayError('timeout'));
@@ -341,6 +488,17 @@ export function createModelGateway(options: GatewayOptions) {
     res.on('close', disconnect);
     const signal = controller.signal;
     const requestStartedAt = new Date().toISOString();
+    const recordFailure = (
+      name: ModelSlotName,
+      code: string,
+      identity: SlotIdentity | undefined
+    ) => {
+      health.lastAttemptAt = requestStartedAt;
+      health[name] = { lastErrorCode: code, lastErrorAt: new Date().toISOString() };
+      // The identity this failure names, for the change the re-check looks for.
+      identities[name] = identity;
+      failureRevisions[name]++;
+    };
     let last = new GatewayError('not_configured');
     let activeSlot: ModelSlotName = 'primary';
     try {
@@ -360,16 +518,24 @@ export function createModelGateway(options: GatewayOptions) {
         )
           throw new GatewayError('invalid_request', 400);
       }
-      for (const name of ['primary', 'reserve'] as const) {
+      for (const name of slotNames) {
         signal.throwIfAborted();
         activeSlot = name;
+        let identity: SlotIdentity | undefined;
         try {
-          const slot = await wait(options.slots.read(name), signal);
-          if (!slot) {
-            if (name === 'reserve') break;
+          const read = await wait(options.slots.read(name), signal);
+          identity = slotIdentity(read);
+          if (read.state === 'absent') {
+            if (name === 'reserve') {
+              reserveAbsent = true;
+              break;
+            }
             throw new GatewayError('not_configured');
           }
-          await attempt(slot, name, payload, res, signal);
+          if (name === 'reserve') reserveAbsent = false;
+          await attempt(read.slot, name, payload, res, signal);
+          failureRevisions[name]++;
+          outcomeRevision++;
           health.lastAttemptAt = requestStartedAt;
           health.state = 'ok';
           health.outageSince = null;
@@ -379,8 +545,7 @@ export function createModelGateway(options: GatewayOptions) {
         } catch (error) {
           last = safeError(signal.aborted ? signal.reason : error);
           if (last.code === 'client_disconnected') throw last;
-          health.lastAttemptAt = requestStartedAt;
-          health[name] = { lastErrorCode: last.code, lastErrorAt: new Date().toISOString() };
+          recordFailure(name, last.code, identity);
           if (
             signal.aborted ||
             last.code === 'not_configured' ||
@@ -400,6 +565,7 @@ export function createModelGateway(options: GatewayOptions) {
         'request_too_large',
       ].includes(failure.code);
       if (!callerOutcome) {
+        outcomeRevision++;
         health.lastAttemptAt = requestStartedAt;
         health.state = 'down';
         health.outageSince ??= new Date().toISOString();
@@ -417,6 +583,7 @@ export function createModelGateway(options: GatewayOptions) {
       }
       ownedError(res, failure, activeSlot);
     } finally {
+      activeRequests--;
       cancel(timer);
       res.removeListener('close', disconnect);
     }
@@ -424,14 +591,20 @@ export function createModelGateway(options: GatewayOptions) {
   const api = createServer((req, res) => {
     void serve(req, res);
   });
-  const status = createServer((req, res) => {
+  async function answerStatus(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (req.method !== 'GET' || req.url !== '/status') {
       res.writeHead(404);
       res.end();
       return;
     }
+    // A stale outage is cleared before the answer, bounded by STATUS_RECHECK.bound.
+    await recheckIfStale();
+    if (res.destroyed || res.writableEnded) return;
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify(health));
+  }
+  const status = createServer((req, res) => {
+    void answerStatus(req, res);
   });
   return { api, status };
 }

@@ -2,7 +2,13 @@
 import { readFile } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
-import type { ModelSlot, ModelSlotName } from './model.js';
+import {
+  slotIdentity,
+  type ModelSlot,
+  type ModelSlotName,
+  type SlotIdentity,
+  type SlotRead,
+} from './model.js';
 
 export type BaoErrorCode = 'sealed' | 'unreachable' | 'denied' | 'not_found';
 export class BaoStorageError extends Error {
@@ -214,12 +220,18 @@ export function createRoleBaoClient(options: RoleBaoOptions) {
       return send(path, method, token, payload);
     }
   }
-  async function readSlot(slot: ModelSlotName): Promise<ModelSlot | null> {
+  /**
+   * One read of a slot, carrying the KV v2 `metadata.version` the read
+   * returned: the identity a recorded failure is compared against later
+   * (ADR-013 D6). The version travels in this same read-only data read.
+   */
+  async function readSlot(slot: ModelSlotName): Promise<SlotRead> {
     let result: Record<string, unknown>;
     try {
       result = await call(`lifemodel/data/model/${slot}`);
     } catch (error) {
-      if (error instanceof BaoStorageError && error.code === 'not_found') return null;
+      if (error instanceof BaoStorageError && error.code === 'not_found')
+        return { state: 'absent' };
       throw error;
     }
     const data = result['data'] as Record<string, unknown> | undefined;
@@ -228,17 +240,21 @@ export function createRoleBaoClient(options: RoleBaoOptions) {
       metadata?.['destroyed'] === true ||
       (typeof metadata?.['deletion_time'] === 'string' && metadata['deletion_time'] !== '')
     )
-      return null;
+      return { state: 'absent' };
     const value = data?.['data'] as Record<string, unknown> | undefined;
+    const version = metadata?.['version'];
     if (
       !value ||
       !['openai', 'ollama'].includes(String(value['kind'])) ||
       typeof value['baseUrl'] !== 'string' ||
       typeof value['model'] !== 'string' ||
-      (value['key'] !== undefined && typeof value['key'] !== 'string')
+      (value['key'] !== undefined && typeof value['key'] !== 'string') ||
+      typeof version !== 'number' ||
+      !Number.isInteger(version) ||
+      version < 1
     )
       throw failure('unreachable');
-    return value as unknown as ModelSlot;
+    return { state: 'present', slot: value as unknown as ModelSlot, version };
   }
   return {
     call,
@@ -260,25 +276,34 @@ export class SlotStorageUnavailableError extends Error {
 }
 /** Per-slot cache; invalidation discards the old credential, even while Bao is down. */
 export function createCachedSlotReader(
-  read: (slot: ModelSlotName) => Promise<ModelSlot | null>,
+  read: (slot: ModelSlotName) => Promise<SlotRead>,
   now = Date.now
 ) {
   const cache = new Map<
     ModelSlotName,
-    { value: ModelSlot | null; refreshed: number; failedSince?: number }
+    { value: SlotRead; refreshed: number; failedSince?: number }
   >();
-  const pending = new Map<ModelSlotName, Promise<ModelSlot | null>>();
+  const pending = new Map<ModelSlotName, Promise<SlotRead>>();
   const generations = new Map<ModelSlotName, number>();
   return {
     keys(): string[] {
-      return [...cache.values()].flatMap(({ value }) => (value?.key ? [value.key] : []));
+      return [...cache.values()].flatMap(({ value }) =>
+        value.state === 'present' && value.slot.key ? [value.slot.key] : []
+      );
     },
     invalidate(slot: ModelSlotName) {
       cache.delete(slot);
       generations.set(slot, (generations.get(slot) ?? 0) + 1);
       pending.delete(slot);
     },
-    async read(slot: ModelSlotName): Promise<ModelSlot | null> {
+    /**
+     * The slot's identity straight from Bao, never from the cache beneath
+     * `/status`: the re-check exists to notice a change the cache cannot see.
+     */
+    async identity(slot: ModelSlotName): Promise<SlotIdentity> {
+      return slotIdentity(await read(slot));
+    },
+    async read(slot: ModelSlotName): Promise<SlotRead> {
       const old = cache.get(slot);
       if (old && now() - old.refreshed < 30_000) return old.value;
       const active = pending.get(slot);

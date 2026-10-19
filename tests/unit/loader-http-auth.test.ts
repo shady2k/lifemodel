@@ -1823,7 +1823,7 @@ describe('real Bao storage behind the loader model HTTP routes', () => {
                 model: 'm',
                 key: 'private-model-key',
               },
-              metadata: {},
+              metadata: { version: 1 },
             },
           })
         );

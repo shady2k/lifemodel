@@ -202,6 +202,37 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
 
 ## Amendments
 
+- **D6, Health (2026-10-19, lifemodel-s9v5.1.6).** A recorded outage names
+  each failing slot's KV v2 identity: `metadata.version` from the same
+  read-only `lifemodel/data/model/<slot>` read, or `absent` for the required
+  primary. No new permission, endpoint or listener is added. An absent optional
+  reserve is not a failure; it is a separate recovery candidate.
+  Only while `state` is `down`, `GET /status` re-reads identifiable failing
+  slots and the absent-reserve candidate. At most one Bao read batch remains
+  in flight until its reads actually settle; a new batch starts no more than
+  once per 5 s. Each caller waits at most 1 s on that shared batch. Results
+  arriving past the batch's 1 s deadline are discarded. A Bao error or an
+  identity-less storage failure is skipped independently, not treated as a
+  change and not allowed to suppress other slots' resets.
+  A changed slot clears its own `lastErrorCode`/`lastErrorAt` and cached value
+  only if its failure revision is still the one observed before the read.
+  Active-attempt credentials remain in response inspection (buffered, SSE and
+  headers) until those attempts end, regardless of cache eviction.
+  The request level returns to `unknown` with `outageSince` and `lastErrorCode`
+  null only if its outcome revision has not changed, no request is in flight,
+  and no failing slot remains. Alternatively, an absent reserve appearing
+  makes the request level `unknown` so the next request can use it; unchanged
+  identifiable slot failures remain, and any identity-less failure still
+  blocks that request-level reset. A newer success or failure cannot be
+  overwritten by an older re-check. `ok` and initial `unknown` do not re-read
+  Bao. `lastAttemptAt` and `lastSuccessAt` remain facts; identities and
+  revisions never enter the status body.
+  The loader shows "model saved — waiting for the first request" for `unknown`
+  after a successful save in the page session. Its safe status projection has
+  no `lastSuccessAt`, so it retains that save fact for the whole page session:
+  neither an older poll nor a historical `ok` poll proves a post-save success.
+  The waiting line is hidden for `ok`, `down` and unavailable status; a real
+  failure still shows the outage.
 - ADR-010: model requests leave through the platform-owned `model-gateway`
   over synchronous HTTP, not through `cmd.egress` events and Agent Vault;
   the egress gateway of ADR-010 remains the design for tool and Motor egress

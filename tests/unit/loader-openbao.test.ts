@@ -586,7 +586,7 @@ describe('OpenBao bootstrap', () => {
             body: JSON.stringify({
               data: {
                 data: { kind: 'openai', baseUrl: 'https://model.example/v1', model: 'm' },
-                metadata: {},
+                metadata: { version: 1 },
               },
             }),
           };
