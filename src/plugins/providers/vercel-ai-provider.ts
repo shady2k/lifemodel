@@ -17,6 +17,7 @@ import { toStrictSchema } from '../../llm/tool-schema.js';
 import { resolveModelParams } from './model-params.js';
 import { compileTranscript, resolveTranscriptPolicy } from './transcript-compiler.js';
 import { proxyFetch } from '../../utils/proxy-fetch.js';
+import { MODEL_SESSION_HEADER } from '../../config/model-endpoint.js';
 
 // Vercel AI SDK imports
 import { createOpenAI } from '@ai-sdk/openai';
@@ -169,7 +170,10 @@ export class VercelAIProvider extends BaseLLMProvider {
    * replace the broken tools in the JSON body.
    * See: https://github.com/vercel/ai/issues/9761
    */
-  private createEndpointFetch(signal: AbortSignal): typeof globalThis.fetch {
+  private createEndpointFetch(
+    signal: AbortSignal,
+    sessionId: string | undefined
+  ): typeof globalThis.fetch {
     return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       // Fix outgoing request: replace broken tool schemas with raw tools
       let modifiedInit = init;
@@ -187,10 +191,14 @@ export class VercelAIProvider extends BaseLLMProvider {
       // This attempt's own signal (the timeout aborts the HTTP request itself)
       // and no Authorization header: lifemodel holds no key, and the platform's
       // model gateway injects the real one on its way upstream (ADR-013 D2/D4).
+      const headers = withoutAuthorization(modifiedInit?.headers);
+      // The conversation this request belongs to, for the platform gateway to
+      // fill a slot's `{session}` header from (ADR-013, custom headers).
+      if (sessionId !== undefined) headers.set(MODEL_SESSION_HEADER, sessionId);
       modifiedInit = {
         ...(modifiedInit ?? {}),
         signal,
-        headers: withoutAuthorization(modifiedInit?.headers),
+        headers,
       };
 
       // Out through the environment's proxy the way curl reaches an http
@@ -226,14 +234,18 @@ export class VercelAIProvider extends BaseLLMProvider {
    * parsing internally on this endpoint. addCacheControl is skipped separately
    * to avoid multipart system messages that @ai-sdk/openai rejects.
    */
-  private getModel(modelId: string, signal: AbortSignal): LanguageModel {
+  private getModel(
+    modelId: string,
+    signal: AbortSignal,
+    sessionId: string | undefined
+  ): LanguageModel {
     return createOpenAI({
       baseURL: this.config.baseUrl,
       // The SDK insists on a key and lifemodel has none to give: the empty
       // value only satisfies its own guard, and the fetch wrapper above drops
       // the header it builds, so no credential leaves this process.
       apiKey: '',
-      fetch: this.createEndpointFetch(signal),
+      fetch: this.createEndpointFetch(signal, sessionId),
     }).chat(modelId);
   }
 
@@ -639,7 +651,7 @@ export class VercelAIProvider extends BaseLLMProvider {
     }
 
     // Get the model
-    const model = this.getModel(modelId, attempt.signal);
+    const model = this.getModel(modelId, attempt.signal, request.sessionId);
 
     // Debug logging
     this.providerLogger?.debug(

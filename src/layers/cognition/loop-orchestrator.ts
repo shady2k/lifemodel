@@ -17,7 +17,8 @@ import { isProactiveTrigger } from './prompts/runtime-snapshot.js';
 export function buildRequest(
   messages: Message[],
   tools: (OpenAIChatTool | MinimalOpenAIChatTool)[],
-  forceRespond: boolean
+  forceRespond: boolean,
+  sessionId?: string
 ): ToolCompletionRequest {
   const toolChoice: 'auto' | 'none' = forceRespond ? 'none' : 'auto';
 
@@ -63,6 +64,7 @@ export function buildRequest(
     toolChoice,
     parallelToolCalls: false, // Sequential for determinism
     ...(responseFormat && { responseFormat }),
+    ...(sessionId !== undefined && { sessionId }),
   };
 }
 

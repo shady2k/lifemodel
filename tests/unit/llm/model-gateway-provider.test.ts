@@ -243,4 +243,17 @@ describe('the core provider in front of the model gateway', () => {
     expect(gateway.requests).toHaveLength(1);
     expect(gateway.requests[0]?.path).toBe('/v1/chat/completions');
   });
+
+  it('names the turn conversation in one request header and none when it has none', async () => {
+    const gateway = await gatewayWith(answerOnce('hello'));
+    const provider = providerFor(gateway.baseUrl);
+
+    await provider.complete({ ...REQUEST, sessionId: 'rcpt_ab12cd34' });
+    await provider.complete(REQUEST);
+
+    expect(gateway.requests).toHaveLength(2);
+    expect(gateway.requests[0]?.headers['x-lifemodel-session']).toBe('rcpt_ab12cd34');
+    expect(gateway.requests[1]?.headers['x-lifemodel-session']).toBeUndefined();
+    expect(gateway.requests[0]?.headers['authorization']).toBeUndefined();
+  });
 });

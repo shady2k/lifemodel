@@ -272,7 +272,14 @@ export class AgenticLoop {
       const filteredTools = filterToolsForContext(allTools, context, useSmart);
 
       // Build request
-      const request = buildRequest(messages, filteredTools, state.forceRespond === true);
+      // The turn's conversation is named to the platform's model gateway, so a
+      // slot's `{session}` header carries this conversation's own id.
+      const request = buildRequest(
+        messages,
+        filteredTools,
+        state.forceRespond === true,
+        context.recipientId
+      );
 
       const triggerTimeout = getTimeoutForTrigger(context.triggerSignal.type);
       const llmOptions: LLMOptions = {
