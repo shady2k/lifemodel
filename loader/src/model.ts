@@ -36,16 +36,13 @@ export function slotIdentity(read: SlotRead): SlotIdentity {
   return read.state === 'present' ? { version: read.version } : 'absent';
 }
 /**
- * Everything a slot stores that is secret: its key and every header value
- * (ADR-013, the custom-headers amendment). Nothing else may be logged, put in
- * a status answer, sent to the core or returned in a response.
+ * The shortest static part — the value with every `{session}` removed — that
+ * D4's response inspectors treat as credential material (ADR-013, the
+ * custom-headers amendment). A shorter value (`1`, `true`, a version, a bare
+ * `{session}`) collides with ordinary replies, so it is not matched: the guard
+ * is a heuristic against echo, not proof of secrecy.
  */
-export function slotSecrets(slot: ModelSlot): string[] {
-  return [
-    ...(slot.key ? [slot.key] : []),
-    ...(slot.headers ?? []).flatMap((header) => (header.value === '' ? [] : [header.value])),
-  ];
-}
+export const MIN_HEADER_SECRET_BYTES = 16;
 export interface ModelSlots {
   read(slot: ModelSlotName): Promise<ModelSlot | null>;
   write(slot: ModelSlotName, value: ModelSlot): Promise<void>;
@@ -145,16 +142,33 @@ export function renderHeaderValue(value: string, sessionId: string): string {
   return value.split(SESSION_PLACEHOLDER).join(sessionId);
 }
 /**
- * The slot's own headers, each `{session}` filled from this session id, in the
- * owner's order. A caller sets its own host, content type, accept,
- * authorization and content length over them: a value can never replace one of
- * those (ADR-013, the custom-headers amendment).
+ * One render of the slot's own headers, each `{session}` filled from this
+ * session id, in the owner's order: the map sent upstream and the rendered
+ * values that answer may never echo (ADR-013, the custom-headers amendment). A
+ * caller sets its own host, content type, accept, authorization and content
+ * length over the map, so a value can never replace one of those.
+ *
+ * The map has no prototype, so every accepted token is an own property: a token
+ * named `__proto__` would otherwise reach Object.prototype's legacy setter
+ * instead of the wire.
  */
+export function renderAttemptHeaders(
+  slot: ModelSlot,
+  sessionId: string
+): { headers: Record<string, string>; secrets: string[] } {
+  const headers = Object.create(null) as Record<string, string>;
+  const secrets: string[] = [];
+  for (const header of slot.headers ?? []) {
+    const value = renderHeaderValue(header.value, sessionId);
+    headers[header.name] = value;
+    const staticPart = header.value.split(SESSION_PLACEHOLDER).join('');
+    if (Buffer.byteLength(staticPart, 'utf8') >= MIN_HEADER_SECRET_BYTES) secrets.push(value);
+  }
+  return { headers, secrets };
+}
+/** The slot's own headers for this session id, without the echo guard's material. */
 export function renderSlotHeaders(slot: ModelSlot, sessionId: string): Record<string, string> {
-  const headers: Record<string, string> = {};
-  for (const header of slot.headers ?? [])
-    headers[header.name] = renderHeaderValue(header.value, sessionId);
-  return headers;
+  return renderAttemptHeaders(slot, sessionId).headers;
 }
 export type ModelErrorCode =
   | 'unreachable'

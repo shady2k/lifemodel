@@ -4,7 +4,6 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import {
   slotIdentity,
-  slotSecrets,
   validateSlotHeaders,
   type ModelSlot,
   type ModelSlotHeader,
@@ -303,10 +302,14 @@ export function createCachedSlotReader(
   const pending = new Map<ModelSlotName, Promise<SlotRead>>();
   const generations = new Map<ModelSlotName, number>();
   return {
-    /** The key and every header value: material no response may contain. */
+    /**
+     * The cached slots' keys: material no response may contain. A header value
+     * is rendered for the attempt that sends it and pinned by that attempt, so
+     * the cache cannot offer it without a session id.
+     */
     keys(): string[] {
       return [...cache.values()].flatMap(({ value }) =>
-        value.state === 'present' ? slotSecrets(value.slot) : []
+        value.state === 'present' && value.slot.key !== undefined ? [value.slot.key] : []
       );
     },
     invalidate(slot: ModelSlotName) {

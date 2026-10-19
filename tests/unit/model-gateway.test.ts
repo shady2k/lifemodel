@@ -1471,6 +1471,54 @@ describe('model gateway clears a stale outage on a slot change', () => {
     }
   );
 
+  it.each(['buffered', 'stream', 'header'] as const)(
+    'pins an active rendered header value across a cache reset for %s responses (F2)',
+    async (mode) => {
+      const f = await fixture(undefined, undefined, { cache: 0 });
+      // A rendered value that also fits the only forwarded header's syntax.
+      const ticket = '9876543210987654';
+      f.slots.primary = {
+        ...f.slots.primary!,
+        headers: [{ name: 'x-ticket', value: ticket }],
+      };
+      f.slots.reserve = null;
+      f.handlers.primary = failing;
+      await (await f.post()).text();
+      const entered = latch();
+      let release!: () => void;
+      f.handlers.primary = (_req, res) => {
+        release = () => {
+          if (mode === 'stream') {
+            res.writeHead(200, { 'content-type': 'text/event-stream' });
+            res.end(event(ticket) + endStream());
+          } else {
+            res.writeHead(200, { 'retry-after': ticket });
+            res.end(JSON.stringify(answer('real', mode === 'header' ? 'safe' : ticket)));
+          }
+        };
+        entered.resolve();
+      };
+      const pending = f.post(mode === 'stream' ? streamPayload : undefined);
+      await entered.promise;
+      // The cache is invalidated while the attempt's answer is still pending.
+      f.slots.primary = {
+        ...f.slots.primary!,
+        headers: [{ name: 'x-ticket', value: 'NEW-HEADER-SECRET-VALUE' }],
+      };
+      f.versions.primary = 2;
+      const reset = await statusOf(f);
+      const keys = f.cache.keys();
+      release();
+      const response = await pending;
+      expect(reset).toMatchObject({ primary: { lastErrorCode: null } });
+      expect(keys).not.toContain(ticket);
+      expect(await response.text()).not.toContain(ticket);
+      expect(response.headers.get('retry-after')).toBeNull();
+      expect(response.status).toBe(mode === 'header' ? 200 : 502);
+      expect(JSON.stringify(f.lines)).not.toContain(ticket);
+    }
+  );
+
   it.each(['failure', 'success', 'in-flight'] as const)(
     'does not overwrite a newer %s during a re-check (F2)',
     async (outcome) => {
@@ -1707,6 +1755,53 @@ describe('model gateway custom slot headers', () => {
     const status = await (await fetch(`${f.statusUrl}/status`)).text();
     expect(status).not.toContain('HEADER-SUPER-SECRET');
     expect(JSON.stringify(f.lines)).not.toContain('HEADER-SUPER-SECRET');
+  });
+
+  it.each(['buffered', 'stream'] as const)(
+    'refuses an upstream answer that echoes the rendered value a %s attempt sent',
+    async (mode) => {
+      const f = await fixture();
+      f.slots.primary = {
+        ...f.slots.primary!,
+        headers: [{ name: 'x-token', value: 'RENDERED-HEADER-SECRET-{session}' }],
+      };
+      f.slots.reserve = null;
+      let sentValue = '';
+      f.handlers.primary = (req, res) => {
+        sentValue = String(req.headers['x-token']);
+        if (mode === 'stream') {
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          res.end(event(sentValue) + endStream());
+        } else {
+          res.end(JSON.stringify(answer('real', sentValue)));
+        }
+      };
+      const response = await f.post(undefined, { 'x-lifemodel-session': 'conv-1' });
+      expect(sentValue).toBe('RENDERED-HEADER-SECRET-conv-1');
+      expect(response.status).toBe(502);
+      expect(await response.text()).not.toContain('RENDERED-HEADER-SECRET');
+      expect(JSON.stringify(f.lines)).not.toContain('RENDERED-HEADER-SECRET');
+    }
+  );
+
+  it('accepts a valid answer when a slot carries a short ordinary value', async () => {
+    const f = await fixture();
+    f.slots.primary = {
+      ...f.slots.primary!,
+      headers: [
+        { name: 'x-version', value: '1' },
+        { name: 'x-flag', value: 'true' },
+        { name: 'x-opencode-session', value: '{session}' },
+      ],
+    };
+    const response = await f.post(undefined, { 'x-lifemodel-session': 'conv-1' });
+    expect(response.status).toBe(200);
+    // The fixture's ordinary answer carries 'chat-1' and 'OK': a one-character
+    // value would collide with it, and it is not treated as a credential.
+    expect(await response.json()).toEqual(answer());
+    expect(f.attempts[0]?.headers['x-version']).toBe('1');
+    expect(f.attempts[0]?.headers['x-flag']).toBe('true');
+    expect(f.attempts[0]?.headers['x-opencode-session']).toBe('conv-1');
   });
 
   it('sends exactly the headers of today for a slot that carries none', async () => {

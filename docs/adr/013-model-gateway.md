@@ -238,11 +238,23 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
   key in the same `lifemodel/data/model/<slot>` record and secret exactly as the
   key is: no value reaches `/status`, a log line, an error message, the core or
   any response, and a saved value is never shown back in the loader — only its
-  name, with the value masked. Every non-empty value joins the key in the
-  material D4's response inspectors keep out of an answer; an empty value
-  carries nothing to guard. No new OpenBao permission and no new endpoint: the
-  gateway's existing read of `lifemodel/data/model/*` already carries the
+  name, with the value masked. No new OpenBao permission and no new endpoint:
+  the gateway's existing read of `lifemodel/data/model/*` already carries the
   record.
+  A header joins the key in the material D4's response inspectors refuse when
+  the answer echoes it, and the rule is narrow on purpose. What counts is the
+  value's static part — the stored value with every `{session}` removed — and
+  only from 16 bytes: a value whose static part is 15 bytes or less (`1`,
+  `true`, a version, a bare `{session}`) is not matched, because such a string
+  occurs in ordinary replies and would refuse a valid answer. What is matched is
+  the rendered value that attempt really sent upstream, never its template. The
+  guard remains a heuristic against echo, not proof of secrecy: direct
+  redaction above covers every value, of any length. Each attempt pins its
+  key and its rendered values with a reference count and releases them when the
+  attempt ends, exactly as the key is pinned, so a slot cache eviction cannot
+  drop protection from an answer still in flight; they are inspected in
+  buffered JSON, in SSE split across frames and in the forwarded response
+  headers, as the key is.
   A name is an RFC 9110 token of at most 64 characters, compared
   case-insensitively; a value has no CR, LF or NUL and at most 1024 bytes; at
   most 16 headers, no duplicate names. Refused names are the gateway's own and
@@ -308,7 +320,10 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
   probe id; a reserved or malformed name, a CR/LF value, a duplicate name and an
   over-long list are refused at save and at read; no value reaches `/status`, a
   log line, the core or a response; a slot without headers sends what it sent
-  before.
+  before. A rendered value of 16 static bytes or more echoed by an upstream in a
+  buffered answer or an SSE frame is refused, also after a status re-check
+  invalidated the slot cache while that answer was in flight, and a one-character
+  value in an ordinary answer is not.
 - Bao: the `model-gateway` role reads the slots and is denied writes and
   unrelated paths (real role, on the VM).
 - On the test VM from a clean snapshot, with the LAN fixtures saved through

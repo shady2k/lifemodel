@@ -708,19 +708,16 @@ describe('gateway slot cache', () => {
       await expect(f.client.readSlot('primary')).rejects.toMatchObject({ code: 'unreachable' });
     }
   });
-  it('names the key and every header value as material a response may never contain', async () => {
+  it('offers only the key: a header value is rendered and pinned by its own attempt', async () => {
     const cache = createCachedSlotReader(async () => ({
       state: 'present' as const,
       slot: {
         ...slot(),
-        headers: [
-          { name: 'x-a', value: 'the-header-value' },
-          { name: 'x-b', value: '' },
-        ],
+        headers: [{ name: 'x-a', value: 'the-header-value' }],
       },
       version: 1,
     }));
     await cache.read('primary');
-    expect(cache.keys()).toEqual(['slot-secret', 'the-header-value']);
+    expect(cache.keys()).toEqual(['slot-secret']);
   });
 });

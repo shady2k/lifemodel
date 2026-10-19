@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   MAX_SLOT_HEADERS,
+  renderAttemptHeaders,
   renderHeaderValue,
-  slotSecrets,
   SlotHeaderError,
   validateSlotHeaders,
   validSessionId,
@@ -115,18 +115,66 @@ describe('slot custom header validation', () => {
     }
   });
 
-  it('names the key and every header value as the slot secret material', () => {
-    expect(
-      slotSecrets({
-        kind: 'openai',
+  it('renders the headers of one attempt and names the values a response may not echo', () => {
+    const slot = {
+      kind: 'openai' as const,
+      baseUrl: 'https://models.example/v1',
+      model: 'm',
+      headers: [
+        header('x-opencode-session', 'id-{session}'),
+        header('x-long-secret', 'RENDERED-HEADER-SECRET-{session}'),
+        header('x-short', '1'),
+        header('x-version', 'v1.2'),
+        header('x-empty', ''),
+      ],
+    };
+    const rendered = renderAttemptHeaders(slot, 'conv-1');
+    expect(Object.entries(rendered.headers)).toEqual([
+      ['x-opencode-session', 'id-conv-1'],
+      ['x-long-secret', 'RENDERED-HEADER-SECRET-conv-1'],
+      ['x-short', '1'],
+      ['x-version', 'v1.2'],
+      ['x-empty', ''],
+    ]);
+    // Only a value whose static part reaches 16 bytes is credential material,
+    // and what is matched is the rendered value of this attempt, not the
+    // stored template.
+    expect(rendered.secrets).toEqual(['RENDERED-HEADER-SECRET-conv-1']);
+  });
+
+  it('counts the static part, not the template, against the 16-byte floor', () => {
+    const slot = (value: string) => ({
+      kind: 'openai' as const,
+      baseUrl: 'https://models.example/v1',
+      model: 'm',
+      headers: [header('x-a', value)],
+    });
+    expect(renderAttemptHeaders(slot('{session}'), 'conv-1').secrets).toEqual([]);
+    expect(renderAttemptHeaders(slot('123456789012345'), 'conv-1').secrets).toEqual([]);
+    expect(renderAttemptHeaders(slot('1234567890123456'), 'conv-1').secrets).toEqual([
+      '1234567890123456',
+    ]);
+    // Fifteen static bytes plus a long session id are still fifteen static bytes.
+    expect(renderAttemptHeaders(slot('{session}-12345678901234'), 'x'.repeat(128)).secrets).toEqual(
+      []
+    );
+  });
+
+  it('keeps a token named __proto__ an own header property', () => {
+    const rendered = renderAttemptHeaders(
+      {
+        kind: 'openai' as const,
         baseUrl: 'https://models.example/v1',
         model: 'm',
-        key: 'the-key',
-        headers: [header('x-a', 'the-value'), header('x-b', '')],
-      })
-    ).toEqual(['the-key', 'the-value']);
-    expect(
-      slotSecrets({ kind: 'ollama', baseUrl: 'https://models.example/v1', model: 'm' })
-    ).toEqual([]);
+        headers: [header('__proto__', 'own-value'), header('constructor', 'ctor-value')],
+      },
+      'conv-1'
+    );
+    expect(Object.getPrototypeOf(rendered.headers)).toBeNull();
+    expect(Object.prototype.hasOwnProperty.call(rendered.headers, '__proto__')).toBe(true);
+    expect(Object.entries(rendered.headers)).toEqual([
+      ['__proto__', 'own-value'],
+      ['constructor', 'ctor-value'],
+    ]);
   });
 });

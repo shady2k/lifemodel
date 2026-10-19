@@ -9,7 +9,7 @@ import { request as httpsRequest } from 'node:https';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import {
-  renderSlotHeaders,
+  renderAttemptHeaders,
   resolveModelDestination,
   SESSION_HEADER,
   SESSION_PLACEHOLDER,
@@ -214,36 +214,34 @@ export function createModelGateway(options: GatewayOptions) {
 
   /**
    * The upstream header set: the slot's own headers first, in the owner's
-   * order, each with every `{session}` filled from the caller; the gateway's
-   * own host, content type, accept, authorization and content length are then
-   * set over them, so a custom header can never replace one of those. A value
-   * that had to fall back to this process's own id is named in one log line,
-   * never with its value (ADR-013, the custom-headers amendment).
+   * order, each already rendered with the caller's session; the gateway's own
+   * host, content type, accept, authorization and content length are then set
+   * over them, so a custom header can never replace one of those. A value that
+   * had to fall back to this process's own id is named in one log line, never
+   * with its value (ADR-013, the custom-headers amendment).
    */
   function upstreamHeaders(
     slot: ModelSlot,
+    custom: Record<string, string>,
     session: { id: string; callerNamed: boolean },
-    url: URL,
-    payload: Record<string, unknown> | undefined,
-    body: string | undefined
+    target: { host: string; stream: boolean; contentLength: number | undefined }
   ): Record<string, string> {
-    const headers = renderSlotHeaders(slot, session.id);
     const fellBack = session.callerNamed
       ? []
       : (slot.headers ?? [])
           .filter((header) => header.value.includes(SESSION_PLACEHOLDER))
           .map((header) => header.name);
-    headers['host'] = url.host;
-    headers['content-type'] = 'application/json';
-    headers['accept'] = payload?.['stream'] === true ? 'text/event-stream' : 'application/json';
-    if (slot.key) headers['authorization'] = `Bearer ${slot.key}`;
-    if (body !== undefined) headers['content-length'] = String(Buffer.byteLength(body));
+    custom['host'] = target.host;
+    custom['content-type'] = 'application/json';
+    custom['accept'] = target.stream ? 'text/event-stream' : 'application/json';
+    if (slot.key) custom['authorization'] = `Bearer ${slot.key}`;
+    if (target.contentLength !== undefined) custom['content-length'] = String(target.contentLength);
     if (fellBack.length > 0)
       options.logger.warn(
         { headers: fellBack },
         'Model gateway filled the session placeholder with its own process id'
       );
-    return headers;
+    return custom;
   }
 
   /** Bound each caller's wait, not the lifetime of the shared Bao read batch. */
@@ -335,9 +333,24 @@ export function createModelGateway(options: GatewayOptions) {
    * amendment). A value carrying `{session}` is filled from here.
    */
   const processSessionId = randomUUID();
-  // Concurrent attempts retain their keys independently of cache eviction.
+  // Concurrent attempts retain their keys and their rendered header values
+  // independently of cache eviction: an answer still in flight is inspected
+  // against what that attempt really sent.
   const activeKeys = new Map<string, number>();
-  const inspectedKeys = () => [...options.slots.keys(), ...activeKeys.keys()];
+  const activeHeaderSecrets = new Map<string, number>();
+  const inspectedKeys = () => [
+    ...options.slots.keys(),
+    ...activeKeys.keys(),
+    ...activeHeaderSecrets.keys(),
+  ];
+  function retain(retained: Map<string, number>, secret: string): void {
+    retained.set(secret, (retained.get(secret) ?? 0) + 1);
+  }
+  function release(retained: Map<string, number>, secret: string): void {
+    const remaining = (retained.get(secret) ?? 1) - 1;
+    if (remaining === 0) retained.delete(secret);
+    else retained.set(secret, remaining);
+  }
   async function attempt(
     slot: ModelSlot,
     name: ModelSlotName,
@@ -346,15 +359,14 @@ export function createModelGateway(options: GatewayOptions) {
     signal: AbortSignal,
     session: { id: string; callerNamed: boolean }
   ): Promise<void> {
-    if (slot.key) activeKeys.set(slot.key, (activeKeys.get(slot.key) ?? 0) + 1);
+    const rendered = renderAttemptHeaders(slot, session.id);
+    if (slot.key) retain(activeKeys, slot.key);
+    for (const secret of rendered.secrets) retain(activeHeaderSecrets, secret);
     try {
-      await sendAttempt(slot, name, payload, res, signal, session);
+      await sendAttempt(slot, name, payload, res, signal, session, rendered.headers);
     } finally {
-      if (slot.key) {
-        const remaining = (activeKeys.get(slot.key) ?? 1) - 1;
-        if (remaining === 0) activeKeys.delete(slot.key);
-        else activeKeys.set(slot.key, remaining);
-      }
+      if (slot.key) release(activeKeys, slot.key);
+      for (const secret of rendered.secrets) release(activeHeaderSecrets, secret);
     }
   }
 
@@ -364,7 +376,8 @@ export function createModelGateway(options: GatewayOptions) {
     payload: Record<string, unknown> | undefined,
     res: ServerResponse,
     signal: AbortSignal,
-    session: { id: string; callerNamed: boolean }
+    session: { id: string; callerNamed: boolean },
+    custom: Record<string, string>
   ): Promise<void> {
     const startedAt = Date.now();
     const connectDeadline = startedAt + limits.connect;
@@ -405,7 +418,11 @@ export function createModelGateway(options: GatewayOptions) {
             ...(options.tlsCa === undefined ? {} : { ca: options.tlsCa }),
           }
         : {}),
-      headers: upstreamHeaders(slot, session, url, payload, body),
+      headers: upstreamHeaders(slot, custom, session, {
+        host: url.host,
+        stream: payload?.['stream'] === true,
+        contentLength: body === undefined ? undefined : Buffer.byteLength(body),
+      }),
     });
     // A permanent safe listener also handles destruction after the response event.
     req.on('error', () => {
