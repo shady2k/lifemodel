@@ -6,7 +6,9 @@
 # product pull requests with read-only permissions. `ci-core-image-publish`
 # publishes only that core image on every push to main and is the only job that
 # asks for packages: write. The platform loader image is built by the release
-# workflow. There is no Docker-run instance image or host-side test exception.
+# workflow and, without pushing it, by `ci-loader-image` on pull requests that
+# touch its inputs. There is no Docker-run instance image or host-side test
+# exception.
 #
 # `--no-renames` in the first job is not a detail: `git diff --name-only`
 # reports a detected rename by its destination alone, so moving product code
@@ -70,6 +72,7 @@ jobs:
     outputs:
       product: ${{ steps.classify.outputs.product }}
       web_app: ${{ steps.classify.outputs.web_app }}
+      loader_image: ${{ steps.classify.outputs.loader_image }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -132,6 +135,7 @@ jobs:
           echo "product output: $verdict"
           echo "$verdict" >> "$GITHUB_OUTPUT"
           scripts/ci-web-provenance-paths.sh < "$out" >> "$GITHUB_OUTPUT"
+          scripts/ci-loader-paths.sh < "$out" >> "$GITHUB_OUTPUT"
 
   # The product checks, as the one command a person runs before pushing. It is
   # skipped for a change that cannot touch product code and while a pull
@@ -316,7 +320,8 @@ jobs:
           node "$gate/rules/check-present.mjs" --config "$gate/config.json" --base "$base" --head "$HEAD_SHA"
 
   # Build the standalone core image on pull requests without a write token.
-  # The platform loader image is built in the release workflow.
+  # The platform loader image is built by ci-loader-image below; the release
+  # workflow also builds it, for tags.
   ci-core-image:
     needs: changes
     if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.product == 'true') && !github.event.pull_request.draft }}
@@ -405,3 +410,45 @@ jobs:
           scripts/build-web-image.sh main "$SHA"
           docker push "ghcr.io/shady2k/lifemodel-web:main"
           docker push "ghcr.io/shady2k/lifemodel-web:$SHA"
+
+  # Build the platform loader image on pull requests that touch its inputs, so
+  # a broken docker/loader/Dockerfile fails here instead of failing the signed
+  # release (lifemodel-5f4q.1). Like ci-core-image and ci-web-image, it asks
+  # for no write token: no registry login, no push - the image never leaves
+  # this runner.
+  #
+  # prepare-loader-context.sh refuses the zero digest placeholders that a
+  # plain checkout carries, because a release has to pin the pushed core and
+  # web digests before it bundles. This build publishes nothing, so the job
+  # stamps an obviously dummy non-zero digest into its own checkout first,
+  # through the release digest scripts; the placeholders stay in the
+  # committed tree and the release refusal is not weakened.
+  ci-loader-image:
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.loader_image == 'true') && !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The seed bundle carries the repository's full history, and
+          # prepare-loader-context.sh refuses a shallow checkout.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pin dummy digests for this build only
+        run: |
+          set -eu
+          # Not a pushed digest and never pinned anywhere: it exists only so
+          # prepare-loader-context.sh sees what a release sees.
+          dummy=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          scripts/release/set-core-digest.sh "$dummy" deploy/platform/applications/lifemodel/kustomization.yaml
+          scripts/release/set-web-digest.sh "$dummy" deploy/platform/applications/lifemodel/kustomization.yaml
+      - name: Prepare the full-history loader seed bundle
+        run: scripts/release/prepare-loader-context.sh
+      - name: Build the platform loader image
+        env:
+          SHA: ${{ github.sha }}
+        run: docker build --file docker/loader/Dockerfile --tag "ci-loader-$SHA" .
+      - name: Remove the temporary loader build context
+        if: always()
+        run: rm -rf .docker-context
