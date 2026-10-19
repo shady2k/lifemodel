@@ -196,87 +196,123 @@ export function createModelGateway(options: GatewayOptions) {
     reserve: undefined,
   };
   const slotNames: readonly ModelSlotName[] = ['primary', 'reserve'];
+  const failureRevisions: Record<ModelSlotName, number> = { primary: 0, reserve: 0 };
+  let outcomeRevision = 0;
+  let activeRequests = 0;
+  // Optional absence is a recovery candidate, never a slot failure.
+  let reserveAbsent = false;
   let recheckedAt = 0;
   let rechecking: Promise<void> | undefined;
 
   const failingSlots = (): ModelSlotName[] =>
     slotNames.filter((name) => health[name].lastErrorCode !== null);
 
-  /** A re-check read that does not answer inside the bound answers nothing. */
-  function within<T>(promises: Promise<T>[], ms: number): Promise<T[] | undefined> {
-    return new Promise<T[] | undefined>((resolve) => {
-      const timer = schedule(() => {
-        resolve(undefined);
-      }, ms);
-      void Promise.allSettled(promises).then((results) => {
+  /** Bound each caller's wait, not the lifetime of the shared Bao read batch. */
+  function within(promise: Promise<void>): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const timer = schedule(resolve, recheck.bound);
+      void promise.finally(() => {
         cancel(timer);
-        resolve(
-          results.every((result) => result.status === 'fulfilled')
-            ? results.map((result) => (result as PromiseFulfilledResult<T>).value)
-            : undefined
-        );
+        resolve();
       });
     });
   }
 
-  /**
-   * A recorded outage is stale when the slot it names changed (ADR-013 D6).
-   * Each failing slot's version is read afresh; a slot whose version moved — or
-   * that was absent and now exists — has its failure and cached value cleared,
-   * and the request level returns to `unknown` once every failing slot changed.
-   * A Bao error or a read past the bound changes nothing.
-   */
   async function recheckOutage(): Promise<void> {
     if (health.state !== 'down') return;
-    const failing = failingSlots();
-    if (failing.length === 0) return;
-    const recorded = failing.map((name) => identities[name]);
-    // A slot whose own read failed holds no version: nothing changed for it.
-    if (recorded.some((identity) => identity === undefined)) return;
-    const current = await within(
-      failing.map((name) => options.slots.identity(name)),
-      recheck.bound
+    const revision = outcomeRevision;
+    const deadline = Date.now() + recheck.bound;
+    const candidate = reserveAbsent;
+    const observed = slotNames.map((name) => ({
+      name,
+      identity: identities[name],
+      revision: failureRevisions[name],
+      failing: health[name].lastErrorCode !== null,
+    }));
+    const current = await Promise.all(
+      observed.map(async ({ name, identity, failing }) => {
+        // A storage error has no identity. Skip it, not the other slots.
+        if (!(failing && identity !== undefined) && !(name === 'reserve' && candidate))
+          return undefined;
+        return options.slots.identity(name).catch(() => undefined);
+      })
     );
-    if (current === undefined) return;
-    const changed: ModelSlotName[] = [];
-    for (const [index, name] of failing.entries()) {
-      const before = recorded[index];
+    // Late results are discarded, but the single-flight handle lived until now.
+    if (Date.now() >= deadline || health.state !== 'down') return;
+    let reserveAppeared = false;
+    for (const [index, before] of observed.entries()) {
       const after = current[index];
-      if (before === undefined || after === undefined) continue;
-      if (!sameIdentity(before, after)) changed.push(name);
+      if (after === undefined || failureRevisions[before.name] !== before.revision) continue;
+      if (
+        before.failing &&
+        before.identity !== undefined &&
+        !sameIdentity(before.identity, after)
+      ) {
+        health[before.name] = { lastErrorCode: null, lastErrorAt: null };
+        identities[before.name] = undefined;
+        failureRevisions[before.name]++;
+        options.slots.invalidate(before.name);
+      }
+      if (before.name === 'reserve' && candidate && reserveAbsent && after !== 'absent') {
+        reserveAppeared = true;
+        options.slots.invalidate('reserve');
+      }
     }
-    for (const name of changed) {
-      health[name] = { lastErrorCode: null, lastErrorAt: null };
-      identities[name] = undefined;
-      // The cached value predates the change the owner saved.
-      options.slots.invalidate(name);
-    }
-    if (changed.length === failing.length) {
+    const remaining = failingSlots();
+    const unidentified = remaining.some((name) => identities[name] === undefined);
+    if (
+      outcomeRevision === revision &&
+      activeRequests === 0 &&
+      (remaining.length === 0 || (reserveAppeared && !unidentified))
+    ) {
       health.state = 'unknown';
       health.outageSince = null;
       health.lastErrorCode = null;
+      outcomeRevision++;
+      if (reserveAppeared) reserveAbsent = false;
     }
   }
 
-  /** One read in flight, and no more often than `STATUS_RECHECK.cache`. */
+  /** Retain the actual read handle until Bao settles, even after callers time out. */
   function recheckIfStale(): Promise<void> {
     if (health.state !== 'down') return Promise.resolve();
+    if (rechecking !== undefined) return within(rechecking);
     const startedAt = Date.now();
     if (startedAt - recheckedAt < recheck.cache) return Promise.resolve();
     recheckedAt = startedAt;
-    rechecking ??= (async () => {
-      try {
-        await recheckOutage();
-      } catch {
+    rechecking = recheckOutage()
+      .catch(() => {
         // A re-check that cannot read changes nothing.
-      }
-    })().finally(() => {
-      rechecking = undefined;
-    });
-    return rechecking;
+      })
+      .finally(() => {
+        rechecking = undefined;
+      });
+    return within(rechecking);
   }
 
+  // Concurrent attempts retain their keys independently of cache eviction.
+  const activeKeys = new Map<string, number>();
+  const inspectedKeys = () => [...options.slots.keys(), ...activeKeys.keys()];
   async function attempt(
+    slot: ModelSlot,
+    name: ModelSlotName,
+    payload: Record<string, unknown> | undefined,
+    res: ServerResponse,
+    signal: AbortSignal
+  ): Promise<void> {
+    if (slot.key) activeKeys.set(slot.key, (activeKeys.get(slot.key) ?? 0) + 1);
+    try {
+      await sendAttempt(slot, name, payload, res, signal);
+    } finally {
+      if (slot.key) {
+        const remaining = (activeKeys.get(slot.key) ?? 1) - 1;
+        if (remaining === 0) activeKeys.delete(slot.key);
+        else activeKeys.set(slot.key, remaining);
+      }
+    }
+  }
+
+  async function sendAttempt(
     slot: ModelSlot,
     name: ModelSlotName,
     payload: Record<string, unknown> | undefined,
@@ -378,14 +414,14 @@ export function createModelGateway(options: GatewayOptions) {
         active.throwIfAborted();
         const value = parseSafe(
           new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)),
-          options.slots.keys()
+          inspectedKeys()
         );
         validateResponse(value, payload === undefined);
-        const output = serializeSafe(value, options.slots.keys());
-        res.writeHead(200, returnHeaders(upstream, name, false, options.slots.keys()));
+        const output = serializeSafe(value, inspectedKeys());
+        res.writeHead(200, returnHeaders(upstream, name, false, inspectedKeys()));
         res.end(output);
       } else {
-        const inspector = new SafeEventStream(() => options.slots.keys());
+        const inspector = new SafeEventStream(() => inspectedKeys());
         const decoder = new TextDecoder('utf-8', { fatal: true });
         let pending = '';
         let previousCR = false;
@@ -408,7 +444,7 @@ export function createModelGateway(options: GatewayOptions) {
             const output = inspector.frame(frame);
             if (output) {
               if (!res.headersSent)
-                res.writeHead(200, returnHeaders(upstream, name, true, options.slots.keys()));
+                res.writeHead(200, returnHeaders(upstream, name, true, inspectedKeys()));
               if (!res.write(output)) await once(res, 'drain', { signal: active });
             }
           }
@@ -441,6 +477,7 @@ export function createModelGateway(options: GatewayOptions) {
       res.end();
       return;
     }
+    activeRequests++;
     const controller = new AbortController();
     const timer = schedule(() => {
       controller.abort(new GatewayError('timeout'));
@@ -460,6 +497,7 @@ export function createModelGateway(options: GatewayOptions) {
       health[name] = { lastErrorCode: code, lastErrorAt: new Date().toISOString() };
       // The identity this failure names, for the change the re-check looks for.
       identities[name] = identity;
+      failureRevisions[name]++;
     };
     let last = new GatewayError('not_configured');
     let activeSlot: ModelSlotName = 'primary';
@@ -488,15 +526,16 @@ export function createModelGateway(options: GatewayOptions) {
           const read = await wait(options.slots.read(name), signal);
           identity = slotIdentity(read);
           if (read.state === 'absent') {
-            // The primary's absence ends the request; the reserve's is a slot
-            // failure like any other, and keeps the primary's own code visible.
             if (name === 'reserve') {
-              recordFailure(name, 'not_configured', identity);
+              reserveAbsent = true;
               break;
             }
             throw new GatewayError('not_configured');
           }
+          if (name === 'reserve') reserveAbsent = false;
           await attempt(read.slot, name, payload, res, signal);
+          failureRevisions[name]++;
+          outcomeRevision++;
           health.lastAttemptAt = requestStartedAt;
           health.state = 'ok';
           health.outageSince = null;
@@ -526,6 +565,7 @@ export function createModelGateway(options: GatewayOptions) {
         'request_too_large',
       ].includes(failure.code);
       if (!callerOutcome) {
+        outcomeRevision++;
         health.lastAttemptAt = requestStartedAt;
         health.state = 'down';
         health.outageSince ??= new Date().toISOString();
@@ -543,6 +583,7 @@ export function createModelGateway(options: GatewayOptions) {
       }
       ownedError(res, failure, activeSlot);
     } finally {
+      activeRequests--;
       cancel(timer);
       res.removeListener('close', disconnect);
     }
