@@ -269,7 +269,11 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
   code, which the loader shows in English and Russian — and again where the
   gateway reads a slot: a stored list that breaks it is refused, never trimmed.
   Omitting the list when saving keeps the stored one, as an omitted key does; an
-  explicit empty list clears it.
+  explicit empty list clears it. A save request's body is bounded at 43,008 bytes
+  (`MAX_SLOT_BODY`): the declared maxima with JSON escaping — sixteen 1024-byte
+  values of quotes or backslashes, their names, the entry envelopes and the
+  slot's own fields. A larger body answers `body_too_large` before any rule or
+  endpoint check.
   A value may carry `{session}`. The core names the conversation of a chat turn
   in one inbound request header, `x-lifemodel-session` — its conversation id,
   and a later task its own. The gateway reads that header and no other inbound
@@ -322,7 +326,8 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
   the gateway send the caller's conversation id, and the loader's check sends a
   probe id; a reserved or malformed name, a CR/LF value, a control character, a
   non-ASCII value, a duplicate name and an over-long list are refused at save and
-  at read; no value reaches `/status`, a
+  at read; sixteen 1024-byte values save on both slots, with and without JSON
+  escaping, and a body past the bound answers `body_too_large`; no value reaches `/status`, a
   log line, the core or a response; a slot without headers sends what it sent
   before. A rendered value of 16 static bytes or more echoed by an upstream in a
   buffered answer or an SSE frame is refused, also after a status re-check

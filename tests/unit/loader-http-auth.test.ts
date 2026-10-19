@@ -11,7 +11,15 @@ import { loadConfig } from '../../loader/src/config.js';
 import { createSession, hashPassword, verifySession } from '../../loader/src/auth.js';
 import { createTestClock } from '../../loader/src/clock.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
-import { ModelCheckError, type ModelSlots, type ModelSlot } from '../../loader/src/model.js';
+import {
+  MAX_SLOT_BODY,
+  MAX_SLOT_HEADER_VALUE,
+  MAX_SLOT_HEADERS,
+  ModelCheckError,
+  type ModelSlots,
+  type ModelSlot,
+  type ModelSlotHeader,
+} from '../../loader/src/model.js';
 import type { LoaderState } from '../../loader/src/state.js';
 
 const SERVICE_HOST = 'loader.lifemodel-system.svc.cluster.local';
@@ -1295,7 +1303,7 @@ describe('loader static UI and JSON API', () => {
         expect((await request(base, route.path, good, route.method, body)).status).toBe(400);
       }
       expect(
-        (await request(base, route.path, good, route.method, ' '.repeat(16 * 1024 + 1))).status
+        (await request(base, route.path, good, route.method, ' '.repeat(MAX_SLOT_BODY + 1))).status
       ).toBe(413);
     }
     for (const route of ['/api/model', '/api/model/primary', '/api/model/reserve']) {
@@ -1623,6 +1631,64 @@ describe('loader static UI and JSON API', () => {
       expect(response.body).not.toContain('secret-key');
     }
     expect(saved?.headers).toEqual([]);
+  });
+
+  it('saves a header list at the declared maxima on both slots, JSON escaping included', async () => {
+    const record = await hashPassword('owner password');
+    const saved: Record<'primary' | 'reserve', ModelSlot | null> = { primary: null, reserve: null };
+    const slots: ModelSlots = {
+      read: async (slot) => saved[slot],
+      write: async (slot, value) => {
+        saved[slot] = structuredClone(value);
+      },
+      clearReserve: async () => {
+        saved.reserve = null;
+      },
+    };
+    const checked: ModelSlot[] = [];
+    const { base, clock } = await start(record, undefined, slots, async (slot) => {
+      checked.push(structuredClone(slot));
+    });
+    const cookie = `__Host-lm_session=${createSession(record, clock.now())}`;
+    const csrf = JSON.parse(
+      (await request(base, '/api/state', { host: 'boot-lifemodel.local', cookie })).body
+    ).csrfToken as string;
+    const headers = {
+      host: 'boot-lifemodel.local',
+      cookie,
+      origin: 'https://boot-lifemodel.local',
+      'content-type': 'application/json',
+      'x-csrf-token': csrf,
+    };
+    const lists: ModelSlotHeader[][] = [
+      // Sixteen values at the byte bound.
+      Array.from({ length: MAX_SLOT_HEADERS }, (_, index) => ({
+        name: `x-header-${String(index)}`,
+        value: 'a'.repeat(MAX_SLOT_HEADER_VALUE),
+      })),
+      // Sixteen values of quotes and backslashes: their JSON text is twice as large.
+      Array.from({ length: MAX_SLOT_HEADERS }, (_, index) => ({
+        name: `x-escaped-${String(index)}`,
+        value: '"\\'.repeat(MAX_SLOT_HEADER_VALUE / 2),
+      })),
+    ];
+    for (const list of lists)
+      for (const route of ['/api/model/primary', '/api/model/reserve'] as const) {
+        const body = JSON.stringify({
+          kind: 'openai',
+          baseUrl: 'https://models.example/v1',
+          model: 'm',
+          key: 'secret-key',
+          headers: list,
+        });
+        // The declared maxima are exactly what a save must accept.
+        expect(Buffer.byteLength(body)).toBeGreaterThan(16 * 1024);
+        expect(Buffer.byteLength(body)).toBeLessThanOrEqual(MAX_SLOT_BODY);
+        const response = await request(base, route, headers, 'PUT', body);
+        expect(response.status).toBe(200);
+        expect(saved[route.endsWith('/primary') ? 'primary' : 'reserve']?.headers).toEqual(list);
+      }
+    expect(checked.at(-1)?.headers).toEqual(lists[1]);
   });
 
   it('rejects only the concurrent check for the same slot and advances onboarding only for saved primary', async () => {

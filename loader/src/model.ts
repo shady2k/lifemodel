@@ -54,6 +54,14 @@ export const MAX_SLOT_HEADERS = 16;
 export const MAX_SLOT_HEADER_NAME = 64;
 /** The longest accepted header value, in bytes. */
 export const MAX_SLOT_HEADER_VALUE = 1024;
+/**
+ * The largest slot save body the declared maxima can produce: sixteen entries
+ * whose value is 1024 bytes of quote or backslash characters, which JSON escapes
+ * to 2048, with room for the name, the entry envelope and the slot's own fields
+ * (ADR-013, the custom-headers amendment).
+ */
+export const MAX_SLOT_BODY =
+  MAX_SLOT_HEADERS * (MAX_SLOT_HEADER_NAME + 2 * MAX_SLOT_HEADER_VALUE + 64) + 8 * 1024;
 /** An RFC 9110 token: the only shape a header name may have. */
 const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 /**

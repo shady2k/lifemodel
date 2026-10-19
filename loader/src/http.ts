@@ -32,6 +32,7 @@ import { resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   createModelChecker,
+  MAX_SLOT_BODY,
   ModelCheckError,
   publicSlot,
   SlotHeaderError,
@@ -578,10 +579,10 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         for await (const chunk of req) {
           const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
           size += part.length;
-          if (size > 16 * 1024) break;
+          if (size > MAX_SLOT_BODY) break;
           chunks.push(Buffer.from(part));
         }
-        if (size > 16 * 1024) {
+        if (size > MAX_SLOT_BODY) {
           res.writeHead(413);
           res.end('{"error":"body_too_large"}');
           return;
