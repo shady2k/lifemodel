@@ -343,6 +343,14 @@ deploy branch):
   or restarted module — therefore frees its slot within one renewal window,
   not for the stream's whole age; a stream whose lease the store no longer
   holds ends and the tab subscribes afresh.
+- A stream is also held to that limit locally (lifemodel-hf2k.1). It keeps a
+  deadline taken from its last lease the store confirmed — the acquisition,
+  or a renewal the store answered — and only a confirmation moves the
+  deadline: a renewal that errors or times out never keeps the stream past
+  it, and a renewal that lands after the stream ended revives nothing. A
+  replica that cannot reach the store, so no renewal is confirmed, therefore
+  ends its streams at the deadline instead of streaming on slots the store may
+  already be handing to another replica; the sum over replicas stays four.
 - An event stream closes after 15 minutes. The browser reconnects, which
   sends a new ForwardAuth check, so an expired session stops streaming.
   Logout closes the tab's stream and clears its cached transcript.

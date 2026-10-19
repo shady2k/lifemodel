@@ -31,9 +31,17 @@ const STREAM_MAX_AGE_MS = 15 * 60_000;
  * connection that dies without releasing it — a closed tab, a killed or
  * restarted module — frees its slot within one renewal window instead of
  * blocking the owner for the whole stream age.
+ *
+ * The stream holds a local deadline taken from its last confirmed lease. A
+ * renewal that errors, times out or lands after that deadline never moves it,
+ * so a module that cannot reach the store — a replica-specific outage — ends
+ * its streams at the deadline instead of streaming on a slot the store may
+ * already have handed to another replica.
  */
 const STREAM_LEASE_TTL_MS = 15_000;
-const LEASE_RENEW_MS = 5_000;
+/** A renewal every third of the lease's life, never slower than the ADR's 5 s. */
+const LEASE_RENEW_RATIO = 3;
+const LEASE_RENEW_MAX_MS = 5_000;
 const LEASE_RENEW_TIMEOUT_MS = 500;
 const STATE_POLL_MS = 250;
 const HEARTBEAT_MS = 15_000;
@@ -63,6 +71,8 @@ export interface WebServerOptions {
   bodyLimit?: number;
   /** The ADR's 15 minutes; a test shortens it to watch a stream end on its own. */
   streamMaxAgeMs?: number;
+  /** The lease's life; a test shortens it to watch a lapsed stream end. */
+  streamLeaseTtlMs?: number;
 }
 
 interface StreamEvent {
@@ -133,6 +143,13 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
   });
   const appDirectory = path.resolve(options.appDirectory);
   const streamMaxAgeMs = options.streamMaxAgeMs ?? STREAM_MAX_AGE_MS;
+  const streamLeaseTtlMs = options.streamLeaseTtlMs ?? STREAM_LEASE_TTL_MS;
+  if (!Number.isFinite(streamLeaseTtlMs) || streamLeaseTtlMs <= 0)
+    throw new Error('streamLeaseTtlMs must be a positive number of milliseconds');
+  const leaseRenewMs = Math.max(
+    1,
+    Math.min(Math.floor(streamLeaseTtlMs / LEASE_RENEW_RATIO), LEASE_RENEW_MAX_MS)
+  );
   const rates = new Map<string, { start: number; count: number }>();
   const activeStreams = new Map<string, number>();
   let statusReaders = 0;
@@ -281,6 +298,8 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     let ended = false;
     let handedOff = false;
     let renewTimer: ReturnType<typeof setInterval> | undefined;
+    let leaseDeadline = 0;
+    let leaseDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
     const queue = new BoundedQueue<StreamEvent>();
     const admissionDeadline = Date.now() + streamMaxAgeMs;
     const admissionTimer = setTimeout(() => {
@@ -304,6 +323,8 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
       clearTimeout(admissionTimer);
       if (renewTimer !== undefined) clearInterval(renewTimer);
       renewTimer = undefined;
+      if (leaseDeadlineTimer !== undefined) clearTimeout(leaseDeadlineTimer);
+      leaseDeadlineTimer = undefined;
       const remaining = (activeStreams.get(session) ?? 1) - 1;
       if (remaining <= 0) activeStreams.delete(session);
       else activeStreams.set(session, remaining);
@@ -315,11 +336,11 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     };
     reply.raw.once('close', onRequestClose);
     const remainingAdmission = () => Math.max(0, admissionDeadline - Date.now());
+    // The lease's life is measured from before the acquisition, so a slow
+    // acquisition never extends it beyond what the store was asked for.
+    const acquireExpiry = Date.now() + streamLeaseTtlMs;
     try {
-      const acquire = options.transcript.acquireStreamLease(
-        session,
-        Date.now() + STREAM_LEASE_TTL_MS
-      );
+      const acquire = options.transcript.acquireStreamLease(session, acquireExpiry);
       void acquire
         .then((value) => {
           if (value && (ended || lifecycle.signal.aborted)) {
@@ -394,30 +415,52 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     handedOff = true;
     reply.raw.removeListener('close', onRequestClose);
     response.on('close', cleanup);
+    /**
+     * Holds the stream to the last lease the store confirmed. Only an
+     * acquisition or a renewal the store answered calls this, so no error, no
+     * timeout and no late answer can keep a stream past its lease: at the
+     * deadline the stream ends, and the page reconnects and is admitted afresh.
+     */
+    const holdLeaseDeadline = (expiresAt: number) => {
+      if (ended) return;
+      leaseDeadline = expiresAt;
+      if (leaseDeadlineTimer !== undefined) clearTimeout(leaseDeadlineTimer);
+      leaseDeadlineTimer = setTimeout(
+        () => {
+          leaseDeadlineTimer = undefined;
+          if (ended) return;
+          if (Date.now() >= leaseDeadline) cleanup();
+          else holdLeaseDeadline(leaseDeadline);
+        },
+        Math.max(0, expiresAt - Date.now())
+      );
+    };
+    holdLeaseDeadline(acquireExpiry);
     const renewLease = async () => {
       const heldLeaseId = leaseId;
       if (!heldLeaseId || ended) return;
+      const expiresAt = Date.now() + streamLeaseTtlMs;
       try {
         const stillHeld = await withTimeout(
-          options.transcript.renewStreamLease(
-            session,
-            heldLeaseId,
-            Date.now() + STREAM_LEASE_TTL_MS
-          ),
+          options.transcript.renewStreamLease(session, heldLeaseId, expiresAt),
           new AbortController().signal,
           LEASE_RENEW_TIMEOUT_MS
         );
         // A lease the store no longer holds would let this stream run uncounted.
         // It ends here, and the page reconnects and is admitted afresh.
-        if (!stillHeld) cleanup();
+        if (!stillHeld) {
+          cleanup();
+          return;
+        }
+        holdLeaseDeadline(expiresAt);
       } catch {
-        // A store that cannot answer keeps the stream: the next renewal retries,
-        // and the lease lapses only while the store stays unavailable.
+        // A store that cannot answer keeps the stream only to the lease the
+        // store last confirmed: past that deadline the stream ends below.
       }
     };
     renewTimer = setInterval(() => {
       void renewLease();
-    }, LEASE_RENEW_MS);
+    }, leaseRenewMs);
 
     let previousModelStatus: string | null = null;
     const publishModelStatus = () => {

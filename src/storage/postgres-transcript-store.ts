@@ -25,9 +25,12 @@ return 1
 `;
 const RELEASE_STREAM_LEASE_SCRIPT = `redis.call('ZREM', KEYS[1], ARGV[1]); return 1`;
 const RENEW_STREAM_LEASE_SCRIPT = `
-if redis.call('ZSCORE', KEYS[1], ARGV[1]) == false then return 0 end
-redis.call('ZADD', KEYS[1], tonumber(ARGV[2]), ARGV[1])
-redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[3]))
+local score = redis.call('ZSCORE', KEYS[1], ARGV[1])
+if score == false then return 0 end
+-- A lease whose score has passed is gone: it is not renewed back into life.
+if tonumber(score) <= tonumber(ARGV[2]) then return 0 end
+redis.call('ZADD', KEYS[1], tonumber(ARGV[3]), ARGV[1])
+redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[4]))
 return 1
 `;
 /**
@@ -258,12 +261,15 @@ export class PostgresTranscriptStore implements TranscriptReader {
     if (!Number.isFinite(expiresAt) || expiresAt <= Date.now())
       throw new Error('Stream lease expiry must be in the future');
     const sessionKey = `web:stream-leases:${createHash('sha256').update(session).digest('hex')}`;
+    // One clock for the whole operation: the same `now` decides whether the
+    // lease is still alive and how long the key outlives it.
     const now = Date.now();
     const result = await this.redis.eval(
       RENEW_STREAM_LEASE_SCRIPT,
       1,
       sessionKey,
       leaseId,
+      String(now),
       String(expiresAt),
       String(expiresAt - now + LEASE_KEY_SLACK_MS)
     );

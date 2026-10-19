@@ -30,7 +30,11 @@ export interface TranscriptReader {
    * slot within one renewal window rather than blocking the next page.
    */
   acquireStreamLease(session: string, expiresAt: number): Promise<string | null>;
-  /** Extends a held lease; false when the store no longer holds it. */
+  /**
+   * Extends a held, unexpired lease. False when the store no longer holds it
+   * or its expiry has already passed: a lapsed or released lease is never
+   * renewed back into life.
+   */
   renewStreamLease(session: string, leaseId: string, expiresAt: number): Promise<boolean>;
   releaseStreamLease(session: string, leaseId: string): Promise<void>;
 }

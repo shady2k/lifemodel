@@ -1,5 +1,6 @@
 import { expect } from 'vitest';
 import { createWebServer } from '../../src/web/server.js';
+import type { TranscriptReader } from '../../src/ports/transcript.js';
 import { PostgresTranscriptStore } from '../../src/storage/postgres-transcript-store.js';
 import { httpTransport, type TranscriptMessage } from '../../web/app/src/transport.js';
 import type { TestStores } from './test-stores.js';
@@ -19,8 +20,8 @@ export interface WebModule {
 }
 
 export async function startWebModule(
-  transcript: PostgresTranscriptStore,
-  options: { port?: number; streamMaxAgeMs?: number } = {}
+  transcript: TranscriptReader,
+  options: { port?: number; streamMaxAgeMs?: number; streamLeaseTtlMs?: number } = {}
 ): Promise<WebModule> {
   const server = createWebServer({
     allowedOrigin: 'https://lifemodel.local',
@@ -33,6 +34,9 @@ export async function startWebModule(
     modelStatus: silentModelStatus(),
     logger: { info: () => undefined },
     ...(options.streamMaxAgeMs === undefined ? {} : { streamMaxAgeMs: options.streamMaxAgeMs }),
+    ...(options.streamLeaseTtlMs === undefined
+      ? {}
+      : { streamLeaseTtlMs: options.streamLeaseTtlMs }),
   });
   await server.listen({ host: '127.0.0.1', port: options.port ?? 0 });
   const address = server.server.address();
@@ -83,7 +87,7 @@ export interface Page {
  */
 export async function openPage(
   recipientId: string,
-  options: { streamMaxAgeMs?: number; forwardAuth?: boolean } = {}
+  options: { streamMaxAgeMs?: number; forwardAuth?: boolean; streamLeaseTtlMs?: number } = {}
 ): Promise<Page> {
   const stores = await createTestStores();
   await applyTestMigrations(stores.postgres);
