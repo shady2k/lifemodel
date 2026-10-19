@@ -10,6 +10,7 @@ import {
   waitUntil,
   type InstalledBrowser,
 } from '../helpers/browser-event-source.js';
+import { createForwardAuthProxy, type ForwardAuthProxy } from '../helpers/forward-auth-proxy.js';
 import { httpTransport, type TranscriptMessage } from '../../web/app/src/transport.js';
 
 /** The session key the server derives for a page that sends no session cookie. */
@@ -71,6 +72,8 @@ interface Page {
   transcript: PostgresTranscriptStore;
   recipientId: string;
   module: WebModule;
+  /** Present when the page reaches the module through a ForwardAuth-style proxy. */
+  proxy?: ForwardAuthProxy;
   browser: InstalledBrowser;
   received: TranscriptMessage[];
   subscribe: (after: string | null) => void;
@@ -84,23 +87,26 @@ interface Page {
  */
 async function openPage(
   recipientId: string,
-  options: { streamMaxAgeMs?: number } = {}
+  options: { streamMaxAgeMs?: number; forwardAuth?: boolean } = {}
 ): Promise<Page> {
   const stores = await createTestStores();
   await applyTestMigrations(stores.postgres);
   const transcript = new PostgresTranscriptStore(stores.postgres, stores.redis, recipientId);
+  const module = await startWebModule(transcript, options);
+  const proxy = options.forwardAuth ? await createForwardAuthProxy(module.port) : undefined;
   const page: Page = {
     stores,
     transcript,
     recipientId,
-    module: await startWebModule(transcript, options),
+    module,
+    ...(proxy ? { proxy } : {}),
     browser: {} as InstalledBrowser,
     received: [],
     subscribe: () => undefined,
     restart: async () => undefined,
     close: async () => undefined,
   };
-  page.browser = installBrowserFetch(page.module.base);
+  page.browser = installBrowserFetch(proxy?.base ?? page.module.base);
   let stop: () => void = () => undefined;
   page.subscribe = (after) => {
     stop = httpTransport.subscribe(
@@ -118,6 +124,7 @@ async function openPage(
   page.close = async () => {
     stop();
     page.browser.restore();
+    await page.proxy?.close();
     await stopWebModule(page.module);
     await Promise.all([stores.postgres.end(), stores.redis.quit()]);
   };
@@ -208,6 +215,64 @@ describe('a reply reaches an open page through the real web server', () => {
         'the reply committed while the module was down'
       );
       expect(page.browser.sources().length).toBeGreaterThan(1);
+      exactlyOnce(page.received);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
+  it("shows the reply after a loader rollout refused the page's reconnect", async () => {
+    const page = await openPage('web-live-forward-auth', { forwardAuth: true });
+    try {
+      const first = await page.transcript.readTranscript({ limit: 50 });
+      page.subscribe(first.cursor);
+      await insertRow(page.stores, page.recipientId, 'inbound:auth', 'user', 'вопрос');
+      await waitUntil(
+        () => page.received.some((message) => message.text === 'вопрос'),
+        'the first live row'
+      );
+      // The loader pod is replaced: the open stream drops, and the ingress
+      // answers the page's reconnect with ForwardAuth's non-200.
+      const proxy = page.proxy;
+      if (!proxy) throw new Error('the page has no proxy');
+      proxy.refuse = true;
+      proxy.dropConnections();
+      await waitUntil(
+        () => page.browser.sources().some((source) => source.lastStatus === 401),
+        "the page's reconnect to be refused by ForwardAuth"
+      );
+      await insertRow(page.stores, page.recipientId, 'channel:web:auth', 'assistant', 'ответ');
+      // The page recovers when the new loader pod answers: no reload, no action.
+      proxy.refuse = false;
+      await waitUntil(
+        () => page.received.some((message) => message.text === 'ответ'),
+        'the reply committed while the rollout refused the stream',
+        30_000
+      );
+      exactlyOnce(page.received);
+    } finally {
+      await page.close();
+    }
+  }, 90_000);
+
+  it('keeps an idle page current across many stream ends', async () => {
+    const page = await openPage('web-live-idle', { streamMaxAgeMs: 700 });
+    try {
+      const first = await page.transcript.readTranscript({ limit: 50 });
+      page.subscribe(first.cursor);
+      await insertRow(page.stores, page.recipientId, 'inbound:idle', 'user', 'вопрос');
+      await waitUntil(
+        () => page.received.some((message) => message.text === 'вопрос'),
+        'the first live row'
+      );
+      // The page sits open with nothing to show while its stream keeps ending.
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+      await insertRow(page.stores, page.recipientId, 'channel:web:idle', 'assistant', 'ответ');
+      await waitUntil(
+        () => page.received.some((message) => message.text === 'ответ'),
+        'the reply after hours of a page being open'
+      );
+      expect(page.browser.sources().length).toBeGreaterThan(2);
       exactlyOnce(page.received);
     } finally {
       await page.close();
