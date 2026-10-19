@@ -23,7 +23,15 @@ interface Slot {
   baseUrl: string;
   model: string;
   keySet: boolean;
+  /** The stored header names only; a value never comes back from the loader. */
+  headerNames?: string[];
 }
+interface HeaderRow {
+  name: string;
+  value: string;
+}
+/** What a stored header value looks like after save: the name, never the value. */
+const MASKED_VALUE = '\u2022\u2022\u2022\u2022\u2022\u2022';
 interface State {
   setupNeeded: boolean;
   loggedIn: boolean;
@@ -41,7 +49,121 @@ const codes = [
   'bad_response',
   'blocked_destination',
   'storage_unavailable',
+  'header_shape_invalid',
+  'header_name_invalid',
+  'header_name_reserved',
+  'header_value_invalid',
+  'header_duplicate',
+  'header_too_many',
 ];
+/**
+ * The slot's additional headers: a collapsed section with name/value rows,
+ * add and remove. After a save the stored header names are listed with their
+ * values masked - the loader never sends a value back (ADR-013, custom
+ * headers).
+ */
+function HeaderFields(props: {
+  id: string;
+  rows: HeaderRow[];
+  open: boolean;
+  names: string[];
+  onToggle: () => void;
+  onChange: (rows: HeaderRow[]) => void;
+}) {
+  const { t } = useTranslation();
+  const update = (index: number, field: keyof HeaderRow, text: string) => {
+    props.onChange(
+      props.rows.map((row, position) => (position === index ? { ...row, [field]: text } : row))
+    );
+  };
+  return (
+    <div className="space-y-2">
+      <Button type="button" variant="outline" aria-expanded={props.open} onClick={props.onToggle}>
+        {t('additionalHeaders')}
+      </Button>
+      {props.names.length > 0 && (
+        <ul
+          className="space-y-1 text-xs text-muted-foreground"
+          aria-label={t('storedHeaders')}
+          id={`${props.id}-stored`}
+        >
+          {props.names.map((name) => (
+            <li key={name}>
+              <strong>{name}</strong>: {MASKED_VALUE}
+            </li>
+          ))}
+        </ul>
+      )}
+      {props.open && (
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground" id={`${props.id}-hint`}>
+            {t('headersHint')}
+          </p>
+          {props.names.length > 0 && props.rows.length === 0 && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                props.onChange([]);
+              }}
+            >
+              {t('clearHeaders')}
+            </Button>
+          )}
+          {props.rows.map((row, index) => (
+            <div className="flex items-end gap-2" key={`${props.id}-row-${String(index)}`}>
+              <div className="flex-1 space-y-1">
+                <Label htmlFor={`${props.id}-name-${String(index)}`}>
+                  {t('headerName', { number: index + 1 })}
+                </Label>
+                <Input
+                  id={`${props.id}-name-${String(index)}`}
+                  value={row.name}
+                  onChange={(e) => {
+                    update(index, 'name', e.target.value);
+                  }}
+                />
+              </div>
+              <div className="flex-1 space-y-1">
+                <Label htmlFor={`${props.id}-value-${String(index)}`}>
+                  {t('headerValue', { number: index + 1 })}
+                </Label>
+                <Input
+                  id={`${props.id}-value-${String(index)}`}
+                  value={row.value}
+                  onChange={(e) => {
+                    update(index, 'value', e.target.value);
+                  }}
+                />
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  props.onChange(props.rows.filter((_, position) => position !== index));
+                }}
+              >
+                {t('removeHeader', { number: index + 1 })}
+              </Button>
+            </div>
+          ))}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              props.onChange([...props.rows, { name: '', value: '' }]);
+            }}
+          >
+            {t('addHeader')}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
 export default function App() {
   const { t } = useTranslation();
   const [state, setState] = useState<State | null>(null);
@@ -64,6 +186,15 @@ export default function App() {
   const [baseUrl, setBaseUrl] = useState('');
   const [model, setModel] = useState('');
   const [key, setKey] = useState('');
+  const [headerRows, setHeaderRows] = useState<HeaderRow[]>([]);
+  const [headersOpen, setHeadersOpen] = useState(false);
+  // Whether the owner touched the section: an untouched section sends no
+  // header list, so the stored one is kept (the rule the key follows);
+  // removing every row sends an empty list and clears it explicitly.
+  const [headersEdited, setHeadersEdited] = useState(false);
+  const [reserveHeaderRows, setReserveHeaderRows] = useState<HeaderRow[]>([]);
+  const [reserveHeadersOpen, setReserveHeadersOpen] = useState(false);
+  const [reserveHeadersEdited, setReserveHeadersEdited] = useState(false);
   const [modelStatus, setModelStatus] = useState<ModelStatusEvent | null>();
   // A slot saved in this page session: an `unknown` state then says so.
   const [slotSaved, setSlotSaved] = useState(false);
@@ -178,7 +309,13 @@ export default function App() {
       const response = await fetch('/api/model/primary', {
         method: 'PUT',
         headers: { 'content-type': 'application/json', 'x-csrf-token': state?.csrfToken ?? '' },
-        body: JSON.stringify({ kind, baseUrl, model, ...(key ? { key } : {}) }),
+        body: JSON.stringify({
+          kind,
+          baseUrl,
+          model,
+          ...(key ? { key } : {}),
+          ...(headersEdited ? { headers: headerRows } : {}),
+        }),
       });
       if (!response.ok) {
         const value = (await response.json()) as { error?: string };
@@ -187,6 +324,8 @@ export default function App() {
         return;
       }
       setKey('');
+      setHeaderRows([]);
+      setHeadersEdited(false);
       setSlotSaved(true);
       await load();
     } catch {
@@ -208,6 +347,7 @@ export default function App() {
           baseUrl: reserveBaseUrl,
           model: reserveModel,
           ...(reserveKey ? { key: reserveKey } : {}),
+          ...(reserveHeadersEdited ? { headers: reserveHeaderRows } : {}),
         }),
       });
       if (!response.ok) {
@@ -217,11 +357,12 @@ export default function App() {
         return;
       }
       setReserveKey('');
+      setReserveHeaderRows([]);
+      setReserveHeadersEdited(false);
       setReserve(null);
       setReserveKind('openai');
       setReserveBaseUrl('');
       setReserveModel('');
-      setReserveKey('');
       setSlotSaved(true);
       await load();
     } catch {
@@ -248,6 +389,8 @@ export default function App() {
       setReserveBaseUrl('');
       setReserveModel('');
       setReserveKey('');
+      setReserveHeaderRows([]);
+      setReserveHeadersEdited(false);
       await load();
     } catch {
       setReserveError(t('setupError'));
@@ -511,6 +654,19 @@ export default function App() {
                     {slot.keySet ? t('keySet') : t('keyOptional')}
                   </p>
                 </div>
+                <HeaderFields
+                  id="primary-headers"
+                  rows={headerRows}
+                  open={headersOpen}
+                  names={slot.headerNames ?? []}
+                  onToggle={() => {
+                    setHeadersOpen(!headersOpen);
+                  }}
+                  onChange={(rows) => {
+                    setHeaderRows(rows);
+                    setHeadersEdited(true);
+                  }}
+                />
                 <Button disabled={busy}>{busy ? t('checking') : t('checkSave')}</Button>
               </form>
               <div className="mt-8">
@@ -595,6 +751,19 @@ export default function App() {
                           {reserve?.keySet ? t('keySet') : t('keyOptional')}
                         </p>
                       </div>
+                      <HeaderFields
+                        id="reserve-headers"
+                        rows={reserveHeaderRows}
+                        open={reserveHeadersOpen}
+                        names={reserve?.headerNames ?? []}
+                        onToggle={() => {
+                          setReserveHeadersOpen(!reserveHeadersOpen);
+                        }}
+                        onChange={(rows) => {
+                          setReserveHeaderRows(rows);
+                          setReserveHeadersEdited(true);
+                        }}
+                      />
                       <Button disabled={busy}>{busy ? t('checking') : t('checkSave')}</Button>
                       {reserve && (
                         <Button
