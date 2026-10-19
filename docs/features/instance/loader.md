@@ -47,8 +47,10 @@ accepted by the owner on 2026-10-19 (lifemodel-3wi9, ADR-012):
   saved to OpenBao in the same request), and "this device" (the chat address,
   the CA certificate's SHA-256 fingerprint and its download), then the chat.
 - **Afterwards, settings:** the primary and the optional reserve model, the
-  model's connection line from the gateway's `/status` (ADR-013 D6), password
-  change, the CA certificate and logout.
+  model's connection line from the gateway's `/status` (ADR-013 D6) — including
+  "model saved — waiting for the first request" while the state is `unknown`
+  after a save in this page session — password change, the CA certificate and
+  logout.
 
 The design pass on the wizard and settings (focus, the device step fitting the
 screen, step progress and Back, header actions, sections) waits in

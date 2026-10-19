@@ -28,6 +28,12 @@ export interface ModelStatusSource {
 export const MODEL_STATUS_UNAVAILABLE_KEY = 'modelStatusUnavailable';
 /** The line shown for an outage, with {{time}} and {{error}} (ADR-013 D6). */
 export const MODEL_STATUS_OUTAGE_KEY = 'modelOutage';
+/**
+ * The line shown while the state is `unknown` right after the owner saved a
+ * slot in the page session: the save is visible, the first request is not yet.
+ * It is not an error code, so it is not in the phrase map below.
+ */
+export const MODEL_STATUS_AWAITING_KEY = 'modelAwaitingFirstRequest';
 /** The phrase for a safe code this build does not know. */
 export const MODEL_STATUS_UNKNOWN_ERROR_KEY = 'modelErrorUnknown';
 

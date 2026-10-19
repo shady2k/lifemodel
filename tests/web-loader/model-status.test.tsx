@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { axe } from 'jest-axe';
 import '@testing-library/jest-dom/vitest';
 import 'jest-axe/extend-expect';
@@ -93,7 +93,9 @@ describe('the loader settings show the model connection', () => {
         }),
       }));
       const { container } = render(<App />);
-      expect(await screen.findByRole('heading', { name: language === 'ru' ? 'Настройки' : 'Settings' })).toBeInTheDocument();
+      expect(
+        await screen.findByRole('heading', { name: language === 'ru' ? 'Настройки' : 'Settings' })
+      ).toBeInTheDocument();
       const line = await screen.findByText(new RegExp(`^${lead} \\d{2}:\\d{2} ${tail}$`));
       expect(line.closest('[data-slot=alert]')).not.toBeNull();
       expect(container.textContent).not.toContain('upstream_500');
@@ -122,7 +124,10 @@ describe('the loader settings show the model connection', () => {
   it.each([
     ['a failed request', () => ({ ok: false, status: 503, json: async () => ({}) })],
     ['an unavailable status', () => ({ ok: true, json: async () => null })],
-    ['a body the loader cannot read', () => ({ ok: true, json: async () => ({ state: 'broken' }) })],
+    [
+      'a body the loader cannot read',
+      () => ({ ok: true, json: async () => ({ state: 'broken' }) }),
+    ],
   ])('shows the quieter unavailable line for %s', async (_name, response) => {
     await i18n.changeLanguage('en');
     stub(response);
@@ -150,6 +155,55 @@ describe('the loader settings show the model connection', () => {
     expect(line.textContent).toMatch(/\d{1,2}[./]\d{1,2}/);
   });
 
+  it.each([
+    ['en-US', 'en', 'Model saved — waiting for the first request'],
+    ['ru-RU', 'ru', 'Модель сохранена — ждём первого запроса'],
+  ])(
+    'shows the waiting line for unknown after the owner saved a slot (%s)',
+    async (locale, language, line) => {
+      Object.defineProperty(navigator, 'language', { configurable: true, value: locale });
+      await i18n.changeLanguage(language);
+      stub(() => ({
+        ok: true,
+        json: async () => ({ state: 'unknown', outageSince: null, lastErrorCode: null }),
+      }));
+      const { container } = render(<App />);
+      await screen.findByRole('heading', { name: language === 'ru' ? 'Настройки' : 'Settings' });
+      await waitFor(() =>
+        expect(fetchMock.mock.calls.some(([url]) => url === '/api/model-status')).toBe(true)
+      );
+      // Nothing is saved in this page session yet: unknown stays silent.
+      expect(container.textContent).not.toContain(line);
+      const save = screen.getByRole('button', {
+        name: language === 'ru' ? 'Проверить и сохранить' : 'Check and save',
+      });
+      fireEvent.submit(save.closest('form')!);
+      expect(await screen.findByText(line)).toBeInTheDocument();
+      expect(await axe(container)).toHaveNoViolations();
+    }
+  );
+
+  it('keeps the outage line after a save when the model really failed', async () => {
+    await i18n.changeLanguage('en');
+    stub(() => ({
+      ok: true,
+      json: async () => ({
+        state: 'down',
+        outageSince: new Date(Date.now() - 60_000).toISOString(),
+        lastErrorCode: 'upstream_500',
+      }),
+    }));
+    const { container } = render(<App />);
+    await screen.findByRole('heading', { name: 'Settings' });
+    const save = await screen.findByRole('button', { name: 'Check and save' });
+    fireEvent.submit(save.closest('form')!);
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([url]) => url === '/api/model/primary')).toBe(true)
+    );
+    expect(await screen.findByText(/— the model is answering with an error$/)).toBeInTheDocument();
+    expect(container.textContent).not.toContain('Model saved — waiting for the first request');
+  });
+
   it('has words for every safe code in both languages', () => {
     const codes = [
       ...Object.keys(MODEL_STATUS_ERROR_KEYS),
@@ -163,7 +217,8 @@ describe('the loader settings show the model connection', () => {
     for (const language of ['en', 'ru'] as const)
       for (const code of codes) {
         const key = modelErrorKey(code);
-        const phrase = resources[language].translation[key as keyof typeof resources.en.translation];
+        const phrase =
+          resources[language].translation[key as keyof typeof resources.en.translation];
         expect(phrase, `${language}:${key}`).toBeTruthy();
         expect(String(phrase)).not.toBe(code);
       }
