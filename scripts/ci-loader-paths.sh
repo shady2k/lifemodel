@@ -26,11 +26,17 @@
 #   * scripts/release/ — the context script and the digest pinners the job
 #     calls.
 #
-# A change to anything else cannot change what this image builds. No network,
-# no clock, no arguments: the same list always gets the same answer. Its
-# behaviour is pinned by tests/unit/ci-loader-paths.test.ts.
+# A change to anything else cannot change what this image builds. No record at
+# all is no evidence of safety either: when the producer emits no "changed:"
+# line -- ci.yml's unknown-range fallback feeds it `ci-product-paths.sh
+# < /dev/null`, which answers product=true with no records -- no path was
+# readable, so the image is selected, the way the producer itself answers
+# product=true on no input. No network, no clock, no arguments: the same list
+# always gets the same answer. Its behaviour is pinned by
+# tests/unit/ci-loader-paths.test.ts.
 set -eu
 selected=false
+read_any=false
 while IFS= read -r line || [ -n "$line" ]; do
     # The producer emits `changed: <path>` lines followed by its own verdict.
     # Ignore the verdict and classify only paths from the producer's contract.
@@ -38,9 +44,12 @@ while IFS= read -r line || [ -n "$line" ]; do
         "changed: "*) path=${line#"changed: "} ;;
         *) continue ;;
     esac
+    read_any=true
     case "$path" in
         loader/*|web/loader/*|web/kit/*|docker/loader/*|.dockerignore|deploy/platform/*|scripts/release/*|src/web/model-status.ts|src/web/contract.ts|package.json|package-lock.json)
             selected=true ;;
     esac
 done
+# Nothing was read: the range was unreadable, so the build is owed.
+[ "$read_any" = true ] || selected=true
 printf 'loader_image=%s\n' "$selected"

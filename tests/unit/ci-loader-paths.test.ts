@@ -46,8 +46,29 @@ describe('loader image CI path classification', () => {
       'loader_image=false'
     );
   });
-  it('answers loader_image=false for an empty change', () => {
-    expect(selectProducerOutput()).toBe('loader_image=false');
+  it('selects the loader image when the producer supplies no changed-path records', () => {
+    // No records: no path was readable, so no path is evidence of safety —
+    // the same rule the producer applies to its own empty input.
+    expect(selectProducerOutput()).toBe('loader_image=true');
+  });
+  it('selects the loader image for the unknown-range fallback the workflow runs', () => {
+    const workflow = readFileSync(
+      fileURLToPath(new URL('../../.github/workflows/ci.yml', import.meta.url)),
+      'utf8'
+    );
+    // The no-range branch writes the producer's output to the same file the
+    // selector reads, so what the fallback writes is exactly what the selector
+    // must classify.
+    expect(workflow).toContain('scripts/ci-product-paths.sh < /dev/null > "$out"');
+    expect(workflow).toContain('scripts/ci-loader-paths.sh < "$out" >> "$GITHUB_OUTPUT"');
+    // The real producer on no input — what the fallback writes — carries no
+    // records and a product verdict, and the real selector answers true on it.
+    const fallback = execFileSync('sh', [producer], { input: '', encoding: 'utf8' });
+    expect(fallback).not.toMatch(/^changed: /m);
+    expect(fallback).toMatch(/product=true\n$/);
+    expect(execFileSync('sh', [script], { input: fallback, encoding: 'utf8' }).trim()).toBe(
+      'loader_image=true'
+    );
   });
   it('keeps the workflow producer-to-selector command contract intact', () => {
     const workflow = readFileSync(
