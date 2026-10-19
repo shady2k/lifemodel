@@ -146,7 +146,11 @@ export const httpTransport: WebTransport = {
 
     const catchUp = async () => {
       for (let page = 0; page < CATCH_UP_PAGES; page += 1) {
-        const read = await readTranscriptPage(undefined, delivered ?? undefined);
+        // Always an explicit ascending cursor: a page read without a cursor is
+        // the store's latest page, newest first, which would deliver the newest
+        // row alone and skip every row older than it. A null cursor is an empty
+        // history, so it reads from the start of the transcript.
+        const read = await readTranscriptPage(undefined, delivered ?? '0');
         for (const message of read.messages) deliver(message);
         if (closed || read.messages.length < CATCH_UP_PAGE_SIZE) return;
       }
