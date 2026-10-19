@@ -42,7 +42,8 @@ const answer = (model = 'upstream-model', content: string | null = 'OK') => ({
 type Handler = (req: IncomingMessage, res: ServerResponse, body: Record<string, unknown>) => void;
 async function fixture(
   options?: Parameters<typeof createModelGateway>[0]['timeouts'],
-  timers?: Parameters<typeof createModelGateway>[0]['timers']
+  timers?: Parameters<typeof createModelGateway>[0]['timers'],
+  recheck?: Parameters<typeof createModelGateway>[0]['recheck']
 ) {
   const attempts: Array<{
     slot: ModelSlotName;
@@ -73,6 +74,8 @@ async function fixture(
     };
   }
   let baoStatus = 200;
+  let holdReads = false;
+  const versions: Record<ModelSlotName, number> = { primary: 1, reserve: 1 };
   const reads: string[] = [];
   const logins: unknown[] = [];
   const bao = await listen(
@@ -89,11 +92,14 @@ async function fixture(
         return;
       }
       reads.push(req.url ?? '');
-      const slot = req.url?.endsWith('/reserve') ? slots.reserve : slots.primary;
+      // A held read answers nothing: the re-check's own bound must end the wait.
+      if (holdReads) return;
+      const name: ModelSlotName = req.url?.endsWith('/reserve') ? 'reserve' : 'primary';
+      const slot = slots[name];
       res.writeHead(baoStatus === 200 && !slot ? 404 : baoStatus);
       res.end(
         baoStatus === 200
-          ? JSON.stringify({ data: { data: slot, metadata: {} } })
+          ? JSON.stringify({ data: { data: slot, metadata: { version: versions[name] } } })
           : 'PRIVATE BAO BODY'
       );
     })
@@ -112,6 +118,7 @@ async function fixture(
     logger,
     ...(options ? { timeouts: options } : {}),
     ...(timers ? { timers } : {}),
+    ...(recheck ? { recheck } : {}),
   });
   const url = await listen(app.api);
   const statusUrl = await listen(app.status);
@@ -140,8 +147,12 @@ async function fixture(
     logins,
     lines,
     cache,
+    versions,
     set baoStatus(value: number) {
       baoStatus = value;
+    },
+    set holdReads(value: boolean) {
+      holdReads = value;
     },
   };
 }
@@ -1253,5 +1264,145 @@ describe('model gateway production timer and inbound boundaries', () => {
     expect(text).toContain('400 Bad Request');
     expect(f.attempts).toEqual([]);
     expect(f.reads).toEqual([]);
+  });
+});
+
+describe('model gateway clears a stale outage on a slot change', () => {
+  const statusOf = async (f: Awaited<ReturnType<typeof fixture>>) =>
+    (await fetch(`${f.statusUrl}/status`)).json();
+  const failing = (_req: IncomingMessage, res: ServerResponse) => {
+    res.writeHead(503);
+    res.end();
+  };
+
+  it('turns down/not_configured into unknown once the absent primary is saved', async () => {
+    const f = await fixture(undefined, undefined, { cache: 0 });
+    const saved = { ...f.slots.primary! };
+    f.slots.primary = null;
+    expect((await f.post()).status).toBe(502);
+    expect(await statusOf(f)).toMatchObject({
+      state: 'down',
+      lastErrorCode: 'not_configured',
+    });
+    // The owner saves the primary: the slot now exists at a new version.
+    f.slots.primary = saved;
+    f.versions.primary = 2;
+    expect(await statusOf(f)).toMatchObject({
+      state: 'unknown',
+      outageSince: null,
+      lastErrorCode: null,
+      primary: { lastErrorCode: null, lastErrorAt: null },
+    });
+  });
+
+  it('turns down/upstream_503 into unknown when both failing slots changed', async () => {
+    const f = await fixture(undefined, undefined, { cache: 0 });
+    f.handlers.primary = failing;
+    f.handlers.reserve = failing;
+    expect((await f.post()).status).toBe(502);
+    const down = await statusOf(f);
+    expect(down).toMatchObject({ state: 'down', lastErrorCode: 'upstream_503' });
+    expect(down.outageSince).not.toBeNull();
+    f.versions.primary = 2;
+    f.versions.reserve = 2;
+    expect(await statusOf(f)).toMatchObject({
+      state: 'unknown',
+      outageSince: null,
+      lastErrorCode: null,
+      primary: { lastErrorCode: null, lastErrorAt: null },
+      reserve: { lastErrorCode: null, lastErrorAt: null },
+    });
+  });
+
+  it('keeps the outage while the slots keep their versions', async () => {
+    const f = await fixture(undefined, undefined, { cache: 0 });
+    f.handlers.primary = failing;
+    f.handlers.reserve = failing;
+    await (await f.post()).text();
+    const first = await statusOf(f);
+    expect(first.state).toBe('down');
+    const outage = {
+      state: 'down',
+      outageSince: first.outageSince,
+      lastErrorCode: 'upstream_503',
+      primary: { lastErrorCode: 'upstream_503' },
+      reserve: { lastErrorCode: 'upstream_503' },
+    };
+    expect(await statusOf(f)).toMatchObject(outage);
+    // A request still fails on the unchanged slots and shows the same outage.
+    await (await f.post()).text();
+    expect(await statusOf(f)).toMatchObject(outage);
+  });
+
+  it('answers within the bound while the re-check read does not answer', async () => {
+    const f = await fixture(undefined, undefined, { cache: 0 });
+    f.handlers.primary = failing;
+    f.handlers.reserve = failing;
+    await (await f.post()).text();
+    f.holdReads = true;
+    const startedAt = Date.now();
+    const body = await statusOf(f);
+    expect(Date.now() - startedAt).toBeLessThan(1_500);
+    expect(body.state).toBe('down');
+    expect(body.outageSince).not.toBeNull();
+  });
+
+  it('changes nothing when Bao refuses the re-check read', async () => {
+    const f = await fixture(undefined, undefined, { cache: 0 });
+    f.handlers.primary = failing;
+    f.handlers.reserve = failing;
+    await (await f.post()).text();
+    const down = await statusOf(f);
+    expect(down.state).toBe('down');
+    // A saved slot behind a Bao error is not a change the gateway can see.
+    f.versions.primary = 2;
+    f.baoStatus = 503;
+    expect(await statusOf(f)).toEqual(down);
+  });
+
+  it('re-reads the failing slots at most once per cache window', async () => {
+    const f = await fixture();
+    f.handlers.primary = failing;
+    f.handlers.reserve = failing;
+    await (await f.post()).text();
+    const reads = f.reads.length;
+    expect((await statusOf(f)).state).toBe('down');
+    expect(f.reads.length - reads).toBe(2);
+    // The same answer serves the next poll: no second read inside the window.
+    expect((await statusOf(f)).state).toBe('down');
+    expect(f.reads.length - reads).toBe(2);
+  });
+
+  it('keeps the request down when only one failing slot changed', async () => {
+    const f = await fixture(undefined, undefined, { cache: 0 });
+    f.handlers.primary = failing;
+    f.handlers.reserve = failing;
+    await (await f.post()).text();
+    f.versions.primary = 2;
+    const body = await statusOf(f);
+    expect(body.state).toBe('down');
+    expect(body.outageSince).not.toBeNull();
+    expect(body.primary).toEqual({ lastErrorCode: null, lastErrorAt: null });
+    expect(body.reserve.lastErrorCode).toBe('upstream_503');
+  });
+
+  it('shows down again when the saved slot really fails', async () => {
+    const f = await fixture(undefined, undefined, { cache: 0 });
+    const saved = { ...f.slots.primary! };
+    f.slots.primary = null;
+    await (await f.post()).text();
+    f.slots.primary = saved;
+    f.versions.primary = 2;
+    expect(await statusOf(f)).toMatchObject({ state: 'unknown' });
+    f.handlers.primary = failing;
+    f.handlers.reserve = failing;
+    await (await f.post()).text();
+    // The reset dropped the cached absence: the request reached the upstream again.
+    expect(f.attempts.map((attempt) => attempt.slot)).toEqual(['primary', 'reserve']);
+    expect(await statusOf(f)).toMatchObject({
+      state: 'down',
+      lastErrorCode: 'upstream_503',
+    });
+    expect((await statusOf(f)).outageSince).not.toBeNull();
   });
 });

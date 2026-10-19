@@ -202,6 +202,22 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
 
 ## Amendments
 
+- **D6, Health (2026-10-19, lifemodel-s9v5.1.6).** The gateway also learns of a
+  slot change: a recorded outage names the slots' KV v2 identities. Each failed
+  attempt records the `metadata.version` its read returned (`absent` when the
+  slot was missing); the version travels in the same read-only
+  `lifemodel/data/model/<slot>` read the gateway already makes, so no new
+  permission, endpoint or listener is added. While `state` is `down`,
+  `GET /status` re-reads the failing slots' versions — one read in flight, at
+  most once per 5 s, the whole re-check bounded to 1 s, and the answer never
+  waits past that bound. A failing slot whose version changed, or that was
+  absent and now exists, clears its own `lastErrorCode`/`lastErrorAt` and its
+  cached slot, so the next request reads the saved value; the request level
+  returns to `unknown` with `outageSince` null only when every failing slot
+  changed, and the loader's settings then show "model saved — waiting for the
+  first request" if the owner saved a slot in that page session. A slot that
+  did not change keeps its failure, a Bao error during the re-check changes
+  nothing, and a real failure after the reset shows the outage again.
 - ADR-010: model requests leave through the platform-owned `model-gateway`
   over synchronous HTTP, not through `cmd.egress` events and Agent Vault;
   the egress gateway of ADR-010 remains the design for tool and Motor egress

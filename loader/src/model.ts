@@ -16,6 +16,17 @@ export interface ModelSlot {
 export interface ModelSlotView extends Omit<ModelSlot, 'key'> {
   keySet: boolean;
 }
+/** The slot's own KV v2 identity: the version that holds it, or its absence. */
+export type SlotIdentity = { version: number } | 'absent';
+/**
+ * One read of a slot: the value with the KV version it came from, or its
+ * absence. The version is the read's own `metadata.version` (ADR-013 D6).
+ */
+export type SlotRead = { state: 'present'; slot: ModelSlot; version: number } | { state: 'absent' };
+/** The identity a later read is compared against. */
+export function slotIdentity(read: SlotRead): SlotIdentity {
+  return read.state === 'present' ? { version: read.version } : 'absent';
+}
 export interface ModelSlots {
   read(slot: ModelSlotName): Promise<ModelSlot | null>;
   write(slot: ModelSlotName, value: ModelSlot): Promise<void>;
