@@ -54,8 +54,30 @@ resolver from every pod). It reads the host's `/etc/resolv.conf` first and
 systemd-resolved's `/run/systemd/resolve/resolv.conf` second, because the
 resolved stub holds only 127.0.0.53. It names the file to k3s in
 `/etc/rancher/k3s/config.yaml.d/lifemodel-resolv-conf.yaml`, and the
-`lifemodel-k3s-resolv.path` unit rewrites it and recreates the CoreDNS pods
-whenever the host's DNS changes.
+`lifemodel-k3s-resolv.path` unit regenerates it whenever the host's DNS changes.
+The generator is local-only, bounded to 30 seconds, and a required prerequisite
+of k3s. A k3s pre-start check also refuses a missing or empty file. The generated
+file contains at most three validated global-unicast nameservers (plus the k3s
+metadata-address exception) and an optional bounded search list. Host comments,
+options, zones and control characters are never copied.
+
+`lifemodel-k3s-dns-apply.service` reconciles CoreDNS after k3s starts, including
+on an installer upgrade: k3s restarts alone do not replace surviving pods. It
+waits for the API with bounded requests, rolls CoreDNS out, waits for readiness,
+and checks the pod's nameservers. Only then does it write the content hash to
+`/run/lifemodel/k3s-resolv.applied`. Failed or interrupted updates stay pending;
+the 180-second service retries after 30 seconds. An unchanged resolver does not
+clear a pending update. Both install paths enable this service at boot; the
+installer waits up to 390 seconds across failed starts and retries after
+restarting k3s. The generator requests a nonblocking restart of the apply
+service, not a coalescible start, so a DNS change during an activating apply
+queues a new invocation.
+
+**DNS reconciliation is not ready for deployment:** the current verification
+executes `cat` inside CoreDNS. The pinned k3s CoreDNS 1.14.6 image is distroless
+and does not include `cat`. Until a supported verification method is selected,
+apply fails closed with no applied marker and the installer reaches its bounded
+failure. Command-boundary tests do not prove this image can execute the check.
 
 The name and selected digest (or explicitly chosen tag) persist in
 `/etc/lifemodel/instance.env`. Rerunning the installer without release flags

@@ -35,6 +35,8 @@ grep -F 'boot-lifemodel.local eth0' "$work/rendered/systemd/lifemodel-mdns-boot-
 grep -F 'ExecStart=/usr/lib/lifemodel/k3s-resolv.sh /usr/lib/lifemodel/resolv-conf.mjs /run/lifemodel/k3s-resolv.conf /etc/resolv.conf /run/systemd/resolve/resolv.conf' "$work/rendered/systemd/lifemodel-k3s-resolv.service"
 grep -F 'PathChanged=/etc/resolv.conf' "$work/rendered/systemd/lifemodel-k3s-resolv.path"
 grep -F 'PathChanged=/run/systemd/resolve/resolv.conf' "$work/rendered/systemd/lifemodel-k3s-resolv.path"
+grep -F 'Requires=lifemodel-k3s-resolv.service' "$work/rendered/systemd/k3s.service.d/lifemodel-resolv.conf"
+grep -F 'TimeoutStartSec=180' "$work/rendered/systemd/lifemodel-k3s-dns-apply.service"
 grep -Fx 'resolv-conf: /run/lifemodel/k3s-resolv.conf' "$work/rendered/k3s/config.yaml.d/lifemodel-resolv-conf.yaml"
 if grep -v '^[[:space:]]*#' "$work/rendered/ocirepository.yaml" | grep -E '@[A-Z_]+@' || grep -F '${LIFEMODEL_NAME}' "$work/rendered/instance.yaml"; then
   echo 'installer left an unresolved template value' >&2; exit 1

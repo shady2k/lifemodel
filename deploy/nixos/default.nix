@@ -151,14 +151,31 @@ in
       description = "Write the resolv.conf k3s gives the kubelet and CoreDNS";
       wantedBy = [ "multi-user.target" ];
       before = [ "k3s.service" ];
-      wants = [ "network-online.target" ];
-      after = [ "network-online.target" ];
-      path = [ pkgs.nodejs lifemodelK3s ];
+      path = [ pkgs.nodejs pkgs.coreutils pkgs.systemd ];
       unitConfig.StartLimitIntervalSec = 0;
       # No RemainAfterExit: the path unit starts this unit again on every change,
       # and starting an already-active unit would do nothing.
-      serviceConfig.Type = "oneshot";
+      serviceConfig = { Type = "oneshot"; TimeoutStartSec = 30; };
       script = "exec ${k3sResolvScript} ${k3sResolvGenerator} ${k3sResolvConf} /etc/resolv.conf /run/systemd/resolve/resolv.conf";
+    };
+    k3s = {
+      requires = [ "lifemodel-k3s-resolv.service" ];
+      after = [ "lifemodel-k3s-resolv.service" ];
+      serviceConfig.ExecStartPre = "${pkgs.coreutils}/bin/test -s ${k3sResolvConf}";
+    };
+    lifemodel-k3s-dns-apply = {
+      description = "Reconcile CoreDNS with the desired host resolver";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "k3s.service" ];
+      path = [ pkgs.nodejs pkgs.coreutils lifemodelK3s ];
+      unitConfig.StartLimitIntervalSec = 0;
+      serviceConfig = {
+        Type = "oneshot";
+        TimeoutStartSec = 180;
+        Restart = "on-failure";
+        RestartSec = 30;
+      };
+      script = "exec ${../k3s/k3s-dns-apply.sh} ${k3sResolvConf}";
     };
     lifemodel-flux-bootstrap = {
       description = "Install pinned Flux and lifemodel platform root objects";

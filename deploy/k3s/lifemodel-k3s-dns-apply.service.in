@@ -1,0 +1,15 @@
+[Unit]
+Description=Reconcile CoreDNS with the desired host resolver
+After=k3s.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+TimeoutStartSec=180
+Restart=on-failure
+RestartSec=30
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=@DNS_APPLY_SH@ @RESOLV_CONF@
+
+[Install]
+WantedBy=multi-user.target

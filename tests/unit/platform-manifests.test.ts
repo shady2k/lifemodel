@@ -163,6 +163,8 @@ shift 3
 printf '%s\n' "$*" >> "$K3S_CALLS"
 case "$*" in
   *'get nodes'*) exit 0 ;;
+  *'exec deploy/coredns -- cat /etc/resolv.conf'*) cat "$LIFEMODEL_INSTALL_ROOT/run/lifemodel/k3s-resolv.conf"; exit 0 ;;
+  *'get --raw=/readyz'*|*'rollout restart deploy/coredns'*|*'rollout status deploy/coredns'*) exit 0 ;;
   *'get ocirepository platform'*) printf '{"metadata":{"managedFields":[%s]}}\n' "$K3S_MANAGED_FIELDS" ;;
   *'get configmap lifemodel-instance -o jsonpath='*) [ -f "$K3S_IDENTITY" ] && cat "$K3S_IDENTITY" || { echo '(NotFound)' >&2; exit 1; } ;;
   *'get namespace flux-system -o jsonpath='*) [ "$K3S_FOREIGN" = 1 ] && echo external || echo lifemodel ;;
@@ -180,7 +182,14 @@ esac`
   );
   command('apt-get', 'echo "$*" >> "$APT_LOG"; exit 0');
   command('ip', `if [ "$1" = -j ]; then printf '%s\n' "$ROUTES"; else exit 0; fi`);
-  command('systemctl', 'echo "$*" >> "$SYSTEMCTL_LOG"; exit 0');
+  command(
+    'systemctl',
+    `echo "$*" >> "$SYSTEMCTL_LOG"
+if [ "$*" = 'start lifemodel-k3s-dns-apply.service' ]; then
+  exec sh "$LIFEMODEL_INSTALL_ROOT/usr/lib/lifemodel/k3s-dns-apply.sh" "$LIFEMODEL_INSTALL_ROOT/run/lifemodel/k3s-resolv.conf"
+fi
+exit 0`
+  );
   command(
     'ufw',
     `if [ "$1" = status ]; then echo Status: ${options.ufwActive ? 'active' : 'inactive'}; else echo "$*" >> "$UFW_LOG"; fi`
