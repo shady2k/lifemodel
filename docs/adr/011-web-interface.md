@@ -336,6 +336,13 @@ deploy branch):
 - Private API responses carry `Cache-Control: no-store`.
 - Limits: request body size, page size (≤ 50), catch-up batch size,
   concurrent event streams per session (4), and send rate.
+- The four-stream bound is leased in Valkey, so it holds across web module
+  instances. A lease lives only while its stream renews it: the stream
+  renews every 5 s and a lease not renewed for 15 s is gone (lifemodel-hf2k.1).
+  A connection that dies without releasing its lease — a closed tab, a killed
+  or restarted module — therefore frees its slot within one renewal window,
+  not for the stream's whole age; a stream whose lease the store no longer
+  holds ends and the tab subscribes afresh.
 - An event stream closes after 15 minutes. The browser reconnects, which
   sends a new ForwardAuth check, so an expired session stops streaming.
   Logout closes the tab's stream and clears its cached transcript.
@@ -382,8 +389,21 @@ deploy branch):
   order, in batches of up to 50.
 - `state` events carry no id, so they never move the resume cursor. The
   current state is sent first on every subscription.
-- On reconnect the browser's `Last-Event-ID` resumes. A reload starts again
-  from the latest page.
+- The tab owns reconnection, not the browser's default. An `EventSource`
+  fails the connection for good on any non-200 answer — a refused
+  subscription (429), an unavailable module (503), a gateway error page — so
+  one refusal would leave an open page without new rows until a reload
+  (lifemodel-hf2k.1). The tab resubscribes itself after a bounded, jittered
+  delay (0.5 s doubling to 15 s, half of it jitter), resuming from the last
+  sequence it has, and reads the transcript from that sequence before each
+  attempt: a reply committed while no stream was open appears even if the
+  next subscription is refused again. Rows at or below the last delivered
+  sequence are dropped, so a catch-up page and the stream never render a
+  reply twice. Nothing new is shown while it reconnects; a failure long
+  enough to matter shows the presence's existing "no connection since
+  HH:MM".
+- On reconnect the browser's `Last-Event-ID` resumes a stream the server still
+  holds open; a reload starts again from the latest page.
 - The tab merges rows by `sequence` and owner bubbles by `clientId`, so
   duplicate delivery renders once.
 - A heartbeat comment goes out every 15 s, and the response is flushed per

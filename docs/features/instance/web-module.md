@@ -29,4 +29,4 @@ The web module serves the built React application and the owner-facing API on it
 
 1. Check `/metrics` for SSE lag, reconnects and creature-state freshness. Check web logs for stream termination and store failures; logs must not include message text or credentials.
 2. Confirm the owner-visible transcript is advancing and Valkey `outbound` wake hints are present. The stream also polls the transcript, so a missing hint alone should not block catch-up.
-3. If the stream remains stuck, restart the web pod only after confirming the core can still commit and the stores are healthy. A reconnect resumes from its last event id; verify catch-up and duplicate suppression in the browser.
+3. If the stream remains stuck, restart the web pod only after confirming the core can still commit and the stores are healthy. A reconnect resumes from its last event id; verify catch-up and duplicate suppression in the browser. The page resubscribes by itself, so a `429 too_many_streams` in the log is a page that is recovering, not a stuck one: a lease not renewed for 15 s frees its stream slot, which is how a killed web module's slots return (lifemodel-hf2k.1).
