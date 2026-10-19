@@ -1633,6 +1633,103 @@ describe('loader static UI and JSON API', () => {
     expect(saved?.headers).toEqual([]);
   });
 
+  it('keeps the reserve headers when a save omits them and through a key change', async () => {
+    const record = await hashPassword('owner password');
+    const saved: Record<'primary' | 'reserve', ModelSlot | null> = { primary: null, reserve: null };
+    const slots: ModelSlots = {
+      read: async (slot) => saved[slot],
+      write: async (slot, value) => {
+        saved[slot] = structuredClone(value);
+      },
+      clearReserve: async () => {
+        saved.reserve = null;
+      },
+    };
+    const { base, clock } = await start(record, undefined, slots, async () => {});
+    const cookie = `__Host-lm_session=${createSession(record, clock.now())}`;
+    const csrf = JSON.parse(
+      (await request(base, '/api/state', { host: 'boot-lifemodel.local', cookie })).body
+    ).csrfToken as string;
+    const headers = {
+      host: 'boot-lifemodel.local',
+      cookie,
+      origin: 'https://boot-lifemodel.local',
+      'content-type': 'application/json',
+      'x-csrf-token': csrf,
+    };
+    const reserveHeaders: ModelSlotHeader[] = [
+      { name: 'x-opencode-session', value: '{session}' },
+      { name: 'x-tenant', value: 'tenant-a' },
+    ];
+    const saved1 = await request(
+      base,
+      '/api/model/reserve',
+      headers,
+      'PUT',
+      JSON.stringify({
+        kind: 'openai',
+        baseUrl: 'https://models.example/v1',
+        model: 'reserve-model',
+        key: 'reserve-key',
+        headers: reserveHeaders,
+      })
+    );
+    expect(saved1.status).toBe(200);
+    expect(saved.reserve?.headers).toEqual(reserveHeaders);
+    // An omitted list keeps the stored one, and the new key replaces the old.
+    const keyChanged = await request(
+      base,
+      '/api/model/reserve',
+      headers,
+      'PUT',
+      JSON.stringify({
+        kind: 'openai',
+        baseUrl: 'https://models.example/v1',
+        model: 'reserve-model',
+        key: 'rotated-reserve-key',
+      })
+    );
+    expect(keyChanged.status).toBe(200);
+    expect(saved.reserve?.headers).toEqual(reserveHeaders);
+    expect(saved.reserve?.key).toBe('rotated-reserve-key');
+    // The same omission keeps a cleared list cleared.
+    expect(
+      (
+        await request(
+          base,
+          '/api/model/reserve',
+          headers,
+          'PUT',
+          JSON.stringify({
+            kind: 'openai',
+            baseUrl: 'https://models.example/v1',
+            model: 'reserve-model',
+            headers: [],
+          })
+        )
+      ).status
+    ).toBe(200);
+    expect(saved.reserve?.headers).toEqual([]);
+    expect(saved.reserve?.key).toBe('rotated-reserve-key');
+    expect(
+      (
+        await request(
+          base,
+          '/api/model/reserve',
+          headers,
+          'PUT',
+          JSON.stringify({
+            kind: 'openai',
+            baseUrl: 'https://models.example/v1',
+            model: 'reserve-model',
+          })
+        )
+      ).status
+    ).toBe(200);
+    expect(saved.reserve?.headers).toEqual([]);
+    expect(saved.reserve?.key).toBe('rotated-reserve-key');
+  });
+
   it('saves a header list at the declared maxima on both slots, JSON escaping included', async () => {
     const record = await hashPassword('owner password');
     const saved: Record<'primary' | 'reserve', ModelSlot | null> = { primary: null, reserve: null };
