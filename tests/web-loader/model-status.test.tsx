@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { axe } from 'jest-axe';
 import '@testing-library/jest-dom/vitest';
 import 'jest-axe/extend-expect';
@@ -202,6 +202,65 @@ describe('the loader settings show the model connection', () => {
     );
     expect(await screen.findByText(/— the model is answering with an error$/)).toBeInTheDocument();
     expect(container.textContent).not.toContain('Model saved — waiting for the first request');
+  });
+
+  it('retains the save across an older ok poll and later historical ok/down/unavailable polls (F6)', async () => {
+    await i18n.changeLanguage('en');
+    let poll!: () => void;
+    const realInterval = window.setInterval;
+    const interval = vi.spyOn(window, 'setInterval').mockImplementation((callback, ms, ...args) => {
+      if (ms === 10_000) {
+        poll = callback as () => void;
+        return 123 as ReturnType<typeof window.setInterval>;
+      }
+      return realInterval(callback, ms, ...args);
+    });
+    let release!: (value: unknown) => void;
+    let next: unknown = new Promise((resolve) => {
+      release = resolve;
+    });
+    let polls = 0;
+    stub(() => {
+      polls++;
+      return next;
+    });
+    const { container } = render(<App />);
+    try {
+      await screen.findByRole('heading', { name: 'Settings' });
+      await waitFor(() => expect(polls).toBe(1));
+      const save = screen.getByRole('button', { name: 'Check and save' });
+      fireEvent.submit(save.closest('form')!);
+      await waitFor(() => expect(save).not.toBeDisabled());
+      // This ok read started before the save. It cannot prove post-save success.
+      await act(async () => {
+        release({ ok: true, json: async () => ({ state: 'ok' }) });
+      });
+      const show = async (body: unknown, expected?: string) => {
+        const before = polls;
+        next = { ok: true, json: async () => body };
+        poll();
+        await waitFor(() => expect(polls).toBe(before + 1));
+        if (expected) expect(await screen.findByText(expected)).toBeInTheDocument();
+      };
+      const line = 'Model saved — waiting for the first request';
+      await show({ state: 'unknown' }, line);
+      // Even a post-save ok poll can describe a historical request: the loader
+      // projection has no lastSuccessAt. Retain the page-session fact.
+      await show({ state: 'ok' });
+      await waitFor(() => expect(screen.queryByText(line)).toBeNull());
+      await show({ state: 'unknown' }, line);
+      await show({
+        state: 'down',
+        outageSince: new Date().toISOString(),
+        lastErrorCode: 'timeout',
+      });
+      expect(await screen.findByText(/— the request timed out$/)).toBeInTheDocument();
+      expect(container.textContent).not.toContain(line);
+      await show(null, 'Model status unavailable');
+      await show({ state: 'unknown' }, line);
+    } finally {
+      interval.mockRestore();
+    }
   });
 
   it('has words for every safe code in both languages', () => {

@@ -111,8 +111,9 @@ export default function App() {
         if (!active) return;
         const parsed = parseModelStatus(value);
         setModelStatus(parsed);
-        // Once the model answers, the save's waiting line has served its purpose.
-        if (parsed?.state === 'ok') setSlotSaved(false);
+        // The projection has no lastSuccessAt: even an ok poll can describe a
+        // pre-save request. Keep the save fact for this page session; only an
+        // unknown state displays it, never ok/down/unavailable.
       } catch {
         // No status is readable: the settings show the quiet unavailable line.
         if (active) setModelStatus(null);
