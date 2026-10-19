@@ -68,12 +68,14 @@ export interface GatewayOptions {
 }
 /** The header names the gateway owns: a slot's own header may never set one. */
 const GATEWAY_HEADERS = ['host', 'content-type', 'accept', 'authorization', 'content-length'];
-/**
- * Set one of the gateway's own headers over the slot's, whatever casing the slot
- * used for that name: two casings of one name would arrive upstream twice.
- */
+/** Drop every casing of one header name: two casings would arrive upstream twice. */
+function dropHeader(headers: Record<string, string>, name: string): void {
+  for (const key of Object.keys(headers))
+    if (key.toLowerCase() === name) Reflect.deleteProperty(headers, key);
+}
+/** Set one of the gateway's own headers over the slot's, whatever casing it used. */
 function setOwnHeader(headers: Record<string, string>, name: string, value: string): void {
-  for (const key of Object.keys(headers)) if (key.toLowerCase() === name) delete headers[key];
+  dropHeader(headers, name);
   headers[name] = value;
 }
 interface SlotHealth {
@@ -254,10 +256,9 @@ export function createModelGateway(options: GatewayOptions) {
     // one it does not set (authorization without a key, content-length on a GET)
     // is dropped from the slot's own list, so it cannot become the gateway's.
     for (const name of GATEWAY_HEADERS) {
-      for (const key of Object.keys(custom))
-        if (key.toLowerCase() === name && !own.has(name)) delete custom[key];
       const value = own.get(name);
-      if (value !== undefined) setOwnHeader(custom, name, value);
+      if (value === undefined) dropHeader(custom, name);
+      else setOwnHeader(custom, name, value);
     }
     if (fellBack.length > 0) {
       const signature = `${slotName}:${fellBack.join(',')}`;
