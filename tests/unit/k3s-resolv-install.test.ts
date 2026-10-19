@@ -95,6 +95,10 @@ describe('the installer hands k3s a resolv.conf it accepts', () => {
     expect(apply).toContain('Restart=on-failure');
     expect(apply).toContain('RestartSec=30');
     expect(apply).toContain('WantedBy=multi-user.target');
+    expect(apply).toContain(
+      'ExecStart=/usr/lib/lifemodel/k3s-dns-apply.sh /run/lifemodel/k3s-resolv.conf /usr/lib/lifemodel/resolv-conf.mjs /etc/resolv.conf /run/systemd/resolve/resolv.conf'
+    );
+    expect(apply).not.toMatch(/@[A-Z_]+@/);
     expect(unit).toContain('Type=oneshot');
     expect(unit).toContain(
       'ExecStart=/usr/lib/lifemodel/k3s-resolv.sh /usr/lib/lifemodel/resolv-conf.mjs ' +

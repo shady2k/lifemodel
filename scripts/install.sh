@@ -331,6 +331,7 @@ render_k3s_resolv_files() {
   install -m 0755 "$K3S_RESOLV_SOURCE/k3s-dns-apply.sh" "$render_dir/resolv/k3s-dns-apply.sh"
   cp "$K3S_RESOLV_SOURCE/k3s.service.d/lifemodel-resolv.conf" "$render_dir/systemd/k3s.service.d/lifemodel-resolv.conf"
   sed -e "s|@DNS_APPLY_SH@|$LIFEMODEL_DNS_APPLY_SH|g" \
+      -e "s|@RESOLV_MJS@|$LIFEMODEL_RESOLV_MJS|g" \
       -e "s|@RESOLV_CONF@|$K3S_RESOLV_CONF|g" \
       "$K3S_RESOLV_SOURCE/lifemodel-k3s-dns-apply.service.in" \
       > "$render_dir/systemd/lifemodel-k3s-dns-apply.service"
