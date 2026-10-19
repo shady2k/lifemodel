@@ -158,9 +158,9 @@ model access, checked) → the chat, answered by the owner's real model
 - **Renewal.** The leaf is valid 397 days and reissued when 30 days remain, by
   a daily timer in the loader as well as at start. Traefik reloads the Secret
   live. The CA is valid 10 years; its renewal is a later concern, recorded.
-- **Profile.** CA: ECDSA P-256, BasicConstraints CA:true pathlen 0,
+- **Profile.** CA: ECDSA secp256r1, BasicConstraints CA:true pathlen 0,
   KeyUsage keyCertSign+cRLSign, random 128-bit serial, notBefore 1 h back.
-  Leaf: ECDSA P-256, SANs = the three names, ExtendedKeyUsage serverAuth,
+  Leaf: ECDSA secp256r1, SANs = the three names, ExtendedKeyUsage serverAuth,
   KeyUsage digitalSignature, random serial, notBefore 1 h back. Issued with
   `@peculiar/x509` (pinned) over WebCrypto; Node's `X509Certificate` only
   parses.
