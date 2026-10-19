@@ -696,7 +696,10 @@ describe('gateway slot cache', () => {
     for (const refused of [
       [{ name: 'authorization', value: 'Bearer x' }],
       [{ name: 'x-a', value: 'line\r\nbreak' }],
-      [{ name: 'x-a', value: '1' }, { name: 'X-A', value: '2' }],
+      [
+        { name: 'x-a', value: '1' },
+        { name: 'X-A', value: '2' },
+      ],
       [{ name: 'x-a', value: 'v', extra: true }],
       'not-a-list',
       [{ name: 'x-a' }],

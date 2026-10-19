@@ -4,11 +4,7 @@ import { createServer as createHttpsServer, type Server as HttpsServer } from 'n
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { networkInterfaces } from 'node:os';
-import {
-  CHECK_SESSION_ID,
-  createModelChecker,
-  ModelCheckError,
-} from '../../loader/src/model.js';
+import { CHECK_SESSION_ID, createModelChecker, ModelCheckError } from '../../loader/src/model.js';
 import { modelEndpointUrl } from '../../loader/src/model-url.js';
 
 const servers: Array<Server | HttpsServer> = [];

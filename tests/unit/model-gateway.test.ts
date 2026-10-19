@@ -1687,9 +1687,7 @@ describe('model gateway custom slot headers', () => {
     expect(logged).not.toContain(String(fallback));
     expect(logged).toContain('session placeholder');
     // Only the two requests that had to fall back log the line.
-    expect(
-      f.lines.filter((line) => line.message.includes('session placeholder'))
-    ).toHaveLength(2);
+    expect(f.lines.filter((line) => line.message.includes('session placeholder'))).toHaveLength(2);
     expect(f.lines.map((line) => line.fields['header'])).not.toContain('id-conv-1');
   });
 

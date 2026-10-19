@@ -14,10 +14,7 @@ const header = (name: string, value: string): ModelSlotHeader => ({ name, value 
 describe('slot custom header validation', () => {
   it('accepts an ordered list of RFC 9110 tokens and keeps its order and case', () => {
     expect(
-      validateSlotHeaders([
-        header('x-opencode-session', '{session}'),
-        header('X-Api-Version', '2'),
-      ])
+      validateSlotHeaders([header('x-opencode-session', '{session}'), header('X-Api-Version', '2')])
     ).toEqual([header('x-opencode-session', '{session}'), header('X-Api-Version', '2')]);
     expect(validateSlotHeaders([])).toEqual([]);
   });
@@ -68,9 +65,9 @@ describe('slot custom header validation', () => {
   });
 
   it('refuses a duplicate name in any case and more than sixteen headers', () => {
-    expect(() =>
-      validateSlotHeaders([header('x-a', '1'), header('X-A', '2')])
-    ).toThrowError(expect.objectContaining({ code: 'header_duplicate' }));
+    expect(() => validateSlotHeaders([header('x-a', '1'), header('X-A', '2')])).toThrowError(
+      expect.objectContaining({ code: 'header_duplicate' })
+    );
     const many = Array.from({ length: MAX_SLOT_HEADERS }, (_, index) =>
       header(`x-h-${String(index)}`, 'v')
     );
@@ -128,8 +125,8 @@ describe('slot custom header validation', () => {
         headers: [header('x-a', 'the-value'), header('x-b', '')],
       })
     ).toEqual(['the-key', 'the-value']);
-    expect(slotSecrets({ kind: 'ollama', baseUrl: 'https://models.example/v1', model: 'm' })).toEqual(
-      []
-    );
+    expect(
+      slotSecrets({ kind: 'ollama', baseUrl: 'https://models.example/v1', model: 'm' })
+    ).toEqual([]);
   });
 });
