@@ -1876,7 +1876,9 @@ describe('model gateway custom slot headers', () => {
           res.end(JSON.stringify(answer('real', sentValue)));
         }
       };
-      const response = await f.post(undefined, { 'x-lifemodel-session': 'conv-1' });
+      const response = await f.post(mode === 'stream' ? streamPayload : undefined, {
+        'x-lifemodel-session': 'conv-1',
+      });
       expect(sentValue).toBe('RENDERED-HEADER-SECRET-conv-1');
       expect(response.status).toBe(502);
       expect(await response.text()).not.toContain('RENDERED-HEADER-SECRET');
