@@ -19,6 +19,8 @@
 #   * package.json and package-lock.json — installed by the ui-build stage,
 #     which also runs the manifest's build:loader-ui script;
 #   * docker/loader/ — the Dockerfile the job builds;
+#   * .dockerignore — the context filter Docker reads when it assembles this
+#     job's build context: it decides which of the files above reach the build;
 #   * deploy/platform/ — the release tree whose kustomization the seed bundle
 #     carries;
 #   * scripts/release/ — the context script and the digest pinners the job
@@ -37,7 +39,7 @@ while IFS= read -r line || [ -n "$line" ]; do
         *) continue ;;
     esac
     case "$path" in
-        loader/*|web/loader/*|web/kit/*|docker/loader/*|deploy/platform/*|scripts/release/*|src/web/model-status.ts|src/web/contract.ts|package.json|package-lock.json)
+        loader/*|web/loader/*|web/kit/*|docker/loader/*|.dockerignore|deploy/platform/*|scripts/release/*|src/web/model-status.ts|src/web/contract.ts|package.json|package-lock.json)
             selected=true ;;
     esac
 done

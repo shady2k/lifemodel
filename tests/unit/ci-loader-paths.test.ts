@@ -20,6 +20,7 @@ describe('loader image CI path classification', () => {
     ['the loader UI', ['web/loader/src/app.tsx']],
     ['the shared UI kit the Dockerfile copies', ['web/kit/components/ui/button.tsx']],
     ['the Dockerfile itself', ['docker/loader/Dockerfile']],
+    ['the context filter Docker reads when it assembles the build context', ['.dockerignore']],
     [
       'the release tree the seed bundle carries',
       ['deploy/platform/applications/lifemodel/kustomization.yaml'],
