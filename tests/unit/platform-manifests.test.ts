@@ -187,7 +187,7 @@ esac`
     'systemctl',
     `echo "$*" >> "$SYSTEMCTL_LOG"
 if [ "$*" = 'start lifemodel-k3s-dns-apply.service' ]; then
-  exec sh "$LIFEMODEL_INSTALL_ROOT/usr/lib/lifemodel/k3s-dns-apply.sh" "$LIFEMODEL_INSTALL_ROOT/run/lifemodel/k3s-resolv.conf"
+  exec sh "$LIFEMODEL_INSTALL_ROOT/usr/lib/lifemodel/k3s-dns-apply.sh" "$LIFEMODEL_INSTALL_ROOT/run/lifemodel/k3s-resolv.conf" "$LIFEMODEL_INSTALL_ROOT/usr/lib/lifemodel/resolv-conf.mjs" /etc/resolv.conf /run/systemd/resolve/resolv.conf
 fi
 exit 0`
   );
