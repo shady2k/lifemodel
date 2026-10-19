@@ -22,6 +22,7 @@ function setup(
       readTranscript: vi.fn().mockResolvedValue({ rows: [], cursor: null }),
       watchTranscript: vi.fn(),
       acquireStreamLease: vi.fn().mockResolvedValue('lease-id'),
+      renewStreamLease: vi.fn().mockResolvedValue(true),
       releaseStreamLease: vi.fn().mockResolvedValue(undefined),
     },
     creatureState: { readCreatureState: vi.fn().mockResolvedValue(null) },
@@ -242,8 +243,9 @@ describe('POST /api/messages', () => {
 });
 
 describe('GET /api/events admission', () => {
-  it('passes the single stream deadline to shared lease acquisition', async () => {
+  it('leases a stream slot for seconds and renews it while the stream is open', async () => {
     const acquireStreamLease = vi.fn().mockResolvedValue('lease-id');
+    const renewStreamLease = vi.fn().mockResolvedValue(true);
     const server = createWebServer({
       allowedOrigin: 'https://lifemodel.local',
       instanceName: 'lifemodel',
@@ -256,6 +258,7 @@ describe('GET /api/events admission', () => {
           await new Promise<void>(() => {});
         }),
         acquireStreamLease,
+        renewStreamLease,
         releaseStreamLease: vi.fn(),
       },
       creatureState: { readCreatureState: vi.fn().mockResolvedValue(null) },
@@ -271,17 +274,77 @@ describe('GET /api/events admission', () => {
       const response = await fetch(`http://127.0.0.1:${address.port}/api/events?after=0`, {
         signal: abort.signal,
       });
-      const expiry = acquireStreamLease.mock.calls[0]?.[1] as number;
       expect(response.status).toBe(200);
-      expect(expiry).toBeGreaterThanOrEqual(before + 15 * 60_000);
-      expect(expiry).toBeLessThanOrEqual(Date.now() + 15 * 60_000);
+      // A lease of a closed connection must not linger for the stream's whole age.
+      const expiry = acquireStreamLease.mock.calls[0]?.[1] as number;
+      expect(expiry).toBeGreaterThan(before);
+      expect(expiry).toBeLessThanOrEqual(Date.now() + 30_000);
+      // The open stream renews it, so the slot stays taken while the page listens.
+      await new Promise((resolve) => setTimeout(resolve, 5_500));
+      expect(renewStreamLease).toHaveBeenCalled();
+      const [session, leaseId, renewExpiry] = renewStreamLease.mock.calls[0] as [
+        string,
+        string,
+        number,
+      ];
+      expect(leaseId).toBe('lease-id');
+      expect(session).toBe(acquireStreamLease.mock.calls[0]?.[0]);
+      expect(renewExpiry).toBeGreaterThan(expiry);
       abort.abort();
       await response.body?.cancel().catch(() => undefined);
     } finally {
       abort.abort();
       await server.close();
     }
-  });
+  }, 20_000);
+
+  it('ends a stream whose lease the store no longer holds', async () => {
+    const releaseStreamLease = vi.fn().mockResolvedValue(undefined);
+    const server = createWebServer({
+      allowedOrigin: 'https://lifemodel.local',
+      instanceName: 'lifemodel',
+      appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
+      runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
+      intake: { acceptOwnerMessage: vi.fn() } as unknown as IOwnerMessageIntake,
+      transcript: {
+        readTranscript: vi.fn().mockResolvedValue({ rows: [], cursor: null }),
+        watchTranscript: vi.fn(async function* () {
+          await new Promise<void>(() => undefined);
+        }),
+        acquireStreamLease: vi.fn().mockResolvedValue('lease-id'),
+        renewStreamLease: vi.fn().mockResolvedValue(false),
+        releaseStreamLease,
+      },
+      creatureState: { readCreatureState: vi.fn().mockResolvedValue(null) },
+      modelStatus: silentModelStatus(),
+      logger: { info: vi.fn() },
+    });
+    const abort = new AbortController();
+    try {
+      await server.listen({ host: '127.0.0.1', port: 0 });
+      const address = server.server.address();
+      if (!address || typeof address === 'string') throw new Error('HTTP listener did not start');
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/events?after=0`, {
+        signal: abort.signal,
+      });
+      const reader = response.body!.getReader();
+      // The stream ends when its lapsed lease is noticed: the page reconnects
+      // and is admitted afresh instead of streaming uncounted.
+      let frames = '';
+      const decoder = new TextDecoder();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        frames += decoder.decode(value);
+      }
+      expect(frames).toContain('event: state');
+      // Releasing a lease the store already dropped is harmless, and it is retried.
+      expect(releaseStreamLease).toHaveBeenCalledWith(expect.any(String), 'lease-id');
+    } finally {
+      abort.abort();
+      await server.close();
+    }
+  }, 20_000);
 
   it('fails closed with 503 when shared lease acquisition rejects', async () => {
     const { server } = setup();
@@ -297,6 +360,7 @@ describe('GET /api/events admission', () => {
         readTranscript: vi.fn().mockResolvedValue({ rows: [], cursor: null }),
         watchTranscript: vi.fn(),
         acquireStreamLease: vi.fn().mockRejectedValue(new Error('lease unavailable')),
+        renewStreamLease: vi.fn().mockResolvedValue(true),
         releaseStreamLease: vi.fn(),
       },
       creatureState: { readCreatureState: vi.fn().mockResolvedValue(null) },
@@ -334,6 +398,7 @@ describe('static application', () => {
           await new Promise<void>(() => {});
         }),
         acquireStreamLease: vi.fn().mockResolvedValue('lease-id'),
+        renewStreamLease: vi.fn().mockResolvedValue(true),
         releaseStreamLease: vi.fn().mockResolvedValue(undefined),
       },
       creatureState: { readCreatureState },

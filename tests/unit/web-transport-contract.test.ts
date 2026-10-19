@@ -33,6 +33,7 @@ describe('web server and browser transport contract', () => {
         readTranscript,
         watchTranscript: vi.fn(),
         acquireStreamLease: vi.fn().mockResolvedValue('lease'),
+        renewStreamLease: vi.fn().mockResolvedValue(true),
         releaseStreamLease: vi.fn(),
       } as never,
       creatureState: { readCreatureState: vi.fn().mockResolvedValue(null) },
@@ -82,16 +83,15 @@ describe('web server and browser transport contract', () => {
         readTranscript: vi.fn().mockResolvedValue({ rows: [], cursor: null }),
         watchTranscript: vi.fn(() => new Promise<never>(() => undefined)),
         acquireStreamLease: vi.fn().mockResolvedValue('lease'),
+        renewStreamLease: vi.fn().mockResolvedValue(true),
         releaseStreamLease: vi.fn().mockResolvedValue(undefined),
       } as never,
       creatureState: {
-        readCreatureState: vi
-          .fn()
-          .mockResolvedValue({
-            state: 'thinking',
-            epoch: 55,
-            publishedAt: Date.parse(publishedAt),
-          }),
+        readCreatureState: vi.fn().mockResolvedValue({
+          state: 'thinking',
+          epoch: 55,
+          publishedAt: Date.parse(publishedAt),
+        }),
       },
       modelStatus: silentModelStatus(),
       logger: { info: vi.fn() },
@@ -139,6 +139,7 @@ describe('web server and browser transport contract', () => {
           yield row;
         },
         acquireStreamLease: vi.fn().mockResolvedValue('lease'),
+        renewStreamLease: vi.fn().mockResolvedValue(true),
         releaseStreamLease: vi.fn().mockResolvedValue(undefined),
       },
       creatureState: { readCreatureState: vi.fn().mockResolvedValue(null) },
