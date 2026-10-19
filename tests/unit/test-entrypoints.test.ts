@@ -17,7 +17,12 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as semver from 'semver';
 import { ciEntrypointPolicy } from '../helpers/ci-entrypoint-policy.js';
-import { networkCreateArgs, STORE_IMAGES, storeContainerArgs, validateStoreImages } from '../../scripts/test-isolated.mjs';
+import {
+  networkCreateArgs,
+  STORE_IMAGES,
+  storeContainerArgs,
+  validateStoreImages,
+} from '../../scripts/test-isolated.mjs';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 
@@ -81,7 +86,7 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
     // (GIT_INDEX_FILE above all); none of them may leak into the launcher's
     // child, which snapshots the tree itself.
     expect(hook).toMatch(
-      /^\(\n\s+unset GIT_INDEX_FILE[^\n]*\\\n[^\n]*\n\s+node scripts\/test-isolated\.mjs check\n\)/m,
+      /^\(\n\s+unset GIT_INDEX_FILE[^\n]*\\\n[^\n]*\n\s+node scripts\/test-isolated\.mjs check\n\)/m
     );
     expect(hook).toContain('# --- BEGIN LIFEMODEL BACKLOG GATE ---');
     expect(hook).toContain('node .backlog/gate.mjs');
@@ -95,6 +100,24 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
     expect(ci).not.toContain('instance-first-start.test.ts');
     expect(ci).toContain('scripts/build-core-image.sh');
     expect(ci).not.toContain('scripts/build-image.sh');
+  });
+
+  it('the loader image job builds the platform image without publishing it', () => {
+    const ci = readFileSync(join(repoRoot, '.github/workflows/ci.yml'), 'utf8');
+    const start = ci.indexOf('\n  ci-loader-image:');
+    expect(start).toBeGreaterThan(0);
+    // The job body reaches to the next job header, or to the end of the file.
+    const job = ci.slice(start + 1).split(/\n(?=  [a-z][a-z0-9-]*:\n)/)[0];
+    expect(job).toContain('needs: changes');
+    expect(job).toContain("needs.changes.outputs.loader_image == 'true'");
+    expect(job).toContain('fetch-depth: 0');
+    expect(job).toContain('scripts/release/prepare-loader-context.sh');
+    expect(job).toContain('docker build --file docker/loader/Dockerfile');
+    // A pull-request build never publishes: no registry login, no push, no
+    // write token.
+    expect(job).not.toMatch(/docker login/);
+    expect(job).not.toContain('docker push');
+    expect(job).not.toContain('packages: write');
   });
 
   it('puts pinned migration lint inside the required backlog job', () => {
@@ -114,9 +137,13 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
     const mutations = [
       ci.replace('run: node scripts/test-isolated.mjs check', 'run: npm ci'),
       ci.replace('run: node scripts/test-isolated.mjs check', 'run: npx vitest run'),
-      ci.replace('run: node scripts/test-isolated.mjs check', 'run: |\n          node scripts/test-isolated.mjs check\n          npm ci'),
+      ci.replace(
+        'run: node scripts/test-isolated.mjs check',
+        'run: |\n          node scripts/test-isolated.mjs check\n          npm ci'
+      ),
       ci + '\n  unexpected:\n    steps:\n      - name: Bad\n        run: npm ci\n',
-      ci + '\n  unexpected:\n    steps:\n      - name: Bad\n        run: |\n          npx vitest run\n',
+      ci +
+        '\n  unexpected:\n    steps:\n      - name: Bad\n        run: |\n          npx vitest run\n',
       ci.replace('\n  ci-core-image:\n', '\n  renamed-core-image:\n'),
     ];
     for (const changed of mutations) {
@@ -145,14 +172,16 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
         expect(entry, `${name} is in package.json but has no lockfile entry`).toBeTruthy();
         expect(
           entry?.version !== undefined && semver.satisfies(entry.version, spec),
-          `${name}@${entry?.version} does not satisfy ${spec}`,
+          `${name}@${entry?.version} does not satisfy ${spec}`
         ).toBe(true);
       }
     }
   });
 
   it('store images are digest pinned and refuses tag-only images', () => {
-    expect(Object.values(STORE_IMAGES).every((image) => /@sha256:[a-f0-9]{64}$/.test(image))).toBe(true);
+    expect(Object.values(STORE_IMAGES).every((image) => /@sha256:[a-f0-9]{64}$/.test(image))).toBe(
+      true
+    );
     expect(() => validateStoreImages({ valkey: 'valkey/valkey:8.1' })).toThrow(/sha256 digest/);
   });
 
@@ -161,7 +190,12 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
     expect(network).toContain('--internal');
     expect(network).toContain('--label');
     const valkey = storeContainerArgs('valkey', STORE_IMAGES.valkey, 'run-network', 'valkey');
-    const postgres = storeContainerArgs('postgres', STORE_IMAGES.postgres, 'run-network', 'postgres');
+    const postgres = storeContainerArgs(
+      'postgres',
+      STORE_IMAGES.postgres,
+      'run-network',
+      'postgres'
+    );
     for (const args of [valkey, postgres]) {
       expect(args).toContain('--network');
       expect(args).toContain('run-network');

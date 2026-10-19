@@ -163,7 +163,7 @@ disposable test boundary, `scripts/test-isolated.mjs
   refuses a
   raw vitest start on the host in every CI job.
 
-CI builds and publishes only the standalone core image; all tests run through the isolated launcher.
+CI builds and publishes the standalone core and web images. It also builds the platform loader image on pull requests that touch its inputs, without publishing it; all tests run through the isolated launcher.
 
 Prerequisites for test runs and checks: **Node.js ≥ 24 and Docker**. Watch
 (`test:watch`) is explicitly unsupported, never a host fallback.
