@@ -91,3 +91,4 @@ EXPOSE 7000
 # No init: one Node process, nothing to reap. Node forwards SIGTERM to its
 # handlers (loader/src/main.ts), so `kubectl delete pod` drains it.
 ENTRYPOINT ["node", "/opt/lifemodel/loader/dist/main.js"]
+# probe: harmless edit (lifemodel-5f4q.1)
