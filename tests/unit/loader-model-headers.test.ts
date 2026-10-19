@@ -54,14 +54,29 @@ describe('slot custom header validation', () => {
     }
   });
 
-  it('refuses a value with a CR, an LF or a NUL and one over 1024 bytes', () => {
-    for (const value of ['a\r\nb', 'a\rb', 'a\nb', 'a\0b', 'ю'.repeat(513)]) {
+  it('refuses a value Node cannot send: a CR, an LF, a NUL, another control, DEL or any non-ASCII', () => {
+    for (const value of [
+      'a\r\nb',
+      'a\rb',
+      'a\nb',
+      'a\0b',
+      '\u0001',
+      '\u001f',
+      '\u007f',
+      '\u00e9',
+      'Привет',
+      'ю'.repeat(512),
+    ]) {
       expect(() => validateSlotHeaders([header('x-ok', value)])).toThrowError(
         expect.objectContaining({ code: 'header_value_invalid' })
       );
     }
-    expect(validateSlotHeaders([header('x-ok', 'ю'.repeat(512))])).toHaveLength(1);
-    expect(validateSlotHeaders([header('x-ok', 'a'.repeat(1024))])).toHaveLength(1);
+    expect(() => validateSlotHeaders([header('x-ok', 'a'.repeat(1025))])).toThrowError(
+      expect.objectContaining({ code: 'header_value_invalid' })
+    );
+    // What Node really sends: HTAB and printable US-ASCII.
+    for (const value of ['a\tb', '\t', ' !"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~', 'a'.repeat(1024)])
+      expect(validateSlotHeaders([header('x-ok', value)])).toHaveLength(1);
   });
 
   it('refuses a duplicate name in any case and more than sixteen headers', () => {

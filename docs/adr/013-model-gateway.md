@@ -256,7 +256,10 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
   buffered JSON, in SSE split across frames and in the forwarded response
   headers, as the key is.
   A name is an RFC 9110 token of at most 64 characters, compared
-  case-insensitively; a value has no CR, LF or NUL and at most 1024 bytes; at
+  case-insensitively; a value is HTAB and printable US-ASCII (0x20–0x7E) only
+  and at most 1024 bytes — a non-ASCII value is refused rather than encoded,
+  because Node rejects it before the wire and a UTF-8 secret sent as Latin-1
+  would not be the same secret; at
   most 16 headers, no duplicate names. Refused names are the gateway's own and
   the hop-by-hop and cookie headers: `host`, `authorization`,
   `proxy-authorization`, `content-length`, `content-type`, `accept`,
@@ -317,8 +320,9 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
   reserve success, repeated failure, recovery and no attempts.
 - Custom slot headers: a slot saved with `x-opencode-session: {session}` makes
   the gateway send the caller's conversation id, and the loader's check sends a
-  probe id; a reserved or malformed name, a CR/LF value, a duplicate name and an
-  over-long list are refused at save and at read; no value reaches `/status`, a
+  probe id; a reserved or malformed name, a CR/LF value, a control character, a
+  non-ASCII value, a duplicate name and an over-long list are refused at save and
+  at read; no value reaches `/status`, a
   log line, the core or a response; a slot without headers sends what it sent
   before. A rendered value of 16 static bytes or more echoed by an upstream in a
   buffered answer or an SSE frame is refused, also after a status re-check

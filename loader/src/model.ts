@@ -57,6 +57,12 @@ export const MAX_SLOT_HEADER_VALUE = 1024;
 /** An RFC 9110 token: the only shape a header name may have. */
 const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 /**
+ * What Node can put in an outgoing header value: HTAB and printable US-ASCII.
+ * A non-ASCII value is refused rather than encoded — Node rejects it before the
+ * wire, and a UTF-8 secret sent as Latin-1 would not be the same secret.
+ */
+const HEADER_VALUE = /^[\t\x20-\x7e]*$/;
+/**
  * Names the gateway sets itself, and the hop-by-hop and cookie headers a
  * request must never carry from a slot: a custom header can never replace
  * `host`, `content-type`, `accept`, `authorization` or `content-length`.
@@ -119,7 +125,7 @@ export function validateSlotHeaders(input: unknown): ModelSlotHeader[] {
     if (RESERVED_HEADERS.has(lower) || lower.startsWith('proxy-'))
       throw new SlotHeaderError('header_name_reserved');
     if (seen.has(lower)) throw new SlotHeaderError('header_duplicate');
-    if (/[\r\n\0]/.test(value) || Buffer.byteLength(value, 'utf8') > MAX_SLOT_HEADER_VALUE)
+    if (!HEADER_VALUE.test(value) || Buffer.byteLength(value, 'utf8') > MAX_SLOT_HEADER_VALUE)
       throw new SlotHeaderError('header_value_invalid');
     seen.add(lower);
     headers.push({ name, value });

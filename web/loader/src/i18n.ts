@@ -71,7 +71,8 @@ export const resources = {
       model_header_name_invalid:
         'A header name may use only letters, digits and symbols such as - and _, up to 64 characters.',
       model_header_name_reserved: 'The gateway sets this header itself; choose another name.',
-      model_header_value_invalid: 'A header value must be one line of at most 1024 bytes.',
+      model_header_value_invalid:
+        'A header value must be one line of Latin letters, digits, punctuation or a tab, at most 1024 bytes.',
       model_header_duplicate: 'Two headers have the same name.',
       model_header_too_many: 'At most 16 additional headers.',
       deviceTitle: 'Set up this device',
@@ -184,7 +185,8 @@ export const resources = {
       model_header_name_invalid:
         'В имени заголовка допустимы только латинские буквы, цифры и символы вроде - и _, до 64 символов.',
       model_header_name_reserved: 'Этот заголовок задаёт сам шлюз; выберите другое имя.',
-      model_header_value_invalid: 'Значение заголовка — одна строка не длиннее 1024 байт.',
+      model_header_value_invalid:
+        'Значение заголовка — одна строка из латинских букв, цифр, знаков и табуляции, не длиннее 1024 байт.',
       model_header_duplicate: 'Два заголовка имеют одинаковое имя.',
       model_header_too_many: 'Не более 16 дополнительных заголовков.',
       deviceTitle: 'Настройте это устройство',

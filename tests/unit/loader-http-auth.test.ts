@@ -1565,6 +1565,16 @@ describe('loader static UI and JSON API', () => {
     expect(kept.status).toBe(200);
     expect(saved?.headers).toEqual(candidate.headers);
     expect(saved?.key).toBe('secret-key');
+    // A value Node really sends: a tab and printable US-ASCII are accepted.
+    const tabbed = await request(
+      base,
+      '/api/model/primary',
+      headers,
+      'PUT',
+      JSON.stringify({ ...candidate, headers: [{ name: 'x-tab', value: 'a\tb' }] })
+    );
+    expect(tabbed.status).toBe(200);
+    expect(saved?.headers).toEqual([{ name: 'x-tab', value: 'a\tb' }]);
     const cleared = await request(
       base,
       '/api/model/primary',
@@ -1582,6 +1592,9 @@ describe('loader static UI and JSON API', () => {
       [[{ name: 'bad name', value: 'v' }], 'header_name_invalid'],
       [[{ name: 'a'.repeat(65), value: 'v' }], 'header_name_invalid'],
       [[{ name: 'x-a', value: 'line\r\nbreak' }], 'header_value_invalid'],
+      [[{ name: 'x-a', value: 'Привет' }], 'header_value_invalid'],
+      [[{ name: 'x-a', value: 'a\u0001b' }], 'header_value_invalid'],
+      [[{ name: 'x-a', value: 'del\u007f' }], 'header_value_invalid'],
       [[{ name: 'x-a', value: 'a'.repeat(1025) }], 'header_value_invalid'],
       [
         [
