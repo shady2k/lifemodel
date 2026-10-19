@@ -233,6 +233,44 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
   neither an older poll nor a historical `ok` poll proves a post-save success.
   The waiting line is hidden for `ok`, `down` and unavailable status; a real
   failure still shows the outage.
+- **D2, custom slot headers (2026-10-19, lifemodel-4utg).** A slot gains an
+  optional ordered list of additional headers, `{name, value}`, stored with the
+  key in the same `lifemodel/data/model/<slot>` record and secret exactly as the
+  key is: no value reaches `/status`, a log line, an error message, the core or
+  any response, and a saved value is never shown back in the loader — only its
+  name, with the value masked. Every non-empty value joins the key in the
+  material D4's response inspectors keep out of an answer; an empty value
+  carries nothing to guard. No new OpenBao permission and no new endpoint: the
+  gateway's existing read of `lifemodel/data/model/*` already carries the
+  record.
+  A name is an RFC 9110 token of at most 64 characters, compared
+  case-insensitively; a value has no CR, LF or NUL and at most 1024 bytes; at
+  most 16 headers, no duplicate names. Refused names are the gateway's own and
+  the hop-by-hop and cookie headers: `host`, `authorization`,
+  `proxy-authorization`, `content-length`, `content-type`, `accept`,
+  `connection`, `keep-alive`, `transfer-encoding`, `te`, `trailer`, `upgrade`,
+  `expect`, `cookie`, every `proxy-*` and every `:`-prefixed name. The rule is
+  enforced where the slot is saved — a refused save answers that rule's own safe
+  code, which the loader shows in English and Russian — and again where the
+  gateway reads a slot: a stored list that breaks it is refused, never trimmed.
+  Omitting the list when saving keeps the stored one, as an omitted key does; an
+  explicit empty list clears it.
+  A value may carry `{session}`. The core names the conversation of a chat turn
+  in one inbound request header, `x-lifemodel-session` — its conversation id,
+  and a later task its own. The gateway reads that header and no other inbound
+  header, accepts it only as `^[A-Za-z0-9._:-]{1,128}$`, and replaces every
+  `{session}` with it. When a value carries `{session}` and the caller names no
+  valid id, the gateway fills it with one random id it made at start and logs one
+  line naming those headers, never a value. The loader's own model check sends
+  the same headers with `{session}` set to a fixed probe id, so a slot is checked
+  with what the gateway will later send.
+  The upstream header set is built in that order: the slot's own headers first,
+  then the gateway's `host`, `content-type`, `accept`, `authorization` and
+  `content-length` over them, so no custom header can replace one of those. A
+  slot without headers sends exactly the headers D2 named before this amendment.
+  The sentence "The slot contract is Bearer-only; an endpoint needing other
+  secret headers needs a recorded extension first" is superseded: this is that
+  extension.
 - ADR-010: model requests leave through the platform-owned `model-gateway`
   over synchronous HTTP, not through `cmd.egress` events and Agent Vault;
   the egress gateway of ADR-010 remains the design for tool and Motor egress
@@ -265,6 +303,12 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
   listener; base-path joining for `/v1`, `/v1/`, a prefixed base; Bao seal,
   token expiry, JWT rotation, deletion and key rotation; status semantics for
   reserve success, repeated failure, recovery and no attempts.
+- Custom slot headers: a slot saved with `x-opencode-session: {session}` makes
+  the gateway send the caller's conversation id, and the loader's check sends a
+  probe id; a reserved or malformed name, a CR/LF value, a duplicate name and an
+  over-long list are refused at save and at read; no value reaches `/status`, a
+  log line, the core or a response; a slot without headers sends what it sent
+  before.
 - Bao: the `model-gateway` role reads the slots and is denied writes and
   unrelated paths (real role, on the VM).
 - On the test VM from a clean snapshot, with the LAN fixtures saved through
