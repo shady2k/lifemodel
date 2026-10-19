@@ -90,7 +90,7 @@ tick), Energy & state are physiology. Start with `README.md` and
 | `npm run connect` | connect this clone: git hooks, backlog import, gate check |
 | `npm run backlog` | the backlog gate (`npm run backlog:json` for JSON output) |
 | `npm run present` | the present-documents check |
-| `nix flake check` | checks the exported NixOS module and platform installer rendering; needs Nix; CI does not run it yet (lifemodel-lut.3.6) |
+| `nix flake check` | checks the exported NixOS module and platform installer rendering; needs Nix; CI's `ci-nix` job runs it on pull requests that touch what the flake reads (selected by `scripts/ci-nix-paths.sh`) (lifemodel-lut.3.6) |
 | `npm run ready` | open leaves ready to claim |
 | `npm run browser:auth` | browser authentication (`cli/browser-auth.ts`) |
 
@@ -163,7 +163,7 @@ disposable test boundary, `scripts/test-isolated.mjs
   refuses a
   raw vitest start on the host in every CI job.
 
-CI builds and publishes the standalone core and web images. It also builds the platform loader image on pull requests that touch its inputs, without publishing it; all tests run through the isolated launcher.
+CI builds and publishes the standalone core and web images. It also builds the platform loader image on pull requests that touch its inputs, without publishing it, and runs `nix flake check` on pull requests that touch what the flake reads (the `ci-nix` job); all tests run through the isolated launcher.
 
 Prerequisites for test runs and checks: **Node.js ≥ 24 and Docker**. Watch
 (`test:watch`) is explicitly unsupported, never a host fallback.
