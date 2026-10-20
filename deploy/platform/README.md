@@ -127,6 +127,15 @@ The module logs in to OpenBao with role `storage-module`, whose policy is
 `read` on the one custody record and nothing else, provisioned and verified by
 the loader's bootstrap before the root token is retired.
 
+This arrives with a fresh installation only. An instance bootstrapped by an
+earlier platform version has no `storage-module` identity and no `loader-storage`
+grant on the custody record, and its root token is already retired, so nothing
+can provision them in place; the loader refuses that instance on every start
+with one named error that says a reinstall is required. There is no upgrade
+path. SeaweedFS custody runs as the loader's first first-start phase, before the
+phases that wait on platform B or C, because platform A waits for the storage
+module's readiness and those later steps wait for A.
+
 `seaweedfs-access` admits only storage-module pods, and only on 8333: the
 master, volume and filer ports have no allow rule anywhere, so the namespace
 default deny keeps them private to that pod. `storage-module-access` lets the

@@ -81,7 +81,10 @@ spec:
               path: /status
               port: status
             periodSeconds: 10
-            timeoutSeconds: 3
+            # The module answers within 3 s (STORAGE_HEALTH_DEFAULTS.boundMs),
+            # so the probe's own timeout leaves two seconds of margin for the
+            # response; a probe that fired earlier would cut a valid answer.
+            timeoutSeconds: 5
             failureThreshold: 3
           # Liveness is this process, not the store: a stopped SeaweedFS must
           # never restart the module that reports it.
