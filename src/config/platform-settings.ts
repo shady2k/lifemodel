@@ -293,18 +293,23 @@ export function createPlatformSettingsReader(
       }
       const revision = Math.floor(document.revision);
       const values: PlatformSettingsValues = { ...defaultValues() };
-      const refused: { key: string; reasonCode: PlatformRefusalCode }[] = [];
+      const refused: { key?: string; reasonCode: PlatformRefusalCode }[] = [];
       for (const [key, raw] of Object.entries(document.values as Record<string, unknown>)) {
         const check = validatePlatformValue(key, raw);
         if (!check.ok) {
-          refused.push({ key, reasonCode: check.reasonCode });
+          // A key is logged only when the declarations know it: an unknown key
+          // is untrusted file text, so its refusal carries the code alone.
+          refused.push({
+            key: specsByKey.has(key) ? key : undefined,
+            reasonCode: check.reasonCode,
+          });
           continue;
         }
         // The key's spec typed the check, so the value fits the key's kind.
         Object.assign(values, { [key]: check.value });
       }
       const signature = `r${String(revision)}|${refused
-        .map((problem) => `${problem.key}:${problem.reasonCode}`)
+        .map((problem) => `${problem.key ?? 'unknown'}:${problem.reasonCode}`)
         .sort()
         .join(',')}`;
       if (refused.length > 0)

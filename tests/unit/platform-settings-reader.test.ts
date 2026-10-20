@@ -138,7 +138,8 @@ describe('core platform settings reader', () => {
     expect(refused).toEqual([
       ['tasks.harness', 'not_an_option'],
       ['tasks.wrapGraceSeconds', 'below_minimum'],
-      ['storage.made.up', 'unknown_key'],
+      // An unknown key is untrusted file text, so its refusal names no key.
+      [undefined, 'unknown_key'],
     ]);
   });
 
@@ -179,6 +180,21 @@ describe('core platform settings reader', () => {
     await reader.read();
     expect(warnings(calls)).toHaveLength(2);
     expect(warnings(calls)[1]?.obj.reasonCode).toBe('above_maximum');
+  });
+
+  it('never writes an unknown property name into a log line', async () => {
+    const calls: RecordedLog[] = [];
+    const dir = directory();
+    writeFileSync(
+      join(dir, PLATFORM_SETTINGS_FILE),
+      document(4, { 'review-private-canary': true })
+    );
+    await readerFor(dir, calls).read();
+    const refused = warnings(calls);
+    expect(refused).toHaveLength(1);
+    expect(refused[0]?.obj.code).toBe('invalid_value');
+    expect(refused[0]?.obj.reasonCode).toBe('unknown_key');
+    expect(JSON.stringify(calls)).not.toContain('review-private-canary');
   });
 
   it('never writes a value into a log line', async () => {
