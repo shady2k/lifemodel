@@ -4,6 +4,7 @@ resources:
   - namespace.yaml
   - applications.yaml
   - loader-app-rbac.yaml
+  - loader-settings-rbac.yaml
   - service-account.yaml
   - auth-delegator.yaml
   - openbao/rendered.yaml

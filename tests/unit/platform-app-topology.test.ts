@@ -72,6 +72,34 @@ describe('per-namespace application topology', () => {
       .flatMap(docs)
       .filter((o) => o.kind === 'Role');
     expect(loaderRoles).toHaveLength(2);
+    const settingsRbac = docs('deploy/platform/a/loader-settings-rbac.yaml');
+    const settingsRole = settingsRbac.find(
+      (o) => o.kind === 'Role' && o.metadata.name === 'loader-platform-settings'
+    );
+    expect(settingsRole?.metadata.namespace).toBe('lifemodel');
+    expect(settingsRole?.rules).toEqual([
+      {
+        apiGroups: [''],
+        resources: ['configmaps'],
+        resourceNames: ['lifemodel-platform-settings'],
+        verbs: ['get', 'update'],
+      },
+      { apiGroups: [''], resources: ['configmaps'], verbs: ['create'] },
+    ]);
+    expect(settingsRbac).toContainEqual(
+      expect.objectContaining({
+        kind: 'RoleBinding',
+        metadata: expect.objectContaining({
+          name: 'loader-platform-settings',
+          namespace: 'lifemodel',
+        }),
+        subjects: [expect.objectContaining({ name: 'loader', namespace: 'lifemodel-system' })],
+        roleRef: expect.objectContaining({ name: 'loader-platform-settings' }),
+      })
+    );
+    expect(
+      YAML.parse(readFileSync('deploy/platform/a/kustomization.yaml', 'utf8')).resources
+    ).toContain('loader-settings-rbac.yaml');
     for (const role of loaderRoles) {
       const secretGrants = role.rules.filter((rule: any) => rule.resources.includes('secrets'));
       expect(secretGrants).toEqual([

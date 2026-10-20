@@ -18,6 +18,10 @@ import i18n, { languageFor } from './i18n';
 import { ModelStatus } from './ModelStatus';
 import { parseModelStatus } from '../../../src/web/model-status.js';
 import type { ModelStatusEvent } from '../../../src/web/contract.js';
+import type {
+  SettingDeclaration,
+  SettingsSectionPayload,
+} from '../../../loader/src/settings/registry.js';
 interface Slot {
   kind: 'openai' | 'ollama';
   baseUrl: string;
@@ -164,6 +168,186 @@ function HeaderFields(props: {
     </div>
   );
 }
+/**
+ * One generated control (ADR-014 D6): the declaration alone decides what is
+ * rendered and how a value is checked; the code switches on the control kind,
+ * never on a setting's name.
+ */
+function SettingControl(props: {
+  declaration: SettingDeclaration;
+  value: boolean | number | string;
+  language: 'en' | 'ru';
+  csrfToken: string;
+  onSaved: () => Promise<void>;
+}) {
+  const { t } = useTranslation();
+  const declaration = props.declaration;
+  const [draft, setDraft] = useState(String(props.value));
+  const [status, setStatus] = useState('');
+  const [error, setError] = useState('');
+  const label = declaration.label[props.language];
+  const description = declaration.description[props.language];
+  async function save(value: boolean | number | string) {
+    setBusy(true);
+    setError('');
+    try {
+      const response = await fetch(`/api/settings/${declaration.key}`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json', 'x-csrf-token': props.csrfToken },
+        body: JSON.stringify({ value }),
+      });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => ({}))) as {
+          error?: string;
+          reasonCode?: string;
+          limit?: number;
+        };
+        setError(refusalText(t, declaration, body));
+        return;
+      }
+      setStatus(t('settingsSaved'));
+      await props.onSaved();
+    } catch {
+      setError(t('settingsSaveFailed'));
+    } finally {
+      setBusy(false);
+    }
+  }
+  const [busy, setBusy] = useState(false);
+  if (declaration.control === 'secret')
+    return (
+      <div className="space-y-1">
+        <Label htmlFor={`${declaration.key}-value`}>{label}</Label>
+        <p className="text-xs text-muted-foreground">{t('settingsSecretNote')}</p>
+        <p className="text-xs text-muted-foreground">{description}</p>
+      </div>
+    );
+  return (
+    <form
+      className="space-y-2"
+      aria-label={label}
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (declaration.control === 'number') {
+          const parsed = Number(draft);
+          void save(Number.isFinite(parsed) && draft.trim() !== '' ? parsed : draft);
+        } else {
+          void save(draft);
+        }
+      }}
+    >
+      <Label htmlFor={`${declaration.key}-value`}>{label}</Label>
+      <p className="text-xs text-muted-foreground">{description}</p>
+      {declaration.control === 'number' && (
+        <div className="flex items-end gap-2">
+          <Input
+            id={`${declaration.key}-value`}
+            type="number"
+            {...(declaration.min === undefined ? {} : { min: declaration.min })}
+            {...(declaration.max === undefined ? {} : { max: declaration.max })}
+            value={draft}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              setStatus('');
+            }}
+          />
+          {declaration.unit && (
+            <span className="text-sm text-muted-foreground">{declaration.unit}</span>
+          )}
+          <Button type="submit" disabled={busy}>
+            {t('settingsSave')}
+          </Button>
+        </div>
+      )}
+      {declaration.control === 'toggle' && (
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            aria-pressed={props.value === true}
+            disabled={busy}
+            onClick={() => {
+              void save(!(props.value === true));
+            }}
+          >
+            {props.value === true ? t('settingsOn') : t('settingsOff')}
+          </Button>
+        </div>
+      )}
+      {declaration.control === 'select' && (
+        <div className="flex items-end gap-2">
+          <Select
+            value={draft}
+            onValueChange={(value) => {
+              setDraft(value);
+              setStatus('');
+            }}
+          >
+            <SelectTrigger id={`${declaration.key}-value`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {(declaration.options ?? []).map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label[props.language]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button type="submit" disabled={busy}>
+            {t('settingsSave')}
+          </Button>
+        </div>
+      )}
+      {declaration.control === 'text' && (
+        <div className="flex items-end gap-2">
+          <Input
+            id={`${declaration.key}-value`}
+            value={draft}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              setStatus('');
+            }}
+          />
+          <Button type="submit" disabled={busy}>
+            {t('settingsSave')}
+          </Button>
+        </div>
+      )}
+      {status && (
+        <p role="status" className="text-xs text-muted-foreground">
+          {status}
+        </p>
+      )}
+      {error && (
+        <p role="alert" className="text-xs text-destructive">
+          {error}
+        </p>
+      )}
+    </form>
+  );
+}
+
+/** The declaration's refusal, localized from the response's code and limits. */
+function refusalText(
+  t: (key: string, options?: Record<string, unknown>) => string,
+  declaration: SettingDeclaration,
+  body: { error?: string; reasonCode?: string; limit?: number }
+): string {
+  if (body.error === 'unknown_setting') return t('settingsUnknownSetting');
+  if (body.error === 'secret_setting') return t('settingsSecretNote');
+  if (body.error === 'invalid_value') {
+    if (body.reasonCode === 'below_minimum')
+      return t('settingsBelowMinimum', { limit: body.limit ?? declaration.min });
+    if (body.reasonCode === 'above_maximum')
+      return t('settingsAboveMaximum', { limit: body.limit ?? declaration.max });
+    if (body.reasonCode === 'not_an_option') return t('settingsNotAnOption');
+    if (body.reasonCode === 'empty') return t('settingsEmpty');
+    return t('settingsInvalidValue');
+  }
+  return t('settingsSaveFailed');
+}
+
 export default function App() {
   const { t } = useTranslation();
   const [state, setState] = useState<State | null>(null);
@@ -196,6 +380,8 @@ export default function App() {
   const [reserveHeadersOpen, setReserveHeadersOpen] = useState(false);
   const [reserveHeadersEdited, setReserveHeadersEdited] = useState(false);
   const [modelStatus, setModelStatus] = useState<ModelStatusEvent | null>();
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionPayload | null>(null);
+  const [settingsLoadFailed, setSettingsLoadFailed] = useState(false);
   // A slot saved in this page session: an `unknown` state then says so.
   const [slotSaved, setSlotSaved] = useState(false);
   async function load() {
@@ -225,6 +411,24 @@ export default function App() {
           setReserveBaseUrl(data.reserve.baseUrl);
           setReserveModel(data.reserve.model);
         }
+      }
+      try {
+        const settingsResponse = await fetch('/api/settings', { cache: 'no-store' });
+        if (!settingsResponse.ok) throw new Error('settings');
+        const section = (await settingsResponse.json()) as SettingsSectionPayload;
+        if (
+          !Array.isArray(section.declarations) ||
+          typeof section.values !== 'object' ||
+          section.values === null ||
+          typeof section.revision !== 'number' ||
+          !Array.isArray(section.problems) ||
+          typeof section.projection?.state !== 'string'
+        )
+          throw new Error('settings');
+        setSettingsSection(section);
+        setSettingsLoadFailed(false);
+      } catch {
+        setSettingsLoadFailed(true);
       }
     }
   }
@@ -464,6 +668,15 @@ export default function App() {
   const instanceName = state.instanceName ?? 'lifemodel';
   const appUrl = `https://${instanceName}.local/`;
   const handoffUrl = `https://boot-${instanceName}.local/login?next=${encodeURIComponent(appUrl)}`;
+  const settingsLanguage: 'en' | 'ru' = i18n.language === 'ru' ? 'ru' : 'en';
+  const settingsGroups: [string, SettingDeclaration[]][] = [];
+  if (settingsSection !== null)
+    for (const declaration of settingsSection.declarations) {
+      const last = settingsGroups.at(-1);
+      if (last?.[0] === declaration.section) last[1].push(declaration);
+      else settingsGroups.push([declaration.section, [declaration]]);
+    }
+  const sectionTitle = (id: string) => (i18n.exists(`section_${id}`) ? t(`section_${id}`) : id);
   return (
     <main className="relative grid min-h-svh place-items-center bg-background px-5 py-16 text-foreground">
       <div className="absolute right-5 top-5 flex gap-2">
@@ -790,6 +1003,58 @@ export default function App() {
                   {t('modelAccess')}
                 </h2>
                 {modelStatus !== undefined && <ModelStatus value={modelStatus} saved={slotSaved} />}
+              </section>
+              <section className="mt-8 space-y-4" aria-labelledby="platform-settings-title">
+                <h2 id="platform-settings-title" className="text-lg font-semibold">
+                  {t('platformSettings')}
+                </h2>
+                {settingsLoadFailed && (
+                  <Alert role="status">
+                    <AlertDescription>{t('settingsLoadFailed')}</AlertDescription>
+                  </Alert>
+                )}
+                {settingsSection !== null && (
+                  <>
+                    {settingsSection.problems.length > 0 && (
+                      <Alert role="status">
+                        <AlertDescription>
+                          <p>{t('settingsProblemsHeading')}</p>
+                          <ul className="list-disc space-y-1 pl-5 text-sm">
+                            {settingsSection.problems.map((problem, index) => (
+                              <li key={`${problem.key ?? 'file'}-${String(index)}`}>
+                                {problem.reason}
+                              </li>
+                            ))}
+                          </ul>
+                        </AlertDescription>
+                      </Alert>
+                    )}
+                    {settingsSection.projection.state === 'failed' && (
+                      <Alert role="status">
+                        <AlertDescription>{t('settingsProjectionFailed')}</AlertDescription>
+                      </Alert>
+                    )}
+                    {settingsGroups.map(([id, declarations]) => (
+                      <div key={id} className="space-y-4">
+                        <h3 className="text-base font-semibold">{sectionTitle(id)}</h3>
+                        {declarations.map((declaration) => (
+                          <SettingControl
+                            key={declaration.key}
+                            declaration={declaration}
+                            value={
+                              settingsSection.values[declaration.key] ?? declaration.default ?? ''
+                            }
+                            language={settingsLanguage}
+                            csrfToken={state?.csrfToken ?? ''}
+                            onSaved={async () => {
+                              await load();
+                            }}
+                          />
+                        ))}
+                      </div>
+                    ))}
+                  </>
+                )}
               </section>
               <section className="mt-8 space-y-4" aria-labelledby="password-change-title">
                 <h2 id="password-change-title" className="text-lg font-semibold">
