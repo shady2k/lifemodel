@@ -1,6 +1,15 @@
 # Research: the harness inside a task and its S3 artifact store (lifemodel-653.4)
 
-Date: 2026-10-20. Scope: the replaceable harness inside one Kubernetes Job,
+Date: 2026-10-20. Round 2 re-evaluates the harness after the owner's
+2026-10-20 clarification: a mounted provider config is allowed; no **real** key
+may enter a task, but an ignored fixed placeholder is allowed. Round-1 strict
+config/key judgements below are being replaced, not new deployment acceptance.
+The round-2 Prime Agent pin is **0.10.1-beta.38**, Linux x64, bundled commit
+`58f9e8bb0ef54956e2e796ef96723f20b43fc55d`, from the `nightly` release assets
+(updated 2026-10-19). Its archive SHA-256 is
+`d9510643a91cb2a4b3b44a92a51a57395985a725b7e2a121228b9796ecb1bb67`, verified
+locally against the published beta manifest. Stable is still 0.10.0; this beta
+is not a 1.x release. Scope: the replaceable harness inside one Kubernetes Job,
 and the in-cluster S3-compatible store for its durable output. This is research,
 not an implementation or a deployment decision. Primary sources, installed CLI
 inspection and bounded local probes supply the evidence. Unknowns are recorded
