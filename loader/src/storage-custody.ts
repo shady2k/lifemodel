@@ -11,7 +11,7 @@
 import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { request as httpsRequest } from 'node:https';
-import type { PlatformPhase } from './platform-bootstrap.js';
+import { PlatformPhaseError, type PlatformPhase } from './platform-bootstrap.js';
 
 /** The one OpenBao KV v2 record the module's S3 credentials live in. */
 export const STORAGE_CUSTODY_PATH = 'lifemodel/data/storage/seaweed';
@@ -22,6 +22,25 @@ export const STORAGE_IDENTITY_NAME = 'storage-module';
 /** The Secret only the SeaweedFS pod mounts, holding its S3 identity file. */
 export const S3_IDENTITY_SECRET = 'seaweed-s3-identity';
 export const S3_IDENTITY_KEY = 's3.json';
+
+/**
+ * The one way forward for an instance bootstrapped before this platform
+ * version: its root token is retired, so the grant the loader's custody write
+ * needs can never be provisioned, and there is no in-place upgrade.
+ */
+export const STORAGE_FRESH_INSTALL_ERROR =
+  'this platform version needs a fresh installation for the storage module: OpenBao denies the Seaweed custody record and the root token is already retired, so an instance bootstrapped by an earlier platform version cannot be upgraded in place (reinstall this instance)';
+
+/**
+ * A denied custody record means an older platform, not a transient fault:
+ * nothing in the loader can grant itself the missing policy in steady state.
+ * Every other code is a real failure and keeps itself.
+ */
+export function storageCustodyDenied(error: unknown): never {
+  if ((error as { code?: unknown }).code === 'denied')
+    throw new PlatformPhaseError('storage-seaweed-custody', STORAGE_FRESH_INSTALL_ERROR);
+  throw error;
+}
 
 export interface StorageS3Credentials {
   accessKey: string;
@@ -223,12 +242,12 @@ export function createStorageCustodyPhase(deps: StorageCustodyPhaseDeps): Platfo
     name: 'storage-seaweed-custody',
     run: async () => {
       let credentials: StorageS3Credentials;
-      const existing = await deps.bao.read();
+      const existing = await deps.bao.read().catch(storageCustodyDenied);
       if (existing === null) {
         const generated = deps.generate?.() ?? generateStorageCredentials();
         credentials = parseStorageCredentials(generated);
-        await deps.bao.write(credentials);
-        const saved = await deps.bao.read();
+        await deps.bao.write(credentials).catch(storageCustodyDenied);
+        const saved = await deps.bao.read().catch(storageCustodyDenied);
         if (saved === null)
           throw new Error('OpenBao storage custody record is absent after its write');
         const verified = parseStorageCredentials(saved);

@@ -61,9 +61,7 @@ function fixture(
     ensureStoragePolicy: async (_token) => {
       events.push('storage-policy');
     },
-    readStorageCustody: async () => {
-      throw new Error('bootstrap never reads the storage custody record');
-    },
+    readStorageCustody: async () => null,
     writeStorageCustody: async () => {
       throw new Error('bootstrap never writes the storage custody record');
     },
@@ -1265,6 +1263,10 @@ describe('OpenBao bootstrap', () => {
       readModelSlot: async () => {
         throw new Error('must not read a model slot');
       },
+      readStorageCustody: async () => null,
+      writeStorageCustody: async () => {
+        throw new Error('must not write the storage custody record');
+      },
       writeModelSlot: async () => {
         throw new Error('must not write a model slot');
       },
@@ -1523,5 +1525,90 @@ describe('the storage module custody identity', () => {
       (call) => call.method === 'POST' && call.path.endsWith('/lifemodel/data/storage/seaweed')
     );
     expect(JSON.parse(write?.body ?? '{}')).toEqual({ data: record });
+  });
+});
+
+describe('an instance bootstrapped before the storage module', () => {
+  it('fails with one named fresh-install error instead of retrying a denied read', async () => {
+    let custodyRead = 0;
+    const api = createOpenBaoApi({
+      address: 'http://openbao.test:8200',
+      role: 'loader',
+      readJwt: async () => 'loader-jwt',
+      request: async (url) => {
+        if (url.pathname.endsWith('/sys/seal-status'))
+          return { status: 200, body: '{"initialized":true,"sealed":false}' };
+        if (url.pathname.endsWith('/auth/kubernetes/login'))
+          return {
+            status: 200,
+            body: JSON.stringify({
+              auth: { client_token: 'old-loader-token', lease_duration: 3600, renewable: true },
+            }),
+          };
+        if (url.pathname.endsWith('/lifemodel/data/storage/seaweed')) {
+          custodyRead++;
+          // The old loader identity never had loader-storage: the read is denied.
+          return { status: 403, body: '{"errors":["permission denied"]}' };
+        }
+        return { status: 204, body: '' };
+      },
+    });
+    let record: PlatformPhaseRecord | null = { phase: 'valkey-password', status: 'complete' };
+    const store: PlatformPhaseStore = {
+      read: async () => record,
+      write: async (next) => {
+        record = next;
+      },
+    };
+    const bootstrap = createOpenBaoBootstrap({
+      bao: api,
+      // The root token is already retired: nothing can provision a new policy.
+      custody: { read: async () => ({ keys: ['key'], rootToken: null }), write: async () => {} },
+      runPhases: createPlatformPhaseRunner(store),
+    });
+    let failure: unknown;
+    try {
+      await bootstrap.runInitial();
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toMatch(/fresh installation for the storage module/);
+    expect((failure as Error).message).toMatch(/reinstall/i);
+    // The error names the phase it belongs to, so the loader's log line is not
+    // a generic denial against an unrelated completed phase.
+    expect((failure as { phase?: string }).phase).toBe('storage-seaweed-custody');
+    // The denied token is retried once after a fresh login before it is refused.
+    expect(custodyRead).toBeGreaterThan(0);
+    // Nothing was rewritten and no phase ran: the instance cannot be upgraded.
+    expect(record).toEqual({ phase: 'valkey-password', status: 'complete' });
+  });
+
+  it('proceeds when the custody record is simply absent on a current installation', async () => {
+    const api = createOpenBaoApi({
+      address: 'http://openbao.test:8200',
+      role: 'loader',
+      readJwt: async () => 'loader-jwt',
+      request: async (url) => {
+        if (url.pathname.endsWith('/sys/seal-status'))
+          return { status: 200, body: '{"initialized":true,"sealed":false}' };
+        if (url.pathname.endsWith('/auth/kubernetes/login'))
+          return {
+            status: 200,
+            body: JSON.stringify({
+              auth: { client_token: 'loader-token', lease_duration: 3600, renewable: true },
+            }),
+          };
+        if (url.pathname.endsWith('/lifemodel/data/storage/seaweed'))
+          return { status: 404, body: '{"errors":[]}' };
+        return { status: 204, body: '' };
+      },
+    });
+    const bootstrap = createOpenBaoBootstrap({
+      bao: api,
+      custody: { read: async () => ({ keys: ['key'], rootToken: null }), write: async () => {} },
+      runPhases: async () => {},
+    });
+    await expect(bootstrap.runInitial()).resolves.toBeUndefined();
   });
 });

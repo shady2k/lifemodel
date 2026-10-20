@@ -5,6 +5,7 @@ import type { ModelSlot } from './model.js';
 import { createRoleBaoClient, BaoStorageError, type RoleBaoOptions } from './model-bao.js';
 import {
   readCustodyRecord,
+  storageCustodyDenied,
   STORAGE_CUSTODY_PATH,
   type StorageS3Credentials,
 } from './storage-custody.js';
@@ -98,6 +99,18 @@ export function createOpenBaoBootstrap(deps: OpenBaoBootstrapDeps): {
     if ((await bao.status()).sealed)
       throw new Error('OpenBao remains sealed after submitting its custody key');
   };
+  /**
+   * The steady-state loader writes the Seaweed custody record with its own
+   * grant (policy `loader-storage`, ADR-015 S-D1). An instance bootstrapped by
+   * an earlier platform version never received that grant and cannot be given
+   * it: provisioning needs the root token, which is already retired. There is
+   * no upgrade path, so this names the one way forward instead of retrying a
+   * bare denial for the life of the deployment.
+   */
+  const assertStorageCustodyGrant = async (): Promise<void> => {
+    // An absent record is a current installation whose phase has not run yet.
+    await bao.readStorageCustody().catch(storageCustodyDenied);
+  };
   const validateAndUnsealBeforeResume = async (): Promise<void> => {
     const status = await bao.status();
     if (!status.initialized) return;
@@ -105,6 +118,7 @@ export function createOpenBaoBootstrap(deps: OpenBaoBootstrapDeps): {
     assertKeys(saved);
     if (status.sealed) await unseal();
     if (saved.rootToken === null) {
+      await assertStorageCustodyGrant();
       await bao.login();
     }
   };
