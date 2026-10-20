@@ -6,7 +6,7 @@ import { axe } from 'jest-axe';
 import '@testing-library/jest-dom/vitest';
 import 'jest-axe/extend-expect';
 import i18n from '../../web/loader/src/i18n';
-import App from '../../web/loader/src/App';
+import App, { formatDecimalBytes } from '../../web/loader/src/App';
 import type { SettingsSectionPayload } from '../../loader/src/settings/registry.js';
 
 const concurrencyDeclaration = {
@@ -338,7 +338,7 @@ describe('loader settings section', () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
-  it('renders the read-only fixed value in Russian the same decimal way', async () => {
+  it('renders the read-only fixed value in Russian with the localized unit', async () => {
     Object.defineProperty(navigator, 'language', { configurable: true, value: 'ru-RU' });
     await i18n.changeLanguage('ru');
     mockDonePage(
@@ -349,7 +349,7 @@ describe('loader settings section', () => {
     );
     render(<App />);
     expect(await screen.findByText('Потолок хранилища')).toBeInTheDocument();
-    expect(await screen.findByText('20 GB')).toBeInTheDocument();
+    expect(await screen.findByText('20 ГБ')).toBeInTheDocument();
     expect(
       screen.queryByLabelText('Потолок хранилища', { selector: 'input' })
     ).not.toBeInTheDocument();
@@ -380,5 +380,20 @@ describe('loader settings section', () => {
     expect(await screen.findByRole('heading', { name: 'Настройки платформы' })).toBeInTheDocument();
     expect(await screen.findByRole('heading', { name: 'Задачи' })).toBeInTheDocument();
     expect(screen.getByLabelText('Параллельные задачи', { selector: 'input' })).toHaveValue(2);
+  });
+});
+
+describe('decimal byte formatting', () => {
+  it('localizes the unit suffixes and the decimal separator', () => {
+    expect(formatDecimalBytes(20000000000, 'en')).toBe('20 GB');
+    expect(formatDecimalBytes(20000000000, 'ru')).toBe('20 ГБ');
+    expect(formatDecimalBytes(3000000000000, 'en')).toBe('3 TB');
+    expect(formatDecimalBytes(3000000000000, 'ru')).toBe('3 ТБ');
+    expect(formatDecimalBytes(2500000, 'en')).toBe('2.5 MB');
+    expect(formatDecimalBytes(2500000, 'ru')).toBe('2,5 МБ');
+    expect(formatDecimalBytes(1500, 'en')).toBe('1.5 kB');
+    expect(formatDecimalBytes(1500, 'ru')).toBe('1,5 кБ');
+    expect(formatDecimalBytes(999, 'en')).toBe('999 B');
+    expect(formatDecimalBytes(999, 'ru')).toBe('999 Б');
   });
 });

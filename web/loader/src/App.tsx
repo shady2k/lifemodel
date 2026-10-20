@@ -173,23 +173,28 @@ function HeaderFields(props: {
  * rendered and how a value is checked; the code switches on the control kind,
  * never on a setting's name.
  */
-const BYTE_UNITS: readonly { limit: number; suffix: string }[] = [
-  { limit: 1e12, suffix: 'TB' },
-  { limit: 1e9, suffix: 'GB' },
-  { limit: 1e6, suffix: 'MB' },
-  { limit: 1e3, suffix: 'kB' },
+const BYTE_UNITS: readonly { limit: number; suffix: { en: string; ru: string } }[] = [
+  { limit: 1e12, suffix: { en: 'TB', ru: 'ТБ' } },
+  { limit: 1e9, suffix: { en: 'GB', ru: 'ГБ' } },
+  { limit: 1e6, suffix: { en: 'MB', ru: 'МБ' } },
+  { limit: 1e3, suffix: { en: 'kB', ru: 'кБ' } },
 ];
 
-/** A decimal byte count a person can read: 20000000000 renders as '20 GB'. */
-function formatDecimalBytes(value: number): string {
+/**
+ * A decimal byte count a person can read: 20000000000 renders as '20 GB' in
+ * English and '20 ГБ' in Russian, with the language's decimal separator.
+ */
+export function formatDecimalBytes(value: number, language: 'en' | 'ru'): string {
   for (const unit of BYTE_UNITS) {
     if (value >= unit.limit) {
       const scaled = value / unit.limit;
-      const text = Number.isInteger(scaled) ? String(scaled) : scaled.toFixed(1);
-      return `${text} ${unit.suffix}`;
+      const text = Number.isInteger(scaled)
+        ? String(scaled)
+        : scaled.toLocaleString(language, { maximumFractionDigits: 1 });
+      return `${text} ${unit.suffix[language]}`;
     }
   }
-  return `${String(value)} B`;
+  return `${String(value)} ${language === 'ru' ? 'Б' : 'B'}`;
 }
 
 /** The fixed text of a read-only setting's value; never an input. */
@@ -201,7 +206,7 @@ function fixedSettingText(
 ): string {
   if (declaration.control === 'number') {
     if (declaration.format === 'bytes' && typeof value === 'number')
-      return formatDecimalBytes(value);
+      return formatDecimalBytes(value, language);
     return String(value);
   }
   if (declaration.control === 'select') {
