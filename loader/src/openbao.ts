@@ -3,6 +3,11 @@ import { request as httpsRequest } from 'node:https';
 import { readFile } from 'node:fs/promises';
 import type { ModelSlot } from './model.js';
 import { createRoleBaoClient, BaoStorageError, type RoleBaoOptions } from './model-bao.js';
+import {
+  readCustodyRecord,
+  STORAGE_CUSTODY_PATH,
+  type StorageS3Credentials,
+} from './storage-custody.js';
 
 export interface BaoKeys {
   keys: string[];
@@ -20,6 +25,11 @@ export interface BaoApi {
   ensureLoaderPolicy(rootToken: string): Promise<void>;
   login(): Promise<void>;
   ensureModelPolicy?(rootToken: string): Promise<void>;
+  /** The storage module's read-only identity and the loader's custody write (ADR-015 S-D1). */
+  ensureStoragePolicy(rootToken: string): Promise<void>;
+  /** The SeaweedFS S3 custody record, or null when it does not exist yet. */
+  readStorageCustody(): Promise<Record<string, unknown> | null>;
+  writeStorageCustody(value: StorageS3Credentials): Promise<void>;
   revokeRootToken(rootToken: string): Promise<void>;
   readModelSlot(slot: 'primary' | 'reserve'): Promise<ModelSlot | null>;
   writeModelSlot(slot: 'primary' | 'reserve', value: ModelSlot): Promise<void>;
@@ -112,6 +122,7 @@ export function createOpenBaoBootstrap(deps: OpenBaoBootstrapDeps): {
       if (bao.ensureModelPolicy === undefined)
         throw new Error('OpenBao model policy provisioner is unavailable');
       await bao.ensureModelPolicy(saved.rootToken);
+      await bao.ensureStoragePolicy(saved.rootToken);
       await bao.revokeRootToken(saved.rootToken);
     }
     if (!(await bao.rootTokenActive(saved.rootToken))) await bao.login();
@@ -293,34 +304,49 @@ export function createOpenBaoApi(
   const asToken = (token: string, path: string, method: string, payload?: unknown) =>
     client.call(path, method, payload, { token });
 
+  interface ServiceIdentity {
+    /** The policy, the Kubernetes-auth role and the ServiceAccount name. */
+    role: string;
+    /** The exact policy text; nothing is added to it. */
+    policy: string;
+    /** Paths the policy must grant `read` on, and nothing more. */
+    verify: readonly string[];
+    /** Paths it must not reach at all. */
+    deny: readonly string[];
+    /** How the failure messages name the holder, e.g. "the gateway". */
+    holder: string;
+  }
   /**
-   * The model gateway's own identity (ADR-013 D3), provisioned beside
-   * `loader-model` and verified before the root token is retired.
+   * A platform service's own identity, provisioned beside `loader-model` and
+   * verified before the root token is retired (ADR-013 D3, ADR-015 S-D1).
    *
-   * The gateway logs in with its own ServiceAccount, so it holds the policy
-   * `read` on the model slots and nothing else. Its Kubernetes-auth login
-   * needs the gateway's projected JWT, which the loader does not have: the
-   * policy is therefore checked through a bounded token that carries that
-   * policy alone, and the role's binding to the gateway ServiceAccount is
-   * checked by reading the role back. Policy and role writes repeat safely.
-   * Token creation is not idempotent: a lost response can leave a parented,
-   * nonrenewable token alive until its 60s TTL or root retirement.
+   * Each service logs in with its own ServiceAccount, so it holds one
+   * read-only policy and nothing else. Its Kubernetes-auth login needs the
+   * service's projected JWT, which the loader does not have: the policy is
+   * therefore checked through a bounded token that carries that policy alone,
+   * and the role's binding to the ServiceAccount is checked by reading the
+   * role back. Policy and role writes repeat safely. Token creation is not
+   * idempotent: a lost response can leave a parented, nonrenewable token alive
+   * until its 60s TTL or root retirement.
    */
-  const ensureModelGatewayIdentity = async (rootToken: string): Promise<void> => {
-    // No metadata, no delete, no write: the gateway reads slots and nothing else.
-    const policy = 'path "lifemodel/data/model/*" { capabilities = ["read"] }';
-    await asToken(rootToken, 'sys/policies/acl/model-gateway', 'PUT', { policy });
-    await asToken(rootToken, 'auth/kubernetes/role/model-gateway', 'POST', {
-      bound_service_account_names: ['model-gateway'],
+  const ensureServiceIdentity = async (
+    rootToken: string,
+    identity: ServiceIdentity
+  ): Promise<void> => {
+    await asToken(rootToken, `sys/policies/acl/${identity.role}`, 'PUT', {
+      policy: identity.policy,
+    });
+    await asToken(rootToken, `auth/kubernetes/role/${identity.role}`, 'POST', {
+      bound_service_account_names: [identity.role],
       bound_service_account_namespaces: ['lifemodel-system'],
-      policies: ['model-gateway'],
+      policies: [identity.role],
       token_no_default_policy: true,
       ttl: '1h',
     });
-    const response = await asToken(rootToken, 'auth/kubernetes/role/model-gateway', 'GET');
+    const response = await asToken(rootToken, `auth/kubernetes/role/${identity.role}`, 'GET');
     const recorded = response['data'];
     if (recorded === null || typeof recorded !== 'object' || Array.isArray(recorded))
-      throw new Error('OpenBao model-gateway role response has no data object');
+      throw new Error(`OpenBao ${identity.role} role response has no data object`);
     const role = recorded as Record<string, unknown>;
     const serviceAccounts = role['bound_service_account_names'];
     const namespaces = role['bound_service_account_namespaces'];
@@ -328,20 +354,20 @@ export function createOpenBaoApi(
     if (
       !Array.isArray(serviceAccounts) ||
       serviceAccounts.length !== 1 ||
-      serviceAccounts[0] !== 'model-gateway' ||
+      serviceAccounts[0] !== identity.role ||
       !Array.isArray(namespaces) ||
       namespaces.length !== 1 ||
       namespaces[0] !== 'lifemodel-system' ||
       !Array.isArray(policies) ||
       policies.length !== 1 ||
-      policies[0] !== 'model-gateway' ||
+      policies[0] !== identity.role ||
       role['token_no_default_policy'] !== true
     )
       throw new Error(
-        'OpenBao model-gateway role is not bound to the gateway ServiceAccount alone'
+        `OpenBao ${identity.role} role is not bound to ${identity.holder} ServiceAccount alone`
       );
     const minted = await asToken(rootToken, 'auth/token/create', 'POST', {
-      policies: ['model-gateway'],
+      policies: [identity.role],
       ttl: '60s',
       renewable: false,
       no_default_policy: true,
@@ -349,38 +375,56 @@ export function createOpenBaoApi(
     const auth = minted['auth'] as Record<string, unknown> | undefined;
     const verificationToken = auth?.['client_token'];
     if (typeof verificationToken !== 'string' || verificationToken === '')
-      throw new Error('OpenBao issued no token for the model-gateway capability check');
+      throw new Error(`OpenBao issued no token for the ${identity.role} capability check`);
     try {
       const tokenPolicies = auth?.['policies'];
       if (
         !Array.isArray(tokenPolicies) ||
         tokenPolicies.length !== 1 ||
-        tokenPolicies[0] !== 'model-gateway'
+        tokenPolicies[0] !== identity.role
       )
-        throw new Error('OpenBao verification token must carry the model-gateway policy alone');
+        throw new Error(`OpenBao verification token must carry the ${identity.role} policy alone`);
       const capabilities = await asToken(rootToken, 'sys/capabilities', 'POST', {
         token: verificationToken,
-        paths: [
-          'lifemodel/data/model/primary',
-          'lifemodel/data/model/reserve',
-          'lifemodel/metadata/model/primary',
-        ],
+        paths: [...identity.verify, ...identity.deny],
       });
-      for (const slot of ['lifemodel/data/model/primary', 'lifemodel/data/model/reserve']) {
-        const granted = capabilities[slot] as string[] | undefined;
-        if (granted?.length !== 1 || granted[0] !== 'read')
+      for (const path of identity.verify) {
+        const granted = capabilities[path];
+        if (!Array.isArray(granted) || granted.length !== 1 || granted[0] !== 'read')
           throw new Error(
-            'OpenBao model-gateway policy does not grant read on every model slot and nothing more'
+            `OpenBao ${identity.role} policy does not grant read on ${path} and nothing more`
           );
       }
-      const unrelated = capabilities['lifemodel/metadata/model/primary'] as string[] | undefined;
-      if (unrelated?.length !== 1 || unrelated[0] !== 'deny')
-        throw new Error('OpenBao model-gateway policy reaches beyond the model slots it reads');
+      for (const path of identity.deny) {
+        const granted = capabilities[path];
+        if (!Array.isArray(granted) || granted.length !== 1 || granted[0] !== 'deny')
+          throw new Error(
+            `OpenBao ${identity.role} policy reaches beyond the paths ${identity.holder} reads`
+          );
+      }
     } finally {
       // The check's token is bounded anyway; revoke it so no credential outlives the check.
       await asToken(rootToken, 'auth/token/revoke', 'POST', { token: verificationToken });
     }
   };
+  /** The model gateway reads the model slots and nothing else (ADR-013 D3). */
+  const ensureModelGatewayIdentity = async (rootToken: string): Promise<void> =>
+    ensureServiceIdentity(rootToken, {
+      role: 'model-gateway',
+      policy: 'path "lifemodel/data/model/*" { capabilities = ["read"] }',
+      verify: ['lifemodel/data/model/primary', 'lifemodel/data/model/reserve'],
+      deny: ['lifemodel/metadata/model/primary'],
+      holder: 'the gateway',
+    });
+  /** The storage module reads the one SeaweedFS custody record (ADR-015 S-D1). */
+  const ensureStorageModuleIdentity = async (rootToken: string): Promise<void> =>
+    ensureServiceIdentity(rootToken, {
+      role: 'storage-module',
+      policy: `path "${STORAGE_CUSTODY_PATH}" { capabilities = ["read"] }`,
+      verify: [STORAGE_CUSTODY_PATH],
+      deny: ['lifemodel/data/model/primary'],
+      holder: 'the storage module',
+    });
   return {
     status: async () => {
       const data = await asAnonymous('sys/seal-status', 'GET');
@@ -494,6 +538,42 @@ export function createOpenBaoApi(
         !primaryMetadata?.includes('read')
       )
         throw new Error('OpenBao loader-model login did not have expected model capabilities');
+    },
+    ensureStoragePolicy: async (rootToken) => {
+      // The loader writes the custody record; the module only reads it.
+      const policy = `path "${STORAGE_CUSTODY_PATH}" { capabilities = ["create", "update", "read"] }`;
+      await asToken(rootToken, 'sys/policies/acl/loader-storage', 'PUT', { policy });
+      await asToken(rootToken, 'auth/kubernetes/role/loader', 'POST', {
+        bound_service_account_names: ['loader'],
+        bound_service_account_namespaces: ['lifemodel-system'],
+        policies: ['loader', 'loader-model', 'loader-storage'],
+        ttl: '1h',
+      });
+      // The storage path joins the live loader token only through a fresh login.
+      await client.login();
+      const capabilities = await asRole('sys/capabilities-self', 'POST', {
+        paths: [STORAGE_CUSTODY_PATH, 'lifemodel/data/model/primary'],
+      });
+      const custody = capabilities[STORAGE_CUSTODY_PATH];
+      const model = capabilities['lifemodel/data/model/primary'];
+      if (
+        !Array.isArray(custody) ||
+        !custody.includes('create') ||
+        !custody.includes('update') ||
+        !custody.includes('read') ||
+        custody.includes('delete')
+      )
+        throw new Error(
+          'OpenBao loader-storage login did not have create, update and read on the custody record'
+        );
+      if (!Array.isArray(model) || !model.includes('read'))
+        throw new Error('OpenBao loader login lost its model-slot rights');
+      await ensureStorageModuleIdentity(rootToken);
+    },
+    readStorageCustody: async () =>
+      readCustodyRecord((path, method) => asRole(path, method ?? 'GET')),
+    writeStorageCustody: async (value) => {
+      await asRole(STORAGE_CUSTODY_PATH, 'POST', { data: value });
     },
     readModelSlot: async (slot) => {
       const read = await client.readSlot(slot);

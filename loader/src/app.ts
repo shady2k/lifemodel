@@ -31,6 +31,7 @@ import {
 } from './settings/store.js';
 import { createKubernetesPostgresSecretPhase } from './postgres.js';
 import { createKubernetesValkeySecretPhase } from './valkey.js';
+import { createKubernetesS3IdentitySecret, createStorageCustodyPhase } from './storage-custody.js';
 import {
   createGiteaBootstrap,
   createGiteaHttpApi,
@@ -50,6 +51,8 @@ export interface LoaderAppDeps {
   platformGiteaPhases?: PlatformPhase[];
   platformGiteaApi?: GiteaApi;
   platformBootstrap?: { runInitial(): Promise<void>; unsealIfSealed(): Promise<void> };
+  /** The SeaweedFS S3 custody phase (ADR-015 S-D1); tests replace it. */
+  platformStorageCustody?: PlatformPhase;
   pki?: PkiManager;
   settingsProjection?: SettingsProjection;
   settingsStore?: SettingsStore;
@@ -90,6 +93,15 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
     api: giteaApi,
     runPhases: createPlatformPhaseRunner(phaseStore),
   });
+  const platformStorageCustody =
+    deps.platformStorageCustody ??
+    createStorageCustodyPhase({
+      bao: {
+        read: () => bao.api.readStorageCustody(),
+        write: (value) => bao.api.writeStorageCustody(value),
+      },
+      identity: createKubernetesS3IdentitySecret(),
+    });
   const platformBootstrap =
     deps.platformBootstrap ??
     (() => {
@@ -101,6 +113,9 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
           ...giteaBootstrap.phases(),
           createKubernetesPostgresSecretPhase(),
           createKubernetesValkeySecretPhase(),
+          // The SeaweedFS service identity, after the loader holds its own
+          // custody-record access (ADR-015 S-D1).
+          platformStorageCustody,
         ],
       });
       return {
