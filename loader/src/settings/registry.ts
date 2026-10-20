@@ -59,6 +59,11 @@ export interface SettingDeclaration {
   max?: number;
   /** What a number counts ("tasks", "days"). Never lives in prose. */
   unit?: string;
+  /**
+   * A value the owner can never change: the registry refuses every write and
+   * a screen renders the declared default as fixed text with no input.
+   */
+  readOnly?: boolean;
   authority: SettingAuthority;
   apply: ApplyTiming;
 }
@@ -72,6 +77,7 @@ export type SettingRefusalCode =
   | 'too_long'
   | 'empty'
   | 'not_an_option'
+  | 'read_only'
   | 'secret_setting';
 
 export type ValueCheck =
@@ -147,6 +153,10 @@ function assertDeclaration(declaration: SettingDeclaration): void {
     throw new SettingsDeclarationError(`${declaration.key}: unknown authority`);
   if (!APPLY_TIMINGS.includes(declaration.apply))
     throw new SettingsDeclarationError(`${declaration.key}: unknown apply timing`);
+  if (declaration.readOnly !== undefined && typeof declaration.readOnly !== 'boolean')
+    throw new SettingsDeclarationError(`${declaration.key}: readOnly must be a boolean`);
+  if (declaration.readOnly === true && declaration.control === 'secret')
+    throw new SettingsDeclarationError('a read-only secret cannot exist: a secret is never read');
   if (declaration.control === 'secret') {
     if ('default' in declaration && declaration.default !== undefined)
       throw new SettingsDeclarationError('a secret setting must not declare a default');
@@ -206,6 +216,12 @@ function assertDeclaration(declaration: SettingDeclaration): void {
 
 /** The value check behind every write. Pure, so every consumer refuses alike. */
 export function checkValue(declaration: SettingDeclaration, value: unknown): ValueCheck {
+  if (declaration.readOnly)
+    return {
+      ok: false,
+      reasonCode: 'read_only',
+      reason: `${declaration.key} is fixed; it cannot be changed`,
+    };
   if (declaration.control === 'secret')
     return {
       ok: false,

@@ -412,6 +412,34 @@ describe('settings declaration registry', () => {
     });
   });
 
+  it('refuses every write to a read-only declaration, the default included', () => {
+    const registry = createSettingsRegistry([fixed]);
+    expect(registry.validate('tasks.fixed', 6)).toMatchObject({
+      ok: false,
+      reasonCode: 'read_only',
+    });
+    expect(registry.validate('tasks.fixed', 5)).toMatchObject({
+      ok: false,
+      reasonCode: 'read_only',
+    });
+    expect(registry.validate('tasks.fixed', 'five')).toMatchObject({
+      ok: false,
+      reasonCode: 'read_only',
+    });
+    expect(
+      registry.validate('tasks.fixed', 5).ok === false && registry.validate('tasks.fixed', 5).reason
+    ).toContain('tasks.fixed');
+  });
+
+  it('refuses a read-only declaration on a secret and a non-boolean readOnly', () => {
+    expect(() => createSettingsRegistry([{ ...secretDeclaration, readOnly: true }])).toThrow(
+      new SettingsDeclarationError('a read-only secret cannot exist: a secret is never read')
+    );
+    expect(() =>
+      createSettingsRegistry([{ ...fixed, readOnly: 'yes' } as SettingDeclaration])
+    ).toThrow(SettingsDeclarationError);
+  });
+
   it('carries English and Russian labels and descriptions on every platform declaration', () => {
     for (const declaration of platformSettings.declarations()) {
       for (const language of ['en', 'ru'] as const) {
@@ -432,6 +460,21 @@ describe('settings declaration registry', () => {
     ]);
   });
 });
+
+const fixed: SettingDeclaration = {
+  key: 'tasks.fixed',
+  section: 'tasks',
+  label: { en: 'Fixed', ru: 'Фиксировано' },
+  description: { en: 'A fixed value.', ru: 'Фиксированное значение.' },
+  control: 'number',
+  dataClass: 'publicConfig',
+  default: 5,
+  min: 1,
+  max: 8,
+  authority: 'owner',
+  apply: 'immediate',
+  readOnly: true,
+};
 
 const secretDeclaration: SettingDeclaration = {
   key: 'tasks.token',
@@ -742,6 +785,18 @@ describe('settings file store', () => {
     });
     // A refused write changes nothing on disk.
     expect(() => readFileSync(settingsPath(root))).toThrow();
+  });
+
+  it('refuses a write to a read-only setting and changes nothing on disk', async () => {
+    const root = storeRoot();
+    const { store } = createStore(root, {
+      declarations: [concurrency, fixed, secretDeclaration],
+    });
+    await store.load();
+    await expect(store.set('tasks.fixed', 6)).rejects.toMatchObject({ code: 'read_only' });
+    await expect(store.set('tasks.fixed', 5)).rejects.toMatchObject({ code: 'read_only' });
+    expect(() => readFileSync(settingsPath(root))).toThrow();
+    expect(store.section().values['tasks.fixed']).toBe(5);
   });
 
   it('a failed projection is recorded and shown, never fatal, and a retry recovers', async () => {
@@ -1112,6 +1167,22 @@ describe('settings HTTP routes', () => {
     expect(restarted.section().revision).toBe(2);
     expect(projected.map((content) => content.revision)).toEqual([1, 2]);
     expect(projected.at(-1)?.values).toEqual({ 'tasks.concurrency': 3, 'tasks.other': 4 });
+  });
+
+  it('refuses a PUT to a read-only setting with the read_only reason', async () => {
+    const { ask, csrf } = await start({
+      declarations: [concurrency, fixed, secretDeclaration],
+    });
+    const written = await ask('/api/settings/tasks.fixed', {
+      method: 'PUT',
+      body: JSON.stringify({ value: 5 }),
+      csrf: csrf(),
+    });
+    expect(written.status).toBe(400);
+    expect(JSON.parse(written.body)).toMatchObject({
+      error: 'invalid_value',
+      reasonCode: 'read_only',
+    });
   });
 
   it('answers 503 storage_unavailable when the settings seam is not wired', async () => {
