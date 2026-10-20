@@ -21,7 +21,8 @@ The task and all owner comments on lifemodel-653 were read with `br show` and
 `br comments list` (read-only). The current feature is lifemodel-653, motor-1,
 not the web-interface feature named in the inherited worker rules. The latest
 owner decisions require separate Kubernetes Jobs, a replaceable harness, one
-CI-built signed/pinned workbench image, no model or storage key inside a task,
+CI-built signed/pinned workbench image, no real model credential or storage
+signing key inside a task,
 and retained logs, results and marked artifacts in S3. Unmarked files and the
 working volume disappear. MinIO is excluded by the owner; its archive date is
 not needed to make that exclusion. Research does not amend ADR-010 or ADR-011.
@@ -75,7 +76,8 @@ the round-1 pins; this is not a claim they are still the newest releases.
 
 ### 2.3 Primary evidence and important distinctions
 
-**Prime Agent.** The installed CLI reports `0.9.8`. Its bundled README,
+**Historical round-1 Prime Agent 0.9.8 evidence.** The installed CLI reported
+`0.9.8`. Its bundled README,
 `docs/models.md`, `docs/rpc.md`, `docs/sdk.md`, `docs/usage.md`, package manifest
 and MIT licence were read locally. The public
 [0.9.8 tag](https://github.com/PrimeIntellect-ai/prime-agent/tree/v0.9.8)
@@ -755,10 +757,13 @@ These are design inputs, not silently resolved requirements:
 - **Harness seam:** immutable briefing plus tool/access-request events,
   bounded progress, one terminal success/failure/stopped disposition, artifact
   manifest validation and real-task acceptance. A final assistant turn alone
-  is not task success. Prime's observed CLI 0 on provider error, failed tool and
-  abort requires explicit JSON error/stopped normalization; match tool effects
-  to required outcomes, and redact message/tool bodies in product progress.
-  Prove a second fake adapter changes no caller.
+  is not task success. Prime's observed CLI 0 on provider error and abort
+  requires explicit terminal `stopReason` error/stopped normalization. Its
+  failed-tool run ended with final text, so also inspect tool `isError` and
+  required effect outcomes; only an unresolved required effect fails the task,
+  not an error recovered by a successful retry. Redact message/tool bodies in
+  product progress. A fake second adapter proves the seam's unit contract;
+  a second real adapter is needed to accept actual harness replaceability.
 - **Resume and Stop:** retained session state versus discarded work volume;
   no automatic replay of ambiguous shell effects; process-tree/cgroup cleanup,
   upload drain deadline and honest status if output cannot be retained before
