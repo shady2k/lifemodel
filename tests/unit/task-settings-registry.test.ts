@@ -1,10 +1,17 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   createSettingsRegistry,
   SettingsDeclarationError,
   type SettingDeclaration,
 } from '../../loader/src/settings/registry.js';
 import { platformSettings } from '../../loader/src/settings/platform.js';
+import { createSettingsStore, SettingsWriteError } from '../../loader/src/settings/store.js';
+import { createNodeFileSystem } from '../../loader/src/fs.js';
+import { createTestClock } from '../../loader/src/clock.js';
+import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 
 const concurrency: SettingDeclaration = {
   key: 'tasks.concurrency',
@@ -196,5 +203,268 @@ describe('settings declaration registry', () => {
     expect(declaration?.label.ru).toBeTruthy();
     expect(declaration?.description.en).toBeTruthy();
     expect(declaration?.description.ru).toBeTruthy();
+  });
+});
+
+const secretDeclaration: SettingDeclaration = {
+  key: 'tasks.token',
+  section: 'tasks',
+  label: { en: 'Token', ru: 'Токен' },
+  description: { en: 'A secret.', ru: 'Секрет.' },
+  control: 'secret',
+  dataClass: 'secretAuthenticator',
+  authority: 'owner',
+  apply: 'immediate',
+};
+
+describe('settings file store', () => {
+  const roots: string[] = [];
+  afterEach(() => {
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  });
+  function storeRoot(): string {
+    const root = mkdtempSync(join(tmpdir(), 'settings-store-'));
+    mkdirSync(join(root, 'loader'), { recursive: true });
+    roots.push(root);
+    return root;
+  }
+  const settingsPath = (root: string) => join(root, 'loader', 'settings.json');
+  function createStore(
+    root: string,
+    options: {
+      declarations?: SettingDeclaration[];
+      readFile?: (path: string) => Promise<string>;
+      rename?: (from: string, to: string) => Promise<void>;
+      projection?: { project(): Promise<void> };
+    } = {}
+  ) {
+    const lines: RecordedLine[] = [];
+    let fs = createNodeFileSystem();
+    if (options.readFile) fs = { ...fs, readFile: (path: string) => options.readFile!(path) };
+    if (options.rename)
+      fs = { ...fs, rename: (from: string, to: string) => options.rename!(from, to) };
+    const store = createSettingsStore({
+      fs,
+      config: { loaderDir: join(root, 'loader') },
+      registry: createSettingsRegistry(options.declarations ?? [concurrency, secretDeclaration]),
+      clock: createTestClock(),
+      logger: createRecordingLogger(lines),
+      ...(options.projection ? { projection: options.projection } : {}),
+    });
+    return { store, lines };
+  }
+
+  it('normally a valid value stores with a new revision and reads back', async () => {
+    const root = storeRoot();
+    const { store } = createStore(root);
+    await store.load();
+    const written = await store.set('tasks.concurrency', 3);
+    expect(written).toEqual({ value: 3, revision: 1 });
+    const section = store.section();
+    expect(section.values['tasks.concurrency']).toBe(3);
+    expect(section.revision).toBe(1);
+    expect(JSON.parse(readFileSync(settingsPath(root), 'utf8'))).toEqual({
+      version: 1,
+      revision: 1,
+      values: { 'tasks.concurrency': 3 },
+    });
+  });
+
+  it('the value survives re-creating the store over the same store', async () => {
+    const root = storeRoot();
+    const first = createStore(root);
+    await first.store.load();
+    await first.store.set('tasks.concurrency', 5);
+    const second = createStore(root);
+    await second.store.load();
+    expect(second.store.section().values['tasks.concurrency']).toBe(5);
+    expect(second.store.section().revision).toBe(1);
+  });
+
+  it('continues the revision stored in the file', async () => {
+    const root = storeRoot();
+    writeFileSync(
+      settingsPath(root),
+      JSON.stringify({ version: 1, revision: 41, values: { 'tasks.concurrency': 2 } })
+    );
+    const { store } = createStore(root);
+    await store.load();
+    expect(store.section().revision).toBe(41);
+    const written = await store.set('tasks.concurrency', 4);
+    expect(written.revision).toBe(42);
+  });
+
+  it('a corrupt file is kept aside with a timestamp, the defaults are used and the problem is shown', async () => {
+    const root = storeRoot();
+    const broken = '{ not json';
+    writeFileSync(settingsPath(root), broken);
+    const renames: Array<[string, string]> = [];
+    const { store, lines } = createStore(root, {
+      rename: async (from, to) => {
+        renames.push([from, to]);
+        await createNodeFileSystem().rename(from, to);
+      },
+    });
+    await store.load();
+    expect(store.section().values['tasks.concurrency']).toBe(2);
+    expect(store.section().revision).toBe(0);
+    expect(store.section().problems).toHaveLength(1);
+    expect(store.section().problems[0]?.code).toBe('corrupt');
+    expect(
+      readdirSync(join(root, 'loader')).some((name) => name.startsWith('settings.json.invalid-'))
+    ).toBe(true);
+    const kept = readdirSync(join(root, 'loader')).find((name) =>
+      name.startsWith('settings.json.invalid-')
+    )!;
+    expect(readFileSync(join(root, 'loader', kept), 'utf8')).toBe(broken);
+    expect(readdirSync(join(root, 'loader'))).not.toContain('settings.json');
+    expect(lines.some((line) => line.level === 'warn' && line.fields.code === 'corrupt')).toBe(
+      true
+    );
+    // And the loader keeps working: a write starts a fresh document.
+    const written = await store.set('tasks.concurrency', 3);
+    expect(written.revision).toBe(1);
+  });
+
+  it('an unreadable file does not block the loader: defaults are used and the problem is shown', async () => {
+    const root = storeRoot();
+    writeFileSync(settingsPath(root), JSON.stringify({ version: 1, revision: 7, values: {} }));
+    const renames: Array<[string, string]> = [];
+    const { store } = createStore(root, {
+      readFile: (path) => {
+        if (path === settingsPath(root)) {
+          const error = new Error('permission denied') as NodeJS.ErrnoException;
+          error.code = 'EACCES';
+          throw error;
+        }
+        return createNodeFileSystem().readFile(path);
+      },
+      rename: async (from, to) => {
+        renames.push([from, to]);
+      },
+    });
+    await store.load();
+    expect(store.section().values['tasks.concurrency']).toBe(2);
+    expect(store.section().problems[0]?.code).toBe('unreadable');
+    expect(renames).toHaveLength(1);
+    await expect(store.set('tasks.concurrency', 3)).resolves.toMatchObject({ revision: 1 });
+  });
+
+  it('a value of the wrong type is dropped with a problem and valid values are kept', async () => {
+    const root = storeRoot();
+    writeFileSync(
+      settingsPath(root),
+      JSON.stringify({ version: 1, revision: 3, values: { 'tasks.concurrency': 'many' } })
+    );
+    const { store, lines } = createStore(root);
+    await store.load();
+    expect(store.section().values['tasks.concurrency']).toBe(2);
+    expect(store.section().revision).toBe(3);
+    expect(store.section().problems).toEqual([
+      {
+        code: 'wrong_type',
+        key: 'tasks.concurrency',
+        reason: expect.stringContaining('tasks.concurrency'),
+      },
+    ]);
+    expect(lines.some((line) => line.level === 'warn')).toBe(true);
+  });
+
+  it('an unknown key in the file is dropped with a problem', async () => {
+    const root = storeRoot();
+    writeFileSync(
+      settingsPath(root),
+      JSON.stringify({
+        version: 1,
+        revision: 2,
+        values: { 'tasks.concurrency': 2, 'tasks.made.up': true },
+      })
+    );
+    const { store } = createStore(root);
+    await store.load();
+    expect(store.section().values['tasks.concurrency']).toBe(2);
+    expect(store.section().problems).toEqual([
+      {
+        code: 'unknown_key',
+        key: 'tasks.made.up',
+        reason: expect.stringContaining('tasks.made.up'),
+      },
+    ]);
+  });
+
+  it('a secret value in the file is dropped with a problem: no read path exists', async () => {
+    const root = storeRoot();
+    writeFileSync(
+      settingsPath(root),
+      JSON.stringify({ version: 1, revision: 1, values: { 'tasks.token': 'hush' } })
+    );
+    const { store } = createStore(root);
+    await store.load();
+    expect(store.section().values['tasks.token']).toBeUndefined();
+    expect(store.section().problems).toEqual([
+      { code: 'secret_setting', key: 'tasks.token', reason: expect.stringContaining('OpenBao') },
+    ]);
+  });
+
+  it('an out-of-bounds value in the file falls back to the default with a problem', async () => {
+    const root = storeRoot();
+    writeFileSync(
+      settingsPath(root),
+      JSON.stringify({ version: 1, revision: 1, values: { 'tasks.concurrency': 99 } })
+    );
+    const { store } = createStore(root);
+    await store.load();
+    expect(store.section().values['tasks.concurrency']).toBe(2);
+    expect(store.section().problems[0]).toMatchObject({
+      code: 'above_maximum',
+      key: 'tasks.concurrency',
+    });
+  });
+
+  it("a write refuses unknown keys, wrong types and bounds with the declaration's reason", async () => {
+    const root = storeRoot();
+    const { store } = createStore(root);
+    await store.load();
+    await expect(store.set('tasks.made.up', 1)).rejects.toMatchObject({
+      code: 'unknown_key',
+    });
+    await expect(store.set('tasks.concurrency', 'many')).rejects.toBeInstanceOf(SettingsWriteError);
+    await expect(store.set('tasks.concurrency', 0)).rejects.toMatchObject({
+      code: 'below_minimum',
+      limit: 1,
+    });
+    await expect(store.set('tasks.concurrency', 9)).rejects.toMatchObject({
+      code: 'above_maximum',
+      limit: 8,
+    });
+    await expect(store.set('tasks.token', 'hush')).rejects.toMatchObject({
+      code: 'secret_setting',
+    });
+    // A refused write changes nothing on disk.
+    expect(() => readFileSync(settingsPath(root))).toThrow();
+  });
+
+  it('a failed projection is recorded and shown, never fatal, and a retry recovers', async () => {
+    const root = storeRoot();
+    let attempts = 0;
+    const { store } = createStore(root, {
+      projection: {
+        project: async () => {
+          attempts += 1;
+          if (attempts === 1) throw new Error('the API refused the write');
+        },
+      },
+    });
+    await store.load();
+    await expect(store.set('tasks.concurrency', 3)).resolves.toMatchObject({ revision: 1 });
+    expect(store.section().projection).toEqual({
+      state: 'failed',
+      reason: 'the API refused the write',
+    });
+    // The value is stored despite the failed projection.
+    expect(store.section().values['tasks.concurrency']).toBe(3);
+    await store.projectNow();
+    expect(store.section().projection).toEqual({ state: 'ok' });
+    expect(attempts).toBe(2);
   });
 });

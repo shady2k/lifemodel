@@ -11,6 +11,8 @@ export interface FileSystem {
   writeFileAtomic(path: string, contents: string, mode: number): Promise<void>;
   chmod(path: string, mode: number): Promise<void>;
   writeFileExclusive(path: string, contents: string, mode: number): Promise<void>;
+  /** Moves one path to another on the same filesystem (keeping a broken file aside). */
+  rename(from: string, to: string): Promise<void>;
 }
 
 async function linkExclusive(source: string, target: string): Promise<void> {
@@ -62,6 +64,7 @@ export function createNodeFileSystem(): FileSystem {
       }
     },
     chmod: (path, mode) => chmod(path, mode),
+    rename: (from, to) => rename(from, to),
     writeFileExclusive: async (path, contents, mode) => {
       await mkdir(dirname(path), { recursive: true, mode: 0o700 });
       const temporary = join(dirname(path), `.${randomUUID()}.tmp`);
