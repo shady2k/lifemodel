@@ -5,7 +5,10 @@ Date: 2026-10-20. Task: lifemodel-653.5 (motor-1).
 ## Status, context and ownership
 
 Direction confirmed by the owner's 08:40 comment on lifemodel-653.5; record
-proposed for independent review. Not built or accepted on a deployed instance.
+proposed for integration. Different-model review passed at 28bc0345 after two
+rounds; [review evidence](../features/motor/tasks-design-review.md) records its
+scope and the later e196a69d deadline clarification for coordinator verification.
+Not built or accepted on a deployed instance.
 [ADR-014](014-task-runtime.md) owns launch, live steering and task outcomes;
 [this component/sequence view](../features/motor/tasks-design.md) joins them.
 This separate record is clearer than a section in 014: storage has independent

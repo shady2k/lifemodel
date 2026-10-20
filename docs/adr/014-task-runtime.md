@@ -4,8 +4,11 @@ Date: 2026-10-20. Task: lifemodel-653.5 (motor-1).
 
 ## Status and provenance
 
-Direction confirmed by the owner; decision record proposed for independent
-review, not implementation acceptance. The feature's confirmed frame is the
+Direction confirmed by the owner; decision record proposed for integration,
+not implementation acceptance. Different-model review passed for design handoff
+at 28bc0345 after two rounds; [review evidence](../features/motor/tasks-design-review.md)
+retains findings/dispositions and scopes the later e196a69d deadline clarification
+for coordinator verification. No third review round or runtime proof is claimed. The feature's confirmed frame is the
 2026-10-20 comment beginning “Design frame for lifemodel-653 confirmed”. The
 four 08:40–08:44 comments on lifemodel-653.5 settle storage, Stop and urgency.
 They supersede the corresponding recommendations in

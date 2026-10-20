@@ -335,3 +335,6 @@ filer/IAM/custody/catalog/tombstones must restore together. Full offline pins,
 real gateway/live harness contract, token bound-UID support and API deadline
 failure are first acceptance risks. Independent design review and stage
 implementation evidence must remain separate from this intended model.
+[Independent review evidence](tasks-design-review.md) records two rounds and
+PASS for design handoff at 28bc0345; the later database-time deadline clarification
+is explicitly handed to the coordinator for verification, not a third model round.
