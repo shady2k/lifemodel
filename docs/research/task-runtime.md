@@ -87,8 +87,9 @@ throws `No API key for provider` in the simple stream path. The
 [RPC protocol](https://github.com/PrimeIntellect-ai/prime-agent/blob/v0.9.8/packages/coding-agent/docs/rpc.md)
 has LF-delimited commands/events, prompt acceptance distinct from completion,
 and abort. The [SDK](https://github.com/PrimeIntellect-ai/prime-agent/blob/v0.9.8/packages/coding-agent/docs/sdk.md)
-offers in-memory session/model objects and custom tools; that is an adapter
-option, not proof the CLI meets env-only/keyless requirements. The isolated
+offers in-memory session/model objects and custom tools; that was an adapter
+option, not proof of the **round-1** env-only/no-dummy requirement. That old
+criterion is superseded; no new 0.9.8 model/proxy test was run in round 2. The isolated
 CLI probe failed earlier with `supervisor_generation_stale` (exit 1), so it
 **did not test authentication or proxying**. No existing daemon was stopped or
 reconfigured to work around it.
@@ -102,9 +103,10 @@ name **v0.10.1-beta.38**, updated 2026-10-19T22:03:47Z. The evaluated binary's
 bundled package manifest identifies source commit
 `58f9e8bb0ef54956e2e796ef96723f20b43fc55d`; the nightly release body agrees.
 The public version tag resolves to
-`0b75b208f31ed35b051e49813ed90af32fbd5940` (release metadata), so the bundled
-source pin and asset hash above identify this probe more precisely than the
-mutable `nightly` URL alone. All 294 visible branches were listed, including
+`0b75b208f31ed35b051e49813ed90af32fbd5940`; its commit message says this is a
+tag-only child of `58f9e8b`, differing only in Cargo workspace version rows.
+The bundled source pin and asset hash identify this probe more precisely than
+the mutable `nightly` URL alone. All 294 visible branches were listed, including
 `main`, `beta` and Rust-port branches; tags and the pinned
 [README](https://github.com/PrimeIntellect-ai/prime-agent/blob/58f9e8bb0ef54956e2e796ef96723f20b43fc55d/README.md)
 provided no 1.x release. There is no root CHANGELOG.md or old
@@ -305,10 +307,15 @@ during the agent turn. No cluster, VM or product-test commands ran.
 Mounted-file equivalent (same stock files, also exercised mode 0444; this was
 not an actual Kubernetes mount):
 
+`$HOME/.prime/agent/models.json`:
+
 ```json
-// $HOME/.prime/agent/models.json
 {"providers":{"probe":{"baseUrl":"http://127.0.0.1:<port>/v1","api":"openai-completions","apiKey":"ignored-placeholder","models":[{"id":"probe"}]}}}
-// $HOME/.prime/agent/settings.json
+```
+
+`$HOME/.prime/agent/settings.json`:
+
+```json
 {"defaultProvider":"probe","defaultModel":"probe","telemetry":{"enabled":false},"traces":{"enabled":false}}
 ```
 
