@@ -173,6 +173,45 @@ function HeaderFields(props: {
  * rendered and how a value is checked; the code switches on the control kind,
  * never on a setting's name.
  */
+const BYTE_UNITS: readonly { limit: number; suffix: string }[] = [
+  { limit: 1e12, suffix: 'TB' },
+  { limit: 1e9, suffix: 'GB' },
+  { limit: 1e6, suffix: 'MB' },
+  { limit: 1e3, suffix: 'kB' },
+];
+
+/** A decimal byte count a person can read: 20000000000 renders as '20 GB'. */
+function formatDecimalBytes(value: number): string {
+  for (const unit of BYTE_UNITS) {
+    if (value >= unit.limit) {
+      const scaled = value / unit.limit;
+      const text = Number.isInteger(scaled) ? String(scaled) : scaled.toFixed(1);
+      return `${text} ${unit.suffix}`;
+    }
+  }
+  return `${String(value)} B`;
+}
+
+/** The fixed text of a read-only setting's value; never an input. */
+function fixedSettingText(
+  value: boolean | number | string,
+  declaration: SettingDeclaration,
+  language: 'en' | 'ru',
+  labels: { on: string; off: string }
+): string {
+  if (declaration.control === 'number') {
+    if (declaration.format === 'bytes' && typeof value === 'number')
+      return formatDecimalBytes(value);
+    return String(value);
+  }
+  if (declaration.control === 'select') {
+    const option = declaration.options?.find((candidate) => candidate.value === value);
+    return option ? option.label[language] : String(value);
+  }
+  if (declaration.control === 'toggle') return value === true ? labels.on : labels.off;
+  return String(value);
+}
+
 function SettingControl(props: {
   declaration: SettingDeclaration;
   value: boolean | number | string;
@@ -214,6 +253,19 @@ function SettingControl(props: {
     }
   }
   const [busy, setBusy] = useState(false);
+  if (declaration.readOnly)
+    return (
+      <div className="space-y-1">
+        <Label>{label}</Label>
+        <p className="text-xs text-muted-foreground">{description}</p>
+        <p className="text-sm font-medium">
+          {fixedSettingText(props.value, declaration, props.language, {
+            on: t('settingsOn'),
+            off: t('settingsOff'),
+          })}
+        </p>
+      </div>
+    );
   if (declaration.control === 'secret')
     return (
       <div className="space-y-1">
@@ -339,6 +391,7 @@ function refusalText(
   if (body.error === 'unknown_setting') return t('settingsUnknownSetting');
   if (body.error === 'secret_setting') return t('settingsSecretNote');
   if (body.error === 'invalid_value') {
+    if (body.reasonCode === 'read_only') return t('settingsReadOnly');
     if (body.reasonCode === 'below_minimum')
       return t('settingsBelowMinimum', { limit: body.limit ?? declaration.min });
     if (body.reasonCode === 'above_maximum')

@@ -41,6 +41,44 @@ const stopGraceDeclaration = {
   apply: 'immediate',
 };
 
+const warningLeadDaysDeclaration = {
+  key: 'storage.warningLeadDays',
+  section: 'tasks',
+  label: { en: 'Deletion warning lead', ru: 'Предупреждение перед удалением' },
+  description: {
+    en: 'How many days before stored output is deleted the owner is warned first.',
+    ru: 'За сколько дней до удаления сохранённых результатов владельца предупреждают заранее.',
+  },
+  control: 'number',
+  dataClass: 'publicConfig',
+  default: 7,
+  min: 1,
+  max: 30,
+  unit: { en: 'days', ru: 'дни' },
+  authority: 'owner',
+  apply: 'immediate',
+};
+
+const ceilingDeclaration = {
+  key: 'storage.ceilingBytes',
+  section: 'tasks',
+  label: { en: 'Storage ceiling', ru: 'Потолок хранилища' },
+  description: {
+    en: 'Fixed at 20 GB (20,000,000,000 bytes) of sealed task output. It cannot be changed.',
+    ru: 'Фиксирован: 20 ГБ (20 000 000 000 байт) запечатанных результатов задач. Его нельзя изменить.',
+  },
+  control: 'number',
+  dataClass: 'publicConfig',
+  default: 20000000000,
+  min: 20000000000,
+  max: 20000000000,
+  unit: { en: 'bytes', ru: 'байты' },
+  format: 'bytes',
+  readOnly: true,
+  authority: 'owner',
+  apply: 'immediate',
+};
+
 let fetchMock: ReturnType<typeof vi.fn>;
 function sectionPayload(overrides: Partial<SettingsSectionPayload> = {}): SettingsSectionPayload {
   return {
@@ -281,6 +319,57 @@ describe('loader settings section', () => {
     render(<App />);
     expect(await screen.findByText('задачи')).toBeInTheDocument();
     expect(await screen.findByText('секунды')).toBeInTheDocument();
+  });
+
+  it('renders a read-only setting as fixed text with no input and a decimal bytes value', async () => {
+    await i18n.changeLanguage('en');
+    mockDonePage(
+      sectionPayload({
+        declarations: [ceilingDeclaration],
+        values: { 'storage.ceilingBytes': 20000000000 },
+      })
+    );
+    const { container } = render(<App />);
+    expect(await screen.findByText('20 GB')).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText('Storage ceiling', { selector: 'input' })
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('renders the read-only fixed value in Russian the same decimal way', async () => {
+    Object.defineProperty(navigator, 'language', { configurable: true, value: 'ru-RU' });
+    await i18n.changeLanguage('ru');
+    mockDonePage(
+      sectionPayload({
+        declarations: [ceilingDeclaration],
+        values: { 'storage.ceilingBytes': 20000000000 },
+      })
+    );
+    render(<App />);
+    expect(await screen.findByText('Потолок хранилища')).toBeInTheDocument();
+    expect(await screen.findByText('20 GB')).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText('Потолок хранилища', { selector: 'input' })
+    ).not.toBeInTheDocument();
+  });
+
+  it('shows the days unit of the warning lead', async () => {
+    await i18n.changeLanguage('en');
+    mockDonePage(
+      sectionPayload({
+        declarations: [warningLeadDaysDeclaration],
+        values: { 'storage.warningLeadDays': 7 },
+      })
+    );
+    const { container } = render(<App />);
+    const input = await screen.findByLabelText('Deletion warning lead', { selector: 'input' });
+    expect(input).toHaveValue(7);
+    expect(input).toHaveAttribute('min', '1');
+    expect(input).toHaveAttribute('max', '30');
+    expect(screen.getByText('days')).toBeInTheDocument();
+    expect(await axe(container)).toHaveNoViolations();
   });
 
   it('renders the declaration labels in Russian', async () => {

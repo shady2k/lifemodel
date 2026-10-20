@@ -107,9 +107,10 @@ const storageWarningLeadDays: SettingDeclaration = {
 
 /**
  * The platform storage ceiling is a fixed owner decision (20 GB decimal, ADR
- * -015), not an editable value: its bounds pin min, max and default to the
- * one allowed number, so the registry refuses every other value and the
- * owner cannot change the ceiling.
+ * -015), not an editable value: read-only, so the registry refuses every
+ * write and a screen renders it as fixed text; the bounds pin the one
+ * allowed number and the bytes format shows it as 20 GB, never a raw digit
+ * string.
  */
 const storageCeilingBytes: SettingDeclaration = {
   key: 'storage.ceilingBytes',
@@ -125,6 +126,8 @@ const storageCeilingBytes: SettingDeclaration = {
   min: 20_000_000_000,
   max: 20_000_000_000,
   unit: { en: 'bytes', ru: 'байты' },
+  format: 'bytes',
+  readOnly: true,
   authority: 'owner',
   apply: 'immediate',
 };

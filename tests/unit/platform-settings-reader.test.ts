@@ -57,7 +57,6 @@ describe('core platform settings reader', () => {
         'tasks.wrapGraceSeconds': 600,
         'storage.retention': 'forever',
         'storage.warningLeadDays': 14,
-        'storage.ceilingBytes': 20000000000,
       })
     );
     const settings = await readerFor(dir, calls).read();
@@ -69,6 +68,7 @@ describe('core platform settings reader', () => {
         'tasks.wrapGraceSeconds': 600,
         'storage.retention': 'forever',
         'storage.warningLeadDays': 14,
+        // The read-only ceiling is never projected; its declared default stands.
         'storage.ceilingBytes': 20000000000,
       },
     });

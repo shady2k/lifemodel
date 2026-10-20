@@ -64,6 +64,8 @@ export interface SettingDeclaration {
    * a screen renders the declared default as fixed text with no input.
    */
   readOnly?: boolean;
+  /** How a number is displayed. 'bytes' renders a decimal byte count (20 GB). */
+  format?: 'bytes';
   authority: SettingAuthority;
   apply: ApplyTiming;
 }
@@ -154,6 +156,10 @@ function assertDeclaration(declaration: SettingDeclaration): void {
   if (!APPLY_TIMINGS.includes(declaration.apply))
     throw new SettingsDeclarationError(`${declaration.key}: unknown apply timing`);
   if (declaration.unit !== undefined) assertLocalized(declaration.unit, 'unit', declaration.key);
+  if (declaration.format !== undefined && declaration.format !== 'bytes')
+    throw new SettingsDeclarationError(`${declaration.key}: unknown format`);
+  if (declaration.format !== undefined && declaration.control !== 'number')
+    throw new SettingsDeclarationError(`${declaration.key}: a bytes format needs a number control`);
   if (declaration.readOnly !== undefined && typeof declaration.readOnly !== 'boolean')
     throw new SettingsDeclarationError(`${declaration.key}: readOnly must be a boolean`);
   if (declaration.readOnly === true && declaration.control === 'secret')

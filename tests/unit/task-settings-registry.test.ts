@@ -389,7 +389,7 @@ describe('settings declaration registry', () => {
     });
   });
 
-  it('declares the storage ceiling as fixed at 20 GB, so no other value validates', () => {
+  it('declares the storage ceiling read-only, displayed as decimal bytes', () => {
     const ceiling = platformSettings.get('storage.ceilingBytes');
     expect(ceiling).toMatchObject({
       key: 'storage.ceilingBytes',
@@ -400,29 +400,32 @@ describe('settings declaration registry', () => {
       min: 20_000_000_000,
       max: 20_000_000_000,
       unit: { en: 'bytes', ru: 'байты' },
+      format: 'bytes',
+      readOnly: true,
       authority: 'owner',
       apply: 'immediate',
     });
-    // The fixed ceiling is modelled through the declaration's own bounds:
-    // min, max and default are the same value, so the registry refuses every
-    // other value and the owner cannot change the ceiling.
-    expect(platformSettings.validate('storage.ceilingBytes', 20_000_000_000)).toEqual({
-      ok: true,
-      value: 20_000_000_000,
-    });
-    expect(platformSettings.validate('storage.ceilingBytes', 20_000_000_001)).toMatchObject({
+    // The registry refuses every write, the fixed value included; the display
+    // format is a bytes count, so a screen shows 20 GB instead of a raw digit
+    // string.
+    expect(platformSettings.validate('storage.ceilingBytes', 20_000_000_000)).toMatchObject({
       ok: false,
-      reasonCode: 'above_maximum',
-      limit: 20_000_000_000,
+      reasonCode: 'read_only',
     });
     expect(platformSettings.validate('storage.ceilingBytes', 40_000_000_000)).toMatchObject({
       ok: false,
-      reasonCode: 'above_maximum',
+      reasonCode: 'read_only',
     });
-    expect(platformSettings.validate('storage.ceilingBytes', 19_999_999_999)).toMatchObject({
-      ok: false,
-      reasonCode: 'below_minimum',
-    });
+  });
+
+  it('refuses a bytes display format outside a number control', () => {
+    expect(() => createSettingsRegistry([{ ...concurrency, format: 'bytes' }])).not.toThrow();
+    expect(() =>
+      createSettingsRegistry([{ ...enabled, format: 'bytes' } as SettingDeclaration])
+    ).toThrow(SettingsDeclarationError);
+    expect(() =>
+      createSettingsRegistry([{ ...secretDeclaration, format: 'bytes' } as SettingDeclaration])
+    ).toThrow(SettingsDeclarationError);
   });
 
   it('refuses every write to a read-only declaration, the default included', () => {

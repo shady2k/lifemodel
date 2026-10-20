@@ -57,7 +57,8 @@ export type PlatformRefusalCode =
   | 'wrong_type'
   | 'below_minimum'
   | 'above_maximum'
-  | 'not_an_option';
+  | 'not_an_option'
+  | 'read_only';
 
 export type PlatformValueCheck =
   | { ok: true; value: number | string }
@@ -79,6 +80,8 @@ interface NumberSpec {
   readonly default: number;
   readonly min: number;
   readonly max: number;
+  /** A fixed value: the loader refuses every write, so it is never projected. */
+  readonly readOnly?: boolean;
 }
 
 interface SelectSpec {
@@ -86,6 +89,8 @@ interface SelectSpec {
   readonly key: keyof PlatformSettingsValues;
   readonly default: string;
   readonly options: readonly string[];
+  /** A fixed value: the loader refuses every write, so it is never projected. */
+  readonly readOnly?: boolean;
 }
 
 type PlatformSettingSpec = NumberSpec | SelectSpec;
@@ -138,6 +143,7 @@ export const platformSettingSpecs: readonly PlatformSettingSpec[] = [
     default: PLATFORM_SETTING_DEFAULTS['storage.ceilingBytes'],
     min: 20_000_000_000,
     max: 20_000_000_000,
+    readOnly: true,
   },
 ];
 
@@ -150,6 +156,12 @@ export function validatePlatformValue(key: string, value: unknown): PlatformValu
   const spec = specsByKey.get(key);
   if (spec === undefined)
     return { ok: false, reasonCode: 'unknown_key', reason: `unknown platform setting "${key}"` };
+  if (spec.readOnly)
+    return {
+      ok: false,
+      reasonCode: 'read_only',
+      reason: `${key} is fixed; it cannot be changed`,
+    };
   if (spec.kind === 'number') {
     if (typeof value !== 'number' || !Number.isFinite(value))
       return { ok: false, reasonCode: 'wrong_type', reason: `${key} expects a number` };
