@@ -96,5 +96,6 @@
     "maskPatterns": [],
     "sure": 0.9,
     "model": "jev-1.13"
-  }
+  },
+  "notifyPushes": true
 }
