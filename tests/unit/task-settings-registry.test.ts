@@ -248,6 +248,17 @@ describe('settings declaration registry', () => {
     );
   });
 
+  it('carries a localized unit on a number declaration, en and ru', () => {
+    const wrapGrace = platformSettings.get('tasks.wrapGraceSeconds');
+    expect(wrapGrace?.unit).toEqual({ en: 'seconds', ru: 'секунды' });
+    expect(() =>
+      createSettingsRegistry([{ ...concurrency, unit: { en: 'tasks', ru: '' } }])
+    ).toThrow(SettingsDeclarationError);
+    expect(() =>
+      createSettingsRegistry([{ ...concurrency, unit: { en: '', ru: 'задачи' } }])
+    ).toThrow(SettingsDeclarationError);
+  });
+
   it('declares the platform tasks.concurrency setting: number 1..8, default 2, section tasks', () => {
     const declaration = platformSettings.get('tasks.concurrency');
     expect(declaration).toMatchObject({
@@ -257,6 +268,7 @@ describe('settings declaration registry', () => {
       default: 2,
       min: 1,
       max: 8,
+      unit: { en: 'tasks', ru: 'задачи' },
       authority: 'owner',
       apply: 'nextAdmission',
     });
@@ -299,7 +311,7 @@ describe('settings declaration registry', () => {
       default: 300,
       min: 30,
       max: 3600,
-      unit: 'seconds',
+      unit: { en: 'seconds', ru: 'секунды' },
       authority: 'owner',
       apply: 'nextAdmission',
     });
@@ -346,33 +358,34 @@ describe('settings declaration registry', () => {
     });
   });
 
-  it('declares the deletion warning lead in seconds, one to thirty days, default seven days', () => {
-    const warningLead = platformSettings.get('storage.warningLeadSeconds');
+  it('declares the deletion warning lead in days, one to thirty, default seven', () => {
+    const warningLead = platformSettings.get('storage.warningLeadDays');
     expect(warningLead).toMatchObject({
-      key: 'storage.warningLeadSeconds',
+      key: 'storage.warningLeadDays',
       section: 'tasks',
       control: 'number',
       dataClass: 'publicConfig',
-      default: 604800,
-      min: 86400,
-      max: 2592000,
-      unit: 'seconds',
+      default: 7,
+      min: 1,
+      max: 30,
+      unit: { en: 'days', ru: 'дни' },
       authority: 'owner',
       apply: 'immediate',
     });
-    expect(platformSettings.validate('storage.warningLeadSeconds', 86399)).toMatchObject({
+    // The owner never sees a raw second count: the value is whole days.
+    expect(platformSettings.validate('storage.warningLeadDays', 0)).toMatchObject({
       ok: false,
       reasonCode: 'below_minimum',
-      limit: 86400,
+      limit: 1,
     });
-    expect(platformSettings.validate('storage.warningLeadSeconds', 2592001)).toMatchObject({
+    expect(platformSettings.validate('storage.warningLeadDays', 31)).toMatchObject({
       ok: false,
       reasonCode: 'above_maximum',
-      limit: 2592000,
+      limit: 30,
     });
-    expect(platformSettings.validate('storage.warningLeadSeconds', 1209600)).toEqual({
+    expect(platformSettings.validate('storage.warningLeadDays', 7)).toEqual({
       ok: true,
-      value: 1209600,
+      value: 7,
     });
   });
 
@@ -386,7 +399,7 @@ describe('settings declaration registry', () => {
       default: 20_000_000_000,
       min: 20_000_000_000,
       max: 20_000_000_000,
-      unit: 'bytes',
+      unit: { en: 'bytes', ru: 'байты' },
       authority: 'owner',
       apply: 'immediate',
     });

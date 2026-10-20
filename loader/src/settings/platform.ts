@@ -15,7 +15,7 @@ const tasksConcurrency: SettingDeclaration = {
   default: 2,
   min: 1,
   max: 8,
-  unit: 'tasks',
+  unit: { en: 'tasks', ru: 'задачи' },
   authority: 'owner',
   apply: 'nextAdmission',
 };
@@ -57,7 +57,7 @@ const tasksWrapGraceSeconds: SettingDeclaration = {
   default: 300,
   min: 30,
   max: 3600,
-  unit: 'seconds',
+  unit: { en: 'seconds', ru: 'секунды' },
   authority: 'owner',
   apply: 'nextAdmission',
 };
@@ -83,23 +83,24 @@ const storageRetention: SettingDeclaration = {
 };
 
 /**
- * How long before a planned deletion the owner is warned; the deletion plans
- * snapshot the lead they announced (ADR-015).
+ * How many days before a planned deletion the owner is warned; the deletion
+ * plans snapshot the lead they announced (ADR-015). The value is whole days,
+ * never a raw second count.
  */
-const storageWarningLeadSeconds: SettingDeclaration = {
-  key: 'storage.warningLeadSeconds',
+const storageWarningLeadDays: SettingDeclaration = {
+  key: 'storage.warningLeadDays',
   section: 'tasks',
   label: { en: 'Deletion warning lead', ru: 'Предупреждение перед удалением' },
   description: {
-    en: 'How long before stored output is deleted the owner is warned first.',
-    ru: 'За сколько до удаления сохранённых результатов владельца предупреждают заранее.',
+    en: 'How many days before stored output is deleted the owner is warned first.',
+    ru: 'За сколько дней до удаления сохранённых результатов владельца предупреждают заранее.',
   },
   control: 'number',
   dataClass: 'publicConfig',
-  default: 604_800,
-  min: 86_400,
-  max: 2_592_000,
-  unit: 'seconds',
+  default: 7,
+  min: 1,
+  max: 30,
+  unit: { en: 'days', ru: 'дни' },
   authority: 'owner',
   apply: 'immediate',
 };
@@ -123,7 +124,7 @@ const storageCeilingBytes: SettingDeclaration = {
   default: 20_000_000_000,
   min: 20_000_000_000,
   max: 20_000_000_000,
-  unit: 'bytes',
+  unit: { en: 'bytes', ru: 'байты' },
   authority: 'owner',
   apply: 'immediate',
 };
@@ -134,6 +135,6 @@ export const platformSettings = createSettingsRegistry([
   tasksHarness,
   tasksWrapGraceSeconds,
   storageRetention,
-  storageWarningLeadSeconds,
+  storageWarningLeadDays,
   storageCeilingBytes,
 ]);

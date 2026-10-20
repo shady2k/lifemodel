@@ -22,7 +22,7 @@ const concurrencyDeclaration = {
   default: 2,
   min: 1,
   max: 8,
-  unit: 'tasks',
+  unit: { en: 'tasks', ru: 'задачи' },
   authority: 'owner',
   apply: 'nextAdmission',
 };
@@ -36,7 +36,7 @@ const stopGraceDeclaration = {
   default: 300,
   min: 0,
   max: 3600,
-  unit: 'seconds',
+  unit: { en: 'seconds', ru: 'секунды' },
   authority: 'owner',
   apply: 'immediate',
 };
@@ -254,6 +254,33 @@ describe('loader settings section', () => {
     fireEvent.submit(input.closest('form')!);
     expect(await screen.findByRole('alert')).toHaveTextContent('The largest allowed value is 8.');
     expect(attempts).toBe(0);
+  });
+
+  it('renders a number unit localized from the declaration', async () => {
+    await i18n.changeLanguage('en');
+    mockDonePage(
+      sectionPayload({
+        declarations: [concurrencyDeclaration, stopGraceDeclaration],
+        values: { 'tasks.concurrency': 2, 'tasks.stopGraceSeconds': 300 },
+      })
+    );
+    render(<App />);
+    expect(await screen.findByText('tasks')).toBeInTheDocument();
+    expect(await screen.findByText('seconds')).toBeInTheDocument();
+  });
+
+  it('renders the localized units in Russian', async () => {
+    Object.defineProperty(navigator, 'language', { configurable: true, value: 'ru-RU' });
+    await i18n.changeLanguage('ru');
+    mockDonePage(
+      sectionPayload({
+        declarations: [concurrencyDeclaration, stopGraceDeclaration],
+        values: { 'tasks.concurrency': 2, 'tasks.stopGraceSeconds': 300 },
+      })
+    );
+    render(<App />);
+    expect(await screen.findByText('задачи')).toBeInTheDocument();
+    expect(await screen.findByText('секунды')).toBeInTheDocument();
   });
 
   it('renders the declaration labels in Russian', async () => {

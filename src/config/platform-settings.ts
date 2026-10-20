@@ -41,7 +41,7 @@ export interface PlatformSettingsValues {
   'tasks.harness': TaskHarness;
   'tasks.wrapGraceSeconds': number;
   'storage.retention': StorageRetention;
-  'storage.warningLeadSeconds': number;
+  'storage.warningLeadDays': number;
   'storage.ceilingBytes': number;
 }
 
@@ -69,7 +69,7 @@ const PLATFORM_SETTING_DEFAULTS = {
   'tasks.harness': 'opencode',
   'tasks.wrapGraceSeconds': 300,
   'storage.retention': '90d',
-  'storage.warningLeadSeconds': 604_800,
+  'storage.warningLeadDays': 7,
   'storage.ceilingBytes': 20_000_000_000,
 } as const satisfies PlatformSettingsValues;
 
@@ -127,10 +127,10 @@ export const platformSettingSpecs: readonly PlatformSettingSpec[] = [
   },
   {
     kind: 'number',
-    key: 'storage.warningLeadSeconds',
-    default: PLATFORM_SETTING_DEFAULTS['storage.warningLeadSeconds'],
-    min: 86_400,
-    max: 2_592_000,
+    key: 'storage.warningLeadDays',
+    default: PLATFORM_SETTING_DEFAULTS['storage.warningLeadDays'],
+    min: 1,
+    max: 30,
   },
   {
     kind: 'number',

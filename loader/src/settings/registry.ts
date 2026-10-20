@@ -57,8 +57,8 @@ export interface SettingDeclaration {
   /** The declared bounds of a number control, stated on the screen. */
   min?: number;
   max?: number;
-  /** What a number counts ("tasks", "days"). Never lives in prose. */
-  unit?: string;
+  /** What a number counts, localized ("tasks"/"задачи"). Never lives in prose. */
+  unit?: LocalizedText;
   /**
    * A value the owner can never change: the registry refuses every write and
    * a screen renders the declared default as fixed text with no input.
@@ -153,6 +153,7 @@ function assertDeclaration(declaration: SettingDeclaration): void {
     throw new SettingsDeclarationError(`${declaration.key}: unknown authority`);
   if (!APPLY_TIMINGS.includes(declaration.apply))
     throw new SettingsDeclarationError(`${declaration.key}: unknown apply timing`);
+  if (declaration.unit !== undefined) assertLocalized(declaration.unit, 'unit', declaration.key);
   if (declaration.readOnly !== undefined && typeof declaration.readOnly !== 'boolean')
     throw new SettingsDeclarationError(`${declaration.key}: readOnly must be a boolean`);
   if (declaration.readOnly === true && declaration.control === 'secret')

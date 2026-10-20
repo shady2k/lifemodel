@@ -252,7 +252,9 @@ function SettingControl(props: {
             }}
           />
           {declaration.unit && (
-            <span className="text-sm text-muted-foreground">{declaration.unit}</span>
+            <span className="text-sm text-muted-foreground">
+              {declaration.unit[props.language]}
+            </span>
           )}
           <Button type="submit" disabled={busy}>
             {t('settingsSave')}

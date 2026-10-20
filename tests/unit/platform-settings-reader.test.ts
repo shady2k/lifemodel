@@ -17,7 +17,7 @@ const defaults: PlatformSettingsValues = {
   'tasks.harness': 'opencode',
   'tasks.wrapGraceSeconds': 300,
   'storage.retention': '90d',
-  'storage.warningLeadSeconds': 604800,
+  'storage.warningLeadDays': 7,
   'storage.ceilingBytes': 20000000000,
 };
 
@@ -56,7 +56,7 @@ describe('core platform settings reader', () => {
         'tasks.harness': 'prime-agent',
         'tasks.wrapGraceSeconds': 600,
         'storage.retention': 'forever',
-        'storage.warningLeadSeconds': 1209600,
+        'storage.warningLeadDays': 14,
         'storage.ceilingBytes': 20000000000,
       })
     );
@@ -68,7 +68,7 @@ describe('core platform settings reader', () => {
         'tasks.harness': 'prime-agent',
         'tasks.wrapGraceSeconds': 600,
         'storage.retention': 'forever',
-        'storage.warningLeadSeconds': 1209600,
+        'storage.warningLeadDays': 14,
         'storage.ceilingBytes': 20000000000,
       },
     });
@@ -186,12 +186,12 @@ describe('core platform settings reader', () => {
     const dir = directory();
     writeFileSync(
       join(dir, PLATFORM_SETTINGS_FILE),
-      document(3, { 'tasks.harness': 'codex', 'storage.warningLeadSeconds': 7 })
+      document(3, { 'tasks.harness': 'codex', 'storage.warningLeadDays': 31 })
     );
     await readerFor(dir, calls).read();
     const serialized = JSON.stringify(calls);
     expect(serialized).not.toContain('codex');
-    expect(serialized).toContain('storage.warningLeadSeconds');
+    expect(serialized).toContain('storage.warningLeadDays');
   });
 });
 
@@ -250,6 +250,9 @@ describe('core reader parity with the loader registry', () => {
     29,
     300,
     3601,
+    7,
+    30,
+    31,
     86400,
     604800,
     2592001,
