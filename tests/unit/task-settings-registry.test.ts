@@ -58,6 +58,18 @@ const other: SettingDeclaration = {
   apply: 'nextAdmission',
 };
 
+const enabled: SettingDeclaration = {
+  key: 'tasks.enabled',
+  section: 'tasks',
+  label: { en: 'Enabled', ru: 'Включено' },
+  description: { en: 'Whether tasks run.', ru: 'Запускаются ли задачи.' },
+  control: 'toggle',
+  dataClass: 'publicConfig',
+  default: true,
+  authority: 'owner',
+  apply: 'nextAdmission',
+};
+
 describe('settings declaration registry', () => {
   it('registers a declaration and enumerates it', () => {
     const registry = createSettingsRegistry([concurrency]);
@@ -203,6 +215,30 @@ describe('settings declaration registry', () => {
     ).toThrow(SettingsDeclarationError);
   });
 
+  it('registers a toggle with a boolean default, true or false, and validates boolean values', () => {
+    expect(() => createSettingsRegistry([enabled])).not.toThrow();
+    expect(() => createSettingsRegistry([{ ...enabled, default: false }])).not.toThrow();
+    const registry = createSettingsRegistry([enabled]);
+    expect(registry.validate('tasks.enabled', true)).toEqual({ ok: true, value: true });
+    expect(registry.validate('tasks.enabled', false)).toEqual({ ok: true, value: false });
+    expect(registry.validate('tasks.enabled', 'true')).toMatchObject({
+      ok: false,
+      reasonCode: 'wrong_type',
+    });
+  });
+
+  it('refuses a toggle declared with a non-boolean default', () => {
+    expect(() => createSettingsRegistry([{ ...enabled, default: 'yes' }])).toThrow(
+      new SettingsDeclarationError('tasks.enabled: a toggle declares a boolean default')
+    );
+    expect(() => createSettingsRegistry([{ ...enabled, default: 1 }])).toThrow(
+      SettingsDeclarationError
+    );
+    expect(() =>
+      createSettingsRegistry([{ ...enabled, default: undefined } as SettingDeclaration])
+    ).toThrow(SettingsDeclarationError);
+  });
+
   it('refuses a number declaration whose default or bounds contradict each other', () => {
     expect(() => createSettingsRegistry([{ ...concurrency, default: 20 }])).toThrow(
       SettingsDeclarationError
@@ -293,6 +329,22 @@ describe('settings file store', () => {
       revision: 1,
       values: { 'tasks.concurrency': 3 },
     });
+  });
+
+  it('stores a toggle write as a boolean and reads it back', async () => {
+    const root = storeRoot();
+    const { store } = createStore(root, {
+      declarations: [concurrency, enabled, secretDeclaration],
+    });
+    await store.load();
+    await expect(store.set('tasks.enabled', false)).resolves.toEqual({ value: false, revision: 1 });
+    expect(JSON.parse(readFileSync(settingsPath(root), 'utf8'))).toEqual({
+      version: 1,
+      revision: 1,
+      values: { 'tasks.enabled': false },
+    });
+    expect(store.section().values['tasks.enabled']).toBe(false);
+    await expect(store.set('tasks.enabled', 'on')).rejects.toMatchObject({ code: 'wrong_type' });
   });
 
   it('the value survives re-creating the store over the same store', async () => {
@@ -601,6 +653,7 @@ describe('settings HTTP routes', () => {
   async function start(
     options: {
       settings?: SettingsHttp | null;
+      declarations?: SettingDeclaration[];
       buildStore?: (loaderDir: string) => StartedStore;
     } = {}
   ) {
@@ -622,7 +675,9 @@ describe('settings HTTP routes', () => {
         : createSettingsStore({
             fs: createNodeFileSystem(),
             config: { loaderDir: join(root, 'loader') },
-            registry: createSettingsRegistry([concurrency, secretDeclaration]),
+            registry: createSettingsRegistry(
+              options.declarations ?? [concurrency, secretDeclaration]
+            ),
             clock: createTestClock(),
             logger: createRecordingLogger([]),
           });
@@ -767,6 +822,29 @@ describe('settings HTTP routes', () => {
     });
     expect(secret.status).toBe(400);
     expect(JSON.parse(secret.body)).toMatchObject({ error: 'secret_setting' });
+  });
+
+  it('writes a toggle value as a boolean through the route', async () => {
+    const { ask, csrf } = await start({
+      declarations: [concurrency, enabled, secretDeclaration],
+    });
+    const written = await ask('/api/settings/tasks.enabled', {
+      method: 'PUT',
+      body: JSON.stringify({ value: false }),
+      csrf: csrf(),
+    });
+    expect(written.status).toBe(200);
+    expect(JSON.parse(written.body)).toEqual({ ok: true, value: false, revision: 1 });
+    const refused = await ask('/api/settings/tasks.enabled', {
+      method: 'PUT',
+      body: JSON.stringify({ value: 'on' }),
+      csrf: csrf(),
+    });
+    expect(refused.status).toBe(400);
+    expect(JSON.parse(refused.body)).toMatchObject({
+      error: 'invalid_value',
+      reasonCode: 'wrong_type',
+    });
   });
 
   it('keeps the route table: a keyed GET is 405, an empty key is 404, foreign origins are 403', async () => {

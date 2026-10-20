@@ -187,6 +187,11 @@ function assertDeclaration(declaration: SettingDeclaration): void {
       );
     return;
   }
+  if (declaration.control === 'toggle') {
+    if (typeof declaration.default !== 'boolean')
+      throw new SettingsDeclarationError(`${declaration.key}: a toggle declares a boolean default`);
+    return;
+  }
   if (typeof declaration.default !== 'string')
     throw new SettingsDeclarationError(`${declaration.key}: a text declares a string default`);
 }

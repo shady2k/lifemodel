@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { axe } from 'jest-axe';
 import '@testing-library/jest-dom/vitest';
 import 'jest-axe/extend-expect';
@@ -106,6 +106,18 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+const enabledDeclaration = {
+  key: 'tasks.enabled',
+  section: 'tasks',
+  label: { en: 'Enabled', ru: 'Включено' },
+  description: { en: 'Whether tasks run.', ru: 'Запускаются ли задачи.' },
+  control: 'toggle',
+  dataClass: 'publicConfig',
+  default: true,
+  authority: 'owner',
+  apply: 'nextAdmission',
+};
+
 describe('loader settings section', () => {
   it('renders the concurrency control from the declaration', async () => {
     await i18n.changeLanguage('en');
@@ -155,6 +167,27 @@ describe('loader settings section', () => {
     ).toBeInTheDocument();
     expect(await screen.findByLabelText('Soft-stop grace', { selector: 'input' })).toHaveValue(300);
     expect(container.textContent).not.toContain('tasks.concurrency');
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('renders a second declaration that is a toggle and saves its boolean on click', async () => {
+    await i18n.changeLanguage('en');
+    const puts: Array<Record<string, unknown>> = [];
+    mockDonePage(
+      sectionPayload({
+        declarations: [concurrencyDeclaration, enabledDeclaration],
+        values: { 'tasks.concurrency': 2, 'tasks.enabled': true },
+      }),
+      puts
+    );
+    const { container } = render(<App />);
+    const form = await screen.findByRole('form', { name: 'Enabled' });
+    const toggle = within(form).getByRole('button');
+    expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    expect(toggle).toHaveTextContent('On');
+    expect(screen.getByText('Whether tasks run.')).toBeInTheDocument();
+    fireEvent.click(toggle);
+    await waitFor(() => expect(puts).toEqual([{ value: false }]));
     expect(await axe(container)).toHaveNoViolations();
   });
 
