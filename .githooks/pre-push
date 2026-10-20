@@ -32,6 +32,19 @@ command -v node >/dev/null 2>&1 || { printf 'pre-push: node is not on PATH; run 
 refs=$(cat)
 [ -n "$refs" ] || { printf 'pre-push: no ref lines on stdin — an empty input is an error, never a pass\n' >&2; exit 1; }
 
+# The tracker's store first: CI reads the remote's refs/tracker/state for the
+# gate and the task links, and with no background sync (owner, 2026-10-20) a
+# tracker write since the last recorded commit is on this machine only until
+# this publishes it. A store that cannot be published refuses the push: CI
+# would judge a state that is not this one.
+if [ -f "$gate/sync/tracker-sync.mjs" ]; then
+    env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE node "$gate/sync/tracker-sync.mjs" publish \
+        --recipe "$(git rev-parse --show-toplevel)/$gate/sync/trackers/br.mjs" >/dev/null || {
+        printf 'pre-push: the tracker store could not be published (lines above); CI would read an older one\n' >&2
+        exit 1
+    }
+fi
+
 status=0
 while IFS= read -r line; do
     [ -n "$line" ] || continue

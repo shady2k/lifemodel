@@ -3,8 +3,8 @@
 #
 # `npm run connect` runs it. It is the one command a fresh clone needs before
 # its first commit: it checks every local input a hook reads, points git at
-# .githooks, connects the checkout to this machine's tracker store and checks
-# that the store's background sync runs. Everything missing is reported in one
+# .githooks and connects the checkout to this machine's tracker store.
+# Everything missing is reported in one
 # run, and nothing is connected until nothing is missing: a clone with hooks and
 # no `br` would refuse every commit-link check with a reason nobody set out to
 # learn.
@@ -14,9 +14,9 @@
 # refs/tracker/state under $XDG_STATE_HOME/<main checkout name>/tracker, which
 # .backlog/sync/tracker-sync.mjs keeps in step with the remote. connect creates
 # it from the remote's ref where this machine has none, and links this
-# checkout's .beads to it. Starting the sync as a service changes what runs on
-# the machine, so connect does not do it: it fails naming
-# scripts/tracker-sync-service.sh until the sync is up.
+# checkout's .beads to it. The store is published at each recorded commit and
+# before each push; no background sync is required (owner, 2026-10-20: one
+# person, one machine). scripts/tracker-sync-service.sh can add one later.
 #
 # It also appends the backlog gate to .husky/pre-commit and .husky/commit-msg,
 # marked and idempotently: husky (npm ci) sets core.hooksPath=.husky/_ and
@@ -147,18 +147,14 @@ fi
 append_block .husky/pre-commit "$PRE_BLOCK"
 append_block .husky/commit-msg "$MSG_BLOCK"
 
-# The store's background sync: a change is published within seconds and other
-# machines' changes arrive on a timer only while it runs.
+# No background sync is required (owner, 2026-10-20: one person, one machine).
+# The store reaches the remote when a commit is recorded and before every push
+# (.githooks/pre-push publishes it), which is what CI reads. A background sync,
+# where one runs, only publishes sooner; say which it is.
 if command -v systemctl >/dev/null 2>&1 && sh scripts/tracker-sync-service.sh status >/dev/null 2>&1; then
-    :
-elif pid="$(dirname "$(dirname "$store")")/watch.pid" && [ -f "$pid" ] && kill -0 "$(cat "$pid")" 2>/dev/null; then
-    :
+    printf 'connect: the tracker store is also published in the background (lifemodel-tracker-sync.service)\n'
 else
-    printf 'connect: the tracker store'"'"'s sync is not running, so a change here would reach no other machine.\n' >&2
-    printf '         Start it as a service: sh scripts/tracker-sync-service.sh install\n' >&2
-    printf '         or by hand, in a terminal that stays open: node .backlog/sync/tracker-sync.mjs watch\n' >&2
-    printf '         The checkout and its hooks are connected; run npm run connect again once the sync runs.\n' >&2
-    exit 1
+    printf 'connect: the tracker store is published at each commit and push; no background sync runs\n'
 fi
 
 # Prove the gate runs here, now. A red verdict is the gate working; only an
@@ -175,4 +171,4 @@ fi
 if [ ! -d node_modules ]; then
     printf 'note: node_modules is absent — the product checks (lint-staged, tsc, vitest) are skipped until you run: npm ci\n' >&2
 fi
-printf 'connect: hooks from .githooks, .beads linked to the tracker store %s, its sync running, every hook input present\n' "$store"
+printf 'connect: hooks from .githooks, .beads linked to the tracker store %s, every hook input present\n' "$store"
