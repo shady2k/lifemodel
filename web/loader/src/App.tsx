@@ -669,11 +669,11 @@ export default function App() {
   const appUrl = `https://${instanceName}.local/`;
   const handoffUrl = `https://boot-${instanceName}.local/login?next=${encodeURIComponent(appUrl)}`;
   const settingsLanguage: 'en' | 'ru' = i18n.language === 'ru' ? 'ru' : 'en';
-  const settingsGroups: Array<[string, SettingDeclaration[]]> = [];
+  const settingsGroups: [string, SettingDeclaration[]][] = [];
   if (settingsSection !== null)
     for (const declaration of settingsSection.declarations) {
-      const last = settingsGroups[settingsGroups.length - 1];
-      if (last !== undefined && last[0] === declaration.section) last[1].push(declaration);
+      const last = settingsGroups.at(-1);
+      if (last?.[0] === declaration.section) last[1].push(declaration);
       else settingsGroups.push([declaration.section, [declaration]]);
     }
   const sectionTitle = (id: string) => (i18n.exists(`section_${id}`) ? t(`section_${id}`) : id);

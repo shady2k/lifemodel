@@ -129,11 +129,11 @@ function assertDeclaration(declaration: SettingDeclaration): void {
   assertLocalized(declaration.description, 'description', declaration.key);
   if (!CONTROLS.includes(declaration.control))
     throw new SettingsDeclarationError(
-      `${declaration.key}: unknown control ${JSON.stringify(String(declaration.control))}`
+      `${declaration.key}: unknown control ${JSON.stringify(declaration.control)}`
     );
   if (!DATA_CLASSES.includes(declaration.dataClass))
     throw new SettingsDeclarationError(
-      `${declaration.key}: unknown data class ${JSON.stringify(String(declaration.dataClass))}`
+      `${declaration.key}: unknown data class ${JSON.stringify(declaration.dataClass)}`
     );
   if (!AUTHORITIES.includes(declaration.authority))
     throw new SettingsDeclarationError(`${declaration.key}: unknown authority`);

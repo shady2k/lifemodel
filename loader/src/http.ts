@@ -667,7 +667,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           return;
         }
         try {
-          const written = await settings.set(key, (payload as { value: unknown })['value']);
+          const written = await settings.set(key, (payload as { value: unknown }).value);
           res.writeHead(200, {
             'content-type': 'application/json; charset=utf-8',
             'cache-control': 'no-store',

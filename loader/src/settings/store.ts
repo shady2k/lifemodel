@@ -47,13 +47,13 @@ export interface StoredSettings {
 }
 
 /** What the projection receives: effective non-secret values and the revision. */
-export interface SettingsProjectionContent extends StoredSettings {}
+export type SettingsProjectionContent = StoredSettings;
 
 export interface SettingsProjection {
   project(content: SettingsProjectionContent): Promise<void>;
 }
 
-export interface SettingsSectionSnapshot extends SettingsSectionPayload {}
+export type SettingsSectionSnapshot = SettingsSectionPayload;
 
 /** A refused write: the declaration's own reason, safe to show. */
 export class SettingsWriteError extends Error {
