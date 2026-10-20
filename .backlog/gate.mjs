@@ -1,14 +1,24 @@
 #!/usr/bin/env node
-// The backlog gate: the tracker judged by .backlog/rules/check.mjs, the staged
-// export against the export as committed at <base> (default HEAD), so under
-// `block-new` only what this change introduced fails and older debt is printed.
+// The backlog gate: the tracker judged by .backlog/rules/check.mjs against a
+// baseline, so under `block-new` only what is new fails and older debt is printed.
 //
-//   gate.mjs [--base <rev>] [--json] [--worktree]
+// The tracker lives outside the code branches (adapter.mjs says how it is read):
+// "now" is the store as it is now, and the baseline is the state the store
+// recorded under the base revision's own name, or the newest recording among its
+// ancestors. A history with no recording at all is the empty backlog, said so:
+// everything is new against it, honestly.
+//
+//   gate.mjs [--base <rev>] [--offline] [--json]   now vs the recording at or before <rev> (HEAD);
+//                                                  --offline: no sync first (the commit hook)
+//   gate.mjs --head <rev> --base <rev> --ref <ref> CI: the recording of <rev> vs the base's,
+//            [--head-or-before]                    both read from <ref>'s tree; --head-or-before
+//                                                  takes the newest recording at or before <rev>
+//                                                  (a merge GitHub made, which nobody recorded)
 //
 // The baseline config is the one committed at <base>, so a budget lowered in
-// this change counts against it. A merge is judged against both parents
-// (merge-gate.mjs says why): debt the other parent already carried is not new
-// because HEAD lacked it.
+// this change counts against it. A merge in progress is judged against both
+// parents (merge-gate.mjs says why): debt the other parent already carried is
+// not new because HEAD lacked it.
 //
 // Exit 0 clean, 1 new violations, 2 cannot check (never a pass).
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -16,7 +26,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { read } from './adapter.mjs';
+import { normalize, readAt, readNow } from './adapter.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const git = (...a) => execFileSync('git', a, { encoding: 'utf8', maxBuffer: 1 << 30, stdio: ['ignore', 'pipe', 'ignore'] });
@@ -25,9 +35,15 @@ const git = (...a) => execFileSync('git', a, { encoding: 'utf8', maxBuffer: 1 <<
 // would read as "this change adds a problem". It is a missing input, said as one.
 const RULES = ['check.mjs', 'time-format.mjs'];
 
-// One judgement of the staged backlog against <base>: a check.mjs run whose
+function baselineOf(base, ref) {
+  const r = readAt(base, { ref, orBefore: true });
+  if (r) return normalize(r.rows, r.source);
+  return { generatedAt: new Date().toISOString(), source: `empty (no recording at or before ${base})`, issues: [] };
+}
+
+// One judgement of the backlog now against <base>: a check.mjs run whose
 // stdout (with --json) is returned, or whose exit code is returned without it.
-function judged(base, nowFile, json) {
+function judged(base, ref, nowFile, json) {
   const dir = mkdtempSync(join(tmpdir(), 'lifemodel-gate-'));
   try {
     const put = (name, value) => {
@@ -35,16 +51,9 @@ function judged(base, nowFile, json) {
       writeFileSync(p, typeof value === 'string' ? value : JSON.stringify(value));
       return p;
     };
-    // A base that predates the installation carries no export and no config:
-    // there was no backlog then, so the empty backlog is the honest baseline
-    // (and today's config judges it). Anything this change adds is new.
-    let baseline = null;
+    const baseline = baselineOf(base, ref);
+    if (!json) console.log(`baseline: ${baseline.source}`);
     let baselineConfig = null;
-    try {
-      baseline = JSON.stringify(read(['--at', base]));
-    } catch {
-      baseline = JSON.stringify({ generatedAt: new Date().toISOString(), source: `empty (no .beads/issues.jsonl at ${base})`, issues: [] });
-    }
     try {
       baselineConfig = git('show', `${base}:.backlog/config.json`);
     } catch {
@@ -69,23 +78,39 @@ function judged(base, nowFile, json) {
 function main(argv) {
   const gone = RULES.filter((f) => !existsSync(join(HERE, 'rules', f)));
   if (gone.length) throw new Error(`missing .backlog/rules/${gone.join(', .backlog/rules/')}`);
-  const b = argv.indexOf('--base');
-  const base = b >= 0 ? argv[b + 1] : 'HEAD';
+  const val = (flag) => {
+    const i = argv.indexOf(flag);
+    return i >= 0 ? argv[i + 1] : undefined;
+  };
+  const known = new Set(['--base', '--head', '--ref', '--json', '--head-or-before', '--offline']);
+  for (let i = 0; i < argv.length; i++) {
+    if (!known.has(argv[i])) throw new Error(`unknown argument ${argv[i]}`);
+    if (['--base', '--head', '--ref'].includes(argv[i])) i++;
+  }
+  const base = val('--base') || 'HEAD';
+  const head = val('--head');
+  const ref = val('--ref');
   const json = argv.includes('--json');
+  if (head && !ref) throw new Error('--head reads a recording, so it needs --ref <ref> (CI: refs/tracker/state)');
   const dir = mkdtempSync(join(tmpdir(), 'lifemodel-gate-'));
   try {
-    // Staged (`:0`), never the working tree: `br` rewrites the export on almost
-    // every command, so a working-tree read would judge backlog writes the
-    // commit is not making. --worktree reads the working tree, for connect's
-    // proof that the gate runs in a clone with nothing staged.
-    const nowAt = argv.includes('--worktree') ? null : ':0';
-    const now = join(dir, 'now.json');
-    writeFileSync(now, JSON.stringify(read(nowAt === null ? [] : ['--at', nowAt])));
-    const mergeHead = git('rev-parse', '--git-path', 'MERGE_HEAD').trim();
-    const other = existsSync(mergeHead) ? readFileSync(mergeHead, 'utf8').split('\n')[0].trim() : null;
+    let now;
+    if (head) {
+      const r = readAt(head, { ref, orBefore: argv.includes('--head-or-before') });
+      if (!r) throw new Error(`no recording at or before ${head}`);
+      now = normalize(r.rows, r.source);
+    } else {
+      const r = readNow({ offline: argv.includes('--offline') });
+      now = normalize(r.rows, r.source);
+    }
+    if (!json) console.log(`judged:   ${now.source}`);
+    const nowFile = join(dir, 'now.json');
+    writeFileSync(nowFile, JSON.stringify(now));
+    const mergeHead = head ? null : git('rev-parse', '--git-path', 'MERGE_HEAD').trim();
+    const other = mergeHead && existsSync(mergeHead) ? readFileSync(mergeHead, 'utf8').split('\n')[0].trim() : null;
     if (other && !spawnSync('git', ['rev-parse', '-q', '--verify', `${other}^{commit}`]).status) {
-      const vsHead = judged(base, now, true);
-      const vsOther = judged(other, now, true);
+      const vsHead = judged(base, ref, nowFile, true);
+      const vsOther = judged(other, ref, nowFile, true);
       const mg = spawnSync(process.execPath, [join(HERE, 'merge-gate.mjs')], {
         input: JSON.stringify({ head: JSON.parse(vsHead.stdout), other: JSON.parse(vsOther.stdout) }),
         encoding: 'utf8',
@@ -93,13 +118,13 @@ function main(argv) {
       if (json) process.stdout.write(mg.stdout || '');
       else if (mg.stdout) console.log(mg.stdout.trim());
       if (mg.status === 1)
-        console.error('\nBACKLOG GATE: this merge adds a problem to the tracker (lines above, with their fix). Older problems do not block.');
+        console.error('\nBACKLOG GATE: the tracker has a problem that neither parent of this merge had (lines above, with their fix). Older problems do not block.');
       return mg.status ?? 2;
     }
-    const r = judged(base, now, json); // judged() already printed the report
+    const r = judged(base, ref, nowFile, json); // judged() already printed the report
     if (r.status === 1) {
-      console.error('\nBACKLOG GATE: this change adds a problem to the tracker (FAIL lines above, with their fix).');
-      console.error('Older problems are listed but do not block. Fix the new ones, then commit again.');
+      console.error('\nBACKLOG GATE: the tracker has a problem that its state at the base did not have (FAIL lines above, with their fix).');
+      console.error('Older problems are listed but do not block. Fix the new ones in the tracker, then commit again.');
     }
     return r.status;
   } finally {
@@ -111,6 +136,6 @@ try {
   process.exitCode = main(process.argv.slice(2));
 } catch (e) {
   console.error(`backlog gate could not run: ${e.message.split('\n')[0]}`);
-  console.error('This refuses the commit rather than passing it unchecked. Connect the clone: npm run connect');
+  console.error('This refuses rather than passing unchecked. Connect the clone: npm run connect');
   process.exitCode = 2;
 }

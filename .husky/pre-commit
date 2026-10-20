@@ -28,21 +28,11 @@ if ! command -v node >/dev/null 2>&1 || [ ! -f .backlog/rules/check-product.mjs 
     exit 1
 fi
 node .backlog/rules/check-product.mjs --staged || exit 1
-# Managed by scripts/connect-clone.sh. The tracker export lands only through a
-# session landing branch (land/<name>) and its pull request; refuse it staged on
-# any other branch but main (the seeding commit of the installation itself is
-# the exception).
-if git diff --cached --name-only -- .beads/issues.jsonl 2>/dev/null | grep -q .; then
-    _branch=$(git symbolic-ref --quiet --short HEAD || echo "a detached HEAD")
-    case "$_branch" in
-        main|land/*) ;;
-        *)
-            if git rev-parse -q --verify HEAD:.backlog/config.json >/dev/null 2>&1; then
-                printf "TRACKER: the tracker export is staged on %s; it lands only through a land/<name> branch and its pull request. Unstage it: git restore --staged .beads/issues.jsonl\n" "$_branch" >&2
-                exit 1
-            fi
-            ;;
-    esac
+# Managed by scripts/connect-clone.sh. The tracker lives outside the code
+# branches: .beads is the link to the store of this machine, never committed.
+if git diff --cached --name-only --diff-filter=d -- .beads 2>/dev/null | grep -q .; then
+    printf "TRACKER: a tracker file is staged; the tracker lives in the store of this machine, outside every branch. Unstage it: git restore --staged .beads\n" >&2
+    exit 1
 fi
-node .backlog/gate.mjs || exit 1
+node .backlog/gate.mjs --offline || exit 1
 # --- END LIFEMODEL BACKLOG GATE ---

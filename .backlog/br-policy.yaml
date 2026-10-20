@@ -4,7 +4,8 @@
 # as its comment, written in the same transaction (required_fields below). Neither
 # is ready: `br ready` offers `open` only. `strict` makes br refuse a status not
 # listed here, so a typo cannot become a status the adapter stops on. br reads
-# this file from the MAIN checkout's .beads, whichever worktree runs it.
+# this file from the store's .beads/policy.yaml, where npm run connect installs
+# this copy (.backlog/br-policy.yaml); the tracker itself lives outside the branches.
 workflow:
   strict: true
   statuses: [open, in_progress, blocked, deferred, submitted, implemented, closed, tombstone]

@@ -38,11 +38,14 @@
 # The same required job also owns the pinned, checksum-verified expanding-only
 # migration lint, so a red squawk result blocks the documented merge path:
 #
-#   1. the backlog gate: the export at the head of the change judged against
-#      the export at its baseline, under the config's strength (block-new),
-#      each judged by the config of its own day;
+#   1. the backlog gate: the tracker's state the store recorded for the head of
+#      the change judged against its state at the baseline, under the config's
+#      strength (block-new), each judged by the config of its own day. The
+#      tracker lives outside the code branches, on refs/tracker/state, which no
+#      branch contains and whose push starts no workflow
+#      (docs/backlog-integration.md, Tracker layout);
 #   2. the commit-link check: every commit the change introduces names a leaf
-#      task that exists;
+#      task that exists in the store now;
 #   3. the present-documents check, on pull requests only: the documents the
 #      config lists as describing the present may not be left naming a path
 #      the change removed.
@@ -61,7 +64,7 @@ permissions:
 
 jobs:
   # Which checks a change owes is decided by what it changes. A path that
-  # cannot change what the product does — the tracker's export, the documents,
+  # cannot change what the product does — the tracker's link, the documents,
   # the backlog gate's own files, the git hooks, connect-clone.sh — owes the
   # backlog checks, not typecheck, lint and the suite; everything else,
   # .github/ and the scripts included, owes them. Reading the change, the
@@ -194,9 +197,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # The baseline is another revision of the tracked export and the
-          # commit range needs the merge base, so the history has to be here.
-          # A shallow clone has neither.
+          # The commit range needs the merge base and the baseline is the
+          # store's recording of an older revision, so the history has to be
+          # here. A shallow clone has neither.
           fetch-depth: 0
 
       - uses: actions/setup-node@v7
@@ -231,6 +234,14 @@ jobs:
           [ -n "$revision" ] || { echo "missing product-document revision" >&2; exit 2; }
           node .backlog/rules/check-product.mjs --rev "$revision"
 
+      - name: Fetch the tracker store
+        run: |
+          set -eu
+          # The tracker is not in any branch: it is the store ref. A clone
+          # without it cannot judge the tracker, which is an error, never a pass.
+          git fetch --no-tags origin +refs/tracker/state:refs/tracker/state
+          git log -1 --format='store: %h %s' refs/tracker/state
+
       - name: The backlog is still a queue
         env:
           # Through the environment rather than into the script: an expression
@@ -242,13 +253,13 @@ jobs:
           BEFORE: ${{ github.event.before }}
         run: |
           set -eu
-          gate=.backlog
           # The baseline: what was already wrong before this change. On a pull
           # request that is the merge base with the branch being merged into;
           # on a push to main it is the commit main was at before the push,
           # because a merge base against the branch's own upstream is the
           # branch itself. A first push or a shallow surprise leaves neither,
-          # and then the previous commit is the honest answer.
+          # and then the previous commit is the honest answer. The gate reads
+          # the newest recording at or before it.
           base=""
           if [ "$EVENT" = pull_request ]; then
             base=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")
@@ -258,25 +269,16 @@ jobs:
           if [ -z "$base" ] || [ "$(git rev-parse "$base^{commit}")" = "$(git rev-parse HEAD)" ]; then
             base=$(git rev-parse HEAD^)
           fi
-          echo "baseline: $base"
-          # The export at the head of the change: branches do not carry the
-          # export (it is committed on main only), so the newest snapshot the
-          # checked history reaches is the honest head. A change that removes
-          # the export entirely is an input error, said as one.
-          head_export=$(git rev-list -1 "${HEAD_SHA:-HEAD}" -- .beads/issues.jsonl 2>/dev/null \
-            || git rev-list -1 HEAD -- .beads/issues.jsonl)
-          [ -n "$head_export" ] || { echo "no .beads/issues.jsonl anywhere in this history" >&2; exit 2; }
-          node "$gate/adapter.mjs" --at "$base" > "$RUNNER_TEMP/backlog-baseline.json" 2>/dev/null \
-            || printf '{"generatedAt":"1970-01-01T00:00:00Z","source":"empty","issues":[]}' > "$RUNNER_TEMP/backlog-baseline.json"
-          baseline_config=""
-          if git show "$base:$gate/config.json" > "$RUNNER_TEMP/backlog-baseline-config.json" 2>/dev/null; then
-            baseline_config="--baseline-config $RUNNER_TEMP/backlog-baseline-config.json"
+          # The head: on a pull request, the state recorded for exactly its
+          # head commit, which the pushing clone recorded (its pre-push hook
+          # refuses a push it could not record). A push to main is the merge
+          # GitHub made, which no clone recorded: the newest recording at or
+          # before it, which the gate's "judged:" line names.
+          if [ "$EVENT" = pull_request ]; then
+            node .backlog/gate.mjs --head "$HEAD_SHA" --base "$base" --ref refs/tracker/state
+          else
+            node .backlog/gate.mjs --head "$(git rev-parse HEAD)" --head-or-before --base "$base" --ref refs/tracker/state
           fi
-          # shellcheck disable=SC2086 # baseline_config is two words or none
-          node "$gate/adapter.mjs" --at "$head_export" |
-            node "$gate/rules/check.mjs" \
-              --config "$gate/config.json" \
-              --baseline "$RUNNER_TEMP/backlog-baseline.json" $baseline_config -
 
       - name: Every new commit names a task
         env:
@@ -292,16 +294,15 @@ jobs:
           # which is GitHub's synthetic merge — and an empty range is an error,
           # never a pass. On a push to main it is the commits of the pushed tip
           # that no ref the remote already had reaches, past main's own "before"
-          # when the push has one. Never a merge base with main itself.
-          head_export=$(git rev-list -1 "${HEAD_SHA:-HEAD}" -- .beads/issues.jsonl 2>/dev/null \
-            || git rev-list -1 HEAD -- .beads/issues.jsonl)
-          [ -n "$head_export" ] || { echo "no .beads/issues.jsonl anywhere in this history" >&2; exit 2; }
+          # when the push has one. Never a merge base with main itself. Tasks
+          # resolve against the store as it is now, so a task filed after the
+          # branch was cut resolves.
           if [ "$EVENT" = pull_request ]; then
             range="$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")..$HEAD_SHA"
             echo "range: $range"
-            node "$gate/commits.mjs" --range "$range" --export-at "$head_export"
+            node "$gate/commits.mjs" --range "$range" --tracker-ref refs/tracker/state
           else
-            set -- --introduced "$(git rev-parse HEAD)" --by "$GITHUB_REF" --export-at "$head_export"
+            set -- --introduced "$(git rev-parse HEAD)" --by "$GITHUB_REF" --tracker-ref refs/tracker/state
             if [ -n "${BEFORE:-}" ] && git rev-parse -q --verify "$BEFORE^{commit}" >/dev/null; then
               set -- "$@" --before "$BEFORE"
             fi

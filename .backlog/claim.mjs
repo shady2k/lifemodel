@@ -1,55 +1,57 @@
 #!/usr/bin/env node
-// Guarded task claims (lifemodel-j1l). Readiness belongs to this project;
-// ownership and target compare-and-swap stay in br's native transaction.
-import {execFileSync} from 'node:child_process';
-import {readFileSync} from 'node:fs';
-import {pathToFileURL} from 'node:url';
-import {normalize, parseJsonl} from './adapter.mjs';
+// Guarded task claims (lifemodel-j1l). Readiness belongs to this project; the
+// claim itself goes through the store's mechanism (.backlog/sync/tracker-sync.mjs),
+// which writes the holder against the state it just merged from the remote and
+// counts the claim only once it is on the remote (lifemodel-hsyc). A claim the
+// remote's newer state refuses is lost and said so: exit 3, nothing left behind.
+//
+// The residual the layout accepts: two machines claiming one item inside the
+// same seconds can both believe they hold it until the next sync, after which
+// every machine shows one holder and the other session learns at its next read
+// that the item is not its own.
+import {spawnSync} from 'node:child_process';
+import {dirname,join} from 'node:path';
+import {fileURLToPath,pathToFileURL} from 'node:url';
+import {read} from './adapter.mjs';
 import {readyLeaves} from './ready.mjs';
 
-function br(args) {
-  return execFileSync('br', args, {encoding:'utf8', maxBuffer:64*1024*1024, stdio:['ignore','pipe','pipe']});
+const MECHANISM=join(dirname(fileURLToPath(import.meta.url)),'sync','tracker-sync.mjs');
+const ACTOR=/^[^:\s]+:[^@\s]+@[^:\s]+:[^#\s]+#[^\s]+$/;
+
+function mechanism(args) {
+  const r=spawnSync(process.execPath,[MECHANISM,...args],{encoding:'utf8',maxBuffer:64*1024*1024});
+  if (r.error) throw new Error(`the store's mechanism could not be run: ${r.error.message}`);
+  return r;
 }
+function said(r) {return `${(r.stderr||'').trim()} ${(r.stdout||'').trim()}`.trim();}
+
 export function claim(id, {actor, checkout='HEAD'} = {}) {
-  if (!id || !/^[^:\s]+:[^@\s]+@[^:\s]+:[^#\s]+#[^\s]+$/.test(actor || '')) {
+  if (!id || !ACTOR.test(actor || '')) {
     throw new Error('claim needs an issue id and --actor <harness-role:person@machine:branch#session>');
   }
-  const version = /\bbr\s+(\d+)\.(\d+)\.(\d+)\b/.exec(br(['--version']));
-  if (!version || Number(version[1]) === 0 && Number(version[2]) < 7) {
-    throw new Error('Guarded claim needs br >=0.7.0 (--if-unchanged); upgrade br, never use a manual --force fallback');
-  }
-  // Do not judge an old checkout export: every worktree uses the main store.
-  // Flush normally, without any export/import force or guard waiver.
-  br(['sync','--flush-only','--export-parallelism','1']);
-  const location = JSON.parse(br(['where','--json']));
-  if (!location.jsonl_path) throw new Error('br where did not report its authoritative jsonl_path');
-  const rows = parseJsonl(readFileSync(location.jsonl_path,'utf8'));
-  const snapshot = normalize(rows, 'br authoritative flushed export');
-  const target = rows.find(row => row.id === id && row.status !== 'tombstone');
-  if (!target || !target.updated_at) throw new Error(`${id}: no live target with updated_at`);
+  // The store as every machine has it now: a read that cannot reach the remote
+  // says so, and the claim below would refuse anyway (it must reach the remote).
+  const snapshot=read([]);
   const merged = revision => {
     const sha = String(revision || '').split('@').pop();
     if (!sha) return false;
-    try {
-      execFileSync('git',['merge-base','--is-ancestor',sha,checkout],{stdio:'ignore'});
-      return true;
-    } catch { return false; }
+    return spawnSync('git',['merge-base','--is-ancestor',sha,checkout],{stdio:'ignore'}).status===0;
   };
   const candidate = readyLeaves(snapshot.issues,{merged}).find(issue => issue.id === id);
   if (!candidate) throw new Error(`${id}: not an open, unheld, ready leaf in checkout ${checkout}; no claim attempted`);
-  const by = new Map(snapshot.issues.map(issue => [issue.id,issue]));
-  const override = candidate.blockedBy.some(dep => by.get(dep)?.status === 'implemented');
-  const args = ['update',id,'--claim','--actor',actor,'--if-unchanged',target.updated_at];
-  // The ONLY approved waiver is br's closed-only advisory dependency check,
-  // after project readiness/ancestry guards pass. Native exclusive ownership,
-  // target timestamp CAS and terminal-state checks are not waived by --force.
-  if (override) args.push('--force');
-  return br(args);
+  const held=mechanism(['claim','--item',id,'--holder',actor]);
+  if (held.status===3) throw Object.assign(new Error(`claim lost: ${said(held)}`),{lost:true});
+  if (held.status!==0) throw new Error(`the claim was not made (exit ${held.status}): ${said(held)}`);
+  // The holder alone leaves the item open; the claim is the holder and the
+  // active status together, each published before it counts.
+  const active=mechanism(['transition','--item',id,'--to','in_progress','--expect','open']);
+  if (active.status!==0) throw new Error(`${id} is held by ${actor} but could not be made active (exit ${active.status}): ${said(active)}; release or retry it`);
+  return `${id} claimed by ${actor}, active, on the remote\n`;
 }
 function main(argv) {
   const [id,...rest] = argv;
   if (id === '--help') {
-    console.log('claim.mjs <id> --actor <full-agent-name> [--checkout <revision>]\nRequires br >=0.7.0. No caller --force option.');
+    console.log('claim.mjs <id> --actor <full-agent-name> [--checkout <revision>]\nExit 3 when the claim was lost to another holder.');
     return 0;
   }
   const options = {};
@@ -66,7 +68,7 @@ function main(argv) {
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   try {process.exitCode=main(process.argv.slice(2));}
   catch(error) {
-    console.error(`Guarded claim refused: ${error.stderr?.toString().trim() || error.message}`);
-    process.exitCode=1;
+    console.error(`Guarded claim refused: ${error.message}`);
+    process.exitCode=error.lost?3:1;
   }
 }

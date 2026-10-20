@@ -1,10 +1,17 @@
 #!/bin/sh
-# pre-push — what this push introduces, checked for task links.
+# pre-push — what this push introduces, checked for task links, and the pushed
+# tip recorded in the tracker's store.
 #
 # For each ref being pushed: the commits of its tip that no ref the remote
 # already holds reaches. A tag, or a new branch, on a commit the remote already
 # holds introduces nothing and passes with "nothing to check". A hook given no
 # ref lines is refused: an empty input is an error, never a pass.
+#
+# The tracker lives outside the code branches: CI reads the state the store
+# recorded under the pushed tip's own name (docs/backlog-integration.md). The
+# post-commit hook records each commit in the background; a tip it missed is
+# recorded here when it is this checkout's HEAD, and refused otherwise, because
+# a later state is not that revision's.
 #
 # Product suites are NOT here, deliberately: a push has to be cheap or people
 # learn to pass hooks with --no-verify. CI is the source of truth.
@@ -36,21 +43,28 @@ while IFS= read -r line; do
 ' "$remote_ref"
         continue
     fi
-    # The export the checked commits resolve tasks against: the newest snapshot
-    # this history reaches (feature branches do not carry the export; main and land/* branches do).
-    export_at=$(git rev-list -1 HEAD -- .beads/issues.jsonl 2>/dev/null || true)
     before_args=""
     if [ "$remote_sha" != "0000000000000000000000000000000000000000" ] &&
         git rev-parse -q --verify "$remote_sha^{commit}" >/dev/null 2>&1; then
         before_args="--before $remote_sha"
     fi
-    if [ -n "$export_at" ]; then
-        export_args="--export-at $export_at"
-    else
-        export_args=""
+    if [ -f "$gate/sync/tracker-sync.mjs" ] && ! node "$gate/recorded.mjs" "$local_sha"; then
+        if [ "$local_sha" = "$(git rev-parse HEAD)" ]; then
+            env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE node "$gate/sync/tracker-sync.mjs" record --revision "$local_sha" \
+                --checkout "$(git rev-parse --show-toplevel)" --recipe "$gate/sync/trackers/br.mjs" || {
+                printf 'pre-push: %s could not be recorded in the tracker store (lines above); CI would refuse it\n' "$local_sha" >&2
+                status=1
+                continue
+            }
+        else
+            printf 'pre-push: %s (%s) has no recording in the tracker store and is not this checkout'"'"'s HEAD.\n' "$local_sha" "$remote_ref" >&2
+            printf '          Check it out (its post-commit hook records it) or commit on it, then push again.\n' >&2
+            status=1
+            continue
+        fi
     fi
     # shellcheck disable=SC2086
-    if ! node "$gate/commits.mjs" --introduced "$local_sha" --by "$remote_ref" $before_args $export_args; then
+    if ! node "$gate/commits.mjs" --introduced "$local_sha" --by "$remote_ref" $before_args; then
         status=1
     fi
 done <<EOF

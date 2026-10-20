@@ -30,3 +30,6 @@ data/
 
 # Coverage
 coverage/
+
+# The link to this machine's tracker store, outside every branch (docs/backlog-integration.md, Tracker layout)
+.beads

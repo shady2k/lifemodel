@@ -67,20 +67,31 @@ the repository's installation, and each person's plugin and hooks are their own.
 
 ### Checks and execution
 
-- **Backlog adapter:** `node .backlog/adapter.mjs` (default: the working
-  tree's `.beads/issues.jsonl`; `--at <rev>` reads it as committed at a
-  revision — `:0` the staged copy, `HEAD` the last commit; `--jsonl <file>`
-  reads any beads-format export). It never opens br's database: `br` resolves
-  the main checkout's database from every worktree, so it would answer about
-  the wrong branch; the tracked export is the only copy git can show at
-  another revision. A status the adapter does not map is refused (exit 2);
-  tombstones are dropped.
+- **Backlog adapter:** `node .backlog/adapter.mjs`. The tracker lives outside
+  the code branches (**Tracker layout**), so it reads the store, never a code
+  tree: by default the store as it is now, after a sync with the remote (an
+  unreachable remote is said on stderr and in the `source` line: this machine's
+  store only); `--offline` skips the sync; `--at <rev>` the state the store
+  recorded under that revision's own name, refused (exit 2) where there is
+  none; `--at-or-before <rev>` the newest recording among the revision and its
+  ancestors, named in `source`; `--ref <ref>` reads the store from a ref's tree
+  instead of this machine's store worktree (CI: `refs/tracker/state`);
+  `--jsonl <file>` any beads-format export. A status the adapter does not map is
+  refused (exit 2); tombstones are dropped. `node .backlog/recorded.mjs <rev>`
+  says whether this machine's store recorded a revision (the pre-push hook).
 - **Rules:** `.backlog/rules/check.mjs` with `time-format.mjs` beside it,
   `check-commits.mjs`, `check-docs.mjs`, `check-product.mjs`, and `check-present.mjs` with
   `document-format.mjs` beside it — byte-for-byte copies of shady2k-skills
-  0.115.0's `skills/backlog/setup-shady2k-skills/` at setup version 0.46.0,
+  0.121.0's `skills/backlog/setup-shady2k-skills/` at setup version 0.51.0,
   never edited here. Their `--version` is the installation. Proving it: `cmp`
   each against the plugin copy.
+- **Charter outcomes:** none with ids yet. The rules that read them
+  (`orphaned-outcome`, `unobservable-first-stage`, `unserved-outcome`), the
+  vision's journeys and principles with ids, `Serves:` lines and `codePaths`
+  are adopted with the next charter, `observability-1` (owner, 2026-10-20, at
+  the 0.51.0 setup: adopting them on motor-1, whose three features are not yet
+  staged and with no document gate, would refuse every landing and every
+  feature commit). Until then they report nothing and `codePaths` is absent.
 - **Present documents:** the config's `presentDocuments` — `AGENTS.md`,
   `README.md`, `docs/architecture.md`, `docs/concepts/*.md`,
   `docs/features/**/*.md`, `docs/plugins/*.md`. `npm run present` runs the
@@ -105,41 +116,75 @@ the repository's installation, and each person's plugin and hooks are their own.
   way; where the record still matters it is then written again with the run
   script. `timeRecordsExempt` is empty: time records are adopted by this setup
   and no unclaimed work was in flight.
-- **Tracker layout:** the store is `br` (beads_rust 0.7): one SQLite database
-  per machine under the main checkout's `.beads/`, which `br` resolves from
-  every worktree; its JSONL export `.beads/issues.jsonl` is a tracked file.
+- **Tracker layout:** the store is `br` (beads_rust 0.7) and lives **outside
+  the code branches** (lifemodel-hsyc, owner at the instance-1 retrospective,
+  moved at the 0.51.0 setup on 2026-10-20). One store per machine: a worktree of
+  this repository detached at `refs/tracker/state`, a ref no branch contains,
+  parked at `$XDG_STATE_HOME/lifemodel/tracker` (`~/.local/state/lifemodel/tracker`;
+  named after the main checkout, so every worktree of the machine reaches the
+  one store). It holds `.beads/issues.jsonl`, `.beads/beads.base.jsonl` and
+  `.beads/config.yaml` (the state files the recipe carries between machines,
+  `claim_exclusive` among them), `.tracker-sync/recordings/<sha>.jsonl` (the
+  state under each code revision's own name, written once and never moved) and
+  `.tracker-sync/machines.json` (machine ordinals). br's database there is this
+  machine's own, rebuilt from the state files, never committed. The project's
+  statuses (`submitted`, `implemented`) are br's policy file, which the recipe
+  does not carry: `.backlog/br-policy.yaml` is the project's copy, and `npm run
+  connect` installs it as the store's `.beads/policy.yaml`. Every checkout and
+  worktree has `.beads` as a link to the store's `.beads` (ignored in
+  `.gitignore`); a new worktree gets it from the post-checkout hook. No code
+  branch carries a tracker record, and the pre-commit hook refuses a staged path
+  under `.beads`. The tracker at a code revision is the store's recording of it
+  (`adapter.mjs --at`), never the revision's tree; the last in-tree revision,
+  `d2354717` (main before the move), was recorded from its own committed export.
+  A branch from before the move still tracks a real `.beads` folder: checking it
+  out replaces the link with that folder (the store is untouched; proved), and
+  switching back relinks it (post-checkout); a folder holding a tracker is
+  refused and named, never overwritten. Pushing `refs/tracker/state` starts no
+  workflow: GitHub's push event fires for branches and tags only, and the
+  project's run list after the first push showed none (proof on lifemodel-hsyc).
   `main` is protected (owner, 2026-10-08): it takes changes only through pull
-  requests with green `changes`, `ci-product` and `ci-backlog`, admins
-  included, so nothing is pushed to it directly. The export reaches `main`
-  only on a session's **landing branch**, `land/<name>`, cut from
-  `origin/main`, which carries the session's bookkeeping (the export, lessons,
-  document edits; never product code) and lands by one pull request at the
-  session's end, merged by the owner. The pre-commit hook refuses the export
-  staged on any other branch but `main` (a commit there cannot be pushed) -
-  with one carve-out: the seeding commit of the installation itself (a tree
-  whose HEAD has no `.backlog/config.json` yet) may carry it, because before
-  it lands, `main` has no tracker file at all. The tracker at a code revision
-  is the export as committed at it (`adapter.mjs --at <rev>`); on a branch
-  that does not carry the export, the newest snapshot the history reaches is
-  the honest answer (that is what the pre-push hook and CI use). `br sync
-  --merge` is never used to catch up: it tombstones what the export lacks;
-  `br sync --import-only` builds a fresh clone's database from the export.
-- **Landing a session:** `br sync --flush-only` writes the database to the
-  **main checkout's** export (br resolves it from every worktree); copy that
-  file into the landing worktree, run the gate there (`npm run backlog`),
-  commit naming the task it records, push the branch and open one pull request
-  (its CI is `changes` and `ci-backlog`, seconds; `ci-product` is skipped for
-  the export and documents). After the owner merges, bring the main checkout to
-  the merge without letting `br` import an older export: in one command, copy
-  `.beads/issues.jsonl` aside, `git checkout -- .beads/issues.jsonl`,
-  `git pull --ff-only`, copy it back (the database is newer than any merged
-  snapshot).
-- **Run script inputs in a worktree:** a worktree's own `.beads/issues.jsonl`
-  is the snapshot of its branch, not the tracker; a worker reads the tracker
-  for `runs.mjs` as `node .backlog/adapter.mjs --jsonl
-  /home/dev/repos/lifemodel/.beads/issues.jsonl` (the main checkout's export,
-  which br keeps flushed), refreshed after its own br writes. A stale export
-  made a worker's receipt miss its own claim (lifemodel-ggc run).
+  requests with green `changes`, `ci-product` and `ci-backlog`, admins included.
+- **Tracker synchronization:** `.backlog/sync/tracker-sync.mjs` with the recipe
+  `.backlog/sync/trackers/br.mjs` and the systemd template
+  `.backlog/sync/supervisors/systemd-user/tracker-sync.service`, byte-for-byte
+  copies of shady2k-skills 0.121.0 (`tracker-sync.version`; `node
+  .backlog/sync/tracker-sync.mjs status --expect-version <the set's version>`
+  says whether this copy is behind). The supervisor is the systemd `--user`
+  unit `lifemodel-tracker-sync.service`, rendered and started by `sh
+  scripts/tracker-sync-service.sh install` (the owner's decision per machine:
+  it changes what runs there), running `watch --interval 10 --debounce 2
+  --max-age 5`: a change is published 2 s after the last write or 5 s at most,
+  and the other machines' state is taken every 10 s; every network operation is
+  killed after 10 s (push) or 20 s (fetch). Keeping it after logout and reboot
+  needs `loginctl enable-linger <user>`. A claim and a status transition through
+  the mechanism (`claim`, `transition`) are written against the state just
+  merged from the remote and count only once they are on it; a lost one is exit
+  3, said, and nothing is left behind. Two machines claiming one item in the same
+  seconds can both believe they hold it until the next sync; after it every
+  machine shows one holder. The merge is per item: comments (records) only
+  append and keep both sides, a field changed on two sides takes the tracker's
+  order and the overwritten value is kept on the item, and where that cannot
+  separate them the order on the ref decides. While the remote is unreachable,
+  writes continue in the store and are published within seconds of its return;
+  a read that needs every machine's state says the remote is unreachable. Each
+  revision is recorded by the post-commit and post-merge hooks (in the
+  background) and again by pre-push for the pushed tip. A record (a `br`
+  comment) posted on one machine keeps its id on every machine only while one
+  machine writes: two machines posting records should post through the
+  recipe's `post`, which gives globally unique ids (not yet wired; this
+  project has one machine, vm-agents). Proved at installation on this machine;
+  a real reboot and a second real machine are not proved yet.
+- **Landing a session:** nothing to land for the tracker: every write is
+  published by the sync within seconds, and no branch carries it. A session ends
+  with `node .backlog/sync/tracker-sync.mjs status` showing nothing queued
+  locally. Bookkeeping that is a document (lessons, docs edits) lands like any
+  change, on a branch named for its task. After a pull request merges, the main
+  checkout fast-forwards with `git pull --ff-only`; nothing about the tracker is
+  copied.
+- **Run script inputs in a worktree:** every checkout reads the same store;
+  the run script's `--backlog` is the adapter's export written to a file
+  (`node .backlog/adapter.mjs > <file>`), refreshed after one's own br writes.
 - **Product-document form check:** `.backlog/rules/check-product.mjs` runs
   unconditionally in both commit-hook paths on `--staged`, preserving Git's
   commit-specific index, and in `ci-backlog` on the PR head or pushed revision
@@ -156,37 +201,46 @@ the repository's installation, and each person's plugin and hooks are their own.
   (a receipt reports a run of work, not a change to a revision, so no check on
   the change can verify it — `main` takes changes only through pull requests
   with green required checks).
-- **Backlog gate:** `npm run backlog` (`node .backlog/gate.mjs --worktree`) by
-  hand; in the pre-commit hook it judges the **staged** export
-  (`--at :0`) against `HEAD` (`--base <rev>` to override), each judged by the
-  config of its own day, under the config's strength (`block-new`). A base
-  that predates the installation (no export at it) is the empty backlog —
-  everything this change adds is new, honestly. A merge is judged against
-  both parents (`merge-gate.mjs`): an error is new only when it is new
-  against HEAD and against the other parent.
+- **Backlog gate:** `npm run backlog` (`node .backlog/gate.mjs`): the store now
+  (synced) judged against the newest recording at or before `HEAD` (`--base
+  <rev>` to override), each judged by the config of its own day, under the
+  config's strength (`block-new`); a history with no recording is the empty
+  backlog, said in its `baseline:` line. The pre-commit hook runs it with
+  `--offline` (a commit does not wait on the remote). CI runs `gate.mjs --head
+  <sha> --base <sha> --ref refs/tracker/state`, the recording of the pull
+  request's head (`--head-or-before` on a push to main, whose merge commit
+  GitHub made and nobody recorded). A merge in progress is judged against both
+  parents (`merge-gate.mjs`): an error is new only when it is new against HEAD
+  and against the other parent.
 - **JSON report:** `npm run backlog:json`.
 - **Commit-link input and check:** `node .backlog/commits.mjs
-  --message-file <f>` (the pending message; tasks from br's own export, so a
-  task filed a minute ago resolves), `--range <base>..<head>` (every commit
-  the range introduces), or `--introduced <tip> --by <ref> [--before <sha>]`
-  (what a push of `<ref>` introduces: the commits of its tip that no other
-  remote ref reaches; none is a pass that says so). `--export-at <rev>`
-  resolves tasks from the export at a revision. An empty range is exit 2,
-  never a pass. Its tests: `node --test .backlog/commits.test.mjs` (a scratch
-  remote); the adapter's: `node --test .backlog/adapter.test.mjs`; ready's:
-  `node --test .backlog/ready.test.mjs`; the merge gate's:
-  `node --test .backlog/merge-gate.test.mjs`.
-- **Local entry points:** `.githooks/pre-commit` (tracker layout guard, then
-  the backlog gate when the export or the gate is staged),
-  `.githooks/commit-msg` (commit links), `.githooks/pre-push` (the introduced
-  range per pushed ref; no ref lines is refused), `.githooks/pre-merge-commit`
-  (delegates to pre-commit). A hook that cannot find what it reads refuses and
-  names `npm run connect`. `scripts/connect-clone.sh` also appends the gate to
-  `.husky/pre-commit` and `.husky/commit-msg`, marked and idempotently: husky
-  (an `npm ci`) sets `core.hooksPath=.husky/_`, and with the blocks in place
-  the gate runs whichever hooks directory is active — husky's product checks
-  (lint-staged, then the isolated check through `scripts/test-isolated.mjs`)
-  included.
+  --message-file <f>` (the pending message), `--range <base>..<head>` (every
+  commit the range introduces), or `--introduced <tip> --by <ref> [--before
+  <sha>]` (what a push of `<ref>` introduces: the commits of its tip that no
+  other remote ref reaches; none is a pass that says so). Tasks resolve against
+  the store **as it is now**, never as a revision held it, so a task filed
+  after a branch was cut resolves for its commits: this machine's store locally
+  (offline for the message, synced for a push), `--tracker-ref
+  refs/tracker/state` in CI. An empty range is exit 2, never a pass. Tests:
+  `node --test .backlog/commits.test.mjs` (a scratch remote and a store ref),
+  `node --test .backlog/adapter.test.mjs`, `node --test .backlog/ready.test.mjs`,
+  `node --test .backlog/merge-gate.test.mjs`, and `node --test
+  .backlog/claim.test.mjs` (a real store on a scratch remote).
+- **Local entry points:** `.githooks/pre-commit` (the product-document check,
+  the tracker guard — no staged path under `.beads` — then the backlog gate,
+  offline), `.githooks/commit-msg` (commit links), `.githooks/pre-push` (the
+  pushed tip recorded in the store, recorded now when it is HEAD and refused
+  otherwise, then the introduced range per pushed ref; no ref lines is
+  refused), `.githooks/pre-merge-commit` (delegates to pre-commit),
+  `.githooks/post-commit` and `.githooks/post-merge` (record the revision in the
+  store, in the background, never failing), `.githooks/post-checkout` (relink
+  `.beads` to the store). The last three carry the mechanism's marker lines
+  and portable commands, so `tracker-sync.mjs connect` accepts the tracked
+  folder and writes no hook of its own. A hook that cannot find what it reads
+  refuses and names `npm run connect`. `scripts/connect-clone.sh` also appends
+  the gate to `.husky/pre-commit` and `.husky/commit-msg`, marked and
+  idempotently; husky's hooks folder has no record steps, so a checkout on
+  `.husky/_` records revisions only at push (lifemodel-j6n9 is the fix).
 - **The hooks directory is `.githooks`, not husky's `.husky/_`:** the gate
   hooks must fire in a clone that has not run `npm ci` (agents' worktrees
   never do), and `.githooks` needs only `node` and `git`. The product checks
@@ -198,24 +252,30 @@ the repository's installation, and each person's plugin and hooks are their own.
   whose paths include product code — and when the `changes` job that decides
   that did not succeed — and is skipped for one that cannot touch it.
 - **Connecting a clone:** `npm run connect` (`scripts/connect-clone.sh`). It
-  checks `git`, `node`, `br`, the four hooks, the gate's files and a readable
-  `.backlog/config.json`, reports everything missing in one run and connects
-  nothing until nothing is missing; then it sets `core.hooksPath .githooks`,
-  imports the tracked backlog into br's database (`br sync --import-only`),
-  appends the marked gate blocks to the husky hooks, and runs the gate once
-  (`--worktree`); exit 2 disconnects the proof and fails the connect. Safe to
-  rerun. With no `node_modules` it still connects and says the product checks
-  are skipped until `npm ci` — a message that is already stale under the
-  launcher wiring (the suite needs the isolated launcher; husky's
-  `lint-staged` still needs host development dependencies), `lifemodel-z5e`.
+  checks `git`, `node`, `br`, the seven hooks, the gate's and the mechanism's
+  files and a readable `.backlog/config.json`, refuses a real `.beads` tracker
+  folder from before the move (move it aside), reports everything missing in
+  one run and connects nothing until nothing is missing; then it sets
+  `core.hooksPath .githooks`, runs `tracker-sync.mjs connect` for this
+  checkout (the machine's store made from the remote's ref where it has none,
+  `.beads` linked to it), installs the project's br policy into the store,
+  appends the marked gate blocks to the husky hooks, checks that the sync runs
+  (the systemd unit, or a `watch` started by hand) and fails naming
+  `scripts/tracker-sync-service.sh install` where it does not, and runs the gate
+  once offline; exit 2 fails the connect. Safe to rerun. With no
+  `node_modules` it still connects and says the product checks are skipped
+  until `npm ci` — a message that is already stale under the launcher wiring,
+  `lifemodel-z5e`.
 - **CI:** `ci-backlog` in `.github/workflows/ci.yml`, on pull requests to
-  `main` and pushes to `main`, node 24, `fetch-depth: 0`, no npm install. The
-  backlog baseline is the PR's merge base or the push's `before` (else
-  `HEAD^`), with the export judged at each end by its own day's config. The
-  commit range is merge base..PR head on a pull request (never GitHub's
-  synthetic merge; an empty range is an error) and `commits.mjs --introduced`
-  on a push. The present-documents check runs on pull requests only. Tasks
-  resolve from the newest export the checked history reaches. `ci-product` is
+  `main` and pushes to `main`, node 24, `fetch-depth: 0`, no npm install; it
+  fetches `refs/tracker/state` and fails if it cannot. The backlog baseline is
+  the newest recording at or before the PR's merge base or the push's `before`
+  (else `HEAD^`), the head the recording of the PR's head (at or before, on a
+  push), each judged by its own day's config. The commit range is merge
+  base..PR head on a pull request (never GitHub's synthetic merge; an empty
+  range is an error) and `commits.mjs --introduced` on a push. The
+  present-documents check runs on pull requests only. Tasks resolve against the
+  store ref as it is now. `ci-product` is
   the product checks and needs the `changes` job in front of it: `changes` reads
   the change's paths with `git diff --no-renames` for range merge base...head on
   a pull request or `before..after` on a push (a `before` this checkout cannot
@@ -323,7 +383,9 @@ the repository's installation, and each person's plugin and hooks are their own.
   itself as assignee; otherwise the gate reads the span as ended with no
   receipt. `submitted` and `implemented` take their comment atomically:
   `br update <id> --status implemented --transition-comment "implemented: ..."`;
-  a separate comment does not satisfy `.beads/policy.yaml`. A worker's span in
+  a separate comment does not satisfy the store's `.beads/policy.yaml`. Such a
+  transition is a br write the sync publishes within seconds; it counts once
+  `node .backlog/sync/tracker-sync.mjs status` shows nothing queued. A worker's span in
   prime-agent gets a measured receipt (`receipt --end finished --harness
   prime-agent --session <id>`): the run script reads its transcript. The
   worker posts it as its last record, after the work, so the span covers it.
@@ -337,7 +399,7 @@ what this protocol adds is listed.
 | --- | --- |
 | create | `br create "<title>" -t task\|bug\|epic -l <milestone>,<area> -d "<body with DONE WHEN for an epic>" [--parent <id>] [--acceptance ...] --silent` |
 | link / unlink | `br dep add <consumer leaf> <producer leaf>` (`blocks`), the reason and what releases it in a comment; provenance is `discovered-from`, which the adapter never reads as a dependency |
-| claim | `node .backlog/claim.mjs <id> --actor '<harness>-<role>:<person>@<machine>:<branch>#<session>' [--checkout <revision>]`, then the record `runs.mjs claim` prints. Requires `br >=0.7.0`: reads the authoritative flushed tracker, checks an open unheld ready leaf and revision ancestry, then uses native exclusive `--claim --if-unchanged`. Only a satisfied implemented prerequisite permits the internal `--force` advisory-readiness override. Direct/manual `--force` is not the workflow; unknown, held, unmerged, cross-feature or stale-target claims refuse without a claim mutation. No early closure or edge removal |
+| claim | `node .backlog/claim.mjs <id> --actor '<harness>-<role>:<person>@<machine>:<branch>#<session>' [--checkout <revision>]`, then the record `runs.mjs claim` prints. Reads the store synced with the remote, checks an open unheld ready leaf and revision ancestry, then claims through the mechanism (`tracker-sync.mjs claim`, then `transition --to in_progress --expect open`), each counted once it is on the remote; a lost claim is exit 3, said, with nothing left behind. Unknown, duplicate or incomplete options, a malformed actor and an unready leaf refuse without a claim |
 | release | `br update <id> --status open --assignee '' --actor ...`; submitted and implemented work keeps its status |
 | implemented | coordinator: `br update <id> --status implemented --assignee '' --transition-comment 'implemented: <rev> -- <checks>' --actor ...` |
 | submitted | worker: `br update <id> --status submitted --assignee '' --transition-comment 'submitted: <branch>@<rev> -- <evidence>' --actor ...`; the coordinator then takes the assignee |
@@ -351,7 +413,7 @@ what this protocol adds is listed.
 | pending integration / acceptance | `br list --status submitted` / `br list --status implemented` |
 | children | `br show <id>` lists them, every status; or the adapter's export filtered on `parent` |
 | search / show | `br search`, `br show <id>`, `br list -l <area>` |
-| publish | at the session's end, on `land/<name>` from `origin/main`: `br sync --flush-only`, copy the main checkout's export in, gate clean, commit naming the task it records, push, one pull request the owner merges; then fast-forward the main checkout as **Landing a session** says |
+| publish | the sync publishes every write within seconds; `node .backlog/sync/tracker-sync.mjs publish` pushes now, and `status` shows what is queued. Nothing lands on a branch |
 
 When a skill reports the installation is out of date, run `setup-shady2k-skills`. An explicit
 setup invocation rechecks everything even if its recorded version matches.

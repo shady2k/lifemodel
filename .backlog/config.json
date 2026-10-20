@@ -87,5 +87,14 @@
     "beads",
     "br ",
     ".beads"
-  ]
+  ],
+  "openQuestions": "one-at-a-time",
+  "jev": {
+    "consent": true,
+    "route": "openrouter",
+    "idPattern": "\\blifemodel-[a-z0-9]{3,4}(?:\\.[0-9]+)*\\b",
+    "maskPatterns": [],
+    "sure": 0.9,
+    "model": "jev-1.13"
+  }
 }

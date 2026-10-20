@@ -133,10 +133,10 @@ describe('the disposable launch boundary', () => {
       writeFileSync(join(root, 'package.json'), '{}');
       writeFileSync(join(root, 'package-lock.json'), '{}');
       mkdirSync(join(root, 'outside'));
-      writeFileSync(join(root, 'outside', 'issues.jsonl'), '{}');
-      symlinkSync(join(root, 'outside'), join(root, '.beads'));
+      writeFileSync(join(root, 'outside', 'note.md'), '{}');
+      symlinkSync(join(root, 'outside'), join(root, 'docs'));
       expect(() => stageSnapshot(root, join(root, 'snapshot'))).toThrow(/symlink/);
-      rmSync(join(root, '.beads'));
+      rmSync(join(root, 'docs'));
       writeFileSync(join(root, 'outside', 'policy'), 'legacy-peer-deps=true');
       symlinkSync(join(root, 'outside', 'policy'), join(root, '.npmrc'));
       expect(() => stageSnapshot(root, join(root, 'snapshot2'))).toThrow(/symlink/);
@@ -244,19 +244,33 @@ describe('the disposable launch boundary', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+  it('leaves out the link to the tracker store, whose records are not test input', () => {
+    const root = mkdtempSync(join(tmpdir(), 'snapshot-tracker-link-'));
+    try {
+      writeFileSync(join(root, 'package.json'), '{}');
+      writeFileSync(join(root, 'package-lock.json'), '{}');
+      mkdirSync(join(root, 'store'));
+      writeFileSync(join(root, 'store', 'issues.jsonl'), '{}');
+      symlinkSync(join(root, 'store'), join(root, '.beads'));
+      const destination = stageSnapshot(root, join(root, 'snapshot'));
+      expect(existsSync(join(destination, '.beads'))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   it('normalizes snapshot-only permissions for the non-root Docker copy', () => {
     const root = mkdtempSync(join(tmpdir(), 'snapshot-modes-'));
     try {
       writeFileSync(join(root, 'package.json'), '{}');
       writeFileSync(join(root, 'package-lock.json'), '{}');
-      mkdirSync(join(root, '.beads'));
-      writeFileSync(join(root, '.beads', 'issues.jsonl'), '{}', { mode: 0o600 });
+      mkdirSync(join(root, 'docs'));
+      writeFileSync(join(root, 'docs', 'note.md'), '{}', { mode: 0o600 });
       mkdirSync(join(root, 'scripts'));
       writeFileSync(join(root, 'scripts', 'tool.sh'), '#!/bin/sh', { mode: 0o700 });
       const destination = stageSnapshot(root, join(root, 'snapshot'));
-      expect(statSync(join(destination, '.beads', 'issues.jsonl')).mode & 0o777).toBe(0o644);
+      expect(statSync(join(destination, 'docs', 'note.md')).mode & 0o777).toBe(0o644);
       expect(statSync(join(destination, 'scripts', 'tool.sh')).mode & 0o777).toBe(0o755);
-      expect(statSync(join(root, '.beads', 'issues.jsonl')).mode & 0o777).toBe(0o600);
+      expect(statSync(join(root, 'docs', 'note.md')).mode & 0o777).toBe(0o600);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
