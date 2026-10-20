@@ -122,6 +122,18 @@ export function createSettingsStore(deps: SettingsStoreDeps): SettingsStore {
     problems = [problem];
   }
 
+  // One serial queue per store: a settings read-modify-write transaction -
+  // validate, allocate the revision, write the file, project - never overlaps
+  // another, and projection attempts run in submission order, so an older
+  // attempt can neither overwrite a newer projection nor mark success after a
+  // newer failure.
+  let transactions: Promise<unknown> = Promise.resolve();
+  function serialize<T>(task: () => Promise<T>): Promise<T> {
+    const run = transactions.then(task, task);
+    transactions = run.catch(() => undefined);
+    return run;
+  }
+
   return {
     load: async () => {
       problems = [];
@@ -206,28 +218,32 @@ export function createSettingsStore(deps: SettingsStoreDeps): SettingsStore {
         projection,
       };
     },
-    set: async (key, value) => {
-      const check = registry.validate(key, value);
-      if (!check.ok) throw new SettingsWriteError(check.reasonCode, check.reason, check.limit);
-      const typed = check.value;
-      const next: StoredSettings = {
-        revision: stored.revision + 1,
-        values: { ...stored.values, [key]: typed },
-      };
-      await fs.writeFileAtomic(path, `${JSON.stringify(document(next), null, 2)}\n`, FILE_MODE);
-      stored = next;
-      problems = problems.filter((problem) => problem.key !== key);
-      await attemptProjection();
-      return { value: typed, revision: next.revision };
-    },
-    projectNow: () => attemptProjection(),
+    set: (key, value) =>
+      serialize(async () => {
+        const check = registry.validate(key, value);
+        if (!check.ok) throw new SettingsWriteError(check.reasonCode, check.reason, check.limit);
+        const typed = check.value;
+        // The revision is allocated inside the serial section, from the state
+        // the previous transaction committed.
+        const next: StoredSettings = {
+          revision: stored.revision + 1,
+          values: { ...stored.values, [key]: typed },
+        };
+        await fs.writeFileAtomic(path, `${JSON.stringify(document(next), null, 2)}\n`, FILE_MODE);
+        stored = next;
+        problems = problems.filter((problem) => problem.key !== key);
+        await projectNow();
+        return { value: typed, revision: next.revision };
+      }),
+    projectNow: () => serialize(() => projectNow()),
   };
 
   function document(state: StoredSettings): StoredDocument {
     return { version: DOCUMENT_VERSION, revision: state.revision, values: state.values };
   }
 
-  async function attemptProjection(): Promise<void> {
+  /** One projection attempt over the current state; records the outcome, never throws. */
+  async function projectNow(): Promise<void> {
     if (!deps.projection) {
       projection = { state: 'ok' };
       return;

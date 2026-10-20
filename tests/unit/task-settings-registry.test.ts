@@ -44,6 +44,20 @@ const concurrency: SettingDeclaration = {
   apply: 'nextAdmission',
 };
 
+const other: SettingDeclaration = {
+  key: 'tasks.other',
+  section: 'tasks',
+  label: { en: 'Other tasks', ru: 'Другие задачи' },
+  description: { en: 'A second number setting.', ru: 'Вторая числовая настройка.' },
+  control: 'number',
+  dataClass: 'publicConfig',
+  default: 5,
+  min: 1,
+  max: 8,
+  authority: 'owner',
+  apply: 'nextAdmission',
+};
+
 describe('settings declaration registry', () => {
   it('registers a declaration and enumerates it', () => {
     const registry = createSettingsRegistry([concurrency]);
@@ -478,6 +492,44 @@ describe('settings file store', () => {
     expect(store.section().projection).toEqual({ state: 'ok' });
     expect(attempts).toBe(2);
   });
+
+  it('serializes projection attempts: an older attempt never marks success after a newer failure', async () => {
+    const root = storeRoot();
+    let setCalls = 0;
+    let releaseFirstProjection!: () => void;
+    const secondSetCalled = new Promise<void>((resolve) => {
+      releaseFirstProjection = resolve;
+    });
+    let projectCalls = 0;
+    const created = createStore(root, {
+      projection: {
+        project: async () => {
+          projectCalls += 1;
+          if (projectCalls === 1) await secondSetCalled;
+          else throw new Error('the API refused the newer write');
+        },
+      },
+    });
+    const raw = created.store;
+    const store = {
+      ...raw,
+      set: (key: string, value: unknown) => {
+        setCalls += 1;
+        if (setCalls === 2) releaseFirstProjection();
+        return raw.set(key, value);
+      },
+    };
+    await store.load();
+    const first = store.set('tasks.concurrency', 3);
+    const second = store.set('tasks.concurrency', 4);
+    await Promise.all([first, second]);
+    // The recorded outcome is the newest attempt's failure, not the older success.
+    expect(store.section().projection).toEqual({
+      state: 'failed',
+      reason: 'the API refused the newer write',
+    });
+    expect(store.section().values['tasks.concurrency']).toBe(4);
+  });
 });
 
 describe('settings HTTP routes', () => {
@@ -488,7 +540,13 @@ describe('settings HTTP routes', () => {
     for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   });
 
-  async function start(options: { settings?: SettingsHttp | null } = {}) {
+  type StartedStore = SettingsHttp & { load(): Promise<void> };
+  async function start(
+    options: {
+      settings?: SettingsHttp | null;
+      buildStore?: (loaderDir: string) => StartedStore;
+    } = {}
+  ) {
     const root = mkdtempSync(join(tmpdir(), 'settings-http-'));
     roots.push(root);
     mkdirSync(join(root, 'loader'), { recursive: true });
@@ -501,13 +559,16 @@ describe('settings HTTP routes', () => {
       replaceAuth: async () => undefined,
       readOnboarding: async () => ({ version: 1, step: 'done', completedAt: 'now' }),
     } as unknown as LoaderState;
-    const store = createSettingsStore({
-      fs: createNodeFileSystem(),
-      config: { loaderDir: join(root, 'loader') },
-      registry: createSettingsRegistry([concurrency, secretDeclaration]),
-      clock: createTestClock(),
-      logger: createRecordingLogger([]),
-    });
+    const store: StartedStore =
+      options.buildStore !== undefined
+        ? options.buildStore(join(root, 'loader'))
+        : createSettingsStore({
+            fs: createNodeFileSystem(),
+            config: { loaderDir: join(root, 'loader') },
+            registry: createSettingsRegistry([concurrency, secretDeclaration]),
+            clock: createTestClock(),
+            logger: createRecordingLogger([]),
+          });
     await store.load();
     const loader = createLoaderHttp({
       state,
@@ -659,6 +720,97 @@ describe('settings HTTP routes', () => {
     ).toBe(404);
     const foreign = await ask('/api/settings', { origin: 'https://elsewhere.example' });
     expect(foreign.status).toBe(403);
+  });
+
+  it('serializes overlapping PUTs: unique increasing revisions, both keys kept, newest projected', async () => {
+    let setCalls = 0;
+    let releaseFirstWrite!: () => void;
+    const secondSetCalled = new Promise<void>((resolve) => {
+      releaseFirstWrite = resolve;
+    });
+    let writes = 0;
+    let loaderDir = '';
+    const projected: Array<{
+      revision: number;
+      values: Record<string, boolean | number | string>;
+    }> = [];
+    const { ask, csrf } = await start({
+      buildStore: (dir) => {
+        loaderDir = dir;
+        const real = createNodeFileSystem();
+        const raw = createSettingsStore({
+          fs: {
+            ...real,
+            writeFileAtomic: async (path: string, contents: string, mode: number) => {
+              writes += 1;
+              // Hold the first write at the filesystem boundary until both
+              // requests have entered the store, making the overlap exact.
+              if (writes === 1) await secondSetCalled;
+              return real.writeFileAtomic(path, contents, mode);
+            },
+          },
+          config: { loaderDir: dir },
+          registry: createSettingsRegistry([concurrency, other, secretDeclaration]),
+          clock: createTestClock(),
+          logger: createRecordingLogger([]),
+          projection: {
+            project: async (content) => {
+              projected.push(structuredClone(content));
+            },
+          },
+        });
+        return {
+          ...raw,
+          set: (key: string, value: unknown) => {
+            setCalls += 1;
+            if (setCalls === 2) releaseFirstWrite();
+            return raw.set(key, value);
+          },
+        };
+      },
+    });
+    const token = csrf();
+    const [left, right] = await Promise.all([
+      ask('/api/settings/tasks.concurrency', {
+        method: 'PUT',
+        body: JSON.stringify({ value: 3 }),
+        csrf: token,
+      }),
+      ask('/api/settings/tasks.other', {
+        method: 'PUT',
+        body: JSON.stringify({ value: 4 }),
+        csrf: token,
+      }),
+    ]);
+    expect(left.status).toBe(200);
+    expect(right.status).toBe(200);
+    const revisions = [
+      (JSON.parse(left.body) as { revision: number }).revision,
+      (JSON.parse(right.body) as { revision: number }).revision,
+    ].sort((a, b) => a - b);
+    expect(revisions).toEqual([1, 2]);
+    const finalDocument = JSON.parse(readFileSync(join(loaderDir, 'settings.json'), 'utf8')) as {
+      version: number;
+      revision: number;
+      values: Record<string, number>;
+    };
+    expect(finalDocument).toEqual({
+      version: 1,
+      revision: 2,
+      values: { 'tasks.concurrency': 3, 'tasks.other': 4 },
+    });
+    const restarted = createSettingsStore({
+      fs: createNodeFileSystem(),
+      config: { loaderDir },
+      registry: createSettingsRegistry([concurrency, other, secretDeclaration]),
+      clock: createTestClock(),
+      logger: createRecordingLogger([]),
+    });
+    await restarted.load();
+    expect(restarted.section().values).toEqual({ 'tasks.concurrency': 3, 'tasks.other': 4 });
+    expect(restarted.section().revision).toBe(2);
+    expect(projected.map((content) => content.revision)).toEqual([1, 2]);
+    expect(projected.at(-1)?.values).toEqual({ 'tasks.concurrency': 3, 'tasks.other': 4 });
   });
 
   it('answers 503 storage_unavailable when the settings seam is not wired', async () => {
