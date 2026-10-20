@@ -52,7 +52,7 @@ capabilities are a separate question in part 3.
 | **DeepSeek Harness (`dsh`)** | Official developer-preview harness; headless profile takes stdin, emits JSON events and a final result; shell/files | **Not stock default.** Default DeepSeek Messages transport requires `x-api-key`; alternate OpenAI-compatible providers require provider configuration | Documents HTTPS_PROXY and custom CA; named sessions and headless cancellation/lifecycle need adapter mapping | MIT; preview, not a settled production contract. No OCI image measured |
 | **OpenCode 1.19.0 probed / 1.19.3 sources** | `run --format json`; shell/file tools; streamed tool/text/step events | **Yes in local probe.** `OPENCODE_CONFIG_CONTENT`, custom `@ai-sdk/openai-compatible`, `baseURL`, omit `apiKey` | HTTPS proxy + custom CA passed local probe. `--session` / `--continue`; server abort or terminate Job | MIT; active stable releases. Published 1.19.3 Linux x64 archive **60,716,380 bytes**; installed 1.19.0 payload **254,277,088 bytes**, before workbench tools |
 | **Codex CLI 0.163.0 sources** | `codex exec`, JSONL events and last-message output; shell/patch tools | Custom no-key provider possible via inline `-c` overrides, but **Responses API only**, not an arbitrary Chat Completions gateway | Standard proxy/client configuration; `exec resume`; terminate process/Job. Not locally exercised here | Apache-2.0; official OpenAI project. Linux x64 musl archive **112,589,966 bytes**; not final image size |
-| **Pi 1.3.0 sources** | Print / JSON / RPC and SDK; shell/read/edit/write | Custom providers documented through `models.json`, even local models require a dummy key; **fails strict gate** | Standard proxy support; saved sessions, RPC abort | MIT; upstream lineage, independently usable. Linux x64 archive **42,617,111 bytes**, not final image size |
+| **Pi 1.3.0 sources** | Print / JSON / RPC and SDK; shell/read/edit/write | Documented arbitrary OpenAI-compatible endpoints use `models.json` and a dummy key for unauthenticated servers; **fails strict gate** | Standard proxy support; saved sessions, RPC abort | MIT; upstream lineage, independently usable. Linux x64 archive **42,617,111 bytes**, not final image size |
 
 ### 2.3 Primary evidence and important distinctions
 
@@ -431,8 +431,8 @@ Its [Helm chart](https://github.com/deuxfleurs-org/garage/blob/v2.4.1/script/hel
 has singleNode mode and separate metadata/data PVCs, so it is **not** rejected
 for lacking Kubernetes support. The mismatches are authorization shape and
 [AGPLv3](https://github.com/deuxfleurs-org/garage/blob/v2.4.1/LICENSE) versus
-the other candidates' permissive licences. AGPL is a distribution obligation,
-not evidence of unsafe code. Its [recovery guide](https://github.com/deuxfleurs-org/garage/blob/v2.4.1/doc/book/operations/recovering.md)
+the other candidates' permissive licences. AGPL carries licensing/source-availability obligations, including for some
+modified network services; it is not evidence of unsafe code. Its [recovery guide](https://github.com/deuxfleurs-org/garage/blob/v2.4.1/doc/book/operations/recovering.md)
 does not make metadata-only snapshots sufficient for object recovery or turn
 one replica into disk redundancy. No image or runtime probe was spent on it.
 
@@ -457,8 +457,11 @@ Recommended custody arrangement (design inference, not implemented):
    needs broker-enforced prefix scope or a separate bucket, without equivalent
    native per-prefix STS defense in depth.
 3. For an approved relative filename, the broker canonicalizes the full key,
-   authorizes the operation/size, and issues a short-lived **single-method,
-   single-object** PUT or GET presign. All three stores support presigned GET;
+   approves the operation and declared size, and issues a short-lived
+   **single-method, single-object** PUT or GET presign. A host-only signed PUT
+   does not itself enforce actual byte limits or quotas: require a supported
+   signed/enforced constraint, byte proxying, or verification with rejection
+   and cleanup before publication. All three stores support presigned GET;
    RustFS/SeaweedFS PUT/GET were tested. A presign is not a prefix-wide SDK
    credential. List/delete can be mediated by the gateway; multipart needs
    explicit create/upload-part/complete/abort handling rather than assuming a
@@ -470,8 +473,11 @@ Recommended custody arrangement (design inference, not implemented):
    authorization/object invalidation. Never log URLs, headers or tokens or
    put them into prompts/history. If “no keys” also forbids bearer URLs in
    tasks, the gateway must proxy bytes instead.
-5. The allowed route is task → gateway → store, not unrestricted cluster access.
-   A browser presigned URL must name a reachable, authenticated/exposed S3 route
+5. Authorization goes task → gateway; data either goes through that proxy or
+   to a narrowly allowed S3 route using the returned presign. This is not
+   unrestricted cluster access. The design must resolve the owner's ban on
+   arbitrary internal addresses with the chosen artifact route. A browser
+   presigned URL must name a reachable, authenticated/exposed S3 route
    with exactly the signed host/path, or the web gateway must stream the bytes.
    Rewriting a signed URL's internal host to the public host after signing
    breaks SigV4; an internal-only store URL is not an owner download design.
