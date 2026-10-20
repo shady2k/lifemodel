@@ -11,20 +11,18 @@ resources:
   # The model gateway arrives after OpenBao it logs in to (ADR-013 D1/D8).
   - model-gateway-service-account.yaml
   - model-gateway.yaml
-  # SeaweedFS and the storage module arrive after OpenBao, which the module
-  # logs in to (ADR-015 S-D1): the identity Secret first, then the pod that
-  # mounts it, then the module that reads the custody record and the S3 port.
+  # SeaweedFS arrives after OpenBao, whose custody record holds its identity
+  # (ADR-015 S-D1): the identity Secret first, then the pod that mounts it. The
+  # storage module itself reads the SQL catalog, so it lives in the platform
+  # step after the database (step D).
   - seaweedfs-s3-identity.yaml
   - seaweedfs-rbac.yaml
   - seaweedfs.yaml
-  - storage-module-service-account.yaml
-  - storage-module.yaml
   - gitea
   - network-policy.yaml
 images:
-  # The gateway and the storage module run the loader's image (each with its own
-  # entry point); the release flow pins this digest to the same pushed loader
-  # digest A0 uses (ADR-013 D8, ADR-015 S-D1).
+  # The gateway runs the loader's image with its own entry point; the release
+  # flow pins this digest to the same pushed loader digest A0 uses (ADR-013 D8).
   - name: ghcr.io/shady2k/lifemodel-loader
     newName: ghcr.io/shady2k/lifemodel-loader
     digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

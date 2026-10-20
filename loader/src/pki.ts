@@ -19,6 +19,20 @@ export interface TlsSecretStore {
   read(): Promise<{ ca?: string; cert?: string; key?: string }>;
   write(ca: string, cert: string, key: string): Promise<void>;
 }
+/**
+ * The instance-CA leaf the storage module serves its task listener with
+ * (ADR-015 S-D1). Its names are in-cluster only: no browser ever reaches it,
+ * so it is not part of the edge leaf's host list and gets its own Secret.
+ */
+export const STORAGE_MODULE_TLS_HOSTS = [
+  'storage-module.lifemodel-system.svc',
+  'storage-module.lifemodel-system.svc.cluster.local',
+] as const;
+export interface ServiceLeafOptions {
+  hosts: readonly string[];
+  /** The one Secret the module's pod mounts; the loader is its only writer. */
+  secret: TlsSecretStore;
+}
 export interface CaConfigMapStore {
   read(): Promise<string | null>;
   write(ca: string): Promise<void>;
@@ -31,6 +45,9 @@ export interface PkiReport {
   ca: 'present-matching' | 'missing' | 'mismatch' | 'invalid';
   leaf: 'valid' | 'missing' | 'invalid' | 'expiring';
   sans: string[];
+  /** The storage module's task-listener leaf, issued from the same CA. */
+  serviceLeaf: 'valid' | 'missing' | 'invalid' | 'expiring';
+  serviceSans: string[];
   fingerprint: string | null;
   caFingerprint?: string | null;
   leafNotAfter?: string | null;
@@ -128,14 +145,17 @@ export function createPkiManager(options: {
   clock: Clock;
   secret: TlsSecretStore;
   configMap: CaConfigMapStore;
+  /** The storage module's task-listener leaf (ADR-015 S-D1). */
+  service: ServiceLeafOptions;
   status?: PkiStatusStore;
 }): PkiManager {
-  const { config, fs, clock, secret, configMap, status } = options;
+  const { config, fs, clock, secret, configMap, service, status } = options;
   const directory = join(config.volumeRoot, 'pki');
   const caPath = join(directory, 'ca.crt');
   const keyPath = join(directory, 'ca.key');
   const identityPath = join(config.volumeRoot, 'instance.json');
   const hosts = instanceHosts(config.instanceName);
+  const serviceHosts = [...service.hosts];
   async function readJson<T>(path: string): Promise<T | null> {
     if (!(await fs.exists(path))) return null;
     try {
@@ -165,12 +185,12 @@ export function createPkiManager(options: {
     });
     return { keyPem, cert: toPem(cert) };
   }
-  async function issue(ca: CaDisk): Promise<{ cert: string; key: string }> {
+  async function issue(ca: CaDisk, names: string[]): Promise<{ cert: string; key: string }> {
     const caKey = await privateCryptoKey(ca.keyPem);
     const leafKeys = await crypto.subtle.generateKey(alg, true, ['sign', 'verify']);
     const cert = await x509.X509CertificateGenerator.create({
       serialNumber: serial(),
-      subject: `CN=${hosts[0] ?? config.instanceName}`,
+      subject: `CN=${names[0] ?? config.instanceName}`,
       issuer: new x509.X509Certificate(ca.cert).subject,
       notBefore: new Date(clock.now() - 60 * 60 * 1000),
       notAfter: new Date(clock.now() + LEAF_LIFETIME),
@@ -179,7 +199,7 @@ export function createPkiManager(options: {
       signingKey: caKey,
       extensions: [
         new x509.SubjectAlternativeNameExtension(
-          hosts.map((value) => ({ type: 'dns' as const, value }))
+          names.map((value) => ({ type: 'dns' as const, value }))
         ),
         new x509.ExtendedKeyUsageExtension(['1.3.6.1.5.5.7.3.1'], true),
         new x509.KeyUsagesExtension(x509.KeyUsageFlags.digitalSignature, true),
@@ -189,8 +209,9 @@ export function createPkiManager(options: {
   }
   function certStatus(
     certPem: string | null,
-    keyPem?: string,
-    expectedCa?: string
+    keyPem: string | undefined,
+    expectedCa: string | undefined,
+    names: string[]
   ): PkiReport['leaf'] {
     if (!certPem) return 'missing';
     try {
@@ -201,8 +222,8 @@ export function createPkiManager(options: {
         .split(', ')
         .map((value) => value.replace(/^DNS:/, ''));
       if (
-        sans.length !== hosts.length ||
-        [...sans].sort().join('\0') !== [...hosts].sort().join('\0')
+        sans.length !== names.length ||
+        [...sans].sort().join('\0') !== [...names].sort().join('\0')
       )
         return 'invalid';
       if (
@@ -294,13 +315,22 @@ export function createPkiManager(options: {
       if (identity.fingerprint !== fingerprint)
         throw new Error('PKI CA does not match instance identity');
       const current = await secret.read();
-      if (certStatus(current.cert ?? null, current.key, ca.cert) === 'valid') {
-        await configMap.write(ca.cert);
-        return;
+      if (certStatus(current.cert ?? null, current.key, ca.cert, hosts) !== 'valid') {
+        const leaf = await issue(ca, hosts);
+        await secret.write(ca.cert, leaf.cert, leaf.key);
       }
-      const leaf = await issue(ca);
-      await secret.write(ca.cert, leaf.cert, leaf.key);
       await configMap.write(ca.cert);
+      // The module's own leaf, from this CA and on its own names: its pod
+      // mounts this Secret and nothing else reads it. A missing or expiring
+      // leaf is reissued the same way the edge leaf is.
+      const serviceCurrent = await service.secret.read();
+      if (
+        certStatus(serviceCurrent.cert ?? null, serviceCurrent.key, ca.cert, serviceHosts) !==
+        'valid'
+      ) {
+        const leaf = await issue(ca, serviceHosts);
+        await service.secret.write(ca.cert, leaf.cert, leaf.key);
+      }
     },
     report: async () => {
       let identity: Identity | null = null,
@@ -332,7 +362,7 @@ export function createPkiManager(options: {
       let leafNotAfter = '';
       try {
         const current = await secret.read();
-        leaf = certStatus(current.cert ?? null, current.key, ca?.cert);
+        leaf = certStatus(current.cert ?? null, current.key, ca?.cert, hosts);
         if (current.cert) {
           const cert = new NodeX509Certificate(current.cert);
           leafNotAfter = cert.validTo;
@@ -345,11 +375,31 @@ export function createPkiManager(options: {
       } catch {
         leaf = 'invalid';
       }
+      let serviceLeaf: PkiReport['leaf'] = 'missing',
+        serviceSans: string[] = [];
+      let serviceLeafNotAfter = '';
+      try {
+        const current = await service.secret.read();
+        serviceLeaf = certStatus(current.cert ?? null, current.key, ca?.cert, serviceHosts);
+        if (current.cert) {
+          const cert = new NodeX509Certificate(current.cert);
+          serviceLeafNotAfter = cert.validTo;
+          serviceSans = (cert.subjectAltName ?? '')
+            .split(', ')
+            .filter(Boolean)
+            .map((v) => v.replace(/^DNS:/, ''));
+          if (serviceHosts.some((host) => !serviceSans.includes(host))) serviceLeaf = 'invalid';
+        }
+      } catch {
+        serviceLeaf = 'invalid';
+      }
       const result: PkiReport = {
         identity: identityState,
         ca: caState,
         leaf,
         sans,
+        serviceLeaf,
+        serviceSans,
         fingerprint: caFingerprint,
       };
       await status?.write({
@@ -359,6 +409,9 @@ export function createPkiManager(options: {
         caFingerprint: result.fingerprint,
         leafNotAfter,
         leafSans: sans,
+        serviceLeaf,
+        serviceSans,
+        serviceLeafNotAfter,
         checkedAt: new Date(clock.now()).toISOString(),
         ...(caState === 'invalid' ? { error: 'invalid CA pair' } : {}),
       });

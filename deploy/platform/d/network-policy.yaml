@@ -1,0 +1,73 @@
+# The storage module's own routes (ADR-015 S-D1). It inherits nothing from the
+# loader: this policy is the whole of what it may do.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: storage-module-access
+  namespace: lifemodel-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: storage-module
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # 8081 is the health listener, read by the loader's platform status. The
+    # task listener's peers (8443) arrive with lifemodel-653.7.2, together with
+    # the trusted-control and owner-read listeners; until then no pod may reach
+    # it, and the namespace default deny is what says so.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: loader
+      ports:
+        - protocol: TCP
+          port: 8081
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Its own OpenBao login and the custody record it reads; never the loader's.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openbao
+      ports:
+        - protocol: TCP
+          port: 8200
+    # The one store it may use, on the S3 port only.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: seaweedfs
+      ports:
+        - protocol: TCP
+          port: 8333
+    # Its catalog, on the database Service's port. The database's own policy
+    # admits this pod back (deploy/platform/state/network-policy.yaml).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-state
+          podSelector:
+            matchLabels:
+              cnpg.io/cluster: lifemodel
+      ports:
+        - protocol: TCP
+          port: 5432

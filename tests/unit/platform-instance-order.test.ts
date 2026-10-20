@@ -9,13 +9,14 @@ const read = (path: string) => YAML.parse(readFileSync(path, 'utf8')) as Record<
 const resource = (name: string) => read(join(root, name));
 
 describe('platform dependency structure', () => {
-  it('orders platform-instance before A0, A, B and C without a dependency cycle', () => {
+  it('orders platform-instance before A0, A, B, C and D without a dependency cycle', () => {
     const docs = [
       'instance-reconciler.yaml',
       'a0-reconciler.yaml',
       'a-reconciler.yaml',
       'b-reconciler.yaml',
       'c-reconciler.yaml',
+      'd-reconciler.yaml',
     ].map((name) => read(join(root, name)));
     const byName = new Map(docs.map((doc) => [doc.metadata.name, doc]));
     expect(byName.get('platform-instance')?.spec.dependsOn ?? []).toEqual([]);
@@ -23,6 +24,7 @@ describe('platform dependency structure', () => {
     expect(byName.get('platform-a')?.spec.dependsOn).toEqual([{ name: 'platform-a0' }]);
     expect(byName.get('platform-b')?.spec.dependsOn).toEqual([{ name: 'platform-a' }]);
     expect(byName.get('platform-c')?.spec.dependsOn).toEqual([{ name: 'platform-b' }]);
+    expect(byName.get('platform-d')?.spec.dependsOn).toEqual([{ name: 'platform-c' }]);
     const visiting = new Set<string>();
     const visited = new Set<string>();
     const visit = (name: string) => {
@@ -37,11 +39,11 @@ describe('platform dependency structure', () => {
       visited.add(name);
     };
     for (const name of byName.keys()) visit(name);
-    expect([...visited]).toHaveLength(5);
+    expect([...visited]).toHaveLength(6);
   });
 
   it('gives every namespaced object an upstream namespace or one in the same Kustomization', () => {
-    const dirs = ['instance', 'a0', 'a', 'b', 'state'];
+    const dirs = ['instance', 'a0', 'a', 'b', 'state', 'd'];
     const owned = new Map<string, string[]>();
     const objectsByDir = new Map<string, Record<string, any>[]>();
     const collect = (directory: string): Record<string, any>[] => {
@@ -98,6 +100,7 @@ describe('platform dependency structure', () => {
       ['a', 'platform-a'],
       ['b', 'platform-b'],
       ['state', 'platform-c'],
+      ['d', 'platform-d'],
     ]);
     for (const [dir, objects] of objectsByDir)
       for (const obj of objects) {

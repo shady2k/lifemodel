@@ -1,0 +1,25 @@
+# The storage module's step: its readiness reads the Postgres catalog that
+# platform C creates (ADR-015 S-D7), so it depends on C. Keeping the module in
+# A would make A wait for the database while the database waits for A.
+#
+# The timeout covers the first installation: the catalog appears when the first
+# generation's migrate initContainer applies db/migrations, and that generation
+# starts from the loader's own first-start plan. Flux retries a step that misses
+# its timeout on the next interval, so a slow cold start delays this step and
+# never blocks a later one - it is the last step.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: platform-d
+  namespace: flux-system
+spec:
+  interval: 10m0s
+  timeout: 30m0s
+  dependsOn:
+    - name: platform-c
+  path: ./d
+  prune: true
+  wait: true
+  sourceRef:
+    kind: OCIRepository
+    name: platform

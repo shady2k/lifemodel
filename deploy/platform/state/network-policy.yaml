@@ -27,6 +27,18 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
+    # The storage module's catalog (ADR-015 S-D7). Its own step policy carries
+    # the matching egress; this side names the one pod that may connect.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: storage-module
+      ports:
+        - protocol: TCP
+          port: 5432
     - from:
         - namespaceSelector:
             matchLabels:

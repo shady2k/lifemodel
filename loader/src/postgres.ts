@@ -1,4 +1,8 @@
-/** Copies the CNPG-generated application login into the core namespace. */
+/**
+ * Copies the CNPG-generated application login into the two namespaces that use
+ * it: the core, and the storage module (the interim login the owner chose for
+ * it, lifemodel-653.7.8, until lifemodel-2t5 leases it an identity).
+ */
 import { readFile } from 'node:fs/promises';
 import { request as httpsRequest } from 'node:https';
 import type { PlatformPhase } from './platform-bootstrap.js';
@@ -19,11 +23,18 @@ export interface KubernetesPostgresSecretOptions {
 
 const SOURCE_NAMESPACE = 'lifemodel-state';
 const SOURCE_NAME = 'lifemodel-app';
-const TARGET_NAMESPACE = 'lifemodel';
-const TARGET_NAME = 'lifemodel-db-credentials';
+const TARGETS = [
+  { namespace: 'lifemodel', name: 'lifemodel-db-credentials' },
+  { namespace: 'lifemodel-system', name: 'storage-module-db-credentials' },
+] as const;
 const SERVICE_ACCOUNT = '/var/run/secrets/kubernetes.io/serviceaccount';
 
-/** A fixed-name API client; it reads one CNPG Secret and writes one core Secret only. */
+/**
+ * A fixed-name API client: it reads the one CNPG Secret and writes only the two
+ * platform-created Secrets named above. The module's copy is a Secret in its
+ * own namespace that only its pod reads, so the module never sees the core
+ * namespace and no other workload sees a database login.
+ */
 export function createKubernetesPostgresSecretPhase(
   options: KubernetesPostgresSecretOptions = {}
 ): PlatformPhase {
@@ -119,8 +130,6 @@ export function createKubernetesPostgresSecretPhase(
     });
   }
   const sourceUrl = new URL(`/api/v1/namespaces/${SOURCE_NAMESPACE}/secrets/${SOURCE_NAME}`, host);
-  const targetUrl = new URL(`/api/v1/namespaces/${TARGET_NAMESPACE}/secrets/${TARGET_NAME}`, host);
-  const targetCollection = new URL(`/api/v1/namespaces/${TARGET_NAMESPACE}/secrets`, host);
   return {
     name: 'cnpg-copy-core-credentials',
     run: async () => {
@@ -139,61 +148,72 @@ export function createKubernetesPostgresSecretPhase(
         !Buffer.from(password, 'base64').toString()
       )
         throw new Error('CNPG application Secret lifemodel-app has no username/password');
-      const body = {
-        apiVersion: 'v1',
-        kind: 'Secret',
-        metadata: {
-          name: TARGET_NAME,
-          namespace: TARGET_NAMESPACE,
-          annotations: { 'kustomize.toolkit.fluxcd.io/prune': 'disabled' },
-        },
-        type: 'Opaque',
-        data: { username, password },
-      };
-      const verify = async (): Promise<void> => {
-        const response = await send(targetUrl, 'GET');
-        const copied =
-          response.status === 200
-            ? (JSON.parse(response.body) as { data?: Record<string, string> }).data
-            : undefined;
-        if (
-          response.status !== 200 ||
-          copied?.['username'] !== username ||
-          copied['password'] !== password
-        )
-          throw new Error('core database Secret read-back did not match CNPG credentials');
-      };
-      let target = await send(targetUrl, 'GET');
-      if (target.status === 404) {
-        target = await send(targetCollection, 'POST', body);
-        if (target.status === 201) return verify();
-        if (target.status !== 409)
+      /** One target: create it when it is absent, else replace its two keys. */
+      async function copy(target: (typeof TARGETS)[number]): Promise<void> {
+        const targetUrl = new URL(
+          `/api/v1/namespaces/${target.namespace}/secrets/${target.name}`,
+          host
+        );
+        const collection = new URL(`/api/v1/namespaces/${target.namespace}/secrets`, host);
+        const body = {
+          apiVersion: 'v1',
+          kind: 'Secret',
+          metadata: {
+            name: target.name,
+            namespace: target.namespace,
+            annotations: { 'kustomize.toolkit.fluxcd.io/prune': 'disabled' },
+          },
+          type: 'Opaque',
+          data: { username, password },
+        };
+        const verify = async (): Promise<void> => {
+          const response = await send(targetUrl, 'GET');
+          const copied =
+            response.status === 200
+              ? (JSON.parse(response.body) as { data?: Record<string, string> }).data
+              : undefined;
+          if (
+            response.status !== 200 ||
+            copied?.['username'] !== username ||
+            copied['password'] !== password
+          )
+            throw new Error(
+              `${target.name} read-back did not match CNPG credentials (${String(response.status)})`
+            );
+        };
+        let current = await send(targetUrl, 'GET');
+        if (current.status === 404) {
+          current = await send(collection, 'POST', body);
+          if (current.status === 201) return verify();
+          if (current.status !== 409)
+            throw new Error(
+              `${target.name} create failed (${String(current.status)}): ${current.body}`
+            );
+          current = await send(targetUrl, 'GET');
+          if (current.status !== 200)
+            throw new Error(
+              `${target.name} read after conflict failed (${String(current.status)}): ${current.body}`
+            );
+        }
+        if (current.status !== 200)
           throw new Error(
-            `core database Secret create failed (${String(target.status)}): ${target.body}`
+            `${target.name} read failed (${String(current.status)}): ${current.body}`
           );
-        target = await send(targetUrl, 'GET');
-        if (target.status !== 200)
+        const resourceVersion = (
+          JSON.parse(current.body) as { metadata?: { resourceVersion?: string } }
+        ).metadata?.resourceVersion;
+        if (!resourceVersion) throw new Error(`${target.name} has no resourceVersion`);
+        const result = await send(targetUrl, 'PUT', {
+          ...body,
+          metadata: { ...body.metadata, resourceVersion },
+        });
+        if (result.status !== 200)
           throw new Error(
-            `core database Secret read after conflict failed (${String(target.status)}): ${target.body}`
+            `${target.name} update failed (${String(result.status)}): ${result.body}`
           );
+        await verify();
       }
-      if (target.status !== 200)
-        throw new Error(
-          `core database Secret read failed (${String(target.status)}): ${target.body}`
-        );
-      const resourceVersion = (
-        JSON.parse(target.body) as { metadata?: { resourceVersion?: string } }
-      ).metadata?.resourceVersion;
-      if (!resourceVersion) throw new Error('core database Secret has no resourceVersion');
-      const result = await send(targetUrl, 'PUT', {
-        ...body,
-        metadata: { ...body.metadata, resourceVersion },
-      });
-      if (result.status !== 200)
-        throw new Error(
-          `core database Secret update failed (${String(result.status)}): ${result.body}`
-        );
-      await verify();
+      for (const target of TARGETS) await copy(target);
     },
   };
 }
