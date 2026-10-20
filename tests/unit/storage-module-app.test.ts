@@ -1,14 +1,16 @@
 /**
  * The storage module's status listener (ADR-015 S-D1, S-D7).
  *
- * `/status` is readiness: SeaweedFS must answer with valid auth. `/livez` is
- * the process. A refused credential, a stopped store and an unreadable custody
+ * `/status` is readiness: the module's Postgres catalog must be readable and
+ * SeaweedFS must answer with valid auth. `/livez` is the process. A missing
+ * catalog, a refused credential, a stopped store and an unreadable custody
  * record each make the module unready with their own reason, and its log never
  * carries the credential or a store body.
  */
 import { createServer, type Server } from 'node:http';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createStorageModule } from '../../loader/src/storage-module-app.js';
+import type { Catalog, CatalogCheck } from '../../loader/src/storage-catalog.js';
 import {
   STORAGE_BUCKET,
   StorageCustodyError,
@@ -16,12 +18,21 @@ import {
 } from '../../loader/src/storage-custody.js';
 import type { S3Check } from '../../loader/src/storage-s3.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
+import {
+  createStorageCertificate,
+  type TestStorageCertificate,
+} from '../helpers/storage-certificate.js';
 
 const credentials: StorageS3Credentials = {
   accessKey: 'A1B2C3D4E5F60718293A',
   secretKey: 'c2VjcmV0LWtleS1mb3ItdGhlLXN0b3JhZ2UtbW9kdWxl',
 };
 const servers: Server[] = [];
+let certificate: TestStorageCertificate;
+beforeAll(async () => {
+  certificate = await createStorageCertificate();
+});
+afterAll(() => certificate.cleanup());
 afterEach(async () => {
   for (const server of servers.splice(0)) {
     server.closeAllConnections();
@@ -29,19 +40,44 @@ afterEach(async () => {
   }
 });
 
+/** A reload timer that never fires: these checks are about readiness. */
+function pausedTimers() {
+  const timer = {} as ReturnType<typeof setTimeout>;
+  return { set: () => timer, clear: () => undefined };
+}
+
 async function fixture(
-  options: { custody?: () => Promise<StorageS3Credentials>; check?: () => Promise<S3Check> } = {}
+  options: {
+    custody?: () => Promise<StorageS3Credentials>;
+    check?: () => Promise<S3Check>;
+    catalog?: () => Promise<CatalogCheck>;
+  } = {}
 ) {
   const lines: RecordedLine[] = [];
   const seen: StorageS3Credentials[] = [];
+  let catalogReads = 0;
+  const catalog: Catalog = {
+    check: async () => {
+      catalogReads += 1;
+      return options.catalog ? options.catalog() : { ok: true };
+    },
+  };
   const app = createStorageModule({
     bucket: STORAGE_BUCKET,
+    catalog,
     custody: {
       read: options.custody ?? (() => Promise.resolve(credentials)),
     },
     check: async (given) => {
       seen.push(given);
       return options.check ? options.check() : { ok: true };
+    },
+    tls: {
+      cert: certificate.cert,
+      key: certificate.key,
+      read: () => Promise.resolve({ cert: certificate.cert, key: certificate.key }),
+      reloadMs: 60_000,
+      timers: pausedTimers(),
     },
     logger: createRecordingLogger(lines),
     health: { cacheMs: 0, boundMs: 200 },
@@ -55,6 +91,8 @@ async function fixture(
     lines,
     seen,
     base,
+    catalogReads: () => catalogReads,
+    module: app,
     get: async (path: string) => {
       const response = await fetch(`${base}${path}`, { method: 'GET' });
       const text = await response.text();
@@ -64,7 +102,7 @@ async function fixture(
 }
 
 describe('the storage module status listener', () => {
-  it('answers ready only when the store answered with the module credentials', async () => {
+  it('answers ready only when the catalog and the store answered', async () => {
     const f = await fixture();
     const answer = await f.get('/status');
     expect(answer.status).toBe(200);
@@ -73,6 +111,7 @@ describe('the storage module status listener', () => {
     expect(JSON.parse(answer.body)).toMatchObject({ state: 'ok', store: 'seaweedfs' });
     // The check used the custody credentials and nothing else.
     expect(f.seen).toEqual([credentials]);
+    expect(f.catalogReads()).toBe(1);
     expect(JSON.stringify(f.lines)).not.toContain(credentials.secretKey);
   });
 
@@ -89,6 +128,41 @@ describe('the storage module status listener', () => {
     expect(f.lines.filter((line) => line.level === 'warn')).toEqual([
       { level: 'warn', fields: { code }, message: expect.any(String) },
     ]);
+  });
+
+  it.each([
+    ['unreachable', 503],
+    ['auth_failed', 503],
+    ['schema_missing', 503],
+    ['forbidden', 503],
+  ] as const)('is unready with catalog_unavailable when the catalog says %s', async (cause) => {
+    let failing = true;
+    const f = await fixture({
+      catalog: () =>
+        Promise.resolve(failing ? { ok: false, cause } : ({ ok: true } as CatalogCheck)),
+    });
+    const refused = await f.get('/status');
+    expect(refused.status).toBe(503);
+    expect(JSON.parse(refused.body)).toMatchObject({
+      state: 'down',
+      lastErrorCode: 'catalog_unavailable',
+    });
+    // No store read and no custody read: the catalog comes first.
+    expect(f.seen).toEqual([]);
+    // One line per change, carrying the repair and never a body.
+    expect(f.lines.filter((line) => line.level === 'warn')).toEqual([
+      {
+        level: 'warn',
+        fields: { code: 'catalog_unavailable', cause },
+        message: expect.any(String),
+      },
+    ]);
+
+    // The catalog returning is what makes the module ready again.
+    failing = false;
+    const recovered = await f.get('/status');
+    expect(recovered.status).toBe(200);
+    expect(f.seen).toEqual([credentials]);
   });
 
   it('is unready when its custody record cannot be read, and never calls the store', async () => {
@@ -120,6 +194,7 @@ describe('the storage module status listener', () => {
     const lines: RecordedLine[] = [];
     const app = createStorageModule({
       bucket: STORAGE_BUCKET,
+      catalog: { check: () => Promise.resolve({ ok: true }) },
       custody: { read: () => Promise.resolve(credentials) },
       check: (given) => {
         void given;
@@ -129,6 +204,12 @@ describe('the storage module status listener', () => {
             resolve({ ok: true });
           });
         });
+      },
+      tls: {
+        cert: certificate.cert,
+        key: certificate.key,
+        read: () => Promise.resolve({ cert: certificate.cert, key: certificate.key }),
+        timers: pausedTimers(),
       },
       logger: createRecordingLogger(lines),
       health: { cacheMs: 0, boundMs: 20 },
@@ -153,8 +234,11 @@ describe('the storage module status listener', () => {
     expect((await fetch(`${base}/status`)).status).toBe(200);
   });
 
-  it('serves liveness for the process whatever the store does', async () => {
-    const f = await fixture({ check: () => Promise.resolve({ ok: false, code: 'unreachable' }) });
+  it('serves liveness for the process whatever the catalog and the store do', async () => {
+    const f = await fixture({
+      check: () => Promise.resolve({ ok: false, code: 'unreachable' }),
+      catalog: () => Promise.resolve({ ok: false, cause: 'unreachable' }),
+    });
     const live = await f.get('/livez');
     expect(live.status).toBe(200);
     expect(JSON.parse(live.body)).toEqual({ state: 'live' });

@@ -1,6 +1,9 @@
 /** Separate process entry point: the platform storage module, built into the loader image. */
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { createRoleBaoClient } from './model-bao.js';
 import { createStdoutLogger } from './logger.js';
+import { catalogConnectionString, createCatalog } from './storage-catalog.js';
 import {
   createCachedCustodyReader,
   readCustodyRecord,
@@ -9,6 +12,10 @@ import {
 } from './storage-custody.js';
 import { checkS3Bucket } from './storage-s3.js';
 import { createStorageModule } from './storage-module-app.js';
+
+/** The module's two listeners: probes on `status`, task requests on `task` over TLS. */
+const STATUS_PORT = 8081;
+const TASK_PORT = 8443;
 
 const logger = createStdoutLogger((line) => process.stdout.write(`${line}\n`));
 
@@ -25,31 +32,66 @@ function required(name: string): string {
 const baoAddress = required('LIFEMODEL_OPENBAO_ADDRESS');
 const endpoint = required('LIFEMODEL_STORAGE_S3_ENDPOINT');
 const bucket = required('LIFEMODEL_STORAGE_BUCKET');
+// The interim login the owner chose for this module (lifemodel-653.7.8): the
+// database owner's own, until lifemodel-2t5 leases it an identity.
+const databaseUsername = required('LIFEMODEL_DB_USERNAME');
+const databasePassword = required('LIFEMODEL_DB_PASSWORD');
+const tlsDirectory = required('LIFEMODEL_STORAGE_TLS_DIR');
 if (bucket !== STORAGE_BUCKET) {
   // The custody identity's actions are scoped to the bucket this build owns.
   logger.error({ code: 'unexpected_bucket' }, 'Storage module cannot start');
   process.exit(1);
 }
 
+/** The mounted leaf: `tls.crt` and `tls.key` of the Secret the loader writes. */
+async function readCertificate(): Promise<{ cert: string; key: string }> {
+  const [cert, key] = await Promise.all([
+    readFile(join(tlsDirectory, 'tls.crt'), 'utf8'),
+    readFile(join(tlsDirectory, 'tls.key'), 'utf8'),
+  ]);
+  return { cert, key };
+}
+
+let certificate: { cert: string; key: string };
+try {
+  certificate = await readCertificate();
+} catch {
+  // Never the path and never the file's content: the code says what to repair.
+  logger.error({ code: 'certificate_unavailable' }, 'Storage module cannot start');
+  process.exit(1);
+}
+
 const bao = createRoleBaoClient({ address: baoAddress, role: 'storage-module', logger });
 const custody = createCachedCustodyReader(() => readCustodyRecord(bao.call));
+const catalog = createCatalog({
+  connectionString: catalogConnectionString(databaseUsername, databasePassword),
+});
 const app = createStorageModule({
   bucket,
+  catalog,
   custody,
   check: (credentials: StorageS3Credentials, signal: AbortSignal) =>
     checkS3Bucket({ endpoint, bucket, credentials, signal }),
   logger,
+  tls: { ...certificate, read: readCertificate },
 });
-app.status.listen(8081, '0.0.0.0');
+app.status.listen(STATUS_PORT, '0.0.0.0');
+app.task.server.listen(TASK_PORT, '0.0.0.0');
 
 function stop(): void {
+  app.task.close();
   app.status.closeAllConnections();
   app.status.close();
 }
 process.on('SIGTERM', stop);
 process.on('SIGINT', stop);
 app.status.on('error', () => {
-  logger.error({ code: 'listener_failed' }, 'Storage module listener failed');
+  logger.error({ code: 'listener_failed' }, 'Storage module status listener failed');
+  stop();
+  process.exitCode = 1;
+});
+app.task.server.on('error', () => {
+  logger.error({ code: 'listener_failed' }, 'Storage module task listener failed');
   stop();
   process.exitCode = 1;
 });
