@@ -67,6 +67,17 @@ spec:
       ports:
         - protocol: TCP
           port: 8081
+    # The loader reads the storage module's health, not its data routes.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: storage-module
+      ports:
+        - protocol: TCP
+          port: 8081
 
     # Model checks may reach public endpoints and RFC1918 LAN Ollama; application validation blocks pod/service and metadata ranges.
     - to:

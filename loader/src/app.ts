@@ -19,6 +19,7 @@ import {
 import {
   createKubernetesPhaseStore,
   createPlatformPhaseRunner,
+  PlatformPhaseError,
   type PlatformPhaseStore,
   type PlatformPhase,
 } from './platform-bootstrap.js';
@@ -31,6 +32,7 @@ import {
 } from './settings/store.js';
 import { createKubernetesPostgresSecretPhase } from './postgres.js';
 import { createKubernetesValkeySecretPhase } from './valkey.js';
+import { createKubernetesS3IdentitySecret, createStorageCustodyPhase } from './storage-custody.js';
 import {
   createGiteaBootstrap,
   createGiteaHttpApi,
@@ -50,9 +52,39 @@ export interface LoaderAppDeps {
   platformGiteaPhases?: PlatformPhase[];
   platformGiteaApi?: GiteaApi;
   platformBootstrap?: { runInitial(): Promise<void>; unsealIfSealed(): Promise<void> };
+  /** The SeaweedFS S3 custody phase (ADR-015 S-D1); tests replace it. */
+  platformStorageCustody?: PlatformPhase;
   pki?: PkiManager;
   settingsProjection?: SettingsProjection;
   settingsStore?: SettingsStore;
+}
+
+export interface FirstStartPhaseDeps {
+  gitea: PlatformPhase[];
+  storageCustody: PlatformPhase;
+  postgres?: PlatformPhase;
+  valkey?: PlatformPhase;
+}
+
+/**
+ * The loader's first-start phase order after OpenBao's policy phase
+ * (ADR-010 R7-02, ADR-015 S-D1).
+ *
+ * Seaweed custody comes first. It needs only OpenBao, which the policy phase
+ * has just prepared, and the platform Secret. Every phase after it may wait on
+ * a later platform step: the Postgres and Valkey credential phases copy
+ * Secrets that only exist once `lifemodel-state` (platform C) has run, and C
+ * waits for B, which waits for A - and A waits for the storage module, whose
+ * readiness needs the custody this phase writes. Custody last is a deadlock on
+ * a fresh installation, not a slow start.
+ */
+export function platformFirstStartPhases(deps: FirstStartPhaseDeps): PlatformPhase[] {
+  return [
+    deps.storageCustody,
+    ...deps.gitea,
+    deps.postgres ?? createKubernetesPostgresSecretPhase(),
+    deps.valkey ?? createKubernetesValkeySecretPhase(),
+  ];
 }
 
 export interface LoaderApp {
@@ -90,6 +122,15 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
     api: giteaApi,
     runPhases: createPlatformPhaseRunner(phaseStore),
   });
+  const platformStorageCustody =
+    deps.platformStorageCustody ??
+    createStorageCustodyPhase({
+      bao: {
+        read: () => bao.api.readStorageCustody(),
+        write: (value) => bao.api.writeStorageCustody(value),
+      },
+      identity: createKubernetesS3IdentitySecret(),
+    });
   const platformBootstrap =
     deps.platformBootstrap ??
     (() => {
@@ -97,11 +138,12 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         bao: bao.api,
         custody: bao.custody,
         runPhases: createPlatformPhaseRunner(phaseStore),
-        extraPhases: deps.platformGiteaPhases ?? [
-          ...giteaBootstrap.phases(),
-          createKubernetesPostgresSecretPhase(),
-          createKubernetesValkeySecretPhase(),
-        ],
+        extraPhases:
+          deps.platformGiteaPhases ??
+          platformFirstStartPhases({
+            gitea: giteaBootstrap.phases(),
+            storageCustody: platformStorageCustody,
+          }),
       });
       return {
         runInitial: () => bootstrap.runInitial(),
@@ -164,10 +206,13 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         logger.info({}, 'platform bootstrap is ready');
         delayMs = 30_000;
       } catch (error) {
-        let phase = 'unknown';
+        // A named failure states its own phase: a precondition checked before
+        // the plan runs has no failed phase record to read (ADR-015 S-D1).
+        const named = error instanceof PlatformPhaseError ? error.phase : undefined;
+        let phase = named ?? 'unknown';
         try {
           const record = await phaseStore.read();
-          if (record?.status === 'failed') phase = record.phase;
+          if (named === undefined && record?.status === 'failed') phase = record.phase;
         } catch {
           /* Keep the original bootstrap failure visible. */
         }

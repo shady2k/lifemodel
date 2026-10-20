@@ -17,6 +17,21 @@ export interface PlatformPhase {
   run(): Promise<void>;
 }
 
+/**
+ * A bootstrap failure that names the phase it belongs to. A precondition
+ * checked before the phase plan runs has no durable phase record of its own,
+ * so the loader's log line would otherwise name an unrelated completed phase.
+ */
+export class PlatformPhaseError extends Error {
+  constructor(
+    readonly phase: string,
+    message: string
+  ) {
+    super(message);
+    this.name = 'PlatformPhaseError';
+  }
+}
+
 /** Runs named idempotent actions; completion is durable before a later action starts. */
 export function createPlatformPhaseRunner(
   store: PlatformPhaseStore

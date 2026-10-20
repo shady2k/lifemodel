@@ -1,0 +1,27 @@
+# The loader's write of the SeaweedFS S3 identity Secret (ADR-015 S-D1).
+# Trusted bootstrap is the only writer; the module reads the OpenBao record,
+# never this Secret, and no other identity may touch it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: loader-seaweed-identity
+  namespace: lifemodel-system
+rules:
+  - apiGroups: ['']
+    resources: ['secrets']
+    resourceNames: ['seaweed-s3-identity']
+    verbs: ['get', 'update']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: loader-seaweed-identity
+  namespace: lifemodel-system
+subjects:
+  - kind: ServiceAccount
+    name: loader
+    namespace: lifemodel-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: loader-seaweed-identity

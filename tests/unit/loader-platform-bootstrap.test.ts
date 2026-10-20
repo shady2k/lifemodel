@@ -268,33 +268,38 @@ describe('platform bootstrap phases', () => {
     expect(egress).toContain('kubernetes.io/metadata.name: openbao');
     expect(egress).toContain('port: 8200');
     const parsed = YAML.parse(policy);
-    expect(parsed.spec.egress).toHaveLength(7);
+    expect(parsed.spec.egress).toHaveLength(8);
     expect(
       parsed.spec.egress
         .flatMap((rule: any) =>
           (rule.ports ?? []).map((port: any) => `${port.protocol}/${port.port}`)
         )
         .sort()
-    ).toEqual(['TCP/11434', 'TCP/3000', 'TCP/53', 'TCP/6443', 'TCP/8081', 'TCP/8200', 'UDP/53']);
+    ).toEqual([
+      'TCP/11434',
+      'TCP/3000',
+      'TCP/53',
+      'TCP/6443',
+      // The model gateway's health listener and the storage module's.
+      'TCP/8081',
+      'TCP/8081',
+      'TCP/8200',
+      'UDP/53',
+    ]);
     expect(egress).toContain(
       '# No port restriction: owner endpoints may use LAN Ollama 11434 or custom HTTPS ports.'
     );
-    expect(parsed.spec.egress[4].ports).toBeUndefined();
-    expect(parsed.spec.egress[4].to[0].ipBlock.except).toEqual([
+    expect(parsed.spec.egress[5].ports).toBeUndefined();
+    expect(parsed.spec.egress[5].to[0].ipBlock.except).toEqual([
       '10.42.0.0/16',
       '10.43.0.0/16',
       '169.254.0.0/16',
     ]);
     // The unported rule admits 192.168.1.20:11434; its exceptions deny cluster and metadata ranges.
-    expect(parsed.spec.egress[4].to[0].ipBlock.except).toContain('169.254.0.0/16');
+    expect(parsed.spec.egress[5].to[0].ipBlock.except).toContain('169.254.0.0/16');
     expect(parsed.spec.egress[1].to).toEqual([{ ipBlock: { cidr: '0.0.0.0/0' } }]);
-    expect(parsed.spec.egress[4].to[0].ipBlock.except).toEqual([
-      '10.42.0.0/16',
-      '10.43.0.0/16',
-      '169.254.0.0/16',
-    ]);
     expect(
-      parsed.spec.egress[5].to[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name']
+      parsed.spec.egress[6].to[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name']
     ).toBe('ollama');
     expect(parsed.spec.egress[1].ports).toEqual([{ protocol: 'TCP', port: 6443 }]);
   });

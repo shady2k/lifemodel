@@ -101,7 +101,13 @@ function assertStepANetworkPolicies(objects: Record<string, any>[]): void {
     'lifemodel-git': ['gitea-default-deny'],
     // The namespace default deny, the loader's own permits and the model
     // gateway's own routes: three separate objects (ADR-013 D5).
-    'lifemodel-system': ['lifemodel-system-default-deny', 'loader-access', 'model-gateway-access'],
+    'lifemodel-system': [
+      'lifemodel-system-default-deny',
+      'loader-access',
+      'model-gateway-access',
+      'seaweedfs-access',
+      'storage-module-access',
+    ],
   };
   for (const [namespace, names] of Object.entries(expected)) {
     const actual = objects
@@ -1100,6 +1106,12 @@ describe('platform manifests', () => {
               },
               podSelector: { matchLabels: { 'app.kubernetes.io/name': 'model-gateway' } },
             },
+            {
+              namespaceSelector: {
+                matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' },
+              },
+              podSelector: { matchLabels: { 'app.kubernetes.io/name': 'storage-module' } },
+            },
           ],
           ports: [{ protocol: 'TCP', port: 8200 }],
         },
@@ -1442,6 +1454,17 @@ describe('platform manifests', () => {
       {
         to: [
           {
+            namespaceSelector: {
+              matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' },
+            },
+            podSelector: { matchLabels: { 'app.kubernetes.io/name': 'storage-module' } },
+          },
+        ],
+        ports: [{ protocol: 'TCP', port: 8081 }],
+      },
+      {
+        to: [
+          {
             ipBlock: {
               cidr: '0.0.0.0/0',
               except: ['10.42.0.0/16', '10.43.0.0/16', '169.254.0.0/16'],
@@ -1493,6 +1516,16 @@ describe('platform manifests', () => {
           (rule.ports ?? []).map((port: any) => `${port.protocol}/${port.port}`)
         )
         .sort()
-    ).toEqual(['TCP/11434', 'TCP/3000', 'TCP/53', 'TCP/6443', 'TCP/8081', 'TCP/8200', 'UDP/53']);
+    ).toEqual([
+      'TCP/11434',
+      'TCP/3000',
+      'TCP/53',
+      'TCP/6443',
+      // The model gateway's health listener and the storage module's.
+      'TCP/8081',
+      'TCP/8081',
+      'TCP/8200',
+      'UDP/53',
+    ]);
   });
 });

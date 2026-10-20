@@ -310,6 +310,12 @@ describe('the platform model gateway', () => {
             },
             podSelector: { matchLabels: { 'app.kubernetes.io/name': 'model-gateway' } },
           },
+          {
+            namespaceSelector: {
+              matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' },
+            },
+            podSelector: { matchLabels: { 'app.kubernetes.io/name': 'storage-module' } },
+          },
         ],
         ports: [{ protocol: 'TCP', port: 8200 }],
       },

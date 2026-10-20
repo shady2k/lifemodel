@@ -58,6 +58,13 @@ function fixture(
     ensureModelPolicy: async (_token) => {
       events.push('model-policy');
     },
+    ensureStoragePolicy: async (_token) => {
+      events.push('storage-policy');
+    },
+    readStorageCustody: async () => null,
+    writeStorageCustody: async () => {
+      throw new Error('bootstrap never writes the storage custody record');
+    },
     login: async () => {
       events.push('login');
     },
@@ -143,24 +150,33 @@ function gatewayBoundary(
           status: 200,
           body: JSON.stringify({ auth: { client_token: 'loader', lease_duration: 3600 } }),
         };
-      if (path.endsWith('/auth/kubernetes/role/model-gateway') && method === 'GET')
+      const identityRole = path.endsWith('/auth/kubernetes/role/model-gateway')
+        ? 'model-gateway'
+        : path.endsWith('/auth/kubernetes/role/storage-module')
+          ? 'storage-module'
+          : undefined;
+      if (identityRole !== undefined && method === 'GET')
         return options.roleReadBack === undefined
           ? data({
-              bound_service_account_names: ['model-gateway'],
+              bound_service_account_names: [identityRole],
               bound_service_account_namespaces: ['lifemodel-system'],
-              policies: ['model-gateway'],
+              policies: [identityRole],
               token_no_default_policy: true,
             })
           : { status: 200, body: options.roleReadBack };
       if (path.endsWith('/auth/token/create')) {
         mints++;
         expect(token).toBe('root');
-        expect(JSON.parse(body ?? '{}')).toEqual({
-          policies: ['model-gateway'],
-          no_default_policy: true,
-          ttl: '60s',
-          renewable: false,
-        });
+        const requested = JSON.parse(body ?? '{}') as { policies?: string[] };
+        // The check token is bounded, parented and carries one policy alone.
+        expect(Object.keys(requested).sort()).toEqual([
+          'no_default_policy',
+          'policies',
+          'renewable',
+          'ttl',
+        ]);
+        expect(requested).toMatchObject({ no_default_policy: true, ttl: '60s', renewable: false });
+        expect(requested.policies).toHaveLength(1);
         if (options.crashAt === 'mint' && !failed) {
           failed = true;
           throw new Error('lost create response');
@@ -170,7 +186,12 @@ function gatewayBoundary(
           body: JSON.stringify({
             auth: {
               client_token: `check-${String(mints)}`,
-              policies: ['model-gateway', ...(options.extraPolicies ?? [])],
+              policies: [
+                requested.policies?.[0],
+                ...(requested.policies?.[0] === 'model-gateway'
+                  ? (options.extraPolicies ?? [])
+                  : []),
+              ],
               lease_duration: 60,
               renewable: false,
             },
@@ -179,23 +200,31 @@ function gatewayBoundary(
       }
       if (path.endsWith('/sys/capabilities')) {
         expect(token).toBe('root');
-        expect(JSON.parse(body ?? '{}')).toEqual({
-          token: `check-${String(mints)}`,
-          paths: [
-            'lifemodel/data/model/primary',
-            'lifemodel/data/model/reserve',
-            'lifemodel/metadata/model/primary',
-          ],
-        });
+        const requested = JSON.parse(body ?? '{}') as { token?: string; paths?: string[] };
+        const forStorage = requested.paths?.includes('lifemodel/data/storage/seaweed') === true;
+        if (!forStorage)
+          expect(requested).toEqual({
+            token: `check-${String(mints)}`,
+            paths: [
+              'lifemodel/data/model/primary',
+              'lifemodel/data/model/reserve',
+              'lifemodel/metadata/model/primary',
+            ],
+          });
         if (options.crashAt === 'capabilities' && !failed) {
           failed = true;
           throw new Error('lost capabilities response');
         }
-        const caps = {
-          'lifemodel/data/model/primary': ['read'],
-          'lifemodel/data/model/reserve': ['read'],
-          'lifemodel/metadata/model/primary': ['deny'],
-        };
+        const caps = forStorage
+          ? {
+              'lifemodel/data/storage/seaweed': ['read'],
+              'lifemodel/data/model/primary': ['deny'],
+            }
+          : {
+              'lifemodel/data/model/primary': ['read'],
+              'lifemodel/data/model/reserve': ['read'],
+              'lifemodel/metadata/model/primary': ['deny'],
+            };
         return { status: 200, body: JSON.stringify({ ...caps, data: caps }) };
       }
       if (path.endsWith('/auth/token/revoke')) {
@@ -225,6 +254,7 @@ function gatewayBoundary(
           'lifemodel/data/model/reserve': ['create', 'update', 'read', 'delete'],
           'lifemodel/metadata/model/primary': ['read'],
           'lifemodel/metadata/model/reserve': ['read'],
+          'lifemodel/data/storage/seaweed': ['create', 'update', 'read'],
         };
         return { status: 200, body: JSON.stringify({ ...caps, data: caps }) };
       }
@@ -277,7 +307,9 @@ describe('OpenBao bootstrap', () => {
     expect(f.rootRetired).toBe(false);
     expect(record).toEqual({ phase: 'openbao-policy', status: 'failed' });
     await bootstrap.runInitial();
-    expect(f.revoked).toEqual(['check-2']); // root retirement also revokes the first parented child
+    // Re-entry revokes the gateway's second check token and then the storage
+    // module's; root retirement also revokes the first parented child.
+    expect(f.revoked).toEqual(['check-2', 'check-3']);
     expect(f.rootRetired).toBe(true);
     expect(keys.rootToken).toBeNull();
   });
@@ -837,7 +869,7 @@ describe('OpenBao bootstrap', () => {
       address: 'http://openbao.test:8200',
       role: 'loader',
       readJwt: async () => 'loader-jwt',
-      request: async (url, method, token) => {
+      request: async (url, method, token, body) => {
         paths.push(url.pathname);
         if (url.pathname.endsWith('/sys/seal-status'))
           return { status: 200, body: JSON.stringify({ initialized: true, sealed: false }) };
@@ -855,54 +887,73 @@ describe('OpenBao bootstrap', () => {
               auth: { client_token: 'loader-token', lease_duration: 3600, renewable: true },
             }),
           };
-        if (url.pathname.endsWith('/auth/kubernetes/role/model-gateway') && method === 'GET')
+        const identityRole = url.pathname.endsWith('/auth/kubernetes/role/model-gateway')
+          ? 'model-gateway'
+          : url.pathname.endsWith('/auth/kubernetes/role/storage-module')
+            ? 'storage-module'
+            : undefined;
+        if (identityRole !== undefined && method === 'GET')
           return {
             status: 200,
             body: JSON.stringify({
               data: {
-                bound_service_account_names: ['model-gateway'],
+                bound_service_account_names: [identityRole],
                 bound_service_account_namespaces: ['lifemodel-system'],
-                policies: ['model-gateway'],
+                policies: [identityRole],
                 token_no_default_policy: true,
               },
             }),
           };
-        if (url.pathname.endsWith('/auth/token/create'))
+        if (url.pathname.endsWith('/auth/token/create')) {
+          const requested =
+            body !== undefined
+              ? (JSON.parse(body) as { policies: string[] }).policies[0]
+              : 'unknown';
           return {
             status: 200,
             body: JSON.stringify({
               auth: {
-                client_token: 'gateway-check-token',
-                policies: ['model-gateway'],
+                client_token: `${requested}-check-token`,
+                policies: [requested],
                 lease_duration: 60,
                 renewable: false,
               },
             }),
           };
-        if (
-          url.pathname.endsWith('/sys/capabilities-self') ||
-          url.pathname.endsWith('/sys/capabilities')
-        )
+        }
+        if (url.pathname.endsWith('/sys/capabilities-self'))
+          return {
+            status: 200,
+            body: legacyResponse({
+              'sys/seal-status': ['read'],
+              'sys/unseal': ['update'],
+              'sys/init': ['deny'],
+              'lifemodel/data/model/primary': ['create', 'update', 'read'],
+              'lifemodel/data/model/reserve': ['create', 'update', 'read', 'delete'],
+              'lifemodel/metadata/model/reserve': ['read'],
+              'lifemodel/metadata/model/primary': ['read'],
+              'lifemodel/data/storage/seaweed': ['create', 'update', 'read'],
+            }),
+          };
+        if (url.pathname.endsWith('/sys/capabilities')) {
+          const requested =
+            body !== undefined ? (JSON.parse(body) as { paths?: string[] }).paths : undefined;
           return {
             status: 200,
             body: legacyResponse(
-              url.pathname.endsWith('/sys/capabilities')
+              requested?.includes('lifemodel/data/storage/seaweed') === true
                 ? {
+                    'lifemodel/data/storage/seaweed': ['read'],
+                    'lifemodel/data/model/primary': ['deny'],
+                  }
+                : {
                     'lifemodel/data/model/primary': ['read'],
                     'lifemodel/data/model/reserve': ['read'],
                     'lifemodel/metadata/model/primary': ['deny'],
                   }
-                : {
-                    'sys/seal-status': ['read'],
-                    'sys/unseal': ['update'],
-                    'sys/init': ['deny'],
-                    'lifemodel/data/model/primary': ['create', 'update', 'read'],
-                    'lifemodel/data/model/reserve': ['create', 'update', 'read', 'delete'],
-                    'lifemodel/metadata/model/reserve': ['read'],
-                    'lifemodel/metadata/model/primary': ['read'],
-                  }
             ),
           };
+        }
         return { status: 204, body: '' };
       },
     });
@@ -934,11 +985,18 @@ describe('OpenBao bootstrap', () => {
     expect(gatewayPolicy).toBeGreaterThanOrEqual(0);
     expect(gatewayRole).toBeGreaterThan(gatewayPolicy);
     expect(gatewayCheck).toBeGreaterThan(gatewayRole);
-    // The root token is retired only after the gateway's identity was written
+    // The storage module's own identity is written and verified the same way.
+    const storagePolicy = paths.indexOf('/v1/sys/policies/acl/storage-module');
+    const storageRole = paths.indexOf('/v1/auth/kubernetes/role/storage-module');
+    const storageCheck = paths.indexOf('/v1/sys/capabilities', storageRole);
+    expect(storagePolicy).toBeGreaterThan(gatewayCheck);
+    expect(storageRole).toBeGreaterThan(storagePolicy);
+    expect(storageCheck).toBeGreaterThan(storageRole);
+    // The root token is retired only after every platform identity was written
     // AND verified: a role provisioned after the retirement could never be
-    // fixed by the loader again (ADR-013 D3).
+    // fixed by the loader again (ADR-013 D3, ADR-015 S-D1).
     expect(retiredAt).toHaveLength(1);
-    expect(retiredAt[0]).toBeGreaterThan(gatewayCheck);
+    expect(retiredAt[0]).toBeGreaterThan(storageCheck);
     // The retirement is the LAST revoke-self of the phase: the capability
     // check's own bounded token was revoked inside the verification above.
     expect(paths.lastIndexOf('/v1/auth/token/revoke-self')).toBe(retiredAt[0]);
@@ -969,6 +1027,11 @@ describe('OpenBao bootstrap', () => {
           events.push(`model-policy:${String(attempts)}`);
           if (attempts === 1) throw new Error('crash before the gateway identity was verified');
         },
+        ensureStoragePolicy: async () => {
+          events.push('storage-policy');
+        },
+        readStorageCustody: async () => null,
+        writeStorageCustody: async () => {},
         login: async () => {
           events.push('login');
         },
@@ -994,6 +1057,7 @@ describe('OpenBao bootstrap', () => {
       'model-policy:1',
       'loader-policy',
       'model-policy:2',
+      'storage-policy',
       'revoke',
       'login',
     ]);
@@ -1045,6 +1109,9 @@ describe('OpenBao bootstrap', () => {
         rootTokenActive: async () => !retired,
         ensureLoaderPolicy: async () => {},
         ensureModelPolicy: (root) => api.ensureModelPolicy!(root),
+        ensureStoragePolicy: (root) => api.ensureStoragePolicy(root),
+        readStorageCustody: () => api.readStorageCustody(),
+        writeStorageCustody: (value) => api.writeStorageCustody(value),
         login: () => api.login(),
         revokeRootToken: async () => {
           events.push('revoke');
@@ -1126,6 +1193,7 @@ describe('OpenBao bootstrap', () => {
       'unseal:key-1',
       'policy',
       'model-policy',
+      'storage-policy',
       'revoke',
       'login',
       'custody-write',
@@ -1195,6 +1263,10 @@ describe('OpenBao bootstrap', () => {
       readModelSlot: async () => {
         throw new Error('must not read a model slot');
       },
+      readStorageCustody: async () => null,
+      writeStorageCustody: async () => {
+        throw new Error('must not write the storage custody record');
+      },
       writeModelSlot: async () => {
         throw new Error('must not write a model slot');
       },
@@ -1254,5 +1326,289 @@ describe('OpenBao bootstrap', () => {
     await f.bootstrap.unsealIfSealed();
     expect(f.events).toEqual(['unseal:key-1']);
     expect(f.events).not.toContain('init');
+  });
+});
+
+describe('the storage module custody identity', () => {
+  it('provisions one read-only record and the loader write of it, then verifies both', async () => {
+    const calls: Array<{ path: string; method: string; body?: string }> = [];
+    const revoked: string[] = [];
+    const api = createOpenBaoApi({
+      address: 'http://openbao.test:8200',
+      role: 'loader',
+      readJwt: async () => 'loader-jwt',
+      request: async (url, method, token, body) => {
+        calls.push({
+          path: url.pathname,
+          method,
+          ...(body === undefined ? {} : { body }),
+        });
+        if (url.pathname.endsWith('/auth/kubernetes/login'))
+          return {
+            status: 200,
+            body: JSON.stringify({
+              auth: { client_token: 'loader-token', lease_duration: 3600, renewable: true },
+            }),
+          };
+        if (url.pathname.endsWith('/auth/kubernetes/role/storage-module') && method === 'GET')
+          return {
+            status: 200,
+            body: JSON.stringify({
+              data: {
+                bound_service_account_names: ['storage-module'],
+                bound_service_account_namespaces: ['lifemodel-system'],
+                policies: ['storage-module'],
+                token_no_default_policy: true,
+              },
+            }),
+          };
+        if (url.pathname.endsWith('/auth/token/create'))
+          return {
+            status: 200,
+            body: JSON.stringify({
+              auth: {
+                client_token: 'storage-check-token',
+                policies: ['storage-module'],
+                lease_duration: 60,
+                renewable: false,
+              },
+            }),
+          };
+        if (url.pathname.endsWith('/sys/capabilities-self'))
+          return {
+            status: 200,
+            body: legacyResponse({
+              'lifemodel/data/storage/seaweed': ['create', 'update', 'read'],
+              'lifemodel/data/model/primary': ['create', 'update', 'read'],
+            }),
+          };
+        if (url.pathname.endsWith('/sys/capabilities'))
+          return {
+            status: 200,
+            body: legacyResponse({
+              'lifemodel/data/storage/seaweed': ['read'],
+              'lifemodel/data/model/primary': ['deny'],
+            }),
+          };
+        if (url.pathname.endsWith('/auth/token/revoke'))
+          revoked.push(JSON.parse(body ?? '{}').token as string);
+        return { status: 204, body: '' };
+      },
+    });
+    await api.ensureStoragePolicy('root');
+
+    const policyOf = (path: string) =>
+      JSON.parse(calls.find((call) => call.path.endsWith(path))?.body ?? '{}').policy as string;
+    // The module reads exactly one record and holds no other right at all.
+    expect(policyOf('/sys/policies/acl/storage-module')).toBe(
+      'path "lifemodel/data/storage/seaweed" { capabilities = ["read"] }'
+    );
+    expect(policyOf('/sys/policies/acl/storage-module')).not.toMatch(/create|update|delete|\*/);
+    // The loader writes it and keeps its model rights.
+    expect(policyOf('/sys/policies/acl/loader-storage')).toBe(
+      'path "lifemodel/data/storage/seaweed" { capabilities = ["create", "update", "read"] }'
+    );
+    const loaderRoles = calls
+      .filter((call) => call.path.endsWith('/auth/kubernetes/role/loader'))
+      .map((call) => JSON.parse(call.body ?? '{}'));
+    expect(loaderRoles.at(-1)).toEqual({
+      bound_service_account_names: ['loader'],
+      bound_service_account_namespaces: ['lifemodel-system'],
+      policies: ['loader', 'loader-model', 'loader-storage'],
+      ttl: '1h',
+    });
+    const moduleRole = calls.find(
+      (call) => call.path.endsWith('/auth/kubernetes/role/storage-module') && call.method === 'POST'
+    );
+    expect(JSON.parse(moduleRole?.body ?? '{}')).toEqual({
+      bound_service_account_names: ['storage-module'],
+      bound_service_account_namespaces: ['lifemodel-system'],
+      policies: ['storage-module'],
+      token_no_default_policy: true,
+      ttl: '1h',
+    });
+    const check = calls.find((call) => call.path.endsWith('/sys/capabilities'));
+    expect(JSON.parse(check?.body ?? '{}')).toEqual({
+      token: 'storage-check-token',
+      paths: ['lifemodel/data/storage/seaweed', 'lifemodel/data/model/primary'],
+    });
+    // The check's own bounded token never outlives the check.
+    expect(revoked).toEqual(['storage-check-token']);
+  });
+
+  it.each([
+    ['a role bound to another ServiceAccount', { bound_service_account_names: ['loader'] }],
+    ['a role granting a second policy', { policies: ['storage-module', 'default'] }],
+    ['a role without the no-default clause', { token_no_default_policy: false }],
+    ['a role bound to another namespace', { bound_service_account_namespaces: ['lifemodel'] }],
+  ])('refuses %s', async (_description, mutation) => {
+    let minted = 0;
+    const api = createOpenBaoApi({
+      address: 'http://openbao.test:8200',
+      role: 'loader',
+      readJwt: async () => 'loader-jwt',
+      request: async (url, method) => {
+        if (url.pathname.endsWith('/auth/kubernetes/login'))
+          return {
+            status: 200,
+            body: JSON.stringify({
+              auth: { client_token: 'loader-token', lease_duration: 3600, renewable: true },
+            }),
+          };
+        if (url.pathname.endsWith('/auth/kubernetes/role/storage-module') && method === 'GET')
+          return {
+            status: 200,
+            body: JSON.stringify({
+              data: {
+                bound_service_account_names: ['storage-module'],
+                bound_service_account_namespaces: ['lifemodel-system'],
+                policies: ['storage-module'],
+                token_no_default_policy: true,
+                ...mutation,
+              },
+            }),
+          };
+        if (url.pathname.endsWith('/auth/token/create')) minted++;
+        if (url.pathname.endsWith('/sys/capabilities-self'))
+          return {
+            status: 200,
+            body: legacyResponse({
+              'lifemodel/data/storage/seaweed': ['create', 'update', 'read'],
+              'lifemodel/data/model/primary': ['read'],
+            }),
+          };
+        return { status: 204, body: '' };
+      },
+    });
+    await expect(api.ensureStoragePolicy('root')).rejects.toThrow(/storage-module/);
+    // No verification token is minted for an identity that is wrongly bound.
+    expect(minted).toBe(0);
+  });
+
+  it('reads the custody record and writes it as KV v2 data', async () => {
+    const calls: Array<{ path: string; method: string; body?: string }> = [];
+    let status = 200;
+    const api = createOpenBaoApi({
+      address: 'http://openbao.test:8200',
+      role: 'loader',
+      readJwt: async () => 'loader-jwt',
+      request: async (url, method, _token, body) => {
+        calls.push({ path: url.pathname, method, ...(body === undefined ? {} : { body }) });
+        if (url.pathname.endsWith('/auth/kubernetes/login'))
+          return {
+            status: 200,
+            body: JSON.stringify({
+              auth: { client_token: 'loader-token', lease_duration: 3600, renewable: true },
+            }),
+          };
+        if (url.pathname.endsWith('/lifemodel/data/storage/seaweed'))
+          return status === 404 && method === 'GET'
+            ? { status: 404, body: '{"errors":[]}' }
+            : {
+                status: 200,
+                body: JSON.stringify({
+                  data: {
+                    data: { accessKey: 'A1B2C3D4E5F60718293A', secretKey: 's'.repeat(40) },
+                    metadata: { version: 3 },
+                  },
+                }),
+              };
+        return { status: 204, body: '' };
+      },
+    });
+    const record = { accessKey: 'A1B2C3D4E5F60718293A', secretKey: 's'.repeat(40) };
+    await expect(api.readStorageCustody()).resolves.toEqual(record);
+    status = 404;
+    await expect(api.readStorageCustody()).resolves.toBeNull();
+    await api.writeStorageCustody(record);
+    const write = calls.find(
+      (call) => call.method === 'POST' && call.path.endsWith('/lifemodel/data/storage/seaweed')
+    );
+    expect(JSON.parse(write?.body ?? '{}')).toEqual({ data: record });
+  });
+});
+
+describe('an instance bootstrapped before the storage module', () => {
+  it('fails with one named fresh-install error instead of retrying a denied read', async () => {
+    let custodyRead = 0;
+    const api = createOpenBaoApi({
+      address: 'http://openbao.test:8200',
+      role: 'loader',
+      readJwt: async () => 'loader-jwt',
+      request: async (url) => {
+        if (url.pathname.endsWith('/sys/seal-status'))
+          return { status: 200, body: '{"initialized":true,"sealed":false}' };
+        if (url.pathname.endsWith('/auth/kubernetes/login'))
+          return {
+            status: 200,
+            body: JSON.stringify({
+              auth: { client_token: 'old-loader-token', lease_duration: 3600, renewable: true },
+            }),
+          };
+        if (url.pathname.endsWith('/lifemodel/data/storage/seaweed')) {
+          custodyRead++;
+          // The old loader identity never had loader-storage: the read is denied.
+          return { status: 403, body: '{"errors":["permission denied"]}' };
+        }
+        return { status: 204, body: '' };
+      },
+    });
+    let record: PlatformPhaseRecord | null = { phase: 'valkey-password', status: 'complete' };
+    const store: PlatformPhaseStore = {
+      read: async () => record,
+      write: async (next) => {
+        record = next;
+      },
+    };
+    const bootstrap = createOpenBaoBootstrap({
+      bao: api,
+      // The root token is already retired: nothing can provision a new policy.
+      custody: { read: async () => ({ keys: ['key'], rootToken: null }), write: async () => {} },
+      runPhases: createPlatformPhaseRunner(store),
+    });
+    let failure: unknown;
+    try {
+      await bootstrap.runInitial();
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toMatch(/fresh installation for the storage module/);
+    expect((failure as Error).message).toMatch(/reinstall/i);
+    // The error names the phase it belongs to, so the loader's log line is not
+    // a generic denial against an unrelated completed phase.
+    expect((failure as { phase?: string }).phase).toBe('storage-seaweed-custody');
+    // The denied token is retried once after a fresh login before it is refused.
+    expect(custodyRead).toBeGreaterThan(0);
+    // Nothing was rewritten and no phase ran: the instance cannot be upgraded.
+    expect(record).toEqual({ phase: 'valkey-password', status: 'complete' });
+  });
+
+  it('proceeds when the custody record is simply absent on a current installation', async () => {
+    const api = createOpenBaoApi({
+      address: 'http://openbao.test:8200',
+      role: 'loader',
+      readJwt: async () => 'loader-jwt',
+      request: async (url) => {
+        if (url.pathname.endsWith('/sys/seal-status'))
+          return { status: 200, body: '{"initialized":true,"sealed":false}' };
+        if (url.pathname.endsWith('/auth/kubernetes/login'))
+          return {
+            status: 200,
+            body: JSON.stringify({
+              auth: { client_token: 'loader-token', lease_duration: 3600, renewable: true },
+            }),
+          };
+        if (url.pathname.endsWith('/lifemodel/data/storage/seaweed'))
+          return { status: 404, body: '{"errors":[]}' };
+        return { status: 204, body: '' };
+      },
+    });
+    const bootstrap = createOpenBaoBootstrap({
+      bao: api,
+      custody: { read: async () => ({ keys: ['key'], rootToken: null }), write: async () => {} },
+      runPhases: async () => {},
+    });
+    await expect(bootstrap.runInitial()).resolves.toBeUndefined();
   });
 });
