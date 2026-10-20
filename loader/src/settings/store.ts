@@ -202,6 +202,17 @@ export function createSettingsStore(deps: SettingsStoreDeps): SettingsStore {
             : 0,
         values,
       };
+      if (problems.length > 0) {
+        // Any per-value problem is a kept-aside reason, like a corrupt file:
+        // the original bytes are the only repair copy, so move them aside
+        // before a later write can overwrite them. Valid values stay
+        // effective and a failed backup stays nonfatal.
+        await keepAside();
+        logger.warn(
+          { path, code: 'kept_aside' },
+          'platform settings file has values this loader refused; it is kept aside and the next change writes a fresh document'
+        );
+      }
     },
     section: () => {
       const values: Record<string, boolean | number | string> = {};

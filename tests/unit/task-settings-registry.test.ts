@@ -446,6 +446,63 @@ describe('settings file store', () => {
     });
   });
 
+  it('a file with a per-value problem is kept aside before a later write can overwrite it', async () => {
+    const root = storeRoot();
+    const original = JSON.stringify({
+      version: 1,
+      revision: 7,
+      values: { 'tasks.concurrency': 3, 'tasks.other': 99, 'tasks.made.up': 1 },
+    });
+    writeFileSync(settingsPath(root), original);
+    const { store } = createStore(root, {
+      declarations: [concurrency, other, secretDeclaration],
+    });
+    await store.load();
+    // Valid values stay effective; the refused ones show as problems.
+    expect(store.section().values['tasks.concurrency']).toBe(3);
+    expect(store.section().values['tasks.other']).toBe(5);
+    expect(store.section().problems.map((problem) => problem.code)).toEqual([
+      'above_maximum',
+      'unknown_key',
+    ]);
+    // The original document is preserved beside the store, untouched.
+    const directory = readdirSync(join(root, 'loader'));
+    const kept = directory.filter((name) => name.startsWith('settings.json.invalid-'));
+    expect(kept).toHaveLength(1);
+    expect(readFileSync(join(root, 'loader', kept[0]!), 'utf8')).toBe(original);
+    expect(directory).not.toContain('settings.json');
+    // A later successful PUT writes a fresh document and leaves the repair copy alone.
+    await expect(store.set('tasks.concurrency', 4)).resolves.toMatchObject({ revision: 8 });
+    expect(JSON.parse(readFileSync(settingsPath(root), 'utf8'))).toEqual({
+      version: 1,
+      revision: 8,
+      values: { 'tasks.concurrency': 4 },
+    });
+    expect(
+      readdirSync(join(root, 'loader')).some((name) => name.startsWith('settings.json.invalid-'))
+    ).toBe(true);
+  });
+
+  it('a failed keep-aside of a value-invalid file is nonfatal: the problem is shown and the loader keeps working', async () => {
+    const root = storeRoot();
+    writeFileSync(
+      settingsPath(root),
+      JSON.stringify({ version: 1, revision: 7, values: { 'tasks.concurrency': 99 } })
+    );
+    const { store, lines } = createStore(root, {
+      rename: async () => {
+        throw new Error('the volume refused the rename');
+      },
+    });
+    await expect(store.load()).resolves.toBeUndefined();
+    expect(store.section().values['tasks.concurrency']).toBe(2);
+    expect(store.section().problems[0]).toMatchObject({ code: 'above_maximum' });
+    expect(
+      lines.some((line) => line.level === 'warn' && line.fields.code === 'keep_aside_failed')
+    ).toBe(true);
+    await expect(store.set('tasks.concurrency', 3)).resolves.toMatchObject({ revision: 8 });
+  });
+
   it("a write refuses unknown keys, wrong types and bounds with the declaration's reason", async () => {
     const root = storeRoot();
     const { store } = createStore(root);
@@ -957,13 +1014,17 @@ describe('the platform loader serves settings', () => {
       },
     });
   }
-  async function settings(port: number, cookie: string): Promise<{ status: number; body: string }> {
+  async function getFrom(
+    port: number,
+    path: string,
+    cookie: string
+  ): Promise<{ status: number; body: string }> {
     return new Promise((resolve, reject) => {
       const req = httpRequest(
         {
           hostname: '127.0.0.1',
           port,
-          path: '/api/settings',
+          path,
           method: 'GET',
           headers: { host: 'boot-lifemodel.local', cookie },
         },
@@ -976,6 +1037,40 @@ describe('the platform loader serves settings', () => {
       );
       req.on('error', reject);
       req.end();
+    });
+  }
+  const settings = (port: number, cookie: string) => getFrom(port, '/api/settings', cookie);
+  async function putSetting(
+    port: number,
+    cookie: string,
+    csrf: string,
+    key: string,
+    value: unknown
+  ): Promise<{ status: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const req = httpRequest(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: `/api/settings/${key}`,
+          method: 'PUT',
+          headers: {
+            host: 'boot-lifemodel.local',
+            cookie,
+            origin: 'https://boot-lifemodel.local',
+            'content-type': 'application/json',
+            'x-csrf-token': csrf,
+          },
+        },
+        (res) => {
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', (chunk: string) => (body += chunk));
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+        }
+      );
+      req.on('error', reject);
+      req.end(JSON.stringify({ value }));
     });
   }
   async function setUp(port: number): Promise<string> {
@@ -1065,5 +1160,43 @@ describe('the platform loader serves settings', () => {
     };
     expect(again.values['tasks.concurrency']).toBe(3);
     await second.shutdown('test');
+  });
+
+  it('keeps a value-invalid settings file aside and a later PUT writes a fresh document', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'settings-app-invalid-'));
+    roots.push(root);
+    const original = JSON.stringify({
+      version: 1,
+      revision: 7,
+      values: { 'tasks.concurrency': 99 },
+    });
+    writeFileSync(join(root, 'settings.json'), original);
+    const app = appFor(root, []);
+    await app.start();
+    const cookie = await setUp(app.port());
+    const served = JSON.parse((await settings(app.port(), cookie)).body) as {
+      values: Record<string, number>;
+      revision: number;
+      problems: Array<{ code: string }>;
+    };
+    expect(served.values['tasks.concurrency']).toBe(2);
+    expect(served.revision).toBe(7);
+    expect(served.problems.map((problem) => problem.code)).toEqual(['above_maximum']);
+    const kept = readdirSync(root).filter((name) => name.startsWith('settings.json.invalid-'));
+    expect(kept).toHaveLength(1);
+    expect(readFileSync(join(root, kept[0]!), 'utf8')).toBe(original);
+    const state = JSON.parse((await getFrom(app.port(), '/api/state', cookie)).body) as {
+      csrfToken: string;
+    };
+    const written = await putSetting(app.port(), cookie, state.csrfToken, 'tasks.concurrency', 3);
+    expect(written.status).toBe(200);
+    expect(JSON.parse(written.body)).toEqual({ ok: true, value: 3, revision: 8 });
+    expect(JSON.parse(readFileSync(join(root, 'settings.json'), 'utf8'))).toEqual({
+      version: 1,
+      revision: 8,
+      values: { 'tasks.concurrency': 3 },
+    });
+    expect(readFileSync(join(root, kept[0]!), 'utf8')).toBe(original);
+    await app.shutdown('test');
   });
 });
