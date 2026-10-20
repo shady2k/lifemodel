@@ -7,8 +7,10 @@ Date: 2026-10-20. Task: lifemodel-653.5 (motor-1).
 Direction confirmed by the owner; decision record proposed for integration,
 not implementation acceptance. Different-model review passed for design handoff
 at 28bc0345 after two rounds; [review evidence](../features/motor/tasks-design-review.md)
-retains findings/dispositions and scopes the later e196a69d deadline clarification
-for coordinator verification. No third review round or runtime proof is claimed. The feature's confirmed frame is the
+retains findings/dispositions and the coordinator's step-C verification.
+Step C checks the pinned Kubernetes mechanisms, removes the CREATE webhook and
+separate deadline reconciler, retains only the residual execution claim, and
+sets the configurable warning lead to seven days. No third review round or runtime proof is claimed. The feature's confirmed frame is the
 2026-10-20 comment beginning “Design frame for lifemodel-653 confirmed”. The
 four 08:40–08:44 comments on lifemodel-653.5 settle storage, Stop and urgency.
 They supersede the corresponding recommendations in
@@ -72,12 +74,12 @@ ADR-015. Fixture sizes specify evidence, not a maximum number of owner tasks.
 | --- | --- | --- |
 | T01 | Deploy on **one k3s node**, plain Jobs first; no Docker socket/privilege/hostPath/other-task volume (owner frame, ADR-010) | WALK-TASK-ISOLATION: one fresh k3s node, **two concurrent Jobs**, distinct files/profiles; each cross-read and raw cluster/store access denied; inspect Pod admission and final volume removal |
 | T02 | One CI-built signed, digest-pinned workbench contains **OpenCode and prime-agent**; setting selects one per accepted task; startup offline (owner) | `tests/unit/task-workbench-contract.test.ts`: rendered image/signature/pin; WALK-TWO-HARNESSES: **two tasks per adapter**, shell + actual gateway + live steering + stop, no startup installs |
-| T03 | Task has zero RBAC and no model/S3/git/store signing key; explicitly projected service-audience SA tokens are bearer bootstrap identity, not secret keys (owner) | `tests/integration/task-identity.test.ts`: **two task UIDs**, wrong audience/SA/Pod/Job, replay after revoke, token rotation; WALK-TASK-ISOLATION inspects specs/env/files/logs without printing secrets |
+| T03 | Task has zero RBAC and no model/S3/git/store signing key; explicitly projected service-audience SA tokens are bearer bootstrap identity, not secret keys (owner) | `tests/integration/task-identity.test.ts`: **two task UIDs**, wrong audience/SA/Pod/Job/owner reference, unbound late-create Pod, replay after revoke, token rotation and paused binding projection; WALK-TASK-ISOLATION inspects specs/env/files/logs without printing secrets |
 | T04 | Persist task registry/mailbox in **Postgres**, tick/outbox signals in existing **Valkey** seams; no file state or task store client (frame, standing durable-home rule) | `tests/integration/task-restart.test.ts`: read-only DATA_PATH and kill/restart core at **eight boundaries** named in D3; zero lost ACKs and one terminal event key |
-| T05 | Commit launch/profile/effect intent before dispatch; one launch authorizes **at most one harness execution**, including controller replacement Pods (ADR-010 keyed effects) | `tests/integration/task-launch-fence.test.ts`: **two core epochs + two candidate Pod UIDs**, delayed create/delete, lost response/duplicate start, deleted-running-Pod replacement; WALK-TASK-RESTART verifies only one execution claim and zero replacement harness starts |
+| T05 | Commit launch/profile/effect intent before dispatch; one launch authorizes **at most one harness execution**, including controller replacement Pods (ADR-010 keyed effects) | `tests/integration/task-launch-fence.test.ts`: **two core epochs + two candidate Pod UIDs**, delayed create/AlreadyExists/adopt/stop/delete, controller restart or lost Pod-create observation, duplicate/lost start reply and authority restart; render Never/0/Failed plus fail-on-disruption/nonzero policy; WALK-TASK-RESTART verifies one claim, zero replacement harness starts, failed partial outcome and cleanup |
 | T06 | Network is deny-first; task can reach only scoped runtime services and granted egress; internal cluster targets/other files/keys remain hard-denied (owner, ADR-013) | `tests/integration/task-consent-contract.test.ts` plus WALK-TASK-ISOLATION: **two profiles**, no-network and one approved domain, forbidden methods/private IP/redirect/domain denied |
 | T07 | Both harnesses expose live commands/events/one semantic terminal result; one stalled task cannot block owner intake (owner) | `tests/integration/task-harness-contract.test.ts`: **two real adapters + one scripted adapter**; with one blocked stream, 20 owner intakes and 20 second-task control messages each ACK **within 2 s**, frame/buffer/timeout limits in D2 hold; mid-tool steer/question/abort/error and duplicate replay |
-| T08 | Soft Stop and agent timeout wrap up without new external effects; hard deadline defaults to **300 s**; hard Stop deletes immediately; stop-all soft-stops current tasks, not core (owner answer) | `tests/integration/task-stop.test.ts`: virtual clock, **two running + one queued + one starting**, repeated Stop/timeout/hard/all; WALK-TASK-STOPS observes real delete requests, retained marked bytes and no remaining Pod/PVC |
+| T08 | Soft Stop and agent timeout wrap up without new external effects; hard deadline defaults to **300 s**; hard Stop deletes immediately; stop-all soft-stops current tasks, not core (owner answer) | `tests/integration/task-stop.test.ts`: virtual clock, **two running + one queued + one starting**, repeated Stop/timeout/hard/all; WALK-TASK-STOPS checks mutable Job deadline shortening from startTime, no extension/suspend, delayed patch/conflict/restart and core-down timeout/soft Stop; observes native deadline termination, real hard-delete requests, retained marked bytes and no remaining Pod/PVC |
 | T09 | Urgent precedes normal; FIFO in each class, owner or agent can mark urgent, no preemption; concurrency is platform bounded (owner answer) | `tests/integration/task-admission.test.ts`: **100 queued tasks, cap 2, two dispatch contenders**, mixed urgent/normal and cap decrease/restart; no third live reservation, stable class FIFO |
 | T10 | Registry descriptors are typed, loader/platform-owned; secrets set/delete/exists only; ceilings cannot be raised by core (owner/nocx) | `tests/unit/task-settings-registry.test.ts`: duplicate/unknown/type/bounds/secret-read refusal; WALK-TASK-SETTINGS: add **one declaration**, render bounds/errors in deployed Chromium + Firefox, core unavailable |
 | T11 | Web uses narrow domain operations, authenticated same-origin downloads, no raw clients; tasks only in panel, Stop/Stop-now/Stop-all/urgent available (owner, ADR-011/012) | `tests/unit/web-layer-boundary.test.ts` extension and WALK-TASK-PANEL: **two tasks**, ordinary dialogue, restart, attachment download, session expiry and controls on Chromium + Firefox under PRA-001 |
@@ -98,8 +100,15 @@ APIs never leave the pod. CLI 0, `agent_end` or `step_finish` alone is not succe
 normalize provider errors, aborts and unresolved required tool failures [R].
 
 Jobs use restricted security context, one generic ephemeral working volume,
-private HOME/session directories, `restartPolicy: Never`, `backoffLimit: 0` and
-an absolute hard deadline. No shared source/workspace volume. Both harnesses
+private HOME/session directories, `parallelism: 1`, `completions: 1`,
+`restartPolicy: Never`, `backoffLimit: 0`, `podReplacementPolicy: Failed` and
+an absolute hard deadline. `podFailurePolicy` fails the Job on
+`DisruptionTarget=True` or any nonzero launcher/container exit (NotIn [0]);
+all unmatched failures count, never Ignore. These policies prevent normal
+retry and wait for terminal Pods rather than replacing a terminating Pod.
+They are supported by the pinned k3s v1.35.8+k3s1 / Kubernetes v1.35.8; the
+replacement policy is GA/locked on since 1.34 [K]. They are not a documented
+at-most-once program-start guarantee; D3 covers the remaining ambiguity. No shared source/workspace volume. Both harnesses
 use baked mounted non-secret endpoint/model configuration; Prime's ignored
 placeholder is not authorization. Skills are versioned Postgres instructions,
 not executable shared files or hot-installed plugins. Workbench inputs pin the
@@ -193,38 +202,60 @@ GET/adopt of that exact name/UID/template hash, not a new attempt. A mismatch
 fails visibly. No new Job after a recorded terminal launch tombstone. Job GC
 is driven by reconciler; no `ttlSecondsAfterFinished` before storage seal.
 
-**Kubernetes fencing:** SQL fencing alone cannot stop a delayed API request.
-A fail-closed platform admission verifier handles task Job and Pod CREATE and
-Job mutation: under a narrow authorization read it checks current core epoch,
-reserved task/launch revision, allowed template and nonterminal launch marker.
-Job restart fields alone do **not** forbid controller-created replacement Pods.
-Each Pod starts only a trusted inert launcher. Before it invokes a harness,
-a platform execution gate makes an atomic once-only SQL claim on launch ID,
-bound live Pod UID and a fresh process boot nonce; only that claimant gets a
-start acknowledgement and runtime binding. Claim is durable before response;
-two Pod UIDs racing cannot both win. Same-identity reconnect can read its saved
-binding but cannot mint another start permit. Launcher has one guarded start
-transition and never invokes start twice; a timed-out/lost start reply consumes
-the claim and fails conservatively, even if a delayed acknowledgement arrives.
-Nonce is memory-only; after launcher/process loss, a new nonce or Pod UID cannot
-reacquire execution. Include authority restart and delayed first-claim reply
-in T05, not only competing Pod requests. A replacement Pod
-may transiently exist as an inert launcher, with no model/storage/effect rights;
-it is rejected and deleted, not called a second execution. First authorized
-Pod loss is failed, not a request to reissue. The gate is not side-effecting
-admission: Pod UID exists and TokenReview is validated at handshake. Its row is
-retained until all old Job/delivery paths are fenced, including cleanup.
-On takeover, the new
-core reconciles the deterministic name **before** any further dispatch; a
-terminal Job/name is retained until old-epoch requests cannot be admitted.
-A create admitted just before takeover can arrive late: new core adopts it,
-never creates another name. If stop wins meanwhile, Pod CREATE admission
-rejects the revoked launch even if Job CREATE was already admitted. For delete,
-require a recorded stop/cleanup intent and use UID/resourceVersion preconditions;
-a stale arbitrary delete is refused by the verifier. No broad task CRUD bypass
-for ordinary core credentials. The verifier is platform-owned, not a generation
-hook; API/verifier outage fails closed. This added dependency is intentional.
+**Kubernetes fencing after coordinator verification:** no task CREATE
+webhook. Deterministic launch names give AlreadyExists/GET/adopt, not a second
+Job, and current canonical intent plus live Pod/Job identity gates all runtime
+binding. A delayed old-epoch Job/Pod CREATE may reach Kubernetes after Stop;
+it can consume bounded startup resources but stays an inert launcher, cannot
+start a harness or obtain model/storage/effect rights, and the existing core
+registry reconciler deletes it by exact UID on watch/resync. This is not a
+promise that no stale Kubernetes object can exist. Keep launch tombstones;
+never authorize another Job UID for that launch after terminality or loss.
+A delayed deletion must match recorded irreversible stop/cleanup intent and
+UID/resourceVersion preconditions; no Job-name-only delete and no launch reuse.
+Core losing its SQL fence stops dispatch; takeover reconciles deterministic
+names before new dispatch. No separate epoch-admission service is needed.
 
+**Residual once-only execution claim retained, not a new service:** D1's
+Never/0/Failed/failure policies remove normal replacement retries but do not
+make Job Pod creation transactional. Kubernetes explicitly warns that even a
+one-completion, one-parallelism Never Job can start a program twice [K]. The
+pinned controller uses informer observations and in-memory creation expectations
+that expire after five minutes; failed/unknown Pod-create responses or controller
+restart do not create a durable application start claim [KC]. Failed waits for
+known terminating Pods; it cannot fence an unobserved duplicate. Do not turn
+normal-controller behaviour into a no-rerun guarantee for ambiguous shell acts.
+
+Keep one small SQL claim in the existing verified-binding operation, served
+by the platform model gateway's task-identity listener, not a standalone gate
+process/deployment. Each Pod starts a trusted inert launcher. TokenReview,
+live non-deleting Pod/controller Job UID/template/launch checks and current
+canonical nonterminal intent precede a CAS on launch ID, Pod UID and fresh
+memory-only process boot nonce. Only the durable winner receives runtime
+binding and a start ACK; both candidate UIDs cannot win. The launcher retains
+its guarded single-start transition. Lost/timed-out reply consumes the claim
+and fails conservatively even if an ACK arrives later; reconnect reads binding
+but never grants a new start. New process/nonce or Pod UID cannot reacquire it.
+First execution Pod loss fails with partial/uncertain effects, never reruns.
+Duplicate/replacement Pods stay inert and are deleted. Retain the claim through
+all late-create/cleanup paths. Gateway/SQL/API outage denies start, not a
+fallback run. T05 must exercise observation loss/authority restart as well as
+normal failed-Pod handling; no runtime test is claimed by this source review.
+
+Static guards use Kubernetes built-ins, not a live SQL webhook: RBAC and PSA,
+ResourceQuota/LimitRange, and a service-free ValidatingAdmissionPolicy/CEL rule
+for the task namespace. Validate approved SA/image/template bounds, owner
+reference/launch-label consistency and fixed Never/0/Failed/failure policy;
+reject suspend/resume, manual selector/adoption, deadline removal/increase and
+launch-identity mutation. On Job UPDATE, require non-null
+`activeDeadlineSeconds <= oldObject.spec.activeDeadlineSeconds`; deadline-only
+patches use UID/resourceVersion CAS. Pod CREATE checks owner-reference shape
+and launcher-only template, not a nonexistent pre-CREATE UID. CEL cannot query
+SQL/current epoch or resolve an owner reference by itself: live binding checks,
+not labels/CEL, provide that proof [V]. Old-epoch late object creation is the
+narrow residual, safely denied execution by the claim/intent path above.
+Platform control handlers hold only necessary namespace-scoped create/read/
+patch/delete; task SAs still have none.
 On startup and watch resync, reconcile nonterminal registry rows with Jobs,
 storage space state and cleanup rows. No recomputation from Job status alone:
 a Job success does not prove retained result; a lost Job does not erase output.
@@ -271,19 +302,39 @@ Scheduling/startup delay therefore counts against it; the separate 120 s
 startup deadline can end a never-ready task earlier. Handshake gives launcher
 the verified absolute `softDueAt = Job.startTime + timeout`; a launcher arriving
 past it starts wrapping, not new work. Its local timer triggers wrap/cause timeout
-even while core is down, then reports the keyed event on reconnect. The platform
-control component also observes that absolute deadline as a backstop. Job
-`activeDeadlineSeconds` is fixed to timeout + snapshotted wrap grace, protecting
-the same outer bound if core dies. Earlier manual soft Stop
-sets the earlier persisted deadline; a platform deadline reconciler watches
-that intent and deletes at that deadline independently of core. It belongs to
-the platform task-control/admission component, holds only namespace-scoped
-Job delete rights, and checks UID/current stop intent. It is not an executor
-backend or an LLM loop. Restore its deadlines from Postgres after restart;
-queue admission is never delegated to it. The Job field remains the final
-backstop for agent timeout; cluster/API outage prevents a literal timed delete
-and is an unhealthy platform condition, not an extension approved by the task.
+even while core is down, then reports the keyed event on reconnect. Canonical
+database-time authorization independently denies new effects after softDueAt
+and all task operations after the hard bound, even with delayed timer reporting.
 
+**Drop the separate platform deadline reconciler.** At Job creation set Job-level
+`activeDeadlineSeconds = timeout + snapshotted wrap grace`. Kubernetes' Job
+controller enforces it without the core; it is mutable on a running Job [K, KC].
+Earlier soft Stop persists `hardStopAt = min(existing hard bound, first Stop +
+snapshot grace)` and immediately patches the same Job. The field is a duration
+from persisted `Job.status.startTime`, **not an absolute timestamp or a new
+countdown from patch time**: set it to
+`min(current ADS, floor((hardStopAt - Job.startTime) / 1 second))`.
+If due/nonpositive, delete immediately rather than write an invalid value.
+Use UID/resourceVersion CAS, GET/retry on conflict, never move the bound later;
+CEL rejects increases/removal/suspend so a delayed stale patch cannot extend it.
+Set `terminationGracePeriodSeconds: 0`: the 300 s application wrap has already
+provided the grace. Node/API/controller outage still prevents a literal timed
+physical kill; report unhealthy, never promise instantaneous termination.
+
+The existing task-control operation in core (agent) or loader/web domain handler
+(owner, even with core down) owns this finite patch, not a new timer worker.
+Persist keyed intent and patch-pending receipt before the request; Stop returns
+`enforcement pending` until GET verifies the shortened bound on the correct UID.
+If the handler dies between SQL commit and PATCH, the original native timeout
+still holds, authorization already forbids effects, and the existing durable
+control-operation replay on handler restart retries the patch. Do not claim the
+earlier physical bound was installed before that receipt. Native Kubernetes
+eliminates the independent deadline scheduler **after patch confirmation**;
+no cross-store atomicity is invented. T08 kills core after confirmation and
+also tests the pre-patch crash gap, API-down pending status and recovery.
+A never-started/missing startTime Job is stopped/deleted, never launched just
+to obtain a timer; late CREATE remains inert under D3. Timeout keeps the same
+soft-wrap path and fixed native outer bound.
 Hard “stop now” records revocation/stop intent and initiates storage revoke
 and Job DELETE in parallel **without waiting for harness, seal or upload**.
 Removal uses zero requested grace; API latency and kubelet termination are
@@ -291,7 +342,8 @@ observable, not promised instantaneous physical deletion. Storage enforces
 revocation as ADR-015 defines; only already stored and marked objects survive.
 Seal/terminal reply can follow later. Repeating hard Stop is idempotent.
 Soft/hard Stop on a queued task creates no Job and yields stopped/empty seal;
-on starting task it cancels the reservation and fences late Pod creation.
+on starting task it cancels the reservation, denies late launcher binding/start
+and reconciles late Kubernetes objects for deletion.
 
 Stop-all takes a transactional snapshot of all current nonterminal task IDs
 and creates idempotent soft-stop intents for each; queued tasks are stopped,
@@ -321,7 +373,7 @@ consume that timeout; Job scheduling/launcher startup afterward does.
 
 At tenfold fixture depth (100 tasks versus a 10-task functional fixture), SQL
 ordering and one admission row keep cap=2; no claim of unlimited throughput.
-ResourceQuota/LimitRange and platform admission enforce profile CPU/memory/time
+ResourceQuota/LimitRange and service-free CEL admission enforce profile CPU/memory/time
 ceilings. Reject invalid profiles; capacity shortage reports queued/starting
 reason, not invented fallback resources. Recheck effective ceilings/settings
 at dispatch; if lowered below requested profile, wait with `profile exceeds
@@ -435,8 +487,10 @@ content in storage, not process diagnostic logging; strip credential material.
 - Urgent-first permits starvation; no preemption gives predictable running
   work at the cost of waiting for a slot. Wrap grace can occupy capacity five
   minutes longer; hard Stop deliberately loses unmarked/unacknowledged work.
-- Platform identity/admission/deadline and storage add services and failure
-  dependencies. TokenReview/API outage fails closed, not to SA-name fallback.
+- Storage remains a separate service. Identity/start binding reuses the model
+  gateway; CEL admission and native Job deadlines need no webhook/deadline
+  deployment. Binding SQL/API outage fails closed, not to SA-name fallback.
+  A Stop patch crash gap remains explicit as enforcement pending, not success.
 - Pin/contract-test the real harnesses first; round-2 mocks [R] did not prove
   mid-tool steering, full offline workbench or hostile process-tree cleanup.
 - Review boundary: single-node process isolation, not a hardware-VM boundary.
@@ -448,6 +502,35 @@ content in storage, not process diagnostic logging; strip credential material.
   cleanup; no user-facing availability SLO/RPO is invented by this record.
 
 ## Sources
+
+[K] [Kubernetes Jobs](https://kubernetes.io/docs/concepts/workloads/controllers/job/):
+Handling Pod/container failures (explicit duplicate-program warning), Pod
+replacement policy, Pod failure policy and Job termination/active deadlines.
+Pin evidence: `scripts/install.sh` sets `K3S_VERSION="1.35.8+k3s1"`;
+`flake.nix` injects locked nixpkgs `k3s` into `deploy/nixos/default.nix`, which
+asserts that exact package. `flake.lock` pins nixpkgs
+`7993f34ee47e28a3d607a525aadc6c94b73be728`; its
+[alias](https://github.com/NixOS/nixpkgs/blob/7993f34ee47e28a3d607a525aadc6c94b73be728/pkgs/top-level/all-packages.nix)
+selects `k3s_1_35`, whose
+[version](https://github.com/NixOS/nixpkgs/blob/7993f34ee47e28a3d607a525aadc6c94b73be728/pkgs/applications/networking/cluster/k3s/1_35/versions.nix)
+is 1.35.8+k3s1. The pinned
+[k3s go.mod](https://github.com/k3s-io/k3s/blob/e952d68a5a5f8953c4549cf8fb557f3eae417107/go.mod)
+selects Kubernetes v1.35.8-k3s1. Its
+[feature table](https://github.com/k3s-io/kubernetes/blob/v1.35.8-k3s1/pkg/features/kube_features.go)
+locks JobPodReplacementPolicy GA on at 1.34.
+
+[KC] Pinned Kubernetes source:
+[Job controller](https://github.com/k3s-io/kubernetes/blob/v1.35.8-k3s1/pkg/controller/job/job_controller.go)
+(`syncJob`, `manageJob`, `onlyReplaceFailedPods`, `pastActiveDeadline`),
+[controller expectations](https://github.com/k3s-io/kubernetes/blob/v1.35.8-k3s1/pkg/controller/controller_utils.go)
+(`SatisfiedExpectations`, `ExpectationsTimeout`, in-memory store),
+[Job validation](https://github.com/k3s-io/kubernetes/blob/v1.35.8-k3s1/pkg/apis/batch/validation/validation.go)
+(`ValidateJobSpecUpdate` permits ADS mutation). Source review, not a cluster
+probe; duplicate creation is a residual failure case, not normal retry policy.
+
+[V] [ValidatingAdmissionPolicy](https://kubernetes.io/docs/reference/access-authn-authz/validating-admission-policy/):
+in-process CEL rules over object/oldObject/parameters, without a webhook service.
+Static policy cannot replace canonical task-intent or live-UID authorization.
 
 [R] [Task-runtime research, both rounds](../research/task-runtime.md).
 [J] [Jobs-engine research](../research/jobs-engine.md).
@@ -467,7 +550,8 @@ not their unrelated rollout/bootstrap contracts.
 - **653 / registry + launch + channel:** T04–T05 crash matrix, deterministic
   launch/admission fence and one terminal/outbox contract with real test stores.
 - **653 / stops + admission:** T08–T09, persisted absolute deadlines/urgent FIFO,
-  platform deadline enforcer, simultaneous core restart and hard Stop.
+  native monotone Job deadline patches/receipts, simultaneous core restart and
+  hard Stop, patch-pending crash/replay and core-down post-patch termination.
 - **653 / storage module:** ADR-015 S01–S10; allocate/bind/mark/revoke/seal and
   all crash/recovery/quota/download checks are required integration evidence.
 - **653 / registry settings:** T10; one declaration renders without a hand list;
