@@ -224,8 +224,8 @@ export function createPlatformSettingsReader(
   interface LogLine {
     level: 'info' | 'warn';
     code: string;
-    key?: string;
-    reasonCode?: string;
+    key?: string | undefined;
+    reasonCode?: string | undefined;
     msg: string;
   }
   function logOnce(signature: string, lines: LogLine[]): void {
@@ -299,10 +299,11 @@ export function createPlatformSettingsReader(
         if (!check.ok) {
           // A key is logged only when the declarations know it: an unknown key
           // is untrusted file text, so its refusal carries the code alone.
-          refused.push({
-            key: specsByKey.has(key) ? key : undefined,
-            reasonCode: check.reasonCode,
-          });
+          refused.push(
+            specsByKey.has(key)
+              ? { key, reasonCode: check.reasonCode }
+              : { reasonCode: check.reasonCode }
+          );
           continue;
         }
         // The key's spec typed the check, so the value fits the key's kind.
