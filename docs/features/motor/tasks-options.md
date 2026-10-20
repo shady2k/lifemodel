@@ -5,6 +5,31 @@ behaviour.** The confirmed frame is the feature comment of 2026-10-20 starting �
 lifemodel-653 confirmed”. This note stops at the owner's trades; it does not amend an ADR or
 start implementation.
 
+## Owner answers after step A (2026-10-20)
+
+This document is history, not the final decision. The owner's four comments on
+lifemodel-653.5 replace these recommendations; [ADR-014](../../adr/014-task-runtime.md),
+[ADR-015](../../adr/015-storage-module.md) and the
+[task views](tasks-design.md) record the chosen direction.
+
+- **§4 changed:** a separate platform storage module owns all storage authority,
+  allocation, confinement, sealing and byte transfer. Tasks call it directly with
+  projected SA tokens, not through core. All callers use its own API/CLI, never
+  S3. SeaweedFS credentials stay only there; the owner accepts proxy byte cost.
+- **§3 / trade 2 changed:** soft Stop asks the harness to wrap up without new
+  external effects, then enforces a settings deadline (default five minutes).
+  Agent-set timeout follows the same path. Hard “stop now” deletes the Job at
+  once, preserving only already stored and marked output. “Stop all” is soft
+  for every current task and does not stop lifemodel.
+- **§5 / trade 3 changed:** FIFO within urgent and ordinary queues; urgent starts
+  first when a slot frees. Either owner or agent may set urgent. No preemption.
+- **Trade 1 settled:** all bytes cross the storage module for live confinement
+  and revocation, not direct presigns. Step A's core-owned upload/broker shape
+  is superseded, not silently relabelled.
+
+The other options below retain their original wording as history. None is a
+present-tense claim about what is built.
+
 ## Outcome, drivers and fixed choices
 
 The owner hands long work to lifemodel and keeps talking. The agent answers at once, briefs a
