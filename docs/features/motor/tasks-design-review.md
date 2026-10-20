@@ -5,14 +5,60 @@ untracked review file. Actual reviewer model: shady2k-gateway/gpt-6.1-sol.
 Two rounds: frame-first review at 82eec5eb, fixes and final PASS at 28bc0345.
 No third review round. This is design handoff evidence, not stage acceptance.
 
-After the reviewed revision, e196a69d clarifies that canonical authorization
-also computes effective wrapping/revoked mode from absolute deadlines using
-database time. The author checked this against the established canonical-intent
-rule: it closes delayed-timer propagation without reopening the owner's Stop
-trade. **The different-model verdict does not claim to cover this later diff**;
-the coordinator should verify it when integrating. It changes no constraint ID,
-policy default or product implementation. The final records remain proposed
-architecture until owner/coordinator acceptance; checks are stage obligations.
+After the reviewed revision, e196a69d clarified database-time deadline
+authorization. The coordinator's step-C verification below addresses that
+clarification and simplifies platform controls. **The round-2 verdict does not
+claim to cover either later diff.** The records remain proposed architecture
+until owner/coordinator acceptance; checks are stage obligations.
+
+## Coordinator verification, step C (2026-10-20)
+
+The coordinator (Claude, a different model) requested simplification after the
+two completed review rounds. This section records the response, not a third
+review or a new reviewer PASS. Owner choices and 22 closed constraints remain.
+Current ADRs/views supersede the component descriptions in the verbatim reports
+below. Primary source/pin evidence is in ADR-014 [K]/[KC]/[V].
+
+1. **Replacement Pods:** add explicit Never/0/Failed plus one completion/parallelism
+   and fail-on-disruption/nonzero Pod policy. Both install paths pin k3s
+   1.35.8+k3s1, whose Kubernetes 1.35.8 replacement policy is GA/locked on.
+   This removes ordinary replacement retries/overlap, not Kubernetes' documented
+   duplicate-program-start residual. The pinned controller uses in-memory,
+   expiring Pod-create expectations; controller/observation failure is not a
+   durable start fence. **Retain** the launch/Pod/memory-nonce claim, but fold it
+   into the existing model gateway task-identity/binding endpoint, no separate
+   gate deployment. Keep launcher's single-start guard and conservative lost-ACK
+   failure. T05 names normal policy checks and residual controller/create faults.
+2. **Stale-epoch CREATE:** **drop** the fail-closed SQL admission webhook.
+   Deterministic names/AlreadyExists/adopt, permanent launch tombstones, current
+   intent/live-owner checks before execution and existing registry cleanup cover
+   the outcome. Late objects can transiently exist, but are inert and denied
+   binding/model/storage/effects. Use built-in RBAC/PSA/quota plus service-free
+   CEL for static template/identity and monotone deadlines. CEL/labels cannot
+   prove current SQL epoch or actual owner liveness; do not claim they can.
+   T03/T05 check stale/forged binding and late-create/Stop cleanup, not zero
+   late object creation. Deleted first execution never authorizes another UID.
+3. **Deadlines:** **drop** the separate deadline reconciler. Job ADS is mutable;
+   native controller enforces the hard bound after a successful patch with core
+   down. Convert absolute hardStopAt to seconds **from Job.status.startTime**,
+   floor and min with current ADS; do not put now+grace directly into a duration.
+   Reject increases/removal/suspend via CEL; use UID/resourceVersion CAS and
+   zero extra termination grace. Existing agent/owner control handlers persist
+   intent and patch receipt; a pre-patch crash/API outage is enforcement pending,
+   repaired by existing keyed control replay on handler restart. The original
+   native timeout and canonical database-time access denial remain backstops;
+   no claim of earlier physical enforcement before patch confirmation. T08
+   covers both sides of that cross-store gap and core-down native termination.
+4. **Warning:** change default **24 h → 7 days / 604800 s**, keeping one keyed
+   batched notice. A typed loader/platform setting snapshots lead/revision into
+   each plan; a later setting cannot shorten an announced window. S07 checks
+   default/configured boundary, restart and policy-change behaviour. This allows
+   owner absence without changing 90 days/forever/pin/20 GB protections.
+
+The coordinator's request includes the earlier database-time clarification: it
+keeps canonical intent/deadline authorization independent of projection/timer
+delay. Design-only source inspection, not cluster proof. Product tests, real
+Job walks and owner/coordinator integration acceptance remain outstanding.
 
 ---
 

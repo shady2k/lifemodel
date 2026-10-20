@@ -19,9 +19,10 @@ flowchart LR
 platform settings/auth projection
 storage catalog)]
     VK[(Valkey: tick snapshot + Signal streams)]
-    Control[Platform task-control
-admission + absolute deadline enforcer]
-    API[Kubernetes API]
+    Identity[Existing model gateway task-identity endpoint
+verified binding + once-only SQL claim]
+    API[Kubernetes API
+built-in CEL + native Job deadlines]
     Model[Platform model gateway
 task identity listener + key custody]
     Storage[Platform storage module
@@ -47,9 +48,10 @@ OpenCode OR prime-agent]
     Core -->|fenced domain writes| PG
     Core -->|Signals + committed effect keys| VK
     Core -->|ensure/adopt/delete by launch key| API
-    API -->|admission checks| Control
-    Control -->|current intents + verified bindings| PG
-    Control -->|deadline delete by UID| API
+    Identity -->|current intent + binding CAS| PG
+    Identity -->|TokenReview + live owner lookup| API
+    Loader -->|owner Stop: monotone deadline patch / delete| API
+    Launch -->|bind before harness start| Identity
     API --> Job
     Launch -->|outbound TLS, durable mailbox ACK| Core
     Launch -->|audience token, model only| Model
@@ -65,7 +67,9 @@ OpenCode OR prime-agent]
     Effect -->|credential custody, no key returned| Bao
 ```
 
-Arrows are allowed logical operations, not broad network grants. The TLS task
+Identity and Model above are endpoints in the **same existing model gateway
+process**, not separate deployments. Arrows are allowed logical operations,
+not broad network grants. The TLS task
 listeners require the explicit audience tokens of ADR-014 D1; direct task→SQL,
 Valkey/API/Bao/Seaweed/core-model-listener are denied. No task ingress exposes
 harness RPC. DNS and the narrowly approved runtime routes are exceptions to
@@ -75,20 +79,24 @@ Web raw DB arrows above denote **implementation behind domain ports**, not pg
 clients in handlers. Core schema task operations and storage/schema grants are
 separate. No task script can query any schema or choose a bucket/prefix.
 
-A Job may create a replacement Pod despite backoffLimit=0. Every Pod therefore
-starts an inert trusted launcher: SQL CAS on launch ID + live Pod UID + fresh
-memory-only process nonce grants one execution before harness start or runtime
-binding. Same-process duplicate response cannot invoke start twice; another
-Pod/nonce never reacquires the claim. First execution Pod loss fails the task;
-controller replacement is denied runtime rights and deleted. This is at-most-one
-authorized execution, not a false exactly-once Kubernetes Pod-create promise.
+Pinned k3s 1.35.8+k3s1 supports Never/0/Failed and fail-on-disruption/nonzero
+Pod policy. These prevent ordinary retries/overlap, not all duplicate program
+starts under ambiguous Pod-create observation/controller recovery (ADR-014 [K,
+KC]). Retain the small launch/Pod/boot-nonce CAS inside the existing model
+gateway task-identity binding operation, with inert launchers and guarded
+single start; no separate gate deployment. Lost start reply fails conservatively,
+replacement identities cannot reacquire, and first execution Pod loss fails.
 
-The admission/deadline component is platform task control, not a second launch
-queue or executor service. Core initiates Jobs and owns task intent/outcome;
-control validates admission and executes persisted stop deadlines while core
-is down. It is the only non-core actor with narrowly scoped task cleanup
-rights; it cannot submit new work. Storage enforces its own access revision,
-not a task IAM policy or core HTTP round trip.
+Step C drops the CREATE webhook and deadline reconciler. Deterministic names
+adopt AlreadyExists; late stopped-launch objects remain inert and the existing
+core registry reconciler deletes them. Service-free CEL checks static template,
+owner-reference/label shape, immutable identity and never-increasing ADS;
+canonical SQL/live API binding, not CEL/labels, supplies lifecycle proof. Core
+owns launch/outcome; existing loader/web Stop handlers can shorten native Job
+ADS with core down. A confirmed deadline patch needs no independent timer
+service. A pre-patch crash is explicitly enforcement pending until replay, not
+an installed earlier physical deadline. Storage reads canonical intent/deadline
+plus verified binding itself; no core HTTP round trip.
 
 ## Durable ownership and port contracts
 
@@ -96,7 +104,7 @@ not a task IAM policy or core HTTP round trip.
 | --- | --- | --- |
 | Core (`core` schema) | Task/launch identity, briefing/profile/harness/image revision, accepted order/urgent, stop cause/deadlines, terminal candidate/outcome, mailbox ACK/cursors, outcome outbox, cleanup state | TaskService; cognition tools use port, web uses narrow task operations |
 | Platform settings scope | Typed Motor declarations/values/revision and authority/apply timing | Loader generated UI; core reads effective snapshot, admission validates ceilings |
-| Platform task-control scope | Read-only-to-consumers verified launch/Job/Pod binding and access mode/revision, deadline work receipts | Verifier/deadline component writes from committed intents + API; storage/model read narrow projection |
+| Platform identity scope | Read-only-to-consumers verified launch/Job/Pod binding, consumed execution claim and access mode/revision | Existing model gateway identity endpoint writes binding/claim from canonical intent + API; listeners read narrow projection; no webhook/deadline deployment |
 | Storage (`storage` schema) | Space binding/access revision, upload/reservation/mark ledger, immutable manifests, deletion plans/read leases/tombstones and receipts | Own API: task data, core control/read, web read, health separated |
 | Seaweed PVC | Private immutable bytes, filer metadata, backend auth/config as required | Only storage S3 adapter; platform recovery backs up all required state |
 | Valkey | Committed core snapshot/Signal streams, not artifact bytes or task authority | Existing core seams; no per-task Valkey passwords |
@@ -125,8 +133,8 @@ stateDiagram-v2
     [*] --> queued: core accepts committed launch key
     queued --> starting: core admission reserves slot + allocate intent
     starting --> running: core observes bound ready launcher/Job
-    running --> wrapping_up: soft Stop or agent timeout / core or platform control
-    starting --> wrapping_up: soft Stop / core or platform control
+    running --> wrapping_up: soft Stop or agent timeout / control handler or launcher timer
+    starting --> wrapping_up: soft Stop / control handler
     wrapping_up --> stopped: owner-stop candidate + sealed receipt / core CAS
     wrapping_up --> failed: timeout/error candidate + sealed receipt / core CAS
     running --> done: semantic success + sealed receipt / core CAS
@@ -152,16 +160,16 @@ removed; this cannot keep a slot occupied after Pod termination is confirmed.
 | --- | --- | --- |
 | accept→queued | Core after deciding-turn commit; persist immutable launch key and settings/profile snapshot | Replay returns same task; queue is not an in-memory Promise |
 | queued→starting | Core locks admission row, checks cap/priority/profile, reserves, allocates storage | Allocation/Job create retries by key; no second launch ID on lost response |
-| starting→running | Core observes verified Job/Pod UID + durable one-execution claim by launch/Pod/process nonce | Atomic platform start gate permits one launcher only; replacement Pod stays inert; deterministic name adopts delayed Job create |
-| running/starting→wrapping-up | Persist owner Stop or due timeout, deny new effects, command harness wrap, set absolute hardStopAt | Repeat cannot extend deadline; platform deadline enforcer works while core down |
+| starting→running | Core observes verified Job/Pod UID + durable one-execution claim by launch/Pod/process nonce | Existing gateway binding CAS permits one launcher only; replacement Pod stays inert; deterministic name adopts delayed Job create |
+| running/starting→wrapping-up | Persist owner Stop or due timeout, deny new effects, command harness wrap, set absolute hardStopAt | Repeat cannot extend deadline; confirmed native Job ADS patch works while core down; pending patch is visible/replayed |
 | nonterminal→terminal candidate | Core/reconciler persists semantic success/error or stop reason; remove compute as needed | Hard stop beats an uncommitted success candidate; terminal CAS never changes afterward |
 | candidate→done/failed/stopped | Core freezes/revokes storage, ends compute, obtains seal receipt, CAS terminal + outcome outbox | One terminal key, duplicate result/Job watch/seal replies harmless; missing result never fake success |
-| cleanup pending→complete | Core or platform cleanup reconciler confirms Pod/ephemeral PVC gone, module confirms unmarked bytes deleted | Independently replayable; no terminal task reopened, no slot released for unknown live compute |
+| cleanup pending→complete | Existing core registry reconciler or owner control handler confirms Pod/ephemeral PVC gone, module confirms unmarked bytes deleted | Independently replayable; no terminal task reopened, no slot released for unknown live compute |
 
 Failure reasons distinguish model/tool/infra/timeout and preserve partial result
 references. A stopped task can have useful result files but remains stopped.
 Task deletion/Pod eviction never auto-runs the shell again. Queued/starting
-soft Stop creates no computation solely to wrap; pending create is fenced.
+soft Stop creates no computation solely to wrap; pending create is denied runtime binding/start and reconciled for deletion.
 A queued failure before allocation uses an idempotent empty sealed receipt so
 outcome shape stays explicit. Terminal/outbox delivery is at-least-once with
 idempotent consumer, not an exactly-once external action guarantee.
@@ -180,10 +188,12 @@ sequenceDiagram
         Caller->>Control: softStop(taskId, requestId)
         Control->>DB: record cause, wrapping, immutable hardStopAt
         Control->>DB: revoke new external-effect grants
+        Control->>K: CAS shorten ADS from persisted Job.startTime (never extend)
+        K-->>Control: confirmed bound or explicit enforcement pending
         Control-->>Task: wrap: finish local step, save + mark + result
         Task->>Store: put and mark while wrapping
         Note over Control,K: hardStopAt = first Stop + snapshot grace; default 300 s
-        Control->>K: delete at hardStopAt if still running
+        Note over Task,K: native Job controller terminates at confirmed hard bound, without core
     else Hard stop now
         Caller->>Control: hardStop(taskId, requestId)
         Control->>DB: stop/revoke intent before side effects
@@ -198,17 +208,20 @@ sequenceDiagram
 ```
 
 Core handles normal task commands; direct owner Stop intake and platform
-deadline enforcement do not require a cognition turn. Eventual delete latency
+native deadline PATCH do not require a cognition turn. Eventual delete latency
 under API/node failure is reported unhealthy, not claimed instantaneous.
 Timeout origin is persisted Job.status.startTime, not harness-ready time;
 scheduling/launcher delay counts, pre-Job queue wait does not. Launcher receives
 verified absolute softDueAt and fires its local wrap timer even with core down;
-late handshake starts wrapping instead of new work. Platform control also
-observes the deadline; both dedupe the same timeout intent. T08 includes an
-unscheduled/delayed Job and core outage spanning softDueAt. Five minutes is wrap
-time, not Kubernetes termination grace to leave runaway compute alive after
-the hard deadline. Soft-stop `hardStopAt` survives core/
-control restart and is never extended by another click or setting change.
+late handshake starts wrapping instead of new work. Database-time authorization
+also derives due mode without a timer event. Native Job ADS starts as timeout +
+wrap grace; manual Stop patches `min(current ADS, floor(hardStopAt - startTime))`
+in seconds, or deletes if already due. Zero requested termination grace follows
+the application wrap. No suspend/reset or deadline extension is allowed by CEL.
+Stop is enforcement pending until correct UID/bound confirmation; handler crash
+before PATCH is retried by existing durable control replay on restart. T08
+covers that gap, conflicts/stale patches, and core-down native termination after
+confirmation. Five minutes is application wrap, not extra termination grace.
 
 Queue key `(urgent first, original accepted sequence, taskId)` is durable.
 Owner or agent can change urgent while queued; new urgency does not create a
@@ -229,7 +242,8 @@ sequenceDiagram
     participant C as Core / TaskService
     participant P as Postgres task + mailbox/outbox
     participant S as Storage module
-    participant K as Kubernetes + platform admission
+    participant K as Kubernetes API + native policy
+    participant I as Existing model gateway identity endpoint
     participant T as Job launcher / selected harness
     participant M as Model gateway
     participant W as Web
@@ -240,12 +254,13 @@ sequenceDiagram
     C->>S: allocate(taskId, launchId, effectKey)
     S-->>C: stable space ID (not a secret)
     C->>K: ensure deterministic Job, image/profile/hard deadline
-    K->>P: verify current epoch/reservation/template
+    Note over C,K: CEL static guards only, no SQL CREATE webhook
     K-->>C: Job UID or unknown response → adopt by name
-    T->>K: platform start gate: live Pod UID + boot nonce
-    K->>P: CAS consumed execution claim by launch, one winner
-    K-->>T: one-use start ACK (lost reply fails conservatively)
-    K->>S: verified execution binding, no second Pod/nonce grant
+    T->>I: bind/start: audience token + live Pod UID + boot nonce
+    I->>K: TokenReview + live Pod/Job/owner/template checks
+    I->>P: canonical intent + CAS execution claim, one winner
+    I-->>T: one-use start ACK (lost reply fails conservatively)
+    S->>P: read verified binding + canonical intent; no second Pod/nonce grant
     T->>C: audience token; connect/resume mailbox
     C->>P: verify binding; persist running + cursors
     T->>M: model via task identity relay/header
@@ -315,7 +330,8 @@ Defaults: 90-day age; forever and pin block automatic deletion; 20 GB decimal
 logical ceiling also charges reservations. Quota pressure can propose only
 unpinned, finite-retention sealed output for warning-first reclamation, never
 forever, pinned or active spaces. If nothing eligible remains, new uploads fail
-with capacity_exhausted. Warning lead default 24 h; core emits one keyed batched
+with capacity_exhausted. Warning lead setting defaults to **7 days / 604800 s**;
+plans snapshot revision/lead, never shorten an announced window. Core emits one keyed batched
 ordinary reply, module waits for persisted notice receipt plus lead time. No
 core/notice means deletion waits, not a silent age eviction. The warning lead
 is an explicit engineering default, not an additional owner quote.
@@ -337,4 +353,6 @@ failure are first acceptance risks. Independent design review and stage
 implementation evidence must remain separate from this intended model.
 [Independent review evidence](tasks-design-review.md) records two rounds and
 PASS for design handoff at 28bc0345; the later database-time deadline clarification
-is explicitly handed to the coordinator for verification, not a third model round.
+was included in the coordinator's step-C verification. Step C removes the
+CREATE webhook/deadline service and retains only the residual claim in existing
+identity binding; source checks are not a third review or runtime proof.

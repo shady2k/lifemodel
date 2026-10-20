@@ -7,7 +7,8 @@ Date: 2026-10-20. Task: lifemodel-653.5 (motor-1).
 Direction confirmed by the owner's 08:40 comment on lifemodel-653.5; record
 proposed for integration. Different-model review passed at 28bc0345 after two
 rounds; [review evidence](../features/motor/tasks-design-review.md) records its
-scope and the later e196a69d deadline clarification for coordinator verification.
+scope and the coordinator's step-C verification of native Job controls and
+the configurable seven-day warning lead.
 Not built or accepted on a deployed instance.
 [ADR-014](014-task-runtime.md) owns launch, live steering and task outcomes;
 [this component/sequence view](../features/motor/tasks-design.md) joins them.
@@ -60,8 +61,8 @@ limits beyond the owner-declared 20 GB logical-storage ceiling.
 | S03 | ACK only after immutable bytes and metadata are durable; retry idempotently; no path traversal/symlink/special file or cross-space name (nothing-lost/isolation) | `tests/integration/storage-module-objects.test.ts`: **32 objects**, duplicate/conflicting IDs, byte/hash mismatch, lost ACK, malicious names; restart between object write and metadata commit |
 | S04 | Allocate/bind/revoke/seal are keyed, revisioned and recoverable; seal makes space read-only, hashes marked files and deletes the rest (owner) | `tests/integration/storage-module-seal.test.ts`: **two spaces, eight objects each**, kill at freeze/hash/manifest/delete/receipt; replay same sealed receipt and retained marked bytes only |
 | S05 | Persist log/result while running; hard Stop keeps only already stored+marked output; unacknowledged bytes are explicitly not guaranteed (owner) | WALK-TASK-STOPS + `tests/integration/task-storage-stop.test.ts`: **two Jobs**, soft wrap vs hard kill during PUT/mark, module restart; logs/result chunks marked incrementally and no fabricated complete artifact |
-| S06 | Retention defaults **90 days**, supports forever/pin; instance logical output ceiling **20 GB = 20,000,000,000 bytes**; no silent protected-data eviction (owner + explicit unit choice) | `tests/integration/storage-module-retention.test.ts`: clock at 89/90/91 days, pinned/forever/unpinned; quota ledger fixture at **20 GB** with boundary ±1 byte, **100 object metadata rows**, concurrent reservations and stale settings revision |
-| S07 | One batched warning per deletion plan precedes deletion; pin/read/seal races cannot resurrect or delete protected output (owner) | `tests/integration/storage-module-gc.test.ts`: **100 artifacts**, one batch/notification key, owner pin after warning, two GC contenders, active reader and crash before/after delete; zero per-item notices |
+| S06 | Retention defaults **90 days**, supports forever/pin; instance logical output ceiling **20 GB = 20,000,000,000 bytes**; no silent protected-data eviction (owner + explicit unit choice) | `tests/integration/storage-module-retention.test.ts`: clock at 89/90/91 days (selection, not early deletion) and after notice + 7 days, pinned/forever/unpinned; quota ledger fixture at **20 GB** with boundary ±1 byte, **100 object metadata rows**, concurrent reservations and stale settings revision |
+| S07 | One batched warning per deletion plan precedes deletion by a configurable **7 days** by default; pin/read/seal races cannot resurrect or delete protected output (owner) | `tests/integration/storage-module-gc.test.ts`: **100 artifacts**, one batch/notification key, default 7-day lead ±1 s and configured lead/revision change with no retroactive early deletion, owner pin after warning, two GC contenders, active reader and crash before/after delete; zero per-item notices |
 | S08 | Owner downloads through authenticated same-origin web→module; no raw S3 client/URL, no unsafe inline artifact execution (ADR-011/012, owner) | `tests/integration/task-artifact-download.test.ts`: **two owner sessions, two artifacts**, expired session, traversal, CRLF filename/HTML content, range/reconnect and mid-read expiry; WALK-TASK-PANEL in Chromium + Firefox |
 | S09 | Seaweed **single-node weed mini** with persistent volume, auth fail-closed, internal-only S3; recover objects + filer metadata + IAM/custody + SQL catalog together (owner/research) | WALK-STORAGE-RESTORE: one fresh k3s node, **32 objects of 4 MiB plus 2 partial uploads**, restart and restore into empty instance; hashes/marks/read denial/tombstones match; record measured restore time and backup age |
 | S10 | Bound transfer/memory/client pressure with reserved web/control capacity; health never reports failed stores as empty (limits/visibility) | `tests/integration/storage-module-pressure.test.ts`: **20 attempted streams, 2 tasks + web**, 4 MiB chunks; active/buffer limits in S-D3 never exceeded, overload rejected **within 1 s**, 20 healthy control/second-task operations each ACK **within 2 s** with one stalled stream; WALK-STORAGE-LOAD proves RSS **≤512 MiB** at this fixture and no secret/body diagnostic logs |
@@ -114,8 +115,9 @@ own service-audience projected identities on their distinct listeners; web
 cannot call control operations. Authorization is operation-shaped, not shared
 namespace trust.
 
-A platform task-control component maintains a **narrow SQL authorization
-projection** (task/attempt/launch IDs, verified Job/Pod UIDs, access revision,
+The existing platform model gateway task-identity listener maintains the
+verified binding through D3's once-only CAS; its reconciliation maintains a
+**narrow SQL authorization projection** (task/attempt/launch IDs, verified Job/Pod UIDs, access revision,
 mode active/wrapping/revoked) from committed lifecycle intents and actual API
 objects. Core writes lifecycle intents through its fenced operations; storage
 cannot edit the core registry or infer liveness solely from an unfenced message.
@@ -127,7 +129,10 @@ worker catches up. No eventual projection alone can authorize stale active
 mode. Also verify actual Pod/Job liveness per operation/chunk using current API
 reads, never watcher cache; failure rejects access. A watch drives cleanup but
 is not the source of authorization freshness. Missing projection/binding fails
-closed until reconciled. Control component can revoke without cognition.
+closed until reconciled. Loader/web domain control handlers can record revoke
+intent without cognition or core availability; no CREATE webhook or deadline
+scheduler is required. The binding claim adds an operation to the existing
+gateway, not another platform deployment.
 This projection contains no briefing, secret or grants and is not a second
 task outcome/launch registry. S02 pauses the projection watcher, commits revoke
 intent, then attempts PUT/mark/GET before reconciliation and injects a delayed old active
@@ -137,7 +142,9 @@ boundary: zero later authorizations may use the older mode/revision. The same
 read computes effective mode from canonical absolute softDueAt/hardStopAt using
 the database clock: due timeout denies new effects (wrap data/model only), hard
 deadline denies task operations even if a timer/projection worker has not yet
-published its event. API deletion is still driven independently. A chunk
+published its event. Native Job ADS enforces the confirmed hard bound without
+core; ADR-014 D4 exposes a pending deadline PATCH instead of claiming an earlier
+bound before Kubernetes confirms it. A chunk
 already authorized before intent commit may complete; revoke ACK additionally
 confirms active-stream cancellation. T03/T06 apply this same rule to model and
 effect listeners, not only storage.
@@ -218,7 +225,9 @@ logs are separately authorized private content, credential-filtered at source.
 Core `allocate(taskId, launchId, effectKey, retentionRevision)` creates exactly
 one space before Job launch. Allocate response carries opaque space ID, not a
 secret. `bind` accepts only the registered actual Job/Pod UIDs through the
-platform control identity; the task cannot self-bind. Restart returns same space.
+trusted core/control identity using D3's gateway-verified once-only binding;
+the task cannot self-bind and core cannot supply an unchecked replacement UID.
+Restart returns same space.
 Core can read task output through module while running; web only sees objects
 already marked, never arbitrary unmarked workspace staging. Owner downloads
 need not wait for final seal if a marked immutable object already exists.
@@ -266,8 +275,14 @@ PUT. Core can then propose oldest unpinned, finite-retention sealed spaces for r
 prompt per item and no eviction hidden behind a failed upload retry.
 
 Module builds one durable deletion plan with candidate IDs/revisions, total
-bytes/reason and earliest-delete time. Default warning lead is **24 hours**
-(engineering default), both for age and quota reclamation. A single ordinary
+bytes/reason and earliest-delete time. Default warning lead is **7 days**
+(coordinator verification, owner-away allowance), both for age and quota
+reclamation. `preDeletionWarningLeadSeconds` is a typed loader/platform setting,
+default **604800**, positive with unit/bounds validation. Snapshot its revision
+and lead into the plan. A later setting change cannot shorten an already
+announced window; increased protection may delay it, new plans use the new
+value. S07 checks default/configured leads and restart/revision boundaries.
+A single ordinary
 batched notice covers the plan, keyed by plan ID; core writes it through its
 existing durable outbound/message path. `warningCommitted(planId, messageId)`
 is accepted only with the matching persisted owner-notice receipt, not an LLM

@@ -126,9 +126,9 @@ model provider; untrusted task code has the same task identity either way.
 Each trusted listener uses TokenReview with its audience and namespace-scoped
 Pod/Job reads: authenticated result, bound Pod UID, live non-deleting Pod and
 controller Job UID must match the registered attempt. Reject absent bound UID
-rather than accept SA-only identity. Core registers binding via allocation/bind
-(ADR-015); a platform-only authorization projection verifies Job existence and
-launch identity. No task can patch labels, request tokens or reach the API.
+rather than accept SA-only identity. Core allocates the space (ADR-015); the existing model gateway identity
+endpoint verifies actual Job/Pod ownership and registers the once-only binding
+of D3. Its platform-only authorization projection verifies launch identity. No task can patch labels, request tokens or reach the API.
 The task model listener replaces caller session with trusted task ID and uses
 ADR-013 filtering/failover/custody; core's existing listener is unchanged.
 Model, channel, storage and effect listeners use the narrow SQL authorization
@@ -231,8 +231,10 @@ by the platform model gateway's task-identity listener, not a standalone gate
 process/deployment. Each Pod starts a trusted inert launcher. TokenReview,
 live non-deleting Pod/controller Job UID/template/launch checks and current
 canonical nonterminal intent precede a CAS on launch ID, Pod UID and fresh
-memory-only process boot nonce. Only the durable winner receives runtime
-binding and a start ACK; both candidate UIDs cannot win. The launcher retains
+memory-only process boot nonce. The same verified binding transaction records
+Job.startTime and the snapshotted soft/hard timeout bounds before any start
+permit, so core loss cannot leave deadline authorization uninitialized. Only
+the durable winner receives runtime binding and a start ACK; both candidate UIDs cannot win. The launcher retains
 its guarded single-start transition. Lost/timed-out reply consumes the claim
 and fails conservatively even if an ACK arrives later; reconnect reads binding
 but never grants a new start. New process/nonce or Pod UID cannot reacquire it.
