@@ -305,6 +305,20 @@ describe('platform admission policies', () => {
     expect(
       evaluate(validation, { request: { ...loaderRequest, operation: 'DELETE' }, object: null })
     ).toBe(true);
+    // The core's own identity is refused like any other requester: it reads
+    // the projection through its mounted volume, never through the API.
+    const coreRequest = {
+      ...cnpgRequest,
+      userInfo: { username: 'system:serviceaccount:lifemodel:core' },
+    };
+    expect(evaluate(condition.expression, { request: coreRequest, object: settings })).toBe(true);
+    expect(evaluate(validation, { request: coreRequest, object: settings })).toBe(false);
+    expect(
+      evaluate(validation, { request: { ...coreRequest, operation: 'UPDATE' }, object: settings })
+    ).toBe(false);
+    expect(
+      evaluate(validation, { request: { ...coreRequest, operation: 'DELETE' }, object: null })
+    ).toBe(false);
     // An unrelated ConfigMap never matches the guard, so other actors keep working.
     const unrelated = { ...cnpgRequest, name: 'kube-root-ca.crt' };
     expect(
