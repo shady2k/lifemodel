@@ -39,7 +39,10 @@ export interface SelectOption {
 }
 
 export interface SettingDeclaration {
-  /** A dotted lowercase key, unique across every home of the registry. */
+  /**
+   * A dotted key with a lowercase first segment (later segments may be
+   * camelCase), unique across every home of the registry.
+   */
   key: string;
   /** The grouping id the screen renders the setting under. */
   section: string;
@@ -54,8 +57,15 @@ export interface SettingDeclaration {
   /** The declared bounds of a number control, stated on the screen. */
   min?: number;
   max?: number;
-  /** What a number counts ("tasks", "days"). Never lives in prose. */
-  unit?: string;
+  /** What a number counts, localized ("tasks"/"задачи"). Never lives in prose. */
+  unit?: LocalizedText;
+  /**
+   * A value the owner can never change: the registry refuses every write and
+   * a screen renders the declared default as fixed text with no input.
+   */
+  readOnly?: boolean;
+  /** How a number is displayed. 'bytes' renders a decimal byte count (20 GB). */
+  format?: 'bytes';
   authority: SettingAuthority;
   apply: ApplyTiming;
 }
@@ -69,6 +79,7 @@ export type SettingRefusalCode =
   | 'too_long'
   | 'empty'
   | 'not_an_option'
+  | 'read_only'
   | 'secret_setting';
 
 export type ValueCheck =
@@ -99,7 +110,13 @@ export interface SettingsSectionPayload {
   projection: { state: 'unattempted' | 'ok' | 'failed'; reason?: string };
 }
 
-const KEY_PATTERN = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9-]*)+$/;
+/**
+ * The grammar of a declaration key, shared with every route that names one: a
+ * dotted key whose first segment is lowercase; later segments may be camelCase
+ * (the platform declares tasks.wrapGraceSeconds and friends), so the grammar
+ * admits an uppercase after a segment's first character only.
+ */
+export const SETTING_KEY_PATTERN = /^[a-z][a-z0-9]*(?:\.[a-z][a-zA-Z0-9-]*)+$/;
 
 const CONTROLS: readonly SettingControl[] = ['toggle', 'number', 'select', 'text', 'secret'];
 const DATA_CLASSES: readonly SettingDataClass[] = [
@@ -119,9 +136,9 @@ function assertLocalized(text: LocalizedText, what: string, key: string): void {
 }
 
 function assertDeclaration(declaration: SettingDeclaration): void {
-  if (!KEY_PATTERN.test(declaration.key))
+  if (!SETTING_KEY_PATTERN.test(declaration.key))
     throw new SettingsDeclarationError(
-      `setting key ${JSON.stringify(declaration.key)} must be a dotted lowercase key`
+      `setting key ${JSON.stringify(declaration.key)} must be a dotted key with a lowercase first segment`
     );
   if (typeof declaration.section !== 'string' || declaration.section.trim() === '')
     throw new SettingsDeclarationError(`${declaration.key}: section must not be empty`);
@@ -139,6 +156,15 @@ function assertDeclaration(declaration: SettingDeclaration): void {
     throw new SettingsDeclarationError(`${declaration.key}: unknown authority`);
   if (!APPLY_TIMINGS.includes(declaration.apply))
     throw new SettingsDeclarationError(`${declaration.key}: unknown apply timing`);
+  if (declaration.unit !== undefined) assertLocalized(declaration.unit, 'unit', declaration.key);
+  if (declaration.format !== undefined && declaration.format !== 'bytes')
+    throw new SettingsDeclarationError(`${declaration.key}: unknown format`);
+  if (declaration.format !== undefined && declaration.control !== 'number')
+    throw new SettingsDeclarationError(`${declaration.key}: a bytes format needs a number control`);
+  if (declaration.readOnly !== undefined && typeof declaration.readOnly !== 'boolean')
+    throw new SettingsDeclarationError(`${declaration.key}: readOnly must be a boolean`);
+  if (declaration.readOnly === true && declaration.control === 'secret')
+    throw new SettingsDeclarationError('a read-only secret cannot exist: a secret is never read');
   if (declaration.control === 'secret') {
     if ('default' in declaration && declaration.default !== undefined)
       throw new SettingsDeclarationError('a secret setting must not declare a default');
@@ -198,6 +224,12 @@ function assertDeclaration(declaration: SettingDeclaration): void {
 
 /** The value check behind every write. Pure, so every consumer refuses alike. */
 export function checkValue(declaration: SettingDeclaration, value: unknown): ValueCheck {
+  if (declaration.readOnly)
+    return {
+      ok: false,
+      reasonCode: 'read_only',
+      reason: `${declaration.key} is fixed; it cannot be changed`,
+    };
   if (declaration.control === 'secret')
     return {
       ok: false,

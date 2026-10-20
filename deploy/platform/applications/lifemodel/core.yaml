@@ -135,8 +135,21 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            # The loader's platform settings projection (ADR-014 D6): read
+            # -only, so the core reads the owner's values and can never write
+            # them; it holds no API token and no ConfigMap RBAC.
+            - name: platform-settings
+              mountPath: /opt/lifemodel/platform-settings
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir:
             medium: Memory
             sizeLimit: 256Mi
+        # Optional: the core boots on the declarations' defaults before the
+        # loader first projects the ConfigMap; the kubelet refreshes the
+        # volume, so a change needs no core restart.
+        - name: platform-settings
+          configMap:
+            name: lifemodel-platform-settings
+            optional: true

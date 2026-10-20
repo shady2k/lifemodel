@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import YAML from 'yaml';
+import { PLATFORM_SETTINGS_DIR } from '../../src/config/platform-settings.js';
 
 const root = fileURLToPath(new URL('../../deploy/platform/', import.meta.url));
 const application = YAML.parseAllDocuments(
@@ -33,6 +34,12 @@ describe('core application generation', () => {
     expect(statefulSet.spec.volumeClaimTemplates).toBeUndefined();
     expect(pod.volumes).toEqual([
       { name: 'tmp', emptyDir: { medium: 'Memory', sizeLimit: '256Mi' } },
+      // The loader's settings projection, read-only (ADR-014 D6): the core
+      // reads the owner's platform values and can never write them.
+      {
+        name: 'platform-settings',
+        configMap: { name: 'lifemodel-platform-settings', optional: true },
+      },
     ]);
     expect(pod.securityContext).toMatchObject({
       runAsNonRoot: true,
@@ -53,7 +60,10 @@ describe('core application generation', () => {
       allowPrivilegeEscalation: false,
       capabilities: { drop: ['ALL'] },
     });
-    expect(pod.containers[0].volumeMounts).toEqual([{ name: 'tmp', mountPath: '/tmp' }]);
+    expect(pod.containers[0].volumeMounts).toEqual([
+      { name: 'tmp', mountPath: '/tmp' },
+      { name: 'platform-settings', mountPath: PLATFORM_SETTINGS_DIR, readOnly: true },
+    ]);
     expect(pod.initContainers[0].command).toEqual([
       '/usr/local/bin/lifemodel-core-entrypoint',
       'migrate',
@@ -117,6 +127,78 @@ describe('core application generation', () => {
         `${resource.kind} in ${resource.metadata.name} must be permitted to lifemodel-applier`
       ).toBe(true);
     }
+  });
+
+  it('mounts the settings projection read-only at the path the core reader reads', () => {
+    const statefulSet = application.find((item: any) => item.kind === 'StatefulSet');
+    const pod = statefulSet.spec.template.spec;
+    const mount = pod.containers[0].volumeMounts.find(
+      (entry: any) => entry.name === 'platform-settings'
+    );
+    expect(mount).toEqual({
+      name: 'platform-settings',
+      mountPath: PLATFORM_SETTINGS_DIR,
+      readOnly: true,
+    });
+    // The init container migrates the database and never reads the settings.
+    expect(pod.initContainers[0].volumeMounts).toEqual([{ name: 'tmp', mountPath: '/tmp' }]);
+  });
+
+  it('grants the core no ConfigMap write anywhere in the platform', () => {
+    const manifestDirectory = fileURLToPath(new URL('../../deploy/platform/', import.meta.url));
+    const files: string[] = [];
+    const walk = (directory: string): void => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) walk(path);
+        else if (entry.name.endsWith('.yaml') || entry.name.endsWith('.yml')) files.push(path);
+      }
+    };
+    walk(manifestDirectory);
+    const documents = files
+      .flatMap((file) =>
+        YAML.parseAllDocuments(readFileSync(file, 'utf8')).map((doc) => doc.toJSON())
+      )
+      .filter((object: any) => object !== null && typeof object === 'object');
+    const writeVerbs = new Set(['create', 'update', 'patch', 'delete', 'deletecollection', '*']);
+    const configMapWriters = documents.filter((object: any) =>
+      ['Role', 'ClusterRole'].includes(object.kind) &&
+      (object.rules ?? []).some(
+        (rule: any) =>
+          (rule.resources ?? []).includes('configmaps') &&
+          (rule.verbs ?? []).some((verb: string) => writeVerbs.has(verb))
+      )
+    );
+    // The projection writer exists - the loader's settings Role - and the
+    // core is bound to none of the writers.
+    expect(
+      configMapWriters.some((object: any) => object.metadata.name === 'loader-platform-settings')
+    ).toBe(true);
+    const bindings = documents.filter((object: any) =>
+      ['RoleBinding', 'ClusterRoleBinding'].includes(object.kind)
+    );
+    for (const binding of bindings) {
+      const ref = binding.roleRef ?? {};
+      const bindsWriter = configMapWriters.some(
+        (writer: any) =>
+          writer.kind === ref.kind &&
+          writer.metadata.name === ref.name &&
+          (ref.kind === 'ClusterRole' || writer.metadata.namespace === binding.metadata.namespace)
+      );
+      if (!bindsWriter) continue;
+      const boundToCore = (binding.subjects ?? []).some(
+        (subject: any) => subject.kind === 'ServiceAccount' && subject.name === 'core'
+      );
+      expect(
+        boundToCore,
+        `${binding.kind} ${binding.metadata?.name} binds a ConfigMap writer to the core`
+      ).toBe(false);
+    }
+    // And the core keeps no API token its mounts could turn into API access.
+    const coreAccount = documents.find(
+      (object: any) => object.kind === 'ServiceAccount' && object.metadata.name === 'core'
+    );
+    expect(coreAccount?.automountServiceAccountToken).toBe(false);
   });
 
   it('keeps the core and web build scripts separate', () => {

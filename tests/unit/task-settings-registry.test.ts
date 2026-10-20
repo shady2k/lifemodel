@@ -248,6 +248,17 @@ describe('settings declaration registry', () => {
     );
   });
 
+  it('carries a localized unit on a number declaration, en and ru', () => {
+    const wrapGrace = platformSettings.get('tasks.wrapGraceSeconds');
+    expect(wrapGrace?.unit).toEqual({ en: 'seconds', ru: 'секунды' });
+    expect(() =>
+      createSettingsRegistry([{ ...concurrency, unit: { en: 'tasks', ru: '' } }])
+    ).toThrow(SettingsDeclarationError);
+    expect(() =>
+      createSettingsRegistry([{ ...concurrency, unit: { en: '', ru: 'задачи' } }])
+    ).toThrow(SettingsDeclarationError);
+  });
+
   it('declares the platform tasks.concurrency setting: number 1..8, default 2, section tasks', () => {
     const declaration = platformSettings.get('tasks.concurrency');
     expect(declaration).toMatchObject({
@@ -257,6 +268,7 @@ describe('settings declaration registry', () => {
       default: 2,
       min: 1,
       max: 8,
+      unit: { en: 'tasks', ru: 'задачи' },
       authority: 'owner',
       apply: 'nextAdmission',
     });
@@ -265,7 +277,220 @@ describe('settings declaration registry', () => {
     expect(declaration?.description.en).toBeTruthy();
     expect(declaration?.description.ru).toBeTruthy();
   });
+
+  it('declares the task harness as a select of the two adapters, defaulting to opencode', () => {
+    const harness = platformSettings.get('tasks.harness');
+    expect(harness).toMatchObject({
+      key: 'tasks.harness',
+      section: 'tasks',
+      control: 'select',
+      dataClass: 'publicConfig',
+      default: 'opencode',
+      authority: 'owner',
+      apply: 'nextAdmission',
+    });
+    expect(harness?.options?.map((option) => option.value)).toEqual(['opencode', 'prime-agent']);
+    expect(harness?.options?.every((option) => option.label.en && option.label.ru)).toBe(true);
+    expect(platformSettings.validate('tasks.harness', 'prime-agent')).toEqual({
+      ok: true,
+      value: 'prime-agent',
+    });
+    expect(platformSettings.validate('tasks.harness', 'codex')).toMatchObject({
+      ok: false,
+      reasonCode: 'not_an_option',
+    });
+  });
+
+  it('declares the soft-stop grace in seconds, 30..3600, default 300', () => {
+    const wrapGrace = platformSettings.get('tasks.wrapGraceSeconds');
+    expect(wrapGrace).toMatchObject({
+      key: 'tasks.wrapGraceSeconds',
+      section: 'tasks',
+      control: 'number',
+      dataClass: 'publicConfig',
+      default: 300,
+      min: 30,
+      max: 3600,
+      unit: { en: 'seconds', ru: 'секунды' },
+      authority: 'owner',
+      apply: 'nextAdmission',
+    });
+    expect(platformSettings.validate('tasks.wrapGraceSeconds', 29)).toMatchObject({
+      ok: false,
+      reasonCode: 'below_minimum',
+      limit: 30,
+    });
+    expect(platformSettings.validate('tasks.wrapGraceSeconds', 3601)).toMatchObject({
+      ok: false,
+      reasonCode: 'above_maximum',
+      limit: 3600,
+    });
+    expect(platformSettings.validate('tasks.wrapGraceSeconds', 600)).toEqual({
+      ok: true,
+      value: 600,
+    });
+  });
+
+  it('declares the output retention as an enum, never 0, default 90 days', () => {
+    const retention = platformSettings.get('storage.retention');
+    expect(retention).toMatchObject({
+      key: 'storage.retention',
+      section: 'tasks',
+      control: 'select',
+      dataClass: 'publicConfig',
+      default: '90d',
+      authority: 'owner',
+      apply: 'immediate',
+    });
+    expect(retention?.options?.map((option) => option.value)).toEqual(['90d', 'forever']);
+    // Forever is an enum value of its own, never a 0 number (ADR-014 D6).
+    expect(platformSettings.validate('storage.retention', 0)).toMatchObject({
+      ok: false,
+      reasonCode: 'wrong_type',
+    });
+    expect(platformSettings.validate('storage.retention', '0')).toMatchObject({
+      ok: false,
+      reasonCode: 'not_an_option',
+    });
+    expect(platformSettings.validate('storage.retention', 'forever')).toEqual({
+      ok: true,
+      value: 'forever',
+    });
+  });
+
+  it('declares the deletion warning lead in days, one to thirty, default seven', () => {
+    const warningLead = platformSettings.get('storage.warningLeadDays');
+    expect(warningLead).toMatchObject({
+      key: 'storage.warningLeadDays',
+      section: 'tasks',
+      control: 'number',
+      dataClass: 'publicConfig',
+      default: 7,
+      min: 1,
+      max: 30,
+      unit: { en: 'days', ru: 'дни' },
+      authority: 'owner',
+      apply: 'immediate',
+    });
+    // The owner never sees a raw second count: the value is whole days.
+    expect(platformSettings.validate('storage.warningLeadDays', 0)).toMatchObject({
+      ok: false,
+      reasonCode: 'below_minimum',
+      limit: 1,
+    });
+    expect(platformSettings.validate('storage.warningLeadDays', 31)).toMatchObject({
+      ok: false,
+      reasonCode: 'above_maximum',
+      limit: 30,
+    });
+    expect(platformSettings.validate('storage.warningLeadDays', 7)).toEqual({
+      ok: true,
+      value: 7,
+    });
+  });
+
+  it('declares the storage ceiling read-only, displayed as decimal bytes', () => {
+    const ceiling = platformSettings.get('storage.ceilingBytes');
+    expect(ceiling).toMatchObject({
+      key: 'storage.ceilingBytes',
+      section: 'tasks',
+      control: 'number',
+      dataClass: 'publicConfig',
+      default: 20_000_000_000,
+      min: 20_000_000_000,
+      max: 20_000_000_000,
+      unit: { en: 'bytes', ru: 'байты' },
+      format: 'bytes',
+      readOnly: true,
+      authority: 'owner',
+      apply: 'immediate',
+    });
+    // The registry refuses every write, the fixed value included; the display
+    // format is a bytes count, so a screen shows 20 GB instead of a raw digit
+    // string.
+    expect(platformSettings.validate('storage.ceilingBytes', 20_000_000_000)).toMatchObject({
+      ok: false,
+      reasonCode: 'read_only',
+    });
+    expect(platformSettings.validate('storage.ceilingBytes', 40_000_000_000)).toMatchObject({
+      ok: false,
+      reasonCode: 'read_only',
+    });
+  });
+
+  it('refuses a bytes display format outside a number control', () => {
+    expect(() => createSettingsRegistry([{ ...concurrency, format: 'bytes' }])).not.toThrow();
+    expect(() =>
+      createSettingsRegistry([{ ...enabled, format: 'bytes' } as SettingDeclaration])
+    ).toThrow(SettingsDeclarationError);
+    expect(() =>
+      createSettingsRegistry([{ ...secretDeclaration, format: 'bytes' } as SettingDeclaration])
+    ).toThrow(SettingsDeclarationError);
+  });
+
+  it('refuses every write to a read-only declaration, the default included', () => {
+    const registry = createSettingsRegistry([fixed]);
+    expect(registry.validate('tasks.fixed', 6)).toMatchObject({
+      ok: false,
+      reasonCode: 'read_only',
+    });
+    expect(registry.validate('tasks.fixed', 5)).toMatchObject({
+      ok: false,
+      reasonCode: 'read_only',
+    });
+    expect(registry.validate('tasks.fixed', 'five')).toMatchObject({
+      ok: false,
+      reasonCode: 'read_only',
+    });
+    expect(
+      registry.validate('tasks.fixed', 5).ok === false && registry.validate('tasks.fixed', 5).reason
+    ).toContain('tasks.fixed');
+  });
+
+  it('refuses a read-only declaration on a secret and a non-boolean readOnly', () => {
+    expect(() => createSettingsRegistry([{ ...secretDeclaration, readOnly: true }])).toThrow(
+      new SettingsDeclarationError('a read-only secret cannot exist: a secret is never read')
+    );
+    expect(() =>
+      createSettingsRegistry([{ ...fixed, readOnly: 'yes' } as SettingDeclaration])
+    ).toThrow(SettingsDeclarationError);
+  });
+
+  it('carries English and Russian labels and descriptions on every platform declaration', () => {
+    for (const declaration of platformSettings.declarations()) {
+      for (const language of ['en', 'ru'] as const) {
+        expect(declaration.label[language].trim()).not.toBe('');
+        expect(declaration.description[language].trim()).not.toBe('');
+      }
+    }
+  });
+
+  it('keeps every platform declaration in the one generated tasks section', () => {
+    expect(platformSettings.declarations().map((declaration) => declaration.section)).toEqual([
+      'tasks',
+      'tasks',
+      'tasks',
+      'tasks',
+      'tasks',
+      'tasks',
+    ]);
+  });
 });
+
+const fixed: SettingDeclaration = {
+  key: 'tasks.fixed',
+  section: 'tasks',
+  label: { en: 'Fixed', ru: 'Фиксировано' },
+  description: { en: 'A fixed value.', ru: 'Фиксированное значение.' },
+  control: 'number',
+  dataClass: 'publicConfig',
+  default: 5,
+  min: 1,
+  max: 8,
+  authority: 'owner',
+  apply: 'immediate',
+  readOnly: true,
+};
 
 const secretDeclaration: SettingDeclaration = {
   key: 'tasks.token',
@@ -576,6 +801,18 @@ describe('settings file store', () => {
     });
     // A refused write changes nothing on disk.
     expect(() => readFileSync(settingsPath(root))).toThrow();
+  });
+
+  it('refuses a write to a read-only setting and changes nothing on disk', async () => {
+    const root = storeRoot();
+    const { store } = createStore(root, {
+      declarations: [concurrency, fixed, secretDeclaration],
+    });
+    await store.load();
+    await expect(store.set('tasks.fixed', 6)).rejects.toMatchObject({ code: 'read_only' });
+    await expect(store.set('tasks.fixed', 5)).rejects.toMatchObject({ code: 'read_only' });
+    expect(() => readFileSync(settingsPath(root))).toThrow();
+    expect(store.section().values['tasks.fixed']).toBe(5);
   });
 
   it('a failed projection is recorded and shown, never fatal, and a retry recovers', async () => {
@@ -946,6 +1183,86 @@ describe('settings HTTP routes', () => {
     expect(restarted.section().revision).toBe(2);
     expect(projected.map((content) => content.revision)).toEqual([1, 2]);
     expect(projected.at(-1)?.values).toEqual({ 'tasks.concurrency': 3, 'tasks.other': 4 });
+  });
+
+  it('refuses a PUT to a read-only setting with the read_only reason', async () => {
+    const { ask, csrf } = await start({
+      declarations: [concurrency, fixed, secretDeclaration],
+    });
+    const written = await ask('/api/settings/tasks.fixed', {
+      method: 'PUT',
+      body: JSON.stringify({ value: 5 }),
+      csrf: csrf(),
+    });
+    expect(written.status).toBe(400);
+    expect(JSON.parse(written.body)).toMatchObject({
+      error: 'invalid_value',
+      reasonCode: 'read_only',
+    });
+  });
+
+  it('saves every platform key through the route, refuses the read-only ceiling and survives a restart', async () => {
+    let loaderDir = '';
+    const registry = createSettingsRegistry(platformSettings.declarations());
+    const { ask, csrf } = await start({
+      buildStore: (dir) => {
+        loaderDir = dir;
+        return createSettingsStore({
+          fs: createNodeFileSystem(),
+          config: { loaderDir: dir },
+          registry,
+          clock: createTestClock(),
+          logger: createRecordingLogger([]),
+        });
+      },
+    });
+    const token = csrf();
+    const grace = await ask('/api/settings/tasks.wrapGraceSeconds', {
+      method: 'PUT',
+      body: JSON.stringify({ value: 600 }),
+      csrf: token,
+    });
+    expect(grace.status).toBe(200);
+    expect(JSON.parse(grace.body)).toMatchObject({ ok: true, value: 600 });
+    const lead = await ask('/api/settings/storage.warningLeadDays', {
+      method: 'PUT',
+      body: JSON.stringify({ value: 14 }),
+      csrf: token,
+    });
+    expect(lead.status).toBe(200);
+    expect(JSON.parse(lead.body)).toMatchObject({ ok: true, value: 14 });
+    const ceiling = await ask('/api/settings/storage.ceilingBytes', {
+      method: 'PUT',
+      body: JSON.stringify({ value: 40000000000 }),
+      csrf: token,
+    });
+    expect(ceiling.status).toBe(400);
+    expect(JSON.parse(ceiling.body)).toMatchObject({
+      error: 'invalid_value',
+      reasonCode: 'read_only',
+    });
+    const section = JSON.parse((await ask('/api/settings')).body) as {
+      values: Record<string, number>;
+    };
+    expect(section.values['tasks.wrapGraceSeconds']).toBe(600);
+    expect(section.values['storage.warningLeadDays']).toBe(14);
+    expect(section.values['storage.ceilingBytes']).toBe(20000000000);
+    const restarted = createSettingsStore({
+      fs: createNodeFileSystem(),
+      config: { loaderDir },
+      registry,
+      clock: createTestClock(),
+      logger: createRecordingLogger([]),
+    });
+    await restarted.load();
+    expect(restarted.section().values).toEqual({
+      'tasks.concurrency': 2,
+      'tasks.harness': 'opencode',
+      'tasks.wrapGraceSeconds': 600,
+      'storage.retention': '90d',
+      'storage.warningLeadDays': 14,
+      'storage.ceilingBytes': 20000000000,
+    });
   });
 
   it('answers 503 storage_unavailable when the settings seam is not wired', async () => {

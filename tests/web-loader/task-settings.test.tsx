@@ -6,7 +6,7 @@ import { axe } from 'jest-axe';
 import '@testing-library/jest-dom/vitest';
 import 'jest-axe/extend-expect';
 import i18n from '../../web/loader/src/i18n';
-import App from '../../web/loader/src/App';
+import App, { formatDecimalBytes } from '../../web/loader/src/App';
 import type { SettingsSectionPayload } from '../../loader/src/settings/registry.js';
 
 const concurrencyDeclaration = {
@@ -22,7 +22,7 @@ const concurrencyDeclaration = {
   default: 2,
   min: 1,
   max: 8,
-  unit: 'tasks',
+  unit: { en: 'tasks', ru: 'задачи' },
   authority: 'owner',
   apply: 'nextAdmission',
 };
@@ -36,7 +36,45 @@ const stopGraceDeclaration = {
   default: 300,
   min: 0,
   max: 3600,
-  unit: 'seconds',
+  unit: { en: 'seconds', ru: 'секунды' },
+  authority: 'owner',
+  apply: 'immediate',
+};
+
+const warningLeadDaysDeclaration = {
+  key: 'storage.warningLeadDays',
+  section: 'tasks',
+  label: { en: 'Deletion warning lead', ru: 'Предупреждение перед удалением' },
+  description: {
+    en: 'How many days before stored output is deleted the owner is warned first.',
+    ru: 'За сколько дней до удаления сохранённых результатов владельца предупреждают заранее.',
+  },
+  control: 'number',
+  dataClass: 'publicConfig',
+  default: 7,
+  min: 1,
+  max: 30,
+  unit: { en: 'days', ru: 'дни' },
+  authority: 'owner',
+  apply: 'immediate',
+};
+
+const ceilingDeclaration = {
+  key: 'storage.ceilingBytes',
+  section: 'tasks',
+  label: { en: 'Storage ceiling', ru: 'Потолок хранилища' },
+  description: {
+    en: 'Fixed at 20 GB (20,000,000,000 bytes) of sealed task output. It cannot be changed.',
+    ru: 'Фиксирован: 20 ГБ (20 000 000 000 байт) запечатанных результатов задач. Его нельзя изменить.',
+  },
+  control: 'number',
+  dataClass: 'publicConfig',
+  default: 20000000000,
+  min: 20000000000,
+  max: 20000000000,
+  unit: { en: 'bytes', ru: 'байты' },
+  format: 'bytes',
+  readOnly: true,
   authority: 'owner',
   apply: 'immediate',
 };
@@ -256,6 +294,84 @@ describe('loader settings section', () => {
     expect(attempts).toBe(0);
   });
 
+  it('renders a number unit localized from the declaration', async () => {
+    await i18n.changeLanguage('en');
+    mockDonePage(
+      sectionPayload({
+        declarations: [concurrencyDeclaration, stopGraceDeclaration],
+        values: { 'tasks.concurrency': 2, 'tasks.stopGraceSeconds': 300 },
+      })
+    );
+    render(<App />);
+    expect(await screen.findByText('tasks')).toBeInTheDocument();
+    expect(await screen.findByText('seconds')).toBeInTheDocument();
+  });
+
+  it('renders the localized units in Russian', async () => {
+    Object.defineProperty(navigator, 'language', { configurable: true, value: 'ru-RU' });
+    await i18n.changeLanguage('ru');
+    mockDonePage(
+      sectionPayload({
+        declarations: [concurrencyDeclaration, stopGraceDeclaration],
+        values: { 'tasks.concurrency': 2, 'tasks.stopGraceSeconds': 300 },
+      })
+    );
+    render(<App />);
+    expect(await screen.findByText('задачи')).toBeInTheDocument();
+    expect(await screen.findByText('секунды')).toBeInTheDocument();
+  });
+
+  it('renders a read-only setting as fixed text with no input and a decimal bytes value', async () => {
+    await i18n.changeLanguage('en');
+    mockDonePage(
+      sectionPayload({
+        declarations: [ceilingDeclaration],
+        values: { 'storage.ceilingBytes': 20000000000 },
+      })
+    );
+    const { container } = render(<App />);
+    expect(await screen.findByText('20 GB')).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText('Storage ceiling', { selector: 'input' })
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('renders the read-only fixed value in Russian with the localized unit', async () => {
+    Object.defineProperty(navigator, 'language', { configurable: true, value: 'ru-RU' });
+    await i18n.changeLanguage('ru');
+    mockDonePage(
+      sectionPayload({
+        declarations: [ceilingDeclaration],
+        values: { 'storage.ceilingBytes': 20000000000 },
+      })
+    );
+    render(<App />);
+    expect(await screen.findByText('Потолок хранилища')).toBeInTheDocument();
+    expect(await screen.findByText('20 ГБ')).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText('Потолок хранилища', { selector: 'input' })
+    ).not.toBeInTheDocument();
+  });
+
+  it('shows the days unit of the warning lead', async () => {
+    await i18n.changeLanguage('en');
+    mockDonePage(
+      sectionPayload({
+        declarations: [warningLeadDaysDeclaration],
+        values: { 'storage.warningLeadDays': 7 },
+      })
+    );
+    const { container } = render(<App />);
+    const input = await screen.findByLabelText('Deletion warning lead', { selector: 'input' });
+    expect(input).toHaveValue(7);
+    expect(input).toHaveAttribute('min', '1');
+    expect(input).toHaveAttribute('max', '30');
+    expect(screen.getByText('days')).toBeInTheDocument();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it('renders the declaration labels in Russian', async () => {
     Object.defineProperty(navigator, 'language', { configurable: true, value: 'ru-RU' });
     await i18n.changeLanguage('ru');
@@ -264,5 +380,20 @@ describe('loader settings section', () => {
     expect(await screen.findByRole('heading', { name: 'Настройки платформы' })).toBeInTheDocument();
     expect(await screen.findByRole('heading', { name: 'Задачи' })).toBeInTheDocument();
     expect(screen.getByLabelText('Параллельные задачи', { selector: 'input' })).toHaveValue(2);
+  });
+});
+
+describe('decimal byte formatting', () => {
+  it('localizes the unit suffixes and the decimal separator', () => {
+    expect(formatDecimalBytes(20000000000, 'en')).toBe('20 GB');
+    expect(formatDecimalBytes(20000000000, 'ru')).toBe('20 ГБ');
+    expect(formatDecimalBytes(3000000000000, 'en')).toBe('3 TB');
+    expect(formatDecimalBytes(3000000000000, 'ru')).toBe('3 ТБ');
+    expect(formatDecimalBytes(2500000, 'en')).toBe('2.5 MB');
+    expect(formatDecimalBytes(2500000, 'ru')).toBe('2,5 МБ');
+    expect(formatDecimalBytes(1500, 'en')).toBe('1.5 kB');
+    expect(formatDecimalBytes(1500, 'ru')).toBe('1,5 кБ');
+    expect(formatDecimalBytes(999, 'en')).toBe('999 B');
+    expect(formatDecimalBytes(999, 'ru')).toBe('999 Б');
   });
 });

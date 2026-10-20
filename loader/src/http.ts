@@ -49,6 +49,7 @@ import {
   type ModelStatusReader,
 } from './model-status.js';
 import { SettingsWriteError, type SettingsSectionSnapshot } from './settings/store.js';
+import { SETTING_KEY_PATTERN } from './settings/registry.js';
 
 /** The settings seam the HTTP layer sees: the section and one validated write. */
 export interface SettingsHttp {
@@ -86,9 +87,6 @@ const API_METHODS: Record<string, string> = {
   '/api/model/reserve': 'PUT',
   '/api/settings': 'GET',
 };
-/** A PUT /api/settings/<key> route: the key shape is the declaration key shape. */
-const SETTING_KEY_PATTERN = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9-]*)+$/;
-
 function settingsKeyOf(path: string): string | null {
   if (!path.startsWith('/api/settings/')) return null;
   const key = path.slice('/api/settings/'.length);
