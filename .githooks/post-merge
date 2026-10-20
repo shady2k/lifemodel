@@ -1,0 +1,14 @@
+#!/bin/sh
+# post-merge — record the tracker's state under the revision just landed.
+#
+# The tracker lives outside the code branches (docs/backlog-integration.md,
+# Tracker layout): no commit carries it, so the store records its state under
+# each revision's own name, and a read "at a revision" (the gate's baseline, CI)
+# takes that recording. In the background: the step talks to the remote and a
+# commit must not wait on it. pre-push records the pushed tip again if this
+# missed it. Never fails the commit.
+top=$(git rev-parse --show-toplevel)
+[ -f "$top/.backlog/sync/tracker-sync.mjs" ] || exit 0
+# shady2k tracker-sync record: this line records the revision this hook just cut or landed
+(env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE node "$top/.backlog/sync/tracker-sync.mjs" record --revision "$(git rev-parse HEAD)" --checkout "$top" --recipe "$top/.backlog/sync/trackers/br.mjs" >/dev/null 2>&1 || true) &
+exit 0

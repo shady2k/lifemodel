@@ -2,26 +2,42 @@
 // br (beads_rust) -> the normalized backlog the shipped rules read (.backlog/rules/,
 // model.md of shady2k-skills). The rules know no tracker; everything br-specific is here.
 //
-//   adapter.mjs                       the working tree's .beads/issues.jsonl
-//   adapter.mjs --at <rev>            the export as committed at <rev> (`:0` = staged, `HEAD` = last commit)
-//   adapter.mjs --jsonl <file>        any beads-format JSONL export
+// The tracker lives outside the code branches (lifemodel-hsyc): one store per
+// machine, a worktree of this repository detached at refs/tracker/state, which
+// no branch contains, kept in step with the remote by .backlog/sync/tracker-sync.mjs.
+// No code revision carries a tracker record, so the state "at a revision" is
+// what the store recorded under that revision's own name when it was cut or
+// landed (.tracker-sync/recordings/<sha>.jsonl), never the revision's tree.
 //
-// It reads the TRACKED JSONL EXPORT, not br's database, deliberately: `br` never
-// runs git, so the export is the only copy git can show at another revision — which
-// is where a baseline comes from, and the only honest source of ages once a bulk
-// edit has rewritten them. The database is also the main checkout's from every
-// worktree, so reading it would answer about the wrong branch. A live read for
-// the commit-link check uses the export `br where` names (see commits.mjs).
+//   adapter.mjs                        the store as it is now, after a sync with the
+//                                      remote; unreachable: this machine's store, said so
+//   adapter.mjs --offline              the store as it is now, no sync
+//   adapter.mjs --at <rev>             the store's recording of <rev>; refused where none
+//   adapter.mjs --at-or-before <rev>   the newest recording among <rev> and its ancestors
+//                                      (a baseline, or a merge GitHub made, which no
+//                                      clone recorded); the source line names which one
+//   adapter.mjs --ref <git ref>        read the store from that ref's tree instead of this
+//                                      machine's store worktree (CI: refs/tracker/state)
+//   adapter.mjs --jsonl <file>         any beads-format JSONL export
 //
 // Exit 2, with the reason, when the tracker cannot be read: an unreadable
-// backlog is never an empty one.
-import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+// backlog is never an empty one, and a revision with no recording is not the
+// empty backlog either.
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const MECHANISM = join(HERE, 'sync', 'tracker-sync.mjs');
+const EXPORT = '.beads/issues.jsonl';
+const RECORDINGS = '.tracker-sync/recordings';
 
 const TYPES = new Set(['epic', 'task', 'bug', 'chore']);
-// `submitted` and `implemented` are br statuses of this project (.beads/policy.yaml),
-// and the transition that sets one carries its revision and evidence as a comment:
+// `submitted` and `implemented` are br statuses of this project (.backlog/br-policy.yaml,
+// installed as the store's .beads/policy.yaml), and the transition that sets one
+// carries its revision and evidence as a comment:
 // `submitted: <rev> -- <evidence>` (docs/backlog-integration.md). A stage's
 // acceptance is a comment on the stage of the same shape,
 // `accepted: <accepted revision> -- <evidence>`: an accepted stage stays open
@@ -114,34 +130,138 @@ export function parseJsonl(text) {
     .map((l) => JSON.parse(l));
 }
 
-export function readExport(at, exportPath = '.beads/issues.jsonl') {
-  // `git show :0:<path>` is the staged copy and `git show HEAD:<path>` the last
-  // committed one; both take the same spelling, so one flag serves the hook and
-  // a baseline alike.
-  const text = at
-    ? execFileSync('git', ['show', `${at}:${exportPath}`], { encoding: 'utf8', maxBuffer: 1 << 30, stdio: ['ignore', 'pipe', 'pipe'] })
-    : readFileSync(exportPath, 'utf8');
-  return parseJsonl(text);
+// The mechanism writes a state as sections, one per state file of the recipe:
+// `=== <path>\n<content>`. The tracker's items are the export's section.
+export function exportSection(text, what) {
+  const re = /^=== (.*)\n/gm;
+  const marks = [];
+  let m;
+  while ((m = re.exec(text))) marks.push([m[1], m.index, m.index + m[0].length]);
+  const i = marks.findIndex(([p]) => p === EXPORT);
+  if (i < 0) throw new Error(`${what} carries no ${EXPORT} section`);
+  return text.slice(marks[i][2], i + 1 < marks.length ? marks[i + 1][1] : text.length);
+}
+
+const git = (args) => execFileSync('git', args, { encoding: 'utf8', maxBuffer: 1 << 30, stdio: ['ignore', 'pipe', 'pipe'] });
+
+// This machine's store, where the mechanism keeps it: named after the MAIN
+// checkout (the parent of the common git directory), so every worktree of the
+// machine reaches the one store (tracker-sync.mjs, machineDir).
+export function storeDir() {
+  const common = resolve(git(['rev-parse', '--git-common-dir']).trim());
+  const base = process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state');
+  const store = join(base, basename(dirname(common)), 'tracker');
+  if (!existsSync(join(store, EXPORT))) throw new Error(`this machine has no tracker store at ${store}; run npm run connect`);
+  return store;
+}
+
+// A place a store can be read from: this machine's store worktree, or a ref's
+// tree (CI fetches refs/tracker/state; it has no store of its own).
+function placeOf(ref) {
+  if (ref) {
+    return {
+      name: ref,
+      read: (p) => {
+        const r = spawnSync('git', ['show', `${ref}:${p}`], { encoding: 'utf8', maxBuffer: 1 << 30 });
+        return r.status === 0 ? r.stdout : null;
+      },
+    };
+  }
+  const store = storeDir();
+  return { name: store, read: (p) => (existsSync(join(store, p)) ? readFileSync(join(store, p), 'utf8') : null) };
+}
+
+function commitOf(rev) {
+  const r = spawnSync('git', ['rev-parse', '-q', '--verify', `${rev}^{commit}`], { encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(`${rev} is not a commit git can read here`);
+  return r.stdout.trim();
+}
+
+const recordingOf = (place, sha) => place.read(`${RECORDINGS}/${sha}.jsonl`);
+
+// The state the store recorded for <rev>. With orBefore, the newest recording
+// among <rev> and its ancestors, or null where the history has none at all.
+export function readAt(rev, { ref, orBefore = false } = {}) {
+  const place = placeOf(ref);
+  const sha = commitOf(rev);
+  const own = recordingOf(place, sha);
+  if (own !== null) return { rows: parseJsonl(exportSection(own, `the recording of ${sha}`)), source: `store ${place.name} @ ${sha}` };
+  if (!orBefore)
+    throw new Error(
+      `the store (${place.name}) never recorded ${sha.slice(0, 12)}, so its tracker state is unknown and is not guessed from a later one. ` +
+        'A commit made in a connected clone is recorded by its post-commit hook and again before its push; run npm run connect there',
+    );
+  // Newest first by commit date: for a merge GitHub made, its own branch's tip
+  // comes before the older main it merged into.
+  const ancestors = git(['rev-list', '--date-order', '--max-count=2000', sha]).split('\n').filter(Boolean);
+  for (const a of ancestors) {
+    const text = recordingOf(place, a);
+    if (text !== null)
+      return {
+        rows: parseJsonl(exportSection(text, `the recording of ${a}`)),
+        source: `store ${place.name} @ ${a} (newest recording at or before ${sha.slice(0, 12)})`,
+      };
+  }
+  return null;
+}
+
+export function readNow({ ref, offline = false } = {}) {
+  if (ref) {
+    const text = placeOf(ref).read(EXPORT);
+    if (text === null) throw new Error(`${ref} carries no ${EXPORT}`);
+    return { rows: parseJsonl(text), source: `store ${ref} (now)` };
+  }
+  const store = storeDir();
+  if (!offline) {
+    // The export command syncs with the remote first, so the state is every
+    // machine's; exit 4 is "the remote is unreachable", and then this machine's
+    // store is read and said to be this machine's only.
+    const r = spawnSync(process.execPath, [MECHANISM, 'export'], { encoding: 'utf8', maxBuffer: 1 << 30 });
+    if (r.status === 0) return { rows: parseJsonl(exportSection(r.stdout, 'the store export')), source: `store ${store} (now, synced)` };
+    if (r.status !== 4) throw new Error(`the store export failed (exit ${r.status}): ${(r.stderr || '').trim().split('\n')[0]}`);
+    process.stderr.write("backlog adapter: the remote is unreachable; this is this machine's store only, not every machine's\n");
+    return {
+      rows: parseJsonl(readFileSync(join(store, EXPORT), 'utf8')),
+      source: `store ${store} (now, this machine only: the remote is unreachable)`,
+    };
+  }
+  return { rows: parseJsonl(readFileSync(join(store, EXPORT), 'utf8')), source: `store ${store} (now, not synced)` };
 }
 
 export function read(argv) {
-  const at = argv.indexOf('--at');
-  const file = argv.indexOf('--jsonl');
-  if (at >= 0) {
-    const rev = argv[at + 1];
-    return normalize(readExport(rev), `beads .beads/issues.jsonl @ ${rev}`);
+  const val = (flag) => {
+    const i = argv.indexOf(flag);
+    return i >= 0 ? argv[i + 1] : undefined;
+  };
+  const ref = val('--ref');
+  if (val('--jsonl')) return normalize(parseJsonl(readFileSync(val('--jsonl'), 'utf8')), `beads jsonl ${val('--jsonl')}`);
+  if (val('--at')) {
+    const r = readAt(val('--at'), { ref });
+    return normalize(r.rows, r.source);
   }
-  if (file >= 0) return normalize(parseJsonl(readFileSync(argv[file + 1], 'utf8')), `beads jsonl ${argv[file + 1]}`);
-  return normalize(readExport(null), 'beads .beads/issues.jsonl (working tree)');
+  if (val('--at-or-before')) {
+    const r = readAt(val('--at-or-before'), { ref, orBefore: true });
+    if (!r) throw new Error(`no recording at or before ${val('--at-or-before')}`);
+    return normalize(r.rows, r.source);
+  }
+  const r = readNow({ ref, offline: argv.includes('--offline') });
+  return normalize(r.rows, r.source);
 }
 
 function main() {
   const argv = process.argv.slice(2);
+  const valued = ['--at', '--at-or-before', '--ref', '--jsonl'];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--at' || a === '--jsonl') i++; // value flag
+    if (valued.includes(a)) {
+      if (!argv[i + 1] || argv[i + 1].startsWith('--')) {
+        console.error(`adapter.mjs: ${a} needs a value`);
+        return 2;
+      }
+      i++;
+    } else if (a === '--offline') continue;
     else if (a === '--help' || a === '-h') {
-      console.log('adapter.mjs [--at <git-rev>|:0] [--jsonl <file>]  > normalized.json');
+      console.log('adapter.mjs [--offline | --at <rev> | --at-or-before <rev> | --jsonl <file>] [--ref <git ref>]  > normalized.json');
       return 0;
     } else {
       console.error(`adapter.mjs: unknown argument ${a}`);

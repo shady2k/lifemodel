@@ -1,0 +1,13 @@
+#!/bin/sh
+# post-checkout — put this checkout back on the machine's tracker store.
+#
+# A branch from before the move tracks its own .beads folder, so checking it out
+# replaces the link to the store with a real folder; switching away leaves that
+# folder behind, and a tracker started there would be a second tracker. The
+# mechanism relinks a folder holding nothing but locks and names one holding a
+# tracker. Never fails the checkout.
+top=$(git rev-parse --show-toplevel)
+[ -f "$top/.backlog/sync/tracker-sync.mjs" ] || exit 0
+# shady2k tracker-sync relink: this line puts a checkout back on the store when a branch left a folder there
+env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE node "$top/.backlog/sync/tracker-sync.mjs" relink --checkout "$top" --recipe "$top/.backlog/sync/trackers/br.mjs" || true
+exit 0

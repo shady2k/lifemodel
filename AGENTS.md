@@ -70,8 +70,10 @@ tick), Energy & state are physiology. Start with `README.md` and
 - `tests/` — unit and integration tests, fixtures, helpers
 - `docs/` — architecture, concepts, features, plugins, ADRs, charters
 - `cli/browser-auth.ts` — browser authentication helper
-- `.backlog/` — the backlog gate and its rules; `docs/backlog-integration.md`
-  describes the workflow
+- `.backlog/` — the backlog gate and its rules, and in `.backlog/sync/` the
+  mechanism that keeps the tracker outside the code branches: one store per
+  machine on `refs/tracker/state`, linked from each checkout's `.beads`;
+  `docs/backlog-integration.md` describes the workflow
 
 ## Commands
 
@@ -87,7 +89,7 @@ tick), Energy & state are physiology. Start with `README.md` and
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run lint` | ESLint over `src/` and `loader/` (`lint:fix` to auto-fix) |
 | `npm run format` / `format:check` | Prettier over `src/**/*.ts` and `loader/**/*.ts` |
-| `npm run connect` | connect this clone: git hooks, backlog import, gate check |
+| `npm run connect` | connect this clone: git hooks, the link to this machine's tracker store, a check that its sync runs, gate check |
 | `npm run backlog` | the backlog gate (`npm run backlog:json` for JSON output) |
 | `npm run present` | the present-documents check |
 | `nix flake check` | checks the exported NixOS module and platform installer rendering; needs Nix; CI's `ci-nix` job runs it on pull requests that touch what the flake reads (selected by `scripts/ci-nix-paths.sh`) (lifemodel-lut.3.6) |

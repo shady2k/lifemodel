@@ -85,7 +85,9 @@ export function stageSnapshot(root, destination) {
       fs.chmodSync(target, stat.mode & 0o111 ? 0o755 : 0o644);
     } else throw new Error(`Snapshot refuses special file: ${relative}`);
   }
-  for (const entry of [...FILES, ...DIRS, '.beads/config.yaml', '.beads/policy.yaml', '.beads/issues.jsonl']) copy(entry);
+  // .beads is never copied: it is the link to this machine's tracker store, which
+  // holds the owner's records and lives outside the branches (lifemodel-hsyc).
+  for (const entry of [...FILES, ...DIRS]) copy(entry);
   for (const manifest of ['package.json', 'package-lock.json']) {
     if (!fs.existsSync(path.join(destination, manifest))) throw new Error(`Missing ${manifest}`);
   }

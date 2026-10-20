@@ -1,50 +1,75 @@
-// node --test .backlog/claim.test.mjs (execute inside the test boundary).
-import {test} from 'node:test';
+// node --test .backlog/claim.test.mjs
+//
+// The guarded claim against a real store: a scratch remote, a clone connected
+// to its own machine store (XDG_STATE_HOME points into the scratch folder), br
+// writing through the clone's .beads link, and claim.mjs run there. The claim
+// must land on the remote's refs/tracker/state, holder and active status both.
+// Races between machines are the mechanism's own proofs (shady2k-skills
+// test/tracker-sync-proof.mjs); this proves the project's readiness guard and
+// that the claim goes through the mechanism.
+import {test,before,after} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,existsSync,rmSync} from 'node:fs';
+import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {dirname,join} from 'node:path';
 import {execFileSync,spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-const adapter=fileURLToPath(new URL('./claim.mjs',import.meta.url));
+
+const HERE=dirname(fileURLToPath(import.meta.url));
+const CLAIM=join(HERE,'claim.mjs');
+const MECHANISM=join(HERE,'sync','tracker-sync.mjs');
+const RECIPE=join(HERE,'sync','trackers','br.mjs');
 const actor='prime-worker:fixture@offline:main#test1234';
-function fixture(action){
- const root=mkdtempSync(join(tmpdir(),'guarded-claim-unit-'));
- try{
- const env={...process.env,GIT_AUTHOR_NAME:'fixture',GIT_AUTHOR_EMAIL:'fixture@example.invalid',GIT_COMMITTER_NAME:'fixture',GIT_COMMITTER_EMAIL:'fixture@example.invalid'};
- execFileSync('git',['init','-q',root],{env});execFileSync('git',['commit','--allow-empty','-qm','fixture'],{cwd:root,env});
- const rev=execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim();
- const bin=join(root,'bin');mkdirSync(bin);
- const rows=join(root,'issues.jsonl'), calls=join(root,'calls.json');
- const stamp='2026-10-09T16:00:00Z';
- const stage={id:'stage',issue_type:'epic',status:'open'};
- const target={id:'task',issue_type:'task',status:'open',updated_at:stamp,dependencies:[{type:'parent-child',depends_on_id:'stage'}]};
- const producer={id:'producer',issue_type:'task',status:'implemented',dependencies:[{type:'parent-child',depends_on_id:'stage'}],comments:[{id:1,created_at:stamp,text:`implemented: ${rev} -- checked`}]};
- const save=data=>writeFileSync(rows,data.map(r=>JSON.stringify(r)).join('\n')+'\n');
- save([stage,target]);
- writeFileSync(join(bin,'br'),`#!/usr/bin/env node
-import fs from 'node:fs';const args=process.argv.slice(2);
-if(args[0]==='--version')console.log(process.env.FIXTURE_BR_VERSION||'br 0.7.0');
-else if(args[0]==='where')console.log(JSON.stringify({jsonl_path:${JSON.stringify(rows)}}));
-else if(args[0]==='sync'){}
-else if(args[0]==='update'){fs.writeFileSync(${JSON.stringify(calls)},JSON.stringify(args));console.log('claimed');}
-else process.exit(2);
-`,{mode:0o755});
- const invoke=(extra=[],override={})=>spawnSync(process.execPath,[adapter,'task','--actor',actor,...extra],{cwd:root,encoding:'utf8',env:{...env,PATH:bin+':'+process.env.PATH,...override}});
- action({stage,target,producer,save,calls,invoke,stamp});
- }finally{rmSync(root,{recursive:true,force:true});}
+let root,work,env;
+const run=(cmd,args)=>spawnSync(cmd,args,{cwd:work,encoding:'utf8',env});
+const ok=(cmd,args)=>{const r=run(cmd,args);assert.equal(r.status,0,`${cmd} ${args.join(' ')}: ${r.stderr}${r.stdout}`);return r.stdout.trim();};
+const created=out=>/(fx-[a-z0-9.]+)/.exec(out)[1];
+const remoteItem=id=>{
+  const text=execFileSync('git',['--git-dir',join(root,'remote.git'),'show','refs/tracker/state:.beads/issues.jsonl'],{encoding:'utf8'});
+  return text.trim().split('\n').map(l=>JSON.parse(l)).find(i=>i.id===id);
+};
+
+before(()=>{
+  root=mkdtempSync(join(tmpdir(),'guarded-claim-'));
+  work=join(root,'work');
+  env={...process.env,XDG_STATE_HOME:join(root,'state'),GIT_AUTHOR_NAME:'fixture',GIT_AUTHOR_EMAIL:'fixture@example.invalid',GIT_COMMITTER_NAME:'fixture',GIT_COMMITTER_EMAIL:'fixture@example.invalid'};
+  execFileSync('git',['init','-q','--bare','-b','main',join(root,'remote.git')]);
+  execFileSync('git',['clone','-q',join(root,'remote.git'),work],{env,stdio:'ignore'});
+  ok('git',['commit','--allow-empty','-qm','fixture']);
+  ok('git',['push','-q','origin','HEAD:main']);
+  ok(process.execPath,[MECHANISM,'connect','--checkout',work,'--recipe',RECIPE,'--prefix','fx','--machine','fixture']);
+});
+after(()=>rmSync(root,{recursive:true,force:true}));
+
+function leaf(){
+  const stage=created(ok('br',['--no-color','create','a stage','-t','epic']));
+  const task=created(ok('br',['--no-color','create','a leaf','-t','task','--parent',stage]));
+  ok(process.execPath,[MECHANISM,'publish']);
+  return task;
 }
-test('ordinary guarded claim supplies native exclusivity and timestamp CAS without force',()=>fixture(({calls,invoke,stamp})=>{
- const r=invoke();assert.equal(r.status,0,r.stderr);const args=JSON.parse(readFileSync(calls));assert.ok(args.includes('--claim'));assert.equal(args[args.indexOf('--actor')+1],actor);assert.equal(args[args.indexOf('--if-unchanged')+1],stamp);assert.ok(!args.includes('--force'));
-}));
-test('only validated implemented readiness permits the internal advisory override',()=>fixture(({stage,target,producer,save,calls,invoke})=>{
- target.dependencies.push({type:'blocks',depends_on_id:'producer'});save([stage,target,producer]);const r=invoke();assert.equal(r.status,0,r.stderr);assert.ok(JSON.parse(readFileSync(calls)).includes('--force'));
-}));
-test('held or unready target never reaches native claim',()=>fixture(({stage,target,producer,save,calls,invoke})=>{
- target.assignee='other';save([stage,target]);assert.equal(invoke().status,1);assert.ok(!existsSync(calls));
- target.assignee=null;producer.comments=[];target.dependencies.push({type:'blocks',depends_on_id:'producer'});save([stage,target,producer]);assert.equal(invoke().status,1);assert.ok(!existsSync(calls));
-}));
-test('manual force, duplicate flags and unsupported br are refused without claim',()=>fixture(({calls,invoke})=>{
- for(const r of [invoke(['--force']),invoke(['--actor',actor]),invoke([],{FIXTURE_BR_VERSION:'br 0.6.0'})])assert.equal(r.status,1,r.stderr);
- assert.ok(!existsSync(calls));
-}));
+
+test('a ready leaf is claimed on the remote: holder and active status both',()=>{
+  const task=leaf();
+  const r=run(process.execPath,[CLAIM,task,'--actor',actor]);
+  assert.equal(r.status,0,r.stderr+r.stdout);
+  const there=remoteItem(task);
+  assert.equal(there.assignee,actor);
+  assert.equal(there.status,'in_progress');
+});
+
+test('a held leaf is not ready, and never reaches the mechanism',()=>{
+  const task=leaf();
+  assert.equal(run(process.execPath,[CLAIM,task,'--actor',actor]).status,0);
+  const r=run(process.execPath,[CLAIM,task,'--actor','prime-worker:other@offline:main#test9999']);
+  assert.equal(r.status,1,r.stderr);
+  assert.match(r.stderr,/not an open, unheld, ready leaf/);
+  assert.equal(remoteItem(task).assignee,actor);
+});
+
+test('a malformed actor, a duplicate or an unknown option is refused without a claim',()=>{
+  const task=leaf();
+  for(const args of [[task,'--actor','someone'],[task,'--actor',actor,'--actor',actor],[task,'--actor',actor,'--force','x']]){
+    assert.equal(run(process.execPath,[CLAIM,...args]).status,1);
+  }
+  assert.equal(remoteItem(task).assignee ?? null,null);
+});

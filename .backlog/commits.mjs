@@ -18,9 +18,11 @@
 // the moment this check was switched on (the setup's landing). Older ones were
 // made under no rule; they are listed as such and fail nothing.
 //
-// WHICH TASKS: every issue of the tracker, closed ones included. Locally that
-// is the export `br` keeps current (`br where`), so a task filed a minute ago
-// resolves; in CI it is the newest export the checked history reaches.
+// WHICH TASKS: every issue of the tracker, closed ones included, as the store
+// holds it NOW, never as a code revision held it: the tracker lives outside the
+// code branches (lifemodel-hsyc), so a task filed after a branch was cut
+// resolves for that branch's commits. Locally that is this machine's store; in
+// CI it is the store ref's tree (--tracker-ref refs/tracker/state).
 //
 //   commits.mjs --message-file <file>   the pending message (commit-msg hook)
 //   commits.mjs --range <base>..<head>  every commit the range introduces
@@ -28,7 +30,7 @@
 //                                       every commit a push of <ref> brings that
 //                                       no other remote ref reaches; none is a pass,
 //                                       said out loud (pre-push hook, CI)
-//     [--export-at <rev>]               tasks from the export at <rev>
+//     [--tracker-ref <ref>]             tasks from the store on <ref> (CI)
 //     [--json]
 //
 // Exit 0 linked, 1 a commit without a valid link, 2 cannot check (never a pass).
@@ -36,7 +38,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { normalize, readExport, parseJsonl } from './adapter.mjs';
+import { normalize, readNow } from './adapter.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ID = /\blifemodel-[a-z0-9]+(?:\.\d+)*\b/g;
@@ -100,24 +102,11 @@ function introducedBy(tip, ref, before) {
   });
 }
 
-function tasks(exportAt) {
-  let rows;
-  if (exportAt) rows = readExport(exportAt);
-  else {
-    // The pending message is checked against br's own export, which holds a
-    // task filed a minute ago that no commit carries yet. Without br there is
-    // no such export, and the tree's copy would refuse that task as unknown
-    // for a reason nobody could see, so a missing br is an error, not a
-    // fallback.
-    const where = spawnSync('br', ['where', '--json'], { encoding: 'utf8' });
-    if (where.error)
-      throw new Error(`br could not be run (${where.error.code}); run npm run connect, which names what is missing`);
-    if (where.status !== 0)
-      throw new Error(`br where failed: ${(where.stderr || '').trim() || `exit ${where.status}`}; run npm run connect`);
-    rows = parseJsonl(readFileSync(JSON.parse(where.stdout).jsonl_path, 'utf8'));
-  }
-  if (!rows.length)
-    throw new Error('the export holds no task; run npm run connect to import the backlog');
+function tasks(trackerRef, offline) {
+  // The pending message is checked against this machine's store without a
+  // network round (a commit must not wait on the remote); a push syncs first.
+  const { rows } = readNow({ ref: trackerRef, offline });
+  if (!rows.length) throw new Error('the store holds no task; run npm run connect to import the backlog');
   return normalize(rows).issues.map((i) => ({ id: i.id, type: i.type, parent: i.parent }));
 }
 
@@ -127,7 +116,7 @@ function main() {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--json') opt.json = true;
-    else if (['--message-file', '--range', '--introduced', '--by', '--before', '--export-at'].includes(a) && argv[i + 1])
+    else if (['--message-file', '--range', '--introduced', '--by', '--before', '--tracker-ref'].includes(a) && argv[i + 1])
       opt[a.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = argv[++i];
     else {
       console.error(`commits.mjs: unknown or incomplete argument ${a}`);
@@ -218,7 +207,6 @@ function main() {
       }
       commits.push({ id: sha, taskIds });
     }
-    if (!opt.exportAt) opt.exportAt = opt.introduced || opt.range.split('..')[1];
   }
 
   if (before.length) {
@@ -233,7 +221,7 @@ function main() {
 
   let issues;
   try {
-    issues = tasks(opt.exportAt);
+    issues = tasks(opt.trackerRef, !!opt.messageFile);
   } catch (e) {
     console.error(`commits.mjs: the tracker could not be read: ${e.message}`);
     console.error('This refuses the commit rather than passing it unchecked. Connect the clone: npm run connect');

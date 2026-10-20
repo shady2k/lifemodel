@@ -185,7 +185,7 @@ const tool = basename(process.argv[1]);
 let phase;
 if (tool === 'npx' && JSON.stringify(args) === '["lint-staged"]') phase = 'lint';
 else if (tool === 'node' && JSON.stringify(args) === '["scripts/test-isolated.mjs","check"]') phase = 'product';
-else if (tool === 'node' && JSON.stringify(args) === '[".backlog/gate.mjs"]') phase = 'gate';
+else if (tool === 'node' && JSON.stringify(args) === '[".backlog/gate.mjs","--offline"]') phase = 'gate';
 else if (tool === 'node' && JSON.stringify(args) === '[".backlog/rules/check-product.mjs","--staged"]') phase = 'documents';
 else throw new Error('unexpected dispatch: ' + tool + ' ' + JSON.stringify(args));
 const env = Object.fromEntries(${JSON.stringify(names)}.map(name => [name, process.env[name] ?? null]));

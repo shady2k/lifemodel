@@ -30,51 +30,24 @@ done
 node "$gate/rules/check-product.mjs" --staged
 
 # --- 1. the tracker layout --------------------------------------------------
-# The tracker is one state for every branch: .beads/issues.jsonl reaches main
-# only through a session's landing branch, land/<name>, and its one pull request
-# (main is protected: nothing is pushed to it directly, owner 2026-10-08). A
-# feature branch that carried it would land every other run's states with its
-# own, so every other branch refuses it. main itself is let through: a commit
-# there cannot be pushed anyway. The one other exception is the seeding commit
-# of the installation itself: the branch that first lands .backlog/ also lands
-# the export, because before it main has no tracker file at all.
-if git diff --cached --name-only -- .beads/issues.jsonl | grep -q .; then
-    branch=$(git symbolic-ref --quiet --short HEAD || echo "a detached HEAD")
-    case "$branch" in
-        main|land/*) ;;
-        *)
-            if git rev-parse -q --verify HEAD:.backlog/config.json >/dev/null 2>&1; then
-                printf 'TRACKER: the tracker export is staged on %s:\n' "$branch" >&2
-                git diff --cached --name-only -- .beads/issues.jsonl | sed 's/^/         /' >&2
-                printf '         The tracker is shared by every branch; its export lands only through a\n' >&2
-                printf '         session landing branch (land/<name>) and its pull request.\n' >&2
-                printf '         Unstage it and commit the rest: git restore --staged .beads/issues.jsonl\n' >&2
-                exit 1
-            fi
-            ;;
-    esac
+# The tracker lives outside the code branches (docs/backlog-integration.md,
+# Tracker layout): .beads is this machine's link to its store and no commit
+# carries a tracker record. A staged path under it is a store file reaching a
+# branch, whatever the branch; deleting one (the move's own commit) is allowed.
+if git diff --cached --name-only --diff-filter=d -- .beads | grep -q .; then
+    printf 'TRACKER: a tracker file is staged:\n' >&2
+    git diff --cached --name-only --diff-filter=d -- .beads | sed 's/^/         /' >&2
+    printf '         The tracker lives in this machine'"'"'s store, outside every branch; .beads is\n' >&2
+    printf '         only the link to it. Unstage it and commit the rest: git restore --staged .beads\n' >&2
+    exit 1
 fi
 
 # --- 2. the backlog gate ----------------------------------------------------
-# It compares the STAGED export against HEAD, never the working tree: br
-# rewrites the export on almost every command. It runs only when the export or
-# the gate itself is staged; a change that touches neither owes it nothing.
-CHANGED=$(git diff --cached --name-only 2>/dev/null || true)
-RUN_BACKLOG=1
-if [ -n "$CHANGED" ]; then
-    RUN_BACKLOG=0
-    case "$CHANGED" in
-        *.beads/issues.jsonl*|*.backlog/*) RUN_BACKLOG=1 ;;
-    esac
-fi
-
-if [ "$RUN_BACKLOG" = 1 ]; then
-    # Exit 1 is red and exit 2 is misuse — a gate that cannot run is as red as
-    # one that found a problem; both refuse the commit.
-    node "$gate/gate.mjs"
-    printf 'OK:   backlog gate\n'
-else
-    printf 'OK:   backlog gate — skipped (the backlog export is not staged)\n'
-fi
+# The store as it is now, judged against what the store recorded at HEAD (or
+# the newest recording before it), without a network round: a commit must not
+# wait on the remote. Exit 1 is red and exit 2 is misuse — a gate that cannot
+# run is as red as one that found a problem; both refuse the commit.
+node "$gate/gate.mjs" --offline
+printf 'OK:   backlog gate\n'
 
 printf 'note: the product checks (lint-staged, tsc, vitest) are not run here; run them with npm ci + husky, or in CI.\n'

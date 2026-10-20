@@ -2,10 +2,12 @@
 //
 // What a push introduces, as the pre-push hook and CI see it: a scratch
 // remote, a clone that pushed to it and fetched back, and commits.mjs run
-// there. Also the message parser itself, on the shapes it must tell apart.
+// there, its tasks read from a store ref no branch contains, as CI reads
+// refs/tracker/state. Also the message parser itself, on the shapes it must
+// tell apart.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, before, test } from 'node:test';
@@ -32,6 +34,17 @@ const commit = (subject) => {
   git('commit', '-q', '-m', subject);
   return git('rev-parse', 'HEAD');
 };
+// The store: a commit on refs/tracker/state whose tree holds .beads/issues.jsonl
+// and nothing of the code.
+const store = (...tasks) => {
+  const blob = execFileSync('git', ['hash-object', '-w', '--stdin'], {
+    cwd: work, encoding: 'utf8', input: tasks.map((t) => JSON.stringify(t)).join('\n') + '\n',
+  }).trim();
+  const inner = execFileSync('git', ['mktree'], { cwd: work, encoding: 'utf8', input: `100644 blob ${blob}\tissues.jsonl\n` }).trim();
+  const tree = execFileSync('git', ['mktree'], { cwd: work, encoding: 'utf8', input: `040000 tree ${inner}\t.beads\n` }).trim();
+  git('update-ref', 'refs/tracker/state', git('commit-tree', tree, '-m', 'tracker store'));
+};
+const STORE = ['--tracker-ref', 'refs/tracker/state'];
 const links = (...args) => spawnSync(process.execPath, [SCRIPT, ...args], { cwd: work, encoding: 'utf8' });
 
 test('linkedIds: ids in parentheses in the header paragraph, and nothing else', () => {
@@ -57,8 +70,7 @@ before(() => {
   git('config', 'user.email', 'test@example.com');
   git('config', 'user.name', 'test');
   git('config', 'commit.gpgsign', 'false');
-  mkdirSync(join(work, '.beads'));
-  writeFileSync(join(work, '.beads/issues.jsonl'), `${JSON.stringify(TASK)}\n`);
+  store(TASK);
   commit('chore: the first commit (lifemodel-t1)');
   git('push', '-q', 'origin', 'HEAD:main');
 });
@@ -68,7 +80,7 @@ after(() => rmSync(root, { recursive: true, force: true }));
 test('a tag on a commit the remote already holds introduces nothing, and passes', () => {
   git('tag', 'v1');
   git('push', '-q', 'origin', 'v1');
-  const run = links('--introduced', git('rev-parse', 'v1'), '--by', 'refs/tags/v1', '--export-at', 'HEAD');
+  const run = links('--introduced', git('rev-parse', 'v1'), '--by', 'refs/tags/v1', ...STORE);
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stdout, /refs\/tags\/v1 introduces no commits: nothing to check/);
 });
@@ -76,7 +88,7 @@ test('a tag on a commit the remote already holds introduces nothing, and passes'
 test('a new branch on a commit the remote already holds introduces nothing, and passes', () => {
   git('push', '-q', 'origin', 'HEAD:refs/heads/release/a');
   git('fetch', '-q', 'origin');
-  const run = links('--introduced', git('rev-parse', 'HEAD'), '--by', 'refs/heads/release/a', '--export-at', 'HEAD');
+  const run = links('--introduced', git('rev-parse', 'HEAD'), '--by', 'refs/heads/release/a', ...STORE);
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stdout, /introduces no commits: nothing to check/);
 });
@@ -86,7 +98,7 @@ test('a new branch carrying a linked commit is checked and passes', () => {
   const tip = commit('fix: a linked change (lifemodel-t1)');
   git('push', '-q', 'origin', 'release/b');
   git('fetch', '-q', 'origin');
-  const run = links('--introduced', tip, '--by', 'refs/heads/release/b', '--export-at', 'HEAD');
+  const run = links('--introduced', tip, '--by', 'refs/heads/release/b', ...STORE);
   assert.equal(run.status, 0, run.stdout + run.stderr);
   assert.match(run.stdout, /1 commit\(s\) checked, 0 link problem/);
 });
@@ -96,7 +108,7 @@ test('a new commit with no task link is refused, past the branch\'s own "before"
   const tip = commit('fix: a change that names nothing');
   git('push', '-q', 'origin', 'release/b');
   git('fetch', '-q', 'origin');
-  const run = links('--introduced', tip, '--by', 'refs/heads/release/b', '--before', old, '--export-at', 'HEAD');
+  const run = links('--introduced', tip, '--by', 'refs/heads/release/b', '--before', old, ...STORE);
   assert.equal(run.status, 1, run.stdout + run.stderr);
   assert.match(run.stdout, /1 commit\(s\) checked, 1 link problem/);
 });
@@ -106,8 +118,19 @@ test('a tag on a new unlinked commit is refused', () => {
   const tip = commit('chore: an unlinked release commit');
   git('tag', 'v2');
   git('push', '-q', 'origin', 'v2');
-  const run = links('--introduced', tip, '--by', 'refs/tags/v2', '--export-at', 'HEAD');
+  const run = links('--introduced', tip, '--by', 'refs/tags/v2', ...STORE);
   assert.equal(run.status, 1, run.stdout + run.stderr);
+});
+
+test('a task filed after the branch was cut resolves: tasks come from the store now, not the branch', () => {
+  git('checkout', '-q', '-b', 'late-task');
+  const tip = commit('feat: work for a task filed later (lifemodel-t9)');
+  const refused = links('--introduced', tip, '--by', 'refs/heads/late-task', ...STORE);
+  assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+  store(TASK, { ...TASK, id: 'lifemodel-t9', title: 'filed after the cut' });
+  const run = links('--introduced', tip, '--by', 'refs/heads/late-task', ...STORE);
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  git('checkout', '-q', '-');
 });
 
 test('a tip git cannot read, or a push with no ref, is misuse, never a pass', () => {
