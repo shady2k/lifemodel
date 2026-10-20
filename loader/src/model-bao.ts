@@ -21,7 +21,7 @@ export class BaoStorageError extends Error {
 }
 export interface RoleBaoOptions {
   address: string;
-  role: 'loader' | 'model-gateway';
+  role: 'loader' | 'model-gateway' | 'storage-module';
   jwtFile?: string;
   readJwt?: () => Promise<string>;
   now?: () => number;

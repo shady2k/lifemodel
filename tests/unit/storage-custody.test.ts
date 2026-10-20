@@ -114,6 +114,30 @@ describe('the module custody reader', () => {
     await expect(reader.read()).rejects.toMatchObject({ code: 'sealed' });
   });
 
+  it('fails closed when the record disappears between refreshes', async () => {
+    let present = true;
+    const reader = createCachedCustodyReader(async () => (present ? credentials : null), {
+      now: () => Date.now(),
+      refreshMs: 0,
+    });
+    await expect(reader.read()).resolves.toEqual(credentials);
+    present = false;
+    // The credential it held is not served: a record that is gone is no access.
+    await expect(reader.read()).rejects.toMatchObject({ code: 'missing' });
+  });
+
+  it('applies a rotated record on its next refresh', async () => {
+    const rotated = { accessKey: 'Z9Y8X7W6V5U4T3S2R1Q0', secretKey: 'r'.repeat(40) };
+    let current = credentials;
+    const reader = createCachedCustodyReader(async () => current, {
+      now: () => Date.now(),
+      refreshMs: 0,
+    });
+    await expect(reader.read()).resolves.toEqual(credentials);
+    current = rotated;
+    await expect(reader.read()).resolves.toEqual(rotated);
+  });
+
   it('reports an absent record as missing and a broken one as invalid', async () => {
     await expect(createCachedCustodyReader(async () => null).read()).rejects.toMatchObject({
       code: 'missing',
