@@ -36,7 +36,8 @@ const custody = createCachedCustodyReader(() => readCustodyRecord(bao.call));
 const app = createStorageModule({
   bucket,
   custody,
-  check: (credentials: StorageS3Credentials) => checkS3Bucket({ endpoint, bucket, credentials }),
+  check: (credentials: StorageS3Credentials, signal: AbortSignal) =>
+    checkS3Bucket({ endpoint, bucket, credentials, signal }),
   logger,
 });
 app.status.listen(8081, '0.0.0.0');

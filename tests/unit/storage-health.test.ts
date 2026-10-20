@@ -137,10 +137,9 @@ describe('the storage module health answer', () => {
       boundMs: 20,
     });
     const answer = await health.evaluate();
-    // No answer yet: the module is not ready, and it did not invent one.
+    // No answer in time: the module is not ready, and it says why.
     expect(answer.status).toBe(503);
-    expect(answer.body.state).toBe('unknown');
-    expect(answer.body.lastErrorCode).toBeNull();
+    expect(answer.body).toMatchObject({ state: 'down', lastErrorCode: 'timeout' });
     settle?.();
   });
 
@@ -160,5 +159,112 @@ describe('the storage module health answer', () => {
     await health.evaluate();
     await health.evaluate();
     expect(checks).toBe(1);
+  });
+});
+
+describe('the storage module health deadline', () => {
+  interface Step {
+    ok: boolean;
+    code?: 'unreachable' | 'auth_denied' | 'bucket_missing' | 'unexpected';
+  }
+  /**
+   * A check driven by the test: it answers the next scripted result, or holds
+   * until released. Every call records the signal it was given.
+   */
+  function scripted() {
+    const lines: RecordedLine[] = [];
+    const signals: AbortSignal[] = [];
+    const queue: Array<Step | 'stall'> = [];
+    const held: Array<() => void> = [];
+    let calls = 0;
+    const health = createStorageHealth({
+      bucket: 'lifemodel-storage',
+      check: (signal) => {
+        calls++;
+        signals.push(signal);
+        const next = queue.shift() ?? { ok: true };
+        if (next === 'stall')
+          return new Promise<StoreCheck>((resolve) => {
+            held.push(() => {
+              resolve({ ok: false, code: 'unreachable' });
+            });
+          });
+        return Promise.resolve(
+          next.ok ? { ok: true } : { ok: false, code: next.code ?? 'unreachable' }
+        );
+      },
+      logger: createRecordingLogger(lines),
+      cacheMs: 0,
+      boundMs: 20,
+    });
+    return {
+      health,
+      lines,
+      signals,
+      get calls() {
+        return calls;
+      },
+      script(...steps: Array<Step | 'stall'>) {
+        queue.push(...steps);
+      },
+      release() {
+        for (const settle of held.splice(0)) settle();
+      },
+    };
+  }
+
+  it('turns unhealthy when a healthy check passes its deadline, and healthy again when it answers', async () => {
+    const f = scripted();
+    f.script({ ok: true }, 'stall', { ok: true });
+    expect((await f.health.evaluate()).status).toBe(200);
+    const stalled = await f.health.evaluate();
+    expect(stalled.status).toBe(503);
+    expect(stalled.body).toMatchObject({ state: 'down', lastErrorCode: 'timeout' });
+    // The check that missed the deadline is cancelled, not left running.
+    expect(f.signals.at(-1)?.aborted).toBe(true);
+    // A late answer from that check never overwrites the deadline outcome.
+    f.release();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(f.health.body()).toMatchObject({ state: 'down', lastErrorCode: 'timeout' });
+    const recovered = await f.health.evaluate();
+    expect(recovered.status).toBe(200);
+    expect(recovered.body).toMatchObject({ state: 'ok', lastErrorCode: null });
+  });
+
+  it('answers every concurrent caller with the deadline outcome and starts one check', async () => {
+    const f = scripted();
+    f.script('stall');
+    const [first, second] = await Promise.all([f.health.evaluate(), f.health.evaluate()]);
+    expect(first.status).toBe(503);
+    expect(second.status).toBe(503);
+    expect(first.body.lastErrorCode).toBe('timeout');
+    expect(f.calls).toBe(1);
+    f.release();
+  });
+
+  it('never lets an obsolete late completion replace newer health', async () => {
+    const f = scripted();
+    f.script('stall', { ok: true });
+    expect((await f.health.evaluate()).status).toBe(503);
+    expect((await f.health.evaluate()).status).toBe(200);
+    // The stalled first check now answers: it is obsolete and changes nothing.
+    f.release();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(f.health.body()).toMatchObject({ state: 'ok', lastErrorCode: null });
+  });
+
+  it('logs the deadline once, and recovery after it', async () => {
+    const f = scripted();
+    f.script('stall', 'stall', { ok: true });
+    await f.health.evaluate();
+    await f.health.evaluate();
+    expect(f.lines.filter((line) => line.level === 'warn')).toEqual([
+      { level: 'warn', fields: { code: 'timeout' }, message: expect.any(String) },
+    ]);
+    await f.health.evaluate();
+    expect(f.lines.filter((line) => line.level === 'info')).toEqual([
+      { level: 'info', fields: { outageSeconds: 0 }, message: expect.any(String) },
+    ]);
+    f.release();
   });
 });

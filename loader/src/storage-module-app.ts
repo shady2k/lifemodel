@@ -18,8 +18,8 @@ export interface StorageModuleOptions {
   bucket: string;
   /** The custody record, in memory only; a failure here is a failed module. */
   custody: { read(): Promise<StorageS3Credentials> };
-  /** One authenticated check of the store with the given credentials. */
-  check(credentials: StorageS3Credentials): Promise<S3Check>;
+  /** One authenticated check of the store; the signal ends a check past its deadline. */
+  check(credentials: StorageS3Credentials, signal: AbortSignal): Promise<S3Check>;
   logger: LoaderLogger;
   now?: () => number;
   health?: { cacheMs?: number; boundMs?: number };
@@ -36,9 +36,11 @@ export const STORAGE_MODULE_PATHS = { status: '/status', livez: '/livez' } as co
 export function createStorageModule(options: StorageModuleOptions): StorageModule {
   let custodyCode: string | null = null;
 
-  async function checkStore(): Promise<StoreCheck> {
+  async function checkStore(signal: AbortSignal): Promise<StoreCheck> {
     let credentials: StorageS3Credentials;
     try {
+      // A deadline that has already passed is not worth a Bao read.
+      if (signal.aborted) return { ok: false, code: 'unreachable' };
       credentials = await options.custody.read();
     } catch (error) {
       const code = error instanceof StorageCustodyError ? error.code : 'unreachable';
@@ -53,7 +55,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
       return { ok: false, code: 'credentials_unavailable' };
     }
     custodyCode = null;
-    return options.check(credentials);
+    return options.check(credentials, signal);
   }
 
   const healthOptions: StorageHealthOptions = {

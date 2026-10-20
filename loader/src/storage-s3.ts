@@ -133,11 +133,14 @@ export interface BucketCheckOptions {
   credentials: S3Credentials;
   now?: () => Date;
   timeoutMs?: number;
+  /** The caller's deadline: an aborted check stops its request and reports unreachable. */
+  signal?: AbortSignal;
   /** Tests replace the transport; production talks HTTP to the endpoint. */
   transport?: (
     url: URL,
     headers: Record<string, string>,
-    timeoutMs: number
+    timeoutMs: number,
+    signal?: AbortSignal
   ) => Promise<S3TransportResult>;
 }
 const DEFAULT_TIMEOUT_MS = 5_000;
@@ -154,7 +157,8 @@ function classify(status: number): S3Check {
 function transportTo(
   url: URL,
   headers: Record<string, string>,
-  timeoutMs: number
+  timeoutMs: number,
+  signal?: AbortSignal
 ): Promise<S3TransportResult> {
   return new Promise<S3TransportResult>((resolve, reject) => {
     const send = url.protocol === 'https:' ? httpsRequest : httpRequest;
@@ -166,22 +170,33 @@ function transportTo(
       if (result instanceof Error) reject(result);
       else resolve(result);
     };
-    const req = send(url, { method: 'GET', headers, agent: false }, (res) => {
-      // The answer's status is the whole result: never read, parse or keep the body.
-      res.resume();
-      res.on('error', () => {
-        finish({ status: res.statusCode ?? 0 });
-      });
-      res.on('end', () => {
-        finish({ status: res.statusCode ?? 0 });
-      });
-      res.on('close', () => {
-        finish({ status: res.statusCode ?? 0 });
-      });
-    });
+    const req = send(
+      url,
+      { method: 'GET', headers, agent: false, ...(signal ? { signal } : {}) },
+      (res) => {
+        // The answer's status is the whole result: never read, parse or keep the body.
+        res.resume();
+        res.on('error', () => {
+          finish({ status: res.statusCode ?? 0 });
+        });
+        res.on('end', () => {
+          finish({ status: res.statusCode ?? 0 });
+        });
+        res.on('close', () => {
+          finish({ status: res.statusCode ?? 0 });
+        });
+      }
+    );
     const timer = setTimeout(() => {
       req.destroy(new Error('storage check timed out'));
     }, timeoutMs);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        req.destroy(new Error('storage check aborted'));
+      },
+      { once: true }
+    );
     req.on('error', (error) => {
       finish(error instanceof Error ? error : new Error('storage check failed'));
     });
@@ -207,8 +222,14 @@ export async function checkS3Bucket(options: BucketCheckOptions): Promise<S3Chec
     now: (options.now ?? (() => new Date()))(),
   });
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (options.signal?.aborted) return { ok: false, code: 'unreachable', status: null };
   try {
-    const result = await (options.transport ?? transportTo)(url, headers, timeoutMs);
+    const result = await (options.transport ?? transportTo)(
+      url,
+      headers,
+      timeoutMs,
+      options.signal
+    );
     return classify(result.status);
   } catch {
     return { ok: false, code: 'unreachable', status: null };

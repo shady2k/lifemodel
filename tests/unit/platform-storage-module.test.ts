@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 import { describe, expect, it } from 'vitest';
+import { STORAGE_HEALTH_DEFAULTS } from '../../loader/src/storage-health.js';
 import {
   S3_IDENTITY_KEY,
   S3_IDENTITY_SECRET,
@@ -270,6 +271,15 @@ describe('the storage module workload', () => {
       requests: { cpu: '50m', memory: '64Mi' },
       limits: { cpu: '500m', memory: '256Mi' },
     });
+  });
+
+  it('keeps the probe timeout above the module health deadline', () => {
+    // A probe that timed out at the module's own deadline would cut a valid
+    // answer; the margin is the difference.
+    expect(moduleContainer?.readinessProbe.timeoutSeconds).toBe(5);
+    expect(moduleContainer!.readinessProbe.timeoutSeconds * 1000).toBeGreaterThan(
+      STORAGE_HEALTH_DEFAULTS.boundMs
+    );
   });
 
   it('takes readiness from the store and liveness from the process', () => {

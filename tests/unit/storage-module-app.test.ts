@@ -114,6 +114,45 @@ describe('the storage module status listener', () => {
     expect(f.seen).toEqual([credentials]);
   });
 
+  it('is unready, with the deadline as the reason, when the store stops answering', async () => {
+    const held: Array<() => void> = [];
+    let stalled = false;
+    const lines: RecordedLine[] = [];
+    const app = createStorageModule({
+      bucket: STORAGE_BUCKET,
+      custody: { read: () => Promise.resolve(credentials) },
+      check: (given) => {
+        void given;
+        if (!stalled) return Promise.resolve({ ok: true });
+        return new Promise<S3Check>((resolve) => {
+          held.push(() => {
+            resolve({ ok: true });
+          });
+        });
+      },
+      logger: createRecordingLogger(lines),
+      health: { cacheMs: 0, boundMs: 20 },
+    });
+    servers.push(app.status);
+    await new Promise<void>((resolve) => app.status.listen(0, '127.0.0.1', resolve));
+    const address = app.status.address();
+    if (!address || typeof address === 'string') throw new Error('not listening');
+    const base = `http://127.0.0.1:${String(address.port)}`;
+    expect((await fetch(`${base}/status`)).status).toBe(200);
+    stalled = true;
+    const stalledAnswer = await fetch(`${base}/status`);
+    expect(stalledAnswer.status).toBe(503);
+    expect(JSON.parse(await stalledAnswer.text())).toMatchObject({
+      state: 'down',
+      lastErrorCode: 'timeout',
+    });
+    // The late answer from the check that missed its deadline changes nothing.
+    stalled = false;
+    for (const settle of held.splice(0)) settle();
+    expect(app.health.body()).toMatchObject({ state: 'down', lastErrorCode: 'timeout' });
+    expect((await fetch(`${base}/status`)).status).toBe(200);
+  });
+
   it('serves liveness for the process whatever the store does', async () => {
     const f = await fixture({ check: () => Promise.resolve({ ok: false, code: 'unreachable' }) });
     const live = await f.get('/livez');
