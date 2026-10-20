@@ -12,7 +12,7 @@ spec:
           operator: In
           values: [lifemodel-git, lifemodel, lifemodel-motor, lifemodel-state]
     resourceRules:
-      - apiGroups: [""]
+      - apiGroups: ['']
         apiVersions: [v1]
         operations: [CREATE, UPDATE, DELETE]
         resources: [secrets]
@@ -47,7 +47,7 @@ spec:
           operator: In
           values: [lifemodel, lifemodel-motor]
     resourceRules:
-      - apiGroups: [""]
+      - apiGroups: ['']
         apiVersions: [v1]
         operations: [CREATE, UPDATE, DELETE]
         resources: [configmaps]
@@ -67,6 +67,43 @@ metadata:
   name: loader-configmap-admission
 spec:
   policyName: loader-configmap-admission
+  validationActions: [Deny]
+---
+# Exclusive ownership of the authoritative settings projection: the exact
+# resource is reserved for the loader against every requester, so no other
+# identity with ConfigMap write RBAC (an operator's service account, for
+# instance) can create, update or delete it. Unrelated ConfigMaps never match.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: platform-settings-ownership-admission
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: [lifemodel, lifemodel-motor]
+    resourceRules:
+      - apiGroups: ['']
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [configmaps]
+  matchConditions:
+    - name: platform-settings-resource
+      # request.name, not the (absent on DELETE) new object.
+      expression: request.namespace == 'lifemodel' && request.name == 'lifemodel-platform-settings'
+  validations:
+    - expression: request.userInfo.username == 'system:serviceaccount:lifemodel-system:loader'
+      message: only the loader may create, update or delete the platform settings ConfigMap
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: platform-settings-ownership-admission
+spec:
+  policyName: platform-settings-ownership-admission
   validationActions: [Deny]
 ---
 apiVersion: admissionregistration.k8s.io/v1

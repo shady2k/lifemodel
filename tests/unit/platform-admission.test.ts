@@ -40,6 +40,7 @@ describe('platform admission policies', () => {
       expect(binding(name)?.spec.validationActions).toEqual(['Deny']);
     }
     expect(policy('loader-configmap-admission')).toBeDefined();
+    expect(policy('platform-settings-ownership-admission')).toBeDefined();
     expect(
       objects
         .filter((item: any) => item.kind === 'ValidatingAdmissionPolicy')
@@ -49,6 +50,7 @@ describe('platform admission policies', () => {
       'application-kustomization-admission',
       'loader-configmap-admission',
       'loader-secret-admission',
+      'platform-settings-ownership-admission',
     ]);
     expect(
       objects
@@ -59,6 +61,7 @@ describe('platform admission policies', () => {
       'application-kustomization-admission',
       'loader-configmap-admission',
       'loader-secret-admission',
+      'platform-settings-ownership-admission',
     ]);
   });
 
@@ -255,5 +258,63 @@ describe('platform admission policies', () => {
       })
     ).toBe(false);
     expect(binding('loader-configmap-admission')?.spec.validationActions).toEqual(['Deny']);
+  });
+
+  it('reserves the platform settings ConfigMap for the loader against every requester', () => {
+    const policyObject = policy('platform-settings-ownership-admission');
+    expect(policyObject.spec.failurePolicy).toBe('Fail');
+    expect(policyObject.spec.matchConstraints.resourceRules[0]).toMatchObject({
+      apiGroups: [''],
+      resources: ['configmaps'],
+      operations: ['CREATE', 'UPDATE', 'DELETE'],
+    });
+    const [condition] = policyObject.spec.matchConditions as Array<{ expression: string }>;
+    // The exact resource, matched on request fields so a DELETE - which carries
+    // no new object - is covered too.
+    expect(condition.expression).toContain("request.namespace == 'lifemodel'");
+    expect(condition.expression).toContain("request.name == 'lifemodel-platform-settings'");
+    expect(condition.expression).not.toContain('object');
+    const validation = policyObject.spec.validations[0].expression as string;
+    // A shipped non-loader identity with cluster-wide ConfigMap write RBAC
+    // (the cloudnative-pg operator service account).
+    const cnpgRequest = {
+      name: 'lifemodel-platform-settings',
+      namespace: 'lifemodel',
+      operation: 'CREATE',
+      userInfo: { username: 'system:serviceaccount:cnpg-system:cloudnative-pg' },
+    };
+    const settings = {
+      metadata: { name: 'lifemodel-platform-settings', namespace: 'lifemodel' },
+    };
+    // The policy matches the exact resource for that principal...
+    expect(evaluate(condition.expression, { request: cnpgRequest, object: settings })).toBe(true);
+    // ...and refuses its create, update and delete of the projection.
+    expect(evaluate(validation, { request: cnpgRequest, object: settings })).toBe(false);
+    expect(
+      evaluate(validation, { request: { ...cnpgRequest, operation: 'UPDATE' }, object: settings })
+    ).toBe(false);
+    expect(
+      evaluate(validation, { request: { ...cnpgRequest, operation: 'DELETE' }, object: null })
+    ).toBe(false);
+    // The loader passes the guard; the separate loader clamp still forbids its delete.
+    const loaderRequest = {
+      ...cnpgRequest,
+      userInfo: { username: 'system:serviceaccount:lifemodel-system:loader' },
+    };
+    expect(evaluate(validation, { request: loaderRequest, object: settings })).toBe(true);
+    expect(
+      evaluate(validation, { request: { ...loaderRequest, operation: 'DELETE' }, object: null })
+    ).toBe(true);
+    // An unrelated ConfigMap never matches the guard, so other actors keep working.
+    const unrelated = { ...cnpgRequest, name: 'kube-root-ca.crt' };
+    expect(
+      evaluate(condition.expression, {
+        request: unrelated,
+        object: { metadata: { name: 'kube-root-ca.crt', namespace: 'lifemodel' } },
+      })
+    ).toBe(false);
+    expect(binding('platform-settings-ownership-admission')?.spec.validationActions).toEqual([
+      'Deny',
+    ]);
   });
 });
