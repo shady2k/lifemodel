@@ -36,9 +36,13 @@ policy isolation for an untested release.
 
 ### 2.1 Criteria and shortlist
 
-The first choice is **OpenCode**, provisionally, because it passes the strict
-keyless endpoint and proxy checks without patching an agent. This is not a
-claim that it is the best coding model: the local model was a scripted stub.
+The first choice remains **OpenCode**, provisionally, for its already-probed
+stable headless path and simpler non-Python task runtime. **Prime Agent
+0.10.1-beta.38 is now a demonstrated alternative**, not a config/key failure:
+round 2 passed its local shell, JSON result, HTTPS proxy/CA, resume and abort
+checks with mounted config and an ignored placeholder. Pi and configured
+DeepSeek also pass the revised config criterion by source evidence. This is
+not a coding-model ranking: the local model was a scripted stub.
 
 Besides the required prime-agent and DeepSeek candidates, include OpenCode,
 Codex CLI and Pi. They cover three useful integration shapes: a provider-neutral
@@ -50,18 +54,24 @@ or coding benchmark was used.
 
 ### 2.2 Comparison at a glance
 
-“Env-only” means configuration may be supplied as environment data but no
-provider configuration file is required. “No key” means no real **or dummy**
-API key is required and no Authorization header is sent. Short-lived storage
-capabilities are a separate question in part 3.
+**Round-2 criterion:** endpoint and model may be set by a mounted provider
+config (for example a ConfigMap) or environment. **No real key** means no model
+credential carrying authority enters a task. An ignored fixed placeholder is
+allowed, even when sent as `Authorization: Bearer ...`; absent Authorization
+is not a hidden requirement. Round 1 instead required env-only configuration
+and no dummy key, which wrongly excludes valid candidates under the owner's
+new rule. Short-lived storage signing keys remain keys (part 3).
 
-| Candidate / evidence version | One briefing, tools, progress and result | Arbitrary keyless OpenAI endpoint, no config file | Proxy, resume and stop | Licence / maturity / footprint |
+| Candidate / evidence version | One briefing, tools, progress and result | Custom endpoint + mounted config/env, no real key | Proxy, resume and stop | Licence / maturity / footprint |
 |---|---|---|---|---|
-| **prime-agent 0.9.8 installed** | `--print`, JSONL/RPC; Python REPL provides shell/files, skills and subagents | **Not stock CLI.** Documented custom providers use `models.json`; simple OpenAI stream requires a key. An extension/SDK adapter is possible, not demonstrated | Resume sessions, RPC abort and stop command. Installed proxy behaviour not established by this run | MIT; independently developed Pi fork. Installed release files **172,169,686 bytes**, not a workbench image. Latest upstream is now **0.10.0**, a different implementation; do not extrapolate installed tests |
-| **DeepSeek Harness (`dsh`)** | Official developer-preview harness; headless profile takes stdin, emits JSON events and a final result; shell/files | **Not stock default.** Default DeepSeek Messages transport requires `x-api-key`; alternate OpenAI-compatible providers require provider configuration | Documents HTTPS_PROXY and custom CA; named sessions and headless cancellation/lifecycle need adapter mapping | MIT; preview, not a settled production contract. No OCI image measured |
-| **OpenCode 1.19.0 probed / 1.19.3 sources** | `run --format json`; shell/file tools; streamed tool/text/step events | **Yes in local probe.** `OPENCODE_CONFIG_CONTENT`, custom `@ai-sdk/openai-compatible`, `baseURL`, omit `apiKey` | HTTPS proxy + custom CA passed local probe. `--session` / `--continue`; server abort or terminate Job | MIT; active stable releases. Published 1.19.3 Linux x64 archive **60,716,380 bytes**; installed 1.19.0 payload **254,277,088 bytes**, before workbench tools |
-| **Codex CLI 0.163.0 sources** | `codex exec`, JSONL events and last-message output; shell/patch tools | Custom no-key provider possible via inline `-c` overrides, but **Responses API only**, not an arbitrary Chat Completions gateway | Standard proxy/client configuration; `exec resume`; terminate process/Job. Not locally exercised here | Apache-2.0; official OpenAI project. Linux x64 musl archive **112,589,966 bytes**; not final image size |
-| **Pi 1.3.0 sources** | Print / JSON / RPC and SDK; shell/read/edit/write | Documented arbitrary OpenAI-compatible endpoints use `models.json` and a dummy key for unauthenticated servers; **fails strict gate** | Standard proxy support; saved sessions, RPC abort | MIT; upstream lineage, independently usable. Linux x64 archive **42,617,111 bytes**, not final image size |
+| **prime-agent 0.10.1-beta.38 probed** (Rust; 0.9.8 historical evidence below) | `--print --mode json @briefing`; `python_repl` → shell; tool/text/turn events and terminal assistant in `agent_end` passed | **Pass, probed.** `models.json` selects Chat Completions base URL; `settings.json` selects provider/model. Requires ignored placeholder; sends Bearer placeholder. Omitting it gave no available model | **Probed** HTTPS_PROXY + NODE_EXTRA_CA_CERTS, saved-session resume, RPC abort, SIGTERM. Simple print run reported no background service | MIT; Rust rewrite, **prerelease**, not 1.x. Archive **22,572,323 bytes**; unpacked release **66,499,656 bytes**, plus Python runtime/dependencies (not an image) |
+| **DeepSeek Harness (`dsh`, 687f282 sources)** | Developer-preview headless profile takes stdin, emits JSON events and final result; shell/files | **Changed: source-supported pass via configured `llm-pi-ai`.** Mounted Cordis profile supplies OpenAI endpoint/model; placeholder through `apiKeyEnv` or Authorization header. Native default is still DeepSeek Messages with x-api-key | Documents HTTPS_PROXY/custom CA; named sessions, headless lifecycle need adapter mapping. Not locally re-probed | MIT; preview, not a settled production contract. No OCI image measured |
+| **OpenCode 1.19.0 probed / 1.19.3 sources** | `run --format json`; shell/file tools; streamed tool/text/step events | **Pass, unchanged.** Inline env JSON or mounted JSON; custom `@ai-sdk/openai-compatible`, `baseURL`, omit `apiKey` entirely | HTTPS proxy + custom CA passed round 1. `--session` / `--continue`; server abort or terminate Job. Stop not locally exercised | MIT; active stable releases. Published 1.19.3 archive **60,716,380 bytes**; installed 1.19.0 payload **254,277,088 bytes**, before tools |
+| **Codex CLI 0.163.0 sources** | `codex exec`, JSONL events and last-message output; shell/patch tools | **Config pass, protocol caveat unchanged.** Mounted TOML or `-c` custom no-key provider; **Responses API only**, not Chat Completions | Standard proxy/client configuration; `exec resume`; terminate process/Job. Not locally exercised | Apache-2.0; official OpenAI project. Linux x64 musl archive **112,589,966 bytes**, not final image size |
+| **Pi 1.3.0 sources** | Print / JSON / RPC and SDK; shell/read/edit/write | **Changed: source-supported pass.** Mounted `models.json` sets OpenAI base URL/model with documented ignored dummy key | Standard proxy support; saved sessions, RPC abort. Standalone custom CA not locally established | MIT; upstream lineage, independently usable. Linux x64 archive **42,617,111 bytes**, not final image size |
+
+Only Prime Agent was newly installed/model-probed in round 2. Other rows retain
+the round-1 pins; this is not a claim they are still the newest releases.
 
 ### 2.3 Primary evidence and important distinctions
 
@@ -83,16 +93,47 @@ CLI probe failed earlier with `supervisor_generation_stale` (exit 1), so it
 **did not test authentication or proxying**. No existing daemon was stopped or
 reconfigured to work around it.
 
-The [latest release API](https://api.github.com/repos/PrimeIntellect-ai/prime-agent/releases/latest)
-reports 0.10.0 and a Linux x64 archive of 21,556,959 bytes. Public main at
-`58f9e8bb0ef54956e2e796ef96723f20b43fc55d` uses Rust crates, unlike the
-installed 0.9.8 TypeScript distribution. Its
-[OpenAI completion source](https://github.com/PrimeIntellect-ai/prime-agent/blob/58f9e8bb0ef54956e2e796ef96723f20b43fc55d/crates/pa-ai/src/providers/openai_completions/mod.rs)
-still returns a no-key error in the inspected path; its
-[custom-CA change note](https://github.com/PrimeIntellect-ai/prime-agent/blob/58f9e8bb0ef54956e2e796ef96723f20b43fc55d/.changes/fix-custom-ca-trust.md)
-claims OS roots and `NODE_EXTRA_CA_CERTS` support. This is source evidence,
-not a probe of the latest release. A release pin must precede any acceptance
-claim, including its daemon/process and Python runtime footprint.
+**Round-2 release investigation and source pin.** The
+[stable release API](https://api.github.com/repos/PrimeIntellect-ai/prime-agent/releases/latest)
+still names **v0.10.0** (2026-10-09). The rolling
+[nightly release](https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/nightly)
+and its [beta manifest](https://github.com/PrimeIntellect-ai/prime-agent/releases/download/nightly/beta.json)
+name **v0.10.1-beta.38**, updated 2026-10-19T22:03:47Z. The evaluated binary's
+bundled package manifest identifies source commit
+`58f9e8bb0ef54956e2e796ef96723f20b43fc55d`; the nightly release body agrees.
+The public version tag resolves to
+`0b75b208f31ed35b051e49813ed90af32fbd5940` (release metadata), so the bundled
+source pin and asset hash above identify this probe more precisely than the
+mutable `nightly` URL alone. All 294 visible branches were listed, including
+`main`, `beta` and Rust-port branches; tags and the pinned
+[README](https://github.com/PrimeIntellect-ai/prime-agent/blob/58f9e8bb0ef54956e2e796ef96723f20b43fc55d/README.md)
+provided no 1.x release. There is no root CHANGELOG.md or old
+packages/coding-agent/CHANGELOG.md at the inspected Rust pin; release changes
+live under `.changes/`. The owner may mean the rewrite, but that intent is
+unconfirmed. **This note evaluates beta.38, not an alleged version 1, and does
+not claim the same probes for stable 0.10.0.**
+
+The pinned Rust [custom-model parser](https://github.com/PrimeIntellect-ai/prime-agent/blob/58f9e8bb0ef54956e2e796ef96723f20b43fc55d/crates/pa-core/src/models/custom.rs),
+[settings types](https://github.com/PrimeIntellect-ai/prime-agent/blob/58f9e8bb0ef54956e2e796ef96723f20b43fc55d/crates/pa-core/src/settings/types.rs)
+and [print/RPC runner](https://github.com/PrimeIntellect-ai/prime-agent/blob/58f9e8bb0ef54956e2e796ef96723f20b43fc55d/crates/pa-cli/src/print_runtime.rs)
+are the relevant implementation, not 0.9.8's TypeScript guide. The
+[OpenAI source](https://github.com/PrimeIntellect-ai/prime-agent/blob/58f9e8bb0ef54956e2e796ef96723f20b43fc55d/crates/pa-ai/src/providers/openai_completions/mod.rs)
+still checks key presence, but an ignored literal now meets the owner's rule.
+The [TLS client](https://github.com/PrimeIntellect-ai/prime-agent/blob/58f9e8bb0ef54956e2e796ef96723f20b43fc55d/crates/pa-ai/src/utils_inner/tls.rs)
+loads native roots and `NODE_EXTRA_CA_CERTS` once per process. Both config and
+TLS claims were exercised below. The pinned README explicitly warns that
+workers/kernels are **not** a sandbox; Kubernetes must supply that boundary.
+
+The [kernel bootstrap](https://github.com/PrimeIntellect-ai/prime-agent/blob/58f9e8bb0ef54956e2e796ef96723f20b43fc55d/crates/pa-core/src/kernel/bootstrap/mod.rs)
+needs the bundled `prime-agent-runtime`, a snapshot package and default Python
+packages (including numpy/pandas/scipy). First-run bootstrap normally needs
+network; `PRIME_AGENT_KERNEL_PYTHON` can select a pre-provisioned interpreter.
+The probe used that stock override and disabled skill discovery; bundled Python
+skills were not installed and generated explicit unavailable-skill warnings.
+Thus shell support passed, **not** every bundled skill or subagent capability.
+Bake the runtime/dependency lock into the workbench; a small Rust archive is
+not the complete agent footprint. Print/RPC tests here used no background
+daemon; interactive/daemon shutdown semantics remain a separate surface.
 
 **DeepSeek identity.** The official
 [DeepSeek Harness README](https://github.com/deepseek-ai/deepseek-harness/blob/687f282e8625c6b8d11ff58211a90524be2e4317/README.md)
@@ -117,8 +158,12 @@ Completed work exits 0; error/abort/no-turn exits 1. The
 requires `DEEPSEEK_API_KEY`; overriding `DEEPSEEK_BASE_URL` does not change
 its Messages wire protocol. Generic OpenAI providers use
 [llm-pi-ai](https://github.com/deepseek-ai/deepseek-harness/blob/687f282e8625c6b8d11ff58211a90524be2e4317/packages/llm/llm-pi-ai/README.md)
-configuration in a Cordis patch file; a baked custom profile could bridge this,
-but that is integration work, not a stock env-only/keyless pass.
+configuration in a Cordis patch file. **Round-2 change:** that mounted file is
+now allowed. The same guide explicitly says an unauthenticated OpenAI route
+needs a placeholder through `apiKeyEnv` or an Authorization entry in `headers`.
+Use a fixed ignored value, never a real credential. This is a source-supported
+config pass without a fork, not a new local headless/proxy pass. The native
+DeepSeek route is still the wrong wire protocol for a Chat Completions gateway.
 
 The [base composition](https://github.com/deepseek-ai/deepseek-harness/blob/687f282e8625c6b8d11ff58211a90524be2e4317/packages/bundle/base/cordis.patch.yml)
 includes bash/files/skills/subagents/jobs. The
@@ -165,6 +210,8 @@ Responses only and explicitly rejects removed `chat`. Repeated
 [`-c` overrides](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/cli/src/config_override.rs)
 can define a provider and env-derived base URL without `config.toml`; that is
 launcher-generated configuration, not a universal endpoint-env-only shortcut.
+**Round 2:** a mounted `~/.codex/config.toml` is also acceptable. Removing the
+config restriction does not add Chat Completions support.
 The [proxy client](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/http-client/src/outbound_proxy.rs)
 uses standard proxy variables; its
 [custom CA support](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/http-client/src/custom_ca.rs)
@@ -178,6 +225,9 @@ No local proxy or shutdown claim is inferred from those sources.
 [print/JSON/session controls](https://github.com/badlogic/pi-mono/blob/71023aec1546d6d677a65669c5665c0927ce0dd0/packages/coding-agent/docs/cli.md),
 [custom model files](https://github.com/badlogic/pi-mono/blob/71023aec1546d6d677a65669c5665c0927ce0dd0/packages/coding-agent/docs/models.md)
 and a [key gate](https://github.com/badlogic/pi-mono/blob/71023aec1546d6d677a65669c5665c0927ce0dd0/packages/ai/src/api/openai-completions.ts).
+**Round-2 change:** the guide's explicit dummy-key example meets the relaxed
+rule with mounted `models.json`; the gateway must ignore it. This source-level
+pass does not establish local tool/proxy/CA behaviour for Pi 1.3.0.
 Its [HTTP dispatcher](https://github.com/badlogic/pi-mono/blob/71023aec1546d6d677a65669c5665c0927ce0dd0/packages/coding-agent/src/core/http-dispatcher.ts)
 uses an environment proxy agent; the standalone binary's custom-CA behaviour
 was not verified. The
@@ -239,26 +289,119 @@ Sources: [configuration](https://opencode.ai/docs/config/),
 [CLI environment flags](https://opencode.ai/docs/cli/),
 [network and CA settings](https://opencode.ai/docs/network/).
 
+### 2.4.1 Round-2 Prime Agent probes (0.10.1-beta.38)
+
+Downloaded the official Linux x64 archive into an untracked throwaway directory
+**inside this worktree** and verified its SHA-256 against `beta.json` and the
+GitHub asset digest. Unpacked it directly as a standalone release; never ran
+the global installer/update command. The installed 0.9.8 binary and real
+`~/.prime` were untouched. All CLI runs used `timeout`, a sanitized `env -i`,
+a temporary HOME/XDG tree and an empty work directory, with startup network
+operations disabled by `--offline` and telemetry disabled. Model traffic used
+only local scripted mocks, never a real model. Runtime dependencies were
+provisioned separately with bounded `lifemodel-heavy uv` commands, not fetched
+during the agent turn. No cluster, VM or product-test commands ran.
+
+Mounted-file equivalent (same stock files, also exercised mode 0444; this was
+not an actual Kubernetes mount):
+
+```json
+// $HOME/.prime/agent/models.json
+{"providers":{"probe":{"baseUrl":"http://127.0.0.1:<port>/v1","api":"openai-completions","apiKey":"ignored-placeholder","models":[{"id":"probe"}]}}}
+// $HOME/.prime/agent/settings.json
+{"defaultProvider":"probe","defaultModel":"probe","telemetry":{"enabled":false},"traces":{"enabled":false}}
+```
+
+Representative launch, with `<release>`/`<home>`/`<python>` under the throwaway
+directory and only explicit environment values (no inherited provider keys):
+
+```text
+timeout 40s env -i HOME=<home> PATH=<tool-path> XDG_CONFIG_HOME=<home>/.config XDG_CACHE_HOME=<home>/.cache PRIME_AGENT_KERNEL_PYTHON=<python> DO_NOT_TRACK=1 PRIME_AGENT_TELEMETRY_DISABLED=1 <release>/prime-agent --offline --no-skills --no-prompt-templates --no-context-files --no-themes --cwd <empty-workdir> --provider probe --model probe --mode json --print @<briefing.txt>
+```
+
+The successful shell mock sent a streamed Chat Completions `python_repl` call
+with `{"code":"print((await bash('printf R6534B_TOOL_OK')).output)"}`, then a
+final text response after receiving the tool result. Each successful cycle
+used two POSTs to `/v1/chat/completions`, model `probe`, with
+`Authorization: Bearer ignored-placeholder`. The mock never validated that
+value: it conveys no authority. Endpoint lived in `models.json`; a separate
+run omitted CLI `--provider/--model` and used `settings.json` successfully.
+
+| Probe (bounded foreground CLI) | Own exit / observed result | Meaning / limit |
+|---|---|---|
+| `timeout 15s ... --version` / `--help` | 0 / 0; **0.10.1-beta.38** | Correct throwaway binary, Rust package manifest/source pin above |
+| `timeout 30s ... --print --mode json`, omit apiKey | **1**, `No models available`; zero mock requests | A placeholder is required for this custom route; not credential-free in the old no-dummy sense |
+| `timeout 40s ... --print --mode json`, placeholder + shell | **0**; `tool_execution_start/update/end`, tool result `isError=false`, stdout `R6534B_TOOL_OK`; final assistant `R6534B_MOCK_OK`, `stopReason=stop`, `agent_end` | One-shot briefing, actual shell execution and JSONL progress/result pass |
+| `timeout 15s ...`, mode-0444 config, no provider/model arguments | **0**; selected `probe/probe`, final result | Stock mounted-config shape supplies endpoint and model; actual ConfigMap mount not tested |
+| `timeout 30s ...`, HTTPS_PROXY + NODE_EXTRA_CA_CERTS | **0**; two CONNECTs and two HTTPS model requests; shell and final cycle passed | Local proxy maps `model.probe.invalid:443` to TLS mock; CA signed a separate non-CA server certificate |
+| `timeout 15s ...`, same proxy/valid leaf but no custom CA | **0**, terminal assistant `stopReason=error`, `Connection error.`; no successful model result | Negative trust control; **exit 0 is not task success** |
+| `timeout 20s ... --mode rpc`, abort after mock receives request | **0** after input EOF; prompt ack then abort ack `success=true`, terminal `stopReason=aborted`, `Request was aborted`, `agent_end` | In-flight model cancellation passed. Prompt ack alone is not completion. No long-running shell/subagent cancellation tested |
+| `timeout --signal=TERM --kill-after=2s 2s ... --print` while mock holds reply | **124**; request received; process ended in about 2 seconds | Simple client stop passed; timeout status is not a normal final result. No hostile descendant/cgroup proof |
+| `timeout 15s ... --resume <saved-id> --print ...` | **0**; prior tool message present in next model request; final result | Saved conversation resume passed, not transactional shell replay or cross-Job recovery |
+| `timeout 10s ... status`, then process-name inspection | **0**, `No background services found`; no remaining throwaway CLI/kernel process | This print/RPC route did not require a resident service; says nothing about interactive daemon mode |
+
+Two setup controls failed before the final successful cases. A venv invocation
+naming `/usr/bin/python3` failed (exit 2) because this NixOS host has Python at
+`/run/current-system/sw/bin/python3`; corrected, provision succeeded. The
+first shell attempt then found installed numpy/pandas/scipy unimportable under
+`env -i` because `libstdc++.so.6` was absent from the loader path. Supplying the
+host's explicit `NIX_LD_LIBRARY_PATH` as `LD_LIBRARY_PATH` fixed it; no agent
+source changed. That failed tool still led to final mock text and exit 0:
+**a final answer cannot erase an earlier failed required effect**. Production
+must include native libraries, not copy this host-specific loader path.
+
+The initial TLS fixture reused a self-signed CA certificate as the server leaf;
+Python's urllib control accepted it (200) but Prime's Rust TLS rejected it
+(`Connection error.`, CLI 0). With a proper signed leaf, the CA-positive test
+passed and CA-negative test failed as expected. This was a fixture correction,
+not evidence that disabling verification is needed. Verification stayed on.
+The transcript contains full tool/message bodies; normalize/redact progress
+before forwarding it into product logs. The Rust [RPC tests](https://github.com/PrimeIntellect-ai/prime-agent/blob/58f9e8bb0ef54956e2e796ef96723f20b43fc55d/crates/pa-cli/tests/rpc_mode_e2e.rs)
+also cover abort/event ordering, but were read, not run here.
+
+Unpacked release files total **66,499,656 bytes** before execution; the probe's
+separate 50-package Python venv was about **274.5 MB** (logical file sizes,
+Python 3.14.7 host interpreter, no bundled Python skills). Neither is an OCI
+size, RSS measurement or reproducible production dependency lock. No current
+stable-0.10.0, real-gateway/model, tool-network, skill, long-run or Kubernetes
+acceptance is claimed. All mock listeners were closed, TLS private keys and
+the throwaway release/HOME/venv removed after recording results.
+
 ### 2.5 Recommendation, main risk, and evidence that would change it
 
-**Recommend OpenCode as the first harness adapter**, pinned and baked into the
-one workbench image. It is the only candidate in this run demonstrated to use
-an arbitrary Chat Completions endpoint without a key/config file, through a
-proxy, while executing a shell tool and producing machine-readable results.
-Keep the adapter narrow: briefing in, progress/tool events out, exactly one
-terminal disposition and artifact manifest. The platform, not harness tool
-permissions, enforces file/network/resource boundaries.
+**Recommend OpenCode as the first harness adapter**, still provisionally,
+pinned and baked into the one workbench image. The reason is now its stable
+headless path already demonstrated in round 1 and simpler non-Python runtime,
+**not** exclusive compliance with no-config/no-dummy rules that no longer
+apply. **Prime Agent beta.38 is a credible second adapter**, with the same
+local shell/JSON/proxy gates plus newly exercised abort/resume. Its smaller
+release archive does not remove its substantial Python runtime/dependencies.
+Pi and configured DeepSeek stay on the shortlist; their relaxed config pass is
+source-supported, not yet locally demonstrated. Codex still needs Responses
+support at the gateway.
 
-**Main risk:** release churn and hidden network/process behaviour. The probe
-was installed 1.19.0, while source review includes stable 1.19.3; no real model,
-long-running resume, stop/process-tree cleanup or Kubernetes run was tested.
-Its event stream is not a durable task-result protocol by itself.
+Keep the adapter narrow: briefing in, bounded progress/tool events out,
+exactly one terminal disposition and artifact manifest. The platform, not
+harness tool permissions, enforces file/network/resource boundaries. Normalize
+Prime's `error`/`aborted` stop reasons and failed required tool effects; neither
+CLI 0 nor `agent_end` alone is a success contract.
 
-**Would change it:** a pinned workbench fails no-key/proxy, offline startup,
-resume/cancel or result-contract tests with the actual gateway, or DeepSeek /
-prime-agent demonstrate the same strict gates without a fork and materially
-better task behaviour. Codex becomes competitive if the gateway explicitly
-supports the Responses API. No harness is accepted for deployment by this note.
+**Main risk:** release churn and hidden network/process behaviour. Prime's
+rewrite is only probed at a prerelease; the stable release was not substituted
+as if equivalent. OpenCode's existing local probe is 1.19.0 while source review
+includes 1.19.3. No actual gateway, real model, pinned full workbench, long-run
+process-tree cleanup or Kubernetes run was accepted. JSON events are not a
+durable task-result protocol by themselves.
+
+**Would change it:** prefer Prime if the chosen production pin (stable or an
+explicitly accepted beta) passes the actual gateway, fully offline baked
+runtime, real tool-heavy task, terminal-error normalization and bounded
+process-tree cancellation tests, and RLM/skills materially improve that task.
+The new probes already remove the previous authentication/config objection;
+requiring no placeholder or no config again would reinstate a rejected gate.
+Pi/DeepSeek can win on equivalent runtime evidence and simpler integration.
+A failure of OpenCode on the real gateway, cancel/result contract or offline
+startup also reopens the choice. No harness is accepted for deployment here.
 
 ## 3. S3 store for output and artifacts
 
@@ -594,14 +737,21 @@ research alone.
 
 These are design inputs, not silently resolved requirements:
 
-- **Wire and launch contract:** Chat Completions, Responses or both; whether
-  inline environment JSON / launcher-generated overrides meet “no config file”;
-  exact harness version/image digest and entirely offline startup, including
-  auxiliary/title models, plugins, Python runtime and toolchain.
+- **Wire and launch contract:** Chat Completions, Responses or both. The owner
+  has now allowed mounted provider config (for example a ConfigMap) or env;
+  do not reopen “no config file” or “no ignored placeholder” as requirements.
+  Pin config schema and exact harness/image version; keep HOME/session state
+  task-private, mount only non-secret endpoint/model/placeholder data, and
+  bake entirely offline startup, including auxiliary/title models, plugins,
+  Python/native libraries and toolchain. Prime beta.38 passed local mocks,
+  not the production pin/gateway/workbench acceptance.
 - **Harness seam:** immutable briefing plus tool/access-request events,
   bounded progress, one terminal success/failure/stopped disposition, artifact
   manifest validation and real-task acceptance. A final assistant turn alone
-  is not task success. Prove a second fake adapter changes no caller.
+  is not task success. Prime's observed CLI 0 on provider error, failed tool and
+  abort requires explicit JSON error/stopped normalization; match tool effects
+  to required outcomes, and redact message/tool bodies in product progress.
+  Prove a second fake adapter changes no caller.
 - **Resume and Stop:** retained session state versus discarded work volume;
   no automatic replay of ambiguous shell effects; process-tree/cgroup cleanup,
   upload drain deadline and honest status if output cannot be retained before
