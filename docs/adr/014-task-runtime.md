@@ -126,7 +126,9 @@ available during wrapping, external effects do not; hard revoke denies both.
 Never cache positive liveness across revocation; API/authority outage rejects
 new operations. T03/T06/S02 pause the projection writer, commit stop without
 delivering revoke RPC, and inject delayed active revisions: no post-intent
-operation may authorize against the stale revision. Existing model responses may end;
+operation may authorize against the stale revision. Authorization also derives
+effective mode from absolute deadlines at database time, so a core-down timeout
+cannot rely only on eventual local-timer reporting. Existing model responses may end;
 they do not confer permission to execute an external effect.
 
 Rejected from options §1: core-signed JWT adds signer custody/revocation and

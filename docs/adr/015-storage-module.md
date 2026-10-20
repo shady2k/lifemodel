@@ -130,7 +130,11 @@ task outcome/launch registry. S02 pauses the projection watcher, commits revoke
 intent, then attempts PUT/mark/GET before reconciliation and injects a delayed old active
 projection; hard revoke denies all, soft wrap allows only wrap data/model calls
 and denies new effects. The canonical committed intent is the authorization
-boundary: zero later authorizations may use the older mode/revision. A chunk
+boundary: zero later authorizations may use the older mode/revision. The same
+read computes effective mode from canonical absolute softDueAt/hardStopAt using
+the database clock: due timeout denies new effects (wrap data/model only), hard
+deadline denies task operations even if a timer/projection worker has not yet
+published its event. API deletion is still driven independently. A chunk
 already authorized before intent commit may complete; revoke ACK additionally
 confirms active-stream cancellation. T03/T06 apply this same rule to model and
 effect listeners, not only storage.
