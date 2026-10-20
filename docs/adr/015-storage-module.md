@@ -61,7 +61,7 @@ limits beyond the owner-declared 20 GB logical-storage ceiling.
 | S07 | One batched warning per deletion plan precedes deletion; pin/read/seal races cannot resurrect or delete protected output (owner) | `tests/integration/storage-module-gc.test.ts`: **100 artifacts**, one batch/notification key, owner pin after warning, two GC contenders, active reader and crash before/after delete; zero per-item notices |
 | S08 | Owner downloads through authenticated same-origin web→module; no raw S3 client/URL, no unsafe inline artifact execution (ADR-011/012, owner) | `tests/integration/task-artifact-download.test.ts`: **two owner sessions, two artifacts**, expired session, traversal, CRLF filename/HTML content, range/reconnect and mid-read expiry; WALK-TASK-PANEL in Chromium + Firefox |
 | S09 | Seaweed **single-node weed mini** with persistent volume, auth fail-closed, internal-only S3; recover objects + filer metadata + IAM/custody + SQL catalog together (owner/research) | WALK-STORAGE-RESTORE: one fresh k3s node, **32 objects of 4 MiB plus 2 partial uploads**, restart and restore into empty instance; hashes/marks/read denial/tombstones match; record measured restore time and backup age |
-| S10 | Bounded transfer/memory/client pressure and safe diagnostics; task stream cannot starve another or web; health never reports a failed store as empty (limits/visibility) | `tests/integration/storage-module-pressure.test.ts`: **20 simultaneous streams, 2 tasks + web**, 4 MiB chunks, induced disk/API/SQL failure, quota/429/backpressure; WALK-STORAGE-LOAD records RSS/latency, no unbounded buffer or secret/body in diagnostic logs |
+| S10 | Bound transfer/memory/client pressure with reserved web/control capacity; health never reports failed stores as empty (limits/visibility) | `tests/integration/storage-module-pressure.test.ts`: **20 attempted streams, 2 tasks + web**, 4 MiB chunks; active/buffer limits in S-D3 never exceeded, overload rejected **within 1 s**, 20 healthy control/second-task operations each ACK **within 2 s** with one stalled stream; WALK-STORAGE-LOAD proves RSS **≤512 MiB** at this fixture and no secret/body diagnostic logs |
 
 ## Decisions
 
@@ -117,11 +117,23 @@ mode active/wrapping/revoked) from committed lifecycle intents and actual API
 objects. Core writes lifecycle intents through its fenced operations; storage
 cannot edit the core registry or infer liveness solely from an unfenced message.
 Module performs its own live checks and reads current revision at each
-operation/chunk; no synchronous call to the core process is required. Missing
-projection/binding fails closed until reconciled. Control component can revoke
-without cognition; lifecycle-watch failure rejects fresh access rather than
-assume active. This projection contains no briefing, secret or grants and is
-not a second task outcome/launch registry.
+operation/chunk; no synchronous call to the core process is required. Read
+committed lifecycle access intent and verified binding **together** through a
+narrow SQL operation: a newer stop/revoke intent wins even before the projection
+worker catches up. No eventual projection alone can authorize stale active
+mode. Also verify actual Pod/Job liveness per operation/chunk using current API
+reads, never watcher cache; failure rejects access. A watch drives cleanup but
+is not the source of authorization freshness. Missing projection/binding fails
+closed until reconciled. Control component can revoke without cognition.
+This projection contains no briefing, secret or grants and is not a second
+task outcome/launch registry. S02 pauses the projection watcher, commits revoke
+intent, then attempts PUT/mark/GET before reconciliation and injects a delayed old active
+projection; hard revoke denies all, soft wrap allows only wrap data/model calls
+and denies new effects. The canonical committed intent is the authorization
+boundary: zero later authorizations may use the older mode/revision. A chunk
+already authorized before intent commit may complete; revoke ACK additionally
+confirms active-stream cancellation. T03/T06 apply this same rule to model and
+effect listeners, not only storage.
 
 `revoke(space, expectedRevision, effectKey)` fences data operations in the
 module's own catalog. **Immediate** means linearizable at the durable revoke
@@ -163,8 +175,20 @@ No credential parameters or raw URL output. Core/web domain adapters implement
 the same API, no SDK route around it. Marking is not a grant to send a file to
 another service; owner attachment is a separate read reference.
 
-Transfer design default: at most **4 MiB per chunk**, server bounds headers,
-body, listing and open transfers before reading. Chunking is module protocol,
+Transfer design defaults: at most **4 MiB per chunk**, **8** active transfer
+workers total, at most **2 per task** and **2 reserved for owner reads**, plus
+**2 independent control workers** (allocate/revoke/seal metadata). Twenty
+attempted streams therefore exercise refusal/backpressure, not twenty full
+buffers. Chunk buffers total **32 MiB** maximum; bounded queues hold only
+metadata (**64 KiB** aggregate), not extra artifact chunks. At most **32** queued
+requests, excess responds 429 within **1 s**; per-chunk network/SQL deadline
+**10 s**, no progress ends that stream without occupying a worker forever.
+Workers select round-robin by space after each chunk; no stalled upload holds
+a control worker or web reserve. A revoke cancels all that space's workers.
+The **512 MiB** RSS bound is a fixture acceptance budget to measure on the
+specified single-node walk, not a vendor minimum or full-platform memory claim.
+Values are typed settings with finite hard bounds; changes rerun S10. Server
+bounds headers/body/listing before reading. Chunking is module protocol,
 not task-facing S3 multipart; objects commit only after every chunk/hash check.
 Reserve declared bytes transactionally against quota before accepting chunks;
 count actual bytes, reject surplus early. An upload ID cannot be reused to
@@ -246,8 +270,11 @@ Updates to the same pending batch coalesce; new candidates cannot inherit an
 already elapsed warning window. No repeated notice on restart/delivery retry.
 
 Before delete, atomically recheck pins/policy/object revisions and active-read
-lease; changed/protected objects leave the plan. `deleting` tombstone prevents
-new reads/marks; bounded existing read leases finish first (revoke for hard
+lease; changed/protected objects leave the plan. Pin/retention changes serialize
+with entry to `deleting` under that same row lock/CAS: a pin that wins removes
+the object from the plan; a pin that loses returns `already_deleting`, never
+ACKs protection of bytes being removed. S07 checks both orderings and replay.
+`deleting` tombstone prevents new reads/marks/pins; bounded existing read leases finish first (revoke for hard
 space revoke is separate). SQL intent precedes S3 deletes; acknowledge removed
 bytes only after backend confirms. Lost responses retry deletes safely; retain
 tombstones/plan receipts while any retry path can name them. Owner manual delete

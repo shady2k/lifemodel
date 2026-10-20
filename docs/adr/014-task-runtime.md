@@ -71,9 +71,9 @@ ADR-015. Fixture sizes specify evidence, not a maximum number of owner tasks.
 | T02 | One CI-built signed, digest-pinned workbench contains **OpenCode and prime-agent**; setting selects one per accepted task; startup offline (owner) | `tests/unit/task-workbench-contract.test.ts`: rendered image/signature/pin; WALK-TWO-HARNESSES: **two tasks per adapter**, shell + actual gateway + live steering + stop, no startup installs |
 | T03 | Task has zero RBAC and no model/S3/git/store signing key; explicitly projected service-audience SA tokens are bearer bootstrap identity, not secret keys (owner) | `tests/integration/task-identity.test.ts`: **two task UIDs**, wrong audience/SA/Pod/Job, replay after revoke, token rotation; WALK-TASK-ISOLATION inspects specs/env/files/logs without printing secrets |
 | T04 | Persist task registry/mailbox in **Postgres**, tick/outbox signals in existing **Valkey** seams; no file state or task store client (frame, standing durable-home rule) | `tests/integration/task-restart.test.ts`: read-only DATA_PATH and kill/restart core at **eight boundaries** named in D3; zero lost ACKs and one terminal event key |
-| T05 | Launch/profile/effect intent must be committed before dispatch; one accepted launch key never becomes two running Pods through replay (ADR-010 keyed effects) | `tests/integration/task-launch-fence.test.ts`: **two competing core epochs**, delayed create/delete, lost create response and duplicate delivery; WALK-TASK-RESTART confirms admission fence on real API |
+| T05 | Commit launch/profile/effect intent before dispatch; one launch authorizes **at most one harness execution**, including controller replacement Pods (ADR-010 keyed effects) | `tests/integration/task-launch-fence.test.ts`: **two core epochs + two candidate Pod UIDs**, delayed create/delete, lost response/duplicate start, deleted-running-Pod replacement; WALK-TASK-RESTART verifies only one execution claim and zero replacement harness starts |
 | T06 | Network is deny-first; task can reach only scoped runtime services and granted egress; internal cluster targets/other files/keys remain hard-denied (owner, ADR-013) | `tests/integration/task-consent-contract.test.ts` plus WALK-TASK-ISOLATION: **two profiles**, no-network and one approved domain, forbidden methods/private IP/redirect/domain denied |
-| T07 | Both harnesses expose live commands/events/one semantic terminal result; core remains responsive while a task stalls (owner) | `tests/integration/task-harness-contract.test.ts`: **two real adapters + one scripted adapter**, mid-tool steer/question/abort/error, duplicate ACK replay; owner intake succeeds while one stream blocks |
+| T07 | Both harnesses expose live commands/events/one semantic terminal result; one stalled task cannot block owner intake (owner) | `tests/integration/task-harness-contract.test.ts`: **two real adapters + one scripted adapter**; with one blocked stream, 20 owner intakes and 20 second-task control messages each ACK **within 2 s**, frame/buffer/timeout limits in D2 hold; mid-tool steer/question/abort/error and duplicate replay |
 | T08 | Soft Stop and agent timeout wrap up without new external effects; hard deadline defaults to **300 s**; hard Stop deletes immediately; stop-all soft-stops current tasks, not core (owner answer) | `tests/integration/task-stop.test.ts`: virtual clock, **two running + one queued + one starting**, repeated Stop/timeout/hard/all; WALK-TASK-STOPS observes real delete requests, retained marked bytes and no remaining Pod/PVC |
 | T09 | Urgent precedes normal; FIFO in each class, owner or agent can mark urgent, no preemption; concurrency is platform bounded (owner answer) | `tests/integration/task-admission.test.ts`: **100 queued tasks, cap 2, two dispatch contenders**, mixed urgent/normal and cap decrease/restart; no third live reservation, stable class FIFO |
 | T10 | Registry descriptors are typed, loader/platform-owned; secrets set/delete/exists only; ceilings cannot be raised by core (owner/nocx) | `tests/unit/task-settings-registry.test.ts`: duplicate/unknown/type/bounds/secret-read refusal; WALK-TASK-SETTINGS: add **one declaration**, render bounds/errors in deployed Chromium + Firefox, core unavailable |
@@ -119,8 +119,14 @@ rather than accept SA-only identity. Core registers binding via allocation/bind
 launch identity. No task can patch labels, request tokens or reach the API.
 The task model listener replaces caller session with trusted task ID and uses
 ADR-013 filtering/failover/custody; core's existing listener is unchanged.
-Model, channel and storage never cache positive liveness across revocation;
-API/authority outage rejects new operations. Existing model responses may end;
+Model, channel, storage and effect listeners use the narrow SQL authorization
+read of ADR-015 S-D2: current committed lifecycle access intent and binding are
+read together; newer revoke/stop wins over lagging projection. Model remains
+available during wrapping, external effects do not; hard revoke denies both.
+Never cache positive liveness across revocation; API/authority outage rejects
+new operations. T03/T06/S02 pause the projection writer, commit stop without
+delivering revoke RPC, and inject delayed active revisions: no post-intent
+operation may authorize against the stale revision. Existing model responses may end;
 they do not confer permission to execute an external effect.
 
 Rejected from options §1: core-signed JWT adds signer custody/revocation and
@@ -144,8 +150,17 @@ assumes contiguous IDs after deletions. Core emits normal Signals through its
 existing bus seam; control transport envelopes are not a second cognition
 model. Owner input is never sent raw to a task; the agent turns it into steer.
 `step` is a bounded short line; `question` asks the agent, which may ask owner.
-Use separate per-task queues and bounded frames, no unbounded memory buffering.
-Task output/log bytes go **directly to storage**, not through this stream.
+Use independent per-task queues; output/log bytes go **directly to storage**,
+not this stream. Design defaults: control frame **64 KiB**, at most **16**
+unacknowledged frames/**1 MiB** per task connection, **4 MiB** process-wide
+control buffer, **5 s** ACK timeout before disconnect/replay. Event processing
+uses round-robin task queues, at most **one frame per task per scheduling pass**;
+control/owner-intake workers and their bounded SQL pool reservations are separate
+from artifact transfer workers. Saturated task queues apply backpressure/429,
+never borrow the owner-intake reserve. T07's 2 s fixture bound tests this
+mechanism locally without claiming a production network/LLM latency SLO.
+Frame/queue/timeout values are typed platform settings with hard validation;
+raising them requires rerunning the fixture, not silently permitting infinity.
 
 The launcher ACKs steering only after its adapter accepts it and records the
 command ID on its private working volume. A core restart preserves that volume
@@ -177,7 +192,24 @@ is driven by reconciler; no `ttlSecondsAfterFinished` before storage seal.
 A fail-closed platform admission verifier handles task Job and Pod CREATE and
 Job mutation: under a narrow authorization read it checks current core epoch,
 reserved task/launch revision, allowed template and nonterminal launch marker.
-Job spec forbids any manual restart/replacement policy. On takeover, the new
+Job restart fields alone do **not** forbid controller-created replacement Pods.
+Each Pod starts only a trusted inert launcher. Before it invokes a harness,
+a platform execution gate makes an atomic once-only SQL claim on launch ID,
+bound live Pod UID and a fresh process boot nonce; only that claimant gets a
+start acknowledgement and runtime binding. Claim is durable before response;
+two Pod UIDs racing cannot both win. Same-identity reconnect can read its saved
+binding but cannot mint another start permit. Launcher has one guarded start
+transition and never invokes start twice; a timed-out/lost start reply consumes
+the claim and fails conservatively, even if a delayed acknowledgement arrives.
+Nonce is memory-only; after launcher/process loss, a new nonce or Pod UID cannot
+reacquire execution. Include authority restart and delayed first-claim reply
+in T05, not only competing Pod requests. A replacement Pod
+may transiently exist as an inert launcher, with no model/storage/effect rights;
+it is rejected and deleted, not called a second execution. First authorized
+Pod loss is failed, not a request to reissue. The gate is not side-effecting
+admission: Pod UID exists and TokenReview is validated at handshake. Its row is
+retained until all old Job/delivery paths are fenced, including cleanup.
+On takeover, the new
 core reconciles the deterministic name **before** any further dispatch; a
 terminal Job/name is retained until old-epoch requests cannot be admitted.
 A create admitted just before takeover can arrive late: new core adopts it,
@@ -229,9 +261,15 @@ uncertain/delivered by effect key, cancel where supported, never claim undo.
 `wrapGraceSeconds` defaults to **300** (owner answer, not core's five-second
 shutdown deadline). Its absolute `hardStopAt` is persisted, never moved later
 by repeat Stop, settings changes, reconnect or core restart. Agent profile has
-required positive timeout from Job start. Reaching it triggers soft wrap with
-cause timeout; Job `activeDeadlineSeconds` is fixed to timeout + snapshotted
-wrap grace, protecting the outer bound if core dies. Earlier manual soft Stop
+required positive timeout from the Kubernetes Job's persisted `status.startTime` (not harness-ready time).
+Scheduling/startup delay therefore counts against it; the separate 120 s
+startup deadline can end a never-ready task earlier. Handshake gives launcher
+the verified absolute `softDueAt = Job.startTime + timeout`; a launcher arriving
+past it starts wrapping, not new work. Its local timer triggers wrap/cause timeout
+even while core is down, then reports the keyed event on reconnect. The platform
+control component also observes that absolute deadline as a backstop. Job
+`activeDeadlineSeconds` is fixed to timeout + snapshotted wrap grace, protecting
+the same outer bound if core dies. Earlier manual soft Stop
 sets the earlier persisted deadline; a platform deadline reconciler watches
 that intent and deletes at that deadline independently of core. It belongs to
 the platform task-control/admission component, holds only namespace-scoped
@@ -273,7 +311,8 @@ subject to platform ceiling. Lowering it does not kill existing work; new
 admission waits below the new effective cap. Pending unscheduled Jobs count;
 use an explicit settings startup deadline (design default **120 s**) to report
 failure and clean up rather than hold capacity forever. This deadline is not
-the agent's running timeout. Queue has no running timeout until compute starts.
+the agent's Job-lifetime timeout. Queue wait before Job.startTime does not
+consume that timeout; Job scheduling/launcher startup afterward does.
 
 At tenfold fixture depth (100 tasks versus a 10-task functional fixture), SQL
 ordering and one admission row keep cap=2; no claim of unlimited throughput.

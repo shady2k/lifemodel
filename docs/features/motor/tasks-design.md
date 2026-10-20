@@ -75,6 +75,14 @@ Web raw DB arrows above denote **implementation behind domain ports**, not pg
 clients in handlers. Core schema task operations and storage/schema grants are
 separate. No task script can query any schema or choose a bucket/prefix.
 
+A Job may create a replacement Pod despite backoffLimit=0. Every Pod therefore
+starts an inert trusted launcher: SQL CAS on launch ID + live Pod UID + fresh
+memory-only process nonce grants one execution before harness start or runtime
+binding. Same-process duplicate response cannot invoke start twice; another
+Pod/nonce never reacquires the claim. First execution Pod loss fails the task;
+controller replacement is denied runtime rights and deleted. This is at-most-one
+authorized execution, not a false exactly-once Kubernetes Pod-create promise.
+
 The admission/deadline component is platform task control, not a second launch
 queue or executor service. Core initiates Jobs and owns task intent/outcome;
 control validates admission and executes persisted stop deadlines while core
@@ -102,9 +110,13 @@ backend changes no caller. One workbench ships both pins/offline dependencies.
 
 Task-service method names `stopAll` / `setUrgent` are dedicated fields/actions,
 not attribute-prefix routing. Cross-core effects use committed idempotency keys;
-storage control requests carry expected revision and effect key. Every wait/
-network request has a bounded timeout; infrastructure failures retry keyed
-operations, invalid profiles/tokens/names do not retry unchanged input.
+storage control requests carry expected revision and effect key. Every wait/network request declares a finite timeout. ADR-014 D2 fixes control
+frame/buffer/5 s ACK limits and round-robin separate owner capacity; ADR-015
+S-D3 fixes 8 transfer slots (2/task, 2 reserved web), 2 independent control
+workers, 32 MiB chunk buffer and 10 s chunk deadline. T07's 2 s responsive-work
+bound and S10's 1 s overload/2 s progress/512 MiB RSS fixture budget are pass
+criteria, not just measurements. Infrastructure failures retry keyed operations;
+invalid profiles/tokens/names do not retry unchanged input.
 
 ## Task state machine
 
@@ -140,7 +152,7 @@ removed; this cannot keep a slot occupied after Pod termination is confirmed.
 | --- | --- | --- |
 | accept→queued | Core after deciding-turn commit; persist immutable launch key and settings/profile snapshot | Replay returns same task; queue is not an in-memory Promise |
 | queued→starting | Core locks admission row, checks cap/priority/profile, reserves, allocates storage | Allocation/Job create retries by key; no second launch ID on lost response |
-| starting→running | Core observes verified Job UID + Pod UID + launcher handshake | Binding must exist before data/model access; deterministic name adopts delayed create |
+| starting→running | Core observes verified Job/Pod UID + durable one-execution claim by launch/Pod/process nonce | Atomic platform start gate permits one launcher only; replacement Pod stays inert; deterministic name adopts delayed Job create |
 | running/starting→wrapping-up | Persist owner Stop or due timeout, deny new effects, command harness wrap, set absolute hardStopAt | Repeat cannot extend deadline; platform deadline enforcer works while core down |
 | nonterminal→terminal candidate | Core/reconciler persists semantic success/error or stop reason; remove compute as needed | Hard stop beats an uncommitted success candidate; terminal CAS never changes afterward |
 | candidate→done/failed/stopped | Core freezes/revokes storage, ends compute, obtains seal receipt, CAS terminal + outcome outbox | One terminal key, duplicate result/Job watch/seal replies harmless; missing result never fake success |
@@ -188,8 +200,14 @@ sequenceDiagram
 Core handles normal task commands; direct owner Stop intake and platform
 deadline enforcement do not require a cognition turn. Eventual delete latency
 under API/node failure is reported unhealthy, not claimed instantaneous.
-Five minutes is wrap time, not Kubernetes termination grace to leave runaway
-compute alive after the hard deadline. Soft-stop `hardStopAt` survives core/
+Timeout origin is persisted Job.status.startTime, not harness-ready time;
+scheduling/launcher delay counts, pre-Job queue wait does not. Launcher receives
+verified absolute softDueAt and fires its local wrap timer even with core down;
+late handshake starts wrapping instead of new work. Platform control also
+observes the deadline; both dedupe the same timeout intent. T08 includes an
+unscheduled/delayed Job and core outage spanning softDueAt. Five minutes is wrap
+time, not Kubernetes termination grace to leave runaway compute alive after
+the hard deadline. Soft-stop `hardStopAt` survives core/
 control restart and is never extended by another click or setting change.
 
 Queue key `(urgent first, original accepted sequence, taskId)` is durable.
@@ -224,7 +242,10 @@ sequenceDiagram
     C->>K: ensure deterministic Job, image/profile/hard deadline
     K->>P: verify current epoch/reservation/template
     K-->>C: Job UID or unknown response → adopt by name
-    C->>S: bind verified Job/Pod UIDs via platform authority
+    T->>K: platform start gate: live Pod UID + boot nonce
+    K->>P: CAS consumed execution claim by launch, one winner
+    K-->>T: one-use start ACK (lost reply fails conservatively)
+    K->>S: verified execution binding, no second Pod/nonce grant
     T->>C: audience token; connect/resume mailbox
     C->>P: verify binding; persist running + cursors
     T->>M: model via task identity relay/header
@@ -279,12 +300,16 @@ stateDiagram-v2
 ```
 
 Runtime identity checks happen in storage module on every operation/bounded
-chunk, including while core process is down. A revoke has a durable access
+chunk, including while core process is down. Read current lifecycle intent and
+binding together: revoke wins over a lagging projection worker; current API
+Pod/Job reads, not watcher caches, prove liveness. API/read failure denies access. A revoke has a durable access
 revision linearization point: no new chunk authorizes after ACK; previously
 sent bytes cannot be recalled. Missing live API/binding/authority fails closed.
 Only module holds Seaweed signing credentials, and only module speaks S3.
 `sealed` is read-only, with private byte IDs/hashes, not task filesystem paths.
 Owner/core read roles can read marked output; task loses rights at freeze.
+Pin/retention updates and entry to deleting use the same CAS: pin winner excludes
+the object; losing pin returns already_deleting, never false protection ACK.
 
 Defaults: 90-day age; forever and pin block automatic deletion; 20 GB decimal
 logical ceiling also charges reservations. Quota pressure can propose only
