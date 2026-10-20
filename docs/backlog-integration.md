@@ -13,6 +13,11 @@ the repository's installation, and each person's plugin and hooks are their own.
   carries the install line for people who do not have the plugin yet.
 - **Artifact language:** English (owner, 2026-10-07). The Russian ADRs
   (docs/adr/006..009, on their own branches) stay as they are.
+- **Pushes when the owner is away:** on (`notifyPushes`, owner, 2026-10-20,
+  after the test message arrived). The channel is the owner's own command in
+  `~/.config/shady2k-skills/notify.json` on this machine, sent through the run
+  script's `notify`; no token is in the repository. It carries a run's progress
+  digest, a point the run could not settle and a decision waiting on the owner.
 - **Vision, roadmap and charters:** `docs/vision.md` holds the vision and the
   roadmap (milestones in order); charters are `docs/charters/<milestone label>.md`.
   Status comes from the tracker, never from a document.
