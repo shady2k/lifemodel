@@ -265,6 +265,172 @@ describe('settings declaration registry', () => {
     expect(declaration?.description.en).toBeTruthy();
     expect(declaration?.description.ru).toBeTruthy();
   });
+
+  it('declares the task harness as a select of the two adapters, defaulting to opencode', () => {
+    const harness = platformSettings.get('tasks.harness');
+    expect(harness).toMatchObject({
+      key: 'tasks.harness',
+      section: 'tasks',
+      control: 'select',
+      dataClass: 'publicConfig',
+      default: 'opencode',
+      authority: 'owner',
+      apply: 'nextAdmission',
+    });
+    expect(harness?.options?.map((option) => option.value)).toEqual(['opencode', 'prime-agent']);
+    expect(harness?.options?.every((option) => option.label.en && option.label.ru)).toBe(true);
+    expect(platformSettings.validate('tasks.harness', 'prime-agent')).toEqual({
+      ok: true,
+      value: 'prime-agent',
+    });
+    expect(platformSettings.validate('tasks.harness', 'codex')).toMatchObject({
+      ok: false,
+      reasonCode: 'not_an_option',
+    });
+  });
+
+  it('declares the soft-stop grace in seconds, 30..3600, default 300', () => {
+    const wrapGrace = platformSettings.get('tasks.wrapGraceSeconds');
+    expect(wrapGrace).toMatchObject({
+      key: 'tasks.wrapGraceSeconds',
+      section: 'tasks',
+      control: 'number',
+      dataClass: 'publicConfig',
+      default: 300,
+      min: 30,
+      max: 3600,
+      unit: 'seconds',
+      authority: 'owner',
+      apply: 'nextAdmission',
+    });
+    expect(platformSettings.validate('tasks.wrapGraceSeconds', 29)).toMatchObject({
+      ok: false,
+      reasonCode: 'below_minimum',
+      limit: 30,
+    });
+    expect(platformSettings.validate('tasks.wrapGraceSeconds', 3601)).toMatchObject({
+      ok: false,
+      reasonCode: 'above_maximum',
+      limit: 3600,
+    });
+    expect(platformSettings.validate('tasks.wrapGraceSeconds', 600)).toEqual({
+      ok: true,
+      value: 600,
+    });
+  });
+
+  it('declares the output retention as an enum, never 0, default 90 days', () => {
+    const retention = platformSettings.get('storage.retention');
+    expect(retention).toMatchObject({
+      key: 'storage.retention',
+      section: 'tasks',
+      control: 'select',
+      dataClass: 'publicConfig',
+      default: '90d',
+      authority: 'owner',
+      apply: 'immediate',
+    });
+    expect(retention?.options?.map((option) => option.value)).toEqual(['90d', 'forever']);
+    // Forever is an enum value of its own, never a 0 number (ADR-014 D6).
+    expect(platformSettings.validate('storage.retention', 0)).toMatchObject({
+      ok: false,
+      reasonCode: 'wrong_type',
+    });
+    expect(platformSettings.validate('storage.retention', '0')).toMatchObject({
+      ok: false,
+      reasonCode: 'not_an_option',
+    });
+    expect(platformSettings.validate('storage.retention', 'forever')).toEqual({
+      ok: true,
+      value: 'forever',
+    });
+  });
+
+  it('declares the deletion warning lead in seconds, one to thirty days, default seven days', () => {
+    const warningLead = platformSettings.get('storage.warningLeadSeconds');
+    expect(warningLead).toMatchObject({
+      key: 'storage.warningLeadSeconds',
+      section: 'tasks',
+      control: 'number',
+      dataClass: 'publicConfig',
+      default: 604800,
+      min: 86400,
+      max: 2592000,
+      unit: 'seconds',
+      authority: 'owner',
+      apply: 'immediate',
+    });
+    expect(platformSettings.validate('storage.warningLeadSeconds', 86399)).toMatchObject({
+      ok: false,
+      reasonCode: 'below_minimum',
+      limit: 86400,
+    });
+    expect(platformSettings.validate('storage.warningLeadSeconds', 2592001)).toMatchObject({
+      ok: false,
+      reasonCode: 'above_maximum',
+      limit: 2592000,
+    });
+    expect(platformSettings.validate('storage.warningLeadSeconds', 1209600)).toEqual({
+      ok: true,
+      value: 1209600,
+    });
+  });
+
+  it('declares the storage ceiling as fixed at 20 GB, so no other value validates', () => {
+    const ceiling = platformSettings.get('storage.ceilingBytes');
+    expect(ceiling).toMatchObject({
+      key: 'storage.ceilingBytes',
+      section: 'tasks',
+      control: 'number',
+      dataClass: 'publicConfig',
+      default: 20_000_000_000,
+      min: 20_000_000_000,
+      max: 20_000_000_000,
+      unit: 'bytes',
+      authority: 'owner',
+      apply: 'immediate',
+    });
+    // The fixed ceiling is modelled through the declaration's own bounds:
+    // min, max and default are the same value, so the registry refuses every
+    // other value and the owner cannot change the ceiling.
+    expect(platformSettings.validate('storage.ceilingBytes', 20_000_000_000)).toEqual({
+      ok: true,
+      value: 20_000_000_000,
+    });
+    expect(platformSettings.validate('storage.ceilingBytes', 20_000_000_001)).toMatchObject({
+      ok: false,
+      reasonCode: 'above_maximum',
+      limit: 20_000_000_000,
+    });
+    expect(platformSettings.validate('storage.ceilingBytes', 40_000_000_000)).toMatchObject({
+      ok: false,
+      reasonCode: 'above_maximum',
+    });
+    expect(platformSettings.validate('storage.ceilingBytes', 19_999_999_999)).toMatchObject({
+      ok: false,
+      reasonCode: 'below_minimum',
+    });
+  });
+
+  it('carries English and Russian labels and descriptions on every platform declaration', () => {
+    for (const declaration of platformSettings.declarations()) {
+      for (const language of ['en', 'ru'] as const) {
+        expect(declaration.label[language].trim()).not.toBe('');
+        expect(declaration.description[language].trim()).not.toBe('');
+      }
+    }
+  });
+
+  it('keeps every platform declaration in the one generated tasks section', () => {
+    expect(platformSettings.declarations().map((declaration) => declaration.section)).toEqual([
+      'tasks',
+      'tasks',
+      'tasks',
+      'tasks',
+      'tasks',
+      'tasks',
+    ]);
+  });
 });
 
 const secretDeclaration: SettingDeclaration = {

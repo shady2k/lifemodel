@@ -39,7 +39,10 @@ export interface SelectOption {
 }
 
 export interface SettingDeclaration {
-  /** A dotted lowercase key, unique across every home of the registry. */
+  /**
+   * A dotted key with a lowercase first segment (later segments may be
+   * camelCase), unique across every home of the registry.
+   */
   key: string;
   /** The grouping id the screen renders the setting under. */
   section: string;
@@ -99,7 +102,12 @@ export interface SettingsSectionPayload {
   projection: { state: 'unattempted' | 'ok' | 'failed'; reason?: string };
 }
 
-const KEY_PATTERN = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9-]*)+$/;
+/**
+ * A dotted key whose first segment is lowercase; later segments may be
+ * camelCase (the platform declares tasks.wrapGraceSeconds and friends), so
+ * the grammar admits an uppercase after a segment's first character only.
+ */
+const KEY_PATTERN = /^[a-z][a-z0-9]*(?:\.[a-z][a-zA-Z0-9-]*)+$/;
 
 const CONTROLS: readonly SettingControl[] = ['toggle', 'number', 'select', 'text', 'secret'];
 const DATA_CLASSES: readonly SettingDataClass[] = [
@@ -121,7 +129,7 @@ function assertLocalized(text: LocalizedText, what: string, key: string): void {
 function assertDeclaration(declaration: SettingDeclaration): void {
   if (!KEY_PATTERN.test(declaration.key))
     throw new SettingsDeclarationError(
-      `setting key ${JSON.stringify(declaration.key)} must be a dotted lowercase key`
+      `setting key ${JSON.stringify(declaration.key)} must be a dotted key with a lowercase first segment`
     );
   if (typeof declaration.section !== 'string' || declaration.section.trim() === '')
     throw new SettingsDeclarationError(`${declaration.key}: section must not be empty`);
