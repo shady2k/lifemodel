@@ -18,10 +18,9 @@ import type { FileSystem } from '../fs.js';
 import type { LoaderConfig } from '../config.js';
 import type { LoaderLogger } from '../logger.js';
 import {
-  checkValue,
-  type SettingDeclaration,
   type SettingRefusalCode,
   type SettingsRegistry,
+  type SettingsSectionPayload,
 } from './registry.js';
 
 const FILE_MODE = 0o600;
@@ -54,13 +53,7 @@ export interface SettingsProjection {
   project(content: SettingsProjectionContent): Promise<void>;
 }
 
-export interface SettingsSectionSnapshot extends StoredSettings {
-  declarations: readonly SettingDeclaration[];
-  /** Effective values of every non-secret declaration; secrets are absent. */
-  values: Record<string, boolean | number | string>;
-  problems: readonly SettingsProblem[];
-  projection: ProjectionOutcome;
-}
+export interface SettingsSectionSnapshot extends SettingsSectionPayload {}
 
 /** A refused write: the declaration's own reason, safe to show. */
 export class SettingsWriteError extends Error {

@@ -1,0 +1,30 @@
+# The platform settings projection (ADR-014 D6): the loader writes one named
+# ConfigMap in the application namespace; the core and the web module read it
+# and can never write it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: loader-platform-settings
+  namespace: lifemodel
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["lifemodel-platform-settings"]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: loader-platform-settings
+  namespace: lifemodel
+subjects:
+  - kind: ServiceAccount
+    name: loader
+    namespace: lifemodel-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: loader-platform-settings

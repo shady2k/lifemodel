@@ -78,6 +78,27 @@ export type ValueCheck =
 /** A declaration that contradicts itself is a programmer error, not a runtime value error. */
 export class SettingsDeclarationError extends Error {}
 
+/** One load-time or value problem, safe to show the owner. */
+export interface SettingProblem {
+  code: string;
+  key?: string;
+  reason: string;
+}
+
+/**
+ * The section payload the loader serves and a screen renders: the
+ * declarations, the effective values of the non-secret declarations, the
+ * revision, the load problems and the projection state. Secret declarations
+ * are listed but carry no value and no default.
+ */
+export interface SettingsSectionPayload {
+  declarations: readonly SettingDeclaration[];
+  values: Record<string, boolean | number | string>;
+  revision: number;
+  problems: readonly SettingProblem[];
+  projection: { state: 'unattempted' | 'ok' | 'failed'; reason?: string };
+}
+
 const KEY_PATTERN = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9-]*)+$/;
 
 const CONTROLS: readonly SettingControl[] = ['toggle', 'number', 'select', 'text', 'secret'];

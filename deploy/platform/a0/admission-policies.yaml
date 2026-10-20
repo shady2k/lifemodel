@@ -37,6 +37,41 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
+  name: loader-configmap-admission
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: [lifemodel, lifemodel-motor]
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [configmaps]
+  matchConditions:
+    - name: loader-identity
+      expression: request.userInfo.username == 'system:serviceaccount:lifemodel-system:loader'
+  validations:
+    - expression: >-
+        request.operation != 'DELETE' &&
+        request.namespace == 'lifemodel' &&
+        object.metadata.name == 'lifemodel-platform-settings'
+      message: loader may only create or update the platform settings ConfigMap; deletion is forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: loader-configmap-admission
+spec:
+  policyName: loader-configmap-admission
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
   name: application-kustomization-admission
 spec:
   failurePolicy: Fail

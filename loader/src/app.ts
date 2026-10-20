@@ -22,6 +22,13 @@ import {
   type PlatformPhaseStore,
   type PlatformPhase,
 } from './platform-bootstrap.js';
+import { platformSettings } from './settings/platform.js';
+import { createKubernetesSettingsProjection } from './settings/projection.js';
+import {
+  createSettingsStore,
+  type SettingsProjection,
+  type SettingsStore,
+} from './settings/store.js';
 import { createKubernetesPostgresSecretPhase } from './postgres.js';
 import { createKubernetesValkeySecretPhase } from './valkey.js';
 import {
@@ -44,6 +51,8 @@ export interface LoaderAppDeps {
   platformGiteaApi?: GiteaApi;
   platformBootstrap?: { runInitial(): Promise<void>; unsealIfSealed(): Promise<void> };
   pki?: PkiManager;
+  settingsProjection?: SettingsProjection;
+  settingsStore?: SettingsStore;
 }
 
 export interface LoaderApp {
@@ -100,6 +109,16 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       };
     })();
 
+  const settings: SettingsStore =
+    deps.settingsStore ??
+    createSettingsStore({
+      fs,
+      config,
+      registry: platformSettings,
+      clock,
+      logger,
+      projection: deps.settingsProjection ?? createKubernetesSettingsProjection(),
+    });
   const modelSlots: ModelSlots = {
     read: (slot) => bao.api.readModelSlot(slot),
     write: (slot, value) => bao.api.writeModelSlot(slot, value),
@@ -111,6 +130,16 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
   const stopped = new Promise<void>((resolve) => {
     resolveStop = resolve;
   });
+
+  /** A failed settings projection is retried for the loader's whole life; never fatal. */
+  async function projectSettingsUntilStopped(): Promise<void> {
+    await settings.projectNow();
+    while (!stopping) {
+      await Promise.race([clock.sleep(30_000), stopped]);
+      if (stopping) return;
+      if (settings.section().projection.state === 'failed') await settings.projectNow();
+    }
+  }
 
   async function renewPkiUntilStopped(): Promise<void> {
     while (!stopping) {
@@ -183,7 +212,8 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
           }
           throw error;
         }
-        http = createLoaderHttp({ state, logger, clock, pki, config, modelSlots });
+        await settings.load();
+        http = createLoaderHttp({ state, logger, clock, pki, config, modelSlots, settings });
         await new Promise<void>((resolve, reject) => {
           const server = http?.server;
           if (server === undefined) {
@@ -199,6 +229,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         logger.info({ port: config.httpPort, volume: config.volumeRoot }, 'platform loader is up');
         void bootstrapUntilStopped();
         void renewPkiUntilStopped();
+        void projectSettingsUntilStopped();
       } catch (error) {
         logger.error({ error: describe(error) }, 'the platform loader could not start');
         deps.exit(1);

@@ -2,16 +2,27 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { request as httpRequest } from 'node:http';
 import {
   createSettingsRegistry,
   SettingsDeclarationError,
   type SettingDeclaration,
 } from '../../loader/src/settings/registry.js';
 import { platformSettings } from '../../loader/src/settings/platform.js';
-import { createSettingsStore, SettingsWriteError } from '../../loader/src/settings/store.js';
+import {
+  createSettingsStore,
+  SettingsWriteError,
+  type SettingsHttp,
+} from '../../loader/src/settings/store.js';
+import { createKubernetesSettingsProjection } from '../../loader/src/settings/projection.js';
 import { createNodeFileSystem } from '../../loader/src/fs.js';
-import { createTestClock } from '../../loader/src/clock.js';
+import { createTestClock, systemClock } from '../../loader/src/clock.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
+import { createLoaderHttp } from '../../loader/src/http.js';
+import { createLoaderApp } from '../../loader/src/app.js';
+import { loadConfig } from '../../loader/src/config.js';
+import { createSession, csrfToken, hashPassword } from '../../loader/src/auth.js';
+import type { LoaderState } from '../../loader/src/state.js';
 
 const concurrency: SettingDeclaration = {
   key: 'tasks.concurrency',
@@ -466,5 +477,441 @@ describe('settings file store', () => {
     await store.projectNow();
     expect(store.section().projection).toEqual({ state: 'ok' });
     expect(attempts).toBe(2);
+  });
+});
+
+describe('settings HTTP routes', () => {
+  const servers: Array<ReturnType<typeof createLoaderHttp>> = [];
+  const roots: string[] = [];
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map(({ close }) => close()));
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  });
+
+  async function start(options: { settings?: SettingsHttp | null } = {}) {
+    const root = mkdtempSync(join(tmpdir(), 'settings-http-'));
+    roots.push(root);
+    mkdirSync(join(root, 'loader'), { recursive: true });
+    const record = await hashPassword('owner password');
+    const session = createSession(record, Date.now());
+    const state = {
+      ensureLayout: async () => undefined,
+      readAuth: async () => record,
+      writeAuth: async () => undefined,
+      replaceAuth: async () => undefined,
+      readOnboarding: async () => ({ version: 1, step: 'done', completedAt: 'now' }),
+    } as unknown as LoaderState;
+    const store = createSettingsStore({
+      fs: createNodeFileSystem(),
+      config: { loaderDir: join(root, 'loader') },
+      registry: createSettingsRegistry([concurrency, secretDeclaration]),
+      clock: createTestClock(),
+      logger: createRecordingLogger([]),
+    });
+    await store.load();
+    const loader = createLoaderHttp({
+      state,
+      logger: createRecordingLogger([]),
+      clock: createTestClock(),
+      config: loadConfig({ LIFEMODEL_NAME: 'lifemodel' }),
+      pki: {
+        bootstrap: async () => undefined,
+        report: async () => ({
+          identity: 'present',
+          ca: 'present',
+          leaf: 'valid',
+          sans: [],
+          fingerprint: 'x',
+        }),
+        caPem: async () => 'CA',
+      },
+      ...(options.settings === null ? {} : { settings: options.settings ?? store }),
+    });
+    servers.push(loader);
+    await new Promise<void>((resolve) => loader.server.listen(0, '127.0.0.1', resolve));
+    const address = loader.server.address();
+    if (address === null || typeof address === 'string') throw new Error('server did not bind');
+    const base = `http://127.0.0.1:${String(address.port)}`;
+    const ask = async (
+      path: string,
+      init: {
+        method?: string;
+        body?: string;
+        cookie?: boolean;
+        csrf?: string;
+        origin?: string | null;
+        contentType?: string | null;
+      } = {}
+    ) => {
+      const headers: Record<string, string> = {
+        host: 'boot-lifemodel.local',
+        ...(init.cookie === false ? {} : { cookie: `__Host-lm_session=${session}` }),
+        ...(init.csrf === undefined ? {} : { 'x-csrf-token': init.csrf }),
+        ...(init.origin === null ? {} : { origin: init.origin ?? 'https://boot-lifemodel.local' }),
+        ...(init.contentType === null
+          ? {}
+          : { 'content-type': init.contentType ?? 'application/json' }),
+      };
+      return new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const req = httpRequest(
+          `${base}${path}`,
+          { method: init.method ?? 'GET', headers },
+          (res) => {
+            let body = '';
+            res.setEncoding('utf8');
+            res.on('data', (chunk: string) => (body += chunk));
+            res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+          }
+        );
+        req.on('error', reject);
+        req.end(init.body);
+      });
+    };
+    return {
+      base,
+      csrf: () => csrfToken(record, session),
+      ask,
+    };
+  }
+
+  it('serves the section: declarations with values, no secret value, revision and no problems', async () => {
+    const { ask } = await start();
+    const response = await ask('/api/settings');
+    expect(response.status).toBe(200);
+    const section = JSON.parse(response.body) as {
+      declarations: Array<{ key: string; control: string }>;
+      values: Record<string, number>;
+      revision: number;
+      problems: unknown[];
+      projection: { state: string };
+    };
+    expect(section.declarations.map((d) => d.key)).toEqual(['tasks.concurrency', 'tasks.token']);
+    expect(section.values).toEqual({ 'tasks.concurrency': 2 });
+    expect(section.revision).toBe(0);
+    expect(section.problems).toEqual([]);
+    expect(section.projection).toEqual({ state: 'unattempted' });
+  });
+
+  it('writes one value behind session, CSRF and origin, then serves it back', async () => {
+    const { ask, csrf } = await start();
+    const refused = await ask('/api/settings/tasks.concurrency', {
+      method: 'PUT',
+      body: JSON.stringify({ value: 3 }),
+    });
+    expect(refused.status).toBe(403);
+    const written = await ask('/api/settings/tasks.concurrency', {
+      method: 'PUT',
+      body: JSON.stringify({ value: 3 }),
+      csrf: csrf(),
+    });
+    expect(written.status).toBe(200);
+    expect(JSON.parse(written.body)).toEqual({ ok: true, value: 3, revision: 1 });
+    const section = JSON.parse((await ask('/api/settings')).body) as {
+      values: Record<string, number>;
+    };
+    expect(section.values['tasks.concurrency']).toBe(3);
+  });
+
+  it("refuses wrong types, bounds and unknown keys with the declaration's reason", async () => {
+    const { ask, csrf } = await start();
+    const token = csrf();
+    const wrongType = await ask('/api/settings/tasks.concurrency', {
+      method: 'PUT',
+      body: JSON.stringify({ value: 'many' }),
+      csrf: token,
+    });
+    expect(wrongType.status).toBe(400);
+    expect(JSON.parse(wrongType.body)).toMatchObject({
+      error: 'invalid_value',
+      reasonCode: 'wrong_type',
+    });
+    const bounds = await ask('/api/settings/tasks.concurrency', {
+      method: 'PUT',
+      body: JSON.stringify({ value: 9 }),
+      csrf: token,
+    });
+    expect(JSON.parse(bounds.body)).toMatchObject({
+      error: 'invalid_value',
+      reasonCode: 'above_maximum',
+      limit: 8,
+    });
+    const unknown = await ask('/api/settings/tasks.made.up', {
+      method: 'PUT',
+      body: JSON.stringify({ value: 1 }),
+      csrf: token,
+    });
+    expect(unknown.status).toBe(404);
+    expect(JSON.parse(unknown.body)).toMatchObject({ error: 'unknown_setting' });
+    const secret = await ask('/api/settings/tasks.token', {
+      method: 'PUT',
+      body: JSON.stringify({ value: 'hush' }),
+      csrf: token,
+    });
+    expect(secret.status).toBe(400);
+    expect(JSON.parse(secret.body)).toMatchObject({ error: 'secret_setting' });
+  });
+
+  it('keeps the route table: a keyed GET is 405, an empty key is 404, foreign origins are 403', async () => {
+    const { ask } = await start();
+    expect((await ask('/api/settings/tasks.concurrency')).status).toBe(405);
+    expect(
+      (await ask('/api/settings/', { method: 'PUT', body: JSON.stringify({ value: 1 }) })).status
+    ).toBe(404);
+    const foreign = await ask('/api/settings', { origin: 'https://elsewhere.example' });
+    expect(foreign.status).toBe(403);
+  });
+
+  it('answers 503 storage_unavailable when the settings seam is not wired', async () => {
+    const { ask } = await start({ settings: null });
+    const response = await ask('/api/settings');
+    expect(response.status).toBe(503);
+    expect(JSON.parse(response.body)).toEqual({ error: 'storage_unavailable' });
+  });
+});
+
+describe('settings ConfigMap projection', () => {
+  const projectionRoots: string[] = [];
+  afterEach(() => {
+    for (const root of projectionRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+  });
+  async function projectionWith(
+    respond: (
+      url: URL,
+      method: string,
+      body: string | undefined
+    ) => { status: number; body: string }
+  ) {
+    const directory = mkdtempSync(join(tmpdir(), 'settings-projection-'));
+    projectionRoots.push(directory);
+    const tokenFile = join(directory, 'token');
+    writeFileSync(tokenFile, 'test-token');
+    const calls: Array<{ method: string; path: string; body?: string }> = [];
+    const projection = createKubernetesSettingsProjection({
+      tokenFile,
+      request: async (url, method, _token, body) => {
+        calls.push({ method, path: url.pathname, body });
+        return respond(url, method, body);
+      },
+    });
+    return { projection, calls };
+  }
+  const configMapBody = (body: string | undefined) =>
+    JSON.parse(body ?? '{}') as {
+      metadata: { name: string; namespace: string; annotations: Record<string, string> };
+      data: Record<string, string>;
+    };
+
+  it('creates the named ConfigMap once and verifies the write by reading back', async () => {
+    let stored: Record<string, string> | null = null;
+    const { projection, calls } = await projectionWith((_url, method, body) => {
+      if (method === 'GET')
+        return {
+          status: stored === null ? 404 : 200,
+          body: stored === null ? '' : JSON.stringify({ data: stored }),
+        };
+      if (method === 'POST') {
+        stored = configMapBody(body).data;
+        return { status: 201, body: '' };
+      }
+      stored = configMapBody(body).data;
+      return { status: 200, body: '' };
+    });
+    await projection.project({ revision: 3, values: { 'tasks.concurrency': 3 } });
+    expect(calls.map((call) => call.method)).toEqual(['GET', 'POST', 'GET']);
+    expect(calls[0]?.path).toBe(
+      '/api/v1/namespaces/lifemodel/configmaps/lifemodel-platform-settings'
+    );
+    const created = configMapBody(calls[1]?.body);
+    expect(created.metadata.name).toBe('lifemodel-platform-settings');
+    expect(created.metadata.namespace).toBe('lifemodel');
+    expect(created.metadata.annotations['kustomize.toolkit.fluxcd.io/prune']).toBe('disabled');
+    expect(JSON.parse(created.data['settings.json'])).toEqual({
+      version: 1,
+      revision: 3,
+      values: { 'tasks.concurrency': 3 },
+    });
+  });
+
+  it('updates with the read resourceVersion', async () => {
+    let stored: Record<string, string> | null = null;
+    const { projection, calls } = await projectionWith((_url, method, body) => {
+      if (method === 'GET')
+        return {
+          status: 200,
+          body: JSON.stringify({
+            metadata: { resourceVersion: stored === null ? '42' : '43' },
+            ...(stored === null ? {} : { data: stored }),
+          }),
+        };
+      stored = configMapBody(body).data;
+      return { status: 200, body: '' };
+    });
+    await projection.project({ revision: 4, values: {} });
+    const updated = JSON.parse(calls.find((call) => call.method === 'PUT')?.body ?? '{}') as {
+      metadata: { resourceVersion?: string };
+    };
+    expect(updated.metadata.resourceVersion).toBe('42');
+  });
+
+  it('throws on a refused write so the store can record, show and retry it', async () => {
+    const { projection } = await projectionWith((_url, method) =>
+      method === 'POST' ? { status: 403, body: 'denied' } : { status: 404, body: '' }
+    );
+    await expect(projection.project({ revision: 1, values: {} })).rejects.toThrow(
+      /create failed \(403\)/
+    );
+  });
+});
+
+describe('the platform loader serves settings', () => {
+  const roots: string[] = [];
+  afterEach(() => {
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  });
+  function appFor(root: string, projectionLog: unknown[]) {
+    return createLoaderApp({
+      config: {
+        ...loadConfig({
+          LIFEMODEL_VOLUME_ROOT: root,
+          LIFEMODEL_HTTP_PORT: '0',
+          LIFEMODEL_NAME: 'lifemodel',
+        }),
+        loaderDir: root,
+      },
+      fs: createNodeFileSystem(),
+      runner: { run: async () => ({ code: 0, stdout: '', stderr: '' }) },
+      logger: createRecordingLogger([]),
+      clock: systemClock,
+      exit: () => undefined,
+      pki: {
+        bootstrap: async () => undefined,
+        report: async () => ({
+          identity: 'present',
+          ca: 'present',
+          leaf: 'valid',
+          sans: [],
+          fingerprint: 'x',
+        }),
+        caPem: async () => 'CA',
+      },
+      platformBootstrap: {
+        runInitial: async () => undefined,
+        unsealIfSealed: async () => undefined,
+      },
+      settingsProjection: {
+        project: async (content) => {
+          projectionLog.push(structuredClone(content));
+        },
+      },
+    });
+  }
+  async function settings(port: number, cookie: string): Promise<{ status: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const req = httpRequest(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: '/api/settings',
+          method: 'GET',
+          headers: { host: 'boot-lifemodel.local', cookie },
+        },
+        (res) => {
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', (chunk: string) => (body += chunk));
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+        }
+      );
+      req.on('error', reject);
+      req.end();
+    });
+  }
+  async function setUp(port: number): Promise<string> {
+    const setup = await new Promise<{
+      status: number;
+      headers: Record<string, string | string[] | undefined>;
+    }>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: '/api/setup',
+          method: 'POST',
+          headers: {
+            host: 'boot-lifemodel.local',
+            origin: 'https://boot-lifemodel.local',
+            'content-type': 'application/json',
+          },
+        },
+        (res) => {
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', (chunk: string) => (body += chunk));
+          res.on('end', () =>
+            resolve({
+              status: res.statusCode ?? 0,
+              headers: res.headers as Record<string, string | string[] | undefined>,
+            })
+          );
+        }
+      );
+      req.on('error', reject);
+      req.end(JSON.stringify({ password: 'a secure password' }));
+    });
+    expect(setup.status).toBe(200);
+    return String(setup.headers['set-cookie'] ?? '').split(';')[0]!;
+  }
+
+  it('starts with a corrupt settings file, serves defaults and shows the problem', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'settings-app-'));
+    roots.push(root);
+    writeFileSync(join(root, 'settings.json'), '{ broken');
+    const projectionLog: unknown[] = [];
+    const app = appFor(root, projectionLog);
+    await app.start();
+    const cookie = await setUp(app.port());
+    const response = await settings(app.port(), cookie);
+    expect(response.status).toBe(200);
+    const section = JSON.parse(response.body) as {
+      values: Record<string, number>;
+      revision: number;
+      problems: Array<{ code: string }>;
+    };
+    expect(section.values['tasks.concurrency']).toBe(2);
+    expect(section.revision).toBe(0);
+    expect(section.problems.map((problem) => problem.code)).toEqual(['corrupt']);
+    expect(readdirSync(root).some((name) => name.startsWith('settings.json.invalid-'))).toBe(true);
+    expect(readdirSync(root)).not.toContain('settings.json');
+    await app.shutdown('test');
+  });
+
+  it('serves a valid stored value across a restart and projects it', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'settings-app-valid-'));
+    roots.push(root);
+    writeFileSync(
+      join(root, 'settings.json'),
+      JSON.stringify({ version: 1, revision: 4, values: { 'tasks.concurrency': 3 } })
+    );
+    const projectionLog: unknown[] = [];
+    const first = appFor(root, projectionLog);
+    await first.start();
+    const cookie = await setUp(first.port());
+    const served = JSON.parse((await settings(first.port(), cookie)).body) as {
+      values: Record<string, number>;
+      revision: number;
+      problems: unknown[];
+    };
+    expect(served.values['tasks.concurrency']).toBe(3);
+    expect(served.revision).toBe(4);
+    expect(served.problems).toEqual([]);
+    expect(projectionLog).toEqual([{ revision: 4, values: { 'tasks.concurrency': 3 } }]);
+    await first.shutdown('test');
+    const second = appFor(root, projectionLog);
+    await second.start();
+    const again = JSON.parse((await settings(second.port(), cookie)).body) as {
+      values: Record<string, number>;
+    };
+    expect(again.values['tasks.concurrency']).toBe(3);
+    await second.shutdown('test');
   });
 });

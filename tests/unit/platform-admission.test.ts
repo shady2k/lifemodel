@@ -39,18 +39,27 @@ describe('platform admission policies', () => {
     for (const name of ['loader-secret-admission', 'application-kustomization-admission']) {
       expect(binding(name)?.spec.validationActions).toEqual(['Deny']);
     }
+    expect(policy('loader-configmap-admission')).toBeDefined();
     expect(
       objects
         .filter((item: any) => item.kind === 'ValidatingAdmissionPolicy')
         .map((item: any) => item.metadata.name)
         .sort()
-    ).toEqual(['application-kustomization-admission', 'loader-secret-admission']);
+    ).toEqual([
+      'application-kustomization-admission',
+      'loader-configmap-admission',
+      'loader-secret-admission',
+    ]);
     expect(
       objects
         .filter((item: any) => item.kind === 'ValidatingAdmissionPolicyBinding')
         .map((item: any) => item.metadata.name)
         .sort()
-    ).toEqual(['application-kustomization-admission', 'loader-secret-admission']);
+    ).toEqual([
+      'application-kustomization-admission',
+      'loader-configmap-admission',
+      'loader-secret-admission',
+    ]);
   });
 
   it('limits loader Secret writes to the names used by the loader', () => {
@@ -180,7 +189,11 @@ describe('platform admission policies', () => {
         object: { ...valid, spec: { ...valid.spec, path: '.' } },
       })
     ).toBe(false);
-    for (const objectName of ['loader-secret-admission', 'application-kustomization-admission']) {
+    for (const objectName of [
+      'loader-secret-admission',
+      'loader-configmap-admission',
+      'application-kustomization-admission',
+    ]) {
       expect(policy(objectName).spec.failurePolicy).toBe('Fail');
     }
     const guardedAccesses = [
@@ -204,5 +217,43 @@ describe('platform admission policies', () => {
     expect(policyObject.spec.matchConstraints.namespaceSelector.matchExpressions[0].values).toEqual(
       ['lifemodel', 'lifemodel-motor']
     );
+  });
+
+  it('limits loader ConfigMap writes to the platform settings projection', () => {
+    const policyObject = policy('loader-configmap-admission');
+    expect(policyObject.spec.matchConstraints.resourceRules[0]).toMatchObject({
+      apiGroups: [''],
+      resources: ['configmaps'],
+      operations: ['CREATE', 'UPDATE', 'DELETE'],
+    });
+    const expression = policyObject.spec.validations[0].expression;
+    const request = {
+      operation: 'CREATE',
+      namespace: 'lifemodel',
+      userInfo: { username: 'system:serviceaccount:lifemodel-system:loader' },
+    };
+    const projection = {
+      metadata: { name: 'lifemodel-platform-settings', namespace: 'lifemodel' },
+    };
+    expect(evaluate(expression, { request, object: projection })).toBe(true);
+    expect(
+      evaluate(expression, {
+        request: { ...request, namespace: 'lifemodel-motor' },
+        object: { metadata: { name: 'lifemodel-platform-settings' } },
+      })
+    ).toBe(false);
+    expect(
+      evaluate(expression, {
+        request,
+        object: { metadata: { name: 'unrelated', namespace: 'lifemodel' } },
+      })
+    ).toBe(false);
+    expect(
+      evaluate(expression, {
+        request: { ...request, operation: 'DELETE' },
+        object: projection,
+      })
+    ).toBe(false);
+    expect(binding('loader-configmap-admission')?.spec.validationActions).toEqual(['Deny']);
   });
 });

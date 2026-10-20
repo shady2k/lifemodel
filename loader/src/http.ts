@@ -48,6 +48,13 @@ import {
   type LoaderModelStatus,
   type ModelStatusReader,
 } from './model-status.js';
+import { SettingsWriteError, type SettingsSectionSnapshot } from './settings/store.js';
+
+/** The settings seam the HTTP layer sees: the section and one validated write. */
+export interface SettingsHttp {
+  section(): SettingsSectionSnapshot;
+  set(key: string, value: unknown): Promise<{ value: boolean | number | string; revision: number }>;
+}
 
 export interface LoaderHttpDeps {
   state: LoaderState;
@@ -59,6 +66,7 @@ export interface LoaderHttpDeps {
   modelSlots?: ModelSlots;
   modelStatus?: ModelStatusReader;
   modelChecker?: (slot: ModelSlot, slotName?: ModelSlotName) => Promise<void>;
+  settings?: SettingsHttp;
 }
 export interface LoaderHttp {
   server: Server;
@@ -76,7 +84,16 @@ const API_METHODS: Record<string, string> = {
   '/api/model-status': 'GET',
   '/api/model/primary': 'PUT',
   '/api/model/reserve': 'PUT',
+  '/api/settings': 'GET',
 };
+/** A PUT /api/settings/<key> route: the key shape is the declaration key shape. */
+const SETTING_KEY_PATTERN = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9-]*)+$/;
+
+function settingsKeyOf(path: string): string | null {
+  if (!path.startsWith('/api/settings/')) return null;
+  const key = path.slice('/api/settings/'.length);
+  return SETTING_KEY_PATTERN.test(key) ? key : null;
+}
 const CSP =
   "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
@@ -104,6 +121,12 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
   };
   const defaultModelChecker = createModelChecker();
   const checkModel = deps.modelChecker ?? defaultModelChecker;
+  const settings: SettingsHttp = deps.settings ?? {
+    section: () => {
+      throw new Error('settings storage unavailable');
+    },
+    set: () => Promise.reject(new Error('settings storage unavailable')),
+  };
   const modelStatus: ModelStatusReader =
     deps.modelStatus ?? createModelStatusReader({ url: config.modelStatusUrl });
   const modelChecks = new Set<ModelSlotName>();
@@ -191,7 +214,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       return;
     }
     if (!serviceVerify && requestHost === bootHost && path.startsWith('/api/')) {
-      const expectedMethod = API_METHODS[path];
+      const expectedMethod = settingsKeyOf(path) !== null ? 'PUT' : API_METHODS[path];
       if (expectedMethod === undefined) {
         sendText(res, 404, 'not found');
         return;
@@ -223,7 +246,9 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           path === '/api/logout' ||
           path === '/api/onboarding/device')) ||
       (method === 'PUT' && (path === '/api/model/primary' || path === '/api/model/reserve')) ||
-      (method === 'DELETE' && path === '/api/model/reserve');
+      (method === 'DELETE' && path === '/api/model/reserve') ||
+      (method === 'GET' && path === '/api/settings') ||
+      (method === 'PUT' && settingsKeyOf(path) !== null);
     if (
       !serviceVerify &&
       requestHost === bootHost &&
@@ -548,6 +573,137 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           'cache-control': 'no-store',
         });
         res.end(JSON.stringify(status));
+        return;
+      }
+      if (path === '/api/settings' && method === 'GET') {
+        const origin = header(req, 'origin');
+        const fetchSite = header(req, 'sec-fetch-site');
+        const record = await state.readAuth();
+        const token = record === null ? null : sessionToken(req, record);
+        if (
+          token === null ||
+          (origin !== undefined &&
+            !sameOrigin(origin, undefined, `boot-${config.instanceName}.local`)) ||
+          (fetchSite !== undefined && fetchSite !== 'same-origin')
+        ) {
+          res.writeHead(403);
+          res.end();
+          return;
+        }
+        try {
+          const section = settings.section();
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+          });
+          res.end(JSON.stringify(section));
+        } catch {
+          res.writeHead(503, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+          });
+          res.end('{"error":"storage_unavailable"}');
+        }
+        return;
+      }
+      if (path.startsWith('/api/settings/') && method === 'PUT') {
+        const key = settingsKeyOf(path);
+        if (key === null) {
+          sendText(res, 404, 'not found');
+          return;
+        }
+        const record = await state.readAuth();
+        const token = record === null ? null : sessionToken(req, record);
+        if (record === null || token === null) {
+          res.writeHead(401);
+          res.end();
+          return;
+        }
+        if (
+          refuseOrigin(req) !== null ||
+          !verifyCsrf(header(req, 'x-csrf-token') ?? '', record, token)
+        ) {
+          res.writeHead(403);
+          res.end('{"error":"origin_or_csrf"}');
+          return;
+        }
+        if (
+          header(req, 'content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json'
+        ) {
+          res.writeHead(415);
+          res.end('{"error":"content_type"}');
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let size = 0;
+        for await (const chunk of req) {
+          const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          size += part.length;
+          if (size > MAX_FORM_BYTES) break;
+          chunks.push(Buffer.from(part));
+        }
+        if (size > MAX_FORM_BYTES) {
+          res.writeHead(413);
+          res.end('{"error":"body_too_large"}');
+          return;
+        }
+        let payload: unknown;
+        try {
+          payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        } catch {
+          res.writeHead(400);
+          res.end('{"error":"invalid_body"}');
+          return;
+        }
+        if (
+          typeof payload !== 'object' ||
+          payload === null ||
+          Array.isArray(payload) ||
+          Object.keys(payload).length !== 1 ||
+          !('value' in payload)
+        ) {
+          res.writeHead(400);
+          res.end('{"error":"invalid_body"}');
+          return;
+        }
+        try {
+          const written = await settings.set(key, (payload as { value: unknown })['value']);
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+          });
+          res.end(JSON.stringify({ ok: true, ...written }));
+        } catch (error) {
+          if (error instanceof SettingsWriteError) {
+            const status = error.code === 'unknown_key' ? 404 : 400;
+            const code =
+              error.code === 'unknown_key'
+                ? 'unknown_setting'
+                : error.code === 'secret_setting'
+                  ? 'secret_setting'
+                  : 'invalid_value';
+            res.writeHead(status, {
+              'content-type': 'application/json; charset=utf-8',
+              'cache-control': 'no-store',
+            });
+            res.end(
+              JSON.stringify({
+                error: code,
+                reason: error.message,
+                ...(error.code === 'unknown_key' || error.code === 'secret_setting'
+                  ? {}
+                  : { reasonCode: error.code }),
+                ...(error.limit === undefined ? {} : { limit: error.limit }),
+              })
+            );
+            return;
+          }
+          res.writeHead(503, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+          });
+          res.end('{"error":"storage_unavailable"}');
+        }
         return;
       }
       if ((path === '/api/model/primary' || path === '/api/model/reserve') && method === 'PUT') {
