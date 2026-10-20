@@ -36,14 +36,14 @@ export type TaskHarness = 'opencode' | 'prime-agent';
 export type StorageRetention = '90d' | 'forever';
 
 /** The effective platform values, typed per declaration. */
-export type PlatformSettingsValues = {
+export interface PlatformSettingsValues {
   'tasks.concurrency': number;
   'tasks.harness': TaskHarness;
   'tasks.wrapGraceSeconds': number;
   'storage.retention': StorageRetention;
   'storage.warningLeadSeconds': number;
   'storage.ceilingBytes': number;
-};
+}
 
 export interface PlatformSettings {
   /** The loader-side revision the projection carried; 0 when nothing is projected. */
@@ -209,16 +209,14 @@ export function createPlatformSettingsReader(
   // log again, so a steady projection stays quiet at any read rate.
   let loggedSignature: string | null = null;
 
-  function logOnce(
-    signature: string,
-    lines: Array<{
-      level: 'info' | 'warn';
-      code: string;
-      key?: string;
-      reasonCode?: string;
-      msg: string;
-    }>
-  ): void {
+  interface LogLine {
+    level: 'info' | 'warn';
+    code: string;
+    key?: string;
+    reasonCode?: string;
+    msg: string;
+  }
+  function logOnce(signature: string, lines: LogLine[]): void {
     if (signature === loggedSignature) return;
     loggedSignature = signature;
     for (const line of lines) {
@@ -281,16 +279,17 @@ export function createPlatformSettingsReader(
           'the platform settings file is not a document this loader projects; the declared defaults are in use'
         );
       }
-      const revision = Math.floor(document.revision as number);
-      const values: Record<string, number | string> = { ...defaultValues() };
-      const refused: Array<{ key: string; reasonCode: PlatformRefusalCode }> = [];
+      const revision = Math.floor(document.revision);
+      const values: PlatformSettingsValues = { ...defaultValues() };
+      const refused: { key: string; reasonCode: PlatformRefusalCode }[] = [];
       for (const [key, raw] of Object.entries(document.values as Record<string, unknown>)) {
         const check = validatePlatformValue(key, raw);
         if (!check.ok) {
           refused.push({ key, reasonCode: check.reasonCode });
           continue;
         }
-        values[key] = check.value;
+        // The key's spec typed the check, so the value fits the key's kind.
+        Object.assign(values, { [key]: check.value });
       }
       const signature = `r${String(revision)}|${refused
         .map((problem) => `${problem.key}:${problem.reasonCode}`)
@@ -311,9 +310,7 @@ export function createPlatformSettingsReader(
         logOnce(signature, [
           { level: 'info', code: 'current', msg: 'the platform settings are read' },
         ]);
-      // Every kept value passed its key's spec, so the record carries exactly
-      // the declared kinds.
-      return { revision, values: values as PlatformSettingsValues };
+      return { revision, values };
     },
   };
 }
