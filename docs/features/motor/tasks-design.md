@@ -286,13 +286,14 @@ Only module holds Seaweed signing credentials, and only module speaks S3.
 `sealed` is read-only, with private byte IDs/hashes, not task filesystem paths.
 Owner/core read roles can read marked output; task loses rights at freeze.
 
-Defaults: 90-day age, forever disables age, pin blocks automatic deletion;
-20 GB decimal logical ceiling also charges reservations. Quota pressure may
-propose unpinned forever output for warning-first reclamation, never a pin or
-active space. Warning lead default 24 h; core emits one keyed batched ordinary
-reply, module waits for persisted notice receipt plus lead time. No core/notice
-means deletion waits, not a silent age eviction. These engineering policy
-interpretations are explicit in ADR-015, not additional owner quotes.
+Defaults: 90-day age; forever and pin block automatic deletion; 20 GB decimal
+logical ceiling also charges reservations. Quota pressure can propose only
+unpinned, finite-retention sealed output for warning-first reclamation, never
+forever, pinned or active spaces. If nothing eligible remains, new uploads fail
+with capacity_exhausted. Warning lead default 24 h; core emits one keyed batched
+ordinary reply, module waits for persisted notice receipt plus lead time. No
+core/notice means deletion waits, not a silent age eviction. The warning lead
+is an explicit engineering default, not an additional owner quote.
 
 ## Acceptance trace and known evidence limits
 

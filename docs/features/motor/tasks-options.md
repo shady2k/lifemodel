@@ -334,16 +334,13 @@ ownership remains as stated in the frame; generation-operator provisioning is no
   Outbox](https://microservices.io/patterns/data/transactional-outbox.html). Reference
   monitor/capability security: [Saltzer/Schroeder, complete
   mediation](https://web.mit.edu/Saltzer/www/publications/protection/).
-- [P] PostgreSQL [SELECT locking / SKIP LOCKED](https://www.postgresql.org/docs/current/sql-
-  select.html).
+- [P] PostgreSQL [SELECT locking / SKIP LOCKED](https://www.postgresql.org/docs/current/sql-select.html).
 - [S] SeaweedFS [OIDC](https://github.com/seaweedfs/seaweedfs/wiki/OIDC-Integration) and the
   released authorization/presign sources linked in [R].
 - [N] nocx `internal/settings/settings.go`, read at commit
   `71cc0698823b5d618f08a441e434e99d9a91eb5a`: typed keys, Descriptor/Declaration, bounds/unit,
   data classes and secret set/delete/exists without get. Port the registry idea, not nocx's
   storage or transport. Local source, not a dependency.
-- Baselines: [ADR-010](../../adr/010-container-generations.md), [ADR-011](../../adr/011-web-
-  interface.md), [ADR-012](../../adr/012-loader-interface-and-access.md),
-  [ADR-013](../../adr/013-model-gateway.md), [containers view](../instance/containers-
-  design.md), [web target](../instance/web-interface.md). Named-pattern applications above are
+- Baselines: [ADR-010](../../adr/010-container-generations.md), [ADR-011](../../adr/011-web-interface.md), [ADR-012](../../adr/012-loader-interface-and-access.md),
+  [ADR-013](../../adr/013-model-gateway.md), [containers view](../instance/containers-design.md), [web target](../instance/web-interface.md). Named-pattern applications above are
   design inferences; no new live/probe evidence is claimed.

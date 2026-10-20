@@ -489,6 +489,16 @@ deploy branch):
   - new messages and the state are announced politely;
   - text reflows at 400% zoom.
 
+## Task-surface extension (proposed, 2026-10-20)
+
+[ADR-014 D8](014-task-runtime.md) extends D4 with narrow task read/control
+operations and authenticated artifact access, not raw store clients.
+[ADR-015](015-storage-module.md) owns web-to-storage-module byte streaming.
+The owner replaced transcript chips with panel-only tasks and ordinary replies
+with result attachments. Two Stops, stop-all and urgency belong to the task
+panel. These are design changes for motor-1/hf2k, not claims about this module's
+built routes. ADR-012 HTTPS/session amendments remain authoritative.
+
 ## Amendments to ADR-010
 
 1. **The ingress gateway's send applier, `cmd.send` → INSERT-by-key →

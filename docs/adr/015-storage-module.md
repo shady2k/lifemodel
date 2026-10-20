@@ -224,14 +224,14 @@ can equal 20 GB; S3 metadata/replication/backup headroom is additional capacity.
 Use decimal **20,000,000,000 bytes**, displayed as GB, with exact byte ledger.
 Physical free-space pressure fails uploads visibly, never evicts without policy.
 
-Pin forbids automatic deletion. Forever disables age expiry; size-pressure
-reclamation may select **unpinned forever** output only after the same warning
-(the UI states this explicitly). If only pins/active spaces remain, reject new
-uploads with `capacity_exhausted`, preserving existing output; do not delete
-protected data. This engineering interpretation keeps forever meaningful for
-age while honoring a finite ceiling; reviewer/owner must flag any mismatch.
+Pin and forever forbid automatic deletion. If only pinned/forever/active spaces
+remain, reject new uploads with `capacity_exhausted`, preserving existing
+output; do not weaken “forever” to mean “until quota pressure”. The owner can
+explicitly unpin/change retention/delete through authenticated operations.
+This conservative rule honors retention and the finite ceiling without making
+an unanswered data-loss trade on the owner’s behalf.
 Reservation at limit rejects the next byte; it does not silently delete during
-PUT. Core can then propose oldest unpinned sealed spaces for reclaim. No user
+PUT. Core can then propose oldest unpinned, finite-retention sealed spaces for reclaim. No user
 prompt per item and no eviction hidden behind a failed upload retry.
 
 Module builds one durable deletion plan with candidate IDs/revisions, total

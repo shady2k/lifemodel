@@ -802,6 +802,15 @@ under the same effect id.
 
 ## State ownership (every inventory 1.3 row)
 
+Task-specific amendment, 2026-10-20: proposed
+[ADR-014](../../adr/014-task-runtime.md) replaces row 17's separate Motor owner
+with core-owned keyed task registry/mailbox/outbox rows. Proposed
+[ADR-015](../../adr/015-storage-module.md) adds the platform storage module and
+SeaweedFS for retained output/marked files; private ephemeral work volumes still
+die with their Jobs. The [task views](../motor/tasks-design.md) carry the new
+component/lifecycle interaction. These decisions are not built behaviour; the
+older table below remains the ADR-010 baseline where not expressly amended.
+
 Decided by ADR-010 question 4 as amended 2026-10-12 (neurons stay core
 plugins; the five feature plugins become function images; plugins change
 only via commit + generation; skills = Postgres data). Charter-fixed rows

@@ -4,6 +4,13 @@ Date: 2026-10-12 (rewritten 2026-10-12 on the owner's platform decision).
 
 ## Status
 
+Task-specific proposed amendment (2026-10-20):
+[ADR-014](014-task-runtime.md) records core-started Jobs, core-owned task
+registry, two harnesses, task identity and two Stops; [ADR-015](015-storage-module.md)
+records the separate platform storage module and retained SeaweedFS output.
+Their named amendments replace this record's older Motor-specific ownership/
+credential/output shape, not the unrelated rollout/bootstrap rules below.
+
 Accepted 2026-10-13 by the owner's merge of PR #28 (295f067).
 
 Proposed (rewritten 2026-10-13 on the owner's fixed two-layer GitOps
