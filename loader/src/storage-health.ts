@@ -49,6 +49,15 @@ export interface StorageHealth {
   evaluate(): Promise<{ status: number; body: StorageHealthBody }>;
 }
 
+interface ActiveCheck {
+  id: number;
+  control: AbortController;
+  /** Settles when the check's result has been applied or discarded. */
+  promise: Promise<void>;
+  /** Settles when this check's own deadline passed, or when it finished first. */
+  deadline: Promise<void>;
+}
+
 /** The module's bounds; the manifest's probe timeout is checked against this. */
 export const STORAGE_HEALTH_DEFAULTS = { cacheMs: 2_000, boundMs: 3_000 } as const;
 
@@ -68,7 +77,12 @@ export function createStorageHealth(options: StorageHealthOptions): StorageHealt
   /** The last check started, and the last one whose result counted. */
   let started = 0;
   let applied = 0;
-  let pending: { id: number; promise: Promise<void>; control: AbortController } | undefined;
+  /**
+   * The live check. Its deadline belongs to the check, not to a caller: every
+   * caller awaiting this check settles on this one outcome, and no caller can
+   * expire a check it did not await.
+   */
+  let pending: ActiveCheck | undefined;
 
   /**
    * Record one outcome. An older check's late answer never overwrites a newer
@@ -104,21 +118,9 @@ export function createStorageHealth(options: StorageHealthOptions): StorageHealt
     if (changed) options.logger.warn({ code }, 'The storage module cannot use SeaweedFS');
   }
 
-  /**
-   * The check missed its deadline: that evaluation is unhealthy, the check is
-   * cancelled, and whatever it eventually answers is obsolete.
-   */
-  function expire(): void {
-    const expired = pending;
-    if (expired === undefined) return;
-    pending = undefined;
-    applied = Math.max(applied, expired.id);
-    expired.control.abort(new Error('storage health deadline'));
-    recordFailure(now(), 'timeout');
-  }
-
-  function startCheck(): Promise<void> | undefined {
-    if (pending !== undefined) return undefined;
+  function startCheck(): ActiveCheck | undefined {
+    // A live check is shared by every caller, including its deadline.
+    if (pending !== undefined) return pending;
     if (lastCheckedAt !== null && now() - lastCheckedAt < cacheMs) return undefined;
     const id = ++started;
     const control = new AbortController();
@@ -134,8 +136,28 @@ export function createStorageHealth(options: StorageHealthOptions): StorageHealt
     const promise = running.finally(() => {
       if (pending?.id === id) pending = undefined;
     });
-    pending = { id, promise, control };
-    return promise;
+    let settled: (() => void) | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      settled = resolve;
+    });
+    const timer = schedule(() => {
+      // This check missed its own deadline: that outcome is unhealthy, the
+      // check is cancelled, and whatever it answers later is obsolete. Only
+      // this check may be affected - never a newer one that replaced it.
+      if (pending?.id === id) {
+        pending = undefined;
+        applied = Math.max(applied, id);
+        control.abort(new Error('storage health deadline'));
+        recordFailure(now(), 'timeout');
+      }
+      settled?.();
+    }, boundMs);
+    void promise.finally(() => {
+      cancel(timer);
+      settled?.();
+    });
+    pending = { id, control, promise, deadline };
+    return pending;
   }
 
   function iso(at: number | null): string | null {
@@ -159,22 +181,9 @@ export function createStorageHealth(options: StorageHealthOptions): StorageHealt
     body,
     evaluate: async () => {
       // A cached answer, a shared check, or a new one: the caller waits on the
-      // check that belongs to its own evaluation, bounded by the deadline.
-      const waiting = startCheck() ?? pending?.promise;
-      if (waiting !== undefined) {
-        let expired = false;
-        await new Promise<void>((resolve) => {
-          const timer = schedule(() => {
-            expired = true;
-            resolve();
-          }, boundMs);
-          void waiting.finally(() => {
-            cancel(timer);
-            resolve();
-          });
-        });
-        if (expired) expire();
-      }
+      // check it belongs to, and on that check's own deadline.
+      const check = startCheck();
+      if (check !== undefined) await Promise.race([check.promise, check.deadline]);
       return { status: state === 'ok' ? 200 : 503, body: body() };
     },
   };

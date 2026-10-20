@@ -268,3 +268,129 @@ describe('the storage module health deadline', () => {
     f.release();
   });
 });
+
+/**
+ * A deterministic scheduler: one clock, and timers that only run when the test
+ * advances past their due time, in due order. No wall clock, no polling.
+ */
+function clockwork() {
+  let clock = 0;
+  let nextId = 0;
+  const scheduled = new Map<number, { at: number; callback: () => void }>();
+  return {
+    now: () => clock,
+    timers: {
+      set: ((callback: () => void, ms?: number) => {
+        const id = ++nextId;
+        scheduled.set(id, { at: clock + Number(ms ?? 0), callback });
+        return id;
+      }) as unknown as typeof setTimeout,
+      clear: ((id: number) => {
+        scheduled.delete(id);
+      }) as unknown as typeof clearTimeout,
+    },
+    async advance(ms: number): Promise<void> {
+      const target = clock + ms;
+      for (;;) {
+        const due = [...scheduled.entries()]
+          .filter(([, timer]) => timer.at <= target)
+          .sort((left, right) => left[1].at - right[1].at)[0];
+        if (due === undefined) break;
+        scheduled.delete(due[0]);
+        clock = Math.max(clock, due[1].at);
+        due[1].callback();
+        // Let the health code's continuations run before the next timer.
+        await Promise.resolve();
+        await Promise.resolve();
+      }
+      clock = target;
+    },
+  };
+}
+
+describe('the storage module health deadline ownership', () => {
+  it('never lets a late caller of an expired check cancel the check that replaced it', async () => {
+    const time = clockwork();
+    const signals: AbortSignal[] = [];
+    // An abort-insensitive store check: held until the test answers it.
+    const held: Array<(result: StoreCheck) => void> = [];
+    const health = createStorageHealth({
+      bucket: 'lifemodel-storage',
+      check: (signal) => {
+        signals.push(signal);
+        return new Promise<StoreCheck>((resolve) => {
+          held.push(resolve);
+        });
+      },
+      logger: createRecordingLogger([]),
+      now: time.now,
+      timers: time.timers,
+      // The production cache and bound: 2 s and 3 s.
+    });
+
+    const first = health.evaluate(); // check 1
+    await time.advance(2_500);
+    const joined = health.evaluate(); // a caller that joins check 1
+    await time.advance(500); // 3 s: check 1 misses its deadline
+    expect((await first).status).toBe(503);
+    expect(signals[0]?.aborted).toBe(true);
+    expect(health.body()).toMatchObject({ state: 'down', lastErrorCode: 'timeout' });
+
+    await time.advance(2_100); // 5.1 s: past the 2 s cache, so a new check starts
+    const replacement = health.evaluate(); // check 2
+    expect(signals).toHaveLength(2);
+
+    // The late caller of check 1 reaches its own old deadline here. It may
+    // only report its own check's outcome: check 2 is still running and must
+    // neither be aborted nor have its result discarded.
+    await time.advance(450);
+    expect(signals[1]?.aborted).toBe(false);
+
+    held[1]?.({ ok: true }); // check 2 answers successfully
+    const recovered = await replacement;
+    expect(recovered.status).toBe(200);
+    expect(recovered.body).toMatchObject({ state: 'ok', lastErrorCode: null });
+
+    held[0]?.({ ok: false, code: 'unreachable' }); // check 1 answers late
+    expect((await joined).status).toBe(503);
+    expect(health.body()).toMatchObject({ state: 'ok', lastErrorCode: null });
+  });
+
+  it('cannot be expired by the deadline of a check that already answered', async () => {
+    const time = clockwork();
+    const signals: AbortSignal[] = [];
+    const held: Array<(result: StoreCheck) => void> = [];
+    let answerImmediately = true;
+    const health = createStorageHealth({
+      bucket: 'lifemodel-storage',
+      check: (signal) => {
+        signals.push(signal);
+        if (answerImmediately) {
+          answerImmediately = false;
+          return Promise.resolve({ ok: true });
+        }
+        return new Promise<StoreCheck>((resolve) => {
+          held.push(resolve);
+        });
+      },
+      logger: createRecordingLogger([]),
+      now: time.now,
+      timers: time.timers,
+    });
+
+    expect((await health.evaluate()).status).toBe(200); // check 1 answers at t=0
+    await time.advance(2_100); // past the 2 s cache
+    const second = health.evaluate(); // check 2, its own deadline at 5.1 s
+    expect(signals).toHaveLength(2);
+    // 3 s: when check 1's deadline would have been. It already answered, so it
+    // cannot expire the check that replaced it.
+    await time.advance(900);
+    expect(signals[1]?.aborted).toBe(false);
+    expect(health.body()).toMatchObject({ state: 'ok', lastErrorCode: null });
+    // 5.1 s: check 2's own deadline.
+    await time.advance(2_100);
+    expect((await second).status).toBe(503);
+    expect(signals[1]?.aborted).toBe(true);
+    held[0]?.({ ok: true });
+  });
+});
