@@ -90,6 +90,51 @@ policy `read` on `lifemodel/data/model/*` only, provisioned and verified by the
 loader's bootstrap before the root token is retired. The core's endpoint comes
 from `LIFEMODEL_MODEL_BASE_URL` and carries no key.
 
+## Step A: SeaweedFS and the storage module
+
+`seaweedfs` is a one-replica StatefulSet in `lifemodel-system` running
+`weed mini`: master, volume server, filer and S3 in one process on one
+retained 10Gi `local-path` volume (ADR-015 S-D1). The image is pinned by the
+research digest, the process is started directly as the image's own non-root
+user, and the flags are explicit: data, filer metadata and the mini
+configuration file live under `/data`, the components talk over loopback, and
+the admin UI, WebDAV and the Iceberg and Lance catalogs are disabled. S3
+requires authentication (`-s3.config`): a missing or unreadable identity file
+stops the process, and a file that yields no identity denies every request, so
+there is no anonymous mode. The Service publishes only the S3 port 8333.
+
+The S3 identity is platform custody. The loader's first start generates the
+module's service credentials, keeps them in the OpenBao record
+`lifemodel/data/storage/seaweed`, and projects them into the
+`seaweed-s3-identity` Secret that only the SeaweedFS pod mounts (as
+`/etc/seaweedfs/s3.json`). One identity, scoped to the one bucket
+`lifemodel-storage`, with `Read`, `Write` and `List` on that bucket and no
+admin action. Flux creates the Secret empty once (`IfNotPresent`) and never
+overwrites the loader's content. Rotation rewrites the record and the Secret;
+SeaweedFS reads the file at startup, so a rotation takes effect on its next
+restart.
+
+`storage-module` is a Deployment and Service in `lifemodel-system`, also the
+loader image with its own entry point
+(`/opt/lifemodel/loader/dist/storage-module.js`), its own ServiceAccount and no
+loader volume. This build answers health only: `GET /status` on its own status
+listener is 200 when SeaweedFS answered a signed listing of the module's bucket
+with valid auth, and 503 with the reason (`unreachable`, `auth_denied`,
+`bucket_missing`, `unexpected`, `credentials_unavailable`) otherwise; `GET
+/livez` is the process, so a stopped store never restarts the module that
+reports it. It logs status codes and identifiers only, never a key or a body.
+The module logs in to OpenBao with role `storage-module`, whose policy is
+`read` on the one custody record and nothing else, provisioned and verified by
+the loader's bootstrap before the root token is retired.
+
+`seaweedfs-access` admits only storage-module pods, and only on 8333: the
+master, volume and filer ports have no allow rule anywhere, so the namespace
+default deny keeps them private to that pod. `storage-module-access` lets the
+module reach DNS, OpenBao 8200 and SeaweedFS 8333, and lets the loader read its
+health on 8081; it has no Internet, model or Kubernetes API route yet - the
+TokenReview egress arrives with the task API (lifemodel-653.7.2), together with
+the task, trusted-control and owner-read listeners.
+
 The `gitea-admin` Secret remains while the chart references it. Its Bao-held
 retirement is lifemodel-2t5.2. The Gitea and OpenBao charts are vendored at
 pinned versions and rendered into committed manifests; `nix flake check`

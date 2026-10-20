@@ -1,0 +1,105 @@
+# The platform storage module (ADR-015 S-D1, S-D7).
+#
+# The loader's own image with its own entry point, like the model gateway: no
+# generation ever builds or changes the code that holds the SeaweedFS
+# credentials. This build answers health only; the task, control and owner-read
+# listeners arrive with their stages (lifemodel-653.7.2, .5).
+apiVersion: v1
+kind: Service
+metadata:
+  name: storage-module
+  namespace: lifemodel-system
+spec:
+  selector:
+    app.kubernetes.io/name: storage-module
+  ports:
+    # Health, on its own listener: NetworkPolicies are L3/L4, so /status is not
+    # exposed on a data port (ADR-015 S-D1).
+    - name: status
+      port: 8081
+      targetPort: status
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: storage-module
+  namespace: lifemodel-system
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: storage-module
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: storage-module
+    spec:
+      serviceAccountName: storage-module
+      # OpenBao Kubernetes-auth login reads this projected token afresh.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: storage-module
+          # Kustomize pins the pushed loader digest, the same one A0 uses.
+          image: ghcr.io/shady2k/lifemodel-loader:release-placeholder
+          imagePullPolicy: IfNotPresent
+          # The absolute path of the module's entry point, never the loader's
+          # main.js and never the gateway's.
+          command: ['node', '/opt/lifemodel/loader/dist/storage-module.js']
+          env:
+            - name: LIFEMODEL_OPENBAO_ADDRESS
+              value: http://openbao.openbao.svc:8200
+            - name: LIFEMODEL_STORAGE_S3_ENDPOINT
+              value: http://seaweedfs.lifemodel-system.svc:8333
+            - name: LIFEMODEL_STORAGE_BUCKET
+              value: lifemodel-storage
+          ports:
+            - name: status
+              containerPort: 8081
+              protocol: TCP
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          # Readiness is the store: SeaweedFS must answer with valid auth, so a
+          # refused credential or a stopped store makes the module unready. It
+          # becomes ready again when the store returns (ADR-015 S-D7).
+          readinessProbe:
+            httpGet:
+              path: /status
+              port: status
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Liveness is this process, not the store: a stopped SeaweedFS must
+          # never restart the module that reports it.
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: status
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Mi

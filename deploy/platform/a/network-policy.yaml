@@ -27,7 +27,9 @@ spec:
     - Egress
   ingress:
     # The loader bootstraps Bao; the model gateway logs in with its own
-    # ServiceAccount and reads the model slots (ADR-013 D3/D5).
+    # ServiceAccount and reads the model slots (ADR-013 D3/D5); the storage
+    # module logs in with its own ServiceAccount and reads the one SeaweedFS
+    # custody record (ADR-015 S-D1).
     - from:
         - namespaceSelector:
             matchLabels:
@@ -41,6 +43,12 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: model-gateway
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: storage-module
       ports:
         - protocol: TCP
           port: 8200
@@ -146,3 +154,107 @@ spec:
       ports:
         - protocol: TCP
           port: 11434
+
+---
+# SeaweedFS (ADR-015 S-D1). Only the storage module reaches it, and only on the
+# S3 port: the master, volume and filer ports have no allow rule at all, so the
+# namespace default deny alone is what keeps them private to this pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: seaweedfs-access
+  namespace: lifemodel-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: seaweedfs
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: storage-module
+      ports:
+        - protocol: TCP
+          port: 8333
+  egress:
+    # Nothing in the cluster is allowed to answer it, and it reaches nothing:
+    # its components talk over loopback inside its own pod.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# The storage module's own routes (ADR-015 S-D1). It inherits nothing from the
+# loader: this policy is the whole of what it may do.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: storage-module-access
+  namespace: lifemodel-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: storage-module
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # 8081 is the health listener, read by the loader's platform status. The
+    # task, trusted-control and owner-read listeners and their peers arrive
+    # with lifemodel-653.7.2 and lifemodel-653.7.5.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: loader
+      ports:
+        - protocol: TCP
+          port: 8081
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Its own OpenBao login and the custody record it reads; never the loader's.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openbao
+      ports:
+        - protocol: TCP
+          port: 8200
+    # The one store it may use, on the S3 port only.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: seaweedfs
+      ports:
+        - protocol: TCP
+          port: 8333
