@@ -89,7 +89,7 @@ tick), Energy & state are physiology. Start with `README.md` and
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run lint` | ESLint over `src/` and `loader/` (`lint:fix` to auto-fix) |
 | `npm run format` / `format:check` | Prettier over `src/**/*.ts` and `loader/**/*.ts` |
-| `npm run connect` | connect this clone: git hooks, the link to this machine's tracker store, a check that its sync runs, gate check |
+| `npm run connect` | connect this clone: git hooks, the link to this machine's tracker store, gate check |
 | `npm run backlog` | the backlog gate (`npm run backlog:json` for JSON output) |
 | `npm run present` | the present-documents check |
 | `nix flake check` | checks the exported NixOS module and platform installer rendering; needs Nix; CI's `ci-nix` job runs it on pull requests that touch what the flake reads (selected by `scripts/ci-nix-paths.sh`) (lifemodel-lut.3.6) |

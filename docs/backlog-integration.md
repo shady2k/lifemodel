@@ -150,14 +150,19 @@ the repository's installation, and each person's plugin and hooks are their own.
   `.backlog/sync/supervisors/systemd-user/tracker-sync.service`, byte-for-byte
   copies of shady2k-skills 0.121.0 (`tracker-sync.version`; `node
   .backlog/sync/tracker-sync.mjs status --expect-version <the set's version>`
-  says whether this copy is behind). The supervisor is the systemd `--user`
-  unit `lifemodel-tracker-sync.service`, rendered and started by `sh
-  scripts/tracker-sync-service.sh install` (the owner's decision per machine:
-  it changes what runs there), running `watch --interval 10 --debounce 2
-  --max-age 5`: a change is published 2 s after the last write or 5 s at most,
-  and the other machines' state is taken every 10 s; every network operation is
-  killed after 10 s (push) or 20 s (fetch). Keeping it after logout and reboot
-  needs `loginctl enable-linger <user>`. A claim and a status transition through
+  says whether this copy is behind). **No background sync runs** (owner,
+  2026-10-20: "я один работаю" — one person, one machine): the store reaches
+  the remote when a commit is recorded (post-commit, post-merge) and before
+  every push (`.githooks/pre-push` runs `publish` first and refuses the push if
+  it cannot), which is what CI reads; a tracker write between commits stays on
+  this machine until then, and `node .backlog/sync/tracker-sync.mjs publish`
+  sends it now. A second person or machine is the moment to add the
+  supervisor: the systemd `--user` unit `lifemodel-tracker-sync.service`,
+  rendered and started by `sh scripts/tracker-sync-service.sh install`, running
+  `watch --interval 10 --debounce 2 --max-age 5` (publish 2 s after the last
+  write or 5 s at most, the other machines' state every 10 s), with `loginctl
+  enable-linger <user>` to outlive logout and reboot. Every network operation
+  is killed after 10 s (push) or 20 s (fetch). A claim and a status transition through
   the mechanism (`claim`, `transition`) are written against the state just
   merged from the remote and count only once they are on it; a lost one is exit
   3, said, and nothing is left behind. Two machines claiming one item in the same
@@ -166,7 +171,8 @@ the repository's installation, and each person's plugin and hooks are their own.
   append and keep both sides, a field changed on two sides takes the tracker's
   order and the overwritten value is kept on the item, and where that cannot
   separate them the order on the ref decides. While the remote is unreachable,
-  writes continue in the store and are published within seconds of its return;
+  writes continue in the store and are published at the next commit or push
+  that reaches it;
   a read that needs every machine's state says the remote is unreachable. Each
   revision is recorded by the post-commit and post-merge hooks (in the
   background) and again by pre-push for the pushed tip. A record (a `br`
@@ -175,10 +181,10 @@ the repository's installation, and each person's plugin and hooks are their own.
   recipe's `post`, which gives globally unique ids (not yet wired; this
   project has one machine, vm-agents). Proved at installation on this machine;
   a real reboot and a second real machine are not proved yet.
-- **Landing a session:** nothing to land for the tracker: every write is
-  published by the sync within seconds, and no branch carries it. A session ends
-  with `node .backlog/sync/tracker-sync.mjs status` showing nothing queued
-  locally. Bookkeeping that is a document (lessons, docs edits) lands like any
+- **Landing a session:** nothing to land for the tracker: no branch carries
+  it. A session that wrote to the tracker after its last push ends with
+  `node .backlog/sync/tracker-sync.mjs publish`, and `status` showing nothing
+  queued locally. Bookkeeping that is a document (lessons, docs edits) lands like any
   change, on a branch named for its task. After a pull request merges, the main
   checkout fast-forwards with `git pull --ff-only`; nothing about the tracker is
   copied.
@@ -259,9 +265,8 @@ the repository's installation, and each person's plugin and hooks are their own.
   `core.hooksPath .githooks`, runs `tracker-sync.mjs connect` for this
   checkout (the machine's store made from the remote's ref where it has none,
   `.beads` linked to it), installs the project's br policy into the store,
-  appends the marked gate blocks to the husky hooks, checks that the sync runs
-  (the systemd unit, or a `watch` started by hand) and fails naming
-  `scripts/tracker-sync-service.sh install` where it does not, and runs the gate
+  appends the marked gate blocks to the husky hooks,
+  says whether a background sync also runs (none is required), and runs the gate
   once offline; exit 2 fails the connect. Safe to rerun. With no
   `node_modules` it still connects and says the product checks are skipped
   until `npm ci` — a message that is already stale under the launcher wiring,
@@ -384,8 +389,9 @@ the repository's installation, and each person's plugin and hooks are their own.
   receipt. `submitted` and `implemented` take their comment atomically:
   `br update <id> --status implemented --transition-comment "implemented: ..."`;
   a separate comment does not satisfy the store's `.beads/policy.yaml`. Such a
-  transition is a br write the sync publishes within seconds; it counts once
-  `node .backlog/sync/tracker-sync.mjs status` shows nothing queued. A worker's span in
+  transition is a br write that reaches the remote at the next recorded
+  commit or push; it counts once `node .backlog/sync/tracker-sync.mjs publish`
+  has sent it. A worker's span in
   prime-agent gets a measured receipt (`receipt --end finished --harness
   prime-agent --session <id>`): the run script reads its transcript. The
   worker posts it as its last record, after the work, so the span covers it.
@@ -413,7 +419,7 @@ what this protocol adds is listed.
 | pending integration / acceptance | `br list --status submitted` / `br list --status implemented` |
 | children | `br show <id>` lists them, every status; or the adapter's export filtered on `parent` |
 | search / show | `br search`, `br show <id>`, `br list -l <area>` |
-| publish | the sync publishes every write within seconds; `node .backlog/sync/tracker-sync.mjs publish` pushes now, and `status` shows what is queued. Nothing lands on a branch |
+| publish | at each recorded commit and before each push, by the hooks; `node .backlog/sync/tracker-sync.mjs publish` pushes now, and `status` shows what is queued. Nothing lands on a branch |
 
 When a skill reports the installation is out of date, run `setup-shady2k-skills`. An explicit
 setup invocation rechecks everything even if its recorded version matches.
