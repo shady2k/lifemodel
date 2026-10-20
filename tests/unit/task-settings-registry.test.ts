@@ -1201,6 +1201,70 @@ describe('settings HTTP routes', () => {
     });
   });
 
+  it('saves every platform key through the route, refuses the read-only ceiling and survives a restart', async () => {
+    let loaderDir = '';
+    const registry = createSettingsRegistry(platformSettings.declarations());
+    const { ask, csrf } = await start({
+      buildStore: (dir) => {
+        loaderDir = dir;
+        return createSettingsStore({
+          fs: createNodeFileSystem(),
+          config: { loaderDir: dir },
+          registry,
+          clock: createTestClock(),
+          logger: createRecordingLogger([]),
+        });
+      },
+    });
+    const token = csrf();
+    const grace = await ask('/api/settings/tasks.wrapGraceSeconds', {
+      method: 'PUT',
+      body: JSON.stringify({ value: 600 }),
+      csrf: token,
+    });
+    expect(grace.status).toBe(200);
+    expect(JSON.parse(grace.body)).toMatchObject({ ok: true, value: 600 });
+    const lead = await ask('/api/settings/storage.warningLeadDays', {
+      method: 'PUT',
+      body: JSON.stringify({ value: 14 }),
+      csrf: token,
+    });
+    expect(lead.status).toBe(200);
+    expect(JSON.parse(lead.body)).toMatchObject({ ok: true, value: 14 });
+    const ceiling = await ask('/api/settings/storage.ceilingBytes', {
+      method: 'PUT',
+      body: JSON.stringify({ value: 40000000000 }),
+      csrf: token,
+    });
+    expect(ceiling.status).toBe(400);
+    expect(JSON.parse(ceiling.body)).toMatchObject({
+      error: 'invalid_value',
+      reasonCode: 'read_only',
+    });
+    const section = JSON.parse((await ask('/api/settings')).body) as {
+      values: Record<string, number>;
+    };
+    expect(section.values['tasks.wrapGraceSeconds']).toBe(600);
+    expect(section.values['storage.warningLeadDays']).toBe(14);
+    expect(section.values['storage.ceilingBytes']).toBe(20000000000);
+    const restarted = createSettingsStore({
+      fs: createNodeFileSystem(),
+      config: { loaderDir },
+      registry,
+      clock: createTestClock(),
+      logger: createRecordingLogger([]),
+    });
+    await restarted.load();
+    expect(restarted.section().values).toEqual({
+      'tasks.concurrency': 2,
+      'tasks.harness': 'opencode',
+      'tasks.wrapGraceSeconds': 600,
+      'storage.retention': '90d',
+      'storage.warningLeadDays': 14,
+      'storage.ceilingBytes': 20000000000,
+    });
+  });
+
   it('answers 503 storage_unavailable when the settings seam is not wired', async () => {
     const { ask } = await start({ settings: null });
     const response = await ask('/api/settings');

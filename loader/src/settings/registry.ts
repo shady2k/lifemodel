@@ -111,11 +111,12 @@ export interface SettingsSectionPayload {
 }
 
 /**
- * A dotted key whose first segment is lowercase; later segments may be
- * camelCase (the platform declares tasks.wrapGraceSeconds and friends), so
- * the grammar admits an uppercase after a segment's first character only.
+ * The grammar of a declaration key, shared with every route that names one: a
+ * dotted key whose first segment is lowercase; later segments may be camelCase
+ * (the platform declares tasks.wrapGraceSeconds and friends), so the grammar
+ * admits an uppercase after a segment's first character only.
  */
-const KEY_PATTERN = /^[a-z][a-z0-9]*(?:\.[a-z][a-zA-Z0-9-]*)+$/;
+export const SETTING_KEY_PATTERN = /^[a-z][a-z0-9]*(?:\.[a-z][a-zA-Z0-9-]*)+$/;
 
 const CONTROLS: readonly SettingControl[] = ['toggle', 'number', 'select', 'text', 'secret'];
 const DATA_CLASSES: readonly SettingDataClass[] = [
@@ -135,7 +136,7 @@ function assertLocalized(text: LocalizedText, what: string, key: string): void {
 }
 
 function assertDeclaration(declaration: SettingDeclaration): void {
-  if (!KEY_PATTERN.test(declaration.key))
+  if (!SETTING_KEY_PATTERN.test(declaration.key))
     throw new SettingsDeclarationError(
       `setting key ${JSON.stringify(declaration.key)} must be a dotted key with a lowercase first segment`
     );
