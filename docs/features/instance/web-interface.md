@@ -25,19 +25,18 @@ messages, because the assistant has nowhere else to put progress.
 - **The creature has one state.** It thinks as one, not per message. There
   are no per-message statuses, except a message that failed to send
   ("не отправлено — повторить").
-- **Progress lives with the task, not in the conversation.** A task appears
-  in the conversation once, as a clickable chip under the message that
-  started it ("◌ Собрать скиллы из шаблонов"), showing its state. The
-  chip opens the task's drawer; the conversation itself gets no "still
-  running" messages.
+- **Progress lives with the task, not in the conversation.** Tasks appear in
+  the right panel, not as transcript cards or chips (owner, 2026-10-19/20;
+  [ADR-014](../../adr/014-task-runtime.md)). The conversation remains ordinary
+  replies, including summaries with attachments; no "still running" messages.
 - **The conversation is never busy.** The owner can change the subject at
   any moment without fear that lifemodel drops what it was doing. (The
   owner, 2026-10-15: dots does some work inside its conversation turn, and
   asking about something else feels like it may abandon that work.)
   - Long work is always a task. A conversation turn is short: understand,
     answer, decide. Anything longer than one turn (running commands,
-    checks, builds) becomes a task with its chip, never work done inside
-    the turn.
+    checks, builds) becomes a task visible in the panel, never work done
+    inside the turn.
   - A new message cancels nothing. A started task runs until Stop or the
     owner's explicit request.
   - Every started piece of work is visible in "Сейчас" as running, so the
@@ -46,7 +45,7 @@ messages, because the assistant has nowhere else to put progress.
   writes to a task. A message is bound to a matter in three layers:
   1. lifemodel infers it from context, and asks when unsure ("про
      синхронизацию MailFlow или про дашборд?");
-  2. "↩ Ответить" on any message or task chip binds the reply to it; the
+  2. "↩ Ответить" on any message binds the reply to it; the
      message shows a small quote, so the history stays readable;
   3. "@" in the composer picks a task or a project.
 
@@ -62,7 +61,7 @@ messages, because the assistant has nowhere else to put progress.
 │ lifemodel    │  ты: возьми апстрим, синхронизируй…  │ (аватар) lifemodel   │
 │ ▸ Разговор   │  lifemodel: Сделаю: возьму upstream, │ думает               │
 │              │  уберу ненужные патчи, заведу issue. │                      │
-│ ПРОЕКТЫ      │  [◌ Синхр. с upstream · MailFlow]    │ ИДЁТ                 │
+│              │                                      │ ИДЁТ                 │
 │  MailFlow  1 │  ты ↩ «Синхр…»: issue не дублируй    │ ▶ Синхр. с upstream  │
 │  Bifrost     │  lifemodel: CI зелёный, issue #611…  │   MailFlow · 12 мин  │
 │  Hindsight   │  Собрать и развернуть в кластере?    │   frontend-тесты     │
@@ -89,7 +88,7 @@ messages, because the assistant has nowhere else to put progress.
     Ответить.
   - Each message has "↩ Ответить" and reactions. lifemodel reads reactions
     as feedback.
-- **The task drawer** opens from a chip or the panel:
+- **The task drawer** opens from the panel:
   - the task's own feed: its steps, collapsed ("Ran commands", "Review
     finished"), its reports and a live "thinking";
   - the conversation messages bound to the task;
@@ -112,11 +111,16 @@ messages, because the assistant has nowhere else to put progress.
   - Scheduled items: reminders and deadlines.
   - Results: pull requests, reports, issues.
   - The current generation, with a way to the loader's rollback.
-- **Stop is the one direct action.** It stops a task without going through
-  lifemodel, like the loader's panic. lifemodel receives "the owner stopped
-  the task" and says in the conversation what that means for the rest of the
-  work. Everything else about tasks (restart, new conditions, priority) goes
-  through the conversation.
+- **Task controls work without a cognition turn.** Soft **Stop** asks the
+  harness to wrap up with no new external effects; a settings deadline
+  (default five minutes) then removes its Job. **Stop now** removes it without
+  waiting for uploads; only already stored and marked output is kept.
+  **Stop all tasks** soft-stops every current task, not lifemodel itself.
+  Owner and agent can mark a task **urgent**: it starts before ordinary queued
+  work when a slot frees, with FIFO within each class and no preemption.
+  The panel exposes these controls; the owner can also ask in words. Results,
+  questions and changes of scope still pass through lifemodel's conversation.
+  These controls are not the loader's platform panic.
 - **Left: sections, not chats.**
   - **Разговор.**
   - **Проекты:** long-lived goals or areas of life, each with its tasks,
@@ -139,7 +143,10 @@ messages, because the assistant has nowhere else to put progress.
 
 ## Out of instance-1
 
-- Attachments (images and files, both ways): the owner, 2026-10-15.
+- Owner uploads/images remain later work (owner, 2026-10-15). Task-result
+  attachments are included in motor-1 (owner, 2026-10-20): artifact IDs resolve
+  through authenticated web downloads to the storage module, never S3 URLs
+  ([ADR-015](../../adr/015-storage-module.md)).
 - The PWA and Web Push: they need HTTPS and an address the phone reaches. A
   later feature.
 
@@ -160,6 +167,7 @@ waiting for one. When the session itself has ended, the page leaves for the
 loader's login instead of showing an error, and the draft the owner was
 writing comes back with it after the login.
 
-Task chips and the drawer, Stop, "@", reactions, projects, memory and
-settings come with the features that create tasks and projects
-(lifemodel-653, lifemodel-n6r).
+The task panel/drawer, two Stops, stop-all, urgency and result attachments
+are designed in ADR-014/015, not built yet (lifemodel-653; UI in lifemodel-hf2k).
+"@", reactions, projects, memory and settings come with the features that
+create tasks and projects (lifemodel-653, lifemodel-n6r).

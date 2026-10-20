@@ -202,6 +202,12 @@ Owner decisions this ADR implements (lifemodel-2t5, 2026-10-15/16):
 
 ## Amendments
 
+- **Proposed task ingress (2026-10-20, lifemodel-653.5):**
+  [ADR-014 D1](014-task-runtime.md) adds a separate audience-authenticated task
+  listener with bound Pod/Job identity and platform task-session attribution.
+  Existing core ingress, upstream filtering/failover and key custody remain
+  unchanged; task access is not a widening of the current core-only listener.
+
 - **D6, Health (2026-10-19, lifemodel-s9v5.1.6).** A recorded outage names
   each failing slot's KV v2 identity: `metadata.version` from the same
   read-only `lifemodel/data/model/<slot>` read, or `absent` for the required
