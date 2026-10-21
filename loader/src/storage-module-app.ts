@@ -235,7 +235,12 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
                     signal,
                     ...(objectId ? { objectId } : {}),
                   })
-                : access.openTaskStream({ token, space: objectMatch[1], signal });
+                : access.openTaskStream({
+                    token,
+                    space: objectMatch[1],
+                    signal,
+                    write: req.method !== 'GET',
+                  });
             const abortInput = (): void => {
               req.destroy();
               res.destroy();
@@ -266,11 +271,18 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
                 // Failure cleanup re-proves the same token/space independently
                 // of the canceled transfer. The caller must close this stream.
                 () =>
-                  access.openTaskStream({
-                    token,
-                    space: objectSpace,
-                    signal: AbortSignal.timeout(10_000),
-                  }),
+                  role === 'read' && options.seal
+                    ? options.seal.openCoreStream({
+                        token,
+                        space: objectSpace,
+                        signal: AbortSignal.timeout(10_000),
+                        ...(objectId ? { objectId } : {}),
+                      })
+                    : access.openTaskStream({
+                        token,
+                        space: objectSpace,
+                        signal: AbortSignal.timeout(10_000),
+                      }),
                 progress,
                 role === 'read'
               );
@@ -482,9 +494,10 @@ function createTaskListener(
     close: () => {
       stopped = true;
       if (timer !== undefined) cancel(timer);
-      if (!server.listening) return;
+      // server.close() may already have stopped intake while pools drained.
+      // Existing connections still need release even when listening is false.
       server.closeAllConnections();
-      server.close();
+      if (server.listening) server.close();
     },
   };
 }

@@ -108,14 +108,20 @@ let stopped = false;
 function stop(): void {
   if (stopped) return;
   stopped = true;
-  app.task.close();
-  objectS3.close();
-  void objects.close();
-  void seal.close();
-  app.control.close();
-  app.read.close();
+  // Stop intake without aborting an active SQL operation's S3 transport.
+  for (const listener of [app.task, app.control, app.read]) listener.server.close();
   app.status.closeAllConnections();
   app.status.close();
+  // Pool close drains checked-out SQL clients, not whole multi-transaction
+  // requests. Keep their S3 dependency alive until both pools have settled.
+  void Promise.allSettled([seal.close(), objects.close()]).then((results) => {
+    for (const listener of [app.task, app.control, app.read]) listener.close();
+    objectS3.close();
+    if (results.some((result) => result.status === 'rejected')) {
+      logger.error({ code: 'storage_close_failed' }, 'Storage module pool shutdown failed');
+      process.exitCode = 1;
+    }
+  });
 }
 process.on('SIGTERM', stop);
 process.on('SIGINT', stop);

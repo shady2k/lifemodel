@@ -22,8 +22,14 @@ Task and web identities cannot call them. Requests reject unknown or missing fie
   does not grant access. Stage 3 owns the verified projection writer.
 - `POST /seal {space,effectKey,expectedRevision,outcome}` accepts `completed`,
   `failed`, or `stopped`. Access revisions are nonnegative decimal strings.
-  A stale revision or changed keyed request conflicts. A new key cannot replace
-  an existing seal operation.
+  A stale revision or changed keyed request conflicts. A new key with the current
+  frozen revision and `failed`/`stopped` may recover a frozen operation that has
+  no manifest. It reuses the persisted candidates, never rescans or reopens the
+  space. Once a manifest exists, another key cannot replace the operation.
+
+Effect keys are scoped per operation (`allocate`, `bind`, `seal`); seal keys are
+also scoped per space. Reusing a key in another operation or another seal space
+is independent. Within its scope, a changed request conflicts.
 - Existing `POST /revoke` remains keyed. New revoke operations cannot replace a
   frozen/sealed space; an old receipt still replays without changing mode.
 
@@ -45,9 +51,9 @@ No new SQL function, dependency, external endpoint or bootstrap dependency is
 introduced. The module uses a bounded reusable catalog pool and the existing
 signed keep-alive S3 adapter. Empty tables are ready; missing schema is not.
 
-1. Normal completion/failure first waits for the current local handler snapshot
-   to settle, bounded to five seconds (`quiescence_pending` on timeout). This
-   lets admitted mark acknowledgements finish. Hard Stop (`stopped`) skips that
+1. Normal completion/failure first waits for the current local writer/publication
+   handler snapshot to settle, bounded to five seconds (`quiescence_pending` on
+   timeout). This lets admitted mark acknowledgements finish, not task GET readers. Hard Stop (`stopped`) skips that
    pre-freeze wait. Freeze then locks the space, increments access revision,
    sets `frozen` and saves an immutable candidate set of marks. Existing
    mark/publication share locks serialize before freeze, with a five-second SQL
@@ -56,21 +62,32 @@ signed keep-alive S3 adapter. Empty tables are ready; missing schema is not.
    settlement, bounded to five seconds. Failure stays read-only and returns
    `cleanup_pending`. The one-replica/Recreate topology makes this process's
    local registry complete. The S3 adapter also retains actual ClientRequest
-   close promises across operation disposal and settlement timeouts. Seal waits
-   that snapshot with its own five-second bound before cleanup. This global
-   conservative check can defer a new seal behind another space's active
-   transport; reserved/fair worker admission remains .7.7. Already saved seal
+   close promises across operation disposal and settlement timeouts, carrying
+   each operation's space even before custody resolves. Seal waits only its own
+   space's operations/transports with a five-second bound before cleanup. Foreign
+   task uploads and core reads never enter that barrier. Reserved/fair worker
+   admission remains .7.7. Already saved seal
    receipts replay before transfer barriers. Startup closes the previous
    process's sockets.
 3. Checksum-enabled S3 HEAD validates length and SHA-256 of every frozen marked
    immutable version. This reuses PUT's backend persistence contract, avoids
    unbounded byte rereads, and fails visibly on mismatch/absence. It does not
    silently discard a corrupt mark. A completed outcome without a marked result
-   returns `missing_result`; it cannot fabricate success.
+   returns `missing_result` inside the freeze transaction: the transaction rolls
+   back, the space remains open, and no operation or receipt is saved. A later
+   failed/stopped request with a new key can seal it without inventing success.
+   A checksum mismatch first fails visibly and leaves frozen candidates with no
+   manifest. An explicit new failed/stopped recovery request may exclude a
+   mismatching candidate, recording its metadata and `reason:checksum_mismatch`
+   in the manifest's `excluded` list. Completed can never seal over a mismatch.
+   Backend/network availability errors are not checksum exclusions and still fail.
 4. Commit manifest version 1, ID, content hash and exact marked object IDs,
    names, sizes, hashes and roles before any cleanup DELETE. Canonical digest
    is SHA-256 of UTF-8 JSON `{version:1,objects:[...]}`, objects sorted by UUID,
-   each object field ordered `id,name,size,sha256,mark`. Replay uses persisted
+   each object field ordered `id,name,size,sha256,mark`. If any candidates are
+   excluded, the canonical JSON also contains `excluded:[...]` after `objects`;
+   each exclusion contains the same ordered metadata followed by `reason`.
+   Excluded bytes are garbage, not retained members. Replay uses persisted
    candidates/manifest, never scans a changing workspace to redefine output.
 5. `manifest-committed → cleanup`: persist all non-retained attempt keys in
    `seal_gc`, DELETE each through the module's S3 custody (200/204/404 are
@@ -88,7 +105,14 @@ manifest:{id,version:1,sha256,objects}}`. `completed` has a result and null reas
 `failed` uses `partial_output` / `missing_result`; `stopped` uses
 `stopped_partial_output` / `stopped_missing_result`. Sealed means retained marked
 output, not semantic harness success. Core owns its terminal outcome/outbox and
-must record the returned receipt ID and manifest hash.
+must record the returned receipt ID and manifest hash. Checksum-recovery receipts
+have `reason:checksum_mismatch` and include `manifest.excluded` with every corrupt
+candidate, while `manifest.objects` contains only verified retained bytes.
+
+At shutdown the module stops listener intake, drains/closes the seal and object
+SQL pools, then closes the S3 adapter. This orders dependency teardown; it is not
+an unbounded drain of every multi-transaction request. Interrupted seal steps
+remain durable and replayable.
 
 ## Accepted backend residual and later work
 

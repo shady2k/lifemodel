@@ -53,6 +53,7 @@ interface Operation extends QueryResultRow {
   outcome: Seal['outcome'];
   state: string;
   candidates: Candidate[];
+  checksum_recovery: boolean;
 }
 export interface StorageSeal {
   allocate(input: unknown): Promise<Record<string, unknown>>;
@@ -129,8 +130,15 @@ export function createStorageSeal(options: Options): StorageSeal {
       client?.release(broken);
     }
   }
-  async function key(client: PoolClient, effect: string) {
-    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [effect]);
+  async function key(
+    client: PoolClient,
+    operation: 'allocate' | 'bind' | 'seal',
+    effect: string,
+    space?: string
+  ) {
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+      JSON.stringify([operation, space ?? null, effect]),
+    ]);
   }
   async function replay(
     client: PoolClient,
@@ -159,11 +167,12 @@ export function createStorageSeal(options: Options): StorageSeal {
     return same(keys, Object.keys(bb).sort()) && keys.every((k) => equal(aa[k], bb[k]));
   }
   async function operation(client: PoolClient, request: Seal): Promise<Operation> {
-    await key(client, request.effectKey);
+    await key(client, 'seal', request.effectKey, request.space);
     const old = (
-      await client.query<Operation>('SELECT * FROM storage.seal_operations WHERE effect_key=$1', [
-        request.effectKey,
-      ])
+      await client.query<Operation>(
+        'SELECT * FROM storage.seal_operations WHERE space_id=$1 AND effect_key=$2',
+        [request.space, request.effectKey]
+      )
     ).rows[0];
     if (old) {
       if (!equal(old.request, request)) fail(409, 'effect_conflict');
@@ -177,15 +186,36 @@ export function createStorageSeal(options: Options): StorageSeal {
     ).rows[0];
     if (!space) fail(404, 'space_not_found');
     if (space.access_revision !== request.expectedRevision) fail(409, 'revision_conflict');
+    const previous = (
+      await client.query<Operation>(
+        'SELECT * FROM storage.seal_operations WHERE space_id=$1 FOR UPDATE',
+        [request.space]
+      )
+    ).rows[0];
+    if (previous) {
+      if (
+        space.mode !== 'frozen' ||
+        previous.state !== 'frozen' ||
+        request.outcome === 'completed' ||
+        (
+          await client.query('SELECT 1 FROM storage.seal_manifests WHERE space_id=$1', [
+            request.space,
+          ])
+        ).rowCount
+      )
+        fail(409, 'seal_conflict');
+      // Explicit failed/stopped recovery changes the outcome, never the frozen
+      // candidate set or access revision. Old requests cannot publish over it.
+      return required(
+        (
+          await client.query<Operation>(
+            'UPDATE storage.seal_operations SET effect_key=$2,request=$3,outcome=$4,checksum_recovery=true WHERE space_id=$1 RETURNING *',
+            [request.space, request.effectKey, request, request.outcome]
+          )
+        ).rows[0]
+      );
+    }
     if (!['open', 'wrapping', 'revoked'].includes(space.mode)) fail(409, 'seal_conflict');
-    if (
-      (
-        await client.query('SELECT 1 FROM storage.seal_operations WHERE space_id=$1', [
-          request.space,
-        ])
-      ).rowCount
-    )
-      fail(409, 'seal_conflict');
     const revision = (BigInt(space.access_revision) + 1n).toString();
     // This row lock is the bounded quiescence barrier: every publication/mark
     // holds FOR SHARE through commit. Hard stop does not await any byte stream.
@@ -199,6 +229,11 @@ export function createStorageSeal(options: Options): StorageSeal {
         [request.space]
       )
     ).rows;
+    if (
+      request.outcome === 'completed' &&
+      !candidates.some((candidate) => candidate.mark === 'result')
+    )
+      fail(409, 'missing_result');
     const result = await client.query<Operation>(
       `INSERT INTO storage.seal_operations(space_id,effect_key,request,receipt_id,manifest_id,revision,outcome,state,candidates) VALUES($1,$2,$3,$4,$5,$6,$7,'frozen',$8) RETURNING *`,
       [
@@ -224,7 +259,7 @@ export function createStorageSeal(options: Options): StorageSeal {
         retentionRevision: required(raw['retentionRevision']),
       } satisfies Allocate;
       return tx(async (client) => {
-        await key(client, request.effectKey);
+        await key(client, 'allocate', request.effectKey);
         const saved = await replay(client, 'allocate_receipts', request.effectKey, request);
         if (saved) return saved;
         await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 1))', [
@@ -278,7 +313,7 @@ export function createStorageSeal(options: Options): StorageSeal {
       } satisfies Bind;
       // Receipt replay is independent of later Pod death; it grants no new access.
       const saved = await tx(async (client) => {
-        await key(client, request.effectKey);
+        await key(client, 'bind', request.effectKey);
         const saved = await replay(client, 'bind_receipts', request.effectKey, request);
         if (saved) return saved;
         const bound = (
@@ -320,7 +355,7 @@ export function createStorageSeal(options: Options): StorageSeal {
         jobUid: projection.job_uid,
       });
       return tx(async (client) => {
-        await key(client, request.effectKey);
+        await key(client, 'bind', request.effectKey);
         const saved = await replay(client, 'bind_receipts', request.effectKey, request);
         if (saved) return saved;
         const proof = await client.query(
@@ -413,11 +448,11 @@ export function createStorageSeal(options: Options): StorageSeal {
         outcome: required(raw['outcome']) as Seal['outcome'],
       };
       const savedReceipt = await tx(async (client) => {
-        await key(client, request.effectKey);
+        await key(client, 'seal', request.effectKey, request.space);
         const saved = (
           await client.query<{ request: Seal; receipt: Record<string, unknown> }>(
-            'SELECT o.request,r.receipt FROM storage.seal_operations o JOIN storage.seal_receipts r ON r.effect_key=o.effect_key WHERE o.effect_key=$1',
-            [request.effectKey]
+            'SELECT o.request,r.receipt FROM storage.seal_operations o JOIN storage.seal_receipts r ON r.space_id=o.space_id AND r.effect_key=o.effect_key WHERE o.space_id=$1 AND o.effect_key=$2',
+            [request.space, request.effectKey]
           )
         ).rows[0];
         if (saved && !equal(saved.request, request)) fail(409, 'effect_conflict');
@@ -427,26 +462,45 @@ export function createStorageSeal(options: Options): StorageSeal {
       if (request.outcome !== 'stopped') await options.access.quiesceSpace(request.space);
       let op = await tx((client) => operation(client, request));
       await options.access.settleSpace(request.space);
-      await options.s3.settle(AbortSignal.timeout(5000));
+      await options.s3.settle(request.space, AbortSignal.timeout(5000));
       if (op.state === 'frozen') {
-        for (const candidate of op.candidates)
-          await options.s3.verify(
-            candidate.s3_key,
-            candidate.size,
-            candidate.sha256,
-            AbortSignal.timeout(10_000)
-          );
-        const objects = op.candidates.map((item) => ({
-          id: item.id,
-          name: item.name,
-          size: item.size,
-          sha256: item.sha256,
-          mark: item.mark,
-        }));
+        const objects: Marked[] = [];
+        const excluded: (Marked & { reason: 'checksum_mismatch' })[] = [];
+        for (const candidate of op.candidates) {
+          const key = candidate.s3_key;
+          // JSONB normalizes field order; rebuild the documented digest order.
+          const marked: Marked = {
+            id: candidate.id,
+            name: candidate.name,
+            size: candidate.size,
+            sha256: candidate.sha256,
+            mark: candidate.mark,
+          };
+          try {
+            await options.s3.verify(
+              request.space,
+              key,
+              candidate.size,
+              candidate.sha256,
+              AbortSignal.timeout(10_000)
+            );
+            objects.push(marked);
+          } catch (error) {
+            if (
+              !op.checksum_recovery ||
+              request.outcome === 'completed' ||
+              !(error instanceof StorageAccessError) ||
+              error.code !== 'checksum_mismatch'
+            )
+              throw error;
+            excluded.push({ ...marked, reason: 'checksum_mismatch' });
+          }
+        }
         const hasResult = objects.some((o) => o.mark === 'result');
         if (request.outcome === 'completed' && !hasResult) fail(409, 'missing_result');
-        const reason =
-          request.outcome === 'completed'
+        const reason = excluded.length
+          ? 'checksum_mismatch'
+          : request.outcome === 'completed'
             ? null
             : request.outcome === 'failed'
               ? hasResult
@@ -456,10 +510,10 @@ export function createStorageSeal(options: Options): StorageSeal {
                 ? 'stopped_partial_output'
                 : 'stopped_missing_result';
         const sha256 = createHash('sha256')
-          .update(JSON.stringify({ version: 1, objects }))
+          .update(JSON.stringify({ version: 1, objects, ...(excluded.length ? { excluded } : {}) }))
           .digest('hex');
         op = await tx(async (client) => {
-          await key(client, request.effectKey);
+          await key(client, 'seal', request.effectKey, request.space);
           const current = required(
             (
               await client.query<Operation>(
@@ -468,10 +522,18 @@ export function createStorageSeal(options: Options): StorageSeal {
               )
             ).rows[0]
           );
+          if (!equal(current.request, request)) fail(409, 'effect_conflict');
           if (current.state !== 'frozen') return current;
           await client.query(
-            'INSERT INTO storage.seal_manifests(space_id,id,version,sha256,objects,reason) VALUES($1,$2,1,$3,$4,$5)',
-            [request.space, current.manifest_id, sha256, JSON.stringify(objects), reason]
+            'INSERT INTO storage.seal_manifests(space_id,id,version,sha256,objects,excluded,reason) VALUES($1,$2,1,$3,$4,$5,$6)',
+            [
+              request.space,
+              current.manifest_id,
+              sha256,
+              JSON.stringify(objects),
+              JSON.stringify(excluded),
+              reason,
+            ]
           );
           return required(
             (
@@ -485,7 +547,7 @@ export function createStorageSeal(options: Options): StorageSeal {
       }
       if (op.state === 'manifest-committed' || op.state === 'cleanup') {
         await tx(async (client) => {
-          await key(client, request.effectKey);
+          await key(client, 'seal', request.effectKey, request.space);
           await client.query(
             `INSERT INTO storage.seal_gc(space_id,attempt_id,s3_key) SELECT a.space_id,a.id,a.s3_key FROM storage.upload_attempts a WHERE a.space_id=$1 AND NOT EXISTS(SELECT 1 FROM storage.object_versions v JOIN storage.objects o ON o.id=v.object_id WHERE v.attempt_id=a.id AND o.id::text IN (SELECT item->>'id' FROM storage.seal_manifests m CROSS JOIN LATERAL jsonb_array_elements(m.objects) item WHERE m.space_id=$1)) ON CONFLICT DO NOTHING`,
             [request.space]
@@ -506,7 +568,7 @@ export function createStorageSeal(options: Options): StorageSeal {
         );
         for (const entry of entries) {
           try {
-            await options.s3.delete(entry.s3_key, AbortSignal.timeout(10_000));
+            await options.s3.delete(request.space, entry.s3_key, AbortSignal.timeout(10_000));
           } catch {
             fail(503, 'cleanup_pending');
           }
@@ -518,7 +580,7 @@ export function createStorageSeal(options: Options): StorageSeal {
           });
         }
         await tx(async (client) => {
-          await key(client, request.effectKey);
+          await key(client, 'seal', request.effectKey, request.space);
           if (
             (
               await client.query(
@@ -551,11 +613,11 @@ export function createStorageSeal(options: Options): StorageSeal {
         });
       }
       return tx(async (client) => {
-        await key(client, request.effectKey);
+        await key(client, 'seal', request.effectKey, request.space);
         const saved = (
           await client.query<{ receipt: Record<string, unknown> }>(
-            'SELECT receipt FROM storage.seal_receipts WHERE effect_key=$1',
-            [request.effectKey]
+            'SELECT receipt FROM storage.seal_receipts WHERE space_id=$1 AND effect_key=$2',
+            [request.space, request.effectKey]
           )
         ).rows[0];
         if (saved) return saved.receipt;
@@ -566,6 +628,7 @@ export function createStorageSeal(options: Options): StorageSeal {
               version: string;
               sha256: string;
               objects: Marked[];
+              excluded: (Marked & { reason: 'checksum_mismatch' })[];
               reason: string | null;
             }>('SELECT * FROM storage.seal_manifests WHERE space_id=$1', [request.space])
           ).rows[0]
@@ -583,6 +646,7 @@ export function createStorageSeal(options: Options): StorageSeal {
             version: Number(manifest.version),
             sha256: manifest.sha256,
             objects: manifest.objects,
+            ...(manifest.excluded.length ? { excluded: manifest.excluded } : {}),
           },
         };
         await client.query(
@@ -614,8 +678,8 @@ export function createStorageSeal(options: Options): StorageSeal {
           if (identity.role !== 'core') fail(403, 'identity_denied');
           await tx(async (client) => {
             const row = (
-              await client.query<{ id: string }>(
-                'SELECT id FROM storage.spaces WHERE id=$1 FOR SHARE',
+              await client.query<{ id: string; revision: string; mode: string }>(
+                'SELECT id,access_revision::text AS revision,mode FROM storage.spaces WHERE id=$1 FOR SHARE',
                 [space]
               )
             ).rows[0];
@@ -636,8 +700,8 @@ export function createStorageSeal(options: Options): StorageSeal {
             if (
               (dispatch as (value: unknown) => unknown)({
                 space,
-                revision: '0',
-                mode: 'active',
+                revision: row.revision,
+                mode: row.mode,
               }) !== undefined
             )
               fail(500, 'async_dispatch_forbidden');

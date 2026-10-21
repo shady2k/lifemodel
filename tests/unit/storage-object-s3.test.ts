@@ -51,6 +51,7 @@ async function put(
   key = 'private-001'
 ) {
   await client.put(
+    'space-a',
     key,
     bytes.length,
     hash(bytes),
@@ -62,11 +63,122 @@ async function put(
 }
 
 describe('the module private S3 byte backend', () => {
+  it('settles only the selected space while another space has an open upload', async () => {
+    const { client } = await setup();
+    const bytes = Buffer.from('held upload');
+    let entered: () => void = () => undefined;
+    let release: () => void = () => undefined;
+    const guarded = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const upload = client.put(
+      'space-a',
+      'private-held',
+      bytes.length,
+      hash(bytes),
+      source(bytes),
+      new AbortController().signal,
+      async (_size, send) => {
+        entered();
+        await released;
+        send();
+      }
+    );
+    try {
+      await guarded;
+      let ownSettled = false;
+      const own = client.settle('space-a', AbortSignal.timeout(1000)).then(() => {
+        ownSettled = true;
+      });
+      await client.settle('space-b', AbortSignal.timeout(1000));
+      expect(ownSettled).toBe(false);
+      release();
+      await upload;
+      await own;
+    } finally {
+      release();
+      await upload.catch(() => undefined);
+    }
+  });
+  it('tracks operations before custody resolves so same-space settlement cannot miss a request', async () => {
+    const { server } = await setup();
+    const bytes = Buffer.from('held custody');
+    server.objects.set('private-held', { bytes, sha256: hash(bytes) });
+    let entered: () => void = () => undefined;
+    let release: () => void = () => undefined;
+    const reading = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const client = createStorageObjectS3({
+      endpoint: server.endpoint,
+      bucket: server.bucket,
+      custody: {
+        async read() {
+          entered();
+          await released;
+          return server.credentials;
+        },
+      },
+    });
+    cleanup.push(() => client.close());
+    const verification = client.verify(
+      'space-a',
+      'private-held',
+      bytes.length,
+      hash(bytes),
+      new AbortController().signal
+    );
+    try {
+      await reading;
+      let ownSettled = false;
+      const own = client.settle('space-a', AbortSignal.timeout(1000)).then(() => {
+        ownSettled = true;
+      });
+      await client.settle('space-b', AbortSignal.timeout(1000));
+      expect(ownSettled).toBe(false);
+      expect(server.requests).toHaveLength(0);
+      release();
+      await verification;
+      await own;
+      expect(server.requests.map((entry) => entry.method)).toEqual(['HEAD']);
+    } finally {
+      release();
+      await verification.catch(() => undefined);
+    }
+  });
+  it.each([404, 500])(
+    'distinguishes HEAD integrity failure from backend status %s',
+    async (status) => {
+      const { client, server } = await setup();
+      const bytes = Buffer.from('x');
+      server.objects.set('private-missing', { bytes, sha256: hash(bytes) });
+      server.hooks.beforeHead = () => ({ status });
+      await expect(
+        client.verify(
+          'space-a',
+          'private-missing',
+          1,
+          hash(Buffer.from('x')),
+          new AbortController().signal
+        )
+      ).rejects.toMatchObject({
+        status: 503,
+        code: status === 404 ? 'checksum_mismatch' : 'object_store_unavailable',
+      });
+    }
+  );
   it('signs PUT and checksum-enabled HEAD and verifies durable bytes before resolving', async () => {
     const fixture = await setup({ chunkBytes: 7 });
     const bytes = Buffer.from('verified immutable bytes');
     const guarded: number[] = [];
     await fixture.client.put(
+      'space-a',
       'private-001',
       bytes.length,
       hash(bytes),
@@ -113,7 +225,7 @@ describe('the module private S3 byte backend', () => {
       });
       await expect(put(client)).rejects.toMatchObject({
         status: 503,
-        code: 'object_store_unavailable',
+        code: 'checksum_mismatch',
       });
       expect(server.objects.size).toBe(1);
     }
@@ -125,6 +237,7 @@ describe('the module private S3 byte backend', () => {
       const bytes = Buffer.from('bytes');
       await expect(
         client.put(
+          'space-a',
           'private-001',
           kind === 'length' ? 2 : bytes.length,
           kind === 'hash' ? '0'.repeat(64) : hash(bytes),
@@ -141,6 +254,7 @@ describe('the module private S3 byte backend', () => {
     let guards = 0;
     await expect(
       client.put(
+        'space-a',
         'private-001',
         6,
         hash(Buffer.from('secret')),
@@ -160,7 +274,13 @@ describe('the module private S3 byte backend', () => {
     const { client, server } = await setup({ chunkBytes: 3 });
     const bytes = await put(client);
     const chunks: Buffer[] = [];
-    for await (const chunk of await client.get('private-001', 1, 13, new AbortController().signal))
+    for await (const chunk of await client.get(
+      'space-a',
+      'private-001',
+      1,
+      13,
+      new AbortController().signal
+    ))
       chunks.push(chunk);
     expect(chunks.every((c) => c.length <= 3)).toBe(true);
     expect(Buffer.concat(chunks)).toEqual(bytes.subarray(1, 14));
@@ -190,7 +310,15 @@ describe('the module private S3 byte backend', () => {
       [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => undefined) }),
     };
     await expect(
-      client.put('private-001', 1, '0'.repeat(64), stalled, new AbortController().signal, dispatch)
+      client.put(
+        'space-a',
+        'private-001',
+        1,
+        '0'.repeat(64),
+        stalled,
+        new AbortController().signal,
+        dispatch
+      )
     ).rejects.toMatchObject({ status: 503 });
     server.objects.set('private-002', { bytes: Buffer.from('x'), sha256: hash(Buffer.from('x')) });
     const controller = new AbortController();
@@ -198,37 +326,38 @@ describe('the module private S3 byte backend', () => {
       controller.abort();
       return 'hang';
     };
-    await expect(client.get('private-002', 0, 0, controller.signal)).rejects.toBeInstanceOf(
-      StorageAccessError
-    );
+    await expect(
+      client.get('space-a', 'private-002', 0, 0, controller.signal)
+    ).rejects.toBeInstanceOf(StorageAccessError);
   });
   it('aborts GET streams and can make another request after a dropped socket', async () => {
     const { client, server } = await setup();
     await put(client, Buffer.alloc(200_000, 3));
     const controller = new AbortController();
-    const stream = await client.get('private-001', 0, 199_999, controller.signal);
+    const stream = await client.get('space-a', 'private-001', 0, 199_999, controller.signal);
     controller.abort();
     await expect(read(stream)).rejects.toBeInstanceOf(StorageAccessError);
     server.hooks.beforeGet = () => 'lose-response';
     await expect(
-      client.get('private-001', 0, 1, new AbortController().signal)
+      client.get('space-a', 'private-001', 0, 1, new AbortController().signal)
     ).rejects.toBeInstanceOf(StorageAccessError);
     delete server.hooks.beforeGet;
     expect(
-      (await read(await client.get('private-001', 0, 1, new AbortController().signal))).length
+      (await read(await client.get('space-a', 'private-001', 0, 1, new AbortController().signal)))
+        .length
     ).toBe(2);
   });
   it('rejects preaborted requests, unbounded settings, and unsafe keys locally', async () => {
     const { client, server } = await setup();
     const controller = new AbortController();
     controller.abort();
-    await expect(client.get('private-001', 0, 1, controller.signal)).rejects.toBeInstanceOf(
-      StorageAccessError
-    );
+    await expect(
+      client.get('space-a', 'private-001', 0, 1, controller.signal)
+    ).rejects.toBeInstanceOf(StorageAccessError);
     for (const key of ['../escape', '/root', 'a%2fb', 'a?b'])
-      await expect(client.get(key, 0, 1, new AbortController().signal)).rejects.toBeInstanceOf(
-        StorageAccessError
-      );
+      await expect(
+        client.get('space-a', key, 0, 1, new AbortController().signal)
+      ).rejects.toBeInstanceOf(StorageAccessError);
     expect(server.requests).toHaveLength(0);
     expect(() =>
       createStorageObjectS3({
@@ -246,6 +375,7 @@ describe('the module private S3 byte backend', () => {
     const sizes: number[] = [];
     const chunks: Buffer[] = [];
     for await (const chunk of await client.get(
+      'space-a',
       'private-large',
       0,
       bytes.length - 1,

@@ -8,6 +8,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { PoolClient } from 'pg';
+import { createStorageSeal } from '../../loader/src/storage-seal.js';
+import { createStorageAccess } from '../../loader/src/storage-access.js';
+import { createStorageObjectS3 } from '../../loader/src/storage-object-s3.js';
+import { createKubernetesStorageIdentity } from '../../loader/src/storage-identity.js';
 import { createTestStores, workerDatabaseUrl, type TestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
 import { createSealIdentity } from '../helpers/storage-seal-identity.js';
@@ -390,6 +394,39 @@ afterAll(async () => {
 }, 20_000);
 
 describe('module-owned allocation, verified binding and marked core reads', () => {
+  it('core read decisions carry the actual locked revision and storage mode', async () => {
+    await prepare();
+    const s3 = createStorageObjectS3({
+      endpoint: backend.endpoint,
+      bucket: backend.bucket,
+      custody: { read: async () => backend.credentials },
+    });
+    const access = createStorageAccess({
+      connectionString: workerDatabaseUrl(),
+      identity: createKubernetesStorageIdentity(identity.options),
+    });
+    const seal = createStorageSeal({ connectionString: workerDatabaseUrl(), s3, access });
+    const stream = seal.openCoreStream({ token: 'coreRead', space: spaces.a });
+    try {
+      for (const mode of ['wrapping', 'frozen', 'sealed']) {
+        await stores.postgres.query(
+          'UPDATE storage.spaces SET access_revision=7,mode=$2 WHERE id=$1',
+          [spaces.a, mode]
+        );
+        let decision: unknown;
+        await stream.chunk(0, (value) => {
+          decision = value;
+          return undefined;
+        });
+        expect(decision).toEqual({ space: spaces.a, revision: '7', mode });
+      }
+    } finally {
+      stream.close();
+      await seal.close();
+      s3.close();
+    }
+  });
+
   it('allocates once per launch, replays exact receipts and conflicts on changed keyed inputs', async () => {
     const first = await allocate('a');
     expect((await call('control', 'POST', '/allocate', allocateInput('a'))).json).toEqual(first);
@@ -399,6 +436,14 @@ describe('module-owned allocation, verified binding and marked core reads', () =
     expect(
       (await call('control', 'POST', '/allocate', { ...allocateInput('a'), taskId: 'other' }))
         .status
+    ).toBe(409);
+    expect(
+      (
+        await call('control', 'POST', '/allocate', {
+          ...allocateInput('a', 'changed-retention'),
+          retentionRevision: 'retention-2',
+        })
+      ).status
     ).toBe(409);
     expect(
       (await stores.postgres.query('SELECT count(*)::int AS n FROM storage.spaces')).rows[0].n
@@ -602,6 +647,142 @@ describe('module-owned allocation, verified binding and marked core reads', () =
 });
 
 describe('durable seal recovery at real process and store boundaries', () => {
+  it('seals while a foreign space has a live core read transport', async () => {
+    await prepare();
+    const data = await populate();
+    const reached = deferred();
+    const release = deferred();
+    releases.push(release.resolve);
+    backend.hooks.beforeGet = async () => {
+      reached.resolve();
+      await release.promise;
+    };
+    const downloading = call(
+      'read',
+      'GET',
+      `/spaces/${spaces.b}/objects/${data.b[0].receipt.id}`
+    ).catch(() => undefined);
+    await reached.promise;
+    const sealed = await call('control', 'POST', '/seal', sealInput());
+    expect(sealed.status).toBe(200);
+    expect(sealed.json.state).toBe('sealed');
+    release.resolve();
+    expect((await downloading)?.body).toEqual(data.b[0].bytes);
+  }, 30_000);
+
+  it.each(['failed', 'stopped'] as const)(
+    'recovers a frozen checksum mismatch as %s using only persisted candidates',
+    async (outcome) => {
+      await prepare();
+      const data = await populate();
+      const candidate = (
+        await stores.postgres.query(
+          'SELECT a.s3_key FROM storage.object_versions v JOIN storage.upload_attempts a ON a.id=v.attempt_id WHERE v.object_id=$1',
+          [data.a[0].receipt.id]
+        )
+      ).rows[0];
+      backend.objects.get(candidate.s3_key)!.sha256 = '0'.repeat(64);
+      const first = await call('control', 'POST', '/seal', sealInput());
+      expect(first.status).toBe(503);
+      expect(await manifest()).toBeUndefined();
+      // A new completed key must never hide corrupt marked bytes.
+      expect(
+        (
+          await call('control', 'POST', '/seal', {
+            ...sealInput('a', 'completed', 'still-completed'),
+            expectedRevision: '1',
+          })
+        ).status
+      ).toBe(409);
+      // Poison fresh catalog metadata: recovery must use the frozen candidate list.
+      await stores.postgres.query(
+        "UPDATE storage.objects SET mark='artifact',name='not-the-frozen-name' WHERE id=$1",
+        [data.a[1].receipt.id]
+      );
+      const request = { ...sealInput('a', outcome, 'repair-hash'), expectedRevision: '1' };
+      await kill();
+      await start();
+      const sealed = await call('control', 'POST', '/seal', request);
+      expect(sealed.status).toBe(200);
+      expect(sealed.json).toMatchObject({ outcome, state: 'sealed', reason: 'checksum_mismatch' });
+      expect(sealed.json.manifest.objects).toEqual(
+        marked(data).filter((o) => o.id !== data.a[0].receipt.id)
+      );
+      expect(sealed.json.manifest.excluded).toEqual([
+        { ...data.a[0].receipt, reason: 'checksum_mismatch' },
+      ]);
+      expect(sealed.json.manifest.sha256).toBe(
+        hash(
+          Buffer.from(
+            JSON.stringify({
+              version: 1,
+              objects: sealed.json.manifest.objects.map((o: ObjectReceipt) => ({
+                id: o.id,
+                name: o.name,
+                size: o.size,
+                sha256: o.sha256,
+                mark: o.mark,
+              })),
+              excluded: sealed.json.manifest.excluded.map((o: ObjectReceipt) => ({
+                id: o.id,
+                name: o.name,
+                size: o.size,
+                sha256: o.sha256,
+                mark: o.mark,
+                reason: 'checksum_mismatch',
+              })),
+            })
+          )
+        )
+      );
+      expect(backend.objects.has(candidate.s3_key)).toBe(false);
+      expect(
+        (await call('read', 'GET', `/spaces/${spaces.a}/objects/${data.a[0].receipt.id}`)).status
+      ).toBe(404);
+      expect((await call('control', 'POST', '/seal', request)).json).toEqual(sealed.json);
+      expect((await call('control', 'POST', '/seal', sealInput())).status).toBe(409);
+    },
+    30_000
+  );
+  it('normal seal does not await a slow own-file task download', async () => {
+    await prepare();
+    const data = await populate();
+    const reached = deferred();
+    const release = deferred();
+    releases.push(release.resolve);
+    backend.hooks.beforeGet = async () => {
+      reached.resolve();
+      await release.promise;
+    };
+    const downloading = call(
+      'task',
+      'GET',
+      `/spaces/${spaces.a}/objects/${data.a[0].receipt.id}`
+    ).catch(() => undefined);
+    await reached.promise;
+    const sealed = await call('control', 'POST', '/seal', sealInput());
+    expect(sealed.status).toBe(200);
+    expect(sealed.json.state).toBe('sealed');
+    release.resolve();
+    await downloading;
+  }, 30_000);
+  it('scopes a seal effect key per space and separately from allocate and bind', async () => {
+    await prepare();
+    await populate();
+    for (const task of ['a', 'b']) {
+      const reply = await call(
+        'control',
+        'POST',
+        '/seal',
+        sealInput(task, 'completed', 'allocate-a')
+      );
+      expect(reply.status).toBe(200);
+      expect(
+        (await call('control', 'POST', '/seal', sealInput(task, 'completed', 'allocate-a'))).json
+      ).toEqual(reply.json);
+    }
+  }, 30_000);
+
   it('aborts and settles a live mid-body PUT before completing seal cleanup', async () => {
     await prepare();
     const result = await put('a', 'ready-result', Buffer.from('result'));
@@ -901,6 +1082,59 @@ describe('durable seal recovery at real process and store boundaries', () => {
       ).status
     ).toBe(403);
   }, 30_000);
+  it('seals promptly while another space has an unfinished task transfer', async () => {
+    await prepare();
+    const data = await populate();
+    let reached = false;
+    backend.hooks.duringPut = async () => {
+      reached = true;
+    };
+    const bytes = Buffer.alloc(8 * 1024 * 1024, 98);
+    const pending = new Promise<void>((resolve) => {
+      const req = request(
+        {
+          hostname: 'localhost',
+          port: ports.task,
+          method: 'PUT',
+          path: `/spaces/${spaces.b}/objects/unrelated-transfer`,
+          ca: identity.certificate.ca,
+          agent: false,
+          headers: {
+            authorization: 'Bearer b',
+            'content-length': String(bytes.length),
+            'x-storage-name': Buffer.from('b/unrelated.txt').toString('base64url'),
+            'x-storage-length': String(bytes.length),
+            'x-storage-sha256': hash(bytes),
+          },
+        },
+        (res) => {
+          res.on('error', () => resolve());
+          res.on('end', () => resolve());
+          res.resume();
+        }
+      );
+      req.on('socket', (socket) => socket.on('error', () => undefined));
+      req.on('error', () => resolve());
+      req.on('close', () => resolve());
+      releases.push(() => req.destroy());
+      req.write(bytes.subarray(0, 4 * 1024 * 1024));
+    });
+    await expect.poll(() => reached, { timeout: 5000 }).toBe(true);
+    const began = performance.now();
+    const replay = await call('control', 'POST', '/seal', sealInput());
+    expect(replay.status).toBe(200);
+    expect(replay.json.state).toBe('sealed');
+    expect(performance.now() - began).toBeLessThan(4000);
+    // The slow foreign transfer remains active and writable until its own stop.
+    expect((await call('task', 'GET', `/spaces/${spaces.b}/objects`, undefined, 'b')).status).toBe(
+      200
+    );
+    for (const release of releases.splice(0)) release();
+    await pending;
+    expect((await call('read', 'GET', `/spaces/${spaces.a}/objects`)).json.objects).toEqual(
+      data.a.slice(0, 4).map((o) => o.receipt)
+    );
+  }, 30_000);
   it('replays a sealed receipt immediately while another space has an unfinished task transfer', async () => {
     await prepare();
     const data = await populate();
@@ -958,15 +1192,39 @@ describe('durable seal recovery at real process and store boundaries', () => {
   }, 30_000);
   it('fails a completed outcome with no marked result instead of inventing success', async () => {
     await prepare();
+    expect((await put('a', 'unmarked-result', Buffer.from('unmarked'))).status).toBe(200);
     const failed = await call('control', 'POST', '/seal', sealInput());
     expect(failed.status).toBe(409);
     expect(failed.json.error.code).toBe('missing_result');
-    await assertFrozen();
+    expect(
+      (
+        await stores.postgres.query(
+          'SELECT mode,access_revision::text AS revision FROM storage.spaces WHERE id=$1',
+          [spaces.a]
+        )
+      ).rows[0]
+    ).toEqual({ mode: 'open', revision: '0' });
     expect(await manifest()).toBeUndefined();
+    expect(
+      (await stores.postgres.query('SELECT count(*)::int AS n FROM storage.seal_operations'))
+        .rows[0].n
+    ).toBe(0);
     expect(
       (await stores.postgres.query('SELECT count(*)::int AS n FROM storage.seal_receipts')).rows[0]
         .n
     ).toBe(0);
+    const recovered = await call(
+      'control',
+      'POST',
+      '/seal',
+      sealInput('a', 'failed', 'recover-missing')
+    );
+    expect(recovered.status).toBe(200);
+    expect(recovered.json).toMatchObject({
+      outcome: 'failed',
+      reason: 'missing_result',
+      state: 'sealed',
+    });
   });
   it('persists the manifest before delete, remains read-only on cleanup failure, then retries without rescanning', async () => {
     await prepare();

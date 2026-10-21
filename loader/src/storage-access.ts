@@ -12,7 +12,7 @@ export { StorageAccessError } from './storage-access-error.js';
 export interface StorageDecision {
   space: string;
   revision: string;
-  mode: 'active' | 'wrapping';
+  mode: 'active' | 'wrapping' | 'open' | 'frozen' | 'sealed' | 'revoked';
 }
 export interface RevokeReceipt {
   id: string;
@@ -44,7 +44,13 @@ export interface StorageAccessOptions {
 }
 export interface StorageAccess {
   identity: KubernetesStorageIdentity;
-  openTaskStream(input: { token: string; space: string; signal?: AbortSignal }): StorageTaskStream;
+  openTaskStream(input: {
+    token: string;
+    space: string;
+    signal?: AbortSignal;
+    /** Writer/publication streams participate in normal-end quiescence. Defaults to true. */
+    write?: boolean;
+  }): StorageTaskStream;
   revoke(space: string, expectedRevision: string, effectKey: string): Promise<RevokeReceipt>;
   /** Freeze commits the SQL fence before canceling and settling local handlers. */
   settleSpace(space: string): Promise<void>;
@@ -76,6 +82,7 @@ export const STORAGE_AUTH_READ = `WITH instant AS MATERIALIZED (SELECT clock_tim
 export function createStorageAccess(options: StorageAccessOptions): StorageAccess {
   const streams = new Map<string, Set<AbortController>>();
   const settlements = new Map<AbortController, Promise<void>>();
+  const writers = new Set<AbortController>();
   const timeoutMs = options.timeoutMs ?? 5_000;
   /** Serializes local decisions/dispatch with commit-to-cancel-to-ACK. Not transfer. */
   const queues = new Map<string, Promise<void>>();
@@ -148,11 +155,13 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
   return {
     identity: options.identity,
     quiesceSpace: async (space) => {
-      const pending = [...(streams.get(space) ?? [])].map((controller) => {
-        const promise = settlements.get(controller);
-        if (!promise) throw new StorageAccessError(503, 'cleanup_pending');
-        return promise;
-      });
+      const pending = [...(streams.get(space) ?? [])]
+        .filter((controller) => writers.has(controller))
+        .map((controller) => {
+          const promise = settlements.get(controller);
+          if (!promise) throw new StorageAccessError(503, 'cleanup_pending');
+          return promise;
+        });
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
@@ -200,7 +209,7 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
         return false;
       }
     },
-    openTaskStream: ({ token, space, signal: parent }) => {
+    openTaskStream: ({ token, space, signal: parent, write = true }) => {
       validateSpace(space);
       const controller = new AbortController();
       const controllers = streams.get(space) ?? new Set<AbortController>();
@@ -212,6 +221,7 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
         })
       );
       controllers.add(controller);
+      if (write) writers.add(controller);
       streams.set(space, controllers);
       const signal = AbortSignal.any([controller.signal, ...(parent ? [parent] : [])]);
       function live(): void {
@@ -297,6 +307,7 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
           controller.abort();
           controllers.delete(controller);
           settlements.delete(controller);
+          writers.delete(controller);
           settled();
           if (!controllers.size && streams.get(space) === controllers) streams.delete(space);
         },

@@ -14,6 +14,7 @@ import { signS3Request } from './storage-s3.js';
 export type StorageObjectS3Guard = (bytes: number, dispatch: () => undefined) => Promise<void>;
 export interface StorageObjectS3 {
   put(
+    space: string,
     key: string,
     length: number,
     sha256: string,
@@ -23,16 +24,23 @@ export interface StorageObjectS3 {
     onProgress?: () => void
   ): Promise<void>;
   get(
+    space: string,
     key: string,
     start: number,
     end: number,
     signal: AbortSignal,
     onProgress?: () => void
   ): Promise<AsyncIterable<Buffer>>;
-  verify(key: string, length: number, sha256: string, signal: AbortSignal): Promise<void>;
-  delete(key: string, signal: AbortSignal): Promise<void>;
-  /** Await real request closure, including canceled operations whose handler left. */
-  settle(signal: AbortSignal): Promise<void>;
+  verify(
+    space: string,
+    key: string,
+    length: number,
+    sha256: string,
+    signal: AbortSignal
+  ): Promise<void>;
+  delete(space: string, key: string, signal: AbortSignal): Promise<void>;
+  /** Await this space’s operations and real request closure, including canceled handlers. */
+  settle(space: string, signal: AbortSignal): Promise<void>;
   close(): void;
 }
 export interface StorageObjectS3Options {
@@ -75,15 +83,35 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
   const httpAgent = new HttpAgent({ keepAlive: true, maxSockets: 16, maxFreeSockets: 4 });
   const httpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 16, maxFreeSockets: 4 });
   const active = new Set<() => void>();
-  const transportClosures = new Set<Promise<void>>();
+  const pendingBySpace = new Map<string, Set<Promise<void>>>();
+  function track(space: string) {
+    const pending = pendingBySpace.get(space) ?? new Set<Promise<void>>();
+    let resolve: () => void = ignoreError;
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    pending.add(promise);
+    pendingBySpace.set(space, pending);
+    return {
+      promise,
+      complete: () => {
+        pending.delete(promise);
+        if (!pending.size && pendingBySpace.get(space) === pending) pendingBySpace.delete(space);
+        resolve();
+      },
+    };
+  }
   const sockets = new WeakSet<object>();
   let closed = false;
   function path(key: string): URL {
     if (!/^[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/.test(key) || key.length > 1024) throw invalid();
     return new URL(`/${options.bucket}/${key}`, endpoint);
   }
-  function operation(parent: AbortSignal, onProgress?: () => void) {
+  function operation(space: string, parent: AbortSignal, onProgress?: () => void) {
     if (closed || parent.aborted) throw unavailable();
+    // Track before the custody await: no ClientRequest exists yet, but this
+    // operation can still dispatch one unless it completes or is cancelled.
+    const ongoing = track(space);
     const controller = new AbortController();
     const requests = new Set<ClientRequest>();
     const requestClosures: Promise<void>[] = [];
@@ -112,6 +140,7 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
       clearTimeout(timer);
       parent.removeEventListener('abort', cancel);
       active.delete(cancel);
+      ongoing.complete();
     }
     async function wait<T>(promise: Promise<T>): Promise<T> {
       if (controller.signal.aborted) {
@@ -176,17 +205,14 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
       // Register before returning the request: cancellation is not settlement.
       // ClientRequest close also fires on normal completion with a pooled socket;
       // waiting for the reusable socket itself would block successful transfers.
-      const closure = new Promise<void>((resolve) => {
-        req.once('close', () => {
-          requests.delete(req);
-          transportClosures.delete(closure);
-          resolve();
-        });
+      const closure = track(space);
+      req.once('close', () => {
+        requests.delete(req);
+        closure.complete();
       });
       // Keep this independent of the operation lifetime: an operation timeout
       // must not turn an unclosed transport into successful seal cleanup.
-      transportClosures.add(closure);
-      requestClosures.push(closure);
+      requestClosures.push(closure.promise);
       req.on('error', () => {
         rejectResponse(unavailable());
       });
@@ -229,12 +255,13 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
       const head = await open('HEAD', url, { 'x-amz-checksum-mode': 'ENABLED' });
       head.req.end();
       const verified = await wait(head.received);
+      if (verified.statusCode === 404) throw new StorageAccessError(503, 'checksum_mismatch');
+      if (verified.statusCode !== 200) throw unavailable();
       if (
-        verified.statusCode !== 200 ||
         verified.headers['content-length'] !== String(length) ||
         verified.headers['x-amz-checksum-sha256'] !== Buffer.from(sha256, 'hex').toString('base64')
       )
-        throw unavailable();
+        throw new StorageAccessError(503, 'checksum_mismatch');
       progress();
       await drain(verified);
       if (controller.signal.aborted) throw unavailable();
@@ -254,11 +281,11 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
     };
   }
   return {
-    async put(key, length, sha256, source, signal, guard, onProgress) {
+    async put(space, key, length, sha256, source, signal, guard, onProgress) {
       const url = path(key);
       if (!Number.isSafeInteger(length) || length < 0 || !/^[a-f0-9]{64}$/.test(sha256))
         throw invalid();
-      const op = operation(signal, onProgress);
+      const op = operation(space, signal, onProgress);
       let iterator: AsyncIterator<Buffer> | undefined;
       try {
         const { req, received } = await op.open(
@@ -344,7 +371,7 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
         await op.settle();
       }
     },
-    async get(key, start, end, signal, onProgress) {
+    async get(space, key, start, end, signal, onProgress) {
       const url = path(key);
       if (
         !Number.isSafeInteger(start) ||
@@ -354,7 +381,7 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
         !Number.isSafeInteger(end - start + 1)
       )
         throw invalid();
-      const op = operation(signal, onProgress);
+      const op = operation(space, signal, onProgress);
       try {
         const { req, received } = await op.open('GET', url, {
           range: `bytes=${String(start)}-${String(end)}`,
@@ -425,11 +452,11 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
         throw unavailable();
       }
     },
-    async verify(key, length, sha256, signal) {
+    async verify(space, key, length, sha256, signal) {
       const url = path(key);
       if (!Number.isSafeInteger(length) || length < 0 || !/^[a-f0-9]{64}$/.test(sha256))
         throw invalid();
-      const op = operation(signal);
+      const op = operation(space, signal);
       try {
         await op.verify(url, length, sha256);
       } catch (error) {
@@ -441,9 +468,9 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
         await op.settle();
       }
     },
-    async delete(key, signal) {
+    async delete(space, key, signal) {
       const url = path(key);
-      const op = operation(signal);
+      const op = operation(space, signal);
       try {
         const { req, received } = await op.open('DELETE', url, {});
         req.end();
@@ -462,20 +489,25 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
         await op.settle();
       }
     },
-    async settle(signal) {
-      const pending = [...transportClosures];
+    async settle(space, signal) {
       if (signal.aborted) throw new StorageAccessError(503, 'cleanup_pending');
-      await new Promise<void>((resolve, reject) => {
-        const abort = (): void => {
-          reject(new StorageAccessError(503, 'cleanup_pending'));
-        };
-        signal.addEventListener('abort', abort, { once: true });
-        void Promise.all(pending).then(() => {
-          signal.removeEventListener('abort', abort);
-          if (signal.aborted) reject(new StorageAccessError(503, 'cleanup_pending'));
-          else resolve();
+      // Re-read after each batch: a custody await may become a transport while
+      // this barrier waits, and every such request must close before cleanup.
+      while (pendingBySpace.has(space)) {
+        const pending = [...(pendingBySpace.get(space) ?? [])];
+        await new Promise<void>((resolve, reject) => {
+          const abort = (): void => {
+            signal.removeEventListener('abort', abort);
+            reject(new StorageAccessError(503, 'cleanup_pending'));
+          };
+          signal.addEventListener('abort', abort, { once: true });
+          void Promise.all(pending).then(() => {
+            signal.removeEventListener('abort', abort);
+            if (signal.aborted) reject(new StorageAccessError(503, 'cleanup_pending'));
+            else resolve();
+          });
         });
-      });
+      }
     },
     close() {
       closed = true;

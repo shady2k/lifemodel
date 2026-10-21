@@ -300,6 +300,7 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
             if (hash.digest('hex') !== sha256) throw new StorageAccessError(400, 'hash_mismatch');
           }
           await options.s3.put(
+            space,
             key,
             size,
             sha256,
@@ -415,7 +416,14 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
         let headers = false;
         for (let offset = start; offset <= end; offset += settings.chunkBytes) {
           const last = Math.min(end, offset + settings.chunkBytes - 1);
-          const body = await options.s3.get(saved.s3_key, offset, last, stream.signal, progress);
+          const body = await options.s3.get(
+            space,
+            saved.s3_key,
+            offset,
+            last,
+            stream.signal,
+            progress
+          );
           let received = 0;
           for await (const part of body) {
             for (let index = 0; index < part.length; index += settings.chunkBytes) {

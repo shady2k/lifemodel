@@ -33,13 +33,14 @@ CREATE TABLE IF NOT EXISTS storage.bind_receipts (
 );
 CREATE TABLE IF NOT EXISTS storage.seal_operations (
   space_id text PRIMARY KEY REFERENCES storage.spaces(id),
-  effect_key text NOT NULL UNIQUE,
+  effect_key text NOT NULL,
   request jsonb NOT NULL,
   receipt_id text NOT NULL UNIQUE,
   manifest_id text NOT NULL UNIQUE,
   revision bigint NOT NULL CHECK (revision >= 0),
   outcome text NOT NULL CHECK (outcome IN ('completed','failed','stopped')),
   candidates jsonb NOT NULL,
+  checksum_recovery boolean NOT NULL DEFAULT false,
   state text NOT NULL CHECK (state IN ('frozen','manifest-committed','cleanup','sealed')),
   frozen_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
@@ -49,6 +50,7 @@ CREATE TABLE IF NOT EXISTS storage.seal_manifests (
   version bigint NOT NULL CHECK (version=1),
   sha256 text NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
   objects jsonb NOT NULL,
+  excluded jsonb NOT NULL DEFAULT '[]'::jsonb,
   reason text
 );
 CREATE TABLE IF NOT EXISTS storage.seal_gc (
@@ -66,8 +68,9 @@ CREATE TABLE IF NOT EXISTS storage.object_tombstones (
   reason text NOT NULL CHECK (reason='seal_unmarked')
 );
 CREATE TABLE IF NOT EXISTS storage.seal_receipts (
-  effect_key text PRIMARY KEY,
+  effect_key text NOT NULL,
   space_id text NOT NULL UNIQUE REFERENCES storage.spaces(id),
-  receipt jsonb NOT NULL
+  receipt jsonb NOT NULL,
+  PRIMARY KEY(space_id,effect_key)
 );
 -- migrate:down
