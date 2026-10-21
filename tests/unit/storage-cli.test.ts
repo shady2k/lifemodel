@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { createServer, type Server } from 'node:https';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runStorageCli } from '../../loader/src/storage-cli.js';
@@ -116,6 +116,16 @@ describe('lifemodel-storage', () => {
     expect(JSON.parse(stdout)).toEqual(receipt);
     expect(stderr).toBe('');
   });
+  it.each(['\ufeff', '\ufeffreport.txt'])(
+    'preserves every code point in BOM-bearing upload names %j',
+    async (name) => {
+      await writeFile(join(directory, name), bytes);
+      answer = (_req, res) => res.end(JSON.stringify({ ...receipt, name }));
+      expect(await run(['put', name, '--upload-id', 'bom-upload']), stderr).toBe(0);
+      expect(calls[0]!.headers['x-storage-name']).toBe(Buffer.from(name).toString('base64url'));
+      expect(JSON.parse(stdout).name).toBe(name);
+    }
+  );
   it('rereads a projected token (including a rotated symlink) for every invocation', async () => {
     await source();
     await rm(join(directory, 'token'));
@@ -165,7 +175,7 @@ describe('lifemodel-storage', () => {
     expect(calls).toHaveLength(1);
     expect(stderr).toContain('transfer_failed');
   });
-  it('removes an incomplete download after the remote socket drops', async () => {
+  it('retains and identifies an incomplete inode after the remote socket drops', async () => {
     answer = (_req, res) => {
       res.writeHead(200, { 'content-length': '1000' });
       res.flushHeaders();
@@ -173,7 +183,45 @@ describe('lifemodel-storage', () => {
       res.destroy();
     };
     expect(await run(['get', 'object-a', 'download'])).toBe(1);
-    await expect(readFile(join(directory, 'download'))).rejects.toMatchObject({ code: 'ENOENT' });
+    const partial = await stat(join(directory, 'download'));
+    expect(partial.isFile()).toBe(true);
+    expect(stderr).toContain(
+      `partial_retained dev=${String(partial.dev)} ino=${String(partial.ino)}`
+    );
+    expect(stderr).not.toContain(directory);
+  });
+  it('does not unlink an unrelated replacement after a failed download', async () => {
+    const destination = join(directory, 'download');
+    const originalPartial = join(directory, 'original-partial');
+    const valuable = join(directory, 'valuable.txt');
+    const valuableBytes = Buffer.from('valuable unrelated user file');
+    await writeFile(valuable, valuableBytes);
+    let replacementInstalled = false;
+    let fixtureError: unknown;
+    answer = (req, _res) => {
+      // The request starts only after localFile exclusively created download.
+      // Replace the directory entry before failing the in-flight request.
+      void (async () => {
+        await rename(destination, originalPartial);
+        await rename(valuable, destination);
+        replacementInstalled = true;
+      })()
+        .catch((error: unknown) => {
+          fixtureError = error;
+        })
+        .finally(() => {
+          req.socket.destroy();
+        });
+    };
+    expect(await run(['get', 'object-a', 'download'])).toBe(1);
+    expect(fixtureError).toBeUndefined();
+    expect(replacementInstalled).toBe(true);
+    // The CLI owns the original inode, not the replacement destination name.
+    expect(await readFile(destination)).toEqual(valuableBytes);
+    const retained = await stat(originalPartial);
+    expect(stderr).toContain(
+      `partial_retained dev=${String(retained.dev)} ino=${String(retained.ino)}`
+    );
   });
   it('lists a bounded page and passes its opaque cursor without reinterpretation', async () => {
     const page = { objects: [receipt], nextCursor: 'next_cursor' };
@@ -296,6 +344,48 @@ describe('lifemodel-storage', () => {
     expect(await run(['list'])).toBe(1);
     expect(stdout).toBe('');
     expect(stderr).not.toContain('private');
+  });
+  it('awaits stdout completion before returning success', async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const writing = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const completion = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let settled = false;
+    const outcome = runStorageCli(['mark', 'object-a', 'artifact'], {
+      env,
+      cwd: directory,
+      stdout: async () => {
+        entered();
+        await completion;
+      },
+      stderr: () => undefined,
+    }).then((code) => {
+      settled = true;
+      return code;
+    });
+    await writing;
+    expect(settled).toBe(false);
+    release();
+    expect(await outcome).toBe(0);
+  });
+  it('does not recursively report a rejected stderr write', async () => {
+    let writes = 0;
+    expect(
+      await runStorageCli(['invalid'], {
+        env,
+        cwd: directory,
+        stdout: () => undefined,
+        stderr: async () => {
+          writes++;
+          throw new Error('broken pipe');
+        },
+      })
+    ).toBe(1);
+    expect(writes).toBe(1);
   });
   it('does not expose unknown response properties in successful JSON', async () => {
     answer = (_req, res) =>

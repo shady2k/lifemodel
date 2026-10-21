@@ -228,6 +228,33 @@ describe('task immutable object API', () => {
     ).toBe(409);
     expect((await list()).json.objects).toHaveLength(1);
   });
+  it.each([
+    ['BOM-only', '\ufeff'],
+    ['BOM-prefixed', '\ufeffreport.txt'],
+  ])('preserves the exact UTF-8 %s display name', async (_, name) => {
+    const reply = await put('bom-name', Buffer.from('named bytes'), name);
+    expect(reply.status).toBe(200);
+    expect(reply.json.name).toBe(name);
+    expect(Buffer.from(reply.json.name)).toEqual(Buffer.from(name));
+    const page = await list();
+    expect(page.status).toBe(200);
+    expect(page.json.objects).toEqual([reply.json]);
+    const retry = await put('bom-name', Buffer.from('named bytes'), name);
+    expect(retry.status).toBe(200);
+    expect(retry.json).toEqual(reply.json);
+  });
+  it('rejects a plain-name retry of a BOM-prefixed upload as conflicting', async () => {
+    const bytes = Buffer.from('same bytes');
+    const original = await put('bom-conflict', bytes, '\ufeffreport.txt');
+    expect(original.status).toBe(200);
+    const retry = await put('bom-conflict', bytes, 'report.txt');
+    expect(retry.status).toBe(409);
+    expect(retry.json.error.code).toBe('upload_conflict');
+    const page = await list();
+    expect(page.status).toBe(200);
+    expect(page.json.objects).toEqual([original.json]);
+    expect(original.json.name).toBe('\ufeffreport.txt');
+  });
   it.each(['short', 'surplus', 'hash'])('does not publish %s bytes', async (failure) => {
     const bytes = Buffer.from('payload');
     const extra =
@@ -270,6 +297,78 @@ describe('task immutable object API', () => {
       (await call('POST', '/spaces/a/objects/missing/mark', Buffer.from('{"role":"result"}')))
         .status
     ).toBe(404);
+  });
+  it('lists only acknowledged own-space metadata across populated-space pagination', async () => {
+    const receipts: Record<string, any[]> = { a: [], b: [] };
+    const marks = { a: 'artifact', b: 'result' };
+    // Interleave global sequences so every page boundary can cross a foreign row.
+    for (let n = 0; n < 2; n++) {
+      for (const space of ['a', 'b'] as const) {
+        const name = `${space}-private-name-${n}.txt`;
+        const bytes = Buffer.from(`${space}-private-bytes-${n}`);
+        const uploaded = await call(
+          'PUT',
+          `/spaces/${space}/objects/upload-${n}`,
+          bytes,
+          {
+            'x-storage-name': Buffer.from(name).toString('base64url'),
+            'x-storage-length': String(bytes.length),
+            'x-storage-sha256': hash(bytes),
+          },
+          space
+        );
+        expect(uploaded.status).toBe(200);
+        const marked = await call(
+          'POST',
+          `/spaces/${space}/objects/${uploaded.json.id}/mark`,
+          Buffer.from(JSON.stringify({ role: marks[space] })),
+          {},
+          space
+        );
+        expect(marked.status).toBe(200);
+        expect(marked.json).toEqual({ ...uploaded.json, mark: marks[space] });
+        receipts[space].push(marked.json);
+      }
+    }
+    for (const space of ['a', 'b'] as const) {
+      const foreign = receipts[space === 'a' ? 'b' : 'a'];
+      const assertNoForeignMetadata = (rows: any[]) => {
+        for (const other of foreign) {
+          expect(rows.map((row) => row.name)).not.toContain(other.name);
+          expect(rows.map((row) => row.sha256)).not.toContain(other.sha256);
+          expect(rows.map((row) => row.mark)).not.toContain(other.mark);
+        }
+      };
+      const full = await call('GET', `/spaces/${space}/objects?limit=100`, undefined, {}, space);
+      expect(full.status).toBe(200);
+      assertNoForeignMetadata(full.json.objects);
+      expect(full.json.objects.map((row: any) => row.id)).toEqual(
+        receipts[space].map((row) => row.id)
+      );
+      expect(full.json.objects).toEqual(receipts[space]);
+      let cursor = '';
+      const seen = [];
+      // Two one-row pages and the terminal empty page; bounded even if cursors regress.
+      for (let pageIndex = 0; pageIndex < 3; pageIndex++) {
+        const page = await call(
+          'GET',
+          `/spaces/${space}/objects?limit=1${cursor ? `&cursor=${cursor}` : ''}`,
+          undefined,
+          {},
+          space
+        );
+        expect(page.status).toBe(200);
+        assertNoForeignMetadata(page.json.objects);
+        expect(page.json.objects).toEqual(receipts[space].slice(pageIndex, pageIndex + 1));
+        expect(typeof page.json.nextCursor).toBe('string');
+        if (pageIndex < 2) expect(page.json.nextCursor).not.toBe(cursor);
+        else expect(page.json.nextCursor).toBe(cursor);
+        cursor = page.json.nextCursor;
+        seen.push(...page.json.objects);
+      }
+      expect(seen.map((row: any) => row.id)).toEqual(receipts[space].map((row) => row.id));
+      assertNoForeignMetadata(seen);
+    }
   });
   it('bounds ranges, cursors, listing and unknown selectors', async () => {
     const reply = await put('range', Buffer.from('0123456789'));

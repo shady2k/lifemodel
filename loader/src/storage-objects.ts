@@ -218,11 +218,16 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
         const nameBytes = Buffer.from(encoded, 'base64url');
         let name: string;
         try {
-          name = new TextDecoder('utf-8', { fatal: true }).decode(nameBytes);
+          // Display names are exact metadata: a leading BOM is part of the name.
+          name = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(nameBytes);
         } catch {
           invalid();
         }
-        if (nameBytes.toString('base64url') !== encoded) invalid();
+        if (
+          nameBytes.toString('base64url') !== encoded ||
+          !Buffer.from(name, 'utf8').equals(nameBytes)
+        )
+          invalid();
         validateStorageName(name);
         const length = header(req, 'x-storage-length');
         const sha256 = header(req, 'x-storage-sha256');

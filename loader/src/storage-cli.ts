@@ -1,6 +1,6 @@
 /** The narrow task storage client. It owns no S3 credentials or signing code. */
 import { constants } from 'node:fs';
-import { open, readFile, unlink, type FileHandle } from 'node:fs/promises';
+import { open, readFile, type FileHandle } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { request } from 'node:https';
 import type { IncomingMessage } from 'node:http';
@@ -15,8 +15,8 @@ const ROLES = new Set(['artifact', 'result', 'log']);
 export interface StorageCliOptions {
   env: NodeJS.ProcessEnv;
   cwd: string;
-  stdout(text: string): void;
-  stderr(text: string): void;
+  stdout(text: string): void | Promise<void>;
+  stderr(text: string): void | Promise<void>;
 }
 
 class CliError extends Error {
@@ -120,8 +120,8 @@ function parse(argv: string[]): Command {
 
 interface LocalFile {
   file: FileHandle;
-  /** Parent stays open even if its original path is renamed during the transfer. */
-  parent: string;
+  /** Identity of the inode we created, not its replaceable directory entry. */
+  identity: { dev: number; ino: number };
   close(): Promise<void>;
 }
 
@@ -159,11 +159,12 @@ async function localFile(cwd: string, name: string, output: boolean): Promise<Lo
         (output ? constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL : constants.O_RDONLY),
       0o600
     );
-    if (!(await file.stat()).isFile()) throw new CliError('local_file_invalid');
+    const stat = await file.stat();
+    if (!stat.isFile()) throw new CliError('local_file_invalid');
     const openedFile = file;
     return {
       file,
-      parent,
+      identity: { dev: stat.dev, ino: stat.ino },
       close: async () => {
         await openedFile.close();
         await Promise.all(directories.map((handle) => handle.close()));
@@ -455,16 +456,27 @@ export async function runStorageCli(argv: string[], options: StorageCliOptions):
         nextCursor: page['nextCursor'],
       };
     }
-    options.stdout(`${JSON.stringify(result)}\n`);
+    await options.stdout(`${JSON.stringify(result)}\n`);
     return 0;
   } catch (error) {
     const safe = error instanceof CliError ? error : new CliError('operation_failed');
-    options.stderr(
-      `lifemodel-storage: ${safe.code} id=${randomUUID()} status=${String(safe.status ?? 500)}\n`
-    );
+    // Node has no linkat(AT_EMPTY_PATH)/renameat2(RENAME_NOREPLACE) interface.
+    // A named staging entry or a stat-then-unlink would still race a same-task
+    // writer. Fail safely: retain the exclusively created inode, identify it,
+    // and NEVER unlink a caller-visible name, even if it still looks like ours.
+    const retained =
+      partial && local
+        ? ` partial_retained dev=${String(local.identity.dev)} ino=${String(local.identity.ino)}`
+        : '';
+    try {
+      await options.stderr(
+        `lifemodel-storage: ${safe.code} id=${randomUUID()} status=${String(safe.status ?? 500)}${retained}\n`
+      );
+    } catch {
+      // In particular, never report a broken stderr by writing to it again.
+    }
     return 1;
   } finally {
-    if (partial && local) await unlink(local.parent).catch(() => undefined);
     await local?.close().catch(() => undefined);
   }
 }
