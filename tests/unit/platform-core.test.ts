@@ -40,6 +40,29 @@ describe('core application generation', () => {
         name: 'platform-settings',
         configMap: { name: 'lifemodel-platform-settings', optional: true },
       },
+      // Explicit service audiences only, never the default API audience.
+      {
+        name: 'storage-identity',
+        projected: {
+          defaultMode: 288,
+          sources: [
+            {
+              serviceAccountToken: {
+                audience: 'lifemodel-core-storage-control',
+                expirationSeconds: 3600,
+                path: 'control-token',
+              },
+            },
+            {
+              serviceAccountToken: {
+                audience: 'lifemodel-core-storage-read',
+                expirationSeconds: 3600,
+                path: 'read-token',
+              },
+            },
+          ],
+        },
+      },
     ]);
     expect(pod.securityContext).toMatchObject({
       runAsNonRoot: true,
@@ -63,6 +86,11 @@ describe('core application generation', () => {
     expect(pod.containers[0].volumeMounts).toEqual([
       { name: 'tmp', mountPath: '/tmp' },
       { name: 'platform-settings', mountPath: PLATFORM_SETTINGS_DIR, readOnly: true },
+      {
+        name: 'storage-identity',
+        mountPath: '/var/run/secrets/lifemodel-storage',
+        readOnly: true,
+      },
     ]);
     expect(pod.initContainers[0].command).toEqual([
       '/usr/local/bin/lifemodel-core-entrypoint',
@@ -161,13 +189,14 @@ describe('core application generation', () => {
       )
       .filter((object: any) => object !== null && typeof object === 'object');
     const writeVerbs = new Set(['create', 'update', 'patch', 'delete', 'deletecollection', '*']);
-    const configMapWriters = documents.filter((object: any) =>
-      ['Role', 'ClusterRole'].includes(object.kind) &&
-      (object.rules ?? []).some(
-        (rule: any) =>
-          (rule.resources ?? []).includes('configmaps') &&
-          (rule.verbs ?? []).some((verb: string) => writeVerbs.has(verb))
-      )
+    const configMapWriters = documents.filter(
+      (object: any) =>
+        ['Role', 'ClusterRole'].includes(object.kind) &&
+        (object.rules ?? []).some(
+          (rule: any) =>
+            (rule.resources ?? []).includes('configmaps') &&
+            (rule.verbs ?? []).some((verb: string) => writeVerbs.has(verb))
+        )
     );
     // The projection writer exists - the loader's settings Role - and the
     // core is bound to none of the writers.
@@ -194,7 +223,8 @@ describe('core application generation', () => {
         `${binding.kind} ${binding.metadata?.name} binds a ConfigMap writer to the core`
       ).toBe(false);
     }
-    // And the core keeps no API token its mounts could turn into API access.
+    // The core's explicit storage-audience tokens confer no API access, and
+    // it keeps default API-audience automount disabled.
     const coreAccount = documents.find(
       (object: any) => object.kind === 'ServiceAccount' && object.metadata.name === 'core'
     );

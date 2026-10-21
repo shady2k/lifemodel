@@ -1,0 +1,79 @@
+# TokenReview is cluster-scoped. Do not use system:auth-delegator: the module
+# only verifies tokens, never SubjectAccessReviews or impersonation.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: storage-module-token-review
+rules:
+  - apiGroups: ['authentication.k8s.io']
+    resources: ['tokenreviews']
+    verbs: ['create']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: storage-module-token-review
+subjects:
+  - kind: ServiceAccount
+    name: storage-module
+    namespace: lifemodel-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: storage-module-token-review
+---
+# Bound core/web identity needs the current live Pod on every operation.
+# No label lookup, list, watch, write or Secret read is an authorization input.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: storage-module-identity-read
+  namespace: lifemodel
+rules:
+  - apiGroups: ['']
+    resources: ['pods']
+    verbs: ['get']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: storage-module-identity-read
+  namespace: lifemodel
+subjects:
+  - kind: ServiceAccount
+    name: storage-module
+    namespace: lifemodel-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: storage-module-identity-read
+---
+# Tasks additionally prove that the live Pod's controller Job is still live.
+# Names are discovered from the bound identity, so resourceNames cannot pin
+# these dynamic Pods/Jobs. Namespace + get-only is the narrow read boundary.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: storage-module-identity-read
+  namespace: lifemodel-motor
+rules:
+  - apiGroups: ['']
+    resources: ['pods']
+    verbs: ['get']
+  - apiGroups: ['batch']
+    resources: ['jobs']
+    verbs: ['get']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: storage-module-identity-read
+  namespace: lifemodel-motor
+subjects:
+  - kind: ServiceAccount
+    name: storage-module
+    namespace: lifemodel-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: storage-module-identity-read

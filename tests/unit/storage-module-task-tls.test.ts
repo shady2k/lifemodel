@@ -1,3 +1,7 @@
+import { createStorageAccess } from '../../loader/src/storage-access.js';
+import { createKubernetesStorageIdentity } from '../../loader/src/storage-identity.js';
+import { createTestStores, workerDatabaseUrl, type TestStores } from '../helpers/test-stores.js';
+import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
 /**
  * The storage module's TLS task listener (ADR-015 S-D1, ADR-012 Decision 3).
  *
@@ -28,11 +32,18 @@ const credentials: StorageS3Credentials = {
 /** The canonical in-cluster name of the module's Service. */
 const host = STORAGE_MODULE_TLS_HOSTS[1];
 let certificate: TestStorageCertificate;
+let stores: TestStores;
 const servers: Array<StatusServer | SecureServer> = [];
 beforeAll(async () => {
+  stores = await createTestStores();
+  await applyTestMigrations(stores.postgres);
   certificate = await createStorageCertificate();
 });
-afterAll(() => certificate.cleanup());
+afterAll(async () => {
+  certificate.cleanup();
+  await stores.postgres.end();
+  await stores.redis.quit();
+});
 afterEach(() => {
   for (const server of servers.splice(0)) {
     server.closeAllConnections();
@@ -68,6 +79,10 @@ async function fixture(read?: () => Promise<{ cert: string; key: string }>) {
   const lines: RecordedLine[] = [];
   const clock = manualTimers();
   const app = createStorageModule({
+    access: createStorageAccess({
+      connectionString: workerDatabaseUrl(),
+      identity: createKubernetesStorageIdentity(),
+    }),
     bucket: STORAGE_BUCKET,
     catalog: { check: () => Promise.resolve({ ok: true }) },
     custody: { read: () => Promise.resolve(credentials) },

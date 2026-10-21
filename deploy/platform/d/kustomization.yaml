@@ -6,6 +6,8 @@ resources:
   # wait for it before the database exists. SeaweedFS, its Secret and its RBAC
   # stay in A; only the workload that needs SQL moves here.
   - storage-module-service-account.yaml
+  - task-service-account.yaml
+  - storage-module-rbac.yaml
   - storage-module.yaml
   - network-policy.yaml
 images:

@@ -373,10 +373,14 @@ describe('the storage module workload', () => {
     expect(moduleService?.spec.ports).toEqual([
       { name: 'status', port: 8081, targetPort: 'status', protocol: 'TCP' },
       { name: 'task', port: 8443, targetPort: 'task', protocol: 'TCP' },
+      { name: 'control', port: 8444, targetPort: 'control', protocol: 'TCP' },
+      { name: 'read', port: 8445, targetPort: 'read', protocol: 'TCP' },
     ]);
     expect(moduleContainer?.ports).toEqual([
       { name: 'status', containerPort: 8081, protocol: 'TCP' },
       { name: 'task', containerPort: 8443, protocol: 'TCP' },
+      { name: 'control', containerPort: 8444, protocol: 'TCP' },
+      { name: 'read', containerPort: 8445, protocol: 'TCP' },
     ]);
   });
 });
@@ -421,7 +425,7 @@ describe('the storage network routes', () => {
     });
   });
 
-  it('lets the module reach DNS, OpenBao, SeaweedFS and its database, and nothing else', () => {
+  it('lets the module reach only DNS, OpenBao, SeaweedFS, its database and the API', () => {
     const access = byName(stepDPolicies, 'storage-module-access');
     expect(access?.spec).toEqual({
       podSelector: { matchLabels: { 'app.kubernetes.io/name': 'storage-module' } },
@@ -437,6 +441,45 @@ describe('the storage network routes', () => {
             },
           ],
           ports: [{ protocol: 'TCP', port: 8081 }],
+        },
+        {
+          from: [
+            {
+              namespaceSelector: {
+                matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-motor' },
+              },
+              podSelector: { matchLabels: { 'app.kubernetes.io/name': 'task' } },
+            },
+          ],
+          ports: [{ protocol: 'TCP', port: 8443 }],
+        },
+        {
+          from: [
+            {
+              namespaceSelector: {
+                matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel' },
+              },
+              podSelector: { matchLabels: { 'app.kubernetes.io/name': 'core' } },
+            },
+          ],
+          ports: [{ protocol: 'TCP', port: 8444 }],
+        },
+        {
+          from: [
+            {
+              namespaceSelector: {
+                matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel' },
+              },
+              podSelector: { matchLabels: { 'app.kubernetes.io/name': 'core' } },
+            },
+            {
+              namespaceSelector: {
+                matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel' },
+              },
+              podSelector: { matchLabels: { 'app.kubernetes.io/name': 'web' } },
+            },
+          ],
+          ports: [{ protocol: 'TCP', port: 8445 }],
         },
       ],
       egress: [
@@ -469,20 +512,24 @@ describe('the storage network routes', () => {
           ],
           ports: [{ protocol: 'TCP', port: 5432 }],
         },
+        {
+          to: [{ ipBlock: { cidr: '0.0.0.0/0' } }],
+          ports: [{ protocol: 'TCP', port: 6443 }],
+        },
       ],
     });
     const peers = JSON.stringify(access?.spec.egress ?? []);
-    // No Internet, no model route, no store port but the one bucket's S3.
-    expect(peers).not.toContain('0.0.0.0/0');
+    // The only any-address exception is API TCP 6443, pinned above. No model
+    // route, Internet HTTPS, or store port but the one bucket's S3 is allowed.
     expect(peers).not.toContain('9333');
     expect(peers).not.toContain('9340');
     expect(peers).not.toContain('8888');
-    expect(peers).not.toContain('6443');
-    // No pod may reach the task listener yet: its peers arrive with 653.7.2.
+    expect(peers).not.toContain('model-gateway');
+    // Each listener has its own peers, never a shared data/control port.
     const ingress = (access?.spec.ingress ?? []).flatMap((rule: Record<string, any>) =>
       (rule.ports ?? []).map((port: Record<string, any>) => port.port)
     );
-    expect(ingress).toEqual([8081]);
+    expect(ingress).toEqual([8081, 8443, 8444, 8445]);
   });
 
   it('admits that module to the database and no other pod in its namespace', () => {
@@ -554,6 +601,8 @@ describe('the platform release', () => {
     expect(kustomization.resources).not.toContain('storage-module.yaml');
     for (const file of [
       'storage-module-service-account.yaml',
+      'task-service-account.yaml',
+      'storage-module-rbac.yaml',
       'storage-module.yaml',
       'network-policy.yaml',
     ])

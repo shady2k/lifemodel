@@ -3,9 +3,9 @@
 #
 # The loader's own image with its own entry point, like the model gateway: no
 # generation ever builds or changes the code that holds the SeaweedFS
-# credentials and the catalog login. This build answers health and serves its
-# TLS task listener; the task, control and owner-read APIs arrive with their
-# stages (lifemodel-653.7.2, .5).
+# credentials and the catalog login. Task, trusted control and trusted read
+# use separate TLS listeners and service-audience identities (ADR-015 S-D2).
+# Health stays on its own loader-only listener.
 apiVersion: v1
 kind: Service
 metadata:
@@ -21,11 +21,18 @@ spec:
       port: 8081
       targetPort: status
       protocol: TCP
-    # The task listener. Its clients arrive with 653.7.2; until then the
-    # namespace default deny has no peer for this port.
+    # Task data is distinct from trusted control and read (ADR-015 S-D1).
     - name: task
       port: 8443
       targetPort: task
+      protocol: TCP
+    - name: control
+      port: 8444
+      targetPort: control
+      protocol: TCP
+    - name: read
+      port: 8445
+      targetPort: read
       protocol: TCP
 ---
 apiVersion: apps/v1
@@ -46,7 +53,8 @@ spec:
         app.kubernetes.io/name: storage-module
     spec:
       serviceAccountName: storage-module
-      # OpenBao Kubernetes-auth login reads this projected token afresh.
+      # OpenBao login and the module's TokenReview/Pod/Job API reads use this
+      # API-audience token. Caller service-audience tokens are never API tokens.
       automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
@@ -93,6 +101,12 @@ spec:
               protocol: TCP
             - name: task
               containerPort: 8443
+              protocol: TCP
+            - name: control
+              containerPort: 8444
+              protocol: TCP
+            - name: read
+              containerPort: 8445
               protocol: TCP
           securityContext:
             readOnlyRootFilesystem: true

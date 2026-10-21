@@ -13,10 +13,7 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # 8081 is the health listener, read by the loader's platform status. The
-    # task listener's peers (8443) arrive with lifemodel-653.7.2, together with
-    # the trusted-control and owner-read listeners; until then no pod may reach
-    # it, and the namespace default deny is what says so.
+    # Health is loader-only. No data or trusted caller reaches this listener.
     - from:
         - namespaceSelector:
             matchLabels:
@@ -27,6 +24,43 @@ spec:
       ports:
         - protocol: TCP
           port: 8081
+    # Each peer is namespace AND Pod selector, never namespace-wide trust.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-motor
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: task
+      ports:
+        - protocol: TCP
+          port: 8443
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: core
+      ports:
+        - protocol: TCP
+          port: 8444
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: core
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: web
+      ports:
+        - protocol: TCP
+          port: 8445
   egress:
     - to:
         - namespaceSelector:
@@ -71,3 +105,89 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
+    # k3s DNATs the API Service to the node address, which static manifests
+    # cannot know. Follow the platform API pattern: TCP 6443 is the only
+    # any-address exception, authenticated with the module's own API token.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 6443
+---
+# The caller side of the storage route; all other egress stays default-denied
+# unless another platform policy explicitly grants it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: task-storage-egress
+  namespace: lifemodel-motor
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: task
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: storage-module
+      ports:
+        - protocol: TCP
+          port: 8443
+---
+# The caller side of the storage route; all other egress stays default-denied
+# unless another platform policy explicitly grants it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: core-storage-egress
+  namespace: lifemodel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: core
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: storage-module
+      ports:
+        - protocol: TCP
+          port: 8444
+        - protocol: TCP
+          port: 8445
+---
+# The caller side of the storage route; all other egress stays default-denied
+# unless another platform policy explicitly grants it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-storage-egress
+  namespace: lifemodel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: web
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: storage-module
+      ports:
+        - protocol: TCP
+          port: 8445

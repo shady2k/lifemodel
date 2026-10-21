@@ -1,3 +1,5 @@
+import { createStorageAccess } from '../../loader/src/storage-access.js';
+import { createKubernetesStorageIdentity } from '../../loader/src/storage-identity.js';
 /**
  * The storage module's readiness against its real catalog (ADR-015 S-D7).
  *
@@ -46,6 +48,10 @@ afterEach(() => {
 /** Points the module at one connection string and serves its status listener. */
 async function startModule(connectionString: string, lines: RecordedLine[]) {
   const module = createStorageModule({
+    access: createStorageAccess({
+      connectionString: workerDatabaseUrl(),
+      identity: createKubernetesStorageIdentity(),
+    }),
     bucket: STORAGE_BUCKET,
     catalog: createCatalog({ connectionString }),
     custody: {
@@ -98,12 +104,14 @@ describe('the storage module readiness with a real catalog', () => {
     const databaseUrl = workerDatabaseUrl();
     // A fresh catalog state: no storage schema and no record of its migration.
     await stores.postgres.query('DROP SCHEMA IF EXISTS storage CASCADE');
+    await stores.postgres.query('DROP SCHEMA IF EXISTS task_access CASCADE');
     const migrated = await stores.postgres.query(
       "SELECT to_regclass('public.schema_migrations') AS table"
     );
     if (migrated.rows[0]?.table !== null)
-      await stores.postgres.query('DELETE FROM public.schema_migrations WHERE version = $1', [
+      await stores.postgres.query('DELETE FROM public.schema_migrations WHERE version IN ($1,$2)', [
         STORAGE_MIGRATION,
+        '20261015000012',
       ]);
     const lines: RecordedLine[] = [];
     const module = await startModule(databaseUrl, lines);

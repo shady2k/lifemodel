@@ -104,6 +104,11 @@ spec:
               value: '5000'
             - name: MOTOR_CORTEX_ENABLED
               value: 'false'
+            # Service-audience identities, never Kubernetes API credentials.
+            - name: LIFEMODEL_STORAGE_CONTROL_TOKEN_FILE
+              value: /var/run/secrets/lifemodel-storage/control-token
+            - name: LIFEMODEL_STORAGE_READ_TOKEN_FILE
+              value: /var/run/secrets/lifemodel-storage/read-token
             # The platform pins the model endpoint to its own gateway (ADR-013
             # D2/D7): the core holds no key, and this value overrides
             # core.settings and cannot be edited there.
@@ -137,9 +142,13 @@ spec:
               mountPath: /tmp
             # The loader's platform settings projection (ADR-014 D6): read
             # -only, so the core reads the owner's values and can never write
-            # them; it holds no API token and no ConfigMap RBAC.
+            # them; it holds no API-audience token and no ConfigMap RBAC.
             - name: platform-settings
               mountPath: /opt/lifemodel/platform-settings
+              readOnly: true
+            # No subPath: kubelet rotates these bound service-audience tokens.
+            - name: storage-identity
+              mountPath: /var/run/secrets/lifemodel-storage
               readOnly: true
       volumes:
         - name: tmp
@@ -153,3 +162,17 @@ spec:
           configMap:
             name: lifemodel-platform-settings
             optional: true
+        # Only service-specific audiences are projected; default API-audience
+        # automount stays disabled on both the Pod and its ServiceAccount.
+        - name: storage-identity
+          projected:
+            defaultMode: 288
+            sources:
+              - serviceAccountToken:
+                  audience: lifemodel-core-storage-control
+                  expirationSeconds: 3600
+                  path: control-token
+              - serviceAccountToken:
+                  audience: lifemodel-core-storage-read
+                  expirationSeconds: 3600
+                  path: read-token
