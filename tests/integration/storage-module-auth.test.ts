@@ -562,6 +562,16 @@ describe('durable revision fencing and stream cancellation', () => {
       stream.close();
     }
   });
+  it('returns only committed publication rows to the trusted module', async () => {
+    const stream = operation();
+    try {
+      expect(
+        await stream.publish({ text: 'SELECT $1::text AS status', values: ['completed'] })
+      ).toEqual({ rows: [{ status: 'completed' }] });
+    } finally {
+      stream.close();
+    }
+  });
   it('publication commits metadata under the same guard and rolls back a failed write', async () => {
     const stream = operation();
     await stream.publish({

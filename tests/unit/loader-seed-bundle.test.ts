@@ -153,6 +153,7 @@ describe('loader image release seed bundle', () => {
         'loader/src/http.ts',
         'loader/package.json',
         'docker/loader/Dockerfile',
+        'docker/loader/lifemodel-storage',
         'src/web/model-status.ts',
         'src/web/contract.ts',
         '.docker-context/seed.bundle',

@@ -17,6 +17,7 @@ import {
 } from './storage-health.js';
 import { StorageCustodyError, type StorageS3Credentials } from './storage-custody.js';
 import type { S3Check } from './storage-s3.js';
+import type { StorageObjects } from './storage-objects.js';
 
 /** The mounted instance-CA leaf: read at start, then re-read on every reload. */
 export interface StorageTaskTlsOptions {
@@ -39,6 +40,8 @@ export interface StorageModuleOptions {
   bucket: string;
   /** Required authority: readiness and every data operation fail closed. */
   access: StorageAccess;
+  /** Task object adapter. Absent only in identity/health-only fixtures. */
+  objects?: StorageObjects;
   /** The module's own catalog; readiness needs it, as it needs the store. */
   catalog: Catalog;
   /** The custody record, in memory only; a failure here is a failed module. */
@@ -90,6 +93,8 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
     if (signal.aborted) return { ok: false, code: 'timeout' };
     const catalog = await checkCatalog(signal);
     if (!catalog.ok) return catalog;
+    if (options.objects && !(await options.objects.check(signal)))
+      return { ok: false, code: 'catalog_unavailable', cause: 'objects_unavailable' };
     if (!(await options.access.check(signal)))
       return { ok: false, code: 'catalog_unavailable', cause: 'authorization_unavailable' };
     let credentials: StorageS3Credentials;
@@ -160,9 +165,14 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           return;
         }
         const match = /^\/spaces\/([a-z0-9][a-z0-9_-]{0,63})\/access$/.exec(req.url ?? '');
+        const objectMatch =
+          role === 'task' && options.objects
+            ? /^\/spaces\/([a-z0-9][a-z0-9_-]{0,63})\/objects(?=\/|\?|$)(.*)$/.exec(req.url ?? '')
+            : null;
         if (
           !(
             (role === 'task' && req.method === 'GET' && match) ||
+            objectMatch ||
             (role === 'control' && req.method === 'POST' && req.url === '/revoke') ||
             (role === 'read' && req.method === 'GET' && req.url === '/identity')
           )
@@ -172,7 +182,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           return;
         }
         // Only a validated opaque ID may enter diagnostics, never an arbitrary path.
-        space = role === 'task' ? (match?.[1] ?? null) : null;
+        space = role === 'task' ? (match?.[1] ?? objectMatch?.[1] ?? null) : null;
         const access = options.access;
         const authHeaders = req.rawHeaders.filter(
           (_, index) => index % 2 === 0 && req.rawHeaders[index]?.toLowerCase() === 'authorization'
@@ -190,9 +200,68 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           if (!res.writableEnded) control.abort();
         };
         res.on('close', disconnected);
-        const signal = AbortSignal.any([control.signal, AbortSignal.timeout(10_000)]);
+        // ADR-015 bounds absence of progress, not the whole transfer. Each
+        // successful guarded dispatch/publication or backend chunk earns a fresh
+        // budget; fragments alone do not keep a stalled chunk alive.
+        const signal = control.signal;
+        let idle: ReturnType<typeof setTimeout> | undefined;
+        const progress = (): void => {
+          if (signal.aborted) return;
+          if (idle !== undefined) clearTimeout(idle);
+          idle = setTimeout(() => {
+            control.abort();
+          }, 10_000);
+          idle.unref();
+        };
+        progress();
         try {
           let result: unknown;
+          if (objectMatch?.[1] && options.objects) {
+            const objectSpace = objectMatch[1];
+            const stream = access.openTaskStream({ token, space: objectMatch[1], signal });
+            const abortInput = (): void => {
+              req.destroy();
+              res.destroy();
+            };
+            stream.signal.addEventListener('abort', abortInput, { once: true });
+            try {
+              const progressing: typeof stream = {
+                signal: stream.signal,
+                chunk: async (bytes, dispatch) => {
+                  await stream.chunk(bytes, dispatch);
+                  progress();
+                },
+                publish: async (statement) => {
+                  const result = await stream.publish(statement);
+                  progress();
+                  return result;
+                },
+                close: () => {
+                  stream.close();
+                },
+              };
+              await options.objects.handle(
+                req,
+                res,
+                objectMatch[1],
+                objectMatch[2] || '/',
+                progressing,
+                // Failure cleanup re-proves the same token/space independently
+                // of the canceled transfer. The caller must close this stream.
+                () =>
+                  access.openTaskStream({
+                    token,
+                    space: objectSpace,
+                    signal: AbortSignal.timeout(10_000),
+                  }),
+                progress
+              );
+            } finally {
+              stream.signal.removeEventListener('abort', abortInput);
+              stream.close();
+            }
+            return;
+          }
           if (role === 'task' && match?.[1]) {
             const stream = access.openTaskStream({ token, space: match[1], signal });
             try {
@@ -249,6 +318,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
             res.end(JSON.stringify(result));
           }
         } finally {
+          if (idle !== undefined) clearTimeout(idle);
           res.removeListener('close', disconnected);
         }
       } catch (error) {
@@ -260,6 +330,10 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           { id: failure.id, code: failure.code, status: failure.status, space },
           'Storage request denied'
         );
+        if (res.headersSent) {
+          res.destroy();
+          return;
+        }
         if (!res.destroyed && !res.writableEnded) {
           res.writeHead(failure.status, JSON_HEADERS);
           res.end(JSON.stringify({ error: { id: failure.id, code: failure.code } }));
@@ -294,11 +368,18 @@ function createTaskListener(
   const reloadMs = options.reloadMs ?? STORAGE_TASK_TLS_DEFAULTS.reloadMs;
   let cert = options.cert;
   let key = options.key;
-  const server = createSecureServer({ cert, key }, (req, res) => {
+  const server = createSecureServer({ cert, key, maxHeaderSize: 8192 }, (req, res) => {
     void answer(req, res);
   });
+  server.maxHeadersCount = 32;
+  server.on('clientError', (_error, socket) => {
+    socket.destroy();
+  });
   server.headersTimeout = 5_000;
-  server.requestTimeout = 10_000;
+  // Node requestTimeout bounds the entire request body, including healthy long
+  // uploads. Bound idle sockets instead; the handler also bounds chunk progress.
+  server.requestTimeout = 0;
+  server.setTimeout(10_000, (socket) => socket.destroy());
   server.on('connection', (socket) => {
     socket.on('error', () => undefined);
   });

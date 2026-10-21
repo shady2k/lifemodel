@@ -27,8 +27,11 @@ export interface StorageTaskStream {
   /** Trusted module SQL only, never caller-provided SQL. Executes one parameterized
    * metadata statement under fresh authority + revision locks. Resolves after COMMIT.
    * .7.5 uses this for publication/mark; private S3 transfer stays outside the lock. */
-  publish(statement: StorageMetadataStatement): Promise<void>;
+  publish(statement: StorageMetadataStatement): Promise<StoragePublicationResult>;
   close(): void;
+}
+export interface StoragePublicationResult {
+  rows: Record<string, unknown>[];
 }
 export interface StorageMetadataStatement {
   text: string;
@@ -163,14 +166,14 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
       async function guarded(
         bytes: number,
         dispatch: ((decision: StorageDecision) => undefined) | StorageMetadataStatement
-      ): Promise<void> {
+      ): Promise<StoragePublicationResult | undefined> {
         if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > 4 * 1024 * 1024)
           throw new StorageAccessError(400, 'invalid_chunk');
         live();
         const identity = await options.identity.verify(token, STORAGE_AUDIENCES.task, signal);
         {
           live();
-          await transaction(async (client, assertLive) => {
+          return await transaction(async (client, assertLive) => {
             // Fixed lock order: stable canonical authority, then catalog. These
             // lock-only reads confer no permission; the one final JOIN does.
             const locked = await client.query<{
@@ -214,20 +217,28 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
               const returned = (dispatch as (value: StorageDecision) => unknown)(decision);
               if (returned !== undefined)
                 throw new StorageAccessError(500, 'async_dispatch_forbidden');
+              return undefined;
             } else {
               // No Client/permit escapes. The storage adapter supplies fixed SQL,
               // binds all request values, and must never issue transaction control.
-              await client.query(dispatch.text, dispatch.values);
+              const result = await client.query(dispatch.text, dispatch.values);
               assertLive();
               live();
+              return { rows: result.rows as Record<string, unknown>[] };
             }
           }, signal);
         }
       }
       return {
         signal,
-        chunk: guarded,
-        publish: (statement) => guarded(0, statement),
+        chunk: async (bytes, dispatch) => {
+          await guarded(bytes, dispatch);
+        },
+        publish: async (statement) => {
+          const result = await guarded(0, statement);
+          if (!result) throw new StorageAccessError(503, 'publication_unavailable');
+          return result;
+        },
         close: () => {
           controller.abort();
           controllers.delete(controller);
