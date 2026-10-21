@@ -17,6 +17,8 @@ import { createKubernetesStorageIdentity } from './storage-identity.js';
 import { createStorageObjects } from './storage-objects.js';
 import { createStorageObjectS3 } from './storage-object-s3.js';
 import { createStorageSeal } from './storage-seal.js';
+import { createStorageRetention } from './storage-retention.js';
+import { createStorageRetentionSettings } from './storage-retention-settings.js';
 
 /** Four listeners: health, task data, trusted core control, trusted core/web read. */
 const STATUS_PORT = 8081;
@@ -82,12 +84,25 @@ const access = createStorageAccess({
   connectionString: catalogConnectionString(databaseUsername, databasePassword),
   identity: createKubernetesStorageIdentity(),
 });
+const retention = createStorageRetention({
+  connectionString: catalogConnectionString(databaseUsername, databasePassword),
+  s3: objectS3,
+  settings: createStorageRetentionSettings({
+    logger,
+    ...(process.env['LIFEMODEL_STORAGE_SETTINGS_PATH']
+      ? { path: process.env['LIFEMODEL_STORAGE_SETTINGS_PATH'] }
+      : {}),
+  }),
+  logger,
+});
 const seal = createStorageSeal({
   connectionString: catalogConnectionString(databaseUsername, databasePassword),
   s3: objectS3,
   access,
+  retention,
 });
 const app = createStorageModule({
+  retention,
   seal,
   objects,
   bucket,
@@ -103,6 +118,7 @@ app.status.listen(STATUS_PORT, '0.0.0.0');
 app.task.server.listen(TASK_PORT, '0.0.0.0');
 app.control.server.listen(CONTROL_PORT, '0.0.0.0');
 app.read.server.listen(READ_PORT, '0.0.0.0');
+retention.start();
 
 let stopped = false;
 function stop(): void {
@@ -114,7 +130,7 @@ function stop(): void {
   app.status.close();
   // Pool close drains checked-out SQL clients, not whole multi-transaction
   // requests. Keep their S3 dependency alive until both pools have settled.
-  void Promise.allSettled([seal.close(), objects.close()]).then((results) => {
+  void Promise.allSettled([retention.close(), seal.close(), objects.close()]).then((results) => {
     for (const listener of [app.task, app.control, app.read]) listener.close();
     objectS3.close();
     if (results.some((result) => result.status === 'rejected')) {

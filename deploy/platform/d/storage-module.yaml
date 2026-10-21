@@ -77,6 +77,8 @@ spec:
               value: http://seaweedfs.lifemodel-system.svc:8333
             - name: LIFEMODEL_STORAGE_BUCKET
               value: lifemodel-storage
+            - name: LIFEMODEL_STORAGE_SETTINGS_PATH
+              value: /opt/lifemodel/platform-settings/settings.json
             # The interim login the owner chose (lifemodel-653.7.8): the
             # database owner's own, copied by the loader into this namespace
             # until lifemodel-2t5 leases the module an identity. Only this pod
@@ -150,6 +152,10 @@ spec:
             - name: tls
               mountPath: /opt/lifemodel/tls
               readOnly: true
+            # Directory mount (no subPath), so kubelet refreshes each revision.
+            - name: platform-settings
+              mountPath: /opt/lifemodel/platform-settings
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir:
@@ -160,3 +166,9 @@ spec:
             secretName: storage-module-tls
             # Group read: the pod's fsGroup owns the mounted files.
             defaultMode: 288
+        # Optional breaks any bootstrap dependency on the projection: the
+        # reader uses declared defaults until loader creates the ConfigMap.
+        - name: platform-settings
+          configMap:
+            name: lifemodel-storage-settings
+            optional: true

@@ -45,7 +45,7 @@ spec:
       matchExpressions:
         - key: kubernetes.io/metadata.name
           operator: In
-          values: [lifemodel, lifemodel-motor]
+          values: [lifemodel, lifemodel-motor, lifemodel-system]
     resourceRules:
       - apiGroups: ['']
         apiVersions: [v1]
@@ -57,9 +57,11 @@ spec:
   validations:
     - expression: >-
         request.operation != 'DELETE' &&
-        request.namespace == 'lifemodel' &&
-        object.metadata.name == 'lifemodel-platform-settings'
-      message: loader may only create or update the platform settings ConfigMap; deletion is forbidden
+        ((request.namespace == 'lifemodel' && object.metadata.name == 'lifemodel-platform-settings') ||
+         (request.namespace == 'lifemodel-system' &&
+          (object.metadata.name == 'lifemodel-storage-settings' ||
+           (request.operation == 'UPDATE' && object.metadata.name in ['lifemodel-ca', 'lifemodel-pki-status']))))
+      message: loader may only create or update the named settings projections or update its existing PKI ConfigMaps; deletion is forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -84,7 +86,7 @@ spec:
       matchExpressions:
         - key: kubernetes.io/metadata.name
           operator: In
-          values: [lifemodel, lifemodel-motor]
+          values: [lifemodel, lifemodel-motor, lifemodel-system]
     resourceRules:
       - apiGroups: ['']
         apiVersions: [v1]
@@ -93,7 +95,9 @@ spec:
   matchConditions:
     - name: platform-settings-resource
       # request.name, not the (absent on DELETE) new object.
-      expression: request.namespace == 'lifemodel' && request.name == 'lifemodel-platform-settings'
+      expression: >-
+        (request.namespace == 'lifemodel' && request.name == 'lifemodel-platform-settings') ||
+        (request.namespace == 'lifemodel-system' && request.name == 'lifemodel-storage-settings')
   validations:
     - expression: request.userInfo.username == 'system:serviceaccount:lifemodel-system:loader'
       message: only the loader may create, update or delete the platform settings ConfigMap

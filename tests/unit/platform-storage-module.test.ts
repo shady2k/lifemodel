@@ -254,6 +254,10 @@ describe('the storage module workload', () => {
         value: 'http://seaweedfs.lifemodel-system.svc:8333',
       },
       { name: 'LIFEMODEL_STORAGE_BUCKET', value: STORAGE_BUCKET },
+      {
+        name: 'LIFEMODEL_STORAGE_SETTINGS_PATH',
+        value: '/opt/lifemodel/platform-settings/settings.json',
+      },
       // The interim catalog login: the owner's decision (lifemodel-653.7.8).
       {
         name: 'LIFEMODEL_DB_USERNAME',
@@ -274,6 +278,10 @@ describe('the storage module workload', () => {
     expect(modulePod?.volumes).toEqual([
       { name: 'tmp', emptyDir: { medium: 'Memory', sizeLimit: '32Mi' } },
       { name: 'tls', secret: { secretName: 'storage-module-tls', defaultMode: 288 } },
+      {
+        name: 'platform-settings',
+        configMap: { name: 'lifemodel-storage-settings', optional: true },
+      },
     ]);
     expect(JSON.stringify(moduleDeployment)).not.toMatch(/accessKey|s3\.json/);
     // The database login reaches the process as two Secret keys, never as an

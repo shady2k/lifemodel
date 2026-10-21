@@ -19,6 +19,7 @@ import { StorageCustodyError, type StorageS3Credentials } from './storage-custod
 import type { S3Check } from './storage-s3.js';
 import type { StorageObjects } from './storage-objects.js';
 import type { StorageSeal } from './storage-seal.js';
+import type { StorageRetention } from './storage-retention.js';
 
 /** The mounted instance-CA leaf: read at start, then re-read on every reload. */
 export interface StorageTaskTlsOptions {
@@ -44,6 +45,7 @@ export interface StorageModuleOptions {
   /** Task object adapter. Absent only in identity/health-only fixtures. */
   objects?: StorageObjects;
   seal?: StorageSeal;
+  retention?: StorageRetention;
   /** The module's own catalog; readiness needs it, as it needs the store. */
   catalog: Catalog;
   /** The custody record, in memory only; a failure here is a failed module. */
@@ -99,6 +101,8 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
       return { ok: false, code: 'catalog_unavailable', cause: 'objects_unavailable' };
     if (options.seal && !(await options.seal.check(signal)))
       return { ok: false, code: 'catalog_unavailable', cause: 'seal_unavailable' };
+    if (options.retention && !(await options.retention.check(signal)))
+      return { ok: false, code: 'catalog_unavailable', cause: 'retention_unavailable' };
     if (!(await options.access.check(signal)))
       return { ok: false, code: 'catalog_unavailable', cause: 'authorization_unavailable' };
     let credentials: StorageS3Credentials;
@@ -174,8 +178,21 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           options.objects
             ? /^\/spaces\/([a-z0-9][a-z0-9_-]{0,63})\/objects(?=\/|\?|$)(.*)$/.exec(req.url ?? '')
             : null;
+        const retentionRoute =
+          role === 'control' &&
+          options.retention &&
+          ((req.method === 'GET' && /^\/retention\/plans(?:\?|$)/.test(req.url ?? '')) ||
+            (req.method === 'POST' &&
+              [
+                '/retention/warningCommitted',
+                '/retention/pin',
+                '/retention/unpin',
+                '/retention/policy',
+                '/retention/reclaim',
+              ].includes(req.url ?? '')));
         if (
           !(
+            retentionRoute ||
             (role === 'task' && req.method === 'GET' && match) ||
             objectMatch ||
             (role === 'control' &&
@@ -304,7 +321,25 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           } else {
             const identity = await access.identity.verify(token, STORAGE_AUDIENCES[role], signal);
             if (role === 'read') result = { role: identity.role };
-            else {
+            else if (retentionRoute && options.retention && req.method === 'GET') {
+              const url = new URL(req.url ?? '', 'https://storage.invalid');
+              if (
+                [...url.searchParams.keys()].some(
+                  (key) =>
+                    !['limit', 'cursor'].includes(key) || url.searchParams.getAll(key).length !== 1
+                )
+              )
+                throw new StorageAccessError(400, 'invalid_request');
+              const limit = url.searchParams.get('limit');
+              if (limit !== null && !/^[1-9][0-9]{0,2}$/.test(limit))
+                throw new StorageAccessError(400, 'invalid_request');
+              result = await options.retention.pending({
+                ...(limit === null ? {} : { limit: Number(limit) }),
+                ...(url.searchParams.has('cursor')
+                  ? { cursor: url.searchParams.get('cursor') ?? '' }
+                  : {}),
+              });
+            } else {
               let size = 0;
               const chunks: Buffer[] = [];
               for await (const part of req) {
@@ -323,6 +358,30 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
               if (value === null || typeof value !== 'object' || Array.isArray(value))
                 throw new StorageAccessError(400, 'invalid_request');
               const input = value as Record<string, unknown>;
+              if (retentionRoute && options.retention) {
+                const route = req.url;
+                if (route === '/retention/warningCommitted')
+                  result = await options.retention.warningCommitted(input);
+                else if (route === '/retention/reclaim')
+                  result = await options.retention.reclaim(input);
+                else {
+                  if ('operation' in input) throw new StorageAccessError(400, 'invalid_request');
+                  result = await options.retention.policy({
+                    ...input,
+                    operation:
+                      route === '/retention/policy'
+                        ? 'retention'
+                        : route === '/retention/pin'
+                          ? 'pin'
+                          : 'unpin',
+                  });
+                }
+                if (!signal.aborted && !res.destroyed && !res.writableEnded) {
+                  res.writeHead(200, JSON_HEADERS);
+                  res.end(JSON.stringify(result));
+                }
+                return;
+              }
               if (options.seal && req.url !== '/revoke') {
                 const route = req.url;
                 result =

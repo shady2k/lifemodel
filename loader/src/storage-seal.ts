@@ -8,11 +8,14 @@ import {
   type StorageTaskStream,
 } from './storage-access.js';
 import type { StorageObjectS3 } from './storage-object-s3.js';
+import type { StorageRetention } from './storage-retention.js';
 
 interface Options {
   connectionString: string;
   s3: StorageObjectS3;
   access: StorageAccess;
+  retention?: StorageRetention;
+  now?: () => number;
 }
 interface Allocate {
   taskId: string;
@@ -223,6 +226,7 @@ export function createStorageSeal(options: Options): StorageSeal {
       request.space,
       revision,
     ]);
+    await options.retention?.snapshot(client, request.space);
     const candidates = (
       await client.query<Candidate>(
         `SELECT o.id::text,o.name,o.size::float8 AS size,o.sha256,o.mark,a.s3_key FROM storage.objects o JOIN storage.object_versions v ON v.object_id=o.id JOIN storage.upload_attempts a ON a.id=v.attempt_id WHERE o.space_id=$1 AND o.mark IS NOT NULL ORDER BY o.id`,
@@ -658,12 +662,17 @@ export function createStorageSeal(options: Options): StorageSeal {
     },
     openCoreStream: ({ token, space, objectId, signal: parent }) => {
       if (!SPACE.test(space)) fail(400, 'invalid_request');
+      const lease = randomUUID();
       const controller = new AbortController();
       const signal = AbortSignal.any([controller.signal, ...(parent ? [parent] : [])]);
       return {
         signal,
         close: () => {
           controller.abort();
+          if (options.retention)
+            void tx(async (client) => {
+              await client.query('DELETE FROM storage.read_leases WHERE id=$1', [lease]);
+            }).catch(() => undefined);
         },
         publish: () => Promise.reject(new StorageAccessError(403, 'read_only')),
         chunk: async (bytes, dispatch) => {
@@ -684,6 +693,19 @@ export function createStorageSeal(options: Options): StorageSeal {
               )
             ).rows[0];
             if (!row) fail(404, 'space_not_found');
+            if (options.retention) {
+              const policy = (
+                await client.query<{ state: string }>(
+                  'SELECT state FROM storage.retention_policies WHERE space_id=$1',
+                  [space]
+                )
+              ).rows[0];
+              if (policy && policy.state !== 'retained') fail(404, 'object_not_found');
+              await client.query(
+                'INSERT INTO storage.read_leases(id,space_id,expires_at) VALUES($1,$2,to_timestamp($3/1000.0)) ON CONFLICT(id) DO UPDATE SET expires_at=EXCLUDED.expires_at',
+                [lease, space, (options.now ?? Date.now)() + 30000]
+              );
+            }
             if (
               objectId &&
               !(

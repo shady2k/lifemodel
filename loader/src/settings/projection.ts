@@ -1,6 +1,6 @@
 /**
  * The read-only projection of the platform settings for consumers: one
- * ConfigMap in the application namespace that only the loader's service
+ * ConfigMap per consumer namespace that only the loader's service
  * account may write (ADR-014 D6; the core reads it, never writes it).
  *
  * One fixed-name API client: GET, create once, then update with the read
@@ -85,6 +85,10 @@ export function createKubernetesSettingsProjection(
             res.on('aborted', () => {
               clearTimeout(timer);
               reject(new Error('Kubernetes API response was truncated'));
+            });
+            res.on('error', () => {
+              clearTimeout(timer);
+              reject(new Error('Kubernetes API response failed'));
             });
           }
         );
@@ -186,6 +190,39 @@ export function createKubernetesSettingsProjection(
       if (updated.status !== 200)
         throw new Error(`platform settings ConfigMap update failed (${String(updated.status)})`);
       await verify();
+    },
+  };
+}
+
+/**
+ * One authoritative revision, two fixed read-only mounts. Try both targets
+ * even if one fails; the store records failure and retries the whole revision.
+ * Both use the same writer and verify their resourceVersion-checked write.
+ */
+export function createPlatformSettingsProjection(
+  options: Omit<KubernetesSettingsProjectionOptions, 'namespace' | 'name'> = {}
+): SettingsProjection {
+  const targets = [
+    createKubernetesSettingsProjection({
+      ...options,
+      namespace: 'lifemodel',
+      name: 'lifemodel-platform-settings',
+    }),
+    createKubernetesSettingsProjection({
+      ...options,
+      namespace: 'lifemodel-system',
+      name: 'lifemodel-storage-settings',
+    }),
+  ];
+  return {
+    project: async (content) => {
+      const outcomes = await Promise.allSettled(targets.map((target) => target.project(content)));
+      for (const outcome of outcomes) {
+        if (outcome.status === 'rejected')
+          throw outcome.reason instanceof Error
+            ? outcome.reason
+            : new Error('platform settings projection failed');
+      }
     },
   };
 }

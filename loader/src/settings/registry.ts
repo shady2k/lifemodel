@@ -57,6 +57,8 @@ export interface SettingDeclaration {
   /** The declared bounds of a number control, stated on the screen. */
   min?: number;
   max?: number;
+  /** A number that accepts whole values only. */
+  integer?: boolean;
   /** What a number counts, localized ("tasks"/"задачи"). Never lives in prose. */
   unit?: LocalizedText;
   /**
@@ -156,6 +158,11 @@ function assertDeclaration(declaration: SettingDeclaration): void {
     throw new SettingsDeclarationError(`${declaration.key}: unknown authority`);
   if (!APPLY_TIMINGS.includes(declaration.apply))
     throw new SettingsDeclarationError(`${declaration.key}: unknown apply timing`);
+  if (
+    declaration.integer !== undefined &&
+    (typeof declaration.integer !== 'boolean' || declaration.control !== 'number')
+  )
+    throw new SettingsDeclarationError(`${declaration.key}: integer requires a number control`);
   if (declaration.unit !== undefined) assertLocalized(declaration.unit, 'unit', declaration.key);
   if (declaration.format !== undefined && declaration.format !== 'bytes')
     throw new SettingsDeclarationError(`${declaration.key}: unknown format`);
@@ -203,6 +210,8 @@ function assertDeclaration(declaration: SettingDeclaration): void {
       throw new SettingsDeclarationError(
         `${declaration.key}: the minimum must not exceed the maximum`
       );
+    if (declaration.integer && !Number.isSafeInteger(declaration.default))
+      throw new SettingsDeclarationError(`${declaration.key}: the default must be an integer`);
     if (declaration.min !== undefined && declaration.default < declaration.min)
       throw new SettingsDeclarationError(
         `${declaration.key}: the default is below the declared minimum`
@@ -248,6 +257,12 @@ export function checkValue(declaration: SettingDeclaration, value: unknown): Val
   if (declaration.control === 'number') {
     if (typeof value !== 'number' || !Number.isFinite(value))
       return { ok: false, reasonCode: 'wrong_type', reason: `${declaration.key} expects a number` };
+    if (declaration.integer && !Number.isSafeInteger(value))
+      return {
+        ok: false,
+        reasonCode: 'wrong_type',
+        reason: `${declaration.key} expects an integer`,
+      };
     if (declaration.min !== undefined && value < declaration.min)
       return {
         ok: false,

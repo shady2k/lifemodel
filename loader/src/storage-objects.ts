@@ -187,7 +187,7 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
           'SELECT o.id,v.receipt,i.lease_expires_at,a.s3_key,q.reserved_bytes FROM storage.objects o JOIN storage.object_versions v ON v.object_id=o.id JOIN storage.upload_intents i ON i.object_id=o.id JOIN storage.upload_attempts a ON a.id=v.attempt_id JOIN storage.space_quota q ON q.space_id=o.space_id WHERE false'
         );
         const functions = await query<{ ready: boolean }>(
-          "SELECT to_regprocedure('storage.reserve_upload(text,text,uuid,text,bigint,text,integer)') IS NOT NULL AND to_regprocedure('storage.complete_upload(text,text,uuid)') IS NOT NULL AND to_regprocedure('storage.release_upload(text,text)') IS NOT NULL AS ready"
+          "SELECT to_regprocedure('storage.reserve_upload(text,text,uuid,text,bigint,text,integer)') IS NOT NULL AND to_regprocedure('storage.complete_upload(text,text,uuid)') IS NOT NULL AND to_regprocedure('storage.release_upload(text,text)') IS NOT NULL AND to_regprocedure('storage.begin_attempt(uuid,text,text,text)') IS NOT NULL AS ready"
         );
         return !signal.aborted && functions.rows[0]?.ready === true;
       } catch {
@@ -264,10 +264,12 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
           if (!intent.reserved) throw new StorageAccessError(507, 'capacity_exhausted');
           const attempt = randomUUID();
           const key = `private/${randomUUID()}`;
-          await stream.publish({
-            text: 'INSERT INTO storage.upload_attempts(id,space_id,upload_id,s3_key) VALUES($1,$2,$3,$4)',
+          const begun = await stream.publish({
+            text: 'SELECT storage.begin_attempt($1,$2,$3,$4) AS accepted',
             values: [attempt, space, uploadId, key],
           });
+          if (begun?.rows[0]?.['accepted'] !== true)
+            throw new StorageAccessError(409, 'upload_expired');
           async function* source() {
             let accepted = 0;
             let emitted = 0;

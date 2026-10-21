@@ -11,6 +11,7 @@ import type { StorageS3Credentials } from '../../loader/src/storage-custody.js';
 export interface FakeStorageObject {
   bytes: Buffer;
   sha256: string;
+  lastModified?: number;
 }
 export interface StorageS3Request {
   method: string;
@@ -23,7 +24,7 @@ export type StorageS3Action =
   | undefined
   | 'hang'
   | 'lose-response'
-  | { status: number; headers?: Record<string, string> };
+  | { status: number; headers?: Record<string, string>; body?: string };
 export type StorageS3Hook = (
   request: StorageS3Request
 ) => StorageS3Action | Promise<StorageS3Action>;
@@ -34,6 +35,7 @@ export interface StorageS3Hooks {
   afterWrite?: StorageS3Hook;
   beforeHead?: StorageS3Hook;
   beforeGet?: StorageS3Hook;
+  beforeList?: StorageS3Hook;
   beforeDelete?: StorageS3Hook;
   afterDelete?: StorageS3Hook;
 }
@@ -111,7 +113,7 @@ export async function createSealS3(
     if (result === 'lose-response') req.socket.destroy();
     else if (result !== 'hang') {
       res.writeHead(result.status, { ...defaults, ...result.headers });
-      res.end('private backend error body');
+      res.end(result.body ?? 'private backend error body');
     }
     return true;
   }
@@ -165,7 +167,7 @@ export async function createSealS3(
         // Model an accepted, fully-read backend PUT whose commit can outlive
         // cancellation of the module's TCP connection.
         if (await action(hooks.beforeCommit, record, req, res)) return;
-        objects.set(record.key, { bytes, sha256: hash(bytes) });
+        objects.set(record.key, { bytes, sha256: hash(bytes), lastModified: Date.now() });
         if (await action(hooks.afterWrite, record, req, res)) return;
         res.writeHead(200);
         res.end();
@@ -177,6 +179,64 @@ export async function createSealS3(
         if (await action(hooks.afterDelete, record, req, res)) return;
         res.writeHead(204);
         res.end();
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === prefix && url.searchParams.has('list-type')) {
+        if (await action(hooks.beforeList, record, req, res)) return;
+        const cursor = url.searchParams.get('continuation-token');
+        const after =
+          cursor === null ? undefined : Buffer.from(cursor, 'base64url').toString('utf8');
+        if (
+          url.searchParams.get('list-type') !== '2' ||
+          url.searchParams.get('prefix') !== 'private/' ||
+          url.searchParams.get('max-keys') !== '100' ||
+          [...url.searchParams.keys()].some(
+            (key) => !['list-type', 'prefix', 'max-keys', 'continuation-token'].includes(key)
+          ) ||
+          (cursor !== null && (Buffer.from(after ?? '').toString('base64url') !== cursor || !after))
+        ) {
+          res.writeHead(400);
+          res.end();
+          return;
+        }
+        const keys = [...objects.keys()]
+          .filter((key) => key.startsWith('private/') && (after === undefined || key > after))
+          .sort();
+        const page = keys.slice(0, 100);
+        const truncated = keys.length > page.length;
+        const xml = (value: string) =>
+          value.replace(/[&<>"']/g, (character) => {
+            if (character === '&') return '&amp;';
+            if (character === '<') return '&lt;';
+            if (character === '>') return '&gt;';
+            if (character === '"') return '&quot;';
+            return '&apos;';
+          });
+        const body =
+          '<?xml version="1.0" encoding="UTF-8"?>' +
+          '<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">' +
+          `<Name>${xml(bucket)}</Name><Prefix>private/</Prefix><MaxKeys>100</MaxKeys>` +
+          `<KeyCount>${page.length}</KeyCount><IsTruncated>${String(truncated)}</IsTruncated>` +
+          page
+            .map((key) => {
+              const object = objects.get(key);
+              if (!object) throw new Error('missing fake object');
+              object.lastModified ??= Date.now();
+              return (
+                `<Contents><Key>${xml(key)}</Key><Size>${object.bytes.length}</Size>` +
+                `<LastModified>${new Date(object.lastModified).toISOString()}</LastModified></Contents>`
+              );
+            })
+            .join('') +
+          (truncated
+            ? `<NextContinuationToken>${Buffer.from(page[page.length - 1] ?? '').toString('base64url')}</NextContinuationToken>`
+            : '') +
+          '</ListBucketResult>';
+        res.writeHead(200, {
+          'content-type': 'application/xml',
+          'content-length': String(Buffer.byteLength(body)),
+        });
+        res.end(body);
         return;
       }
       const object = objects.get(record.key);

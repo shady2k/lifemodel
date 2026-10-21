@@ -1,19 +1,19 @@
 # The platform settings projection (ADR-014 D6): the loader writes one named
-# ConfigMap in the application namespace; the core and the web module read it
-# and can never write it.
+# ConfigMap per consumer namespace; core, web and storage only mount it.
+# A0 admission clamps create to the fixed names and reserves them to loader.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: loader-platform-settings
   namespace: lifemodel
 rules:
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    resourceNames: ["lifemodel-platform-settings"]
-    verbs: ["get", "update"]
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["create"]
+  - apiGroups: ['']
+    resources: ['configmaps']
+    resourceNames: ['lifemodel-platform-settings']
+    verbs: ['get', 'update']
+  - apiGroups: ['']
+    resources: ['configmaps']
+    verbs: ['create']
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -28,3 +28,31 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: loader-platform-settings
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: loader-storage-settings
+  namespace: lifemodel-system
+rules:
+  - apiGroups: ['']
+    resources: ['configmaps']
+    resourceNames: ['lifemodel-storage-settings']
+    verbs: ['get', 'update']
+  - apiGroups: ['']
+    resources: ['configmaps']
+    verbs: ['create']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: loader-storage-settings
+  namespace: lifemodel-system
+subjects:
+  - kind: ServiceAccount
+    name: loader
+    namespace: lifemodel-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: loader-storage-settings
