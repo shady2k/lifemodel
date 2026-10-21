@@ -37,26 +37,42 @@ export type RetainedArtifact = {
   task: string;
 };
 
-export async function createRetentionHarness() {
+export async function createRetentionHarness(bucket = 'task-output') {
   const stores = await createTestStores();
   stores.postgres.on('error', () => undefined);
   stores.postgres.on('connect', (client) => client.on('error', () => undefined));
   await applyTestMigrations(stores.postgres);
   const sqlProxy = await createSealSqlProxy(workerDatabaseUrl());
   const identity = await createSealIdentity();
-  const backend = await createSealS3({ bucket: 'task-output' });
+  const backend = await createSealS3({ bucket });
   const root = await mkdtemp(join(tmpdir(), 'storage-retention-'));
+  await writeFile(join(root, 'tls.crt'), identity.certificate.cert);
+  await writeFile(join(root, 'tls.key'), identity.certificate.key, {
+    mode: 0o600,
+  });
+  await writeFile(
+    join(root, 'entry-settings.json'),
+    JSON.stringify({
+      version: 1,
+      revision: 1,
+      values: { 'storage.retention': '90d', 'storage.warningLeadDays': 7 },
+    })
+  );
   const children = new Set<RetentionChild>();
   const releases: Array<() => void> = [];
   let current: RetentionChild;
   let now = TERMINAL;
-  let settings: { retention: '90d' | 'forever'; warningLeadDays: number; revision: number } = {
+  let settings: {
+    retention: '90d' | 'forever';
+    warningLeadDays: number;
+    revision: number;
+  } = {
     retention: '90d',
     warningLeadDays: 7,
     revision: 1,
   };
   let sequence = 0;
-  async function start() {
+  async function start(entry?: { baoAddress: string; serviceAccount: string }) {
     const configFile = join(root, `config-${++sequence}.json`);
     await writeFile(
       configFile,
@@ -68,20 +84,56 @@ export async function createRetentionHarness() {
         certificate: identity.certificate,
         now,
         settings,
+        ...(entry ?? {}),
       }),
       { mode: 0o600 }
     );
     const processChild = fork(
-      fileURLToPath(new URL('../fixtures/storage-retention-child.ts', import.meta.url)),
+      fileURLToPath(
+        new URL(
+          entry
+            ? '../fixtures/storage-module-startup-child.ts'
+            : '../fixtures/storage-retention-child.ts',
+          import.meta.url
+        )
+      ),
       [configFile],
       {
         execArgv: ['--import', 'tsx'],
+        env: entry
+          ? {
+              ...process.env,
+              LIFEMODEL_OPENBAO_ADDRESS: entry.baoAddress,
+              LIFEMODEL_STORAGE_S3_ENDPOINT: backend.endpoint,
+              LIFEMODEL_STORAGE_BUCKET: 'lifemodel-storage',
+              LIFEMODEL_DB_USERNAME: decodeURIComponent(
+                new URL(sqlProxy.connectionString).username
+              ),
+              LIFEMODEL_DB_PASSWORD: decodeURIComponent(
+                new URL(sqlProxy.connectionString).password
+              ),
+              LIFEMODEL_STORAGE_TLS_DIR: root,
+              LIFEMODEL_STORAGE_SETTINGS_PATH: join(root, 'entry-settings.json'),
+              KUBERNETES_SERVICE_HOST: 'localhost',
+              KUBERNETES_SERVICE_PORT_HTTPS: new URL(identity.options.apiServer).port,
+            }
+          : process.env,
         stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       }
     );
     processChild.on('error', () => undefined);
     processChild.stdout?.on('error', () => undefined);
     processChild.stderr?.on('error', () => undefined);
+    let stderr = '';
+    processChild.stderr?.on('data', (part) => {
+      stderr = (stderr + String(part)).slice(-8192);
+    });
+    const child: RetentionChild = {
+      process: processChild,
+      ports: {} as RetentionChild['ports'],
+    };
+    children.add(child);
+    processChild.once('exit', () => children.delete(child));
     const ports = await new Promise<RetentionChild['ports']>((resolve, reject) => {
       const timer = setTimeout(() => reject(Error('retention child startup deadline')), 15_000);
       processChild.once('message', (message: any) => {
@@ -90,16 +142,14 @@ export async function createRetentionHarness() {
       });
       processChild.once('exit', (code, signal) => {
         clearTimeout(timer);
-        reject(Error(`retention child exited ${code ?? signal}`));
+        reject(Error(`retention child exited ${code ?? signal}: ${stderr}`));
       });
       processChild.once('error', () => {
         clearTimeout(timer);
         reject(Error('retention child start failed'));
       });
     });
-    const child = { process: processChild, ports };
-    children.add(child);
-    processChild.once('exit', () => children.delete(child));
+    child.ports = ports;
     current = child;
     return child;
   }
@@ -332,7 +382,10 @@ export async function createRetentionHarness() {
     return response.json as { plans: any[]; nextCursor: string | null };
   }
   async function warn(planId: string, messageId = 'owner-message') {
-    return call('control', 'POST', '/retention/warningCommitted', { planId, messageId });
+    return call('control', 'POST', '/retention/warningCommitted', {
+      planId,
+      messageId,
+    });
   }
   async function policy(
     space: string,

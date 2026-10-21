@@ -29,6 +29,7 @@ export type StorageS3Hook = (
   request: StorageS3Request
 ) => StorageS3Action | Promise<StorageS3Action>;
 export interface StorageS3Hooks {
+  beforeBucketCheck?: StorageS3Hook;
   beforePut?: StorageS3Hook;
   beforeCommit?: StorageS3Hook;
   duringPut?: (request: StorageS3Request, closed: Promise<void>) => Promise<void>;
@@ -131,6 +132,9 @@ export async function createSealS3(
         bytes: 0,
       };
       requests.push(record);
+      if (record.authorized && req.method === 'GET' && url.pathname === `/${bucket}`) {
+        if (await action(hooks.beforeBucketCheck, record, req, res)) return;
+      }
       if (!record.authorized || !url.pathname.startsWith(prefix)) {
         res.writeHead(403);
         res.end('private credentials rejected');

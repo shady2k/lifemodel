@@ -146,7 +146,9 @@ describe('storage seal wiring', () => {
     const sealClose = vi.fn(() => sealDrained.promise);
     const objectsClose = vi.fn(() => objectsDrained.promise);
     const s3Close = vi.fn();
-    const ownerReady = vi.fn(async () => undefined);
+    const ownerReady = vi
+      .fn(async () => undefined)
+      .mockRejectedValueOnce(new Error('database temporarily unavailable'));
     const ownerClose = vi.fn(async () => undefined);
     const retentionClose = vi.fn(async () => undefined);
     const listener = () => ({
@@ -227,6 +229,10 @@ describe('storage seal wiring', () => {
     try {
       await import('../../loader/src/storage-module.js');
       expect(ownerReady).toHaveBeenCalledOnce();
+      for (const listener of [app.task, app.control, app.read])
+        expect(listener.server.listen).toHaveBeenCalledOnce();
+      expect(app.status.listen).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(ownerReady).toHaveBeenCalledTimes(2));
       stop();
       for (const listener of [app.task, app.control, app.read]) {
         expect(listener.server.close).toHaveBeenCalledOnce();

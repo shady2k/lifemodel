@@ -80,8 +80,8 @@ const objectS3 = createStorageObjectS3({ endpoint, bucket, custody, logger });
 const owner = createStorageUploadOwner({
   connectionString: catalogConnectionString(databaseUsername, databasePassword),
 });
-// No listener can start a transfer before its boot heartbeat is durable.
-await owner.ready();
+// Readiness and PUT guards require a durable boot heartbeat. Its registration
+// runs after listeners start: a temporarily unavailable database is not fatal.
 const objects = createStorageObjects({
   connectionString: catalogConnectionString(databaseUsername, databasePassword),
   s3: objectS3,
@@ -130,9 +130,28 @@ app.read.server.listen(READ_PORT, '0.0.0.0');
 retention.start();
 
 let stopped = false;
+let ownerRetry: ReturnType<typeof setTimeout> | undefined;
+let ownerBackoffMs = 250;
+async function registerOwner(): Promise<void> {
+  try {
+    await owner.ready();
+  } catch {
+    if (stopped) return;
+    // One bounded SQL attempt at a time, with capped backoff. ready() keeps its
+    // existing boot-fencing rules even if an INSERT committed without a reply.
+    ownerRetry = setTimeout(() => {
+      ownerRetry = undefined;
+      void registerOwner();
+    }, ownerBackoffMs);
+    ownerRetry.unref();
+    ownerBackoffMs = Math.min(ownerBackoffMs * 2, 5_000);
+  }
+}
+void registerOwner();
 function stop(): void {
   if (stopped) return;
   stopped = true;
+  if (ownerRetry) clearTimeout(ownerRetry);
   // Stop intake without aborting an active SQL operation's S3 transport.
   for (const listener of [app.task, app.control, app.read]) listener.server.close();
   app.status.closeAllConnections();
