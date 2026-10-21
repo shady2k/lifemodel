@@ -14,7 +14,11 @@ import {
 
 export type BaoErrorCode = 'sealed' | 'unreachable' | 'denied' | 'not_found';
 export class BaoStorageError extends Error {
-  constructor(readonly code: BaoErrorCode) {
+  constructor(
+    readonly code: BaoErrorCode,
+    /** HTTP status, or zero when no complete HTTP response is available. */
+    readonly status = 0
+  ) {
     super(code);
     this.name = 'BaoStorageError';
   }
@@ -93,7 +97,18 @@ export function createRoleBaoClient(options: RoleBaoOptions) {
             });
           }
         );
-        const timer = setTimeout(() => req.destroy(new BaoStorageError('unreachable')), timeoutMs);
+        // sys/init starts Raft and waits for its first leader inside Initialize.
+        // OpenBao v2.7.1 uses a background context there: aborting this client
+        // cannot stop it committing, and its one response holds the only keys.
+        // No finite client deadline can safely race that non-idempotent call.
+        // A stuck init must stay pending for operator diagnosis, not be retried
+        // while the server can still commit it. All other requests retain their
+        // own ordinary deadline.
+        // https://github.com/openbao/openbao/blob/v2.7.1/internal/http/sys_init.go
+        const timer =
+          method === 'POST' && url.pathname === '/v1/sys/init'
+            ? undefined
+            : setTimeout(() => req.destroy(new BaoStorageError('unreachable')), timeoutMs);
         req.on('error', () => {
           clearTimeout(timer);
           reject(new BaoStorageError('unreachable'));
@@ -107,10 +122,11 @@ export function createRoleBaoClient(options: RoleBaoOptions) {
   function failure(
     code: BaoErrorCode,
     message = 'OpenBao request failed',
-    fields: Record<string, unknown> = {}
+    fields: Record<string, unknown> = {},
+    status = 0
   ): BaoStorageError {
-    if (code !== 'not_found') options.logger?.error({ code, ...fields }, message);
-    return new BaoStorageError(code);
+    if (code !== 'not_found') options.logger?.error({ code, status, ...fields }, message);
+    return new BaoStorageError(code, status);
   }
   async function send(
     path: string,
@@ -135,15 +151,25 @@ export function createRoleBaoClient(options: RoleBaoOptions) {
                 ? 'sealed'
                 : 'unreachable';
         // Never include, parse, or log an error response body.
-        throw new BaoStorageError(code);
+        throw new BaoStorageError(code, response.status);
       }
       if (!response.body) return {};
-      const decoded: unknown = JSON.parse(response.body);
+      let decoded: unknown;
+      try {
+        decoded = JSON.parse(response.body);
+      } catch {
+        throw new BaoStorageError('unreachable', response.status);
+      }
       if (typeof decoded !== 'object' || decoded === null || Array.isArray(decoded))
-        throw new BaoStorageError('unreachable');
+        throw new BaoStorageError('unreachable', response.status);
       return decoded as Record<string, unknown>;
     } catch (error) {
-      throw failure(error instanceof BaoStorageError ? error.code : 'unreachable');
+      throw failure(
+        error instanceof BaoStorageError ? error.code : 'unreachable',
+        undefined,
+        undefined,
+        error instanceof BaoStorageError ? error.status : 0
+      );
     }
   }
   function acceptAuth(result: Record<string, unknown>): void {
