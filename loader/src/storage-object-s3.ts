@@ -19,9 +19,16 @@ export interface StorageObjectS3 {
     sha256: string,
     source: AsyncIterable<Buffer>,
     signal: AbortSignal,
-    guard: StorageObjectS3Guard
+    guard: StorageObjectS3Guard,
+    onProgress?: () => void
   ): Promise<void>;
-  get(key: string, start: number, end: number, signal: AbortSignal): Promise<AsyncIterable<Buffer>>;
+  get(
+    key: string,
+    start: number,
+    end: number,
+    signal: AbortSignal,
+    onProgress?: () => void
+  ): Promise<AsyncIterable<Buffer>>;
   close(): void;
 }
 export interface StorageObjectS3Options {
@@ -70,7 +77,7 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
     if (!/^[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/.test(key) || key.length > 1024) throw invalid();
     return new URL(`/${options.bucket}/${key}`, endpoint);
   }
-  function operation(parent: AbortSignal) {
+  function operation(parent: AbortSignal, onProgress?: () => void) {
     if (closed || parent.aborted) throw unavailable();
     const controller = new AbortController();
     let request: ClientRequest | undefined;
@@ -82,8 +89,15 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
       response?.destroy();
       dispose();
     };
-    const timer = setTimeout(cancel, timeoutMs);
+    let timer = setTimeout(cancel, timeoutMs);
     timer.unref();
+    function progress(): void {
+      if (done || controller.signal.aborted) throw unavailable();
+      clearTimeout(timer);
+      timer = setTimeout(cancel, timeoutMs);
+      timer.unref();
+      onProgress?.();
+    }
     parent.addEventListener('abort', cancel, { once: true });
     active.add(cancel);
     function dispose(): void {
@@ -170,11 +184,13 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
     async function drain(res: IncomingMessage): Promise<void> {
       const iterator = res[Symbol.asyncIterator]();
       while (!(await wait(iterator.next())).done) {
-        /* No backend response body escapes. */
+        // Discard error/empty response bodies without treating arbitrary body
+        // fragments as successful transfer progress.
       }
     }
     return {
       wait,
+      progress,
       open,
       drain,
       cancel,
@@ -185,11 +201,11 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
     };
   }
   return {
-    async put(key, length, sha256, source, signal, guard) {
+    async put(key, length, sha256, source, signal, guard, onProgress) {
       const url = path(key);
       if (!Number.isSafeInteger(length) || length < 0 || !/^[a-f0-9]{64}$/.test(sha256))
         throw invalid();
-      const op = operation(signal);
+      const op = operation(signal, onProgress);
       let iterator: AsyncIterator<Buffer> | undefined;
       try {
         const { req, received } = await op.open(
@@ -222,6 +238,7 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
                 return undefined;
               })
             );
+            op.progress();
             measured.update(chunk);
             count += chunk.length;
             if (!writable && req.writableNeedDrain)
@@ -253,6 +270,7 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
         req.end();
         const res = await op.wait(received);
         if (res.statusCode !== 200) throw unavailable();
+        op.progress();
         await op.drain(res);
         const head = await op.open('HEAD', url, { 'x-amz-checksum-mode': 'ENABLED' });
         head.req.end();
@@ -264,6 +282,7 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
             Buffer.from(sha256, 'hex').toString('base64')
         )
           throw unavailable();
+        op.progress();
         await op.drain(verified);
         op.live();
       } catch (error) {
@@ -281,7 +300,7 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
         }
       }
     },
-    async get(key, start, end, signal) {
+    async get(key, start, end, signal, onProgress) {
       const url = path(key);
       if (
         !Number.isSafeInteger(start) ||
@@ -291,7 +310,7 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
         !Number.isSafeInteger(end - start + 1)
       )
         throw invalid();
-      const op = operation(signal);
+      const op = operation(signal, onProgress);
       try {
         const { req, received } = await op.open('GET', url, {
           range: `bytes=${String(start)}-${String(end)}`,
@@ -308,6 +327,7 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
           res.headers['content-length'] !== String(end - start + 1)
         )
           throw unavailable();
+        op.progress();
         return (async function* () {
           let count = 0;
           let emitted = 0;
@@ -337,7 +357,7 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
                   pending = undefined;
                   filled = 0;
                   emitted += chunk.length;
-                  op.live();
+                  op.progress();
                   yield chunk;
                 }
               }

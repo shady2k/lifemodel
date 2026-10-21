@@ -53,7 +53,7 @@ Object adapters in lifemodel-653.7.5 must call:
    Supply one fixed, parameterized **module-owned metadata SQL statement**, not
    request SQL or transaction-control SQL. It repeats identity and authorization,
    executes that statement under the same locks and resolves only after COMMIT.
-   No Client or mutable SQL permission escapes. Write private immutable S3 bytes
+   It returns only the committed statement rows to the trusted module, so object completion statuses can be checked. No Client or mutable SQL permission escapes. Write private immutable S3 bytes
    outside the transaction first; ACK durable metadata only after publication
    resolves. A transient chunk callback is not a durable metadata operation.
 5. Observe `stream.signal` to cancel transfer resources immediately, and call

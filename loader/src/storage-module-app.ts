@@ -200,10 +200,24 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           if (!res.writableEnded) control.abort();
         };
         res.on('close', disconnected);
-        const signal = AbortSignal.any([control.signal, AbortSignal.timeout(10_000)]);
+        // ADR-015 bounds absence of progress, not the whole transfer. Each
+        // successful guarded dispatch/publication or backend chunk earns a fresh
+        // budget; fragments alone do not keep a stalled chunk alive.
+        const signal = control.signal;
+        let idle: ReturnType<typeof setTimeout> | undefined;
+        const progress = (): void => {
+          if (signal.aborted) return;
+          if (idle !== undefined) clearTimeout(idle);
+          idle = setTimeout(() => {
+            control.abort();
+          }, 10_000);
+          idle.unref();
+        };
+        progress();
         try {
           let result: unknown;
           if (objectMatch?.[1] && options.objects) {
+            const objectSpace = objectMatch[1];
             const stream = access.openTaskStream({ token, space: objectMatch[1], signal });
             const abortInput = (): void => {
               req.destroy();
@@ -211,7 +225,37 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
             };
             stream.signal.addEventListener('abort', abortInput, { once: true });
             try {
-              await options.objects.handle(req, res, objectMatch[1], objectMatch[2] || '/', stream);
+              const progressing: typeof stream = {
+                signal: stream.signal,
+                chunk: async (bytes, dispatch) => {
+                  await stream.chunk(bytes, dispatch);
+                  progress();
+                },
+                publish: async (statement) => {
+                  const result = await stream.publish(statement);
+                  progress();
+                  return result;
+                },
+                close: () => {
+                  stream.close();
+                },
+              };
+              await options.objects.handle(
+                req,
+                res,
+                objectMatch[1],
+                objectMatch[2] || '/',
+                progressing,
+                // Failure cleanup re-proves the same token/space independently
+                // of the canceled transfer. The caller must close this stream.
+                () =>
+                  access.openTaskStream({
+                    token,
+                    space: objectSpace,
+                    signal: AbortSignal.timeout(10_000),
+                  }),
+                progress
+              );
             } finally {
               stream.signal.removeEventListener('abort', abortInput);
               stream.close();
@@ -274,6 +318,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
             res.end(JSON.stringify(result));
           }
         } finally {
+          if (idle !== undefined) clearTimeout(idle);
           res.removeListener('close', disconnected);
         }
       } catch (error) {
@@ -331,7 +376,10 @@ function createTaskListener(
     socket.destroy();
   });
   server.headersTimeout = 5_000;
-  server.requestTimeout = 10_000;
+  // Node requestTimeout bounds the entire request body, including healthy long
+  // uploads. Bound idle sockets instead; the handler also bounds chunk progress.
+  server.requestTimeout = 0;
+  server.setTimeout(10_000, (socket) => socket.destroy());
   server.on('connection', (socket) => {
     socket.on('error', () => undefined);
   });

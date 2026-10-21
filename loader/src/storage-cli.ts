@@ -56,6 +56,7 @@ function nameValid(name: string): boolean {
     Buffer.from(name, 'utf8').toString('utf8') === name &&
     name.normalize('NFC') === name &&
     !hasControl(name) &&
+    !/\p{Cf}/u.test(name) &&
     !name.includes('\\') &&
     !/^[A-Za-z]:/.test(name) &&
     !/%(?:25)*(?:2f|5c)/i.test(name) &&
@@ -342,6 +343,21 @@ function receipt(value: unknown): Receipt {
     mark: value['mark'],
   };
 }
+/** The catalog is the reference; transport Content-Length is not an object receipt. */
+function downloadMetadata(response: IncomingMessage): { size: number; sha256: string } {
+  const size = response.headers['x-storage-size'];
+  const sha256 = response.headers['x-storage-sha256'];
+  if (
+    typeof size !== 'string' ||
+    !/^(?:0|[1-9][0-9]*)$/.test(size) ||
+    !Number.isSafeInteger(Number(size)) ||
+    typeof sha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(sha256)
+  )
+    throw new CliError('response_invalid');
+  return { size: Number(size), sha256 };
+}
+
 async function metadata(response: IncomingMessage): Promise<unknown> {
   const parts: Buffer[] = [];
   let length = 0;
@@ -403,20 +419,36 @@ export async function runStorageCli(argv: string[], options: StorageCliOptions):
       local = await localFile(options.cwd, command.name, true);
       partial = true;
       const file = local.file;
-      await transfer(config, 'GET', `${base}/${command.id}`, {}, undefined, async (response) => {
-        for await (const part of response) {
-          const bytes = Buffer.from(part as Uint8Array);
-          let offset = 0;
-          while (offset < bytes.length) {
-            const { bytesWritten } = await file.write(bytes, offset, bytes.length - offset);
-            if (!bytesWritten) throw new CliError('local_write_failed');
-            offset += bytesWritten;
+      result = await transfer(
+        config,
+        'GET',
+        `${base}/${command.id}`,
+        {},
+        undefined,
+        async (response) => {
+          const catalog = downloadMetadata(response);
+          const hash = createHash('sha256');
+          let length = 0;
+          for await (const part of response) {
+            const bytes = Buffer.from(part as Uint8Array);
+            length += bytes.length;
+            if (!Number.isSafeInteger(length) || length > catalog.size)
+              throw new CliError('response_invalid');
+            hash.update(bytes);
+            let offset = 0;
+            while (offset < bytes.length) {
+              const { bytesWritten } = await file.write(bytes, offset, bytes.length - offset);
+              if (!bytesWritten) throw new CliError('local_write_failed');
+              offset += bytesWritten;
+            }
           }
+          if (length !== catalog.size || hash.digest('hex') !== catalog.sha256)
+            throw new CliError('response_invalid');
+          await file.sync();
+          return { id: command.id, size: catalog.size, sha256: catalog.sha256 };
         }
-        await file.sync();
-      });
+      );
       partial = false;
-      result = { id: command.id };
     } else if (command.kind === 'mark') {
       result = receipt(
         await transfer(

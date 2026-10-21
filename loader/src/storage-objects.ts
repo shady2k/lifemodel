@@ -29,7 +29,9 @@ export interface StorageObjects {
     res: ServerResponse,
     space: string,
     tail: string,
-    stream: StorageTaskStream
+    stream: StorageTaskStream,
+    recover?: () => StorageTaskStream,
+    progress?: () => void
   ): Promise<void>;
   expiredUploads(): Promise<{ space: string; uploadId: string }[]>;
   check(signal: AbortSignal): Promise<boolean>;
@@ -79,6 +81,7 @@ export function validateStorageName(name: string): void {
     !name ||
     Buffer.byteLength(name) > 1024 ||
     name.normalize('NFC') !== name ||
+    /\p{Cf}/u.test(name) ||
     Array.from(name).some((char) => {
       const point = char.codePointAt(0) ?? 0;
       return point < 32 || (point >= 127 && point <= 159);
@@ -183,7 +186,7 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
           'SELECT o.id,v.receipt,i.lease_expires_at,a.s3_key,q.reserved_bytes FROM storage.objects o JOIN storage.object_versions v ON v.object_id=o.id JOIN storage.upload_intents i ON i.object_id=o.id JOIN storage.upload_attempts a ON a.id=v.attempt_id JOIN storage.space_quota q ON q.space_id=o.space_id WHERE false'
         );
         const functions = await query<{ ready: boolean }>(
-          "SELECT to_regprocedure('storage.reserve_upload(text,text,uuid,text,bigint,text,integer)') IS NOT NULL AND to_regprocedure('storage.complete_upload(text,text,uuid)') IS NOT NULL AS ready"
+          "SELECT to_regprocedure('storage.reserve_upload(text,text,uuid,text,bigint,text,integer)') IS NOT NULL AND to_regprocedure('storage.complete_upload(text,text,uuid)') IS NOT NULL AND to_regprocedure('storage.release_upload(text,text)') IS NOT NULL AS ready"
         );
         return !signal.aborted && functions.rows[0]?.ready === true;
       } catch {
@@ -197,7 +200,7 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
       );
       return result.rows.map((row) => ({ space: row.space_id, uploadId: row.upload_id }));
     },
-    handle: async (req, res, space, tail, stream) => {
+    handle: async (req, res, space, tail, stream, recover, progress) => {
       await stream.chunk(0, () => undefined);
       if (
         tail.length > 1024 ||
@@ -238,70 +241,112 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
         )
           invalid();
         const size = Number(length);
-        await stream.publish({
-          text: 'SELECT storage.reserve_upload($1,$2,$3,$4,$5,$6,$7)',
-          values: [space, uploadId, randomUUID(), name, size, sha256, settings.leaseSeconds],
-        });
-        const intents = await query<IntentRow>(
-          'SELECT * FROM storage.upload_intents WHERE space_id=$1 AND upload_id=$2',
-          [space, uploadId]
-        );
-        const intent = intents.rows[0];
-        if (!intent) throw new StorageAccessError(507, 'capacity_exhausted');
-        if (intent.name !== name || Number(intent.size) !== size || intent.sha256 !== sha256)
-          throw new StorageAccessError(409, 'upload_conflict');
-        if (intent.state === 'completed') {
+        try {
+          await stream.publish({
+            text: 'SELECT storage.reserve_upload($1,$2,$3,$4,$5,$6,$7)',
+            values: [space, uploadId, randomUUID(), name, size, sha256, settings.leaseSeconds],
+          });
+          const intents = await query<IntentRow & { reserved: boolean }>(
+            'SELECT * FROM storage.upload_intents WHERE space_id=$1 AND upload_id=$2',
+            [space, uploadId]
+          );
+          const intent = intents.rows[0];
+          if (!intent) throw new StorageAccessError(507, 'capacity_exhausted');
+          if (intent.name !== name || Number(intent.size) !== size || intent.sha256 !== sha256)
+            throw new StorageAccessError(409, 'upload_conflict');
+          if (intent.state === 'completed') {
+            const saved = await object(space, intent.object_id);
+            await answer(res, stream, saved.receipt);
+            return;
+          }
+          if (!intent.reserved) throw new StorageAccessError(507, 'capacity_exhausted');
+          const attempt = randomUUID();
+          const key = `private/${randomUUID()}`;
+          await stream.publish({
+            text: 'INSERT INTO storage.upload_attempts(id,space_id,upload_id,s3_key) VALUES($1,$2,$3,$4)',
+            values: [attempt, space, uploadId, key],
+          });
+          async function* source() {
+            let accepted = 0;
+            let emitted = 0;
+            let pending: Buffer | undefined;
+            let filled = 0;
+            const hash = createHash('sha256');
+            for await (const part of req) {
+              stream.signal.throwIfAborted();
+              const bytes = Buffer.isBuffer(part) ? part : Buffer.from(part);
+              if (accepted + bytes.length > size)
+                throw new StorageAccessError(400, 'length_mismatch');
+              accepted += bytes.length;
+              hash.update(bytes);
+              for (let offset = 0; offset < bytes.length; ) {
+                pending ??= Buffer.allocUnsafe(Math.min(settings.chunkBytes, size - emitted));
+                const copied = Math.min(bytes.length - offset, pending.length - filled);
+                bytes.copy(pending, filled, offset, offset + copied);
+                filled += copied;
+                offset += copied;
+                if (filled === pending.length) {
+                  const chunk = pending;
+                  pending = undefined;
+                  filled = 0;
+                  emitted += chunk.length;
+                  yield chunk;
+                }
+              }
+            }
+            if (accepted !== size) throw new StorageAccessError(400, 'length_mismatch');
+            if (hash.digest('hex') !== sha256) throw new StorageAccessError(400, 'hash_mismatch');
+          }
+          await options.s3.put(
+            key,
+            size,
+            sha256,
+            source(),
+            stream.signal,
+            (bytes, dispatch) => stream.chunk(bytes, dispatch),
+            progress
+          );
+          const publication = await stream.publish({
+            text: 'SELECT storage.complete_upload($1,$2,$3) AS status',
+            values: [space, uploadId, attempt],
+          });
+          const status = publication?.rows[0]?.['status'];
+          if (status !== 'completed' && status !== 'already_completed')
+            throw new StorageAccessError(503, 'completion_failed');
           const saved = await object(space, intent.object_id);
           await answer(res, stream, saved.receipt);
           return;
-        }
-        const attempt = randomUUID();
-        const key = `private/${randomUUID()}`;
-        await stream.publish({
-          text: 'INSERT INTO storage.upload_attempts(id,space_id,upload_id,s3_key) VALUES($1,$2,$3,$4)',
-          values: [attempt, space, uploadId, key],
-        });
-        async function* source() {
-          let accepted = 0;
-          let emitted = 0;
-          let pending: Buffer | undefined;
-          let filled = 0;
-          const hash = createHash('sha256');
-          for await (const part of req) {
-            stream.signal.throwIfAborted();
-            const bytes = Buffer.isBuffer(part) ? part : Buffer.from(part);
-            if (accepted + bytes.length > size)
-              throw new StorageAccessError(400, 'length_mismatch');
-            accepted += bytes.length;
-            hash.update(bytes);
-            for (let offset = 0; offset < bytes.length; ) {
-              pending ??= Buffer.allocUnsafe(Math.min(settings.chunkBytes, size - emitted));
-              const copied = Math.min(bytes.length - offset, pending.length - filled);
-              bytes.copy(pending, filled, offset, offset + copied);
-              filled += copied;
-              offset += copied;
-              if (filled === pending.length) {
-                const chunk = pending;
-                pending = undefined;
-                filled = 0;
-                emitted += chunk.length;
-                yield chunk;
+        } catch (error) {
+          // Conflicting metadata did not acquire a reservation and must not
+          // cancel an independent matching attempt using this upload ID.
+          if (!(error instanceof StorageAccessError && error.code === 'upload_conflict')) {
+            let recovery: StorageTaskStream | undefined;
+            const release = {
+              text: 'SELECT storage.release_upload($1,$2)',
+              values: [space, uploadId],
+            };
+            try {
+              // A disconnected/expired request cannot authorize its own cleanup.
+              // Re-open with the same identity and space, not a cached decision.
+              recovery = stream.signal.aborted ? recover?.() : undefined;
+              try {
+                await (recovery ?? stream).publish(release);
+              } catch (releaseError) {
+                // Cancellation can race the live check while the original guard
+                // is proving identity. Retry once with an independent bound.
+                if (recovery || !stream.signal.aborted || !recover) throw releaseError;
+                recovery = recover();
+                await recovery.publish(release);
               }
+            } catch {
+              // Revocation or a catalog outage must fail closed. Keep the safe
+              // original outcome; an unreleased intent remains collectible.
+            } finally {
+              recovery?.close();
             }
           }
-          if (accepted !== size) throw new StorageAccessError(400, 'length_mismatch');
-          if (hash.digest('hex') !== sha256) throw new StorageAccessError(400, 'hash_mismatch');
+          throw error;
         }
-        await options.s3.put(key, size, sha256, source(), stream.signal, (bytes, dispatch) =>
-          stream.chunk(bytes, dispatch)
-        );
-        await stream.publish({
-          text: 'SELECT storage.complete_upload($1,$2,$3)',
-          values: [space, uploadId, attempt],
-        });
-        const saved = await object(space, intent.object_id);
-        await answer(res, stream, saved.receipt);
-        return;
       }
       if (req.method === 'GET' && parts.length === 0) {
         if (
@@ -355,7 +400,12 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
         }
         if (size === 0) {
           await stream.chunk(0, () => {
-            res.writeHead(200, { 'content-length': '0', 'cache-control': 'no-store' });
+            res.writeHead(200, {
+              'content-length': '0',
+              'cache-control': 'no-store',
+              'x-storage-size': saved.size,
+              'x-storage-sha256': saved.sha256,
+            });
             res.end();
           });
           return;
@@ -363,7 +413,7 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
         let headers = false;
         for (let offset = start; offset <= end; offset += settings.chunkBytes) {
           const last = Math.min(end, offset + settings.chunkBytes - 1);
-          const body = await options.s3.get(saved.s3_key, offset, last, stream.signal);
+          const body = await options.s3.get(saved.s3_key, offset, last, stream.signal, progress);
           let received = 0;
           for await (const part of body) {
             for (let index = 0; index < part.length; index += settings.chunkBytes) {
@@ -379,6 +429,8 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
                     'content-length': String(end - start + 1),
                     'cache-control': 'no-store',
                     'x-content-type-options': 'nosniff',
+                    'x-storage-size': saved.size,
+                    'x-storage-sha256': saved.sha256,
                     ...(range
                       ? { 'content-range': `bytes ${String(start)}-${String(end)}/${String(size)}` }
                       : {}),

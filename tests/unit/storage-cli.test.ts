@@ -69,9 +69,18 @@ beforeEach(async () => {
   calls = [];
   stdout = '';
   stderr = '';
-  answer = (_req, res) => {
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify(receipt));
+  answer = (req, res) => {
+    if (req.method === 'GET' && !req.url?.includes('?')) {
+      res.writeHead(200, {
+        'content-type': 'application/octet-stream',
+        'x-storage-size': String(receipt.size),
+        'x-storage-sha256': receipt.sha256,
+      });
+      res.end(bytes);
+    } else {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(receipt));
+    }
   };
 });
 afterEach(async () => {
@@ -116,14 +125,15 @@ describe('lifemodel-storage', () => {
     expect(JSON.parse(stdout)).toEqual(receipt);
     expect(stderr).toBe('');
   });
-  it.each(['\ufeff', '\ufeffreport.txt'])(
-    'preserves every code point in BOM-bearing upload names %j',
+  it.each(['\ufeff', '\ufeffreport.txt', 'invoice\u202etxt.exe', 'invisible\u200b.txt'])(
+    'refuses format controls including BOM in put/get names %j',
     async (name) => {
       await writeFile(join(directory, name), bytes);
-      answer = (_req, res) => res.end(JSON.stringify({ ...receipt, name }));
-      expect(await run(['put', name, '--upload-id', 'bom-upload']), stderr).toBe(0);
-      expect(calls[0]!.headers['x-storage-name']).toBe(Buffer.from(name).toString('base64url'));
-      expect(JSON.parse(stdout).name).toBe(name);
+      expect(await run(['put', name, '--upload-id', 'format-upload'])).toBe(1);
+      expect(await run(['get', 'object-a', `download-${name}`])).toBe(1);
+      expect(calls).toHaveLength(0);
+      expect(stdout).toBe('');
+      expect(stderr).toContain('arguments_invalid');
     }
   );
   it('rereads a projected token (including a rotated symlink) for every invocation', async () => {
@@ -149,18 +159,89 @@ describe('lifemodel-storage', () => {
   });
   it('gets bytes into a new regular file without treating object ids as paths', async () => {
     await mkdir(join(directory, 'nested'));
-    answer = (_req, res) => {
-      res.writeHead(200, { 'content-type': 'application/octet-stream' });
-      res.end(bytes);
-    };
     expect(
       await run(['get', 'object-a', receipt.name]),
       `${stderr} requestCount=${calls.length}`
     ).toBe(0);
     expect(await readFile(join(directory, receipt.name))).toEqual(bytes);
     expect(calls[0]).toMatchObject({ method: 'GET', path: '/spaces/space-a/objects/object-a' });
+    expect(JSON.parse(stdout)).toEqual({
+      id: receipt.id,
+      size: receipt.size,
+      sha256: receipt.sha256,
+    });
     expect(stdout).not.toContain(endpoint);
+    expect(stderr).toBe('');
   });
+  it('verifies and reports the catalog metadata for an empty download', async () => {
+    const sha256 = createHash('sha256').update('').digest('hex');
+    answer = (_req, res) => {
+      res.writeHead(200, { 'x-storage-size': '0', 'x-storage-sha256': sha256 });
+      res.end();
+    };
+    expect(await run(['get', 'object-a', 'empty']), stderr).toBe(0);
+    expect(await readFile(join(directory, 'empty'))).toEqual(Buffer.alloc(0));
+    expect(JSON.parse(stdout)).toEqual({ id: 'object-a', size: 0, sha256 });
+    expect(stderr).toBe('');
+  });
+  it.each([
+    ['missing size', undefined, receipt.sha256],
+    ['missing hash', String(receipt.size), undefined],
+    ['leading zero size', `0${String(receipt.size)}`, receipt.sha256],
+    ['signed size', `+${String(receipt.size)}`, receipt.sha256],
+    ['negative size', '-1', receipt.sha256],
+    ['fractional size', `${String(receipt.size)}.0`, receipt.sha256],
+    ['exponent size', '1e1', receipt.sha256],
+    ['unsafe size', '9007199254740992', receipt.sha256],
+    ['duplicate size', [String(receipt.size), String(receipt.size)], receipt.sha256],
+    ['uppercase hash', String(receipt.size), receipt.sha256.toUpperCase()],
+    ['short hash', String(receipt.size), receipt.sha256.slice(1)],
+    ['invalid hash', String(receipt.size), 'g'.repeat(64)],
+    ['duplicate hash', String(receipt.size), [receipt.sha256, receipt.sha256]],
+  ])(
+    'refuses %s catalog download headers and retains the identified file',
+    async (_label, size, sha256) => {
+      answer = (_req, res) => {
+        if (size !== undefined) res.setHeader('x-storage-size', size);
+        if (sha256 !== undefined) res.setHeader('x-storage-sha256', sha256);
+        res.end(bytes);
+      };
+      expect(await run(['get', 'object-a', 'download'])).toBe(1);
+      const partial = await stat(join(directory, 'download'));
+      expect(stdout).toBe('');
+      expect(stderr).toContain('response_invalid');
+      expect(stderr).toContain(
+        `partial_retained dev=${String(partial.dev)} ino=${String(partial.ino)}`
+      );
+      expect(stderr).not.toContain(directory);
+    }
+  );
+  it.each([
+    ['short bytes', bytes.subarray(1), receipt.size, receipt.sha256],
+    ['surplus bytes', Buffer.concat([bytes, Buffer.from('!')]), receipt.size, receipt.sha256],
+    ['changed bytes', Buffer.alloc(bytes.length, 'x'), receipt.size, receipt.sha256],
+    ['wrong hash', bytes, receipt.size, '0'.repeat(64)],
+  ])(
+    'refuses %s against catalog metadata before reporting success',
+    async (_label, body, size, sha256) => {
+      answer = (_req, res) => {
+        res.writeHead(200, {
+          'content-length': String(body.length),
+          'x-storage-size': String(size),
+          'x-storage-sha256': sha256,
+        });
+        res.end(body);
+      };
+      expect(await run(['get', 'object-a', 'download'])).toBe(1);
+      const partial = await stat(join(directory, 'download'));
+      expect(stdout).toBe('');
+      expect(stderr).toContain('response_invalid');
+      expect(stderr).toContain(
+        `partial_retained dev=${String(partial.dev)} ino=${String(partial.ino)}`
+      );
+      expect(stderr).not.toContain(directory);
+    }
+  );
   it('never overwrites an existing destination', async () => {
     await source();
     expect(await run(['get', 'object-a', receipt.name])).toBe(1);
@@ -177,7 +258,11 @@ describe('lifemodel-storage', () => {
   });
   it('retains and identifies an incomplete inode after the remote socket drops', async () => {
     answer = (_req, res) => {
-      res.writeHead(200, { 'content-length': '1000' });
+      res.writeHead(200, {
+        'content-length': '1000',
+        'x-storage-size': '1000',
+        'x-storage-sha256': receipt.sha256,
+      });
       res.flushHeaders();
       res.write('partial');
       res.destroy();

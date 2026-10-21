@@ -228,33 +228,18 @@ describe('task immutable object API', () => {
     ).toBe(409);
     expect((await list()).json.objects).toHaveLength(1);
   });
-  it.each([
-    ['BOM-only', '\ufeff'],
-    ['BOM-prefixed', '\ufeffreport.txt'],
-  ])('preserves the exact UTF-8 %s display name', async (_, name) => {
-    const reply = await put('bom-name', Buffer.from('named bytes'), name);
-    expect(reply.status).toBe(200);
-    expect(reply.json.name).toBe(name);
-    expect(Buffer.from(reply.json.name)).toEqual(Buffer.from(name));
-    const page = await list();
-    expect(page.status).toBe(200);
-    expect(page.json.objects).toEqual([reply.json]);
-    const retry = await put('bom-name', Buffer.from('named bytes'), name);
-    expect(retry.status).toBe(200);
-    expect(retry.json).toEqual(reply.json);
-  });
-  it('rejects a plain-name retry of a BOM-prefixed upload as conflicting', async () => {
-    const bytes = Buffer.from('same bytes');
-    const original = await put('bom-conflict', bytes, '\ufeffreport.txt');
-    expect(original.status).toBe(200);
-    const retry = await put('bom-conflict', bytes, 'report.txt');
-    expect(retry.status).toBe(409);
-    expect(retry.json.error.code).toBe('upload_conflict');
-    const page = await list();
-    expect(page.status).toBe(200);
-    expect(page.json.objects).toEqual([original.json]);
-    expect(original.json.name).toBe('\ufeffreport.txt');
-  });
+  it.each(['\ufeff', '\ufeffreport.txt', 'invoice\u202etxt.exe'])(
+    'refuses Unicode format controls without aliasing names %j',
+    async (name) => {
+      expect((await put('format-name', Buffer.from('named bytes'), name)).status).toBe(400);
+      expect((await list()).json.objects).toEqual([]);
+      // Refusal never reserves this ID or strips code points into a plain alias.
+      const plain = await put('format-name', Buffer.from('named bytes'), 'report.txt');
+      expect(plain.status).toBe(200);
+      expect(plain.json.name).toBe('report.txt');
+      expect((await put('format-name', Buffer.from('named bytes'), name)).status).toBe(400);
+    }
+  );
   it.each(['short', 'surplus', 'hash'])('does not publish %s bytes', async (failure) => {
     const bytes = Buffer.from('payload');
     const extra =
@@ -368,6 +353,56 @@ describe('task immutable object API', () => {
       }
       expect(seen.map((row: any) => row.id)).toEqual(receipts[space].map((row) => row.id));
       assertNoForeignMetadata(seen);
+    }
+  });
+  it('refuses a cursor minted for a different space', async () => {
+    const foreign = await call('GET', '/spaces/b/objects?limit=1', undefined, {}, 'b');
+    expect(foreign.status).toBe(200);
+    expect(typeof foreign.json.nextCursor).toBe('string');
+    const reply = await call('GET', `/spaces/a/objects?cursor=${foreign.json.nextCursor}`);
+    expect(reply.status).toBe(400);
+    expect(reply.json.error.code).toBe('invalid_request');
+  });
+  it.each([
+    ['ten-byte', Buffer.from('0123456789'), 'bytes=0-10'],
+    ['empty', Buffer.alloc(0), 'bytes=0-0'],
+  ])(
+    'refuses an end beyond the %s object before contacting any backend',
+    async (id, bytes, range) => {
+      const uploaded = await put(id, bytes);
+      expect(uploaded.status).toBe(200);
+      const before = backend.requests.length;
+      // Seaweed clamps oversized range ends; a client error must never reach it.
+      backend.hooks.beforeGet = () => ({
+        status: 206,
+        headers: {
+          'content-range': 'bytes 0-9/10',
+          'content-length': '10',
+        },
+      });
+      const reply = await call('GET', `/spaces/a/objects/${uploaded.json.id}`, undefined, {
+        range,
+      });
+      expect(reply.status).toBe(416);
+      expect(reply.json.error.code).toBe('invalid_range');
+      expect(backend.requests.length).toBe(before);
+    }
+  );
+  it('denies foreign tokens for existing and random IDs before catalog or backend reads', async () => {
+    const uploaded = await put('private', Buffer.from('private bytes'));
+    expect(uploaded.status).toBe(200);
+    const before = backend.requests.length;
+    for (const id of [uploaded.json.id, '8b5cc2de-ad1a-49de-a774-a5c8d82eece4'])
+      expect((await call('GET', `/spaces/a/objects/${id}`, undefined, {}, 'b')).status).toBe(403);
+    // Fault the read surface itself, without replacing any adapter or authority.
+    // An attempted catalog read would now return 503, not either required 403.
+    await stores.postgres.query('ALTER TABLE storage.objects RENAME TO objects_read_forbidden');
+    try {
+      for (const id of [uploaded.json.id, '8b5cc2de-ad1a-49de-a774-a5c8d82eece4'])
+        expect((await call('GET', `/spaces/a/objects/${id}`, undefined, {}, 'b')).status).toBe(403);
+      expect(backend.requests.length).toBe(before);
+    } finally {
+      await stores.postgres.query('ALTER TABLE storage.objects_read_forbidden RENAME TO objects');
     }
   });
   it('bounds ranges, cursors, listing and unknown selectors', async () => {
@@ -679,6 +714,11 @@ describe('task immutable object API', () => {
       expect(await runStorageCli(['list'], options), error).toBe(0);
       expect(JSON.parse(output).objects).toEqual([{ ...receipt, mark: 'result' }]);
       expect(await runStorageCli(['get', receipt.id, 'download.txt'], options), error).toBe(0);
+      expect(JSON.parse(output)).toEqual({
+        id: receipt.id,
+        size: receipt.size,
+        sha256: receipt.sha256,
+      });
       expect(await readFile(join(directory, 'download.txt'), 'utf8')).toBe('cli bytes');
     } finally {
       await rm(directory, { recursive: true, force: true });
