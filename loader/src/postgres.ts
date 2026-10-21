@@ -135,9 +135,7 @@ export function createKubernetesPostgresSecretPhase(
     run: async () => {
       const source = await send(sourceUrl, 'GET');
       if (source.status !== 200)
-        throw new Error(
-          `CNPG application Secret read failed (${String(source.status)})`
-        );
+        throw new Error(`CNPG application Secret read failed (${String(source.status)})`);
       const credentials = (JSON.parse(source.body) as { data?: Record<string, string> }).data;
       const username = credentials?.['username'];
       const password = credentials?.['password'];
