@@ -136,7 +136,7 @@ export function createKubernetesPostgresSecretPhase(
       const source = await send(sourceUrl, 'GET');
       if (source.status !== 200)
         throw new Error(
-          `CNPG application Secret read failed (${String(source.status)}): ${source.body}`
+          `CNPG application Secret read failed (${String(source.status)})`
         );
       const credentials = (JSON.parse(source.body) as { data?: Record<string, string> }).data;
       const username = credentials?.['username'];
@@ -187,19 +187,15 @@ export function createKubernetesPostgresSecretPhase(
           current = await send(collection, 'POST', body);
           if (current.status === 201) return verify();
           if (current.status !== 409)
-            throw new Error(
-              `${target.name} create failed (${String(current.status)}): ${current.body}`
-            );
+            throw new Error(`${target.name} create failed (${String(current.status)})`);
           current = await send(targetUrl, 'GET');
           if (current.status !== 200)
             throw new Error(
-              `${target.name} read after conflict failed (${String(current.status)}): ${current.body}`
+              `${target.name} read after conflict failed (${String(current.status)})`
             );
         }
         if (current.status !== 200)
-          throw new Error(
-            `${target.name} read failed (${String(current.status)}): ${current.body}`
-          );
+          throw new Error(`${target.name} read failed (${String(current.status)})`);
         const resourceVersion = (
           JSON.parse(current.body) as { metadata?: { resourceVersion?: string } }
         ).metadata?.resourceVersion;
@@ -209,9 +205,7 @@ export function createKubernetesPostgresSecretPhase(
           metadata: { ...body.metadata, resourceVersion },
         });
         if (result.status !== 200)
-          throw new Error(
-            `${target.name} update failed (${String(result.status)}): ${result.body}`
-          );
+          throw new Error(`${target.name} update failed (${String(result.status)})`);
         await verify();
       }
       for (const target of TARGETS) await copy(target);
