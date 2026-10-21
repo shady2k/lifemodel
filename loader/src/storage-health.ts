@@ -46,7 +46,7 @@ export interface StorageHealthOptions {
   /**
    * How long an evaluation waits for its check. It must stay below the
    * Kubernetes readiness probe's `timeoutSeconds`, so the probe always gets an
-   * answer (deploy/platform/a/storage-module.yaml).
+   * answer (deploy/platform/d/storage-module.yaml).
    */
   boundMs?: number;
   timers?: { set: typeof setTimeout; clear: typeof clearTimeout };

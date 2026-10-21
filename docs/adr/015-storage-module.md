@@ -357,9 +357,11 @@ ambiguity; malformed names/tokens/quota do not launch retry storms.
   промежуточный вариант. Его мы никому не показываем, у нас greenfield."): no
   NOLOGIN group, no vault-env injection and no separate role now; those are
   2t5's. Nothing else in S-D1 widens: the module still reads only the one
-  custody record in OpenBao and still holds no S3 or model key. This
-  intermediate state is not shown to anyone and carries no upgrade path - a
-  fresh installation is the only form of it.
+  custody record in OpenBao, and what it holds is that record's scoped Seaweed
+  S3 signing credentials in memory - no model key, no loader root or unseal
+  material and no unrelated credential. This intermediate state is not shown to
+  anyone and carries no upgrade path - a fresh installation is the only form of
+  it.
 
 ## Options rejected and consequences
 
