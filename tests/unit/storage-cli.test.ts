@@ -104,6 +104,70 @@ async function source() {
 }
 
 describe('lifemodel-storage', () => {
+  it.each([
+    ['no arguments', []],
+    ['path escape', ['put', '../escape', '--upload-id', 'escape']],
+  ])('omits HTTP status for arguments_invalid: %s', async (_label, args) => {
+    expect(await run(args)).toBe(1);
+    expect(stderr).toMatch(/^lifemodel-storage: arguments_invalid id=[0-9a-f-]{36}\n$/);
+    expect(calls).toHaveLength(0);
+    expect(stdout).toBe('');
+  });
+  it.each(['symlink source', 'existing destination'])(
+    'omits HTTP status for local_file_invalid: %s',
+    async (failure) => {
+      await source();
+      await symlink(receipt.name, join(directory, 'linked'));
+      const args =
+        failure === 'symlink source'
+          ? ['put', 'linked', '--upload-id', 'link']
+          : ['get', 'object-a', receipt.name];
+      expect(await run(args)).toBe(1);
+      expect(stderr).toMatch(/^lifemodel-storage: local_file_invalid id=[0-9a-f-]{36}\n$/);
+      expect(await readFile(join(directory, receipt.name))).toEqual(bytes);
+      expect(calls).toHaveLength(0);
+      expect(stdout).toBe('');
+    }
+  );
+  it('omits HTTP status for configuration_invalid before contacting the module', async () => {
+    delete env['LIFEMODEL_STORAGE_ENDPOINT'];
+    expect(await run(['list'])).toBe(1);
+    expect(stderr).toMatch(/^lifemodel-storage: configuration_invalid id=[0-9a-f-]{36}\n$/);
+    expect(calls).toHaveLength(0);
+  });
+  it('omits HTTP status for operation_failed when local stdout fails', async () => {
+    expect(
+      await runStorageCli(['mark', 'object-a', 'artifact'], {
+        env,
+        cwd: directory,
+        stdout: () => {
+          throw new Error('local output failure');
+        },
+        stderr: (text) => {
+          stderr += text;
+        },
+      })
+    ).toBe(1);
+    expect(stderr).toMatch(/^lifemodel-storage: operation_failed id=[0-9a-f-]{36}\n$/);
+  });
+  it.each([403, 404, 409, 500, 503])(
+    'preserves the actual HTTP rejection status %s',
+    async (status) => {
+      answer = (_req, res) => {
+        res.writeHead(status);
+        res.end('private response');
+      };
+      expect(await run(['list'])).toBe(1);
+      expect(stderr).toMatch(
+        new RegExp(
+          `^lifemodel-storage: request_rejected id=[0-9a-f-]{36} status=${String(status)}\\n$`
+        )
+      );
+      expect(calls).toHaveLength(1);
+      expect(stdout).toBe('');
+    }
+  );
+
   it('puts immutable bytes with canonical name, measured length/hash and explicit upload id', async () => {
     await source();
     expect(
@@ -210,6 +274,7 @@ describe('lifemodel-storage', () => {
       const partial = await stat(join(directory, 'download'));
       expect(stdout).toBe('');
       expect(stderr).toContain('response_invalid');
+      expect(stderr).not.toContain('status=');
       expect(stderr).toContain(
         `partial_retained dev=${String(partial.dev)} ino=${String(partial.ino)}`
       );
@@ -255,6 +320,7 @@ describe('lifemodel-storage', () => {
     expect(await run(['list'])).toBe(1);
     expect(calls).toHaveLength(1);
     expect(stderr).toContain('transfer_failed');
+    expect(stderr).not.toContain('status=');
   });
   it('retains and identifies an incomplete inode after the remote socket drops', async () => {
     answer = (_req, res) => {

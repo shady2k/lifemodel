@@ -122,9 +122,7 @@ describe('storage CLI entrypoint output pipes', () => {
     expectBounded(result, 1);
     expect(requests).toBe(1);
     expect(result.stdout).toBe('');
-    expect(result.stderr).toMatch(
-      /^lifemodel-storage: operation_failed id=[0-9a-f-]{36} status=500\n$/
-    );
+    expect(result.stderr).toMatch(/^lifemodel-storage: operation_failed id=[0-9a-f-]{36}\n$/);
   });
 
   it('handles a closed stderr pipe without an uncaught exception or recursive diagnostic', async () => {

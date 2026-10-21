@@ -500,9 +500,12 @@ export async function runStorageCli(argv: string[], options: StorageCliOptions):
       partial && local
         ? ` partial_retained dev=${String(local.identity.dev)} ino=${String(local.identity.ino)}`
         : '';
+    // Only an actual HTTP rejection has a status. Local/transport failures
+    // must not invent a module failure code.
+    const status = safe.status === undefined ? '' : ` status=${String(safe.status)}`;
     try {
       await options.stderr(
-        `lifemodel-storage: ${safe.code} id=${randomUUID()} status=${String(safe.status ?? 500)}${retained}\n`
+        `lifemodel-storage: ${safe.code} id=${randomUUID()}${status}${retained}\n`
       );
     } catch {
       // In particular, never report a broken stderr by writing to it again.
