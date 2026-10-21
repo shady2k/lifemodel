@@ -1,6 +1,7 @@
 # Loader build context: files required by the loader image build only.
 *
 !docker/loader/Dockerfile
+!docker/loader/lifemodel-storage
 !loader/package.json
 !loader/package-lock.json
 !loader/tsconfig.json
