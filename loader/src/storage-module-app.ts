@@ -17,6 +17,7 @@ import {
 } from './storage-health.js';
 import { StorageCustodyError, type StorageS3Credentials } from './storage-custody.js';
 import type { S3Check } from './storage-s3.js';
+import type { StorageObjects } from './storage-objects.js';
 
 /** The mounted instance-CA leaf: read at start, then re-read on every reload. */
 export interface StorageTaskTlsOptions {
@@ -39,6 +40,8 @@ export interface StorageModuleOptions {
   bucket: string;
   /** Required authority: readiness and every data operation fail closed. */
   access: StorageAccess;
+  /** Task object adapter. Absent only in identity/health-only fixtures. */
+  objects?: StorageObjects;
   /** The module's own catalog; readiness needs it, as it needs the store. */
   catalog: Catalog;
   /** The custody record, in memory only; a failure here is a failed module. */
@@ -90,6 +93,8 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
     if (signal.aborted) return { ok: false, code: 'timeout' };
     const catalog = await checkCatalog(signal);
     if (!catalog.ok) return catalog;
+    if (options.objects && !(await options.objects.check(signal)))
+      return { ok: false, code: 'catalog_unavailable', cause: 'objects_unavailable' };
     if (!(await options.access.check(signal)))
       return { ok: false, code: 'catalog_unavailable', cause: 'authorization_unavailable' };
     let credentials: StorageS3Credentials;
@@ -160,9 +165,14 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           return;
         }
         const match = /^\/spaces\/([a-z0-9][a-z0-9_-]{0,63})\/access$/.exec(req.url ?? '');
+        const objectMatch =
+          role === 'task' && options.objects
+            ? /^\/spaces\/([a-z0-9][a-z0-9_-]{0,63})\/objects(?=\/|\?|$)(.*)$/.exec(req.url ?? '')
+            : null;
         if (
           !(
             (role === 'task' && req.method === 'GET' && match) ||
+            objectMatch ||
             (role === 'control' && req.method === 'POST' && req.url === '/revoke') ||
             (role === 'read' && req.method === 'GET' && req.url === '/identity')
           )
@@ -172,7 +182,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           return;
         }
         // Only a validated opaque ID may enter diagnostics, never an arbitrary path.
-        space = role === 'task' ? (match?.[1] ?? null) : null;
+        space = role === 'task' ? (match?.[1] ?? objectMatch?.[1] ?? null) : null;
         const access = options.access;
         const authHeaders = req.rawHeaders.filter(
           (_, index) => index % 2 === 0 && req.rawHeaders[index]?.toLowerCase() === 'authorization'
@@ -193,6 +203,21 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
         const signal = AbortSignal.any([control.signal, AbortSignal.timeout(10_000)]);
         try {
           let result: unknown;
+          if (objectMatch?.[1] && options.objects) {
+            const stream = access.openTaskStream({ token, space: objectMatch[1], signal });
+            const abortInput = (): void => {
+              req.destroy();
+              res.destroy();
+            };
+            stream.signal.addEventListener('abort', abortInput, { once: true });
+            try {
+              await options.objects.handle(req, res, objectMatch[1], objectMatch[2] || '/', stream);
+            } finally {
+              stream.signal.removeEventListener('abort', abortInput);
+              stream.close();
+            }
+            return;
+          }
           if (role === 'task' && match?.[1]) {
             const stream = access.openTaskStream({ token, space: match[1], signal });
             try {
@@ -260,6 +285,10 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           { id: failure.id, code: failure.code, status: failure.status, space },
           'Storage request denied'
         );
+        if (res.headersSent) {
+          res.destroy();
+          return;
+        }
         if (!res.destroyed && !res.writableEnded) {
           res.writeHead(failure.status, JSON_HEADERS);
           res.end(JSON.stringify({ error: { id: failure.id, code: failure.code } }));
@@ -294,8 +323,12 @@ function createTaskListener(
   const reloadMs = options.reloadMs ?? STORAGE_TASK_TLS_DEFAULTS.reloadMs;
   let cert = options.cert;
   let key = options.key;
-  const server = createSecureServer({ cert, key }, (req, res) => {
+  const server = createSecureServer({ cert, key, maxHeaderSize: 8192 }, (req, res) => {
     void answer(req, res);
+  });
+  server.maxHeadersCount = 32;
+  server.on('clientError', (_error, socket) => {
+    socket.destroy();
   });
   server.headersTimeout = 5_000;
   server.requestTimeout = 10_000;

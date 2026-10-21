@@ -206,6 +206,21 @@ describe('the storage module status listener', () => {
   it('is unready, with the deadline as the reason, when the store stops answering', async () => {
     const held: Array<() => void> = [];
     let stalled = false;
+    let entered!: () => void;
+    const backendStalled = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const deadlines = new Map<ReturnType<typeof setTimeout>, () => void>();
+    const timers = {
+      set: ((callback: () => void) => {
+        const id = {} as ReturnType<typeof setTimeout>;
+        deadlines.set(id, callback);
+        return id;
+      }) as typeof setTimeout,
+      clear: ((id: ReturnType<typeof setTimeout>) => {
+        deadlines.delete(id);
+      }) as typeof clearTimeout,
+    };
     const lines: RecordedLine[] = [];
     const app = createStorageModule({
       access: createStorageAccess({
@@ -218,6 +233,7 @@ describe('the storage module status listener', () => {
       check: (given) => {
         void given;
         if (!stalled) return Promise.resolve({ ok: true });
+        entered();
         return new Promise<S3Check>((resolve) => {
           held.push(() => {
             resolve({ ok: true });
@@ -232,6 +248,7 @@ describe('the storage module status listener', () => {
       },
       logger: createRecordingLogger(lines),
       health: { cacheMs: 0, boundMs: 20 },
+      timers,
     });
     servers.push(app.status);
     await new Promise<void>((resolve) => app.status.listen(0, '127.0.0.1', resolve));
@@ -240,7 +257,11 @@ describe('the storage module status listener', () => {
     const base = `http://127.0.0.1:${String(address.port)}`;
     expect((await fetch(`${base}/status`)).status).toBe(200);
     stalled = true;
-    const stalledAnswer = await fetch(`${base}/status`);
+    const pending = fetch(`${base}/status`);
+    await backendStalled;
+    expect(deadlines.size).toBe(1);
+    for (const expire of deadlines.values()) expire();
+    const stalledAnswer = await pending;
     expect(stalledAnswer.status).toBe(503);
     expect(JSON.parse(await stalledAnswer.text())).toMatchObject({
       state: 'down',

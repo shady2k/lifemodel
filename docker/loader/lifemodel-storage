@@ -1,0 +1,2 @@
+#!/bin/sh
+exec node /opt/lifemodel/loader/dist/storage-cli-main.js "$@"

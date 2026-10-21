@@ -14,6 +14,8 @@ import { checkS3Bucket } from './storage-s3.js';
 import { createStorageModule } from './storage-module-app.js';
 import { createStorageAccess } from './storage-access.js';
 import { createKubernetesStorageIdentity } from './storage-identity.js';
+import { createStorageObjects } from './storage-objects.js';
+import { createStorageObjectS3 } from './storage-object-s3.js';
 
 /** Four listeners: health, task data, trusted core control, trusted core/web read. */
 const STATUS_PORT = 8081;
@@ -70,7 +72,13 @@ const custody = createCachedCustodyReader(() => readCustodyRecord(bao.call));
 const catalog = createCatalog({
   connectionString: catalogConnectionString(databaseUsername, databasePassword),
 });
+const objectS3 = createStorageObjectS3({ endpoint, bucket, custody });
+const objects = createStorageObjects({
+  connectionString: catalogConnectionString(databaseUsername, databasePassword),
+  s3: objectS3,
+});
 const app = createStorageModule({
+  objects,
   bucket,
   catalog,
   access: createStorageAccess({
@@ -88,8 +96,13 @@ app.task.server.listen(TASK_PORT, '0.0.0.0');
 app.control.server.listen(CONTROL_PORT, '0.0.0.0');
 app.read.server.listen(READ_PORT, '0.0.0.0');
 
+let stopped = false;
 function stop(): void {
+  if (stopped) return;
+  stopped = true;
   app.task.close();
+  objectS3.close();
+  void objects.close();
   app.control.close();
   app.read.close();
   app.status.closeAllConnections();
