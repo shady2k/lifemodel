@@ -5,7 +5,7 @@ SET statement_timeout = '5s';
 -- lifecycle writer updates this stable row in place (never delete/reinsert):
 -- UPDATE conflicts with the reader's short FOR SHARE lock before its final read.
 CREATE SCHEMA IF NOT EXISTS task_access;
-CREATE TABLE task_access.intents (
+CREATE TABLE IF NOT EXISTS task_access.intents (
   task_id text NOT NULL,
   attempt_id text NOT NULL,
   launch_id text NOT NULL,
@@ -17,7 +17,7 @@ CREATE TABLE task_access.intents (
 );
 -- Once-only verified binding, written by gateway reconciliation (ADR-014 D3).
 -- No briefing, secret, grant, outcome or permission to launch is stored here.
-CREATE TABLE task_access.projections (
+CREATE TABLE IF NOT EXISTS task_access.projections (
   task_id text NOT NULL,
   attempt_id text NOT NULL,
   launch_id text NOT NULL,
@@ -33,7 +33,7 @@ CREATE TABLE task_access.projections (
 );
 -- No FK to the future registry or intent: a missing authority row must deny.
 -- A global key records the entire request identity, including expected revision.
-CREATE TABLE storage.revoke_receipts (
+CREATE TABLE IF NOT EXISTS storage.revoke_receipts (
   effect_key text PRIMARY KEY CHECK (length(effect_key) BETWEEN 1 AND 128),
   space_id text NOT NULL REFERENCES storage.spaces(id),
   expected_revision bigint NOT NULL CHECK (expected_revision >= 0),
