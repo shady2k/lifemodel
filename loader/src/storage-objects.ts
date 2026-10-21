@@ -5,6 +5,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import { StorageAccessError, type StorageTaskStream } from './storage-access.js';
 import type { StorageObjectS3 } from './storage-object-s3.js';
+import { createStorageUploadOwner, type StorageUploadOwner } from './storage-upload-owner.js';
 
 export interface StorageTransferSettings {
   chunkBytes: number;
@@ -19,6 +20,7 @@ export const STORAGE_TRANSFER_DEFAULTS: Readonly<StorageTransferSettings> = {
 export interface StorageObjectsOptions {
   connectionString: string;
   s3: StorageObjectS3;
+  owner?: StorageUploadOwner;
   chunkBytes?: number;
   timeoutMs?: number;
   leaseSeconds?: number;
@@ -151,6 +153,8 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
     statement_timeout: settings.timeoutMs,
     application_name: 'lifemodel-storage-objects',
   });
+  const owner =
+    options.owner ?? createStorageUploadOwner({ connectionString: options.connectionString });
   pool.on('error', () => undefined);
   pool.on('connect', (client) => client.on('error', () => undefined));
   async function query<T extends QueryResultRow = QueryResultRow>(
@@ -183,18 +187,22 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
     check: async (signal) => {
       if (signal.aborted) return false;
       try {
+        await owner.ready();
         await query(
           'SELECT o.id,v.receipt,i.lease_expires_at,a.s3_key,q.reserved_bytes FROM storage.objects o JOIN storage.object_versions v ON v.object_id=o.id JOIN storage.upload_intents i ON i.object_id=o.id JOIN storage.upload_attempts a ON a.id=v.attempt_id JOIN storage.space_quota q ON q.space_id=o.space_id WHERE false'
         );
         const functions = await query<{ ready: boolean }>(
-          "SELECT to_regprocedure('storage.reserve_upload(text,text,uuid,text,bigint,text,integer)') IS NOT NULL AND to_regprocedure('storage.complete_upload(text,text,uuid)') IS NOT NULL AND to_regprocedure('storage.release_upload(text,text)') IS NOT NULL AND to_regprocedure('storage.begin_attempt(uuid,text,text,text)') IS NOT NULL AS ready"
+          "SELECT to_regprocedure('storage.reserve_upload(text,text,uuid,text,bigint,text,integer)') IS NOT NULL AND to_regprocedure('storage.complete_upload(text,text,uuid)') IS NOT NULL AND to_regprocedure('storage.release_upload(text,text)') IS NOT NULL AND to_regprocedure('storage.begin_attempt(uuid,text,text,text,uuid)') IS NOT NULL AS ready"
         );
         return !signal.aborted && functions.rows[0]?.ready === true;
       } catch {
         return false;
       }
     },
-    close: () => pool.end(),
+    close: async () => {
+      await pool.end();
+      if (!options.owner) await owner.close();
+    },
     expiredUploads: async () => {
       const result = await query<{ space_id: string; upload_id: string }>(
         "SELECT space_id,upload_id FROM storage.upload_intents WHERE state='pending' AND lease_expires_at<=clock_timestamp() ORDER BY lease_expires_at,space_id,upload_id LIMIT 100"
@@ -243,7 +251,10 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
         )
           invalid();
         const size = Number(length);
+        let activeAttempt: string | undefined;
+        let transportUnsettled = false;
         try {
+          await owner.ready();
           await stream.publish({
             text: 'SELECT storage.reserve_upload($1,$2,$3,$4,$5,$6,$7)',
             values: [space, uploadId, randomUUID(), name, size, sha256, settings.leaseSeconds],
@@ -264,10 +275,15 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
           if (!intent.reserved) throw new StorageAccessError(507, 'capacity_exhausted');
           const attempt = randomUUID();
           const key = `private/${randomUUID()}`;
+          // No await between registration and begin publication: local GC can
+          // never observe a committed owner attempt without its live transfer.
+          const transferSignal = AbortSignal.any([stream.signal, owner.register(attempt)]);
+          activeAttempt = attempt;
           const begun = await stream.publish({
-            text: 'SELECT storage.begin_attempt($1,$2,$3,$4) AS accepted',
-            values: [attempt, space, uploadId, key],
+            text: 'SELECT storage.begin_attempt($1,$2,$3,$4,$5) AS accepted',
+            values: [attempt, space, uploadId, key, owner.bootId],
           });
+          transferSignal.throwIfAborted();
           if (begun?.rows[0]?.['accepted'] !== true)
             throw new StorageAccessError(409, 'upload_expired');
           async function* source() {
@@ -277,7 +293,8 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
             let filled = 0;
             const hash = createHash('sha256');
             for await (const part of req) {
-              stream.signal.throwIfAborted();
+              owner.assertActive();
+              transferSignal.throwIfAborted();
               const bytes = Buffer.isBuffer(part) ? part : Buffer.from(part);
               if (accepted + bytes.length > size)
                 throw new StorageAccessError(400, 'length_mismatch');
@@ -298,19 +315,40 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
                 }
               }
             }
+            owner.assertActive();
+            transferSignal.throwIfAborted();
             if (accepted !== size) throw new StorageAccessError(400, 'length_mismatch');
             if (hash.digest('hex') !== sha256) throw new StorageAccessError(400, 'hash_mismatch');
           }
-          await options.s3.put(
-            space,
-            key,
-            size,
-            sha256,
-            source(),
-            stream.signal,
-            (bytes, dispatch) => stream.chunk(bytes, dispatch),
-            progress
-          );
+          owner.assertActive();
+          transferSignal.throwIfAborted();
+          transportUnsettled = true;
+          try {
+            await options.s3.put(
+              space,
+              key,
+              size,
+              sha256,
+              source(),
+              transferSignal,
+              (bytes, dispatch) =>
+                stream.chunk(bytes, () => {
+                  owner.assertActive();
+                  transferSignal.throwIfAborted();
+                  dispatch();
+                }),
+              progress
+            );
+            transportUnsettled = false;
+          } catch (error) {
+            // A timed-out transport settlement is not proof the socket closed.
+            // Keep local liveness until this boot stops rather than risk DELETE.
+            transportUnsettled =
+              error instanceof StorageAccessError && error.code === 'cleanup_pending';
+            throw error;
+          }
+          owner.assertActive();
+          transferSignal.throwIfAborted();
           const publication = await stream.publish({
             text: 'SELECT storage.complete_upload($1,$2,$3) AS status',
             values: [space, uploadId, attempt],
@@ -351,6 +389,10 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
             }
           }
           throw error;
+        } finally {
+          // S3.put settles its transport before resolving/rejecting. Keep this
+          // registered through completion publication and guarded error cleanup.
+          if (activeAttempt && !transportUnsettled) owner.unregister(activeAttempt);
         }
       }
       if (req.method === 'GET' && parts.length === 0) {

@@ -5,6 +5,7 @@ import { StorageAccessError } from './storage-access-error.js';
 import type { StorageObjectS3 } from './storage-object-s3.js';
 import type { LoaderLogger } from './logger.js';
 import { sweepExpiredUploads } from './storage-expired-uploads.js';
+import type { StorageUploadOwner } from './storage-upload-owner.js';
 
 export interface RetentionSettings {
   retention: '90d' | 'forever';
@@ -14,6 +15,7 @@ export interface RetentionSettings {
 interface Options {
   connectionString: string;
   s3: StorageObjectS3;
+  owner: StorageUploadOwner;
   settings: { read(): Promise<RetentionSettings> };
   logger: LoaderLogger;
   now?: () => number;
@@ -105,32 +107,63 @@ export function createStorageRetention(options: Options): StorageRetention {
       client.release(broken);
     }
   }
-  async function withKey<T>(key: string, work: () => Promise<T>): Promise<T | undefined> {
+  /** SQL sessions serialize healthy contenders, but cannot fence S3 after loss.
+   * DELETE is at-least-once and idempotent: private immutable random keys are
+   * never reused; 200/204/404 confirm removal and SQL accounting changes once.
+   * Cancel transport synchronously on owner error/end, then await its settlement
+   * before releasing this holder. A remote completion can still be ambiguous. */
+  async function withSessionLock<T>(
+    key: string,
+    namespace: 7 | 8,
+    work: (signal: AbortSignal) => Promise<T>
+  ): Promise<T | undefined> {
     const owner = await pool.connect();
+    const controller = new AbortController();
     let locked = false;
     let broken = false;
     const failed = () => {
       broken = true;
+      controller.abort();
     };
     owner.on('error', failed);
+    owner.on('end', failed);
     try {
       locked =
         (
           await owner.query<{ locked: boolean }>(
-            'SELECT pg_try_advisory_lock(hashtextextended($1,8)) AS locked',
-            [key]
+            'SELECT pg_try_advisory_lock(hashtextextended($1,$2)) AS locked',
+            [key, namespace]
           )
         ).rows[0]?.locked === true;
       if (!locked) return undefined;
-      return await work();
+      controller.signal.throwIfAborted();
+      const result = await work(controller.signal);
+      controller.signal.throwIfAborted();
+      return result;
     } finally {
-      if (locked)
-        await owner.query('SELECT pg_advisory_unlock(hashtextextended($1,8))', [key]).catch(() => {
-          broken = true;
-        });
+      if (locked && !broken)
+        await owner
+          .query('SELECT pg_advisory_unlock(hashtextextended($1,$2))', [key, namespace])
+          .catch(failed);
       owner.removeListener('error', failed);
+      owner.removeListener('end', failed);
       owner.release(broken);
     }
+  }
+  function withKey<T>(key: string, work: (signal: AbortSignal) => Promise<T>) {
+    return withSessionLock(key, 8, work);
+  }
+  function collectionFailure(error: unknown, message: string) {
+    const failure =
+      error instanceof StorageAccessError ? error : new StorageAccessError(503, 'gc_unavailable');
+    options.logger.warn(
+      {
+        id: failure.id,
+        ...(error instanceof StorageAccessError ? { status: error.status } : {}),
+        count: 1,
+      },
+      message
+    );
   }
   async function lockPlans(client: PoolClient) {
     await client.query(
@@ -200,19 +233,7 @@ export function createStorageRetention(options: Options): StorageRetention {
     await totals(client, [candidate.plan_id]);
   }
   async function deleteCandidate(candidate: Candidate, settings: RetentionSettings) {
-    // Session lock owns transport work across short SQL transactions. A crash
-    // releases it; the durable deleting intent remains safely retryable.
-    const owner = await pool.connect();
-    let locked = false;
-    try {
-      locked =
-        (
-          await owner.query<{ locked: boolean }>(
-            'SELECT pg_try_advisory_lock(hashtextextended($1,7)) AS locked',
-            [candidate.object_id]
-          )
-        ).rows[0]?.locked === true;
-      if (!locked) return;
+    await withSessionLock(candidate.object_id, 7, async (signal) => {
       const ready = await tx(async (client) => {
         // Policy is the shared pin/delete lock. No network I/O holds it.
         const policy = (
@@ -301,7 +322,13 @@ export function createStorageRetention(options: Options): StorageRetention {
         return true;
       });
       if (!ready) return;
-      await options.s3.delete(candidate.space_id, candidate.s3_key, AbortSignal.timeout(10_000));
+      signal.throwIfAborted();
+      await options.s3.delete(
+        candidate.space_id,
+        candidate.s3_key,
+        AbortSignal.any([signal, AbortSignal.timeout(10_000)])
+      );
+      signal.throwIfAborted();
       await tx(async (client) => {
         await client.query(
           'SELECT space_id FROM storage.retention_policies WHERE space_id=$1 FOR UPDATE',
@@ -330,54 +357,50 @@ export function createStorageRetention(options: Options): StorageRetention {
         );
         await totals(client, [candidate.plan_id]);
       });
-    } finally {
-      let broken = false;
-      if (locked)
-        await owner
-          .query('SELECT pg_advisory_unlock(hashtextextended($1,7))', [candidate.object_id])
-          .catch(() => {
-            broken = true;
-          });
-      owner.release(broken);
-    }
+    });
   }
   async function sweep() {
     const page = await options.s3.listPrivate(sweepCursor, AbortSignal.timeout(10_000));
     sweepCursor = page.nextCursor ?? undefined;
     for (const entry of page.objects) {
-      await tx(async (client) => {
-        // A referenced object never becomes orphan garbage. A live attempt is
-        // protected regardless of the backend object's LastModified timestamp.
-        const referenced = await client.query(
-          `SELECT 1 FROM storage.upload_attempts a JOIN storage.upload_intents i USING(space_id,upload_id) WHERE a.s3_key=$1 AND (EXISTS(SELECT 1 FROM storage.object_versions v WHERE v.attempt_id=a.id AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=v.object_id)) OR (i.state='pending' AND NOT EXISTS(SELECT 1 FROM storage.attempt_gc g WHERE g.attempt_id=a.id) AND NOT EXISTS(SELECT 1 FROM storage.seal_gc g WHERE g.attempt_id=a.id AND g.deleted)))`,
-          [entry.key]
-        );
-        if (referenced.rowCount) return;
-        // Charge discoveries even during grace: unknown backend bytes cannot
-        // silently create free ledger capacity. No reservation is double charged.
-        const held = await client.query(
-          `SELECT 1 FROM storage.upload_attempts a JOIN storage.upload_intents i USING(space_id,upload_id) WHERE a.s3_key=$1 AND i.reserved`,
-          [entry.key]
-        );
-        if (held.rowCount) return;
-        if (
-          (
-            await client.query('SELECT 1 FROM storage.attempt_gc WHERE s3_key=$1 AND NOT deleted', [
-              entry.key,
-            ])
-          ).rowCount
-        )
-          return;
-        const inserted = await client.query(
-          'INSERT INTO storage.orphan_gc(s3_key,size,first_seen_at,last_modified) VALUES($1,$2,to_timestamp($3/1000.0),to_timestamp($4/1000.0)) ON CONFLICT(s3_key) DO UPDATE SET size=EXCLUDED.size,first_seen_at=EXCLUDED.first_seen_at,last_modified=EXCLUDED.last_modified,deleted=false WHERE storage.orphan_gc.deleted RETURNING s3_key',
-          [entry.key, entry.size, now(), entry.lastModified]
-        );
-        if (inserted.rowCount)
-          await client.query(
-            'UPDATE storage.instance_ledger SET used_bytes=used_bytes+$1 WHERE id=true',
-            [entry.size]
+      try {
+        await tx(async (client) => {
+          // A referenced object never becomes orphan garbage. A live attempt is
+          // protected regardless of the backend object's LastModified timestamp.
+          const referenced = await client.query(
+            `SELECT 1 FROM storage.upload_attempts a JOIN storage.upload_intents i USING(space_id,upload_id) WHERE a.s3_key=$1 AND (EXISTS(SELECT 1 FROM storage.object_versions v WHERE v.attempt_id=a.id AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=v.object_id)) OR (i.state='pending' AND NOT EXISTS(SELECT 1 FROM storage.attempt_gc g WHERE g.attempt_id=a.id) AND NOT EXISTS(SELECT 1 FROM storage.seal_gc g WHERE g.attempt_id=a.id AND g.deleted)))`,
+            [entry.key]
           );
-      });
+          if (referenced.rowCount) return;
+          // Charge discoveries even during grace: unknown backend bytes cannot
+          // silently create free ledger capacity. No reservation is double charged.
+          const held = await client.query(
+            `SELECT 1 FROM storage.upload_attempts a JOIN storage.upload_intents i USING(space_id,upload_id) WHERE a.s3_key=$1 AND i.reserved`,
+            [entry.key]
+          );
+          if (held.rowCount) return;
+          if (
+            (
+              await client.query(
+                'SELECT 1 FROM storage.attempt_gc WHERE s3_key=$1 AND NOT deleted',
+                [entry.key]
+              )
+            ).rowCount
+          )
+            return;
+          const inserted = await client.query(
+            'INSERT INTO storage.orphan_gc(s3_key,size,first_seen_at,last_modified) VALUES($1,$2,to_timestamp($3/1000.0),to_timestamp($4/1000.0)) ON CONFLICT(s3_key) DO UPDATE SET size=EXCLUDED.size,first_seen_at=EXCLUDED.first_seen_at,last_modified=EXCLUDED.last_modified,deleted=false WHERE storage.orphan_gc.deleted RETURNING s3_key',
+            [entry.key, entry.size, now(), entry.lastModified]
+          );
+          if (inserted.rowCount)
+            await client.query(
+              'UPDATE storage.instance_ledger SET used_bytes=used_bytes+$1 WHERE id=true',
+              [entry.size]
+            );
+        });
+      } catch (error) {
+        collectionFailure(error, 'Storage orphan accounting pending');
+      }
     }
     const garbage = await tx(
       async (client) =>
@@ -389,50 +412,41 @@ export function createStorageRetention(options: Options): StorageRetention {
         ).rows
     );
     for (const entry of garbage) {
-      const owner = await pool.connect();
-      let locked = false;
       try {
-        locked =
-          (
-            await owner.query<{ locked: boolean }>(
-              'SELECT pg_try_advisory_lock(hashtextextended($1,8)) AS locked',
+        await withKey(entry.s3_key, async (signal) => {
+          const safe = await tx(async (client) => {
+            const row = await client.query(
+              'SELECT 1 FROM storage.orphan_gc WHERE s3_key=$1 AND NOT deleted',
               [entry.s3_key]
-            )
-          ).rows[0]?.locked === true;
-        if (!locked) continue;
-        const safe = await tx(async (client) => {
-          const row = await client.query(
-            'SELECT 1 FROM storage.orphan_gc WHERE s3_key=$1 AND NOT deleted',
-            [entry.s3_key]
-          );
-          const ref = await client.query(
-            `SELECT 1 FROM storage.upload_attempts a JOIN storage.upload_intents i USING(space_id,upload_id) WHERE a.s3_key=$1 AND ((i.state='pending' AND NOT EXISTS(SELECT 1 FROM storage.attempt_gc g WHERE g.attempt_id=a.id) AND NOT EXISTS(SELECT 1 FROM storage.seal_gc g WHERE g.attempt_id=a.id AND g.deleted)) OR EXISTS(SELECT 1 FROM storage.object_versions v WHERE v.attempt_id=a.id AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=v.object_id)))`,
-            [entry.s3_key]
-          );
-          return row.rowCount === 1 && !ref.rowCount;
-        });
-        if (!safe) continue;
-        await options.s3.delete('orphan-gc', entry.s3_key, AbortSignal.timeout(10_000));
-        await tx(async (client) => {
-          const updated = await client.query(
-            'UPDATE storage.orphan_gc SET deleted=true WHERE s3_key=$1 AND NOT deleted RETURNING size::text',
-            [entry.s3_key]
-          );
-          if (updated.rowCount)
-            await client.query(
-              'UPDATE storage.instance_ledger SET used_bytes=used_bytes-$1 WHERE id=true',
-              [entry.size]
             );
+            const ref = await client.query(
+              `SELECT 1 FROM storage.upload_attempts a JOIN storage.upload_intents i USING(space_id,upload_id) WHERE a.s3_key=$1 AND ((i.state='pending' AND NOT EXISTS(SELECT 1 FROM storage.attempt_gc g WHERE g.attempt_id=a.id) AND NOT EXISTS(SELECT 1 FROM storage.seal_gc g WHERE g.attempt_id=a.id AND g.deleted)) OR EXISTS(SELECT 1 FROM storage.object_versions v WHERE v.attempt_id=a.id AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=v.object_id)))`,
+              [entry.s3_key]
+            );
+            return row.rowCount === 1 && !ref.rowCount;
+          });
+          if (!safe) return;
+          signal.throwIfAborted();
+          await options.s3.delete(
+            'orphan-gc',
+            entry.s3_key,
+            AbortSignal.any([signal, AbortSignal.timeout(10_000)])
+          );
+          signal.throwIfAborted();
+          await tx(async (client) => {
+            const updated = await client.query(
+              'UPDATE storage.orphan_gc SET deleted=true WHERE s3_key=$1 AND NOT deleted RETURNING size::text',
+              [entry.s3_key]
+            );
+            if (updated.rowCount)
+              await client.query(
+                'UPDATE storage.instance_ledger SET used_bytes=used_bytes-$1 WHERE id=true',
+                [entry.size]
+              );
+          });
         });
-      } finally {
-        let broken = false;
-        if (locked)
-          await owner
-            .query('SELECT pg_advisory_unlock(hashtextextended($1,8))', [entry.s3_key])
-            .catch(() => {
-              broken = true;
-            });
-        owner.release(broken);
+      } catch (error) {
+        collectionFailure(error, 'Storage orphan deletion pending');
       }
     }
   }
@@ -460,6 +474,8 @@ export function createStorageRetention(options: Options): StorageRetention {
       tx,
       withKey,
       s3: options.s3,
+      owner: options.owner,
+      logger: options.logger,
       now,
       graceMs: STORAGE_RETENTION_BOUNDS.orphanGraceMs,
     });

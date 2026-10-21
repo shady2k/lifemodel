@@ -614,20 +614,37 @@ describe('retention GC at real process and backend boundaries', () => {
     const read = await reading;
     expect(read.status).toBe(200);
     expect(read.body).toEqual(artifact.bytes);
-    await expect
-      .poll(
-        async () =>
-          (
-            await h.stores.postgres.query(
-              'SELECT count(*)::int AS n FROM storage.read_leases WHERE space_id=$1',
-              [artifact.space]
-            )
-          ).rows[0].n,
-        // Stream close performs a bounded five-second SQL cleanup. The default
-        // one-second poll deadline is shorter than that operation under suite load.
-        { timeout: 10_000 }
-      )
-      .toBe(0);
+    try {
+      await expect
+        .poll(
+          async () =>
+            (
+              await h.stores.postgres.query(
+                'SELECT count(*)::int AS n FROM storage.read_leases WHERE space_id=$1',
+                [artifact.space]
+              )
+            ).rows[0].n,
+          // Stream close performs a bounded five-second SQL cleanup. The default
+          // one-second poll deadline is shorter than that operation under suite load.
+          { timeout: 10_000 }
+        )
+        .toBe(0);
+    } catch (error) {
+      const sessions = await h.stores.postgres.query(
+        `SELECT application_name,state,wait_event_type,wait_event,
+           CASE WHEN query LIKE '%DELETE FROM storage.read_leases%' THEN 'read_cleanup'
+                WHEN query LIKE '%INSERT INTO storage.read_leases%' THEN 'read_renewal'
+                ELSE 'other' END AS operation
+           FROM pg_stat_activity WHERE application_name='lifemodel-storage-seal'`
+      );
+      const leases = await h.stores.postgres.query(
+        'SELECT id,expires_at FROM storage.read_leases WHERE space_id=$1',
+        [artifact.space]
+      );
+      throw new Error(JSON.stringify({ sessions: sessions.rows, leases: leases.rows }), {
+        cause: error,
+      });
+    }
     await h.tick();
     expect(h.backend.objects.has(artifact.key)).toBe(false);
     expect(

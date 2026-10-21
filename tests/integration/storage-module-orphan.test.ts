@@ -153,11 +153,12 @@ describe('orphan accounting and expired attempt recovery', () => {
     ).toBe('0');
     expect(
       (
-        await h.stores.postgres.query('SELECT storage.begin_attempt($1,$2,$3,$4) AS accepted', [
+        await h.stores.postgres.query('SELECT storage.begin_attempt($1,$2,$3,$4,$5) AS accepted', [
           randomUUID(),
           space,
           'no-attempt',
           `private/${randomUUID()}`,
+          randomUUID(),
         ])
       ).rows[0].accepted
     ).toBe(false);

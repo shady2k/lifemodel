@@ -168,15 +168,25 @@ BEGIN
   RETURN 'completed';
 END $$;
 REVOKE EXECUTE ON FUNCTION storage.complete_upload(text,text,uuid) FROM PUBLIC;
-CREATE OR REPLACE FUNCTION storage.begin_attempt(p_id uuid,p_space text,p_upload text,p_key text)
+-- Ownerless attempts from before this expansion are abandoned. New runtime
+-- attempts always obtain a fresh owner under the quota/intent/owner lock order.
+CREATE TABLE IF NOT EXISTS storage.upload_owners (
+  boot_id uuid PRIMARY KEY,
+  heartbeat_at timestamptz NOT NULL
+);
+ALTER TABLE storage.upload_attempts ADD COLUMN IF NOT EXISTS owner_boot_id uuid;
+CREATE OR REPLACE FUNCTION storage.begin_attempt(p_id uuid,p_space text,p_upload text,p_key text,p_owner uuid)
 RETURNS boolean LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
 DECLARE intent storage.upload_intents%ROWTYPE;
+        owner_heartbeat timestamptz;
 BEGIN
   PERFORM 1 FROM storage.space_quota WHERE space_id=p_space FOR UPDATE;
   SELECT * INTO intent FROM storage.upload_intents WHERE space_id=p_space AND upload_id=p_upload FOR UPDATE;
   IF NOT FOUND OR intent.state<>'pending' OR NOT intent.reserved OR intent.lease_expires_at<=clock_timestamp() THEN RETURN false; END IF;
-  INSERT INTO storage.upload_attempts(id,space_id,upload_id,s3_key) VALUES(p_id,p_space,p_upload,p_key);
+  SELECT heartbeat_at INTO owner_heartbeat FROM storage.upload_owners WHERE boot_id=p_owner FOR UPDATE;
+  IF NOT FOUND OR owner_heartbeat<=clock_timestamp()-interval '60 seconds' THEN RETURN false; END IF;
+  INSERT INTO storage.upload_attempts(id,space_id,upload_id,s3_key,owner_boot_id) VALUES(p_id,p_space,p_upload,p_key,p_owner);
   RETURN true;
 END $$;
-REVOKE EXECUTE ON FUNCTION storage.begin_attempt(uuid,text,text,text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION storage.begin_attempt(uuid,text,text,text,uuid) FROM PUBLIC;
 -- migrate:down

@@ -83,10 +83,21 @@ policy/object revisions, the warning receipt, lead and live read leases.
 Changed candidates leave the plan and need a fresh warning if later selected.
 
 A durable `deleting` intent precedes S3 DELETE. A session SQL advisory lock
-serializes contenders across the network step; process death releases it.
-200/204/404 confirmation retires the candidate and only then releases bytes.
-A lost reply retries the same key. Tombstones and notice/policy/reclaim receipts
-remain; core marked reads of deleting/deleted output return 404. Existing
+serializes healthy contenders across the network step; process death releases it.
+It does not fence S3 after the SQL session is lost. Backend DELETE is explicitly
+**at-least-once and idempotent**: private keys are random, immutable and never
+reused. A lost reply or lost session can cause another DELETE of that same key;
+200/204/404 all confirm removal. Conditional SQL ledger updates release the
+charge exactly once, even when a confirmation is replayed.
+
+An error or end event on the lock-owning PostgreSQL client immediately aborts
+that holder's in-flight S3 work through an AbortController. The holder awaits
+transport settlement before its local cleanup completes. Candidate deletion,
+expired-attempt cleanup and orphan deletion share this session-lock helper.
+This cancels local transport ownership, not a DELETE already accepted by the
+remote backend; its completion can remain ambiguous and safe to retry.
+Tombstones and notice/policy/reclaim receipts remain; core marked reads of
+deleting/deleted output return 404. Existing
 bounded read leases finish before deletion; each chunk renews a 30-second lease
 and independently rechecks current identity/catalog. Expired leases do not
 block a restarted process forever.
@@ -106,8 +117,20 @@ with bounded authenticated SigV4 pages. Unreferenced keys are durably accounted
 as orphan debt, then removed after a two-day age bound. A live non-retired
 pending attempt and any catalog version protect their keys. Expired attempts
 older than two days first receive a durable retirement marker under the same
-quota/intent locks used by publication; late publication is refused. Reservation
-release follows backend confirmation. A retry creates a fresh private key.
+quota/intent locks used by publication, but reservation expiry alone never proves
+that a PUT stopped. Every real attempt records a random process boot ID in
+`upload_attempts.owner_boot_id`; `upload_owners` holds its durable heartbeat.
+Each module renews that heartbeat every five seconds using database wall time
+(independent of retention's test clock). After 30 seconds without a timely
+renewal the module aborts its transfers and refuses new ones; renewal cannot
+resurrect a heartbeat stale for 60 seconds. Reclamation locks the boot row after
+the quota/intent rows and requires either a stale foreign boot or its own boot
+with no registered live transfer. Registration precedes begin-attempt publication
+and lasts through settled transport and publication/cleanup. A live foreign boot
+protects all its attempts, even after the original reservation lease expires.
+Ownerless pre-expansion attempts are abandoned; they still need expired leases
+and the two-day grace. Late publication of retired attempts is refused.
+Reservation release follows backend confirmation. A retry creates a fresh private key.
 Seal may return bounded `cleanup_pending` while a same-space collector transport is unsettled; keyed seal replay finishes after it settles. This cannot double-release a reservation.
 Zero-attempt expired reservations can also be released; beginning an attempt
 checks the current reservation/lease under that lock.
@@ -122,8 +145,11 @@ reappears. This is reconciliation of backend ambiguity, not a physical PVC bound
 One bounded background reconciliation loop runs in the single-replica/Recreate
 module, with injected virtual clock and explicit `runOnce` in tests. Work pages
 are bounded to 100. SQL locks/CAS and session ownership, not local maps, protect
-against two GC contenders. One space's active reader is excluded before the
-candidate limit and rechecked under lock so it does not block independent spaces.
+against two healthy GC contenders. A failed orphan discovery or deletion keeps
+its durable accounting state for retry and does not stop other keys in the page.
+Diagnostics contain safe failure IDs, status, code and count, never private keys.
+One space's active reader is excluded before the candidate limit and rechecked
+under lock so it does not block independent spaces.
 
 ## Evidence and remaining work
 
@@ -131,9 +157,17 @@ candidate limit and rechecked under lock so it does not block independent spaces
 coalescing, notices, quota proposals, identity refusal and 100-artifact restart.
 `storage-module-gc.test.ts` covers pin/delete ordering, revisions, two processes,
 active reads, lost replies, crashes and late private PUT reconciliation.
+`storage-module-lock-loss.test.ts` terminates the lock-owning SQL backend while
+a real child DELETE is held. It observes the first HTTP transport abort before a
+second child confirms a retry, with one candidate and one ledger release.
 `storage-module-ledger.test.ts` covers 100 metadata rows, exact boundary,
 concurrent reservations, rollback and discovered debt. `storage-module-orphan.test.ts`
-covers HTTP capacity and retirement fencing. Unit settings and S3-list tests
+covers HTTP capacity and retirement fencing. `storage-module-upload-liveness.test.ts`
+covers heartbeat renewal, held PUTs past their original leases, two live boot
+owners, stale SIGKILL recovery, and per-key attempt/orphan retry isolation.
+`storage-module-lock-loss.test.ts` terminates the actual PostgreSQL lock backend,
+observes the first DELETE socket abort, then confirms an idempotent second DELETE
+and a single ledger release. Unit settings and S3-list tests
 exercise projection/defaults/RBAC and bounded authenticated backend enumeration.
 
 This leaf does not send owner notices (.7.9), implement consistent backup/restore

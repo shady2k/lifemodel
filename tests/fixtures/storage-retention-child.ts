@@ -5,6 +5,7 @@ import { createStorageAccess } from '../../loader/src/storage-access.js';
 import { createKubernetesStorageIdentity } from '../../loader/src/storage-identity.js';
 import { createCatalog } from '../../loader/src/storage-catalog.js';
 import { createStorageObjects } from '../../loader/src/storage-objects.js';
+import { createStorageUploadOwner } from '../../loader/src/storage-upload-owner.js';
 import { createStorageObjectS3 } from '../../loader/src/storage-object-s3.js';
 import { createStorageSeal } from '../../loader/src/storage-seal.js';
 import { createStorageRetention } from '../../loader/src/storage-retention.js';
@@ -30,14 +31,18 @@ const s3 = createStorageObjectS3({
   custody: { read: async () => config.credentials },
   timeoutMs: 10_000,
 });
+const owner = createStorageUploadOwner({ connectionString: config.connectionString });
+await owner.ready();
 const objects = createStorageObjects({
   connectionString: config.connectionString,
   s3,
+  owner,
   timeoutMs: 10_000,
 });
 const retention = createStorageRetention({
   connectionString: config.connectionString,
   s3,
+  owner,
   settings: { read: async () => settings },
   now: () => now,
   logger,
