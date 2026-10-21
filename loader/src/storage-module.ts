@@ -16,6 +16,7 @@ import { createStorageAccess } from './storage-access.js';
 import { createKubernetesStorageIdentity } from './storage-identity.js';
 import { createStorageObjects } from './storage-objects.js';
 import { createStorageObjectS3 } from './storage-object-s3.js';
+import { createStorageSeal } from './storage-seal.js';
 
 /** Four listeners: health, task data, trusted core control, trusted core/web read. */
 const STATUS_PORT = 8081;
@@ -77,14 +78,21 @@ const objects = createStorageObjects({
   connectionString: catalogConnectionString(databaseUsername, databasePassword),
   s3: objectS3,
 });
+const access = createStorageAccess({
+  connectionString: catalogConnectionString(databaseUsername, databasePassword),
+  identity: createKubernetesStorageIdentity(),
+});
+const seal = createStorageSeal({
+  connectionString: catalogConnectionString(databaseUsername, databasePassword),
+  s3: objectS3,
+  access,
+});
 const app = createStorageModule({
+  seal,
   objects,
   bucket,
   catalog,
-  access: createStorageAccess({
-    connectionString: catalogConnectionString(databaseUsername, databasePassword),
-    identity: createKubernetesStorageIdentity(),
-  }),
+  access,
   custody,
   check: (credentials: StorageS3Credentials, signal: AbortSignal) =>
     checkS3Bucket({ endpoint, bucket, credentials, signal }),
@@ -103,6 +111,7 @@ function stop(): void {
   app.task.close();
   objectS3.close();
   void objects.close();
+  void seal.close();
   app.control.close();
   app.read.close();
   app.status.closeAllConnections();

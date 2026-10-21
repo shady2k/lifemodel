@@ -29,6 +29,10 @@ export interface StorageObjectS3 {
     signal: AbortSignal,
     onProgress?: () => void
   ): Promise<AsyncIterable<Buffer>>;
+  verify(key: string, length: number, sha256: string, signal: AbortSignal): Promise<void>;
+  delete(key: string, signal: AbortSignal): Promise<void>;
+  /** Await real request closure, including canceled operations whose handler left. */
+  settle(signal: AbortSignal): Promise<void>;
   close(): void;
 }
 export interface StorageObjectS3Options {
@@ -71,6 +75,7 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
   const httpAgent = new HttpAgent({ keepAlive: true, maxSockets: 16, maxFreeSockets: 4 });
   const httpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 16, maxFreeSockets: 4 });
   const active = new Set<() => void>();
+  const transportClosures = new Set<Promise<void>>();
   const sockets = new WeakSet<object>();
   let closed = false;
   function path(key: string): URL {
@@ -80,12 +85,13 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
   function operation(parent: AbortSignal, onProgress?: () => void) {
     if (closed || parent.aborted) throw unavailable();
     const controller = new AbortController();
-    let request: ClientRequest | undefined;
+    const requests = new Set<ClientRequest>();
+    const requestClosures: Promise<void>[] = [];
     let response: IncomingMessage | undefined;
     let done = false;
     const cancel = (): void => {
       controller.abort();
-      request?.destroy();
+      for (const request of requests) request.destroy();
       response?.destroy();
       dispose();
     };
@@ -166,7 +172,21 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
           resolveResponse(res);
         }
       );
-      request = req;
+      requests.add(req);
+      // Register before returning the request: cancellation is not settlement.
+      // ClientRequest close also fires on normal completion with a pooled socket;
+      // waiting for the reusable socket itself would block successful transfers.
+      const closure = new Promise<void>((resolve) => {
+        req.once('close', () => {
+          requests.delete(req);
+          transportClosures.delete(closure);
+          resolve();
+        });
+      });
+      // Keep this independent of the operation lifetime: an operation timeout
+      // must not turn an unclosed transport into successful seal cleanup.
+      transportClosures.add(closure);
+      requestClosures.push(closure);
       req.on('error', () => {
         rejectResponse(unavailable());
       });
@@ -181,6 +201,23 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
       });
       return { req, received };
     }
+    async function settle(): Promise<void> {
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.all(requestClosures),
+          new Promise<never>((_, reject) => {
+            deadline = setTimeout(() => {
+              cancel();
+              reject(new StorageAccessError(503, 'cleanup_pending'));
+            }, 5_000);
+            deadline.unref();
+          }),
+        ]);
+      } finally {
+        if (deadline) clearTimeout(deadline);
+      }
+    }
     async function drain(res: IncomingMessage): Promise<void> {
       const iterator = res[Symbol.asyncIterator]();
       while (!(await wait(iterator.next())).done) {
@@ -188,13 +225,29 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
         // fragments as successful transfer progress.
       }
     }
+    async function verify(url: URL, length: number, sha256: string): Promise<void> {
+      const head = await open('HEAD', url, { 'x-amz-checksum-mode': 'ENABLED' });
+      head.req.end();
+      const verified = await wait(head.received);
+      if (
+        verified.statusCode !== 200 ||
+        verified.headers['content-length'] !== String(length) ||
+        verified.headers['x-amz-checksum-sha256'] !== Buffer.from(sha256, 'hex').toString('base64')
+      )
+        throw unavailable();
+      progress();
+      await drain(verified);
+      if (controller.signal.aborted) throw unavailable();
+    }
     return {
       wait,
       progress,
       open,
       drain,
+      verify,
       cancel,
       dispose,
+      settle,
       live: () => {
         if (controller.signal.aborted) throw unavailable();
       },
@@ -272,19 +325,7 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
         if (res.statusCode !== 200) throw unavailable();
         op.progress();
         await op.drain(res);
-        const head = await op.open('HEAD', url, { 'x-amz-checksum-mode': 'ENABLED' });
-        head.req.end();
-        const verified = await op.wait(head.received);
-        if (
-          verified.statusCode !== 200 ||
-          verified.headers['content-length'] !== String(length) ||
-          verified.headers['x-amz-checksum-sha256'] !==
-            Buffer.from(sha256, 'hex').toString('base64')
-        )
-          throw unavailable();
-        op.progress();
-        await op.drain(verified);
-        op.live();
+        await op.verify(url, length, sha256);
       } catch (error) {
         op.cancel();
         if (error instanceof StorageAccessError) throw error;
@@ -298,6 +339,9 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
             /* Source teardown cannot replace the safe outcome. */
           }
         }
+        // Preserve the transfer outcome unless transport settlement itself times
+        // out: that is cleanup_pending, never evidence that a DELETE is safe.
+        await op.settle();
       }
     },
     async get(key, start, end, signal, onProgress) {
@@ -370,14 +414,68 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
           } finally {
             if (!complete) op.cancel();
             op.dispose();
+            await op.settle();
           }
         })();
       } catch (error) {
         op.cancel();
         op.dispose();
+        await op.settle();
         if (error instanceof StorageAccessError) throw error;
         throw unavailable();
       }
+    },
+    async verify(key, length, sha256, signal) {
+      const url = path(key);
+      if (!Number.isSafeInteger(length) || length < 0 || !/^[a-f0-9]{64}$/.test(sha256))
+        throw invalid();
+      const op = operation(signal);
+      try {
+        await op.verify(url, length, sha256);
+      } catch (error) {
+        op.cancel();
+        if (error instanceof StorageAccessError) throw error;
+        throw unavailable();
+      } finally {
+        op.dispose();
+        await op.settle();
+      }
+    },
+    async delete(key, signal) {
+      const url = path(key);
+      const op = operation(signal);
+      try {
+        const { req, received } = await op.open('DELETE', url, {});
+        req.end();
+        const res = await op.wait(received);
+        if (res.statusCode !== 200 && res.statusCode !== 204 && res.statusCode !== 404)
+          throw unavailable();
+        op.progress();
+        await op.drain(res);
+        op.live();
+      } catch (error) {
+        op.cancel();
+        if (error instanceof StorageAccessError) throw error;
+        throw unavailable();
+      } finally {
+        op.dispose();
+        await op.settle();
+      }
+    },
+    async settle(signal) {
+      const pending = [...transportClosures];
+      if (signal.aborted) throw new StorageAccessError(503, 'cleanup_pending');
+      await new Promise<void>((resolve, reject) => {
+        const abort = (): void => {
+          reject(new StorageAccessError(503, 'cleanup_pending'));
+        };
+        signal.addEventListener('abort', abort, { once: true });
+        void Promise.all(pending).then(() => {
+          signal.removeEventListener('abort', abort);
+          if (signal.aborted) reject(new StorageAccessError(503, 'cleanup_pending'));
+          else resolve();
+        });
+      });
     },
     close() {
       closed = true;

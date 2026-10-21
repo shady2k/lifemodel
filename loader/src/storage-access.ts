@@ -46,6 +46,9 @@ export interface StorageAccess {
   identity: KubernetesStorageIdentity;
   openTaskStream(input: { token: string; space: string; signal?: AbortSignal }): StorageTaskStream;
   revoke(space: string, expectedRevision: string, effectKey: string): Promise<RevokeReceipt>;
+  /** Freeze commits the SQL fence before canceling and settling local handlers. */
+  settleSpace(space: string): Promise<void>;
+  quiesceSpace(space: string): Promise<void>;
   check(signal: AbortSignal): Promise<boolean>;
 }
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -72,6 +75,7 @@ export const STORAGE_AUTH_READ = `WITH instant AS MATERIALIZED (SELECT clock_tim
 
 export function createStorageAccess(options: StorageAccessOptions): StorageAccess {
   const streams = new Map<string, Set<AbortController>>();
+  const settlements = new Map<AbortController, Promise<void>>();
   const timeoutMs = options.timeoutMs ?? 5_000;
   /** Serializes local decisions/dispatch with commit-to-cancel-to-ACK. Not transfer. */
   const queues = new Map<string, Promise<void>>();
@@ -143,6 +147,49 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
   }
   return {
     identity: options.identity,
+    quiesceSpace: async (space) => {
+      const pending = [...(streams.get(space) ?? [])].map((controller) => {
+        const promise = settlements.get(controller);
+        if (!promise) throw new StorageAccessError(503, 'cleanup_pending');
+        return promise;
+      });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.all(pending),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+              reject(new StorageAccessError(503, 'quiescence_pending'));
+            }, 5000);
+            timer.unref();
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    },
+    settleSpace: async (space) => {
+      const pending = [...(streams.get(space) ?? [])].map((controller) => {
+        const promise = settlements.get(controller);
+        if (!promise) throw new StorageAccessError(503, 'cleanup_pending');
+        return promise;
+      });
+      cancel(space);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.all(pending),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+              reject(new StorageAccessError(503, 'cleanup_pending'));
+            }, 5000);
+            timer.unref();
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    },
     check: async (signal) => {
       try {
         await transaction(async (client) => {
@@ -157,6 +204,13 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
       validateSpace(space);
       const controller = new AbortController();
       const controllers = streams.get(space) ?? new Set<AbortController>();
+      let settled: () => void = () => undefined;
+      settlements.set(
+        controller,
+        new Promise<void>((resolve) => {
+          settled = resolve;
+        })
+      );
       controllers.add(controller);
       streams.set(space, controllers);
       const signal = AbortSignal.any([controller.signal, ...(parent ? [parent] : [])]);
@@ -242,6 +296,8 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
         close: () => {
           controller.abort();
           controllers.delete(controller);
+          settlements.delete(controller);
+          settled();
           if (!controllers.size && streams.get(space) === controllers) streams.delete(space);
         },
       };
@@ -277,7 +333,7 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
           if (existing.rows.length !== 1) throw new StorageAccessError(404, 'space_not_found');
           const updated = await client.query<{ access_revision: string }>(
             `UPDATE storage.spaces SET access_revision=access_revision+1, mode='revoked'
-            WHERE id=$1 AND access_revision=$2 RETURNING access_revision::text`,
+            WHERE id=$1 AND access_revision=$2 AND mode IN ('open','wrapping','revoked') RETURNING access_revision::text`,
             [space, expectedRevision]
           );
           const revision = updated.rows[0]?.access_revision;
