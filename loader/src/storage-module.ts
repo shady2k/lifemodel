@@ -76,7 +76,7 @@ const custody = createCachedCustodyReader(() => readCustodyRecord(bao.call));
 const catalog = createCatalog({
   connectionString: catalogConnectionString(databaseUsername, databasePassword),
 });
-const objectS3 = createStorageObjectS3({ endpoint, bucket, custody });
+const objectS3 = createStorageObjectS3({ endpoint, bucket, custody, logger });
 const owner = createStorageUploadOwner({
   connectionString: catalogConnectionString(databaseUsername, databasePassword),
 });
@@ -108,6 +108,7 @@ const seal = createStorageSeal({
   s3: objectS3,
   access,
   retention,
+  logger,
 });
 const app = createStorageModule({
   retention,

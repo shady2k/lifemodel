@@ -16,12 +16,12 @@ interface Options {
   connectionString: string;
   s3: StorageObjectS3;
   owner: StorageUploadOwner;
-  settings: { read(): Promise<RetentionSettings> };
+  settings: { read(): Promise<RetentionSettings | undefined> };
   logger: LoaderLogger;
   now?: () => number;
 }
 export interface StorageRetention {
-  snapshot(client: PoolClient, space: string): Promise<void>;
+  snapshot(client: PoolClient, space: string, terminalAt?: number): Promise<void>;
   pending(input: { limit?: number; cursor?: string }): Promise<Record<string, unknown>>;
   warningCommitted(input: unknown): Promise<Record<string, unknown>>;
   policy(input: unknown): Promise<Record<string, unknown>>;
@@ -182,6 +182,7 @@ export function createStorageRetention(options: Options): StorageRetention {
     transaction?: PoolClient
   ): Promise<string | null> {
     const settings = await options.settings.read();
+    if (!settings) return null;
     const work = async (client: PoolClient) => {
       await lockPlans(client);
       const rows = (
@@ -389,7 +390,7 @@ export function createStorageRetention(options: Options): StorageRetention {
           )
             return;
           const inserted = await client.query(
-            'INSERT INTO storage.orphan_gc(s3_key,size,first_seen_at,last_modified) VALUES($1,$2,to_timestamp($3/1000.0),to_timestamp($4/1000.0)) ON CONFLICT(s3_key) DO UPDATE SET size=EXCLUDED.size,first_seen_at=EXCLUDED.first_seen_at,last_modified=EXCLUDED.last_modified,deleted=false WHERE storage.orphan_gc.deleted RETURNING s3_key',
+            'INSERT INTO storage.orphan_gc(s3_key,size,first_seen_at,last_modified) VALUES($1,$2,to_timestamp($3/1000.0),to_timestamp($4/1000.0)) ON CONFLICT(s3_key) DO UPDATE SET size=EXCLUDED.size,first_seen_at=EXCLUDED.first_seen_at,last_modified=EXCLUDED.last_modified,deleted=false,deleted_at=NULL WHERE storage.orphan_gc.deleted RETURNING s3_key',
             [entry.key, entry.size, now(), entry.lastModified]
           );
           if (inserted.rowCount)
@@ -435,8 +436,8 @@ export function createStorageRetention(options: Options): StorageRetention {
           signal.throwIfAborted();
           await tx(async (client) => {
             const updated = await client.query(
-              'UPDATE storage.orphan_gc SET deleted=true WHERE s3_key=$1 AND NOT deleted RETURNING size::text',
-              [entry.s3_key]
+              'UPDATE storage.orphan_gc SET deleted=true,deleted_at=to_timestamp($2/1000.0) WHERE s3_key=$1 AND NOT deleted RETURNING size::text',
+              [entry.s3_key, now()]
             );
             if (updated.rowCount)
               await client.query(
@@ -479,14 +480,27 @@ export function createStorageRetention(options: Options): StorageRetention {
       now,
       graceMs: STORAGE_RETENTION_BOUNDS.orphanGraceMs,
     });
-    await build('age');
     const settings = await options.settings.read();
-    await tx(async (client) => {
-      await client.query(
-        "UPDATE storage.deletion_plans SET earliest_delete_at=GREATEST(earliest_delete_at,warned_at+make_interval(days=>$1)),lead_days=GREATEST(lead_days,$1) WHERE state='warned'",
-        [settings.warningLeadDays]
-      );
-    });
+    if (settings)
+      await tx(async (client) => {
+        // A failed/missing projection never invents a destructive policy. Backfill
+        // only absent snapshots, retaining the durable freeze's original time.
+        await client.query(
+          `INSERT INTO storage.retention_policies(space_id,retention,settings_revision,terminal_at,expires_at)
+         SELECT o.space_id,$1,$2,o.frozen_at,CASE WHEN $1='90d' THEN o.frozen_at+interval '90 days' ELSE NULL END
+         FROM storage.seal_operations o WHERE NOT EXISTS(SELECT 1 FROM storage.retention_policies p WHERE p.space_id=o.space_id)
+         ORDER BY o.frozen_at,o.space_id LIMIT 100 ON CONFLICT DO NOTHING`,
+          [settings.retention, settings.revision]
+        );
+      });
+    await build('age');
+    if (settings)
+      await tx(async (client) => {
+        await client.query(
+          "UPDATE storage.deletion_plans SET earliest_delete_at=GREATEST(earliest_delete_at,warned_at+make_interval(days=>$1)),lead_days=GREATEST(lead_days,$1) WHERE state='warned'",
+          [settings.warningLeadDays]
+        );
+      });
     const candidates = await tx(
       async (client) =>
         (
@@ -498,7 +512,7 @@ export function createStorageRetention(options: Options): StorageRetention {
     );
     for (const candidate of candidates) {
       try {
-        await deleteCandidate(candidate, settings);
+        if (settings) await deleteCandidate(candidate, settings);
       } catch (error) {
         const failure =
           error instanceof StorageAccessError
@@ -517,6 +531,43 @@ export function createStorageRetention(options: Options): StorageRetention {
         [now()]
       );
     });
+    try {
+      await tx(async (client) => {
+        // Never drop the publication fence while its attempt can still publish.
+        // Confirmed, old attempts and their GC marker retire together by CASCADE.
+        const attempts = await client.query<{ attempt_id: string }>(
+          `SELECT g.attempt_id FROM storage.attempt_gc g
+           JOIN storage.upload_attempts a ON a.id=g.attempt_id
+           WHERE g.deleted AND g.deleted_at<=to_timestamp($1/1000.0)
+             AND NOT EXISTS(SELECT 1 FROM storage.object_versions v WHERE v.attempt_id=g.attempt_id)
+             AND NOT EXISTS(SELECT 1 FROM storage.seal_gc s JOIN storage.seal_operations o ON o.space_id=s.space_id
+               WHERE s.attempt_id=g.attempt_id AND (NOT s.deleted OR o.state<>'sealed'))
+           ORDER BY g.deleted_at,g.attempt_id LIMIT 100 FOR UPDATE OF a,g SKIP LOCKED`,
+          [now() - STORAGE_RETENTION_BOUNDS.orphanGraceMs]
+        );
+        const attemptIds = attempts.rows.map((entry) => entry.attempt_id);
+        await client.query('DELETE FROM storage.seal_gc WHERE attempt_id=ANY($1::uuid[])', [
+          attemptIds,
+        ]);
+        await client.query('DELETE FROM storage.upload_attempts WHERE id=ANY($1::uuid[])', [
+          attemptIds,
+        ]);
+        await client.query(
+          `DELETE FROM storage.orphan_gc WHERE s3_key IN (
+             SELECT s3_key FROM storage.orphan_gc WHERE deleted AND deleted_at<=to_timestamp($1/1000.0)
+             ORDER BY deleted_at,s3_key LIMIT 100 FOR UPDATE SKIP LOCKED)`,
+          [now() - STORAGE_RETENTION_BOUNDS.orphanGraceMs]
+        );
+        // Cross-process ownership always uses database wall time, not age time.
+        await client.query(
+          `DELETE FROM storage.upload_owners WHERE boot_id IN (
+             SELECT boot_id FROM storage.upload_owners WHERE heartbeat_at<=clock_timestamp()-interval '7 days'
+             ORDER BY heartbeat_at,boot_id LIMIT 100 FOR UPDATE SKIP LOCKED)`
+        );
+      });
+    } catch (error) {
+      collectionFailure(error, 'Storage metadata prune pending');
+    }
   }
   function runOnce() {
     running ??= tick().finally(() => {
@@ -539,11 +590,12 @@ export function createStorageRetention(options: Options): StorageRetention {
     timer.unref();
   }
   return {
-    snapshot: async (client, space) => {
+    snapshot: async (client, space, terminalAt = now()) => {
       const setting = await options.settings.read();
+      if (!setting) return;
       await client.query(
         `INSERT INTO storage.retention_policies(space_id,retention,settings_revision,terminal_at,expires_at) VALUES($1,$2,$3,to_timestamp($4/1000.0),CASE WHEN $2='90d' THEN to_timestamp($4/1000.0)+interval '90 days' ELSE NULL END) ON CONFLICT DO NOTHING`,
-        [space, setting.retention, setting.revision, now()]
+        [space, setting.retention, setting.revision, terminalAt]
       );
     },
     pending: async ({ limit = 100, cursor }) => {

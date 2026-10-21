@@ -102,26 +102,41 @@ describe('the storage module settings reader', () => {
     expect(lines).toEqual([]);
   });
 
-  it('uses defaults for a missing projection and logs only once until recovery', async () => {
+  it('waits for the first valid projection and keeps it if missing, logging once until recovery', async () => {
     const { path, settings, lines } = reader();
-    await expect(settings.read()).resolves.toEqual(defaults);
+    await expect(settings.read()).resolves.toBeUndefined();
     await settings.read();
     expect(lines).toHaveLength(1);
     expect(lines[0]?.fields).toEqual({ code: 'missing', count: 1 });
-    writeFileSync(path, document(1, {}));
-    await expect(settings.read()).resolves.toEqual({ ...defaults, revision: 1 });
+    writeFileSync(path, document(1, { 'storage.retention': 'forever' }));
+    const cached = { ...defaults, retention: 'forever', revision: 1 };
+    await expect(settings.read()).resolves.toEqual(cached);
     rmSync(path);
-    await expect(settings.read()).resolves.toEqual(defaults);
+    await expect(settings.read()).resolves.toEqual(cached);
+    await settings.read();
     expect(lines).toHaveLength(2);
     expect(JSON.stringify(lines)).not.toContain(path);
+    writeFileSync(path, document(2, {}));
+    await expect(settings.read()).resolves.toEqual({ ...defaults, revision: 2 });
+    rmSync(path);
+    await expect(settings.read()).resolves.toEqual({ ...defaults, revision: 2 });
+    expect(lines).toHaveLength(3);
   });
 
-  it('uses defaults for an unreadable projection without logging an error or path', async () => {
+  it('waits on an unreadable projection and keeps the last valid document after recovery', async () => {
     const { path, settings, lines } = reader();
     // A directory cannot be read as utf8 on the supported Linux test boundary.
     mkdirSync(path);
-    await expect(settings.read()).resolves.toEqual(defaults);
+    await expect(settings.read()).resolves.toBeUndefined();
     expect(lines[0]?.fields).toEqual({ code: 'unreadable', count: 1 });
+    rmSync(path, { recursive: true });
+    writeFileSync(path, document(4, { 'storage.retention': 'forever' }));
+    const cached = { ...defaults, retention: 'forever', revision: 4 };
+    await expect(settings.read()).resolves.toEqual(cached);
+    rmSync(path);
+    mkdirSync(path);
+    await expect(settings.read()).resolves.toEqual(cached);
+    expect(lines).toHaveLength(2);
     expect(JSON.stringify(lines)).not.toContain(path);
     expect(JSON.stringify(lines)).not.toContain('EISDIR');
   });
@@ -138,32 +153,50 @@ describe('the storage module settings reader', () => {
     JSON.stringify({ version: 1, revision: 1, values: [] }),
     JSON.stringify({ version: 1, revision: 1, values: null }),
     JSON.stringify({ version: 1, revision: 1 }),
-  ])('uses defaults for invalid document %s', async (text) => {
+  ])('waits for a valid document and keeps it on invalid document %s', async (text) => {
     const { path, settings, lines } = reader();
     writeFileSync(path, text);
-    await expect(settings.read()).resolves.toEqual(defaults);
+    await expect(settings.read()).resolves.toBeUndefined();
     await settings.read();
     expect(lines).toHaveLength(1);
     expect(lines[0]?.fields).toEqual({ code: 'invalid_document', count: 1 });
+    writeFileSync(
+      path,
+      document(4, { 'storage.retention': 'forever', 'storage.warningLeadDays': 3 })
+    );
+    const cached = { retention: 'forever', warningLeadDays: 3, revision: 4 };
+    await expect(settings.read()).resolves.toEqual(cached);
+    writeFileSync(path, text);
+    await expect(settings.read()).resolves.toEqual(cached);
+    expect(lines).toHaveLength(2);
     expect(JSON.stringify(lines)).not.toContain('private-document-canary');
     expect(JSON.stringify(lines)).not.toContain(path);
   });
 
-  it.each([0, 31, 7.5, '3', null, false])('defaults only invalid lead %s', async (lead) => {
-    const { path, settings, lines } = reader();
-    writeFileSync(
-      path,
-      document(8, { 'storage.retention': 'forever', 'storage.warningLeadDays': lead })
-    );
-    await expect(settings.read()).resolves.toEqual({
-      retention: 'forever',
-      warningLeadDays: 7,
-      revision: 8,
-    });
-    expect(lines[0]?.fields).toEqual({ code: 'invalid_value', count: 1 });
-  });
+  it.each([0, 31, 7.5, '3', null, false])(
+    'rejects the entire document on invalid lead %s',
+    async (lead) => {
+      const { path, settings, lines } = reader();
+      const invalid = document(8, {
+        'storage.retention': '90d',
+        'storage.warningLeadDays': lead,
+      });
+      writeFileSync(path, invalid);
+      await expect(settings.read()).resolves.toBeUndefined();
+      expect(lines[0]?.fields).toEqual({ code: 'invalid_value', count: 1 });
+      writeFileSync(
+        path,
+        document(7, { 'storage.retention': 'forever', 'storage.warningLeadDays': 3 })
+      );
+      const cached = { retention: 'forever', warningLeadDays: 3, revision: 7 };
+      await expect(settings.read()).resolves.toEqual(cached);
+      writeFileSync(path, invalid);
+      await expect(settings.read()).resolves.toEqual(cached);
+      expect(lines).toHaveLength(2);
+    }
+  );
 
-  it('defaults only invalid retention and never logs raw keys, values or documents', async () => {
+  it('rejects invalid retention without changing the cached document or logging private data', async () => {
     const { path, settings, lines } = reader();
     writeFileSync(
       path,
@@ -173,14 +206,19 @@ describe('the storage module settings reader', () => {
         'private-key-canary': 'private-body-canary',
       })
     );
-    await expect(settings.read()).resolves.toEqual({
-      retention: '90d',
-      warningLeadDays: 3,
-      revision: 9,
-    });
+    await expect(settings.read()).resolves.toBeUndefined();
+    writeFileSync(
+      path,
+      document(7, { 'storage.retention': 'forever', 'storage.warningLeadDays': 30 })
+    );
+    const cached = { retention: 'forever', warningLeadDays: 30, revision: 7 };
+    await expect(settings.read()).resolves.toEqual(cached);
+    writeFileSync(path, document(9, { 'storage.retention': 'private-value-canary' }));
+    await expect(settings.read()).resolves.toEqual(cached);
     writeFileSync(path, document(10, { 'storage.retention': 0, 'storage.warningLeadDays': 0 }));
-    await expect(settings.read()).resolves.toEqual({ ...defaults, revision: 10 });
+    await expect(settings.read()).resolves.toEqual(cached);
     expect(lines.map((line) => line.fields)).toEqual([
+      { code: 'invalid_value', count: 1 },
       { code: 'invalid_value', count: 1 },
       { code: 'invalid_value', count: 2 },
     ]);

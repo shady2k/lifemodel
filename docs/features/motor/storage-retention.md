@@ -12,7 +12,11 @@ rules permit those targets only (existing system PKI updates remain allowed).
 The module mounts the second ConfigMap read-only at
 `/opt/lifemodel/platform-settings/settings.json` and rereads it for each policy
 snapshot and collection pass. It has no ConfigMap API rights. Missing/invalid
-projection values use declared defaults with safe code/count diagnostics.
+projections retain the last valid document with safe code/count diagnostics.
+Before any valid document is read, freeze records no retention snapshot and
+collection cannot age-select that space. The first valid document backfills the
+absent snapshot using the original freeze instant. Later setting changes never
+rewrite an existing snapshot; per-space changes use the core-only routes.
 `storage.retention` is `90d` (default) or `forever`.
 `storage.warningLeadDays` is an integer from 1 through 30, default 7.
 The optional mount introduces no D-to-loader bootstrap wait: A0 starts loader,
@@ -100,7 +104,9 @@ Tombstones and notice/policy/reclaim receipts remain; core marked reads of
 deleting/deleted output return 404. Existing
 bounded read leases finish before deletion; each chunk renews a 30-second lease
 and independently rechecks current identity/catalog. Expired leases do not
-block a restarted process forever.
+block a restarted process forever. Stream close awaits a short bounded cleanup;
+SQL failures log only a safe code, SQLSTATE and count. A later read retries a
+bounded batch, and the tick removes expired leases even if cleanup failed.
 
 ## Capacity and private residue
 
@@ -123,7 +129,10 @@ that a PUT stopped. Every real attempt records a random process boot ID in
 Each module renews that heartbeat every five seconds using database wall time
 (independent of retention's test clock). After 30 seconds without a timely
 renewal the module aborts its transfers and refuses new ones; renewal cannot
-resurrect a heartbeat stale for 60 seconds. Reclamation locks the boot row after
+resurrect a heartbeat stale for 60 seconds. Once the old boot is provably stale
+by that same database predicate, a readiness/transfer request registers a new
+boot and resumes service without a process restart. Old attempts remain under
+the old boot and the staleness rule. Reclamation locks the boot row after
 the quota/intent rows and requires either a stale foreign boot or its own boot
 with no registered live transfer. Registration precedes begin-attempt publication
 and lasts through settled transport and publication/cleanup. A live foreign boot
@@ -147,7 +156,13 @@ module, with injected virtual clock and explicit `runOnce` in tests. Work pages
 are bounded to 100. SQL locks/CAS and session ownership, not local maps, protect
 against two healthy GC contenders. A failed orphan discovery or deletion keeps
 its durable accounting state for retry and does not stop other keys in the page.
-Diagnostics contain safe failure IDs, status, code and count, never private keys.
+Unexpected private listing entries are skipped and counted as
+`object_key_skipped`; structural page damage still fails the page without
+advancing its cursor. The tick prunes at most 100 stale (seven-day) owner rows
+and 100 confirmed attempt/orphan garbage rows older than the two-day grace per
+table. A confirmed attempt and its publication identity retire together so
+pruning cannot reopen publication. Diagnostics contain safe failure IDs, status,
+code and count, never private keys.
 One space's active reader is excluded before the candidate limit and rechecked
 under lock so it does not block independent spaces.
 

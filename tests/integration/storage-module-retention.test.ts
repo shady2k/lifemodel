@@ -16,6 +16,67 @@ afterAll(async () => {
 }, 20_000);
 
 describe('sealed retention snapshots and durable warning plans', () => {
+  it('defers missing settings and backfills the first valid policy at the original terminal time', async () => {
+    await h.projection(null);
+    const artifact = await h.artifact();
+    expect(
+      (
+        await h.stores.postgres.query(
+          'SELECT * FROM storage.retention_policies WHERE space_id=$1',
+          [artifact.space]
+        )
+      ).rows
+    ).toEqual([]);
+    await h.clock(TERMINAL + 90 * DAY);
+    await h.projection(null);
+    await h.tick();
+    expect((await h.pending()).plans).toEqual([]);
+    await h.projection({ retention: 'forever', warningLeadDays: 7, revision: 2 });
+    await h.tick();
+    const policy = (
+      await h.stores.postgres.query(
+        'SELECT retention,terminal_at,expires_at,settings_revision::text FROM storage.retention_policies WHERE space_id=$1',
+        [artifact.space]
+      )
+    ).rows[0];
+    expect(policy).toMatchObject({
+      retention: 'forever',
+      expires_at: null,
+      settings_revision: '2',
+    });
+    expect(policy.terminal_at.getTime()).toBe(TERMINAL);
+    await h.clock(TERMINAL + 100 * DAY, { retention: '90d', revision: 3 });
+    await h.tick();
+    expect((await h.pending()).plans).toEqual([]);
+    expect(
+      (
+        await h.stores.postgres.query(
+          'SELECT retention FROM storage.retention_policies WHERE space_id=$1',
+          [artifact.space]
+        )
+      ).rows[0].retention
+    ).toBe('forever');
+  }, 30000);
+
+  it('uses the last valid forever projection when a later read fails at freeze', async () => {
+    await h.projection({ retention: 'forever', warningLeadDays: 7, revision: 2 });
+    await h.tick();
+    await h.projection('invalid');
+    const artifact = await h.artifact();
+    expect(
+      (
+        await h.stores.postgres.query(
+          'SELECT retention,settings_revision::text FROM storage.retention_policies WHERE space_id=$1',
+          [artifact.space]
+        )
+      ).rows[0]
+    ).toEqual({ retention: 'forever', settings_revision: '2' });
+    await h.clock(TERMINAL + 100 * DAY);
+    await h.projection(null);
+    await h.tick();
+    expect((await h.pending()).plans).toEqual([]);
+  }, 30000);
+
   it('selects at 90 days, never deletes without the notice, then waits seven full days from its commit', async () => {
     const artifact = await h.artifact();
     const policy = (

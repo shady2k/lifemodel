@@ -385,7 +385,7 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
               // Revocation or a catalog outage must fail closed. Keep the safe
               // original outcome; an unreleased intent remains collectible.
             } finally {
-              recovery?.close();
+              await recovery?.close();
             }
           }
           throw error;

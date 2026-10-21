@@ -26,8 +26,11 @@ export interface StorageUploadOwner {
 
 export function createStorageUploadOwner(options: {
   connectionString: string;
+  /** Local monotonic safety clock; never used to decide database staleness. */
+  now?: () => number;
 }): StorageUploadOwner {
-  const bootId = randomUUID();
+  const now = options.now ?? (() => performance.now());
+  let bootId = randomUUID();
   const pool = new Pool({
     connectionString: options.connectionString,
     max: 1,
@@ -40,7 +43,7 @@ export function createStorageUploadOwner(options: {
   pool.on('error', () => undefined);
   pool.on('connect', (client) => client.on('error', () => undefined));
   const live = new Set<string>();
-  const controller = new AbortController();
+  let controller = new AbortController();
   let initialized = false;
   let failed = false;
   let closed = false;
@@ -49,6 +52,7 @@ export function createStorageUploadOwner(options: {
   let watchdog: ReturnType<typeof setTimeout> | undefined;
   let initialization: Promise<void> | undefined;
   let pendingRenewal: Promise<void> | undefined;
+  let recovery: Promise<void> | undefined;
   let closing: Promise<void> | undefined;
   const unavailable = () => new StorageAccessError(503, 'upload_owner_unavailable');
 
@@ -59,15 +63,12 @@ export function createStorageUploadOwner(options: {
     controller.abort();
   }
   function check(): void {
-    if (performance.now() - lastRenewalStart >= FAIL_CLOSED_MS) fail();
+    if (now() - lastRenewalStart >= FAIL_CLOSED_MS) fail();
     if (closed || failed) throw unavailable();
   }
   function armWatchdog(): void {
     if (watchdog) clearTimeout(watchdog);
-    watchdog = setTimeout(
-      fail,
-      Math.max(1, FAIL_CLOSED_MS - (performance.now() - lastRenewalStart))
-    );
+    watchdog = setTimeout(fail, Math.max(1, FAIL_CLOSED_MS - (now() - lastRenewalStart)));
     watchdog.unref();
   }
   function scheduleRenewal(): void {
@@ -78,7 +79,7 @@ export function createStorageUploadOwner(options: {
     renewal.unref();
   }
   async function renew(): Promise<void> {
-    const started = performance.now();
+    const started = now();
     try {
       check();
       // UPDATE takes the same owner row lock as begin and reclamation. A stale
@@ -125,13 +126,13 @@ export function createStorageUploadOwner(options: {
       armWatchdog();
     } catch {
       // Retry only while the local deadline still leaves a full safety margin.
-      if (performance.now() - lastRenewalStart >= FAIL_CLOSED_MS) fail();
+      if (now() - lastRenewalStart >= FAIL_CLOSED_MS) fail();
     } finally {
       scheduleRenewal();
     }
   }
   async function initialize(): Promise<void> {
-    const started = performance.now();
+    const started = now();
     lastRenewalStart = started;
     armWatchdog();
     try {
@@ -149,13 +150,71 @@ export function createStorageUploadOwner(options: {
       throw unavailable();
     }
   }
+  async function recover(): Promise<void> {
+    // No old boot write may overlap replacement. In particular, a pending
+    // initialization can still insert a fresh row after the local abort.
+    await Promise.allSettled([initialization, pendingRenewal]);
+    if (closed) throw unavailable();
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT boot_id FROM storage.upload_owners WHERE boot_id=$1 FOR UPDATE', [
+        bootId,
+      ]);
+      // Use the retirement predicate AFTER obtaining its same row lock. Local
+      // elapsed time cannot prove that a cross-process heartbeat has expired.
+      const result = await client.query<{ fresh: boolean }>(
+        `SELECT heartbeat_at>clock_timestamp()-interval '60 seconds' AS fresh
+         FROM storage.upload_owners WHERE boot_id=$1`,
+        [bootId]
+      );
+      if (result.rows[0]?.fresh) throw unavailable();
+      await client.query('COMMIT');
+    } catch {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        client.release(true);
+        throw unavailable();
+      }
+      client.release();
+      throw unavailable();
+    }
+    client.release();
+    if (closed) throw unavailable();
+    // The old identity is never revived. Its attempts retain their aborted
+    // signal and remain subject to the durable staleness rule during cleanup.
+    bootId = randomUUID();
+    controller = new AbortController();
+    initialized = false;
+    failed = false;
+    lastRenewalStart = Infinity;
+    initialization = undefined;
+    pendingRenewal = undefined;
+    initialization = initialize();
+    await initialization;
+  }
   return {
-    bootId,
+    get bootId() {
+      return bootId;
+    },
     isLive: (attemptId) => live.has(attemptId),
     ready: async () => {
-      check();
-      initialization ??= initialize();
-      await initialization;
+      if (closed) throw unavailable();
+      if (now() - lastRenewalStart >= FAIL_CLOSED_MS) fail();
+      if (failed || recovery) {
+        recovery ??= recover()
+          .catch(() => {
+            throw unavailable();
+          })
+          .finally(() => {
+            recovery = undefined;
+          });
+        await recovery;
+      } else {
+        initialization ??= initialize();
+        await initialization;
+      }
       check();
     },
     assertActive: check,
@@ -172,7 +231,7 @@ export function createStorageUploadOwner(options: {
       closing ??= (async () => {
         closed = true;
         fail();
-        await Promise.allSettled([initialization, pendingRenewal]);
+        await Promise.allSettled([initialization, pendingRenewal, recovery]);
         // Leave the last heartbeat durable. It will age out; deleting it here
         // would let a foreign GC retire still-settling canceled transports.
         await pool.end();

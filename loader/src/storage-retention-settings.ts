@@ -1,7 +1,9 @@
 /**
  * The module's read-only view of the loader's settings document (ADR-014 D6).
  * Re-read the directory-mounted ConfigMap on each use, so kubelet updates need
- * no restart. Defaults are safe even before the loader can project settings.
+ * no restart. Keep the last valid document on projection failure; wait for the
+ * first valid document before permitting retention work. Missing values in a
+ * valid document use the declared defaults.
  * Logs contain reason codes and counts only, never paths, values or errors.
  */
 import { readFile } from 'node:fs/promises';
@@ -17,7 +19,7 @@ export interface StorageRetentionSettings {
 }
 
 export interface StorageRetentionSettingsReader {
-  read(): Promise<StorageRetentionSettings>;
+  read(): Promise<StorageRetentionSettings | undefined>;
 }
 
 export function createStorageRetentionSettings(options: {
@@ -30,16 +32,17 @@ export function createStorageRetentionSettings(options: {
     warningLeadDays: 7,
     revision: 0,
   });
+  let lastValid: StorageRetentionSettings | undefined;
   let loggedProblem: string | undefined;
   function report(code: string, count: number): void {
     const signature = `${code}:${String(count)}`;
     if (loggedProblem === signature) return;
     loggedProblem = signature;
-    options.logger.warn({ code, count }, 'storage retention settings use declared defaults');
+    options.logger.warn({ code, count }, 'storage retention settings projection unavailable');
   }
-  function fallback(code: string): StorageRetentionSettings {
-    report(code, 1);
-    return defaults();
+  function fallback(code: string, count = 1): StorageRetentionSettings | undefined {
+    report(code, count);
+    return lastValid;
   }
   return {
     read: async () => {
@@ -90,8 +93,9 @@ export function createStorageRetentionSettings(options: {
       }
       // The same document carries unrelated platform values. This reader
       // validates only the two values it uses and never logs untrusted keys.
-      if (invalidCount > 0) report('invalid_value', invalidCount);
-      else loggedProblem = undefined;
+      if (invalidCount > 0) return fallback('invalid_value', invalidCount);
+      loggedProblem = undefined;
+      lastValid = result;
       return result;
     },
   };

@@ -275,9 +275,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
                   progress();
                   return result;
                 },
-                close: () => {
-                  stream.close();
-                },
+                close: () => stream.close(),
               };
               await options.objects.handle(
                 req,
@@ -305,7 +303,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
               );
             } finally {
               stream.signal.removeEventListener('abort', abortInput);
-              stream.close();
+              await stream.close();
             }
             return;
           }
@@ -316,7 +314,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
                 result = decision;
               });
             } finally {
-              stream.close();
+              await stream.close();
             }
           } else {
             const identity = await access.identity.verify(token, STORAGE_AUDIENCES[role], signal);

@@ -9,12 +9,14 @@ import {
 } from './storage-access.js';
 import type { StorageObjectS3 } from './storage-object-s3.js';
 import type { StorageRetention } from './storage-retention.js';
+import type { LoaderLogger } from './logger.js';
 
 interface Options {
   connectionString: string;
   s3: StorageObjectS3;
   access: StorageAccess;
   retention?: StorageRetention;
+  logger?: LoaderLogger;
   now?: () => number;
 }
 interface Allocate {
@@ -108,6 +110,59 @@ export function createStorageSeal(options: Options): StorageSeal {
     lock_timeout: 5000,
     application_name: 'lifemodel-storage-seal',
   });
+  // Cleanup has its own short budget and cannot sit behind normal seal work.
+  // SQL expiry remains authoritative if cleanup or its bounded retry fails.
+  const cleanupPool = new Pool({
+    connectionString: options.connectionString,
+    max: 1,
+    connectionTimeoutMillis: 1000,
+    query_timeout: 1500,
+    statement_timeout: 1000,
+    lock_timeout: 500,
+    application_name: 'lifemodel-storage-seal-cleanup',
+  });
+  cleanupPool.on('error', () => undefined);
+  cleanupPool.on('connect', (client) => client.on('error', () => undefined));
+  const pendingCleanup = new Map<string, number>();
+  let retrying: Promise<void> | undefined;
+  const now = options.now ?? Date.now;
+  function pruneCleanup() {
+    for (const [lease, expiresAt] of pendingCleanup)
+      if (expiresAt <= now()) pendingCleanup.delete(lease);
+  }
+  function logSqlFailure(error: unknown, count: number, message: string) {
+    // Driver errors may contain SQL text, parameters or object identifiers.
+    const code = (error as { code?: unknown } | null)?.code;
+    options.logger?.warn(
+      {
+        code: 'seal_sql_failed',
+        sqlstate: typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? code : null,
+        count,
+      },
+      message
+    );
+  }
+  async function cleanLeases(leases: [string, number][]) {
+    if (!leases.length) return;
+    try {
+      await cleanupPool.query('DELETE FROM storage.read_leases WHERE id=ANY($1::uuid[])', [
+        leases.map(([lease]) => lease),
+      ]);
+      for (const [lease] of leases) pendingCleanup.delete(lease);
+    } catch (error) {
+      logSqlFailure(error, leases.length, 'Storage read lease cleanup failed');
+      pruneCleanup();
+      for (const [lease, expiresAt] of leases)
+        if (expiresAt > now() && pendingCleanup.size < 100) pendingCleanup.set(lease, expiresAt);
+    }
+  }
+  function retryCleanup(): Promise<void> {
+    pruneCleanup();
+    retrying ??= cleanLeases([...pendingCleanup]).finally(() => {
+      retrying = undefined;
+    });
+    return retrying;
+  }
   pool.on('error', () => undefined);
   pool.on('connect', (client) => client.on('error', () => undefined));
   async function tx<T>(run: (client: PoolClient) => Promise<T>): Promise<T> {
@@ -127,6 +182,7 @@ export function createStorageSeal(options: Options): StorageSeal {
     } catch (error) {
       await client?.query('ROLLBACK').catch(() => undefined);
       if (error instanceof StorageAccessError) throw error;
+      logSqlFailure(error, 1, 'Storage seal SQL failed');
       return fail(503, 'catalog_unavailable');
     } finally {
       client?.removeListener('error', onError);
@@ -226,7 +282,8 @@ export function createStorageSeal(options: Options): StorageSeal {
       request.space,
       revision,
     ]);
-    await options.retention?.snapshot(client, request.space);
+    const frozenAt = now();
+    await options.retention?.snapshot(client, request.space, frozenAt);
     const candidates = (
       await client.query<Candidate>(
         `SELECT o.id::text,o.name,o.size::float8 AS size,o.sha256,o.mark,a.s3_key FROM storage.objects o JOIN storage.object_versions v ON v.object_id=o.id JOIN storage.upload_attempts a ON a.id=v.attempt_id WHERE o.space_id=$1 AND o.mark IS NOT NULL ORDER BY o.id`,
@@ -239,7 +296,7 @@ export function createStorageSeal(options: Options): StorageSeal {
     )
       fail(409, 'missing_result');
     const result = await client.query<Operation>(
-      `INSERT INTO storage.seal_operations(space_id,effect_key,request,receipt_id,manifest_id,revision,outcome,state,candidates) VALUES($1,$2,$3,$4,$5,$6,$7,'frozen',$8) RETURNING *`,
+      `INSERT INTO storage.seal_operations(space_id,effect_key,request,receipt_id,manifest_id,revision,outcome,state,candidates,frozen_at) VALUES($1,$2,$3,$4,$5,$6,$7,'frozen',$8,to_timestamp($9/1000.0)) RETURNING *`,
       [
         request.space,
         request.effectKey,
@@ -249,6 +306,7 @@ export function createStorageSeal(options: Options): StorageSeal {
         revision,
         request.outcome,
         JSON.stringify(candidates),
+        frozenAt,
       ]
     );
     return required(result.rows[0]);
@@ -663,22 +721,31 @@ export function createStorageSeal(options: Options): StorageSeal {
     openCoreStream: ({ token, space, objectId, signal: parent }) => {
       if (!SPACE.test(space)) fail(400, 'invalid_request');
       const lease = randomUUID();
+      let leaseExpiresAt = now() + 30000;
+      let closing: Promise<void> | undefined;
+      let cleanupRetried = false;
       const controller = new AbortController();
       const signal = AbortSignal.any([controller.signal, ...(parent ? [parent] : [])]);
       return {
         signal,
         close: () => {
           controller.abort();
-          if (options.retention)
-            void tx(async (client) => {
-              await client.query('DELETE FROM storage.read_leases WHERE id=$1', [lease]);
-            }).catch(() => undefined);
+          // Abort synchronously, then await one bounded cleanup attempt. A failed
+          // lease is retried by the next read request; expiry also releases it.
+          closing ??= options.retention
+            ? cleanLeases([[lease, leaseExpiresAt]])
+            : Promise.resolve();
+          return closing;
         },
         publish: () => Promise.reject(new StorageAccessError(403, 'read_only')),
         chunk: async (bytes, dispatch) => {
           if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > 4 * 1024 * 1024)
             fail(400, 'invalid_chunk');
           signal.throwIfAborted();
+          if (options.retention && !cleanupRetried) {
+            cleanupRetried = true;
+            await retryCleanup();
+          }
           const identity = await options.access.identity.verify(
             token,
             [STORAGE_AUDIENCES.read[0]],
@@ -701,9 +768,10 @@ export function createStorageSeal(options: Options): StorageSeal {
                 )
               ).rows[0];
               if (policy && policy.state !== 'retained') fail(404, 'object_not_found');
+              leaseExpiresAt = now() + 30000;
               await client.query(
                 'INSERT INTO storage.read_leases(id,space_id,expires_at) VALUES($1,$2,to_timestamp($3/1000.0)) ON CONFLICT(id) DO UPDATE SET expires_at=EXCLUDED.expires_at',
-                [lease, space, (options.now ?? Date.now)() + 30000]
+                [lease, space, leaseExpiresAt]
               );
             }
             if (
@@ -744,6 +812,8 @@ export function createStorageSeal(options: Options): StorageSeal {
         return false;
       }
     },
-    close: () => pool.end(),
+    close: async () => {
+      await Promise.all([pool.end(), cleanupPool.end()]);
+    },
   };
 }

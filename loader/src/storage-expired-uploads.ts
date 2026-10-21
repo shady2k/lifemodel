@@ -183,14 +183,14 @@ export async function sweepExpiredUploads(options: ExpiredUploadSweepOptions): P
             [attempt.space_id, attempt.upload_id]
           );
           const changed = await client.query(
-            'UPDATE storage.attempt_gc SET deleted=true WHERE attempt_id=$1 AND NOT deleted RETURNING attempt_id',
-            [attempt.attempt_id]
+            'UPDATE storage.attempt_gc SET deleted=true,deleted_at=to_timestamp($2/1000.0) WHERE attempt_id=$1 AND NOT deleted RETURNING attempt_id',
+            [attempt.attempt_id, options.now()]
           );
           if (!changed.rowCount) return;
           // Clear independent orphan debt only after the same confirmed DELETE.
           const orphan = await client.query<{ size: string }>(
-            'UPDATE storage.orphan_gc SET deleted=true WHERE s3_key=$1 AND NOT deleted RETURNING size::text',
-            [attempt.s3_key]
+            'UPDATE storage.orphan_gc SET deleted=true,deleted_at=to_timestamp($2/1000.0) WHERE s3_key=$1 AND NOT deleted RETURNING size::text',
+            [attempt.s3_key, options.now()]
           );
           if (orphan.rowCount)
             await client.query(

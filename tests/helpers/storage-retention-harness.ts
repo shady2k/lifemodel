@@ -383,6 +383,9 @@ export async function createRetentionHarness() {
   }
   return {
     stores,
+    ipc,
+    projection: (value: unknown) => ipc('projection', value),
+    ownerClock: (value: number) => ipc('ownerClock', value),
     sqlProxy,
     backend,
     identity,

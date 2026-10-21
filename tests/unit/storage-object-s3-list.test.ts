@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createStorageObjectS3 } from '../../loader/src/storage-object-s3.js';
+import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 import { createSealS3 } from '../helpers/storage-seal-s3.js';
 
 const cleanup: Array<() => void | Promise<void>> = [];
@@ -12,14 +13,16 @@ const signal = () => new AbortController().signal;
 async function setup(timeoutMs = 1000) {
   const server = await createSealS3();
   cleanup.push(() => server.close());
+  const lines: RecordedLine[] = [];
   const client = createStorageObjectS3({
+    logger: createRecordingLogger(lines),
     endpoint: server.endpoint,
     bucket: server.bucket,
     custody: { read: async () => server.credentials },
     timeoutMs,
   });
   cleanup.push(() => client.close());
-  return { client, server };
+  return { client, server, lines };
 }
 const page = (contents = '', extra = '', truncated = 'false') =>
   '<?xml version="1.0" encoding="UTF-8"?>' +
@@ -89,6 +92,66 @@ describe('bounded private S3 ListObjectsV2', () => {
     expect(await client.listPrivate(token, signal())).toEqual({ objects: [], nextCursor: null });
   });
 
+  it.each([
+    ['unsafe key', object('private/../../secret')],
+    ['non UUID private key', object('private/readable-name')],
+    ['non private key', object('public/00000000-0000-4000-8000-000000000001')],
+    ['missing key', object().replace(/<Key>.*<\/Key>/, '')],
+    ['negative size', object(key(1), '-1')],
+    ['fractional size', object(key(1), '1.5')],
+    ['unsafe size', object(key(1), '9007199254740992')],
+    ['missing size', object().replace(/<Size>.*<\/Size>/, '')],
+    ['invalid date', object(key(1), '12', '2026-02-30T00:00:00Z')],
+    ['missing date', object().replace(/<LastModified>.*<\/LastModified>/, '')],
+  ])(
+    'skips and counts an entry with %s while retaining the page and cursor',
+    async (_name, bad) => {
+      const { client, server, lines } = await setup();
+      server.hooks.beforeList = () => ({
+        status: 200,
+        body: page(
+          object(key(0)) + bad + object(key(2)),
+          '<KeyCount>3</KeyCount><NextContinuationToken>next-token</NextContinuationToken>',
+          'true'
+        ),
+      });
+      expect(await client.listPrivate(undefined, signal())).toEqual({
+        objects: [
+          { key: key(0), size: 12, lastModified: Date.parse('2026-01-01T00:00:00.000Z') },
+          { key: key(2), size: 12, lastModified: Date.parse('2026-01-01T00:00:00.000Z') },
+        ],
+        nextCursor: 'next-token',
+      });
+      expect(lines).toEqual([
+        {
+          level: 'warn',
+          fields: { code: 'object_key_skipped', count: 1 },
+          message: 'storage object listing skipped invalid entries',
+        },
+      ]);
+    }
+  );
+
+  it('counts multiple skipped entries and advances an otherwise empty page', async () => {
+    const { client, server, lines } = await setup();
+    server.hooks.beforeList = () => ({
+      status: 200,
+      body: page(
+        object('private/unknown-one') + object('private/unknown-two'),
+        '<KeyCount>2</KeyCount><NextContinuationToken>next-token</NextContinuationToken>',
+        'true'
+      ),
+    });
+    expect(await client.listPrivate(undefined, signal())).toEqual({
+      objects: [],
+      nextCursor: 'next-token',
+    });
+    expect(lines.map((line) => line.fields)).toEqual([{ code: 'object_key_skipped', count: 2 }]);
+    server.hooks.beforeList = () => ({ status: 200, body: page(object(key(3))) });
+    expect((await client.listPrivate('next-token', signal())).objects[0]?.key).toBe(key(3));
+    expect(lines).toHaveLength(1);
+  });
+
   it.each(['', 'x'.repeat(4097), 'private cursor', 'cursor\n', '\ud800'])(
     'rejects an invalid input cursor before dispatch',
     async (cursor) => {
@@ -107,15 +170,7 @@ describe('bounded private S3 ListObjectsV2', () => {
     ['duplicate field', page(object().replace('</Size>', '</Size><Size>12</Size>'))],
     ['malformed nesting', page(object()).replace('</Contents>', '</Other>')],
     ['second document', page() + page()],
-    ['unsafe key', page(object('private/../../secret'))],
-    ['non UUID private key', page(object('private/readable-name'))],
-    ['non private key', page(object('public/00000000-0000-4000-8000-000000000001'))],
     ['duplicate key', page(object() + object())],
-    ['negative size', page(object(key(1), '-1'))],
-    ['fractional size', page(object(key(1), '1.5'))],
-    ['unsafe size', page(object(key(1), '9007199254740992'))],
-    ['invalid date', page(object(key(1), '12', '2026-02-30T00:00:00Z'))],
-    ['missing date', page(object().replace(/<LastModified>.*<\/LastModified>/, ''))],
     ['unknown truncation', page('', '', 'yes')],
     ['missing token', page('', '', 'true')],
     ['unexpected token', page('', '<NextContinuationToken>token</NextContinuationToken>')],
@@ -125,7 +180,10 @@ describe('bounded private S3 ListObjectsV2', () => {
     ],
     ['too many objects', page(Array.from({ length: 101 }, (_, id) => object(key(id))).join(''))],
     ['wrong prefix', page().replace('<Prefix>private/</Prefix>', '<Prefix>public/</Prefix>')],
+    ['wrong root', '<WrongRoot></WrongRoot>'],
     ['wrong count', page(object(), '<KeyCount>0</KeyCount>')],
+    ['wrong count with invalid entry', page(object('private/unknown'), '<KeyCount>0</KeyCount>')],
+    ['nested field', page(object().replace('<Size>12</Size>', '<Size><Value>12</Value></Size>'))],
   ])('fails safely on %s', async (_name, body) => {
     const { client, server } = await setup();
     server.hooks.beforeList = () => ({ status: 200, body });

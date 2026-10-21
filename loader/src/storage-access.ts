@@ -28,7 +28,7 @@ export interface StorageTaskStream {
    * metadata statement under fresh authority + revision locks. Resolves after COMMIT.
    * .7.5 uses this for publication/mark; private S3 transfer stays outside the lock. */
   publish(statement: StorageMetadataStatement): Promise<StoragePublicationResult>;
-  close(): void;
+  close(): void | Promise<void>;
 }
 export interface StoragePublicationResult {
   rows: Record<string, unknown>[];

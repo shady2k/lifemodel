@@ -8,6 +8,7 @@ import {
 } from 'node:http';
 import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
 import type { StorageS3Credentials } from './storage-custody.js';
+import type { LoaderLogger } from './logger.js';
 import { StorageAccessError } from './storage-access-error.js';
 import { signS3Request } from './storage-s3.js';
 
@@ -53,6 +54,7 @@ export interface StorageObjectS3Options {
   endpoint: string;
   bucket: string;
   custody: { read(): Promise<StorageS3Credentials> };
+  logger?: Pick<LoaderLogger, 'warn'>;
   chunkBytes?: number;
   timeoutMs?: number;
 }
@@ -79,7 +81,7 @@ interface ListXmlNode {
   children: ListXmlNode[];
 }
 /** A deliberately small XML subset: no DTD, external entities, CDATA or processing instructions. */
-function parsePrivateListing(body: string): StorageObjectS3Listing {
+function parsePrivateListing(body: string): StorageObjectS3Listing & { skipped: number } {
   function fail(): never {
     throw unavailable();
   }
@@ -187,35 +189,44 @@ function parsePrivateListing(body: string): StorageObjectS3Listing {
     fail();
   const contents = root.children.filter((child) => child.name === 'Contents');
   if (contents.length > 100) fail();
+  const keyCount = field(root, 'KeyCount', false);
+  // KeyCount describes the wire page, including entries that are not ours to collect.
+  if (keyCount !== undefined && keyCount !== String(contents.length)) fail();
   const keys = new Set<string>();
-  const objects = contents.map((entry) => {
+  const objects: StorageObjectS3Listing['objects'] = [];
+  let skipped = 0;
+  for (const entry of contents) {
     if (entry.text.trim()) fail();
-    const key = field(entry, 'Key');
-    const rawSize = field(entry, 'Size');
-    const rawDate = field(entry, 'LastModified');
-    if (key === undefined || !PRIVATE_KEY.test(key) || keys.has(key)) fail();
-    keys.add(key);
-    if (rawSize === undefined || !/^(?:0|[1-9][0-9]*)$/.test(rawSize)) fail();
-    const size = Number(rawSize);
-    if (!Number.isSafeInteger(size)) fail();
+    // Missing or invalid values affect this entry only. Duplicate/nested fields
+    // still indicate structural damage and must fail the complete page.
+    const key = field(entry, 'Key', false);
+    const rawSize = field(entry, 'Size', false);
+    const rawDate = field(entry, 'LastModified', false);
+    if (key !== undefined) {
+      if (keys.has(key)) fail();
+      keys.add(key);
+    }
+    const size = rawSize === undefined ? NaN : Number(rawSize);
+    const lastModified = rawDate === undefined ? NaN : Date.parse(rawDate);
     // ISO UTC timestamps only; Date.parse alone normalizes invalid dates such as February 30.
     if (
+      key === undefined ||
+      !PRIVATE_KEY.test(key) ||
+      rawSize === undefined ||
+      !/^(?:0|[1-9][0-9]*)$/.test(rawSize) ||
+      !Number.isSafeInteger(size) ||
       rawDate === undefined ||
-      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/.test(rawDate)
-    )
-      fail();
-    const lastModified = Date.parse(rawDate);
-    if (
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/.test(rawDate) ||
       !Number.isSafeInteger(lastModified) ||
       lastModified < 0 ||
       new Date(lastModified).toISOString().slice(0, 19) !== rawDate.slice(0, 19)
-    )
-      fail();
-    return { key, size, lastModified };
-  });
-  const keyCount = field(root, 'KeyCount', false);
-  if (keyCount !== undefined && keyCount !== String(objects.length)) fail();
-  return { objects, nextCursor: cursor ?? null };
+    ) {
+      skipped += 1;
+      continue;
+    }
+    objects.push({ key, size, lastModified });
+  }
+  return { objects, nextCursor: cursor ?? null, skipped };
 }
 
 export function createStorageObjectS3(options: StorageObjectS3Options): StorageObjectS3 {
@@ -477,8 +488,13 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
         }
         op.live();
         const body = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, bytes));
-        const page = parsePrivateListing(body);
+        const { skipped, ...page } = parsePrivateListing(body);
         if (page.nextCursor !== null && page.nextCursor === cursor) throw unavailable();
+        if (skipped > 0)
+          options.logger?.warn(
+            { code: 'object_key_skipped', count: skipped },
+            'storage object listing skipped invalid entries'
+          );
         return page;
       } catch (error) {
         op.cancel();

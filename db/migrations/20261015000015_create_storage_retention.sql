@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS storage.orphan_gc (
   size bigint NOT NULL CHECK (size>=0),
   first_seen_at timestamptz NOT NULL,
   last_modified timestamptz NOT NULL,
+  deleted_at timestamptz,
   deleted boolean NOT NULL DEFAULT false
 );
 CREATE TABLE IF NOT EXISTS storage.attempt_gc (
@@ -132,6 +133,7 @@ CREATE TABLE IF NOT EXISTS storage.attempt_gc (
   space_id text NOT NULL REFERENCES storage.spaces(id) ON DELETE CASCADE,
   s3_key text NOT NULL,
   size bigint NOT NULL CHECK (size>=0),
+  deleted_at timestamptz,
   deleted boolean NOT NULL DEFAULT false
 );
 CREATE OR REPLACE FUNCTION storage.complete_upload(p_space text,p_upload text,p_attempt uuid)
@@ -148,7 +150,7 @@ BEGIN
   -- An orphan discovered after lease expiry can still be published by a valid
   -- sibling. Transfer ownership of the charge under the same intent/quota lock.
   WITH transferred AS (
-    UPDATE storage.orphan_gc SET deleted=true WHERE NOT deleted
+    UPDATE storage.orphan_gc SET deleted=true,deleted_at=clock_timestamp() WHERE NOT deleted
       AND s3_key=(SELECT s3_key FROM storage.upload_attempts WHERE id=p_attempt)
       RETURNING size
   ) UPDATE storage.instance_ledger SET used_bytes=used_bytes-(SELECT COALESCE(sum(size),0) FROM transferred) WHERE id;
