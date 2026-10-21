@@ -294,3 +294,41 @@ describe('the storage module status listener', () => {
     expect(await posted.text()).toBe('');
   });
 });
+
+describe('storage stream quiescence', () => {
+  it('waits for writers by default but not for task readers', async () => {
+    const access = createStorageAccess({
+      connectionString: workerDatabaseUrl(),
+      identity: createKubernetesStorageIdentity(),
+    });
+    const reader = access.openTaskStream({ token: 'unused', space: 'reader-space', write: false });
+    const writer = access.openTaskStream({ token: 'unused', space: 'writer-space' });
+    let writerSettled = false;
+    const pending = access.quiesceSpace('writer-space').then(() => {
+      writerSettled = true;
+    });
+    try {
+      await access.quiesceSpace('reader-space');
+      expect(reader.signal.aborted).toBe(false);
+      expect(writerSettled).toBe(false);
+      writer.close();
+      await pending;
+      expect(writerSettled).toBe(true);
+    } finally {
+      reader.close();
+      writer.close();
+    }
+  });
+
+  it('still cancels and settles task readers after the freeze', async () => {
+    const access = createStorageAccess({
+      connectionString: workerDatabaseUrl(),
+      identity: createKubernetesStorageIdentity(),
+    });
+    const reader = access.openTaskStream({ token: 'unused', space: 'reader-space', write: false });
+    const pending = access.settleSpace('reader-space');
+    expect(reader.signal.aborted).toBe(true);
+    reader.close();
+    await pending;
+  });
+});

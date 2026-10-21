@@ -31,7 +31,8 @@ export interface StorageObjects {
     tail: string,
     stream: StorageTaskStream,
     recover?: () => StorageTaskStream,
-    progress?: () => void
+    progress?: () => void,
+    markedOnly?: boolean
   ): Promise<void>;
   expiredUploads(): Promise<{ space: string; uploadId: string }[]>;
   check(signal: AbortSignal): Promise<boolean>;
@@ -169,10 +170,10 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
       res.end(body);
     });
   }
-  async function object(space: string, id: string) {
+  async function object(space: string, id: string, markedOnly = false) {
     const result = await query<ObjectRow>(
-      `SELECT o.*,a.s3_key,v.receipt FROM storage.objects o JOIN storage.object_versions v ON v.object_id=o.id JOIN storage.upload_attempts a ON a.id=v.attempt_id WHERE o.space_id=$1 AND o.id::text=$2`,
-      [space, id]
+      `SELECT o.*,a.s3_key,v.receipt FROM storage.objects o JOIN storage.object_versions v ON v.object_id=o.id JOIN storage.upload_attempts a ON a.id=v.attempt_id WHERE o.space_id=$1 AND o.id::text=$2 AND ($3::boolean=false OR o.mark IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=o.id)`,
+      [space, id, markedOnly]
     );
     const row = result.rows[0];
     if (!row) throw new StorageAccessError(404, 'object_not_found');
@@ -200,7 +201,8 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
       );
       return result.rows.map((row) => ({ space: row.space_id, uploadId: row.upload_id }));
     },
-    handle: async (req, res, space, tail, stream, recover, progress) => {
+    handle: async (req, res, space, tail, stream, recover, progress, markedOnly = false) => {
+      if (markedOnly && req.method !== 'GET') throw new StorageAccessError(404, 'route_not_found');
       await stream.chunk(0, () => undefined);
       if (
         tail.length > 1024 ||
@@ -298,6 +300,7 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
             if (hash.digest('hex') !== sha256) throw new StorageAccessError(400, 'hash_mismatch');
           }
           await options.s3.put(
+            space,
             key,
             size,
             sha256,
@@ -362,8 +365,8 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
           : '0';
         const rows = (
           await query<PageRow>(
-            'SELECT id,name,size::float8 AS size,sha256,mark,sequence::text FROM storage.objects WHERE space_id=$1 AND sequence>$2 ORDER BY sequence LIMIT $3',
-            [space, after, limit]
+            'SELECT id,name,size::float8 AS size,sha256,mark,sequence::text FROM storage.objects o WHERE space_id=$1 AND sequence>$2 AND ($4::boolean=false OR mark IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=o.id) ORDER BY sequence LIMIT $3',
+            [space, after, limit, markedOnly]
           )
         ).rows;
         // Names may need JSON escaping. Bound the encoded page as well as rows.
@@ -385,7 +388,7 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
       }
       if (!parts[0] || !ID.test(parts[0]) || url.search) invalid();
       if (req.method === 'GET' && parts.length === 1) {
-        const saved = await object(space, parts[0]);
+        const saved = await object(space, parts[0], markedOnly);
         const size = Number(saved.size);
         let start = 0;
         let end = size - 1;
@@ -413,7 +416,14 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
         let headers = false;
         for (let offset = start; offset <= end; offset += settings.chunkBytes) {
           const last = Math.min(end, offset + settings.chunkBytes - 1);
-          const body = await options.s3.get(saved.s3_key, offset, last, stream.signal, progress);
+          const body = await options.s3.get(
+            space,
+            saved.s3_key,
+            offset,
+            last,
+            stream.signal,
+            progress
+          );
           let received = 0;
           for await (const part of body) {
             for (let index = 0; index < part.length; index += settings.chunkBytes) {

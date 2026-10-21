@@ -147,7 +147,7 @@ beforeEach(async () => {
       [id]
     );
     await stores.postgres.query(
-      "INSERT INTO task_access.projections SELECT task_id,attempt_id,launch_id,$2,$3,$1,0,0,'active',soft_due_at,hard_stop_at FROM task_access.intents WHERE task_id=$1",
+      "INSERT INTO task_access.projections(task_id,attempt_id,launch_id,job_uid,pod_uid,space_id,access_revision,intent_revision,mode,soft_due_at,hard_stop_at) SELECT task_id,attempt_id,launch_id,$2,$3,$1,0,0,'active',soft_due_at,hard_stop_at FROM task_access.intents WHERE task_id=$1",
       [id, `job-${id}`, `pod-${id}`]
     );
   }

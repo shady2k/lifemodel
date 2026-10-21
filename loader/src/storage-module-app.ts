@@ -18,6 +18,7 @@ import {
 import { StorageCustodyError, type StorageS3Credentials } from './storage-custody.js';
 import type { S3Check } from './storage-s3.js';
 import type { StorageObjects } from './storage-objects.js';
+import type { StorageSeal } from './storage-seal.js';
 
 /** The mounted instance-CA leaf: read at start, then re-read on every reload. */
 export interface StorageTaskTlsOptions {
@@ -42,6 +43,7 @@ export interface StorageModuleOptions {
   access: StorageAccess;
   /** Task object adapter. Absent only in identity/health-only fixtures. */
   objects?: StorageObjects;
+  seal?: StorageSeal;
   /** The module's own catalog; readiness needs it, as it needs the store. */
   catalog: Catalog;
   /** The custody record, in memory only; a failure here is a failed module. */
@@ -95,6 +97,8 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
     if (!catalog.ok) return catalog;
     if (options.objects && !(await options.objects.check(signal)))
       return { ok: false, code: 'catalog_unavailable', cause: 'objects_unavailable' };
+    if (options.seal && !(await options.seal.check(signal)))
+      return { ok: false, code: 'catalog_unavailable', cause: 'seal_unavailable' };
     if (!(await options.access.check(signal)))
       return { ok: false, code: 'catalog_unavailable', cause: 'authorization_unavailable' };
     let credentials: StorageS3Credentials;
@@ -166,14 +170,18 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
         }
         const match = /^\/spaces\/([a-z0-9][a-z0-9_-]{0,63})\/access$/.exec(req.url ?? '');
         const objectMatch =
-          role === 'task' && options.objects
+          (role === 'task' || (role === 'read' && options.seal && req.method === 'GET')) &&
+          options.objects
             ? /^\/spaces\/([a-z0-9][a-z0-9_-]{0,63})\/objects(?=\/|\?|$)(.*)$/.exec(req.url ?? '')
             : null;
         if (
           !(
             (role === 'task' && req.method === 'GET' && match) ||
             objectMatch ||
-            (role === 'control' && req.method === 'POST' && req.url === '/revoke') ||
+            (role === 'control' &&
+              req.method === 'POST' &&
+              (req.url === '/revoke' ||
+                (options.seal && ['/allocate', '/bind', '/seal'].includes(req.url ?? '')))) ||
             (role === 'read' && req.method === 'GET' && req.url === '/identity')
           )
         ) {
@@ -182,7 +190,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           return;
         }
         // Only a validated opaque ID may enter diagnostics, never an arbitrary path.
-        space = role === 'task' ? (match?.[1] ?? objectMatch?.[1] ?? null) : null;
+        space = match?.[1] ?? objectMatch?.[1] ?? null;
         const access = options.access;
         const authHeaders = req.rawHeaders.filter(
           (_, index) => index % 2 === 0 && req.rawHeaders[index]?.toLowerCase() === 'authorization'
@@ -218,7 +226,21 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           let result: unknown;
           if (objectMatch?.[1] && options.objects) {
             const objectSpace = objectMatch[1];
-            const stream = access.openTaskStream({ token, space: objectMatch[1], signal });
+            const objectId = /^\/([^/?]+)$/.exec(objectMatch[2] ?? '')?.[1];
+            const stream =
+              role === 'read' && options.seal
+                ? options.seal.openCoreStream({
+                    token,
+                    space: objectMatch[1],
+                    signal,
+                    ...(objectId ? { objectId } : {}),
+                  })
+                : access.openTaskStream({
+                    token,
+                    space: objectMatch[1],
+                    signal,
+                    write: req.method !== 'GET',
+                  });
             const abortInput = (): void => {
               req.destroy();
               res.destroy();
@@ -249,12 +271,20 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
                 // Failure cleanup re-proves the same token/space independently
                 // of the canceled transfer. The caller must close this stream.
                 () =>
-                  access.openTaskStream({
-                    token,
-                    space: objectSpace,
-                    signal: AbortSignal.timeout(10_000),
-                  }),
-                progress
+                  role === 'read' && options.seal
+                    ? options.seal.openCoreStream({
+                        token,
+                        space: objectSpace,
+                        signal: AbortSignal.timeout(10_000),
+                        ...(objectId ? { objectId } : {}),
+                      })
+                    : access.openTaskStream({
+                        token,
+                        space: objectSpace,
+                        signal: AbortSignal.timeout(10_000),
+                      }),
+                progress,
+                role === 'read'
               );
             } finally {
               stream.signal.removeEventListener('abort', abortInput);
@@ -293,6 +323,36 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
               if (value === null || typeof value !== 'object' || Array.isArray(value))
                 throw new StorageAccessError(400, 'invalid_request');
               const input = value as Record<string, unknown>;
+              if (options.seal && req.url !== '/revoke') {
+                const route = req.url;
+                result =
+                  route === '/allocate'
+                    ? await options.seal.allocate(input)
+                    : route === '/bind'
+                      ? await options.seal.bind(input)
+                      : await options.seal.seal(input);
+                const receipt = result as { id: string; space: string };
+                space = receipt.space;
+                options.logger.info(
+                  {
+                    id: receipt.id,
+                    code:
+                      route === '/allocate'
+                        ? 'space_allocated'
+                        : route === '/bind'
+                          ? 'space_bound'
+                          : 'space_sealed',
+                    status: 200,
+                    space,
+                  },
+                  'Storage control completed'
+                );
+                if (!signal.aborted && !res.destroyed && !res.writableEnded) {
+                  res.writeHead(200, JSON_HEADERS);
+                  res.end(JSON.stringify(result));
+                }
+                return;
+              }
               if (
                 Object.keys(input).length !== 3 ||
                 typeof input['space'] !== 'string' ||
@@ -434,9 +494,10 @@ function createTaskListener(
     close: () => {
       stopped = true;
       if (timer !== undefined) cancel(timer);
-      if (!server.listening) return;
+      // server.close() may already have stopped intake while pools drained.
+      // Existing connections still need release even when listening is false.
       server.closeAllConnections();
-      server.close();
+      if (server.listening) server.close();
     },
   };
 }

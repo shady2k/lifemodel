@@ -16,6 +16,10 @@ export interface StorageIdentity {
 }
 export interface KubernetesStorageIdentity {
   verify(token: string, audiences: StorageAudience, signal?: AbortSignal): Promise<StorageIdentity>;
+  verifyBinding(
+    input: { podName: string; jobName: string; podUid: string; jobUid: string },
+    signal?: AbortSignal
+  ): Promise<void>;
 }
 interface IdentityOptions {
   apiServer?: string;
@@ -34,7 +38,8 @@ function one(value: unknown): string {
     throw new StorageAccessError(403, 'identity_denied');
   return value[0];
 }
-const NAME = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/;
+const NAME =
+  /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
 const SA = '/var/run/secrets/kubernetes.io/serviceaccount';
 export function createKubernetesStorageIdentity(
   options: IdentityOptions = {}
@@ -44,6 +49,7 @@ export function createKubernetesStorageIdentity(
       `https://${process.env['KUBERNETES_SERVICE_HOST'] ?? 'kubernetes.default.svc'}:${process.env['KUBERNETES_SERVICE_PORT_HTTPS'] ?? '443'}`
   );
   if (base.protocol !== 'https:') throw new StorageAccessError(500, 'identity_config');
+  const sockets = new WeakSet<object>();
   async function call(path: string, payload: unknown, signal: AbortSignal): Promise<RecordValue> {
     signal.throwIfAborted();
     // The module's own API token is reread too; there is no credential fallback.
@@ -110,13 +116,82 @@ export function createKubernetesStorageIdentity(
         }
       );
       req.on('socket', (socket) => {
-        socket.on('error', () => undefined);
+        if (!sockets.has(socket)) {
+          sockets.add(socket);
+          socket.on('error', () => undefined);
+        }
       });
       req.on('error', fail);
       req.end(body);
     });
   }
   return {
+    verifyBinding: async (input, parent) => {
+      const signal = AbortSignal.any([
+        AbortSignal.timeout(options.timeoutMs ?? 5_000),
+        ...(parent ? [parent] : []),
+      ]);
+      try {
+        if (
+          typeof input.podName !== 'string' ||
+          !NAME.test(input.podName) ||
+          typeof input.jobName !== 'string' ||
+          !NAME.test(input.jobName) ||
+          typeof input.podUid !== 'string' ||
+          !input.podUid ||
+          typeof input.jobUid !== 'string' ||
+          !input.jobUid
+        )
+          throw new StorageAccessError(403, 'identity_denied');
+        const namespace = 'lifemodel-motor';
+        const pod = await call(
+          `/api/v1/namespaces/${namespace}/pods/${encodeURIComponent(input.podName)}`,
+          undefined,
+          signal
+        );
+        const metadata = record(pod['metadata']);
+        if (
+          metadata['name'] !== input.podName ||
+          metadata['namespace'] !== namespace ||
+          metadata['uid'] !== input.podUid ||
+          metadata['deletionTimestamp'] != null ||
+          record(pod['spec'])['serviceAccountName'] !== 'task'
+        )
+          throw new StorageAccessError(403, 'identity_denied');
+        const owners = metadata['ownerReferences'];
+        if (!Array.isArray(owners)) throw new StorageAccessError(403, 'identity_denied');
+        const controllers = owners.map(record).filter((owner) => owner['controller'] === true);
+        const controller = controllers[0];
+        if (
+          controllers.length !== 1 ||
+          controller?.['kind'] !== 'Job' ||
+          controller['apiVersion'] !== 'batch/v1' ||
+          controller['name'] !== input.jobName ||
+          controller['uid'] !== input.jobUid
+        )
+          throw new StorageAccessError(403, 'identity_denied');
+        const job = record(
+          (
+            await call(
+              `/apis/batch/v1/namespaces/${namespace}/jobs/${encodeURIComponent(input.jobName)}`,
+              undefined,
+              signal
+            )
+          )['metadata']
+        );
+        if (
+          job['name'] !== input.jobName ||
+          job['namespace'] !== namespace ||
+          job['uid'] !== input.jobUid ||
+          job['deletionTimestamp'] != null
+        )
+          throw new StorageAccessError(403, 'identity_denied');
+      } catch (error) {
+        if (parent?.aborted) throw new StorageAccessError(403, 'access_revoked');
+        if (error instanceof StorageAccessError) throw error;
+        throw new StorageAccessError(503, 'identity_unavailable');
+      }
+    },
     verify: async (token, audiences, parent) => {
       const signal = AbortSignal.any([
         AbortSignal.timeout(options.timeoutMs ?? 5_000),

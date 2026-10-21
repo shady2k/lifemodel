@@ -16,6 +16,7 @@ import { createStorageAccess } from './storage-access.js';
 import { createKubernetesStorageIdentity } from './storage-identity.js';
 import { createStorageObjects } from './storage-objects.js';
 import { createStorageObjectS3 } from './storage-object-s3.js';
+import { createStorageSeal } from './storage-seal.js';
 
 /** Four listeners: health, task data, trusted core control, trusted core/web read. */
 const STATUS_PORT = 8081;
@@ -77,14 +78,21 @@ const objects = createStorageObjects({
   connectionString: catalogConnectionString(databaseUsername, databasePassword),
   s3: objectS3,
 });
+const access = createStorageAccess({
+  connectionString: catalogConnectionString(databaseUsername, databasePassword),
+  identity: createKubernetesStorageIdentity(),
+});
+const seal = createStorageSeal({
+  connectionString: catalogConnectionString(databaseUsername, databasePassword),
+  s3: objectS3,
+  access,
+});
 const app = createStorageModule({
+  seal,
   objects,
   bucket,
   catalog,
-  access: createStorageAccess({
-    connectionString: catalogConnectionString(databaseUsername, databasePassword),
-    identity: createKubernetesStorageIdentity(),
-  }),
+  access,
   custody,
   check: (credentials: StorageS3Credentials, signal: AbortSignal) =>
     checkS3Bucket({ endpoint, bucket, credentials, signal }),
@@ -100,13 +108,20 @@ let stopped = false;
 function stop(): void {
   if (stopped) return;
   stopped = true;
-  app.task.close();
-  objectS3.close();
-  void objects.close();
-  app.control.close();
-  app.read.close();
+  // Stop intake without aborting an active SQL operation's S3 transport.
+  for (const listener of [app.task, app.control, app.read]) listener.server.close();
   app.status.closeAllConnections();
   app.status.close();
+  // Pool close drains checked-out SQL clients, not whole multi-transaction
+  // requests. Keep their S3 dependency alive until both pools have settled.
+  void Promise.allSettled([seal.close(), objects.close()]).then((results) => {
+    for (const listener of [app.task, app.control, app.read]) listener.close();
+    objectS3.close();
+    if (results.some((result) => result.status === 'rejected')) {
+      logger.error({ code: 'storage_close_failed' }, 'Storage module pool shutdown failed');
+      process.exitCode = 1;
+    }
+  });
 }
 process.on('SIGTERM', stop);
 process.on('SIGINT', stop);

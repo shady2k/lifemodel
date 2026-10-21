@@ -16,7 +16,18 @@ Migration `20261015000012_create_task_access.sql` adds these tables:
 - `task_access.projections`: gateway-verified immutable binding from those IDs
   to actual Job UID, Pod UID and space. `intent_revision` orders the lifecycle
   projection; `access_revision` is the independent storage catalog fence. The
-  projection also carries mode and deadline fields. Only canonical intent
+  projection also carries mode and deadline fields. Migration
+  `20261015000014_create_storage_seals.sql` adds nullable `pod_name` and
+  `job_name` locators. Stage 3's gateway writer must persist both together with
+  the verified UIDs: Pod name comes from its TokenReview
+  `authentication.kubernetes.io/pod-name` claim; Job name is deterministic from
+  launch ID under ADR-014 D3 and must match the actual controller reference.
+  Both names must be Kubernetes DNS names. Namespace is fixed to
+  `lifemodel-motor`. Missing names fail bind closed. Core supplies no names or
+  UIDs. The storage module independently GETs the named Pod and Job with existing
+  GET-only RBAC, verifies non-deletion, task service account, exact UIDs and
+  controller ownership. No list/watch right or label lookup is added.
+  Only canonical intent
   deadlines authorize; lagging projection fields cannot extend them. A future
   projection revision, absent authority/binding/space or storage-revision
   mismatch denies. A stale active projection cannot defeat a committed intent.
@@ -90,11 +101,10 @@ There is no cross-service zero-time revoke claim under partition.
   and its exact controller Job. Object routes arrive in lifemodel-653.7.5.
 - Control TLS 8444: `POST /revoke` with exactly
   `{ space, expectedRevision, effectKey }`; revision is a decimal string.
-  Audience `lifemodel-core-storage-control`, SA `lifemodel:core`.
+  Audience `lifemodel-core-storage-control`, SA `lifemodel:core`. [Storage seal](storage-seal.md) also adds keyed allocate/bind/seal on this listener.
 - Read TLS 8445: `GET /identity` proves either core or web identity, audiences
   `lifemodel-core-storage-read` / `lifemodel-web-storage-read` respectively.
-  SA must be `lifemodel:core` / `lifemodel:web`. Owner object reads/marked-only
-  selection arrive in .7.5; that adapter must repeat identity verification on
+  SA must be `lifemodel:core` / `lifemodel:web`. Core-only marked-object reads are now implemented by [storage seal](storage-seal.md); that adapter must repeat identity verification on
   every read chunk. No control route exists on this listener.
 
 All three TLS listeners share the existing instance-CA leaf and reload path.

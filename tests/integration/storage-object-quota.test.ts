@@ -126,7 +126,7 @@ beforeEach(async ({ task }) => {
     "INSERT INTO task_access.intents(task_id,attempt_id,launch_id,revision,mode,soft_due_at,hard_stop_at) VALUES('a','a','a',0,'active',clock_timestamp()+interval '1 hour',clock_timestamp()+interval '2 hours')"
   );
   await stores.postgres.query(
-    "INSERT INTO task_access.projections SELECT task_id,attempt_id,launch_id,'job-a','pod-a','a',0,0,'active',soft_due_at,hard_stop_at FROM task_access.intents WHERE task_id='a'"
+    "INSERT INTO task_access.projections(task_id,attempt_id,launch_id,job_uid,pod_uid,space_id,access_revision,intent_revision,mode,soft_due_at,hard_stop_at) SELECT task_id,attempt_id,launch_id,'job-a','pod-a','a',0,0,'active',soft_due_at,hard_stop_at FROM task_access.intents WHERE task_id='a'"
   );
   await stores.postgres.query(
     "INSERT INTO storage.space_quota(space_id,limit_bytes) VALUES('a',7)"
