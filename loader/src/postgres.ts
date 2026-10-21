@@ -174,7 +174,8 @@ export function createKubernetesPostgresSecretPhase(
               : undefined;
           if (
             response.status !== 200 ||
-            copied?.['username'] !== username ||
+            copied === undefined ||
+            copied['username'] !== username ||
             copied['password'] !== password
           )
             throw new Error(

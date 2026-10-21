@@ -8,8 +8,8 @@
  * the next handshake without a restart and a failed read keeps the old one.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import type { Server } from 'node:http';
-import { request as httpRequest } from 'node:http';
+import { request as httpRequest, type Server as StatusServer } from 'node:http';
+import type { Server as SecureServer } from 'node:https';
 import { request as httpsRequest } from 'node:https';
 import type { PeerCertificate } from 'node:tls';
 import { createStorageModule } from '../../loader/src/storage-module-app.js';
@@ -28,7 +28,7 @@ const credentials: StorageS3Credentials = {
 /** The canonical in-cluster name of the module's Service. */
 const host = STORAGE_MODULE_TLS_HOSTS[1];
 let certificate: TestStorageCertificate;
-const servers: Server[] = [];
+const servers: Array<StatusServer | SecureServer> = [];
 beforeAll(async () => {
   certificate = await createStorageCertificate();
 });

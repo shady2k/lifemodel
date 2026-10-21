@@ -5,7 +5,7 @@
  * requests arrive once 653.7.2 adds their authorization.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { createServer as createSecureServer } from 'node:https';
+import { createServer as createSecureServer, type Server as SecureServer } from 'node:https';
 import type { LoaderLogger } from './logger.js';
 import type { Catalog } from './storage-catalog.js';
 import {
@@ -28,7 +28,7 @@ export interface StorageTaskTlsOptions {
 }
 
 export interface StorageTaskListener {
-  server: Server;
+  server: SecureServer;
   /** Re-read the certificate and use it for the next handshake. */
   reload(): Promise<void>;
   close(): void;

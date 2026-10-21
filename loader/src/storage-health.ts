@@ -111,8 +111,7 @@ export function createStorageHealth(options: StorageHealthOptions): StorageHealt
       lastErrorCode = null;
       lastSuccessAt = at;
       outageSince = null;
-      if (recovered)
-        options.logger.info({ outageSeconds }, 'The storage module is ready again');
+      if (recovered) options.logger.info({ outageSeconds }, 'The storage module is ready again');
       return;
     }
     recordFailure(at, result.code, result.cause);
