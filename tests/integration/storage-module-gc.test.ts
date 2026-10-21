@@ -622,7 +622,10 @@ describe('retention GC at real process and backend boundaries', () => {
               'SELECT count(*)::int AS n FROM storage.read_leases WHERE space_id=$1',
               [artifact.space]
             )
-          ).rows[0].n
+          ).rows[0].n,
+        // Stream close performs a bounded five-second SQL cleanup. The default
+        // one-second poll deadline is shorter than that operation under suite load.
+        { timeout: 10_000 }
       )
       .toBe(0);
     await h.tick();
