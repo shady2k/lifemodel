@@ -7,7 +7,7 @@ import { createLoaderApp, type LoaderApp } from '../../loader/src/app.js';
 import { loadConfig } from '../../loader/src/config.js';
 import { systemClock } from '../../loader/src/clock.js';
 import { createNodeFileSystem } from '../../loader/src/fs.js';
-import { createPkiManager } from '../../loader/src/pki.js';
+import { createPkiManager, STORAGE_MODULE_TLS_HOSTS } from '../../loader/src/pki.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 
 const roots: string[] = [];
@@ -283,6 +283,10 @@ describe('the platform loader', () => {
         },
       },
       configMap: { read: async () => null, write: async () => {} },
+      service: {
+        hosts: STORAGE_MODULE_TLS_HOSTS,
+        secret: { read: async () => ({}), write: async () => {} },
+      },
       status: {
         write: async (value) => {
           for (const [key, item] of Object.entries(value)) status.set(key, item);

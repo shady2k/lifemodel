@@ -5,7 +5,7 @@ import type { CommandRunner } from './exec.js';
 import type { FileSystem } from './fs.js';
 import { createLoaderHttp, type LoaderHttp } from './http.js';
 import type { ModelSlots } from './model.js';
-import { createPkiManager, type PkiManager } from './pki.js';
+import { createPkiManager, STORAGE_MODULE_TLS_HOSTS, type PkiManager } from './pki.js';
 import { createKubernetesTlsStores } from './pki-kubernetes.js';
 import type { LoaderLogger } from './logger.js';
 import { createLoaderState, describe, type LoaderState } from './state.js';
@@ -73,10 +73,13 @@ export interface FirstStartPhaseDeps {
  * Seaweed custody comes first. It needs only OpenBao, which the policy phase
  * has just prepared, and the platform Secret. Every phase after it may wait on
  * a later platform step: the Postgres and Valkey credential phases copy
- * Secrets that only exist once `lifemodel-state` (platform C) has run, and C
- * waits for B, which waits for A - and A waits for the storage module, whose
- * readiness needs the custody this phase writes. Custody last is a deadlock on
- * a fresh installation, not a slow start.
+ * Secrets that only exist once `lifemodel-state` (platform C) has run.
+ *
+ * The storage module lives in its own step after C (platform D, ADR-015 S-D1)
+ * and its readiness reads this custody record, so the record must land before
+ * that step can finish. Keeping the phase first means a fresh installation gets
+ * it from the step that needs only A, not from behind a wait in C that the
+ * module itself is one step further away from.
  */
 export function platformFirstStartPhases(deps: FirstStartPhaseDeps): PlatformPhase[] {
   return [
@@ -99,7 +102,19 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
   const { config, fs, runner, logger, clock } = deps;
   const state = createLoaderState({ fs, config, logger });
   const tlsStores = createKubernetesTlsStores();
-  const pki = deps.pki ?? createPkiManager({ config, fs, clock, ...tlsStores });
+  const pki =
+    deps.pki ??
+    createPkiManager({
+      config,
+      fs,
+      clock,
+      secret: tlsStores.secret,
+      configMap: tlsStores.configMap,
+      status: tlsStores.status,
+      // The storage module's task listener is reached in-cluster only, so its
+      // leaf lives in its own Secret with its own DNS names (ADR-015 S-D1).
+      service: { hosts: STORAGE_MODULE_TLS_HOSTS, secret: tlsStores.serviceSecret },
+    });
   const phaseStore = deps.platformPhaseStore ?? createKubernetesPhaseStore();
   const bao = deps.openBao ?? {
     api: createOpenBaoApi({

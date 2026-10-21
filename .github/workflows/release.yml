@@ -98,12 +98,14 @@ jobs:
       - name: Pin the loader image to its pushed digest
         env:
           LOADER_DIGEST: ${{ steps.loader.outputs.digest }}
-        # A0 runs the loader, step A runs the model gateway from the same image:
-        # both name the one pushed digest (ADR-013 D8).
+        # A0 runs the loader, step A runs the model gateway and step D the
+        # storage module from the same image: all three name the one pushed
+        # digest (ADR-013 D8, ADR-015 S-D1).
         run: >-
           scripts/release/set-loader-digest.sh "$LOADER_DIGEST"
           deploy/platform/a0/kustomization.yaml
           deploy/platform/a/kustomization.yaml
+          deploy/platform/d/kustomization.yaml
 
       - name: Install Flux CLI v2.9.6
         uses: fluxcd/flux2/action@b9c17924adb533d3617ec7de97a7b0f4acc07b39 # v2.9.6

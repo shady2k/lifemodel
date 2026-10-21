@@ -6,39 +6,136 @@ import { createKubernetesPostgresSecretPhase } from '../../loader/src/postgres.j
 
 const encode = (value: string) => Buffer.from(value).toString('base64');
 
-describe('CNPG core credential copy phase', () => {
-  it('copies only the generated login into the core namespace', async () => {
+describe('CNPG application credential copy phase', () => {
+  it('copies only the generated login into the core and storage module namespaces', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'cnpg-credentials-'));
     try {
       const tokenFile = join(directory, 'token');
       await writeFile(tokenFile, 'test-token');
       const calls: { method: string; path: string; body?: any }[] = [];
-      let targetData: Record<string, string> | undefined;
+      // The platform precreates both targets, so both are replaced in place.
+      const targets = new Map<string, Record<string, string>>([
+        ['/api/v1/namespaces/lifemodel/secrets/lifemodel-db-credentials', {}],
+        ['/api/v1/namespaces/lifemodel-system/secrets/storage-module-db-credentials', {}],
+      ]);
       const phase = createKubernetesPostgresSecretPhase({
-        apiServer: 'https://kubernetes.test', tokenFile,
+        apiServer: 'https://kubernetes.test',
+        tokenFile,
         request: async (url, method, _token, body) => {
           const parsed = body === undefined ? undefined : JSON.parse(body);
-          calls.push({ method, path: url.pathname, ...(parsed === undefined ? {} : { body: parsed }) });
+          calls.push({
+            method,
+            path: url.pathname,
+            ...(parsed === undefined ? {} : { body: parsed }),
+          });
           if (url.pathname.endsWith('/lifemodel-state/secrets/lifemodel-app'))
-            return { status: 200, body: JSON.stringify({ data: { username: encode('lifemodel'), password: encode('generated-password'), unrelated: encode('not-copied') } }) };
-          if (method === 'GET' && targetData !== undefined) return { status: 200, body: JSON.stringify({ data: targetData }) };
-          if (method === 'GET') return { status: 404, body: 'not found' };
-          targetData = parsed.data;
-          return { status: 201, body: '{}' };
+            return {
+              status: 200,
+              body: JSON.stringify({
+                data: {
+                  username: encode('lifemodel'),
+                  password: encode('generated-password'),
+                  unrelated: encode('not-copied'),
+                },
+              }),
+            };
+          const target = targets.get(url.pathname);
+          if (target !== undefined && method === 'GET')
+            return {
+              status: 200,
+              body: JSON.stringify({ metadata: { resourceVersion: '1' }, data: target }),
+            };
+          if (target !== undefined && method === 'PUT') {
+            targets.set(url.pathname, parsed.data);
+            return { status: 200, body: '{}' };
+          }
+          return { status: 404, body: 'not found' };
         },
       });
       expect(phase.name).toBe('cnpg-copy-core-credentials');
       await phase.run();
-      const created = calls.find((call) => call.method === 'POST')!.body;
-      expect(created).toMatchObject({ metadata: { name: 'lifemodel-db-credentials', namespace: 'lifemodel', annotations: { 'kustomize.toolkit.fluxcd.io/prune': 'disabled' } }, data: { username: encode('lifemodel'), password: encode('generated-password') } });
-      expect(created.data).not.toHaveProperty('unrelated');
+      const writes = calls.filter((call) => call.method === 'PUT').map((call) => call.body);
+      expect(writes).toEqual([
+        expect.objectContaining({
+          metadata: expect.objectContaining({
+            name: 'lifemodel-db-credentials',
+            namespace: 'lifemodel',
+            annotations: { 'kustomize.toolkit.fluxcd.io/prune': 'disabled' },
+          }),
+          data: { username: encode('lifemodel'), password: encode('generated-password') },
+        }),
+        expect.objectContaining({
+          metadata: expect.objectContaining({
+            name: 'storage-module-db-credentials',
+            namespace: 'lifemodel-system',
+            annotations: { 'kustomize.toolkit.fluxcd.io/prune': 'disabled' },
+          }),
+          data: { username: encode('lifemodel'), password: encode('generated-password') },
+        }),
+      ]);
+      for (const write of writes) expect(write.data).not.toHaveProperty('unrelated');
+      // The core copy first, then the module's; each is read back.
       expect(calls.map(({ method, path }) => [method, path])).toEqual([
         ['GET', '/api/v1/namespaces/lifemodel-state/secrets/lifemodel-app'],
         ['GET', '/api/v1/namespaces/lifemodel/secrets/lifemodel-db-credentials'],
-        ['POST', '/api/v1/namespaces/lifemodel/secrets'],
+        ['PUT', '/api/v1/namespaces/lifemodel/secrets/lifemodel-db-credentials'],
         ['GET', '/api/v1/namespaces/lifemodel/secrets/lifemodel-db-credentials'],
+        ['GET', '/api/v1/namespaces/lifemodel-system/secrets/storage-module-db-credentials'],
+        ['PUT', '/api/v1/namespaces/lifemodel-system/secrets/storage-module-db-credentials'],
+        ['GET', '/api/v1/namespaces/lifemodel-system/secrets/storage-module-db-credentials'],
       ]);
-    } finally { await rm(directory, { recursive: true, force: true }); }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('creates a target Secret that is absent, so a fresh install needs no precreated copy', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cnpg-credentials-'));
+    try {
+      const tokenFile = join(directory, 'token');
+      await writeFile(tokenFile, 'test-token');
+      const calls: { method: string; path: string }[] = [];
+      // One store per target path: a created core copy is not the module's.
+      const created = new Map<string, Record<string, string>>();
+      const phase = createKubernetesPostgresSecretPhase({
+        apiServer: 'https://kubernetes.test',
+        tokenFile,
+        request: async (url, method, _token, body) => {
+          calls.push({ method, path: url.pathname });
+          if (url.pathname.endsWith('/lifemodel-state/secrets/lifemodel-app'))
+            return {
+              status: 200,
+              body: JSON.stringify({
+                data: { username: encode('lifemodel'), password: encode('generated-password') },
+              }),
+            };
+          if (method === 'POST') {
+            const payload = JSON.parse(body!) as {
+              metadata: { name: string };
+              data: Record<string, string>;
+            };
+            created.set(`${url.pathname}/${payload.metadata.name}`, payload.data);
+            return { status: 201, body: '{}' };
+          }
+          const data = created.get(url.pathname);
+          if (data === undefined) return { status: 404, body: 'not found' };
+          return { status: 200, body: JSON.stringify({ data }) };
+        },
+      });
+      await phase.run();
+      expect([...created.keys()].sort()).toEqual([
+        '/api/v1/namespaces/lifemodel-system/secrets/storage-module-db-credentials',
+        '/api/v1/namespaces/lifemodel/secrets/lifemodel-db-credentials',
+      ]);
+      for (const data of created.values())
+        expect(data).toEqual({
+          username: encode('lifemodel'),
+          password: encode('generated-password'),
+        });
+      expect(calls.filter((call) => call.method === 'POST')).toHaveLength(2);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it('fails when a Kubernetes API response stalls past the total deadline', async () => {
@@ -62,8 +159,13 @@ describe('CNPG core credential copy phase', () => {
     try {
       const tokenFile = join(directory, 'token');
       await writeFile(tokenFile, 'test-token');
-      const phase = createKubernetesPostgresSecretPhase({ tokenFile, request: async () => ({ status: 404, body: 'missing' }) });
+      const phase = createKubernetesPostgresSecretPhase({
+        tokenFile,
+        request: async () => ({ status: 404, body: 'missing' }),
+      });
       await expect(phase.run()).rejects.toThrow('CNPG application Secret read failed (404)');
-    } finally { await rm(directory, { recursive: true, force: true }); }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

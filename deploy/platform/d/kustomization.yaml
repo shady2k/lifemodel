@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  # The storage module arrives after the database it reads (platform C): its
+  # readiness checks its own Postgres catalog (ADR-015 S-D7), so nothing may
+  # wait for it before the database exists. SeaweedFS, its Secret and its RBAC
+  # stay in A; only the workload that needs SQL moves here.
+  - storage-module-service-account.yaml
+  - storage-module.yaml
+  - network-policy.yaml
+images:
+  # The module runs the loader's image with its own entry point; the release
+  # flow pins this digest to the same pushed loader digest A0 and A use
+  # (ADR-013 D8, ADR-015 S-D1).
+  - name: ghcr.io/shady2k/lifemodel-loader
+    newName: ghcr.io/shady2k/lifemodel-loader
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

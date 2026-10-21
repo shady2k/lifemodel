@@ -250,9 +250,12 @@ failover budget. See [ADR-013](adr/013-model-gateway.md).
 ## Platform deployment and loader first start
 
 The platform artifact is a signed OCI source applied by Flux. Its root
-Kustomization applies A0 and step A in order: A0 creates and starts the loader
-and Gitea namespace, while A depends on A0 and creates OpenBao, Gitea and the
-application namespaces. A0 does not create any namespace owned by A. The
+Kustomization applies five steps in order: A0, A, B, C and D. A0 creates and
+starts the loader and Gitea namespace, A depends on A0 and creates OpenBao,
+Gitea and the application namespaces, B installs CloudNativePG, C creates the
+shared stores, and D - last - runs the storage module, whose readiness reads
+the database catalog C creates (ADR-015 S-D7). A0 does not create any namespace
+owned by A. The
 loader's platform mode stores restart-safe phase records in a platform-created
 Secret, initializes OpenBao and retains its unseal key, then verifies
 Kubernetes-auth handoff before revoking and removing the root token. It seeds

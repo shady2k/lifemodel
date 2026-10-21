@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { X509Certificate } from 'node:crypto';
 import * as x509 from '@peculiar/x509';
-import { createPkiManager, instanceHosts } from '../../loader/src/pki.js';
+import { createPkiManager, instanceHosts, STORAGE_MODULE_TLS_HOSTS } from '../../loader/src/pki.js';
 import { createNodeFileSystem } from '../../loader/src/fs.js';
 import { createTestClock } from '../../loader/src/clock.js';
 import { loadConfig } from '../../loader/src/config.js';
@@ -17,6 +17,7 @@ function setup() {
   const root = mkdtempSync(join(tmpdir(), 'loader-pki-'));
   roots.push(root);
   let secret: { ca?: string; cert?: string; key?: string } = {};
+  let serviceSecret: { ca?: string; cert?: string; key?: string } = {};
   let caMap: string | null = null;
   const events: string[] = [];
   const clock = createTestClock();
@@ -38,6 +39,16 @@ function setup() {
         caMap = ca;
       },
     },
+    service: {
+      hosts: STORAGE_MODULE_TLS_HOSTS,
+      secret: {
+        read: async () => serviceSecret,
+        write: async (ca, cert, key) => {
+          events.push('service-leaf');
+          serviceSecret = { ca, cert, key };
+        },
+      },
+    },
   });
   return {
     root,
@@ -45,6 +56,12 @@ function setup() {
     events,
     get secret() {
       return secret;
+    },
+    get serviceSecret() {
+      return serviceSecret;
+    },
+    set serviceSecret(value) {
+      serviceSecret = value;
     },
     get caMap() {
       return caMap;
@@ -56,7 +73,7 @@ describe('loader instance PKI', () => {
   it('creates and reads back CA before identity and publishes the leaf before ready', async () => {
     const s = setup();
     await s.manager.bootstrap();
-    expect(s.events).toEqual(['leaf', 'configmap']);
+    expect(s.events).toEqual(['leaf', 'configmap', 'service-leaf']);
     expect(await s.manager.report()).toMatchObject({
       identity: 'present',
       ca: 'present-matching',
@@ -95,6 +112,10 @@ describe('loader instance PKI', () => {
       clock: s.clock,
       secret: { read: async () => ({}), write: async () => {} },
       configMap: { read: async () => null, write: async () => {} },
+      service: {
+        hosts: STORAGE_MODULE_TLS_HOSTS,
+        secret: { read: async () => ({}), write: async () => {} },
+      },
     });
     await expect(manager.bootstrap()).rejects.toThrow('injected read-back failure');
     expect(events).toEqual(['write:key', 'write:cert', 'read:cert', 'read:key']);
@@ -130,6 +151,10 @@ describe('loader instance PKI', () => {
       clock: s.clock,
       secret: { read: async () => ({}), write: async () => {} },
       configMap: { read: async () => null, write: async () => {} },
+      service: {
+        hosts: STORAGE_MODULE_TLS_HOSTS,
+        secret: { read: async () => ({}), write: async () => {} },
+      },
     });
     await expect(interrupted.bootstrap()).rejects.toThrow('simulated interruption');
     expect(await real.exists(join(s.root, 'instance.json'))).toBe(false);
@@ -253,5 +278,59 @@ describe('loader instance PKI', () => {
   it('derives only the three instance names and rejects malformed names', () => {
     expect(instanceHosts('home')).toEqual(['home.local', 'boot-home.local', 'vault-home.local']);
     expect(() => instanceHosts('bad.name')).toThrow();
+  });
+  it('gives the storage module its own leaf, from the same CA, on in-cluster names only', async () => {
+    const s = setup();
+    await s.manager.bootstrap();
+    const ca = new X509Certificate(await s.manager.caPem());
+    const service = new X509Certificate(s.serviceSecret.cert!);
+    // Issued by the one instance CA, and a different certificate from the edge
+    // leaf: a client of one is not a client of the other.
+    expect(service.verify(ca.publicKey)).toBe(true);
+    expect(service.serialNumber).not.toBe(new X509Certificate(s.secret.cert!).serialNumber);
+    expect(service.subjectAltName?.split(', ').sort()).toEqual(
+      [...STORAGE_MODULE_TLS_HOSTS]
+        .sort()
+        .map((name) => `DNS:${name}`)
+        .sort()
+    );
+    expect(service.subjectAltName).not.toContain('home.local');
+    expect(s.serviceSecret.ca).toBe(await s.manager.caPem());
+    expect(await s.manager.report()).toMatchObject({
+      leaf: 'valid',
+      serviceLeaf: 'valid',
+      serviceSans: [...STORAGE_MODULE_TLS_HOSTS],
+    });
+  });
+  it('renews the module leaf on its own window and leaves the edge leaf alone', async () => {
+    const s = setup();
+    await s.manager.bootstrap();
+    const edge = new X509Certificate(s.secret.cert!).serialNumber;
+    const service = new X509Certificate(s.serviceSecret.cert!).serialNumber;
+    // Inside the renewal window both leaves are replaced; the edge leaf keeps
+    // its serial only until then, so the assertion stays one leaf each.
+    s.clock.advance(370 * 24 * 60 * 60 * 1000);
+    await s.manager.bootstrap();
+    expect(new X509Certificate(s.secret.cert!).serialNumber).not.toBe(edge);
+    expect(new X509Certificate(s.serviceSecret.cert!).serialNumber).not.toBe(service);
+    // A leaf removed from its Secret is reissued from the same CA.
+    const fingerprint = (await s.manager.report()).fingerprint;
+    s.serviceSecret.cert = undefined;
+    await s.manager.bootstrap();
+    expect((await s.manager.report()).fingerprint).toBe(fingerprint);
+    expect(
+      new X509Certificate(s.serviceSecret.cert!).verify(
+        new X509Certificate(await s.manager.caPem()).publicKey
+      )
+    ).toBe(true);
+  });
+  it('reports a missing or foreign module leaf instead of calling it ready', async () => {
+    const s = setup();
+    await s.manager.bootstrap();
+    s.serviceSecret.cert = undefined;
+    expect((await s.manager.report()).serviceLeaf).toBe('missing');
+    // The edge leaf is not a module leaf: it names the browser hosts.
+    s.serviceSecret = s.secret;
+    expect((await s.manager.report()).serviceLeaf).toBe('invalid');
   });
 });

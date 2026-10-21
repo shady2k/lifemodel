@@ -8,18 +8,36 @@ export interface TestStores {
   workerId: string;
 }
 
-export function testStoreUrls(env: NodeJS.ProcessEnv = process.env): { valkeyUrl: string; databaseUrl: string } {
+export function testStoreUrls(env: NodeJS.ProcessEnv = process.env): {
+  valkeyUrl: string;
+  databaseUrl: string;
+} {
   const valkeyUrl = env.LIFEMODEL_TEST_VALKEY_URL;
   const databaseUrl = env.LIFEMODEL_TEST_DATABASE_URL;
   if (!valkeyUrl || !databaseUrl) {
-    throw new Error('LIFEMODEL_TEST_VALKEY_URL and LIFEMODEL_TEST_DATABASE_URL are required; run tests through scripts/test-isolated.mjs');
+    throw new Error(
+      'LIFEMODEL_TEST_VALKEY_URL and LIFEMODEL_TEST_DATABASE_URL are required; run tests through scripts/test-isolated.mjs'
+    );
   }
   return { valkeyUrl, databaseUrl };
 }
 
-export async function createTestStores(workerId = process.env.VITEST_WORKER_ID): Promise<TestStores> {
+/** The database of the current test worker: one per worker, created on demand. */
+export function workerDatabaseUrl(workerId = process.env.VITEST_WORKER_ID): string {
+  const { databaseUrl } = testStoreUrls();
+  if (!workerId || !/^\d+$/.test(workerId))
+    throw new Error('VITEST_WORKER_ID must identify the current test worker');
+  const url = new URL(databaseUrl);
+  url.pathname = `/lifemodel_test_worker_${workerId}`;
+  return url.toString();
+}
+
+export async function createTestStores(
+  workerId = process.env.VITEST_WORKER_ID
+): Promise<TestStores> {
   const { valkeyUrl, databaseUrl } = testStoreUrls();
-  if (!workerId || !/^\d+$/.test(workerId)) throw new Error('VITEST_WORKER_ID must identify the current test worker');
+  if (!workerId || !/^\d+$/.test(workerId))
+    throw new Error('VITEST_WORKER_ID must identify the current test worker');
   const databaseName = `lifemodel_test_worker_${workerId}`;
   const adminUrl = new URL(databaseUrl);
   adminUrl.pathname = '/postgres';
@@ -40,6 +58,8 @@ export async function createTestStores(workerId = process.env.VITEST_WORKER_ID):
   return {
     workerId,
     postgres: new Pool({ connectionString: workerDatabaseUrl.toString() }),
-    redis: new Redis(workerValkeyUrl.toString(), { keyPrefix: `lifemodel:test:${workerId}:${randomUUID()}:` }),
+    redis: new Redis(workerValkeyUrl.toString(), {
+      keyPrefix: `lifemodel:test:${workerId}:${randomUUID()}:`,
+    }),
   };
 }

@@ -2,8 +2,8 @@
 
 This directory is the root of the signed platform OCI artifact. The root
 `OCIRepository` and `platform` Kustomization apply the artifact in
-`flux-system`. The artifact declares the platform-instance bootstrap followed by four ordered
-steps: A0, A, B and C. A0 depends on platform-instance, which creates the
+`flux-system`. The artifact declares the platform-instance bootstrap followed by five ordered
+steps: A0, A, B, C and D. A0 depends on platform-instance, which creates the
 loader namespace, app namespace, identity ConfigMaps and named Ingresses. Step A
 `dependsOn: platform-a0`, so OpenBao and Gitea arrive only after the loader
 can start. Step B installs CloudNativePG with its CRDs in a default-deny operator namespace;
@@ -11,7 +11,10 @@ its only opened routes are DNS, the documented Kubernetes API port, Postgres
 instance ports and API-server webhook ingress. Step C depends on B and applies
 shared state resources, including the Postgres Cluster and Valkey StatefulSet.  This order
 lets the loader initialize OpenBao rather than requiring an already running
-Bao. See [ADR-010](../../docs/adr/010-container-generations.md) for the decision.
+Bao. Step D depends on C and applies the storage module, whose readiness reads
+the database's catalog (ADR-015 S-D7); it is last because it is the only
+platform workload that needs SQL. See
+[ADR-010](../../docs/adr/010-container-generations.md) for the decision.
 
 ## A0: loader and admission
 
@@ -90,7 +93,7 @@ policy `read` on `lifemodel/data/model/*` only, provisioned and verified by the
 loader's bootstrap before the root token is retired. The core's endpoint comes
 from `LIFEMODEL_MODEL_BASE_URL` and carries no key.
 
-## Step A: SeaweedFS and the storage module
+## Step A: SeaweedFS
 
 `seaweedfs` is a one-replica StatefulSet in `lifemodel-system` running
 `weed mini`: master, volume server, filer and S3 in one process on one
@@ -114,35 +117,69 @@ overwrites the loader's content. Rotation rewrites the record and the Secret;
 SeaweedFS reads the file at startup, so a rotation takes effect on its next
 restart.
 
-`storage-module` is a Deployment and Service in `lifemodel-system`, also the
-loader image with its own entry point
-(`/opt/lifemodel/loader/dist/storage-module.js`), its own ServiceAccount and no
-loader volume. This build answers health only: `GET /status` on its own status
-listener is 200 when SeaweedFS answered a signed listing of the module's bucket
-with valid auth, and 503 with the reason (`unreachable`, `auth_denied`,
-`bucket_missing`, `unexpected`, `credentials_unavailable`) otherwise; `GET
-/livez` is the process, so a stopped store never restarts the module that
-reports it. It logs status codes and identifiers only, never a key or a body.
-The module logs in to OpenBao with role `storage-module`, whose policy is
-`read` on the one custody record and nothing else, provisioned and verified by
-the loader's bootstrap before the root token is retired.
-
 This arrives with a fresh installation only. An instance bootstrapped by an
 earlier platform version has no `storage-module` identity and no `loader-storage`
 grant on the custody record, and its root token is already retired, so nothing
 can provision them in place; the loader refuses that instance on every start
 with one named error that says a reinstall is required. There is no upgrade
-path. SeaweedFS custody runs as the loader's first first-start phase, before the
-phases that wait on platform B or C, because platform A waits for the storage
-module's readiness and those later steps wait for A.
+path. SeaweedFS custody runs as the loader's first first-start phase: it needs
+only OpenBao, which the policy phase has just prepared, and the platform Secret,
+while the phases after it copy Secrets that exist only once step C has run. The
+storage module of step D reads that custody record, so the record has to land
+from the step that needs only A.
 
 `seaweedfs-access` admits only storage-module pods, and only on 8333: the
 master, volume and filer ports have no allow rule anywhere, so the namespace
-default deny keeps them private to that pod. `storage-module-access` lets the
-module reach DNS, OpenBao 8200 and SeaweedFS 8333, and lets the loader read its
-health on 8081; it has no Internet, model or Kubernetes API route yet - the
-TokenReview egress arrives with the task API (lifemodel-653.7.2), together with
-the task, trusted-control and owner-read listeners.
+default deny keeps them private to that pod.
+
+## Step D: the storage module
+
+`storage-module` is a Deployment and Service in `lifemodel-system`, also the
+loader image with its own entry point
+(`/opt/lifemodel/loader/dist/storage-module.js`), its own ServiceAccount and no
+loader volume. It is in step D, after the database, because its readiness reads
+its own Postgres catalog; in step A it would have made A wait for C while C
+waits for A. Its catalog is the `storage` schema that `db/migrations` creates,
+applied by the first generation's `migrate` initContainer, so on a fresh
+installation the module is unready until that generation has started - the step
+keeps a 30-minute wait for exactly that, and Flux retries it on its interval
+until it converges. The module never reports an empty or missing catalog as
+ready.
+
+`GET /status` on its own status listener is 200 only when the module read its
+catalog table and SeaweedFS answered a signed listing of the module's bucket
+with valid auth; otherwise it is 503 with the reason (`catalog_unavailable`,
+`unreachable`, `auth_denied`, `bucket_missing`, `unexpected`,
+`credentials_unavailable`, `timeout`). A failed catalog read also records the
+repair in the log: `unreachable`, `auth_failed`, `schema_missing`, `forbidden`
+or `failed`. `GET /livez` is the process, so a stopped database or store never
+restarts the module that reports it. It logs status codes and identifiers only,
+never a key, a body or a password.
+
+Its database login is the database owner's own for now, copied by the loader's
+first start from CloudNativePG's generated `lifemodel-app` Secret into the
+platform-created `storage-module-db-credentials` Secret in `lifemodel-system`,
+which only the module's pod reads. That is the owner's interim decision
+(ADR-015 amendment, 2026-10-21, lifemodel-653.7.8); a leased identity is
+lifemodel-2t5's. The module logs in to OpenBao with role `storage-module`,
+whose policy is `read` on the one custody record and nothing else, provisioned
+and verified by the loader's bootstrap before the root token is retired.
+
+The task listener is TLS on 8443, with a second instance-CA leaf for the
+module's in-cluster names (`storage-module.lifemodel-system.svc` and
+`.svc.cluster.local`). The loader issues and renews it into the
+platform-created `storage-module-tls` Secret, which only this pod mounts; the
+module re-reads it once a minute, so a renewal reaches the next handshake
+without a restart. The listener answers a health-like `GET /ping` for now;
+653.7.2 adds TokenReview and the task API to it. Clients trust the instance CA
+(`lifemodel-ca`), and nothing plain serves the task port.
+
+`storage-module-access` lets the module reach DNS, OpenBao 8200, SeaweedFS 8333
+and the database's 5432, and lets the loader read its health on 8081; the
+database's own policy admits this pod back on 5432. It has no Internet, model or
+Kubernetes API route yet, and no pod may reach the task port - the TokenReview
+egress and the task, trusted-control and owner-read peers arrive with the task
+API (lifemodel-653.7.2, lifemodel-653.7.5).
 
 The `gitea-admin` Secret remains while the chart references it. Its Bao-held
 retirement is lifemodel-2t5.2. The Gitea and OpenBao charts are vendored at
@@ -174,7 +211,7 @@ curl --resolve boot-<name>.local:443:VM_IP https://boot-<name>.local/login
 
 Replace `VM_IP` in the command with the VM's reachable IP. Traefik publishes this host on port 443. Port 80 redirects to HTTPS.
 
-The Flux reconcilers use `dependsOn` to enforce platform-instance → A0 → A → B → C.
+The Flux reconcilers use `dependsOn` to enforce platform-instance → A0 → A → B → C → D.
 The instance ConfigMap is required by the platform-instance post-build substitution. See the [Flux v2.9.6
 API](https://github.com/fluxcd/kustomize-controller/blob/v1.9.6/docs/spec/v1/kustomizations.md)
 and [release notes](https://github.com/fluxcd/flux2/releases/tag/v2.9.6).
@@ -196,8 +233,10 @@ store ports, plus the CNPG operator ports. The bootstrap creates database
 `lifemodel` and owner role `lifemodel` with CNPG's generated `lifemodel-app` Secret.
 The post-init SQL enables pgvector in the application database.
 
-The loader copies only the generated username and password to a fixed Secret
-the `lifemodel-db-credentials` Secret in the `lifemodel` namespace, in a resumable first-start phase. It also
+The loader copies only the generated username and password to the
+`lifemodel-db-credentials` Secret in the `lifemodel` namespace and to the
+storage module's `storage-module-db-credentials` Secret in `lifemodel-system`,
+in one resumable first-start phase. It also
 generates a random Valkey password only if the retained source Secret is
 absent, then copies it to the `lifemodel-valkey-credentials` Secret in the `lifemodel` namespace. This uses
 the existing loader ServiceAccount; it adds no controller. The credentials are

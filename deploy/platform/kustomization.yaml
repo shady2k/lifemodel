@@ -6,6 +6,8 @@ resources:
   - a-reconciler.yaml
   - b-reconciler.yaml
   - c-reconciler.yaml
+  - d-reconciler.yaml
 
-# Platform order: A0 -> A -> B (CNPG CRDs/operator) -> C (shared state).
-# Each later step declares its dependency in its reconciler.
+# Platform order: A0 -> A -> B (CNPG CRDs/operator) -> C (shared state) ->
+# D (the storage module, which reads the database C creates). Each later step
+# declares its dependency in its reconciler.

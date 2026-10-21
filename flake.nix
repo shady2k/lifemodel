@@ -281,6 +281,19 @@
           grep -E 'image: ghcr.io/shady2k/lifemodel-loader@sha256:[a-f0-9]{64}' "$1" >/dev/null
         }
         validate_a0 a0.yaml
+        # The storage module's own step: the platform step after the database
+        # (ADR-015 S-D1). It must render with the pinned loader image, its own
+        # entry point and policy, and depend on the database step.
+        kustomize build ${./deploy/platform/d} > step-d.yaml
+        grep -F 'name: storage-module' step-d.yaml >/dev/null
+        grep -F '/opt/lifemodel/loader/dist/storage-module.js' step-d.yaml >/dev/null
+        grep -E 'image: ghcr.io/shady2k/lifemodel-loader@sha256:[a-f0-9]{64}' step-d.yaml >/dev/null
+        grep -F 'name: storage-module-access' step-d.yaml >/dev/null
+        grep -F 'secretName: storage-module-tls' step-d.yaml >/dev/null
+        grep -F 'containerPort: 8443' step-d.yaml >/dev/null
+        grep -F 'name: platform-d' parent.yaml >/dev/null
+        grep -F 'name: platform-c' ${./deploy/platform/d-reconciler.yaml} >/dev/null
+        grep -F 'path: ./d' ${./deploy/platform/d-reconciler.yaml} >/dev/null
         cp -r ${./deploy/platform/a0} missing-resource
         chmod -R u+w missing-resource
         sed '/- deployment.yaml/d' missing-resource/kustomization.yaml > missing-resource/kustomization.tmp

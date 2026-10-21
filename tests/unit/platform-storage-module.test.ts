@@ -3,9 +3,10 @@
  *
  * These checks pin what the manifests say: the pinned release digest, one
  * `weed mini` StatefulSet on a retained volume with authentication required
- * and the unneeded services off, one Service for the S3 port, the module's own
- * ServiceAccount and entry point, and both sides of every network route that
- * makes the module the only way to the store.
+ * and the unneeded services off, one Service for the S3 port, and the module -
+ * in the platform step after the database - with its own ServiceAccount, entry
+ * point, catalog login, instance-CA leaf and both sides of every network route
+ * that makes it the only way to the store.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -36,17 +37,22 @@ const statefulSet = seaweed.find((item) => item.kind === 'StatefulSet');
 const seaweedService = seaweed.find((item) => item.kind === 'Service');
 const seaweedPod = statefulSet?.spec.template.spec;
 const seaweedContainer = seaweedPod?.containers?.[0];
-const module = documents(join(platformRoot, 'a/storage-module.yaml'));
+const module = documents(join(platformRoot, 'd/storage-module.yaml'));
 const moduleDeployment = module.find((item) => item.kind === 'Deployment');
 const moduleService = module.find((item) => item.kind === 'Service');
 const modulePod = moduleDeployment?.spec.template.spec;
 const moduleContainer = modulePod?.containers?.[0];
 const policies = documents(join(platformRoot, 'a/network-policy.yaml'));
+const stepDPolicies = documents(join(platformRoot, 'd/network-policy.yaml'));
 const stepAPolicies = documents(join(platformRoot, 'a0/network-policy.yaml'));
+const statePolicies = documents(join(platformRoot, 'state/network-policy.yaml'));
 const byName = (items: Record<string, any>[], name: string): Record<string, any> | undefined =>
   items.find((item) => item.metadata?.name === name);
 const kustomization = YAML.parse(
   readFileSync(join(platformRoot, 'a/kustomization.yaml'), 'utf8')
+) as { resources: string[]; images: Record<string, any>[] };
+const stepDKustomization = YAML.parse(
+  readFileSync(join(platformRoot, 'd/kustomization.yaml'), 'utf8')
 ) as { resources: string[]; images: Record<string, any>[] };
 
 describe('the SeaweedFS StatefulSet', () => {
@@ -227,7 +233,7 @@ describe('the storage module workload', () => {
     });
     expect(modulePod?.serviceAccountName).toBe('storage-module');
     expect(modulePod?.automountServiceAccountToken).toBe(true);
-    expect(documents(join(platformRoot, 'a/storage-module-service-account.yaml'))).toEqual([
+    expect(documents(join(platformRoot, 'd/storage-module-service-account.yaml'))).toEqual([
       {
         apiVersion: 'v1',
         kind: 'ServiceAccount',
@@ -248,12 +254,85 @@ describe('the storage module workload', () => {
         value: 'http://seaweedfs.lifemodel-system.svc:8333',
       },
       { name: 'LIFEMODEL_STORAGE_BUCKET', value: STORAGE_BUCKET },
+      // The interim catalog login: the owner's decision (lifemodel-653.7.8).
+      {
+        name: 'LIFEMODEL_DB_USERNAME',
+        valueFrom: {
+          secretKeyRef: { name: 'storage-module-db-credentials', key: 'username' },
+        },
+      },
+      {
+        name: 'LIFEMODEL_DB_PASSWORD',
+        valueFrom: {
+          secretKeyRef: { name: 'storage-module-db-credentials', key: 'password' },
+        },
+      },
+      { name: 'LIFEMODEL_STORAGE_TLS_DIR', value: '/opt/lifemodel/tls' },
     ]);
-    // No loader volume, no custody Secret, no key of any kind.
+    // No loader volume, no custody Secret, no S3 key of any kind; the two
+    // Secrets it does mount are its own login and its own leaf.
     expect(modulePod?.volumes).toEqual([
       { name: 'tmp', emptyDir: { medium: 'Memory', sizeLimit: '32Mi' } },
+      { name: 'tls', secret: { secretName: 'storage-module-tls', defaultMode: 288 } },
     ]);
-    expect(JSON.stringify(moduleDeployment)).not.toMatch(/secretKeyRef|accessKey/);
+    expect(JSON.stringify(moduleDeployment)).not.toMatch(/accessKey|s3\.json/);
+    // The database login reaches the process as two Secret keys, never as an
+    // URL with the password inside it.
+    expect(JSON.stringify(moduleContainer?.env)).not.toMatch(/postgresql:\/\//);
+  });
+
+  it('mounts its own leaf read-only and nowhere else', () => {
+    expect(
+      (moduleContainer?.volumeMounts ?? []).find(
+        (mount: Record<string, any>) => mount.name === 'tls'
+      )
+    ).toEqual({ name: 'tls', mountPath: '/opt/lifemodel/tls', readOnly: true });
+    // The loader mounts its own edge leaf (A0); the module's leaf is a second,
+    // different Secret that no other workload mounts.
+    const a0 = documents(join(platformRoot, 'a0/bootstrap-secrets.yaml'));
+    expect(a0.filter((item) => item.metadata?.name === 'storage-module-tls')).toEqual([
+      {
+        apiVersion: 'v1',
+        kind: 'Secret',
+        metadata: {
+          name: 'storage-module-tls',
+          namespace: 'lifemodel-system',
+          annotations: {
+            'kustomize.toolkit.fluxcd.io/ssa': 'IfNotPresent',
+            'kustomize.toolkit.fluxcd.io/prune': 'disabled',
+          },
+        },
+        type: 'kubernetes.io/tls',
+        data: { 'tls.crt': '', 'tls.key': '' },
+      },
+    ]);
+    expect(a0.filter((item) => item.metadata?.name === 'storage-module-db-credentials')).toEqual([
+      {
+        apiVersion: 'v1',
+        kind: 'Secret',
+        metadata: {
+          name: 'storage-module-db-credentials',
+          namespace: 'lifemodel-system',
+          annotations: {
+            'kustomize.toolkit.fluxcd.io/ssa': 'IfNotPresent',
+            'kustomize.toolkit.fluxcd.io/prune': 'disabled',
+          },
+        },
+        type: 'Opaque',
+      },
+    ]);
+    // The loader may write exactly the two platform-created Secrets, and only
+    // get/update: nothing here can create one or delete one.
+    const loaderRole = documents(join(platformRoot, 'a0/service-account.yaml')).find(
+      (item) => item.kind === 'Role' && item.metadata?.name === 'loader-bootstrap'
+    );
+    const secrets = (loaderRole?.rules ?? []).find((rule: Record<string, any>) =>
+      rule.resources.includes('secrets')
+    );
+    expect(secrets.resourceNames).toEqual(
+      expect.arrayContaining(['storage-module-tls', 'storage-module-db-credentials'])
+    );
+    expect(secrets.verbs).toEqual(['get', 'update']);
   });
 
   it('is restricted, read only and bounded', () => {
@@ -282,20 +361,22 @@ describe('the storage module workload', () => {
     );
   });
 
-  it('takes readiness from the store and liveness from the process', () => {
+  it('takes readiness from the catalog and the store, liveness from the process', () => {
     expect(moduleContainer?.readinessProbe).toMatchObject({
       httpGet: { path: '/status', port: 'status' },
     });
     expect(moduleContainer?.livenessProbe).toMatchObject({
       httpGet: { path: '/livez', port: 'status' },
     });
-    // A stopped store must never restart the process that reports it.
+    // A stopped database or store must never restart the process that reports it.
     expect(moduleContainer?.livenessProbe.httpGet.path).not.toBe('/status');
     expect(moduleService?.spec.ports).toEqual([
       { name: 'status', port: 8081, targetPort: 'status', protocol: 'TCP' },
+      { name: 'task', port: 8443, targetPort: 'task', protocol: 'TCP' },
     ]);
     expect(moduleContainer?.ports).toEqual([
       { name: 'status', containerPort: 8081, protocol: 'TCP' },
+      { name: 'task', containerPort: 8443, protocol: 'TCP' },
     ]);
   });
 });
@@ -340,8 +421,8 @@ describe('the storage network routes', () => {
     });
   });
 
-  it('lets the module reach DNS, OpenBao and SeaweedFS, and nothing else', () => {
-    const access = byName(policies, 'storage-module-access');
+  it('lets the module reach DNS, OpenBao, SeaweedFS and its database, and nothing else', () => {
+    const access = byName(stepDPolicies, 'storage-module-access');
     expect(access?.spec).toEqual({
       podSelector: { matchLabels: { 'app.kubernetes.io/name': 'storage-module' } },
       policyTypes: ['Ingress', 'Egress'],
@@ -377,6 +458,17 @@ describe('the storage network routes', () => {
           ],
           ports: [{ protocol: 'TCP', port: 8333 }],
         },
+        {
+          to: [
+            {
+              namespaceSelector: {
+                matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-state' },
+              },
+              podSelector: { matchLabels: { 'cnpg.io/cluster': 'lifemodel' } },
+            },
+          ],
+          ports: [{ protocol: 'TCP', port: 5432 }],
+        },
       ],
     });
     const peers = JSON.stringify(access?.spec.egress ?? []);
@@ -386,6 +478,30 @@ describe('the storage network routes', () => {
     expect(peers).not.toContain('9340');
     expect(peers).not.toContain('8888');
     expect(peers).not.toContain('6443');
+    // No pod may reach the task listener yet: its peers arrive with 653.7.2.
+    const ingress = (access?.spec.ingress ?? []).flatMap((rule: Record<string, any>) =>
+      (rule.ports ?? []).map((port: Record<string, any>) => port.port)
+    );
+    expect(ingress).toEqual([8081]);
+  });
+
+  it('admits that module to the database and no other pod in its namespace', () => {
+    const database = byName(statePolicies, 'lifemodel-state-postgres-access');
+    const modulePeer = (database?.spec.ingress ?? []).find((rule: Record<string, any>) =>
+      (rule.from ?? []).some(
+        (peer: Record<string, any>) =>
+          peer.podSelector?.matchLabels?.['app.kubernetes.io/name'] === 'storage-module'
+      )
+    );
+    expect(modulePeer).toEqual({
+      from: [
+        {
+          namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' } },
+          podSelector: { matchLabels: { 'app.kubernetes.io/name': 'storage-module' } },
+        },
+      ],
+      ports: [{ protocol: 'TCP', port: 5432 }],
+    });
   });
 
   it('admits the module to OpenBao beside the loader and the gateway', () => {
@@ -415,7 +531,7 @@ describe('the storage network routes', () => {
       ],
       ports: [{ protocol: 'TCP', port: 8081 }],
     });
-    const ingress = (byName(policies, 'storage-module-access')?.spec.ingress ?? []).flatMap(
+    const ingress = (byName(stepDPolicies, 'storage-module-access')?.spec.ingress ?? []).flatMap(
       (rule: Record<string, any>) => rule.from ?? []
     );
     expect(ingress).toContainEqual({
@@ -427,31 +543,68 @@ describe('the storage network routes', () => {
 
 describe('the platform release', () => {
   it('applies every new resource through the platform kustomization', () => {
-    for (const file of [
-      'seaweedfs-s3-identity.yaml',
-      'seaweedfs-rbac.yaml',
-      'seaweedfs.yaml',
-      'storage-module-service-account.yaml',
-      'storage-module.yaml',
-    ])
+    // SeaweedFS, its Secret and its RBAC stay with OpenBao in step A.
+    for (const file of ['seaweedfs-s3-identity.yaml', 'seaweedfs-rbac.yaml', 'seaweedfs.yaml'])
       expect(kustomization.resources).toContain(file);
     // The identity Secret and its RBAC arrive before the pod that mounts it.
     expect(kustomization.resources.indexOf('seaweedfs-s3-identity.yaml')).toBeLessThan(
       kustomization.resources.indexOf('seaweedfs.yaml')
     );
-    expect(kustomization.resources.indexOf('openbao/rendered.yaml')).toBeLessThan(
-      kustomization.resources.indexOf('storage-module.yaml')
+    // The module itself is in the step after the database.
+    expect(kustomization.resources).not.toContain('storage-module.yaml');
+    for (const file of [
+      'storage-module-service-account.yaml',
+      'storage-module.yaml',
+      'network-policy.yaml',
+    ])
+      expect(stepDKustomization.resources).toContain(file);
+    expect(
+      stepDKustomization.resources.indexOf('storage-module-service-account.yaml')
+    ).toBeLessThan(stepDKustomization.resources.indexOf('storage-module.yaml'));
+  });
+
+  it('runs the module only after the database it reads', () => {
+    const reconciler = YAML.parse(
+      readFileSync(join(platformRoot, 'd-reconciler.yaml'), 'utf8')
+    ) as Record<string, any>;
+    expect(reconciler).toMatchObject({
+      apiVersion: 'kustomize.toolkit.fluxcd.io/v1',
+      kind: 'Kustomization',
+      metadata: { name: 'platform-d', namespace: 'flux-system' },
+      spec: {
+        dependsOn: [{ name: 'platform-c' }],
+        path: './d',
+        prune: true,
+        wait: true,
+        interval: '10m0s',
+        // A first installation's catalog appears with the first generation's
+        // migration, so this step's own wait has to outlast a cold start.
+        timeout: '30m0s',
+        sourceRef: { kind: 'OCIRepository', name: 'platform' },
+      },
+    });
+    const root = YAML.parse(readFileSync(join(platformRoot, 'kustomization.yaml'), 'utf8')) as {
+      resources: string[];
+    };
+    expect(root.resources).toContain('d-reconciler.yaml');
+    expect(root.resources.indexOf('d-reconciler.yaml')).toBeGreaterThan(
+      root.resources.indexOf('c-reconciler.yaml')
     );
   });
 
   it('pins the module to the loader image the release flow pins for A0', () => {
-    expect(kustomization.images).toContainEqual({
+    expect(stepDKustomization.images).toContainEqual({
       name: 'ghcr.io/shady2k/lifemodel-loader',
       newName: 'ghcr.io/shady2k/lifemodel-loader',
       digest: `sha256:${'0'.repeat(64)}`,
     });
     const workflow = readFileSync(join(repoRoot, '.github/workflows/release.yml'), 'utf8');
-    expect(workflow).toContain('deploy/platform/a/kustomization.yaml');
+    for (const file of [
+      'deploy/platform/a0/kustomization.yaml',
+      'deploy/platform/a/kustomization.yaml',
+      'deploy/platform/d/kustomization.yaml',
+    ])
+      expect(workflow).toContain(file);
   });
 
   it('ships the module entry point in the loader image', () => {

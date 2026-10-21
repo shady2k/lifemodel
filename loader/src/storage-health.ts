@@ -1,11 +1,11 @@
 /**
  * The storage module's health logic (ADR-015 S-D7).
  *
- * Readiness answers one question: does SeaweedFS answer with valid auth right
- * now? A failed store is `down` with its own reason - unreachable, refused,
- * missing bucket, no credentials, or a check that passed its deadline - and is
- * never reported as an empty store. Liveness answers a different one: is this
- * process alive.
+ * Readiness answers one question: can the module use its catalog and its store
+ * right now? A failed catalog or a failed store is `down` with its own reason -
+ * an unreachable catalog, refused credentials, a missing bucket, no Seaweed
+ * custody, or a check that passed its deadline - and is never reported as an
+ * empty store. Liveness answers a different one: is this process alive.
  *
  * A check that misses its deadline is an unhealthy outcome of that evaluation,
  * not a reason to repeat the last good answer: the check is cancelled, its
@@ -14,8 +14,16 @@
 import type { LoaderLogger } from './logger.js';
 import type { S3CheckFailure } from './storage-s3.js';
 
-export type StorageFailureCode = S3CheckFailure | 'credentials_unavailable' | 'timeout';
-export type StoreCheck = { ok: true } | { ok: false; code: StorageFailureCode };
+export type StorageFailureCode =
+  | S3CheckFailure
+  | 'credentials_unavailable'
+  | 'catalog_unavailable'
+  | 'timeout';
+/**
+ * A failed check. `cause` is the repair it needs - a refused login, a missing
+ * schema, an unreachable server - and never a body, a credential or a name.
+ */
+export type StoreCheck = { ok: true } | { ok: false; code: StorageFailureCode; cause?: string };
 
 export interface StorageHealthBody {
   state: 'unknown' | 'ok' | 'down';
@@ -38,7 +46,7 @@ export interface StorageHealthOptions {
   /**
    * How long an evaluation waits for its check. It must stay below the
    * Kubernetes readiness probe's `timeoutSeconds`, so the probe always gets an
-   * answer (deploy/platform/a/storage-module.yaml).
+   * answer (deploy/platform/d/storage-module.yaml).
    */
   boundMs?: number;
   timers?: { set: typeof setTimeout; clear: typeof clearTimeout };
@@ -71,6 +79,8 @@ export function createStorageHealth(options: StorageHealthOptions): StorageHealt
   };
   let state: StorageHealthBody['state'] = 'unknown';
   let lastErrorCode: StorageFailureCode | null = null;
+  /** The repair the last failure named, so a new one is logged as a change. */
+  let lastCause: string | null = null;
   let lastCheckedAt: number | null = null;
   let lastSuccessAt: number | null = null;
   let outageSince: number | null = null;
@@ -101,21 +111,26 @@ export function createStorageHealth(options: StorageHealthOptions): StorageHealt
       lastErrorCode = null;
       lastSuccessAt = at;
       outageSince = null;
-      if (recovered)
-        options.logger.info({ outageSeconds }, 'The storage module reached SeaweedFS again');
+      if (recovered) options.logger.info({ outageSeconds }, 'The storage module is ready again');
       return;
     }
-    recordFailure(at, result.code);
+    recordFailure(at, result.code, result.cause);
   }
 
-  function recordFailure(at: number, code: StorageFailureCode): void {
-    const changed = state !== 'down' || lastErrorCode !== code;
+  function recordFailure(at: number, code: StorageFailureCode, cause?: string): void {
+    // A changed repair is a new diagnosis, even while the code stays the same.
+    const changed = state !== 'down' || lastErrorCode !== code || lastCause !== (cause ?? null);
     state = 'down';
     lastErrorCode = code;
+    lastCause = cause ?? null;
     lastCheckedAt = at;
     outageSince ??= at;
     // One line per reason, never one per probe.
-    if (changed) options.logger.warn({ code }, 'The storage module cannot use SeaweedFS');
+    if (changed)
+      options.logger.warn(
+        { code, ...(cause === undefined ? {} : { cause }) },
+        'The storage module is not ready'
+      );
   }
 
   function startCheck(): ActiveCheck | undefined {

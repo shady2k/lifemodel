@@ -346,6 +346,23 @@ names/token/session values. Stage runbook must cover seal pending, auth failure,
 capacity/pin pressure and restore hold. Bounded retries only for infrastructure
 ambiguity; malformed names/tokens/quota do not launch retry storms.
 
+## Amendments
+
+- **Interim database login for the module (2026-10-21, lifemodel-653.7.8).**
+  S-D1 says module SQL credentials scope only to its catalog. Until
+  lifemodel-2t5 gives the module a leased identity, it uses the database
+  owner's own login - the one core and web use - copied by the loader's first
+  start into a Secret in `lifemodel-system` that only the module's pod mounts.
+  The owner decided this on 2026-10-21 on lifemodel-653.7 ("Берем C. Это
+  промежуточный вариант. Его мы никому не показываем, у нас greenfield."): no
+  NOLOGIN group, no vault-env injection and no separate role now; those are
+  2t5's. Nothing else in S-D1 widens: the module still reads only the one
+  custody record in OpenBao, and what it holds is that record's scoped Seaweed
+  S3 signing credentials in memory - no model key, no loader root or unseal
+  material and no unrelated credential. This intermediate state is not shown to
+  anyone and carries no upgrade path - a fresh installation is the only form of
+  it.
+
 ## Options rejected and consequences
 
 Options are from step A §4, judged in driver order, not reopened vendor ranking:

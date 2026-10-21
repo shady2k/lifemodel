@@ -1,4 +1,4 @@
-/** Narrow Kubernetes API stores for the PKI-owned A0 resources. */
+/** Narrow Kubernetes API stores for the PKI-owned platform resources. */
 import { readFile } from 'node:fs/promises';
 import { request as httpsRequest } from 'node:https';
 import type { TlsSecretStore, CaConfigMapStore, PkiStatusStore } from './pki.js';
@@ -94,10 +94,12 @@ function createApi(options: ApiOptions, resource: string, name: string) {
 }
 export function createKubernetesTlsStores(options: ApiOptions = {}): {
   secret: TlsSecretStore;
+  serviceSecret: TlsSecretStore;
   configMap: CaConfigMapStore;
   status: PkiStatusStore;
 } {
   const sec = createApi(options, 'secrets', 'lifemodel-tls');
+  const serviceSec = createApi(options, 'secrets', 'storage-module-tls');
   const cm = createApi(options, 'configmaps', 'lifemodel-ca');
   const statusCm = createApi(options, 'configmaps', 'lifemodel-pki-status');
   async function read(resource: ReturnType<typeof createApi>) {
@@ -114,10 +116,11 @@ export function createKubernetesTlsStores(options: ApiOptions = {}): {
       data?: Record<string, string>;
     };
   }
-  return {
-    secret: {
+  /** One TLS Secret the platform precreated: read, replace, read back. */
+  function secretStore(resource: ReturnType<typeof createApi>, name: string): TlsSecretStore {
+    return {
       read: async () => {
-        const obj = await read(sec);
+        const obj = await read(resource);
         if (!obj) return {};
         const d = obj.data ?? {};
         return {
@@ -127,15 +130,15 @@ export function createKubernetesTlsStores(options: ApiOptions = {}): {
         };
       },
       write: async (ca, cert, key) => {
-        const old = await read(sec);
+        const old = await read(resource);
         if (!old?.metadata?.resourceVersion)
-          throw new Error('A0 TLS Secret must exist before loader startup');
-        const r = await sec.send('PUT', {
+          throw new Error(`${name} must exist before loader startup`);
+        const r = await resource.send('PUT', {
           apiVersion: 'v1',
           kind: 'Secret',
           metadata: {
-            name: 'lifemodel-tls',
-            namespace: sec.namespace,
+            name,
+            namespace: resource.namespace,
             resourceVersion: old.metadata.resourceVersion,
             ...(old.metadata.annotations ? { annotations: old.metadata.annotations } : {}),
             ...(old.metadata.labels ? { labels: old.metadata.labels } : {}),
@@ -149,11 +152,15 @@ export function createKubernetesTlsStores(options: ApiOptions = {}): {
         });
         if (r.status !== 200)
           throw new Error(`Kubernetes TLS Secret update failed (${String(r.status)})`);
-        const check = await read(sec);
+        const check = await read(resource);
         if (check?.data?.['tls.crt'] !== Buffer.from(cert).toString('base64'))
           throw new Error('Kubernetes TLS Secret read-back mismatch');
       },
-    },
+    };
+  }
+  return {
+    secret: secretStore(sec, 'lifemodel-tls'),
+    serviceSecret: secretStore(serviceSec, 'storage-module-tls'),
     configMap: {
       read: async () => {
         const obj = await read(cm);
