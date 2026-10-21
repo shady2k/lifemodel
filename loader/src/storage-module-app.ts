@@ -160,7 +160,8 @@ function createTaskListener(
   };
   const reloadMs = options.reloadMs ?? STORAGE_TASK_TLS_DEFAULTS.reloadMs;
   let cert = options.cert;
-  const server = createSecureServer({ cert, key: options.key }, (req, res) => {
+  let key = options.key;
+  const server = createSecureServer({ cert, key }, (req, res) => {
     if (req.method !== 'GET' || req.url !== STORAGE_TASK_PATHS.ping) {
       res.writeHead(404);
       res.end();
@@ -179,9 +180,11 @@ function createTaskListener(
     reloading = true;
     try {
       const next = await options.read();
-      if (next.cert !== cert) {
+      // Both halves are replaced together; either changing means a new context.
+      if (next.cert !== cert || next.key !== key) {
         server.setSecureContext({ cert: next.cert, key: next.key });
         cert = next.cert;
+        key = next.key;
         // A rotation is an event, not the absence of one.
         logger.info(
           { code: 'task_certificate_reloaded' },
