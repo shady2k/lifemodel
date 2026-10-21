@@ -92,13 +92,37 @@ describe('OpenBao non-idempotent init over real HTTP', () => {
     }
   );
 
+  it('preserves HTTP 200 for malformed JSON without exposing its private body', async () => {
+    const logs: Array<{ fields: Record<string, unknown>; message: string }> = [];
+    const address = await listen((_req, res) => {
+      res.writeHead(200).end('PRIVATE-MALFORMED-INIT-BODY');
+    });
+    const api = createOpenBaoApi({
+      address,
+      role: 'loader',
+      logger: {
+        error: (fields, message) => {
+          logs.push({ fields, message });
+        },
+      },
+    });
+    const failure = await api.init().catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: 'unreachable', status: 200, message: 'unreachable' });
+    expect(logs).toEqual([
+      { fields: { code: 'unreachable', status: 200 }, message: 'OpenBao request failed' },
+    ]);
+    expect(JSON.stringify({ failure, message: (failure as Error).message, logs })).not.toContain(
+      'PRIVATE-MALFORMED-INIT-BODY'
+    );
+  });
+
   it('keeps slow init material until custody while ordinary requests still expire', async () => {
     const initEntered = deferred<ServerResponse>();
     const ordinaryEntered = deferred<ServerResponse>();
     let initialized = false;
     let holdStatus = false;
     let inits = 0;
-    const logs: unknown[] = [];
+    const logs: Array<{ fields: Record<string, unknown>; message: string }> = [];
     const address = await listen((req, res) => {
       if (req.url === '/v1/sys/init' && req.method === 'POST') {
         inits++;
@@ -111,13 +135,13 @@ describe('OpenBao non-idempotent init over real HTTP', () => {
         res.writeHead(404).end();
       }
     });
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     const api = createOpenBaoApi({
       address,
       role: 'loader',
       logger: {
-        error: (fields) => {
-          logs.push(fields);
+        error: (fields, message) => {
+          logs.push({ fields, message });
         },
       },
     });
@@ -135,6 +159,15 @@ describe('OpenBao non-idempotent init over real HTTP', () => {
     expect(await ordinary).toMatchObject({ code: 'unreachable' });
     // Even several first-election lengths must not cause us to discard init's one response.
     await vi.advanceTimersByTimeAsync(120_000);
+    // The diagnostic is fixed-text metadata only, emitted before custody exists.
+    expect(phase.saved()).toBeNull();
+    expect(logs).toEqual([
+      { fields: { code: 'unreachable', status: 0 }, message: 'OpenBao request failed' },
+      {
+        fields: { operation: 'POST /v1/sys/init', elapsedMs: 30_000 },
+        message: 'OpenBao initialization is still pending',
+      },
+    ]);
     lateResponse.end('late status response');
     initResponse.end(JSON.stringify({ keys: ['test-share'], root_token: 'test-root' }));
     expect(await outcome).toBe('complete');
@@ -142,7 +175,29 @@ describe('OpenBao non-idempotent init over real HTTP', () => {
     expect(phase.record()).toEqual({ phase: 'openbao-init', status: 'complete' });
     expect(phase.events).toEqual(['custody-write', 'custody-read']);
     expect(inits).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
     expect(JSON.stringify(logs)).not.toMatch(/test-share|test-root|late status response/);
+  });
+
+  it('clears the pending diagnostic when init succeeds before 30 seconds', async () => {
+    const logs: unknown[] = [];
+    const address = await listen((_req, res) => {
+      res.end(JSON.stringify({ keys: ['test-share'], root_token: 'test-root' }));
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const api = createOpenBaoApi({
+      address,
+      role: 'loader',
+      logger: {
+        error: (fields) => {
+          logs.push(fields);
+        },
+      },
+    });
+    await api.init();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(logs).toEqual([]);
   });
 
   it.each(['disconnect', 'truncated'])(
@@ -162,7 +217,17 @@ describe('OpenBao non-idempotent init over real HTTP', () => {
           cut.resolve(res);
         } else res.end(JSON.stringify({ initialized, sealed: true }));
       });
-      const api = createOpenBaoApi({ address, role: 'loader' });
+      const logs: Array<Record<string, unknown>> = [];
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      const api = createOpenBaoApi({
+        address,
+        role: 'loader',
+        logger: {
+          error: (fields) => {
+            logs.push(fields);
+          },
+        },
+      });
       const phase = initPhase(api);
       const outcome = phase.bootstrap.runInitial().catch((error: unknown) => error);
       const response = await cut.promise;
@@ -171,6 +236,9 @@ describe('OpenBao non-idempotent init over real HTTP', () => {
       if (mode === 'truncated') response.end();
       else response.destroy();
       expect(await outcome).toMatchObject({ code: 'unreachable' });
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(logs).toEqual([{ code: 'unreachable', status: 0 }]);
       expect(phase.saved()).toBeNull();
       expect(phase.record()).toEqual({ phase: 'openbao-init', status: 'failed' });
       await expect(phase.bootstrap.runInitial()).rejects.toThrow(

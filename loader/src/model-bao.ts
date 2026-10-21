@@ -57,6 +57,12 @@ export function createRoleBaoClient(options: RoleBaoOptions) {
     ((url, method, activeToken, body) =>
       new Promise<{ status: number; body: string }>((resolve, reject) => {
         const request = url.protocol === 'https:' ? httpsRequest : httpRequest;
+        const startedAt = Date.now();
+        const isInit = method === 'POST' && url.pathname === '/v1/sys/init';
+        const clearTimers = () => {
+          clearTimeout(timer);
+          clearTimeout(pendingTimer);
+        };
         const req = request(
           url,
           {
@@ -84,15 +90,15 @@ export function createRoleBaoClient(options: RoleBaoOptions) {
               response += chunk;
             });
             res.on('end', () => {
-              clearTimeout(timer);
+              clearTimers();
               resolve({ status: res.statusCode ?? 0, body: response });
             });
             res.on('aborted', () => {
-              clearTimeout(timer);
+              clearTimers();
               reject(new BaoStorageError('unreachable'));
             });
             res.on('error', () => {
-              clearTimeout(timer);
+              clearTimers();
               reject(new BaoStorageError('unreachable'));
             });
           }
@@ -105,12 +111,20 @@ export function createRoleBaoClient(options: RoleBaoOptions) {
         // while the server can still commit it. All other requests retain their
         // own ordinary deadline.
         // https://github.com/openbao/openbao/blob/v2.7.1/internal/http/sys_init.go
-        const timer =
-          method === 'POST' && url.pathname === '/v1/sys/init'
-            ? undefined
-            : setTimeout(() => req.destroy(new BaoStorageError('unreachable')), timeoutMs);
+        const timer = isInit
+          ? undefined
+          : setTimeout(() => req.destroy(new BaoStorageError('unreachable')), timeoutMs);
+        // One notice only: observation must never cancel or retry initialization.
+        const pendingTimer = isInit
+          ? setTimeout(() => {
+              options.logger?.error(
+                { operation: 'POST /v1/sys/init', elapsedMs: Date.now() - startedAt },
+                'OpenBao initialization is still pending'
+              );
+            }, 30_000)
+          : undefined;
         req.on('error', () => {
-          clearTimeout(timer);
+          clearTimers();
           reject(new BaoStorageError('unreachable'));
         });
         req.end(body);
