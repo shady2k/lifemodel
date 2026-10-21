@@ -92,6 +92,18 @@ export function createCatalog(options: CatalogOptions): Catalog {
         query_timeout: timeoutMs,
         application_name: 'lifemodel-storage-module',
       });
+      /**
+       * A dropped connection rejects the running query AND emits `error` on the
+       * client: the first reaches the catch below, the second would reach the
+       * process and kill the module that is meant to report the outage. The
+       * listener is attached before `connect()`, kept through teardown - where
+       * the dying socket may report again - and only records, so the check
+       * answers unhealthy with the transport error's own cause.
+       */
+      let transportError: unknown;
+      client.on('error', (error: unknown) => {
+        transportError = error;
+      });
       // A refused or silent server must not outlive the check that asked.
       const abort = (): void => {
         client.end().catch(() => undefined);
@@ -102,7 +114,10 @@ export function createCatalog(options: CatalogOptions): Catalog {
         await client.query(STORAGE_CATALOG_READ);
         return { ok: true };
       } catch (error) {
-        return { ok: false, cause: signal.aborted ? 'timeout' : catalogCause(error) };
+        return {
+          ok: false,
+          cause: signal.aborted ? 'timeout' : catalogCause(transportError ?? error),
+        };
       } finally {
         signal.removeEventListener('abort', abort);
         await client.end().catch(() => undefined);
