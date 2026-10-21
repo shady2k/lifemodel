@@ -24,7 +24,9 @@ export interface TestStorageCertificate {
   cleanup(): void;
 }
 
-export async function createStorageCertificate(): Promise<TestStorageCertificate> {
+export async function createStorageCertificate(
+  hosts: readonly string[] = STORAGE_MODULE_TLS_HOSTS
+): Promise<TestStorageCertificate> {
   const root = mkdtempSync(join(tmpdir(), 'lifemodel-storage-cert-'));
   let service: { ca?: string; cert?: string; key?: string } = {};
   const manager = createPkiManager({
@@ -36,7 +38,7 @@ export async function createStorageCertificate(): Promise<TestStorageCertificate
     secret: { read: async () => ({}), write: async () => undefined },
     configMap: { read: async () => null, write: async () => undefined },
     service: {
-      hosts: STORAGE_MODULE_TLS_HOSTS,
+      hosts,
       secret: {
         read: async () => service,
         write: async (ca, cert, key) => {

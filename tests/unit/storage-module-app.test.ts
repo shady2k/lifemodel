@@ -1,3 +1,7 @@
+import { createStorageAccess } from '../../loader/src/storage-access.js';
+import { createKubernetesStorageIdentity } from '../../loader/src/storage-identity.js';
+import { createTestStores, workerDatabaseUrl, type TestStores } from '../helpers/test-stores.js';
+import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
 /**
  * The storage module's status listener (ADR-015 S-D1, S-D7).
  *
@@ -29,10 +33,17 @@ const credentials: StorageS3Credentials = {
 };
 const servers: Server[] = [];
 let certificate: TestStorageCertificate;
+let stores: TestStores;
 beforeAll(async () => {
+  stores = await createTestStores();
+  await applyTestMigrations(stores.postgres);
   certificate = await createStorageCertificate();
 });
-afterAll(() => certificate.cleanup());
+afterAll(async () => {
+  certificate.cleanup();
+  await stores.postgres.end();
+  await stores.redis.quit();
+});
 afterEach(async () => {
   for (const server of servers.splice(0)) {
     server.closeAllConnections();
@@ -63,6 +74,10 @@ async function fixture(
     },
   };
   const app = createStorageModule({
+    access: createStorageAccess({
+      connectionString: workerDatabaseUrl(),
+      identity: createKubernetesStorageIdentity(),
+    }),
     bucket: STORAGE_BUCKET,
     catalog,
     custody: {
@@ -193,6 +208,10 @@ describe('the storage module status listener', () => {
     let stalled = false;
     const lines: RecordedLine[] = [];
     const app = createStorageModule({
+      access: createStorageAccess({
+        connectionString: workerDatabaseUrl(),
+        identity: createKubernetesStorageIdentity(),
+      }),
       bucket: STORAGE_BUCKET,
       catalog: { check: () => Promise.resolve({ ok: true }) },
       custody: { read: () => Promise.resolve(credentials) },

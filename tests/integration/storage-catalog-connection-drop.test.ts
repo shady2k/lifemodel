@@ -1,3 +1,5 @@
+import { createStorageAccess } from '../../loader/src/storage-access.js';
+import { createKubernetesStorageIdentity } from '../../loader/src/storage-identity.js';
 /**
  * The catalog check against a dropped connection (ADR-015 S-D7).
  *
@@ -56,6 +58,10 @@ beforeAll(async () => {
   throughProxy.hostname = '127.0.0.1';
   throughProxy.port = String(address.port);
   module = createStorageModule({
+    access: createStorageAccess({
+      connectionString: workerDatabaseUrl(),
+      identity: createKubernetesStorageIdentity(),
+    }),
     bucket: STORAGE_BUCKET,
     catalog: createCatalog({ connectionString: throughProxy.toString() }),
     custody: {

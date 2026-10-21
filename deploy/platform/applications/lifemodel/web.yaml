@@ -1,4 +1,11 @@
 apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: web
+  namespace: lifemodel
+automountServiceAccountToken: false
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: web
@@ -33,6 +40,7 @@ spec:
       labels:
         app.kubernetes.io/name: web
     spec:
+      serviceAccountName: web
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 10
       securityContext:
@@ -79,6 +87,8 @@ spec:
               value: '8080'
             - name: LIFEMODEL_WEB_INTERNAL_PORT
               value: '8081'
+            - name: LIFEMODEL_STORAGE_READ_TOKEN_FILE
+              value: /var/run/secrets/lifemodel-storage/read-token
             - name: LIFEMODEL_WEB_APP_DIRECTORY
               value: /opt/lifemodel/web/app
             # The gateway's health listener (ADR-013 D5/D6): the web module
@@ -115,8 +125,22 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            # No subPath: kubelet rotates these bound service-audience tokens.
+            - name: storage-identity
+              mountPath: /var/run/secrets/lifemodel-storage
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir:
             medium: Memory
             sizeLimit: 128Mi
+        # Only service-specific audiences are projected; default API-audience
+        # automount stays disabled on both the Pod and its ServiceAccount.
+        - name: storage-identity
+          projected:
+            defaultMode: 288
+            sources:
+              - serviceAccountToken:
+                  audience: lifemodel-web-storage-read
+                  expirationSeconds: 3600
+                  path: read-token

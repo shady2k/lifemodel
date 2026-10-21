@@ -165,21 +165,62 @@ lifemodel-2t5's. The module logs in to OpenBao with role `storage-module`,
 whose policy is `read` on the one custody record and nothing else, provisioned
 and verified by the loader's bootstrap before the root token is retired.
 
-The task listener is TLS on 8443, with a second instance-CA leaf for the
-module's in-cluster names (`storage-module.lifemodel-system.svc` and
-`.svc.cluster.local`). The loader issues and renews it into the
-platform-created `storage-module-tls` Secret, which only this pod mounts; the
-module re-reads it once a minute, so a renewal reaches the next handshake
-without a restart. The listener answers a health-like `GET /ping` for now;
-653.7.2 adds TokenReview and the task API to it. Clients trust the instance CA
-(`lifemodel-ca`), and nothing plain serves the task port.
+The module serves three separate TLS listeners with the existing instance-CA
+leaf for `storage-module.lifemodel-system.svc` and `.svc.cluster.local`. The
+loader issues and renews it into the platform-created `storage-module-tls`
+Secret, mounted only by this pod. Each listener re-reads it once a minute;
+clients must trust the instance CA (`lifemodel-ca`), never disable certificate
+verification. No plaintext listener serves task or trusted operations.
 
-`storage-module-access` lets the module reach DNS, OpenBao 8200, SeaweedFS 8333
-and the database's 5432, and lets the loader read its health on 8081; the
-database's own policy admits this pod back on 5432. It has no Internet, model or
-Kubernetes API route yet, and no pod may reach the task port - the TokenReview
-egress and the task, trusted-control and owner-read peers arrive with the task
-API (lifemodel-653.7.2, lifemodel-653.7.5).
+- Task 8443: `GET /spaces/:space/access` proves current own-space access;
+  `GET /ping` is a transport check only. Audience `lifemodel-task-storage`,
+  identity `lifemodel-motor:task`. Every operation/chunk performs a fresh
+  audience-specific TokenReview and reads the current non-deleting bound Pod
+  and its exact live controller Job. The SQL intent/projection/catalog guard
+  checks binding, revision, mode and database-clock deadlines independently of
+  the core process. No positive identity cache substitutes for these reads.
+- Trusted control 8444: `POST /revoke`, audience
+  `lifemodel-core-storage-control`, exact SA `lifemodel:core` and fresh bound
+  Pod verification. Revoke commits the revision and keyed receipt, then cancels
+  active streams before ACK. A missing space is `404 space_not_found`; a stale
+  expected revision is `409 revision_conflict`.
+- Trusted read 8445: `GET /identity`, audiences
+  `lifemodel-core-storage-read` and `lifemodel-web-storage-read`, matched to
+  `lifemodel:core` and `lifemodel:web` respectively with fresh bound Pod checks.
+  Web cannot invoke control. The object API and marked-only owner reads remain
+  future work in lifemodel-653.7.5; these identity routes are not an object service.
+
+`storage-module-access` and the caller-side egress policies admit these exact
+peers, combining namespaceSelector AND podSelector (the Pod label is
+`app.kubernetes.io/name`):
+
+| Port | Caller namespace | Caller Pod label |
+| --- | --- | --- |
+| Health 8081 | `lifemodel-system` | `loader` |
+| Task 8443 | `lifemodel-motor` | `task` |
+| Control 8444 | `lifemodel` | `core` |
+| Read 8445 | `lifemodel` | `core` or `web` |
+
+Reverse caller egress targets `lifemodel-system` AND `storage-module` on only
+those ports. Module egress is DNS in `kube-system` AND `k8s-app: kube-dns`,
+OpenBao 8200 (the inherited namespace-only peer in `openbao`), SeaweedFS 8333
+in `lifemodel-system` AND `seaweedfs`, and Postgres 5432 in `lifemodel-state`
+AND `cnpg.io/cluster: lifemodel`. The database admits the module back on 5432.
+TCP 6443 is the platform's any-address k3s Kubernetes API egress exception
+because API Service DNAT targets the node address. It grants no API rights:
+RBAC permits only TokenReview creation, Pod GETs in `lifemodel` and
+`lifemodel-motor`, and Job GETs only in `lifemodel-motor`. There is no model
+route or general Internet egress.
+
+Identity proof outages (apiserver 5xx, transport or timeout) fail closed with
+`503 identity_unavailable`; unauthenticated tokens, wrong audience/binding,
+missing/deleting Pod or Job and API 401/403 refusals stay `403 identity_denied`.
+Readiness checks stores and authorization DDL, not Kubernetes verification RBAC;
+a Ready module does not prove those API rights are intact. One request-denial
+or revoke log line contains only `{ id, code, status, space }`; correlate a
+reported error ID with that line. Unknown or invalid space IDs log as null,
+not as a request body, path or file name. Fix the API/RBAC path for a failed
+identity proof; never bypass it or substitute core availability.
 
 The `gitea-admin` Secret remains while the chart references it. Its Bao-held
 retirement is lifemodel-2t5.2. The Gitea and OpenBao charts are vendored at

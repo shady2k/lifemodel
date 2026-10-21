@@ -12,10 +12,14 @@ import {
 } from './storage-custody.js';
 import { checkS3Bucket } from './storage-s3.js';
 import { createStorageModule } from './storage-module-app.js';
+import { createStorageAccess } from './storage-access.js';
+import { createKubernetesStorageIdentity } from './storage-identity.js';
 
-/** The module's two listeners: probes on `status`, task requests on `task` over TLS. */
+/** Four listeners: health, task data, trusted core control, trusted core/web read. */
 const STATUS_PORT = 8081;
 const TASK_PORT = 8443;
+const CONTROL_PORT = 8444;
+const READ_PORT = 8445;
 
 const logger = createStdoutLogger((line) => process.stdout.write(`${line}\n`));
 
@@ -69,6 +73,10 @@ const catalog = createCatalog({
 const app = createStorageModule({
   bucket,
   catalog,
+  access: createStorageAccess({
+    connectionString: catalogConnectionString(databaseUsername, databasePassword),
+    identity: createKubernetesStorageIdentity(),
+  }),
   custody,
   check: (credentials: StorageS3Credentials, signal: AbortSignal) =>
     checkS3Bucket({ endpoint, bucket, credentials, signal }),
@@ -77,9 +85,13 @@ const app = createStorageModule({
 });
 app.status.listen(STATUS_PORT, '0.0.0.0');
 app.task.server.listen(TASK_PORT, '0.0.0.0');
+app.control.server.listen(CONTROL_PORT, '0.0.0.0');
+app.read.server.listen(READ_PORT, '0.0.0.0');
 
 function stop(): void {
   app.task.close();
+  app.control.close();
+  app.read.close();
   app.status.closeAllConnections();
   app.status.close();
 }
@@ -90,8 +102,9 @@ app.status.on('error', () => {
   stop();
   process.exitCode = 1;
 });
-app.task.server.on('error', () => {
-  logger.error({ code: 'listener_failed' }, 'Storage module task listener failed');
-  stop();
-  process.exitCode = 1;
-});
+for (const listener of [app.task, app.control, app.read])
+  listener.server.on('error', () => {
+    logger.error({ code: 'listener_failed' }, 'Storage module TLS listener failed');
+    stop();
+    process.exitCode = 1;
+  });

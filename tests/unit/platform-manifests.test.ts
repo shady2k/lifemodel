@@ -970,18 +970,97 @@ describe('platform manifests', () => {
           item.spec.rules.some((rule: any) => rule.host === 'boot-${LIFEMODEL_NAME}.local')
       )
     ).toBe(true);
-    expect(objects.some((item) => item.kind === 'ClusterRole')).toBe(false);
-    const clusterRoleBindings = objects.filter((item) => item.kind === 'ClusterRoleBinding');
+    // The sole platform-defined cluster role is the module's narrow
+    // TokenReview create right, not broad system:auth-delegator access.
+    expect(objects.filter((item) => item.kind === 'ClusterRole')).toEqual([
+      {
+        apiVersion: 'rbac.authorization.k8s.io/v1',
+        kind: 'ClusterRole',
+        metadata: { name: 'storage-module-token-review' },
+        rules: [
+          {
+            apiGroups: ['authentication.k8s.io'],
+            resources: ['tokenreviews'],
+            verbs: ['create'],
+          },
+        ],
+      },
+    ]);
+    const moduleSubject = {
+      kind: 'ServiceAccount',
+      name: 'storage-module',
+      namespace: 'lifemodel-system',
+    };
+    const clusterRoleBindings = objects
+      .filter((item) => item.kind === 'ClusterRoleBinding')
+      .sort((left, right) => left.metadata.name.localeCompare(right.metadata.name));
     expect(clusterRoleBindings).toEqual([
-      expect.objectContaining({
-        metadata: expect.objectContaining({ name: 'openbao-auth-delegator' }),
+      {
+        apiVersion: 'rbac.authorization.k8s.io/v1',
+        kind: 'ClusterRoleBinding',
+        metadata: { name: 'openbao-auth-delegator' },
         roleRef: {
           apiGroup: 'rbac.authorization.k8s.io',
           kind: 'ClusterRole',
           name: 'system:auth-delegator',
         },
-      }),
+        subjects: [{ kind: 'ServiceAccount', name: 'openbao', namespace: 'openbao' }],
+      },
+      {
+        apiVersion: 'rbac.authorization.k8s.io/v1',
+        kind: 'ClusterRoleBinding',
+        metadata: { name: 'storage-module-token-review' },
+        roleRef: {
+          apiGroup: 'rbac.authorization.k8s.io',
+          kind: 'ClusterRole',
+          name: 'storage-module-token-review',
+        },
+        subjects: [moduleSubject],
+      },
     ]);
+    const identityRoles = objects
+      .filter(
+        (item) => item.kind === 'Role' && item.metadata?.name === 'storage-module-identity-read'
+      )
+      .sort((left, right) => left.metadata.namespace.localeCompare(right.metadata.namespace));
+    expect(identityRoles).toEqual(
+      ['lifemodel', 'lifemodel-motor'].map((namespace) => ({
+        apiVersion: 'rbac.authorization.k8s.io/v1',
+        kind: 'Role',
+        metadata: { name: 'storage-module-identity-read', namespace },
+        rules: [
+          { apiGroups: [''], resources: ['pods'], verbs: ['get'] },
+          ...(namespace === 'lifemodel-motor'
+            ? [{ apiGroups: ['batch'], resources: ['jobs'], verbs: ['get'] }]
+            : []),
+        ],
+      }))
+    );
+    const moduleBindings = objects
+      .filter(
+        (item) =>
+          item.kind === 'RoleBinding' &&
+          (item.subjects ?? []).some(
+            (subject: any) =>
+              subject.kind === 'ServiceAccount' &&
+              subject.name === 'storage-module' &&
+              subject.namespace === 'lifemodel-system'
+          )
+      )
+      .sort((left, right) => left.metadata.namespace.localeCompare(right.metadata.namespace));
+    expect(moduleBindings).toEqual(
+      ['lifemodel', 'lifemodel-motor'].map((namespace) => ({
+        apiVersion: 'rbac.authorization.k8s.io/v1',
+        kind: 'RoleBinding',
+        metadata: { name: 'storage-module-identity-read', namespace },
+        subjects: [moduleSubject],
+        roleRef: {
+          apiGroup: 'rbac.authorization.k8s.io',
+          kind: 'Role',
+          name: 'storage-module-identity-read',
+        },
+      }))
+    );
     expect(sourceFiles.some((file) => file.endsWith('/a0/kustomization.yaml'))).toBe(true);
   });
 
