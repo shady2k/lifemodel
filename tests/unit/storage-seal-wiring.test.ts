@@ -146,6 +146,11 @@ describe('storage seal wiring', () => {
     const sealClose = vi.fn(() => sealDrained.promise);
     const objectsClose = vi.fn(() => objectsDrained.promise);
     const s3Close = vi.fn();
+    const ownerReady = vi
+      .fn(async () => undefined)
+      .mockRejectedValueOnce(new Error('database temporarily unavailable'));
+    const ownerClose = vi.fn(async () => undefined);
+    const retentionClose = vi.fn(async () => undefined);
     const listener = () => ({
       server: Object.assign(new EventEmitter(), { listen: vi.fn(), close: vi.fn() }),
       close: vi.fn(),
@@ -177,6 +182,8 @@ describe('storage seal wiring', () => {
       '../../loader/src/storage-objects.js',
       '../../loader/src/storage-object-s3.js',
       '../../loader/src/storage-seal.js',
+      '../../loader/src/storage-upload-owner.js',
+      '../../loader/src/storage-retention.js',
     ];
     vi.doMock('node:fs/promises', () => ({ readFile: async () => 'fixture-certificate' }));
     vi.doMock('../../loader/src/model-bao.js', () => ({ createRoleBaoClient: () => ({}) }));
@@ -201,6 +208,12 @@ describe('storage seal wiring', () => {
     vi.doMock('../../loader/src/storage-object-s3.js', () => ({
       createStorageObjectS3: () => ({ close: s3Close }),
     }));
+    vi.doMock('../../loader/src/storage-upload-owner.js', () => ({
+      createStorageUploadOwner: () => ({ ready: ownerReady, close: ownerClose }),
+    }));
+    vi.doMock('../../loader/src/storage-retention.js', () => ({
+      createStorageRetention: () => ({ start: vi.fn(), close: retentionClose }),
+    }));
     vi.doMock('../../loader/src/storage-seal.js', () => ({
       createStorageSeal: () => ({ close: sealClose }),
     }));
@@ -215,6 +228,11 @@ describe('storage seal wiring', () => {
     vi.stubEnv('LIFEMODEL_STORAGE_BUCKET', STORAGE_BUCKET);
     try {
       await import('../../loader/src/storage-module.js');
+      expect(ownerReady).toHaveBeenCalledOnce();
+      for (const listener of [app.task, app.control, app.read])
+        expect(listener.server.listen).toHaveBeenCalledOnce();
+      expect(app.status.listen).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(ownerReady).toHaveBeenCalledTimes(2));
       stop();
       for (const listener of [app.task, app.control, app.read]) {
         expect(listener.server.close).toHaveBeenCalledOnce();
@@ -224,11 +242,14 @@ describe('storage seal wiring', () => {
       expect(sealClose).toHaveBeenCalledOnce();
       expect(objectsClose).toHaveBeenCalledOnce();
       expect(s3Close).not.toHaveBeenCalled();
+      expect(ownerClose).not.toHaveBeenCalled();
       sealDrained.resolve();
       await sealDrained.promise;
       expect(s3Close).not.toHaveBeenCalled();
       objectsDrained.resolve();
       await vi.waitFor(() => expect(s3Close).toHaveBeenCalledOnce());
+      expect(ownerClose).toHaveBeenCalledOnce();
+      expect(retentionClose).toHaveBeenCalledOnce();
       for (const listener of [app.task, app.control, app.read])
         expect(listener.close).toHaveBeenCalledOnce();
       stop();

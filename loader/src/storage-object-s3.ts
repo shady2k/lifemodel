@@ -8,11 +8,18 @@ import {
 } from 'node:http';
 import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
 import type { StorageS3Credentials } from './storage-custody.js';
+import type { LoaderLogger } from './logger.js';
 import { StorageAccessError } from './storage-access-error.js';
 import { signS3Request } from './storage-s3.js';
 
 export type StorageObjectS3Guard = (bytes: number, dispatch: () => undefined) => Promise<void>;
+export interface StorageObjectS3Listing {
+  objects: { key: string; size: number; lastModified: number }[];
+  nextCursor: string | null;
+}
 export interface StorageObjectS3 {
+  /** One bounded bucket page, restricted to the module's opaque private keys. */
+  listPrivate(cursor: string | undefined, signal: AbortSignal): Promise<StorageObjectS3Listing>;
   put(
     space: string,
     key: string,
@@ -47,13 +54,180 @@ export interface StorageObjectS3Options {
   endpoint: string;
   bucket: string;
   custody: { read(): Promise<StorageS3Credentials> };
+  logger?: Pick<LoaderLogger, 'warn'>;
   chunkBytes?: number;
   timeoutMs?: number;
 }
 const MAX_CHUNK = 4 * 1024 * 1024;
+const MAX_LIST_BYTES = 128 * 1024;
+const MAX_CURSOR_BYTES = 4096;
+const PRIVATE_KEY = /^private\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+function validCursor(cursor: string): boolean {
+  if (cursor.length === 0 || Buffer.byteLength(cursor) > MAX_CURSOR_BYTES) return false;
+  for (const character of cursor) {
+    const point = character.codePointAt(0) ?? 0;
+    if (point <= 0x20 || (point >= 0x7f && point <= 0x9f) || (point >= 0xd800 && point <= 0xdfff))
+      return false;
+  }
+  return true;
+}
 const unavailable = () => new StorageAccessError(503, 'object_store_unavailable');
 const invalid = () => new StorageAccessError(400, 'invalid_request');
 const ignoreError = (): void => undefined;
+
+interface ListXmlNode {
+  name: string;
+  text: string;
+  children: ListXmlNode[];
+}
+/** A deliberately small XML subset: no DTD, external entities, CDATA or processing instructions. */
+function parsePrivateListing(body: string): StorageObjectS3Listing & { skipped: number } {
+  function fail(): never {
+    throw unavailable();
+  }
+  function decode(text: string): string {
+    return text.replace(
+      /&(#x[0-9a-fA-F]+|#[0-9]+|amp|lt|gt|quot|apos);|&/g,
+      (_entity, name: string | undefined) => {
+        if (name === 'amp') return '&';
+        if (name === 'lt') return '<';
+        if (name === 'gt') return '>';
+        if (name === 'quot') return '"';
+        if (name === 'apos') return "'";
+        if (!name || !/^#(?:[0-9]+|x[0-9a-fA-F]+)$/.test(name)) return fail();
+        const point = name.startsWith('#x') ? parseInt(name.slice(2), 16) : Number(name.slice(1));
+        if (
+          !Number.isSafeInteger(point) ||
+          !(
+            point === 9 ||
+            point === 10 ||
+            point === 13 ||
+            (point >= 0x20 && point <= 0xd7ff) ||
+            (point >= 0xe000 && point <= 0xfffd) ||
+            (point >= 0x10000 && point <= 0x10ffff)
+          )
+        )
+          return fail();
+        return String.fromCodePoint(point);
+      }
+    );
+  }
+  for (const character of body) {
+    const point = character.codePointAt(0) ?? 0;
+    if (
+      (point < 0x20 && point !== 9 && point !== 10 && point !== 13) ||
+      point === 0xfffe ||
+      point === 0xffff
+    )
+      fail();
+  }
+  // Only the standard XML declaration may precede the one document element.
+  body = body.replace(
+    /^\ufeff?\s*<\?xml version=(["'])1\.0\1(?: encoding=(["'])UTF-8\2)?\s*\?>/i,
+    ''
+  );
+  const document: ListXmlNode = { name: '', text: '', children: [] };
+  const stack = [document];
+  let offset = 0;
+  let nodes = 0;
+  while (offset < body.length) {
+    const parent = stack[stack.length - 1];
+    if (!parent) fail();
+    if (body[offset] !== '<') {
+      const end = body.indexOf('<', offset);
+      const text = body.slice(offset, end < 0 ? body.length : end);
+      if (text.includes(']]>')) fail();
+      parent.text += decode(text);
+      offset += text.length;
+      continue;
+    }
+    const end = body.indexOf('>', offset);
+    if (end < 0) fail();
+    const token = body.slice(offset + 1, end);
+    if (token.startsWith('/')) {
+      if (stack.length < 2 || token !== `/${parent.name}`) fail();
+      stack.pop();
+    } else {
+      const tag =
+        /^([A-Za-z][A-Za-z0-9]*)(?:\s+xmlns=(["'])http:\/\/s3\.amazonaws\.com\/doc\/2006-03-01\/\2)?\s*(\/?)$/.exec(
+          token
+        );
+      if (
+        !tag ||
+        (token.includes('xmlns') && stack.length !== 1) ||
+        ++nodes > 2500 ||
+        stack.length > 8
+      )
+        fail();
+      const node: ListXmlNode = { name: tag[1] ?? '', text: '', children: [] };
+      parent.children.push(node);
+      if (!tag[3]) stack.push(node);
+    }
+    offset = end + 1;
+  }
+  if (stack.length !== 1 || document.text.trim() || document.children.length !== 1) fail();
+  const root = document.children[0];
+  if (root?.name !== 'ListBucketResult' || root.text.trim()) fail();
+  function field(parent: ListXmlNode, name: string, required = true): string | undefined {
+    const matches = parent.children.filter((child) => child.name === name);
+    if (matches.length > 1 || (required && matches.length !== 1)) fail();
+    const node = matches[0];
+    if (node?.children.length) fail();
+    return node?.text;
+  }
+  const prefix = field(root, 'Prefix', false);
+  const maxKeys = field(root, 'MaxKeys', false);
+  if (
+    (prefix !== undefined && prefix !== 'private/') ||
+    (maxKeys !== undefined && maxKeys !== '100')
+  )
+    fail();
+  const truncated = field(root, 'IsTruncated');
+  const cursor = field(root, 'NextContinuationToken', false);
+  if (truncated !== 'true' && truncated !== 'false') fail();
+  if (truncated === 'true' ? cursor === undefined || !validCursor(cursor) : cursor !== undefined)
+    fail();
+  const contents = root.children.filter((child) => child.name === 'Contents');
+  if (contents.length > 100) fail();
+  const keyCount = field(root, 'KeyCount', false);
+  // KeyCount describes the wire page, including entries that are not ours to collect.
+  if (keyCount !== undefined && keyCount !== String(contents.length)) fail();
+  const keys = new Set<string>();
+  const objects: StorageObjectS3Listing['objects'] = [];
+  let skipped = 0;
+  for (const entry of contents) {
+    if (entry.text.trim()) fail();
+    // Missing or invalid values affect this entry only. Duplicate/nested fields
+    // still indicate structural damage and must fail the complete page.
+    const key = field(entry, 'Key', false);
+    const rawSize = field(entry, 'Size', false);
+    const rawDate = field(entry, 'LastModified', false);
+    if (key !== undefined) {
+      if (keys.has(key)) fail();
+      keys.add(key);
+    }
+    const size = rawSize === undefined ? NaN : Number(rawSize);
+    const lastModified = rawDate === undefined ? NaN : Date.parse(rawDate);
+    // ISO UTC timestamps only; Date.parse alone normalizes invalid dates such as February 30.
+    if (
+      key === undefined ||
+      !PRIVATE_KEY.test(key) ||
+      rawSize === undefined ||
+      !/^(?:0|[1-9][0-9]*)$/.test(rawSize) ||
+      !Number.isSafeInteger(size) ||
+      rawDate === undefined ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/.test(rawDate) ||
+      !Number.isSafeInteger(lastModified) ||
+      lastModified < 0 ||
+      new Date(lastModified).toISOString().slice(0, 19) !== rawDate.slice(0, 19)
+    ) {
+      skipped += 1;
+      continue;
+    }
+    objects.push({ key, size, lastModified });
+  }
+  return { objects, nextCursor: cursor ?? null, skipped };
+}
 
 export function createStorageObjectS3(options: StorageObjectS3Options): StorageObjectS3 {
   let endpoint: URL;
@@ -281,6 +455,56 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
     };
   }
   return {
+    async listPrivate(cursor, signal) {
+      if (cursor !== undefined && !validCursor(cursor)) throw invalid();
+      const url = new URL(`/${options.bucket}/`, endpoint);
+      url.searchParams.set('list-type', '2');
+      url.searchParams.set('prefix', 'private/');
+      url.searchParams.set('max-keys', '100');
+      if (cursor !== undefined) url.searchParams.set('continuation-token', cursor);
+      // Listing has its own operation scope. It must never hold a space's seal barrier.
+      const op = operation('bucket-list', signal);
+      try {
+        const { req, received } = await op.open('GET', url, {});
+        req.end();
+        const res = await op.wait(received);
+        if (res.statusCode !== 200) throw unavailable();
+        const length = res.headers['content-length'];
+        if (length !== undefined && (!/^[0-9]+$/.test(length) || Number(length) > MAX_LIST_BYTES))
+          throw unavailable();
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        const iterator = res[Symbol.asyncIterator]();
+        for (;;) {
+          const next = await op.wait(iterator.next());
+          if (next.done) break;
+          const value: unknown = next.value;
+          if (!(value instanceof Uint8Array)) throw unavailable();
+          const chunk = Buffer.from(value);
+          bytes += chunk.length;
+          if (bytes > MAX_LIST_BYTES) throw unavailable();
+          chunks.push(chunk);
+          // Keep the original operation deadline: a trickling XML body cannot extend it.
+        }
+        op.live();
+        const body = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, bytes));
+        const { skipped, ...page } = parsePrivateListing(body);
+        if (page.nextCursor !== null && page.nextCursor === cursor) throw unavailable();
+        if (skipped > 0)
+          options.logger?.warn(
+            { code: 'object_key_skipped', count: skipped },
+            'storage object listing skipped invalid entries'
+          );
+        return page;
+      } catch (error) {
+        op.cancel();
+        if (error instanceof StorageAccessError) throw error;
+        throw unavailable();
+      } finally {
+        op.dispose();
+        await op.settle();
+      }
+    },
     async put(space, key, length, sha256, source, signal, guard, onProgress) {
       const url = path(key);
       if (!Number.isSafeInteger(length) || length < 0 || !/^[a-f0-9]{64}$/.test(sha256))

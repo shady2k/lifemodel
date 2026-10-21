@@ -24,7 +24,7 @@ import {
   type PlatformPhase,
 } from './platform-bootstrap.js';
 import { platformSettings } from './settings/platform.js';
-import { createKubernetesSettingsProjection } from './settings/projection.js';
+import { createPlatformSettingsProjection } from './settings/projection.js';
 import {
   createSettingsStore,
   type SettingsProjection,
@@ -174,7 +174,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       registry: platformSettings,
       clock,
       logger,
-      projection: deps.settingsProjection ?? createKubernetesSettingsProjection(),
+      projection: deps.settingsProjection ?? createPlatformSettingsProjection(),
     });
   const modelSlots: ModelSlots = {
     read: (slot) => bao.api.readModelSlot(slot),

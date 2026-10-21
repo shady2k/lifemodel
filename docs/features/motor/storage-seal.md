@@ -124,7 +124,7 @@ listed, never in a manifest, and never readable through the module. This is
 capacity-only residue, not retained task output. Local transfer settlement is
 not a cross-process/backend transaction or a proof of remote rollback.
 The coordinator explicitly accepted this residual in decision 2 for this task.
-`lifemodel-653.7.3` owns orphan reconciliation/sweep; it is not built here.
+[Storage retention](storage-retention.md) (lifemodel-653.7.3) now reconciles and sweeps this private residue with a bounded age grace and durable accounting.
 Do not infer backend quiescence from an upload lease, local cancellation or 404.
 
 Retention/pins/notices and global quota policy remain .7.3; consistent backup

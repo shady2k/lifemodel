@@ -98,6 +98,7 @@ const storageWarningLeadDays: SettingDeclaration = {
   control: 'number',
   dataClass: 'publicConfig',
   default: 7,
+  integer: true,
   min: 1,
   max: 30,
   unit: { en: 'days', ru: 'дни' },

@@ -28,7 +28,7 @@ export interface StorageTaskStream {
    * metadata statement under fresh authority + revision locks. Resolves after COMMIT.
    * .7.5 uses this for publication/mark; private S3 transfer stays outside the lock. */
   publish(statement: StorageMetadataStatement): Promise<StoragePublicationResult>;
-  close(): void;
+  close(): void | Promise<void>;
 }
 export interface StoragePublicationResult {
   rows: Record<string, unknown>[];
@@ -139,6 +139,8 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
     } catch (error) {
       await client.query('ROLLBACK').catch(() => undefined);
       if (error instanceof StorageAccessError) throw error;
+      if (error && typeof error === 'object' && 'code' in error && error.code === '53000')
+        throw new StorageAccessError(507, 'capacity_exhausted');
       throw new StorageAccessError(503, 'access_unavailable');
     } finally {
       signal.removeEventListener('abort', abort);

@@ -80,6 +80,7 @@ interface NumberSpec {
   readonly default: number;
   readonly min: number;
   readonly max: number;
+  readonly integer?: boolean;
   /** A fixed value: the loader refuses every write, so it is never projected. */
   readonly readOnly?: boolean;
 }
@@ -134,6 +135,7 @@ export const platformSettingSpecs: readonly PlatformSettingSpec[] = [
     kind: 'number',
     key: 'storage.warningLeadDays',
     default: PLATFORM_SETTING_DEFAULTS['storage.warningLeadDays'],
+    integer: true,
     min: 1,
     max: 30,
   },
@@ -165,6 +167,8 @@ export function validatePlatformValue(key: string, value: unknown): PlatformValu
   if (spec.kind === 'number') {
     if (typeof value !== 'number' || !Number.isFinite(value))
       return { ok: false, reasonCode: 'wrong_type', reason: `${key} expects a number` };
+    if (spec.integer && !Number.isSafeInteger(value))
+      return { ok: false, reasonCode: 'wrong_type', reason: `${key} expects an integer` };
     if (value < spec.min)
       return {
         ok: false,
