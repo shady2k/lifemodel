@@ -152,6 +152,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
     async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
       req.on('error', () => undefined);
       res.on('error', () => undefined);
+      let space: string | null = null;
       try {
         if (role === 'task' && req.method === 'GET' && req.url === STORAGE_TASK_PATHS.ping) {
           res.writeHead(200, JSON_HEADERS);
@@ -170,6 +171,8 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           res.end();
           return;
         }
+        // Only a validated opaque ID may enter diagnostics, never an arbitrary path.
+        space = role === 'task' ? (match?.[1] ?? null) : null;
         const access = options.access;
         const authHeaders = req.rawHeaders.filter(
           (_, index) => index % 2 === 0 && req.rawHeaders[index]?.toLowerCase() === 'authorization'
@@ -228,10 +231,16 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
                 typeof input['effectKey'] !== 'string'
               )
                 throw new StorageAccessError(400, 'invalid_request');
-              result = await access.revoke(
+              if (/^[a-z0-9][a-z0-9_-]{0,63}$/.test(input['space'])) space = input['space'];
+              const receipt = await access.revoke(
                 input['space'],
                 input['expectedRevision'],
                 input['effectKey']
+              );
+              result = receipt;
+              options.logger.info(
+                { id: receipt.id, code: 'space_revoked', status: 200, space },
+                'Storage access revoked'
               );
             }
           }
@@ -247,6 +256,10 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           error instanceof StorageAccessError
             ? error
             : new StorageAccessError(503, 'access_unavailable');
+        options.logger.warn(
+          { id: failure.id, code: failure.code, status: failure.status, space },
+          'Storage request denied'
+        );
         if (!res.destroyed && !res.writableEnded) {
           res.writeHead(failure.status, JSON_HEADERS);
           res.end(JSON.stringify({ error: { id: failure.id, code: failure.code } }));

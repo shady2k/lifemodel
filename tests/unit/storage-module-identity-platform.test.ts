@@ -303,3 +303,18 @@ describe('storage identity bootstrap order', () => {
     ).toEqual(['storage-custody', 'gitea', 'cnpg-copy-core-credentials', 'valkey-password']);
   });
 });
+
+describe('storage entry point listener ports', () => {
+  it('names all four port constants and starts each listener with its own constant', () => {
+    const entry = readFileSync(join(platformRoot, '../../loader/src/storage-module.ts'), 'utf8');
+    for (const [name, port, listener] of [
+      ['STATUS_PORT', 8081, 'app.status'],
+      ['TASK_PORT', 8443, 'app.task.server'],
+      ['CONTROL_PORT', 8444, 'app.control.server'],
+      ['READ_PORT', 8445, 'app.read.server'],
+    ] as const) {
+      expect(entry).toContain(`const ${name} = ${port};`);
+      expect(entry).toContain(`${listener}.listen(${name}, '0.0.0.0')`);
+    }
+  });
+});

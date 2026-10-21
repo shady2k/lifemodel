@@ -18,6 +18,8 @@ import { createKubernetesStorageIdentity } from './storage-identity.js';
 /** Four listeners: health, task data, trusted core control, trusted core/web read. */
 const STATUS_PORT = 8081;
 const TASK_PORT = 8443;
+const CONTROL_PORT = 8444;
+const READ_PORT = 8445;
 
 const logger = createStdoutLogger((line) => process.stdout.write(`${line}\n`));
 
@@ -83,8 +85,8 @@ const app = createStorageModule({
 });
 app.status.listen(STATUS_PORT, '0.0.0.0');
 app.task.server.listen(TASK_PORT, '0.0.0.0');
-app.control.server.listen(8444, '0.0.0.0');
-app.read.server.listen(8445, '0.0.0.0');
+app.control.server.listen(CONTROL_PORT, '0.0.0.0');
+app.read.server.listen(READ_PORT, '0.0.0.0');
 
 function stop(): void {
   app.task.close();

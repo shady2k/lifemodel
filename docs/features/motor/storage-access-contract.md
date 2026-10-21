@@ -99,12 +99,32 @@ There is no cross-service zero-time revoke claim under partition.
 
 All three TLS listeners share the existing instance-CA leaf and reload path.
 Core/web prove their current bound Pod too. Namespace alone, labels, claimed
-IDs and SA-only tokens never authorize. Each network peer combines namespace
-AND Pod selectors on both ingress and reverse egress. Cluster RBAC permits only
+IDs and SA-only tokens never authorize. Each listener peer combines namespace
+AND Pod selectors on both ingress and reverse caller egress. The inherited
+namespace-only OpenBao egress peer is an explicit exception: TCP 8200 to the
+`openbao` namespace; OpenBao's own default deny and server ingress restrict the
+receiving side. The Kubernetes API is the separate port-6443 ipBlock exception,
+not a Pod-selector peer. Cluster RBAC permits only
 TokenReview creation; namespaced RBAC permits Pod GET in the two caller namespaces
 and Job GET only in `lifemodel-motor`. No list/watch, Secret or mutation rights.
 The k3s API egress follows the platform's port-6443 exception; it grants no API
 right. Task SA has zero RBAC; Job token projection is stage 3's launcher work.
+
+Core/web service-audience token projections are provisioned ahead of their consumers
+in lifemodel-653.7.5 on purpose. The env paths and rotating read-only mounts define
+that integration contract; no current core/web storage client reads them yet.
+The future consumers must load fresh tokens and verify TLS against CA-only
+instance trust, not disable verification or mount the module's private key.
+
+Identity API 5xx, transport and timeout failures are `503 identity_unavailable`;
+TokenReview unauthenticated, audience/SA/binding mismatch, missing/deleting bound
+resources and API 401/403 refusals remain `403 identity_denied`. Each listener
+request denial and each successful revoke (including replay) emits one line with
+only `{ id, code, status, space }`. Revoke uses its saved receipt ID; denial uses
+the returned error ID. A validated opaque space ID is logged when known,
+otherwise null. Tokens, effect keys, bodies, paths and connection strings never
+enter these diagnostics. A missing revoke space is `404 space_not_found`, distinct
+from `409 revision_conflict`. Readiness still proves stores/DDL, not API RBAC.
 
 No first-start phase or A0→A→B→C→D dependency changes. D needs SQL schema,
 Bao and SeaweedFS, never task Jobs or nonempty authorization rows. Pressure,

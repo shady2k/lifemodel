@@ -77,7 +77,18 @@ export function createKubernetesStorageIdentity(
           res.on('aborted', fail);
           if (res.statusCode !== 200 && res.statusCode !== 201) {
             res.resume();
-            reject(new StorageAccessError(403, 'identity_denied'));
+            // A missing bound resource is a denied identity; other non-refusal
+            // statuses are an unavailable proof path, never permission evidence.
+            const denied =
+              res.statusCode === 401 ||
+              res.statusCode === 403 ||
+              (res.statusCode === 404 && payload === undefined);
+            reject(
+              new StorageAccessError(
+                denied ? 403 : 503,
+                denied ? 'identity_denied' : 'identity_unavailable'
+              )
+            );
             return;
           }
           let size = 0;

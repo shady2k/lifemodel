@@ -259,6 +259,11 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
               throw new StorageAccessError(409, 'effect_conflict');
             return { id: saved.receipt_id, space, revision: saved.revision, effectKey };
           }
+          const existing = await client.query(
+            'SELECT id FROM storage.spaces WHERE id=$1 FOR UPDATE',
+            [space]
+          );
+          if (existing.rows.length !== 1) throw new StorageAccessError(404, 'space_not_found');
           const updated = await client.query<{ access_revision: string }>(
             `UPDATE storage.spaces SET access_revision=access_revision+1, mode='revoked'
             WHERE id=$1 AND access_revision=$2 RETURNING access_revision::text`,

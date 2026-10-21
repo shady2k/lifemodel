@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createServer, request, type Server } from 'node:https';
 import { createStorageModule } from '../../loader/src/storage-module-app.js';
 import { createCatalog } from '../../loader/src/storage-catalog.js';
-import { createRecordingLogger } from '../../loader/src/logger.js';
+import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 import { createServer as createTcpServer, connect, type Socket } from 'node:net';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -37,6 +37,9 @@ let wrongNamespace = false;
 let wrongOwner = false;
 let jobUid = 'job-a';
 let apiDown = false;
+let apiFailure:
+  | { kind: 'status' | 'transport' | 'timeout'; status?: number; path?: string }
+  | undefined;
 let reviewed = 0;
 let podReads = 0;
 let jobReads = 0;
@@ -96,6 +99,16 @@ beforeAll(async () => {
     res.on('error', () => undefined);
     void (async () => {
       calls.push(`${req.method} ${req.url}`);
+      if (apiFailure && (!apiFailure.path || req.url?.includes(apiFailure.path))) {
+        if (apiFailure.kind === 'transport') {
+          req.socket.destroy();
+          return;
+        }
+        if (apiFailure.kind === 'timeout') return;
+        res.writeHead(apiFailure.status!);
+        res.end('private upstream body');
+        return;
+      }
       if (apiDown) {
         res.writeHead(503);
         res.end('private upstream body');
@@ -210,6 +223,7 @@ beforeEach(async () => {
   podUid = 'pod-a';
   jobUid = 'job-a';
   holdPod = undefined;
+  apiFailure = undefined;
   podMissing = jobDeleting = wrongAccount = wrongNamespace = wrongOwner = false;
   reviewed = podReads = jobReads = 0;
   calls.length = 0;
@@ -302,7 +316,60 @@ describe('fresh task identity and independent SQL authorization', () => {
       await stores.postgres.query(
         "UPDATE task_access.projections SET pod_uid='unbound' WHERE space_id='a'"
       );
-    await denied();
+    await expect(chunk()).rejects.toMatchObject({
+      status: failure === 'API down' ? 503 : 403,
+      code: failure === 'API down' ? 'identity_unavailable' : expect.any(String),
+    });
+  });
+  it.each([
+    [
+      'projection Job UID mismatch',
+      "UPDATE task_access.projections SET job_uid='job-other' WHERE space_id='a'",
+    ],
+    [
+      'projection intent revision ahead',
+      "UPDATE task_access.projections SET intent_revision=2 WHERE space_id='a'",
+    ],
+    ['catalog access revision ahead', "UPDATE storage.spaces SET access_revision=1 WHERE id='a'"],
+    [
+      'projection access revision ahead',
+      "UPDATE task_access.projections SET access_revision=1 WHERE space_id='a'",
+    ],
+  ])('SQL fence denies %s on an otherwise valid open space', async (_case, sql) => {
+    expect(await chunk()).toBe(true);
+    await stores.postgres.query(sql);
+    expect(
+      (await stores.postgres.query("SELECT mode FROM storage.spaces WHERE id='a'")).rows[0].mode
+    ).toBe('open');
+    await expect(chunk()).rejects.toMatchObject({ status: 403, code: 'access_denied' });
+  });
+  it.each([
+    ['TokenReview 500', 'status', 500, 'tokenreviews'],
+    ['TokenReview endpoint missing', 'status', 404, 'tokenreviews'],
+    ['API throttled', 'status', 429, 'tokenreviews'],
+    ['Pod 503', 'status', 503, '/pods/'],
+    ['Job 502', 'status', 502, '/jobs/'],
+    ['transport failure', 'transport', 0, 'tokenreviews'],
+    ['timeout', 'timeout', 0, 'tokenreviews'],
+  ] as const)(
+    'classifies %s as identity unavailable, never a permission denial',
+    async (_case, kind, status, path) => {
+      apiFailure = { kind, status, path };
+      const identity = createKubernetesStorageIdentity({
+        apiServer,
+        tokenFile,
+        caFile,
+        timeoutMs: 100,
+      });
+      await expect(identity.verify('a', STORAGE_AUDIENCES.task)).rejects.toMatchObject({
+        status: 503,
+        code: 'identity_unavailable',
+      });
+    }
+  );
+  it.each([401, 403])('keeps apiserver refusal %s distinct from outages', async (status) => {
+    apiFailure = { kind: 'status', status };
+    await expect(chunk()).rejects.toMatchObject({ status: 403, code: 'identity_denied' });
   });
   it('refuses a task token on another audience and web on the control identity', async () => {
     await expect(access.identity.verify('a', STORAGE_AUDIENCES.control)).rejects.toMatchObject({
@@ -426,6 +493,16 @@ describe('durable revision fencing and stream cancellation', () => {
       release.resolve();
     }
     await expect(pending).rejects.toMatchObject({ status: 403 });
+  });
+  it('revoke distinguishes a missing space from a stale revision', async () => {
+    await expect(access.revoke('missing', '0', 'missing')).rejects.toMatchObject({
+      status: 404,
+      code: 'space_not_found',
+    });
+    await expect(access.revoke('a', '1', 'stale')).rejects.toMatchObject({
+      status: 409,
+      code: 'revision_conflict',
+    });
   });
   it('replays the same receipt after restart, rejects changed key input and stale different keys', async () => {
     const receipt = await access.revoke('a', '0', 'once');
@@ -689,6 +766,7 @@ describe('durable revision fencing and stream cancellation', () => {
 });
 
 async function listenerFixture() {
+  const lines: RecordedLine[] = [];
   const app = createStorageModule({
     bucket: 'lifemodel-storage',
     catalog: createCatalog({ connectionString: workerDatabaseUrl() }),
@@ -701,7 +779,7 @@ async function listenerFixture() {
     check: async () => {
       throw new Error('not used for access');
     },
-    logger: createRecordingLogger([]),
+    logger: createRecordingLogger(lines),
     tls: {
       cert: certificate.cert,
       key: certificate.key,
@@ -744,6 +822,7 @@ async function listenerFixture() {
   }
   return {
     app,
+    lines,
     call,
     close: () => {
       for (const listener of listeners) listener.close();
@@ -751,6 +830,60 @@ async function listenerFixture() {
   };
 }
 describe('separate TLS operation-shaped listeners', () => {
+  it('logs exactly one safe correlated line per denied request and revoke, including replay', async () => {
+    const f = await listenerFixture();
+    const assertLine = (
+      index: number,
+      id: string,
+      code: string,
+      status: number,
+      space: string | null
+    ) => {
+      expect(f.lines).toHaveLength(index + 1);
+      expect(f.lines[index].fields).toEqual({ id, code, status, space });
+    };
+    try {
+      invalid = true;
+      const denied = await f.call(0, 'secret-caller-token', '/spaces/a/access');
+      expect(denied.status).toBe(403);
+      assertLine(0, denied.body.error.id, 'identity_denied', 403, 'a');
+      invalid = false;
+      apiDown = true;
+      const outage = await f.call(0, 'a', '/spaces/a/access');
+      expect(outage.status).toBe(503);
+      assertLine(1, outage.body.error.id, 'identity_unavailable', 503, 'a');
+      apiDown = false;
+      const cross = await f.call(0, 'a', '/spaces/b/access');
+      expect(cross.status).toBe(403);
+      assertLine(2, cross.body.error.id, 'access_denied', 403, 'b');
+      const input = { space: 'a', expectedRevision: '0', effectKey: 'private-effect-key' };
+      const revoke = await f.call(1, 'core', '/revoke', input);
+      expect(revoke.status).toBe(200);
+      assertLine(3, revoke.body.id, 'space_revoked', 200, 'a');
+      const replay = await f.call(1, 'core', '/revoke', input);
+      expect(replay.body).toEqual(revoke.body);
+      assertLine(4, replay.body.id, 'space_revoked', 200, 'a');
+      const web = await f.call(1, 'web', '/revoke', input);
+      expect(web.status).toBe(403);
+      assertLine(5, web.body.error.id, 'identity_denied', 403, null);
+      const bad = await f.call(1, 'core', '/revoke', { ...input, space: '/private/file-name' });
+      expect(bad.status).toBe(400);
+      assertLine(6, bad.body.error.id, 'invalid_request', 400, null);
+      const output = JSON.stringify(f.lines);
+      for (const secret of [
+        'secret-caller-token',
+        'private upstream body',
+        'private-effect-key',
+        '/private/file-name',
+        'module-token',
+        workerDatabaseUrl(),
+        tokenFile,
+      ])
+        expect(output).not.toContain(secret);
+    } finally {
+      f.close();
+    }
+  });
   it('task proves own access, trusted read proves identity, web cannot revoke on any listener', async () => {
     const f = await listenerFixture();
     try {
