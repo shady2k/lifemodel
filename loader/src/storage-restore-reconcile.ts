@@ -350,6 +350,11 @@ export function createStorageRestoreReconciler(
     await client.query(
       `INSERT INTO storage.space_quota(space_id) SELECT id FROM storage.spaces ON CONFLICT DO NOTHING`
     );
+    // Normalize the starting ledger first: a damaged low ledger would reject
+    // trigger-driven reductions of otherwise correct existing space charges.
+    await client.query(
+      `UPDATE storage.instance_ledger SET used_bytes=(SELECT COALESCE(sum(reserved_bytes+charged_bytes),0) FROM storage.space_quota) WHERE id`
+    );
     // Decrease first: quota triggers enforce instance capacity on increases.
     await client.query(`UPDATE storage.space_quota q SET reserved_bytes=0,charged_bytes=0`);
     await client.query(`UPDATE storage.instance_ledger SET used_bytes=0 WHERE id`);
@@ -433,9 +438,7 @@ export function createStorageRestoreReconciler(
               const owned = await client.query(
                 `SELECT 1 FROM storage.upload_attempts a JOIN storage.upload_intents i USING(space_id,upload_id)
                  WHERE a.s3_key=$1 AND (i.reserved OR
-                   EXISTS(SELECT 1 FROM storage.object_versions v WHERE v.attempt_id=a.id AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=v.object_id)) OR
-                   EXISTS(SELECT 1 FROM storage.attempt_gc g WHERE g.attempt_id=a.id AND NOT g.deleted) OR
-                   (i.state='pending' AND (i.lease_expires_at>clock_timestamp() OR EXISTS(SELECT 1 FROM storage.upload_owners o WHERE o.boot_id=a.owner_boot_id AND o.heartbeat_at>clock_timestamp()-interval '60 seconds'))))`,
+                   EXISTS(SELECT 1 FROM storage.object_versions v WHERE v.attempt_id=a.id AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=v.object_id)))`,
                 [entry.key]
               );
               if (!owned.rowCount)

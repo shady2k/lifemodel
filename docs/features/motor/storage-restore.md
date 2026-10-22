@@ -1,9 +1,9 @@
 # Storage-set backup and restore
 
-Task: lifemodel-653.7.4. **Proposed design, phase 1; not implemented or deployed
-acceptance.** Serves motor-1 outcome 2, “nothing is lost”, and
-[ADR-015](../../adr/015-storage-module.md) S-D7 / S09. Coordinator approval is
-required before implementation.
+Task: lifemodel-653.7.4. Approved storage-set recovery design. Serves motor-1
+outcome 2, “nothing is lost”, and [ADR-015](../../adr/015-storage-module.md)
+S-D7 / S09. Local checks do not replace the coordinator's deployed S09 walk.
+The operator procedure is [storage recovery](../../../deploy/platform/storage-recovery.md).
 
 ## Outcome and existing boundaries
 
@@ -23,9 +23,9 @@ pinned single-process `weed mini` on `data-seaweedfs-0`, a 10Gi PVC.
 `loader/src/storage-access.ts` and `loader/src/storage-object-s3.ts` have local
 per-space settlement barriers, not a global recovery cut. A canceled socket,
 expired upload lease or confirmed DELETE does not prove that an accepted
-remote PUT cannot finish. `loader/src/storage-module.ts` currently starts
-retention without restore detection. No durable maintenance or per-object
-availability state exists yet.
+remote PUT cannot finish. `loader/src/storage-module.ts` wires durable maintenance admission into mutation
+and retention operations. Restore preparation seeds per-version availability
+before startup; reads exclude every unverified/missing/corrupt version.
 
 ## Decisions and rejected alternatives
 
@@ -64,7 +64,7 @@ availability state exists yet.
 
 An expanding migration adds a singleton maintenance record with generation,
 purpose (`backup` / `restore`), state (`normal`, `draining`, `held`,
-`reconciling`), timestamps, and keyed transition receipts. It also adds durable
+`reconciling`), cut timestamp and effect key. It also adds durable
 restore progress and version availability. No runtime schema creation or local
 state-file fallback. Migration statements use `IF NOT EXISTS`; any new SQL
 function pins `search_path` and revokes PUBLIC execute.
@@ -196,8 +196,8 @@ this format to a fresh, module-only, never-IAM/never-SSE history; checking only
 current logical metadata cannot prove removed credentials absent from database
 logs or old volume bytes. A names-only inventory and absence assertions for
 filer KEK/IAM locations are necessary but not sufficient for arbitrary reused
-PVCs. **Coordinator decision required:** approve this narrow sanitized cold-copy
-scope with a pinned-image proof, or change the secret-custody/artifact contract.
+PVCs. **Coordinator-approved scope:** this narrow sanitized cold-copy format requires
+the coordinator's pinned-image proof; arbitrary reused PVCs remain unsupported.
 If the fresh-layout exclusion cannot be proven, stop; do not ship a sanitized
 archive that loses encrypted bytes or claims credential absence without evidence.
 A raw encrypted full-PVC backup needs a different custody contract and is not
@@ -257,14 +257,15 @@ neither needed nor allowed.
    deletions, and instance quota against space totals plus outstanding orphan
    debt. Missing bytes retain their logical charges. Repair only derivable totals
    transactionally; structural inconsistency leaves restore pending.
-7. Run a controlled recovery-only cleanup pass under the restore generation:
-   existing expired-upload/orphan/seal-GC machinery may sweep eligible private
-   residue, preserving live-owner/lease checks and the two-day grace. Young
-   residue remains private and accounted for later GC, not a reason to wait two
-   days before restoring reads. Ordinary age/quota deletion remains disabled.
+7. Inventory backend-only private residue and abandoned attempts without
+   deleting anything under the restore hold. Charge orphan bytes that are not
+   already owned by a reservation or retained version as instance ledger debt.
+   Reserved expired attempts retain their reservation charge. Ordinary retention
+   GC removes eligible residue only after release, using its existing owner,
+   publication and two-day grace checks. No recovery-only deletion bypass exists.
    Deleting candidates retain their tombstones and retry intents; validate,
-   do not resurrect or prematurely complete them. A collector failure is
-   retryable from saved progress.
+   do not resurrect or prematurely complete them. Inventory pages are retryable
+   from the saved backend cursor.
 8. Complete the reconcile receipt. If missing/corrupt versions exist, expose
    degraded/unavailable status and require explicit operator acceptance of that
    recorded count before generation-checked release; no successful clean-restore

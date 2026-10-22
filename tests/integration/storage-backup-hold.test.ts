@@ -367,6 +367,10 @@ describe('restore hold release and maintenance session safety', () => {
       api.prepareRestore({ generation, artifactSha256: 'd'.repeat(64) })
     ).rejects.toMatchObject({ code: 'hold_conflict' });
     expect(await snapshot()).toEqual(before);
+    await api.release({ generation });
+    await api.begin({ effectKey: 'new-backup-after-restore' });
+    await expect(api.prepareRestore(input)).rejects.toMatchObject({ code: 'hold_conflict' });
+    expect(await snapshot()).toEqual(before);
   }, 30000);
 
   it('drains a candidate DELETE already in flight before it declares a consistent cut', async () => {

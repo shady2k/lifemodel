@@ -295,6 +295,17 @@ describe('checkpointed storage restore reconciliation', () => {
         .rows[0].n
     ).toBe(object.bytes.length + 7 + 9);
   });
+  it('repairs a damaged instance ledger even when correct per-space charges already exist', async () => {
+    const object = await publish();
+    await stores.postgres.query('UPDATE storage.instance_ledger SET used_bytes=0');
+    const reconcile = helper();
+    await reconcile.begin(generation);
+    expect(await reconcile.reconcile(generation)).toMatchObject({ complete: true });
+    expect(
+      (await stores.postgres.query('SELECT used_bytes::int AS n FROM storage.instance_ledger'))
+        .rows[0].n
+    ).toBe(object.bytes.length);
+  });
   it('preserves deletion identities, warning receipts and deadlines; malformed membership stays pending', async () => {
     const object = await publish();
     await plan(object);
@@ -339,6 +350,90 @@ describe('checkpointed storage restore reconciliation', () => {
         .rows[0].n
     ).toBe(Buffer.byteLength('restored output') + bytes.length);
     expect(backend.objects.has(orphanKey)).toBe(true);
+  });
+  it('counts expired attempt bytes once, preserves reservations, and never deletes under the restore hold', async () => {
+    const output = await publish();
+    const keys: string[] = [];
+    for (const reserved of [true, false]) {
+      const upload = randomUUID(),
+        attempt = randomUUID(),
+        key = `private/${attempt}`;
+      keys.push(key);
+      const bytes = Buffer.from('expired residue');
+      await stores.postgres.query('SELECT storage.reserve_upload($1,$2,$3,$4,$5,$6,3600)', [
+        'b',
+        upload,
+        upload,
+        'partial.txt',
+        bytes.length,
+        hash(bytes),
+      ]);
+      await stores.postgres.query(
+        "INSERT INTO storage.upload_attempts(id,space_id,upload_id,s3_key,created_at) VALUES($1,$2,$3,$4,clock_timestamp()-interval '3 days')",
+        [attempt, 'b', upload, key]
+      );
+      await stores.postgres.query(
+        "UPDATE storage.upload_intents SET lease_expires_at=clock_timestamp()-interval '3 days' WHERE upload_id=$1",
+        [upload]
+      );
+      if (!reserved) {
+        await stores.postgres.query('SELECT storage.release_upload($1,$2)', ['b', upload]);
+        await stores.postgres.query(
+          'INSERT INTO storage.attempt_gc(attempt_id,space_id,s3_key,size) VALUES($1,$2,$3,$4)',
+          [attempt, 'b', key, bytes.length]
+        );
+      }
+      backend.objects.set(key, {
+        bytes,
+        sha256: hash(bytes),
+        lastModified: Date.now() - 3 * 86400000,
+      });
+    }
+    const reconcile = helper();
+    await reconcile.begin(generation);
+    expect(await reconcile.reconcile(generation)).toMatchObject({ complete: true });
+    expect(
+      (await stores.postgres.query('SELECT used_bytes::int AS n FROM storage.instance_ledger'))
+        .rows[0].n
+    ).toBe(output.bytes.length + 2 * Buffer.byteLength('expired residue'));
+    expect(
+      (
+        await stores.postgres.query(
+          'SELECT count(*)::int AS n FROM storage.orphan_gc WHERE NOT deleted'
+        )
+      ).rows[0].n
+    ).toBe(1);
+    expect(backend.requests.filter((request) => request.method === 'DELETE')).toEqual([]);
+    expect(keys.every((key) => backend.objects.has(key))).toBe(true);
+  });
+  it('accounts unreserved residue despite a fresh upload lease without deleting its bytes', async () => {
+    const upload = randomUUID(),
+      attempt = randomUUID(),
+      key = `private/${attempt}`,
+      bytes = Buffer.from('fresh canceled residue');
+    await stores.postgres.query('SELECT storage.reserve_upload($1,$2,$3,$4,$5,$6,3600)', [
+      'a',
+      upload,
+      upload,
+      'canceled.txt',
+      bytes.length,
+      hash(bytes),
+    ]);
+    await stores.postgres.query(
+      'INSERT INTO storage.upload_attempts(id,space_id,upload_id,s3_key) VALUES($1,$2,$3,$4)',
+      [attempt, 'a', upload, key]
+    );
+    await stores.postgres.query('SELECT storage.release_upload($1,$2)', ['a', upload]);
+    backend.objects.set(key, { bytes, sha256: hash(bytes), lastModified: Date.now() });
+    const reconcile = helper();
+    await reconcile.begin(generation);
+    expect(await reconcile.reconcile(generation)).toMatchObject({ complete: true });
+    expect(
+      (await stores.postgres.query('SELECT used_bytes::int AS n FROM storage.instance_ledger'))
+        .rows[0].n
+    ).toBe(bytes.length);
+    expect(backend.objects.has(key)).toBe(true);
+    expect(backend.requests.some((row) => row.method === 'DELETE')).toBe(false);
   });
   it('refuses a changed seal receipt or deletion plan total without minting replacements', async () => {
     const object = await publish();

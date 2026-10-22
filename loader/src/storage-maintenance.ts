@@ -229,6 +229,16 @@ export function createStorageMaintenance(options: {
           await c.query('COMMIT');
           return current;
         }
+        // A generation is single-use: stale completion/cursor rows must never
+        // certify a newly seeded set, including after release or another hold.
+        if (
+          (
+            await c.query('SELECT 1 FROM storage.restore_progress WHERE generation=$1', [
+              input.generation,
+            ])
+          ).rowCount
+        )
+          fail('hold_conflict', 409);
         await c.query(
           "UPDATE storage.maintenance SET generation=$1,purpose='restore',state='held' WHERE id=true",
           [input.generation]

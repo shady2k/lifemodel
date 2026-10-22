@@ -118,7 +118,10 @@ describe('storage deletion lock-session loss', () => {
       const owners = await h.stores.postgres.query(
         `SELECT DISTINCT a.pid FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid
          WHERE a.application_name='lifemodel-storage-retention'
-           AND l.locktype='advisory' AND l.granted`
+           AND l.locktype='advisory' AND l.granted AND l.mode='ExclusiveLock'
+           AND l.classid=((hashtextextended($1,7)>>32)&4294967295)::oid
+           AND l.objid=(hashtextextended($1,7)&4294967295)::oid`,
+        [artifact.id]
       );
       expect(owners.rows).toHaveLength(1);
       await h.stores.postgres.query('SELECT pg_terminate_backend($1)', [owners.rows[0].pid]);
