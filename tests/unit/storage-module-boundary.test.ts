@@ -26,6 +26,7 @@ describe('storage credential boundary', () => {
         'storage-seal.ts',
         'storage-retention.ts',
         'storage-expired-uploads.ts',
+        'storage-restore-reconcile.ts',
       ].some((name) => path === `loader/src/${name}`);
       const imports = [
         ...text.matchAll(/(?:from\s*|import\s*\(|require\s*\()(['"])([^'"\n]+)\1/g),
