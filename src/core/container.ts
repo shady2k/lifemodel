@@ -1219,6 +1219,7 @@ export async function createContainerAsync(
           snapshotStore,
           epoch: snapshotEpoch,
           conversations: conversationManager,
+          conversationStore: new PostgresConversationStore(postgres),
           recipientId: primaryRecipientId,
           route: { channel: 'web', destination: 'owner' },
           language: () => userModel?.getLanguage() ?? null,

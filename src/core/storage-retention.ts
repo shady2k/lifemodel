@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Logger } from 'pino';
-import type { SnapshotStore } from '../storage/snapshot-store.js';
+import type { SnapshotStore, SnapshotOutboxEvent } from '../storage/snapshot-store.js';
+import type { PostgresConversationStore } from '../storage/postgres-conversation-store.js';
 import type { ConversationManager } from '../storage/conversation-manager.js';
 import {
   StorageControlError,
@@ -57,6 +58,7 @@ export function createStorageRetentionReconciler(options: {
   snapshotStore: SnapshotStore;
   epoch: number;
   conversations: ConversationManager;
+  conversationStore: Pick<PostgresConversationStore, 'findChannelMessage'>;
   recipientId: string;
   route: RecipientRoute;
   language: () => string | null;
@@ -99,29 +101,91 @@ export function createStorageRetentionReconciler(options: {
       return false;
     }
     let success = true;
+    const attempted = new Set<string>();
+    const confirm = async (planId: string, event: SnapshotOutboxEvent): Promise<void> => {
+      const payload = event.payload as { recipientId: string; channel: string; text: string };
+      if (
+        event.eventId !== storageWarningEventId(planId) ||
+        event.type !== 'send.command' ||
+        payload.recipientId !== options.recipientId ||
+        payload.channel !== 'web' ||
+        typeof payload.text !== 'string'
+      )
+        throw new StorageControlError('/retention/receipt');
+      if (stopped) throw new StorageControlError('/retention/stopped');
+      await options.conversations.addMessage(
+        payload.recipientId,
+        { role: 'assistant', content: payload.text },
+        { channel: payload.channel, channelMessageId: event.eventId }
+      );
+      if (stopped) throw new StorageControlError('/retention/stopped');
+      try {
+        await options.client.warningCommitted(planId, event.eventId, controller.signal);
+      } catch (error) {
+        if (!(error instanceof StorageControlError) || error.status !== 409) throw error;
+        // Another message is already recorded. Never invent a new notice.
+        logFailure(error, planId);
+      }
+      if (stopped) throw new StorageControlError('/retention/stopped');
+      // Never discard the append-to-projection recovery payload without a fresh
+      // physical-row read. A read failure retains hot work for a later pass.
+      const persisted = await options.conversationStore.findChannelMessage(
+        payload.recipientId,
+        payload.channel,
+        event.eventId
+      );
+      if (!persisted) throw new StorageControlError('/retention/projection');
+      if (stopped) throw new StorageControlError('/retention/stopped');
+      await options.snapshotStore.releaseNotice(options.epoch, event.eventId);
+    };
+    try {
+      for (const event of await options.snapshotStore.pendingNotices()) {
+        if (stopped) return false;
+        const planId = event.payload['storageDeletionPlanId'];
+        if (typeof planId !== 'string') throw new StorageControlError('/retention/receipt');
+        attempted.add(planId);
+        try {
+          await confirm(
+            planId,
+            await options.snapshotStore.commitNotice(options.epoch, event, true)
+          );
+        } catch (error) {
+          success = false;
+          if (!stopped) logFailure(error, planId);
+        }
+      }
+    } catch (error) {
+      if (!stopped) logFailure(error);
+      return false;
+    }
     for (const plan of page.plans) {
       if (stopped) return false;
+      if (attempted.has(plan.id)) continue;
       try {
-        const event = await options.snapshotStore.commitNotice(options.epoch, {
-          eventId: storageWarningEventId(plan.id),
-          type: 'send.command',
-          payload: {
-            recipientId: options.recipientId,
-            ...options.route,
-            text: notice(plan, options.language()),
-          },
-        });
-        if (stopped) return false;
-        // Publish the same committed event to the web owner's pull surface.
-        // This natural-keyed projection is safe after a lost reply or trimming.
-        const payload = event.payload as { recipientId: string; channel: string; text: string };
-        await options.conversations.addMessage(
-          payload.recipientId,
-          { role: 'assistant', content: payload.text },
-          { channel: payload.channel, channelMessageId: event.eventId }
+        const eventId = storageWarningEventId(plan.id);
+        // Fail closed on a historical lookup error. A physical Postgres row is
+        // permanent even when clear/compaction hides it from current history.
+        const persisted = await options.conversationStore.findChannelMessage(
+          options.recipientId,
+          options.route.channel,
+          eventId
         );
         if (stopped) return false;
-        await options.client.warningCommitted(plan.id, event.eventId, controller.signal);
+        const event = await options.snapshotStore.commitNotice(
+          options.epoch,
+          {
+            eventId,
+            type: 'send.command',
+            payload: {
+              recipientId: options.recipientId,
+              ...options.route,
+              text: persisted?.content ?? notice(plan, options.language()),
+              storageDeletionPlanId: plan.id,
+            },
+          },
+          persisted !== null
+        );
+        await confirm(plan.id, event);
       } catch (error) {
         success = false;
         if (!stopped) logFailure(error, plan.id);

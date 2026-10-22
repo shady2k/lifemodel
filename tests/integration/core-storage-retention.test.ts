@@ -68,6 +68,7 @@ describe('core storage retention notices', () => {
   const components: ReturnType<typeof createStorageRetentionReconciler>[] = [];
   const clients: ReturnType<typeof createStorageControlClient>[] = [];
   const logger = () => recordingLogger(createTestLogger(), logs);
+  const conversationStore = () => new PostgresConversationStore(stores.postgres);
   const manager = () =>
     createConversationManager(new PostgresConversationStore(stores.postgres), createTestLogger());
   function client(timeout = 300) {
@@ -81,13 +82,20 @@ describe('core storage retention notices', () => {
     return result;
   }
   function component(
-    options: { intervalMs?: number; retryMs?: number; language?: () => string | null } = {}
+    options: {
+      intervalMs?: number;
+      retryMs?: number;
+      language?: () => string | null;
+      conversationStore?: PostgresConversationStore;
+      conversations?: ReturnType<typeof manager>;
+    } = {}
   ) {
     const result = createStorageRetentionReconciler({
       client: client(),
       snapshotStore: snapshot,
       epoch,
       conversations: manager(),
+      conversationStore: conversationStore(),
       recipientId: prefix,
       route: { channel: 'web', destination: 'owner' },
       language: () => 'English',
@@ -156,16 +164,28 @@ describe('core storage retention notices', () => {
         for await (const chunk of req) body += chunk;
         const value = JSON.parse(body);
         expect(Object.keys(value).sort()).toEqual(['messageId', 'planId']);
-        const committed = await events();
         const persisted = await rows();
-        // This check occurs at receipt, not after the reconciler finishes.
-        expect(
-          committed.some((event) => event.eventId === value.messageId) ||
-            persisted.some((row) => row.payload.channelMessageId === value.messageId)
-        ).toBe(true);
-        expect(persisted.some((row) => row.payload.channelMessageId === value.messageId)).toBe(
-          true
-        );
+        // Receipt-time oracle: a separately written Postgres row cannot prove
+        // outbound admission. Require the actual hot receipt and full payload.
+        const rawReceipt = await stores.redis.get(`${prefix}current:notice:${value.messageId}`);
+        expect(rawReceipt).not.toBeNull();
+        const receipt = JSON.parse(rawReceipt!);
+        const row = persisted.find((entry) => entry.payload.channelMessageId === value.messageId);
+        expect(row).toBeDefined();
+        expect(receipt).toEqual({
+          eventId: value.messageId,
+          type: 'send.command',
+          payload: {
+            recipientId: prefix,
+            channel: 'web',
+            destination: 'owner',
+            text: row!.payload.content,
+            storageDeletionPlanId: value.planId,
+          },
+        });
+        const committed = await events();
+        const streamEvent = committed.find((event) => event.eventId === value.messageId);
+        if (streamEvent) expect(streamEvent).toEqual(receipt);
         expect(value.messageId).toBe(storageWarningEventId(value.planId));
         confirmations.push(value);
         warningSeen.resolve();
@@ -224,6 +244,166 @@ describe('core storage retention notices', () => {
     await stores.redis.quit();
     await stores.postgres.end();
   });
+
+  async function hotReceipts() {
+    return stores.redis.keys(`${stores.redis.options.keyPrefix ?? ''}${prefix}current:notice:*`);
+  }
+  it('confirmed plan churn removes hot receipts and restore replay uses permanent Postgres rows without appending', async () => {
+    plans = Array.from({ length: 80 }, (_, i) => plan(`churn-${i}`));
+    expect(await component().runOnce()).toBe(true);
+    expect(await hotReceipts()).toHaveLength(0);
+    expect(await events()).toHaveLength(80);
+    expect(await rows()).toHaveLength(80);
+    const originalIds = confirmations.map((entry) => entry.messageId);
+    await stores.redis.del(`${prefix}outbound`, `${prefix}outbound:event-keys`);
+    snapshot = createSnapshotStore(stores.redis, { keyPrefix: prefix });
+    epoch = await snapshot.takeEpoch();
+    plans = plans.map((entry) => ({ ...entry, totalBytes: 1, leadDays: 30 }));
+    expect(await component({ language: () => 'ru' }).runOnce()).toBe(true);
+    expect(await events()).toHaveLength(0);
+    expect(await rows()).toHaveLength(80);
+    expect(await hotReceipts()).toHaveLength(0);
+    expect(
+      confirmations
+        .slice(80)
+        .map((entry) => entry.messageId)
+        .sort()
+    ).toEqual(originalIds.sort());
+    expect(failures).toEqual([]);
+  });
+  it('a 201 accepted warning retires hot state and a cleared conversation still prevents a new append', async () => {
+    warningStatus = 201;
+    expect(await component().runOnce()).toBe(true);
+    expect(await hotReceipts()).toHaveLength(0);
+    await conversationStore().delete(`conversation:${prefix}`);
+    expect(await conversationStore().load(`conversation:${prefix}`)).toBeNull();
+    await stores.redis.del(`${prefix}outbound`, `${prefix}outbound:event-keys`);
+    epoch = await snapshot.takeEpoch();
+    warningStatus = 200;
+    expect(await component().runOnce()).toBe(true);
+    expect(await events()).toHaveLength(0);
+    expect(await rows()).toHaveLength(1);
+    expect(await hotReceipts()).toHaveLength(0);
+    expect(failures).toEqual([]);
+  });
+  it('a Postgres read failure refuses new append and later recovers', async () => {
+    const store = conversationStore();
+    const read = vi
+      .spyOn(store, 'findChannelMessage')
+      .mockRejectedValueOnce(new Error('private database failure'));
+    const reconciler = component({ conversationStore: store });
+    expect(await reconciler.runOnce()).toBe(false);
+    expect(await events()).toHaveLength(0);
+    expect(await hotReceipts()).toHaveLength(0);
+    expect(confirmations).toHaveLength(0);
+    expect(await reconciler.runOnce()).toBe(true);
+    expect(read).toHaveBeenCalled();
+    expect(await hotReceipts()).toHaveLength(0);
+    expect(failures).toEqual([]);
+  });
+  it.each(['append-reply', 'projection-reply', 'confirmation-reply', 'cleanup-reply'] as const)(
+    'restart after lost %s never creates a second notice',
+    async (boundary) => {
+      const first = component();
+      const commit = snapshot.commitNotice.bind(snapshot);
+      const release = snapshot.releaseNotice.bind(snapshot);
+      const spies: { mockRestore(): void }[] = [];
+      if (boundary === 'append-reply')
+        spies.push(
+          vi.spyOn(snapshot, 'commitNotice').mockImplementation(async (...args) => {
+            await commit(...args);
+            first.stop();
+            throw new Error('lost append reply');
+          })
+        );
+      if (boundary === 'projection-reply') {
+        // A separate owner-row write can commit and lose its reply.
+        const store = conversationStore();
+        const save = store.save.bind(store);
+        const managerWithLostReply = createConversationManager(store, createTestLogger());
+        first.stop();
+        const replacement = component({ conversations: managerWithLostReply });
+        spies.push(
+          vi.spyOn(store, 'save').mockImplementation(async (...args) => {
+            await save(...args);
+            replacement.stop();
+            throw new Error('lost projection reply');
+          })
+        );
+        expect(await replacement.runOnce()).toBe(false);
+      } else if (boundary === 'confirmation-reply') {
+        mode = 'hold-warning';
+        const pass = first.runOnce();
+        await warningSeen.promise;
+        first.stop();
+        await pass;
+      } else {
+        if (boundary === 'cleanup-reply')
+          spies.push(
+            vi.spyOn(snapshot, 'releaseNotice').mockImplementation(async (...args) => {
+              await release(...args);
+              first.stop();
+              throw new Error('lost cleanup reply');
+            })
+          );
+        expect(await first.runOnce()).toBe(false);
+      }
+      for (const spy of spies) spy.mockRestore();
+      const original = (await events())[0];
+      expect(original).toBeDefined();
+      await stores.redis.del(`${prefix}outbound`, `${prefix}outbound:event-keys`);
+      snapshot = createSnapshotStore(stores.redis, { keyPrefix: prefix });
+      epoch = await snapshot.takeEpoch();
+      mode = 'normal';
+      const second = component();
+      expect(await second.runOnce()).toBe(true);
+      expect(await events()).toHaveLength(0);
+      expect(await rows()).toHaveLength(1);
+      expect(await hotReceipts()).toHaveLength(0);
+      expect(confirmations.every((entry) => entry.messageId === original.eventId)).toBe(true);
+      expect(failures).toEqual([]);
+    }
+  );
+  it('a lost confirmation followed by a plan disappearing still retires its hot receipt', async () => {
+    const first = component();
+    mode = 'drop-warning';
+    expect(await first.runOnce()).toBe(false);
+    first.stop();
+    expect(await hotReceipts()).toHaveLength(1);
+    plans = [];
+    mode = 'normal';
+    snapshot = createSnapshotStore(stores.redis, { keyPrefix: prefix });
+    epoch = await snapshot.takeEpoch();
+    expect(await component().runOnce()).toBe(true);
+    expect(await hotReceipts()).toHaveLength(0);
+    expect(await events()).toHaveLength(1);
+    expect(confirmations).toHaveLength(2);
+    expect(confirmations[1]).toEqual(confirmations[0]);
+    expect(failures).toEqual([]);
+  });
+  it.each([200, 409])(
+    'cleanup after module %s requires a fresh confirmed Postgres row',
+    async (responseStatus) => {
+      warningStatus = responseStatus;
+      const store = conversationStore();
+      const find = store.findChannelMessage.bind(store);
+      let reads = 0;
+      const spy = vi.spyOn(store, 'findChannelMessage').mockImplementation(async (...args) => {
+        reads++;
+        if (reads === 2) throw new Error('read failed after confirmation');
+        return find(...args);
+      });
+      const reconciler = component({ conversationStore: store });
+      expect(await reconciler.runOnce()).toBe(false);
+      expect(await hotReceipts()).toHaveLength(1);
+      spy.mockRestore();
+      warningStatus = 200;
+      expect(await reconciler.runOnce()).toBe(true);
+      expect(await hotReceipts()).toHaveLength(0);
+      expect(await events()).toHaveLength(1);
+      expect(failures).toEqual([]);
+    }
+  );
 
   it('commits one owner notice per returned plan before confirming, without an LLM or registered channel', async () => {
     plans.push(plan('plan-2'));
@@ -311,12 +491,7 @@ describe('core storage retention notices', () => {
     expect((await rows())[0].payload.content).toBe(original.payload.text);
     expect(confirmations).toEqual([{ planId: 'plan-1', messageId: original.eventId }]);
     expect(failures).toEqual([]);
-    const replay = await snapshot.commitNotice(epoch, {
-      eventId: original.eventId,
-      type: 'send.command',
-      payload: { recipientId: 'changed-owner', channel: 'changed', text: 'changed' },
-    });
-    expect(replay).toEqual(original);
+    expect(await hotReceipts()).toHaveLength(0);
   });
   it.each([401, 503])('list refusal %s emits nothing and later retries', async (code) => {
     const reconciler = component();
@@ -390,7 +565,7 @@ describe('core storage retention notices', () => {
     async (code) => {
       const reconciler = component();
       warningStatus = code;
-      expect(await reconciler.runOnce()).toBe(false);
+      expect(await reconciler.runOnce()).toBe(code === 409);
       expect(await events()).toHaveLength(1);
       warningStatus = 200;
       expect(await reconciler.runOnce()).toBe(true);

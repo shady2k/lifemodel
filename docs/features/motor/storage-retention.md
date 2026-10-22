@@ -57,7 +57,9 @@ Core's `src/core/storage-control-client.ts` uses the control listener at
 `https://storage-module.lifemodel-system.svc:8444`. It verifies TLS against only
 the projected **public instance CA**, never system roots or an insecure fallback.
 One keep-alive agent serves the client. Each request rereads both the projected
-service token and CA and has a five-second overall deadline. Errors and logs
+service token and CA and has a five-second overall deadline. The projection
+reads race the same abort/deadline as HTTP; late filesystem results are discarded
+and cannot start a request or hold the single-flight reconciler indefinitely. Errors and logs
 contain a safe error ID, route, plan ID where known, HTTP status where received,
 and count; they never contain response bodies, tokens, URLs or local paths.
 Socket, request and response error listeners remain through teardown.
@@ -84,21 +86,35 @@ leaves the plan pending until a supported preference is available; it does not
 authorize deletion with a warning the owner might not understand. No LLM runs.
 
 The outbound event ID is `storage-warning_` plus SHA-256 of **only** the plan ID.
-`SnapshotStore.commitNotice` atomically appends that `send.command` to the normal
-outbound stream and retains its original event as a separate, plan-keyed durable
-receipt under the active Valkey epoch. It never overwrites a tick snapshot.
-This extra receipt is intentionally not subject to outbound stream/event-key
-trimming: one record per exposed deletion plan remains, like the module's own
-warning receipts, so a long outage cannot reopen notice admission. A restart
-returns that original event without appending, even after stream/key trimming.
-The original payload is projected idempotently into the owner's Postgres
-conversation using the event ID as its channel message key. **Only after** the
-outbound commit and that Postgres write does core call `warningCommitted` with
-the same event ID. A failed projection leaves the warning pending. There is no
-cross-store transaction; replay completes each boundary with the same key.
-A lost confirmation response retries the same ID; 409 logs the plan/status and
-never substitutes a fresh notice. Module refusal, token/TLS failure and outages
-leave unconfirmed plans pending for a later pass.
+Before appending, core checks the physical Postgres owner message row by its
+permanent natural key `channel:web:<eventId>`. A Postgres read failure forbids
+append and retries later. This lookup ignores clear/compaction views; the row
+is the disk-backed, permanent record that the warning was sent. Admission is
+closed if either this row or the Valkey hot receipt already exists.
+
+`SnapshotStore.commitNotice` atomically appends a new `send.command` to the normal
+outbound stream and retains its original payload in a hot, plan-keyed receipt
+under the active Valkey epoch. It never overwrites a tick snapshot. The hot
+receipt is not subject to outbound stream/event-key trimming, preserving the
+append-to-Postgres gap and the original bytes/lead/language across a crash.
+If the permanent Postgres row already exists, core rehydrates a temporary hot
+receipt from its original content **without appending another event**. This
+also handles a module listing an already-warned plan after restore.
+
+The original event is projected idempotently into the owner's Postgres
+conversation using that natural key. **Only after** outbound admission and the
+Postgres write does core call `warningCommitted` with the same event ID.
+After module acceptance (2xx) or 409, core freshly confirms that the physical
+Postgres row is present, then deletes its hot receipt and pending-work index
+member. Read/cleanup failures retain hot work for retry; no blind TTL is used.
+A bounded 100-entry pending index retries unresolved confirmations even when an
+accepted plan disappears from the list after a lost HTTP response. Such retry
+uses only a plan already listed and durably admitted; it never invents a notice.
+Confirmed historical plans leave no hot receipt. There is no cross-store
+transaction; restart at any boundary reuses the same message ID and recovers
+from the hot receipt or permanent row. A 409 logs plan/status and never invents
+a new notice. Other refusals, token/TLS failures and outages leave unresolved
+work pending for a later pass.
 
 The recipient is the web owner (`web`, destination `owner`), as for other
 owner-directed core work. A registered channel is not required: the ordinary

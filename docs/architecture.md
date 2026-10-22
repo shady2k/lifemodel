@@ -138,9 +138,13 @@ with bounded backoff on failure. It runs outside cognition/plugins and uses no
 LLM; this is a remote contract without push, not polling agent thinking.
 `SnapshotStore.commitNotice` appends the plan-keyed ordinary outbound notice
 under the active epoch without changing tick state, retaining an original-event
-receipt past stream trimming. Only after commit and idempotent Postgres owner
-conversation projection does the reconciler confirm that event ID to storage.
-Restart/lost replies reuse it, even with no channel registered (web is pull).
+hot receipt past stream trimming. The physical Postgres owner message row is the
+permanent admission record; read failures forbid new append. Only after commit
+and idempotent owner projection does core confirm the event ID to storage.
+Module acceptance/409 plus a fresh Postgres row check retires the hot receipt.
+A bounded pending index retries lost confirmations even after plans disappear.
+Historical replay rehydrates a temporary receipt without another append.
+Restart/lost replies reuse the ID, even with no channel registered (web is pull).
 Shutdown aborts HTTP/timers without extending the core stop deadline. See
 [storage retention](features/motor/storage-retention.md#core-side) for warning
 semantics, language handling, the public CA projection and bootstrap order.

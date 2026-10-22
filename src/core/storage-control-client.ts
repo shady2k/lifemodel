@@ -61,12 +61,33 @@ function validPlan(value: unknown): value is DeletionPlan {
   );
 }
 
+/** Settle on abort even when an underlying filesystem read cannot stop. */
+async function withAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  let abort!: () => void;
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    abort = () => {
+      reject(new Error('Storage projection read aborted'));
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) abort();
+  });
+  try {
+    // Promise.race keeps rejection handlers on the read after cancellation.
+    // A late result can settle only the losing promise, never start HTTP.
+    return await Promise.race([operation, cancelled]);
+  } finally {
+    signal.removeEventListener('abort', abort);
+  }
+}
+
 /** One instance, one keep-alive pool. Explicit CA replaces (never extends) system trust. */
 export function createStorageControlClient(options: {
   origin: string;
   tokenFile: string;
   caFile: string;
   requestTimeoutMs?: number;
+  /** Read a rotating projection; cancellation must also bound readers that cannot stop. */
+  readProjection?: (path: string, signal: AbortSignal) => Promise<Buffer>;
 }): StorageControlClient {
   const origin = new URL(options.origin);
   if (
@@ -81,6 +102,7 @@ export function createStorageControlClient(options: {
   const timeoutMs = options.requestTimeoutMs ?? 5000;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || !options.tokenFile || !options.caFile)
     throw new StorageControlError('/configuration');
+  const readProjection = options.readProjection ?? ((path, signal) => readFile(path, { signal }));
   const agent = new Agent({ keepAlive: true, maxSockets: 2, maxFreeSockets: 1 });
   agent.on('error', () => undefined);
   const sockets = new WeakSet<Socket>();
@@ -105,12 +127,17 @@ export function createStorageControlClient(options: {
     let status: number | undefined;
     try {
       // Neither credential nor CA is cached: kubelet rotates projections in place.
-      const [token, ca] = await Promise.all([
-        readFile(options.tokenFile, 'utf8'),
-        readFile(options.caFile),
-      ]);
       controller.signal.throwIfAborted();
-      if (!token.trim() || ca.length === 0) throw new Error('missing projection');
+      const [tokenBytes, ca] = await withAbort(
+        Promise.all([
+          readProjection(options.tokenFile, controller.signal),
+          readProjection(options.caFile, controller.signal),
+        ]),
+        controller.signal
+      );
+      controller.signal.throwIfAborted();
+      const token = tokenBytes.toString('utf8').trim();
+      if (!token || ca.length === 0) throw new Error('missing projection');
       return await new Promise<unknown>((resolve, reject) => {
         const fail = () => {
           reject(new StorageControlError(route, status));
@@ -123,7 +150,7 @@ export function createStorageControlClient(options: {
           rejectUnauthorized: true,
           signal: controller.signal,
           headers: {
-            authorization: `Bearer ${token.trim()}`,
+            authorization: `Bearer ${token}`,
             ...(payload === undefined
               ? {}
               : {
@@ -143,7 +170,7 @@ export function createStorageControlClient(options: {
           res.on('error', fail);
           res.on('aborted', fail);
           status = res.statusCode;
-          if (status !== 200) {
+          if (status === undefined || status < 200 || status >= 300) {
             fail();
             res.destroy();
             req.destroy();

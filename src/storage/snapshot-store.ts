@@ -61,7 +61,7 @@ return 1
 // Infrastructure notices do not snapshot mutable tick state. Their receipt and
 // append share the same epoch fence and outbound stream as tick CAS commits.
 const NOTICE_SCRIPT = `
-local expected = { 'string', 'stream', 'hash', 'string' }
+local expected = { 'string', 'stream', 'hash', 'string', 'zset' }
 for index, kind in ipairs(expected) do
   local result = redis.call('TYPE', KEYS[index])
   local actual = type(result) == 'table' and result.ok or result
@@ -71,11 +71,12 @@ if redis.call('GET', KEYS[1]) ~= ARGV[1] then return false end
 local prior = redis.call('GET', KEYS[4])
 if prior then return prior end
 local event = cjson.decode(ARGV[2])
-if redis.call('HEXISTS', KEYS[3], event.eventId) == 0 then
+if ARGV[3] ~= 'historical' and redis.call('HEXISTS', KEYS[3], event.eventId) == 0 then
   local stream_id = redis.call('XADD', KEYS[2], '*', 'eventId', event.eventId, 'event', ARGV[2])
   redis.call('HSET', KEYS[3], event.eventId, stream_id)
 end
 redis.call('SET', KEYS[4], ARGV[2])
+redis.call('ZADD', KEYS[5], 0, event.eventId)
 return ARGV[2]
 `;
 
@@ -106,6 +107,7 @@ export class SnapshotStore {
   private readonly outboundKey: string;
   private readonly outboundKeysKey: string;
   private readonly completedInboundKey: string;
+  private readonly noticesKey: string;
   private readonly scriptSha: string;
   private readonly owners = new Map<string, SnapshotSectionOwner>();
 
@@ -116,6 +118,7 @@ export class SnapshotStore {
     const prefix = config.keyPrefix ?? 'lifemodel:core:snapshot:';
     this.epochKey = `${prefix}${SNAPSHOT_EPOCH_KEY}`;
     this.snapshotKey = `${prefix}${SNAPSHOT_KEY}`;
+    this.noticesKey = `${prefix}notices:pending`;
     this.outboundKey = config.outboundKey ?? `${prefix}outbound`;
     this.outboundKeysKey = `${prefix}outbound:event-keys`;
     this.completedInboundKey = config.completedInboundKey ?? 'inbound:completed';
@@ -128,26 +131,60 @@ export class SnapshotStore {
     this.owners.set(owner.section, owner);
   }
 
-  /** Persist a plan-keyed notice receipt past ordinary outbound trimming.
-   * The receipt retains the original payload too, so a restarted projection
-   * never substitutes new text/recipient metadata for the committed message.
-   * One receipt per deletion plan, retained like the module's warning receipt.
+  /** Hot original-payload receipt until module confirmation and Postgres proof.
+   * A historical Postgres row suppresses append but rehydrates a temporary
+   * receipt, so every confirmation still has a receipt-time admission witness.
    */
-  async commitNotice(epoch: number, event: SnapshotOutboxEvent): Promise<SnapshotOutboxEvent> {
+  async commitNotice(
+    epoch: number,
+    event: SnapshotOutboxEvent,
+    historical = false
+  ): Promise<SnapshotOutboxEvent> {
     const receiptKey = `${this.snapshotKey}:notice:${event.eventId}`;
     const result = await this.redis.eval(
       NOTICE_SCRIPT,
-      4,
+      5,
       this.epochKey,
       this.outboundKey,
       this.outboundKeysKey,
       receiptKey,
+      this.noticesKey,
       String(epoch),
-      JSON.stringify(event)
+      JSON.stringify(event),
+      historical ? 'historical' : 'new'
     );
     if (typeof result !== 'string')
       throw new StaleSnapshotEpochError(epoch, await this.currentEpoch());
     return JSON.parse(result) as SnapshotOutboxEvent;
+  }
+
+  /** Bounded pending work survives a lost confirmation whose plan stops listing. */
+  async pendingNotices(): Promise<SnapshotOutboxEvent[]> {
+    const ids = await this.redis.zrange(this.noticesKey, '0', '99');
+    if (ids.length === 0) return [];
+    const values = await this.redis.mget(...ids.map((id) => `${this.snapshotKey}:notice:${id}`));
+    return values.flatMap((value) =>
+      value === null ? [] : [JSON.parse(value) as SnapshotOutboxEvent]
+    );
+  }
+
+  /** Caller has just confirmed the physical Postgres natural-key row. */
+  async releaseNotice(epoch: number, eventId: string): Promise<void> {
+    const result = await this.redis.eval(
+      `
+      if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+      redis.call('DEL', KEYS[2])
+      redis.call('ZREM', KEYS[3], ARGV[2])
+      return 1
+    `,
+      3,
+      this.epochKey,
+      `${this.snapshotKey}:notice:${eventId}`,
+      this.noticesKey,
+      String(epoch),
+      eventId
+    );
+    if (Number(result) !== 1) throw new StaleSnapshotEpochError(epoch, await this.currentEpoch());
   }
 
   async takeEpoch(): Promise<number> {
