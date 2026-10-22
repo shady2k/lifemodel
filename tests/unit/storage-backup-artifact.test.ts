@@ -144,6 +144,90 @@ afterEach(async () => {
 });
 
 describe('sanitized cold-copy policy', () => {
+  it('supports exactly the pinned mini VM names and never copies the regenerable admin subtree', async () => {
+    const pinned = JSON.parse(
+      await readFile('deploy/platform/storage-seaweed-layout.json', 'utf8')
+    ) as Pick<typeof policy, 'layout' | 'compatibility'>;
+    const approved = { ...pinned, attestation };
+    const tree = join(base, 'pinned');
+    await mkdir(tree, { mode: 0o700 });
+    const names = (await readFile('tests/fixtures/seaweed-mini-layout-names.txt', 'utf8'))
+      .trim()
+      .split('\n');
+    expect(names).toHaveLength(125);
+    for (const line of names) {
+      const path = join(tree, line.slice(2));
+      if (line.startsWith('d ')) await mkdir(path, { recursive: true, mode: 0o700 });
+      else await put(path, '');
+    }
+    const result = await inventorySeaweedLayout(tree, approved);
+    expect(result.supported).toBe(true);
+    expect(result.entries).toHaveLength(names.length);
+    const admin = result.entries.filter(
+      (entry) => entry.path === 'admin' || entry.path.startsWith('admin/')
+    );
+    expect(admin.length).toBeGreaterThan(1);
+    expect(admin.every((entry) => entry.action === 'exclude')).toBe(true);
+    await chmod(join(tree, 'admin/.session_key'), 0o000);
+    await copySanitizedSeaweedTree(tree, join(base, 'pinned-copy'), approved);
+    await expect(lstat(join(base, 'pinned-copy/admin'))).rejects.toThrow();
+    expect(await readFile(join(base, 'pinned-copy/1.dat'), 'utf8')).toBe('');
+    const copied = await inventorySeaweedLayout(join(base, 'pinned-copy'), approved);
+    expect(copied.supported).toBe(true);
+    expect(copied.entries.every((entry) => entry.action === 'copy')).toBe(true);
+  });
+  it.each([
+    'volume',
+    'filer',
+    'filerldb2',
+    'master',
+    'm9333',
+    'unknown',
+    '../admin',
+    'admin/plugin',
+  ])('refuses excluding data or an unapproved subtree: %s', async (excluded) => {
+    const denied = { ...policy, layout: { ...layout, excludedDirectories: [excluded] } };
+    expect((await inventorySeaweedLayout(source, denied)).supported).toBe(false);
+  });
+  it('refuses exclusions overlapping required paths or copied patterns', async () => {
+    await put(join(source, 'admin/job.pb'), '');
+    for (const change of [
+      { directories: [...layout.directories, 'admin'] },
+      { files: [...layout.files, 'admin/job.pb'] },
+      { filePatterns: ['^admin/job\\.pb$'] },
+      { filePatterns: ['^admin/not-yet-created\\.pb$'] },
+      { filePatterns: ['^filer/.*$|^admin/not-yet-created\\.pb$'] },
+      { directoryPatterns: ['^admin$'] },
+    ]) {
+      const denied = {
+        ...policy,
+        layout: { ...layout, excludedDirectories: ['admin'], ...change },
+      };
+      expect((await inventorySeaweedLayout(source, denied)).supported).toBe(false);
+    }
+  });
+  it('never copies the admin session key even if explicitly or broadly allowlisted', async () => {
+    await put(join(source, 'admin/.session_key'), 'SECRET-CANARY-SESSION');
+    for (const change of [
+      {
+        directories: [...layout.directories, 'admin'],
+        files: [...layout.files, 'admin/.session_key'],
+      },
+      { directoryPatterns: ['^.*$'], filePatterns: ['^.*$'] },
+    ]) {
+      const denied = { ...policy, layout: { ...layout, ...change } };
+      const result = await inventorySeaweedLayout(source, denied);
+      expect(result.supported).toBe(false);
+      expect(
+        result.entries.some(
+          (entry) => entry.path === 'admin/.session_key' && entry.action === 'copy'
+        )
+      ).toBe(false);
+      await expect(
+        copySanitizedSeaweedTree(source, join(base, 'forbidden-copy'), denied)
+      ).rejects.toThrow();
+    }
+  });
   it('returns names/type-only inventory and a layout verdict, never key hashes or contents', async () => {
     const result = await inventorySeaweedLayout(source, policy);
     expect(result.supported).toBe(true);

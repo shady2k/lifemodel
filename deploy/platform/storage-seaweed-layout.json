@@ -1,0 +1,37 @@
+{
+  "layout": {
+    "version": "mini-aba492e2-v1",
+    "seaweedImage": "chrislusf/seaweedfs@sha256:aba492e2a4e4c90bff795745e8e660affa1f09e7650f5981bd7bccd1a06cd931",
+    "directories": [
+      "filerldb2",
+      "m9333",
+      "m9333/snapshot",
+      "worker",
+      "worker/balance",
+      "worker/erasure_coding",
+      "worker/task_logs",
+      "worker/vacuum"
+    ],
+    "files": ["m9333/conf", "m9333/log", "m9333/state", "vol_dir.uuid", "worker/worker.id"],
+    "excludedDirectories": ["admin"],
+    "directoryPatterns": ["^filerldb2/[0-9]{2}$"],
+    "filePatterns": [
+      "^[0-9]+\\.dat$",
+      "^[0-9]+\\.idx$",
+      "^[0-9]+\\.vif$",
+      "^filerldb2/[0-9]{2}/[0-9]+\\.log$",
+      "^filerldb2/[0-9]{2}/[0-9]+\\.ldb$",
+      "^filerldb2/[0-9]{2}/CURRENT(\\.bak)?$",
+      "^filerldb2/[0-9]{2}/LOCK$",
+      "^filerldb2/[0-9]{2}/LOG(\\.old(\\.[0-9]+)?)?$",
+      "^filerldb2/[0-9]{2}/MANIFEST-[0-9]+$",
+      "^m9333/snapshot/[0-9]+_[0-9]+\\.ss$"
+    ]
+  },
+  "compatibility": {
+    "schemaVersion": "20261015000016",
+    "moduleBuild": "OPERATOR_VERIFIED_MODULE_BUILD",
+    "seaweedImage": "chrislusf/seaweedfs@sha256:aba492e2a4e4c90bff795745e8e660affa1f09e7650f5981bd7bccd1a06cd931",
+    "layoutVersion": "mini-aba492e2-v1"
+  }
+}

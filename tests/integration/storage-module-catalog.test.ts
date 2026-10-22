@@ -100,6 +100,24 @@ const causes = (lines: RecordedLine[]): unknown[] =>
   lines.filter((line) => line.level === 'warn').map((line) => line.fields['cause']);
 
 describe('the storage module readiness with a real catalog', () => {
+  it.each(['maintenance', 'version_availability', 'restore_progress'])(
+    'reports schema_missing when recovery table %s is absent',
+    async (table) => {
+      await applyTestMigrations(stores.postgres);
+      await stores.postgres.query(`ALTER TABLE storage.${table} RENAME TO hidden_recovery_table`);
+      try {
+        const lines: RecordedLine[] = [];
+        const module = await startModule(workerDatabaseUrl(), lines);
+        const answer = await module.get();
+        expect(answer.status).toBe(503);
+        expect(answer.body).toMatchObject({ lastErrorCode: 'catalog_unavailable' });
+        expect(causes(lines)).toEqual(['schema_missing']);
+      } finally {
+        await stores.postgres.query(`ALTER TABLE storage.hidden_recovery_table RENAME TO ${table}`);
+      }
+    }
+  );
+
   it('is unready while the storage schema is missing and ready once it is applied', async () => {
     const databaseUrl = workerDatabaseUrl();
     // A fresh catalog state: no storage schema and no record of its migration.
@@ -109,9 +127,8 @@ describe('the storage module readiness with a real catalog', () => {
       "SELECT to_regclass('public.schema_migrations') AS table"
     );
     if (migrated.rows[0]?.table !== null)
-      await stores.postgres.query('DELETE FROM public.schema_migrations WHERE version IN ($1,$2)', [
+      await stores.postgres.query('DELETE FROM public.schema_migrations WHERE version >= $1', [
         STORAGE_MIGRATION,
-        '20261015000012',
       ]);
     const lines: RecordedLine[] = [];
     const module = await startModule(databaseUrl, lines);

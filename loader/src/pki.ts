@@ -111,7 +111,10 @@ function validateCaPair(ca: CaDisk, now: number): string {
   const usage = parsed.extensions.find((e) => e.type === '2.5.29.15') as
     | x509.KeyUsagesExtension
     | undefined;
+  const subjectKeyId = parsed.getExtension(x509.SubjectKeyIdentifierExtension);
   if (
+    !subjectKeyId?.keyId ||
+    subjectKeyId.critical ||
     !constraints?.ca ||
     constraints.pathLength !== 0 ||
     !constraints.critical ||
@@ -187,11 +190,15 @@ export function createPkiManager(options: {
   }
   async function issue(ca: CaDisk, names: string[]): Promise<{ cert: string; key: string }> {
     const caKey = await privateCryptoKey(ca.keyPem);
+    const issuer = new x509.X509Certificate(ca.cert);
+    const issuerKeyId = issuer.getExtension(x509.SubjectKeyIdentifierExtension);
+    if (!issuerKeyId?.keyId)
+      throw new Error('PKI CA certificate is missing its subject key identifier');
     const leafKeys = await crypto.subtle.generateKey(alg, true, ['sign', 'verify']);
     const cert = await x509.X509CertificateGenerator.create({
       serialNumber: serial(),
       subject: `CN=${names[0] ?? config.instanceName}`,
-      issuer: new x509.X509Certificate(ca.cert).subject,
+      issuer: issuer.subject,
       notBefore: new Date(clock.now() - 60 * 60 * 1000),
       notAfter: new Date(clock.now() + LEAF_LIFETIME),
       signingAlgorithm: alg,
@@ -203,6 +210,10 @@ export function createPkiManager(options: {
         ),
         new x509.ExtendedKeyUsageExtension(['1.3.6.1.5.5.7.3.1'], true),
         new x509.KeyUsagesExtension(x509.KeyUsageFlags.digitalSignature, true),
+        await x509.SubjectKeyIdentifierExtension.create(leafKeys.publicKey),
+        // RFC 5280 4.2.1.1: identify the issuer by its actual SKI, not a
+        // separately derived identifier that could disagree with that CA.
+        new x509.AuthorityKeyIdentifierExtension(issuerKeyId.keyId),
       ],
     });
     return { cert: toPem(cert), key: await pemKey(leafKeys.privateKey) };
@@ -241,7 +252,13 @@ export function createPkiManager(options: {
       const usage = parsedLeaf.extensions.find((extension) => extension.type === '2.5.29.15') as
         | x509.KeyUsagesExtension
         | undefined;
+      const subjectKeyId = parsedLeaf.getExtension(x509.SubjectKeyIdentifierExtension);
+      const authorityKeyId = parsedLeaf.getExtension(x509.AuthorityKeyIdentifierExtension);
       if (
+        !subjectKeyId?.keyId ||
+        subjectKeyId.critical ||
+        !authorityKeyId?.keyId ||
+        authorityKeyId.critical ||
         !eku?.critical ||
         eku.usages.length !== 1 ||
         eku.usages[0] !== '1.3.6.1.5.5.7.3.1' ||
@@ -251,7 +268,17 @@ export function createPkiManager(options: {
         return 'invalid';
       if (expectedCa) {
         const ca = new NodeX509Certificate(expectedCa);
-        if (cert.issuer !== ca.subject || !cert.verify(ca.publicKey)) return 'invalid';
+        const issuerKeyId = new x509.X509Certificate(expectedCa).getExtension(
+          x509.SubjectKeyIdentifierExtension
+        );
+        if (
+          !issuerKeyId?.keyId ||
+          issuerKeyId.critical ||
+          authorityKeyId.keyId !== issuerKeyId.keyId ||
+          cert.issuer !== ca.subject ||
+          !cert.verify(ca.publicKey)
+        )
+          return 'invalid';
       }
       return 'valid';
     } catch {

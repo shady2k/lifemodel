@@ -154,7 +154,9 @@ Backup operator sequence:
    artifact is never a successful backup. Failure retains the hold and the
    partial artifact separately for diagnosis; a recovery command can restart
    SeaweedFS and explicitly release the hold without accepting that artifact.
-5. Restart SeaweedFS, verify authenticated backend health, release the matching
+5. After dump/cut copies and verified artifact export, delete SQL and filesystem
+   helpers and await termination before restarting SeaweedFS (small-node resource
+   requests otherwise prevent scheduling). Verify authenticated backend health, release the matching
    source backup hold, and restore the previous Flux/task-launch state. Always
    print the recovery instruction if interrupted; never silently leave a normal
    source with only half an artifact. Copy and independently verify the finished
@@ -192,7 +194,18 @@ creates `.mini_kek_passphrase` and `.mini_sse_kek` under the data directory at
 startup (`ensureMiniDevSSES3Keys`), independently of `-s3.iam=false`.
 Do not print, hash into diagnostic output or copy those keys. Exclude both and
 `mini.options` from the staged tree; startup regenerates these from destination
-configuration/custody. Preserve volume/master/filer metadata and object data,
+configuration/custody. The coordinator's fresh pinned-image names inventory also
+contains `admin/.session_key` and `admin/plugin/**` job state. The trusted
+`layout.excludedDirectories` field excludes the entire audited top-level `admin`
+subtree by names/types only, never opening its files. Only `admin` is currently
+approved: validation refuses data roots, nested exclusions, overlapping required
+paths or copied patterns. `admin/.session_key` is never copyable under any policy.
+Destination Seaweed regenerates the admin session and plugin state on start; old
+sessions, schedules and job history are deliberately not restored. The coordinator
+must verify this regeneration in its destination walk. The tracked
+`deploy/platform/storage-seaweed-layout.json` policy is tested against all 125 names
+in `tests/fixtures/seaweed-mini-layout-names.txt`, with narrow anchored dynamic
+volume/LevelDB/master-snapshot patterns. It carries no operator attestation. Preserve volume/master/filer metadata and object data,
 including hidden database files, using a pinned layout policy rather than a
 broad “skip hidden files” rule.
 
@@ -221,7 +234,11 @@ approved here.
 
 Never copy `seaweed-s3-identity`, projected tokens, TLS keys, SQL passwords,
 OpenBao records or loader volumes. The destination uses its own fresh Bao/S3
-identity and CA. The runbook must verify that source credentials cannot read
+identity and CA. The loader validates the CA's noncritical SKI and issues both
+edge and storage leaves with SKI and AKI equal to the issuer's SKI. Bootstrap
+reissues old missing-identifier leaves under the existing valid CA; an installed
+CA missing SKI fails closed without automatic rotation or a compatibility shim.
+Such a disposable test VM must be reprovisioned. The runbook must verify that source credentials cannot read
 restored storage and destination credentials can. A generic Secret backup is
 neither needed nor allowed.
 

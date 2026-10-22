@@ -26,6 +26,41 @@ const helpers = section(`python3 - <<'PY' 2>"$WORK/helpers.err"`, 'If a Job/imag
 const recovery = section(`python3 - <<'PY' 2>"$WORK/recovery-job.err"`, 'RECOVERY_POD=$(');
 
 describe('storage recovery runbook safety contracts', () => {
+  it('removes SQL and fs helpers before restarting either backend', () => {
+    const source = section(
+      'Restart source while hold remains',
+      'Empty destination, verify before import'
+    );
+    ordered(
+      source,
+      'delete job storage-recovery-sql',
+      'record sql-remove',
+      'delete job storage-recovery-fs',
+      'scale statefulset/seaweedfs --replicas=1'
+    );
+    const destination = section('After promotion, release the fs helper', 'record recovery-job');
+    ordered(
+      destination,
+      'delete job storage-recovery-sql',
+      'record import-sql-release',
+      'delete job storage-recovery-fs',
+      'scale statefulset/seaweedfs --replicas=1',
+      'record import-backend-ready',
+      "job={'apiVersion'"
+    );
+  });
+  it('uses the tested pinned policy and restarting forwards without supplying an attestation', () => {
+    expect(runbook).toContain('deploy/platform/storage-seaweed-layout.json');
+    expect(runbook).toContain("p['attestation']=json.loads");
+    expect(runbook).toContain('each closed psql connection');
+    ordered(
+      runbook.slice(runbook.indexOf('Start this forward')),
+      'while true; do',
+      'kubectl -n lifemodel-system port-forward',
+      'sleep 1',
+      'done'
+    );
+  });
   it('copies destination policy into the fresh helper before artifact verification', () => {
     const destination = section('Stage the trusted archive', 'record trusted-manifest-hash');
     ordered(

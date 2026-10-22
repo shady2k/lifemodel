@@ -40,57 +40,81 @@ instances. Do not run it against a production catalog that contains task output.
   connection string. Logs below go to private files. Publish only safe counts,
   codes, generations and exit statuses. Layout proof is names/type/action only.
 
-### Required independent Seaweed proof — no supplied real-layout claim
+### Tested pinned layout and required independent Seaweed proof
 
-The repository does **not** ship a proven real-PVC layout policy. Do not use
-fixture policy as one. Before cold copy the coordinator must supply private
-`policy.json`, against the exact running image digest, with:
+The repository ships [storage-seaweed-layout.json](storage-seaweed-layout.json),
+with layout/compatibility only, for
+`chrislusf/seaweedfs@sha256:aba492e2a4e4c90bff795745e8e660affa1f09e7650f5981bd7bccd1a06cd931`.
+Its exact paths and fully anchored patterns are checked against the coordinator's
+125-entry names-only fresh-install inventory in
+`tests/fixtures/seaweed-mini-layout-names.txt`. This is a tested names policy, not
+proof of arbitrary PVC history or a completed restore walk. Do not broaden it to
+`^.*$`. An unexpected path still stops the copy.
+
+After the operator shell setup below defines `WORK`, `POLICY` and `record`,
+create private `policy.json` from this tracked file. Set `moduleBuild` to the
+verified installed build; verify `schemaVersion` against the installed migration
+version (0016 or the matching approved revision). Add your own attestation only
+after independent history and metadata checks. Never take policy from an archive:
+
+```bash
+python3 - <<'PY'
+import json,os
+from pathlib import Path
+p=json.loads(Path('deploy/platform/storage-seaweed-layout.json').read_text())
+p['compatibility']['moduleBuild']=os.environ['MODULE_BUILD']
+p['attestation']=json.loads(Path(os.environ['ATTESTATION_FILE']).read_text())
+with Path(os.environ['POLICY']).open('x') as f: json.dump(p,f,indent=2)
+PY
+rc=$?; record trusted-policy "$rc"; test "$rc" = 0 || return 1
+```
+
+Set `MODULE_BUILD` and `ATTESTATION_FILE` privately before this step. The latter
+contains exactly this shape, with a private evidence reference and booleans backed
+by the checks, not values copied just to bypass the gate:
 
 ```json
 {
-  "layout": {
-    "version": "COORDINATOR_APPROVED_LAYOUT_VERSION",
-    "seaweedImage": "chrislusf/seaweedfs@sha256:aba492e2a4e4c90bff795745e8e660affa1f09e7650f5981bd7bccd1a06cd931",
-    "directories": [],
-    "files": [],
-    "directoryPatterns": [],
-    "filePatterns": []
-  },
-  "compatibility": {
-    "schemaVersion": "COORDINATOR_VERIFIED_DBMATE_VERSION",
-    "moduleBuild": "COORDINATOR_VERIFIED_MODULE_BUILD",
-    "seaweedImage": "chrislusf/seaweedfs@sha256:aba492e2a4e4c90bff795745e8e660affa1f09e7650f5981bd7bccd1a06cd931",
-    "layoutVersion": "COORDINATOR_APPROVED_LAYOUT_VERSION"
-  },
-  "attestation": {
-    "evidence": "PRIVATE_PROOF_RECORD_ID",
-    "coldStopped": true,
-    "freshModuleOnlyNeverIamNeverSse": true,
-    "filerKekAbsent": true,
-    "dynamicIamAbsent": true,
-    "bucketEncryptionAbsent": true,
-    "encryptedObjectsAbsent": true
-  }
+  "evidence": "PRIVATE_PROOF_RECORD_ID",
+  "coldStopped": true,
+  "freshModuleOnlyNeverIamNeverSse": true,
+  "filerKekAbsent": true,
+  "dynamicIamAbsent": true,
+  "bucketEncryptionAbsent": true,
+  "encryptedObjectsAbsent": true
 }
 ```
 
-The empty lists are **not** usable defaults. Fill exact required paths and narrow,
-fully anchored dynamic file/directory patterns from a fresh module-only pinned
-image. Do not approve `^.*$`. A names-only inventory cannot prove credential
-absence in old database logs/volume bytes. Independent history and metadata
-checks must establish never-IAM/never-SSE, no filer KEK, no bucket default
- encryption, no encrypted object dependency and no dynamic IAM. Obtain that
-proof before stopping the source, using the coordinator's reviewed tooling;
-there is no built-in `prove-no-secrets` command. If it cannot be established,
-**stop**. Do not set booleans just to bypass the check.
+A names-only inventory cannot prove credential absence in old database logs or
+volume bytes. Establish never-IAM/never-SSE, no filer KEK, no bucket default
+encryption, no encrypted object dependency and no dynamic IAM before stopping
+the source, with reviewed tooling. There is no built-in `prove-no-secrets`
+command. If that evidence cannot be established, **stop**.
 
-`layout` does not open excluded key files. It emits names/type/action only and
-fails on unsupported paths, links, special files or missing required paths.
-`sanitize` excludes `.mini_kek_passphrase`, `.mini_sse_kek` and `mini.options`.
-Seaweed regenerates them using destination configuration. This is valid only
-for the narrow independently attested unencrypted/static-identity history.
-Unknown config, embedded IAM, KEK/SSE dependency or reused-history ambiguity
-means **unsupported**, not a request to copy keys or broaden the allowlist.
+`layout` emits names/type/action only. `sanitize` never opens or copies excluded
+files. It excludes `.mini_kek_passphrase`, `.mini_sse_kek`, `mini.options` and the
+entire `admin/` subtree (including secret `admin/.session_key` and plugin job
+state). Destination Seaweed regenerates these on startup from its own custody
+and configuration. The destination does not inherit admin sessions or plugin
+schedules/history. The coordinator's destination walk must verify regeneration.
+Only the audited exact top-level `admin` subtree may be excluded by policy;
+required/copied paths and volume/filer/master data cannot be excluded. The session
+key can never be copied, even under an attempted allowlist. Links and special
+files still fail closed. Unknown config, IAM/KEK/SSE dependency or reused-history
+ambiguity means **unsupported**, not permission to copy keys.
+
+## Instance TLS profile and existing test installs
+
+The loader's CA already had Subject Key Identifier (SKI). Both edge and storage
+leaves now include SKI and Authority Key Identifier (AKI), with AKI equal to that
+CA's SKI, so strict RFC 5280 clients (including Python 3.13 defaults) accept them.
+Loader bootstrap reissues old leaves missing identifiers under the same valid CA;
+restart/reload the serving workloads to use the updated Secrets before the walk.
+An installed CA missing SKI fails closed as an invalid required profile. It is not
+automatically rotated or accepted through a compatibility shim. Reprovision a
+disposable test VM with fresh custody if it has such a CA; do not delete identity
+or CA files on a live instance to force rotation. CA/identity replacement for live
+instances is outside this storage-set procedure.
 
 ## Operator shell and temporary helpers
 
@@ -100,7 +124,12 @@ operator archive extraction below). Its SQL checks
 need PostgreSQL 17 `psql` and fixed `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`
 and private `PGPASSFILE`; never put passwords in argv. Run the driver on a
 coordinator VM with a reviewed TLS route to each listener and database access
-(or private port forwards). It must reach source task/control/read listeners
+(or private port forwards). `kubectl port-forward` can exit after a connection
+reset; each closed psql connection did so in the VM walk. Run each database,
+task/control/read and S3 forward in a restarting loop (see the S3 example below),
+wait for its listening message before a request, and stop the loop with Ctrl-C
+after the walk. A restarted forward does not retry a failed write: inspect its
+receipt before explicitly retrying. It must reach source task/control/read listeners
 using their actual live identities, not a helper token claimed to be a task.
 
 Use one context at a time. Substitute only the operator paths/context names:
@@ -425,7 +454,12 @@ in trusted owner custody. Independently verify after off-node copying.
 Restart source while hold remains. Check authenticated `/status` through the
 loader's existing health route/Pod, then release this generation:
 
+On a small node, helper resource requests can leave Seaweed Pending. After all
+dump/cut copies and artifact export, remove both helpers **before** backend start.
+
 ```bash
+kubectl -n lifemodel-system delete job storage-recovery-sql --cascade=foreground --wait=true --timeout=120s >"$WORK/sql-remove.out" 2>"$WORK/sql-remove.err"
+rc=$?; record sql-remove "$rc"; test "$rc" = 0 || return 1
 kubectl -n lifemodel-system delete job storage-recovery-fs --cascade=foreground --wait=true --timeout=120s >"$WORK/fs-remove.out" 2>"$WORK/fs-remove.err"
 rc=$?; record fs-remove "$rc"; test "$rc" = 0 || return 1
 kubectl -n lifemodel-system scale statefulset/seaweedfs --replicas=1 >"$WORK/seaweed-start.out" 2>"$WORK/seaweed-start.err"
@@ -620,7 +654,15 @@ operator policies grant only DNS and the two sides of Bao/S3/Postgres routes;
 there is no inbound listener or Kubernetes API route. This adds no RoleBinding
 and mounts no source PVC. Then prepare before any module process can start:
 
+The SQL helper is no longer needed after `pg_restore`; remove it before backend
+start too. Do not create the recovery-module Job until Seaweed is Ready. That Job
+needs Seaweed for reconciliation, so they must fit together; if scheduling fails,
+stop and add node capacity, never weaken the hold or raise replicas. Remove the
+recovery Job before starting the normal module (commands below).
+
 ```bash
+kubectl -n lifemodel-system delete job storage-recovery-sql --cascade=foreground --wait=true --timeout=120s >"$WORK/import-sql-release.out" 2>"$WORK/import-sql-release.err"
+rc=$?; record import-sql-release "$rc"; test "$rc" = 0 || return 1
 kubectl -n lifemodel-system delete job storage-recovery-fs --cascade=foreground --wait=true --timeout=120s >"$WORK/import-fs-release.out" 2>"$WORK/import-fs-release.err"
 rc=$?; record import-fs-release "$rc"; test "$rc" = 0 || return 1
 kubectl -n lifemodel-system scale statefulset/seaweedfs --replicas=1 >"$WORK/import-backend.out" 2>"$WORK/import-backend.err"
@@ -858,7 +900,11 @@ Add `"custody": "/owner-private/custody-check.json"` to destination walk config.
 Start this forward in a separate operator terminal (save its log privately):
 
 ```bash
-kubectl -n lifemodel-system port-forward --address=127.0.0.1 service/seaweedfs 18333:8333 >"$WORK/s3-forward.log" 2>&1
+while true; do
+  kubectl -n lifemodel-system port-forward --address=127.0.0.1 service/seaweedfs 18333:8333 >>"$WORK/s3-forward.log" 2>&1
+  rc=$?; printf 'port-forward exit=%s\n' "$rc" >>"$WORK/s3-forward.log"
+  sleep 1
+done
 ```
 
 With destination PG environment and core/task TLS routes available, run:
@@ -887,8 +933,10 @@ backend keys or reset catalog clocks. Record follow-up observation if needed.
 - A failed `begin`/drain leaves the durable fence. Run `status`; retry the same
   effect key, or stop all mutator processes and finish the held cut. Never copy
   while state is `draining` and never infer coldness from lock release alone.
-- Failed backup: keep incomplete scratch as diagnosis only. Restart source
-  Seaweed, establish authenticated health, explicitly release its matching
+- Failed backup: keep incomplete scratch as diagnosis only. Export any needed
+  scratch privately, delete SQL and fs helper Jobs with foreground wait as above
+  (use `--ignore-not-found` if already removed), then restart source Seaweed.
+  Establish authenticated health, explicitly release its matching
   **backup** generation, then restore prior Flux/launch state. A manifest is
   valid only when build + verify and independent export verification succeeded.
 - Failed import/promotion/reconcile: keep target stopped/restore-held, retain

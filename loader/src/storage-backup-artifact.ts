@@ -10,6 +10,8 @@ export interface ColdCopyLayout {
   seaweedImage: string;
   directories: string[];
   files: string[];
+  /** Exact top-level regenerable state; only audited admin state is supported. */
+  excludedDirectories?: string[];
   /** Trusted, fully anchored patterns for dynamic DB/volume filenames. */
   filePatterns?: string[];
   directoryPatterns?: string[];
@@ -117,6 +119,7 @@ function safePath(value: unknown): value is string {
   );
 }
 function secretPath(path: string): boolean {
+  if (path === 'admin/.session_key') return true;
   return path
     .split('/')
     .some((part) =>
@@ -214,8 +217,36 @@ function validatePolicy(policy: StorageBackupArtifactPolicy): void {
     names.some((path) => !safePath(path) || secretPath(path) || EXCLUDED.has(path))
   )
     fail();
-  compile(layout.filePatterns);
-  compile(layout.directoryPatterns);
+  const excluded = layout.excludedDirectories ?? [];
+  // This is deliberately not an arbitrary ignore list. Only the pinned mini
+  // admin state is known to regenerate without losing master/filer/volume data.
+  if (
+    new Set(excluded).size !== excluded.length ||
+    excluded.some((path) => path !== 'admin') ||
+    names.some((path) => excluded.some((directory) => under(path, directory)))
+  )
+    fail();
+  const patterns = [...(layout.filePatterns ?? []), ...(layout.directoryPatterns ?? [])];
+  compile(patterns);
+  if (excluded.length) {
+    // Prove disjointness without trying to solve arbitrary regex intersections.
+    // With exclusions, dynamic patterns must start with a required copied
+    // top-level directory, or a numeric top-level volume filename. Alternation
+    // is disallowed here so a later branch cannot bypass that fixed prefix.
+    const roots = layout.directories.filter((path) => /^[a-zA-Z0-9_-]+$/.test(path));
+    if (
+      patterns.some(
+        (pattern) =>
+          pattern.includes('|') ||
+          (!roots.some((path) => pattern.startsWith(`^${path}/`)) &&
+            !pattern.startsWith('^[0-9]+\\.'))
+      )
+    )
+      fail();
+  }
+}
+function under(path: string, directory: string): boolean {
+  return path === directory || path.startsWith(`${directory}/`);
 }
 function matches(path: string, names: string[], patterns: RegExp[]): boolean {
   return names.includes(path) || patterns.some((pattern) => pattern.test(path));
@@ -230,7 +261,19 @@ async function inventory(
   const directories = compile(policy.layout.directoryPatterns);
   const entries = (await walk(root)).map((entry) => {
     let action: 'copy' | 'exclude' | 'reject' = 'reject';
-    if (entry.type === 'file' && EXCLUDED.has(entry.path)) action = 'exclude';
+    const excluded = (policy.layout.excludedDirectories ?? []).some((path) =>
+      under(entry.path, path)
+    );
+    if (excluded) {
+      // Inventory only names/types. Never open excluded files, even for hashes.
+      // A policy may not both exclude and copy an observed path.
+      if (
+        files.some((pattern) => pattern.test(entry.path)) ||
+        directories.some((pattern) => pattern.test(entry.path))
+      )
+        fail();
+      if (entry.type === 'file' || entry.type === 'directory') action = 'exclude';
+    } else if (entry.type === 'file' && EXCLUDED.has(entry.path)) action = 'exclude';
     else if (
       !secretPath(entry.path) &&
       ((entry.type === 'file' && matches(entry.path, policy.layout.files, files)) ||
