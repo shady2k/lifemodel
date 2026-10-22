@@ -69,7 +69,9 @@ it('stays alive and unready with Postgres refusing connections, then becomes rea
     'x-storage-sha256': sha256(bytes),
   });
   expect(denied.status).toBe(503);
-  expect(['access_unavailable', 'upload_owner_unavailable']).toContain(denied.json.error.code);
+  expect(['access_unavailable', 'upload_owner_unavailable', 'maintenance_unavailable']).toContain(
+    denied.json.error.code
+  );
   expect(h.backend.requests.filter((r) => r.method === 'PUT')).toHaveLength(0);
 
   h.sqlProxy.restore();

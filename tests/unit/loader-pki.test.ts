@@ -1,9 +1,10 @@
 import 'reflect-metadata';
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { X509Certificate } from 'node:crypto';
+import { createHash, createPrivateKey, X509Certificate } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import * as x509 from '@peculiar/x509';
 import { createPkiManager, instanceHosts, STORAGE_MODULE_TLS_HOSTS } from '../../loader/src/pki.js';
 import { createNodeFileSystem } from '../../loader/src/fs.js';
@@ -69,6 +70,82 @@ function setup() {
     clock,
   };
 }
+// Keep these assertions independent of the lifecycle validator. Node's
+// X509Certificate.verify checks signatures, not RFC 5280's strict extensions.
+function expectStrictKeyIdentifiers(caPem: string, leafPem: string) {
+  const ca = new x509.X509Certificate(caPem);
+  const leaf = new x509.X509Certificate(leafPem);
+  const constraints = ca.getExtension(x509.BasicConstraintsExtension);
+  const caUsage = ca.getExtension(x509.KeyUsagesExtension);
+  const leafUsage = leaf.getExtension(x509.KeyUsagesExtension);
+  const eku = leaf.getExtension(x509.ExtendedKeyUsageExtension);
+  expect(constraints?.ca).toBe(true);
+  expect(constraints?.pathLength).toBe(0);
+  expect(constraints?.critical).toBe(true);
+  expect(caUsage?.usages).toBe(x509.KeyUsageFlags.keyCertSign | x509.KeyUsageFlags.cRLSign);
+  expect(caUsage?.critical).toBe(true);
+  expect(leafUsage?.usages).toBe(x509.KeyUsageFlags.digitalSignature);
+  expect(leafUsage?.critical).toBe(true);
+  expect(eku?.usages).toEqual(['1.3.6.1.5.5.7.3.1']);
+  expect(eku?.critical).toBe(true);
+  const caSki = ca.getExtension(x509.SubjectKeyIdentifierExtension);
+  const leafSki = leaf.getExtension(x509.SubjectKeyIdentifierExtension);
+  const leafAki = leaf.getExtension(x509.AuthorityKeyIdentifierExtension);
+  expect(caSki?.keyId).toMatch(/^(?:[0-9a-f]{2})+$/i);
+  expect(caSki?.critical).toBe(false);
+  expect(leafSki?.keyId).toMatch(/^(?:[0-9a-f]{2})+$/i);
+  expect(leafSki?.critical).toBe(false);
+  expect(leafAki?.keyId).toBe(caSki?.keyId);
+  expect(leafAki?.critical).toBe(false);
+  const nodeCa = new X509Certificate(caPem);
+  const nodeLeaf = new X509Certificate(leafPem);
+  expect(nodeCa.ca).toBe(true);
+  expect(nodeCa.verify(nodeCa.publicKey)).toBe(true);
+  expect(nodeLeaf.ca).toBe(false);
+  expect(nodeLeaf.issuer).toBe(nodeCa.subject);
+  expect(nodeLeaf.verify(nodeCa.publicKey)).toBe(true);
+}
+
+async function resignCertificate(
+  pem: string,
+  signingKeyPem: string,
+  extensions: (current: x509.Extension[]) => x509.Extension[]
+): Promise<string> {
+  const original = new x509.X509Certificate(pem);
+  const signingKey = await crypto.subtle.importKey(
+    'pkcs8',
+    createPrivateKey(signingKeyPem).export({ format: 'der', type: 'pkcs8' }),
+    { name: 'ECDSA', namedCurve: 'P-256', hash: 'SHA-256' },
+    true,
+    ['sign']
+  );
+  const replacement = await x509.X509CertificateGenerator.create({
+    serialNumber: original.serialNumber,
+    subject: original.subject,
+    issuer: original.issuer,
+    notBefore: original.notBefore,
+    notAfter: original.notAfter,
+    publicKey: original.publicKey,
+    signingKey,
+    signingAlgorithm: { name: 'ECDSA', hash: 'SHA-256' },
+    extensions: extensions(original.extensions),
+  });
+  return replacement.toString('pem');
+}
+
+async function replaceCa(s: ReturnType<typeof setup>, cert: string) {
+  const fs = createNodeFileSystem();
+  await fs.writeFileAtomic(join(s.root, 'pki/ca.crt'), cert, 0o644);
+  await fs.writeFileAtomic(
+    join(s.root, 'instance.json'),
+    JSON.stringify({
+      version: 1,
+      fingerprint: createHash('sha256').update(new X509Certificate(cert).raw).digest('hex'),
+    }) + '\n',
+    0o600
+  );
+}
+
 describe('loader instance PKI', () => {
   it('creates and reads back CA before identity and publishes the leaf before ready', async () => {
     const s = setup();
@@ -231,6 +308,141 @@ describe('loader instance PKI', () => {
     expect(ca.ca).toBe(true);
     expect(ca.ca).toBe(true);
     expect(ca.raw.length).toBeGreaterThan(0);
+  });
+  it('issues edge and storage leaves with the strict RFC 5280 key identifiers', async () => {
+    const s = setup();
+    await s.manager.bootstrap();
+    const caPem = await s.manager.caPem();
+    // RFC profile checks always run, including when the isolated image has no
+    // openssl executable. Node's signature verification alone is insufficient.
+    const openssl = spawnSync('openssl', ['version'], { timeout: 5_000 });
+    if (!openssl.error) expect(openssl.status).toBe(0);
+    else expect((openssl.error as NodeJS.ErrnoException).code).toBe('ENOENT');
+    for (const [name, secret, host] of [
+      ['edge', s.secret, instanceHosts('home')[0]],
+      ['storage', s.serviceSecret, STORAGE_MODULE_TLS_HOSTS[0]],
+    ] as const) {
+      expectStrictKeyIdentifiers(caPem, secret.cert!);
+      if (!openssl.error) {
+        const leafPath = join(s.root, `${name}.crt`);
+        writeFileSync(leafPath, secret.cert!);
+        const verified = spawnSync(
+          'openssl',
+          [
+            'verify',
+            '-x509_strict',
+            '-purpose',
+            'sslserver',
+            '-verify_hostname',
+            host!,
+            '-attime',
+            String(Math.floor(s.clock.now() / 1000)),
+            '-CAfile',
+            join(s.root, 'pki/ca.crt'),
+            leafPath,
+          ],
+          { encoding: 'utf8', timeout: 5_000 }
+        );
+        expect(verified.error).toBeUndefined();
+        expect(verified.status, verified.stderr).toBe(0);
+      }
+    }
+    const before = [s.secret.cert, s.serviceSecret.cert];
+    s.events.length = 0;
+    await s.manager.bootstrap();
+    expect([s.secret.cert, s.serviceSecret.cert]).toEqual(before);
+    expect(s.events).toEqual(['configmap']);
+  });
+  it.each([true, false])(
+    'fails closed for an installed CA without SKI (identity present: %s)',
+    async (identityPresent) => {
+      const s = setup();
+      await s.manager.bootstrap();
+      const fs = createNodeFileSystem();
+      const key = await fs.readFile(join(s.root, 'pki/ca.key'));
+      const caWithoutSki = await resignCertificate(await s.manager.caPem(), key, (extensions) =>
+        extensions.filter((extension) => extension.type !== '2.5.29.14')
+      );
+      await replaceCa(s, caWithoutSki);
+      if (!identityPresent)
+        await import('node:fs/promises').then((m) => m.unlink(join(s.root, 'instance.json')));
+      const identity = identityPresent ? await fs.readFile(join(s.root, 'instance.json')) : null;
+      const leaves = [s.secret.cert, s.serviceSecret.cert];
+      s.events.length = 0;
+      await expect(s.manager.bootstrap()).rejects.toThrow(/required profile/);
+      await expect(s.manager.caPem()).rejects.toThrow(/required profile/);
+      expect((await s.manager.report()).ca).toBe('invalid');
+      expect(await fs.readFile(join(s.root, 'pki/ca.crt'))).toBe(caWithoutSki);
+      expect(await fs.readFile(join(s.root, 'pki/ca.key'))).toBe(key);
+      expect(await fs.exists(join(s.root, 'instance.json'))).toBe(identityPresent);
+      if (identityPresent) expect(await fs.readFile(join(s.root, 'instance.json'))).toBe(identity);
+      expect([s.secret.cert, s.serviceSecret.cert]).toEqual(leaves);
+      expect(s.events).toEqual([]);
+    }
+  );
+  it.each(['missing-AKI', 'missing-SKI', 'legacy-no-identifiers', 'wrong-AKI'] as const)(
+    'reissues legacy or invalid edge and storage leaves under the same CA (%s)',
+    async (profile) => {
+      const s = setup();
+      await s.manager.bootstrap();
+      const fs = createNodeFileSystem();
+      const caPem = await s.manager.caPem();
+      const key = await fs.readFile(join(s.root, 'pki/ca.key'));
+      const fingerprint = (await s.manager.report()).fingerprint;
+      for (const secret of [s.secret, s.serviceSecret]) {
+        secret.cert = await resignCertificate(secret.cert!, key, (extensions) =>
+          profile === 'wrong-AKI'
+            ? extensions.map((extension) =>
+                extension.type === '2.5.29.35'
+                  ? new x509.AuthorityKeyIdentifierExtension('ab'.repeat(20))
+                  : extension
+              )
+            : extensions.filter((extension) =>
+                profile === 'legacy-no-identifiers'
+                  ? !['2.5.29.14', '2.5.29.35'].includes(extension.type)
+                  : extension.type !== (profile === 'missing-AKI' ? '2.5.29.35' : '2.5.29.14')
+              )
+        );
+        // Still cryptographically signed by this CA; only the profile is bad.
+        expect(new X509Certificate(secret.cert).verify(new X509Certificate(caPem).publicKey)).toBe(
+          true
+        );
+      }
+      const before = [s.secret.cert, s.serviceSecret.cert];
+      expect(await s.manager.report()).toMatchObject({ leaf: 'invalid', serviceLeaf: 'invalid' });
+      s.events.length = 0;
+      await s.manager.bootstrap();
+      expect(s.events).toEqual(['leaf', 'configmap', 'service-leaf']);
+      expect(s.secret.cert).not.toBe(before[0]);
+      expect(s.serviceSecret.cert).not.toBe(before[1]);
+      expect((await s.manager.report()).fingerprint).toBe(fingerprint);
+      expect(await s.manager.caPem()).toBe(caPem);
+      expectStrictKeyIdentifiers(caPem, s.secret.cert!);
+      expectStrictKeyIdentifiers(caPem, s.serviceSecret.cert!);
+    }
+  );
+  it('copies the actual issuer SKI into AKI rather than deriving another identifier', async () => {
+    const s = setup();
+    await s.manager.bootstrap();
+    const fs = createNodeFileSystem();
+    const key = await fs.readFile(join(s.root, 'pki/ca.key'));
+    const customSki = '12'.repeat(20);
+    const caPem = await resignCertificate(await s.manager.caPem(), key, (extensions) =>
+      extensions.map((extension) =>
+        extension.type === '2.5.29.14'
+          ? new x509.SubjectKeyIdentifierExtension(customSki)
+          : extension
+      )
+    );
+    await replaceCa(s, caPem);
+    await s.manager.bootstrap();
+    for (const secret of [s.secret, s.serviceSecret]) {
+      expectStrictKeyIdentifiers(caPem, secret.cert!);
+      expect(
+        new x509.X509Certificate(secret.cert!).getExtension(x509.AuthorityKeyIdentifierExtension)
+          ?.keyId
+      ).toBe(customSki);
+    }
   });
   it.each(['PARTIAL', 'wrong'])(
     'fails closed for a corrupt or wrong CA key while a valid leaf exists (%s)',

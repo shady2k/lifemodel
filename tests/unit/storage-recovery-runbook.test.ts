@@ -1,0 +1,290 @@
+/** Operator snippets are reviewed instructions, not a cluster simulation.
+ * These contract checks protect ordering and fail-closed guards in the shipped walk.
+ */
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { describe, expect, it } from 'vitest';
+
+const runbook = readFileSync('deploy/platform/storage-recovery.md', 'utf8');
+function section(start: string, end: string): string {
+  const from = runbook.indexOf(start);
+  expect(from, start).toBeGreaterThanOrEqual(0);
+  const to = runbook.indexOf(end, from + start.length);
+  expect(to, end).toBeGreaterThan(from);
+  return runbook.slice(from, to);
+}
+function ordered(text: string, ...steps: string[]): void {
+  let previous = -1;
+  for (const step of steps) {
+    const at = text.indexOf(step, previous + 1);
+    expect(at, step).toBeGreaterThan(previous);
+    previous = at;
+  }
+}
+const guard = section('cat >"$WORK/cold-guard.py"', '# EndpointSlice membership');
+const endpoints = section('cat >"$WORK/storage-endpoints.py"', 'Use the following Python block');
+const helpers = section(`python3 - <<'PY' 2>"$WORK/helpers.err"`, 'If a Job/image cannot run');
+const recovery = section(`python3 - <<'PY' 2>"$WORK/recovery-job.err"`, 'RECOVERY_POD=$(');
+
+describe('storage recovery runbook safety contracts', () => {
+  it('uses the canonical live unavailable view in the cut and walk accounting', () => {
+    const walk = readFileSync('deploy/platform/storage-recovery-walk.py', 'utf8');
+    expect(runbook).toContain(
+      "'unavailableVersions',(SELECT count(*) FROM storage.unavailable_versions)"
+    );
+    expect(walk).toContain("'unavailable',(SELECT count(*) FROM storage.unavailable_versions)");
+  });
+  it('requires fresh forwards between module restart and the next walk request', () => {
+    const walk = section(
+      'kubectl -n lifemodel-system rollout restart deployment/storage-module',
+      '# Perform source cold backup above'
+    );
+    ordered(
+      walk,
+      'rollout status deployment/storage-module',
+      'Restart all module forwards now',
+      'storage-recovery-walk.py capture-source'
+    );
+    expect(runbook).toContain('binds one Pod, not the Service');
+    expect(runbook).toContain('after every module or backend restart');
+  });
+
+  it.each(['empty', 'foreign', 'serving'] as const)(
+    'executes the embedded EndpointSlice check against %s fixture JSON',
+    (fixture) => {
+      const script = endpoints.split("<<'PY'\n")[1]!.split('\nPY')[0]!;
+      const deployment = { metadata: { uid: 'deployment' } };
+      const replicasets = {
+        items: [
+          {
+            metadata: {
+              uid: 'replicaset',
+              ownerReferences: [{ uid: 'deployment', kind: 'Deployment' }],
+            },
+          },
+        ],
+      };
+      const pods = {
+        items: [
+          {
+            metadata: {
+              uid: 'serving-pod',
+              ownerReferences: [{ uid: 'replicaset', kind: 'ReplicaSet' }],
+            },
+            status: { conditions: [{ type: 'Ready', status: 'True' }] },
+          },
+        ],
+      };
+      const fixtures = {
+        deployment,
+        replicasets,
+        pods,
+        endpointslices: {
+          items: [
+            {
+              endpoints:
+                fixture === 'empty'
+                  ? null
+                  : [
+                      {
+                        targetRef: {
+                          kind: 'Pod',
+                          uid: fixture === 'foreign' ? 'foreign-pod' : 'serving-pod',
+                        },
+                        conditions: { ready: true },
+                      },
+                    ],
+            },
+          ],
+        },
+      };
+      // Execute the shipped Python verbatim. Only the external kubectl boundary
+      // returns fixture JSON; parsing, ownership checks and loop all run for real.
+      const bootstrap = `import json,subprocess,sys,types
+fixtures=json.loads(sys.argv[1])
+subprocess.run=lambda args,**kwargs: types.SimpleNamespace(returncode=0,stdout=json.dumps(fixtures[args[4]]))
+sys.argv=['storage-endpoints.py',sys.argv[2]]
+exec(compile(sys.stdin.read(),'storage-endpoints.py','exec'))`;
+      const result = spawnSync(
+        'python3',
+        ['-c', bootstrap, JSON.stringify(fixtures), fixture === 'empty' ? 'empty' : 'serving'],
+        {
+          input: script,
+          encoding: 'utf8',
+          timeout: 5000,
+        }
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(fixture === 'foreign' ? 1 : 0);
+      if (fixture === 'foreign') expect(result.stderr).toContain('unexpected_storage_endpoint');
+      else expect(result.stderr).toBe('');
+    }
+  );
+
+  it('removes SQL and fs helpers before restarting either backend', () => {
+    const source = section(
+      'Restart source while hold remains',
+      'Empty destination, verify before import'
+    );
+    ordered(
+      source,
+      'delete job storage-recovery-sql',
+      'record sql-remove',
+      'delete job storage-recovery-fs',
+      'scale statefulset/seaweedfs --replicas=1'
+    );
+    const destination = section('After promotion, release the fs helper', 'record recovery-job');
+    ordered(
+      destination,
+      'delete job storage-recovery-sql',
+      'record import-sql-release',
+      'delete job storage-recovery-fs',
+      'scale statefulset/seaweedfs --replicas=1',
+      'record import-backend-ready',
+      "job={'apiVersion'"
+    );
+  });
+  it('uses the tested pinned policy and restarting forwards without supplying an attestation', () => {
+    expect(runbook).toContain('deploy/platform/storage-seaweed-layout.json');
+    expect(runbook).toContain("p['attestation']=json.loads");
+    expect(runbook).toContain('each closed psql connection');
+    ordered(
+      runbook.slice(runbook.indexOf('Start this forward')),
+      'while true; do',
+      'kubectl -n lifemodel-system port-forward',
+      'sleep 1',
+      'done'
+    );
+  });
+  it('copies destination policy into the fresh helper before artifact verification', () => {
+    const destination = section('Stage the trusted archive', 'record trusted-manifest-hash');
+    ordered(
+      destination,
+      'cat >/work/policy.json',
+      'record destination-policy-copy',
+      'test "$rc" = 0 || return 1',
+      'lifemodel-storage-recovery verify /work/artifact /work/policy.json'
+    );
+    expect(destination).toContain('<"$WORK/policy.json"');
+  });
+  it('observes the suspended parent idle before suspending children, then checks all reconcilers', () => {
+    expect(guard).toContain("obj['spec'].get('suspend') is not True");
+    expect(guard).toContain("c['type']=='Reconciling' and c['status']!='False'");
+    expect(guard).toContain("obj['metadata']['generation']");
+    expect(guard).toContain('json.dumps(status,sort_keys=True)');
+    expect(guard).toContain('current==previous');
+    expect(guard).toContain("raise RuntimeError('flux_not_quiescent')");
+    ordered(
+      helpers,
+      "with (w/'prior.json').open('x')",
+      "for names in [['platform'],['platform-a','platform-d']]",
+      "'patch','kustomization'",
+      "guard['await_flux'](names)",
+      "guard['await_flux'](guard['FLUX'])",
+      "'scale','statefulset/seaweedfs','--replicas=0'",
+      "'wait','--for=delete','pod'",
+      "guard['cold_guard']()",
+      "job('storage-recovery-fs'",
+      "guard['cold_guard'](get('job','storage-recovery-fs'))"
+    );
+  });
+
+  it('refuses every unexpected PVC user and permits only the exact single helper owner UID', () => {
+    expect(guard).toContain("'get','pods','-o','json'");
+    expect(guard).toContain("get('claimName')==CLAIM");
+    expect(guard).toContain("owners[0]['uid']==allowed_job['metadata']['uid']");
+    expect(guard).toContain("not pod['metadata'].get('deletionTimestamp')");
+    expect(guard).toContain("raise RuntimeError('pvc_has_unexpected_user')");
+    expect(guard).toContain('allowed_count!=1');
+    expect(guard).not.toContain("get('phase')");
+    ordered(
+      guard,
+      'def cold_guard(',
+      'await_flux(FLUX)',
+      "get('statefulset','seaweedfs')['spec'].get('replicas',1)!=0",
+      'no_pvc_users(allowed_job)',
+      'flux_observation(name)'
+    );
+  });
+
+  it('rechecks the cold cut around backup and immediately before destructive promotion', () => {
+    ordered(
+      runbook,
+      'record backup-cold-guard',
+      'lifemodel-storage-recovery sanitize',
+      'lifemodel-storage-recovery build',
+      'record backup-cut-recheck',
+      'fs tar -C /work/artifact'
+    );
+    const promotion = section('record stage-cold-guard', 'All renames above remain');
+    ordered(
+      promotion,
+      'lifemodel-storage-recovery stage',
+      'python3 "$WORK/cold-guard.py" fs',
+      'record promote-cold-guard',
+      'test "$rc" = 0 || return 1',
+      'fs node -e'
+    );
+    const remount = section(`python3 - <<'PY' 2>"$WORK/remount.err"`, 'record writable-remount');
+    ordered(
+      remount,
+      "'delete','job','storage-recovery-fs','--cascade=foreground'",
+      "guard['cold_guard']()",
+      "k('create'"
+    );
+  });
+
+  it('gives the offline Job no Service-selected labels, listener ports, probes or inbound route', () => {
+    expect(recovery).toContain(
+      "template['metadata']={'labels':{'lifemodel-recovery':'storage-recovery-module'}}"
+    );
+    expect(recovery).toContain("container.pop('ports',None)");
+    expect(recovery).toContain("container['command']=['sleep','3600']");
+    for (const probe of ['readinessProbe', 'livenessProbe', 'startupProbe']) {
+      expect(recovery).toContain(`container.pop('${probe}',None)`);
+    }
+    expect(recovery).toContain(
+      "policy('storage-recovery-module-egress','lifemodel-system',selector,ingress=[],egress=egress)"
+    );
+    expect(recovery).toContain(
+      "ingress=[{'from':[peer('lifemodel-system',selector['matchLabels'])],'ports':[tcp(port)]}]"
+    );
+    expect(recovery).toContain("('lifemodel-state',{'cnpg.io/cluster':'lifemodel'},5432)");
+    expect(recovery).not.toContain("'port':6443");
+    expect(recovery).not.toContain("'app.kubernetes.io/name':'storage-module'");
+  });
+
+  it('removes and waits for the offline Job before starting the real module and API checks', () => {
+    const release = section('record release-restore', 'For degraded release');
+    ordered(
+      release,
+      'delete job storage-recovery-module --cascade=foreground --wait=true',
+      'record recovery-remove',
+      'test "$rc" = 0 || return 1',
+      'wait --for=delete pod -l job-name=storage-recovery-module',
+      'record recovery-pods-removed',
+      'test "$rc" = 0 || return 1',
+      'python3 "$WORK/storage-endpoints.py" empty',
+      'scale deploy/storage-module --replicas=1',
+      'rollout status deploy/storage-module',
+      'python3 "$WORK/storage-endpoints.py" serving',
+      'record serving-endpoints'
+    );
+    expect(recovery).toContain('python3 "$WORK/storage-endpoints.py" empty');
+  });
+
+  it('checks EndpointSlices against ready Pods owned by the actual Deployment, not labels alone', () => {
+    expect(endpoints).toContain(
+      "get('endpointslices','-l','kubernetes.io/service-name=storage-module')"
+    );
+    expect(endpoints).toContain(
+      "o['uid']==deployment['metadata']['uid'] and o['kind']=='Deployment'"
+    );
+    expect(endpoints).toContain("o['uid'] in allowed_rs and o['kind']=='ReplicaSet'");
+    expect(endpoints).toContain("if mode=='empty': return False");
+    expect(endpoints).toContain("target.get('uid') not in allowed");
+    expect(endpoints).toContain("raise RuntimeError('unexpected_storage_endpoint')");
+    expect(endpoints).toContain("get('ready') is not True");
+    expect(endpoints).toContain('bool(targets) and targets==allowed');
+  });
+});

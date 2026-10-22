@@ -176,7 +176,7 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
   }
   async function object(space: string, id: string, markedOnly = false) {
     const result = await query<ObjectRow>(
-      `SELECT o.*,a.s3_key,v.receipt FROM storage.objects o JOIN storage.object_versions v ON v.object_id=o.id JOIN storage.upload_attempts a ON a.id=v.attempt_id WHERE o.space_id=$1 AND o.id::text=$2 AND ($3::boolean=false OR o.mark IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=o.id)`,
+      `SELECT o.*,a.s3_key,v.receipt FROM storage.objects o JOIN storage.object_versions v ON v.object_id=o.id JOIN storage.upload_attempts a ON a.id=v.attempt_id WHERE o.space_id=$1 AND o.id::text=$2 AND ($3::boolean=false OR o.mark IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=o.id) AND NOT EXISTS(SELECT 1 FROM storage.version_availability av WHERE av.object_id=o.id AND av.status<>'available')`,
       [space, id, markedOnly]
     );
     const row = result.rows[0];
@@ -409,7 +409,7 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
           : '0';
         const rows = (
           await query<PageRow>(
-            'SELECT id,name,size::float8 AS size,sha256,mark,sequence::text FROM storage.objects o WHERE space_id=$1 AND sequence>$2 AND ($4::boolean=false OR mark IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=o.id) ORDER BY sequence LIMIT $3',
+            `SELECT id,name,size::float8 AS size,sha256,mark,sequence::text FROM storage.objects o WHERE space_id=$1 AND sequence>$2 AND ($4::boolean=false OR mark IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=o.id) AND NOT EXISTS(SELECT 1 FROM storage.version_availability av WHERE av.object_id=o.id AND av.status<>'available') ORDER BY sequence LIMIT $3`,
             [space, after, limit, markedOnly]
           )
         ).rows;

@@ -2,7 +2,7 @@
  * The storage module's Postgres catalog (ADR-015 S-D4, S-D7).
  *
  * Readiness answers whether the module can use its own catalog right now: the
- * one `storage.spaces` read proves the connection, the login and the schema in
+ * catalog read proves the connection, the login and the recovery tables in
  * one statement. An unreachable server, a refused login and a missing schema
  * are three different repairs, so each keeps its own cause in the module's log;
  * the status body carries the one reason code `catalog_unavailable`.
@@ -14,11 +14,15 @@
 import { Client } from 'pg';
 
 /**
- * The one statement readiness runs. It must read a catalog table rather than
- * the schema: an existing schema with no table is not a usable catalog, and an
- * empty table is (S-D7: never "empty", only unavailable).
+ * The one statement readiness runs. Resolve recovery tables even when empty:
+ * a spaces-only read hides a missing recovery migration until maintenance fails.
+ * Empty tables are usable; missing tables are not (S-D7).
  */
-export const STORAGE_CATALOG_READ = 'SELECT 1 FROM storage.spaces LIMIT 1';
+export const STORAGE_CATALOG_READ = `SELECT
+  (SELECT 1 FROM storage.spaces LIMIT 1),
+  (SELECT 1 FROM storage.maintenance LIMIT 1),
+  (SELECT 1 FROM storage.version_availability LIMIT 1),
+  (SELECT 1 FROM storage.restore_progress LIMIT 1)`;
 
 /** The login the module uses until lifemodel-2t5 gives it a leased identity. */
 export const STORAGE_DATABASE_TARGET =

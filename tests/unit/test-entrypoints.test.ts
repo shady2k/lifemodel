@@ -37,6 +37,13 @@ const manifest = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')
 const scripts = manifest.scripts;
 
 describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
+  it('provisions Python inside both disposable boundaries for executed recovery snippets', () => {
+    const launcher = readFileSync(join(repoRoot, 'scripts/test-isolated.mjs'), 'utf8');
+    const machine = readFileSync(join(repoRoot, 'docker/test/bootstrap-orb.sh'), 'utf8');
+    expect(launcher).toContain('git ca-certificates curl python3');
+    expect(launcher).toContain('recipe-v4-python');
+    expect(machine).toContain('python3 uidmap');
+  });
   it('npm test runs the whole suite through the isolated launcher', () => {
     expect(scripts.test).toBe(`${LAUNCHER} test`);
   });

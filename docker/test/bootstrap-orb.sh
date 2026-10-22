@@ -52,7 +52,7 @@ stage_root() {
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     apt-get install -y --no-install-recommends \
-        uidmap fuse-overlayfs slirp4netns iptables iproute2 xz-utils git ca-certificates
+        python3 uidmap fuse-overlayfs slirp4netns iptables iproute2 xz-utils git ca-certificates
 
     for f in /etc/subuid /etc/subgid; do
         grep -q "^${USER_NAME}:" "$f" \

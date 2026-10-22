@@ -1,5 +1,10 @@
 /** Module-owned retention policy, durable warning batches and recoverable byte removal. */
 import { randomUUID } from 'node:crypto';
+import {
+  storageMaintenanceFence,
+  storageDeletionReady,
+  STORAGE_READ_LEASE_MS,
+} from './storage-maintenance.js';
 import { Pool, type PoolClient, type QueryResultRow } from 'pg';
 import { StorageAccessError } from './storage-access-error.js';
 import type { StorageObjectS3 } from './storage-object-s3.js';
@@ -34,7 +39,7 @@ export interface StorageRetention {
 export const STORAGE_RETENTION_BOUNDS = {
   batch: 100,
   orphanGraceMs: 172_800_000,
-  readLeaseMs: 30_000,
+  readLeaseMs: STORAGE_READ_LEASE_MS,
   intervalMs: 60_000,
 } as const;
 const DAY = 86_400_000;
@@ -83,7 +88,7 @@ export function createStorageRetention(options: Options): StorageRetention {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let running: Promise<void> | undefined;
   let sweepCursor: string | undefined;
-  async function tx<T>(run: (client: PoolClient) => Promise<T>): Promise<T> {
+  async function tx<T>(run: (client: PoolClient) => Promise<T>, write = true): Promise<T> {
     const client = await pool.connect().catch(() => fail(503, 'catalog_unavailable'));
     let broken = false;
     const onError = () => {
@@ -92,6 +97,7 @@ export function createStorageRetention(options: Options): StorageRetention {
     client.on('error', onError);
     try {
       await client.query('BEGIN');
+      await storageMaintenanceFence(client, write);
       const result = await run(client);
       if (broken) fail(503, 'catalog_unavailable');
       await client.query('COMMIT');
@@ -236,6 +242,7 @@ export function createStorageRetention(options: Options): StorageRetention {
   async function deleteCandidate(candidate: Candidate, settings: RetentionSettings) {
     await withSessionLock(candidate.object_id, 7, async (signal) => {
       const ready = await tx(async (client) => {
+        if (!(await storageDeletionReady(client, now()))) return false;
         // Policy is the shared pin/delete lock. No network I/O holds it.
         const policy = (
           await client.query<{
@@ -416,6 +423,7 @@ export function createStorageRetention(options: Options): StorageRetention {
       try {
         await withKey(entry.s3_key, async (signal) => {
           const safe = await tx(async (client) => {
+            if (!(await storageDeletionReady(client, now()))) return false;
             const row = await client.query(
               'SELECT 1 FROM storage.orphan_gc WHERE s3_key=$1 AND NOT deleted',
               [entry.s3_key]
@@ -570,9 +578,14 @@ export function createStorageRetention(options: Options): StorageRetention {
     }
   }
   function runOnce() {
-    running ??= tick().finally(() => {
-      running = undefined;
-    });
+    running ??= tick()
+      .catch((error: unknown) => {
+        if (error instanceof StorageAccessError && error.code === 'maintenance_unavailable') return;
+        throw error;
+      })
+      .finally(() => {
+        running = undefined;
+      });
     return running;
   }
   function schedule() {
@@ -589,7 +602,7 @@ export function createStorageRetention(options: Options): StorageRetention {
     }, STORAGE_RETENTION_BOUNDS.intervalMs);
     timer.unref();
   }
-  return {
+  const api: StorageRetention = {
     snapshot: async (client, space, terminalAt = now()) => {
       const setting = await options.settings.read();
       if (!setting) return;
@@ -780,7 +793,7 @@ export function createStorageRetention(options: Options): StorageRetention {
           await client.query(
             'SELECT p.space_id,c.plan_id,r.effect_key,l.id,o.s3_key,t.object_id,rl.id FROM storage.retention_policies p,storage.deletion_candidates c,storage.deletion_plans d,storage.retention_receipts r,storage.instance_ledger l,storage.orphan_gc o,storage.retention_tombstones t,storage.read_leases rl,storage.attempt_gc ag,storage.reclaim_receipts rr WHERE false'
           );
-        });
+        }, false);
         return !signal.aborted;
       } catch {
         return false;
@@ -793,4 +806,5 @@ export function createStorageRetention(options: Options): StorageRetention {
       await pool.end();
     },
   };
+  return api;
 }

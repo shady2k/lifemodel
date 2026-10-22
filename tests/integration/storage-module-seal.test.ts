@@ -621,11 +621,14 @@ describe('module-owned allocation, verified binding and marked core reads', () =
     release.resolve();
     const result = await reading;
     expect(result.complete).toBe(false);
-    expect(result.bytes).toEqual(bytes.subarray(0, 4 * 1024 * 1024));
+    expect(result.bytes.equals(bytes.subarray(0, 4 * 1024 * 1024))).toBe(true);
     identity.deadPods.clear();
-    expect(
-      (await call('read', 'GET', `/spaces/${spaces.a}/objects/${uploaded.json.id}`)).body
-    ).toEqual(bytes);
+    const completeRead = await call(
+      'read',
+      'GET',
+      `/spaces/${spaces.a}/objects/${uploaded.json.id}`
+    );
+    expect(completeRead.body.equals(bytes)).toBe(true);
   }, 30_000);
   it('lets core read only marks while running, denies unmarked bytes and rejects stale seal revisions', async () => {
     await prepare();

@@ -2,6 +2,7 @@
  * it can expose any retired attempt. Reservation bytes remain held until DELETE
  * is confirmed. Durable boot liveness, not the reservation lease, protects PUTs. */
 import { randomUUID } from 'node:crypto';
+import { storageDeletionReady } from './storage-maintenance.js';
 import type { PoolClient } from 'pg';
 import { StorageAccessError } from './storage-access-error.js';
 import type { StorageUploadOwner } from './storage-upload-owner.js';
@@ -150,8 +151,9 @@ export async function sweepExpiredUploads(options: ExpiredUploadSweepOptions): P
       await options.withKey(attempt.s3_key, async (signal) => {
         // Another sweeper or the orphan worker can finish while this worker waits
         // for the shared key lock. Retirement itself remains a terminal marker.
-        const ready = await options.tx(async (client) =>
-          Boolean(
+        const ready = await options.tx(async (client) => {
+          if (!(await storageDeletionReady(client, options.now()))) return false;
+          return Boolean(
             (
               await client.query(
                 `SELECT 1 FROM storage.attempt_gc g WHERE g.attempt_id=$1 AND NOT g.deleted
@@ -160,8 +162,8 @@ export async function sweepExpiredUploads(options: ExpiredUploadSweepOptions): P
                 [attempt.attempt_id]
               )
             ).rowCount
-          )
-        );
+          );
+        });
         if (!ready) return;
         signal.throwIfAborted();
         await options.s3.delete(

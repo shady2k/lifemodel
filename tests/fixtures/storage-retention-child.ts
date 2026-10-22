@@ -8,6 +8,7 @@ import { createKubernetesStorageIdentity } from '../../loader/src/storage-identi
 import { createCatalog } from '../../loader/src/storage-catalog.js';
 import { createStorageObjects } from '../../loader/src/storage-objects.js';
 import { createStorageUploadOwner } from '../../loader/src/storage-upload-owner.js';
+import { createStorageMaintenance } from '../../loader/src/storage-maintenance.js';
 import { createStorageObjectS3 } from '../../loader/src/storage-object-s3.js';
 import { createStorageSeal } from '../../loader/src/storage-seal.js';
 import { createStorageRetention } from '../../loader/src/storage-retention.js';
@@ -76,7 +77,12 @@ const seal = createStorageSeal({
   logger,
   now: () => now,
 });
+const maintenance = createStorageMaintenance({
+  connectionString: config.connectionString,
+  now: () => now,
+});
 const app = createStorageModule({
+  maintenance,
   bucket: 'task-output',
   access,
   objects,
