@@ -320,6 +320,15 @@ pending plan re-listed from an older cut is suppressed by core's permanent
 Postgres owner-message row if core survived. With fresh core state it is warned
 again, which is safe; this is not whole-instance exactly-once recovery.
 
+Unavailable has one SQL definition, `storage.unavailable_versions`: a
+non-available version with neither an object nor a retention tombstone. Restore
+still probes tombstoned versions for byte diagnostics; legitimately GC-deleted
+bytes do not block clean release, and tombstone read denials remain unchanged.
+Reconcile, clean/degraded release, backup cut and walk accounting use that view.
+A receipt's `checked` counts versions probed by that call, not a durable total;
+an idempotent call after completion reports zero. A single 32-version page
+reports 32, even if the next completed receipt reports zero.
+
 ## Checks, operator walk and limits
 
 These are **phase 2 obligations**, not passing evidence. Proposed new test files

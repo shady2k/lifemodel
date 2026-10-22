@@ -153,7 +153,8 @@ export function createStorageRestoreReconciler(
   ): Promise<StorageRestoreProgress> {
     const row = (
       await client.query<{ cursor: string | null; complete: boolean; unavailable: number }>(
-        'SELECT cursor,complete,unavailable::float8 AS unavailable FROM storage.restore_progress WHERE generation=$1',
+        `SELECT cursor,complete,(SELECT count(*)::float8 FROM storage.unavailable_versions WHERE generation=$1) AS unavailable
+         FROM storage.restore_progress WHERE generation=$1`,
         [generation]
       )
     ).rows[0];
@@ -428,6 +429,8 @@ export function createStorageRestoreReconciler(
           )
         ).rows;
         const results: { objectId: string; status: Availability }[] = [];
+        // Keep byte diagnostics for tombstoned objects too. The canonical
+        // unavailable view excludes those deliberate deletions from release.
         for (const row of rows)
           results.push({ objectId: row.object_id, status: await verify(row, signal) });
         return transaction(client, async () => {
@@ -480,9 +483,8 @@ export function createStorageRestoreReconciler(
             await validate(client);
           }
           await client.query(
-            `UPDATE storage.restore_progress SET cursor=$2,complete=$3,unavailable=(SELECT count(*) FROM storage.version_availability a
-          WHERE a.generation=$1 AND a.status IN ('missing','corrupt') AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=a.object_id)
-            AND NOT EXISTS(SELECT 1 FROM storage.retention_tombstones t WHERE t.object_id=a.object_id)) WHERE generation=$1`,
+            `UPDATE storage.restore_progress SET cursor=$2,complete=$3,
+          unavailable=(SELECT count(*) FROM storage.unavailable_versions WHERE generation=$1) WHERE generation=$1`,
             [generation, cursor, complete]
           );
           return progress(client, generation, rows.length);

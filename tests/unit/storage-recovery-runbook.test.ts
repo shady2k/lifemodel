@@ -1,6 +1,7 @@
 /** Operator snippets are reviewed instructions, not a cluster simulation.
  * These contract checks protect ordering and fail-closed guards in the shipped walk.
  */
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
@@ -26,6 +27,100 @@ const helpers = section(`python3 - <<'PY' 2>"$WORK/helpers.err"`, 'If a Job/imag
 const recovery = section(`python3 - <<'PY' 2>"$WORK/recovery-job.err"`, 'RECOVERY_POD=$(');
 
 describe('storage recovery runbook safety contracts', () => {
+  it('uses the canonical live unavailable view in the cut and walk accounting', () => {
+    const walk = readFileSync('deploy/platform/storage-recovery-walk.py', 'utf8');
+    expect(runbook).toContain(
+      "'unavailableVersions',(SELECT count(*) FROM storage.unavailable_versions)"
+    );
+    expect(walk).toContain("'unavailable',(SELECT count(*) FROM storage.unavailable_versions)");
+  });
+  it('requires fresh forwards between module restart and the next walk request', () => {
+    const walk = section(
+      'kubectl -n lifemodel-system rollout restart deployment/storage-module',
+      '# Perform source cold backup above'
+    );
+    ordered(
+      walk,
+      'rollout status deployment/storage-module',
+      'Restart all module forwards now',
+      'storage-recovery-walk.py capture-source'
+    );
+    expect(runbook).toContain('binds one Pod, not the Service');
+    expect(runbook).toContain('after every module or backend restart');
+  });
+
+  it.each(['empty', 'foreign', 'serving'] as const)(
+    'executes the embedded EndpointSlice check against %s fixture JSON',
+    (fixture) => {
+      const script = endpoints.split("<<'PY'\n")[1]!.split('\nPY')[0]!;
+      const deployment = { metadata: { uid: 'deployment' } };
+      const replicasets = {
+        items: [
+          {
+            metadata: {
+              uid: 'replicaset',
+              ownerReferences: [{ uid: 'deployment', kind: 'Deployment' }],
+            },
+          },
+        ],
+      };
+      const pods = {
+        items: [
+          {
+            metadata: {
+              uid: 'serving-pod',
+              ownerReferences: [{ uid: 'replicaset', kind: 'ReplicaSet' }],
+            },
+            status: { conditions: [{ type: 'Ready', status: 'True' }] },
+          },
+        ],
+      };
+      const fixtures = {
+        deployment,
+        replicasets,
+        pods,
+        endpointslices: {
+          items: [
+            {
+              endpoints:
+                fixture === 'empty'
+                  ? null
+                  : [
+                      {
+                        targetRef: {
+                          kind: 'Pod',
+                          uid: fixture === 'foreign' ? 'foreign-pod' : 'serving-pod',
+                        },
+                        conditions: { ready: true },
+                      },
+                    ],
+            },
+          ],
+        },
+      };
+      // Execute the shipped Python verbatim. Only the external kubectl boundary
+      // returns fixture JSON; parsing, ownership checks and loop all run for real.
+      const bootstrap = `import json,subprocess,sys,types
+fixtures=json.loads(sys.argv[1])
+subprocess.run=lambda args,**kwargs: types.SimpleNamespace(returncode=0,stdout=json.dumps(fixtures[args[4]]))
+sys.argv=['storage-endpoints.py',sys.argv[2]]
+exec(compile(sys.stdin.read(),'storage-endpoints.py','exec'))`;
+      const result = spawnSync(
+        'python3',
+        ['-c', bootstrap, JSON.stringify(fixtures), fixture === 'empty' ? 'empty' : 'serving'],
+        {
+          input: script,
+          encoding: 'utf8',
+          timeout: 5000,
+        }
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(fixture === 'foreign' ? 1 : 0);
+      if (fixture === 'foreign') expect(result.stderr).toContain('unexpected_storage_endpoint');
+      else expect(result.stderr).toBe('');
+    }
+  );
+
   it('removes SQL and fs helpers before restarting either backend', () => {
     const source = section(
       'Restart source while hold remains',

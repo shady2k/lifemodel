@@ -2,7 +2,7 @@
  * operator policy, never from an archive. These helpers do not prove Seaweed history. */
 import { createHash, randomUUID } from 'node:crypto';
 import { constants, type Stats } from 'node:fs';
-import { lstat, mkdir, open, readdir, rename, rm } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, readdir, rename, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 export interface ColdCopyLayout {
@@ -129,7 +129,16 @@ function secretPath(path: string): boolean {
     );
 }
 function privateMode(stat: Stats, directory: boolean): boolean {
-  return (stat.mode & 0o7777) === (directory ? 0o700 : 0o600);
+  const mode = stat.mode & 0o7777;
+  // fsGroup-backed staging and extracted artifacts may inherit setgid. No other
+  // special bits or group/other permissions are allowed, even on directories.
+  return directory ? mode === 0o700 || mode === 0o2700 : mode === 0o600;
+}
+async function createPrivateDirectory(path: string): Promise<void> {
+  await mkdir(path, { mode: 0o700 });
+  // mkdir inherits setgid from its parent regardless of the requested mode.
+  // Only normalize directories we just created; never relax an existing tree.
+  await chmod(path, 0o700);
 }
 function identity(left: Stats, right: Stats): boolean {
   return (
@@ -384,11 +393,11 @@ export async function copySanitizedSeaweedTree(
     )
       fail();
     await checkedRoot(dirname(destinationRoot));
-    await mkdir(destinationRoot, { mode: 0o700 });
+    await createPrivateDirectory(destinationRoot);
     for (const entry of result.entries
       .filter((entry) => entry.type === 'directory' && entry.action === 'copy')
       .sort((a, b) => a.path.split('/').length - b.path.split('/').length))
-      await mkdir(join(destinationRoot, entry.path), { mode: 0o700 });
+      await createPrivateDirectory(join(destinationRoot, entry.path));
     const hashes = new Map<string, { length: number; sha256: string }>();
     for (const entry of result.entries)
       if (entry.type === 'file' && entry.action === 'copy')

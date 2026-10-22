@@ -246,7 +246,7 @@ def sql_snapshot(config, expected):
                   " 'orphanDebtBytes',(SELECT COALESCE(sum(size),0) FROM storage.orphan_gc WHERE NOT deleted),"
                   " 'pendingAttempts',(SELECT count(*) FROM storage.upload_attempts a WHERE a.space_id IN "
                   + scope + ' AND NOT EXISTS(SELECT 1 FROM storage.object_versions v WHERE v.attempt_id=a.id)),'
-                  " 'unavailable',(SELECT count(*) FROM storage.version_availability WHERE status<>'available'));" )
+                  " 'unavailable',(SELECT count(*) FROM storage.unavailable_versions));" )
     result = subprocess.run(['psql', '--no-psqlrc', '--quiet', '--tuples-only', '--no-align',
                              '--set=ON_ERROR_STOP=1', '--command', accounting],
                             capture_output=True, timeout=30, check=False)

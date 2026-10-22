@@ -126,12 +126,14 @@ export function createStorageMaintenance(options: {
       if (row.purpose === 'restore') {
         const progress = (
           await c.query<{ complete: boolean; unavailable: string }>(
-            'SELECT complete,unavailable FROM storage.restore_progress WHERE generation=$1 FOR SHARE',
+            `SELECT complete,(SELECT count(*) FROM storage.unavailable_versions WHERE generation=$1) AS unavailable
+             FROM storage.restore_progress WHERE generation=$1 FOR SHARE`,
             [generation]
           )
         ).rows[0];
-        // Acceptance changes only admission. Availability, marks, receipts and
-        // ledger debt remain intact, including on an idempotent release retry.
+        // Count live availability, not a cached progress total. Acceptance
+        // changes only admission. Availability, marks, receipts and ledger debt
+        // remain intact, including on an idempotent release retry.
         const accepted = degraded ? BigInt(unavailable as number) : 0n;
         if (!progress?.complete || BigInt(progress.unavailable) !== accepted)
           fail('restore_pending', 409);

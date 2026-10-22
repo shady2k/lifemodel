@@ -6,6 +6,7 @@ import {
   STORAGE_READ_LEASE_MS,
   STORAGE_CORE_READ_PROGRESS_MS,
 } from '../../loader/src/storage-maintenance.js';
+import { createStorageRestoreReconciler } from '../../loader/src/storage-restore-reconcile.js';
 import { workerDatabaseUrl } from '../helpers/test-stores.js';
 import {
   createRetentionHarness,
@@ -477,6 +478,91 @@ describe('durable storage backup hold', () => {
 });
 
 describe('restore hold release and transaction-local maintenance safety', () => {
+  it('keeps seal and retention tombstones unreadable after a clean restore release with absent bytes', async () => {
+    const sealSpace = await h.prepare('a');
+    const sealed = await h.upload(sealSpace, 'a');
+    await h.stores.postgres.query('UPDATE storage.objects SET mark=NULL WHERE id=$1', [sealed.id]);
+    const seal = await h.call('control', 'POST', '/seal', {
+      space: sealSpace,
+      effectKey: 'seal-unmarked-restore',
+      expectedRevision: '0',
+      outcome: 'failed',
+    });
+    expect(seal.status, JSON.stringify(seal.json)).toBe(200);
+    expect(seal.json.state).toBe('sealed');
+    const retained = await h.artifact('b');
+    await h.clock(TERMINAL + 90 * DAY);
+    await h.tick();
+    const plans = (await h.pending()).plans;
+    expect(plans).toHaveLength(1);
+    expect((await h.warn(plans[0].id)).status).toBe(200);
+    await h.clock(TERMINAL + 98 * DAY);
+    await h.tick();
+    expect(h.backend.objects.has(sealed.key)).toBe(false);
+    expect(h.backend.objects.has(retained.key)).toBe(false);
+    const sealTombstones = (
+      await h.stores.postgres.query('SELECT object_id FROM storage.object_tombstones')
+    ).rows;
+    expect(sealTombstones).toHaveLength(2);
+    expect(sealTombstones).toEqual(
+      expect.arrayContaining([{ object_id: sealed.id }, { object_id: retained.id }])
+    );
+    // Keep the completed GC catalog intact: retention completion writes both
+    // tombstones. The SQL-only reconcile test covers the retention-only window.
+    expect(
+      (await h.stores.postgres.query('SELECT object_id FROM storage.retention_tombstones')).rows
+    ).toEqual([{ object_id: retained.id }]);
+    const api = maintenance();
+    await begin();
+    const generation = randomUUID();
+    await api.prepareRestore({ generation, artifactSha256: 'e'.repeat(64) });
+    const reconcile = createStorageRestoreReconciler({
+      connectionString: workerDatabaseUrl(),
+      s3: {
+        endpoint: h.backend.endpoint,
+        bucket: h.backend.bucket,
+        custody: { read: async () => h.backend.credentials },
+      },
+    });
+    try {
+      await reconcile.begin(generation);
+      expect(await reconcile.reconcile(generation)).toMatchObject({
+        complete: true,
+        checked: 2,
+        unavailable: 0,
+      });
+      expect(
+        (await h.stores.postgres.query('SELECT status FROM storage.version_availability')).rows
+      ).toEqual([{ status: 'missing' }, { status: 'missing' }]);
+      expect((await api.release({ generation })).state).toBe('normal');
+      const beforeReads = h.backend.requests.length;
+      // Missing diagnostics must not mask the independent tombstone guards.
+      for (const status of ['missing', 'available']) {
+        await h.stores.postgres.query('UPDATE storage.version_availability SET status=$1', [
+          status,
+        ]);
+        for (const object of [sealed, retained]) {
+          expect(
+            (await h.call('read', 'GET', `/spaces/${object.space}/objects/${object.id}`)).status
+          ).toBe(404);
+          const listing = await h.call('read', 'GET', `/spaces/${object.space}/objects`);
+          if (object.id === sealed.id) {
+            expect(listing.status).toBe(200);
+            expect(listing.json).toMatchObject({ objects: [] });
+          } else {
+            // Retention deletes the whole space's read surface, including its
+            // list. It returns object_not_found, not an empty successful page.
+            expect(listing.status).toBe(404);
+            expect(listing.json).toMatchObject({ error: { code: 'object_not_found' } });
+          }
+        }
+      }
+      expect(h.backend.requests.slice(beforeReads)).toEqual([]);
+    } finally {
+      await reconcile.close();
+    }
+  }, 30000);
+
   it('requires exact explicit degraded acceptance, preserves unavailable versions, marks and charges, and resumes writes and GC', async () => {
     const missing = await h.artifact();
     const activeSpace = await h.prepare('b');

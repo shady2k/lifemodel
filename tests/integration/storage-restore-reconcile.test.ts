@@ -2,6 +2,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createStorageRestoreReconciler } from '../../loader/src/storage-restore-reconcile.js';
+import { createStorageMaintenance } from '../../loader/src/storage-maintenance.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
 import { createTestStores, workerDatabaseUrl, type TestStores } from '../helpers/test-stores.js';
 import { createSealS3 } from '../helpers/storage-seal-s3.js';
@@ -150,7 +151,14 @@ describe('checkpointed storage restore reconciliation', () => {
   it('seeds every version unavailable atomically and resumes bounded pages without rehashing completed pages', async () => {
     for (let n = 0; n < 3; n++) await publish(Buffer.from(`object-${n}`));
     const first = helper(2);
-    await first.begin(generation);
+    expect(await first.begin(generation)).toMatchObject({ checked: 0, unavailable: 3 });
+    expect(
+      (
+        await stores.postgres.query(
+          'SELECT generation,status FROM storage.unavailable_versions ORDER BY object_id'
+        )
+      ).rows
+    ).toEqual(Array.from({ length: 3 }, () => ({ generation, status: 'unverified' })));
     expect((await statuses()).map((row) => row.status)).toEqual([
       'unverified',
       'unverified',
@@ -159,7 +167,7 @@ describe('checkpointed storage restore reconciliation', () => {
     expect(await first.reconcile(generation)).toMatchObject({
       complete: false,
       checked: 2,
-      unavailable: 0,
+      unavailable: 1,
     });
     expect(
       backend.requests.filter((row) => row.method === 'GET' && row.key.startsWith('private/'))
@@ -177,6 +185,120 @@ describe('checkpointed storage restore reconciliation', () => {
     ).toHaveLength(3);
     expect(backend.requests.every((row) => row.authorized)).toBe(true);
     expect((await statuses()).every((row) => row.status === 'available')).toBe(true);
+  });
+  it('reports 32 checks for one complete page and zero for a resumed completed call', async () => {
+    for (let n = 0; n < 32; n++) await publish(Buffer.from(`object-${n}`));
+    const first = helper();
+    await first.begin(generation);
+    expect(await first.reconcile(generation)).toMatchObject({
+      complete: true,
+      checked: 32,
+      unavailable: 0,
+    });
+    expect(await statuses()).toHaveLength(32);
+    const resumed = helper();
+    await resumed.begin(generation);
+    expect(await resumed.reconcile(generation)).toMatchObject({
+      complete: true,
+      checked: 0,
+      unavailable: 0,
+    });
+    expect(
+      backend.requests.filter((row) => row.method === 'GET' && row.key.startsWith('private/'))
+    ).toHaveLength(32);
+  });
+  it('releases a clean restore with absent seal and retention tombstone bytes but keeps their missing diagnostics', async () => {
+    const sealed = await publish();
+    const retained = await publish(Buffer.from('retention-deleting'), 'b');
+    await stores.postgres.query(
+      "INSERT INTO storage.object_tombstones(object_id,space_id,reason) VALUES($1,$2,'seal_unmarked')",
+      [sealed.id, sealed.space]
+    );
+    await plan(retained);
+    // A backend DELETE can settle before its SQL completion transaction.
+    // That valid window has a retention-only tombstone and retains its charge.
+    await stores.postgres.query("UPDATE storage.deletion_candidates SET state='deleting'");
+    await stores.postgres.query("UPDATE storage.retention_policies SET state='deleting'");
+    await stores.postgres.query(
+      "INSERT INTO storage.retention_tombstones(object_id,space_id,plan_id,state) VALUES($1,$2,'original-plan','deleting')",
+      [retained.id, retained.space]
+    );
+    backend.objects.delete(sealed.key);
+    backend.objects.delete(retained.key);
+    const reconcile = helper();
+    expect(await reconcile.begin(generation)).toMatchObject({ unavailable: 0 });
+    expect(await reconcile.reconcile(generation)).toMatchObject({
+      complete: true,
+      checked: 2,
+      unavailable: 0,
+    });
+    expect(await statuses()).toEqual(
+      expect.arrayContaining([
+        { object_id: sealed.id, status: 'missing' },
+        { object_id: retained.id, status: 'missing' },
+      ])
+    );
+    expect(
+      (await stores.postgres.query('SELECT * FROM storage.unavailable_versions')).rows
+    ).toEqual([]);
+    const retainedCharge = async () =>
+      (
+        await stores.postgres.query(
+          'SELECT charged_bytes::int AS bytes FROM storage.space_quota WHERE space_id=$1',
+          [retained.space]
+        )
+      ).rows[0].bytes;
+    expect(await retainedCharge()).toBe(retained.bytes.length);
+    // Release also uses the canonical live count, not an obsolete cached total.
+    await stores.postgres.query('UPDATE storage.restore_progress SET unavailable=2');
+    const maintenance = createStorageMaintenance({ connectionString: workerDatabaseUrl() });
+    try {
+      expect((await maintenance.release({ generation })).state).toBe('normal');
+      expect(await retainedCharge()).toBe(retained.bytes.length);
+    } finally {
+      await maintenance.close();
+    }
+  });
+  it('blocks clean release for live missing bytes and requires the exact live degraded count despite stale progress totals', async () => {
+    const missing = await publish();
+    const corrupt = await publish(Buffer.from('same length'), 'b');
+    backend.objects.delete(missing.key);
+    backend.objects.get(corrupt.key)!.bytes = Buffer.from('wrong bytes');
+    const reconcile = helper();
+    await reconcile.begin(generation);
+    expect(await reconcile.reconcile(generation)).toMatchObject({ complete: true, unavailable: 2 });
+    expect(
+      (
+        await stores.postgres.query(
+          'SELECT object_id,generation,status FROM storage.unavailable_versions'
+        )
+      ).rows
+    ).toEqual(
+      expect.arrayContaining([
+        { object_id: missing.id, generation, status: 'missing' },
+        { object_id: corrupt.id, generation, status: 'corrupt' },
+      ])
+    );
+    await stores.postgres.query('UPDATE storage.restore_progress SET unavailable=0');
+    expect(await helper().reconcile(generation)).toMatchObject({
+      complete: true,
+      checked: 0,
+      unavailable: 2,
+    });
+    const maintenance = createStorageMaintenance({ connectionString: workerDatabaseUrl() });
+    try {
+      await expect(maintenance.release({ generation })).rejects.toMatchObject({
+        code: 'restore_pending',
+      });
+      await expect(
+        maintenance.releaseDegraded({ generation, unavailable: 1 })
+      ).rejects.toMatchObject({ code: 'restore_pending' });
+      expect((await maintenance.releaseDegraded({ generation, unavailable: 2 })).state).toBe(
+        'normal'
+      );
+    } finally {
+      await maintenance.close();
+    }
   });
   it('rehashes actual multi-chunk and empty bytes rather than trusting original HEAD checksums', async () => {
     const large = await publish(Buffer.alloc(4 * 1024 * 1024 + 31, 'a'));

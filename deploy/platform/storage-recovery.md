@@ -34,6 +34,10 @@ instances. Do not run it against a production catalog that contains task output.
   failure domain, over authenticated encrypted transport to owner-controlled
   encrypted storage. Record backup age and restore duration, not an SLA.
 - Use a private operator directory, `umask 077`, no `set -x`, and no CI upload.
+  Artifact directories must be `0700` or `02700` (setgid inherited from fsGroup
+  is allowed without granting group access). Files must be exactly `0600`.
+  Setuid, sticky and all group/other permission bits are rejected. Sanitized
+  directories created by the CLI are explicitly normalized to `0700`.
   Payloads and evidence contain personal data. User object content can itself
   contain secrets. “Secret-free” means no platform custody material is added.
   Never print a Secret, environment, response body, SQL error, backend key or
@@ -58,7 +62,7 @@ proof of arbitrary PVC history or a completed restore walk. Do not broaden it to
 After the operator shell setup below defines `WORK`, `POLICY` and `record`,
 create private `policy.json` from this tracked file. Set `moduleBuild` to the
 verified installed build; verify `schemaVersion` against the installed migration
-version (0016 or the matching approved revision). Add your own attestation only
+version (0017 or the matching approved revision). Add your own attestation only
 after independent history and metadata checks. Never take policy from an archive:
 
 ```bash
@@ -132,9 +136,15 @@ coordinator VM with a reviewed TLS route to each listener and database access
 reset; each closed psql connection did so in the VM walk. Run each database,
 task/control/read and S3 forward in a restarting loop (see the S3 example below),
 wait for its listening message before a request, and stop the loop with Ctrl-C
-after the walk. A restarted forward does not retry a failed write: inspect its
-receipt before explicitly retrying. It must reach source task/control/read listeners
-using their actual live identities, not a helper token claimed to be a task.
+after the walk. A Service forward binds one Pod, not the Service; it does not
+move to the replacement Pod on rollout. Restart the affected forwards
+after every module or backend restart (including a scale-to-zero/start). Wait
+for the new listening messages, and only then send the next request. A restarting loop
+handles exits but cannot repair a still-running stale forward: stop that process
+and let the loop create a new one. A restarted forward does not retry a failed
+write: inspect its receipt before explicitly retrying. The driver must reach
+source task/control/read listeners using their actual live identities, not a
+helper token claimed to be a task.
 
 Use one context at a time. Substitute only the operator paths/context names:
 
@@ -241,7 +251,7 @@ def check():
     slices=get('endpointslices','-l','kubernetes.io/service-name=storage-module')['items']
     targets=set()
     for item in slices:
-        for e in item.get('endpoints',[]):
+        for e in (item.get('endpoints') or []):
             target=e.get('targetRef',{})
             if mode=='empty': return False
             # Even an unready/non-serving helper endpoint must not be advertised.
@@ -400,7 +410,7 @@ SELECT json_build_object(
     'liveObjects',(SELECT count(*) FROM storage.objects o WHERE NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=o.id) AND NOT EXISTS(SELECT 1 FROM storage.retention_tombstones t WHERE t.object_id=o.id)),
     'liveLogicalBytes',(SELECT COALESCE(sum(size),0) FROM storage.objects o WHERE NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=o.id) AND NOT EXISTS(SELECT 1 FROM storage.retention_tombstones t WHERE t.object_id=o.id)),
     'tombstonedVersions',(SELECT count(*) FROM storage.objects o WHERE EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=o.id) OR EXISTS(SELECT 1 FROM storage.retention_tombstones t WHERE t.object_id=o.id)),
-    'unavailableVersions',(SELECT count(*) FROM storage.version_availability WHERE status<>'available')))
+    'unavailableVersions',(SELECT count(*) FROM storage.unavailable_versions)))
 \g /work/cut.json
 -- pg_dump exits independently of psql's \!; save its OWN status, do not trust psql.
 \! pg_dump --snapshot="$(tr -d '[:space:]' < /work/snapshot)" --format=custom --schema=storage --no-owner --no-acl --file=/work/catalog.dump 2>/work/dump.err; rc=$?; printf '%s\n' "$rc" > /work/dump.exit
@@ -737,9 +747,21 @@ kubectl -n lifemodel-system exec "$RECOVERY_POD" -- lifemodel-storage-recovery r
 rc=$?; record reconcile-page "$rc"; test "$rc" = 0 || return 1
 ```
 
-Each `reconcile` call processes one bounded page. Use this bounded coordinator
-loop, which saves each page and command's own status. It stops after 30 minutes
-or 10,000 pages, preserves the hold on failure, and does not reset progress:
+Each `reconcile` call processes one bounded page. `checked` is the number of
+versions whose bytes this call probed, including tombstoned versions. It is not
+a durable total. For 32 versions on a single page it is 32; calling again after
+completion returns `complete:true, checked:0` without rechecking any bytes.
+The first call above can finish the whole restore, so the loop below can save
+such an idempotent zero-work receipt as its final receipt. Keep all page receipts
+(including the first call) to account for checks; do not treat the last receipt's
+`checked` as the total. `unavailable` counts only non-available versions whose
+objects have neither an object nor a retention tombstone, as defined once by
+`storage.unavailable_versions`. Tombstoned bytes may be absent after legitimate
+GC. Their diagnostic rows can say `missing`; reads remain denied, and they do
+not block clean release. Live missing/corrupt/unverified versions do block it.
+Use this bounded coordinator loop, which saves each page and command's own
+status. It stops after 30 minutes or 10,000 pages, preserves the hold on failure,
+and does not reset progress:
 
 ```bash
 export RECOVERY_POD RESTORE_GENERATION MANIFEST_SHA256
@@ -853,6 +875,10 @@ kubectl -n lifemodel-system rollout restart deployment/storage-module >"$WORK/re
 rc=$?; record restart "$rc"; test "$rc" = 0 || return 1
 kubectl -n lifemodel-system rollout status deployment/storage-module --timeout=180s >"$WORK/restart-ready.out" 2>"$WORK/restart-ready.err"
 rc=$?; record restart-ready "$rc"; test "$rc" = 0 || return 1
+# Restart all module forwards now: stop old port-forward processes, restart the
+# task/control/read loops, and wait for their new listening messages. A Service
+# forward remains bound to its old Pod even if rollout status is now ready.
+# Do the same for SQL/S3 forwards after every corresponding backend restart.
 python3 deploy/platform/storage-recovery-walk.py capture-source --config /owner-private/walk-source.json --evidence "$EVIDENCE"
 rc=$?; record walk-source "$rc"; test "$rc" = 0 || return 1
 # Perform source cold backup above, export it, then isolate source.

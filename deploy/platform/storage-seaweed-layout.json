@@ -32,7 +32,7 @@
     ]
   },
   "compatibility": {
-    "schemaVersion": "20261015000016",
+    "schemaVersion": "20261015000017",
     "moduleBuild": "OPERATOR_VERIFIED_MODULE_BUILD",
     "seaweedImage": "chrislusf/seaweedfs@sha256:aba492e2a4e4c90bff795745e8e660affa1f09e7650f5981bd7bccd1a06cd931",
     "layoutVersion": "mini-aba492e2-v1"

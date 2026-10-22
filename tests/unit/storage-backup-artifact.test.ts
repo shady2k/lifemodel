@@ -428,6 +428,86 @@ describe('sanitized cold-copy policy', () => {
 });
 
 describe('directory backup manifest v1', () => {
+  it('builds and verifies owner-private directories inherited from a real setgid parent', async () => {
+    await chmod(base, 0o2777);
+    expect((await lstat(base)).mode & 0o7777).toBe(0o2777);
+    await stage();
+    expect((await lstat(artifact)).mode & 0o7777).toBe(0o2700);
+    const built = await buildStorageBackupManifest(artifact, metadata, policy);
+    // Tar extraction may preserve setgid on every directory, not only the root.
+    for (const path of ['seaweed', ...layout.directories.map((name) => `seaweed/${name}`)])
+      await chmod(join(artifact, path), 0o2700);
+    expect(await verifyStorageBackupArtifact(artifact, policy)).toEqual(built);
+    for (const path of [
+      'catalog.dump',
+      'manifest.json',
+      ...built.manifest.files.map((file) => file.path),
+    ])
+      expect((await lstat(join(artifact, path))).mode & 0o7777).toBe(0o600);
+  });
+  it('creates sanitized directories as exactly 0700 under a real setgid parent', async () => {
+    await chmod(base, 0o2777);
+    expect((await lstat(base)).mode & 0o7777).toBe(0o2777);
+    const destination = join(base, 'sanitized');
+    await copySanitizedSeaweedTree(source, destination, policy);
+    for (const path of ['', ...layout.directories])
+      expect((await lstat(join(destination, path))).mode & 0o7777).toBe(0o700);
+    for (const path of layout.files)
+      expect((await lstat(join(destination, path))).mode & 0o7777).toBe(0o600);
+  });
+  it.each(
+    ['', 'seaweed', 'seaweed/volume'].flatMap((path) =>
+      [0o750, 0o701, 0o4700, 0o1700, 0o6700, 0o3700].map((mode) => ({ path, mode }))
+    )
+  )(
+    'rejects directory permissions $mode on "$path" during build and verify',
+    async ({ path, mode }) => {
+      await stage();
+      const target = join(artifact, path);
+      await chmod(target, mode);
+      expect((await lstat(target)).mode & 0o7777).toBe(mode);
+      await expect(buildStorageBackupManifest(artifact, metadata, policy)).rejects.toThrow(
+        'storage_backup_artifact_rejected'
+      );
+      await chmod(target, 0o700);
+      await buildStorageBackupManifest(artifact, metadata, policy);
+      await chmod(target, mode);
+      await expect(verifyStorageBackupArtifact(artifact, policy)).rejects.toThrow(
+        'storage_backup_artifact_rejected'
+      );
+    }
+  );
+  it.each(
+    ['catalog.dump', 'seaweed/volume/1.dat'].flatMap((path) =>
+      [0o640, 0o2600, 0o4600, 0o1600, 0o6600, 0o3600].map((mode) => ({ path, mode }))
+    )
+  )('rejects file permissions $mode on "$path" during build and verify', async ({ path, mode }) => {
+    await stage();
+    const target = join(artifact, path);
+    await chmod(target, mode);
+    expect((await lstat(target)).mode & 0o7777).toBe(mode);
+    await expect(buildStorageBackupManifest(artifact, metadata, policy)).rejects.toThrow(
+      'storage_backup_artifact_rejected'
+    );
+    await chmod(target, 0o600);
+    await buildStorageBackupManifest(artifact, metadata, policy);
+    await chmod(target, mode);
+    await expect(verifyStorageBackupArtifact(artifact, policy)).rejects.toThrow(
+      'storage_backup_artifact_rejected'
+    );
+  });
+  it.each([0o640, 0o2600, 0o4600, 0o1600, 0o6600, 0o3600])(
+    'rejects manifest file permissions %i during verify',
+    async (mode) => {
+      await stage();
+      await buildStorageBackupManifest(artifact, metadata, policy);
+      await chmod(join(artifact, 'manifest.json'), mode);
+      expect((await lstat(join(artifact, 'manifest.json'))).mode & 0o7777).toBe(mode);
+      await expect(verifyStorageBackupArtifact(artifact, policy)).rejects.toThrow(
+        'storage_backup_artifact_rejected'
+      );
+    }
+  );
   it('streams exact payload hashes, records the SQL cut/counts/versions and verifies independently', async () => {
     const bytes = Buffer.alloc(5 * 1024 * 1024 + 3, 0x37);
     await writeFile(join(source, 'volume/1.dat'), bytes);
