@@ -318,7 +318,12 @@ describe('platform bootstrap phases', () => {
     expect(role).toContain('- lifemodel-ca');
     expect(role).not.toMatch(/pods|kustomizations|gitrepositories|roles|serviceaccounts/);
     expect(role).toContain("verbs: ['get', 'update']");
-    expect(role).not.toContain('create');
+    const roleObjects = YAML.parseAllDocuments(role)
+      .map((doc) => doc.toJSON())
+      .filter((object) => object.kind === 'Role');
+    for (const object of roleObjects) {
+      for (const rule of object.rules) expect(rule.verbs).toEqual(['get', 'update']);
+    }
     expect(binding).toContain('kind: ServiceAccount');
     expect(binding).toContain('name: loader');
     expect(account).toContain('automountServiceAccountToken: true');
