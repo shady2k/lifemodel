@@ -20,6 +20,7 @@ import type { S3Check } from './storage-s3.js';
 import type { StorageObjects } from './storage-objects.js';
 import type { StorageSeal } from './storage-seal.js';
 import type { StorageRetention } from './storage-retention.js';
+import type { StorageMaintenance } from './storage-maintenance.js';
 
 /** The mounted instance-CA leaf: read at start, then re-read on every reload. */
 export interface StorageTaskTlsOptions {
@@ -46,6 +47,7 @@ export interface StorageModuleOptions {
   objects?: StorageObjects;
   seal?: StorageSeal;
   retention?: StorageRetention;
+  maintenance?: StorageMaintenance;
   /** The module's own catalog; readiness needs it, as it needs the store. */
   catalog: Catalog;
   /** The custody record, in memory only; a failure here is a failed module. */
@@ -97,6 +99,11 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
     if (signal.aborted) return { ok: false, code: 'timeout' };
     const catalog = await checkCatalog(signal);
     if (!catalog.ok) return catalog;
+    if (options.maintenance) {
+      const hold = await options.maintenance.status();
+      if (hold.purpose === 'restore' && hold.state !== 'normal')
+        return { ok: false, code: 'catalog_unavailable', cause: 'restore_pending' };
+    }
     if (options.objects && !(await options.objects.check(signal)))
       return { ok: false, code: 'catalog_unavailable', cause: 'objects_unavailable' };
     if (options.seal && !(await options.seal.check(signal)))
@@ -178,6 +185,13 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           options.objects
             ? /^\/spaces\/([a-z0-9][a-z0-9_-]{0,63})\/objects(?=\/|\?|$)(.*)$/.exec(req.url ?? '')
             : null;
+        const maintenanceRoute =
+          role === 'control' &&
+          options.maintenance &&
+          ((req.method === 'GET' && req.url === '/maintenance/status') ||
+            (req.method === 'POST' &&
+              ['/maintenance/begin', '/maintenance/release'].includes(req.url ?? '')));
+        if (maintenanceRoute) req.socket.setTimeout(25_000);
         const retentionRoute =
           role === 'control' &&
           options.retention &&
@@ -192,6 +206,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
               ].includes(req.url ?? '')));
         if (
           !(
+            maintenanceRoute ||
             retentionRoute ||
             (role === 'task' && req.method === 'GET' && match) ||
             objectMatch ||
@@ -233,9 +248,12 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
         const progress = (): void => {
           if (signal.aborted) return;
           if (idle !== undefined) clearTimeout(idle);
-          idle = setTimeout(() => {
-            control.abort();
-          }, 10_000);
+          idle = setTimeout(
+            () => {
+              control.abort();
+            },
+            maintenanceRoute ? 25_000 : 10_000
+          );
           idle.unref();
         };
         progress();
@@ -308,7 +326,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
             return;
           }
           if (role === 'task' && match?.[1]) {
-            const stream = access.openTaskStream({ token, space: match[1], signal });
+            const stream = access.openTaskStream({ token, space: match[1], signal, write: false });
             try {
               await stream.chunk(0, (decision) => {
                 result = decision;
@@ -319,6 +337,8 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           } else {
             const identity = await access.identity.verify(token, STORAGE_AUDIENCES[role], signal);
             if (role === 'read') result = { role: identity.role };
+            else if (maintenanceRoute && options.maintenance && req.method === 'GET')
+              result = await options.maintenance.status();
             else if (retentionRoute && options.retention && req.method === 'GET') {
               const url = new URL(req.url ?? '', 'https://storage.invalid');
               if (
@@ -356,6 +376,17 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
               if (value === null || typeof value !== 'object' || Array.isArray(value))
                 throw new StorageAccessError(400, 'invalid_request');
               const input = value as Record<string, unknown>;
+              if (maintenanceRoute && options.maintenance) {
+                result =
+                  req.url === '/maintenance/begin'
+                    ? await options.maintenance.begin(input)
+                    : await options.maintenance.release(input);
+                if (!signal.aborted && !res.destroyed && !res.writableEnded) {
+                  res.writeHead(200, JSON_HEADERS);
+                  res.end(JSON.stringify(result));
+                }
+                return;
+              }
               if (retentionRoute && options.retention) {
                 const route = req.url;
                 if (route === '/retention/warningCommitted')

@@ -4,6 +4,7 @@
  * for every next chunk. Untrusted code never supplies a callback or SQL. */
 import { Client } from 'pg';
 import { randomUUID } from 'node:crypto';
+import { createStorageMaintenance } from './storage-maintenance.js';
 import { StorageAccessError } from './storage-access-error.js';
 import { STORAGE_AUDIENCES, type KubernetesStorageIdentity } from './storage-identity.js';
 export { STORAGE_AUDIENCES } from './storage-identity.js';
@@ -80,6 +81,7 @@ export const STORAGE_AUTH_READ = `WITH instant AS MATERIALIZED (SELECT clock_tim
  AND i.task_id=$4 AND i.attempt_id=$5 AND i.launch_id=$6`;
 
 export function createStorageAccess(options: StorageAccessOptions): StorageAccess {
+  const maintenance = createStorageMaintenance({ connectionString: options.connectionString });
   const streams = new Map<string, Set<AbortController>>();
   const settlements = new Map<AbortController, Promise<void>>();
   const writers = new Set<AbortController>();
@@ -226,6 +228,16 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
       if (write) writers.add(controller);
       streams.set(space, controllers);
       const signal = AbortSignal.any([controller.signal, ...(parent ? [parent] : [])]);
+      let admission: ReturnType<typeof maintenance.enter> | undefined;
+      const admit = async (): Promise<void> => {
+        if (!write) return;
+        admission ??= maintenance.enter(signal).then((op) => {
+          if (op.signal.aborted) controller.abort();
+          else op.signal.addEventListener('abort', () => controller.abort(), { once: true });
+          return op;
+        });
+        await admission;
+      };
       function live(): void {
         if (signal.aborted) throw new StorageAccessError(403, 'access_revoked');
       }
@@ -237,6 +249,7 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
           throw new StorageAccessError(400, 'invalid_chunk');
         live();
         const identity = await options.identity.verify(token, STORAGE_AUDIENCES.task, signal);
+        await admit();
         {
           live();
           return await transaction(async (client, assertLive) => {
@@ -305,8 +318,13 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
           if (!result) throw new StorageAccessError(503, 'publication_unavailable');
           return result;
         },
-        close: () => {
+        close: async () => {
           controller.abort();
+          if (admission)
+            await admission.then(
+              (op) => op.close(),
+              () => undefined
+            );
           controllers.delete(controller);
           settlements.delete(controller);
           writers.delete(controller);

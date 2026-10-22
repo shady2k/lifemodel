@@ -413,6 +413,10 @@ export async function createRetentionHarness(bucket = 'task-output') {
       'TRUNCATE task_access.projections,task_access.intents,storage.spaces,storage.deletion_plans,storage.orphan_gc,storage.retention_receipts,storage.reclaim_receipts CASCADE'
     );
     await stores.postgres.query('UPDATE storage.instance_ledger SET used_bytes=0 WHERE id=true');
+    await stores.postgres.query(
+      "UPDATE storage.maintenance SET state='normal',purpose=NULL,generation=NULL,effect_key=NULL,cut_at=NULL WHERE id=true"
+    );
+    await stores.postgres.query('TRUNCATE storage.restore_progress');
     backend.reset();
     identity.deadPods.clear();
     identity.deadJobs.clear();

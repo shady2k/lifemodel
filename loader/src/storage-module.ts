@@ -20,6 +20,7 @@ import { createStorageSeal } from './storage-seal.js';
 import { createStorageRetention } from './storage-retention.js';
 import { createStorageRetentionSettings } from './storage-retention-settings.js';
 import { createStorageUploadOwner } from './storage-upload-owner.js';
+import { createStorageMaintenance } from './storage-maintenance.js';
 
 /** Four listeners: health, task data, trusted core control, trusted core/web read. */
 const STATUS_PORT = 8081;
@@ -110,7 +111,11 @@ const seal = createStorageSeal({
   retention,
   logger,
 });
+const maintenance = createStorageMaintenance({
+  connectionString: catalogConnectionString(databaseUsername, databasePassword),
+});
 const app = createStorageModule({
+  maintenance,
   retention,
   seal,
   objects,

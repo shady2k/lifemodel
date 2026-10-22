@@ -1,5 +1,6 @@
 /** Module-owned retention policy, durable warning batches and recoverable byte removal. */
 import { randomUUID } from 'node:crypto';
+import { createStorageMaintenance } from './storage-maintenance.js';
 import { Pool, type PoolClient, type QueryResultRow } from 'pg';
 import { StorageAccessError } from './storage-access-error.js';
 import type { StorageObjectS3 } from './storage-object-s3.js';
@@ -67,6 +68,7 @@ interface Candidate extends QueryResultRow {
   state: string;
 }
 export function createStorageRetention(options: Options): StorageRetention {
+  const maintenance = createStorageMaintenance({ connectionString: options.connectionString });
   const now = options.now ?? Date.now;
   const pool = new Pool({
     connectionString: options.connectionString,
@@ -83,6 +85,7 @@ export function createStorageRetention(options: Options): StorageRetention {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let running: Promise<void> | undefined;
   let sweepCursor: string | undefined;
+  let maintenanceSignal: AbortSignal | undefined;
   async function tx<T>(run: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await pool.connect().catch(() => fail(503, 'catalog_unavailable'));
     let broken = false;
@@ -119,6 +122,9 @@ export function createStorageRetention(options: Options): StorageRetention {
   ): Promise<T | undefined> {
     const owner = await pool.connect();
     const controller = new AbortController();
+    const abortMaintenance = () => controller.abort();
+    if (maintenanceSignal?.aborted) controller.abort();
+    maintenanceSignal?.addEventListener('abort', abortMaintenance, { once: true });
     let locked = false;
     let broken = false;
     const failed = () => {
@@ -145,6 +151,7 @@ export function createStorageRetention(options: Options): StorageRetention {
         await owner
           .query('SELECT pg_advisory_unlock(hashtextextended($1,$2))', [key, namespace])
           .catch(failed);
+      maintenanceSignal?.removeEventListener('abort', abortMaintenance);
       owner.removeListener('error', failed);
       owner.removeListener('end', failed);
       owner.release(broken);
@@ -570,9 +577,22 @@ export function createStorageRetention(options: Options): StorageRetention {
     }
   }
   function runOnce() {
-    running ??= tick().finally(() => {
-      running = undefined;
-    });
+    running ??= maintenance
+      .run(async (signal) => {
+        maintenanceSignal = signal;
+        try {
+          await tick();
+        } finally {
+          maintenanceSignal = undefined;
+        }
+      })
+      .catch((error: unknown) => {
+        if (error instanceof StorageAccessError && error.code === 'storage_held') return;
+        throw error;
+      })
+      .finally(() => {
+        running = undefined;
+      });
     return running;
   }
   function schedule() {
@@ -589,7 +609,7 @@ export function createStorageRetention(options: Options): StorageRetention {
     }, STORAGE_RETENTION_BOUNDS.intervalMs);
     timer.unref();
   }
-  return {
+  const api: StorageRetention = {
     snapshot: async (client, space, terminalAt = now()) => {
       const setting = await options.settings.read();
       if (!setting) return;
@@ -792,5 +812,12 @@ export function createStorageRetention(options: Options): StorageRetention {
       await running?.catch(() => undefined);
       await pool.end();
     },
+  };
+  return {
+    ...api,
+    pending: (input) => maintenance.run(() => api.pending(input)),
+    warningCommitted: (input) => maintenance.run(() => api.warningCommitted(input)),
+    policy: (input) => maintenance.run(() => api.policy(input)),
+    reclaim: (input) => maintenance.run(() => api.reclaim(input)),
   };
 }

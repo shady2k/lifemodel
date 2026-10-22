@@ -1,6 +1,8 @@
 /** Module-owned allocation, verified binding and replayable seal. No caller SQL. */
 import { Pool, type PoolClient, type QueryResultRow } from 'pg';
 import { createHash, randomUUID } from 'node:crypto';
+import { createStorageMaintenance } from './storage-maintenance.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   StorageAccessError,
   STORAGE_AUDIENCES,
@@ -101,6 +103,13 @@ function required<T>(value: T | undefined): T {
 }
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 export function createStorageSeal(options: Options): StorageSeal {
+  const maintenance = createStorageMaintenance({ connectionString: options.connectionString });
+  const operationSignal = new AsyncLocalStorage<AbortSignal>();
+  const boundedSignal = (ms: number) =>
+    AbortSignal.any([
+      AbortSignal.timeout(ms),
+      ...(operationSignal.getStore() ? [operationSignal.getStore()!] : []),
+    ]);
   const pool = new Pool({
     connectionString: options.connectionString,
     max: 4,
@@ -311,7 +320,7 @@ export function createStorageSeal(options: Options): StorageSeal {
     );
     return required(result.rows[0]);
   }
-  return {
+  const api: StorageSeal = {
     allocate: async (value) => {
       const raw = input(value, ['taskId', 'launchId', 'effectKey', 'retentionRevision']);
       const request = {
@@ -524,7 +533,7 @@ export function createStorageSeal(options: Options): StorageSeal {
       if (request.outcome !== 'stopped') await options.access.quiesceSpace(request.space);
       let op = await tx((client) => operation(client, request));
       await options.access.settleSpace(request.space);
-      await options.s3.settle(request.space, AbortSignal.timeout(5000));
+      await options.s3.settle(request.space, boundedSignal(5000));
       if (op.state === 'frozen') {
         const objects: Marked[] = [];
         const excluded: (Marked & { reason: 'checksum_mismatch' })[] = [];
@@ -544,7 +553,7 @@ export function createStorageSeal(options: Options): StorageSeal {
               key,
               candidate.size,
               candidate.sha256,
-              AbortSignal.timeout(10_000)
+              boundedSignal(10000)
             );
             objects.push(marked);
           } catch (error) {
@@ -630,7 +639,7 @@ export function createStorageSeal(options: Options): StorageSeal {
         );
         for (const entry of entries) {
           try {
-            await options.s3.delete(request.space, entry.s3_key, AbortSignal.timeout(10_000));
+            await options.s3.delete(request.space, entry.s3_key, boundedSignal(10000));
           } catch {
             fail(503, 'cleanup_pending');
           }
@@ -778,7 +787,7 @@ export function createStorageSeal(options: Options): StorageSeal {
               objectId &&
               !(
                 await client.query(
-                  `SELECT 1 FROM storage.objects o WHERE o.space_id=$1 AND o.id::text=$2 AND o.mark IS NOT NULL AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=o.id)`,
+                  `SELECT 1 FROM storage.objects o WHERE o.space_id=$1 AND o.id::text=$2 AND o.mark IS NOT NULL AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=o.id) AND NOT EXISTS(SELECT 1 FROM storage.version_availability av WHERE av.object_id=o.id AND av.status<>'available')`,
                   [space, objectId]
                 )
               ).rowCount
@@ -815,5 +824,14 @@ export function createStorageSeal(options: Options): StorageSeal {
     close: async () => {
       await Promise.all([pool.end(), cleanupPool.end()]);
     },
+  };
+  return {
+    ...api,
+    allocate: (input) =>
+      maintenance.run((signal) => operationSignal.run(signal, () => api.allocate(input))),
+    bind: (input) =>
+      maintenance.run((signal) => operationSignal.run(signal, () => api.bind(input))),
+    seal: (input) =>
+      maintenance.run((signal) => operationSignal.run(signal, () => api.seal(input))),
   };
 }
