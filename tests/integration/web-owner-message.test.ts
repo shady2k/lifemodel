@@ -7,7 +7,10 @@ import { InboundMessageStream } from '../../src/core/message-streams.js';
 import { createWebServer } from '../../src/web/server.js';
 import { silentModelStatus } from '../helpers/model-status.js';
 import { PostgresConversationStore } from '../../src/storage/postgres-conversation-store.js';
-import { PostgresTranscriptStore } from '../../src/storage/postgres-transcript-store.js';
+import {
+  PostgresTranscriptStore,
+  WAKE_CONNECTION_NAME,
+} from '../../src/storage/postgres-transcript-store.js';
 import { CreatureStateStore } from '../../src/storage/creature-state-store.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
 
@@ -22,6 +25,47 @@ function uuidV7(at: number): string {
   bytes[8] = 0x80 | (bytes[8]! & 0x3f);
   const hex = bytes.toString('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
+ * The `key=value` fields of one CLIENT LIST line. A client name may not contain a
+ * space, so splitting on spaces is exact; the last '=' keeps a value with one.
+ */
+function clientListFields(line: string): Map<string, string> {
+  return new Map(
+    line
+      .split(' ')
+      .filter((field) => field.includes('='))
+      .map((field) => {
+        const separator = field.indexOf('=');
+        return [field.slice(0, separator), field.slice(separator + 1)] as const;
+      })
+  );
+}
+
+/**
+ * The ids of the watcher connections this file opened. CLIENT LIST is the whole
+ * server, shared with every other test file's clients, and every transcript
+ * store names its watcher connection the same way, so ours is the one with the
+ * store's name on this file's own logical database (lifemodel-653.7.11).
+ */
+async function watcherClientIds(redis: Redis, database: string): Promise<string[]> {
+  return ((await redis.client('LIST')) as string)
+    .split('\n')
+    .filter(Boolean)
+    .map(clientListFields)
+    .filter(
+      (fields) => fields.get('name') === WAKE_CONNECTION_NAME && fields.get('db') === database
+    )
+    .map((fields) => fields.get('id'))
+    .filter((id): id is string => id !== undefined);
+}
+
+/** The logical database this file's clients use, as the server reports it. */
+async function clientDatabase(redis: Redis): Promise<string> {
+  const database = clientListFields(((await redis.client('INFO')) as string).trim()).get('db');
+  if (database === undefined) throw new Error('CLIENT INFO did not report a database');
+  return database;
 }
 
 async function nextSseEvent(
@@ -385,13 +429,8 @@ describe('owner message HTTP route with real Valkey', () => {
       redis,
       recipient
     ).readTranscript({ limit: 1 });
-    const baseline = new Set(
-      ((await redis.client('LIST')) as string)
-        .split('\n')
-        .filter(Boolean)
-        .map((line) => line.match(/\bid=(\d+)/)?.[1])
-        .filter((id): id is string => id !== undefined)
-    );
+    const database = await clientDatabase(redis);
+    const baseline = new Set(await watcherClientIds(redis, database));
     const abort = new AbortController();
     const response = await fetch(
       `http://127.0.0.1:${address.port}/api/events?after=${page.cursor ?? '0'}`,
@@ -402,12 +441,7 @@ describe('owner message HTTP route with real Valkey', () => {
     let watcherIds: string[] = [];
     await expect
       .poll(async () => {
-        const current = ((await redis.client('LIST')) as string)
-          .split('\n')
-          .filter(Boolean)
-          .map((line) => line.match(/\bid=(\d+)/)?.[1])
-          .filter((id): id is string => id !== undefined);
-        watcherIds = current.filter((id) => !baseline.has(id));
+        watcherIds = (await watcherClientIds(redis, database)).filter((id) => !baseline.has(id));
         return watcherIds;
       })
       .toHaveLength(1);
@@ -415,10 +449,7 @@ describe('owner message HTTP route with real Valkey', () => {
     await reader.cancel().catch(() => undefined);
     await expect
       .poll(async () => {
-        const current = ((await redis.client('LIST')) as string)
-          .split('\n')
-          .filter(Boolean)
-          .map((line) => line.match(/\bid=(\d+)/)?.[1]);
+        const current = await watcherClientIds(redis, database);
         return watcherIds.every((id) => !current.includes(id));
       })
       .toBe(true);

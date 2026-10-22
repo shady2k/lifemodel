@@ -12,6 +12,13 @@ const MAX_PAGE_SIZE = 50;
 const OUTBOUND_STREAM = 'outbound';
 const WAKE_POLL_MS = 1_000;
 const WAKE_CLOSE_TIMEOUT_MS = 100;
+/**
+ * The name of the shared hint connection. It is set at every connect and
+ * reconnect, so CLIENT LIST on a shared Valkey says which component holds a
+ * stream read blocked on the outbound stream instead of showing one anonymous
+ * connection among the core's (lifemodel-653.7.11).
+ */
+export const WAKE_CONNECTION_NAME = 'lifemodel:transcript-wake';
 const STREAM_LEASE_LIMIT = 4;
 const ACQUIRE_STREAM_LEASE_SCRIPT = `
 local now = tonumber(ARGV[2])
@@ -117,7 +124,7 @@ class OutboundWakeBroker {
 
   private start(): void {
     if (this.running) return;
-    this.connection ??= this.source.duplicate();
+    this.connection ??= this.source.duplicate({ connectionName: WAKE_CONNECTION_NAME });
     const connection = this.connection;
     this.running = (async () => {
       while (this.waiters.size > 0 && this.connection === connection) {
