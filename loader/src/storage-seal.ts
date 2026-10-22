@@ -1,7 +1,11 @@
 /** Module-owned allocation, verified binding and replayable seal. No caller SQL. */
 import { Pool, type PoolClient, type QueryResultRow } from 'pg';
 import { createHash, randomUUID } from 'node:crypto';
-import { storageMaintenanceFence } from './storage-maintenance.js';
+import {
+  storageMaintenanceFence,
+  storageDeletionReady,
+  STORAGE_READ_LEASE_MS,
+} from './storage-maintenance.js';
 import {
   StorageAccessError,
   STORAGE_AUDIENCES,
@@ -646,12 +650,15 @@ export function createStorageSeal(options: Options): StorageSeal {
         );
         for (const entry of entries) {
           // Each DELETE needs a fresh intent fence, even within a long seal.
-          await tx(async (client) => {
+          const ready = await tx(async (client) => {
+            if (!(await storageDeletionReady(client, now()))) return false;
             await client.query(
               'SELECT attempt_id FROM storage.seal_gc WHERE space_id=$1 AND attempt_id=$2 FOR UPDATE',
               [request.space, entry.attempt_id]
             );
+            return true;
           });
+          if (!ready) fail(503, 'cleanup_pending');
           try {
             await options.s3.delete(request.space, entry.s3_key, boundedSignal(10000));
           } catch {
@@ -744,7 +751,7 @@ export function createStorageSeal(options: Options): StorageSeal {
     openCoreStream: ({ token, space, objectId, signal: parent }) => {
       if (!SPACE.test(space)) fail(400, 'invalid_request');
       const lease = randomUUID();
-      let leaseExpiresAt = now() + 30000;
+      let leaseExpiresAt = now() + STORAGE_READ_LEASE_MS;
       let closing: Promise<void> | undefined;
       let cleanupRetried = false;
       const controller = new AbortController();
@@ -791,7 +798,9 @@ export function createStorageSeal(options: Options): StorageSeal {
                 )
               ).rows[0];
               if (policy && policy.state !== 'retained') fail(404, 'object_not_found');
-              leaseExpiresAt = now() + 30000;
+              // UPSERT on every writable chunk also reacquires a lease first
+              // admitted while held, or pruned after expiring during the hold.
+              leaseExpiresAt = now() + STORAGE_READ_LEASE_MS;
               if (writable)
                 await client.query(
                   'INSERT INTO storage.read_leases(id,space_id,expires_at) VALUES($1,$2,to_timestamp($3/1000.0)) ON CONFLICT(id) DO UPDATE SET expires_at=EXCLUDED.expires_at',

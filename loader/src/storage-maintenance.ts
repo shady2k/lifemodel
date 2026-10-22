@@ -3,6 +3,14 @@ import { Client, type PoolClient } from 'pg';
 import { randomUUID } from 'node:crypto';
 import { StorageAccessError } from './storage-access-error.js';
 const LOCK = '653740016';
+// Held reads never write leases. Release reserves a full lease/progress window
+// for their next writable chunk to UPSERT protection before byte deletion.
+export const STORAGE_READ_LEASE_MS = 30_000;
+export const STORAGE_CORE_READ_PROGRESS_MS = 10_000;
+export const STORAGE_REOPEN_GRACE_MS = Math.max(
+  STORAGE_READ_LEASE_MS,
+  STORAGE_CORE_READ_PROGRESS_MS
+);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export interface MaintenanceStatus {
   generation: string | null;
@@ -42,10 +50,27 @@ export async function storageMaintenanceFence(
   if (!row || (required && row.state !== 'normal')) fail('maintenance_unavailable');
   return row.state === 'normal';
 }
+/** Called inside a fenced deletion-intent transaction. False means pending,
+ * never failed: no policy/tombstone transition or backend DELETE may follow. */
+export async function storageDeletionReady(
+  client: Client | PoolClient,
+  now: number
+): Promise<boolean> {
+  const row = (
+    await client.query<{ ready: boolean }>(
+      `SELECT state='normal' AND (reopened_at IS NULL OR
+      reopened_at + $2 * interval '1 millisecond' <= to_timestamp($1/1000.0)) AS ready
+     FROM storage.maintenance WHERE id=true`,
+      [now, STORAGE_REOPEN_GRACE_MS]
+    )
+  ).rows[0];
+  return row?.ready === true;
+}
 export function createStorageMaintenance(options: {
   connectionString: string;
   drainMs?: number;
   settleMs?: number;
+  now?: () => number;
 }): StorageMaintenance {
   function client(timeout = 5000) {
     const c = new Client({
@@ -112,7 +137,10 @@ export function createStorageMaintenance(options: {
           fail('restore_pending', 409);
       }
       if (row.state === 'draining') fail('hold_pending', 409);
-      await c.query("UPDATE storage.maintenance SET state='normal' WHERE id=true");
+      await c.query(
+        "UPDATE storage.maintenance SET state='normal',reopened_at=to_timestamp($1/1000.0) WHERE id=true AND state<>'normal'",
+        [(options.now ?? Date.now)()]
+      );
       await c.query('COMMIT');
       return status(c);
     });

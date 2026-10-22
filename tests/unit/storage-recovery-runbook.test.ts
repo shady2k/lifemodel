@@ -26,6 +26,17 @@ const helpers = section(`python3 - <<'PY' 2>"$WORK/helpers.err"`, 'If a Job/imag
 const recovery = section(`python3 - <<'PY' 2>"$WORK/recovery-job.err"`, 'RECOVERY_POD=$(');
 
 describe('storage recovery runbook safety contracts', () => {
+  it('copies destination policy into the fresh helper before artifact verification', () => {
+    const destination = section('Stage the trusted archive', 'record trusted-manifest-hash');
+    ordered(
+      destination,
+      'cat >/work/policy.json',
+      'record destination-policy-copy',
+      'test "$rc" = 0 || return 1',
+      'lifemodel-storage-recovery verify /work/artifact /work/policy.json'
+    );
+    expect(destination).toContain('<"$WORK/policy.json"');
+  });
   it('observes the suspended parent idle before suspending children, then checks all reconcilers', () => {
     expect(guard).toContain("obj['spec'].get('suspend') is not True");
     expect(guard).toContain("c['type']=='Reconciling' and c['status']!='False'");

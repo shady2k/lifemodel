@@ -77,7 +77,10 @@ const seal = createStorageSeal({
   logger,
   now: () => now,
 });
-const maintenance = createStorageMaintenance({ connectionString: config.connectionString });
+const maintenance = createStorageMaintenance({
+  connectionString: config.connectionString,
+  now: () => now,
+});
 const app = createStorageModule({
   maintenance,
   bucket: 'task-output',

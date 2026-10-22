@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS storage.maintenance (
   effect_key text,
   cut_at timestamptz
 );
+-- Expanding/re-runnable, including on databases that already applied the draft.
+ALTER TABLE storage.maintenance ADD COLUMN IF NOT EXISTS reopened_at timestamptz;
 INSERT INTO storage.maintenance(id) VALUES(true) ON CONFLICT DO NOTHING;
 CREATE TABLE IF NOT EXISTS storage.version_availability (
   object_id uuid PRIMARY KEY REFERENCES storage.objects(id) ON DELETE CASCADE,

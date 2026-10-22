@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createStorageMaintenance } from '../../loader/src/storage-maintenance.js';
+import {
+  createStorageMaintenance,
+  STORAGE_REOPEN_GRACE_MS,
+  STORAGE_READ_LEASE_MS,
+  STORAGE_CORE_READ_PROGRESS_MS,
+} from '../../loader/src/storage-maintenance.js';
 import { workerDatabaseUrl } from '../helpers/test-stores.js';
 import {
   createRetentionHarness,
@@ -65,6 +70,206 @@ const begin = () => h.call('control', 'POST', '/maintenance/begin', { effectKey:
 const release = (generation: string) =>
   h.call('control', 'POST', '/maintenance/release', { generation });
 describe('durable storage backup hold', () => {
+  it('keeps release grace at least the lease TTL and core chunk progress deadline', () => {
+    expect(STORAGE_REOPEN_GRACE_MS).toBeGreaterThanOrEqual(STORAGE_READ_LEASE_MS);
+    expect(STORAGE_REOPEN_GRACE_MS).toBeGreaterThanOrEqual(STORAGE_CORE_READ_PROGRESS_MS);
+  });
+
+  it.each(['held-admission', 'expired-before-hold'] as const)(
+    'hands an active %s reader to a writable lease before GC can delete',
+    async (admission) => {
+      const leaseMs = STORAGE_READ_LEASE_MS;
+      const graceMs = STORAGE_REOPEN_GRACE_MS;
+      const obj = await h.artifact('a', Buffer.alloc(8 * 1024 * 1024 + 8, 97));
+      await h.clock(TERMINAL + 90 * DAY);
+      await h.tick();
+      await h.warn((await h.pending()).plans[0].id);
+      const startedAt = TERMINAL + 98 * DAY;
+      await h.clock(startedAt);
+      let held = admission === 'held-admission' ? await begin() : undefined;
+      const second = gate();
+      const resumeSecond = gate();
+      const third = gate();
+      const resumeThird = gate();
+      h.releases.push(resumeSecond.resolve, resumeThird.resolve);
+      let gets = 0;
+      h.backend.hooks.beforeGet = async (record) => {
+        if (record.key !== obj.key) return;
+        gets++;
+        if (gets === 2) {
+          second.resolve();
+          await resumeSecond.promise;
+        } else if (gets === 3) {
+          third.resolve();
+          await resumeThird.promise;
+        }
+      };
+      const reading = h.call('read', 'GET', `/spaces/${obj.space}/objects/${obj.id}`);
+      void reading.catch(() => undefined);
+      await second.promise;
+      if (admission === 'expired-before-hold') {
+        expect(
+          (
+            await h.stores.postgres.query('SELECT id FROM storage.read_leases WHERE space_id=$1', [
+              obj.space,
+            ])
+          ).rowCount
+        ).toBe(1);
+        held = await begin();
+      } else {
+        expect(
+          (
+            await h.stores.postgres.query('SELECT id FROM storage.read_leases WHERE space_id=$1', [
+              obj.space,
+            ])
+          ).rowCount
+        ).toBe(0);
+      }
+      expect(held!.status).toBe(200);
+      // Simulate a long hold without sleeping; the next held chunk cannot renew.
+      const reopenedAt = startedAt + leaseMs + 1;
+      await h.clock(reopenedAt);
+      const leases = () =>
+        h.stores.postgres.query(
+          'SELECT id FROM storage.read_leases WHERE space_id=$1 AND expires_at>to_timestamp($2/1000.0)',
+          [obj.space, reopenedAt]
+        );
+      expect((await leases()).rowCount).toBe(0);
+      expect((await release(held!.json.generation)).status).toBe(200);
+      await h.clock(reopenedAt + graceMs - 1);
+      await h.tick();
+      expect(h.backend.objects.has(obj.key)).toBe(true);
+      expect(
+        (
+          await h.stores.postgres.query(
+            'SELECT state FROM storage.deletion_candidates WHERE object_id=$1',
+            [obj.id]
+          )
+        ).rows[0].state
+      ).toBe('pending');
+      const savedReopenedAt = (
+        await h.stores.postgres.query('SELECT reopened_at FROM storage.maintenance WHERE id=true')
+      ).rows[0].reopened_at;
+      expect(savedReopenedAt.getTime()).toBe(reopenedAt);
+      // An idempotent retry must not perpetually postpone pending deletion.
+      expect((await release(held!.json.generation)).status).toBe(200);
+      expect(
+        (await h.stores.postgres.query('SELECT reopened_at FROM storage.maintenance WHERE id=true'))
+          .rows[0].reopened_at
+      ).toEqual(savedReopenedAt);
+      // Remove an expired row, as a normal collector can: renewal must UPSERT,
+      // not just UPDATE a lease that used to exist before a long hold.
+      await h.stores.postgres.query('DELETE FROM storage.read_leases WHERE space_id=$1', [
+        obj.space,
+      ]);
+      resumeSecond.resolve();
+      await third.promise;
+      expect((await leases()).rowCount).toBe(1);
+      await h.clock(reopenedAt + graceMs);
+      await h.tick();
+      expect(h.backend.objects.has(obj.key)).toBe(true);
+      expect(
+        h.backend.requests.filter((r) => r.method === 'DELETE' && r.key === obj.key)
+      ).toHaveLength(0);
+      resumeThird.resolve();
+      const read = await reading;
+      expect(read.status).toBe(200);
+      expect(read.body.equals(obj.bytes)).toBe(true);
+      await h.clock(reopenedAt + graceMs + leaseMs);
+      await h.tick();
+      expect(h.backend.objects.has(obj.key)).toBe(false);
+    },
+    30_000
+  );
+
+  it('leaves seal, orphan and expired-upload deletions pending inside release grace', async () => {
+    const space = await h.prepare();
+    const unmarked = await h.upload(space);
+    await h.stores.postgres.query('UPDATE storage.objects SET mark=NULL WHERE id=$1', [
+      unmarked.id,
+    ]);
+    const abandoned = randomUUID();
+    const abandonedKey = `private/${abandoned}`;
+    const orphanKey = `private/${randomUUID()}`;
+    const bytes = Buffer.from('private bytes');
+    await h.stores.postgres.query('SELECT storage.reserve_upload($1,$2,$3,$4,$5,$6,3600)', [
+      space,
+      'expired',
+      randomUUID(),
+      'a/expired.txt',
+      bytes.length,
+      sha256(bytes),
+    ]);
+    await h.stores.postgres.query(
+      'INSERT INTO storage.upload_attempts(id,space_id,upload_id,s3_key,created_at) VALUES($1,$2,$3,$4,to_timestamp($5/1000.0))',
+      [abandoned, space, 'expired', abandonedKey, TERMINAL - 3 * DAY]
+    );
+    await h.stores.postgres.query(
+      'UPDATE storage.upload_intents SET lease_expires_at=to_timestamp($2/1000.0) WHERE space_id=$1',
+      [space, TERMINAL - 3 * DAY]
+    );
+    for (const key of [abandonedKey, orphanKey])
+      h.backend.objects.set(key, {
+        bytes,
+        sha256: sha256(bytes),
+        lastModified: TERMINAL - 3 * DAY,
+      });
+    const held = await begin();
+    expect((await release(held.json.generation)).status).toBe(200);
+    await h.clock(TERMINAL + STORAGE_REOPEN_GRACE_MS - 1);
+    // Expired attempt and orphan are not readable, but share the conservative
+    // deletion gate so future read paths cannot accidentally bypass the handoff.
+    await h.tick();
+    for (const key of [unmarked.key, abandonedKey, orphanKey])
+      expect(h.backend.objects.has(key)).toBe(true);
+    const sealRequest = { space, effectKey: 'seal-a', expectedRevision: '0', outcome: 'failed' };
+    const pending = await h.call('control', 'POST', '/seal', sealRequest);
+    expect(pending.status).toBe(503);
+    expect(pending.json.error.code).toBe('cleanup_pending');
+    expect(
+      (
+        await h.stores.postgres.query(
+          'SELECT deleted FROM storage.seal_gc WHERE attempt_id=(SELECT attempt_id FROM storage.object_versions WHERE object_id=$1)',
+          [unmarked.id]
+        )
+      ).rows[0].deleted
+    ).toBe(false);
+    expect(h.backend.requests.filter((r) => r.method === 'DELETE')).toHaveLength(0);
+    await h.clock(TERMINAL + STORAGE_REOPEN_GRACE_MS);
+    const sealed = await h.call('control', 'POST', '/seal', sealRequest);
+    expect(sealed.status, JSON.stringify(sealed.json)).toBe(200);
+    await h.tick();
+    for (const key of [unmarked.key, abandonedKey, orphanKey])
+      expect(h.backend.objects.has(key)).toBe(false);
+  }, 30_000);
+
+  it('finishes a timed-out draining hold with the same key and releases admission', async () => {
+    const api = maintenance({ drainMs: 1, settleMs: 1 });
+    const blocker = await h.stores.postgres.connect();
+    blocker.on('error', () => undefined);
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query('SELECT pg_advisory_xact_lock_shared(653740016)');
+      await expect(api.begin({ effectKey: 'retry-draining' })).rejects.toMatchObject({
+        code: 'maintenance_unavailable',
+      });
+      const draining = await api.status();
+      expect(draining.state).toBe('draining');
+      await blocker.query('COMMIT');
+      await expect(api.release({ generation: draining.generation })).rejects.toMatchObject({
+        code: 'hold_pending',
+      });
+      const retry = maintenance();
+      const held = await retry.begin({ effectKey: 'retry-draining' });
+      expect(held).toMatchObject({ state: 'held', generation: draining.generation });
+      expect((await retry.release({ generation: held.generation })).state).toBe('normal');
+      expect((await h.prepare()).length).toBeGreaterThan(0);
+    } finally {
+      await blocker.query('ROLLBACK');
+      blocker.release();
+    }
+  }, 30_000);
+
   it('refuses all mutations including revoke while authenticated task/core reads still work; restarts and releases a crash-left hold', async () => {
     const space = await h.prepare();
     const obj = await h.upload(space);
@@ -149,6 +354,7 @@ describe('durable storage backup hold', () => {
       200
     );
     await release(held.json.generation);
+    await h.clock(TERMINAL + 98 * DAY + STORAGE_REOPEN_GRACE_MS);
     await h.tick();
     expect(h.backend.objects.has(obj.key)).toBe(false);
   }, 30000);
@@ -498,6 +704,7 @@ describe('restore hold release and transaction-local maintenance safety', () => 
     expect(await catalogSnapshot(retentionTables)).toEqual(cut);
     expect((await release(held.json.generation)).status).toBe(200);
     delete h.backend.hooks.beforeDelete;
+    await h.clock(TERMINAL + 98 * DAY + STORAGE_REOPEN_GRACE_MS);
     await h.tick(collector);
     expect(h.backend.objects.has(first.key)).toBe(false);
     expect(h.backend.objects.has(second.key)).toBe(false);
@@ -552,6 +759,7 @@ describe('restore hold release and transaction-local maintenance safety', () => 
     expect(h.backend.requests.slice(before).filter((r) => r.method === 'DELETE')).toEqual([]);
     expect((await release(held.json.generation)).status).toBe(200);
     delete h.backend.hooks.beforeList;
+    await h.clock(TERMINAL + STORAGE_REOPEN_GRACE_MS);
     await h.tick(collector);
     expect(h.backend.objects.has(key)).toBe(false);
     expect(

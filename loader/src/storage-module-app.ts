@@ -20,7 +20,7 @@ import type { S3Check } from './storage-s3.js';
 import type { StorageObjects } from './storage-objects.js';
 import type { StorageSeal } from './storage-seal.js';
 import type { StorageRetention } from './storage-retention.js';
-import type { StorageMaintenance } from './storage-maintenance.js';
+import { STORAGE_CORE_READ_PROGRESS_MS, type StorageMaintenance } from './storage-maintenance.js';
 
 /** The mounted instance-CA leaf: read at start, then re-read on every reload. */
 export interface StorageTaskTlsOptions {
@@ -252,7 +252,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
             () => {
               control.abort();
             },
-            maintenanceRoute ? 25_000 : 10_000
+            maintenanceRoute ? 25_000 : STORAGE_CORE_READ_PROGRESS_MS
           );
           idle.unref();
         };

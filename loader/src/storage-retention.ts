@@ -1,6 +1,10 @@
 /** Module-owned retention policy, durable warning batches and recoverable byte removal. */
 import { randomUUID } from 'node:crypto';
-import { storageMaintenanceFence } from './storage-maintenance.js';
+import {
+  storageMaintenanceFence,
+  storageDeletionReady,
+  STORAGE_READ_LEASE_MS,
+} from './storage-maintenance.js';
 import { Pool, type PoolClient, type QueryResultRow } from 'pg';
 import { StorageAccessError } from './storage-access-error.js';
 import type { StorageObjectS3 } from './storage-object-s3.js';
@@ -35,7 +39,7 @@ export interface StorageRetention {
 export const STORAGE_RETENTION_BOUNDS = {
   batch: 100,
   orphanGraceMs: 172_800_000,
-  readLeaseMs: 30_000,
+  readLeaseMs: STORAGE_READ_LEASE_MS,
   intervalMs: 60_000,
 } as const;
 const DAY = 86_400_000;
@@ -238,6 +242,7 @@ export function createStorageRetention(options: Options): StorageRetention {
   async function deleteCandidate(candidate: Candidate, settings: RetentionSettings) {
     await withSessionLock(candidate.object_id, 7, async (signal) => {
       const ready = await tx(async (client) => {
+        if (!(await storageDeletionReady(client, now()))) return false;
         // Policy is the shared pin/delete lock. No network I/O holds it.
         const policy = (
           await client.query<{
@@ -418,6 +423,7 @@ export function createStorageRetention(options: Options): StorageRetention {
       try {
         await withKey(entry.s3_key, async (signal) => {
           const safe = await tx(async (client) => {
+            if (!(await storageDeletionReady(client, now()))) return false;
             const row = await client.query(
               'SELECT 1 FROM storage.orphan_gc WHERE s3_key=$1 AND NOT deleted',
               [entry.s3_key]

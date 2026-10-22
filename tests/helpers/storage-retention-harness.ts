@@ -414,7 +414,7 @@ export async function createRetentionHarness(bucket = 'task-output') {
     );
     await stores.postgres.query('UPDATE storage.instance_ledger SET used_bytes=0 WHERE id=true');
     await stores.postgres.query(
-      "UPDATE storage.maintenance SET state='normal',purpose=NULL,generation=NULL,effect_key=NULL,cut_at=NULL WHERE id=true"
+      "UPDATE storage.maintenance SET state='normal',purpose=NULL,generation=NULL,effect_key=NULL,cut_at=NULL,reopened_at=NULL WHERE id=true"
     );
     await stores.postgres.query('TRUNCATE storage.restore_progress');
     backend.reset();

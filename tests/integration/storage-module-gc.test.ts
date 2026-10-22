@@ -742,7 +742,7 @@ describe('retention GC at real process and backend boundaries', () => {
     release.resolve();
     const read = await reading;
     expect(read.status).toBe(200);
-    expect(read.body).toEqual(artifact.bytes);
+    expect(read.body.equals(artifact.bytes)).toBe(true);
     // Cleanup is best effort. The durable guarantee is that protection ends on
     // the injected lease clock, even if the bounded close DELETE cannot commit.
     await h.clock(TERMINAL + 97 * DAY + 31_000);

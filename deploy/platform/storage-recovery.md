@@ -508,6 +508,9 @@ fs mkdir -m 700 /work/artifact 2>"$WORK/stage-mkdir.err"
 rc=$?; record stage-mkdir "$rc"; test "$rc" = 0 || return 1
 fsi tar -C /work/artifact -xf - <"$WORK/checked.tar" 2>"$WORK/stage-transfer.err"
 rc=$?; record stage-transfer "$rc"; test "$rc" = 0 || return 1
+# This destination helper has a fresh /work emptyDir; the source copy is not present.
+fsi sh -c 'umask 077; cat >/work/policy.json' <"$WORK/policy.json" 2>"$WORK/destination-policy-copy.err"
+rc=$?; record destination-policy-copy "$rc"; test "$rc" = 0 || return 1
 fs lifemodel-storage-recovery verify /work/artifact /work/policy.json >"$WORK/verify-destination.json" 2>"$WORK/verify-destination.err"
 rc=$?; record verify-destination "$rc"; test "$rc" = 0 || return 1
 python3 - <<'PY' 2>"$WORK/trusted-hash.err"

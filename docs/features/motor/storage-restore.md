@@ -65,7 +65,7 @@ before startup; reads exclude every unverified/missing/corrupt version.
 
 An expanding migration adds a singleton maintenance record with generation,
 purpose (`backup` / `restore`), state (`normal`, `draining`, `held`,
-`reconciling`), cut timestamp and effect key. It also adds durable
+`reconciling`), cut timestamp, admission-reopened timestamp and effect key. It also adds durable
 restore progress and version availability. No runtime schema creation or local
 state-file fallback. Migration statements use `IF NOT EXISTS`; any new SQL
 function pins `search_path` and revokes PUBLIC execute.
@@ -116,7 +116,16 @@ held-only administrative writer.
 | Hold/status/liveness and explicit generation-checked restore tools | Continue through their administrative transaction fences |
 
 Task reads explicitly use read admission. Core reads check policy even when
-lease renewal is skipped. GC cannot advance during that interval. Owner rows
+lease renewal is skipped. GC cannot advance during that interval.
+Release records `reopened_at` once (idempotent release does not extend it).
+Every byte-deletion intent, including seal cleanup and orphan/expired-attempt
+sweeps, stays pending until `now >= reopened_at + STORAGE_REOPEN_GRACE_MS`.
+That grace is `max(STORAGE_READ_LEASE_MS, STORAGE_CORE_READ_PROGRESS_MS)`:
+30 seconds, at least both the 30-second lease TTL and the core read's 10-second
+per-chunk progress deadline. The first writable core chunk UPSERTs its lease,
+even if the read started while held or its old row expired and was pruned.
+Normal space-row/lease serialization then protects the active read beyond grace.
+No lease/catalog write is allowed while held. Owner rows
 are never revived after staleness; a new boot identity is registered after
 release using the existing stale-owner checks. The artifact is a historical
 cut, not a claim to preserve later revocations.
