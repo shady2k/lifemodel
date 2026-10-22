@@ -195,7 +195,9 @@ export function createStorageSeal(options: Options): StorageSeal {
       return result;
     } catch (error) {
       await client?.query('ROLLBACK').catch(() => undefined);
-      if (error instanceof StorageAccessError) throw error;
+      // Cleanup owns its one sanitized warning and must retain the original
+      // SQLSTATE. Do not convert/log twice before cleanLeases handles it.
+      if (error instanceof StorageAccessError || connectionPool === cleanupPool) throw error;
       logSqlFailure(error, 1, 'Storage seal SQL failed');
       return fail(503, 'catalog_unavailable');
     } finally {
