@@ -168,6 +168,7 @@ export function createStorageRestoreReconciler(
   }
   async function transaction<T>(client: Client, work: () => Promise<T>): Promise<T> {
     await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(653740016)');
     try {
       const value = await work();
       await client.query('COMMIT');

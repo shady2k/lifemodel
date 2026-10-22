@@ -4,6 +4,7 @@
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { Pool } from 'pg';
+import { storageMaintenanceFence } from './storage-maintenance.js';
 import { StorageAccessError } from './storage-access-error.js';
 
 export const STORAGE_UPLOAD_OWNER_STALE_MS = 60_000;
@@ -88,6 +89,11 @@ export function createStorageUploadOwner(options: {
       let renewed = false;
       try {
         await client.query('BEGIN');
+        if (!(await storageMaintenanceFence(client, false))) {
+          await client.query('COMMIT');
+          client.release();
+          return;
+        }
         await client.query(
           'SELECT boot_id FROM storage.upload_owners WHERE boot_id=$1 FOR UPDATE',
           [bootId]
@@ -136,10 +142,24 @@ export function createStorageUploadOwner(options: {
     lastRenewalStart = started;
     armWatchdog();
     try {
-      await pool.query(
-        'INSERT INTO storage.upload_owners(boot_id,heartbeat_at) VALUES($1,clock_timestamp())',
-        [bootId]
-      );
+      const client = await pool.connect();
+      let writable = false;
+      try {
+        await client.query('BEGIN');
+        writable = await storageMaintenanceFence(client, false);
+        if (writable)
+          await client.query(
+            'INSERT INTO storage.upload_owners(boot_id,heartbeat_at) VALUES($1,clock_timestamp())',
+            [bootId]
+          );
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        throw error;
+      } finally {
+        client.release();
+      }
+      if (!writable) return;
       check();
       initialized = true;
       lastRenewalStart = started;
@@ -201,6 +221,14 @@ export function createStorageUploadOwner(options: {
     isLive: (attemptId) => live.has(attemptId),
     ready: async () => {
       if (closed) throw unavailable();
+      // Held service still serves reads and readiness. No heartbeat or recovery
+      // write is needed until admission reopens; register/assertActive still
+      // enforce the existing boot freshness rules for actual transfers.
+      const maintenance = await pool.query<{ state: string }>(
+        'SELECT state FROM storage.maintenance WHERE id=true'
+      );
+      if (!maintenance.rows[0]) throw unavailable();
+      if (maintenance.rows[0].state !== 'normal') return;
       if (now() - lastRenewalStart >= FAIL_CLOSED_MS) fail();
       if (failed || recovery) {
         recovery ??= recover()
@@ -214,6 +242,7 @@ export function createStorageUploadOwner(options: {
       } else {
         initialization ??= initialize();
         await initialization;
+        if (!initialized) initialization = undefined;
       }
       check();
     },

@@ -1,5 +1,5 @@
-/** Durable write admission. Session locks span effects, never SQL row transactions. */
-import { Client } from 'pg';
+/** Durable transaction-local write admission. No SQL session spans S3 work. */
+import { Client, type PoolClient } from 'pg';
 import { randomUUID } from 'node:crypto';
 import { StorageAccessError } from './storage-access-error.js';
 const LOCK = '653740016';
@@ -16,8 +16,6 @@ export interface StorageMaintenance {
   release(input: unknown): Promise<MaintenanceStatus>;
   releaseDegraded(input: unknown): Promise<MaintenanceStatus>;
   prepareRestore(input: { generation: string; artifactSha256: string }): Promise<MaintenanceStatus>;
-  enter(parent?: AbortSignal): Promise<{ signal: AbortSignal; close(): Promise<void> }>;
-  run<T>(work: (signal: AbortSignal) => Promise<T>, parent?: AbortSignal): Promise<T>;
   close(): Promise<void>;
 }
 function fail(code: string, status = 503): never {
@@ -30,13 +28,25 @@ function exact(value: unknown, keys: string[]): Record<string, unknown> {
     fail('invalid_request', 400);
   return row;
 }
+/** Call inside the SAME transaction as the catalog work, before its first write.
+ * The exclusive hold waits for every admitted transaction. Reads may take this
+ * fence too, but must skip their optional writes when it returns false. */
+export async function storageMaintenanceFence(
+  client: Client | PoolClient,
+  required = true
+): Promise<boolean> {
+  await client.query(`SELECT pg_advisory_xact_lock_shared(${LOCK})`);
+  const row = (
+    await client.query<{ state: string }>('SELECT state FROM storage.maintenance WHERE id=true')
+  ).rows[0];
+  if (!row || (required && row.state !== 'normal')) fail('maintenance_unavailable');
+  return row.state === 'normal';
+}
 export function createStorageMaintenance(options: {
   connectionString: string;
   drainMs?: number;
   settleMs?: number;
 }): StorageMaintenance {
-  const live = new Set<{ controller: AbortController; client: Client }>();
-  let closed = false;
   function client(timeout = 5000) {
     const c = new Client({
       connectionString: options.connectionString,
@@ -71,45 +81,6 @@ export function createStorageMaintenance(options: {
     if (!row) fail('maintenance_unavailable');
     return { ...row, cutAt: row.cutAt?.toISOString() ?? null };
   }
-  async function enter(parent?: AbortSignal) {
-    if (closed) fail('maintenance_unavailable');
-    const c = client();
-    const controller = new AbortController();
-    const failed = () => {
-      controller.abort();
-    };
-    c.on('error', failed);
-    c.on('end', failed);
-    const signal = AbortSignal.any([controller.signal, ...(parent ? [parent] : [])]);
-    const item = { client: c, controller };
-    live.add(item);
-    let ended: Promise<void> | undefined;
-    const close = () =>
-      (ended ??= (async () => {
-        live.delete(item);
-        await c.end().catch(() => undefined);
-      })());
-    try {
-      signal.throwIfAborted();
-      await c.connect();
-      // Never queue behind a draining hold's exclusive lock while an admitted
-      // effect is still settling. The row fence below resolves admission races.
-      const admitted = await c.query<{ locked: boolean }>(
-        `SELECT pg_try_advisory_lock_shared(${LOCK}) AS locked`
-      );
-      if (!admitted.rows[0]?.locked) fail('storage_held');
-      await c.query('BEGIN');
-      await c.query('SELECT id FROM storage.maintenance WHERE id=true FOR SHARE');
-      if ((await status(c)).state !== 'normal') fail('storage_held');
-      signal.throwIfAborted();
-      await c.query('COMMIT');
-      return { signal, close };
-    } catch (error) {
-      await close();
-      if (error instanceof StorageAccessError) throw error;
-      fail('maintenance_unavailable');
-    }
-  }
   async function release(value: unknown, degraded = false): Promise<MaintenanceStatus> {
     const input = exact(value, degraded ? ['generation', 'unavailable'] : ['generation']);
     const generation = input['generation'];
@@ -122,6 +93,7 @@ export function createStorageMaintenance(options: {
       fail('invalid_request', 400);
     return connected(async (c) => {
       await c.query('BEGIN');
+      await c.query(`SELECT pg_advisory_xact_lock(${LOCK})`);
       await c.query('SELECT id FROM storage.maintenance WHERE id=true FOR UPDATE');
       const row = await status(c);
       if (row.generation !== generation) fail('hold_conflict', 409);
@@ -147,15 +119,6 @@ export function createStorageMaintenance(options: {
   }
   const api: StorageMaintenance = {
     status: () => status(),
-    enter,
-    run: async (work, parent) => {
-      const op = await enter(parent);
-      try {
-        return await work(op.signal);
-      } finally {
-        await op.close();
-      }
-    },
     begin: async (value) => {
       const input = exact(value, ['effectKey']);
       if (
@@ -183,29 +146,22 @@ export function createStorageMaintenance(options: {
         return status(c);
       });
       if (hold.state === 'held' || hold.state === 'reconciling') return hold;
-      // Cancel local handlers at the drain bound, retaining the DB fence on timeout.
-      const timer = setTimeout(() => {
-        for (const op of live) op.controller.abort();
-      }, options.drainMs ?? 15000);
-      timer.unref();
-      try {
-        return await connected(
-          async (c) => {
-            await c.query(`SELECT pg_advisory_lock(${LOCK})`);
-            await c.query(
-              "UPDATE storage.maintenance SET state='held',cut_at=clock_timestamp() WHERE id=true AND generation=$1 AND state='draining'",
-              [hold.generation]
-            );
-            const result = await status(c);
-            if (result.generation !== hold.generation || result.state !== 'held')
-              fail('hold_conflict', 409);
-            return result;
-          },
-          (options.drainMs ?? 15000) + (options.settleMs ?? 5000)
-        );
-      } finally {
-        clearTimeout(timer);
-      }
+      return connected(
+        async (c) => {
+          await c.query('BEGIN');
+          await c.query(`SELECT pg_advisory_xact_lock(${LOCK})`);
+          await c.query(
+            "UPDATE storage.maintenance SET state='held',cut_at=clock_timestamp() WHERE id=true AND generation=$1 AND state='draining'",
+            [hold.generation]
+          );
+          const result = await status(c);
+          if (result.generation !== hold.generation || result.state !== 'held')
+            fail('hold_conflict', 409);
+          await c.query('COMMIT');
+          return result;
+        },
+        (options.drainMs ?? 15000) + (options.settleMs ?? 5000)
+      );
     },
     release: (value) => release(value),
     releaseDegraded: (value) => release(value, true),
@@ -213,8 +169,8 @@ export function createStorageMaintenance(options: {
       if (!UUID.test(input.generation) || !/^[0-9a-f]{64}$/.test(input.artifactSha256))
         fail('invalid_request', 400);
       return connected(async (c) => {
-        await c.query(`SELECT pg_advisory_lock(${LOCK})`);
         await c.query('BEGIN');
+        await c.query(`SELECT pg_advisory_xact_lock(${LOCK})`);
         await c.query('SELECT id FROM storage.maintenance WHERE id=true FOR UPDATE');
         const current = await status(c);
         if (current.state === 'normal') fail('restore_requires_hold', 409);
@@ -256,8 +212,6 @@ export function createStorageMaintenance(options: {
       });
     },
     close: () => {
-      closed = true;
-      for (const item of live) item.controller.abort();
       return Promise.resolve();
     },
   };

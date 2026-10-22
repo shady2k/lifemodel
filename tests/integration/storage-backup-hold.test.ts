@@ -31,11 +31,41 @@ afterEach(async () => {
 afterAll(async () => {
   await h?.close();
 }, 20000);
+
+async function catalogSnapshot(tables: readonly string[]) {
+  const rows: Record<string, unknown> = {};
+  for (const table of tables) {
+    rows[table] = (
+      await h.stores.postgres.query(
+        `SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]'::jsonb) AS rows FROM storage.${table} t`
+      )
+    ).rows[0].rows;
+  }
+  return rows;
+}
+const allocationTables = [
+  'spaces',
+  'allocations',
+  'allocate_receipts',
+  'space_quota',
+  'instance_ledger',
+];
+const retentionTables = [
+  'orphan_gc',
+  'instance_ledger',
+  'space_quota',
+  'deletion_candidates',
+  'deletion_plans',
+  'retention_policies',
+  'retention_tombstones',
+  'object_tombstones',
+];
+
 const begin = () => h.call('control', 'POST', '/maintenance/begin', { effectKey: 'backup-one' });
 const release = (generation: string) =>
   h.call('control', 'POST', '/maintenance/release', { generation });
 describe('durable storage backup hold', () => {
-  it('refuses mutations while authenticated task/core reads and revoke still work; restarts and releases a crash-left hold', async () => {
+  it('refuses all mutations including revoke while authenticated task/core reads still work; restarts and releases a crash-left hold', async () => {
     const space = await h.prepare();
     const obj = await h.upload(space);
     const held = await begin();
@@ -97,8 +127,8 @@ describe('durable storage backup hold', () => {
           effectKey: 'held-revoke',
         })
       ).status
-    ).toBe(200);
-    expect((await h.call('task', 'GET', `/spaces/${space}/objects/${obj.id}`)).status).toBe(403);
+    ).toBe(503);
+    expect((await h.call('task', 'GET', `/spaces/${space}/objects/${obj.id}`)).status).toBe(200);
   }, 30000);
   it('pauses deletion and orphan passes, preserving their byte/accounting work until release', async () => {
     const obj = await h.artifact();
@@ -122,52 +152,90 @@ describe('durable storage backup hold', () => {
     await h.tick();
     expect(h.backend.objects.has(obj.key)).toBe(false);
   }, 30000);
-  it('holds a writer admitted before the cut until its transport and publication settle', async () => {
+  it('holds through a different child while PUT is stalled, refuses publication and collects the private orphan after release', async () => {
     const space = await h.prepare();
+    const writer = h.child();
+    const holder = await h.start();
     const arrived = gate();
     const proceed = gate();
     h.releases.push(proceed.resolve);
-    h.backend.hooks.beforeCommit = async () => {
+    let key = '';
+    h.backend.hooks.beforeCommit = async (request) => {
+      key = request.key;
       arrived.resolve();
       await proceed.promise;
     };
     const bytes = Buffer.from('cut member');
-    const writing = h.call('task', 'PUT', `/spaces/${space}/objects/cut-member`, bytes, 'a', {
-      'x-storage-name': Buffer.from('cut.txt').toString('base64url'),
-      'x-storage-length': String(bytes.length),
-      'x-storage-sha256': sha256(bytes),
-    });
+    const writing = h.call(
+      'task',
+      'PUT',
+      `/spaces/${space}/objects/cut-member`,
+      bytes,
+      'a',
+      {
+        'x-storage-name': Buffer.from('cut.txt').toString('base64url'),
+        'x-storage-length': String(bytes.length),
+        'x-storage-sha256': sha256(bytes),
+      },
+      writer
+    );
     await arrived.promise;
-    const holding = begin();
-    // Wait for durable admission fence, not elapsed wall time.
-    await expect
-      .poll(
-        async () =>
-          (await h.stores.postgres.query('SELECT state FROM storage.maintenance WHERE id')).rows[0]
-            .state
-      )
-      .toBe('draining');
+    const held = await h.call(
+      'control',
+      'POST',
+      '/maintenance/begin',
+      { effectKey: 'put-cut' },
+      'core',
+      {},
+      holder
+    );
+    expect(held.status).toBe(200);
+    expect(held.json.state).toBe('held');
+    expect(h.backend.objects.has(key)).toBe(false);
+    const snapshot = async () => ({
+      objects: (await h.stores.postgres.query('SELECT * FROM storage.objects')).rows,
+      versions: (await h.stores.postgres.query('SELECT * FROM storage.object_versions')).rows,
+      intents: (await h.stores.postgres.query('SELECT * FROM storage.upload_intents')).rows,
+      attempts: (await h.stores.postgres.query('SELECT * FROM storage.upload_attempts')).rows,
+      quota: (await h.stores.postgres.query('SELECT * FROM storage.space_quota')).rows,
+      ledger: (await h.stores.postgres.query('SELECT * FROM storage.instance_ledger')).rows,
+    });
+    const cut = await snapshot();
+    expect(cut.objects).toEqual([]);
+    expect(cut.versions).toEqual([]);
+    expect(cut.intents[0]).toMatchObject({ state: 'pending', reserved: true });
+    proceed.resolve();
+    expect((await writing).status).toBe(503);
+    expect(h.backend.objects.get(key)?.bytes).toEqual(bytes);
+    expect(await snapshot()).toEqual(cut);
+    expect((await release(held.json.generation)).status).toBe(200);
+    delete h.backend.hooks.beforeCommit;
+    await h.clock(TERMINAL + 3 * DAY);
+    // The original owner knows this settled transfer is no longer live.
+    await h.tick(writer);
+    expect(h.backend.objects.has(key)).toBe(false);
+    expect((await h.stores.postgres.query('SELECT * FROM storage.object_versions')).rows).toEqual(
+      []
+    );
     expect(
       (
-        await h.call(
-          'task',
-          'POST',
-          `/spaces/${space}/objects/00000000-0000-4000-8000-000000000000/mark`,
-          { role: 'result' }
-        )
-      ).status
-    ).toBe(503);
-    proceed.resolve();
-    expect((await writing).status).toBe(200);
-    expect((await holding).json.state).toBe('held');
+        await h.stores.postgres.query('SELECT deleted FROM storage.attempt_gc WHERE s3_key=$1', [
+          key,
+        ])
+      ).rows
+    ).toEqual([{ deleted: true }]);
     expect(
       (
         await h.stores.postgres.query(
-          'SELECT count(*)::int AS count FROM storage.objects WHERE space_id=$1',
+          'SELECT reserved_bytes::text FROM storage.space_quota WHERE space_id=$1',
           [space]
         )
-      ).rows[0].count
-    ).toBe(1);
+      ).rows[0].reserved_bytes
+    ).toBe('0');
+    expect(
+      (await h.stores.postgres.query('SELECT used_bytes::text FROM storage.instance_ledger'))
+        .rows[0].used_bytes
+    ).toBe('0');
   }, 30000);
   it('never serves catalog-only restored versions, including zero bytes, lists and receipt retry', async () => {
     const space = await h.prepare();
@@ -202,7 +270,7 @@ describe('durable storage backup hold', () => {
   }, 30000);
 });
 
-describe('restore hold release and maintenance session safety', () => {
+describe('restore hold release and transaction-local maintenance safety', () => {
   it('requires exact explicit degraded acceptance, preserves unavailable versions, marks and charges, and resumes writes and GC', async () => {
     const missing = await h.artifact();
     const activeSpace = await h.prepare('b');
@@ -373,99 +441,303 @@ describe('restore hold release and maintenance session safety', () => {
     expect(await snapshot()).toEqual(before);
   }, 30000);
 
-  it('drains a candidate DELETE already in flight before it declares a consistent cut', async () => {
-    const object = await h.artifact();
+  it('finishes held while a candidate DELETE stalls, refuses accounting and the next DELETE intent', async () => {
+    const first = await h.artifact();
+    const second = await h.artifact('b');
+    const collector = h.child();
+    const holder = await h.start();
     await h.clock(TERMINAL + 90 * DAY);
-    await h.tick();
+    await h.tick(collector);
     await h.warn((await h.pending()).plans[0].id);
     await h.clock(TERMINAL + 98 * DAY);
-    const arrived = gate(),
-      proceed = gate();
+    const arrived = gate();
+    const proceed = gate();
     h.releases.push(proceed.resolve);
-    h.backend.hooks.beforeDelete = async () => {
+    let deleting = '';
+    h.backend.hooks.beforeDelete = async (request) => {
+      deleting = request.key;
       arrived.resolve();
       await proceed.promise;
     };
-    const collecting = h.tick();
+    const before = h.backend.requests.length;
+    const collecting = h.tick(collector);
     await arrived.promise;
-    const holding = begin();
-    await expect
-      .poll(
-        async () =>
-          (await h.stores.postgres.query('SELECT state FROM storage.maintenance WHERE id')).rows[0]
-            .state
-      )
-      .toBe('draining');
-    expect(h.backend.objects.has(object.key)).toBe(true);
-    proceed.resolve();
-    await collecting;
-    expect((await holding).json.state).toBe('held');
-    expect(h.backend.objects.has(object.key)).toBe(false);
+    const held = await h.call(
+      'control',
+      'POST',
+      '/maintenance/begin',
+      { effectKey: 'gc-cut' },
+      'core',
+      {},
+      holder
+    );
+    expect(held.status).toBe(200);
+    expect(held.json.state).toBe('held');
+    expect(h.backend.objects.has(deleting)).toBe(true);
+    const cut = await catalogSnapshot(retentionTables);
     expect(
       (
         await h.stores.postgres.query(
-          'SELECT state FROM storage.deletion_candidates WHERE object_id=$1',
-          [object.id]
+          'SELECT state,count(*)::int AS count FROM storage.deletion_candidates GROUP BY state ORDER BY state'
         )
-      ).rows[0].state
-    ).toBe('deleted');
+      ).rows
+    ).toEqual([
+      { state: 'deleting', count: 1 },
+      { state: 'pending', count: 1 },
+    ]);
+    proceed.resolve();
+    await collecting;
+    expect(h.backend.objects.has(deleting)).toBe(false);
+    expect(h.backend.objects.has(deleting === first.key ? second.key : first.key)).toBe(true);
+    expect(
+      h.backend.requests
+        .slice(before)
+        .filter((r) => r.method === 'DELETE')
+        .map((r) => r.key)
+    ).toEqual([deleting]);
+    expect(await catalogSnapshot(retentionTables)).toEqual(cut);
+    expect((await release(held.json.generation)).status).toBe(200);
+    delete h.backend.hooks.beforeDelete;
+    await h.tick(collector);
+    expect(h.backend.objects.has(first.key)).toBe(false);
+    expect(h.backend.objects.has(second.key)).toBe(false);
+    expect(
+      (
+        await h.stores.postgres.query(
+          'SELECT state FROM storage.deletion_candidates ORDER BY object_id'
+        )
+      ).rows
+    ).toEqual([{ state: 'deleted' }, { state: 'deleted' }]);
   }, 30000);
 
-  it('aborts at its drain bound but retains admission until the cancelled effect has settled', async () => {
-    const api = maintenance({ drainMs: 50, settleMs: 1000 });
-    const arrived = gate(),
-      cancelled = gate(),
-      settled = gate();
-    h.releases.push(settled.resolve);
-    const operation = api.run(async (signal) => {
-      signal.addEventListener('abort', cancelled.resolve, { once: true });
+  it('refuses orphan discovery and accounting when a LIST started in another child returns after held', async () => {
+    const collector = h.child();
+    const holder = await h.start();
+    const key = `private/${randomUUID()}`;
+    const bytes = Buffer.from('unknown backend orphan');
+    h.backend.objects.set(key, { bytes, sha256: sha256(bytes), lastModified: TERMINAL - 3 * DAY });
+    const arrived = gate();
+    const proceed = gate();
+    h.releases.push(proceed.resolve);
+    h.backend.hooks.beforeList = async () => {
       arrived.resolve();
-      await settled.promise;
-    });
+      await proceed.promise;
+    };
+    const collecting = h.tick(collector);
     await arrived.promise;
-    const holding = api.begin({ effectKey: 'deadline-drain' });
-    await cancelled.promise;
-    expect((await api.status()).state).toBe('draining');
-    await expect(api.enter()).rejects.toMatchObject({ code: 'storage_held' });
-    settled.resolve();
-    await operation;
-    expect((await holding).state).toBe('held');
+    const held = await h.call(
+      'control',
+      'POST',
+      '/maintenance/begin',
+      { effectKey: 'list-cut' },
+      'core',
+      {},
+      holder
+    );
+    expect(held.status).toBe(200);
+    expect(held.json.state).toBe('held');
+    const cut = await catalogSnapshot(retentionTables);
+    const before = h.backend.requests.length;
+    proceed.resolve();
+    await collecting;
+    expect(await catalogSnapshot(retentionTables)).toEqual(cut);
+    expect(
+      (await h.stores.postgres.query('SELECT * FROM storage.orphan_gc WHERE s3_key=$1', [key])).rows
+    ).toEqual([]);
+    expect(
+      (await h.stores.postgres.query('SELECT used_bytes::text FROM storage.instance_ledger'))
+        .rows[0].used_bytes
+    ).toBe('0');
+    expect(h.backend.objects.has(key)).toBe(true);
+    expect(h.backend.requests.slice(before).filter((r) => r.method === 'DELETE')).toEqual([]);
+    expect((await release(held.json.generation)).status).toBe(200);
+    delete h.backend.hooks.beforeList;
+    await h.tick(collector);
+    expect(h.backend.objects.has(key)).toBe(false);
+    expect(
+      (
+        await h.stores.postgres.query('SELECT deleted FROM storage.orphan_gc WHERE s3_key=$1', [
+          key,
+        ])
+      ).rows
+    ).toEqual([{ deleted: true }]);
+    expect(
+      (await h.stores.postgres.query('SELECT used_bytes::text FROM storage.instance_ledger'))
+        .rows[0].used_bytes
+    ).toBe('0');
   }, 30000);
 
-  it('keeps a timed-out hold fenced and lets a later begin finish after the owner settles', async () => {
-    const api = maintenance({ drainMs: 20, settleMs: 30 });
-    const operation = await api.enter();
+  it('cannot allocate after held when its actual blocked seal backend was terminated', async () => {
+    const writer = h.child();
+    const holder = await h.start();
+    const admin = await h.stores.postgres.connect();
+    const launch = 'lost-seal-backend';
     try {
-      await expect(api.begin({ effectKey: 'retry-drain' })).rejects.toMatchObject({
-        code: 'maintenance_unavailable',
-      });
-      expect(operation.signal.aborted).toBe(true);
-      expect((await api.status()).state).toBe('draining');
-      await expect(
-        api.release({ generation: (await api.status()).generation })
-      ).rejects.toMatchObject({ code: 'hold_pending' });
+      const adminPid = (await admin.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
+      await admin.query('SELECT pg_advisory_lock(hashtextextended($1, 1))', [launch]);
+      const before = await catalogSnapshot(allocationTables);
+      const allocating = h.call(
+        'control',
+        'POST',
+        '/allocate',
+        {
+          taskId: launch,
+          launchId: launch,
+          effectKey: 'lost-allocate',
+          retentionRevision: 'retention-1',
+        },
+        'core',
+        {},
+        writer
+      );
+      let backend = 0;
+      await expect
+        .poll(async () => {
+          const blocked = await h.stores.postgres.query(
+            "SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND application_name='lifemodel-storage-seal' AND wait_event='advisory' AND $1=ANY(pg_blocking_pids(pid))",
+            [adminPid]
+          );
+          backend = blocked.rows[0]?.pid ?? 0;
+          return blocked.rowCount;
+        })
+        .toBe(1);
+      expect(
+        (await h.stores.postgres.query('SELECT pg_terminate_backend($1) AS terminated', [backend]))
+          .rows[0].terminated
+      ).toBe(true);
+      const held = await h.call(
+        'control',
+        'POST',
+        '/maintenance/begin',
+        { effectKey: 'lost-backend-cut' },
+        'core',
+        {},
+        holder
+      );
+      expect(held.status).toBe(200);
+      expect(held.json.state).toBe('held');
+      expect(await catalogSnapshot(allocationTables)).toEqual(before);
+      await admin.query('SELECT pg_advisory_unlock(hashtextextended($1, 1))', [launch]);
+      expect((await allocating).status).toBe(503);
+      expect(await catalogSnapshot(allocationTables)).toEqual(before);
+      expect(
+        (await h.call('control', 'GET', '/maintenance/status', undefined, 'core', {}, writer)).json
+          .state
+      ).toBe('held');
+      expect((await release(held.json.generation)).status).toBe(200);
+      expect(
+        (
+          await h.call(
+            'control',
+            'POST',
+            '/allocate',
+            {
+              taskId: launch,
+              launchId: launch,
+              effectKey: 'lost-allocate',
+              retentionRevision: 'retention-1',
+            },
+            'core',
+            {},
+            writer
+          )
+        ).status
+      ).toBe(200);
     } finally {
-      await operation.close();
+      await admin.query('SELECT pg_advisory_unlock_all()');
+      admin.release();
     }
-    expect((await api.begin({ effectKey: 'retry-drain' })).state).toBe('held');
   }, 30000);
 
-  it('propagates parent cancellation and session lock loss to the operation signal', async () => {
-    const api = maintenance({ connectionString: h.sqlProxy.connectionString });
-    const parent = new AbortController();
-    const cancelled = await api.enter(parent.signal);
-    parent.abort();
-    expect(cancelled.signal.aborted).toBe(true);
-    await cancelled.close();
-    const lost = await api.enter();
+  it('drains a real live allocate transaction before held, then refuses any late catalog work', async () => {
+    const writer = h.child();
+    const holder = await h.start();
+    const admin = await h.stores.postgres.connect();
+    const launch = 'live-seal-backend';
     try {
-      h.sqlProxy.drop();
-      await expect.poll(() => lost.signal.aborted).toBe(true);
+      const adminPid = (await admin.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
+      await admin.query('SELECT pg_advisory_lock(hashtextextended($1, 1))', [launch]);
+      const input = {
+        taskId: launch,
+        launchId: launch,
+        effectKey: 'live-allocate',
+        retentionRevision: 'retention-1',
+      };
+      const allocating = h.call('control', 'POST', '/allocate', input, 'core', {}, writer);
+      let backend = 0;
+      await expect
+        .poll(async () => {
+          const blocked = await h.stores.postgres.query(
+            "SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND application_name='lifemodel-storage-seal' AND wait_event='advisory' AND $1=ANY(pg_blocking_pids(pid))",
+            [adminPid]
+          );
+          backend = blocked.rows[0]?.pid ?? 0;
+          return blocked.rowCount;
+        })
+        .toBe(1);
+      const holding = h.call(
+        'control',
+        'POST',
+        '/maintenance/begin',
+        { effectKey: 'live-backend-cut' },
+        'core',
+        {},
+        holder
+      );
+      await expect
+        .poll(
+          async () =>
+            (await h.stores.postgres.query('SELECT state FROM storage.maintenance WHERE id=true'))
+              .rows[0].state
+        )
+        .toBe('draining');
+      // This is the actual begin transaction waiting for the writer's shared
+      // transaction lock, not a synthetic maintenance-side session.
+      await expect
+        .poll(
+          async () =>
+            (
+              await h.stores.postgres.query(
+                "SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND application_name='lifemodel-storage-maintenance' AND wait_event='advisory' AND $1=ANY(pg_blocking_pids(pid))",
+                [backend]
+              )
+            ).rowCount
+        )
+        .toBe(1);
+      expect(
+        (
+          await h.stores.postgres.query('SELECT * FROM storage.allocations WHERE launch_id=$1', [
+            launch,
+          ])
+        ).rows
+      ).toEqual([]);
+      await admin.query('SELECT pg_advisory_unlock(hashtextextended($1, 1))', [launch]);
+      expect((await allocating).status).toBe(200);
+      const held = await holding;
+      expect(held.status).toBe(200);
+      expect(held.json.state).toBe('held');
+      const cut = await catalogSnapshot(allocationTables);
+      expect(
+        (await h.stores.postgres.query('SELECT launch_id FROM storage.allocations')).rows
+      ).toEqual([{ launch_id: launch }]);
+      expect(
+        (
+          await h.call(
+            'control',
+            'POST',
+            '/allocate',
+            { ...input, launchId: 'late-allocation', effectKey: 'late-allocate' },
+            'core',
+            {},
+            writer
+          )
+        ).status
+      ).toBe(503);
+      expect(await catalogSnapshot(allocationTables)).toEqual(cut);
+      expect((await release(held.json.generation)).status).toBe(200);
     } finally {
-      await lost.close();
-      h.sqlProxy.restore();
+      await admin.query('SELECT pg_advisory_unlock_all()');
+      admin.release();
     }
-    await api.close();
-    await expect(api.enter()).rejects.toMatchObject({ code: 'maintenance_unavailable' });
   }, 30000);
 });

@@ -40,9 +40,10 @@ before startup; reads exclude every unverified/missing/corrupt version.
   and neither is needed for this offline operator procedure. An offline admin
   subcommand with the module's existing scoped-purpose SQL configuration handles
   pre-start restore and crash recovery when core is absent; no public admin API.
-- **SQL-backed maintenance state and session operation barrier:** reject an
-  in-memory flag, HTTP-only guard or tick-only guard; restarts and operations
-  already between SQL/S3 steps bypass them.
+- **SQL-backed maintenance state and transaction-local barrier:** every mutating
+  SQL transaction takes the shared transaction advisory fence and checks durable
+  state before its first write. Reject a separate admission session: losing it
+  can release a fence while another session commits catalog changes.
 - **Storage-only archive:** preserve the complete `storage` schema, not selected
   tables. Exclude `task_access`, core SQL, Valkey, Bao and Gitea. Reject restoring
   Pod bindings as live authority: the destination must independently authorize
@@ -76,43 +77,49 @@ restart automatically releases a hold. Backup release is explicit, including
 crash-left holds. A restore release additionally requires a completed reconcile
 receipt for that exact generation. Stale release/reconcile cannot reopen writes.
 
-Admission and drain have a shared ordering point in Postgres. Before any
-mutating operation starts, its SQL session takes a shared advisory operation
-lock and checks maintenance under the singleton row lock, then commits the
-short admission transaction. Keep the session lock for the entire operation,
-including S3 transport settlement and final SQL publication/rollback cleanup;
-never hold a row transaction over network I/O. Begin commits `draining` under
-the same singleton ordering point before waiting for an exclusive operation
-lock. New admissions fail with `503 storage_held`. If the SQL lock connection
-fails, abort that operation's transport immediately and keep its error listener
-through teardown. This follows the existing retention session-lock pattern.
-All code paths use the same lock key/order; background collector and offline
-admin operations do not have a bypass based on HTTP method.
+Admission and drain have a shared ordering point in Postgres. Every catalog
+write transaction (access/publication, revoke, seal, retention, orphan/attempt
+collection, ledger, lease cleanup and owner heartbeat) takes
+`pg_advisory_xact_lock_shared(653740016)` in that same transaction, then reads
+maintenance state before its first write. Only `normal` admits writes; otherwise
+it refuses with `503 maintenance_unavailable`. The persisted name `normal`
+means open admission. No transaction spans S3 work. Session loss rolls back
+that session's own writes; there is no separate admission session to lose.
 
-Proposed drain budget: **15 seconds total**, then cancel admitted writers and
-allow **5 seconds** for settlement. These are new task-local bounds, not an
-RTO. Failure returns `hold_pending`, retains the durable fence and never issues
-a cut receipt. Retry or an operator-confirmed process stop can finish the drain.
-Keep ordinary revoke independent of this long barrier. Process/session drain
-cannot prove remote quiescence; the cold stop below is mandatory even after a
-successful drain. No multi-replica support is added.
+Begin first commits `draining`, which refuses each subsequent write/chunk
+transaction in every process. It then obtains `pg_advisory_xact_lock(653740016)`
+and records `held` in that exclusive transaction. Already admitted transactions
+must commit or roll back before held. The 20-second hold-request SQL budget
+bounds waiting, not an entire remote transfer. A timeout leaves durable
+`draining`; retry can complete it. Reads still work. Shared/exclusive ordering
+is identical across subsystem instances and module processes; no in-memory
+live-operation set or signal is a correctness fence.
+
+A long PUT stops at its next chunk/completion transaction; a GC or seal pass
+stops at its next delete-intent/accounting transaction. S3 calls already in
+flight may finish after held, but cannot publish catalog changes. A refused PUT
+commit can therefore leave a private orphan, which normal orphan/attempt
+sweeps account and remove after release and their grace/ownership checks.
+An ambiguous DELETE leaves its existing intent for idempotent retry after
+release. **SeaweedFS must still be stopped before cold copy**: held is a SQL
+cut, not proof of remote quiescence. The control/restore writers take exclusive
+transaction locks and validate generation; restore reconcile is the explicit
+held-only administrative writer.
 
 | While held | Behavior |
 | --- | --- |
-| PUT/reservation, attempt begin, publication, mark, allocate/bind/seal | Refuse new work before effect; admitted work settles or is aborted before held receipt |
-| Retention tick, expired uploads, seal cleanup, orphan discovery/deletion/pruning | Pause all passes and await existing operations, not merely their next SQL statement |
-| Retention plan listing, warning confirmation, policy/pin/unpin/reclaim | Refuse during hold; even plan GET writes `exposed_at`, so is not a read exception |
-| Authorized object GET/list/range, identity and access checks | Continue with unchanged live identity/revision/tombstone checks; unavailable versions never pass |
-| Revoke, read leases and their cleanup, upload-owner heartbeat, hold/status/liveness | Continue; these safety/liveness writes do not change stored bytes or accounting |
+| PUT/reservation, attempt begin, publication, mark, allocate/bind/seal, revoke | Refuse at the next transaction; no later catalog write can commit |
+| Retention, seal cleanup, orphan/attempt discovery/deletion/pruning | Refuse the next intent/accounting transaction; already dispatched S3 may settle |
+| Retention plan listing, warning confirmation, policy/pin/unpin/reclaim | Refuse; plan GET writes `exposed_at` |
+| Authorized object GET/list/range, identity/access checks | Continue unchanged identity/revision/tombstone checks, without lease writes |
+| Read-lease cleanup and upload-owner heartbeat | Skip writes while held; expiry remains authoritative and owner freshness recovers after release |
+| Hold/status/liveness and explicit generation-checked restore tools | Continue through their administrative transaction fences |
 
-Read handlers must explicitly use read admission: the current task-stream
-default is write admission. Read-lease INSERT/renew/delete must not encounter a
-blanket SQL-write ban. Upload ownership stays registered through transport
-settlement; keep the existing 5-second heartbeat, 30-second local fail-closed
-bound and 60-second database stale rule. Do not turn stale foreign boots live.
-A continuing revoke is captured if committed before the dump's SQL snapshot;
-later revokes lie after that backup cut. The artifact is a historical cut, not
-a claim to preserve revocations made after it.
+Task reads explicitly use read admission. Core reads check policy even when
+lease renewal is skipped. GC cannot advance during that interval. Owner rows
+are never revived after staleness; a new boot identity is registered after
+release using the existing stale-owner checks. The artifact is a historical
+cut, not a claim to preserve later revocations.
 
 Backup operator sequence:
 
@@ -131,8 +138,8 @@ Backup operator sequence:
    leases and upload-owner rows. Use the dump's repeatable-read snapshot also
    for object counts/bytes and cut time (exported SQL snapshot); no separately
    timed totals. Record the applied dbmate version as metadata, not a dump of
-   the global migration-history table. Revoke/lease/heartbeat changes after
-   that SQL snapshot do not change this artifact's cut.
+   the global migration-history table. Held service skips heartbeat and lease
+   writes and refuses revoke until release; the dump captures the SQL cut.
 4. Copy the cold PVC through the sanitized-tree policy below. Finalize and
    verify the manifest only after both payloads are complete. A temporary
    artifact is never a successful backup. Failure retains the hold and the
@@ -292,7 +299,7 @@ SigV4 fake S3 and real isolated Postgres, not fake catalog behavior.
 | Constraint / origin | Planned check |
 | --- | --- |
 | Consistent cut and resumable hold (brief / S-D7) | Hold refuses PUT/mark/seal/allocation and plan mutations; pause candidate/attempt/orphan GC already poised at S3 dispatch; active operations settle or return hold pending; restart preserves hold; stale release fails; later valid release works |
-| Read safety and availability (S-D2 / S-D7) | Authorized task/core GET/list/range, read leases and revoke continue while held; cross-space/revoked/tombstoned reads remain denied; missing and corrupt versions, including empty GET and completed upload replay, never pass healthy |
+| Read safety and availability (S-D2 / S-D7) | Authorized task/core GET/list/range continue while held without lease writes; revoke refuses; cross-space/revoked/tombstoned reads remain denied; missing and corrupt versions, including empty GET and completed upload replay, never pass healthy |
 | Artifact integrity and credential exclusion (brief / S09) | Builder/verifier tests alter one byte, omit/add a file, introduce traversal/symlink and secret-canary files; all fail import; pinned-layout sanitized copy excludes mini keys/options and unsupported dependencies fail closed |
 | Restart-safe reconcile (S-D4 / S-D5 / S-D7) | Kill/retry between pages; preserve marks/manifests/receipts/tombstones/warning windows; correct quota totals including orphan debt; infrastructure failures remain pending; wrong generation never releases |
 | Full storage-set recovery (S09) | Coordinator VM walk below, not claimed by the fake S3 tests |

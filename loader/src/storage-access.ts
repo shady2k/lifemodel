@@ -4,7 +4,7 @@
  * for every next chunk. Untrusted code never supplies a callback or SQL. */
 import { Client } from 'pg';
 import { randomUUID } from 'node:crypto';
-import { createStorageMaintenance } from './storage-maintenance.js';
+import { storageMaintenanceFence } from './storage-maintenance.js';
 import { StorageAccessError } from './storage-access-error.js';
 import { STORAGE_AUDIENCES, type KubernetesStorageIdentity } from './storage-identity.js';
 export { STORAGE_AUDIENCES } from './storage-identity.js';
@@ -81,7 +81,6 @@ export const STORAGE_AUTH_READ = `WITH instant AS MATERIALIZED (SELECT clock_tim
  AND i.task_id=$4 AND i.attempt_id=$5 AND i.launch_id=$6`;
 
 export function createStorageAccess(options: StorageAccessOptions): StorageAccess {
-  const maintenance = createStorageMaintenance({ connectionString: options.connectionString });
   const streams = new Map<string, Set<AbortController>>();
   const settlements = new Map<AbortController, Promise<void>>();
   const writers = new Set<AbortController>();
@@ -105,7 +104,8 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
   }
   async function transaction<T>(
     run: (client: Client, assertLive: () => void) => Promise<T>,
-    parent?: AbortSignal
+    parent?: AbortSignal,
+    write = true
   ): Promise<T> {
     const client = new Client({
       connectionString: options.connectionString,
@@ -129,6 +129,7 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
       signal.throwIfAborted();
       await client.connect();
       await client.query('BEGIN');
+      if (write) await storageMaintenanceFence(client);
       const assertLive = (): void => {
         if (signal.aborted || transportFailed)
           throw new StorageAccessError(503, 'access_unavailable');
@@ -205,9 +206,13 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
     },
     check: async (signal) => {
       try {
-        await transaction(async (client) => {
-          await client.query(AUTH_READY);
-        }, signal);
+        await transaction(
+          async (client) => {
+            await client.query(AUTH_READY);
+          },
+          signal,
+          false
+        );
         return true;
       } catch {
         return false;
@@ -228,23 +233,6 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
       if (write) writers.add(controller);
       streams.set(space, controllers);
       const signal = AbortSignal.any([controller.signal, ...(parent ? [parent] : [])]);
-      let admission: ReturnType<typeof maintenance.enter> | undefined;
-      const admit = async (): Promise<void> => {
-        if (!write) return;
-        admission ??= maintenance.enter(signal).then((op) => {
-          if (op.signal.aborted) controller.abort();
-          else
-            op.signal.addEventListener(
-              'abort',
-              () => {
-                controller.abort();
-              },
-              { once: true }
-            );
-          return op;
-        });
-        await admission;
-      };
       function live(): void {
         if (signal.aborted) throw new StorageAccessError(403, 'access_revoked');
       }
@@ -256,63 +244,66 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
           throw new StorageAccessError(400, 'invalid_chunk');
         live();
         const identity = await options.identity.verify(token, STORAGE_AUDIENCES.task, signal);
-        await admit();
         {
           live();
-          return await transaction(async (client, assertLive) => {
-            // Fixed lock order: stable canonical authority, then catalog. These
-            // lock-only reads confer no permission; the one final JOIN does.
-            const locked = await client.query<{
-              task_id: string;
-              attempt_id: string;
-              launch_id: string;
-            }>(
-              `SELECT i.task_id, i.attempt_id, i.launch_id FROM task_access.intents i
+          return await transaction(
+            async (client, assertLive) => {
+              // Fixed lock order: stable canonical authority, then catalog. These
+              // lock-only reads confer no permission; the one final JOIN does.
+              const locked = await client.query<{
+                task_id: string;
+                attempt_id: string;
+                launch_id: string;
+              }>(
+                `SELECT i.task_id, i.attempt_id, i.launch_id FROM task_access.intents i
               JOIN task_access.projections p USING(task_id,attempt_id,launch_id)
               WHERE p.space_id=$1 AND p.pod_uid=$2 FOR SHARE OF i,p`,
-              [space, identity.podUid]
-            );
-            const binding = locked.rows[0];
-            if (locked.rows.length !== 1 || !binding)
-              throw new StorageAccessError(403, 'access_denied');
-            assertLive();
-            const lockedSpace = await client.query(
-              'SELECT id FROM storage.spaces WHERE id=$1 FOR SHARE',
-              [space]
-            );
-            if (lockedSpace.rows.length !== 1) throw new StorageAccessError(403, 'access_denied');
-            const result = await client.query<StorageDecision & { mode: string }>(
-              STORAGE_AUTH_READ,
-              [
-                space,
-                identity.podUid,
-                identity.jobUid,
-                binding.task_id,
-                binding.attempt_id,
-                binding.launch_id,
-              ]
-            );
-            const decision = result.rows[0];
-            live();
-            assertLive();
-            if (!decision || (decision.mode !== 'active' && decision.mode !== 'wrapping'))
-              throw new StorageAccessError(403, 'access_denied');
-            if (typeof dispatch === 'function') {
-              if (dispatch.constructor.name === 'AsyncFunction')
-                throw new StorageAccessError(500, 'async_dispatch_forbidden');
-              const returned = (dispatch as (value: StorageDecision) => unknown)(decision);
-              if (returned !== undefined)
-                throw new StorageAccessError(500, 'async_dispatch_forbidden');
-              return undefined;
-            } else {
-              // No Client/permit escapes. The storage adapter supplies fixed SQL,
-              // binds all request values, and must never issue transaction control.
-              const result = await client.query(dispatch.text, dispatch.values);
+                [space, identity.podUid]
+              );
+              const binding = locked.rows[0];
+              if (locked.rows.length !== 1 || !binding)
+                throw new StorageAccessError(403, 'access_denied');
               assertLive();
+              const lockedSpace = await client.query(
+                'SELECT id FROM storage.spaces WHERE id=$1 FOR SHARE',
+                [space]
+              );
+              if (lockedSpace.rows.length !== 1) throw new StorageAccessError(403, 'access_denied');
+              const result = await client.query<StorageDecision & { mode: string }>(
+                STORAGE_AUTH_READ,
+                [
+                  space,
+                  identity.podUid,
+                  identity.jobUid,
+                  binding.task_id,
+                  binding.attempt_id,
+                  binding.launch_id,
+                ]
+              );
+              const decision = result.rows[0];
               live();
-              return { rows: result.rows as Record<string, unknown>[] };
-            }
-          }, signal);
+              assertLive();
+              if (!decision || (decision.mode !== 'active' && decision.mode !== 'wrapping'))
+                throw new StorageAccessError(403, 'access_denied');
+              if (typeof dispatch === 'function') {
+                if (dispatch.constructor.name === 'AsyncFunction')
+                  throw new StorageAccessError(500, 'async_dispatch_forbidden');
+                const returned = (dispatch as (value: StorageDecision) => unknown)(decision);
+                if (returned !== undefined)
+                  throw new StorageAccessError(500, 'async_dispatch_forbidden');
+                return undefined;
+              } else {
+                // No Client/permit escapes. The storage adapter supplies fixed SQL,
+                // binds all request values, and must never issue transaction control.
+                const result = await client.query(dispatch.text, dispatch.values);
+                assertLive();
+                live();
+                return { rows: result.rows as Record<string, unknown>[] };
+              }
+            },
+            signal,
+            write
+          );
         }
       }
       return {
@@ -327,11 +318,6 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
         },
         close: async () => {
           controller.abort();
-          if (admission)
-            await admission.then(
-              (op) => op.close(),
-              () => undefined
-            );
           controllers.delete(controller);
           settlements.delete(controller);
           writers.delete(controller);

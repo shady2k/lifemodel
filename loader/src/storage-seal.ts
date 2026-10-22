@@ -1,8 +1,7 @@
 /** Module-owned allocation, verified binding and replayable seal. No caller SQL. */
 import { Pool, type PoolClient, type QueryResultRow } from 'pg';
 import { createHash, randomUUID } from 'node:crypto';
-import { createStorageMaintenance } from './storage-maintenance.js';
-import { AsyncLocalStorage } from 'node:async_hooks';
+import { storageMaintenanceFence } from './storage-maintenance.js';
 import {
   StorageAccessError,
   STORAGE_AUDIENCES,
@@ -103,12 +102,7 @@ function required<T>(value: T | undefined): T {
 }
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 export function createStorageSeal(options: Options): StorageSeal {
-  const maintenance = createStorageMaintenance({ connectionString: options.connectionString });
-  const operationSignal = new AsyncLocalStorage<AbortSignal>();
-  const boundedSignal = (ms: number) => {
-    const current = operationSignal.getStore();
-    return AbortSignal.any([AbortSignal.timeout(ms), ...(current ? [current] : [])]);
-  };
+  const boundedSignal = (ms: number) => AbortSignal.timeout(ms);
   const pool = new Pool({
     connectionString: options.connectionString,
     max: 4,
@@ -153,9 +147,16 @@ export function createStorageSeal(options: Options): StorageSeal {
   async function cleanLeases(leases: [string, number][]) {
     if (!leases.length) return;
     try {
-      await cleanupPool.query('DELETE FROM storage.read_leases WHERE id=ANY($1::uuid[])', [
-        leases.map(([lease]) => lease),
-      ]);
+      await tx(
+        async (client, writable) => {
+          if (writable)
+            await client.query('DELETE FROM storage.read_leases WHERE id=ANY($1::uuid[])', [
+              leases.map(([lease]) => lease),
+            ]);
+        },
+        false,
+        cleanupPool
+      );
       for (const [lease] of leases) pendingCleanup.delete(lease);
     } catch (error) {
       logSqlFailure(error, leases.length, 'Storage read lease cleanup failed');
@@ -173,17 +174,22 @@ export function createStorageSeal(options: Options): StorageSeal {
   }
   pool.on('error', () => undefined);
   pool.on('connect', (client) => client.on('error', () => undefined));
-  async function tx<T>(run: (client: PoolClient) => Promise<T>): Promise<T> {
+  async function tx<T>(
+    run: (client: PoolClient, writable: boolean) => Promise<T>,
+    write = true,
+    connectionPool = pool
+  ): Promise<T> {
     let client: PoolClient | undefined;
     let broken = false;
     const onError = () => {
       broken = true;
     };
     try {
-      client = await pool.connect();
+      client = await connectionPool.connect();
       client.on('error', onError);
       await client.query('BEGIN');
-      const result = await run(client);
+      const writable = await storageMaintenanceFence(client, write);
+      const result = await run(client, writable);
       if (broken) fail(503, 'catalog_unavailable');
       await client.query('COMMIT');
       return result;
@@ -637,6 +643,13 @@ export function createStorageSeal(options: Options): StorageSeal {
             ).rows
         );
         for (const entry of entries) {
+          // Each DELETE needs a fresh intent fence, even within a long seal.
+          await tx(async (client) => {
+            await client.query(
+              'SELECT attempt_id FROM storage.seal_gc WHERE space_id=$1 AND attempt_id=$2 FOR UPDATE',
+              [request.space, entry.attempt_id]
+            );
+          });
           try {
             await options.s3.delete(request.space, entry.s3_key, boundedSignal(10000));
           } catch {
@@ -760,7 +773,7 @@ export function createStorageSeal(options: Options): StorageSeal {
             signal
           );
           if (identity.role !== 'core') fail(403, 'identity_denied');
-          await tx(async (client) => {
+          await tx(async (client, writable) => {
             const row = (
               await client.query<{ id: string; revision: string; mode: string }>(
                 'SELECT id,access_revision::text AS revision,mode FROM storage.spaces WHERE id=$1 FOR SHARE',
@@ -777,10 +790,11 @@ export function createStorageSeal(options: Options): StorageSeal {
               ).rows[0];
               if (policy && policy.state !== 'retained') fail(404, 'object_not_found');
               leaseExpiresAt = now() + 30000;
-              await client.query(
-                'INSERT INTO storage.read_leases(id,space_id,expires_at) VALUES($1,$2,to_timestamp($3/1000.0)) ON CONFLICT(id) DO UPDATE SET expires_at=EXCLUDED.expires_at',
-                [lease, space, leaseExpiresAt]
-              );
+              if (writable)
+                await client.query(
+                  'INSERT INTO storage.read_leases(id,space_id,expires_at) VALUES($1,$2,to_timestamp($3/1000.0)) ON CONFLICT(id) DO UPDATE SET expires_at=EXCLUDED.expires_at',
+                  [lease, space, leaseExpiresAt]
+                );
             }
             if (
               objectId &&
@@ -803,7 +817,7 @@ export function createStorageSeal(options: Options): StorageSeal {
               }) !== undefined
             )
               fail(500, 'async_dispatch_forbidden');
-          });
+          }, false);
         },
       };
     },
@@ -814,7 +828,7 @@ export function createStorageSeal(options: Options): StorageSeal {
           await client.query(
             'SELECT r.receipt FROM storage.seal_receipts r,storage.allocations a,storage.allocate_receipts ar,storage.bindings b,storage.bind_receipts br,storage.seal_operations o,storage.seal_manifests m,storage.seal_gc g,storage.object_tombstones t WHERE false'
           );
-        });
+        }, false);
         return !signal.aborted;
       } catch {
         return false;
@@ -824,13 +838,5 @@ export function createStorageSeal(options: Options): StorageSeal {
       await Promise.all([pool.end(), cleanupPool.end()]);
     },
   };
-  return {
-    ...api,
-    allocate: (input) =>
-      maintenance.run((signal) => operationSignal.run(signal, () => api.allocate(input))),
-    bind: (input) =>
-      maintenance.run((signal) => operationSignal.run(signal, () => api.bind(input))),
-    seal: (input) =>
-      maintenance.run((signal) => operationSignal.run(signal, () => api.seal(input))),
-  };
+  return api;
 }

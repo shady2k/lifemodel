@@ -1,6 +1,6 @@
 /** Module-owned retention policy, durable warning batches and recoverable byte removal. */
 import { randomUUID } from 'node:crypto';
-import { createStorageMaintenance } from './storage-maintenance.js';
+import { storageMaintenanceFence } from './storage-maintenance.js';
 import { Pool, type PoolClient, type QueryResultRow } from 'pg';
 import { StorageAccessError } from './storage-access-error.js';
 import type { StorageObjectS3 } from './storage-object-s3.js';
@@ -68,7 +68,6 @@ interface Candidate extends QueryResultRow {
   state: string;
 }
 export function createStorageRetention(options: Options): StorageRetention {
-  const maintenance = createStorageMaintenance({ connectionString: options.connectionString });
   const now = options.now ?? Date.now;
   const pool = new Pool({
     connectionString: options.connectionString,
@@ -85,8 +84,7 @@ export function createStorageRetention(options: Options): StorageRetention {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let running: Promise<void> | undefined;
   let sweepCursor: string | undefined;
-  let maintenanceSignal: AbortSignal | undefined;
-  async function tx<T>(run: (client: PoolClient) => Promise<T>): Promise<T> {
+  async function tx<T>(run: (client: PoolClient) => Promise<T>, write = true): Promise<T> {
     const client = await pool.connect().catch(() => fail(503, 'catalog_unavailable'));
     let broken = false;
     const onError = () => {
@@ -95,6 +93,7 @@ export function createStorageRetention(options: Options): StorageRetention {
     client.on('error', onError);
     try {
       await client.query('BEGIN');
+      await storageMaintenanceFence(client, write);
       const result = await run(client);
       if (broken) fail(503, 'catalog_unavailable');
       await client.query('COMMIT');
@@ -122,11 +121,6 @@ export function createStorageRetention(options: Options): StorageRetention {
   ): Promise<T | undefined> {
     const owner = await pool.connect();
     const controller = new AbortController();
-    const abortMaintenance = () => {
-      controller.abort();
-    };
-    if (maintenanceSignal?.aborted) controller.abort();
-    maintenanceSignal?.addEventListener('abort', abortMaintenance, { once: true });
     let locked = false;
     let broken = false;
     const failed = () => {
@@ -153,7 +147,6 @@ export function createStorageRetention(options: Options): StorageRetention {
         await owner
           .query('SELECT pg_advisory_unlock(hashtextextended($1,$2))', [key, namespace])
           .catch(failed);
-      maintenanceSignal?.removeEventListener('abort', abortMaintenance);
       owner.removeListener('error', failed);
       owner.removeListener('end', failed);
       owner.release(broken);
@@ -579,17 +572,9 @@ export function createStorageRetention(options: Options): StorageRetention {
     }
   }
   function runOnce() {
-    running ??= maintenance
-      .run(async (signal) => {
-        maintenanceSignal = signal;
-        try {
-          await tick();
-        } finally {
-          maintenanceSignal = undefined;
-        }
-      })
+    running ??= tick()
       .catch((error: unknown) => {
-        if (error instanceof StorageAccessError && error.code === 'storage_held') return;
+        if (error instanceof StorageAccessError && error.code === 'maintenance_unavailable') return;
         throw error;
       })
       .finally(() => {
@@ -802,7 +787,7 @@ export function createStorageRetention(options: Options): StorageRetention {
           await client.query(
             'SELECT p.space_id,c.plan_id,r.effect_key,l.id,o.s3_key,t.object_id,rl.id FROM storage.retention_policies p,storage.deletion_candidates c,storage.deletion_plans d,storage.retention_receipts r,storage.instance_ledger l,storage.orphan_gc o,storage.retention_tombstones t,storage.read_leases rl,storage.attempt_gc ag,storage.reclaim_receipts rr WHERE false'
           );
-        });
+        }, false);
         return !signal.aborted;
       } catch {
         return false;
@@ -815,11 +800,5 @@ export function createStorageRetention(options: Options): StorageRetention {
       await pool.end();
     },
   };
-  return {
-    ...api,
-    pending: (input) => maintenance.run(() => api.pending(input)),
-    warningCommitted: (input) => maintenance.run(() => api.warningCommitted(input)),
-    policy: (input) => maintenance.run(() => api.policy(input)),
-    reclaim: (input) => maintenance.run(() => api.reclaim(input)),
-  };
+  return api;
 }
