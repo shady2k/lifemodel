@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { createContainerAsync, type Container } from '../../src/core/container.js';
 import { createTestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
@@ -50,6 +50,13 @@ afterEach(async () => {
 describe('durable effects during shutdown', { timeout: 120_000 }, () => {
   it('waits for an in-flight memory save before closing the real Postgres store', async () => {
     const stores = await createTestStores();
+    // The file's stores are closed even when an assertion fails: a pool left
+    // open keeps its connection, and the file's database cannot be dropped
+    // (lifemodel-653.7.10).
+    onTestFinished(async () => {
+      await stores.postgres.end();
+      await stores.redis.quit();
+    });
     await applyTestMigrations(stores.postgres);
     previousEnv.clear();
     for (const key of envKeys) previousEnv.set(key, process.env[key]);
