@@ -9,7 +9,7 @@ import Redis from 'iovalkey';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createTestStores, testStoreUrls, type TestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
-import { killProcessGroup } from '../helpers/child-process-group.js';
+import { reapProcessGroupOnExit, stopProcessGroup } from '../helpers/child-process-group.js';
 import { createPersistentRecipientRegistry } from '../../src/core/recipient-registry.js';
 import { InboundMessageStream } from '../../src/core/message-streams.js';
 import { createUserMessageSignal } from '../../src/types/signal.js';
@@ -44,6 +44,8 @@ function startCore(env: NodeJS.ProcessEnv): { child: ChildProcess; ready: Promis
     // The core runs in a child of tsx: its own group lets the teardown kill both.
     detached: true,
   });
+  // A wrapper that dies on its own leaves the core behind: reap the group.
+  reapProcessGroupOnExit(child);
   let stdout = '';
   let stderr = '';
   const ready = new Promise<void>((resolve, reject) => {
@@ -72,9 +74,7 @@ function startCore(env: NodeJS.ProcessEnv): { child: ChildProcess; ready: Promis
 }
 
 async function hardStop(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  killProcessGroup(child);
-  await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  await stopProcessGroup(child);
 }
 
 function fieldsToRecord(fields: string[]): Record<string, string> {

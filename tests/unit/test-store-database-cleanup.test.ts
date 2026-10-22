@@ -15,7 +15,7 @@ import {
 } from '../helpers/test-stores.js';
 import { currentTestFile, pendingTestDatabases } from '../helpers/test-store-database-registry.js';
 import { leftoverTestDatabases } from '../helpers/test-store-audit.js';
-import { TestStoreFinalizer } from '../setup/test-store-finalizer.js';
+import { reclaimFailureMessage, TestStoreFinalizer } from '../setup/test-store-finalizer.js';
 import { registerTestStoreCleanup, testStoreCleanup } from '../setup/test-store-cleanup.js';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
@@ -156,6 +156,14 @@ describe('the test databases of a file (lifemodel-653.7.10)', () => {
     expect(await leftoverTestDatabases()).not.toContain(stray);
     // The record still lists it for this file's hook, which then finds it gone.
     expect(pendingTestDatabases(currentTestFile())?.databases).toContain(stray);
+  });
+
+  it('report a failed reclamation by count, file and SQLSTATE, never by error text', () => {
+    const error = Object.assign(new Error('password=hunter2 host=postgres'), { code: '42501' });
+    const message = reclaimFailureMessage(2, '/tmp/work/tests/integration/thing.test.ts', error);
+    expect(message).toContain('reclaiming 2 database(s) of thing.test.ts failed (code 42501)');
+    expect(message).not.toContain('hunter2');
+    expect(message).not.toContain('postgres');
   });
 
   it('are registered by the setup file, the finalizer and the global audit', () => {

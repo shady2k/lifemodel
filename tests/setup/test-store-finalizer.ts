@@ -22,7 +22,15 @@ import {
   forgetTestDatabases,
   pendingTestDatabases,
 } from '../helpers/test-store-database-registry.js';
-import { reclaimTestDatabases } from '../helpers/test-stores.js';
+import { postgresErrorCode, reclaimTestDatabases } from '../helpers/test-stores.js';
+
+/**
+ * A fixed failure line: the count, the file and the SQLSTATE. Never the error
+ * text, which can carry a connection string.
+ */
+export function reclaimFailureMessage(databases: number, moduleId: string, error: unknown): string {
+  return `test stores: reclaiming ${databases} database(s) of ${basename(moduleId)} failed (code ${postgresErrorCode(error) ?? 'none'})`;
+}
 
 export class TestStoreFinalizer implements Reporter {
   async onTestModuleEnd(module: TestModule): Promise<void> {
@@ -36,10 +44,10 @@ export class TestStoreFinalizer implements Reporter {
         `test stores: reclaimed ${reclaimed.length} database(s) left by the failed teardown of ${basename(module.moduleId)}`
       );
     } catch (error) {
-      // The run is already failing; the audit names what is still there.
-      console.warn(
-        `test stores: reclaiming ${pending.databases.length} database(s) of ${basename(module.moduleId)} failed: ${(error as Error).message}`
-      );
+      // The run is already failing; the audit names what is still there. A fixed
+      // message plus the SQLSTATE: never the error text, which may carry a
+      // connection string.
+      console.warn(reclaimFailureMessage(pending.databases.length, module.moduleId, error));
     }
   }
 }

@@ -62,7 +62,8 @@ function maintenancePool(): Pool {
   return new Pool({ connectionString: adminDatabaseUrl(), max: 1 });
 }
 
-function postgresErrorCode(error: unknown): string | undefined {
+/** The SQLSTATE of a Postgres error, for logs that must not carry the message. */
+export function postgresErrorCode(error: unknown): string | undefined {
   return typeof error === 'object' && error !== null && 'code' in error
     ? (error as { code?: string }).code
     : undefined;
