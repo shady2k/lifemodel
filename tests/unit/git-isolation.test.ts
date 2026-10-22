@@ -96,7 +96,9 @@ describe('a suite started from a git hook', () => {
       fileURLToPath(new URL('../../vitest.config.ts', import.meta.url)),
       'utf8'
     );
-    expect(config).toContain("setupFiles: ['tests/setup/scrub-git-env.ts']");
+    // The scrub setup file is registered for every test file; the list may hold
+    // other setup files (a store-cleanup teardown, for instance).
+    expect(config).toMatch(/setupFiles: \[[^\]]*'tests\/setup\/scrub-git-env\.ts'/);
   });
 
   it('runs git only on the child worktree when git names the commit index explicitly', () => {

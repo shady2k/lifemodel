@@ -131,8 +131,13 @@ disposable test boundary, `scripts/test-isolated.mjs
   `LIFEMODEL_TEST_VALKEY_URL` and `LIFEMODEL_TEST_DATABASE_URL`; that network
   has no outside route. The test container receives no Docker socket or host
   mounts. Tests use `tests/helpers/test-stores.ts` for a Postgres database and
-  Valkey logical database per Vitest worker. Missing store URLs fail tests;
-  there is no skip or substitute store;
+  Valkey logical database per Vitest worker. The Postgres database is created on
+  demand and dropped when its test file finishes
+  (`tests/setup/test-store-cleanup.ts`); one left per file filled the 512 MiB
+  data volume (measured peak 472 MiB of it before, ~70 MiB after, with at most
+  three worker databases at a time; a file whose client is still connected at
+  teardown has its database dropped `WITH (FORCE)` and logs the count). Missing
+  store URLs fail tests; there is no skip or substitute store;
 - the boundary runs Node.js 24.21.0 (`node:24.21.0-bookworm-slim`) with
   dependencies provisioned by native `npm ci` inside a container. Only the
   allowlisted `legacy-peer-deps` install policy is copied from `.npmrc`;
