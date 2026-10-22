@@ -316,7 +316,7 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
           if (!result) throw new StorageAccessError(503, 'publication_unavailable');
           return result;
         },
-        close: async () => {
+        close: () => {
           controller.abort();
           controllers.delete(controller);
           settlements.delete(controller);
