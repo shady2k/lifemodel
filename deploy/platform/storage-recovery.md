@@ -47,7 +47,11 @@ with layout/compatibility only, for
 `chrislusf/seaweedfs@sha256:aba492e2a4e4c90bff795745e8e660affa1f09e7650f5981bd7bccd1a06cd931`.
 Its exact paths and fully anchored patterns are checked against the coordinator's
 125-entry names-only fresh-install inventory in
-`tests/fixtures/seaweed-mini-layout-names.txt`. This is a tested names policy, not
+`tests/fixtures/seaweed-mini-layout-names.txt` and the 128-entry seeded inventory in
+`tests/fixtures/seaweed-mini-layout-names-seeded.txt`.
+Collection volumes such as `lifemodel-storage_2.dat`, `.idx` and `.vif` appear at the
+volume root once data is written.
+This is a tested names policy, not
 proof of arbitrary PVC history or a completed restore walk. Do not broaden it to
 `^.*$`. An unexpected path still stops the copy.
 

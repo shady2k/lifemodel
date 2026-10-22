@@ -144,38 +144,93 @@ afterEach(async () => {
 });
 
 describe('sanitized cold-copy policy', () => {
-  it('supports exactly the pinned mini VM names and never copies the regenerable admin subtree', async () => {
-    const pinned = JSON.parse(
-      await readFile('deploy/platform/storage-seaweed-layout.json', 'utf8')
-    ) as Pick<typeof policy, 'layout' | 'compatibility'>;
-    const approved = { ...pinned, attestation };
-    const tree = join(base, 'pinned');
-    await mkdir(tree, { mode: 0o700 });
-    const names = (await readFile('tests/fixtures/seaweed-mini-layout-names.txt', 'utf8'))
-      .trim()
-      .split('\n');
-    expect(names).toHaveLength(125);
-    for (const line of names) {
-      const path = join(tree, line.slice(2));
-      if (line.startsWith('d ')) await mkdir(path, { recursive: true, mode: 0o700 });
-      else await put(path, '');
+  it.each([
+    ['pre-data', 'tests/fixtures/seaweed-mini-layout-names.txt', 125],
+    ['seeded', 'tests/fixtures/seaweed-mini-layout-names-seeded.txt', 128],
+  ] as const)(
+    'supports exactly the pinned mini VM %s names and never copies the regenerable admin subtree',
+    async (_phase, fixture, count) => {
+      const pinned = JSON.parse(
+        await readFile('deploy/platform/storage-seaweed-layout.json', 'utf8')
+      ) as Pick<typeof policy, 'layout' | 'compatibility'>;
+      const approved = { ...pinned, attestation };
+      const tree = join(base, 'pinned');
+      await mkdir(tree, { mode: 0o700 });
+      const names = (await readFile(fixture, 'utf8')).trim().split('\n');
+      expect(names).toHaveLength(count);
+      for (const line of names) {
+        const path = join(tree, line.slice(2));
+        if (line.startsWith('d ')) await mkdir(path, { recursive: true, mode: 0o700 });
+        else await put(path, '');
+      }
+      const result = await inventorySeaweedLayout(tree, approved);
+      expect(result.supported).toBe(true);
+      expect(result.entries).toHaveLength(names.length);
+      const admin = result.entries.filter(
+        (entry) => entry.path === 'admin' || entry.path.startsWith('admin/')
+      );
+      expect(admin.length).toBeGreaterThan(1);
+      expect(admin.every((entry) => entry.action === 'exclude')).toBe(true);
+      await chmod(join(tree, 'admin/.session_key'), 0o000);
+      await copySanitizedSeaweedTree(tree, join(base, 'pinned-copy'), approved);
+      await expect(lstat(join(base, 'pinned-copy/admin'))).rejects.toThrow();
+      expect(await readFile(join(base, 'pinned-copy/1.dat'), 'utf8')).toBe('');
+      const copied = await inventorySeaweedLayout(join(base, 'pinned-copy'), approved);
+      expect(copied.supported).toBe(true);
+      expect(copied.entries.every((entry) => entry.action === 'copy')).toBe(true);
     }
-    const result = await inventorySeaweedLayout(tree, approved);
-    expect(result.supported).toBe(true);
-    expect(result.entries).toHaveLength(names.length);
-    const admin = result.entries.filter(
-      (entry) => entry.path === 'admin' || entry.path.startsWith('admin/')
-    );
-    expect(admin.length).toBeGreaterThan(1);
-    expect(admin.every((entry) => entry.action === 'exclude')).toBe(true);
-    await chmod(join(tree, 'admin/.session_key'), 0o000);
-    await copySanitizedSeaweedTree(tree, join(base, 'pinned-copy'), approved);
-    await expect(lstat(join(base, 'pinned-copy/admin'))).rejects.toThrow();
-    expect(await readFile(join(base, 'pinned-copy/1.dat'), 'utf8')).toBe('');
-    const copied = await inventorySeaweedLayout(join(base, 'pinned-copy'), approved);
-    expect(copied.supported).toBe(true);
-    expect(copied.entries.every((entry) => entry.action === 'copy')).toBe(true);
-  });
+  );
+  it.each(['dat', 'idx', 'vif'])(
+    'accepts literal collection volume %s patterns with admin excluded',
+    async (extension) => {
+      const name = `lifemodel-storage_2.${extension}`;
+      await put(join(source, name), 'collection-volume');
+      await put(join(source, 'admin/job.pb'), 'regenerable-admin');
+      const approved = {
+        ...policy,
+        layout: {
+          ...layout,
+          excludedDirectories: ['admin'],
+          filePatterns: [`^lifemodel-storage_[0-9]+\\.${extension}$`],
+        },
+      };
+      const result = await inventorySeaweedLayout(source, approved);
+      expect(result.supported).toBe(true);
+      expect(result.entries).toContainEqual({ path: name, type: 'file', action: 'copy' });
+      expect(result.entries).toContainEqual({
+        path: 'admin/job.pb',
+        type: 'file',
+        action: 'exclude',
+      });
+      await copySanitizedSeaweedTree(source, join(base, 'collection-copy'), approved);
+      expect(await readFile(join(base, 'collection-copy', name), 'utf8')).toBe('collection-volume');
+      await expect(lstat(join(base, 'collection-copy/admin'))).rejects.toThrow();
+    }
+  );
+  it.each([
+    '^admin[0-9]+\\.dat$',
+    '^admin_[0-9]+\\.dat$',
+    '^administrator_[0-9]+\\.dat$',
+    '^lifemodel-storage_/[0-9]+\\.dat$',
+    '^lifemodel-storage_[0-9]+\\.dat$|^admin$',
+    '^lifemodel.*_[0-9]+\\.dat$',
+    '^[a-z]+_[0-9]+\\.dat$',
+    '^(lifemodel-storage_)?[0-9]+\\.dat$',
+    '^lifemodel-storage_[0-9]+\\.dat/.*$',
+  ])(
+    'refuses unproven collection prefix patterns even before matching files exist: %s',
+    async (pattern) => {
+      const denied = {
+        ...policy,
+        layout: { ...layout, excludedDirectories: ['admin'], filePatterns: [pattern] },
+      };
+      expect(await inventorySeaweedLayout(source, denied)).toEqual({
+        supported: false,
+        reasons: ['invalid_policy_or_tree'],
+        entries: [],
+      });
+    }
+  );
   it.each([
     'volume',
     'filer',

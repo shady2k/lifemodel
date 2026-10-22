@@ -231,15 +231,22 @@ function validatePolicy(policy: StorageBackupArtifactPolicy): void {
   if (excluded.length) {
     // Prove disjointness without trying to solve arbitrary regex intersections.
     // With exclusions, dynamic patterns must start with a required copied
-    // top-level directory, or a numeric top-level volume filename. Alternation
-    // is disallowed here so a later branch cannot bypass that fixed prefix.
+    // top-level directory, a numeric top-level volume filename, or an exact
+    // collection-volume grammar with a safe literal prefix. That prefix cannot
+    // start with an excluded name; the grammar admits no slash or regex branch.
+    // Alternation is disallowed so no later branch can bypass a fixed prefix.
     const roots = layout.directories.filter((path) => /^[a-zA-Z0-9_-]+$/.test(path));
+    const collectionVolume = (pattern: string): boolean => {
+      const prefix = /^\^([a-zA-Z0-9_-]+)\[0-9\]\+\\\.(?:dat|idx|vif)\$$/u.exec(pattern)?.[1];
+      return prefix !== undefined && !excluded.some((directory) => prefix.startsWith(directory));
+    };
     if (
       patterns.some(
         (pattern) =>
           pattern.includes('|') ||
           (!roots.some((path) => pattern.startsWith(`^${path}/`)) &&
-            !pattern.startsWith('^[0-9]+\\.'))
+            !pattern.startsWith('^[0-9]+\\.') &&
+            !collectionVolume(pattern))
       )
     )
       fail();

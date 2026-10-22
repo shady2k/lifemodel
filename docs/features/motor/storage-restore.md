@@ -204,8 +204,12 @@ Destination Seaweed regenerates the admin session and plugin state on start; old
 sessions, schedules and job history are deliberately not restored. The coordinator
 must verify this regeneration in its destination walk. The tracked
 `deploy/platform/storage-seaweed-layout.json` policy is tested against all 125 names
-in `tests/fixtures/seaweed-mini-layout-names.txt`, with narrow anchored dynamic
-volume/LevelDB/master-snapshot patterns. It carries no operator attestation. Preserve volume/master/filer metadata and object data,
+in `tests/fixtures/seaweed-mini-layout-names.txt` and all 128 seeded names in
+`tests/fixtures/seaweed-mini-layout-names-seeded.txt`, with narrow anchored dynamic
+volume/LevelDB/master-snapshot patterns. Collection volumes such as
+`lifemodel-storage_2.dat`, `.idx` and `.vif` appear at the volume root once data is
+written. The policy carries no operator attestation. Preserve volume/master/filer
+metadata and object data,
 including hidden database files, using a pinned layout policy rather than a
 broad “skip hidden files” rule.
 
