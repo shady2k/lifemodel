@@ -2,15 +2,19 @@ import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import {
   chmod,
+  link,
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   rename,
   rm,
   symlink,
+  utimes,
   writeFile,
+  type FileHandle,
 } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -74,6 +78,51 @@ async function stage(): Promise<void> {
   await mkdir(artifact, { mode: 0o700 });
   await put(join(artifact, 'catalog.dump'), 'storage-only-custom-dump-fixture');
   await copySanitizedSeaweedTree(source, join(artifact, 'seaweed'), policy);
+}
+// Run a real filesystem mutation after the selected inode has returned EOF, but
+// before the reader can perform its post-read checks. No timing or fake stats:
+// the original FileHandle.read still supplies every byte to the production code.
+type ChunkRead = (
+  this: FileHandle,
+  buffer: Buffer,
+  offset: number,
+  length: number,
+  position: null
+) => Promise<{ bytesRead: number; buffer: Buffer }>;
+async function mutateAtReadEnd(
+  path: string,
+  mutate: () => Promise<void>,
+  operation: () => Promise<void>
+): Promise<void> {
+  const probe = await open(path, constants.O_RDONLY);
+  const target = await probe.stat();
+  const prototype = Object.getPrototypeOf(probe) as { read: ChunkRead };
+  const originalRead = prototype.read;
+  await probe.close();
+  let mutations = 0;
+  prototype.read = async function (this: FileHandle, ...args: Parameters<ChunkRead>) {
+    const result = await originalRead.call(this, ...args);
+    if (result.bytesRead === 0 && mutations === 0) {
+      const current = await this.stat();
+      if (current.dev === target.dev && current.ino === target.ino) {
+        mutations += 1;
+        await mutate();
+      }
+    }
+    return result;
+  };
+  try {
+    await operation();
+    expect(mutations).toBe(1);
+  } finally {
+    prototype.read = originalRead;
+  }
+}
+async function replaceWithIdenticalBytes(path: string): Promise<void> {
+  const bytes = await readFile(path);
+  // Keep the old inode alive outside the tree so inode reuse cannot hide replacement.
+  await rename(path, join(base, 'replaced-inode'));
+  await put(path, bytes);
 }
 async function manifestEdit(change: (value: Record<string, unknown>) => void): Promise<void> {
   const path = join(artifact, 'manifest.json');
@@ -172,6 +221,33 @@ describe('sanitized cold-copy policy', () => {
       copySanitizedSeaweedTree(source, join(artifact, 'seaweed'), policy)
     ).rejects.toThrow();
   });
+  it('rejects a hardlinked payload even when its other name is outside the source tree', async () => {
+    await link(join(source, 'volume/1.dat'), join(base, 'outside-payload'));
+    const result = await inventorySeaweedLayout(source, policy);
+    expect(result.supported).toBe(false);
+    expect(result.entries).toContainEqual({
+      path: 'volume/1.dat',
+      type: 'special',
+      action: 'reject',
+    });
+    const destination = join(base, 'copy');
+    await expect(copySanitizedSeaweedTree(source, destination, policy)).rejects.toThrow(
+      'storage_backup_artifact_rejected'
+    );
+    await expect(lstat(destination)).rejects.toThrow();
+  });
+  it('rejects same-byte inode replacement during the actual cold copy', async () => {
+    const path = join(source, 'volume/1.dat');
+    await mutateAtReadEnd(
+      path,
+      () => replaceWithIdenticalBytes(path),
+      async () => {
+        await expect(copySanitizedSeaweedTree(source, join(base, 'copy'), policy)).rejects.toThrow(
+          'storage_backup_artifact_rejected'
+        );
+      }
+    );
+  });
   it('rejects special files without opening them', async () => {
     const server = createServer();
     await new Promise<void>((resolve) => server.listen(join(source, 'socket'), resolve));
@@ -264,6 +340,73 @@ describe('directory backup manifest v1', () => {
       await symlink('/etc/passwd', path);
     }
     await expect(verifyStorageBackupArtifact(artifact, policy)).rejects.toThrow();
+  });
+  it.each(['catalog.dump', 'seaweed/volume/1.dat', 'manifest.json'])(
+    'rejects hardlinked artifact file %s with an alias outside the artifact',
+    async (name) => {
+      await stage();
+      await buildStorageBackupManifest(artifact, metadata, policy);
+      await link(join(artifact, name), join(base, 'outside-artifact-file'));
+      await expect(verifyStorageBackupArtifact(artifact, policy)).rejects.toThrow(
+        'storage_backup_artifact_rejected'
+      );
+    }
+  );
+  it('does not publish a manifest if a payload inode changes while it is hashed', async () => {
+    await stage();
+    const path = join(artifact, 'catalog.dump');
+    await mutateAtReadEnd(
+      path,
+      () => replaceWithIdenticalBytes(path),
+      async () => {
+        await expect(buildStorageBackupManifest(artifact, metadata, policy)).rejects.toThrow(
+          'storage_backup_artifact_rejected'
+        );
+      }
+    );
+    await expect(lstat(join(artifact, 'manifest.json'))).rejects.toThrow();
+  });
+  it('rejects a same-length payload mutation after the verifier has read its bytes', async () => {
+    await stage();
+    await buildStorageBackupManifest(artifact, metadata, policy);
+    const path = join(artifact, 'seaweed/volume/1.dat');
+    await mutateAtReadEnd(
+      path,
+      async () => {
+        const bytes = await readFile(path);
+        bytes[0] = bytes[0] === 65 ? 66 : 65;
+        await writeFile(path, bytes);
+        // Force a distinct mtime even on a coarse-resolution filesystem.
+        await utimes(path, 0, new Date('2000-01-01T00:00:00.000Z'));
+      },
+      async () => {
+        await expect(verifyStorageBackupArtifact(artifact, policy)).rejects.toThrow(
+          'storage_backup_artifact_rejected'
+        );
+      }
+    );
+  });
+  it('rejects a same-length manifest mutation after its bytes have been read', async () => {
+    await stage();
+    await buildStorageBackupManifest(artifact, metadata, policy);
+    const path = join(artifact, 'manifest.json');
+    await mutateAtReadEnd(
+      path,
+      async () => {
+        const bytes = await readFile(path);
+        expect(bytes[bytes.length - 1]).toBe(10);
+        // Valid JSON with identical meaning and length: only identity checks
+        // reject this, not manifest parsing or the later payload hashes.
+        bytes[bytes.length - 1] = 32;
+        await writeFile(path, bytes);
+        await utimes(path, 0, new Date('2000-01-01T00:00:00.000Z'));
+      },
+      async () => {
+        await expect(verifyStorageBackupArtifact(artifact, policy)).rejects.toThrow(
+          'storage_backup_artifact_rejected'
+        );
+      }
+    );
   });
   it.each([
     '/etc/passwd',
