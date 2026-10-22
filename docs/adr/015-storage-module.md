@@ -201,8 +201,11 @@ Workers select round-robin by space after each chunk; no stalled upload holds
 a control worker or web reserve. A revoke cancels all that space's workers.
 The **512 MiB** RSS bound is a fixture acceptance budget to measure on the
 specified single-node walk, not a vendor minimum or full-platform memory claim.
-Values are typed settings with finite hard bounds; changes rerun S10. Server
-bounds headers/body/listing before reading. Chunking is module protocol,
+Values are typed settings with finite hard bounds; changes rerun S10. The
+[transfer settings](../features/motor/storage-objects.md#transfer-bounds) define
+the environment schema; the pressure integration fixture checks admission and
+connection reuse. WALK-STORAGE-LOAD remains the deployed RSS/log acceptance
+receipt. Server bounds headers/body/listing before reading. Chunking is module protocol,
 not task-facing S3 multipart; objects commit only after every chunk/hash check.
 Reserve declared bytes transactionally against quota before accepting chunks;
 count actual bytes, reject surplus early. An upload ID cannot be reused to

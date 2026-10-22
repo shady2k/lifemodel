@@ -63,6 +63,54 @@ async function put(
 }
 
 describe('the module private S3 byte backend', () => {
+  it('keeps a backend read socket available while sixteen PUT sockets wait for their next chunks', async () => {
+    const { server, client } = await setup({ timeoutMs: 1000 });
+    const bytes = Buffer.from('readable');
+    await put(client, bytes, 'readable');
+    const controllers = Array.from({ length: 16 }, () => new AbortController());
+    let entered = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const uploads = controllers.map((controller, n) =>
+      client
+        .put(
+          `space-${n}`,
+          `held-${n}`,
+          bytes.length,
+          hash(bytes),
+          (async function* () {
+            entered++;
+            await gate;
+            controller.signal.throwIfAborted();
+            yield bytes;
+          })(),
+          controller.signal,
+          dispatch
+        )
+        .catch(() => undefined)
+    );
+    try {
+      await expect.poll(() => entered).toBe(16);
+      const started = performance.now();
+      const body = await client.get(
+        'reader',
+        'readable',
+        0,
+        bytes.length - 1,
+        new AbortController().signal
+      );
+      expect(performance.now() - started).toBeLessThan(500);
+      expect((await read(body)).equals(bytes)).toBe(true);
+      expect(server.requests.some((request) => request.method === 'GET')).toBe(true);
+    } finally {
+      controllers.forEach((controller) => controller.abort());
+      release();
+      await Promise.all(uploads);
+    }
+  });
+
   it('settles only the selected space while another space has an open upload', async () => {
     const { client } = await setup();
     const bytes = Buffer.from('held upload');
@@ -201,7 +249,8 @@ describe('the module private S3 byte backend', () => {
     );
     expect(fixture.server.requests[1]?.headers['x-amz-checksum-mode']).toBe('ENABLED');
     expect(fixture.reads).toBe(2);
-    expect(fixture.server.connections).toBe(1);
+    // PUT and checksum HEAD have independent bounded transport pools.
+    expect(fixture.server.connections).toBe(2);
   });
   it('never overwrites an immutable private key', async () => {
     const { client, server } = await setup();

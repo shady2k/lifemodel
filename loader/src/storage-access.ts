@@ -2,7 +2,7 @@
  * escapes. Chunk callbacks dispatch synchronously only: never schedule deferred
  * work with the decision. Await socket drain/S3 outside this guard and reenter
  * for every next chunk. Untrusted code never supplies a callback or SQL. */
-import { Client } from 'pg';
+import { Pool, type PoolClient } from 'pg';
 import { randomUUID } from 'node:crypto';
 import { storageMaintenanceFence } from './storage-maintenance.js';
 import { StorageAccessError } from './storage-access-error.js';
@@ -42,6 +42,8 @@ export interface StorageAccessOptions {
   connectionString: string;
   identity: KubernetesStorageIdentity;
   timeoutMs?: number;
+  /** At most eight transfer guards plus two independent control guards. */
+  poolMax?: number;
 }
 export interface StorageAccess {
   identity: KubernetesStorageIdentity;
@@ -80,11 +82,71 @@ export const STORAGE_AUTH_READ = `WITH instant AS MATERIALIZED (SELECT clock_tim
  AND p.access_revision=s.access_revision AND p.intent_revision <= i.revision
  AND i.task_id=$4 AND i.attempt_id=$5 AND i.launch_id=$6`;
 
-export function createStorageAccess(options: StorageAccessOptions): StorageAccess {
+export function createStorageAccess(
+  options: StorageAccessOptions
+): StorageAccess & { close(): Promise<void> } {
   const streams = new Map<string, Set<AbortController>>();
   const settlements = new Map<AbortController, Promise<void>>();
   const writers = new Set<AbortController>();
   const timeoutMs = options.timeoutMs ?? 5_000;
+  const poolMax = options.poolMax ?? 10;
+  if (!Number.isSafeInteger(poolMax) || poolMax < 1 || poolMax > 10)
+    throw new StorageAccessError(500, 'access_config');
+  const pool = new Pool({
+    connectionString: options.connectionString,
+    application_name: 'lifemodel-storage-access',
+    max: poolMax,
+    connectionTimeoutMillis: timeoutMs,
+    query_timeout: timeoutMs,
+    statement_timeout: timeoutMs,
+    lock_timeout: timeoutMs,
+    idleTimeoutMillis: 1_000,
+    allowExitOnIdle: true,
+  });
+  // Pool errors and client errors are independent of query promise rejections.
+  // Install once per connection, never once per checkout, and keep through end().
+  const failed = new WeakSet<PoolClient>();
+  pool.on('error', () => undefined);
+  pool.on('connect', (client) => {
+    client.on('error', () => {
+      failed.add(client);
+    });
+  });
+  let closing = false;
+  let closePromise: Promise<void> | undefined;
+  /** An aborted waiter cannot cancel pg-pool's internal pending item. If it is
+   * eventually handed a client, destroy that client without running any SQL. */
+  async function acquire(signal: AbortSignal): Promise<PoolClient> {
+    signal.throwIfAborted();
+    if (closing) throw new StorageAccessError(503, 'access_unavailable');
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const abort = (): void => {
+        settled = true;
+        reject(new StorageAccessError(503, 'access_unavailable'));
+      };
+      signal.addEventListener('abort', abort, { once: true });
+      void pool.connect().then(
+        (client) => {
+          signal.removeEventListener('abort', abort);
+          if (settled || signal.aborted || closing) {
+            client.release(true);
+            if (!settled) reject(new StorageAccessError(503, 'access_unavailable'));
+          } else {
+            settled = true;
+            resolve(client);
+          }
+        },
+        () => {
+          signal.removeEventListener('abort', abort);
+          if (!settled) {
+            settled = true;
+            reject(new StorageAccessError(503, 'access_unavailable'));
+          }
+        }
+      );
+    });
+  }
   /** Serializes local decisions/dispatch with commit-to-cancel-to-ACK. Not transfer. */
   const queues = new Map<string, Promise<void>>();
   async function exclusive<T>(space: string, run: () => Promise<T>): Promise<T> {
@@ -103,51 +165,61 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
     }
   }
   async function transaction<T>(
-    run: (client: Client, assertLive: () => void) => Promise<T>,
+    run: (client: PoolClient, assertLive: () => void) => Promise<T>,
     parent?: AbortSignal,
     write = true
   ): Promise<T> {
-    const client = new Client({
-      connectionString: options.connectionString,
-      application_name: 'lifemodel-storage-access',
-      connectionTimeoutMillis: timeoutMs,
-      query_timeout: timeoutMs,
-      statement_timeout: timeoutMs,
-      lock_timeout: timeoutMs,
-    });
-    // Keep through teardown: an error event is independent of a query rejection.
-    let transportFailed = false;
-    client.on('error', () => {
-      transportFailed = true;
-    });
     const signal = AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(parent ? [parent] : [])]);
+    let client: PoolClient | undefined;
+    let retired = false;
     const abort = (): void => {
-      void client.end().catch(() => undefined);
+      if (client && !retired) {
+        retired = true;
+        // release(true) destroys the connection. A query still in flight must
+        // never return to the idle pool or execute for the next request.
+        client.release(true);
+      }
     };
     signal.addEventListener('abort', abort, { once: true });
     try {
-      signal.throwIfAborted();
-      await client.connect();
-      await client.query('BEGIN');
-      if (write) await storageMaintenanceFence(client);
+      client = await acquire(signal);
+      // An abort can win between acquire resolving and this continuation.
+      if (signal.aborted) abort();
+      const connected = client;
       const assertLive = (): void => {
-        if (signal.aborted || transportFailed)
+        if (signal.aborted || retired || failed.has(connected))
           throw new StorageAccessError(503, 'access_unavailable');
       };
+      assertLive();
+      await client.query('BEGIN');
+      if (write) await storageMaintenanceFence(client);
       const value = await run(client, assertLive);
       assertLive();
-      signal.throwIfAborted();
       await client.query('COMMIT');
+      assertLive();
       return value;
     } catch (error) {
-      await client.query('ROLLBACK').catch(() => undefined);
+      const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+      // A local query timeout can reject before PostgreSQL finishes its query.
+      // Only server SQLSTATE errors (or our own completed mediation checks) are
+      // safe to roll back and reuse; retire every uncertain protocol state.
+      if (
+        client &&
+        !(error instanceof StorageAccessError) &&
+        (typeof code !== 'string' || !/^[0-9A-Z]{5}$/.test(code))
+      )
+        failed.add(client);
+      if (client && !retired && !failed.has(client))
+        await client.query('ROLLBACK').catch(() => {
+          if (client) failed.add(client);
+        });
       if (error instanceof StorageAccessError) throw error;
       if (error && typeof error === 'object' && 'code' in error && error.code === '53000')
         throw new StorageAccessError(507, 'capacity_exhausted');
       throw new StorageAccessError(503, 'access_unavailable');
     } finally {
       signal.removeEventListener('abort', abort);
-      await client.end().catch(() => undefined);
+      if (client && !retired) client.release(failed.has(client));
     }
   }
   function cancel(space: string): void {
@@ -158,6 +230,12 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
     if (!ID.test(space)) throw new StorageAccessError(400, 'invalid_request');
   }
   return {
+    close: () => {
+      closing = true;
+      for (const space of streams.keys()) cancel(space);
+      closePromise ??= pool.end();
+      return closePromise;
+    },
     identity: options.identity,
     quiesceSpace: async (space) => {
       const pending = [...(streams.get(space) ?? [])]

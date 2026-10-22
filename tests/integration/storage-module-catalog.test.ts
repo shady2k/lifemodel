@@ -1,5 +1,24 @@
 import { createStorageAccess } from '../../loader/src/storage-access.js';
 import { createKubernetesStorageIdentity } from '../../loader/src/storage-identity.js';
+
+const accessInstances = new Set<ReturnType<typeof createStorageAccess>>();
+const identityInstances = new Set<ReturnType<typeof createKubernetesStorageIdentity>>();
+function trackedAccess(options: Parameters<typeof createStorageAccess>[0]) {
+  const access = createStorageAccess(options);
+  accessInstances.add(access);
+  return access;
+}
+function trackedIdentity() {
+  const identity = createKubernetesStorageIdentity();
+  identityInstances.add(identity);
+  return identity;
+}
+async function closeAccess() {
+  await Promise.all([...accessInstances].map((access) => access.close()));
+  accessInstances.clear();
+  for (const identity of identityInstances) identity.close();
+  identityInstances.clear();
+}
 /**
  * The storage module's readiness against its real catalog (ADR-015 S-D7).
  *
@@ -37,7 +56,8 @@ afterAll(async () => {
   await stores.postgres.end();
   await stores.redis.quit();
 });
-afterEach(() => {
+afterEach(async () => {
+  await closeAccess();
   for (const module of modules.splice(0)) module.task.close();
   for (const server of servers.splice(0)) {
     server.closeAllConnections();
@@ -48,9 +68,9 @@ afterEach(() => {
 /** Points the module at one connection string and serves its status listener. */
 async function startModule(connectionString: string, lines: RecordedLine[]) {
   const module = createStorageModule({
-    access: createStorageAccess({
+    access: trackedAccess({
       connectionString: workerDatabaseUrl(),
-      identity: createKubernetesStorageIdentity(),
+      identity: trackedIdentity(),
     }),
     bucket: STORAGE_BUCKET,
     catalog: createCatalog({ connectionString }),

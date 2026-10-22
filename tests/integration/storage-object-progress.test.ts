@@ -59,6 +59,7 @@ async function stop() {
   app.control.close();
   app.read.close();
   await objects.close();
+  await access.close();
   s3.close();
 }
 async function call(

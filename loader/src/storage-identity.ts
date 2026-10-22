@@ -1,6 +1,6 @@
 /** Fresh Kubernetes proof, never a JWT decode or a positive liveness cache. */
 import { readFile } from 'node:fs/promises';
-import { request } from 'node:https';
+import { Agent, request } from 'node:https';
 import { StorageAccessError } from './storage-access-error.js';
 
 export const STORAGE_AUDIENCES = {
@@ -26,6 +26,8 @@ interface IdentityOptions {
   tokenFile?: string;
   caFile?: string;
   timeoutMs?: number;
+  /** Shared transport bound; every proof is still read afresh. */
+  maxSockets?: number;
 }
 type RecordValue = Record<string, unknown>;
 function record(value: unknown): RecordValue {
@@ -43,21 +45,34 @@ const NAME =
 const SA = '/var/run/secrets/kubernetes.io/serviceaccount';
 export function createKubernetesStorageIdentity(
   options: IdentityOptions = {}
-): KubernetesStorageIdentity {
+): KubernetesStorageIdentity & { close(): void } {
   const base = new URL(
     options.apiServer ??
       `https://${process.env['KUBERNETES_SERVICE_HOST'] ?? 'kubernetes.default.svc'}:${process.env['KUBERNETES_SERVICE_PORT_HTTPS'] ?? '443'}`
   );
   if (base.protocol !== 'https:') throw new StorageAccessError(500, 'identity_config');
+  const maxSockets = options.maxSockets ?? 10;
+  if (!Number.isSafeInteger(maxSockets) || maxSockets < 1 || maxSockets > 10)
+    throw new StorageAccessError(500, 'identity_config');
+  const agent = new Agent({
+    keepAlive: true,
+    maxSockets,
+    maxTotalSockets: maxSockets,
+    maxFreeSockets: Math.min(2, maxSockets),
+  });
+  agent.on('error', () => undefined);
+  let closed = false;
   const sockets = new WeakSet<object>();
   async function call(path: string, payload: unknown, signal: AbortSignal): Promise<RecordValue> {
     signal.throwIfAborted();
+    if (closed) throw new StorageAccessError(503, 'identity_unavailable');
     // The module's own API token is reread too; there is no credential fallback.
     const [token, ca] = await Promise.all([
       readFile(options.tokenFile ?? `${SA}/token`, 'utf8'),
       readFile(options.caFile ?? `${SA}/ca.crt`),
     ]);
-    if (!token.trim()) throw new StorageAccessError(503, 'identity_unavailable');
+    signal.throwIfAborted();
+    if (closed || !token.trim()) throw new StorageAccessError(503, 'identity_unavailable');
     const body = payload === undefined ? undefined : JSON.stringify(payload);
     return new Promise((resolve, reject) => {
       const fail = (): void => {
@@ -69,7 +84,7 @@ export function createKubernetesStorageIdentity(
           method: body === undefined ? 'GET' : 'POST',
           ca,
           signal,
-          agent: false,
+          agent,
           headers: {
             authorization: `Bearer ${token.trim()}`,
             ...(body === undefined
@@ -126,6 +141,10 @@ export function createKubernetesStorageIdentity(
     });
   }
   return {
+    close: () => {
+      closed = true;
+      agent.destroy();
+    },
     verifyBinding: async (input, parent) => {
       const signal = AbortSignal.any([
         AbortSignal.timeout(options.timeoutMs ?? 5_000),

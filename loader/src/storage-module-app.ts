@@ -20,7 +20,8 @@ import type { S3Check } from './storage-s3.js';
 import type { StorageObjects } from './storage-objects.js';
 import type { StorageSeal } from './storage-seal.js';
 import type { StorageRetention } from './storage-retention.js';
-import { STORAGE_CORE_READ_PROGRESS_MS, type StorageMaintenance } from './storage-maintenance.js';
+import { type StorageMaintenance } from './storage-maintenance.js';
+import { createStorageAdmission, type StorageAdmission } from './storage-admission.js';
 
 /** The mounted instance-CA leaf: read at start, then re-read on every reload. */
 export interface StorageTaskTlsOptions {
@@ -41,6 +42,7 @@ export interface StorageTaskListener {
 
 export interface StorageModuleOptions {
   bucket: string;
+  admission?: StorageAdmission;
   /** Required authority: readiness and every data operation fail closed. */
   access: StorageAccess;
   /** Task object adapter. Absent only in identity/health-only fixtures. */
@@ -79,6 +81,7 @@ export const STORAGE_TASK_TLS_DEFAULTS = { reloadMs: 60_000 } as const;
 const JSON_HEADERS = { 'content-type': 'application/json', 'cache-control': 'no-store' };
 
 export function createStorageModule(options: StorageModuleOptions): StorageModule {
+  const admission = options.admission ?? createStorageAdmission();
   let custodyCode: string | null = null;
 
   /**
@@ -165,8 +168,13 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
   }
 
   const status = createServer((req, res) => {
-    void answer(req, res);
+    req.on('error', () => undefined);
+    res.on('error', () => undefined);
+    void answer(req, res).catch(() => {
+      res.destroy();
+    });
   });
+  status.on('connection', (socket) => socket.on('error', () => undefined));
   const serve =
     (role: 'task' | 'control' | 'read') =>
     async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -240,6 +248,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           if (!res.writableEnded) control.abort();
         };
         res.on('close', disconnected);
+        req.on('aborted', disconnected);
         // ADR-015 bounds absence of progress, not the whole transfer. Each
         // successful guarded dispatch/publication or backend chunk earns a fresh
         // budget; fragments alone do not keep a stalled chunk alive.
@@ -252,12 +261,25 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
             () => {
               control.abort();
             },
-            maintenanceRoute ? 25_000 : STORAGE_CORE_READ_PROGRESS_MS
+            maintenanceRoute ? 25_000 : admission.settings.chunkDeadlineMs
           );
           idle.unref();
         };
         progress();
+        let lease: Awaited<ReturnType<StorageAdmission['acquire']>> | undefined;
         try {
+          // Object handlers reserve before allocating their own bounded chunks.
+          // Other routes reserve before identity/SQL/body work, not after it.
+          if (!objectMatch)
+            lease = await admission.acquire({
+              space: space ?? role,
+              role,
+              bytes: 0,
+              signal,
+              metadataBytes:
+                Buffer.byteLength(req.url ?? '') +
+                req.rawHeaders.reduce((sum, part) => sum + Buffer.byteLength(part) + 4, 128),
+            });
           let result: unknown;
           if (objectMatch?.[1] && options.objects) {
             const objectSpace = objectMatch[1];
@@ -317,7 +339,8 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
                         signal: AbortSignal.timeout(10_000),
                       }),
                 progress,
-                role === 'read'
+                role === 'read',
+                { admission, role: role === 'read' ? 'read' : 'task' }
               );
             } finally {
               stream.signal.removeEventListener('abort', abortInput);
@@ -466,8 +489,10 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
             res.end(JSON.stringify(result));
           }
         } finally {
+          lease?.release();
           if (idle !== undefined) clearTimeout(idle);
           res.removeListener('close', disconnected);
+          req.removeListener('aborted', disconnected);
         }
       } catch (error) {
         const failure =
@@ -483,7 +508,10 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           return;
         }
         if (!res.destroyed && !res.writableEnded) {
-          res.writeHead(failure.status, JSON_HEADERS);
+          res.writeHead(failure.status, {
+            ...JSON_HEADERS,
+            ...(failure.status === 429 ? { 'retry-after': '1', connection: 'close' } : {}),
+          });
           res.end(JSON.stringify({ error: { id: failure.id, code: failure.code } }));
         }
       }
@@ -521,6 +549,7 @@ function createTaskListener(
   });
   server.maxHeadersCount = 32;
   server.on('clientError', (_error, socket) => {
+    socket.on('error', () => undefined);
     socket.destroy();
   });
   server.headersTimeout = 5_000;

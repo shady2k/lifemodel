@@ -198,9 +198,11 @@ describe('storage seal wiring', () => {
     }));
     vi.doMock('../../loader/src/storage-s3.js', () => ({ checkS3Bucket: vi.fn() }));
     vi.doMock('../../loader/src/storage-module-app.js', () => ({ createStorageModule: () => app }));
-    vi.doMock('../../loader/src/storage-access.js', () => ({ createStorageAccess: () => ({}) }));
+    vi.doMock('../../loader/src/storage-access.js', () => ({
+      createStorageAccess: () => ({ close: vi.fn(async () => undefined) }),
+    }));
     vi.doMock('../../loader/src/storage-identity.js', () => ({
-      createKubernetesStorageIdentity: () => ({}),
+      createKubernetesStorageIdentity: () => ({ close: vi.fn() }),
     }));
     vi.doMock('../../loader/src/storage-objects.js', () => ({
       createStorageObjects: () => ({ close: objectsClose }),

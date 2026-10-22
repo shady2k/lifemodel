@@ -1,5 +1,24 @@
 import { createStorageAccess } from '../../loader/src/storage-access.js';
 import { createKubernetesStorageIdentity } from '../../loader/src/storage-identity.js';
+
+const accessInstances = new Set<ReturnType<typeof createStorageAccess>>();
+const identityInstances = new Set<ReturnType<typeof createKubernetesStorageIdentity>>();
+function trackedAccess(options: Parameters<typeof createStorageAccess>[0]) {
+  const access = createStorageAccess(options);
+  accessInstances.add(access);
+  return access;
+}
+function trackedIdentity() {
+  const identity = createKubernetesStorageIdentity();
+  identityInstances.add(identity);
+  return identity;
+}
+async function closeAccess() {
+  await Promise.all([...accessInstances].map((access) => access.close()));
+  accessInstances.clear();
+  for (const identity of identityInstances) identity.close();
+  identityInstances.clear();
+}
 /**
  * The catalog check against a dropped connection (ADR-015 S-D7).
  *
@@ -58,9 +77,9 @@ beforeAll(async () => {
   throughProxy.hostname = '127.0.0.1';
   throughProxy.port = String(address.port);
   module = createStorageModule({
-    access: createStorageAccess({
+    access: trackedAccess({
       connectionString: workerDatabaseUrl(),
-      identity: createKubernetesStorageIdentity(),
+      identity: trackedIdentity(),
     }),
     bucket: STORAGE_BUCKET,
     catalog: createCatalog({ connectionString: throughProxy.toString() }),
@@ -87,6 +106,7 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
+  await closeAccess();
   for (const socket of sockets) socket.destroy();
   sockets.clear();
   await new Promise<void>((resolve) => proxy.close(() => resolve()));

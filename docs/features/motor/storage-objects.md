@@ -34,4 +34,53 @@ Configuration is mounted by the trusted launcher, not credential flags: `LIFEMOD
 
 Stage 3 must copy the wrapper and compiled CLI modules into the Linux workbench image (with Node runtime), mount the audience-specific rotating token and CA-only trust, and set the module origin and allocated space. It must not mount module TLS private keys or signing credentials.
 
-No platform dependency changed: A0→A→B→C→D still starts storage after SQL/Bao/Seaweed. Empty authorization/object tables are valid; no task Job or allocation is needed for startup. Allocate/bind/freeze/seal are described in [storage seal](storage-seal.md) (653.7.6). Worker admission, reserved capacity, fair scheduling, RSS and overload bounds belong to 653.7.7. Transfer chunk and deadline settings are typed and bounded but do not claim S10 acceptance.
+No platform dependency changed: A0→A→B→C→D still starts storage after SQL/Bao/Seaweed. Empty authorization/object tables are valid; no task Job or allocation is needed for startup. Allocate/bind/freeze/seal are described in [storage seal](storage-seal.md) (653.7.6). Worker admission, reserved capacity and fair scheduling are being implemented by 653.7.7. The integration fixture is not S10 acceptance; the deployed RSS budget still needs WALK-STORAGE-LOAD acceptance.
+
+## Transfer bounds
+
+One in-process admission scheduler covers all three TLS listeners. It stores only
+slot and queue metadata, never durable authority or artifact buffers. Each chunk
+releases its worker after the backend/socket drain and rejoins the space-fair
+queue before allocating the next buffer. Task traffic cannot borrow the read
+reserve. Control traffic has its own workers. A closed or aborted request frees
+its worker immediately; fresh authorization and the SQL maintenance fence still
+apply to every chunk and publication. Admission never replaces those guards.
+
+Configuration uses integer environment settings. Invalid values fail startup;
+values are never clamped. Defaults are also finite hard maxima unless noted:
+
+| Environment setting | Default | Allowed range |
+| --- | ---: | --- |
+| `LIFEMODEL_STORAGE_CHUNK_BYTES` | 4194304 | 1–4194304 |
+| `LIFEMODEL_STORAGE_TRANSFER_WORKERS` | 8 | 2–8 |
+| `LIFEMODEL_STORAGE_PER_SPACE_WORKERS` | 2 | 1–2 |
+| `LIFEMODEL_STORAGE_RESERVED_READ_WORKERS` | 2 | 1–2, less than total workers |
+| `LIFEMODEL_STORAGE_CONTROL_WORKERS` | 2 | 1–2 |
+| `LIFEMODEL_STORAGE_BUFFER_BYTES` | 33554432 | Must fit the read reserve and at least one task chunk; at most 33554432 |
+| `LIFEMODEL_STORAGE_QUEUE_REQUESTS` | 32 | 1–32 |
+| `LIFEMODEL_STORAGE_QUEUE_BYTES` | 65536 | 1–65536 |
+| `LIFEMODEL_STORAGE_QUEUE_WAIT_MS` | 900 | 1–900 |
+| `LIFEMODEL_STORAGE_CHUNK_DEADLINE_MS` | 10000 | 1–10000 |
+
+Queue accounting includes the request's header/path byte count, not its body.
+Requests wait without consuming their bodies. An excess request, or one still
+queued at its own deadline, returns `429` with `Retry-After: 1`. Retrying after
+pressure clears follows the normal authorization and idempotency rules. No
+transfer occupies a control worker. A stalled chunk is canceled after its own
+no-progress deadline, including while waiting for a source or backend response.
+
+Kubernetes proof uses one keep-alive HTTPS agent with at most ten sockets. The
+access guard uses one PostgreSQL pool with at most ten clients. Neither caches
+positive TokenReview, Pod, Job or authorization decisions. Pool and socket error
+listeners survive request teardown. S3 uses separate bounded keep-alive pools
+for PUT (40 sockets: active plus queued request ceiling), GET (8 sockets) and
+HEAD/DELETE/list control (2 sockets), so a full PUT kept open between chunk
+turns cannot exhaust the read reserve. Write callbacks settle before chunk
+buffer ownership is released, even below the socket high-water mark.
+Readiness still fails closed on an inaccessible catalog or backend and reports recovery after the next successful
+check, never a failed store as an empty page.
+
+The integration pressure fixture checks admission, buffers, queue bounds,
+control/read isolation and connection reuse. It is not the deployed RSS receipt.
+The coordinator must run WALK-STORAGE-LOAD on the VM and record RSS ≤512 MiB plus
+a diagnostic log scan before accepting S10.

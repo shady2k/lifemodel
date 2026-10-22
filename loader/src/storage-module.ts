@@ -21,6 +21,7 @@ import { createStorageRetention } from './storage-retention.js';
 import { createStorageRetentionSettings } from './storage-retention-settings.js';
 import { createStorageUploadOwner } from './storage-upload-owner.js';
 import { createStorageMaintenance } from './storage-maintenance.js';
+import { createStorageAdmission, readStorageAdmissionSettings } from './storage-admission.js';
 
 /** Four listeners: health, task data, trusted core control, trusted core/web read. */
 const STATUS_PORT = 8081;
@@ -77,7 +78,16 @@ const custody = createCachedCustodyReader(() => readCustodyRecord(bao.call));
 const catalog = createCatalog({
   connectionString: catalogConnectionString(databaseUsername, databasePassword),
 });
-const objectS3 = createStorageObjectS3({ endpoint, bucket, custody, logger });
+// Configuration errors fail before any listener or transfer starts.
+const admission = createStorageAdmission(readStorageAdmissionSettings(process.env));
+const objectS3 = createStorageObjectS3({
+  endpoint,
+  bucket,
+  custody,
+  logger,
+  chunkBytes: admission.settings.chunkBytes,
+  timeoutMs: admission.settings.chunkDeadlineMs,
+});
 const owner = createStorageUploadOwner({
   connectionString: catalogConnectionString(databaseUsername, databasePassword),
 });
@@ -87,10 +97,13 @@ const objects = createStorageObjects({
   connectionString: catalogConnectionString(databaseUsername, databasePassword),
   s3: objectS3,
   owner,
+  admission,
 });
+const identity = createKubernetesStorageIdentity();
 const access = createStorageAccess({
   connectionString: catalogConnectionString(databaseUsername, databasePassword),
-  identity: createKubernetesStorageIdentity(),
+  identity,
+  timeoutMs: admission.settings.chunkDeadlineMs,
 });
 const retention = createStorageRetention({
   connectionString: catalogConnectionString(databaseUsername, databasePassword),
@@ -115,6 +128,7 @@ const maintenance = createStorageMaintenance({
   connectionString: catalogConnectionString(databaseUsername, databasePassword),
 });
 const app = createStorageModule({
+  admission,
   maintenance,
   retention,
   seal,
@@ -166,6 +180,8 @@ function stop(): void {
   void Promise.allSettled([retention.close(), seal.close(), objects.close()]).then(
     async (results) => {
       await owner.close();
+      await access.close();
+      identity.close();
       for (const listener of [app.task, app.control, app.read]) listener.close();
       objectS3.close();
       if (results.some((result) => result.status === 'rejected')) {
