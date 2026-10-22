@@ -118,8 +118,117 @@ record() { printf '{"step":"%s","exit":%s}\n' "$1" "$2" >&3; }
 # Do not use a pipeline to report a gate's status. Each status is the command's own.
 ```
 
+Save these reusable checks as `$WORK/cold-guard.py` and
+`$WORK/storage-endpoints.py`. The cold guard waits for two matching
+observations with no active/unknown `Reconciling` condition; the complete status
+(including `lastAttemptedRevision`) and generation must stay stable. Suspension
+alone is not evidence of a finished reconcile. A resumed parent/child, an active
+reconcile or any unexpected PVC user stops the procedure. Use exclusive operator
+control throughout: no other actor may resume Flux, scale workloads or create
+PVC users during copy/promotion. The guard is an observed controller cut, not a
+PVC lock. A `ReadWriteOnce` claim permits multiple Pods on the same node.
+
+```bash
+cat >"$WORK/cold-guard.py" <<'PY'
+import json, subprocess, time
+FLUX=['platform','platform-a','platform-d']
+NAMESPACE='lifemodel-system'
+CLAIM='data-seaweedfs-0'
+def k(*args, data=None):
+    r=subprocess.run(['kubectl',*args],input=data,capture_output=True,check=False,timeout=180)
+    if r.returncode: raise RuntimeError('quiescence_kubectl_failed')
+    return r.stdout
+def get(kind,name,ns=NAMESPACE):
+    return json.loads(k('-n',ns,'get',kind,name,'-o','json'))
+def flux_observation(name):
+    obj=get('kustomization.kustomize.toolkit.fluxcd.io',name,'flux-system')
+    if obj['spec'].get('suspend') is not True: raise RuntimeError('flux_not_suspended')
+    status=obj.get('status',{})
+    if any(c['type']=='Reconciling' and c['status']!='False' for c in status.get('conditions',[])):
+        return None
+    return (obj['metadata']['uid'],obj['metadata']['generation'],
+            json.dumps(status,sort_keys=True))
+def await_flux(names):
+    deadline=time.monotonic()+180
+    previous=None
+    while time.monotonic()<deadline:
+        current=[flux_observation(name) for name in names]
+        if all(x is not None for x in current) and current==previous: return
+        previous=current
+        time.sleep(2)
+    raise RuntimeError('flux_not_quiescent')
+def no_pvc_users(allowed_job=None):
+    # Check all Pods, including Pending/Terminating/terminal ones: RWO is not a fence.
+    pods=json.loads(k('-n',NAMESPACE,'get','pods','-o','json'))['items']
+    allowed_count=0
+    for pod in pods:
+        if not any(v.get('persistentVolumeClaim',{}).get('claimName')==CLAIM
+                   for v in pod['spec'].get('volumes',[])): continue
+        owners=pod['metadata'].get('ownerReferences',[])
+        allowed=(allowed_job is not None and len(owners)==1 and owners[0]['kind']=='Job'
+                 and owners[0]['name']==allowed_job['metadata']['name']
+                 and owners[0]['uid']==allowed_job['metadata']['uid']
+                 and not pod['metadata'].get('deletionTimestamp'))
+        if not allowed: raise RuntimeError('pvc_has_unexpected_user')
+        allowed_count+=1
+    if allowed_job is not None and allowed_count!=1: raise RuntimeError('pvc_helper_not_exclusive')
+def cold_guard(allowed_job=None):
+    await_flux(FLUX)
+    if get('statefulset','seaweedfs')['spec'].get('replicas',1)!=0:
+        raise RuntimeError('backend_not_stopped')
+    no_pvc_users(allowed_job)
+    # Re-read after Pod inventory; a racing parent must not silently resume a child.
+    if any(flux_observation(name) is None for name in FLUX):
+        raise RuntimeError('flux_not_quiescent')
+if __name__=='__main__':
+    import sys
+    if len(sys.argv)!=2 or sys.argv[1] not in ['none','fs']: raise RuntimeError('invalid_guard_mode')
+    cold_guard(get('job','storage-recovery-fs') if sys.argv[1]=='fs' else None)
+PY
+# EndpointSlice membership is checked before/after the offline Job and real start.
+cat >"$WORK/storage-endpoints.py" <<'PY'
+import json,subprocess,sys,time
+mode=sys.argv[1]
+if mode not in ['empty','serving']: raise RuntimeError('invalid_endpoint_mode')
+def get(kind,*args):
+    r=subprocess.run(['kubectl','-n','lifemodel-system','get',kind,*args,'-o','json'],
+                     capture_output=True,timeout=30)
+    if r.returncode: raise RuntimeError('endpoint_query_failed')
+    return json.loads(r.stdout)
+def check():
+    deployment=get('deployment','storage-module')
+    replicasets=get('replicasets')['items']; allowed_rs={r['metadata']['uid'] for r in replicasets
+        if any(o['uid']==deployment['metadata']['uid'] and o['kind']=='Deployment'
+               for o in r['metadata'].get('ownerReferences',[]))}
+    pods=get('pods')['items']; allowed={p['metadata']['uid'] for p in pods
+        if any(o['uid'] in allowed_rs and o['kind']=='ReplicaSet'
+               for o in p['metadata'].get('ownerReferences',[]))
+        and not p['metadata'].get('deletionTimestamp')
+        and any(c['type']=='Ready' and c['status']=='True' for c in p.get('status',{}).get('conditions',[]))}
+    slices=get('endpointslices','-l','kubernetes.io/service-name=storage-module')['items']
+    targets=set()
+    for item in slices:
+        for e in item.get('endpoints',[]):
+            target=e.get('targetRef',{})
+            if mode=='empty': return False
+            # Even an unready/non-serving helper endpoint must not be advertised.
+            if target.get('kind')!='Pod' or target.get('uid') not in allowed:
+                raise RuntimeError('unexpected_storage_endpoint')
+            if e.get('conditions',{}).get('ready') is not True or e.get('conditions',{}).get('terminating'):
+                return False
+            targets.add(target['uid'])
+    return not targets if mode=='empty' else bool(targets) and targets==allowed
+deadline=time.monotonic()+120
+while time.monotonic()<deadline:
+    if check(): break
+    time.sleep(2)
+else: raise RuntimeError('storage_endpoints_not_settled')
+PY
+```
+
 Use the following Python block in the operator shell to save prior state,
-suspend the parent first, stop Seaweed, create two bounded helper Jobs and
+suspend and await the parent **before** suspending/awaiting A and D, stop
+Seaweed, confirm no Pod mounts the claim, create two bounded helper Jobs and
 open the **two sides** of only the SQL route. It refuses an existing helper.
 The fs helper mounts no Secret or service account token. The SQL helper mounts
 only `username` and `password` as env refs from
@@ -142,30 +251,31 @@ rc=$?; record hold-receipt "$rc"; test "$rc" = 0 || return 1
 
 ```bash
 python3 - <<'PY' 2>"$WORK/helpers.err"
-import json, os, re, subprocess
+import json, os, re, runpy
 from pathlib import Path
 w=Path(os.environ['WORK'])
-def k(*args, data=None):
-    r=subprocess.run(['kubectl',*args], input=data, capture_output=True, check=False, timeout=180)
-    if r.returncode: raise RuntimeError('kubectl_failed')
-    return r.stdout
-def get(kind,name,ns='lifemodel-system'):
-    return json.loads(k('-n',ns,'get',kind,name,'-o','json'))
+guard=runpy.run_path(str(w/'cold-guard.py'))
+k=guard['k']; get=guard['get']
 def apply(obj): k('apply','-f','-',data=json.dumps(obj).encode())
 prior={'flux':{},'replicas':{}}
-for name in ['platform','platform-a','platform-d']:
-    obj=get('kustomization.kustomize.toolkit.fluxcd.io',name,'flux-system')
-    prior['flux'][name]=obj['spec'].get('suspend',False)
-    k('-n','flux-system','patch','kustomization',name,'--type=merge','-p','{"spec":{"suspend":true}}')
+for name in guard['FLUX']:
+    prior['flux'][name]=get('kustomization.kustomize.toolkit.fluxcd.io',name,'flux-system')['spec'].get('suspend',False)
 for kind,name in [('statefulset','seaweedfs'),('deployment','storage-module')]:
     prior['replicas'][kind+'/'+name]=get(kind,name)['spec'].get('replicas',1)
+# Save before the first mutation so interrupted suspension remains recoverable.
 with (w/'prior.json').open('x') as f: json.dump(prior,f)
+for names in [['platform'],['platform-a','platform-d']]:
+    for name in names:
+        k('-n','flux-system','patch','kustomization',name,'--type=merge','-p','{"spec":{"suspend":true}}')
+    guard['await_flux'](names)
+guard['await_flux'](guard['FLUX'])
 image=get('deployment','storage-module')['spec']['template']['spec']['containers'][0]['image']
 assert re.search(r'@sha256:[0-9a-f]{64}$',image)
 (w/'module-image').write_text(image+'\n')
 k('-n','lifemodel-system','scale','statefulset/seaweedfs','--replicas=0')
 k('-n','lifemodel-system','wait','--for=delete','pod','-l','app.kubernetes.io/name=seaweedfs','--timeout=120s')
-# A new pod cannot race the cold copy: A and its parent are suspended.
+guard['cold_guard']()
+# All Flux reconcilers are observed idle; no Pod mounts the PVC before admission.
 base={'automountServiceAccountToken':False,'restartPolicy':'Never',
       'securityContext':{'runAsNonRoot':True,'runAsUser':1000,'runAsGroup':1000,'fsGroup':1000,
                          'seccompProfile':{'type':'RuntimeDefault'}}}
@@ -209,6 +319,7 @@ apply({'apiVersion':'networking.k8s.io/v1','kind':'NetworkPolicy',
                                     'podSelector':selector}], 'ports':[{'protocol':'TCP','port':5432}]}]}})
 for name in ['storage-recovery-fs','storage-recovery-sql']:
     k('-n','lifemodel-system','wait','--for=condition=Ready','pod','-l','job-name='+name,'--timeout=120s')
+guard['cold_guard'](get('job','storage-recovery-fs'))
 PY
 rc=$?; record helpers "$rc"; test "$rc" = 0 || return 1
 fs() { kubectl -n lifemodel-system exec job/storage-recovery-fs -- "$@"; }
@@ -229,6 +340,8 @@ Copy trusted policy to the fs helper, take the names-only verdict, then sanitize
 Do not archive raw `/data`. Stderr stays private even on an unsupported layout.
 
 ```bash
+python3 "$WORK/cold-guard.py" fs 2>"$WORK/backup-cold-guard.err"
+rc=$?; record backup-cold-guard "$rc"; test "$rc" = 0 || return 1
 fsi sh -c 'umask 077; cat > /work/policy.json' <"$POLICY" 2>"$WORK/policy-copy.err"
 rc=$?; record policy-copy "$rc"; test "$rc" = 0 || return 1
 fs lifemodel-storage-recovery layout /data /work/policy.json >"$WORK/layout.json" 2>"$WORK/layout.err"
@@ -297,6 +410,9 @@ fs lifemodel-storage-recovery build /work/artifact /work/metadata.json /work/pol
 rc=$?; record build "$rc"; test "$rc" = 0 || return 1
 fs lifemodel-storage-recovery verify /work/artifact /work/policy.json >"$WORK/verify-source.json" 2>"$WORK/verify-source.err"
 rc=$?; record verify-source "$rc"; test "$rc" = 0 || return 1
+# Recheck after hashing/copy as well: an unexpected user invalidates the cut.
+python3 "$WORK/cold-guard.py" fs 2>"$WORK/backup-cut-recheck.err"
+rc=$?; record backup-cut-recheck "$rc"; test "$rc" = 0 || return 1
 fs tar -C /work/artifact -cf - . >"$WORK/storage-set.tar" 2>"$WORK/export-tar.err"
 rc=$?; record export-tar "$rc"; test "$rc" = 0 || return 1
 ```
@@ -310,7 +426,7 @@ Restart source while hold remains. Check authenticated `/status` through the
 loader's existing health route/Pod, then release this generation:
 
 ```bash
-kubectl -n lifemodel-system delete job storage-recovery-fs --wait=true --timeout=120s >"$WORK/fs-remove.out" 2>"$WORK/fs-remove.err"
+kubectl -n lifemodel-system delete job storage-recovery-fs --cascade=foreground --wait=true --timeout=120s >"$WORK/fs-remove.out" 2>"$WORK/fs-remove.err"
 rc=$?; record fs-remove "$rc"; test "$rc" = 0 || return 1
 kubectl -n lifemodel-system scale statefulset/seaweedfs --replicas=1 >"$WORK/seaweed-start.out" 2>"$WORK/seaweed-start.err"
 rc=$?; record seaweed-start "$rc"; test "$rc" = 0 || return 1
@@ -347,24 +463,13 @@ rc=$?; record stop-module-wait "$rc"; test "$rc" = 0 || return 1
 ```
 
 There is no empty-merge import mode in the CLI. Verify SQL emptiness explicitly:
-all storage base tables except the migration-created singleton rows must be
-empty, and their singleton totals/state must be pristine. Run the exact block through the SQL helper (stderr stays private):
+all catalog/user tables must be empty. Only validated boot-only upload-owner
+heartbeats, held maintenance and the zero instance ledger are allowed. The shared
+SQL gate below is also exercised after a fresh module boot/stop in integration
+tests. Run that exact tracked file through the SQL helper (stderr stays private):
 
 ```bash
-sqli psql --no-psqlrc --set=ON_ERROR_STOP=1 >"$WORK/empty-check.out" 2>"$WORK/empty-check.err" <<'SQL'
-DO $$ DECLARE r record; populated boolean; BEGIN
-  FOR r IN SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname='storage'
-           AND tablename NOT IN ('maintenance','instance_ledger') LOOP
-    EXECUTE format('SELECT EXISTS(SELECT 1 FROM storage.%I)',r.tablename) INTO populated;
-    IF populated THEN RAISE EXCEPTION 'destination_not_empty'; END IF;
-  END LOOP;
-  IF (SELECT count(*) FROM storage.maintenance)<>1
-     OR NOT EXISTS(SELECT 1 FROM storage.maintenance WHERE id AND state='held' AND purpose='backup')
-     OR (SELECT count(*) FROM storage.instance_ledger)<>1
-     OR NOT EXISTS(SELECT 1 FROM storage.instance_ledger WHERE id AND used_bytes=0)
-  THEN RAISE EXCEPTION 'destination_not_pristine'; END IF;
-END $$;
-SQL
+sqli psql --no-psqlrc --set=ON_ERROR_STOP=1 >"$WORK/empty-check.out" 2>"$WORK/empty-check.err" < deploy/platform/storage-empty-target.sql
 rc=$?; record empty-check "$rc"; test "$rc" = 0 || return 1
 ```
 
@@ -441,7 +546,9 @@ def k(*args,data=None):
     return r.stdout
 job=json.loads(k('-n','lifemodel-system','get','job','storage-recovery-fs','-o','json'))
 with (w/'readonly-fs-job.json').open('x') as f: json.dump(job,f)
-k('-n','lifemodel-system','delete','job','storage-recovery-fs','--wait=true','--timeout=120s')
+k('-n','lifemodel-system','delete','job','storage-recovery-fs','--cascade=foreground','--wait=true','--timeout=120s')
+import runpy
+guard=runpy.run_path(str(w/'cold-guard.py')); guard['cold_guard']()
 spec=job['spec']; template=spec['template']
 spec.pop('selector',None); spec.pop('manualSelector',None)
 template['metadata']={'labels':{'lifemodel-recovery':'storage-recovery-fs'}}
@@ -476,10 +583,16 @@ Only this explicit empty-target import step removes pristine install-created
 files. Reconcile itself never deletes under hold.
 
 ```bash
+python3 "$WORK/cold-guard.py" fs 2>"$WORK/stage-cold-guard.err"
+rc=$?; record stage-cold-guard "$rc"; test "$rc" = 0 || return 1
 fs lifemodel-storage-recovery stage /work/artifact /data/recovery-stage /work/policy.json >"$WORK/stage.json" 2>"$WORK/stage.err"
 rc=$?; record stage-tree "$rc"; test "$rc" = 0 || return 1
 # The prepared stage has already been copied and independently hashed by stage.
 # All other root entries must still be the previously attested pristine layout.
+# Recheck immediately before destructive promotion. The sole allowed PVC user is
+# this helper Job's exact UID, not a label that a racing Seaweed Pod might share.
+python3 "$WORK/cold-guard.py" fs 2>"$WORK/promote-cold-guard.err"
+rc=$?; record promote-cold-guard "$rc"; test "$rc" = 0 || return 1
 # Explicitly approved destruction of EMPTY target scaffolding only, never source data.
 fs node -e 'const fs=require("node:fs");const p="/data";for(const n of fs.readdirSync(p)){if(n!=="recovery-stage")fs.rmSync(p+"/"+n,{recursive:true,force:false})}for(const n of fs.readdirSync(p+"/recovery-stage"))fs.renameSync(p+"/recovery-stage/"+n,p+"/"+n);fs.rmdirSync(p+"/recovery-stage")' >"$WORK/promote.out" 2>"$WORK/promote.err"
 rc=$?; record promote "$rc"; test "$rc" = 0 || return 1
@@ -497,12 +610,15 @@ until the imported catalog and tree have reconciled together.
 
 After promotion, release the fs helper and start Seaweed with destination
 custody. Create the following bounded offline recovery Job from the installed
-module template. It has the module's existing fixed key refs, identity and
-narrow network routes, but never runs the module. This adds no RoleBinding and
-mounts no source PVC. Then prepare before any module process can start:
+module template. It retains the fixed key refs and ServiceAccount identity,
+but replaces all Pod labels with its own recovery label and removes every
+container port and probe. It never matches the storage Service. Temporary
+operator policies grant only DNS and the two sides of Bao/S3/Postgres routes;
+there is no inbound listener or Kubernetes API route. This adds no RoleBinding
+and mounts no source PVC. Then prepare before any module process can start:
 
 ```bash
-kubectl -n lifemodel-system delete job storage-recovery-fs --wait=true --timeout=120s >"$WORK/import-fs-release.out" 2>"$WORK/import-fs-release.err"
+kubectl -n lifemodel-system delete job storage-recovery-fs --cascade=foreground --wait=true --timeout=120s >"$WORK/import-fs-release.out" 2>"$WORK/import-fs-release.err"
 rc=$?; record import-fs-release "$rc"; test "$rc" = 0 || return 1
 kubectl -n lifemodel-system scale statefulset/seaweedfs --replicas=1 >"$WORK/import-backend.out" 2>"$WORK/import-backend.err"
 rc=$?; record import-backend "$rc"; test "$rc" = 0 || return 1
@@ -510,19 +626,50 @@ kubectl -n lifemodel-system rollout status statefulset/seaweedfs --timeout=180s 
 rc=$?; record import-backend-ready "$rc"; test "$rc" = 0 || return 1
 python3 - <<'PY' 2>"$WORK/recovery-job.err"
 import json,subprocess
-r=subprocess.run(['kubectl','-n','lifemodel-system','get','deployment','storage-module','-o','json'],capture_output=True,timeout=30)
-if r.returncode: raise RuntimeError('template_failed')
-template=json.loads(r.stdout)['spec']['template']; pod=template['spec']; pod['restartPolicy']='Never'
+def k(*args,data=None):
+    r=subprocess.run(['kubectl',*args],input=data,capture_output=True,timeout=180)
+    if r.returncode: raise RuntimeError('recovery_job_failed')
+    return r.stdout
+# Clone fixed identity/custody refs, but never the Service-selected label or ports.
+template=json.loads(k('-n','lifemodel-system','get','deployment','storage-module','-o','json'))['spec']['template']
+template['metadata']={'labels':{'lifemodel-recovery':'storage-recovery-module'}}
+pod=template['spec']; pod['restartPolicy']='Never'
+assert len(pod['containers'])==1 and not pod.get('initContainers')
 container=pod['containers'][0]; container['command']=['sleep','3600']; container.pop('args',None)
 container.pop('readinessProbe',None); container.pop('livenessProbe',None); container.pop('startupProbe',None)
+container.pop('ports',None)
+selector={'matchLabels':{'lifemodel-recovery':'storage-recovery-module'}}
+def peer(namespace,labels):
+    return {'namespaceSelector':{'matchLabels':{'kubernetes.io/metadata.name':namespace}},
+            'podSelector':{'matchLabels':labels}}
+def tcp(port): return {'protocol':'TCP','port':port}
+def policy(name,namespace,select,**rules):
+    obj={'apiVersion':'networking.k8s.io/v1','kind':'NetworkPolicy',
+         'metadata':{'name':name,'namespace':namespace},
+         'spec':{'podSelector':select,'policyTypes':[key.capitalize() for key in rules],**rules}}
+    # create, never adopt an unrelated prior operator policy.
+    k('create','-f','-',data=json.dumps(obj).encode())
+backend_routes=[('openbao',{'app.kubernetes.io/name':'openbao',
+                           'app.kubernetes.io/instance':'openbao','component':'server'},8200),
+                ('lifemodel-system',{'app.kubernetes.io/name':'seaweedfs'},8333),
+                ('lifemodel-state',{'cnpg.io/cluster':'lifemodel'},5432)]
+egress=[{'to':[peer(ns,labels)],'ports':[tcp(port)]} for ns,labels,port in backend_routes]
+egress.append({'to':[peer('kube-system',{'k8s-app':'kube-dns'})],
+               'ports':[{'protocol':'UDP','port':53},tcp(53)]})
+policy('storage-recovery-module-egress','lifemodel-system',selector,ingress=[],egress=egress)
+for ns,labels,port in backend_routes:
+    policy('storage-recovery-module-ingress',ns,{'matchLabels':labels},
+           ingress=[{'from':[peer('lifemodel-system',selector['matchLabels'])],'ports':[tcp(port)]}])
+# No data listeners, API route or inbound allow: only CLI DB/Bao/S3 access.
 job={'apiVersion':'batch/v1','kind':'Job','metadata':{'name':'storage-recovery-module','namespace':'lifemodel-system'},
      'spec':{'backoffLimit':0,'activeDeadlineSeconds':3600,'template':template}}
-r=subprocess.run(['kubectl','create','-f','-'],input=json.dumps(job).encode(),capture_output=True,timeout=30)
-if r.returncode: raise RuntimeError('recovery_job_failed')
+k('create','-f','-',data=json.dumps(job).encode())
 PY
 rc=$?; record recovery-job "$rc"; test "$rc" = 0 || return 1
 kubectl -n lifemodel-system wait --for=condition=Ready pod -l job-name=storage-recovery-module --timeout=120s >"$WORK/recovery-ready.out" 2>"$WORK/recovery-ready.err"
 rc=$?; record recovery-ready "$rc"; test "$rc" = 0 || return 1
+python3 "$WORK/storage-endpoints.py" empty 2>"$WORK/offline-endpoints.err"
+rc=$?; record offline-endpoints "$rc"; test "$rc" = 0 || return 1
 RECOVERY_POD=$(kubectl -n lifemodel-system get pod -l job-name=storage-recovery-module -o jsonpath='{.items[0].metadata.name}')
 rc=$?; record recovery-pod "$rc"; test "$rc" = 0 || return 1
 ```
@@ -576,10 +723,20 @@ python3 -c 'import json,os; from pathlib import Path; r=json.loads((Path(os.envi
 rc=$?; record reconcile-complete "$rc"; test "$rc" = 0 || return 1
 kubectl -n lifemodel-system exec "$RECOVERY_POD" -- lifemodel-storage-recovery release "$RESTORE_GENERATION" >"$WORK/release-restore.json" 2>"$WORK/release-restore.err"
 rc=$?; record release-restore "$rc"; test "$rc" = 0 || return 1
+# Do this immediately after either clean OR degraded release, before any real start.
+kubectl -n lifemodel-system delete job storage-recovery-module --cascade=foreground --wait=true --timeout=120s >"$WORK/recovery-remove.out" 2>"$WORK/recovery-remove.err"
+rc=$?; record recovery-remove "$rc"; test "$rc" = 0 || return 1
+kubectl -n lifemodel-system wait --for=delete pod -l job-name=storage-recovery-module --timeout=120s >"$WORK/recovery-pods-removed.out" 2>"$WORK/recovery-pods-removed.err"
+rc=$?; record recovery-pods-removed "$rc"; test "$rc" = 0 || return 1
+python3 "$WORK/storage-endpoints.py" empty 2>"$WORK/pre-start-endpoints.err"
+rc=$?; record pre-start-endpoints "$rc"; test "$rc" = 0 || return 1
 kubectl -n lifemodel-system scale deploy/storage-module --replicas=1 >"$WORK/start-module.out" 2>"$WORK/start-module.err"
 rc=$?; record start-module "$rc"; test "$rc" = 0 || return 1
 kubectl -n lifemodel-system rollout status deploy/storage-module --timeout=180s >"$WORK/destination-ready.out" 2>"$WORK/destination-ready.err"
 rc=$?; record destination-ready "$rc"; test "$rc" = 0 || return 1
+python3 "$WORK/storage-endpoints.py" serving 2>"$WORK/serving-endpoints.err"
+rc=$?; record serving-endpoints "$rc"; test "$rc" = 0 || return 1
+# Only now open Service-based forwards and run the restored API comparisons.
 ```
 
 For degraded release, separately approve the loss and run
@@ -749,7 +906,13 @@ kubectl -n lifemodel-system delete networkpolicy storage-recovery-sql-egress --i
 rc=$?; record egress-cleanup "$rc"; test "$rc" = 0 || return 1
 kubectl -n lifemodel-state delete networkpolicy storage-recovery-sql-ingress --ignore-not-found >"$WORK/ingress-cleanup.out" 2>"$WORK/ingress-cleanup.err"
 rc=$?; record ingress-cleanup "$rc"; test "$rc" = 0 || return 1
-# Delete only the named recovery-module Job created for this walk, if used.
+kubectl -n lifemodel-system delete networkpolicy storage-recovery-module-egress storage-recovery-module-ingress --ignore-not-found >"$WORK/module-network-cleanup.out" 2>"$WORK/module-network-cleanup.err"
+rc=$?; record module-network-cleanup "$rc"; test "$rc" = 0 || return 1
+kubectl -n openbao delete networkpolicy storage-recovery-module-ingress --ignore-not-found >"$WORK/bao-network-cleanup.out" 2>"$WORK/bao-network-cleanup.err"
+rc=$?; record bao-network-cleanup "$rc"; test "$rc" = 0 || return 1
+kubectl -n lifemodel-state delete networkpolicy storage-recovery-module-ingress --ignore-not-found >"$WORK/db-network-cleanup.out" 2>"$WORK/db-network-cleanup.err"
+rc=$?; record db-network-cleanup "$rc"; test "$rc" = 0 || return 1
+# The offline recovery Job was already removed before the real module started.
 python3 - <<'PY' 2>"$WORK/resume.err"
 import json,os,subprocess
 from pathlib import Path
