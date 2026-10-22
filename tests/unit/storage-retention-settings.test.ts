@@ -496,9 +496,10 @@ describe('storage settings bootstrap and authority', () => {
       )
     ).toBe(true);
     const placeholders = documents('deploy/platform/a0/pki-configmap.yaml');
-    expect(placeholders.map((item) => item.metadata.name)).toEqual([
-      'lifemodel-ca',
-      'lifemodel-pki-status',
+    expect(placeholders.map((item) => [item.metadata.namespace, item.metadata.name])).toEqual([
+      ['lifemodel-system', 'lifemodel-ca'],
+      ['lifemodel', 'lifemodel-ca'],
+      ['lifemodel-system', 'lifemodel-pki-status'],
     ]);
     // A0 creates these as Flux, before loader's UPDATE-only bootstrap writes.
     expect(

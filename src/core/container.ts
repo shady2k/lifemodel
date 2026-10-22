@@ -72,6 +72,8 @@ import {
   startOutboundDelivery,
 } from './message-streams.js';
 import { createBusSignalStream, type BusSnapshot } from './bus-stream.js';
+import { createStorageControlClient } from './storage-control-client.js';
+import { createStorageRetentionReconciler } from './storage-retention.js';
 import { createScopedScriptRunner } from './scoped-script-runner.js';
 import { createBrowserAuthPrimitive } from './browser-auth-primitive.js';
 import { loadAllPlugins } from './plugin-discovery.js';
@@ -1198,6 +1200,33 @@ export async function createContainerAsync(
     logger.error({ err: error }, 'Outbound delivery worker stopped unexpectedly');
   });
 
+  // Storage is an optional standalone integration; the platform always supplies
+  // both service-identity inputs. A partial declaration fails rather than using
+  // system trust or silently disabling owner warnings.
+  const controlTokenFile = process.env['LIFEMODEL_STORAGE_CONTROL_TOKEN_FILE'];
+  const controlCaFile = process.env['LIFEMODEL_STORAGE_CONTROL_CA_FILE'];
+  if (Boolean(controlTokenFile) !== Boolean(controlCaFile)) {
+    throw new Error('Storage control requires both token and instance CA projections');
+  }
+  const storageRetention =
+    controlTokenFile && controlCaFile
+      ? createStorageRetentionReconciler({
+          client: createStorageControlClient({
+            origin: 'https://storage-module.lifemodel-system.svc:8444',
+            tokenFile: controlTokenFile,
+            caFile: controlCaFile,
+          }),
+          snapshotStore,
+          epoch: snapshotEpoch,
+          conversations: conversationManager,
+          recipientId: primaryRecipientId,
+          route: { channel: 'web', destination: 'owner' },
+          language: () => userModel?.getLanguage() ?? null,
+          logger,
+        })
+      : undefined;
+  storageRetention?.start();
+
   // Prime the core queue with messages committed to the inbound stream.
   const replayedInbound = await inboundStream.readNew();
   for (const entry of replayedInbound) coreLoop.pushSignal(entry.signal);
@@ -1243,6 +1272,7 @@ export async function createContainerAsync(
   const stopProgress: StopProgress = { step: 'done' };
   shutdown = makeIdempotentShutdown(() => {
     const budget = coreLoop.getStopDrainTimeoutMs();
+    storageRetention?.stop();
     outboundDelivery.stop();
     return shutdownSequence({
       logger,

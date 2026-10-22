@@ -58,6 +58,27 @@ redis.call('ZREMRANGEBYSCORE', KEYS[5], '-inf', now - 90000000)
 return 1
 `;
 
+// Infrastructure notices do not snapshot mutable tick state. Their receipt and
+// append share the same epoch fence and outbound stream as tick CAS commits.
+const NOTICE_SCRIPT = `
+local expected = { 'string', 'stream', 'hash', 'string' }
+for index, kind in ipairs(expected) do
+  local result = redis.call('TYPE', KEYS[index])
+  local actual = type(result) == 'table' and result.ok or result
+  if actual ~= 'none' and actual ~= kind then return redis.error_reply('WRONGTYPE notice store') end
+end
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return false end
+local prior = redis.call('GET', KEYS[4])
+if prior then return prior end
+local event = cjson.decode(ARGV[2])
+if redis.call('HEXISTS', KEYS[3], event.eventId) == 0 then
+  local stream_id = redis.call('XADD', KEYS[2], '*', 'eventId', event.eventId, 'event', ARGV[2])
+  redis.call('HSET', KEYS[3], event.eventId, stream_id)
+end
+redis.call('SET', KEYS[4], ARGV[2])
+return ARGV[2]
+`;
+
 export class StaleSnapshotEpochError extends Error {
   constructor(
     readonly committerEpoch: number,
@@ -105,6 +126,28 @@ export class SnapshotStore {
     if (this.owners.has(owner.section))
       throw new Error(`Duplicate snapshot section: ${owner.section}`);
     this.owners.set(owner.section, owner);
+  }
+
+  /** Persist a plan-keyed notice receipt past ordinary outbound trimming.
+   * The receipt retains the original payload too, so a restarted projection
+   * never substitutes new text/recipient metadata for the committed message.
+   * One receipt per deletion plan, retained like the module's warning receipt.
+   */
+  async commitNotice(epoch: number, event: SnapshotOutboxEvent): Promise<SnapshotOutboxEvent> {
+    const receiptKey = `${this.snapshotKey}:notice:${event.eventId}`;
+    const result = await this.redis.eval(
+      NOTICE_SCRIPT,
+      4,
+      this.epochKey,
+      this.outboundKey,
+      this.outboundKeysKey,
+      receiptKey,
+      String(epoch),
+      JSON.stringify(event)
+    );
+    if (typeof result !== 'string')
+      throw new StaleSnapshotEpochError(epoch, await this.currentEpoch());
+    return JSON.parse(result) as SnapshotOutboxEvent;
   }
 
   async takeEpoch(): Promise<number> {

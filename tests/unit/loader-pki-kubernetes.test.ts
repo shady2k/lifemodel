@@ -31,14 +31,20 @@ describe('A0 PKI Kubernetes stores', () => {
     await stores.configMap.write('CA');
     expect((await stores.secret.read()).cert).toBe('CERT');
     expect(await stores.configMap.read()).toBe('CA');
-    expect(calls.every((c) => c.url.includes('/namespaces/lifemodel-system/'))).toBe(true);
+    expect(
+      calls.every(
+        (c) =>
+          c.url.includes('/namespaces/lifemodel-system/') ||
+          new URL(c.url).pathname === '/api/v1/namespaces/lifemodel/configmaps/lifemodel-ca'
+      )
+    ).toBe(true);
     expect(calls.map((c) => new URL(c.url).pathname)).toEqual(
       expect.arrayContaining([
         '/api/v1/namespaces/lifemodel-system/secrets/lifemodel-tls',
         '/api/v1/namespaces/lifemodel-system/configmaps/lifemodel-ca',
       ])
     );
-    expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(2);
+    expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(3);
     rmSync(dir, { recursive: true, force: true });
   });
 });
