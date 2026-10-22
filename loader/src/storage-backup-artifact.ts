@@ -101,7 +101,7 @@ function text(value: unknown): value is string {
     typeof value === 'string' &&
     value.length > 0 &&
     value.length <= 1024 &&
-    [...value].every((character) => {
+    Array.from(value).every((character) => {
       const point = character.codePointAt(0) ?? 0;
       return point >= 32 && point !== 127;
     })
@@ -205,7 +205,7 @@ function validatePolicy(policy: StorageBackupArtifactPolicy): void {
   if (
     !attestation ||
     !text(attestation.evidence) ||
-    CHECKS.some((check) => attestation[check] !== true)
+    CHECKS.some((check) => (attestation as unknown as Record<string, unknown>)[check] !== true)
   )
     fail();
   const names = [...layout.files, ...layout.directories];
@@ -510,7 +510,7 @@ export async function buildStorageBackupManifest(
     return await verifyStorageBackupArtifact(root, policy);
   } catch {
     if (published) await rm(join(root, 'manifest.json'), { force: true }).catch(() => undefined);
-    fail();
+    return fail();
   } finally {
     if (temporary) await rm(temporary, { force: true }).catch(() => undefined);
   }
@@ -565,8 +565,7 @@ export async function verifyStorageBackupArtifact(
       files.some((file, index) => {
         const wanted = sorted[index];
         return (
-          !wanted ||
-          file.path !== wanted.path ||
+          file.path !== wanted?.path ||
           file.length !== wanted.length ||
           file.sha256 !== wanted.sha256
         );
@@ -576,6 +575,6 @@ export async function verifyStorageBackupArtifact(
     if (!identity(before, await lstat(path))) fail();
     return { manifest, manifestSha256: createHash('sha256').update(bytes).digest('hex') };
   } catch {
-    fail();
+    return fail();
   }
 }

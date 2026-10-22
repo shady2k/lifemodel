@@ -1,4 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { createStorageMaintenance } from '../../loader/src/storage-maintenance.js';
+import { workerDatabaseUrl } from '../helpers/test-stores.js';
 import {
   createRetentionHarness,
   DAY,
@@ -7,6 +10,14 @@ import {
   gate,
 } from '../helpers/storage-retention-harness.js';
 let h: Awaited<ReturnType<typeof createRetentionHarness>>;
+const maintainers: ReturnType<typeof createStorageMaintenance>[] = [];
+function maintenance(
+  options: { drainMs?: number; settleMs?: number; connectionString?: string } = {}
+) {
+  const result = createStorageMaintenance({ connectionString: workerDatabaseUrl(), ...options });
+  maintainers.push(result);
+  return result;
+}
 beforeAll(async () => {
   h = await createRetentionHarness();
 }, 30000);
@@ -14,6 +25,7 @@ beforeEach(async () => {
   await h.reset();
 }, 20000);
 afterEach(async () => {
+  for (const item of maintainers.splice(0)) await item.close();
   await h.cleanup();
 }, 20000);
 afterAll(async () => {
@@ -187,5 +199,269 @@ describe('durable storage backup hold', () => {
       (await h.stores.postgres.query('SELECT mark FROM storage.objects WHERE id=$1', [obj.id]))
         .rows[0].mark
     ).toBe('result');
+  }, 30000);
+});
+
+describe('restore hold release and maintenance session safety', () => {
+  it('requires exact explicit degraded acceptance, preserves unavailable versions, marks and charges, and resumes writes and GC', async () => {
+    const missing = await h.artifact();
+    const activeSpace = await h.prepare('b');
+    const available = await h.upload(activeSpace, 'b');
+    const api = maintenance();
+    await begin();
+    const generation = randomUUID();
+    await api.prepareRestore({ generation, artifactSha256: 'a'.repeat(64) });
+    await h.stores.postgres.query(
+      "UPDATE storage.version_availability SET status=CASE WHEN object_id=$1 THEN 'missing' ELSE 'available' END,checked_at=clock_timestamp()",
+      [missing.id]
+    );
+    const before = (await h.stores.postgres.query('SELECT used_bytes FROM storage.instance_ledger'))
+      .rows;
+    await expect(api.releaseDegraded({ generation, unavailable: 1 })).rejects.toMatchObject({
+      code: 'restore_pending',
+    });
+    await h.stores.postgres.query(
+      'UPDATE storage.restore_progress SET complete=true,unavailable=1 WHERE generation=$1',
+      [generation]
+    );
+    await expect(api.release({ generation })).rejects.toMatchObject({ code: 'restore_pending' });
+    await expect(
+      api.releaseDegraded({ generation: randomUUID(), unavailable: 1 })
+    ).rejects.toMatchObject({ code: 'hold_conflict' });
+    await expect(api.releaseDegraded({ generation, unavailable: 2 })).rejects.toMatchObject({
+      code: 'restore_pending',
+    });
+    for (const unavailable of [0, -1, 1.5, '1', NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      await expect(api.releaseDegraded({ generation, unavailable })).rejects.toMatchObject({
+        code: 'invalid_request',
+      });
+    }
+    await expect(
+      api.releaseDegraded({ generation, unavailable: 1, force: true })
+    ).rejects.toMatchObject({ code: 'invalid_request' });
+    // Restart may not turn a completed-but-unreleased restore into normal service.
+    await h.kill();
+    await h.start();
+    expect((await h.call('control', 'GET', '/maintenance/status')).json).toMatchObject({
+      generation,
+      purpose: 'restore',
+      state: 'held',
+    });
+    expect(
+      (
+        await h.call(
+          'task',
+          'POST',
+          `/spaces/${activeSpace}/objects/${available.id}/mark`,
+          { role: 'result' },
+          'b'
+        )
+      ).status
+    ).toBe(503);
+    expect(
+      (
+        await h.call(
+          'task',
+          'GET',
+          `/spaces/${activeSpace}/objects/${available.id}`,
+          undefined,
+          'b'
+        )
+      ).body
+    ).toEqual(available.bytes);
+    expect(
+      (await h.call('read', 'GET', `/spaces/${missing.space}/objects/${missing.id}`)).status
+    ).toBe(404);
+    const cut = h.backend.requests.length;
+    await h.tick();
+    expect(h.backend.requests.slice(cut)).toEqual([]);
+    expect((await api.releaseDegraded({ generation, unavailable: 1 })).state).toBe('normal');
+    expect((await api.releaseDegraded({ generation, unavailable: 1 })).state).toBe('normal');
+    expect(
+      (await h.call('read', 'GET', `/spaces/${missing.space}/objects/${missing.id}`)).status
+    ).toBe(404);
+    expect((await h.call('read', 'GET', `/spaces/${missing.space}/objects`)).json.objects).toEqual(
+      []
+    );
+    expect(
+      (
+        await h.stores.postgres.query(
+          'SELECT status FROM storage.version_availability WHERE object_id=$1',
+          [missing.id]
+        )
+      ).rows[0].status
+    ).toBe('missing');
+    expect(
+      (await h.stores.postgres.query('SELECT mark FROM storage.objects WHERE id=$1', [missing.id]))
+        .rows[0].mark
+    ).toBe('result');
+    expect(
+      (await h.stores.postgres.query('SELECT used_bytes FROM storage.instance_ledger')).rows
+    ).toEqual(before);
+    expect(
+      (
+        await h.call(
+          'task',
+          'POST',
+          `/spaces/${activeSpace}/objects/${available.id}/mark`,
+          { role: 'result' },
+          'b'
+        )
+      ).status
+    ).toBe(200);
+    await h.clock(TERMINAL + 90 * DAY);
+    await h.tick();
+    expect((await h.pending()).plans).toHaveLength(1);
+  }, 30000);
+
+  it('refuses degraded acceptance for backup holds and clean restores', async () => {
+    const api = maintenance();
+    const held = await begin();
+    await expect(
+      api.releaseDegraded({ generation: held.json.generation, unavailable: 1 })
+    ).rejects.toMatchObject({ code: 'restore_pending' });
+    const generation = randomUUID();
+    await api.prepareRestore({ generation, artifactSha256: 'b'.repeat(64) });
+    await h.stores.postgres.query(
+      'UPDATE storage.restore_progress SET complete=true WHERE generation=$1',
+      [generation]
+    );
+    await expect(api.releaseDegraded({ generation, unavailable: 1 })).rejects.toMatchObject({
+      code: 'restore_pending',
+    });
+    expect((await api.release({ generation })).state).toBe('normal');
+  }, 30000);
+
+  it('prepares a restore idempotently without resetting completed verification and refuses a conflicting artifact', async () => {
+    const object = await h.artifact();
+    const api = maintenance();
+    await begin();
+    const generation = randomUUID();
+    const input = { generation, artifactSha256: 'c'.repeat(64) };
+    await api.prepareRestore(input);
+    expect(
+      (
+        await h.stores.postgres.query(
+          'SELECT status FROM storage.version_availability WHERE object_id=$1',
+          [object.id]
+        )
+      ).rows[0].status
+    ).toBe('unverified');
+    await h.stores.postgres.query(
+      "UPDATE storage.version_availability SET status='available',checked_at=clock_timestamp() WHERE object_id=$1",
+      [object.id]
+    );
+    await h.stores.postgres.query(
+      'UPDATE storage.restore_progress SET cursor=$1,backend_cursor=$2,inventory_complete=true,complete=true WHERE generation=$3',
+      [object.id, 'saved-cursor', generation]
+    );
+    const snapshot = async () => ({
+      availability: (await h.stores.postgres.query('SELECT * FROM storage.version_availability'))
+        .rows,
+      progress: (await h.stores.postgres.query('SELECT * FROM storage.restore_progress')).rows,
+    });
+    const before = await snapshot();
+    expect((await api.prepareRestore(input)).generation).toBe(generation);
+    expect(await snapshot()).toEqual(before);
+    await expect(
+      api.prepareRestore({ generation, artifactSha256: 'd'.repeat(64) })
+    ).rejects.toMatchObject({ code: 'hold_conflict' });
+    expect(await snapshot()).toEqual(before);
+  }, 30000);
+
+  it('drains a candidate DELETE already in flight before it declares a consistent cut', async () => {
+    const object = await h.artifact();
+    await h.clock(TERMINAL + 90 * DAY);
+    await h.tick();
+    await h.warn((await h.pending()).plans[0].id);
+    await h.clock(TERMINAL + 98 * DAY);
+    const arrived = gate(),
+      proceed = gate();
+    h.releases.push(proceed.resolve);
+    h.backend.hooks.beforeDelete = async () => {
+      arrived.resolve();
+      await proceed.promise;
+    };
+    const collecting = h.tick();
+    await arrived.promise;
+    const holding = begin();
+    await expect
+      .poll(
+        async () =>
+          (await h.stores.postgres.query('SELECT state FROM storage.maintenance WHERE id')).rows[0]
+            .state
+      )
+      .toBe('draining');
+    expect(h.backend.objects.has(object.key)).toBe(true);
+    proceed.resolve();
+    await collecting;
+    expect((await holding).json.state).toBe('held');
+    expect(h.backend.objects.has(object.key)).toBe(false);
+    expect(
+      (
+        await h.stores.postgres.query(
+          'SELECT state FROM storage.deletion_candidates WHERE object_id=$1',
+          [object.id]
+        )
+      ).rows[0].state
+    ).toBe('deleted');
+  }, 30000);
+
+  it('aborts at its drain bound but retains admission until the cancelled effect has settled', async () => {
+    const api = maintenance({ drainMs: 50, settleMs: 1000 });
+    const arrived = gate(),
+      cancelled = gate(),
+      settled = gate();
+    h.releases.push(settled.resolve);
+    const operation = api.run(async (signal) => {
+      signal.addEventListener('abort', cancelled.resolve, { once: true });
+      arrived.resolve();
+      await settled.promise;
+    });
+    await arrived.promise;
+    const holding = api.begin({ effectKey: 'deadline-drain' });
+    await cancelled.promise;
+    expect((await api.status()).state).toBe('draining');
+    await expect(api.enter()).rejects.toMatchObject({ code: 'storage_held' });
+    settled.resolve();
+    await operation;
+    expect((await holding).state).toBe('held');
+  }, 30000);
+
+  it('keeps a timed-out hold fenced and lets a later begin finish after the owner settles', async () => {
+    const api = maintenance({ drainMs: 20, settleMs: 30 });
+    const operation = await api.enter();
+    try {
+      await expect(api.begin({ effectKey: 'retry-drain' })).rejects.toMatchObject({
+        code: 'maintenance_unavailable',
+      });
+      expect(operation.signal.aborted).toBe(true);
+      expect((await api.status()).state).toBe('draining');
+      await expect(
+        api.release({ generation: (await api.status()).generation })
+      ).rejects.toMatchObject({ code: 'hold_pending' });
+    } finally {
+      await operation.close();
+    }
+    expect((await api.begin({ effectKey: 'retry-drain' })).state).toBe('held');
+  }, 30000);
+
+  it('propagates parent cancellation and session lock loss to the operation signal', async () => {
+    const api = maintenance({ connectionString: h.sqlProxy.connectionString });
+    const parent = new AbortController();
+    const cancelled = await api.enter(parent.signal);
+    parent.abort();
+    expect(cancelled.signal.aborted).toBe(true);
+    await cancelled.close();
+    const lost = await api.enter();
+    try {
+      h.sqlProxy.drop();
+      await expect.poll(() => lost.signal.aborted).toBe(true);
+    } finally {
+      await lost.close();
+      h.sqlProxy.restore();
+    }
+    await api.close();
+    await expect(api.enter()).rejects.toMatchObject({ code: 'maintenance_unavailable' });
   }, 30000);
 });

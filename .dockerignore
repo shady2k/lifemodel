@@ -2,6 +2,7 @@
 *
 !docker/loader/Dockerfile
 !docker/loader/lifemodel-storage
+!docker/loader/lifemodel-storage-recovery
 !loader/package.json
 !loader/package-lock.json
 !loader/tsconfig.json

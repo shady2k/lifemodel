@@ -105,11 +105,10 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 export function createStorageSeal(options: Options): StorageSeal {
   const maintenance = createStorageMaintenance({ connectionString: options.connectionString });
   const operationSignal = new AsyncLocalStorage<AbortSignal>();
-  const boundedSignal = (ms: number) =>
-    AbortSignal.any([
-      AbortSignal.timeout(ms),
-      ...(operationSignal.getStore() ? [operationSignal.getStore()!] : []),
-    ]);
+  const boundedSignal = (ms: number) => {
+    const current = operationSignal.getStore();
+    return AbortSignal.any([AbortSignal.timeout(ms), ...(current ? [current] : [])]);
+  };
   const pool = new Pool({
     connectionString: options.connectionString,
     max: 4,

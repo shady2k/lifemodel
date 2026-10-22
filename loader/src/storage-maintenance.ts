@@ -14,18 +14,19 @@ export interface StorageMaintenance {
   status(): Promise<MaintenanceStatus>;
   begin(input: unknown): Promise<MaintenanceStatus>;
   release(input: unknown): Promise<MaintenanceStatus>;
+  releaseDegraded(input: unknown): Promise<MaintenanceStatus>;
   prepareRestore(input: { generation: string; artifactSha256: string }): Promise<MaintenanceStatus>;
   enter(parent?: AbortSignal): Promise<{ signal: AbortSignal; close(): Promise<void> }>;
   run<T>(work: (signal: AbortSignal) => Promise<T>, parent?: AbortSignal): Promise<T>;
   close(): Promise<void>;
 }
-const fail = (code: string, status = 503): never => {
+function fail(code: string, status = 503): never {
   throw new StorageAccessError(status, code);
-};
+}
 function exact(value: unknown, keys: string[]): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail('invalid_request', 400);
   const row = value as Record<string, unknown>;
-  if (Object.keys(row).length !== keys.length || keys.some((k) => !(k in row)))
+  if (Object.keys(row).length !== keys.length || keys.some((k) => !Object.hasOwn(row, k)))
     fail('invalid_request', 400);
   return row;
 }
@@ -63,18 +64,20 @@ export function createStorageMaintenance(options: {
   async function status(c?: Client): Promise<MaintenanceStatus> {
     if (!c) return connected(status);
     const row = (
-      await c.query(
+      await c.query<Omit<MaintenanceStatus, 'cutAt'> & { cutAt: Date | null }>(
         'SELECT generation,purpose,state,cut_at AS "cutAt" FROM storage.maintenance WHERE id=true'
       )
     ).rows[0];
     if (!row) fail('maintenance_unavailable');
-    return { ...row, cutAt: row.cutAt?.toISOString() ?? null } as MaintenanceStatus;
+    return { ...row, cutAt: row.cutAt?.toISOString() ?? null };
   }
   async function enter(parent?: AbortSignal) {
     if (closed) fail('maintenance_unavailable');
     const c = client();
     const controller = new AbortController();
-    const failed = () => controller.abort();
+    const failed = () => {
+      controller.abort();
+    };
     c.on('error', failed);
     c.on('end', failed);
     const signal = AbortSignal.any([controller.signal, ...(parent ? [parent] : [])]);
@@ -89,7 +92,12 @@ export function createStorageMaintenance(options: {
     try {
       signal.throwIfAborted();
       await c.connect();
-      await c.query(`SELECT pg_advisory_lock_shared(${LOCK})`);
+      // Never queue behind a draining hold's exclusive lock while an admitted
+      // effect is still settling. The row fence below resolves admission races.
+      const admitted = await c.query<{ locked: boolean }>(
+        `SELECT pg_try_advisory_lock_shared(${LOCK}) AS locked`
+      );
+      if (!admitted.rows[0]?.locked) fail('storage_held');
       await c.query('BEGIN');
       await c.query('SELECT id FROM storage.maintenance WHERE id=true FOR SHARE');
       if ((await status(c)).state !== 'normal') fail('storage_held');
@@ -101,6 +109,41 @@ export function createStorageMaintenance(options: {
       if (error instanceof StorageAccessError) throw error;
       fail('maintenance_unavailable');
     }
+  }
+  async function release(value: unknown, degraded = false): Promise<MaintenanceStatus> {
+    const input = exact(value, degraded ? ['generation', 'unavailable'] : ['generation']);
+    const generation = input['generation'];
+    if (typeof generation !== 'string' || !UUID.test(generation)) fail('invalid_request', 400);
+    const unavailable = input['unavailable'];
+    if (
+      degraded &&
+      (typeof unavailable !== 'number' || !Number.isSafeInteger(unavailable) || unavailable <= 0)
+    )
+      fail('invalid_request', 400);
+    return connected(async (c) => {
+      await c.query('BEGIN');
+      await c.query('SELECT id FROM storage.maintenance WHERE id=true FOR UPDATE');
+      const row = await status(c);
+      if (row.generation !== generation) fail('hold_conflict', 409);
+      if (degraded && row.purpose !== 'restore') fail('restore_pending', 409);
+      if (row.purpose === 'restore') {
+        const progress = (
+          await c.query<{ complete: boolean; unavailable: string }>(
+            'SELECT complete,unavailable FROM storage.restore_progress WHERE generation=$1 FOR SHARE',
+            [generation]
+          )
+        ).rows[0];
+        // Acceptance changes only admission. Availability, marks, receipts and
+        // ledger debt remain intact, including on an idempotent release retry.
+        const accepted = degraded ? BigInt(unavailable as number) : 0n;
+        if (!progress?.complete || BigInt(progress.unavailable) !== accepted)
+          fail('restore_pending', 409);
+      }
+      if (row.state === 'draining') fail('hold_pending', 409);
+      await c.query("UPDATE storage.maintenance SET state='normal' WHERE id=true");
+      await c.query('COMMIT');
+      return status(c);
+    });
   }
   const api: StorageMaintenance = {
     status: () => status(),
@@ -115,19 +158,26 @@ export function createStorageMaintenance(options: {
     },
     begin: async (value) => {
       const input = exact(value, ['effectKey']);
-      if (typeof input.effectKey !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(input.effectKey))
+      if (
+        typeof input['effectKey'] !== 'string' ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(input['effectKey'])
+      )
         fail('invalid_request', 400);
       const hold = await connected(async (c) => {
         await c.query('BEGIN');
         await c.query('SELECT id FROM storage.maintenance WHERE id=true FOR UPDATE');
-        const row = (await c.query('SELECT * FROM storage.maintenance WHERE id=true')).rows[0];
+        const row = (
+          await c.query<{ state: MaintenanceStatus['state']; effect_key: string | null }>(
+            'SELECT state,effect_key FROM storage.maintenance WHERE id=true'
+          )
+        ).rows[0];
         if (!row) fail('maintenance_unavailable');
-        if (row.state !== 'normal' && row.effect_key !== input.effectKey)
+        if (row.state !== 'normal' && row.effect_key !== input['effectKey'])
           fail('hold_conflict', 409);
         if (row.state === 'normal')
           await c.query(
             "UPDATE storage.maintenance SET generation=$1,purpose='backup',state='draining',effect_key=$2,cut_at=NULL WHERE id=true",
-            [randomUUID(), input.effectKey]
+            [randomUUID(), input['effectKey']]
           );
         await c.query('COMMIT');
         return status(c);
@@ -157,31 +207,8 @@ export function createStorageMaintenance(options: {
         clearTimeout(timer);
       }
     },
-    release: async (value) => {
-      const input = exact(value, ['generation']);
-      if (typeof input.generation !== 'string' || !UUID.test(input.generation))
-        fail('invalid_request', 400);
-      return connected(async (c) => {
-        await c.query('BEGIN');
-        await c.query('SELECT id FROM storage.maintenance WHERE id=true FOR UPDATE');
-        const row = await status(c);
-        if (row.generation !== input.generation) fail('hold_conflict', 409);
-        if (row.purpose === 'restore') {
-          const progress = (
-            await c.query(
-              'SELECT complete,unavailable FROM storage.restore_progress WHERE generation=$1',
-              [input.generation]
-            )
-          ).rows[0];
-          if (!progress?.complete || BigInt(progress.unavailable) !== 0n)
-            fail('restore_pending', 409);
-        }
-        if (row.state === 'draining') fail('hold_pending', 409);
-        await c.query("UPDATE storage.maintenance SET state='normal' WHERE id=true");
-        await c.query('COMMIT');
-        return status(c);
-      });
-    },
+    release: (value) => release(value),
+    releaseDegraded: (value) => release(value, true),
     prepareRestore: async (input) => {
       if (!UUID.test(input.generation) || !/^[0-9a-f]{64}$/.test(input.artifactSha256))
         fail('invalid_request', 400);
@@ -193,7 +220,7 @@ export function createStorageMaintenance(options: {
         if (current.state === 'normal') fail('restore_requires_hold', 409);
         if (current.purpose === 'restore' && current.generation === input.generation) {
           const saved = (
-            await c.query(
+            await c.query<{ artifact_sha256: string | null }>(
               'SELECT artifact_sha256 FROM storage.restore_progress WHERE generation=$1',
               [input.generation]
             )
@@ -218,9 +245,10 @@ export function createStorageMaintenance(options: {
         return status(c);
       });
     },
-    close: async () => {
+    close: () => {
       closed = true;
       for (const item of live) item.controller.abort();
+      return Promise.resolve();
     },
   };
   return api;

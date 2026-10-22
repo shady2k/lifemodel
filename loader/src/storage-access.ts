@@ -233,7 +233,14 @@ export function createStorageAccess(options: StorageAccessOptions): StorageAcces
         if (!write) return;
         admission ??= maintenance.enter(signal).then((op) => {
           if (op.signal.aborted) controller.abort();
-          else op.signal.addEventListener('abort', () => controller.abort(), { once: true });
+          else
+            op.signal.addEventListener(
+              'abort',
+              () => {
+                controller.abort();
+              },
+              { once: true }
+            );
           return op;
         });
         await admission;

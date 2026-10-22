@@ -122,7 +122,9 @@ export function createStorageRetention(options: Options): StorageRetention {
   ): Promise<T | undefined> {
     const owner = await pool.connect();
     const controller = new AbortController();
-    const abortMaintenance = () => controller.abort();
+    const abortMaintenance = () => {
+      controller.abort();
+    };
     if (maintenanceSignal?.aborted) controller.abort();
     maintenanceSignal?.addEventListener('abort', abortMaintenance, { once: true });
     let locked = false;

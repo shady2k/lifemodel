@@ -1,0 +1,3 @@
+#!/bin/sh
+umask 077
+exec node /opt/lifemodel/loader/dist/storage-recovery-cli.js "$@"
