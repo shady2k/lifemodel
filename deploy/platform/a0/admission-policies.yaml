@@ -57,7 +57,11 @@ spec:
   validations:
     - expression: >-
         request.operation != 'DELETE' &&
-        ((request.namespace == 'lifemodel' && object.metadata.name == 'lifemodel-platform-settings') ||
+        ((request.namespace == 'lifemodel' &&
+          (object.metadata.name == 'lifemodel-platform-settings' ||
+           (request.operation == 'UPDATE' && object.metadata.name == 'lifemodel-ca' &&
+            has(object.data) && size(object.data) == 1 && 'ca.crt' in object.data &&
+            !has(object.binaryData)))) ||
          (request.namespace == 'lifemodel-system' &&
           (object.metadata.name == 'lifemodel-storage-settings' ||
            (request.operation == 'UPDATE' && object.metadata.name in ['lifemodel-ca', 'lifemodel-pki-status']))))
@@ -151,4 +155,36 @@ metadata:
   name: application-kustomization-admission
 spec:
   policyName: application-kustomization-admission
+  validationActions: [Deny]
+---
+# Flux may CREATE the A0 placeholder. Only loader can UPDATE it afterwards;
+# nobody may DELETE it. request.name is available even without a new object.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: storage-ca-ownership-admission
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: lifemodel
+    resourceRules:
+      - apiGroups: ['']
+        apiVersions: [v1]
+        operations: [UPDATE, DELETE]
+        resources: [configmaps]
+  matchConditions:
+    - name: storage-ca-resource
+      expression: request.namespace == 'lifemodel' && request.name == 'lifemodel-ca'
+  validations:
+    - expression: request.operation == 'UPDATE' && request.userInfo.username == 'system:serviceaccount:lifemodel-system:loader'
+      message: only loader may update the core public CA ConfigMap; deletion is forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: storage-ca-ownership-admission
+spec:
+  policyName: storage-ca-ownership-admission
   validationActions: [Deny]

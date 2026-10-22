@@ -1,7 +1,7 @@
 # Storage retention and collection
 
 Task: lifemodel-653.7.3. Implements the module side of ADR-015 S-D5, S06/S07.
-This is not deployed acceptance. Core owner notices remain lifemodel-653.7.9.
+The core side is lifemodel-653.7.9. This is not deployed acceptance.
 
 ## Policy and settings
 
@@ -51,15 +51,92 @@ changed requests conflict. Pin that wins the policy lock removes pending
 candidates. If deletion won, the new pin returns `409 already_deleting`; it
 never acknowledges protection of bytes being removed.
 
-### Core's lifemodel-653.7.9 obligation
+### Core side
 
-Fetch plans, persist one ordinary owner notice keyed by plan ID through core's
-existing durable message/outbound path, then call `warningCommitted` with that
-persisted message ID. Retry the same ID after lost responses. The module trusts
-this authenticated service's receipt assertion, not task, web or LLM input;
-it does not query core's message rows or implement outbound delivery. With core
-or chat down, plans remain uncommitted and deletion waits indefinitely.
-A reference to expired output must display not available, not reupload it.
+Core's `src/core/storage-control-client.ts` uses the control listener at
+`https://storage-module.lifemodel-system.svc:8444`. It verifies TLS against only
+the projected **public instance CA**, never system roots or an insecure fallback.
+One keep-alive agent serves the client. Each request rereads both the projected
+service token and CA and has a five-second overall deadline. The projection
+reads race the same abort/deadline as HTTP; late filesystem results are discarded
+and cannot start a request or hold the single-flight reconciler indefinitely. Errors and logs
+contain a safe error ID, route, plan ID where known, HTTP status where received,
+and count; they never contain response bodies, tokens, URLs or local paths.
+Socket, request and response error listeners remain through teardown.
+
+`src/core/storage-retention.ts` is bounded infrastructure, not a plugin or
+cognition. It starts after stores and owner routing are ready, fetches one page
+of at most 100 plans immediately, then runs every **five minutes**. The module
+has no push contract. This fixed infrastructure reconciliation does not poll
+the agent's thinking and does not change Design Principle 2. An outage/refusal
+retries after 30 seconds, doubling to five minutes. A page advances only when
+all its confirmations succeed; the last page resets the cursor. Each pass
+serializes its work. Stop cancels its timer and HTTP work immediately without
+waiting on a store operation or extending core's shared shutdown deadline.
+A store operation that settles after stop cannot trigger a confirmation.
+
+For each returned pending plan only, the core builds plain text with decimal
+human-readable bytes, old task output, the plan's lead in days and an explicit
+promise that nothing is deleted before that lead. It never lists files, object
+keys or space IDs and never promises a pin tool. Templates support the language
+codes already named by the composer (`en`, `ru`, `es`, `de`, `fr`, `zh`, `ja`),
+including region codes and English language-name aliases. No preference uses
+the existing core notices' English default. An unsupported explicit preference
+leaves the plan pending until a supported preference is available; it does not
+authorize deletion with a warning the owner might not understand. No LLM runs.
+
+The outbound event ID is `storage-warning_` plus SHA-256 of **only** the plan ID.
+Before appending, core checks the physical Postgres owner message row by its
+permanent natural key `channel:web:<eventId>`. A Postgres read failure forbids
+append and retries later. This lookup ignores clear/compaction views; the row
+is the disk-backed, permanent record that the warning was sent. Admission is
+closed if either this row or the Valkey hot receipt already exists.
+
+`SnapshotStore.commitNotice` atomically appends a new `send.command` to the normal
+outbound stream and retains its original payload in a hot, plan-keyed receipt
+under the active Valkey epoch. It never overwrites a tick snapshot. The hot
+receipt is not subject to outbound stream/event-key trimming, preserving the
+append-to-Postgres gap and the original bytes/lead/language across a crash.
+If the permanent Postgres row already exists, core rehydrates a temporary hot
+receipt from its original content **without appending another event**. This
+also handles a module listing an already-warned plan after restore.
+
+The original event is projected idempotently into the owner's Postgres
+conversation using that natural key. **Only after** outbound admission and the
+Postgres write does core call `warningCommitted` with the same event ID.
+After module acceptance (2xx) or 409, core freshly confirms that the physical
+Postgres row is present, then deletes its hot receipt and pending-work index
+member. Read/cleanup failures retain hot work for retry; no blind TTL is used.
+A bounded 100-entry pending index retries unresolved confirmations even when an
+accepted plan disappears from the list after a lost HTTP response. Such retry
+uses only a plan already listed and durably admitted; it never invents a notice.
+Confirmed historical plans leave no hot receipt. There is no cross-store
+transaction; restart at any boundary reuses the same message ID and recovers
+from the hot receipt or permanent row. A 409 logs plan/status and never invents
+a new notice. Other refusals, token/TLS failures and outages leave unresolved
+work pending for a later pass.
+
+The recipient is the web owner (`web`, destination `owner`), as for other
+owner-directed core work. A registered channel is not required: the ordinary
+committed-event behavior still applies, and the owner can pull the Postgres
+conversation. **This counts as warned, not as read or delivered.** It is right
+for the existing web pull contract, which has no delivery cursor; this feature
+does not add a read receipt. Core or stores being down prevents confirmation.
+An owner/browser being offline does not prevent the lead clock after the notice
+is committed and available in Postgres. A reference to expired output must
+display not available, not reupload it.
+
+The core mounts only `ca.crt` from a public `lifemodel-ca` ConfigMap replica in
+its own namespace at `/var/run/secrets/lifemodel-storage-ca/ca.crt`, selected by
+`LIFEMODEL_STORAGE_CONTROL_CA_FILE`. A0 precreates the replica and grants loader
+get/update on that single name; PKI publishing writes and reads back source and
+replica. No CA private key or module leaf Secret reaches core. The mount is
+optional so an empty/not-yet-published projection cannot block core startup;
+requests fail closed and retry until the CA arrives. Loader's A0 publishing
+requires neither core nor stores; A grants other rights, B/C create stores and
+D starts storage. There is no D-to-loader or core-to-loader bootstrap wait and
+no new NetworkPolicy route. Standalone core omits both storage identity inputs;
+a partial token/CA declaration is an error.
 
 ## Durable plans and deletion
 
@@ -185,6 +262,6 @@ observes the first DELETE socket abort, then confirms an idempotent second DELET
 and a single ledger release. Unit settings and S3-list tests
 exercise projection/defaults/RBAC and bounded authenticated backend enumeration.
 
-This leaf does not send owner notices (.7.9), implement consistent backup/restore
-(.7.4), prove pressure/fair workers/RSS (.7.7), or wire stage-3 task lifecycle and
+This work does not implement consistent backup/restore (.7.4), prove
+pressure/fair workers/RSS (.7.7), or wire stage-3 task lifecycle and
 terminal outcomes. It does not replace independent stage review or deployment walks.

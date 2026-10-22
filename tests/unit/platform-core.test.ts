@@ -33,6 +33,14 @@ describe('core application generation', () => {
     });
     expect(statefulSet.spec.volumeClaimTemplates).toBeUndefined();
     expect(pod.volumes).toEqual([
+      {
+        name: 'storage-ca',
+        configMap: {
+          name: 'lifemodel-ca',
+          optional: true,
+          items: [{ key: 'ca.crt', path: 'ca.crt' }],
+        },
+      },
       { name: 'tmp', emptyDir: { medium: 'Memory', sizeLimit: '256Mi' } },
       // The loader's settings projection, read-only (ADR-014 D6): the core
       // reads the owner's platform values and can never write them.
@@ -91,6 +99,7 @@ describe('core application generation', () => {
         mountPath: '/var/run/secrets/lifemodel-storage',
         readOnly: true,
       },
+      { name: 'storage-ca', mountPath: '/var/run/secrets/lifemodel-storage-ca', readOnly: true },
     ]);
     expect(pod.initContainers[0].command).toEqual([
       '/usr/local/bin/lifemodel-core-entrypoint',

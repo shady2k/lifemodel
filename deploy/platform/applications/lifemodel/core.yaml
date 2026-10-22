@@ -107,6 +107,8 @@ spec:
             # Service-audience identities, never Kubernetes API credentials.
             - name: LIFEMODEL_STORAGE_CONTROL_TOKEN_FILE
               value: /var/run/secrets/lifemodel-storage/control-token
+            - name: LIFEMODEL_STORAGE_CONTROL_CA_FILE
+              value: /var/run/secrets/lifemodel-storage-ca/ca.crt
             - name: LIFEMODEL_STORAGE_READ_TOKEN_FILE
               value: /var/run/secrets/lifemodel-storage/read-token
             # The platform pins the model endpoint to its own gateway (ADR-013
@@ -150,7 +152,20 @@ spec:
             - name: storage-identity
               mountPath: /var/run/secrets/lifemodel-storage
               readOnly: true
+            # Public instance CA only, never a TLS Secret or private key.
+            - name: storage-ca
+              mountPath: /var/run/secrets/lifemodel-storage-ca
+              readOnly: true
       volumes:
+        - name: storage-ca
+          configMap:
+            name: lifemodel-ca
+            # Missing projection never blocks core startup. The storage
+            # control client fails closed and retries until ca.crt appears.
+            optional: true
+            items:
+              - key: ca.crt
+                path: ca.crt
         - name: tmp
           emptyDir:
             medium: Memory

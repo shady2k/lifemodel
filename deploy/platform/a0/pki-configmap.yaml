@@ -6,6 +6,19 @@ metadata:
 data: {}
 
 ---
+# Only the public instance CA crosses into the core namespace. Both namespaces
+# exist from platform-instance, so loader PKI startup never waits on A/B/C/D.
+# Flux creates the placeholder once; the loader owns every later update.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lifemodel-ca
+  namespace: lifemodel
+  annotations:
+    kustomize.toolkit.fluxcd.io/ssa: IfNotPresent
+    kustomize.toolkit.fluxcd.io/prune: disabled
+data: {}
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:

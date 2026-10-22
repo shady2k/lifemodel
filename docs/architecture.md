@@ -128,6 +128,27 @@ Other queued work not represented in the committed snapshot or its own durable
 store can be lost on process death. A graceful stop may drain a tick within its
 configured deadline; a hard stop during a tick does not drain or commit it.
 
+### Storage retention infrastructure
+
+`src/core/storage-control-client.ts` is the core-only, instance-CA-verified
+HTTPS client for module control (8444), with freshly read projected identity,
+one pooled agent and per-request deadlines. `src/core/storage-retention.ts`
+reconciles one page of pending deletion plans at startup and every five minutes,
+with bounded backoff on failure. It runs outside cognition/plugins and uses no
+LLM; this is a remote contract without push, not polling agent thinking.
+`SnapshotStore.commitNotice` appends the plan-keyed ordinary outbound notice
+under the active epoch without changing tick state, retaining an original-event
+hot receipt past stream trimming. The physical Postgres owner message row is the
+permanent admission record; read failures forbid new append. Only after commit
+and idempotent owner projection does core confirm the event ID to storage.
+Module acceptance/409 plus a fresh Postgres row check retires the hot receipt.
+A bounded pending index retries lost confirmations even after plans disappear.
+Historical replay rehydrates a temporary receipt without another append.
+Restart/lost replies reuse the ID, even with no channel registered (web is pull).
+Shutdown aborts HTTP/timers without extending the core stop deadline. See
+[storage retention](features/motor/storage-retention.md#core-side) for warning
+semantics, language handling, the public CA projection and bootstrap order.
+
 ## COGNITION Agentic Loop
 
 Uses native OpenAI tool calling with **Codex-style natural termination**:

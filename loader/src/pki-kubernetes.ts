@@ -101,6 +101,9 @@ export function createKubernetesTlsStores(options: ApiOptions = {}): {
   const sec = createApi(options, 'secrets', 'lifemodel-tls');
   const serviceSec = createApi(options, 'secrets', 'storage-module-tls');
   const cm = createApi(options, 'configmaps', 'lifemodel-ca');
+  // A0 precreates this public-only replica and its fixed-name write RBAC.
+  // The application namespace exists before A0; no dependency on step A or D.
+  const coreCm = createApi({ ...options, namespace: 'lifemodel' }, 'configmaps', 'lifemodel-ca');
   const statusCm = createApi(options, 'configmaps', 'lifemodel-pki-status');
   async function read(resource: ReturnType<typeof createApi>) {
     const r = await resource.send('GET');
@@ -167,25 +170,27 @@ export function createKubernetesTlsStores(options: ApiOptions = {}): {
         return obj?.data?.['ca.crt'] ? obj.data['ca.crt'] : null;
       },
       write: async (ca) => {
-        const old = await read(cm);
-        if (!old?.metadata?.resourceVersion)
-          throw new Error('A0 CA ConfigMap must exist before loader startup');
-        const r = await cm.send('PUT', {
-          apiVersion: 'v1',
-          kind: 'ConfigMap',
-          metadata: {
-            name: 'lifemodel-ca',
-            namespace: cm.namespace,
-            resourceVersion: old.metadata.resourceVersion,
-            ...(old.metadata.annotations ? { annotations: old.metadata.annotations } : {}),
-            ...(old.metadata.labels ? { labels: old.metadata.labels } : {}),
-          },
-          data: { 'ca.crt': ca },
-        });
-        if (r.status !== 200)
-          throw new Error(`Kubernetes CA ConfigMap update failed (${String(r.status)})`);
-        if ((await read(cm))?.data?.['ca.crt'] !== ca)
-          throw new Error('Kubernetes CA ConfigMap read-back mismatch');
+        for (const resource of [cm, coreCm]) {
+          const old = await read(resource);
+          if (!old?.metadata?.resourceVersion)
+            throw new Error('A0 CA ConfigMap must exist before loader startup');
+          const r = await resource.send('PUT', {
+            apiVersion: 'v1',
+            kind: 'ConfigMap',
+            metadata: {
+              name: 'lifemodel-ca',
+              namespace: resource.namespace,
+              resourceVersion: old.metadata.resourceVersion,
+              ...(old.metadata.annotations ? { annotations: old.metadata.annotations } : {}),
+              ...(old.metadata.labels ? { labels: old.metadata.labels } : {}),
+            },
+            data: { 'ca.crt': ca },
+          });
+          if (r.status !== 200)
+            throw new Error(`Kubernetes CA ConfigMap update failed (${String(r.status)})`);
+          if ((await read(resource))?.data?.['ca.crt'] !== ca)
+            throw new Error('Kubernetes CA ConfigMap read-back mismatch');
+        }
       },
     },
     status: {

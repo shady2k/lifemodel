@@ -51,6 +51,7 @@ describe('platform admission policies', () => {
       'loader-configmap-admission',
       'loader-secret-admission',
       'platform-settings-ownership-admission',
+      'storage-ca-ownership-admission',
     ]);
     expect(
       objects
@@ -62,6 +63,7 @@ describe('platform admission policies', () => {
       'loader-configmap-admission',
       'loader-secret-admission',
       'platform-settings-ownership-admission',
+      'storage-ca-ownership-admission',
     ]);
   });
 

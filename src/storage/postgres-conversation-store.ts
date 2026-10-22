@@ -45,6 +45,21 @@ export class ConversationCompactionConflictError extends Error {
 export class PostgresConversationStore implements Storage {
   constructor(private readonly pool: Pool) {}
 
+  /** Physical natural-key lookup, independent of conversation clear/compaction.
+   * These rows are the permanent sent-notice ledger, not a view of active history.
+   */
+  async findChannelMessage(
+    recipientId: string,
+    channel: string,
+    eventId: string
+  ): Promise<ConversationMessageRow | null> {
+    const result = await this.pool.query<{ payload: ConversationMessageRow }>(
+      "SELECT payload FROM core.conversation_messages WHERE recipient_id=$1 AND message_id=$2 AND kind='message'",
+      [recipientId, `channel:${channel}:${eventId}`]
+    );
+    return result.rows[0]?.payload ?? null;
+  }
+
   async load(key: string): Promise<unknown> {
     const recipientId = this.recipientId(key);
     const { rows } = await this.pool.query<EventRow>(
