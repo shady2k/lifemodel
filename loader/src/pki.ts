@@ -28,6 +28,11 @@ export const STORAGE_MODULE_TLS_HOSTS = [
   'storage-module.lifemodel-system.svc',
   'storage-module.lifemodel-system.svc.cluster.local',
 ] as const;
+/** The separate task model/identity listener (ADR-014 D1). */
+export const TASK_MODEL_TLS_HOSTS = [
+  'model-gateway.lifemodel-system.svc',
+  'model-gateway.lifemodel-system.svc.cluster.local',
+] as const;
 export interface ServiceLeafOptions {
   hosts: readonly string[];
   /** The one Secret the module's pod mounts; the loader is its only writer. */
@@ -48,6 +53,8 @@ export interface PkiReport {
   /** The storage module's task-listener leaf, issued from the same CA. */
   serviceLeaf: 'valid' | 'missing' | 'invalid' | 'expiring';
   serviceSans: string[];
+  taskModelLeaf?: 'valid' | 'missing' | 'invalid' | 'expiring';
+  taskModelSans?: string[];
   fingerprint: string | null;
   caFingerprint?: string | null;
   leafNotAfter?: string | null;
@@ -150,9 +157,11 @@ export function createPkiManager(options: {
   configMap: CaConfigMapStore;
   /** The storage module's task-listener leaf (ADR-015 S-D1). */
   service: ServiceLeafOptions;
+  /** Additional in-cluster listener, absent for isolated storage-only fixtures. */
+  taskModelService?: ServiceLeafOptions;
   status?: PkiStatusStore;
 }): PkiManager {
-  const { config, fs, clock, secret, configMap, service, status } = options;
+  const { config, fs, clock, secret, configMap, service, taskModelService, status } = options;
   const directory = join(config.volumeRoot, 'pki');
   const caPath = join(directory, 'ca.crt');
   const keyPath = join(directory, 'ca.key');
@@ -358,6 +367,14 @@ export function createPkiManager(options: {
         const leaf = await issue(ca, serviceHosts);
         await service.secret.write(ca.cert, leaf.cert, leaf.key);
       }
+      if (taskModelService) {
+        const names = [...taskModelService.hosts];
+        const current = await taskModelService.secret.read();
+        if (certStatus(current.cert ?? null, current.key, ca.cert, names) !== 'valid') {
+          const leaf = await issue(ca, names);
+          await taskModelService.secret.write(ca.cert, leaf.cert, leaf.key);
+        }
+      }
     },
     report: async () => {
       let identity: Identity | null = null,
@@ -420,6 +437,28 @@ export function createPkiManager(options: {
       } catch {
         serviceLeaf = 'invalid';
       }
+      let taskModelLeaf: PkiReport['leaf'] = 'missing';
+      let taskModelSans: string[] = [];
+      let taskModelLeafNotAfter = '';
+      if (taskModelService) {
+        try {
+          const current = await taskModelService.secret.read();
+          taskModelLeaf = certStatus(current.cert ?? null, current.key, ca?.cert, [
+            ...taskModelService.hosts,
+          ]);
+          if (current.cert) {
+            const cert = new NodeX509Certificate(current.cert);
+            taskModelLeafNotAfter = cert.validTo;
+            taskModelSans = (cert.subjectAltName ?? '')
+              .split(', ')
+              .filter(Boolean)
+              .map((value) => value.replace(/^DNS:/, ''));
+          }
+        } catch {
+          taskModelLeaf = 'invalid';
+        }
+      }
+      const taskModelReport = taskModelService ? { taskModelLeaf, taskModelSans } : {};
       const result: PkiReport = {
         identity: identityState,
         ca: caState,
@@ -427,6 +466,7 @@ export function createPkiManager(options: {
         sans,
         serviceLeaf,
         serviceSans,
+        ...taskModelReport,
         fingerprint: caFingerprint,
       };
       await status?.write({
@@ -439,6 +479,8 @@ export function createPkiManager(options: {
         serviceLeaf,
         serviceSans,
         serviceLeafNotAfter,
+        ...taskModelReport,
+        ...(taskModelService ? { taskModelLeafNotAfter } : {}),
         checkedAt: new Date(clock.now()).toISOString(),
         ...(caState === 'invalid' ? { error: 'invalid CA pair' } : {}),
       });

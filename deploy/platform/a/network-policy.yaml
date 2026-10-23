@@ -137,6 +137,26 @@ spec:
       ports:
         - protocol: TCP
           port: 8200
+    # Canonical task intent, once-only claim and verified storage projection.
+    # No SQL readiness dependency: the database arrives later, in C.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-state
+          podSelector:
+            matchLabels:
+              cnpg.io/cluster: lifemodel
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Live TokenReview + exact Pod/Job GETs. k3s API Service DNAT reaches an
+    # unknown node address; RBAC bounds this API-audience service-account token.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 6443
     # The loader's model exception: the owner's endpoints may be public or on
     # the RFC 1918 LAN, while pod, service and link-local ranges stay refused.
     - to:

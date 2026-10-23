@@ -1,6 +1,7 @@
 /** Narrow Kubernetes API stores for the PKI-owned platform resources. */
 import { readFile } from 'node:fs/promises';
-import { request as httpsRequest } from 'node:https';
+import { Agent, request as httpsRequest } from 'node:https';
+import type { Socket } from 'node:net';
 import type { TlsSecretStore, CaConfigMapStore, PkiStatusStore } from './pki.js';
 interface ApiOptions {
   apiServer?: string;
@@ -17,6 +18,24 @@ interface ApiOptions {
   timeoutMs?: number;
 }
 const SA = '/var/run/secrets/kubernetes.io/serviceaccount';
+// One bounded keep-alive pool for this helper, shared across fixed-name reads.
+// Idle sockets expire; error guards remain attached through reuse and teardown.
+const apiAgent = new Agent({
+  keepAlive: true,
+  maxSockets: 4,
+  maxTotalSockets: 4,
+  maxFreeSockets: 2,
+  timeout: 10_000,
+});
+apiAgent.on('error', () => undefined);
+const guardedSockets = new WeakSet<Socket>();
+function guardSocket(socket: Socket): void {
+  if (guardedSockets.has(socket)) return;
+  guardedSockets.add(socket);
+  socket.on('error', () => undefined);
+}
+const MAX_API_RESPONSE_BYTES = 1024 * 1024;
+
 function createApi(options: ApiOptions, resource: string, name: string) {
   const host =
     options.apiServer ??
@@ -29,13 +48,22 @@ function createApi(options: ApiOptions, resource: string, name: string) {
   const timeout = options.timeoutMs ?? 10000;
   const call =
     options.request ??
-    ((target, method, token, body, ca) =>
+    ((url, method, token, body, ca) =>
       new Promise<{ status: number; body: string }>((resolve, reject) => {
+        let settled = false;
+        const fail = (): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(new Error('Kubernetes API transport failed'));
+          req.destroy();
+        };
         const req = httpsRequest(
-          target,
+          url,
           {
             method,
             ca,
+            agent: apiAgent,
             headers: {
               authorization: `Bearer ${token}`,
               ...(body === undefined
@@ -47,28 +75,41 @@ function createApi(options: ApiOptions, resource: string, name: string) {
             },
           },
           (res) => {
-            let text = '';
+            // Before flowing bytes, and retained until the response is gone.
+            res.on('error', fail);
+            res.on('aborted', fail);
+            let response = '';
+            let bytes = 0;
             res.setEncoding('utf8');
             res.on('data', (chunk: string) => {
-              text += chunk;
+              bytes += Buffer.byteLength(chunk);
+              if (bytes > MAX_API_RESPONSE_BYTES) {
+                fail();
+                res.destroy();
+                return;
+              }
+              response += chunk;
             });
             res.on('end', () => {
-              resolve({ status: res.statusCode ?? 0, body: text });
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              resolve({ status: res.statusCode ?? 0, body: response });
             });
-            res.on('aborted', () => {
-              reject(new Error('Kubernetes API response truncated'));
+            res.on('close', () => {
+              if (!res.complete) fail();
             });
           }
         );
-        const timer = setTimeout(
-          () => req.destroy(new Error('Kubernetes API request timed out')),
-          timeout
-        );
-        req.on('close', () => {
-          clearTimeout(timer);
-        });
-        req.on('error', reject);
-        if (body) req.write(body);
+        req.on('error', fail);
+        req.on('socket', guardSocket);
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          reject(new Error('Kubernetes API request timed out'));
+          req.destroy();
+        }, timeout);
+        if (body !== undefined) req.write(body);
         req.end();
       }));
   return {
@@ -76,30 +117,46 @@ function createApi(options: ApiOptions, resource: string, name: string) {
     url,
     send: async (method: string, payload?: unknown) => {
       const token = (await readFile(options.tokenFile ?? `${SA}/token`, 'utf8')).trim();
+      if (!token) throw new Error('Kubernetes ServiceAccount token is empty');
       let ca: Buffer | undefined;
       try {
         ca = await readFile(options.caFile ?? `${SA}/ca.crt`);
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
       }
-      return call(
-        url,
-        method,
-        token,
-        payload === undefined ? undefined : JSON.stringify(payload),
-        ca
-      );
+      const body = payload === undefined ? undefined : JSON.stringify(payload);
+      // Bound injected transports too: a stalled API must not hold PKI boot.
+      if (!options.request) return call(url, method, token, body, ca);
+      return new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error('Kubernetes API request timed out'));
+        }, timeout);
+        Promise.resolve()
+          .then(() => call(url, method, token, body, ca))
+          .then(
+            (response) => {
+              clearTimeout(timer);
+              resolve(response);
+            },
+            () => {
+              clearTimeout(timer);
+              reject(new Error('Kubernetes API transport failed'));
+            }
+          );
+      });
     },
   };
 }
 export function createKubernetesTlsStores(options: ApiOptions = {}): {
   secret: TlsSecretStore;
   serviceSecret: TlsSecretStore;
+  taskModelSecret: TlsSecretStore;
   configMap: CaConfigMapStore;
   status: PkiStatusStore;
 } {
   const sec = createApi(options, 'secrets', 'lifemodel-tls');
   const serviceSec = createApi(options, 'secrets', 'storage-module-tls');
+  const taskModelSec = createApi(options, 'secrets', 'model-gateway-task-tls');
   const cm = createApi(options, 'configmaps', 'lifemodel-ca');
   // A0 precreates these public-only replicas and their fixed-name write RBAC.
   // Both application namespaces exist in instance, before A0; PKI readiness
@@ -170,6 +227,7 @@ export function createKubernetesTlsStores(options: ApiOptions = {}): {
   return {
     secret: secretStore(sec, 'lifemodel-tls'),
     serviceSecret: secretStore(serviceSec, 'storage-module-tls'),
+    taskModelSecret: secretStore(taskModelSec, 'model-gateway-task-tls'),
     configMap: {
       read: async () => {
         const obj = await read(cm);

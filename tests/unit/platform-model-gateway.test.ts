@@ -100,6 +100,7 @@ describe('the platform model gateway', () => {
       'a0/namespace-default-deny.yaml',
       'a0/network-policy.yaml',
       'a/network-policy.yaml',
+      'a/model-gateway-rbac.yaml',
       'a/applications.yaml',
     ])
       expect([...applied].map((path) => relative(platformRoot, path))).toContain(file);
@@ -157,14 +158,29 @@ describe('the platform model gateway', () => {
     expect(container?.image).toBe(`${loaderImage}:release-placeholder`);
     expect(container?.env).toEqual([
       { name: 'LIFEMODEL_OPENBAO_ADDRESS', value: 'http://openbao.openbao.svc:8200' },
+      { name: 'LIFEMODEL_TASK_MODEL_TLS_DIR', value: '/opt/lifemodel/task-model-tls' },
+      { name: 'LIFEMODEL_DB_USERNAME_FILE', value: '/opt/lifemodel/database/username' },
+      { name: 'LIFEMODEL_DB_PASSWORD_FILE', value: '/opt/lifemodel/database/password' },
     ]);
   });
 
-  it('carries no loader volume, custody Secret or PKI and is read only', () => {
+  it('mounts only its own task leaf and optional SQL login, not loader custody or CA key', () => {
     expect(pod?.volumes).toEqual([
       { name: 'tmp', emptyDir: { medium: 'Memory', sizeLimit: '32Mi' } },
+      {
+        name: 'task-model-tls',
+        secret: { secretName: 'model-gateway-task-tls', defaultMode: 288 },
+      },
+      {
+        name: 'database',
+        secret: { secretName: 'model-gateway-db-credentials', optional: true, defaultMode: 288 },
+      },
     ]);
-    expect(container?.volumeMounts).toEqual([{ name: 'tmp', mountPath: '/tmp' }]);
+    expect(container?.volumeMounts).toEqual([
+      { name: 'tmp', mountPath: '/tmp' },
+      { name: 'task-model-tls', mountPath: '/opt/lifemodel/task-model-tls', readOnly: true },
+      { name: 'database', mountPath: '/opt/lifemodel/database', readOnly: true },
+    ]);
     expect(container?.securityContext).toMatchObject({
       readOnlyRootFilesystem: true,
       allowPrivilegeEscalation: false,
@@ -177,7 +193,7 @@ describe('the platform model gateway', () => {
     });
     expect(container?.resources.requests).toBeDefined();
     expect(container?.resources.limits).toBeDefined();
-    // No Kubernetes API use at all: its ServiceAccount is bound to no role.
+    // No unrelated identity or bootstrap roles; task proof has its own narrow RBAC.
     expect(gatewayAccount[0]?.metadata?.name).toBe('model-gateway');
     const rbac = [
       ...documents(join(platformRoot, 'a/service-account.yaml')),
@@ -194,9 +210,10 @@ describe('the platform model gateway', () => {
     }
   });
 
-  it('serves the API on 8080 and health on 8081, readiness independent of slots', () => {
+  it('serves core 8080, task TLS 8446 and health 8081 without SQL readiness', () => {
     expect(container?.ports).toEqual([
       { name: 'api', containerPort: 8080, protocol: 'TCP' },
+      { name: 'task', containerPort: 8446, protocol: 'TCP' },
       { name: 'status', containerPort: 8081, protocol: 'TCP' },
     ]);
     expect(service?.spec.ports).toEqual([
@@ -257,13 +274,25 @@ describe('the platform model gateway', () => {
     ]);
   });
 
-  it('egresses only DNS, OpenBao and the loader model exception', () => {
+  it('egresses only DNS, OpenBao, task SQL/API and the loader model exception', () => {
     expect(gatewayAccess?.spec.egress).toEqual([
       dns,
       {
         to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'openbao' } } }],
         ports: [{ protocol: 'TCP', port: 8200 }],
       },
+      {
+        to: [
+          {
+            namespaceSelector: {
+              matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-state' },
+            },
+            podSelector: { matchLabels: { 'cnpg.io/cluster': 'lifemodel' } },
+          },
+        ],
+        ports: [{ protocol: 'TCP', port: 5432 }],
+      },
+      { to: [{ ipBlock: { cidr: '0.0.0.0/0' } }], ports: [{ protocol: 'TCP', port: 6443 }] },
       modelException,
       {
         to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'ollama' } } }],
@@ -272,8 +301,86 @@ describe('the platform model gateway', () => {
     ]);
     // The loader's own routes are NOT the gateway's (ADR-013 D5).
     const peers = gatewayAccess?.spec.egress.flatMap((rule: any) => rule.to ?? []);
-    expect(JSON.stringify(peers)).not.toContain('6443');
+    expect(
+      gatewayAccess?.spec.egress.filter((rule: any) =>
+        rule.ports?.some((port: any) => port.port === 6443)
+      )
+    ).toEqual([
+      { to: [{ ipBlock: { cidr: '0.0.0.0/0' } }], ports: [{ protocol: 'TCP', port: 6443 }] },
+    ]);
     expect(JSON.stringify(peers)).not.toContain('gitea');
+  });
+
+  it('grants only TokenReview creation and exact motor Pod/Job GETs', () => {
+    const rbac = documents(join(platformRoot, 'a/model-gateway-rbac.yaml'));
+    expect(rbac.filter((item) => item.kind === 'ClusterRole')).toEqual([
+      {
+        apiVersion: 'rbac.authorization.k8s.io/v1',
+        kind: 'ClusterRole',
+        metadata: { name: 'model-gateway-token-review' },
+        rules: [
+          { apiGroups: ['authentication.k8s.io'], resources: ['tokenreviews'], verbs: ['create'] },
+        ],
+      },
+    ]);
+    expect(rbac.filter((item) => item.kind === 'Role')).toEqual([
+      {
+        apiVersion: 'rbac.authorization.k8s.io/v1',
+        kind: 'Role',
+        metadata: { name: 'model-gateway-identity-read', namespace: 'lifemodel-motor' },
+        rules: [
+          { apiGroups: [''], resources: ['pods'], verbs: ['get'] },
+          { apiGroups: ['batch'], resources: ['jobs'], verbs: ['get'] },
+        ],
+      },
+    ]);
+    expect(rbac).toHaveLength(4);
+    for (const binding of rbac.filter((item) => item.kind.endsWith('Binding'))) {
+      expect(binding.subjects).toEqual([
+        { kind: 'ServiceAccount', name: 'model-gateway', namespace: 'lifemodel-system' },
+      ]);
+      expect(binding.roleRef.apiGroup).toBe('rbac.authorization.k8s.io');
+      expect(binding.roleRef.name).toBe(binding.metadata.name);
+    }
+  });
+
+  it('precreates the dedicated leaf/login in A0 and permits only named loader updates', () => {
+    const bootstrap = documents(join(platformRoot, 'a0/bootstrap-secrets.yaml'));
+    for (const name of ['model-gateway-task-tls', 'model-gateway-db-credentials']) {
+      expect(bootstrap.filter((item) => item.metadata?.name === name)).toEqual([
+        expect.objectContaining({
+          kind: 'Secret',
+          metadata: {
+            name,
+            namespace: 'lifemodel-system',
+            annotations: {
+              'kustomize.toolkit.fluxcd.io/ssa': 'IfNotPresent',
+              'kustomize.toolkit.fluxcd.io/prune': 'disabled',
+            },
+          },
+        }),
+      ]);
+    }
+    const loaderRole = documents(join(platformRoot, 'a0/service-account.yaml')).find(
+      (item) => item.kind === 'Role' && item.metadata.name === 'loader-bootstrap'
+    );
+    const rule = loaderRole?.rules.find((item: any) => item.resources.includes('secrets'));
+    expect(rule?.verbs).toEqual(['get', 'update']);
+    expect(rule?.resourceNames).toEqual(
+      expect.arrayContaining(['model-gateway-task-tls', 'model-gateway-db-credentials'])
+    );
+    const database = documents(join(platformRoot, 'state/network-policy.yaml')).find(
+      (item) => item.metadata.name === 'lifemodel-state-postgres-access'
+    );
+    expect(database?.spec.ingress).toContainEqual({
+      from: [
+        {
+          namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' } },
+          podSelector: { matchLabels: { 'app.kubernetes.io/name': 'model-gateway' } },
+        },
+      ],
+      ports: [{ protocol: 'TCP', port: 5432 }],
+    });
   });
 
   it('keeps the namespace default deny apart from the loader own permits', () => {

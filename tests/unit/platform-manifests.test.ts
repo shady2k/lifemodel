@@ -971,22 +971,18 @@ describe('platform manifests', () => {
           item.spec.rules.some((rule: any) => rule.host === 'boot-${LIFEMODEL_NAME}.local')
       )
     ).toBe(true);
-    // The sole platform-defined cluster role is the module's narrow
-    // TokenReview create right, not broad system:auth-delegator access.
-    expect(objects.filter((item) => item.kind === 'ClusterRole')).toEqual([
-      {
+    // Only storage and the task model gateway define cluster roles, each
+    // limited to TokenReview create, never broad auth-delegator access.
+    expect(objects.filter((item) => item.kind === 'ClusterRole')).toEqual(
+      ['model-gateway-token-review', 'storage-module-token-review'].map((name) => ({
         apiVersion: 'rbac.authorization.k8s.io/v1',
         kind: 'ClusterRole',
-        metadata: { name: 'storage-module-token-review' },
+        metadata: { name },
         rules: [
-          {
-            apiGroups: ['authentication.k8s.io'],
-            resources: ['tokenreviews'],
-            verbs: ['create'],
-          },
+          { apiGroups: ['authentication.k8s.io'], resources: ['tokenreviews'], verbs: ['create'] },
         ],
-      },
-    ]);
+      }))
+    );
     const moduleSubject = {
       kind: 'ServiceAccount',
       name: 'storage-module',
@@ -996,6 +992,19 @@ describe('platform manifests', () => {
       .filter((item) => item.kind === 'ClusterRoleBinding')
       .sort((left, right) => left.metadata.name.localeCompare(right.metadata.name));
     expect(clusterRoleBindings).toEqual([
+      {
+        apiVersion: 'rbac.authorization.k8s.io/v1',
+        kind: 'ClusterRoleBinding',
+        metadata: { name: 'model-gateway-token-review' },
+        roleRef: {
+          apiGroup: 'rbac.authorization.k8s.io',
+          kind: 'ClusterRole',
+          name: 'model-gateway-token-review',
+        },
+        subjects: [
+          { kind: 'ServiceAccount', name: 'model-gateway', namespace: 'lifemodel-system' },
+        ],
+      },
       {
         apiVersion: 'rbac.authorization.k8s.io/v1',
         kind: 'ClusterRoleBinding',

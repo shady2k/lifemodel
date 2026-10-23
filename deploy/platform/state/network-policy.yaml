@@ -39,6 +39,17 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
+    # Gateway task identity uses canonical intent and writes the binding/claim.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: model-gateway
+      ports:
+        - protocol: TCP
+          port: 5432
     - from:
         - namespaceSelector:
             matchLabels:

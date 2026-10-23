@@ -1,10 +1,11 @@
 /**
  * Copies the CNPG-generated application login into the two namespaces that use
- * it: the core, and the storage module (the interim login the owner chose for
- * it, lifemodel-653.7.8, until lifemodel-2t5 leases it an identity).
+ * it: the core, storage module and task model gateway (the interim owner
+ * login until lifemodel-2t5 leases modules their own identities).
  */
 import { readFile } from 'node:fs/promises';
-import { request as httpsRequest } from 'node:https';
+import { Agent, request as httpsRequest } from 'node:https';
+import type { Socket } from 'node:net';
 import type { PlatformPhase } from './platform-bootstrap.js';
 
 export interface KubernetesPostgresSecretOptions {
@@ -26,14 +27,32 @@ const SOURCE_NAME = 'lifemodel-app';
 const TARGETS = [
   { namespace: 'lifemodel', name: 'lifemodel-db-credentials' },
   { namespace: 'lifemodel-system', name: 'storage-module-db-credentials' },
+  { namespace: 'lifemodel-system', name: 'model-gateway-db-credentials' },
 ] as const;
 const SERVICE_ACCOUNT = '/var/run/secrets/kubernetes.io/serviceaccount';
+// One bounded keep-alive pool for this helper, shared across fixed-name reads.
+// Idle sockets expire; error guards remain attached through reuse and teardown.
+const apiAgent = new Agent({
+  keepAlive: true,
+  maxSockets: 4,
+  maxTotalSockets: 4,
+  maxFreeSockets: 2,
+  timeout: 10_000,
+});
+apiAgent.on('error', () => undefined);
+const guardedSockets = new WeakSet<Socket>();
+function guardSocket(socket: Socket): void {
+  if (guardedSockets.has(socket)) return;
+  guardedSockets.add(socket);
+  socket.on('error', () => undefined);
+}
+const MAX_API_RESPONSE_BYTES = 1024 * 1024;
 
 /**
- * A fixed-name API client: it reads the one CNPG Secret and writes only the two
- * platform-created Secrets named above. The module's copy is a Secret in its
- * own namespace that only its pod reads, so the module never sees the core
- * namespace and no other workload sees a database login.
+ * A fixed-name API client: it reads the one CNPG Secret and writes only the
+ * three platform-created Secrets named above. Each module mounts only its own
+ * copy, never the core namespace. Gateway startup/readiness does not await this
+ * phase: its optional directory mount refreshes when C supplies the login.
  */
 export function createKubernetesPostgresSecretPhase(
   options: KubernetesPostgresSecretOptions = {}
@@ -49,11 +68,20 @@ export function createKubernetesPostgresSecretPhase(
     options.request ??
     ((url, method, token, body, ca) =>
       new Promise<{ status: number; body: string }>((resolve, reject) => {
+        let settled = false;
+        const fail = (): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(new Error('Kubernetes API transport failed'));
+          req.destroy();
+        };
         const req = httpsRequest(
           url,
           {
             method,
             ca,
+            agent: apiAgent,
             headers: {
               authorization: `Bearer ${token}`,
               ...(body === undefined
@@ -65,32 +93,40 @@ export function createKubernetesPostgresSecretPhase(
             },
           },
           (res) => {
+            // Before flowing bytes, and retained until the response is gone.
+            res.on('error', fail);
+            res.on('aborted', fail);
             let response = '';
+            let bytes = 0;
             res.setEncoding('utf8');
             res.on('data', (chunk: string) => {
+              bytes += Buffer.byteLength(chunk);
+              if (bytes > MAX_API_RESPONSE_BYTES) {
+                fail();
+                res.destroy();
+                return;
+              }
               response += chunk;
             });
             res.on('end', () => {
+              if (settled) return;
+              settled = true;
               clearTimeout(timer);
               resolve({ status: res.statusCode ?? 0, body: response });
             });
-            res.on('aborted', () => {
-              clearTimeout(timer);
-              reject(new Error('Kubernetes API response was truncated'));
+            res.on('close', () => {
+              if (!res.complete) fail();
             });
           }
         );
-        const timer = setTimeout(
-          () =>
-            req.destroy(
-              new Error(`Kubernetes API request timed out after ${String(timeoutMs)} ms`)
-            ),
-          timeoutMs
-        );
-        req.on('error', (error) => {
-          clearTimeout(timer);
-          reject(error instanceof Error ? error : new Error(String(error)));
-        });
+        req.on('error', fail);
+        req.on('socket', guardSocket);
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          reject(new Error('Kubernetes API request timed out'));
+          req.destroy();
+        }, timeoutMs);
         if (body !== undefined) req.write(body);
         req.end();
       }));
@@ -112,9 +148,9 @@ export function createKubernetesPostgresSecretPhase(
       let result: Promise<{ status: number; body: string }>;
       try {
         result = customRequest(url, method, token, requestBody, ca);
-      } catch (error) {
+      } catch {
         clearTimeout(timer);
-        reject(error instanceof Error ? error : new Error(String(error)));
+        reject(new Error('Kubernetes API transport failed'));
         return;
       }
       result.then(
@@ -122,9 +158,9 @@ export function createKubernetesPostgresSecretPhase(
           clearTimeout(timer);
           resolve(response);
         },
-        (error: unknown) => {
+        () => {
           clearTimeout(timer);
-          reject(error instanceof Error ? error : new Error(String(error)));
+          reject(new Error('Kubernetes API transport failed'));
         }
       );
     });

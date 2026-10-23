@@ -62,9 +62,20 @@ spec:
           env:
             - name: LIFEMODEL_OPENBAO_ADDRESS
               value: http://openbao.openbao.svc:8200
+            - name: LIFEMODEL_TASK_MODEL_TLS_DIR
+              value: /opt/lifemodel/task-model-tls
+            # A starts before SQL in C. Read these files per request, not at
+            # boot: optional directory projection refreshes after the copy.
+            - name: LIFEMODEL_DB_USERNAME_FILE
+              value: /opt/lifemodel/database/username
+            - name: LIFEMODEL_DB_PASSWORD_FILE
+              value: /opt/lifemodel/database/password
           ports:
             - name: api
               containerPort: 8080
+              protocol: TCP
+            - name: task
+              containerPort: 8446
               protocol: TCP
             - name: status
               containerPort: 8081
@@ -79,7 +90,8 @@ spec:
               type: RuntimeDefault
           # Readiness is the process's own listeners: missing slots before
           # onboarding never make the gateway unready, so the wizard never
-          # holds platform-a (ADR-013 D8).
+          # holds platform-a (ADR-013 D8). SQL and its credentials arrive in C;
+          # task requests fail closed until then, never readiness or startup.
           readinessProbe:
             httpGet:
               path: /status
@@ -99,8 +111,25 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            # No subPath: kubelet rotates the CA-issued leaf and DB login.
+            - name: task-model-tls
+              mountPath: /opt/lifemodel/task-model-tls
+              readOnly: true
+            - name: database
+              mountPath: /opt/lifemodel/database
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir:
             medium: Memory
             sizeLimit: 32Mi
+        - name: task-model-tls
+          secret:
+            secretName: model-gateway-task-tls
+            defaultMode: 288
+        - name: database
+          secret:
+            secretName: model-gateway-db-credentials
+            # Missing/empty before C is normal; requests deny until it fills.
+            optional: true
+            defaultMode: 288
