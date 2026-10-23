@@ -4,7 +4,7 @@
 FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS cli-build
 WORKDIR /build
 COPY loader/package.json loader/package-lock.json ./
-RUN npm ci --no-audit --no-fund
+RUN npm ci --no-audit --no-fund --ignore-scripts --no-update-notifier --loglevel=http
 COPY loader/tsconfig.json ./
 COPY loader/src/ ./src/
 RUN npm run build
@@ -14,13 +14,20 @@ LABEL org.opencontainers.image.title="lifemodel-workbench" \
       org.opencontainers.image.source="https://github.com/shady2k/lifemodel" \
       org.opencontainers.image.licenses="MIT"
 
-# Debian archive is frozen as well as Node: apt's signed indexes pin the native
-# toolchain and its transitive libraries, not the changing bookworm mirrors.
+# Pin snapshot content before apt uses it, even during the HTTP CA bootstrap.
+# apt still verifies Debian signatures and index/package hashes. Compare the
+# exact metadata apt used too: a second fetch cannot substitute a signed replay.
+# This bookworm InRelease has no Valid-Until; no expiry override is needed.
+ENV DEBIAN_INRELEASE_SHA256=77737fa4b34f2693e982cc9ee35736816c35a7778fc2d326cc1bbf5b301fe1aa
 RUN rm -f /etc/apt/sources.list.d/debian.sources \
- && printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20261015T000000Z bookworm main\n' > /etc/apt/sources.list \
+ && rm -rf /var/lib/apt/lists/* \
+ && /usr/lib/apt/apt-helper download-file http://snapshot.debian.org/archive/debian/20261015T000000Z/dists/bookworm/InRelease /tmp/debian.InRelease "SHA256:${DEBIAN_INRELEASE_SHA256}" \
+ && echo "${DEBIAN_INRELEASE_SHA256}  /tmp/debian.InRelease" | sha256sum -c - \
+ && printf 'deb http://snapshot.debian.org/archive/debian/20261015T000000Z bookworm main\n' > /etc/apt/sources.list \
  && apt-get update -o APT::Update::Error-Mode=any \
+ && cmp /tmp/debian.InRelease /var/lib/apt/lists/*_InRelease \
  && apt-get install -y --no-install-recommends ca-certificates curl git build-essential python3 ripgrep \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* /tmp/debian.InRelease
 
 # Official native release archive; no npm postinstall platform selection or
 # downloader at runtime. Checksum from the exact release's asset metadata.
@@ -38,9 +45,13 @@ RUN test "$(dpkg --print-architecture)" = amd64 \
 # install policy is the repository's legacy-peer-deps=true, passed explicitly.
 WORKDIR /opt/lifemodel
 COPY package.json package-lock.json ./
-RUN HUSKY=0 npm ci --legacy-peer-deps --no-audit --no-fund \
+# Suppress every lifecycle during fetching. Only the audited native/local
+# setup scripts below may run, in a separate build step with networking off.
+# The bundled CPU ONNX runtime needs no unchecked CUDA GitHub release asset.
+RUN npm ci --legacy-peer-deps --no-audit --no-fund --ignore-scripts --no-update-notifier --loglevel=http \
  && test -d /opt/lifemodel/node_modules \
  && npm cache clean --force
+RUN --network=none ONNXRUNTIME_NODE_INSTALL_CUDA=skip npm rebuild esbuild onnxruntime-node protobufjs sharp --foreground-scripts
 COPY --from=cli-build /build/package.json /opt/lifemodel/loader/package.json
 COPY --from=cli-build /build/dist/storage-cli-main.js /build/dist/storage-cli.js /build/dist/task-launcher-main.js /opt/lifemodel/loader/dist/
 COPY --chown=root:root --chmod=0555 docker/loader/lifemodel-storage /usr/local/bin/lifemodel-storage

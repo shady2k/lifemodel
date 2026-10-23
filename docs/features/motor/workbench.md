@@ -27,9 +27,44 @@ postinstall platform probing and fallback npm install. No remote installer,
 These pins reproduce the installed inputs; they do not assert byte-for-byte
 reproducible upstream binaries or OCI timestamps.
 
-Apt uses HTTP only to bootstrap CA certificates from the frozen archive;
-Debian's signed indexes and package hashes authenticate the packages. Apt update
-fails on any fetch error. Harness downloads use HTTPS and the recorded checksum.
+Apt bootstraps CA certificates over HTTP, with the snapshot's exact `InRelease`
+pinned to SHA-256 `77737fa4b34f2693e982cc9ee35736816c35a7778fc2d326cc1bbf5b301fe1aa`.
+The build verifies that hash before apt update, then compares the metadata apt
+actually used with those verified bytes before installing packages. Debian's
+signature checks and index/package hashes remain enabled. This prevents replay
+of a different legitimately signed archive during bootstrap. This bookworm
+metadata has no `Valid-Until`, so no expiry override is needed. Apt update fails
+on any fetch error. Harness downloads use HTTPS and the recorded checksum.
+
+### npm lifecycle policy (CPU only)
+
+Both root and loader `npm ci` run with `--ignore-scripts`. Package tarballs are
+verified against the committed lockfile integrity; no lifecycle runs while the
+fetch step has network access. A separate `RUN --network=none` replays only
+`esbuild`, `onnxruntime-node`, `protobufjs` and `sharp` with foreground logs.
+`ONNXRUNTIME_NODE_INSTALL_CUDA=skip` makes the exact ONNX installer exit before
+URL selection or download; its CPU binding/runtime already ship in the npm
+package. No GPU asset enters this image. Any unexpected fallback requiring
+network fails closed, rather than silently adding unchecked native bytes.
+
+Audit of exact integrity-verified packages in this lock (and their install
+entrypoints, not development/publishing scripts):
+
+| Package / lifecycle | Fetch behavior and build policy |
+| --- | --- |
+| `esbuild@0.27.2`, `postinstall: node install.js` | Uses the lockfile's optional platform binary. If missing, tries nested npm then a direct registry tarball download without its own integrity check. Replay runs without network; missing platform binary cannot fetch. |
+| `onnxruntime-node@1.21.0`, `postinstall: node ./script/install` | Default Linux/x64 downloads an unchecked CUDA GitHub release and can overwrite the CPU library. `ONNXRUNTIME_NODE_INSTALL_CUDA=skip` is checked first and exits before download. Replay is also network-denied. |
+| `protobufjs@7.5.4`, `postinstall: node scripts/postinstall` | Reads local JSON and prints a version-scheme warning. No fetch. Replay is network-denied. |
+| `sharp@0.34.5`, `install: node install/check.js || npm run build` | Uses optional `@img` prebuilt packages from the lockfile. Global libvips or source-build configuration can trigger node-gyp, which could fetch Node headers. Replay is network-denied, so that fallback cannot download. |
+| `fsevents@2.3.3` | Lock has an install marker, but the published tarball has no install lifecycle or `binding.gyp`; its native binary is bundled. Darwin-only optional package, excluded on Linux; not replayed. |
+| Root `prepare: husky` (`husky@9.1.7`) | Local git/hook writes only, no fetch. Skipped; no repository hooks belong in the image. |
+| Loader dependencies | No install lifecycle markers or root install hooks. All scripts are skipped during `npm ci`; compilation is explicit. |
+
+The contract test fixes this audited package/version inventory. An added or
+upgraded installer requires a fresh source audit and an explicit offline policy;
+never remove `--ignore-scripts` or broadly enable install scripts. Network-free
+replay and retained optional packages also cover native fallback risks, not just
+the current ONNX download.
 
 ## Offline startup and private writes
 
@@ -131,9 +166,13 @@ verify the checksum and repeat the no-network/read-only checks. Run the contract
 test and full isolated check. Add another architecture only with its own pinned
 archive/checksum and offline receipt. Never update a harness at task start.
 
-Local Linux/amd64 measurement (2026-10-23): Docker reports **2,755,707,671
-bytes** (2.57 GiB, uncompressed), after a **277 s** build with Node/CLI-build
-layers cached but the runtime toolchain/OpenCode/dev-dependency layers rebuilt.
-This is a development workbench, not a slim production core image. The cache is
-retained; local image tags are removed after acceptance. Registry compression
+Local Linux/amd64 measurement (2026-10-23, audited CPU-only rebuild): Docker
+reports **2,208,704,446 bytes** (2.06 GiB, uncompressed), after a **296 s** build.
+The Node base was cached; apt, OpenCode, both dependency installs and the
+network-denied native setup were rerun. The install log contains 1,008 npm
+fetches (941 unique URLs), all matching integrity-pinned resolved URLs in the
+two lockfiles; no ONNX GitHub release download occurred. The separate OpenCode
+GitHub archive download is intentional and checksum-verified. This is a
+development workbench, not a slim production core image. The build cache is
+retained; local image tags are removed after verification. Registry compression
 and a cold CI build have different size/time costs.

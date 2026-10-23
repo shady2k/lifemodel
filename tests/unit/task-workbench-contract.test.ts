@@ -70,7 +70,59 @@ function assertContext(text: string, ignore: string): void {
   }
 }
 
+function assertAptProvenance(text: string): void {
+  const hash = '77737fa4b34f2693e982cc9ee35736816c35a7778fc2d326cc1bbf5b301fe1aa';
+  expect(text).toContain(`ENV DEBIAN_INRELEASE_SHA256=${hash}`);
+  expect(text).toContain('/usr/lib/apt/apt-helper download-file');
+  expect(text).toContain('"SHA256:${DEBIAN_INRELEASE_SHA256}"');
+  expect(text).toContain('${DEBIAN_INRELEASE_SHA256}  /tmp/debian.InRelease');
+  expect(text).toContain('cmp /tmp/debian.InRelease /var/lib/apt/lists/*_InRelease');
+  expect(text.indexOf('sha256sum -c -')).toBeLessThan(text.indexOf('apt-get update'));
+  expect(text.indexOf('cmp /tmp/debian.InRelease')).toBeLessThan(text.indexOf('apt-get install'));
+  expect(text).not.toMatch(
+    /trusted\s*=\s*yes|allow-unauthenticated|allow-insecure|check-valid-until=no/i
+  );
+}
+
+function assertLifecyclePolicy(text: string): void {
+  const instructions = text.replace(/\\\n\s*/g, ' ').split('\n');
+  const installs = instructions.filter((line) => /^RUN .*npm ci\b/.test(line));
+  expect(installs).toHaveLength(2);
+  for (const line of installs) expect(line).toContain('--ignore-scripts');
+  expect(instructions).toContain(
+    'RUN --network=none ONNXRUNTIME_NODE_INSTALL_CUDA=skip npm rebuild esbuild onnxruntime-node protobufjs sharp --foreground-scripts'
+  );
+  expect(text).not.toMatch(/--ignore-scripts=false|--allow-scripts(?:=|\s)/);
+}
+
 describe('task workbench image contract', () => {
+  it('binds authenticated apt metadata to the intended snapshot before package installation', () => {
+    assertAptProvenance(dockerfile());
+  });
+
+  it('installs lockfile bytes without scripts and rebuilds only audited scripts without network', () => {
+    assertLifecyclePolicy(dockerfile());
+    // A new or upgraded installer requires a new source audit, not silent enablement.
+    const packages = JSON.parse(read('package-lock.json')).packages;
+    expect(
+      Object.entries(packages)
+        .filter(([, entry]: [string, any]) => entry.hasInstallScript)
+        .map(([name, entry]: [string, any]) => [name, entry.version])
+    ).toEqual([
+      ['node_modules/esbuild', '0.27.2'],
+      ['node_modules/fsevents', '2.3.3'],
+      ['node_modules/onnxruntime-node', '1.21.0'],
+      ['node_modules/protobufjs', '7.5.4'],
+      ['node_modules/sharp', '0.34.5'],
+    ]);
+    expect(
+      Object.values(JSON.parse(read('loader/package-lock.json')).packages).filter(
+        (entry: any) => entry.hasInstallScript
+      )
+    ).toEqual([]);
+    expect(JSON.parse(read('package.json')).scripts.prepare).toBe('husky');
+  });
+
   it('pins the Node base, OpenCode version and archive checksum; contains no key build input', () => {
     assertPinnedBuild(dockerfile());
   });
@@ -163,6 +215,39 @@ describe('task workbench image contract', () => {
       expect(
         spawnSync('bash', ['scripts/release/set-workbench-digest.sh', digest, file]).status
       ).not.toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    'malformed suffix',
+    'misplaced placeholder',
+    'zero digest',
+    'wrong target name',
+    'wrong target kind',
+  ])('refuses %s without modifying the overlay', (scenario) => {
+    const dir = mkdtempSync(join(tmpdir(), 'workbench-pin-invalid-'));
+    const file = join(dir, 'kustomization.yaml');
+    const original = read(pinFile);
+    const text =
+      scenario === 'malformed suffix'
+        ? original.replace(placeholder, `${placeholder}f`)
+        : scenario === 'misplaced placeholder'
+          ? original.replace(placeholder, `${image}@sha256:${'b'.repeat(64)}`) +
+            `\n# ${placeholder}\n`
+          : scenario === 'wrong target name'
+            ? original.replace('name: core', 'name: web')
+            : scenario === 'wrong target kind'
+              ? original.replace('kind: StatefulSet', 'kind: Deployment')
+              : original;
+    const digest = `sha256:${(scenario === 'zero digest' ? '0' : 'a').repeat(64)}`;
+    try {
+      writeFileSync(file, text);
+      expect(
+        spawnSync('bash', ['scripts/release/set-workbench-digest.sh', digest, file]).status
+      ).not.toBe(0);
+      expect(read(file)).toBe(text);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
