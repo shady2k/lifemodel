@@ -1,6 +1,11 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer as createHttpsServer, Agent, request, type Server } from 'node:https';
-import { createServer as createHttpServer, type IncomingHttpHeaders } from 'node:http';
+import {
+  createServer as createHttpServer,
+  Agent as HttpAgent,
+  request as httpRequest,
+  type IncomingHttpHeaders,
+} from 'node:http';
 import type { Socket } from 'node:net';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir, networkInterfaces } from 'node:os';
@@ -89,7 +94,7 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
     tokenFile = join(directory, 'token');
     caFile = join(directory, 'ca');
     await writeFile(caFile, certificate.ca);
-    client = new Agent({ keepAlive: true, ca: certificate.ca, maxSockets: 4 });
+    client = new Agent({ keepAlive: true, ca: certificate.ca, maxSockets: 32 });
     client.on('error', () => undefined);
     api = createHttpsServer({ cert: certificate.cert, key: certificate.key }, (req, res) => {
       req.on('error', () => undefined);
@@ -347,12 +352,14 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
     return new Promise<{ status: number; body: any; text: string; headers: IncomingHttpHeaders }>(
       (resolve, reject) => {
         const data = body === undefined ? undefined : JSON.stringify(body);
-        const req = request(
-          new URL(path, base),
+        const url = new URL(path, base);
+        const requestFn = url.protocol === 'https:' ? request : httpRequest;
+        const req = requestFn(
+          url,
           {
             method: data === undefined ? 'GET' : 'POST',
-            agent: client,
-            signal: AbortSignal.timeout(3000),
+            agent: url.protocol === 'https:' ? client : false,
+            signal: AbortSignal.timeout(10000),
             headers: {
               ...headers,
               ...(data === undefined ? {} : { 'content-type': 'application/json' }),
@@ -396,6 +403,7 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
       path: string;
     }[] = [];
     let primaryFailure = false;
+    let holdUpstream: (() => Promise<void>) | undefined;
     const logs: RecordedLine[] = [];
     const logger = createRecordingLogger(logs);
     const address = Object.values(networkInterfaces())
@@ -415,6 +423,7 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
         for await (const chunk of req) chunks.push(Buffer.from(chunk));
         const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
         attempts.push({ body, headers: req.headers, path: req.url ?? '' });
+        await holdUpstream?.();
         if (primaryFailure && req.headers.authorization === `Bearer ${MODEL_KEY}`) {
           res.writeHead(503).end('PRIVATE-UPSTREAM-FAILURE-CANARY');
           return;
@@ -473,7 +482,7 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
         invalidate: () => undefined,
         keys: () => [...slots.values()].map((slot) => slot.key!),
       },
-      timeouts: { connect: 1000, firstByte: 1000, overall: 2000 },
+      timeouts: { connect: 5000, firstByte: 8000, overall: 9000 },
     });
     const authorized = Promise.withResolvers<void>();
     const observedAccess = {
@@ -491,11 +500,28 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
       logger,
     });
     const url = await listen(listener.server);
+    const httpUrls: string[] = [];
+    for (const server of [app.api, app.status]) {
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('no gateway listener');
+      httpUrls.push(`http://127.0.0.1:${address.port}`);
+      cleanup.push(async () => {
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      });
+    }
     cleanup.push(async () => {
       await listener.close();
+      app.close();
     });
     return {
       url,
+      coreModel: () => call(httpUrls[0]!, '/v1/models', {}),
+      status: async () => (await call(httpUrls[1]!, '/status', {})).body,
+      holdUpstream: (hold: () => Promise<void>) => {
+        holdUpstream = hold;
+      },
       attempts,
       logs,
       authorized: authorized.promise,
@@ -554,6 +580,62 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
       expect((await registry.read(f.task.id))?.startedAt).toEqual(f.startedAt);
       expect(await access.authorize(f.token)).toEqual({ taskId: f.task.id });
     }
+  });
+
+  it('verifies an executor Job after API defaulting, quantity canonicalization and generated ownership fields', async () => {
+    const f = await fixture();
+    const job = f.job as any;
+    Object.assign(job.metadata, {
+      generation: 1,
+      creationTimestamp: f.startedAt.toISOString(),
+      managedFields: [],
+    });
+    Object.assign(job.spec, {
+      selector: { matchLabels: { 'batch.kubernetes.io/controller-uid': f.task.jobUid } },
+      suspend: false,
+      manualSelector: false,
+      completionMode: 'NonIndexed',
+    });
+    const template = job.spec.template;
+    template.metadata.creationTimestamp = null;
+    Object.assign(template.metadata.labels, {
+      'batch.kubernetes.io/controller-uid': f.task.jobUid,
+      'controller-uid': f.task.jobUid,
+      'batch.kubernetes.io/job-name': f.task.jobName,
+      'job-name': f.task.jobName,
+    });
+    Object.assign(template.spec, {
+      schedulerName: 'default-scheduler',
+      serviceAccount: 'task',
+      hostNetwork: false,
+      hostPID: false,
+      hostIPC: false,
+      shareProcessNamespace: false,
+      preemptionPolicy: 'PreemptLowerPriority',
+      priority: 0,
+    });
+    const container = template.spec.containers[0];
+    Object.assign(container, {
+      terminationMessagePath: '/dev/termination-log',
+      terminationMessagePolicy: 'File',
+      resources: {
+        requests: { cpu: '0.5', memory: '512Mi' },
+        limits: { cpu: '0.5', memory: '512Mi' },
+      },
+    });
+    const claim = template.spec.volumes.find((v: any) => v.ephemeral).ephemeral.volumeClaimTemplate;
+    claim.metadata = { creationTimestamp: null };
+    claim.spec.volumeMode = 'Filesystem';
+    claim.spec.resources.requests.storage = '10Gi';
+    expect(await access.start(startBody(f.task), f.token)).toMatchObject({ start: true });
+    expect(await access.authorize(f.token)).toEqual({ taskId: f.task.id });
+    expect((await projection(f.task.id))[0]).toMatchObject({
+      job_uid: f.task.jobUid,
+      pod_uid: f.podUid,
+    });
+    // Generated ownership is ignored by hashing only after identity validation.
+    template.metadata.labels['batch.kubernetes.io/controller-uid'] = 'foreign-job';
+    await expect(access.authorize(f.token)).rejects.toMatchObject({ status: 403 });
   });
 
   it.each([
@@ -987,6 +1069,10 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
       const f = await fixture();
       const g = await gateway();
       expect((await g.start(f.task, f.token)).status).toBe(200);
+      expect((await g.coreModel()).status).toBe(200);
+      const before = await g.status();
+      expect(before.state).toBe('ok');
+      const attemptsBefore = [...g.attempts];
       const payload = JSON.stringify({
         model: 'default',
         messages: [{ role: 'user', content: PROMPT }],
@@ -1041,13 +1127,85 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
       }
       const refused = await response;
       expect(refused.status).toBe(403);
-      expect(g.attempts).toEqual([]);
+      expect(g.attempts).toEqual(attemptsBefore);
+      expect(await g.status()).toEqual(before);
       for (const secret of [MODEL_KEY, HARNESS_KEY, MODULE_TOKEN, f.token, PROMPT]) {
         expect(refused.text).not.toContain(secret);
         expect(JSON.stringify(g.logs)).not.toContain(secret);
       }
     }
   );
+  it.each(['revoke', 'deadline'] as const)(
+    'rechecks %s after the shared HTTP agent queues a task behind 16 core requests',
+    async (change) => {
+      const f = await fixture();
+      const g = await gateway();
+      expect((await g.start(f.task, f.token)).status).toBe(200);
+      const full = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      g.holdUpstream(async () => {
+        if (g.attempts.length === 16) full.resolve();
+        await release.promise;
+      });
+      const core = Array.from({ length: 16 }, () => g.coreModel());
+      void Promise.all(core).catch(() => undefined);
+      await full.promise;
+      const queued = Promise.withResolvers<void>();
+      const addRequest = HttpAgent.prototype.addRequest;
+      const spy = vi.spyOn(HttpAgent.prototype, 'addRequest').mockImplementation(function (
+        ...args
+      ) {
+        Reflect.apply(addRequest, this, args);
+        if (Object.values(this.requests).flat().includes(args[0])) queued.resolve();
+      });
+      let taskRequest: ReturnType<typeof g.model> | undefined;
+      try {
+        let deadline: Date | undefined;
+        if (change === 'deadline') {
+          deadline = (
+            await stores.postgres.query<{ at: Date }>(
+              "SELECT clock_timestamp()+interval '2 seconds' AS at"
+            )
+          ).rows[0]!.at;
+          await registry.advanceAccessIntent(f.task.id, {
+            mode: 'active',
+            softDueAt: deadline,
+            hardStopAt: deadline,
+          });
+        }
+        taskRequest = g.model(f.token);
+        void taskRequest.catch(() => undefined);
+        await queued.promise; // Real Agent.addRequest pending queue, not a timer or inferred tick.
+        expect(g.attempts).toHaveLength(16);
+        if (change === 'revoke') await changeIntent(f.task, 'revoked');
+        else
+          await expect
+            .poll(
+              async () =>
+                (
+                  await stores.postgres.query<{ expired: boolean }>(
+                    'SELECT clock_timestamp()>=$1::timestamptz AS expired',
+                    [deadline]
+                  )
+                ).rows[0]!.expired,
+              { timeout: 4000 }
+            )
+            .toBe(true);
+        release.resolve();
+        expect((await taskRequest).status).toBe(403);
+        expect((await Promise.all(core)).map((response) => response.status)).toEqual(
+          Array(16).fill(200)
+        );
+        expect(g.attempts).toHaveLength(16);
+      } finally {
+        release.resolve();
+        spy.mockRestore();
+        await Promise.allSettled([...core, ...(taskRequest ? [taskRequest] : [])]);
+      }
+    },
+    15000
+  );
+
   it('keeps two model callers isolated, rotates the task token and refuses both routes immediately after canonical revoke', async () => {
     const a = await fixture('a');
     const b = await fixture('b');

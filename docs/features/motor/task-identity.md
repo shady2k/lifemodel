@@ -77,12 +77,15 @@ matching projection. The canonical intent must be `active` or `wrapping`, never
 `revoked`, and database time must precede the hard deadline. A stale/paused
 projection cannot defeat canonical revocation. The intent's share lock orders the
 short authorization with lifecycle updates; no SQL lock spans model network I/O.
-After body intake, slot custody and destination resolution, the listener repeats
-fresh Kubernetes and SQL authorization immediately before each upstream dispatch,
-including reserve failover. Pausing a body or a custody/DNS read cannot preserve
-old authority. An upstream request dispatched before revocation can finish; no
+After body intake, slot custody, destination resolution and shared-agent socket
+allocation/connection (including TLS), the listener repeats fresh Kubernetes and
+SQL authorization before sending any HTTP bytes, including reserve failover.
+Pausing a body, custody/DNS read or socket queue cannot preserve old authority. An upstream request dispatched before revocation can finish; no
 next request may authorize after committed revoke. This is request-level mediation, not cancellation of
 already-dispatched upstream inference or a cross-service transaction.
+
+Task identity/lifecycle authorization refusals are caller outcomes. They do not
+change shared provider slot health, model health or `outageSince`.
 
 ## Bounds, caching and failures
 

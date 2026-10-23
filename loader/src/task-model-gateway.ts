@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import type { createModelGateway } from './model-gateway-app.js';
 import type { createTaskIdentity, TaskStart } from './task-identity.js';
 import { StorageAccessError } from './storage-access-error.js';
-import { GatewayError } from './model-gateway-response.js';
+import { TaskAuthorizationError } from './model-gateway-response.js';
 import type { LoaderLogger } from './logger.js';
 export const TASK_TOKEN_HEADER = 'x-lifemodel-task-token';
 interface Options {
@@ -107,7 +107,7 @@ export function createTaskModelGateway(options: Options) {
               error instanceof StorageAccessError
                 ? error
                 : new StorageAccessError(503, 'task_unavailable');
-            throw new GatewayError(failure.code, failure.status);
+            throw new TaskAuthorizationError(failure.code, failure.status);
           }
         });
       }

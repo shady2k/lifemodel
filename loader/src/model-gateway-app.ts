@@ -8,6 +8,8 @@ import {
 } from 'node:http';
 import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
 import { once } from 'node:events';
+import { TLSSocket } from 'node:tls';
+import type { Socket } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import {
   renderAttemptHeaders,
@@ -27,6 +29,7 @@ import type { LoaderLogger } from './logger.js';
 import {
   badResponse,
   GatewayError,
+  TaskAuthorizationError,
   MAX_BODY,
   parseSafe,
   record,
@@ -442,10 +445,6 @@ export function createModelGateway(options: GatewayOptions) {
     });
     signal.throwIfAborted();
     if (Date.now() >= connectDeadline) throw new GatewayError('timeout');
-    // Body intake, custody and DNS may wait. A task needs fresh canonical
-    // authority at actual dispatch, and again before any reserve attempt.
-    if (authorizeTask) await wait(authorizeTask(signal), signal);
-    signal.throwIfAborted();
     const url = modelEndpointUrl(slot.baseUrl, payload ? 'chat/completions' : 'models');
     const body = payload
       ? JSON.stringify({
@@ -480,22 +479,27 @@ export function createModelGateway(options: GatewayOptions) {
     });
     // A permanent safe listener also handles destruction after the response event.
     req.on('error', () => {
-      /* Consumed by the response wait or the response iterator. */
+      // Also fail a socket/authorization wait if transport dies before response intake.
+      if (!active.aborted) controller.abort(new GatewayError('unreachable'));
     });
     const connectTimer = schedule(timeout, Math.max(1, connectDeadline - Date.now()));
     const byteTimer = schedule(timeout, Math.max(1, startedAt + limits.firstByte - Date.now()));
-    req.on('socket', (socket) => {
+    try {
+      // request() may wait in the bounded shared agent queue. It sends no HTTP
+      // bytes until end(): first obtain a connected (TLS-ready) socket, then
+      // refresh task authority after every network wait, including reuse.
+      const [socket] = await (once(req, 'socket', { signal: active }) as Promise<[Socket]>);
       if (!sockets.has(socket)) {
         sockets.add(socket);
         socket.on('error', () => undefined);
       }
-      if (!socket.connecting) cancel(connectTimer);
-      else
-        socket.once(url.protocol === 'https:' ? 'secureConnect' : 'connect', () => {
-          cancel(connectTimer);
+      if (socket instanceof TLSSocket ? !socket.authorized : socket.connecting)
+        await once(socket, url.protocol === 'https:' ? 'secureConnect' : 'connect', {
+          signal: active,
         });
-    });
-    try {
+      cancel(connectTimer);
+      if (authorizeTask) await wait(authorizeTask(active), active);
+      active.throwIfAborted();
       const responsePromise = once(req, 'response', { signal: active }) as Promise<
         [IncomingMessage]
       >;
@@ -691,7 +695,8 @@ export function createModelGateway(options: GatewayOptions) {
           return;
         } catch (error) {
           last = safeError(signal.aborted ? signal.reason : error);
-          if (last.code === 'client_disconnected') throw last;
+          if (last.code === 'client_disconnected' || last instanceof TaskAuthorizationError)
+            throw last;
           recordFailure(name, last.code, identity);
           if (
             signal.aborted ||
@@ -706,11 +711,9 @@ export function createModelGateway(options: GatewayOptions) {
       throw last;
     } catch (error) {
       const failure = safeError(signal.aborted ? signal.reason : error);
-      const callerOutcome = [
-        'client_disconnected',
-        'invalid_request',
-        'request_too_large',
-      ].includes(failure.code);
+      const callerOutcome =
+        failure instanceof TaskAuthorizationError ||
+        ['client_disconnected', 'invalid_request', 'request_too_large'].includes(failure.code);
       if (!callerOutcome) {
         outcomeRevision++;
         health.lastAttemptAt = requestStartedAt;
