@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import YAML from 'yaml';
 import { evaluate } from '@marcbachmann/cel-js';
 
@@ -159,10 +160,38 @@ describe('task admission (actual CEL expression evaluation; API-server typecheck
         objects.find(
           (item: any) =>
             item.kind === 'ValidatingAdmissionPolicyBinding' &&
-            item.spec.policyName === guard.metadata.name
-        )?.spec.validationActions
-      ).toEqual(['Deny']);
+            item.metadata.name === guard.metadata.name
+        )?.spec
+      ).toEqual({ policyName: guard.metadata.name, validationActions: ['Deny'] });
       expect(outcomes(kind, kind === 'Job' ? job() : pod())).toEqual([]);
+    }
+  );
+  it('uses CREATE-only controller probes without requiring Pod get rights', () => {
+    const instructions = readFileSync('tests/fixtures/task-admission/README.md', 'utf8');
+    const controllerCommands = instructions
+      .split('\n')
+      .filter((line) => line.startsWith('node ') && line.includes(`--as=${controller}`));
+    expect(controllerCommands).toHaveLength(2);
+    for (const command of controllerCommands)
+      expect(command).toContain(`kubectl --as=${controller} create --dry-run=server -f -`);
+  });
+  it.each(['Job', 'Pod'] as const)(
+    '%s sidecar probe has native-valid distinct container names before CEL rejects it',
+    (kind) => {
+      const object = JSON.parse(
+        execFileSync(
+          process.execPath,
+          ['tests/fixtures/task-admission/probe.mjs', 'sidecar', kind],
+          {
+            encoding: 'utf8',
+          }
+        )
+      );
+      const spec = kind === 'Job' ? object.spec.template.spec : object.spec;
+      const names = [...spec.containers, ...spec.initContainers].map((c: any) => c.name);
+      expect(new Set(names).size).toBe(names.length);
+      for (const name of names) expect(name).toMatch(/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/);
+      expect(outcomes(kind, object)).toContainEqual(expect.stringMatching(/^task launcher:/));
     }
   );
   it('permits core Job creation and actual k3s per-controller Pod identity only', () => {
@@ -330,13 +359,13 @@ describe('task admission (actual CEL expression evaluation; API-server typecheck
       const spec = (o: any) => (kind === 'Job' ? o.spec.template.spec : o.spec);
       for (const mutate of [
         (s: any) => {
-          s.containers.push(structuredClone(s.containers[0]));
+          s.containers.push({ ...structuredClone(s.containers[0]), name: 'task-extra' });
         },
         (s: any) => {
-          s.initContainers = [structuredClone(s.containers[0])];
+          s.initContainers = [{ ...structuredClone(s.containers[0]), name: 'task-init' }];
         },
         (s: any) => {
-          s.ephemeralContainers = [structuredClone(s.containers[0])];
+          s.ephemeralContainers = [{ ...structuredClone(s.containers[0]), name: 'task-debug' }];
         },
         (s: any) => {
           s.containers[0].image = 'ghcr.io/shady2k/lifemodel-workbench:latest';
@@ -488,6 +517,53 @@ describe('task admission (actual CEL expression evaluation; API-server typecheck
     );
   });
 
+  it.each(['Job', 'Pod'] as const)(
+    '%s permits rotating CA/identity directory mounts and private work subpaths',
+    (kind) => {
+      const object = kind === 'Job' ? job() : pod();
+      const spec = kind === 'Job' ? object.spec.template.spec : object.spec;
+      spec.containers[0].volumeMounts.push(
+        { name: 'identity', mountPath: '/var/run/task-identity', readOnly: true },
+        { name: 'work', mountPath: '/work', subPath: 'workspace' },
+        { name: 'work', mountPath: '/scratch', subPathExpr: 'scratch' }
+      );
+      expect(outcomes(kind, object)).toEqual([]);
+      spec.volumes[1] = {
+        name: 'ca',
+        projected: { sources: [{ configMap: { name: 'lifemodel-ca' } }] },
+      };
+      expect(outcomes(kind, object)).toEqual([]);
+    }
+  );
+  it.each(
+    (['Job', 'Pod'] as const).flatMap((kind) =>
+      ['token', 'CA', 'projected CA'].flatMap((source) =>
+        ['subPath', 'subPathExpr'].map((field) => [kind, source, field] as const)
+      )
+    )
+  )('%s rejects %s %s mounts that freeze rotation', (kind, source, field) => {
+    reject(
+      kind,
+      (object) => {
+        const spec = kind === 'Job' ? object.spec.template.spec : object.spec;
+        if (source === 'projected CA')
+          spec.volumes[1] = {
+            name: 'ca',
+            projected: { sources: [{ configMap: { name: 'lifemodel-ca' } }] },
+          };
+        spec.containers[0].volumeMounts = [
+          {
+            name: source === 'token' ? 'identity' : 'ca',
+            mountPath: '/var/run/task-file',
+            readOnly: true,
+            [field]: source === 'token' ? 'model' : 'ca.crt',
+          },
+        ];
+      },
+      'volumes'
+    );
+  });
+
   it('does not exempt Pod UPDATE or debug ephemeral-container subresources', () => {
     const old = pod();
     expect(outcomes('Pod', pod(), 'UPDATE', old)).toEqual([]);
@@ -499,7 +575,9 @@ describe('task admission (actual CEL expression evaluation; API-server typecheck
         p.metadata.ownerReferences[0].uid = '22222222-2222-2222-2222-222222222222';
       },
       (p: any) => {
-        p.spec.ephemeralContainers = [structuredClone(p.spec.containers[0])];
+        p.spec.ephemeralContainers = [
+          { ...structuredClone(p.spec.containers[0]), name: 'task-debug' },
+        ];
       },
     ]) {
       const changed = pod();

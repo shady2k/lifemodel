@@ -21,7 +21,8 @@
 # arbitrary environment (NODE_OPTIONS/LD_PRELOAD would bypass the start fence).
 # manualSelector/suspend default false in Kubernetes, so false is permitted.
 # Generic ephemeral claims cannot select/prebind/clone another task's storage.
-# CA/identity mounts must be read-only; only fresh working volumes are writable.
+# CA/identity mounts must be read-only directories (no subPath/subPathExpr), so
+# token and CA rotation reaches consumers; private working-volume subpaths are allowed.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -193,7 +194,8 @@ spec:
           (has(s.configMap) && s.configMap.name == 'lifemodel-ca'))))) &&
         variables.p.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m,
          variables.p.volumes.exists(v, v.name == m.name &&
-          ((has(v.emptyDir) || has(v.ephemeral)) || (has(m.readOnly) && m.readOnly == true)))))
+          ((has(v.emptyDir) || has(v.ephemeral)) ||
+           (has(m.readOnly) && m.readOnly == true && !has(m.subPath) && !has(m.subPathExpr))))))
       message: 'task volumes: private emptyDir/ephemeral and read-only public CA or closed-audience identity only'
 ---
 apiVersion: admissionregistration.k8s.io/v1
@@ -338,7 +340,8 @@ spec:
           (has(s.configMap) && s.configMap.name == 'lifemodel-ca'))))) &&
         variables.p.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m,
          variables.p.volumes.exists(v, v.name == m.name &&
-          ((has(v.emptyDir) || has(v.ephemeral)) || (has(m.readOnly) && m.readOnly == true)))))
+          ((has(v.emptyDir) || has(v.ephemeral)) ||
+           (has(m.readOnly) && m.readOnly == true && !has(m.subPath) && !has(m.subPathExpr))))))
       message: 'task volumes: private emptyDir/ephemeral and read-only public CA or closed-audience identity only'
 ---
 apiVersion: admissionregistration.k8s.io/v1

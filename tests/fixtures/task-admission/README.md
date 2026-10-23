@@ -20,11 +20,16 @@ source `pkg/daemons/control/server.go` enables
 created Pod after the workbench leaf pins its image; no broad controller-group
 exception is allowed.
 
-Baseline CREATEs must succeed (dry run; fake image never executes):
+Baseline CREATEs must succeed (dry run; fake image never executes). First confirm
+that `task-admission-probe` Job and `task-admission-probe-pod` Pod are absent in
+`lifemodel-motor`; if either exists, clean up that previous probe before continuing.
+Keep the Job absent throughout the CREATE probes so `apply` never becomes UPDATE.
+The controller Pod probes use `create`, because the Job controller has no Pod `get`
+right and `apply` would fail its preliminary GET before admission:
 
 ```sh
 node tests/fixtures/task-admission/probe.mjs valid Job | kubectl --as=system:serviceaccount:lifemodel:core apply --dry-run=server -f -
-node tests/fixtures/task-admission/probe.mjs valid Pod | kubectl --as=system:serviceaccount:kube-system:job-controller apply --dry-run=server -f -
+node tests/fixtures/task-admission/probe.mjs valid Pod | kubectl --as=system:serviceaccount:kube-system:job-controller create --dry-run=server -f -
 ```
 
 Each command below must fail. The error must name `task-job-admission` or
@@ -50,7 +55,7 @@ node tests/fixtures/task-admission/probe.mjs volumes Job | kubectl --as=system:s
 # hostPath may be caught by PSA first; this CA-reference variant isolates CEL:
 node tests/fixtures/task-admission/probe.mjs ca-reference Job | kubectl --as=system:serviceaccount:lifemodel:core apply --dry-run=server -f -
 node tests/fixtures/task-admission/probe.mjs audience Job | kubectl --as=system:serviceaccount:lifemodel:core apply --dry-run=server -f -
-node tests/fixtures/task-admission/probe.mjs owner Pod | kubectl --as=system:serviceaccount:kube-system:job-controller apply --dry-run=server -f -
+node tests/fixtures/task-admission/probe.mjs owner Pod | kubectl --as=system:serviceaccount:kube-system:job-controller create --dry-run=server -f -
 ```
 
 PSA may reject privileged/hostPath violations before this policy. Such a refusal

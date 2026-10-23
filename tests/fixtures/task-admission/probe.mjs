@@ -145,7 +145,7 @@ const variants = {
     podSpec.containers[0].image = 'ghcr.io/shady2k/lifemodel-workbench:latest';
   },
   sidecar() {
-    podSpec.initContainers = [structuredClone(podSpec.containers[0])];
+    podSpec.initContainers = [{ ...structuredClone(podSpec.containers[0]), name: 'task-init' }];
   },
   security() {
     podSpec.containers[0].securityContext.readOnlyRootFilesystem = false;

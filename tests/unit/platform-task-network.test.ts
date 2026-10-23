@@ -83,6 +83,42 @@ describe('task namespace network and launch rights', () => {
         ingress: [{ from: [peer('lifemodel-motor', 'task')], ports: [tcp(port)] }],
       });
     }
+    // NetworkPolicy permits add together. Scan every rendered policy, not just
+    // the two named rules: an extra policy can reopen either task listener.
+    const taskIngress = objects
+      .filter((o) => o.kind === 'NetworkPolicy')
+      .flatMap((o) =>
+        (o.spec.ingress ?? [])
+          .filter(
+            (r: any) =>
+              !r.ports?.length ||
+              r.ports.some(
+                (p: any) =>
+                  (p.protocol ?? 'TCP') === 'TCP' &&
+                  // Missing ports allow all; named ports may resolve to either
+                  // listener, so do not assume they are safe. Ranges are inclusive.
+                  (typeof p.port !== 'number' ||
+                    [8446, 8447].some((port) => p.port <= port && port <= (p.endPort ?? p.port)))
+              )
+          )
+          .map((rule: any) => ({
+            namespace: o.metadata.namespace,
+            podSelector: o.spec.podSelector,
+            rule,
+          }))
+      );
+    expect(taskIngress).toEqual(
+      (
+        [
+          ['lifemodel-system', 'model-gateway', 8446],
+          ['lifemodel', 'core', 8447],
+        ] as const
+      ).map(([namespace, target, port]) => ({
+        namespace,
+        podSelector: labels(target),
+        rule: { from: [peer('lifemodel-motor', 'task')], ports: [tcp(port)] },
+      }))
+    );
     const services = objects.filter((o) => o.kind === 'Service');
     expect(services.find((o) => o.metadata.name === 'model-gateway').spec.ports).toContainEqual({
       name: 'task',
