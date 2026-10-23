@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import YAML from 'yaml';
-import { evaluate } from '@marcbachmann/cel-js';
+import {
+  evaluateTaskAdmission as outcomes,
+  taskAdmissionPolicy as policy,
+} from '../helpers/task-admission.js';
 
 const a0 = 'deploy/platform/a0/';
 const resources = YAML.parse(readFileSync(`${a0}kustomization.yaml`, 'utf8')).resources;
@@ -101,33 +104,6 @@ function pod(): any {
     },
     spec: source.spec.template.spec,
   };
-}
-function policy(kind: 'Job' | 'Pod'): any {
-  return objects.find(
-    (item: any) =>
-      item.kind === 'ValidatingAdmissionPolicy' &&
-      item.metadata.name === `task-${kind.toLowerCase()}-admission`
-  );
-}
-function outcomes(
-  kind: 'Job' | 'Pod',
-  object: any,
-  operation = 'CREATE',
-  oldObject: any = null,
-  username = kind === 'Job' ? core : controller
-): string[] {
-  const spec = policy(kind).spec;
-  const context: any = {
-    object,
-    oldObject,
-    request: { operation, namespace: 'lifemodel-motor', userInfo: { username } },
-    variables: {},
-  };
-  for (const variable of spec.variables ?? [])
-    context.variables[variable.name] = evaluate(variable.expression, context);
-  return spec.validations
-    .filter((rule: any) => evaluate(rule.expression, context) !== true)
-    .map((rule: any) => rule.message);
 }
 function reject(kind: 'Job' | 'Pod', mutate: (value: any) => void, family: string) {
   const object = kind === 'Job' ? job() : pod();
@@ -458,20 +434,101 @@ describe('task admission (actual CEL expression evaluation; API-server typecheck
         reject(kind, (o) => mutate(spec(o)), 'security');
     }
   );
-  it.each(['Job', 'Pod'] as const)('%s rejects env secret refs and envFrom injection', (kind) => {
-    for (const field of ['env', 'envFrom'])
+  it.each(['Job', 'Pod'] as const)(
+    '%s permits only the ten literal launch-configuration environment names',
+    (kind) => {
+      const names = [
+        'LIFEMODEL_STORAGE_ENDPOINT',
+        'LIFEMODEL_STORAGE_SPACE',
+        'LIFEMODEL_STORAGE_TOKEN_FILE',
+        'LIFEMODEL_STORAGE_CA_FILE',
+        'LIFEMODEL_TASK_CHANNEL_ENDPOINT',
+        'LIFEMODEL_TASK_CHANNEL_TOKEN_FILE',
+        'LIFEMODEL_TASK_CHANNEL_CA_FILE',
+        'LIFEMODEL_TASK_MODEL_ENDPOINT',
+        'LIFEMODEL_TASK_MODEL_TOKEN_FILE',
+        'LIFEMODEL_TASK_MODEL_CA_FILE',
+      ];
+      for (const name of names) {
+        const object = kind === 'Job' ? job() : pod();
+        const c = (kind === 'Job' ? object.spec.template.spec : object.spec).containers[0];
+        c.env = [{ name, value: 'literal-configuration' }];
+        expect(outcomes(kind, object)).toEqual([]);
+      }
+      const object = kind === 'Job' ? job() : pod();
+      const c = (kind === 'Job' ? object.spec.template.spec : object.spec).containers[0];
+      c.env = names.map((name) => ({ name, value: 'literal-configuration' }));
+      c.envFrom = [];
+      expect(outcomes(kind, object)).toEqual([]);
+      c.env = [];
+      expect(outcomes(kind, object)).toEqual([]);
+    }
+  );
+  it.each(['Job', 'Pod'] as const)(
+    '%s rejects unlisted or nonliteral env configuration and every envFrom source',
+    (kind) => {
+      for (const name of [
+        'KEY',
+        'NODE_OPTIONS',
+        'LD_PRELOAD',
+        'PATH',
+        'LIFEMODEL_STORAGE_ENDPOINT_EXTRA',
+        'LIFEMODEL_TASK_CHANNEL_TOKEN',
+        'LIFEMODEL_TASK_MODEL_TOKEN',
+        'lifemodel_storage_endpoint',
+      ])
+        reject(
+          kind,
+          (o) => {
+            const c = (kind === 'Job' ? o.spec.template.spec : o.spec).containers[0];
+            c.env = [
+              { name: 'LIFEMODEL_STORAGE_SPACE', value: 'space-1' },
+              { name, value: 'unlisted' },
+            ];
+          },
+          'environment'
+        );
+      for (const valueFrom of [
+        { secretKeyRef: { name: 'key', key: 'value' } },
+        { configMapKeyRef: { name: 'config', key: 'value' } },
+        { fieldRef: { fieldPath: 'metadata.name' } },
+        { resourceFieldRef: { resource: 'limits.cpu' } },
+      ])
+        for (const literal of [false, true])
+          reject(
+            kind,
+            (o) => {
+              const c = (kind === 'Job' ? o.spec.template.spec : o.spec).containers[0];
+              c.env = [
+                {
+                  name: 'LIFEMODEL_STORAGE_ENDPOINT',
+                  ...(literal ? { value: 'literal' } : {}),
+                  valueFrom,
+                },
+              ];
+            },
+            'environment'
+          );
       reject(
         kind,
         (o) => {
           const c = (kind === 'Job' ? o.spec.template.spec : o.spec).containers[0];
-          c[field] =
-            field === 'env'
-              ? [{ name: 'KEY', valueFrom: { secretKeyRef: { name: 'key', key: 'value' } } }]
-              : [{ secretRef: { name: 'key' } }];
+          c.env = [{ name: 'LIFEMODEL_STORAGE_ENDPOINT' }];
         },
         'environment'
       );
-  });
+      for (const source of [{ secretRef: { name: 'key' } }, { configMapRef: { name: 'config' } }])
+        reject(
+          kind,
+          (o) => {
+            const c = (kind === 'Job' ? o.spec.template.spec : o.spec).containers[0];
+            c.env = [{ name: 'LIFEMODEL_STORAGE_SPACE', value: 'space-1' }];
+            c.envFrom = [source];
+          },
+          'environment'
+        );
+    }
+  );
   it.each(['Job', 'Pod'] as const)('%s closes volume sources and token audience sets', (kind) => {
     const spec = (o: any) => (kind === 'Job' ? o.spec.template.spec : o.spec);
     for (const volume of [

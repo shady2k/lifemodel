@@ -41,9 +41,13 @@ launch identity, normal FIFO slot reservation and the canonical access-intent
 writer. `core.tasks`, `core.task_launches` and `core.task_admission` hold durable
 state; `task_access.intents` is initialized from observed Job start time before
 verified binding and updated monotonically in place. No state lives under
-`DATA_PATH`. The adapter is not yet wired to cognition/Jobs: later task-runtime
-leaves add launch reconciliation, binding, mailbox and sealed finalization.
-See the [task registry contract](features/motor/task-registry.md).
+`DATA_PATH`. The platform-mode container wires this registry to the separate
+`TaskExecutor` port, Kubernetes Jobs adapter and allocation-first launch
+reconciler. Deterministic names and exact template/UID adoption recover unknown
+create replies. Startup/watch resync removes unknown or tombstoned Jobs by exact
+UID; no Job status alone determines outcome. Binding, mailbox and sealed
+finalization remain later seams. See the [task registry contract](features/motor/task-registry.md)
+and [task launch contract](features/motor/task-launch.md).
 The existing Motor Cortex below remains unchanged until its removal task.
 
 ### Motor Cortex (Runtime Service)

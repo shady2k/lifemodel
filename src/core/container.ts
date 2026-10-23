@@ -74,6 +74,11 @@ import {
 import { createBusSignalStream, type BusSnapshot } from './bus-stream.js';
 import { createStorageControlClient } from './storage-control-client.js';
 import { createStorageRetentionReconciler } from './storage-retention.js';
+import { createPlatformSettingsReader } from '../config/platform-settings.js';
+import { createPostgresTaskRegistry } from '../storage/postgres-task-registry.js';
+import type { TaskService } from '../ports/tasks.js';
+import { createKubernetesTaskExecutor } from './kubernetes-task-executor.js';
+import { createTaskLaunchReconciler, taskWorkbenchImage } from './task-launch.js';
 import { createScopedScriptRunner } from './scoped-script-runner.js';
 import { createBrowserAuthPrimitive } from './browser-auth-primitive.js';
 import { loadAllPlugins } from './plugin-discovery.js';
@@ -205,6 +210,8 @@ export interface Container {
   recipientRegistry: IRecipientRegistry | null;
   /** Motor Cortex service for code execution */
   motorCortex: MotorCortex | null;
+  /** Separate cluster Job path; never installed in PluginPrimitives. */
+  taskService: TaskService | null;
   /** Durable inbound log (entries leave it on the turn's recorded outcome; lifemodel-ctc.2.1) */
   inboundStream: InboundMessageStream | null;
   /** Fresh creature state for the web module; no Valkey client crosses this seam. */
@@ -1208,6 +1215,8 @@ export async function createContainerAsync(
   if (Boolean(controlTokenFile) !== Boolean(controlCaFile)) {
     throw new Error('Storage control requires both token and instance CA projections');
   }
+  if (!mergedConfig.motorCortex.enabled && controlTokenFile && controlCaFile)
+    taskWorkbenchImage(process.env['LIFEMODEL_TASK_WORKBENCH_IMAGE']);
   const storageRetention =
     controlTokenFile && controlCaFile
       ? createStorageRetentionReconciler({
@@ -1227,6 +1236,63 @@ export async function createContainerAsync(
         })
       : undefined;
   storageRetention?.start();
+
+  // The storage projections identify platform mode. MOTOR_CORTEX_ENABLED=false
+  // keeps the legacy Docker loop disabled; this Job path is separate from it.
+  let taskService: TaskService | null = null;
+  let taskLaunch: ReturnType<typeof createTaskLaunchReconciler> | undefined;
+  const taskLaunchController = new AbortController();
+  if (!mergedConfig.motorCortex.enabled && controlTokenFile && controlCaFile) {
+    const image = taskWorkbenchImage(process.env['LIFEMODEL_TASK_WORKBENCH_IMAGE']);
+    const imageRevision = image.slice(image.indexOf('@') + 1);
+    const registry = createPostgresTaskRegistry({
+      pool: rawPostgres,
+      epoch: snapshotEpoch,
+      settings: createPlatformSettingsReader({ logger }),
+      imageRevision,
+    });
+    const launchRegistry = createPostgresTaskRegistry({
+      pool: rawPostgres,
+      epoch: snapshotEpoch,
+      settings: createPlatformSettingsReader({ logger }),
+      signal: taskLaunchController.signal,
+    });
+    taskService = {
+      accept: async (request) => {
+        const task = await registry.accept(request);
+        void taskLaunch?.resync();
+        return task;
+      },
+      read: (id) => registry.read(id),
+      list: () => registry.list(),
+    };
+    const executor = createKubernetesTaskExecutor();
+    taskLaunch = createTaskLaunchReconciler({
+      registry: launchRegistry,
+      cancelRegistry: () => {
+        taskLaunchController.abort();
+      },
+      executor,
+      storage: createStorageControlClient({
+        origin: 'https://storage-module.lifemodel-system.svc:8444',
+        tokenFile: controlTokenFile,
+        caFile: controlCaFile,
+      }),
+      logger,
+      scanJobs: async (signal) =>
+        (await executor.listJobs(signal)).map((job) => ({
+          name: job.name,
+          uid: job.uid,
+          launchLabel: job.launchLabel,
+          remove: (abortSignal: AbortSignal) => executor.deleteJob(job, abortSignal),
+        })),
+      closeExecutor: () => {
+        executor.close();
+      },
+      waitForChange: (signal) => executor.waitForChange(signal),
+    });
+    taskLaunch.start();
+  }
 
   // Prime the core queue with messages committed to the inbound stream.
   const replayedInbound = await inboundStream.readNew();
@@ -1273,17 +1339,22 @@ export async function createContainerAsync(
   const stopProgress: StopProgress = { step: 'done' };
   shutdown = makeIdempotentShutdown(() => {
     const budget = coreLoop.getStopDrainTimeoutMs();
+    const deadline = Date.now() + budget;
     storageRetention?.stop();
+    const taskDrain = taskLaunch?.stop(deadline);
     outboundDelivery.stop();
     return shutdownSequence({
       logger,
-      deadline: Date.now() + budget,
+      deadline,
       channels: channels.values(),
       coreLoop,
       stateManager,
       recipientRegistry,
       progress: stopProgress,
     }).finally(async () => {
+      // Worker-owned SQL was cancelled at intake stop; drain it inside the same
+      // deadline before closing the shared pool, without touching turn clients.
+      await taskDrain;
       await snapshotRedis.quit();
       await postgres.end();
     });
@@ -1314,6 +1385,7 @@ export async function createContainerAsync(
     pluginLoader,
     recipientRegistry,
     motorCortex,
+    taskService,
     inboundStream,
     creatureState: creatureStateStore,
     stopProgress: () => stopProgress.step,

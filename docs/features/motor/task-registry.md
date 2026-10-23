@@ -4,15 +4,16 @@ The core owns the registry through `src/ports/tasks.ts` and
 `src/storage/postgres-task-registry.ts`. Migration
 `20261015000019_create_task_registry.sql` expands the existing core schema.
 This is the durable record for the new Job runtime, not a replacement execution
-loop and not the old Motor Cortex `motor-state.ts`. Runtime wiring, launch,
-verified identity, mailbox and finalization are later leaves of stage 3.
+loop and not the old Motor Cortex `motor-state.ts`. The [task launch path](task-launch.md)
+now wires the registry and allocation/Job reconciliation in platform mode.
+Verified identity, mailbox and finalization are later leaves of stage 3.
 
 ## Tables and ownership
 
 | Table | Facts | Writer |
 | --- | --- | --- |
 | `core.tasks` | Immutable launch key, briefing, profile, settings revision, selected harness, workbench image digest, wrap grace, accepted order; public state, candidate/reason, finalization pending and timestamps | Fenced core task registry; later lifecycle/finalization writers use the same fence |
-| `core.task_launches` | One initial attempt and launch per task, deterministic Job name, nullable observed Job/Pod UIDs, irreversible launch tombstone, explicit slot reservation | Fenced core admission/reconciler; verified binding supplies identities, never cognition |
+| `core.task_launches` | One initial attempt and launch per task, deterministic Job name, allocation receipt, template hash, nullable observed Job/Pod UIDs, irreversible launch tombstone, cleanup pending, soft-stop request and explicit slot reservation | Fenced core admission/reconciler; core observes Job UID, verified binding supplies Pod identity, never cognition |
 | `core.task_admission` | One permanent row, locked while accepting, counting/reserving or releasing | Fenced core registry |
 | `task_access.intents` | Stable `(task_id, attempt_id, launch_id)` primary key, revision, mode, finite absolute soft/hard deadlines | Fenced core registry initializes once and only UPDATEs afterward |
 | `task_access.projections` | Verified Job/Pod binding and once-only execution authority | Gateway identity writer in a later leaf; not this registry |
@@ -26,6 +27,10 @@ have a shared finite 15-second SQL-phase bound; lock/statement limits are instal
 the acquired session before entering the fenced seam. Connections are discarded
 after each operation (including a late acquisition after timeout), so abandoned
 queries cannot retain locks and no session settings leak to another pool borrower.
+The launch worker has a separate registry instance with a cancellation signal.
+Stopping discards only that instance's checked-out clients and refuses later work;
+service clients used by the drained turn remain untouched. The worker drains inside
+the core's shared stop deadline before the shared Postgres pool closes.
 Acceptance reads settings before acquiring SQL locks, with a separate 15-second
 bound (at most 30 seconds across its settings and SQL phases). Admission instead
 reads settings after acquiring the admission lock, inside its shared 15-second
@@ -40,9 +45,13 @@ The port is core-only and is not added to `PluginPrimitives`.
 
 `accept` takes the deciding turn's committed effect key as `launchKey`. That turn
 identity is fixed before effects and reused on replay. Reuse with the same
-briefing, structural JSON profile and image digest returns the original record;
-a different payload conflicts. Current settings are not replay payload: replay
-keeps the first settings/harness/grace snapshot even after platform changes.
+briefing, structural JSON profile and caller image digest returns the original record;
+a different payload conflicts. The caller digest is stored separately as
+`request_image_revision`: platform wiring selects the configured deployment image
+only for a new acceptance. An identical replay after deployment keeps the original
+selected image, even if the caller digest differed from it. Current settings are
+not replay payload: replay keeps the first settings/harness/grace snapshot even
+after platform changes.
 
 Domain-separated SHA-256 hashes of the launch key produce task, attempt and
 launch IDs. This avoids a new ID on transaction retry and does not expose the

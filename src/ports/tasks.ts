@@ -36,6 +36,13 @@ export interface TaskAccessIntent {
   readonly hardStopAt: Date;
 }
 
+/** Durable storage allocation response; replay must preserve every receipt field. */
+export interface TaskAllocationReceipt {
+  readonly id: string;
+  readonly space: string;
+  readonly effectKey: string;
+}
+
 export interface TaskRecord {
   readonly id: string;
   readonly launchKey: string;
@@ -59,6 +66,10 @@ export interface TaskRecord {
   readonly launchId: string;
   readonly jobName: string;
   readonly jobUid: string | null;
+  readonly templateHash: string | null;
+  readonly allocationReceipt: TaskAllocationReceipt | null;
+  readonly cleanupPending: boolean;
+  readonly softStopRequestedAt: Date | null;
   readonly podUid: string | null;
   readonly tombstonedAt: Date | null;
   readonly slotReserved: boolean;
@@ -89,8 +100,31 @@ export interface TaskService {
 
 /** Trusted lifecycle writer, not a cognition/plugin tool surface. */
 export interface TaskRegistry extends TaskService {
+  /** Bounded launch/cleanup work page, ordered by immutable accepted order. */
+  listLaunchWork(afterOrder?: string, limit?: number): Promise<readonly TaskRecord[]>;
+  /** Fenced exact deterministic-name lookup for orphan reconciliation. */
+  readByJobName(jobName: string): Promise<TaskRecord | null>;
   /** Locks the shared admission row; reserves one FIFO task. */
   admitNext(): Promise<TaskRecord | null>;
+  /** Persist the exact keyed storage receipt before any Job CREATE. */
+  recordAllocation(
+    taskId: string,
+    launchId: string,
+    receipt: TaskAllocationReceipt
+  ): Promise<TaskRecord>;
+  /** Bind one exact UID/template pair. Never authorizes a tombstoned launch. */
+  bindJob(
+    taskId: string,
+    launchId: string,
+    jobUid: string,
+    templateHash: string
+  ): Promise<TaskRecord>;
+  /** Irreversible launch stop; re-arms cleanup for late CREATE observations. */
+  tombstoneLaunch(taskId: string, launchId: string): Promise<TaskRecord>;
+  /** Caller must confirm exact-UID termination/absence; never releases the slot. */
+  completeLaunchCleanup(taskId: string, launchId: string): Promise<void>;
+  /** Durable request only. Does not claim complete D4 Stop/deadline enforcement. */
+  recordSoftStop(taskId: string, launchId: string): Promise<void>;
   /** Caller must have confirmed compute termination, not just a terminal report. */
   releaseSlot(taskId: string): Promise<void>;
   /** Persist observed Job.status.startTime before gateway verified binding. */

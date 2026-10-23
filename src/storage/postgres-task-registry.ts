@@ -5,6 +5,7 @@ import type {
   AcceptTask,
   TaskAccessIntent,
   TaskAccessMode,
+  TaskAllocationReceipt,
   TaskProfile,
   TaskRecord,
   TaskRegistry,
@@ -35,6 +36,10 @@ interface TaskRow {
   launch_id: string;
   job_name: string;
   job_uid: string | null;
+  template_hash: string | null;
+  allocation_receipt: TaskAllocationReceipt | null;
+  cleanup_pending: boolean;
+  soft_stop_requested_at: Date | null;
   pod_uid: string | null;
   tombstoned_at: Date | null;
   slot_reserved: boolean;
@@ -50,6 +55,7 @@ interface IntentRow {
 }
 
 const TASK_SELECT = `SELECT t.*, l.attempt_id,l.launch_id,l.job_name,l.job_uid,l.pod_uid,
+  l.template_hash,l.allocation_receipt,l.cleanup_pending,l.soft_stop_requested_at,
   l.tombstoned_at,l.slot_reserved FROM core.tasks t JOIN core.task_launches l ON l.task_id=t.id`;
 
 function taskRecord(row: TaskRow): TaskRecord {
@@ -76,6 +82,10 @@ function taskRecord(row: TaskRow): TaskRecord {
     launchId: row.launch_id,
     jobName: row.job_name,
     jobUid: row.job_uid,
+    templateHash: row.template_hash,
+    allocationReceipt: row.allocation_receipt,
+    cleanupPending: row.cleanup_pending,
+    softStopRequestedAt: row.soft_stop_requested_at,
     podUid: row.pod_uid,
     tombstonedAt: row.tombstoned_at,
     slotReserved: row.slot_reserved,
@@ -141,6 +151,10 @@ export function createPostgresTaskRegistry(deps: {
   pool: Pool;
   epoch: number;
   settings: PlatformSettingsReader;
+  /** Deployment image is a first-acceptance snapshot, not replay payload. */
+  imageRevision?: string;
+  /** Cancels only this registry instance's operations and checked-out clients. */
+  signal?: AbortSignal;
   /** Bounds settings reads and SQL including acquisition/holder lock and admission's settings read. */
   operationTimeoutMs?: number;
 }): TaskRegistry {
@@ -150,17 +164,23 @@ export function createPostgresTaskRegistry(deps: {
 
   async function boundedSettings() {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancel: (() => void) | undefined;
     try {
+      if (deps.signal?.aborted) throw new TaskRegistryError('registry', 'storage_error');
       return await Promise.race([
         deps.settings.read(),
         new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => {
+          cancel = () => {
             reject(new TaskRegistryError('registry', 'storage_error'));
-          }, timeoutMs);
+          };
+          deps.signal?.addEventListener('abort', cancel, { once: true });
+          timer = setTimeout(cancel, timeoutMs);
+          if (deps.signal?.aborted) cancel();
         }),
       ]);
     } finally {
       clearTimeout(timer);
+      if (cancel) deps.signal?.removeEventListener('abort', cancel);
     }
   }
 
@@ -172,6 +192,7 @@ export function createPostgresTaskRegistry(deps: {
     let released = false;
     let expired = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancel: (() => void) | undefined;
     const destroy = () => {
       if (raw && !released) {
         released = true;
@@ -221,18 +242,23 @@ export function createPostgresTaskRegistry(deps: {
       }
     };
     try {
+      if (deps.signal?.aborted) throw new TaskRegistryError(taskId, 'storage_error');
       return await Promise.race([
         work(),
         new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => {
+          cancel = () => {
             expired = true;
             destroy();
             reject(new TaskRegistryError(taskId, 'storage_error'));
-          }, timeoutMs);
+          };
+          deps.signal?.addEventListener('abort', cancel, { once: true });
+          timer = setTimeout(cancel, timeoutMs);
+          if (deps.signal?.aborted) cancel();
         }),
       ]);
     } finally {
       clearTimeout(timer);
+      if (cancel) deps.signal?.removeEventListener('abort', cancel);
     }
   }
   async function readTask(client: Pool | PoolClient, taskId: string): Promise<TaskRecord | null> {
@@ -255,10 +281,36 @@ export function createPostgresTaskRegistry(deps: {
     if (!task) throw new TaskRegistryError(taskId, 'not_found');
     return task;
   }
+  async function lockLaunch(
+    client: PoolClient,
+    taskId: string,
+    launchId: string
+  ): Promise<TaskRecord> {
+    const task = await lockTask(client, taskId);
+    if (task.launchId !== launchId) throw new TaskRegistryError(taskId, 'intent_conflict');
+    return task;
+  }
+  function requireLaunchable(task: TaskRecord): void {
+    if (
+      task.state !== 'starting' ||
+      !task.slotReserved ||
+      task.tombstonedAt ||
+      task.softStopRequestedAt ||
+      task.terminalCandidate
+    )
+      throw new TaskRegistryError(task.id, 'invalid_transition');
+  }
+  async function rereadTask(client: PoolClient, taskId: string): Promise<TaskRecord> {
+    const task = await readTask(client, taskId);
+    if (!task) throw new TaskRegistryError(taskId, 'storage_error');
+    return task;
+  }
   return {
     accept: async (request) => {
       const identity = taskIdentity(typeof request.launchKey === 'string' ? request.launchKey : '');
       validateInput(request, identity.id);
+      const imageRevision = deps.imageRevision ?? request.imageRevision;
+      validateInput({ ...request, imageRevision }, identity.id);
       const settings = await boundedSettings();
       return transaction(identity.id, async (client) => {
         // Also serializes accepted-order assignment: commit order cannot invert
@@ -272,15 +324,15 @@ export function createPostgresTaskRegistry(deps: {
           // Compare JSON structurally in SQL, not JS key/insertion order. Settings
           // are NOT request payload: a replay keeps the original snapshot.
           const match = await client.query<{ matches: boolean }>(
-            `SELECT briefing=$2 AND profile=$3::jsonb AND image_revision=$4 AS matches FROM core.tasks WHERE id=$1`,
+            `SELECT briefing=$2 AND profile=$3::jsonb AND request_image_revision=$4 AS matches FROM core.tasks WHERE id=$1`,
             [row.id, request.briefing, JSON.stringify(request.profile), request.imageRevision]
           );
           if (!match.rows[0]?.matches) throw new TaskRegistryError(row.id, 'launch_key_conflict');
           return taskRecord(row);
         }
         await client.query(
-          `INSERT INTO core.tasks(id,launch_key,briefing,profile,settings_revision,harness,image_revision,wrap_grace_seconds)
-          VALUES($1,$2,$3,$4::jsonb,$5,$6,$7,$8)`,
+          `INSERT INTO core.tasks(id,launch_key,briefing,profile,settings_revision,harness,image_revision,wrap_grace_seconds,request_image_revision)
+          VALUES($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9)`,
           [
             identity.id,
             request.launchKey,
@@ -288,8 +340,9 @@ export function createPostgresTaskRegistry(deps: {
             JSON.stringify(request.profile),
             settings.revision,
             settings.values['tasks.harness'],
-            request.imageRevision,
+            imageRevision,
             settings.values['tasks.wrapGraceSeconds'],
+            request.imageRevision,
           ]
         );
         await client.query(
@@ -307,6 +360,34 @@ export function createPostgresTaskRegistry(deps: {
         const rows = await client.query<TaskRow>(`${TASK_SELECT} ORDER BY t.accepted_order,t.id`);
         return rows.rows.map(taskRecord);
       }),
+    listLaunchWork: async (afterOrder = '0', limit = 100) => {
+      if (
+        typeof afterOrder !== 'string' ||
+        !/^(0|[1-9][0-9]{0,18})$/.test(afterOrder) ||
+        BigInt(afterOrder) > 9_223_372_036_854_775_807n ||
+        !Number.isSafeInteger(limit) ||
+        limit < 1 ||
+        limit > 100
+      )
+        throw new TaskRegistryError('registry', 'invalid_input');
+      return transaction('registry', async (client) => {
+        const rows = await client.query<TaskRow>(
+          `${TASK_SELECT} WHERE t.accepted_order>$1::bigint
+          AND (t.state NOT IN ('queued','done','failed','stopped') OR l.cleanup_pending)
+          ORDER BY t.accepted_order LIMIT $2`,
+          [afterOrder, limit]
+        );
+        return rows.rows.map(taskRecord);
+      });
+    },
+    readByJobName: async (jobName) => {
+      if (typeof jobName !== 'string' || !/^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/.test(jobName))
+        throw new TaskRegistryError('registry', 'invalid_input');
+      return transaction('registry', async (client) => {
+        const result = await client.query<TaskRow>(`${TASK_SELECT} WHERE l.job_name=$1`, [jobName]);
+        return result.rows[0] ? taskRecord(result.rows[0]) : null;
+      });
+    },
     admitNext: async () => {
       return transaction('registry', async (client) => {
         await client.query('SELECT id FROM core.task_admission WHERE id FOR UPDATE');
@@ -325,6 +406,7 @@ export function createPostgresTaskRegistry(deps: {
           id: string;
         }>(`SELECT t.id FROM core.tasks t JOIN core.task_launches l ON l.task_id=t.id
           WHERE t.state='queued' AND t.terminal_candidate IS NULL AND l.tombstoned_at IS NULL
+            AND l.soft_stop_requested_at IS NULL
           ORDER BY t.accepted_order,t.id LIMIT 1 FOR UPDATE OF t,l`);
         const taskId = next.rows[0]?.id;
         if (!taskId) return null;
@@ -338,6 +420,94 @@ export function createPostgresTaskRegistry(deps: {
         return readTask(client, taskId);
       });
     },
+    recordAllocation: async (taskId, launchId, receipt) => {
+      if (
+        !receipt ||
+        ![receipt.id, receipt.space].every(
+          (value) => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)
+        ) ||
+        typeof receipt.effectKey !== 'string' ||
+        receipt.effectKey.length === 0 ||
+        receipt.effectKey.length > 512
+      )
+        throw new TaskRegistryError(taskId, 'invalid_input');
+      return transaction(taskId, async (client) => {
+        const task = await lockLaunch(client, taskId, launchId);
+        const existing = task.allocationReceipt;
+        if (existing) {
+          if (
+            existing.id !== receipt.id ||
+            existing.space !== receipt.space ||
+            existing.effectKey !== receipt.effectKey
+          )
+            throw new TaskRegistryError(taskId, 'intent_conflict');
+          return task;
+        }
+        requireLaunchable(task);
+        await client.query(
+          'UPDATE core.task_launches SET allocation_receipt=$2::jsonb WHERE task_id=$1',
+          [
+            taskId,
+            JSON.stringify({ id: receipt.id, space: receipt.space, effectKey: receipt.effectKey }),
+          ]
+        );
+        return rereadTask(client, taskId);
+      });
+    },
+    bindJob: async (taskId, launchId, jobUid, templateHash) => {
+      if (
+        typeof jobUid !== 'string' ||
+        !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(jobUid) ||
+        typeof templateHash !== 'string' ||
+        !/^[0-9a-f]{64}$/.test(templateHash)
+      )
+        throw new TaskRegistryError(taskId, 'invalid_input');
+      return transaction(taskId, async (client) => {
+        const task = await lockLaunch(client, taskId, launchId);
+        if (task.tombstonedAt || task.softStopRequestedAt || task.terminalCandidate)
+          throw new TaskRegistryError(taskId, 'invalid_transition');
+        if (task.jobUid !== null || task.templateHash !== null) {
+          if (task.jobUid !== jobUid || task.templateHash !== templateHash)
+            throw new TaskRegistryError(taskId, 'intent_conflict');
+          return task;
+        }
+        requireLaunchable(task);
+        if (!task.allocationReceipt) throw new TaskRegistryError(taskId, 'invalid_transition');
+        await client.query(
+          'UPDATE core.task_launches SET job_uid=$2,template_hash=$3 WHERE task_id=$1',
+          [taskId, jobUid, templateHash]
+        );
+        return rereadTask(client, taskId);
+      });
+    },
+    tombstoneLaunch: async (taskId, launchId) =>
+      transaction(taskId, async (client) => {
+        await lockLaunch(client, taskId, launchId);
+        await client.query(
+          `UPDATE core.task_launches
+          SET tombstoned_at=COALESCE(tombstoned_at,clock_timestamp()),cleanup_pending=true
+          WHERE task_id=$1`,
+          [taskId]
+        );
+        return rereadTask(client, taskId);
+      }),
+    completeLaunchCleanup: async (taskId, launchId) =>
+      transaction(taskId, async (client) => {
+        const task = await lockLaunch(client, taskId, launchId);
+        if (!task.tombstonedAt) throw new TaskRegistryError(taskId, 'invalid_transition');
+        await client.query('UPDATE core.task_launches SET cleanup_pending=false WHERE task_id=$1', [
+          taskId,
+        ]);
+      }),
+    recordSoftStop: async (taskId, launchId) =>
+      transaction(taskId, async (client) => {
+        await lockLaunch(client, taskId, launchId);
+        await client.query(
+          `UPDATE core.task_launches
+          SET soft_stop_requested_at=COALESCE(soft_stop_requested_at,clock_timestamp()) WHERE task_id=$1`,
+          [taskId]
+        );
+      }),
     releaseSlot: async (taskId) =>
       transaction(taskId, async (client) => {
         await client.query('SELECT id FROM core.task_admission WHERE id FOR UPDATE');
@@ -359,6 +529,7 @@ export function createPostgresTaskRegistry(deps: {
         if (
           task.state !== 'starting' ||
           task.tombstonedAt ||
+          task.softStopRequestedAt ||
           task.terminalCandidate ||
           !task.slotReserved
         )
