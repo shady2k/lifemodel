@@ -122,9 +122,11 @@ universal network sandbox.
 The existing storage CLI reads `LIFEMODEL_STORAGE_ENDPOINT`,
 `LIFEMODEL_STORAGE_SPACE`, `LIFEMODEL_STORAGE_TOKEN_FILE` and
 `LIFEMODEL_STORAGE_CA_FILE`. None is supplied as an image credential. Admission
-currently forbids **all Job env overrides**, so 653.8.7 must map verified task
-binding/mounted identity into the storage child process, not add arbitrary
-Job env injection. Tokens/CA are read-only projected directories, never baked.
+permits only the ten literal endpoint/space/identity-file/CA-file names in the
+[task launch contract](task-launch.md). Arbitrary Job env, valueFrom and envFrom
+remain forbidden. The six channel/model names are the contract reserved for the
+launcher handshake in 653.8.7, not proof that today's inert launcher consumes
+them. Tokens/CA are read-only projected directories, never baked.
 
 ## CI and release
 

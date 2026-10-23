@@ -16,7 +16,7 @@
 # RELEASE PIN POINT 653.8.3: accept only the workbench repository and a complete
 # SHA-256 digest here; .8.3/.5 must pin its released digest in launch inputs.
 # TRUSTED LAUNCHER CONTRACT .8.3/.5: image ENTRYPOINT owns the inert binding
-# handshake. No command/args/env/hook/probe override can run code before it.
+# handshake. No command/args/hook/probe override can run code before it.
 # Add configuration only through an explicitly reviewed safe allowlist, not
 # arbitrary environment (NODE_OPTIONS/LD_PRELOAD would bypass the start fence).
 # manualSelector/suspend default false in Kubernetes, so false is permitted.
@@ -120,9 +120,17 @@ spec:
          !has(c.lifecycle) && !has(c.livenessProbe) && !has(c.readinessProbe) && !has(c.startupProbe))
       message: 'task launcher: one trusted image ENTRYPOINT only; no command, args, hooks, probes, init or sidecars'
     - expression: >-
-        variables.p.containers.all(c, (!has(c.env) || size(c.env) == 0) && (!has(c.envFrom) || size(c.envFrom) ==
-        0))
-      message: 'task environment: no env or envFrom injection; launcher configuration must be baked into the image'
+        variables.p.containers.all(c,
+         (!has(c.envFrom) || size(c.envFrom) == 0) &&
+         (!has(c.env) || c.env.all(e,
+          e.name in [
+           'LIFEMODEL_STORAGE_ENDPOINT', 'LIFEMODEL_STORAGE_SPACE',
+           'LIFEMODEL_STORAGE_TOKEN_FILE', 'LIFEMODEL_STORAGE_CA_FILE',
+           'LIFEMODEL_TASK_CHANNEL_ENDPOINT', 'LIFEMODEL_TASK_CHANNEL_TOKEN_FILE',
+           'LIFEMODEL_TASK_CHANNEL_CA_FILE', 'LIFEMODEL_TASK_MODEL_ENDPOINT',
+           'LIFEMODEL_TASK_MODEL_TOKEN_FILE', 'LIFEMODEL_TASK_MODEL_CA_FILE'] &&
+          has(e.value) && !has(e.valueFrom))))
+      message: 'task environment: only literal allowlisted storage, task channel and task model configuration; no valueFrom or envFrom'
     - expression: >-
         variables.p.restartPolicy == 'Never' &&
 
@@ -266,9 +274,17 @@ spec:
          !has(c.lifecycle) && !has(c.livenessProbe) && !has(c.readinessProbe) && !has(c.startupProbe))
       message: 'task launcher: one trusted image ENTRYPOINT only; no command, args, hooks, probes, init or sidecars'
     - expression: >-
-        variables.p.containers.all(c, (!has(c.env) || size(c.env) == 0) && (!has(c.envFrom) || size(c.envFrom) ==
-        0))
-      message: 'task environment: no env or envFrom injection; launcher configuration must be baked into the image'
+        variables.p.containers.all(c,
+         (!has(c.envFrom) || size(c.envFrom) == 0) &&
+         (!has(c.env) || c.env.all(e,
+          e.name in [
+           'LIFEMODEL_STORAGE_ENDPOINT', 'LIFEMODEL_STORAGE_SPACE',
+           'LIFEMODEL_STORAGE_TOKEN_FILE', 'LIFEMODEL_STORAGE_CA_FILE',
+           'LIFEMODEL_TASK_CHANNEL_ENDPOINT', 'LIFEMODEL_TASK_CHANNEL_TOKEN_FILE',
+           'LIFEMODEL_TASK_CHANNEL_CA_FILE', 'LIFEMODEL_TASK_MODEL_ENDPOINT',
+           'LIFEMODEL_TASK_MODEL_TOKEN_FILE', 'LIFEMODEL_TASK_MODEL_CA_FILE'] &&
+          has(e.value) && !has(e.valueFrom))))
+      message: 'task environment: only literal allowlisted storage, task channel and task model configuration; no valueFrom or envFrom'
     - expression: >-
         variables.p.restartPolicy == 'Never' &&
 

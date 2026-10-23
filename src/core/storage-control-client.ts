@@ -27,7 +27,23 @@ export class StorageControlError extends Error {
   }
 }
 
+export interface StorageAllocationReceipt {
+  readonly id: string;
+  readonly space: string;
+  readonly effectKey: string;
+}
+export interface StorageAllocationRequest {
+  readonly taskId: string;
+  readonly launchId: string;
+  readonly effectKey: string;
+  readonly retentionRevision: string;
+}
+
 export interface StorageControlClient {
+  allocate(
+    request: StorageAllocationRequest,
+    signal?: AbortSignal
+  ): Promise<StorageAllocationReceipt>;
   plans(
     cursor?: string,
     signal?: AbortSignal
@@ -207,6 +223,29 @@ export function createStorageControlClient(options: {
     }
   }
   return {
+    allocate: async (allocation, signal) => {
+      const route = '/allocate';
+      if (
+        ![
+          allocation.taskId,
+          allocation.launchId,
+          allocation.effectKey,
+          allocation.retentionRevision,
+        ].every((value) => typeof value === 'string' && value.length > 0 && value.length <= 512)
+      )
+        throw new StorageControlError(route);
+      const result = await call(route, route, allocation, signal);
+      if (
+        !record(result) ||
+        typeof result['id'] !== 'string' ||
+        !ID.test(result['id']) ||
+        typeof result['space'] !== 'string' ||
+        !ID.test(result['space']) ||
+        result['effectKey'] !== allocation.effectKey
+      )
+        throw new StorageControlError(route, 200);
+      return { id: result['id'], space: result['space'], effectKey: allocation.effectKey };
+    },
     plans: async (cursor, signal) => {
       const route = '/retention/plans';
       const path = `${route}?limit=100${cursor === undefined ? '' : `&cursor=${encodeURIComponent(cursor)}`}`;

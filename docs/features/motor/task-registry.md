@@ -4,15 +4,16 @@ The core owns the registry through `src/ports/tasks.ts` and
 `src/storage/postgres-task-registry.ts`. Migration
 `20261015000019_create_task_registry.sql` expands the existing core schema.
 This is the durable record for the new Job runtime, not a replacement execution
-loop and not the old Motor Cortex `motor-state.ts`. Runtime wiring, launch,
-verified identity, mailbox and finalization are later leaves of stage 3.
+loop and not the old Motor Cortex `motor-state.ts`. The [task launch path](task-launch.md)
+now wires the registry and allocation/Job reconciliation in platform mode.
+Verified identity, mailbox and finalization are later leaves of stage 3.
 
 ## Tables and ownership
 
 | Table | Facts | Writer |
 | --- | --- | --- |
 | `core.tasks` | Immutable launch key, briefing, profile, settings revision, selected harness, workbench image digest, wrap grace, accepted order; public state, candidate/reason, finalization pending and timestamps | Fenced core task registry; later lifecycle/finalization writers use the same fence |
-| `core.task_launches` | One initial attempt and launch per task, deterministic Job name, nullable observed Job/Pod UIDs, irreversible launch tombstone, explicit slot reservation | Fenced core admission/reconciler; verified binding supplies identities, never cognition |
+| `core.task_launches` | One initial attempt and launch per task, deterministic Job name, allocation receipt, template hash, nullable observed Job/Pod UIDs, irreversible launch tombstone, cleanup pending, soft-stop request and explicit slot reservation | Fenced core admission/reconciler; core observes Job UID, verified binding supplies Pod identity, never cognition |
 | `core.task_admission` | One permanent row, locked while accepting, counting/reserving or releasing | Fenced core registry |
 | `task_access.intents` | Stable `(task_id, attempt_id, launch_id)` primary key, revision, mode, finite absolute soft/hard deadlines | Fenced core registry initializes once and only UPDATEs afterward |
 | `task_access.projections` | Verified Job/Pod binding and once-only execution authority | Gateway identity writer in a later leaf; not this registry |

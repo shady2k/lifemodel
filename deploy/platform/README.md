@@ -412,8 +412,28 @@ has only a separate wrap-grace bound), and not ADR-014's 300-second wrap default
 Raising it is an explicit platform policy change. The release pin point is the
 workbench image rule: repository `ghcr.io/shady2k/lifemodel-workbench`, any valid
 sha256 digest for now; 653.8.3 supplies the release digest. The trusted launcher
-is the image ENTRYPOINT. No command/args/env overrides or lifecycle hooks are
-accepted before the workbench/launcher tasks define a reviewed safe contract.
+is the image ENTRYPOINT. Command/args overrides and lifecycle hooks remain
+forbidden. Both Job and Pod policies permit only these literal environment names:
+
+- `LIFEMODEL_STORAGE_ENDPOINT`
+- `LIFEMODEL_STORAGE_SPACE`
+- `LIFEMODEL_STORAGE_TOKEN_FILE`
+- `LIFEMODEL_STORAGE_CA_FILE`
+- `LIFEMODEL_TASK_CHANNEL_ENDPOINT`
+- `LIFEMODEL_TASK_CHANNEL_TOKEN_FILE`
+- `LIFEMODEL_TASK_CHANNEL_CA_FILE`
+- `LIFEMODEL_TASK_MODEL_ENDPOINT`
+- `LIFEMODEL_TASK_MODEL_TOKEN_FILE`
+- `LIFEMODEL_TASK_MODEL_CA_FILE`
+
+Each entry must have a literal `value`; `valueFrom`, nonempty `envFrom`, and all
+other names (including `NODE_OPTIONS`, `LD_PRELOAD` and `PATH`) are denied.
+Values carry non-secret endpoints, space identity and projected token/CA file
+paths, never token contents. This is a closed launch-configuration contract, not
+permission to override the trusted launcher. The existing storage CLI consumes
+the four storage names; the six channel/model names are reserved for the
+verified launcher handshake in 653.8.7. Admission validates the static shape;
+it does not verify endpoint trust or that a literal value contains no secret.
 
 CEL cannot query canonical SQL intent/epoch or resolve a live owner reference.
 Its controller Job owner reference is only a shape check, not proof that the
