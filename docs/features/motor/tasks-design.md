@@ -126,6 +126,14 @@ bound and S10's 1 s overload/2 s progress/512 MiB RSS fixture budget are pass
 criteria, not just measurements. Infrastructure failures retry keyed operations;
 invalid profiles/tokens/names do not retry unchanged input.
 
+## Task registry
+
+The stage-3 [task registry](task-registry.md) implements the core-owned durable
+acceptance, normal FIFO admission and canonical access-intent writer. It records
+immutable launch/profile/settings identities in Postgres under the active-holder
+fence. Job execution, verified binding, mailbox and sealed outcome orchestration
+remain separate integration steps; the state machine below is their contract.
+
 ## Task state machine
 
 ```mermaid
