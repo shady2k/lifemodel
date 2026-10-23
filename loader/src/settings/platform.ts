@@ -62,6 +62,147 @@ const tasksWrapGraceSeconds: SettingDeclaration = {
   apply: 'nextAdmission',
 };
 
+/**
+ * Task-only channel resource budgets (ADR-014 D2). Defaults are the tested
+ * ceilings: increasing a ceiling needs the fairness fixture again, not an
+ * unbounded owner override. Lower values apply to the next channel admission.
+ */
+const taskChannelMaxFrameBytes: SettingDeclaration = {
+  key: 'tasks.channel.maxFrameBytes',
+  section: 'tasks',
+  label: { en: 'Task channel frame limit', ru: 'Предел кадра канала задач' },
+  description: {
+    en: 'Maximum bytes in one task channel frame. Larger frames are refused.',
+    ru: 'Наибольшее число байтов в одном кадре канала задач. Более крупные кадры отклоняются.',
+  },
+  control: 'number',
+  dataClass: 'publicConfig',
+  default: 65_536,
+  integer: true,
+  min: 1,
+  max: 65_536,
+  unit: { en: 'bytes', ru: 'байты' },
+  authority: 'owner',
+  apply: 'nextAdmission',
+};
+
+const taskChannelMaxUnackedFrames: SettingDeclaration = {
+  key: 'tasks.channel.maxUnackedFrames',
+  section: 'tasks',
+  label: {
+    en: 'Unacknowledged frames per connection',
+    ru: 'Кадры без подтверждения на соединение',
+  },
+  description: {
+    en: 'Maximum unacknowledged task channel frames on one connection. Saturation applies backpressure.',
+    ru: 'Наибольшее число кадров без подтверждения в одном соединении. При заполнении применяется обратное давление.',
+  },
+  control: 'number',
+  dataClass: 'publicConfig',
+  default: 16,
+  integer: true,
+  min: 1,
+  max: 16,
+  unit: { en: 'frames', ru: 'кадры' },
+  authority: 'owner',
+  apply: 'nextAdmission',
+};
+
+const taskChannelMaxUnackedBytes: SettingDeclaration = {
+  key: 'tasks.channel.maxUnackedBytes',
+  section: 'tasks',
+  label: { en: 'Unacknowledged bytes per connection', ru: 'Байты без подтверждения на соединение' },
+  description: {
+    en: 'Maximum unacknowledged task channel bytes on one connection. Saturation applies backpressure.',
+    ru: 'Наибольшее число байтов без подтверждения в одном соединении. При заполнении применяется обратное давление.',
+  },
+  control: 'number',
+  dataClass: 'publicConfig',
+  default: 1_048_576,
+  integer: true,
+  min: 1,
+  max: 1_048_576,
+  unit: { en: 'bytes', ru: 'байты' },
+  authority: 'owner',
+  apply: 'nextAdmission',
+};
+
+const taskChannelMaxBufferedBytes: SettingDeclaration = {
+  key: 'tasks.channel.maxBufferedBytes',
+  section: 'tasks',
+  label: { en: 'Task channel process buffer', ru: 'Буфер канала задач на процесс' },
+  description: {
+    en: 'Maximum task channel bytes buffered across the core process. This never borrows owner intake capacity.',
+    ru: 'Наибольшее число байтов канала задач в буфере процесса ядра. Резерв ввода владельца не используется.',
+  },
+  control: 'number',
+  dataClass: 'publicConfig',
+  default: 4_194_304,
+  integer: true,
+  min: 1,
+  max: 4_194_304,
+  unit: { en: 'bytes', ru: 'байты' },
+  authority: 'owner',
+  apply: 'nextAdmission',
+};
+
+const taskChannelAckTimeoutMs: SettingDeclaration = {
+  key: 'tasks.channel.ackTimeoutMs',
+  section: 'tasks',
+  label: { en: 'Task channel ACK timeout', ru: 'Срок подтверждения канала задач' },
+  description: {
+    en: 'Maximum milliseconds to acknowledge a task channel frame before disconnect and replay.',
+    ru: 'Наибольшее число миллисекунд до подтверждения кадра, после которого соединение закрывается для повтора.',
+  },
+  control: 'number',
+  dataClass: 'publicConfig',
+  default: 5_000,
+  integer: true,
+  min: 1,
+  max: 5_000,
+  unit: { en: 'milliseconds', ru: 'миллисекунды' },
+  authority: 'owner',
+  apply: 'nextAdmission',
+};
+
+const taskChannelWorkers: SettingDeclaration = {
+  key: 'tasks.channel.workers',
+  section: 'tasks',
+  label: { en: 'Task channel workers', ru: 'Обработчики канала задач' },
+  description: {
+    en: 'Bounded task channel workers, separate from owner intake and artifact transfer workers.',
+    ru: 'Ограниченное число обработчиков канала задач, отдельно от ввода владельца и передачи файлов.',
+  },
+  control: 'number',
+  dataClass: 'publicConfig',
+  default: 2,
+  integer: true,
+  min: 1,
+  max: 2,
+  unit: { en: 'workers', ru: 'обработчики' },
+  authority: 'owner',
+  apply: 'nextAdmission',
+};
+
+const taskChannelSqlConnections: SettingDeclaration = {
+  key: 'tasks.channel.sqlConnections',
+  section: 'tasks',
+  label: { en: 'Task channel SQL connections', ru: 'Соединения SQL канала задач' },
+  description: {
+    en: 'Reserved task channel SQL connections, independent of owner intake and artifact transfer pools.',
+    ru: 'Выделенные соединения SQL канала задач, независимо от пулов ввода владельца и передачи файлов.',
+  },
+  control: 'number',
+  dataClass: 'publicConfig',
+  default: 2,
+  integer: true,
+  min: 1,
+  max: 2,
+  unit: { en: 'connections', ru: 'соединения' },
+  authority: 'owner',
+  apply: 'nextAdmission',
+};
+
 /** How long sealed task output is kept; forever is an enum value, never 0 (ADR-014 D6). */
 const storageRetention: SettingDeclaration = {
   key: 'storage.retention',
@@ -138,6 +279,13 @@ export const platformSettings = createSettingsRegistry([
   tasksConcurrency,
   tasksHarness,
   tasksWrapGraceSeconds,
+  taskChannelMaxFrameBytes,
+  taskChannelMaxUnackedFrames,
+  taskChannelMaxUnackedBytes,
+  taskChannelMaxBufferedBytes,
+  taskChannelAckTimeoutMs,
+  taskChannelWorkers,
+  taskChannelSqlConnections,
   storageRetention,
   storageWarningLeadDays,
   storageCeilingBytes,

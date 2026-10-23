@@ -29,3 +29,27 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: core-task-launcher
+---
+# TokenReview is the only cluster-scoped right needed by the task-only TLS
+# listener. Do not bind system:auth-delegator or grant SubjectAccessReviews.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: core-task-channel-token-review
+rules:
+  - apiGroups: ['authentication.k8s.io']
+    resources: ['tokenreviews']
+    verbs: ['create']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: core-task-channel-token-review
+subjects:
+  - kind: ServiceAccount
+    name: core
+    namespace: lifemodel
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: core-task-channel-token-review

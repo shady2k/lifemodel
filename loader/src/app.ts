@@ -9,6 +9,7 @@ import {
   createPkiManager,
   STORAGE_MODULE_TLS_HOSTS,
   TASK_MODEL_TLS_HOSTS,
+  TASK_CHANNEL_TLS_HOSTS,
   type PkiManager,
 } from './pki.js';
 import { createKubernetesTlsStores } from './pki-kubernetes.js';
@@ -120,6 +121,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       // leaf lives in its own Secret with its own DNS names (ADR-015 S-D1).
       service: { hosts: STORAGE_MODULE_TLS_HOSTS, secret: tlsStores.serviceSecret },
       taskModelService: { hosts: TASK_MODEL_TLS_HOSTS, secret: tlsStores.taskModelSecret },
+      taskChannelService: { hosts: TASK_CHANNEL_TLS_HOSTS, secret: tlsStores.taskChannelSecret },
     });
   const phaseStore = deps.platformPhaseStore ?? createKubernetesPhaseStore();
   const bao = deps.openBao ?? {

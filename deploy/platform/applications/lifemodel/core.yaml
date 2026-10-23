@@ -87,6 +87,9 @@ spec:
             - name: health
               containerPort: 8081
               protocol: TCP
+            - name: task-channel
+              containerPort: 8447
+              protocol: TCP
           env:
             - name: LIFEMODEL_DB_USERNAME
               valueFrom:
@@ -105,6 +108,10 @@ spec:
                   key: password
             - name: LIFEMODEL_CORE_HEALTH_PORT
               value: '8081'
+            - name: LIFEMODEL_TASK_CHANNEL_PORT
+              value: '8447'
+            - name: LIFEMODEL_TASK_CHANNEL_TLS_DIR
+              value: /opt/lifemodel/task-channel-tls
             - name: LIFEMODEL_CORE_STOP_DEADLINE_MS
               value: '5000'
             - name: MOTOR_CORTEX_ENABLED
@@ -162,9 +169,14 @@ spec:
             - name: task-api-identity
               mountPath: /var/run/secrets/kubernetes.io/serviceaccount
               readOnly: true
-            # Public instance CA only, never a TLS Secret or private key.
+            # Storage client trust is public CA only, never a private key.
             - name: storage-ca
               mountPath: /var/run/secrets/lifemodel-storage-ca
+              readOnly: true
+            # Dedicated server leaf only; never mounted by migrate. No subPath,
+            # so loader renewal reaches the listener through kubelet rotation.
+            - name: task-channel-tls
+              mountPath: /opt/lifemodel/task-channel-tls
               readOnly: true
       volumes:
         # Omitted audience deliberately requests the API-server audience.
@@ -190,6 +202,10 @@ spec:
             items:
               - key: ca.crt
                 path: ca.crt
+        - name: task-channel-tls
+          secret:
+            secretName: core-task-channel-tls
+            defaultMode: 288
         - name: tmp
           emptyDir:
             medium: Memory
