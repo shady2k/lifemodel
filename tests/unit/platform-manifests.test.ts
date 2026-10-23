@@ -1497,14 +1497,38 @@ describe('platform manifests', () => {
     }
   });
 
-  it('limits the added download-session ingress to web pods in the application namespace', () => {
-    const policy = sourceObjects().find(
+  it('permits the download-session check only between web and loader pods on TCP 7000', () => {
+    const policies = sourceObjects().filter((item) => item.kind === 'NetworkPolicy');
+    // Both halves of one path: the web pod's egress and the loader pod's ingress.
+    const egress = policies.find(
       (item) =>
-        item.kind === 'NetworkPolicy' &&
+        item.metadata.namespace === 'lifemodel' && item.metadata.name === 'web-download-auth-egress'
+    );
+    expect(egress, 'missing web-download-auth-egress NetworkPolicy').toBeDefined();
+    expect(egress!.spec).toEqual({
+      podSelector: { matchLabels: { 'app.kubernetes.io/name': 'web' } },
+      policyTypes: ['Egress'],
+      egress: [
+        {
+          to: [
+            {
+              namespaceSelector: {
+                matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' },
+              },
+              podSelector: { matchLabels: { 'app.kubernetes.io/name': 'loader' } },
+            },
+          ],
+          ports: [{ protocol: 'TCP', port: 7000 }],
+        },
+      ],
+    });
+    const ingress = policies.find(
+      (item) =>
         item.metadata.namespace === 'lifemodel-system' &&
         item.metadata.name === 'loader-download-auth-ingress'
     );
-    expect(policy?.spec).toEqual({
+    expect(ingress, 'missing loader-download-auth-ingress NetworkPolicy').toBeDefined();
+    expect(ingress!.spec).toEqual({
       podSelector: { matchLabels: { 'app.kubernetes.io/name': 'loader' } },
       policyTypes: ['Ingress'],
       ingress: [

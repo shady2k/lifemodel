@@ -33,6 +33,7 @@ const COOKIE_B = '__Host-lm_session=download-owner-b';
 type StoredArtifact = {
   bytes: Buffer;
   hold: boolean;
+  gate?: Promise<void>;
   unavailable: boolean;
   status?: number;
   headers?: Record<string, string>;
@@ -112,7 +113,13 @@ describe('recipient-scoped task artifact downloads over HTTP and verified storag
 
   async function seed(
     recipient = 0,
-    options: { bytes?: Buffer; hold?: boolean; name?: string; contentType?: string } = {}
+    options: {
+      bytes?: Buffer;
+      hold?: boolean;
+      gate?: Promise<void>;
+      name?: string;
+      contentType?: string;
+    } = {}
   ): Promise<{ attachment: MessageAttachment; stored: StoredArtifact }> {
     const artifactId = randomUUID();
     const bytes = options.bytes ?? Buffer.from('task output: private recipient bytes');
@@ -125,6 +132,7 @@ describe('recipient-scoped task artifact downloads over HTTP and verified storag
     const stored: StoredArtifact = {
       bytes,
       hold: options.hold ?? false,
+      ...(options.gate === undefined ? {} : { gate: options.gate }),
       unavailable: false,
       opened: Promise.withResolvers<ServerResponse>(),
       closed: Promise.withResolvers<void>(),
@@ -154,52 +162,58 @@ describe('recipient-scoped task artifact downloads over HTTP and verified storag
     directory = await mkdtemp(join(tmpdir(), 'task-artifact-download-'));
     await writeFile(join(directory, 'token'), TOKEN, { mode: 0o600 });
     await writeFile(join(directory, 'ca.pem'), certificate.ca);
-    tls = createServer({ cert: certificate.cert, key: certificate.key }, (request, response) => {
-      request.on('error', () => undefined);
-      response.on('error', () => undefined);
-      liveResponses.add(response);
-      response.once('close', () => liveResponses.delete(response));
-      requests.push({
-        path: request.url ?? '',
-        authorization: request.headers.authorization,
-        range: request.headers.range,
-      });
-      if (request.headers.authorization !== `Bearer ${TOKEN}`) {
-        response.writeHead(401).end();
-        return;
+    tls = createServer(
+      { cert: certificate.cert, key: certificate.key },
+      async (request, response) => {
+        request.on('error', () => undefined);
+        response.on('error', () => undefined);
+        liveResponses.add(response);
+        response.once('close', () => liveResponses.delete(response));
+        requests.push({
+          path: request.url ?? '',
+          authorization: request.headers.authorization,
+          range: request.headers.range,
+        });
+        if (request.headers.authorization !== `Bearer ${TOKEN}`) {
+          response.writeHead(401).end();
+          return;
+        }
+        const match = /^\/artifacts\/([0-9a-f-]{36})$/.exec(request.url ?? '');
+        const stored = match ? artifacts.get(match[1]!) : undefined;
+        if (!stored || stored.unavailable) {
+          response.writeHead(404).end();
+          return;
+        }
+        response.once('close', () => stored.closed.resolve());
+        if (stored.status) {
+          response.writeHead(stored.status).end();
+          return;
+        }
+        const range = request.headers.range;
+        const bounds = range ? /^bytes=(\d+)-(\d+)$/.exec(range) : null;
+        const start = bounds ? Number(bounds[1]) : 0;
+        const end = bounds
+          ? Math.min(Number(bounds[2]), stored.bytes.length - 1)
+          : stored.bytes.length - 1;
+        if (start >= stored.bytes.length) {
+          response.writeHead(416).end();
+          return;
+        }
+        const body = stored.bytes.subarray(start, end + 1);
+        response.writeHead(range ? 206 : 200, {
+          'content-length': String(body.length),
+          'x-storage-size': String(stored.bytes.length),
+          ...(range ? { 'content-range': `bytes ${start}-${end}/${stored.bytes.length}` } : {}),
+          ...stored.headers,
+        });
+        stored.opened.resolve(response);
+        // The gate lets a test act after the route's session check and the storage
+        // open, but before the first body byte reaches the web response.
+        if (stored.gate) await stored.gate;
+        if (stored.hold) response.write(body.subarray(0, PREFIX));
+        else response.end(body);
       }
-      const match = /^\/artifacts\/([0-9a-f-]{36})$/.exec(request.url ?? '');
-      const stored = match ? artifacts.get(match[1]!) : undefined;
-      if (!stored || stored.unavailable) {
-        response.writeHead(404).end();
-        return;
-      }
-      response.once('close', () => stored.closed.resolve());
-      if (stored.status) {
-        response.writeHead(stored.status).end();
-        return;
-      }
-      const range = request.headers.range;
-      const bounds = range ? /^bytes=(\d+)-(\d+)$/.exec(range) : null;
-      const start = bounds ? Number(bounds[1]) : 0;
-      const end = bounds
-        ? Math.min(Number(bounds[2]), stored.bytes.length - 1)
-        : stored.bytes.length - 1;
-      if (start >= stored.bytes.length) {
-        response.writeHead(416).end();
-        return;
-      }
-      const body = stored.bytes.subarray(start, end + 1);
-      response.writeHead(range ? 206 : 200, {
-        'content-length': String(body.length),
-        'x-storage-size': String(stored.bytes.length),
-        ...(range ? { 'content-range': `bytes ${start}-${end}/${stored.bytes.length}` } : {}),
-        ...stored.headers,
-      });
-      if (stored.hold) response.write(body.subarray(0, PREFIX));
-      else response.end(body);
-      stored.opened.resolve(response);
-    });
+    );
     // Bind both loopback families: the HTTPS client may prefer IPv4 even when
     // localhost resolves first to IPv6 inside the isolated test container.
     tls.on('secureConnection', () => {
@@ -483,6 +497,28 @@ describe('recipient-scoped task artifact downloads over HTTP and verified storag
     expect(ended.complete).toBe(false);
     expect(ended.bytes).toEqual(bytes.subarray(0, PREFIX));
     await stored.closed.promise;
+  });
+
+  it('sends no success-only download headers when the session check fails before the first byte', async () => {
+    const gate = Promise.withResolvers<void>();
+    const { attachment, stored } = await seed(0, {
+      bytes: Buffer.alloc(64 * 1024, 0x6b),
+      gate: gate.promise,
+    });
+    // The route's own session check and the storage open have already succeeded
+    // by the time the gate is reached; the session ends before the first byte.
+    const pending = open(0, attachment.artifactId, COOKIE_A, 'bytes=0-1023');
+    await stored.opened.promise;
+    sessions[0]!.active = false;
+    gate.resolve();
+    const result = await pending;
+    const ended = await result.done;
+    expect(result.status).toBeGreaterThanOrEqual(400);
+    expect(result.headers['content-disposition']).toBeUndefined();
+    expect(result.headers['content-range']).toBeUndefined();
+    expect(result.headers['accept-ranges']).toBeUndefined();
+    expect(ended.complete).toBe(true);
+    expect(ended.bytes.toString()).not.toContain('task output: private recipient bytes');
   });
 
   it('does not bless incomplete upstream bytes as a complete download', async () => {

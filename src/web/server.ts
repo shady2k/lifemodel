@@ -311,7 +311,18 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
             );
           },
         });
-        guarded.on('error', () => undefined);
+        // A failure before the first byte must not keep the success-only download
+        // headers: Fastify's error path drops only Content-Type and Content-Length.
+        guarded.on('error', () => {
+          if (reply.raw.headersSent) return;
+          for (const header of [
+            'Content-Disposition',
+            'Content-Range',
+            'Accept-Ranges',
+            'Content-Length',
+          ])
+            reply.removeHeader(header);
+        });
         opened.body.on('error', (error) => guarded.destroy(error));
         opened.body.once('close', () => {
           if (!opened.body.readableEnded) guarded.destroy(new Error('artifact_incomplete'));
