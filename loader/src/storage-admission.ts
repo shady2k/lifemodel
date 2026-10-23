@@ -109,7 +109,9 @@ export interface StorageAdmissionCounters {
   queueBytes: number;
 }
 export interface StorageAdmissionSnapshot extends StorageAdmissionCounters {
+  /** Combined transfer telemetry; task and read admission caps are independent. */
   bySpace: Record<string, number>;
+  /** maxPerSpace is the maximum within either role, not their combined count. */
   observed: StorageAdmissionCounters & { maxPerSpace: number };
 }
 export interface StorageAdmission {
@@ -140,6 +142,7 @@ export function createStorageAdmission(
   const settings = validateStorageAdmissionSettings(input);
   const queue: Pending[] = [];
   const bySpace = new Map<string, number>();
+  const byRoleSpace = { task: new Map<string, number>(), read: new Map<string, number>() };
   const current: StorageAdmissionCounters = {
     active: 0,
     task: 0,
@@ -157,14 +160,15 @@ export function createStorageAdmission(
   function observe(): void {
     for (const key of Object.keys(current) as (keyof StorageAdmissionCounters)[])
       observed[key] = Math.max(observed[key], current[key]);
-    for (const count of bySpace.values())
-      observed.maxPerSpace = Math.max(observed.maxPerSpace, count);
+    for (const counts of Object.values(byRoleSpace))
+      for (const count of counts.values())
+        observed.maxPerSpace = Math.max(observed.maxPerSpace, count);
   }
   function eligible(request: Pick<Pending, 'role' | 'space' | 'bytes'>): boolean {
     if (request.role === 'control') return current.control < settings.controlWorkers;
     if (
       current.active >= settings.transferWorkers ||
-      (bySpace.get(request.space) ?? 0) >= settings.perSpaceWorkers ||
+      (byRoleSpace[request.role].get(request.space) ?? 0) >= settings.perSpaceWorkers ||
       current.bufferedBytes + request.bytes > settings.bufferBytes
     )
       return false;
@@ -197,6 +201,8 @@ export function createStorageAdmission(
       current.bufferedBytes += pending.bytes;
       if (pending.role === 'task') taskBytes += pending.bytes;
       bySpace.set(pending.space, (bySpace.get(pending.space) ?? 0) + 1);
+      const counts = byRoleSpace[pending.role];
+      counts.set(pending.space, (counts.get(pending.space) ?? 0) + 1);
       lastTransferSpace = pending.space;
     }
     observe();
@@ -211,13 +217,20 @@ export function createStorageAdmission(
         current[pending.role] -= 1;
         current.bufferedBytes -= pending.bytes;
         if (pending.role === 'task') taskBytes -= pending.bytes;
+        const counts = byRoleSpace[pending.role];
+        const roleCount = (counts.get(pending.space) ?? 1) - 1;
+        if (roleCount === 0) counts.delete(pending.space);
+        else counts.set(pending.space, roleCount);
         const count = (bySpace.get(pending.space) ?? 1) - 1;
         if (count === 0) bySpace.delete(pending.space);
         else bySpace.set(pending.space, count);
       }
       drain();
     };
-    pending.signal.addEventListener('abort', release, { once: true });
+    // Cancellation requests that a control handler stop. Only its finally may
+    // retire execution capacity after SQL/S3 and cleanup have actually settled.
+    if (pending.role !== 'control')
+      pending.signal.addEventListener('abort', release, { once: true });
     pending.resolve({ release });
   }
   function next(control: boolean): Pending | undefined {

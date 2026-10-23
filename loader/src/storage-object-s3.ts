@@ -229,7 +229,16 @@ function parsePrivateListing(body: string): StorageObjectS3Listing & { skipped: 
   return { objects, nextCursor: cursor ?? null, skipped };
 }
 
-export function createStorageObjectS3(options: StorageObjectS3Options): StorageObjectS3 {
+export interface StorageObjectS3TransportSnapshot {
+  put: { sockets: number; observedSockets: number; limit: number };
+  read: { sockets: number; observedSockets: number; limit: number };
+  control: { sockets: number; observedSockets: number; limit: number };
+}
+
+export function createStorageObjectS3(options: StorageObjectS3Options): StorageObjectS3 & {
+  /** Numeric transport pressure only; never exposes keys, credentials or endpoints. */
+  transportSnapshot(): StorageObjectS3TransportSnapshot;
+} {
   let endpoint: URL;
   try {
     endpoint = new URL(options.endpoint);
@@ -303,6 +312,12 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
   };
   for (const pair of Object.values(agents))
     for (const agent of Object.values(pair)) agent.on('error', ignoreError);
+  const transportSockets = {
+    put: new Set<object>(),
+    read: new Set<object>(),
+    control: new Set<object>(),
+  };
+  const observedSockets = { put: 0, read: 0, control: 0 };
   const active = new Set<() => void>();
   const pendingBySpace = new Map<string, Set<Promise<void>>>();
   function track(space: string) {
@@ -412,7 +427,8 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
       // but attach the rejection listener before dispatch to avoid an unhandled event.
       void received.catch(ignoreError);
       response = undefined;
-      const pair = method === 'PUT' ? agents.put : method === 'GET' ? agents.read : agents.control;
+      const pool = method === 'PUT' ? 'put' : method === 'GET' ? 'read' : 'control';
+      const pair = agents[pool];
       const req = (url.protocol === 'https:' ? httpsRequest : httpRequest)(
         url,
         { method, headers: signed, agent: url.protocol === 'https:' ? pair.https : pair.http },
@@ -442,6 +458,12 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
         if (!response) rejectResponse(unavailable());
       });
       req.on('socket', (socket) => {
+        const live = transportSockets[pool];
+        if (!live.has(socket)) {
+          live.add(socket);
+          observedSockets[pool] = Math.max(observedSockets[pool], live.size);
+          socket.once('close', () => live.delete(socket));
+        }
         if (!sockets.has(socket)) {
           sockets.add(socket);
           socket.on('error', ignoreError);
@@ -503,6 +525,14 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
     };
   }
   return {
+    transportSnapshot() {
+      const snapshot = (pool: keyof typeof agents) => ({
+        sockets: transportSockets[pool].size,
+        observedSockets: observedSockets[pool],
+        limit: agents[pool][endpoint.protocol === 'https:' ? 'https' : 'http'].maxTotalSockets,
+      });
+      return { put: snapshot('put'), read: snapshot('read'), control: snapshot('control') };
+    },
     async listPrivate(cursor, signal) {
       if (cursor !== undefined && !validCursor(cursor)) throw invalid();
       const url = new URL(`/${options.bucket}/`, endpoint);

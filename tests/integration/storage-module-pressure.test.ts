@@ -8,6 +8,18 @@ afterEach(async () => {
 });
 
 describe('storage module under transfer pressure (ADR-015 S10)', () => {
+  it('reads a marked object in the same space as two stalled task PUTs within two seconds', async () => {
+    const h = (fixture = await createPressureHarness({}, { readSpace: 'a' }));
+    const streams = [h.stall('a', 'same-space-one'), h.stall('a', 'same-space-two')];
+    await expect.poll(() => h.admission.snapshot().bufferedBytes).toBe(2 * CHUNK);
+    const read = await h.call('read', 'GET', `/spaces/a/objects/${h.readId}`);
+    expect(read.status).toBe(200);
+    expect(read.body.equals(h.readBytes)).toBe(true);
+    expect(read.elapsed).toBeLessThan(2000);
+    expect(h.admission.snapshot().task).toBe(2);
+    streams.forEach((stream) => stream.abort());
+  });
+
   it('bounds 20 attempted 4 MiB streams across two spaces and rejects excess within one second', async () => {
     const h = (fixture = await createPressureHarness({ queueRequests: 8 }));
     const streams = Array.from({ length: 20 }, (_, n) =>

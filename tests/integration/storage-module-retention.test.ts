@@ -135,6 +135,20 @@ describe('sealed retention snapshots and durable warning plans', () => {
     expect(
       (await h.call('read', 'GET', `/spaces/${artifact.space}/objects/${artifact.id}`)).body
     ).toEqual(artifact.bytes);
+    // HTTP body completion precedes the handler's awaited read-lease cleanup.
+    // Advance the fixture clock only after that SQL protection has retired.
+    await expect
+      .poll(async () =>
+        Number(
+          (
+            await h.stores.postgres.query(
+              'SELECT count(*) FROM storage.read_leases WHERE space_id=$1',
+              [artifact.space]
+            )
+          ).rows[0].count
+        )
+      )
+      .toBe(0);
     await h.clock(TERMINAL + 157 * DAY);
     await h.tick();
     expect(h.backend.objects.has(artifact.key)).toBe(false);

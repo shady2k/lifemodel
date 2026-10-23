@@ -319,43 +319,77 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
             transferSignal.throwIfAborted();
             if (begun?.rows[0]?.['accepted'] !== true)
               throw new StorageAccessError(409, 'upload_expired');
-            async function* source() {
-              let accepted = 0;
-              let emitted = 0;
-              let pending: Buffer | undefined;
-              let filled = 0;
-              const hash = createHash('sha256');
-              for await (const part of req.iterator({ destroyOnReturn: false })) {
-                owner.assertActive();
-                transferSignal.throwIfAborted();
-                const bytes = Buffer.isBuffer(part) ? part : Buffer.from(part);
-                if (accepted + bytes.length > size)
-                  throw new StorageAccessError(400, 'length_mismatch');
-                accepted += bytes.length;
-                hash.update(bytes);
-                for (let offset = 0; offset < bytes.length; ) {
-                  pending ??= Buffer.allocUnsafe(Math.min(settings.chunkBytes, size - emitted));
-                  const copied = Math.min(bytes.length - offset, pending.length - filled);
-                  bytes.copy(pending, filled, offset, offset + copied);
-                  filled += copied;
-                  offset += copied;
-                  if (filled === pending.length) {
-                    let chunk: Buffer | undefined = pending;
-                    pending = undefined;
-                    filled = 0;
-                    emitted += chunk.length;
-                    yield chunk;
-                    chunk = undefined;
+            /** Stay paused and pull only bytes covered by the current lease.
+             * An async iterator can pull a whole TCP fragment and retain its
+             * suffix across the next admission wait. read(n) leaves that suffix
+             * in the transport instead of the queued upload coroutine. */
+            async function readBody(bytes: number): Promise<Buffer | undefined> {
+              return new Promise((resolve, reject) => {
+                const cleanup = (): void => {
+                  req.off('readable', readable);
+                  req.off('end', ended);
+                  req.off('close', closed);
+                  req.off('error', failed);
+                  transferSignal.removeEventListener('abort', aborted);
+                };
+                const failed = (error: Error): void => {
+                  cleanup();
+                  reject(error);
+                };
+                const aborted = (): void => {
+                  cleanup();
+                  reject(new StorageAccessError(503, 'transfer_unavailable'));
+                };
+                const ended = (): void => {
+                  cleanup();
+                  resolve(undefined);
+                };
+                const closed = (): void => {
+                  if (req.readableEnded) ended();
+                  else aborted();
+                };
+                const readable = (): void => {
+                  try {
+                    owner.assertActive();
+                    transferSignal.throwIfAborted();
+                    const part = req.read(bytes) as Buffer | null;
+                    if (part !== null) {
+                      cleanup();
+                      resolve(part);
+                    } else if (req.readableEnded) ended();
+                    else if (req.destroyed) closed();
+                  } catch {
+                    cleanup();
+                    reject(new StorageAccessError(503, 'transfer_unavailable'));
                   }
-                  // Leave the yielded chunk's scope before queueing again. The
-                  // adapter drops its reference before asking for the next chunk.
-                  if (!pending && emitted < size)
-                    await acquire(Math.min(settings.chunkBytes, size - emitted));
-                }
+                };
+                req.on('readable', readable);
+                req.once('end', ended);
+                req.once('close', closed);
+                req.once('error', failed);
+                transferSignal.addEventListener('abort', aborted, { once: true });
+                readable();
+              });
+            }
+            async function* source() {
+              let emitted = 0;
+              const hash = createHash('sha256');
+              while (emitted < size) {
+                const remaining = Math.min(settings.chunkBytes, size - emitted);
+                let chunk = await readBody(remaining);
+                if (chunk?.length !== remaining)
+                  throw new StorageAccessError(400, 'length_mismatch');
+                hash.update(chunk);
+                emitted += chunk.length;
+                yield chunk;
+                chunk = undefined;
+                // Drop the yielded buffer before queueing. No source read may
+                // happen until the next chunk's byte allocation is granted.
+                if (emitted < size) await acquire(Math.min(settings.chunkBytes, size - emitted));
               }
-              owner.assertActive();
-              transferSignal.throwIfAborted();
-              if (accepted !== size) throw new StorageAccessError(400, 'length_mismatch');
+              // A one-byte bounded probe detects surplus without pulling an
+              // arbitrary trailing fragment; the final lease is still held.
+              if (await readBody(1)) throw new StorageAccessError(400, 'length_mismatch');
               if (hash.digest('hex') !== sha256) throw new StorageAccessError(400, 'hash_mismatch');
             }
             owner.assertActive();

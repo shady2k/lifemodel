@@ -63,6 +63,43 @@ describe('storage admission settings', () => {
 });
 
 describe('storage admission scheduler', () => {
+  it('keeps canceled control execution slots until handlers settle', async () => {
+    const admission = createStorageAdmission();
+    const controllers = [new AbortController(), new AbortController()];
+    const leases = await Promise.all(
+      controllers.map((controller) =>
+        admission.acquire({
+          space: 'control',
+          role: 'control',
+          bytes: 0,
+          signal: controller.signal,
+        })
+      )
+    );
+    const next = request(admission, 'next', 'control', 0);
+    controllers.forEach((controller) => controller.abort());
+    expect(admission.snapshot()).toMatchObject({ control: 2, queued: 1 });
+    leases[0]!.release();
+    const replacement = await next;
+    expect(admission.snapshot().control).toBe(2);
+    leases[1]!.release();
+    replacement.release();
+  });
+
+  it('caps reads separately from task transfers in the same space', async () => {
+    const admission = createStorageAdmission();
+    const tasks = await Promise.all([request(admission, 'a'), request(admission, 'a')]);
+    const reads = await Promise.all([
+      request(admission, 'a', 'read'),
+      request(admission, 'a', 'read'),
+    ]);
+    const third = request(admission, 'a', 'read');
+    expect(admission.snapshot()).toMatchObject({ task: 2, read: 2, queued: 1 });
+    reads[0]!.release();
+    const replacement = await third;
+    for (const lease of [...tasks, ...reads, replacement]) lease.release();
+  });
+
   it('caps each space at two chunks and accounts held buffers exactly once', async () => {
     const admission = createStorageAdmission();
     const first = await request(admission, 'space-a');

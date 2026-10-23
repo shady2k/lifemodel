@@ -42,9 +42,19 @@ One in-process admission scheduler covers all three TLS listeners. It stores onl
 slot and queue metadata, never durable authority or artifact buffers. Each chunk
 releases its worker after the backend/socket drain and rejoins the space-fair
 queue before allocating the next buffer. Task traffic cannot borrow the read
-reserve. Control traffic has its own workers. A closed or aborted request frees
-its worker immediately; fresh authorization and the SQL maintenance fence still
-apply to every chunk and publication. Admission never replaces those guards.
+reserve. The per-space cap applies separately to task uploads/downloads on 8443
+and to owner/core reads on 8445 (at most two reads per space). Reads of the same
+space do not consume the task cap; they use the read reserve plus free general
+slots. Control traffic has its own workers. An aborted transfer frees its worker
+immediately. Control cancellation propagates to SQL/S3, but its execution slot
+stays occupied until the handler and cleanup settle. Control SQL cancellation
+terminates only its own captured PostgreSQL session and awaits the server's
+termination acknowledgement; closing a client socket alone is not settlement.
+The cancellation connection is bounded and does not wait behind the blocked
+operation's pool checkout. Partial control bodies close at their own progress
+deadline. Fresh authorization and the SQL maintenance
+fence still apply to every chunk and publication. Admission never replaces those
+guards.
 
 Configuration uses integer environment settings. Invalid values fail startup;
 values are never clamped. Defaults are also finite hard maxima unless noted:

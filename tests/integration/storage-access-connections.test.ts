@@ -284,7 +284,8 @@ describe('bounded fresh storage access connections', () => {
       await Promise.allSettled(pending);
       await access.close?.();
     }
-    expect(await activity()).toHaveLength(0);
+    // Pool shutdown closes local sockets before the server removes their rows.
+    await expect.poll(async () => (await activity()).length).toBe(0);
   });
 
   it('retires an aborted SQL client before its replacement can execute; a queued acquire aborts too', async () => {

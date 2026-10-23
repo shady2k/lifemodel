@@ -3,6 +3,7 @@
  * work with the decision. Await socket drain/S3 outside this guard and reenter
  * for every next chunk. Untrusted code never supplies a callback or SQL. */
 import { Pool, type PoolClient } from 'pg';
+import { withStorageSqlClient } from './storage-control-work.js';
 import { randomUUID } from 'node:crypto';
 import { storageMaintenanceFence } from './storage-maintenance.js';
 import { StorageAccessError } from './storage-access-error.js';
@@ -54,10 +55,15 @@ export interface StorageAccess {
     /** Writer/publication streams participate in normal-end quiescence. Defaults to true. */
     write?: boolean;
   }): StorageTaskStream;
-  revoke(space: string, expectedRevision: string, effectKey: string): Promise<RevokeReceipt>;
+  revoke(
+    space: string,
+    expectedRevision: string,
+    effectKey: string,
+    signal?: AbortSignal
+  ): Promise<RevokeReceipt>;
   /** Freeze commits the SQL fence before canceling and settling local handlers. */
-  settleSpace(space: string): Promise<void>;
-  quiesceSpace(space: string): Promise<void>;
+  settleSpace(space: string, signal?: AbortSignal): Promise<void>;
+  quiesceSpace(space: string, signal?: AbortSignal): Promise<void>;
   check(signal: AbortSignal): Promise<boolean>;
 }
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -167,8 +173,27 @@ export function createStorageAccess(
   async function transaction<T>(
     run: (client: PoolClient, assertLive: () => void) => Promise<T>,
     parent?: AbortSignal,
-    write = true
+    write = true,
+    control = false
   ): Promise<T> {
+    if (control)
+      return withStorageSqlClient(pool, options.connectionString, parent, async (client) => {
+        try {
+          await client.query('BEGIN');
+          await storageMaintenanceFence(client);
+          const assertLive = (): void => {
+            parent?.throwIfAborted();
+          };
+          const result = await run(client, assertLive);
+          assertLive();
+          await client.query('COMMIT');
+          return result;
+        } catch (error) {
+          if (!parent?.aborted) await client.query('ROLLBACK').catch(() => undefined);
+          if (error instanceof StorageAccessError) throw error;
+          throw new StorageAccessError(503, 'access_unavailable');
+        }
+      });
     const signal = AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(parent ? [parent] : [])]);
     let client: PoolClient | undefined;
     let retired = false;
@@ -222,6 +247,31 @@ export function createStorageAccess(
       if (client && !retired) client.release(failed.has(client));
     }
   }
+  async function waitForSpace(
+    pending: Promise<void>[],
+    code: string,
+    signal?: AbortSignal
+  ): Promise<void> {
+    signal?.throwIfAborted();
+    let abort: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.all(pending),
+        new Promise<never>((_, reject) => {
+          abort = () => {
+            reject(new StorageAccessError(503, code));
+          };
+          signal?.addEventListener('abort', abort, { once: true });
+          timer = setTimeout(abort, 5000);
+          timer.unref();
+        }),
+      ]);
+    } finally {
+      if (abort) signal?.removeEventListener('abort', abort);
+      if (timer) clearTimeout(timer);
+    }
+  }
   function cancel(space: string): void {
     for (const controller of streams.get(space) ?? [])
       controller.abort(new StorageAccessError(403, 'access_revoked'));
@@ -237,7 +287,7 @@ export function createStorageAccess(
       return closePromise;
     },
     identity: options.identity,
-    quiesceSpace: async (space) => {
+    quiesceSpace: async (space, signal) => {
       const pending = [...(streams.get(space) ?? [])]
         .filter((controller) => writers.has(controller))
         .map((controller) => {
@@ -245,42 +295,16 @@ export function createStorageAccess(
           if (!promise) throw new StorageAccessError(503, 'cleanup_pending');
           return promise;
         });
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([
-          Promise.all(pending),
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(() => {
-              reject(new StorageAccessError(503, 'quiescence_pending'));
-            }, 5000);
-            timer.unref();
-          }),
-        ]);
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
+      await waitForSpace(pending, 'quiescence_pending', signal);
     },
-    settleSpace: async (space) => {
+    settleSpace: async (space, signal) => {
       const pending = [...(streams.get(space) ?? [])].map((controller) => {
         const promise = settlements.get(controller);
         if (!promise) throw new StorageAccessError(503, 'cleanup_pending');
         return promise;
       });
       cancel(space);
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([
-          Promise.all(pending),
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(() => {
-              reject(new StorageAccessError(503, 'cleanup_pending'));
-            }, 5000);
-            timer.unref();
-          }),
-        ]);
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
+      await waitForSpace(pending, 'cleanup_pending', signal);
     },
     check: async (signal) => {
       try {
@@ -404,7 +428,7 @@ export function createStorageAccess(
         },
       };
     },
-    revoke: async (space, expectedRevision, effectKey) => {
+    revoke: async (space, expectedRevision, effectKey, signal) => {
       validateSpace(space);
       if (
         !REVISION.test(expectedRevision) ||
@@ -413,40 +437,48 @@ export function createStorageAccess(
       )
         throw new StorageAccessError(400, 'invalid_request');
       return exclusive(space, async () => {
-        const receipt = await transaction(async (client) => {
-          // Global effect-key lock also orders same-key requests across spaces.
-          await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [effectKey]);
-          const old = await client.query<{
-            receipt_id: string;
-            space_id: string;
-            expected_revision: string;
-            revision: string;
-          }>('SELECT * FROM storage.revoke_receipts WHERE effect_key=$1', [effectKey]);
-          const saved = old.rows[0];
-          if (saved) {
-            if (saved.space_id !== space || saved.expected_revision !== expectedRevision)
-              throw new StorageAccessError(409, 'effect_conflict');
-            return { id: saved.receipt_id, space, revision: saved.revision, effectKey };
-          }
-          const existing = await client.query(
-            'SELECT id FROM storage.spaces WHERE id=$1 FOR UPDATE',
-            [space]
-          );
-          if (existing.rows.length !== 1) throw new StorageAccessError(404, 'space_not_found');
-          const updated = await client.query<{ access_revision: string }>(
-            `UPDATE storage.spaces SET access_revision=access_revision+1, mode='revoked'
+        signal?.throwIfAborted();
+        const receipt = await transaction(
+          async (client) => {
+            // Global effect-key lock also orders same-key requests across spaces.
+            await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+              effectKey,
+            ]);
+            const old = await client.query<{
+              receipt_id: string;
+              space_id: string;
+              expected_revision: string;
+              revision: string;
+            }>('SELECT * FROM storage.revoke_receipts WHERE effect_key=$1', [effectKey]);
+            const saved = old.rows[0];
+            if (saved) {
+              if (saved.space_id !== space || saved.expected_revision !== expectedRevision)
+                throw new StorageAccessError(409, 'effect_conflict');
+              return { id: saved.receipt_id, space, revision: saved.revision, effectKey };
+            }
+            const existing = await client.query(
+              'SELECT id FROM storage.spaces WHERE id=$1 FOR UPDATE',
+              [space]
+            );
+            if (existing.rows.length !== 1) throw new StorageAccessError(404, 'space_not_found');
+            const updated = await client.query<{ access_revision: string }>(
+              `UPDATE storage.spaces SET access_revision=access_revision+1, mode='revoked'
             WHERE id=$1 AND access_revision=$2 AND mode IN ('open','wrapping','revoked') RETURNING access_revision::text`,
-            [space, expectedRevision]
-          );
-          const revision = updated.rows[0]?.access_revision;
-          if (revision === undefined) throw new StorageAccessError(409, 'revision_conflict');
-          const id = randomUUID();
-          await client.query(
-            `INSERT INTO storage.revoke_receipts(effect_key,space_id,expected_revision,revision,receipt_id) VALUES($1,$2,$3,$4,$5)`,
-            [effectKey, space, expectedRevision, revision, id]
-          );
-          return { id, space, revision, effectKey };
-        });
+              [space, expectedRevision]
+            );
+            const revision = updated.rows[0]?.access_revision;
+            if (revision === undefined) throw new StorageAccessError(409, 'revision_conflict');
+            const id = randomUUID();
+            await client.query(
+              `INSERT INTO storage.revoke_receipts(effect_key,space_id,expected_revision,revision,receipt_id) VALUES($1,$2,$3,$4,$5)`,
+              [effectKey, space, expectedRevision, revision, id]
+            );
+            return { id, space, revision, effectKey };
+          },
+          signal,
+          true,
+          true
+        );
         // SQL denies new chunks after commit; all local streams cancel before ACK. Replays cancel too.
         cancel(space);
         return receipt;

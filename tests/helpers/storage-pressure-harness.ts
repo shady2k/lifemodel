@@ -80,7 +80,12 @@ export interface PressureReply {
   retryAfter: string | undefined;
   elapsed: number;
 }
-export async function createPressureHarness(settings: Partial<StorageAdmissionSettings> = {}) {
+export async function createPressureHarness(
+  settings: Partial<StorageAdmissionSettings> = {},
+  options: { spaces?: string[]; readSpace?: string } = {}
+) {
+  const taskSpaces = [...new Set(['a', 'b', ...(options.spaces ?? [])])];
+  const readSpace = options.readSpace ?? 'reader';
   const stores = await createTestStores();
   stores.postgres.on('error', () => undefined);
   stores.postgres.on('connect', (client) => client.on('error', () => undefined));
@@ -88,7 +93,7 @@ export async function createPressureHarness(settings: Partial<StorageAdmissionSe
   await stores.postgres.query(
     'TRUNCATE task_access.projections,task_access.intents,storage.spaces CASCADE'
   );
-  const api = await createSealIdentity();
+  const api = await createSealIdentity(taskSpaces);
   const tlsProxy = await countedProxy(new URL(api.options.apiServer));
   const sqlProxy = await countedProxy(new URL(workerDatabaseUrl()));
   const backend = await createSealS3({ bucket: 'task-output' });
@@ -125,9 +130,9 @@ export async function createPressureHarness(settings: Partial<StorageAdmissionSe
     if (!address || typeof address === 'string') throw Error('pressure listener unavailable');
     ports[role] = address.port;
   }
-  for (const space of ['a', 'b', 'reader'])
+  for (const space of [...taskSpaces, 'reader'])
     await stores.postgres.query('INSERT INTO storage.spaces(id) VALUES($1)', [space]);
-  for (const task of ['a', 'b']) {
+  for (const task of taskSpaces) {
     await stores.postgres.query(
       "INSERT INTO task_access.intents(task_id,attempt_id,launch_id,revision,mode,soft_due_at,hard_stop_at) VALUES($1,$1,$1,0,'active',clock_timestamp()+interval '1 hour',clock_timestamp()+interval '2 hours')",
       [task]
@@ -143,7 +148,7 @@ export async function createPressureHarness(settings: Partial<StorageAdmissionSe
     attempt = randomUUID(),
     key = `private/${attempt}`;
   await stores.postgres.query('SELECT storage.reserve_upload($1,$2,$3,$4,$5,$6,3600)', [
-    'reader',
+    readSpace,
     'read-output',
     readId,
     'owner-output',
@@ -152,15 +157,16 @@ export async function createPressureHarness(settings: Partial<StorageAdmissionSe
   ]);
   await stores.postgres.query(
     'INSERT INTO storage.upload_attempts(id,space_id,upload_id,s3_key) VALUES($1,$2,$3,$4)',
-    [attempt, 'reader', 'read-output', key]
+    [attempt, readSpace, 'read-output', key]
   );
   await stores.postgres.query('SELECT storage.complete_upload($1,$2,$3)', [
-    'reader',
+    readSpace,
     'read-output',
     attempt,
   ]);
   await stores.postgres.query("UPDATE storage.objects SET mark='result' WHERE id=$1", [readId]);
-  await stores.postgres.query("UPDATE storage.spaces SET mode='sealed' WHERE id='reader'");
+  if (!taskSpaces.includes(readSpace))
+    await stores.postgres.query("UPDATE storage.spaces SET mode='sealed' WHERE id=$1", [readSpace]);
   backend.objects.set(key, { bytes: readBytes, sha256: digest(readBytes) });
   const requests = new Set<ClientRequest>();
   function begin(
@@ -234,7 +240,7 @@ export async function createPressureHarness(settings: Partial<StorageAdmissionSe
     if (!reply) throw Error('pressure request aborted');
     return reply;
   }
-  function stall(space: 'a' | 'b', id: string, length = CHUNK) {
+  function stall(space: string, id: string, length = CHUNK) {
     return begin(
       'task',
       'PUT',
@@ -273,6 +279,7 @@ export async function createPressureHarness(settings: Partial<StorageAdmissionSe
     tlsProxy,
     sqlProxy,
     backend,
+    s3,
     access,
     admission,
     app,

@@ -1,6 +1,7 @@
 /** Durable transaction-local write admission. No SQL session spans S3 work. */
 import { Client, type PoolClient } from 'pg';
 import { randomUUID } from 'node:crypto';
+import { terminateStorageQuery } from './storage-control-work.js';
 import { StorageAccessError } from './storage-access-error.js';
 const LOCK = '653740016';
 // Held reads never write leases. Release reserves a full lease/progress window
@@ -19,11 +20,14 @@ export interface MaintenanceStatus {
   cutAt: string | null;
 }
 export interface StorageMaintenance {
-  status(): Promise<MaintenanceStatus>;
-  begin(input: unknown): Promise<MaintenanceStatus>;
-  release(input: unknown): Promise<MaintenanceStatus>;
-  releaseDegraded(input: unknown): Promise<MaintenanceStatus>;
-  prepareRestore(input: { generation: string; artifactSha256: string }): Promise<MaintenanceStatus>;
+  status(signal?: AbortSignal): Promise<MaintenanceStatus>;
+  begin(input: unknown, signal?: AbortSignal): Promise<MaintenanceStatus>;
+  release(input: unknown, signal?: AbortSignal): Promise<MaintenanceStatus>;
+  releaseDegraded(input: unknown, signal?: AbortSignal): Promise<MaintenanceStatus>;
+  prepareRestore(
+    input: { generation: string; artifactSha256: string },
+    signal?: AbortSignal
+  ): Promise<MaintenanceStatus>;
   close(): Promise<void>;
 }
 function fail(code: string, status = 503): never {
@@ -84,16 +88,42 @@ export function createStorageMaintenance(options: {
     c.on('error', () => undefined);
     return c;
   }
-  async function connected<T>(work: (c: Client) => Promise<T>, timeout = 5000) {
+  async function connected<T>(
+    work: (c: Client) => Promise<T>,
+    timeout = 5000,
+    signal?: AbortSignal
+  ) {
+    signal?.throwIfAborted();
     const c = client(timeout);
+    let cancellation: Promise<void> | undefined;
+    let pid: number | undefined;
+    const abort = (): void => {
+      if (pid !== undefined) {
+        cancellation ??= terminateStorageQuery(options.connectionString, pid);
+        void cancellation.catch(() => undefined);
+      }
+    };
+    signal?.addEventListener('abort', abort, { once: true });
     try {
-      await c.connect();
-      return await work(c);
+      const connecting = c.connect();
+      if (signal?.aborted) abort();
+      await connecting;
+      pid = (await c.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]?.pid;
+      if (signal?.aborted) abort();
+      signal?.throwIfAborted();
+      const result = await work(c);
+      signal?.throwIfAborted();
+      return result;
     } catch (error) {
       if (error instanceof StorageAccessError) throw error;
       fail('maintenance_unavailable');
     } finally {
-      await c.end().catch(() => undefined);
+      signal?.removeEventListener('abort', abort);
+      try {
+        await cancellation;
+      } finally {
+        await c.end().catch(() => undefined);
+      }
     }
   }
   async function status(c?: Client): Promise<MaintenanceStatus> {
@@ -106,7 +136,11 @@ export function createStorageMaintenance(options: {
     if (!row) fail('maintenance_unavailable');
     return { ...row, cutAt: row.cutAt?.toISOString() ?? null };
   }
-  async function release(value: unknown, degraded = false): Promise<MaintenanceStatus> {
+  async function release(
+    value: unknown,
+    degraded = false,
+    signal?: AbortSignal
+  ): Promise<MaintenanceStatus> {
     const input = exact(value, degraded ? ['generation', 'unavailable'] : ['generation']);
     const generation = input['generation'];
     if (typeof generation !== 'string' || !UUID.test(generation)) fail('invalid_request', 400);
@@ -116,65 +150,74 @@ export function createStorageMaintenance(options: {
       (typeof unavailable !== 'number' || !Number.isSafeInteger(unavailable) || unavailable <= 0)
     )
       fail('invalid_request', 400);
-    return connected(async (c) => {
-      await c.query('BEGIN');
-      await c.query(`SELECT pg_advisory_xact_lock(${LOCK})`);
-      await c.query('SELECT id FROM storage.maintenance WHERE id=true FOR UPDATE');
-      const row = await status(c);
-      if (row.generation !== generation) fail('hold_conflict', 409);
-      if (degraded && row.purpose !== 'restore') fail('restore_pending', 409);
-      if (row.purpose === 'restore') {
-        const progress = (
-          await c.query<{ complete: boolean; unavailable: string }>(
-            `SELECT complete,(SELECT count(*) FROM storage.unavailable_versions WHERE generation=$1) AS unavailable
+    return connected(
+      async (c) => {
+        await c.query('BEGIN');
+        await c.query(`SELECT pg_advisory_xact_lock(${LOCK})`);
+        await c.query('SELECT id FROM storage.maintenance WHERE id=true FOR UPDATE');
+        const row = await status(c);
+        if (row.generation !== generation) fail('hold_conflict', 409);
+        if (degraded && row.purpose !== 'restore') fail('restore_pending', 409);
+        if (row.purpose === 'restore') {
+          const progress = (
+            await c.query<{ complete: boolean; unavailable: string }>(
+              `SELECT complete,(SELECT count(*) FROM storage.unavailable_versions WHERE generation=$1) AS unavailable
              FROM storage.restore_progress WHERE generation=$1 FOR SHARE`,
-            [generation]
-          )
-        ).rows[0];
-        // Count live availability, not a cached progress total. Acceptance
-        // changes only admission. Availability, marks, receipts and ledger debt
-        // remain intact, including on an idempotent release retry.
-        const accepted = degraded ? BigInt(unavailable as number) : 0n;
-        if (!progress?.complete || BigInt(progress.unavailable) !== accepted)
-          fail('restore_pending', 409);
-      }
-      if (row.state === 'draining') fail('hold_pending', 409);
-      await c.query(
-        "UPDATE storage.maintenance SET state='normal',reopened_at=to_timestamp($1/1000.0) WHERE id=true AND state<>'normal'",
-        [(options.now ?? Date.now)()]
-      );
-      await c.query('COMMIT');
-      return status(c);
-    });
+              [generation]
+            )
+          ).rows[0];
+          // Count live availability, not a cached progress total. Acceptance
+          // changes only admission. Availability, marks, receipts and ledger debt
+          // remain intact, including on an idempotent release retry.
+          const accepted = degraded ? BigInt(unavailable as number) : 0n;
+          if (!progress?.complete || BigInt(progress.unavailable) !== accepted)
+            fail('restore_pending', 409);
+        }
+        if (row.state === 'draining') fail('hold_pending', 409);
+        await c.query(
+          "UPDATE storage.maintenance SET state='normal',reopened_at=to_timestamp($1/1000.0) WHERE id=true AND state<>'normal'",
+          [(options.now ?? Date.now)()]
+        );
+        await c.query('COMMIT');
+        return status(c);
+      },
+      5000,
+      signal
+    );
   }
   const api: StorageMaintenance = {
-    status: () => status(),
-    begin: async (value) => {
+    status: (signal) => connected(status, 5000, signal),
+    begin: async (value, signal) => {
+      signal?.throwIfAborted();
       const input = exact(value, ['effectKey']);
       if (
         typeof input['effectKey'] !== 'string' ||
         !/^[A-Za-z0-9_-]{1,128}$/.test(input['effectKey'])
       )
         fail('invalid_request', 400);
-      const hold = await connected(async (c) => {
-        await c.query('BEGIN');
-        await c.query('SELECT id FROM storage.maintenance WHERE id=true FOR UPDATE');
-        const row = (
-          await c.query<{ state: MaintenanceStatus['state']; effect_key: string | null }>(
-            'SELECT state,effect_key FROM storage.maintenance WHERE id=true'
-          )
-        ).rows[0];
-        if (!row) fail('maintenance_unavailable');
-        if (row.state !== 'normal' && row.effect_key !== input['effectKey'])
-          fail('hold_conflict', 409);
-        if (row.state === 'normal')
-          await c.query(
-            "UPDATE storage.maintenance SET generation=$1,purpose='backup',state='draining',effect_key=$2,cut_at=NULL WHERE id=true",
-            [randomUUID(), input['effectKey']]
-          );
-        await c.query('COMMIT');
-        return status(c);
-      });
+      const hold = await connected(
+        async (c) => {
+          await c.query('BEGIN');
+          await c.query('SELECT id FROM storage.maintenance WHERE id=true FOR UPDATE');
+          const row = (
+            await c.query<{ state: MaintenanceStatus['state']; effect_key: string | null }>(
+              'SELECT state,effect_key FROM storage.maintenance WHERE id=true'
+            )
+          ).rows[0];
+          if (!row) fail('maintenance_unavailable');
+          if (row.state !== 'normal' && row.effect_key !== input['effectKey'])
+            fail('hold_conflict', 409);
+          if (row.state === 'normal')
+            await c.query(
+              "UPDATE storage.maintenance SET generation=$1,purpose='backup',state='draining',effect_key=$2,cut_at=NULL WHERE id=true",
+              [randomUUID(), input['effectKey']]
+            );
+          await c.query('COMMIT');
+          return status(c);
+        },
+        5000,
+        signal
+      );
       if (hold.state === 'held' || hold.state === 'reconciling') return hold;
       return connected(
         async (c) => {
@@ -190,56 +233,61 @@ export function createStorageMaintenance(options: {
           await c.query('COMMIT');
           return result;
         },
-        (options.drainMs ?? 15000) + (options.settleMs ?? 5000)
+        (options.drainMs ?? 15000) + (options.settleMs ?? 5000),
+        signal
       );
     },
-    release: (value) => release(value),
-    releaseDegraded: (value) => release(value, true),
-    prepareRestore: async (input) => {
+    release: (value, signal) => release(value, false, signal),
+    releaseDegraded: (value, signal) => release(value, true, signal),
+    prepareRestore: async (input, signal) => {
       if (!UUID.test(input.generation) || !/^[0-9a-f]{64}$/.test(input.artifactSha256))
         fail('invalid_request', 400);
-      return connected(async (c) => {
-        await c.query('BEGIN');
-        await c.query(`SELECT pg_advisory_xact_lock(${LOCK})`);
-        await c.query('SELECT id FROM storage.maintenance WHERE id=true FOR UPDATE');
-        const current = await status(c);
-        if (current.state === 'normal') fail('restore_requires_hold', 409);
-        if (current.purpose === 'restore' && current.generation === input.generation) {
-          const saved = (
-            await c.query<{ artifact_sha256: string | null }>(
-              'SELECT artifact_sha256 FROM storage.restore_progress WHERE generation=$1',
-              [input.generation]
-            )
-          ).rows[0];
-          if (saved?.artifact_sha256 !== input.artifactSha256) fail('hold_conflict', 409);
+      return connected(
+        async (c) => {
+          await c.query('BEGIN');
+          await c.query(`SELECT pg_advisory_xact_lock(${LOCK})`);
+          await c.query('SELECT id FROM storage.maintenance WHERE id=true FOR UPDATE');
+          const current = await status(c);
+          if (current.state === 'normal') fail('restore_requires_hold', 409);
+          if (current.purpose === 'restore' && current.generation === input.generation) {
+            const saved = (
+              await c.query<{ artifact_sha256: string | null }>(
+                'SELECT artifact_sha256 FROM storage.restore_progress WHERE generation=$1',
+                [input.generation]
+              )
+            ).rows[0];
+            if (saved?.artifact_sha256 !== input.artifactSha256) fail('hold_conflict', 409);
+            await c.query('COMMIT');
+            return current;
+          }
+          // A generation is single-use: stale completion/cursor rows must never
+          // certify a newly seeded set, including after release or another hold.
+          if (
+            (
+              await c.query('SELECT 1 FROM storage.restore_progress WHERE generation=$1', [
+                input.generation,
+              ])
+            ).rowCount
+          )
+            fail('hold_conflict', 409);
+          await c.query(
+            "UPDATE storage.maintenance SET generation=$1,purpose='restore',state='held' WHERE id=true",
+            [input.generation]
+          );
+          await c.query(
+            `INSERT INTO storage.version_availability(object_id,generation,status) SELECT object_id,$1,'unverified' FROM storage.object_versions ON CONFLICT(object_id) DO UPDATE SET generation=EXCLUDED.generation,status='unverified',checked_at=NULL`,
+            [input.generation]
+          );
+          await c.query(
+            'INSERT INTO storage.restore_progress(generation,artifact_sha256) VALUES($1,$2) ON CONFLICT(generation) DO NOTHING',
+            [input.generation, input.artifactSha256]
+          );
           await c.query('COMMIT');
-          return current;
-        }
-        // A generation is single-use: stale completion/cursor rows must never
-        // certify a newly seeded set, including after release or another hold.
-        if (
-          (
-            await c.query('SELECT 1 FROM storage.restore_progress WHERE generation=$1', [
-              input.generation,
-            ])
-          ).rowCount
-        )
-          fail('hold_conflict', 409);
-        await c.query(
-          "UPDATE storage.maintenance SET generation=$1,purpose='restore',state='held' WHERE id=true",
-          [input.generation]
-        );
-        await c.query(
-          `INSERT INTO storage.version_availability(object_id,generation,status) SELECT object_id,$1,'unverified' FROM storage.object_versions ON CONFLICT(object_id) DO UPDATE SET generation=EXCLUDED.generation,status='unverified',checked_at=NULL`,
-          [input.generation]
-        );
-        await c.query(
-          'INSERT INTO storage.restore_progress(generation,artifact_sha256) VALUES($1,$2) ON CONFLICT(generation) DO NOTHING',
-          [input.generation, input.artifactSha256]
-        );
-        await c.query('COMMIT');
-        return status(c);
-      });
+          return status(c);
+        },
+        5000,
+        signal
+      );
     },
     close: () => {
       return Promise.resolve();
