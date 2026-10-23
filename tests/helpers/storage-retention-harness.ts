@@ -15,6 +15,7 @@ import { createSealS3 } from './storage-seal-s3.js';
 import { createSealSqlProxy } from './storage-seal-sql-proxy.js';
 import { PostgresConversationStore } from '../../src/storage/postgres-conversation-store.js';
 import { storageWarningEventId } from '../../src/core/storage-retention.js';
+import { PersistentRecipientRegistry } from '../../src/core/recipient-registry.js';
 
 export const DAY = 86_400_000;
 export const TERMINAL = Date.UTC(2030, 0, 1);
@@ -74,7 +75,10 @@ export async function createRetentionHarness(bucket = 'task-output') {
     revision: 1,
   };
   let sequence = 0;
-  let noticeRecipient = `storage-retention-${randomUUID()}`;
+  const recipientRegistry = new PersistentRecipientRegistry(stores.postgres);
+  await recipientRegistry.init();
+  const ownerRecipientId = recipientRegistry.getOrCreate('web', 'owner');
+  await recipientRegistry.flush();
   async function start(entry?: { baoAddress: string; serviceAccount: string }) {
     const configFile = join(root, `config-${++sequence}.json`);
     await writeFile(
@@ -387,7 +391,7 @@ export async function createRetentionHarness(bucket = 'task-output') {
   async function warn(planId: string, messageId = storageWarningEventId(planId)) {
     // Positive module fixtures must carry a real persisted core receipt. Tests
     // for missing receipts call the route directly, never this seed helper.
-    await new PostgresConversationStore(stores.postgres).save(`conversation:${noticeRecipient}`, {
+    await new PostgresConversationStore(stores.postgres).save(`conversation:${ownerRecipientId}`, {
       messages: [
         {
           role: 'assistant',
@@ -426,9 +430,8 @@ export async function createRetentionHarness(bucket = 'task-output') {
     for (const child of [...children]) await kill(child);
     for (const release of releases.splice(0)) release();
     await stores.postgres.query('DELETE FROM core.conversation_messages WHERE recipient_id=$1', [
-      noticeRecipient,
+      ownerRecipientId,
     ]);
-    noticeRecipient = `storage-retention-${randomUUID()}`;
     await stores.postgres.query(
       'TRUNCATE task_access.projections,task_access.intents,storage.spaces,storage.deletion_plans,storage.orphan_gc,storage.retention_receipts,storage.reclaim_receipts CASCADE'
     );
@@ -460,6 +463,7 @@ export async function createRetentionHarness(bucket = 'task-output') {
   }
   return {
     stores,
+    ownerRecipientId,
     ipc,
     projection: (value: unknown) => ipc('projection', value),
     ownerClock: (value: number) => ipc('ownerClock', value),

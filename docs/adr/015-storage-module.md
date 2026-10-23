@@ -71,11 +71,11 @@ logical-storage ceiling.
 | S03 | ACK only after immutable bytes and metadata are durable; retry idempotently; no path traversal/symlink/special file or cross-space name (nothing-lost/isolation) | `tests/integration/storage-module-objects.test.ts`: **32 objects**, duplicate/conflicting IDs, byte/hash mismatch, lost ACK, malicious names; restart between object write and metadata commit |
 | S04 | Allocate/bind/revoke/seal are keyed, revisioned and recoverable; seal makes space read-only, hashes marked files and deletes the rest (owner) | `tests/integration/storage-module-seal.test.ts`: **two spaces, eight objects each**, kill at freeze/hash/manifest/delete/receipt; replay same sealed receipt and retained marked bytes only |
 | S05 | Persist log/result while running; hard Stop keeps only already stored+marked output; unacknowledged bytes are explicitly not guaranteed (owner) | WALK-TASK-STOPS + `tests/integration/task-storage-stop.test.ts`: **two Jobs**, soft wrap vs hard kill during PUT/mark, module restart; logs/result chunks marked incrementally and no fabricated complete artifact |
-| S06 | Retention defaults **90 days**, supports forever/pin; instance logical output ceiling **20 GB = 20,000,000,000 bytes**; no silent protected-data eviction (owner + explicit unit choice) | `tests/integration/storage-module-retention.test.ts`: clock at 89/90/91 days (selection, not early deletion) and after notice + 7 days, pinned/forever/unpinned; quota ledger fixture at **20 GB** with boundary ±1 byte, **100 object metadata rows**, concurrent reservations and stale settings revision |
+| S06 | Retention defaults **90 days**, supports forever/pin; instance logical output ceiling **20 GB = 20,000,000,000 bytes**; no silent protected-data eviction (owner + explicit unit choice) | `tests/integration/storage-module-retention.test.ts`: clock at 89/90/91 days (selection, not early deletion) and after notice + 7 days, pinned/forever/unpinned; quota ledger fixture at **20 GB** with boundary ±1 byte, **100 object metadata rows**, concurrent reservations; **target, not current evidence:** stale settings revision |
 | S07 | One batched warning per deletion plan precedes deletion by a configurable **7 days** by default; pin/read/seal races cannot resurrect or delete protected output (owner) | `tests/integration/storage-module-gc.test.ts`: **100 artifacts**, one batch/notification key, default 7-day lead ±1 s and configured lead/revision change with no retroactive early deletion, owner pin after warning, two GC contenders, active reader and crash before/after delete; zero per-item notices |
 | S08 | Owner downloads through authenticated same-origin web→module; no raw S3 client/URL, no unsafe inline artifact execution (ADR-011/012, owner) | `tests/integration/task-artifact-download.test.ts`: **two owner sessions, two artifacts**, expired session, traversal, CRLF filename/HTML content, range/reconnect and mid-read expiry; WALK-TASK-PANEL in Chromium + Firefox |
 | S09 | Seaweed **single-node weed mini** with persistent volume, auth fail-closed, internal-only S3; recover objects + filer metadata + SQL catalog together under fresh destination custody, without copying source secrets (owner/research) | WALK-STORAGE-RESTORE: one fresh k3s node, **32 objects of 4 MiB plus 2 partial uploads**, restart and restore into empty instance; hashes/marks/read denial/tombstones match; record measured restore time and backup age |
-| S10 | Bound transfer/memory/client pressure with reserved web/control capacity; health never reports failed stores as empty (limits/visibility) | `tests/integration/storage-module-pressure.test.ts`: **20 attempted streams, 2 tasks + web**, 4 MiB chunks; active/buffer limits in S-D3 never exceeded, overload rejected **within 1 s**, 20 healthy control/second-task operations each ACK **within 2 s** with one stalled stream; WALK-STORAGE-LOAD proves RSS **≤512 MiB** at this fixture and no secret/body diagnostic logs |
+| S10 | Bound transfer/memory/client pressure with reserved web/control capacity; health never reports failed stores as empty (limits/visibility) | **Target:** 20 attempted streams, 2 tasks + web, 4 MiB chunks. **Current repository evidence:** `tests/integration/storage-module-pressure.test.ts` uses core marked-object reads instead of web downloads; active/buffer limits in S-D3 never exceeded, overload rejected **within 1 s**, 20 healthy control/second-task operations each ACK **within 2 s** with one stalled stream. **Deployment target, not current evidence:** WALK-STORAGE-LOAD must prove RSS **≤512 MiB** at this fixture and no secret/body diagnostic logs |
 
 ## Decisions
 
@@ -320,11 +320,13 @@ is accepted only with the matching persisted owner-notice receipt, not an LLM
 assertion. Core exposes the read-only contract
 `core.storage_owner_notices(message_id, committed_at)` over permanent nonempty
 assistant/web message rows with canonical storage-warning IDs and matching
-channel keys; it exposes no text or recipient data. Module verifies that
+channel keys, joined to the durable recipient-registry row for channel `web`,
+destination `owner` (the core's `getOrCreate('web', 'owner')` binding). It exposes
+no text or recipient data. Module verifies that
 `messageId` is `storage-warning_` plus SHA-256 of `planId` and exists in this view
 inside the same maintenance-fenced transaction before recording the warning.
-A missing or wrong-plan receipt returns `503 warning_receipt_pending` and leaves
-the plan pending for retry. The lead begins at module confirmation time, not the
+A missing, wrong-recipient or wrong-plan receipt returns
+`503 warning_receipt_pending` and leaves the plan pending for retry. The lead begins at module confirmation time, not the
 historical conversation timestamp. Lifemodel-2t5 must grant the module `SELECT`
 on exactly this view, not on core conversation tables or the whole core schema.
 The interim database-owner login does not replace this read-contract boundary.

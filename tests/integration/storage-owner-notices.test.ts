@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { createRetentionHarness, DAY, TERMINAL } from '../helpers/storage-retention-harness.js';
 import { createTestLogger } from '../helpers/test-logger.js';
 import { PostgresConversationStore } from '../../src/storage/postgres-conversation-store.js';
+import { PersistentRecipientRegistry } from '../../src/core/recipient-registry.js';
 import { createConversationManager } from '../../src/storage/conversation-manager.js';
 import { createSnapshotStore, type SnapshotStore } from '../../src/storage/snapshot-store.js';
 import { createStorageControlClient } from '../../src/core/storage-control-client.js';
@@ -23,6 +24,8 @@ let proxy: Server;
 let proxyOrigin: string;
 let dropWarning = false;
 let prefix: string;
+let otherRecipientId: string;
+let recipientRegistry: PersistentRecipientRegistry;
 let snapshot: SnapshotStore;
 let epoch: number;
 const clients: ReturnType<typeof createStorageControlClient>[] = [];
@@ -80,6 +83,10 @@ beforeEach(async () => {
   await h.reset();
   dropWarning = false;
   prefix = `storage-notice-${randomUUID()}:`;
+  recipientRegistry = new PersistentRecipientRegistry(h.stores.postgres);
+  await recipientRegistry.init();
+  otherRecipientId = recipientRegistry.getOrCreate('web', prefix);
+  await recipientRegistry.flush();
   snapshot = createSnapshotStore(h.stores.redis, { keyPrefix: prefix });
   epoch = await snapshot.takeEpoch();
 }, 20_000);
@@ -87,6 +94,11 @@ afterEach(async () => {
   for (const reconciler of reconcilers.splice(0)) reconciler.stop();
   for (const client of clients.splice(0)) client.close();
   await h.cleanup();
+  await h.stores.postgres.query('DELETE FROM core.conversation_messages WHERE recipient_id=$1', [
+    otherRecipientId,
+  ]);
+  recipientRegistry.remove(otherRecipientId);
+  await recipientRegistry.flush();
 }, 20_000);
 afterAll(async () => {
   proxy?.closeAllConnections();
@@ -110,7 +122,7 @@ function reconciler(origin = `https://localhost:${h.child().ports.control}`) {
     epoch,
     conversations: conversations(),
     conversationStore: conversationStore(),
-    recipientId: prefix,
+    recipientId: h.ownerRecipientId,
     route: { channel: 'web', destination: 'owner' },
     language: () => 'en',
     logger: createTestLogger(),
@@ -134,9 +146,9 @@ async function state(planId: string) {
     )
   ).rows[0];
 }
-async function persist(messageId: string) {
+async function persist(messageId: string, recipientId = h.ownerRecipientId) {
   await conversations().addMessage(
-    prefix,
+    recipientId,
     { role: 'assistant', content: 'Old task output will be deleted no earlier than seven days.' },
     { channel: 'web', channelMessageId: messageId }
   );
@@ -163,6 +175,34 @@ describe('persisted owner notice enforcement at the real core/module boundary', 
     await persist(messageId);
     expect((await confirm(planId, messageId)).status).toBe(200);
     expect((await state(planId)).state).toBe('warned');
+  }, 30_000);
+
+  it('refuses another recipient’s canonical notice without changing the pending plan or clock, then accepts the owner retry', async () => {
+    const planId = await plan();
+    const messageId = storageWarningEventId(planId);
+    const original = await state(planId);
+    await persist(messageId, otherRecipientId);
+    const reply = await confirm(planId, messageId);
+    expect(reply.status).toBe(503);
+    expect(reply.json.error.code).toBe('warning_receipt_pending');
+    expect(await state(planId)).toEqual(original);
+    expect(original).toMatchObject({
+      state: 'pending',
+      message_id: null,
+      warned_at: null,
+      earliest_delete_at: null,
+      warning_receipt: null,
+    });
+    expect((await h.pending()).plans.map((entry) => entry.id)).toEqual([planId]);
+    await h.clock(TERMINAL + 91 * DAY);
+    await persist(messageId);
+    expect((await confirm(planId, messageId)).status).toBe(200);
+    expect(await state(planId)).toMatchObject({
+      state: 'warned',
+      message_id: messageId,
+      warned_at: new Date(TERMINAL + 91 * DAY),
+      earliest_delete_at: new Date(TERMINAL + 98 * DAY),
+    });
   }, 30_000);
 
   it('refuses a persisted notice belonging to another plan', async () => {
@@ -216,7 +256,7 @@ describe('persisted owner notice enforcement at the real core/module boundary', 
       (
         await h.stores.postgres.query(
           "SELECT count(*)::int AS count FROM core.conversation_messages WHERE recipient_id=$1 AND kind='message'",
-          [prefix]
+          [h.ownerRecipientId]
         )
       ).rows[0].count
     ).toBe(1);
@@ -225,6 +265,8 @@ describe('persisted owner notice enforcement at the real core/module boundary', 
   it('the narrow read view exposes only permanent assistant web storage warnings, not message contents', async () => {
     const good = storageWarningEventId(randomUUID());
     await persist(good);
+    const wrongRecipient = storageWarningEventId(randomUUID());
+    await persist(wrongRecipient, otherRecipientId);
     const store = conversationStore();
     const rejected = [
       {
@@ -259,8 +301,8 @@ describe('persisted owner notice enforcement at the real core/module boundary', 
         messageId: 'not-a-channel-key',
       },
     ];
-    await store.save(`conversation:${prefix}`, { messages: rejected });
-    await store.save(`conversation:${prefix}`, {
+    await store.save(`conversation:${h.ownerRecipientId}`, { messages: rejected });
+    await store.save(`conversation:${h.ownerRecipientId}`, {
       messages: [],
       compactionMarker: {
         summary: 'Compacted owner history',
@@ -268,7 +310,7 @@ describe('persisted owner notice enforcement at the real core/module boundary', 
         timestamp: new Date().toISOString(),
       },
     });
-    expect(await store.load(`conversation:${prefix}`)).toMatchObject({ messages: [] });
+    expect(await store.load(`conversation:${h.ownerRecipientId}`)).toMatchObject({ messages: [] });
     expect(
       (
         await h.stores.postgres.query(
@@ -277,12 +319,12 @@ describe('persisted owner notice enforcement at the real core/module boundary', 
         )
       ).rows
     ).toEqual([{ message_id: good }]);
-    await store.delete(`conversation:${prefix}`);
-    expect(await store.load(`conversation:${prefix}`)).toBeNull();
+    await store.delete(`conversation:${h.ownerRecipientId}`);
+    expect(await store.load(`conversation:${h.ownerRecipientId}`)).toBeNull();
     const rows = (
       await h.stores.postgres.query(
         'SELECT * FROM core.storage_owner_notices WHERE message_id=ANY($1::text[])',
-        [[good, ...rejected.map((entry) => entry.channelMessageId)]]
+        [[good, wrongRecipient, ...rejected.map((entry) => entry.channelMessageId)]]
       )
     ).rows;
     expect(rows).toHaveLength(1);

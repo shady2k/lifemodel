@@ -56,13 +56,16 @@ never acknowledges protection of bytes being removed.
 Core exposes `core.storage_owner_notices(message_id, committed_at)` through
 expanding migration `20261015000018_create_storage_owner_notices.sql`. The view
 selects only permanent nonempty assistant/web message rows with canonical
-storage-warning IDs and matching channel keys. It does not expose message text
+storage-warning IDs and matching channel keys, joined to the durable
+`core.recipient_registry` row for channel `web`, destination `owner` — the same
+`getOrCreate('web', 'owner')` binding core uses. It does not expose message text
 or recipients and does not copy core state into the module catalog.
 
 Inside the same maintenance-fenced transaction that records a new warning, the
 module requires both the canonical ID (`storage-warning_` plus SHA-256 of
-`planId`) and a matching row in this view. A missing or wrong-plan receipt
-returns `503 warning_receipt_pending`, leaving the plan pending and retryable.
+`planId`) and a matching row in this view. A missing, wrong-recipient or
+wrong-plan receipt returns `503 warning_receipt_pending`, leaving the plan
+pending and retryable.
 The lead clock starts at module confirmation time plus the plan's lead days;
 `committed_at` is the persisted row's insertion timestamp (`created_at`), visible
 to the module only after commit, not the exact PostgreSQL commit wall time. It
