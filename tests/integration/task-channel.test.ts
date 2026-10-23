@@ -1,0 +1,865 @@
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { Agent, createServer, request, type Server } from 'node:https';
+import type { IncomingHttpHeaders } from 'node:http';
+import type { Socket } from 'node:net';
+import { connect, type TLSSocket } from 'node:tls';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { createTestStores, workerDatabaseUrl, type TestStores } from '../helpers/test-stores.js';
+import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
+import {
+  createStorageCertificate,
+  type TestStorageCertificate,
+} from '../helpers/storage-certificate.js';
+import { createTestLogger, recordingLogger, type RecordedLog } from '../helpers/test-logger.js';
+import {
+  createPlatformSettingsReader,
+  type PlatformSettingsValues,
+} from '../../src/config/platform-settings.js';
+import { createPostgresTaskRegistry } from '../../src/storage/postgres-task-registry.js';
+import { createPostgresTaskMailbox } from '../../src/storage/postgres-task-mailbox.js';
+import { OwnerMessageIntake } from '../../src/storage/owner-message-intake.js';
+import { createTaskChannel } from '../../src/core/task-channel.js';
+import { createTaskKubernetesIdentity } from '../../src/core/task-kubernetes-identity.js';
+import { createTaskKubernetesIdentity as createModelIdentity } from '../../loader/src/task-kubernetes-identity.js';
+import { createTaskIdentity } from '../../loader/src/task-identity.js';
+import { renderTaskJob, TASK_TEMPLATE_HASH } from '../../src/core/kubernetes-task-executor.js';
+import type { TaskRecord, TaskRegistry } from '../../src/ports/tasks.js';
+import type { TaskChannelFrame, TaskMailbox } from '../../src/ports/task-channel.js';
+
+// All durable assertions use migrated Postgres/Valkey. Only Kubernetes is fake,
+// at its real TLS boundary, including the model listener's once-only start claim.
+describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
+  let stores: TestStores;
+  let certificate: TestStorageCertificate;
+  let directory: string;
+  let tokenFile: string;
+  let caFile: string;
+  let api: Server;
+  let origin: string;
+  let client: Agent;
+  let registry: TaskRegistry;
+  let mailbox: TaskMailbox;
+  let identity: ReturnType<typeof createTaskKubernetesIdentity>;
+  let access: ReturnType<typeof createTaskIdentity>;
+  let apiStatus: number;
+  let values: PlatformSettingsValues;
+  let reviews: string[][];
+  let wireErrors: string[];
+  let logs: RecordedLog[];
+  const sockets = new Set<Socket>();
+  const clientSockets = new WeakSet<Socket>();
+  const cleanup: (() => void | Promise<void>)[] = [];
+  const pods = new Map<string, any>();
+  const jobs = new Map<string, any>();
+  const tokens = new Map<
+    string,
+    { podName: string; podUid: string; audience?: string; bound?: boolean; authenticated?: boolean }
+  >();
+  const MODULE_TOKEN = 'TASK-CHANNEL-MODULE-TOKEN-PRIVATE-CANARY';
+  const PAYLOAD = 'TASK-CHANNEL-PAYLOAD-PRIVATE-CANARY';
+  const URL_CANARY = 'TASK-CHANNEL-URL-PRIVATE-CANARY';
+  const AUDIENCE = 'lifemodel-task-channel';
+  const settings = createPlatformSettingsReader({
+    logger: createTestLogger(),
+    dir: '/missing-channel-settings',
+  });
+
+  beforeAll(async () => {
+    stores = await createTestStores();
+    stores.postgres.on('error', () => undefined);
+    stores.postgres.on('connect', (connection) => connection.on('error', () => undefined));
+    stores.redis.on('error', () => undefined);
+    await applyTestMigrations(stores.postgres);
+    certificate = await createStorageCertificate(['localhost']);
+    directory = await mkdtemp(join(tmpdir(), 'task-channel-'));
+    tokenFile = join(directory, 'token');
+    caFile = join(directory, 'ca');
+    await writeFile(tokenFile, MODULE_TOKEN);
+    await writeFile(caFile, certificate.ca);
+    client = new Agent({ keepAlive: true, ca: certificate.ca, maxSockets: 32 });
+    client.on('error', () => undefined);
+    api = createServer({ cert: certificate.cert, key: certificate.key }, (req, res) => {
+      req.on('error', () => undefined);
+      res.on('error', () => undefined);
+      void (async () => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(Buffer.from(chunk));
+        const send = (status: number, body: unknown) =>
+          res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(body));
+        if (req.headers.authorization !== `Bearer ${MODULE_TOKEN}`) {
+          wireErrors.push('invalid Kubernetes bearer');
+          send(401, {});
+          return;
+        }
+        if (apiStatus !== 200) {
+          send(apiStatus, {});
+          return;
+        }
+        const path = req.url ?? '';
+        if (path === '/apis/authentication.k8s.io/v1/tokenreviews') {
+          const body = JSON.parse(Buffer.concat(chunks).toString());
+          const token = String(body.spec?.token);
+          const expected = token.startsWith('MODEL-') ? 'lifemodel-task-model' : AUDIENCE;
+          if (
+            req.method !== 'POST' ||
+            JSON.stringify(body.spec?.audiences) !== JSON.stringify([expected])
+          ) {
+            wireErrors.push('invalid TokenReview audience');
+            send(400, {});
+            return;
+          }
+          reviews.push(body.spec.audiences);
+          const bound = tokens.get(token);
+          send(200, {
+            status: bound
+              ? {
+                  authenticated: bound.authenticated ?? true,
+                  audiences: [bound.audience ?? expected],
+                  user: {
+                    uid: 'task-sa-uid',
+                    username: 'system:serviceaccount:lifemodel-motor:task',
+                    extra:
+                      bound.bound === false
+                        ? {}
+                        : {
+                            'authentication.kubernetes.io/pod-name': [bound.podName],
+                            'authentication.kubernetes.io/pod-uid': [bound.podUid],
+                          },
+                  },
+                }
+              : { authenticated: false },
+          });
+          return;
+        }
+        if (req.method !== 'GET' || chunks.length) {
+          wireErrors.push('invalid resource GET');
+          send(400, {});
+          return;
+        }
+        if (path.startsWith('/api/v1/namespaces/lifemodel-motor/pods/')) {
+          const pod = pods.get(decodeURIComponent(path.split('/').at(-1)!));
+          send(pod ? 200 : 404, pod ?? {});
+          return;
+        }
+        if (path.startsWith('/apis/batch/v1/namespaces/lifemodel-motor/jobs/')) {
+          const job = jobs.get(decodeURIComponent(path.split('/').at(-1)!));
+          send(job ? 200 : 404, job ?? {});
+          return;
+        }
+        wireErrors.push('unexpected Kubernetes path');
+        send(404, {});
+      })().catch(() => {
+        wireErrors.push('Kubernetes handler failed');
+        res.destroy();
+      });
+    });
+    api.on('error', () => undefined);
+    api.on('tlsClientError', () => undefined);
+    api.on('connection', (socket) => {
+      socket.on('error', () => undefined);
+      sockets.add(socket);
+      socket.on('close', () => sockets.delete(socket));
+    });
+    origin = await listen(api);
+  });
+  beforeEach(async () => {
+    await stores.postgres.query(
+      'TRUNCATE task_access.projections, task_access.intents, task_access.start_claims'
+    );
+    await stores.postgres.query('TRUNCATE core.tasks CASCADE');
+    await stores.postgres.query('TRUNCATE storage.spaces CASCADE');
+    await stores.postgres.query(
+      'INSERT INTO core.active_holder VALUES(true,1) ON CONFLICT(id) DO UPDATE SET epoch=1'
+    );
+    registry = createPostgresTaskRegistry({ pool: stores.postgres, epoch: 1, settings });
+    mailbox = createPostgresTaskMailbox({
+      pool: stores.postgres,
+      epoch: 1,
+      operationTimeoutMs: 1000,
+    });
+    values = { ...(await settings.read()).values };
+    pods.clear();
+    jobs.clear();
+    tokens.clear();
+    reviews = [];
+    wireErrors = [];
+    logs = [];
+    apiStatus = 200;
+    identity = createTaskKubernetesIdentity({
+      apiServer: origin,
+      tokenFile,
+      caFile,
+      timeoutMs: 500,
+    });
+    const modelIdentity = createModelIdentity({
+      apiServer: origin,
+      tokenFile,
+      caFile,
+      timeoutMs: 500,
+    });
+    access = createTaskIdentity({ connectionString: workerDatabaseUrl(), identity: modelIdentity });
+    cleanup.push(
+      () => mailbox.stop(),
+      () => identity.close(),
+      () => modelIdentity.close(),
+      () => access.close()
+    );
+  });
+  afterEach(async () => {
+    for (const close of cleanup.splice(0).reverse()) await close();
+    expect(wireErrors).toEqual([]);
+  });
+  afterAll(async () => {
+    client?.destroy();
+    for (const socket of sockets) socket.destroy();
+    if (api) await new Promise<void>((resolve) => api.close(() => resolve()));
+    certificate?.cleanup();
+    if (directory) await rm(directory, { recursive: true, force: true });
+    if (stores) await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+  });
+
+  async function listen(server: Server) {
+    server.on('error', () => undefined);
+    server.on('tlsClientError', () => undefined);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('listener address missing');
+    return `https://localhost:${address.port}`;
+  }
+  function registerPod(task: TaskRecord, suffix: string) {
+    const podName = `${task.jobName}-${suffix}`;
+    const podUid = `pod-${suffix}-${task.id}`;
+    pods.set(podName, {
+      apiVersion: 'v1',
+      kind: 'Pod',
+      metadata: {
+        name: podName,
+        namespace: 'lifemodel-motor',
+        uid: podUid,
+        ownerReferences: [
+          {
+            apiVersion: 'batch/v1',
+            kind: 'Job',
+            name: task.jobName,
+            uid: task.jobUid,
+            controller: true,
+          },
+        ],
+      },
+      spec: { serviceAccountName: 'task' },
+      status: { phase: 'Running' },
+    });
+    const token = `CHANNEL-TOKEN-PRIVATE-CANARY-${suffix}-${task.id}`;
+    const modelToken = `MODEL-TOKEN-PRIVATE-CANARY-${suffix}-${task.id}`;
+    tokens.set(token, { podName, podUid });
+    tokens.set(modelToken, { podName, podUid });
+    return { token, modelToken, podName, podUid };
+  }
+  async function fixture(key = 'one', started = true) {
+    let task = await registry.accept({
+      launchKey: key,
+      briefing: PAYLOAD,
+      profile: {
+        id: 'small',
+        revision: '1',
+        timeoutSeconds: 600,
+        cpuMillis: 500,
+        memoryBytes: 536870912,
+      },
+      imageRevision: `sha256:${'a'.repeat(64)}`,
+    });
+    expect((await registry.admitNext())?.id).toBe(task.id);
+    const space = `space-${key}`;
+    await stores.postgres.query('INSERT INTO storage.spaces(id) VALUES($1)', [space]);
+    await stores.postgres.query(
+      'INSERT INTO storage.allocations(task_id,launch_id,space_id,retention_revision) VALUES($1,$2,$3,$4)',
+      [task.id, task.launchId, space, String(task.settingsRevision)]
+    );
+    task = await registry.recordAllocation(task.id, task.launchId, {
+      id: `receipt-${key}`,
+      space,
+      effectKey: `${task.launchId}:allocate`,
+    });
+    const job = renderTaskJob({
+      task,
+      spaceId: space,
+      workbenchImage: `ghcr.io/shady2k/lifemodel-workbench@${task.imageRevision}`,
+    });
+    job.metadata.uid = `job-${key}`;
+    job.metadata.resourceVersion = '1';
+    const at = (await stores.postgres.query<{ at: Date }>('SELECT clock_timestamp() AS at'))
+      .rows[0]!.at;
+    job.status = { startTime: at.toISOString(), active: 1 };
+    jobs.set(task.jobName, job);
+    task = await registry.bindJob(
+      task.id,
+      task.launchId,
+      job.metadata.uid,
+      job.metadata.annotations![TASK_TEMPLATE_HASH] as string
+    );
+    await registry.initializeAccessIntent(task.id, at);
+    const pod = registerPod(task, key);
+    if (started)
+      await access.start(
+        {
+          taskId: task.id,
+          attemptId: task.attemptId,
+          launchId: task.launchId,
+          bootNonce: randomUUID(),
+        },
+        pod.modelToken
+      );
+    return { task, job, ...pod };
+  }
+  function step(task: TaskRecord, sequence = 1): TaskChannelFrame {
+    return {
+      taskId: task.id,
+      attemptId: task.attemptId,
+      direction: 'task_to_core',
+      messageId: randomUUID(),
+      sequence,
+      kind: 'step',
+      payload: { line: PAYLOAD },
+    };
+  }
+  async function listener(
+    overrides: { mailbox?: TaskMailbox; settings?: Partial<PlatformSettingsValues> } = {}
+  ) {
+    const channel = createTaskChannel({
+      tls: { cert: certificate.cert, key: certificate.key },
+      mailbox: overrides.mailbox ?? mailbox,
+      identity,
+      settings: { ...values, ...overrides.settings },
+      logger: recordingLogger(createTestLogger('silent'), logs),
+    });
+    const url = await listen(channel.server);
+    cleanup.push(() => channel.stop(Date.now() + 1000));
+    return { ...channel, url };
+  }
+  async function rows(frame: TaskChannelFrame) {
+    return (
+      await stores.postgres.query(
+        'SELECT * FROM core.task_mailbox WHERE task_id=$1 AND direction=$2 AND message_id=$3',
+        [frame.taskId, frame.direction, frame.messageId]
+      )
+    ).rows;
+  }
+  type Response = {
+    status: number;
+    text: string;
+    body: any;
+    headers: IncomingHttpHeaders;
+    rowsAtReceipt?: any[];
+  };
+  async function call(
+    url: string,
+    token: string,
+    frame: TaskChannelFrame,
+    options: { path?: string; raw?: string; inspectRow?: boolean } = {}
+  ): Promise<Response> {
+    const data = options.raw ?? JSON.stringify(frame);
+    return new Promise((resolve, reject) => {
+      const req = request(
+        new URL(options.path ?? '/task/events', url),
+        {
+          method: 'POST',
+          agent: client,
+          signal: AbortSignal.timeout(5000),
+          headers: {
+            authorization: `Bearer ${token}`,
+            'content-type': 'application/json',
+            'content-length': Buffer.byteLength(data),
+          },
+        },
+        (res) => {
+          res.on('error', reject);
+          res.on('aborted', () => reject(new Error('channel response aborted')));
+          // Capture the database observation at HTTP ACK headers, before consuming its body.
+          const receivedRows = options.inspectRow ? rows(frame) : Promise.resolve(undefined);
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk: Buffer) => chunks.push(chunk));
+          res.on('end', () => {
+            void receivedRows
+              .then((observed) => {
+                const text = Buffer.concat(chunks).toString();
+                resolve({
+                  status: res.statusCode!,
+                  headers: res.headers,
+                  text,
+                  body: text ? JSON.parse(text) : null,
+                  rowsAtReceipt: observed,
+                });
+              })
+              .catch(reject);
+          });
+        }
+      );
+      req.on('error', reject);
+      req.on('socket', (socket) => {
+        if (!clientSockets.has(socket)) {
+          clientSockets.add(socket);
+          socket.on('error', () => undefined);
+        }
+      });
+      req.end(data);
+    });
+  }
+  async function rawSocket(url: string): Promise<TLSSocket> {
+    const target = new URL(url);
+    const socket = connect({
+      host: '127.0.0.1',
+      port: Number(target.port),
+      servername: 'localhost',
+      ca: certificate.ca,
+    });
+    socket.on('error', () => undefined);
+    socket.setTimeout(5000, () => socket.destroy());
+    cleanup.push(() => {
+      socket.destroy();
+    });
+    await new Promise<void>((resolve, reject) => {
+      socket.once('secureConnect', resolve);
+      socket.once('error', reject);
+    });
+    return socket;
+  }
+  function wire(token: string, data: string, length = Buffer.byteLength(data)) {
+    return `POST /task/events HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ${token}\r\nContent-Type: application/json\r\nContent-Length: ${length}\r\nConnection: keep-alive\r\n\r\n${data}`;
+  }
+  async function bounded<T>(promise: Promise<T>, timeoutMs = 4000): Promise<T> {
+    const signal = AbortSignal.timeout(timeoutMs);
+    return new Promise<T>((resolve, reject) => {
+      const abort = () => reject(new Error('task channel fixture deadline exceeded'));
+      signal.addEventListener('abort', abort, { once: true });
+      void promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+    });
+  }
+  function ownerId() {
+    const time = Date.now().toString(16).padStart(12, '0');
+    return `${time.slice(0, 8)}-${time.slice(8)}-7${randomUUID().slice(0, 3)}-8${randomUUID().slice(0, 3)}-${randomUUID().replaceAll('-', '').slice(0, 12)}`;
+  }
+
+  it('commits before ACK headers, stores replay once, and accepts gaps and lower sequences', async () => {
+    const f = await fixture();
+    const channel = await listener();
+    const high = step(f.task, 80);
+    const first = await call(channel.url, f.token, high, { inspectRow: true });
+    expect(first.status).toBe(200);
+    expect(first.rowsAtReceipt).toHaveLength(1);
+    expect(first.rowsAtReceipt![0]).toMatchObject({
+      task_id: f.task.id,
+      message_id: high.messageId,
+      sequence: '80',
+      payload: high.payload,
+    });
+    const replay = await call(channel.url, f.token, high, { inspectRow: true });
+    expect(replay.status).toBe(200);
+    expect(replay.body).toEqual(first.body);
+    expect(replay.rowsAtReceipt).toHaveLength(1);
+    const lower = step(f.task, 3);
+    const later = step(f.task, 100);
+    for (const frame of [lower, later]) {
+      const response = await call(channel.url, f.token, frame, { inspectRow: true });
+      expect(response.status).toBe(200);
+      expect(response.rowsAtReceipt).toHaveLength(1);
+    }
+    expect(
+      (await mailbox.listUnsignalled(10)).map((entry) => entry.frame.messageId).sort()
+    ).toEqual([high.messageId, lower.messageId, later.messageId].sort());
+  });
+
+  it.each([
+    'wrong-audience',
+    'unbound',
+    'unclaimed',
+    'loser-pod',
+    'terminal',
+    'unknown-attempt',
+  ] as const)('refuses %s without storing a frame', async (fault) => {
+    const f = await fixture('one', fault !== 'unclaimed');
+    let token = f.token;
+    let frame = step(f.task);
+    if (fault === 'wrong-audience') tokens.get(token)!.audience = 'lifemodel-task-model';
+    if (fault === 'unbound') tokens.get(token)!.bound = false;
+    if (fault === 'loser-pod') token = registerPod(f.task, 'loser').token;
+    if (fault === 'unknown-attempt') frame = { ...frame, attemptId: randomUUID() };
+    if (fault === 'terminal') {
+      await stores.postgres.query("UPDATE core.tasks SET state='running' WHERE id=$1", [f.task.id]);
+      await stores.postgres.query("UPDATE core.tasks SET state='wrapping-up' WHERE id=$1", [
+        f.task.id,
+      ]);
+      await stores.postgres.query(
+        "UPDATE core.tasks SET state='done', terminal_candidate='done', terminal_reason_code='succeeded', terminal_at=clock_timestamp() WHERE id=$1",
+        [f.task.id]
+      );
+    }
+    const channel = await listener();
+    const response = await call(channel.url, token, frame);
+    expect([403, 409]).toContain(response.status);
+    expect(await rows(frame)).toEqual([]);
+  });
+
+  it('stores semantic terminal object IDs once and refuses a different second terminal report', async () => {
+    const f = await fixture();
+    const channel = await listener();
+    const terminal: TaskChannelFrame = {
+      ...step(f.task, 7),
+      kind: 'terminal',
+      payload: {
+        outcome: 'succeeded',
+        summary: PAYLOAD,
+        resultObjectId: 'object-result',
+        logObjectId: 'object-log',
+        artifactObjectIds: ['object-artifact'],
+      },
+    };
+    const ack = await call(channel.url, f.token, terminal, { inspectRow: true });
+    expect(ack.status).toBe(200);
+    expect(ack.rowsAtReceipt).toHaveLength(1);
+    expect(ack.rowsAtReceipt![0].payload).toEqual(terminal.payload);
+    expect((await call(channel.url, f.token, terminal)).body).toEqual(ack.body);
+    const other = { ...terminal, messageId: randomUUID(), sequence: 8 };
+    expect((await call(channel.url, f.token, other)).status).toBe(409);
+    expect(await rows(other)).toEqual([]);
+  });
+
+  it('rechecks live identity on each keep-alive request and denies Kubernetes outage', async () => {
+    const f = await fixture();
+    const channel = await listener();
+    expect((await call(channel.url, f.token, step(f.task))).status).toBe(200);
+    expect(reviews.at(-1)).toEqual([AUDIENCE]);
+    tokens.get(f.token)!.authenticated = false;
+    const revoked = step(f.task, 2);
+    expect((await call(channel.url, f.token, revoked)).status).toBe(403);
+    expect(await rows(revoked)).toEqual([]);
+    tokens.get(f.token)!.authenticated = true;
+    apiStatus = 503;
+    const unavailable = step(f.task, 3);
+    expect((await call(channel.url, f.token, unavailable)).status).toBe(503);
+    expect(await rows(unavailable)).toEqual([]);
+  });
+
+  it('never logs payload, token, URL or raw identity errors', async () => {
+    const f = await fixture();
+    const channel = await listener();
+    expect((await call(channel.url, f.token, step(f.task))).status).toBe(200);
+    expect(
+      (await call(channel.url, f.token, step(f.task), { path: `/task/events?${URL_CANARY}` }))
+        .status
+    ).toBe(404);
+    tokens.get(f.token)!.authenticated = false;
+    expect((await call(channel.url, f.token, step(f.task))).status).toBe(403);
+    apiStatus = 503;
+    await call(channel.url, f.token, step(f.task));
+    expect(logs.length).toBeGreaterThan(0);
+    for (const secret of [PAYLOAD, f.token, MODULE_TOKEN, URL_CANARY, origin])
+      expect(JSON.stringify(logs)).not.toContain(secret);
+  });
+
+  it('a stalled task connection cannot delay 20 durable owner intakes or 20 other-task ACKs beyond 2 seconds', async () => {
+    const stalled = await fixture('stalled');
+    const healthy = await fixture('healthy');
+    const channel = await listener();
+    const socket = await rawSocket(channel.url);
+    // This peer never reads ACKs. Its complete first event must still commit,
+    // and its next incomplete frame reserves memory, never a control SQL worker.
+    socket.pause();
+    const committed = step(stalled.task);
+    socket.write(wire(stalled.token, JSON.stringify(committed)));
+    await expect.poll(async () => (await rows(committed)).length).toBe(1);
+    const held = JSON.stringify(step(stalled.task, 2));
+    const entered = Promise.withResolvers<void>();
+    channel.server.once('request', () => entered.resolve());
+    socket.write(wire(stalled.token, held.slice(0, -1), Buffer.byteLength(held)));
+    await bounded(entered.promise);
+    const owner = new OwnerMessageIntake(stores.redis, 'owner');
+    const ownerRequests = Array.from({ length: 20 }, async () => {
+      const start = performance.now();
+      const accepted = await owner.acceptOwnerMessage(ownerId(), 'owner intake');
+      expect(accepted.status).toBe('accepted');
+      expect(performance.now() - start).toBeLessThanOrEqual(2000);
+    });
+    const taskRequests = Array.from({ length: 20 }, async (_, index) => {
+      const start = performance.now();
+      const response = await call(channel.url, healthy.token, step(healthy.task, index * 3 + 1));
+      expect(response.status).toBe(200);
+      expect(performance.now() - start).toBeLessThanOrEqual(2000);
+    });
+    await Promise.all([...ownerRequests, ...taskRequests]);
+    expect(await stores.redis.xlen('inbound')).toBe(20);
+  }, 10000);
+
+  it('refuses an oversized frame without identity lookup or a mailbox insert', async () => {
+    const f = await fixture();
+    const channel = await listener();
+    const frame = step(f.task);
+    const before = reviews.length;
+    const response = await call(channel.url, f.token, frame, {
+      raw: JSON.stringify({ ...frame, payload: { line: 'x'.repeat(65536) } }),
+    });
+    expect(response.status).toBe(413);
+    expect(reviews).toHaveLength(before);
+    expect(await rows(frame)).toEqual([]);
+  });
+
+  it('returns 429 with Retry-After when held bodies fill the process buffer; owner intake remains available', async () => {
+    const f = await fixture();
+    const channel = await listener({
+      settings: { 'tasks.channel.maxFrameBytes': 1024, 'tasks.channel.maxBufferedBytes': 1024 },
+    });
+    const socket = await rawSocket(channel.url);
+    const held = JSON.stringify(step(f.task));
+    const entered = Promise.withResolvers<void>();
+    channel.server.once('request', () => entered.resolve());
+    socket.write(wire(f.token, held.slice(0, -1), Buffer.byteLength(held)));
+    await bounded(entered.promise);
+    const refused = step(f.task, 2);
+    const response = await call(channel.url, f.token, refused);
+    expect(response.status).toBe(429);
+    expect(response.headers['retry-after']).toBeDefined();
+    expect(await rows(refused)).toEqual([]);
+    expect(
+      (
+        await new OwnerMessageIntake(stores.redis, 'owner').acceptOwnerMessage(
+          ownerId(),
+          'owner reserve'
+        )
+      ).status
+    ).toBe('accepted');
+  });
+
+  it.each(['frames', 'bytes'] as const)(
+    'bounds per-connection unacked %s even with HTTP pipelining',
+    async (bound) => {
+      const f = await fixture();
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      let appends = 0;
+      const gated: TaskMailbox = {
+        ...mailbox,
+        append: async (...args) => {
+          appends++;
+          if (appends === 1) {
+            entered.resolve();
+            await release.promise;
+          }
+          return mailbox.append(...args);
+        },
+      };
+      const channel = await listener({
+        mailbox: gated,
+        settings: {
+          'tasks.channel.maxFrameBytes': 1024,
+          ...(bound === 'frames'
+            ? { 'tasks.channel.maxUnackedFrames': 2 }
+            : { 'tasks.channel.maxUnackedBytes': 2048 }),
+        },
+      });
+      const socket = await rawSocket(channel.url);
+      const frames = [step(f.task, 1), step(f.task, 2), step(f.task, 3)];
+      let response = '';
+      const done = Promise.withResolvers<void>();
+      socket.on('data', (chunk) => {
+        response += chunk.toString();
+        if (response.includes('429 Too Many Requests')) done.resolve();
+      });
+      socket.on('close', () => done.resolve());
+      let requests = 0;
+      const admitted = Promise.withResolvers<void>();
+      channel.server.on('request', () => {
+        if (++requests === 3) admitted.resolve();
+      });
+      socket.write(frames.map((frame) => wire(f.token, JSON.stringify(frame))).join(''));
+      try {
+        await bounded(entered.promise);
+        // Node sends pipelined replies in request order. Release the first ACK
+        // only after all request handlers have admitted/refused the pipeline.
+        await bounded(admitted.promise);
+      } finally {
+        release.resolve();
+      }
+      await bounded(done.promise);
+      expect(response).toContain('429 Too Many Requests');
+      expect(response.toLowerCase()).toContain('retry-after:');
+      expect(await rows(frames[2]!)).toEqual([]);
+      expect(appends).toBeLessThanOrEqual(2);
+    }
+  );
+
+  it('bounds active SQL work separately from queued task frames and owner intake', async () => {
+    const a = await fixture('a');
+    const b = await fixture('b');
+    const firstEntered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let active = 0;
+    let peak = 0;
+    const gated: TaskMailbox = {
+      ...mailbox,
+      append: async (...args) => {
+        active++;
+        peak = Math.max(peak, active);
+        firstEntered.resolve();
+        try {
+          await release.promise;
+          return await mailbox.append(...args);
+        } finally {
+          active--;
+        }
+      },
+    };
+    const channel = await listener({
+      mailbox: gated,
+      settings: { 'tasks.channel.workers': 2, 'tasks.channel.sqlConnections': 1 },
+    });
+    const first = call(channel.url, a.token, step(a.task));
+    void first.catch(() => undefined);
+    await bounded(firstEntered.promise);
+    const observedSecond = Promise.withResolvers<void>();
+    channel.server.once('request', (req) => req.once('end', () => observedSecond.resolve()));
+    const second = call(channel.url, b.token, step(b.task));
+    void second.catch(() => undefined);
+    try {
+      await bounded(observedSecond.promise);
+      expect(active).toBe(1);
+      const started = performance.now();
+      expect(
+        (
+          await new OwnerMessageIntake(stores.redis, 'owner').acceptOwnerMessage(
+            ownerId(),
+            'still accepted'
+          )
+        ).status
+      ).toBe('accepted');
+      expect(performance.now() - started).toBeLessThanOrEqual(2000);
+    } finally {
+      release.resolve();
+    }
+    expect((await first).status).toBe(200);
+    expect((await second).status).toBe(200);
+    expect(peak).toBe(1);
+  });
+
+  it('expires an unacknowledged append at the configured ACK deadline and releases its worker', async () => {
+    const f = await fixture();
+    const entered = Promise.withResolvers<void>();
+    const cancelled = Promise.withResolvers<void>();
+    let calls = 0;
+    const gated: TaskMailbox = {
+      ...mailbox,
+      append: async (...args) => {
+        if (++calls !== 1) return mailbox.append(...args);
+        const signal = args[2]!;
+        entered.resolve();
+        await new Promise<void>((_resolve, reject) => {
+          const abort = () => {
+            cancelled.resolve();
+            reject(signal.reason);
+          };
+          if (signal.aborted) abort();
+          else signal.addEventListener('abort', abort, { once: true });
+        });
+        throw new Error('aborted append must not resume');
+      },
+    };
+    const channel = await listener({
+      mailbox: gated,
+      settings: {
+        'tasks.channel.ackTimeoutMs': 200,
+        'tasks.channel.workers': 1,
+        'tasks.channel.sqlConnections': 1,
+      },
+    });
+    const frame = step(f.task);
+    const socket = await rawSocket(channel.url);
+    const closed = Promise.withResolvers<void>();
+    socket.once('close', () => closed.resolve());
+    socket.resume();
+    const start = performance.now();
+    socket.write(wire(f.token, JSON.stringify(frame)));
+    await bounded(entered.promise);
+    await bounded(cancelled.promise, 1500);
+    await bounded(closed.promise, 1500);
+    expect(performance.now() - start).toBeLessThanOrEqual(1500);
+    expect(logs.some((line) => line.obj.code === 'ack_timeout' && line.obj.status === 504)).toBe(
+      true
+    );
+    expect(await rows(frame)).toEqual([]);
+    expect((await call(channel.url, f.token, step(f.task, 2))).status).toBe(200);
+  });
+
+  it('reclaims partial-frame reservations when TLS peers disconnect', async () => {
+    const f = await fixture();
+    const channel = await listener({
+      settings: { 'tasks.channel.maxFrameBytes': 1024, 'tasks.channel.maxBufferedBytes': 1024 },
+    });
+    for (let index = 0; index < 3; index++) {
+      const socket = await rawSocket(channel.url);
+      const entered = Promise.withResolvers<void>();
+      const released = Promise.withResolvers<void>();
+      channel.server.once('request', (req, res) => {
+        res.once('close', () => released.resolve());
+        entered.resolve();
+      });
+      const held = JSON.stringify(step(f.task, index + 1));
+      socket.write(wire(f.token, held.slice(0, -1), Buffer.byteLength(held)));
+      await bounded(entered.promise);
+      socket.destroy();
+      await bounded(released.promise);
+    }
+    expect((await call(channel.url, f.token, step(f.task, 10))).status).toBe(200);
+  });
+
+  it('schedules one frame per task per pass rather than draining a noisy task first', async () => {
+    const a = await fixture('a');
+    const b = await fixture('b');
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const order: string[] = [];
+    const gated: TaskMailbox = {
+      ...mailbox,
+      append: async (...args) => {
+        order.push(args[0].taskId);
+        if (order.length === 1) {
+          entered.resolve();
+          await release.promise;
+        }
+        return mailbox.append(...args);
+      },
+    };
+    const channel = await listener({
+      mailbox: gated,
+      settings: {
+        'tasks.channel.workers': 1,
+        'tasks.channel.sqlConnections': 1,
+      },
+    });
+    const first = call(channel.url, a.token, step(a.task, 1));
+    void first.catch(() => undefined);
+    await bounded(entered.promise);
+    const queued = Promise.withResolvers<void>();
+    let bodies = 0;
+    channel.server.on('request', (req) =>
+      req.once('end', () => {
+        if (++bodies === 3) queued.resolve();
+      })
+    );
+    const next = [
+      call(channel.url, a.token, step(a.task, 2)),
+      call(channel.url, a.token, step(a.task, 3)),
+      call(channel.url, b.token, step(b.task, 1)),
+    ];
+    void Promise.all(next).catch(() => undefined);
+    try {
+      await bounded(queued.promise);
+    } finally {
+      release.resolve();
+    }
+    expect((await Promise.all([first, ...next])).map((response) => response.status)).toEqual([
+      200, 200, 200, 200,
+    ]);
+    expect(order).toEqual([a.task.id, b.task.id, a.task.id, a.task.id]);
+  });
+});

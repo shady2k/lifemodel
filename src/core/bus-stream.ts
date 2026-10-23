@@ -22,6 +22,7 @@ export interface BusSnapshot {
 
 export interface BusSignalStream extends SnapshotSectionOwner<BusSnapshot> {
   append(signal: Signal): Promise<string>;
+  appendTaskSignal(signal: Signal, key: string): Promise<string>;
   readAfter(offset: string, limit: number): Promise<BusSignalEntry[]>;
   trimBefore(offset: string): Promise<void>;
   committedOffset(): string;
@@ -33,10 +34,22 @@ export interface BusSignalStream extends SnapshotSectionOwner<BusSnapshot> {
   admissionCapacity(): number;
 }
 
+// Keep the dedup receipt after stream trimming: Postgres may not have committed
+// markSignalled yet. Task+direction+message ID is immutable for the mailbox's
+// lifetime. A normal append deliberately does not use this separate hash.
+const APPEND_TASK_SIGNAL = `
+local existing = redis.call('HGET', KEYS[2], ARGV[1])
+if existing then return existing end
+local id = redis.call('XADD', KEYS[1], '*', 'signal', ARGV[2])
+redis.call('HSET', KEYS[2], ARGV[1], id)
+return id
+`;
+
 /** Durable FIFO for internal signals, sharing the snapshot store's key prefix. */
 export class ValkeyBusSignalStream implements BusSignalStream {
   readonly section = 'busOffset';
   private readonly key: string;
+  private readonly taskDedupKey: string;
   private snapshot: BusSnapshot = { version: 1, watermark: '0-0', entries: {} };
 
   constructor(
@@ -44,10 +57,26 @@ export class ValkeyBusSignalStream implements BusSignalStream {
     keyPrefix = 'lifemodel:core:snapshot:'
   ) {
     this.key = `${keyPrefix}bus`;
+    this.taskDedupKey = `${keyPrefix}bus:task-dedup`;
   }
 
   async append(signal: Signal): Promise<string> {
     return (await this.redis.xadd(this.key, '*', 'signal', JSON.stringify(signal))) as string;
+  }
+
+  /** Atomic admission closes the append-before-mailbox-mark crash window. */
+  async appendTaskSignal(signal: Signal, key: string): Promise<string> {
+    if (!key || signal.type !== 'task_report' || signal.data?.kind !== 'task_report') {
+      throw new Error('Invalid task bus signal');
+    }
+    return (await this.redis.eval(
+      APPEND_TASK_SIGNAL,
+      2,
+      this.key,
+      this.taskDedupKey,
+      key,
+      JSON.stringify(signal)
+    )) as string;
   }
 
   async readAfter(offset: string, limit: number): Promise<BusSignalEntry[]> {
