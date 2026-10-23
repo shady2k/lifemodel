@@ -10,7 +10,9 @@ application authority. No code under `src/runtime/motor-cortex/` changes.
 
 The platform mode core uses its raw Postgres pool, active snapshot epoch and
 platform settings reader to construct the fenced task registry. Acceptance
-snapshots the digest from the validated `LIFEMODEL_TASK_WORKBENCH_IMAGE`.
+snapshots the digest from the validated `LIFEMODEL_TASK_WORKBENCH_IMAGE` only on
+first acceptance. It stores the caller image digest separately for payload-conflict
+checks; identical replay returns the original selected image after deployment.
 The repository is the fixed admission-policy repository
 `ghcr.io/shady2k/lifemodel-workbench`; repository plus persisted digest therefore
 reconstructs the same immutable image after restart. Missing, tagged or malformed
@@ -86,9 +88,13 @@ remain the finalizer's job. Cleanup stays pending until that later confirmation.
 
 Each HTTPS client has one keep-alive agent, a deadline per call and rereads the
 projected token and CA for every call. Errors/logs contain safe codes, IDs and
-counts, not response bodies or transport causes. Stop cancels retry/watch I/O and
-closes both clients synchronously. It does not wait on registry or API work and
-cannot hold the core's one shutdown deadline.
+counts, not response bodies or transport causes. LIST is capped at 100 pages,
+10,000 matched Jobs, 4096-byte continuation tokens and one 30-second overall
+deadline, in addition to per-request limits. Empty filtered pages cannot keep a
+pass alive indefinitely. Stop cancels retry/watch I/O, closes both HTTP clients,
+and discards only the worker registry's checked-out SQL clients. The worker drains
+inside the core's shared shutdown deadline before pool close. Unrelated service
+and core clients remain available for the drained turn's commit.
 
 `requestSoftStop` records durable intent only in stage 3. It does not claim wrap,
 revocation or a shortened native deadline. Stage 5 owns that complete operation.

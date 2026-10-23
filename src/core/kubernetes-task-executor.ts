@@ -16,6 +16,9 @@ import type {
 export const TASK_LAUNCH_LABEL = 'lifemodel.dev/launch-id';
 export const TASK_TEMPLATE_HASH = 'lifemodel.dev/template-hash';
 const IMAGE_REPOSITORY = 'ghcr.io/shady2k/lifemodel-workbench';
+const MAX_LIST_PAGES = 100;
+const MAX_LIST_CONTINUATION_BYTES = 4096;
+const LIST_TIMEOUT_MS = 30_000;
 type JsonObject = Record<string, unknown>;
 export interface TaskKubernetesJob {
   apiVersion?: string;
@@ -598,14 +601,37 @@ export class KubernetesTaskExecutor implements TaskExecutor {
     if (response.status !== 200) throw new TaskExecutorError('api_error');
   }
   async listJobs(signal?: AbortSignal): Promise<TaskObservedJob[]> {
+    const controller = new AbortController();
+    const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+    const deadline = performance.now() + LIST_TIMEOUT_MS;
+    // One deadline covers all pages, including empty filtered pages. Per-request
+    // transport timeouts alone would restart the budget on every continuation.
+    const timer = setTimeout(() => {
+      controller.abort();
+    }, LIST_TIMEOUT_MS);
+    timer.unref();
+    try {
+      return await this.listJobsWithinDeadline(combined, deadline);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  private async listJobsWithinDeadline(
+    signal: AbortSignal,
+    deadline: number
+  ): Promise<TaskObservedJob[]> {
     const jobs: TaskObservedJob[] = [];
     const seen = new Set<string>();
     let continuation = '';
     let listResourceVersion: string | undefined;
+    let pages = 0;
     do {
+      if (signal.aborted || performance.now() >= deadline) throw new TaskExecutorError('aborted');
+      if (pages++ >= MAX_LIST_PAGES) throw new TaskExecutorError('api_error');
       const params = new URLSearchParams({ labelSelector: TASK_LAUNCH_LABEL, limit: '100' });
       if (continuation) params.set('continue', continuation);
       const response = await this.send('GET', `${this.collection}?${params}`, undefined, signal);
+      if (signal.aborted || performance.now() >= deadline) throw new TaskExecutorError('aborted');
       if (response.status !== 200) throw new TaskExecutorError('api_error');
       const body = object(response.body);
       const metadata = body['metadata'] === undefined ? {} : object(body['metadata']);
@@ -650,7 +676,11 @@ export class KubernetesTaskExecutor implements TaskExecutor {
       if (jobs.length > 10_000) throw new TaskExecutorError('api_error');
       const next =
         body['metadata'] === undefined ? undefined : object(body['metadata'])['continue'];
-      if (next !== undefined && typeof next !== 'string') throw new TaskExecutorError('api_error');
+      if (
+        next !== undefined &&
+        (typeof next !== 'string' || Buffer.byteLength(next) > MAX_LIST_CONTINUATION_BYTES)
+      )
+        throw new TaskExecutorError('api_error');
       continuation = next ?? '';
       if (continuation && seen.has(continuation)) throw new TaskExecutorError('api_error');
       if (continuation) seen.add(continuation);

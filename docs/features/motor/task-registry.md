@@ -27,6 +27,10 @@ have a shared finite 15-second SQL-phase bound; lock/statement limits are instal
 the acquired session before entering the fenced seam. Connections are discarded
 after each operation (including a late acquisition after timeout), so abandoned
 queries cannot retain locks and no session settings leak to another pool borrower.
+The launch worker has a separate registry instance with a cancellation signal.
+Stopping discards only that instance's checked-out clients and refuses later work;
+service clients used by the drained turn remain untouched. The worker drains inside
+the core's shared stop deadline before the shared Postgres pool closes.
 Acceptance reads settings before acquiring SQL locks, with a separate 15-second
 bound (at most 30 seconds across its settings and SQL phases). Admission instead
 reads settings after acquiring the admission lock, inside its shared 15-second
@@ -41,9 +45,13 @@ The port is core-only and is not added to `PluginPrimitives`.
 
 `accept` takes the deciding turn's committed effect key as `launchKey`. That turn
 identity is fixed before effects and reused on replay. Reuse with the same
-briefing, structural JSON profile and image digest returns the original record;
-a different payload conflicts. Current settings are not replay payload: replay
-keeps the first settings/harness/grace snapshot even after platform changes.
+briefing, structural JSON profile and caller image digest returns the original record;
+a different payload conflicts. The caller digest is stored separately as
+`request_image_revision`: platform wiring selects the configured deployment image
+only for a new acceptance. An identical replay after deployment keeps the original
+selected image, even if the caller digest differed from it. Current settings are
+not replay payload: replay keeps the first settings/harness/grace snapshot even
+after platform changes.
 
 Domain-separated SHA-256 hashes of the launch key produce task, attempt and
 launch IDs. This avoids a new ID on transaction retry and does not expose the

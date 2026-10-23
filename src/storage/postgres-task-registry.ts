@@ -151,6 +151,10 @@ export function createPostgresTaskRegistry(deps: {
   pool: Pool;
   epoch: number;
   settings: PlatformSettingsReader;
+  /** Deployment image is a first-acceptance snapshot, not replay payload. */
+  imageRevision?: string;
+  /** Cancels only this registry instance's operations and checked-out clients. */
+  signal?: AbortSignal;
   /** Bounds settings reads and SQL including acquisition/holder lock and admission's settings read. */
   operationTimeoutMs?: number;
 }): TaskRegistry {
@@ -160,17 +164,23 @@ export function createPostgresTaskRegistry(deps: {
 
   async function boundedSettings() {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancel: (() => void) | undefined;
     try {
+      if (deps.signal?.aborted) throw new TaskRegistryError('registry', 'storage_error');
       return await Promise.race([
         deps.settings.read(),
         new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => {
+          cancel = () => {
             reject(new TaskRegistryError('registry', 'storage_error'));
-          }, timeoutMs);
+          };
+          deps.signal?.addEventListener('abort', cancel, { once: true });
+          timer = setTimeout(cancel, timeoutMs);
+          if (deps.signal?.aborted) cancel();
         }),
       ]);
     } finally {
       clearTimeout(timer);
+      if (cancel) deps.signal?.removeEventListener('abort', cancel);
     }
   }
 
@@ -182,6 +192,7 @@ export function createPostgresTaskRegistry(deps: {
     let released = false;
     let expired = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancel: (() => void) | undefined;
     const destroy = () => {
       if (raw && !released) {
         released = true;
@@ -231,18 +242,23 @@ export function createPostgresTaskRegistry(deps: {
       }
     };
     try {
+      if (deps.signal?.aborted) throw new TaskRegistryError(taskId, 'storage_error');
       return await Promise.race([
         work(),
         new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => {
+          cancel = () => {
             expired = true;
             destroy();
             reject(new TaskRegistryError(taskId, 'storage_error'));
-          }, timeoutMs);
+          };
+          deps.signal?.addEventListener('abort', cancel, { once: true });
+          timer = setTimeout(cancel, timeoutMs);
+          if (deps.signal?.aborted) cancel();
         }),
       ]);
     } finally {
       clearTimeout(timer);
+      if (cancel) deps.signal?.removeEventListener('abort', cancel);
     }
   }
   async function readTask(client: Pool | PoolClient, taskId: string): Promise<TaskRecord | null> {
@@ -293,6 +309,8 @@ export function createPostgresTaskRegistry(deps: {
     accept: async (request) => {
       const identity = taskIdentity(typeof request.launchKey === 'string' ? request.launchKey : '');
       validateInput(request, identity.id);
+      const imageRevision = deps.imageRevision ?? request.imageRevision;
+      validateInput({ ...request, imageRevision }, identity.id);
       const settings = await boundedSettings();
       return transaction(identity.id, async (client) => {
         // Also serializes accepted-order assignment: commit order cannot invert
@@ -306,15 +324,15 @@ export function createPostgresTaskRegistry(deps: {
           // Compare JSON structurally in SQL, not JS key/insertion order. Settings
           // are NOT request payload: a replay keeps the original snapshot.
           const match = await client.query<{ matches: boolean }>(
-            `SELECT briefing=$2 AND profile=$3::jsonb AND image_revision=$4 AS matches FROM core.tasks WHERE id=$1`,
+            `SELECT briefing=$2 AND profile=$3::jsonb AND request_image_revision=$4 AS matches FROM core.tasks WHERE id=$1`,
             [row.id, request.briefing, JSON.stringify(request.profile), request.imageRevision]
           );
           if (!match.rows[0]?.matches) throw new TaskRegistryError(row.id, 'launch_key_conflict');
           return taskRecord(row);
         }
         await client.query(
-          `INSERT INTO core.tasks(id,launch_key,briefing,profile,settings_revision,harness,image_revision,wrap_grace_seconds)
-          VALUES($1,$2,$3,$4::jsonb,$5,$6,$7,$8)`,
+          `INSERT INTO core.tasks(id,launch_key,briefing,profile,settings_revision,harness,image_revision,wrap_grace_seconds,request_image_revision)
+          VALUES($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9)`,
           [
             identity.id,
             request.launchKey,
@@ -322,8 +340,9 @@ export function createPostgresTaskRegistry(deps: {
             JSON.stringify(request.profile),
             settings.revision,
             settings.values['tasks.harness'],
-            request.imageRevision,
+            imageRevision,
             settings.values['tasks.wrapGraceSeconds'],
+            request.imageRevision,
           ]
         );
         await client.query(

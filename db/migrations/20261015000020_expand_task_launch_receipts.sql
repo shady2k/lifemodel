@@ -1,6 +1,34 @@
 -- migrate:up
 SET lock_timeout = '1s';
 SET statement_timeout = '5s';
+-- Keep caller payload distinct from the deployment-selected image. Existing
+-- acceptances used the supplied image directly, so their payload is that digest.
+ALTER TABLE core.tasks ADD COLUMN IF NOT EXISTS request_image_revision text;
+UPDATE core.tasks SET request_image_revision=image_revision WHERE request_image_revision IS NULL;
+DO $migration$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+    WHERE conrelid = 'core.tasks'::regclass AND conname = 'task_request_image_shape'
+  ) THEN
+    ALTER TABLE core.tasks ADD CONSTRAINT task_request_image_shape CHECK (
+      request_image_revision IS NOT NULL AND request_image_revision ~ '^sha256:[0-9a-f]{64}$'
+    ) NOT VALID;
+  END IF;
+  ALTER TABLE core.tasks VALIDATE CONSTRAINT task_request_image_shape;
+END;
+$migration$;
+CREATE OR REPLACE FUNCTION core.guard_task_request_image_update()
+RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+  IF NEW.request_image_revision IS DISTINCT FROM OLD.request_image_revision THEN
+    RAISE EXCEPTION 'task immutable input' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE OR REPLACE TRIGGER guard_task_request_image_update BEFORE UPDATE ON core.tasks
+  FOR EACH ROW EXECUTE FUNCTION core.guard_task_request_image_update();
+REVOKE EXECUTE ON FUNCTION core.guard_task_request_image_update() FROM PUBLIC;
 ALTER TABLE core.task_launches
   ADD COLUMN IF NOT EXISTS allocation_receipt jsonb,
   ADD COLUMN IF NOT EXISTS template_hash text,

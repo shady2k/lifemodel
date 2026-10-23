@@ -21,6 +21,7 @@ import {
   renderTaskJob,
 } from '../../src/core/kubernetes-task-executor.js';
 import { createFakeTaskExecutor } from '../../src/core/fake-task-executor.js';
+import { createTaskKubernetesClient } from '../../src/core/task-kubernetes-client.js';
 import {
   createTaskLaunchReconciler,
   allocationEffectKey,
@@ -128,6 +129,20 @@ describe('task launch fence (real Postgres, HTTPS Kubernetes API)', () => {
           const job = structuredClone(body);
           job.metadata.uid = 'job-uid-1';
           job.metadata.resourceVersion = '1';
+          // Simulate a competing CREATE winning after the caller's absent GET.
+          if (mode === 'conflict-create' && !jobs.has(job.metadata.name))
+            jobs.set(job.metadata.name, job);
+          if (jobs.has(job.metadata.name)) {
+            send(409, {
+              apiVersion: 'v1',
+              kind: 'Status',
+              status: 'Failure',
+              reason: 'AlreadyExists',
+              code: 409,
+              details: { name: job.metadata.name, group: 'batch', kind: 'jobs' },
+            });
+            return;
+          }
           jobs.set(job.metadata.name, job);
           if (job.metadata.name === raceJobName) {
             createSeen.resolve();
@@ -138,7 +153,7 @@ describe('task launch fence (real Postgres, HTTPS Kubernetes API)', () => {
             req.socket.destroy();
             return;
           }
-          send(mode === 'conflict-create' ? 409 : 201, job);
+          send(201, job);
           return;
         }
         if (req.method === 'DELETE') {
@@ -276,6 +291,49 @@ describe('task launch fence (real Postgres, HTTPS Kubernetes API)', () => {
       expect(await component().runOnce()).toBe(true);
       expect(creates).toBe(1);
       expect(storageCalls).toBe(1);
+    }
+  );
+  it('returns AlreadyExists without overwriting an existing Job on duplicate CREATE', async () => {
+    const task = await admitted('duplicate-create');
+    const api = executor();
+    await api.ensureStarted(launch(task));
+    const original = structuredClone(jobs.get(task.jobName));
+    const client = createTaskKubernetesClient({ apiServer: origin, tokenFile, caFile });
+    closers.push(client.close);
+    const duplicate = renderTaskJob(launch(task));
+    duplicate.spec['backoffLimit'] = 99;
+    const response = await client.request(
+      'POST',
+      '/apis/batch/v1/namespaces/lifemodel-motor/jobs',
+      duplicate
+    );
+    expect(response).toMatchObject({
+      status: 409,
+      body: { kind: 'Status', status: 'Failure', reason: 'AlreadyExists', code: 409 },
+    });
+    expect(jobs.get(task.jobName)).toEqual(original);
+    expect(jobs.size).toBe(1);
+    expect(await api.observe(launch(task))).toMatchObject({ jobUid: 'job-uid-1' });
+  });
+  it.each(['observe', 'deleteNow'] as const)(
+    'refuses %s for a same-template replacement of an already-bound Job UID',
+    async (operation) => {
+      const task = await admitted('bound-uid-replacement');
+      expect(await component().runOnce()).toBe(true);
+      const boundTask = (await registry.read(task.id))!;
+      expect(boundTask.jobUid).toBe('job-uid-1');
+      const replacement = structuredClone(jobs.get(task.jobName));
+      replacement.metadata.uid = 'replacement-uid';
+      replacement.metadata.resourceVersion = '2';
+      jobs.set(task.jobName, replacement);
+      const api = executor();
+      // Only immutable API identity differs: labels, template and hash still match.
+      await expect(api[operation](launch(boundTask))).rejects.toMatchObject({
+        code: 'identity_mismatch',
+      });
+      expect(requests.filter((request) => request.method === 'DELETE')).toEqual([]);
+      expect(jobs.get(task.jobName)).toEqual(replacement);
+      expect((await registry.read(task.id))?.jobUid).toBe('job-uid-1');
     }
   );
   it.each(['hash', 'label'] as const)(

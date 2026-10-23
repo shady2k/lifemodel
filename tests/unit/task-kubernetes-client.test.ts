@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createTaskKubernetesClient } from '../../src/core/task-kubernetes-client.js';
 import { TaskExecutorError } from '../../src/core/task-executor.js';
+import { createKubernetesTaskExecutor } from '../../src/core/kubernetes-task-executor.js';
 
 // Projection stalls are part of the request deadline and close boundary. A late
 // secret read must never become an HTTP request after shutdown.
@@ -47,4 +48,63 @@ describe('task Kubernetes transport projection boundary', () => {
       expect(vi.getTimerCount()).toBe(0);
     }
   );
+});
+
+describe('task Kubernetes LIST bounds', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('refuses many empty pages with unique continuation tokens at the page limit', async () => {
+    let pages = 0;
+    const request = vi.fn(async () => ({
+      status: 200,
+      body: {
+        items: [],
+        metadata: { continue: ++pages < 150 ? `page-${pages}` : '' },
+      },
+    }));
+    const api = createKubernetesTaskExecutor({ client: { request, close: vi.fn() } });
+    await expect(api.listJobs()).rejects.toMatchObject({ code: 'api_error' });
+    expect(request).toHaveBeenCalledTimes(100);
+  });
+
+  it('refuses an oversized continuation before sending it back to the API', async () => {
+    const request = vi.fn(async () => ({
+      status: 200,
+      body: { items: [], metadata: { continue: 'é'.repeat(2049) } },
+    }));
+    const api = createKubernetesTaskExecutor({ client: { request, close: vi.fn() } });
+    await expect(api.listJobs()).rejects.toMatchObject({ code: 'api_error' });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('shares one deadline across slow pages and aborts the outstanding request', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    const signals: AbortSignal[] = [];
+    const request = vi.fn(
+      async (_method: string, _path: string, _body?: unknown, signal?: AbortSignal) => {
+        signals.push(signal!);
+        return new Promise<{ status: number; body: unknown }>((resolve, reject) => {
+          const abort = () => {
+            clearTimeout(timer);
+            reject(new TaskExecutorError('aborted'));
+          };
+          const timer = setTimeout(() => {
+            signal!.removeEventListener('abort', abort);
+            resolve({
+              status: 200,
+              body: { items: [], metadata: { continue: `page-${signals.length}` } },
+            });
+          }, 10_000);
+          signal!.addEventListener('abort', abort, { once: true });
+        });
+      }
+    );
+    const api = createKubernetesTaskExecutor({ client: { request, close: vi.fn() } });
+    const outcome = api.listJobs().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await outcome).toMatchObject({ code: 'aborted' });
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });

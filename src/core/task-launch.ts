@@ -38,6 +38,7 @@ export function createTaskLaunchReconciler(options: {
     }[]
   >;
   closeExecutor?: () => void;
+  cancelRegistry?: () => void;
   waitForChange?: (signal: AbortSignal) => Promise<void>;
 }) {
   const controller = new AbortController();
@@ -45,6 +46,7 @@ export function createTaskLaunchReconciler(options: {
   let inflight: Promise<boolean> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let started = false;
+  let driver: Promise<void> | undefined;
   let failures = 0;
   let workCursor = '0';
   let moreWork = false;
@@ -204,7 +206,7 @@ export function createTaskLaunchReconciler(options: {
       return success;
     } catch (error) {
       if (error instanceof StalePostgresEpochError) {
-        stop();
+        void stop();
         return false;
       }
       if (!stopped) options.logger.warn({ count: 1 }, 'Task reconciliation remains pending');
@@ -270,13 +272,28 @@ export function createTaskLaunchReconciler(options: {
       if (signal.aborted) done();
     });
   }
-  function stop() {
+  function stop(deadline = Date.now() + 5000): Promise<void> {
     stopped = true;
     clearTimeout(timer);
     controller.abort();
+    options.cancelRegistry?.();
     for (const resolve of waiters.splice(0)) resolve(false);
     options.storage.close();
     options.closeExecutor?.();
+    return drain(deadline);
+  }
+  async function drain(deadline: number): Promise<void> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.allSettled([inflight, driver]),
+        new Promise<void>((resolve) => {
+          timeout = setTimeout(resolve, Math.max(0, deadline - Date.now()));
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+    }
   }
   async function resync(): Promise<boolean> {
     wakeRevision++;
@@ -296,7 +313,7 @@ export function createTaskLaunchReconciler(options: {
     start: () => {
       if (!started && !stopped) {
         started = true;
-        void drive();
+        driver = drive();
       }
     },
     stop,

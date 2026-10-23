@@ -77,6 +77,38 @@ describe('fenced durable task registry', () => {
     expect(await registry.readAccessIntent(accepted[0].id)).toBeNull();
   });
 
+  it('cancels an owned checked-out SQL client without destroying an unrelated shared-pool client', async () => {
+    const controller = new AbortController();
+    const cancellable = createPostgresTaskRegistry({
+      pool: stores.postgres,
+      epoch: 1,
+      settings,
+      signal: controller.signal,
+    });
+    const unrelated = await stores.postgres.connect();
+    try {
+      await unrelated.query('BEGIN; LOCK TABLE core.tasks IN ACCESS EXCLUSIVE MODE');
+      const outcome = cancellable.listLaunchWork().catch((error: unknown) => error);
+      await expect
+        .poll(async () => {
+          const waiting = await stores.postgres
+            .query(`SELECT count(*)::int AS n FROM pg_stat_activity
+          WHERE datname=current_database() AND wait_event_type='Lock'
+          AND query LIKE '%t.accepted_order>%';`);
+          return waiting.rows[0].n;
+        })
+        .toBe(1);
+      controller.abort();
+      expect(await outcome).toMatchObject({ code: 'storage_error' });
+      expect((await unrelated.query('SELECT 42 AS value')).rows[0].value).toBe(42);
+      await expect(cancellable.list()).rejects.toMatchObject({ code: 'storage_error' });
+    } finally {
+      await unrelated.query('ROLLBACK');
+      unrelated.release();
+    }
+    expect(await registry.list()).toEqual([]);
+  });
+
   it('conflicts on a changed payload without leaking private input', async () => {
     const task = await registry.accept(request('conflict'));
     for (const changed of [
@@ -91,6 +123,12 @@ describe('fenced durable task registry', () => {
       });
     }
     expect(await registry.list()).toHaveLength(1);
+    await expect(
+      stores.postgres.query('UPDATE core.tasks SET request_image_revision=$2 WHERE id=$1', [
+        task.id,
+        `sha256:${'b'.repeat(64)}`,
+      ])
+    ).rejects.toMatchObject({ code: '23514' });
   });
 
   it('enforces launch-key uniqueness independently of the adapter', async () => {
@@ -98,8 +136,8 @@ describe('fenced durable task registry', () => {
     await expect(
       stores.postgres.query(
         `INSERT INTO core.tasks
-      (id, launch_key, briefing, profile, image_revision, harness, settings_revision, wrap_grace_seconds)
-      SELECT 'other-task', launch_key, briefing, profile, image_revision, harness, settings_revision, wrap_grace_seconds
+      (id, launch_key, briefing, profile, image_revision, harness, settings_revision, wrap_grace_seconds, request_image_revision)
+      SELECT 'other-task', launch_key, briefing, profile, image_revision, harness, settings_revision, wrap_grace_seconds, request_image_revision
       FROM core.tasks WHERE id=$1`,
         [task.id]
       )

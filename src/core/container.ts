@@ -1241,6 +1241,7 @@ export async function createContainerAsync(
   // keeps the legacy Docker loop disabled; this Job path is separate from it.
   let taskService: TaskService | null = null;
   let taskLaunch: ReturnType<typeof createTaskLaunchReconciler> | undefined;
+  const taskLaunchController = new AbortController();
   if (!mergedConfig.motorCortex.enabled && controlTokenFile && controlCaFile) {
     const image = taskWorkbenchImage(process.env['LIFEMODEL_TASK_WORKBENCH_IMAGE']);
     const imageRevision = image.slice(image.indexOf('@') + 1);
@@ -1248,10 +1249,17 @@ export async function createContainerAsync(
       pool: rawPostgres,
       epoch: snapshotEpoch,
       settings: createPlatformSettingsReader({ logger }),
+      imageRevision,
+    });
+    const launchRegistry = createPostgresTaskRegistry({
+      pool: rawPostgres,
+      epoch: snapshotEpoch,
+      settings: createPlatformSettingsReader({ logger }),
+      signal: taskLaunchController.signal,
     });
     taskService = {
       accept: async (request) => {
-        const task = await registry.accept({ ...request, imageRevision });
+        const task = await registry.accept(request);
         void taskLaunch?.resync();
         return task;
       },
@@ -1260,7 +1268,10 @@ export async function createContainerAsync(
     };
     const executor = createKubernetesTaskExecutor();
     taskLaunch = createTaskLaunchReconciler({
-      registry,
+      registry: launchRegistry,
+      cancelRegistry: () => {
+        taskLaunchController.abort();
+      },
       executor,
       storage: createStorageControlClient({
         origin: 'https://storage-module.lifemodel-system.svc:8444',
@@ -1328,18 +1339,22 @@ export async function createContainerAsync(
   const stopProgress: StopProgress = { step: 'done' };
   shutdown = makeIdempotentShutdown(() => {
     const budget = coreLoop.getStopDrainTimeoutMs();
+    const deadline = Date.now() + budget;
     storageRetention?.stop();
-    taskLaunch?.stop();
+    const taskDrain = taskLaunch?.stop(deadline);
     outboundDelivery.stop();
     return shutdownSequence({
       logger,
-      deadline: Date.now() + budget,
+      deadline,
       channels: channels.values(),
       coreLoop,
       stateManager,
       recipientRegistry,
       progress: stopProgress,
     }).finally(async () => {
+      // Worker-owned SQL was cancelled at intake stop; drain it inside the same
+      // deadline before closing the shared pool, without touching turn clients.
+      await taskDrain;
       await snapshotRedis.quit();
       await postgres.end();
     });
