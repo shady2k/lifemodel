@@ -199,6 +199,14 @@ describe('durable fenced task mailbox', () => {
     });
   });
 
+  it('denies a live proof with a different template hash from the saved binding', async () => {
+    await expect(
+      mailbox().append(frame(), { ...identity, templateHash: 'c'.repeat(64) })
+    ).rejects.toMatchObject({ code: 'identity_mismatch' });
+    expect(await mailbox().listUnsignalled()).toEqual([]);
+    expect(await mailbox().readCursor(identity.taskId, 'task_to_core')).toBeNull();
+  });
+
   it('replays durable pending rows across restart and marks exact message IDs idempotently', async () => {
     await mailbox().append(frame('a', 99), identity);
     await mailbox().append(frame('b', 2), identity);

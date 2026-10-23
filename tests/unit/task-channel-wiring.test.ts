@@ -15,7 +15,7 @@ describe('task-channel core reservations', () => {
     const source = readFileSync('src/core/task-channel.ts', 'utf8');
     expect(source).toContain('queue.splice(index, 1)');
     expect(source.indexOf('queue.splice(index, 1)')).toBeLessThan(
-      source.indexOf('buffered -= frameLimit')
+      source.indexOf('buffered -= reservedBytes')
     );
   });
 

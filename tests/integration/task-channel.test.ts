@@ -326,12 +326,16 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
     };
   }
   async function listener(
-    overrides: { mailbox?: TaskMailbox; settings?: Partial<PlatformSettingsValues> } = {}
+    overrides: {
+      mailbox?: TaskMailbox;
+      settings?: Partial<PlatformSettingsValues>;
+      identity?: typeof identity;
+    } = {}
   ) {
     const channel = createTaskChannel({
       tls: { cert: certificate.cert, key: certificate.key },
       mailbox: overrides.mailbox ?? mailbox,
-      identity,
+      identity: overrides.identity ?? identity,
       settings: { ...values, ...overrides.settings },
       logger: recordingLogger(createTestLogger('silent'), logs),
     });
@@ -607,11 +611,14 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
 
   it('returns 429 with Retry-After when held bodies fill the process buffer; owner intake remains available', async () => {
     const f = await fixture();
+    const held = JSON.stringify(step(f.task));
     const channel = await listener({
-      settings: { 'tasks.channel.maxFrameBytes': 1024, 'tasks.channel.maxBufferedBytes': 1024 },
+      settings: {
+        'tasks.channel.maxFrameBytes': 1024,
+        'tasks.channel.maxBufferedBytes': Buffer.byteLength(held),
+      },
     });
     const socket = await rawSocket(channel.url);
-    const held = JSON.stringify(step(f.task));
     const entered = Promise.withResolvers<void>();
     channel.server.once('request', () => entered.resolve());
     socket.write(wire(f.token, held.slice(0, -1), Buffer.byteLength(held)));
@@ -655,7 +662,10 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
           'tasks.channel.maxFrameBytes': 1024,
           ...(bound === 'frames'
             ? { 'tasks.channel.maxUnackedFrames': 2 }
-            : { 'tasks.channel.maxUnackedBytes': 2048 }),
+            : {
+                'tasks.channel.maxUnackedBytes':
+                  2 * Buffer.byteLength(JSON.stringify(step(f.task))),
+              }),
         },
       });
       const socket = await rawSocket(channel.url);
@@ -851,6 +861,155 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
       await bounded(released.promise);
     }
     expect((await call(channel.url, f.token, step(f.task, 10))).status).toBe(200);
+  });
+
+  it.each(['tasks.channel.maxUnackedBytes', 'tasks.channel.maxBufferedBytes'] as const)(
+    'admits a small fixed-length frame with a lowered %s and the default frame ceiling',
+    async (key) => {
+      const f = await fixture();
+      const projection = join(directory, 'settings.json');
+      await writeFile(
+        projection,
+        JSON.stringify({ version: 1, revision: 1, values: { [key]: 32_768 } })
+      );
+      const projected = await createPlatformSettingsReader({
+        dir: directory,
+        logger: createTestLogger('silent'),
+      }).read();
+      expect(projected.values[key]).toBe(32_768);
+      expect(projected.values['tasks.channel.maxFrameBytes']).toBe(65_536);
+      const channel = await listener({ settings: projected.values });
+      const response = await call(channel.url, f.token, step(f.task), { inspectRow: true });
+      expect(response.status).toBe(200);
+      expect(response.rowsAtReceipt).toHaveLength(1);
+      const before = reviews.length;
+      expect(
+        (await call(channel.url, f.token, step(f.task, 2), { raw: ' '.repeat(32_769) })).status
+      ).toBe(413);
+      expect(reviews).toHaveLength(before);
+    }
+  );
+
+  it('caps pre-authentication intake at 64 pending requests even for tiny bodies', async () => {
+    const f = await fixture();
+    const channel = await listener();
+    const sockets: TLSSocket[] = [];
+    const before = reviews.length;
+    let admitted = 0;
+    try {
+      for (let index = 0; index < 64; index++) {
+        const socket = await rawSocket(channel.url);
+        sockets.push(socket);
+        const entered = Promise.withResolvers<void>();
+        channel.server.once('request', () => {
+          admitted++;
+          entered.resolve();
+        });
+        socket.write(wire(f.token, '{', 2));
+        await bounded(entered.promise);
+      }
+      expect(admitted).toBe(64);
+      expect(reviews).toHaveLength(before);
+      const response = await call(channel.url, f.token, step(f.task));
+      expect(response.status).toBe(429);
+      expect(response.headers['retry-after']).toBe('1');
+      expect(reviews).toHaveLength(before);
+    } finally {
+      for (const socket of sockets) socket.destroy();
+    }
+  });
+
+  it('isolates slow pre-authentication for forged task IDs from healthy task workers', async () => {
+    const noisy = await fixture('noisy');
+    const healthy = await fixture('healthy');
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let verifying = 0;
+    let peak = 0;
+    const channel = await listener({
+      identity: {
+        ...identity,
+        verify: async (token, signal) => {
+          if (token !== noisy.token) return identity.verify(token, signal);
+          verifying++;
+          peak = Math.max(peak, verifying);
+          entered.resolve();
+          try {
+            await release.promise;
+            return await identity.verify(token, signal);
+          } finally {
+            verifying--;
+          }
+        },
+      },
+    });
+    const requests = Array.from({ length: 12 }, (_, index) =>
+      call(channel.url, noisy.token, { ...step(noisy.task, index + 1), taskId: `forged-${index}` })
+    );
+    void Promise.all(requests).catch(() => undefined);
+    try {
+      await bounded(entered.promise);
+      const started = performance.now();
+      const response = await bounded(call(channel.url, healthy.token, step(healthy.task)), 1500);
+      expect(response.status).toBe(200);
+      expect(performance.now() - started).toBeLessThanOrEqual(1500);
+      expect(peak).toBe(1);
+      expect(verifying).toBe(1);
+      expect(
+        (await new OwnerMessageIntake(stores.redis, 'owner').acceptOwnerMessage(ownerId(), 'owner'))
+          .status
+      ).toBe('accepted');
+    } finally {
+      release.resolve();
+      await Promise.all(requests);
+    }
+    expect((await Promise.all(requests)).every((response) => response.status === 403)).toBe(true);
+  });
+
+  it('gives one verified Job one worker share even across tokens and forged task IDs', async () => {
+    const noisy = await fixture('noisy');
+    const healthy = await fixture('healthy');
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let active = 0;
+    let peak = 0;
+    const channel = await listener({
+      mailbox: {
+        ...mailbox,
+        append: async (...args) => {
+          if (args[1].jobUid !== noisy.task.jobUid) return mailbox.append(...args);
+          active++;
+          peak = Math.max(peak, active);
+          entered.resolve();
+          try {
+            await release.promise;
+            return await mailbox.append(...args);
+          } finally {
+            active--;
+          }
+        },
+      },
+    });
+    const requests = Array.from({ length: 8 }, (_, index) => {
+      const token = `${noisy.token}-${index}`;
+      tokens.set(token, { ...tokens.get(noisy.token)! });
+      return call(channel.url, token, {
+        ...step(noisy.task, index + 1),
+        taskId: `forged-${index}`,
+      });
+    });
+    void Promise.all(requests).catch(() => undefined);
+    try {
+      await bounded(entered.promise);
+      const response = await bounded(call(channel.url, healthy.token, step(healthy.task)), 1500);
+      expect(response.status).toBe(200);
+      expect(peak).toBe(1);
+    } finally {
+      release.resolve();
+      await Promise.all(requests);
+    }
+    expect(peak).toBe(1);
+    expect((await Promise.all(requests)).every((response) => response.status === 403)).toBe(true);
   });
 
   it('schedules one frame per task per pass rather than draining a noisy task first', async () => {

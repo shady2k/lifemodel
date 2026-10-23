@@ -122,12 +122,21 @@ Raising a hard maximum requires code review and rerunning the two-second fixture
 | `tasks.channel.workers` | 2 |
 | `tasks.channel.sqlConnections` | 2 |
 
-Each admitted request reserves one whole maximum frame before body intake.
-Reservations include slow/partial bodies, queued frames and outstanding responses;
-this conservative accounting cannot overrun either byte budget. Each connection
-has its own frame/byte accounting. Task queues are round-robin: one frame per task
-per pass, no concurrent frames from one task. Active workers are bounded by both
-worker and SQL limits. Core creates a physically separate bounded Postgres pool
+Before body intake, a fixed-length request reserves its Content-Length (at least
+one byte); a chunked request reserves the smaller of the frame ceiling and the
+two byte budgets. Bodies exceeding their reservation are refused with 413.
+Thus small frames fit lowered byte budgets without requiring the frame ceiling
+to be lowered too. Reservations include slow/partial bodies, queued frames and
+outstanding responses. At most 64 requests may be admitted across all stages,
+even when bodies are tiny. Each connection has its own frame/byte accounting.
+Fresh verification has two dedicated workers, separately from mailbox workers,
+and serializes repeated credentials by a nonlogged token digest without caching
+proofs. Unknown credentials cannot be assigned a trusted task share; distinct
+credentials can saturate this bounded verification reservation, but never occupy
+mailbox or owner-intake workers. Verified queues are round-robin by Job UID,
+not the supplied frame task ID: one frame per Job per pass, no concurrent frames
+from one Job even across Pod credentials or token rotations. Active mailbox
+workers are bounded by both worker and SQL limits. Core creates a physically separate bounded Postgres pool
 for task intake and replay. It never borrows the owner-intake pool. Artifact
 transfers use storage and no channel worker. On shutdown, intake stops, sockets
 close, identity requests abort and mailbox-owned SQL clients are destroyed before

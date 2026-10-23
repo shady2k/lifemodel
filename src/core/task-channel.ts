@@ -1,5 +1,6 @@
 /** Task-only TLS ingress. No artifact bytes, cognition, or owner-intake capacity. */
 import { createServer, type Server } from 'node:https';
+import { createHash } from 'node:crypto';
 import type { ServerResponse, IncomingMessage } from 'node:http';
 import type { TLSSocket } from 'node:tls';
 import type { Socket } from 'node:net';
@@ -52,41 +53,71 @@ export function createTaskChannel(options: ChannelOptions): {
   const sockets = new Set<Socket>();
   const counters = new Map<Socket, { frames: number; bytes: number }>();
   const controllers = new Set<AbortController>();
-  const queues = new Map<string, Work[]>();
-  const activeTasks = new Set<string>();
-  const ready: string[] = [];
-  let active = 0;
   let buffered = 0;
+  let pending = 0;
   let closed = false;
   const logger = options.logger.child({ component: 'task-channel' });
 
-  function schedule(): void {
-    while (!closed && active < workerLimit && ready.length) {
-      const taskId = ready.shift();
-      if (!taskId || activeTasks.has(taskId)) continue;
-      const queue = queues.get(taskId);
-      const work = queue?.shift();
-      if (!work) {
-        queues.delete(taskId);
-        continue;
+  // Independent task-only reservations. Authentication never occupies a mailbox
+  // worker. The token key only serializes repeated credentials before verification;
+  // it is not trusted as an identity and no positive proof is cached.
+  function scheduler(limit: number) {
+    const queues = new Map<string, Work[]>();
+    const activeTasks = new Set<string>();
+    const ready: string[] = [];
+    let active = 0;
+    function schedule(): void {
+      while (!closed && active < limit && ready.length) {
+        const taskId = ready.shift();
+        if (!taskId || activeTasks.has(taskId)) continue;
+        const queue = queues.get(taskId);
+        const work = queue?.shift();
+        if (!work) {
+          queues.delete(taskId);
+          continue;
+        }
+        if (work.cancelled()) {
+          if (queue?.length) ready.push(taskId);
+          else queues.delete(taskId);
+          continue;
+        }
+        active++;
+        activeTasks.add(taskId);
+        void work.run().finally(() => {
+          active--;
+          activeTasks.delete(taskId);
+          if (queues.get(taskId)?.length) ready.push(taskId);
+          else queues.delete(taskId);
+          schedule();
+        });
       }
-      if (work.cancelled()) {
-        if (queue?.length) ready.push(taskId);
-        else queues.delete(taskId);
-        continue;
-      }
-      active++;
-      activeTasks.add(taskId);
-      // One frame from this task, then move the task to the tail of the pass.
-      void work.run().finally(() => {
-        active--;
-        activeTasks.delete(taskId);
-        if (queues.get(taskId)?.length) ready.push(taskId);
-        else queues.delete(taskId);
-        schedule();
-      });
     }
+    return {
+      add(work: Work) {
+        const queue = queues.get(work.taskId) ?? [];
+        queue.push(work);
+        queues.set(work.taskId, queue);
+        if (!activeTasks.has(work.taskId) && !ready.includes(work.taskId)) ready.push(work.taskId);
+        schedule();
+      },
+      remove(work: Work) {
+        const queue = queues.get(work.taskId);
+        const index = queue?.indexOf(work) ?? -1;
+        if (queue && index >= 0) queue.splice(index, 1);
+        if (queue?.length === 0) {
+          queues.delete(work.taskId);
+          const readyIndex = ready.indexOf(work.taskId);
+          if (readyIndex >= 0) ready.splice(readyIndex, 1);
+        }
+      },
+      clear() {
+        queues.clear();
+        ready.length = 0;
+      },
+    };
   }
+  const authentication = scheduler(2);
+  const mailbox = scheduler(workerLimit);
   function send(res: ServerResponse, status: number, body: unknown): void {
     if (res.destroyed || res.writableEnded) return;
     res.writeHead(status, {
@@ -121,23 +152,37 @@ export function createTaskChannel(options: ChannelOptions): {
       refuse(res, 413, 'frame_too_large');
       return;
     }
+    const capacity = Math.min(
+      frameLimit,
+      settings['tasks.channel.maxUnackedBytes'],
+      settings['tasks.channel.maxBufferedBytes']
+    );
+    // Fixed-length frames reserve their actual wire size. Chunked requests reserve
+    // the entire admissible allowance and are cut off at that allowance.
+    const reservedBytes = length === undefined ? capacity : Math.max(1, Number(length));
+    if (reservedBytes > capacity) {
+      refuse(res, 413, 'frame_too_large');
+      return;
+    }
     const socket = req.socket;
     const count = counters.get(socket) ?? { frames: 0, bytes: 0 };
-    // Reserve the entire bounded frame BEFORE intake; slow/chunked bodies cannot
-    // escape the process or connection memory budgets.
+    // Reserve BEFORE intake. In addition to byte bounds, at most 64 requests
+    // (the tested default full-frame process capacity) may await any stage.
     if (
+      pending >= 64 ||
       count.frames >= settings['tasks.channel.maxUnackedFrames'] ||
-      count.bytes + frameLimit > settings['tasks.channel.maxUnackedBytes'] ||
-      buffered + frameLimit > settings['tasks.channel.maxBufferedBytes']
+      count.bytes + reservedBytes > settings['tasks.channel.maxUnackedBytes'] ||
+      buffered + reservedBytes > settings['tasks.channel.maxBufferedBytes']
     ) {
       refuse(res, 429, 'channel_saturated');
       return;
     }
     count.frames++;
-    count.bytes += frameLimit;
+    count.bytes += reservedBytes;
+    pending++;
     if (!counters.has(socket)) socket.once('close', () => counters.delete(socket));
     counters.set(socket, count);
-    buffered += frameLimit;
+    buffered += reservedBytes;
     const controller = new AbortController();
     controllers.add(controller);
     const signal = controller.signal;
@@ -150,19 +195,14 @@ export function createTaskChannel(options: ChannelOptions): {
       released = true;
       clearTimeout(timer);
       if (queuedWork) {
-        const queue = queues.get(queuedWork.taskId);
-        const index = queue?.indexOf(queuedWork) ?? -1;
-        if (queue && index >= 0) queue.splice(index, 1);
-        if (queue?.length === 0) {
-          queues.delete(queuedWork.taskId);
-          const readyIndex = ready.indexOf(queuedWork.taskId);
-          if (readyIndex >= 0) ready.splice(readyIndex, 1);
-        }
+        authentication.remove(queuedWork);
+        mailbox.remove(queuedWork);
         queuedWork = undefined;
       }
       count.frames--;
-      count.bytes -= frameLimit;
-      buffered -= frameLimit;
+      count.bytes -= reservedBytes;
+      buffered -= reservedBytes;
+      pending--;
       controllers.delete(controller);
       parts.length = 0;
       controller.abort();
@@ -179,7 +219,7 @@ export function createTaskChannel(options: ChannelOptions): {
     req.on('data', (chunk: Buffer) => {
       if (signal.aborted) return;
       bytes += chunk.length;
-      if (bytes > frameLimit) {
+      if (bytes > reservedBytes) {
         refuse(res, 413, 'frame_too_large');
         parts.length = 0;
       } else parts.push(chunk);
@@ -210,40 +250,54 @@ export function createTaskChannel(options: ChannelOptions): {
         return;
       }
       const token = authorization.slice(7);
+      const fail = (error: unknown) => {
+        if (signal.aborted) return;
+        const safe =
+          error instanceof TaskChannelError
+            ? error
+            : new TaskChannelError(503, 'channel_unavailable');
+        refuse(res, safe.status, safe.code);
+      };
       const work: Work = {
-        taskId: frame.taskId,
+        taskId: createHash('sha256').update(token).digest('hex'),
         cancelled: () => signal.aborted,
         run: async () => {
           try {
             signal.throwIfAborted();
             const proof = await options.identity.verify(token, signal);
             signal.throwIfAborted();
-            let ack: TaskChannelAck;
-            try {
-              ack = await options.mailbox.append(frame, proof, signal);
-            } finally {
-              // A disconnect can race COMMIT. Replay must not depend on the ACK.
-              options.onStored?.();
-            }
-            signal.throwIfAborted();
-            // The committed mailbox row is the ACK boundary, not Signal emission.
-            send(res, 200, ack);
+            const stored: Work = {
+              // Kubernetes verifies the Job UID freshly. Different frame IDs,
+              // Pod credentials and token rotations cannot create extra shares.
+              taskId: proof.jobUid,
+              cancelled: () => signal.aborted,
+              run: async () => {
+                try {
+                  signal.throwIfAborted();
+                  let ack: TaskChannelAck;
+                  try {
+                    ack = await options.mailbox.append(frame, proof, signal);
+                  } finally {
+                    // A disconnect can race COMMIT. Replay must not depend on the ACK.
+                    options.onStored?.();
+                  }
+                  signal.throwIfAborted();
+                  // The committed mailbox row is the ACK boundary, not Signal emission.
+                  send(res, 200, ack);
+                } catch (error) {
+                  fail(error);
+                }
+              },
+            };
+            queuedWork = stored;
+            mailbox.add(stored);
           } catch (error) {
-            if (signal.aborted) return;
-            const safe =
-              error instanceof TaskChannelError
-                ? error
-                : new TaskChannelError(503, 'channel_unavailable');
-            refuse(res, safe.status, safe.code);
+            fail(error);
           }
         },
       };
       queuedWork = work;
-      const queue = queues.get(frame.taskId) ?? [];
-      queue.push(work);
-      queues.set(frame.taskId, queue);
-      if (!activeTasks.has(frame.taskId) && !ready.includes(frame.taskId)) ready.push(frame.taskId);
-      schedule();
+      authentication.add(work);
     });
   }
   const server = createServer(
@@ -300,8 +354,8 @@ export function createTaskChannel(options: ChannelOptions): {
       (stopping ??= (async () => {
         closed = true;
         clearTimeout(reloadTimer);
-        queues.clear();
-        ready.length = 0;
+        authentication.clear();
+        mailbox.clear();
         for (const controller of controllers) controller.abort();
         for (const socket of sockets) socket.destroy();
         await new Promise<void>((resolve) => {
