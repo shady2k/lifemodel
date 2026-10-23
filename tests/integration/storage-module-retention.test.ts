@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createRetentionHarness, DAY, TERMINAL } from '../helpers/storage-retention-harness.js';
+import { storageWarningEventId } from '../../src/core/storage-retention.js';
 
 let h: Awaited<ReturnType<typeof createRetentionHarness>>;
 beforeAll(async () => {
@@ -126,7 +127,7 @@ describe('sealed retention snapshots and durable warning plans', () => {
         [planId]
       )
     ).rows[0];
-    expect(stored).toMatchObject({ state: 'warned', message_id: 'owner-message' });
+    expect(stored).toMatchObject({ state: 'warned', message_id: storageWarningEventId(planId) });
     expect(new Date(stored.warned_at).getTime()).toBe(TERMINAL + 150 * DAY);
     expect(new Date(stored.earliest_delete_at).getTime()).toBe(TERMINAL + 157 * DAY);
     await h.clock(TERMINAL + 157 * DAY - 1000);
@@ -197,7 +198,7 @@ describe('sealed retention snapshots and durable warning plans', () => {
       )
     ).rows[0];
     expect(stored).toMatchObject({ lead_days: 3, settings_revision: '2' });
-    expect((await h.warn(freshPlan.id, 'configured-lead-message')).status).toBe(200);
+    expect((await h.warn(freshPlan.id)).status).toBe(200);
     await h.clock(TERMINAL + 183 * DAY - 1000);
     await h.tick();
     expect(h.backend.objects.has(fresh.key)).toBe(true);

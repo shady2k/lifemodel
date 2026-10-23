@@ -4,12 +4,16 @@ Date: 2026-10-20. Task: lifemodel-653.5 (motor-1).
 
 ## Status, context and ownership
 
-Direction confirmed by the owner's 08:40 comment on lifemodel-653.5; record
-proposed for integration. Different-model review passed at 28bc0345 after two
-rounds; [review evidence](../features/motor/tasks-design-review.md) records its
-scope and the coordinator's step-C verification of native Job controls and
-the configurable seven-day warning lead.
-Not built or accepted on a deployed instance.
+Direction confirmed by the owner's 08:40 comment on lifemodel-653.5.
+Different-model design review passed at 28bc0345 after two rounds;
+[review evidence](../features/motor/tasks-design-review.md) records that historical
+scope and the coordinator's step-C verification of native Job controls and the
+configurable seven-day warning lead. The stage-2 module, object/control APIs,
+retention and core warning reconciler, recovery tooling and admission controls
+are implemented with repository tests. This is not deployed acceptance.
+Stage-3 task lifecycle/terminal integration (S05) and owner web downloads (S08)
+remain pending. Repository fixtures do not prove deployed Seaweed persistence,
+network enforcement or RSS; the deployment walks below still need acceptance.
 [ADR-014](014-task-runtime.md) owns launch, live steering and task outcomes;
 [this component/sequence view](../features/motor/tasks-design.md) joins them.
 This separate record is clearer than a section in 014: storage has independent
@@ -49,10 +53,16 @@ No Seaweed IAM rule is trusted as the task-isolation boundary.
 
 ## Constraints (closed requirements and their checks)
 
-S01–S10 are the complete additional constraints. Tests/walks are **future stage
-obligations**, not existing passing tests. Together with ADR-014 T01–T12 there
-are **22 constraints**. Size fixtures are concrete evidence, not production
-limits beyond the owner-declared 20 GB logical-storage ceiling.
+S01–S10 are the complete additional constraints and their acceptance targets,
+not a claim that every named check exists or has passed. Module-side repository
+checks now exist for S01–S04, S06/S07, S09 and S10; their scope is described in
+the linked storage feature documents. The named S05/S08 integration tests and
+real task/owner-browser paths remain future work. Current S10 tests and the walk
+use core marked-object reads as the read-capacity surrogate, not owner web
+download acceptance. Deployment walks remain separate acceptance obligations.
+Together with ADR-014 T01–T12 there are **22 constraints**. Size fixtures are
+concrete evidence, not production limits beyond the owner-declared 20 GB
+logical-storage ceiling.
 
 | ID | Requirement / origin | Concrete check and fixture |
 | --- | --- | --- |
@@ -64,7 +74,7 @@ limits beyond the owner-declared 20 GB logical-storage ceiling.
 | S06 | Retention defaults **90 days**, supports forever/pin; instance logical output ceiling **20 GB = 20,000,000,000 bytes**; no silent protected-data eviction (owner + explicit unit choice) | `tests/integration/storage-module-retention.test.ts`: clock at 89/90/91 days (selection, not early deletion) and after notice + 7 days, pinned/forever/unpinned; quota ledger fixture at **20 GB** with boundary ±1 byte, **100 object metadata rows**, concurrent reservations and stale settings revision |
 | S07 | One batched warning per deletion plan precedes deletion by a configurable **7 days** by default; pin/read/seal races cannot resurrect or delete protected output (owner) | `tests/integration/storage-module-gc.test.ts`: **100 artifacts**, one batch/notification key, default 7-day lead ±1 s and configured lead/revision change with no retroactive early deletion, owner pin after warning, two GC contenders, active reader and crash before/after delete; zero per-item notices |
 | S08 | Owner downloads through authenticated same-origin web→module; no raw S3 client/URL, no unsafe inline artifact execution (ADR-011/012, owner) | `tests/integration/task-artifact-download.test.ts`: **two owner sessions, two artifacts**, expired session, traversal, CRLF filename/HTML content, range/reconnect and mid-read expiry; WALK-TASK-PANEL in Chromium + Firefox |
-| S09 | Seaweed **single-node weed mini** with persistent volume, auth fail-closed, internal-only S3; recover objects + filer metadata + IAM/custody + SQL catalog together (owner/research) | WALK-STORAGE-RESTORE: one fresh k3s node, **32 objects of 4 MiB plus 2 partial uploads**, restart and restore into empty instance; hashes/marks/read denial/tombstones match; record measured restore time and backup age |
+| S09 | Seaweed **single-node weed mini** with persistent volume, auth fail-closed, internal-only S3; recover objects + filer metadata + SQL catalog together under fresh destination custody, without copying source secrets (owner/research) | WALK-STORAGE-RESTORE: one fresh k3s node, **32 objects of 4 MiB plus 2 partial uploads**, restart and restore into empty instance; hashes/marks/read denial/tombstones match; record measured restore time and backup age |
 | S10 | Bound transfer/memory/client pressure with reserved web/control capacity; health never reports failed stores as empty (limits/visibility) | `tests/integration/storage-module-pressure.test.ts`: **20 attempted streams, 2 tasks + web**, 4 MiB chunks; active/buffer limits in S-D3 never exceeded, overload rejected **within 1 s**, 20 healthy control/second-task operations each ACK **within 2 s** with one stalled stream; WALK-STORAGE-LOAD proves RSS **≤512 MiB** at this fixture and no secret/body diagnostic logs |
 
 ## Decisions
@@ -77,15 +87,18 @@ account and readiness/metrics listener. It is not generation-editable code.
 Its OpenBao role reads only the named Seaweed custody record; secrets live in
 memory, refresh/rotation is bounded and fail-closed. No model keys, loader root,
 unseal material or unrelated store rights. Module SQL credentials scope only
-to its catalog and narrow task-authorization read described below. Seaweed's
+to its catalog, the narrow task-authorization read described below and the
+persisted owner-notice view in S-D5 (subject to the interim login amendment). Seaweed's
 own S3 auth configuration is provisioned by trusted bootstrap in platform
 custody; no caller or generation holds those signing credentials. Seaweed must
 validate service credentials: missing auth config refuses readiness, not an
 anonymous mode. Basic static service signing is sufficient; STS inside module
 is optional defense in depth, never the task boundary.
 
-SeaweedFS is a single `weed mini` StatefulSet/PVC with explicit flags, one
-writer/Recreate updates and all unneeded admin/WebDAV/catalog ports disabled.
+SeaweedFS is a single-replica `weed mini` StatefulSet/PVC with explicit flags
+and the StatefulSet's RollingUpdate strategy. The separate storage-module
+Deployment is single-replica with Recreate updates for its local cancellation
+barriers. All unneeded Seaweed admin/WebDAV/catalog ports are disabled.
 Only module→S3 is permitted. Filer/master/volume ports remain private to the
 Seaweed process; tasks/core/web cannot bypass the module through them. Do not
 use chart defaults (`emptyDir`/anonymous S3) or assume one disk is redundancy.
@@ -208,7 +221,12 @@ not an uncharged 4 MiB request high-water mark. See transfer settings below.
 Per-chunk network/SQL deadline
 **10 s**, no progress ends that stream without occupying a worker forever.
 Workers select round-robin by space after each chunk; no stalled upload holds
-a control worker or web reserve. A revoke cancels all that space's workers.
+a control worker or web reserve. SQL checkout capacity is also separated by
+operation class: control pools do not share task guard, core read or collector
+clients. The [implemented pool bounds](../features/motor/storage-objects.md#transfer-bounds)
+reserve this capacity without claiming a universal two-second control SLA under
+store outages or locks on the control operation's own rows.
+A revoke cancels all that space's workers.
 The **512 MiB** RSS bound is a fixture acceptance budget to measure on the
 specified single-node walk, not a vendor minimum or full-platform memory claim.
 Values are typed settings with finite hard bounds; changes rerun S10. The
@@ -290,8 +308,8 @@ prompt per item and no eviction hidden behind a failed upload retry.
 Module builds one durable deletion plan with candidate IDs/revisions, total
 bytes/reason and earliest-delete time. Default warning lead is **7 days**
 (coordinator verification, owner-away allowance), both for age and quota
-reclamation. `preDeletionWarningLeadSeconds` is a typed loader/platform setting,
-default **604800**, positive with unit/bounds validation. Snapshot its revision
+reclamation. `storage.warningLeadDays` is a typed loader/platform setting:
+integer **1..30 days**, default **7**. Snapshot its revision
 and lead into the plan. A later setting change cannot shorten an already
 announced window; increased protection may delay it, new plans use the new
 value. S07 checks default/configured leads and restart/revision boundaries.
@@ -299,7 +317,18 @@ A single ordinary
 batched notice covers the plan, keyed by plan ID; core writes it through its
 existing durable outbound/message path. `warningCommitted(planId, messageId)`
 is accepted only with the matching persisted owner-notice receipt, not an LLM
-assertion. No deletion until receipt exists and lead time elapsed. If core/chat
+assertion. Core exposes the read-only contract
+`core.storage_owner_notices(message_id, committed_at)` over permanent nonempty
+assistant/web message rows with canonical storage-warning IDs and matching
+channel keys; it exposes no text or recipient data. Module verifies that
+`messageId` is `storage-warning_` plus SHA-256 of `planId` and exists in this view
+inside the same maintenance-fenced transaction before recording the warning.
+A missing or wrong-plan receipt returns `503 warning_receipt_pending` and leaves
+the plan pending for retry. The lead begins at module confirmation time, not the
+historical conversation timestamp. Lifemodel-2t5 must grant the module `SELECT`
+on exactly this view, not on core conversation tables or the whole core schema.
+The interim database-owner login does not replace this read-contract boundary.
+No deletion until receipt exists and lead time elapsed. If core/chat
 is down, deletion waits and capacity can block; nothing silently evicts.
 Updates to the same pending batch coalesce; new candidates cannot inherit an
 already elapsed warning window. No repeated notice on restart/delivery retry.
@@ -338,8 +367,14 @@ files. hf2k owns panel UI/walk, while storage owns API authorization checks.
 
 ### S-D7. Recovery, health and safe failure
 
-Backup SQL catalog/space revisions/manifests/deletion tombstones plus Seaweed
-volume data, filer metadata and IAM/config/custody as one recoverable set.
+Backup the complete storage SQL catalog, including space revisions, manifests
+and deletion tombstones, together with a sanitized cold Seaweed volume/filer
+metadata tree as one recoverable set. The [storage-set recovery contract](../features/motor/storage-restore.md)
+requires fresh destination custody and the same pinned versions. Do not copy
+source Bao, IAM, signing/login secrets or environment-specific mini configuration.
+This narrower archive supports only an attested fresh, module-only history that
+has never used IAM or SSE; arbitrary reused PVCs are unsupported. Verify that
+source credentials are denied and destination credentials accepted after restore.
 Record backup generation/cut and pause writes/GC for a consistent recovery
 point; generic S3 copy or volume mirror alone is not enough. Keep recovery
 copy outside the node's failure domain before claiming disk-loss recovery.
@@ -351,7 +386,13 @@ is made until owner sets objectives and this drill records measured evidence.
 Backups and private logs may contain personal data; apply same access custody.
 
 Readiness fails on inaccessible catalog/backend, missing auth or unreconciled
-unsafe catalog version. Empty/unset is not storage_unavailable. Liveness tests
+unsafe catalog version. Listeners and the retention loop start even under a
+restore hold; maintenance-fenced transactions deny ordinary writes/GC. While
+restore purpose is non-normal, health returns 503 `catalog_unavailable` with
+safe logged cause `restore_pending`, not a new public error code or extra
+hold/progress/count JSON fields. Inspect maintenance/reconcile details through
+the administrative CLI; a healthy ordinary backup hold still permits reads.
+Empty/unset is not storage_unavailable. Liveness tests
 process health, not absence of artifacts. Expose safe counters for reserved/
 charged bytes, active transfers, denied cross-space calls, pending seal/GC,
 oldest plan and backend failures; label only bounded status classes, not file
@@ -362,7 +403,8 @@ ambiguity; malformed names/tokens/quota do not launch retry storms.
 ## Amendments
 
 - **Interim database login for the module (2026-10-21, lifemodel-653.7.8).**
-  S-D1 says module SQL credentials scope only to its catalog. Until
+  S-D1's intended SQL scope is its catalog and the narrow authorization/notice
+  read contracts, not core conversation-table access. Until
   lifemodel-2t5 gives the module a leased identity, it uses the database
   owner's own login - the one core and web use - copied by the loader's first
   start into a Secret in `lifemodel-system` that only the module's pod mounts.

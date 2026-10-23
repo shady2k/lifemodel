@@ -135,7 +135,11 @@ process.on('message', (message: any) => {
               })
         );
     } else if (message.command === 'ownerClock') ownerTime = message.value;
-    else if (message.command === 'readiness') {
+    else if (message.command === 'retentionCheck') {
+      const result = await retention.check(AbortSignal.timeout(12_000));
+      process.send?.({ id: message.id, result });
+      return;
+    } else if (message.command === 'readiness') {
       const result = (await app.health.evaluate()).status === 200;
       process.send?.({ id: message.id, result });
       return;

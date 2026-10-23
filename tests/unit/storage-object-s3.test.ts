@@ -119,6 +119,58 @@ describe('the module private S3 byte backend', () => {
     // it with Vitest's default five-second test timeout.
   }, 15_000);
 
+  it('settles same-space task GETs but not independently retained core GETs', async () => {
+    const { client, server } = await setup();
+    const bytes = await put(client);
+    let reached!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.hooks.beforeGet = async () => {
+      reached();
+      await released;
+    };
+    const core = client.get(
+      'space-a',
+      'private-001',
+      0,
+      bytes.length - 1,
+      new AbortController().signal,
+      undefined,
+      'retained-read'
+    );
+    let task: ReturnType<typeof client.get> | undefined;
+    void core.catch(() => undefined);
+    try {
+      await entered;
+      await client.settle('space-a', AbortSignal.timeout(1000));
+      task = client.get(
+        'space-a',
+        'private-001',
+        0,
+        bytes.length - 1,
+        new AbortController().signal
+      );
+      void task.catch(() => undefined);
+      await expect.poll(() => server.requests.filter((r) => r.method === 'GET').length).toBe(2);
+      await expect(client.settle('space-a', AbortSignal.timeout(50))).rejects.toMatchObject({
+        code: 'cleanup_pending',
+      });
+      release();
+      expect((await read(await core)).equals(bytes)).toBe(true);
+      expect((await read(await task)).equals(bytes)).toBe(true);
+      await client.settle('space-a', AbortSignal.timeout(1000));
+    } finally {
+      release();
+      await core.catch(() => undefined);
+      await task?.catch(() => undefined);
+    }
+  });
+
   it('settles only the selected space while another space has an open upload', async () => {
     const { client } = await setup();
     const bytes = Buffer.from('held upload');

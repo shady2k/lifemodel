@@ -82,7 +82,7 @@ export interface PressureReply {
 }
 export async function createPressureHarness(
   settings: Partial<StorageAdmissionSettings> = {},
-  options: { spaces?: string[]; readSpace?: string } = {}
+  options: { spaces?: string[]; readSpace?: string; accessPoolMax?: number } = {}
 ) {
   const taskSpaces = [...new Set(['a', 'b', ...(options.spaces ?? [])])];
   const readSpace = options.readSpace ?? 'reader';
@@ -99,7 +99,11 @@ export async function createPressureHarness(
   const backend = await createSealS3({ bucket: 'task-output' });
   backend.hooks.beforeBucketCheck = () => ({ status: 200 });
   const identity = createKubernetesStorageIdentity({ ...api.options, apiServer: tlsProxy.url });
-  const access = createStorageAccess({ connectionString: sqlProxy.url, identity });
+  const access = createStorageAccess({
+    connectionString: sqlProxy.url,
+    identity,
+    poolMax: options.accessPoolMax,
+  });
   const admission = createStorageAdmission(settings);
   const s3 = createStorageObjectS3({
     endpoint: backend.endpoint,

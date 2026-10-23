@@ -536,7 +536,7 @@ describe('retention GC at real process and backend boundaries', () => {
           .rows[0].n
       ).toBe(1);
       expect((await h.pending()).plans).toEqual([]);
-      expect((await h.warn(plan.id, 'owner-message')).status).toBe(200);
+      expect((await h.warn(plan.id)).status).toBe(200);
       expect((await h.warn(plan.id, 'second-message')).status).toBe(409);
       expect(
         (await h.call('read', 'GET', `/spaces/${artifact.space}/objects/${artifact.id}`)).status

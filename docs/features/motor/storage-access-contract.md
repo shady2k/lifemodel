@@ -1,7 +1,9 @@
 # Storage authorization contract
 
-Task: lifemodel-653.7.2. Implements ADR-015 S-D2 and check S02's authorization
-core. This is not the object API or a deployed acceptance record.
+Task: lifemodel-653.7.2. Historical leaf scope: ADR-015 S-D2 and check S02's
+authorization core. The current module also serves the [object API](storage-objects.md),
+[allocation/seal](storage-seal.md) and [retention](storage-retention.md) routes.
+This is not a deployed acceptance record.
 
 ## Durable read contract
 
@@ -41,10 +43,30 @@ login is unchanged, per ADR-015's owner amendment; scoped leased roles remain
 lifemodel-2t5. The module does not migrate its own schema. Core's existing
 migration initContainer applies expanding dbmate migrations.
 
+### Persisted owner-notice read contract
+
+Migration `20261015000018_create_storage_owner_notices.sql` adds
+`core.storage_owner_notices(message_id, committed_at)`. Like the task-access
+projection, this is a narrow SQL read contract, not ownership of core's tables.
+It exposes only permanent nonempty assistant/web message rows with canonical
+storage-warning IDs and matching channel keys; no text, recipient, briefing,
+secret or grant is exposed. `committed_at` is the row's insertion timestamp,
+visible after commit, not the database's exact commit wall time. No data copy or
+runtime schema creation is involved.
+
+Before recording a new warning, the module checks the plan's canonical message
+ID and its presence in this view in the same maintenance-fenced transaction.
+Missing or wrong-plan receipts return `503 warning_receipt_pending` without
+starting the deletion clock; the plan stays pending and retryable. See
+[retention](storage-retention.md#persisted-owner-notice-receipt) for timing and
+replay semantics. Lifemodel-2t5 must grant module `SELECT` on exactly
+`core.storage_owner_notices`, not core conversation tables or all core relations.
+The existing task-access read contract is unchanged.
+
 ## Each chunk and publication
 
 `createStorageAccess` in `loader/src/storage-access.ts` creates the authority.
-Object adapters in lifemodel-653.7.5 must call:
+The shipped object adapters use this contract:
 
 1. `openTaskStream({ token, space, signal? })` **before** asynchronous transfer
    work. The caller reads its projected service token afresh for each request.
@@ -98,7 +120,8 @@ There is no cross-service zero-time revoke claim under partition.
 - Task TLS 8443: `GET /spaces/:space/access` proves current own-space access;
   `GET /ping` is an unauthenticated transport check, never data authority.
   Audience `lifemodel-task-storage`, SA `lifemodel-motor:task`, bound live Pod
-  and its exact controller Job. Object routes arrive in lifemodel-653.7.5.
+  and its exact controller Job. The [object routes](storage-objects.md) serve
+  own-space PUT/GET/list/mark on this listener.
 - Control TLS 8444: `POST /revoke` with exactly
   `{ space, expectedRevision, effectKey }`; revision is a decimal string.
   Audience `lifemodel-core-storage-control`, SA `lifemodel:core`. [Storage seal](storage-seal.md) also adds keyed allocate/bind/seal on this listener.
@@ -120,11 +143,13 @@ and Job GET only in `lifemodel-motor`. No list/watch, Secret or mutation rights.
 The k3s API egress follows the platform's port-6443 exception; it grants no API
 right. Task SA has zero RBAC; Job token projection is stage 3's launcher work.
 
-Core/web service-audience token projections are provisioned ahead of their consumers
-in lifemodel-653.7.5 on purpose. The env paths and rotating read-only mounts define
-that integration contract; no current core/web storage client reads them yet.
-The future consumers must load fresh tokens and verify TLS against CA-only
-instance trust, not disable verification or mount the module's private key.
+Core/web service-audience token projections and rotating read-only mounts define
+the integration contract. The wired core retention reconciler already uses the
+control token and public CA through `src/core/storage-control-client.ts` (see
+[core warnings](storage-retention.md#core-side)). Core read and owner web download
+consumers remain later integration work. Every consumer must load fresh tokens
+and verify TLS against CA-only instance trust, not disable verification or mount
+the module's private key.
 
 Identity API 5xx, transport and timeout failures are `503 identity_unavailable`;
 TokenReview unauthenticated, audience/SA/binding mismatch, missing/deleting bound
@@ -137,6 +162,8 @@ enter these diagnostics. A missing revoke space is `404 space_not_found`, distin
 from `409 revision_conflict`. Readiness still proves stores/DDL, not API RBAC.
 
 No first-start phase or A0→A→B→C→D dependency changes. D needs SQL schema,
-Bao and SeaweedFS, never task Jobs or nonempty authorization rows. Pressure,
-reserved workers and request admission caps remain lifemodel-653.7.7; this guard
-has finite API/SQL/chunk bounds but does not claim its pressure acceptance.
+Bao and SeaweedFS, never task Jobs or nonempty authorization rows. Historically,
+this authorization leaf did not implement pressure controls. The current module
+wires [bounded admission, reserved workers and fair scheduling](storage-objects.md#transfer-bounds)
+from lifemodel-653.7.7. Repository pressure checks do not replace deployed RSS
+and network acceptance.

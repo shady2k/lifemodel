@@ -1,5 +1,5 @@
 /** Module-owned retention policy, durable warning batches and recoverable byte removal. */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   storageMaintenanceFence,
   storageDeletionReady,
@@ -88,6 +88,19 @@ export function createStorageRetention(options: Options): StorageRetention {
   });
   pool.on('error', () => undefined);
   pool.on('connect', (client) => client.on('error', () => undefined));
+  // Background collection may hold SQL owners across S3; it cannot consume the
+  // capacity reserved for the two authenticated HTTP control workers.
+  const controlPool = new Pool({
+    connectionString: options.connectionString,
+    max: 2,
+    connectionTimeoutMillis: 5000,
+    query_timeout: 5000,
+    statement_timeout: 5000,
+    lock_timeout: 5000,
+    application_name: 'lifemodel-storage-retention-control',
+  });
+  controlPool.on('error', () => undefined);
+  controlPool.on('connect', (client) => client.on('error', () => undefined));
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let running: Promise<void> | undefined;
@@ -95,11 +108,12 @@ export function createStorageRetention(options: Options): StorageRetention {
   async function tx<T>(
     run: (client: PoolClient) => Promise<T>,
     write = true,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    connectionPool = pool
   ): Promise<T> {
     try {
       return await withStorageSqlClient(
-        pool,
+        connectionPool,
         options.connectionString,
         signal,
         async (client, retire) => {
@@ -125,7 +139,8 @@ export function createStorageRetention(options: Options): StorageRetention {
     }
   }
   function requestTransaction(signal: AbortSignal | undefined) {
-    return <T>(run: (client: PoolClient) => Promise<T>, write = true) => tx(run, write, signal);
+    return <T>(run: (client: PoolClient) => Promise<T>, write = true) =>
+      tx(run, write, signal, controlPool);
   }
   /** SQL sessions serialize healthy contenders, but cannot fence S3 after loss.
    * DELETE is at-least-once and idempotent: private immutable random keys are
@@ -692,6 +707,16 @@ export function createStorageRetention(options: Options): StorageRetention {
           return plan.warning_receipt ?? fail(503, 'catalog_unavailable');
         }
         if (plan.state !== 'pending') fail(409, 'plan_complete');
+        // A trusted caller's assertion is not proof of a visible owner notice.
+        // Read only the core's narrow, permanent receipt contract in this same
+        // fenced transaction, before starting the deletion warning clock.
+        const expectedMessageId = `storage-warning_${createHash('sha256').update(planId).digest('hex')}`;
+        const persisted = await client.query(
+          'SELECT 1 FROM core.storage_owner_notices WHERE message_id=$1 LIMIT 1',
+          [messageId]
+        );
+        if (messageId !== expectedMessageId || !persisted.rowCount)
+          fail(503, 'warning_receipt_pending');
         const receipt = {
           id: randomUUID(),
           planId,
@@ -829,7 +854,7 @@ export function createStorageRetention(options: Options): StorageRetention {
       stopped = true;
       if (timer) clearTimeout(timer);
       await running?.catch(() => undefined);
-      await pool.end();
+      await Promise.all([pool.end(), controlPool.end()]);
     },
   };
   return api;

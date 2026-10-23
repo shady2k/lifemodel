@@ -198,7 +198,12 @@ describe('request cancellation reaches real control dependencies', () => {
       const blocker = await h.stores.postgres.connect();
       const controller = new AbortController();
       let outcome: 'pending' | 'resolved' | 'rejected' = 'pending';
-      const name = kind === 'revoke' ? 'access' : kind;
+      const name = {
+        seal: 'seal',
+        retention: 'retention-control',
+        maintenance: 'maintenance',
+        revoke: 'access-control',
+      }[kind];
       try {
         await blocker.query('BEGIN');
         await blocker.query('LOCK TABLE storage.maintenance IN ACCESS EXCLUSIVE MODE');

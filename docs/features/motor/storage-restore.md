@@ -16,8 +16,9 @@ There is no disk-loss RPO/RTO promise. Record backup age and measured restore
 time; copy the finished artifact outside the node's failure domain for disk-loss
 safety.
 
-The module is a single replica with Recreate deployment. SeaweedFS is the
-pinned single-process `weed mini` on `data-seaweedfs-0`, a 10Gi PVC.
+The module is a single-replica Recreate Deployment. SeaweedFS is a single-replica
+StatefulSet with RollingUpdate, running pinned single-process `weed mini` on
+`data-seaweedfs-0`, a 10Gi PVC.
 [Object publication](storage-objects.md), [seal](storage-seal.md) and
 [retention](storage-retention.md) each cross SQL and S3 in several steps.
 `loader/src/storage-access.ts` and `loader/src/storage-object-s3.ts` have local
@@ -221,9 +222,12 @@ in memory (upstream
 `SetStaticIdentities`). The upstream
 [SSE manager](https://github.com/seaweedfs/seaweedfs/blob/530be3e37337488ecc34d58441e0bc476e121c93/weed/s3api/s3_sse_s3.go)
 checks for an existing filer KEK even when given a generated local key.
-Phase 2 must establish the supported fresh layout with the pinned image and
-reject an existing filer KEK, encrypted object dependency, dynamic IAM state or
-unexpected config/secret file rather than stripping required recovery material.
+The shipped pinned-layout policy and builder/verifier require a fresh-layout
+attestation and reject unsupported dependencies or unexpected paths; the
+coordinator must independently establish that evidence for the pinned image.
+An existing filer KEK, encrypted object dependency, dynamic IAM state or
+unexpected config/secret file is unsupported, not permission to strip required
+recovery material.
 Check bucket default encryption as well as individual PUT behavior. Restrict
 this format to a fresh, module-only, never-IAM/never-SSE history; checking only
 current logical metadata cannot prove removed credentials absent from database
@@ -242,9 +246,10 @@ identity and CA. The loader validates the CA's noncritical SKI and issues both
 edge and storage leaves with SKI and AKI equal to the issuer's SKI. Bootstrap
 reissues old missing-identifier leaves under the existing valid CA; an installed
 CA missing SKI fails closed without automatic rotation or a compatibility shim.
-Such a disposable test VM must be reprovisioned. The runbook must verify that source credentials cannot read
-restored storage and destination credentials can. A generic Secret backup is
-neither needed nor allowed.
+Such a disposable test VM must be reprovisioned. The runbook's operator-only
+custody check verifies that source credentials cannot read restored storage and
+destination credentials can; it is a required walk step, not deployed evidence
+from this document. A generic Secret backup is neither needed nor allowed.
 
 ## Restore into an empty storage instance
 
@@ -266,13 +271,19 @@ neither needed nor allowed.
    enables the module. Record `restore` purpose/new generation and artifact
    identity durably before starting any module process. The dump itself already
    contains a hold, so accidental early startup still cannot enable writes/GC.
-4. Start SeaweedFS with destination custody. Start storage-module; its first
-   action checks the maintenance record. No `retention.start()` or mutation
-   intake is enabled while held/reconciling. Liveness stays available. Status
-   exposes safe hold/generation/progress/unavailable counts, not filenames or
-   credentials. Read readiness returns 503 `restore_pending` until safety
-   classification completes; ordinary backup holds leave readiness usable for
-   reads. Restore verification never depends on live historical task Pods.
+4. Start SeaweedFS with destination custody. Storage-module starts its status,
+   task, control and read listeners and calls `retention.start()`, even under a
+   restore hold. Durable transaction fences refuse ordinary mutations and
+   collection writes while held/reconciling; listener startup is not write
+   admission. Liveness stays available. `GET /status` returns 503 with
+   `lastErrorCode: "catalog_unavailable"`; its safe logged cause is
+   `restore_pending` while restore purpose is non-normal, including a completed
+   reconciliation awaiting release. The health JSON has only `state`, `store`,
+   `bucket`, `lastErrorCode`, `lastCheckedAt`, `lastSuccessAt` and `outageSeconds`,
+   not hold/generation/progress/unavailable counts. Inspect those through the
+   maintenance status/reconcile CLI used by the runbook. Ordinary backup holds
+   leave readiness usable for reads if the stores are healthy. Restore
+   verification never depends on live historical task Pods.
 5. Run/retry bounded reconciliation pages (100 rows, request-owned SQL/S3
    deadlines), checkpointed by generation. Inventory every referenced immutable
    version, including previously sealed and manifest-committed spaces; validate
@@ -303,10 +314,11 @@ neither needed nor allowed.
    Deleting candidates retain their tombstones and retry intents; validate,
    do not resurrect or prematurely complete them. Inventory pages are retryable
    from the saved backend cursor.
-8. Complete the reconcile receipt. If missing/corrupt versions exist, expose
-   degraded/unavailable status and require explicit operator acceptance of that
-   recorded count before generation-checked release; no successful clean-restore
-   claim. Otherwise release normally, start ordinary collection, and restore
+8. Complete the reconcile receipt. If missing/corrupt versions exist, inspect
+   the recorded unavailable count through the administrative CLI and explicitly
+   accept it before generation-checked release; no successful clean-restore
+   claim. Health JSON does not add a degraded/count field. Otherwise release
+   normally, allow ordinary collection writes to resume, and restore
    Flux/task-launch state. Read checks always honor availability, even after a
    degraded release. An interrupted restore stays held and can be resumed; an
    operator can discard the stopped empty-target attempt and repeat import,
@@ -331,29 +343,32 @@ reports 32, even if the next completed receipt reports zero.
 
 ## Checks, operator walk and limits
 
-These are **phase 2 obligations**, not passing evidence. Proposed new test files
-stay under `tests/`; reuse `tests/helpers/storage-retention-harness.ts`, the
-SigV4 fake S3 and real isolated Postgres, not fake catalog behavior.
+The phase-2 source implementation and checks now exist. The following inventory
+describes repository coverage, not a receipt that those checks passed on a given
+revision or that the deployed S09 walk is accepted. Integration fixtures use
+`tests/helpers/storage-retention-harness.ts`, SigV4 fake S3 and real isolated
+Postgres; they do not prove real Seaweed persistence or CNI enforcement.
 
-| Constraint / origin | Planned check |
+| Constraint / origin | Repository check or pending walk |
 | --- | --- |
-| Consistent cut and resumable hold (brief / S-D7) | Hold refuses PUT/mark/seal/allocation and plan mutations; pause candidate/attempt/orphan GC already poised at S3 dispatch; active operations settle or return hold pending; restart preserves hold; stale release fails; later valid release works |
-| Read safety and availability (S-D2 / S-D7) | Authorized task/core GET/list/range continue while held without lease writes; revoke refuses; cross-space/revoked/tombstoned reads remain denied; missing and corrupt versions, including empty GET and completed upload replay, never pass healthy |
-| Artifact integrity and credential exclusion (brief / S09) | Builder/verifier tests alter one byte, omit/add a file, introduce traversal/symlink and secret-canary files; all fail import; pinned-layout sanitized copy excludes mini keys/options and unsupported dependencies fail closed |
-| Restart-safe reconcile (S-D4 / S-D5 / S-D7) | Kill/retry between pages; preserve marks/manifests/receipts/tombstones/warning windows; correct quota totals including orphan debt; infrastructure failures remain pending; wrong generation never releases |
+| Consistent cut and resumable hold (brief / S-D7) | `tests/integration/storage-backup-hold.test.ts`: hold refuses PUT/mark/seal/allocation and plan mutations; pause candidate/attempt/orphan GC already poised at S3 dispatch; active operations settle or return hold pending; restart preserves hold; stale release fails; later valid release works |
+| Read safety and availability (S-D2 / S-D7) | `tests/integration/storage-backup-hold.test.ts` and `tests/integration/storage-restore-reconcile.test.ts`: authorized task/core GET/list/range continue while held without lease writes; revoke refuses; cross-space/revoked/tombstoned reads remain denied; missing and corrupt versions, including empty GET and completed upload replay, never pass healthy |
+| Artifact integrity and credential exclusion (brief / S09) | `tests/unit/storage-backup-artifact.test.ts`: builder/verifier tests alter one byte, omit/add a file, introduce traversal/symlink and secret-canary files; all fail import; pinned-layout sanitized copy excludes mini keys/options and unsupported dependencies fail closed |
+| Restart-safe reconcile (S-D4 / S-D5 / S-D7) | `tests/integration/storage-restore-reconcile.test.ts`: bounded resumable pages preserve marks/manifests/receipts/tombstones/warning windows; correct quota totals including orphan debt; infrastructure failures remain pending; wrong generation never releases |
 | Full storage-set recovery (S09) | Coordinator VM walk below, not claimed by the fake S3 tests |
 
-Phase 2 supplies an exact operator runbook/script beside `deploy/platform/`,
-using the loader image's administrative CLI plus explicit operator-created,
-bounded PVC helper commands/Jobs. It must include interruption recovery and
+The operator [runbook/script](../../../deploy/platform/storage-recovery.md) uses
+the loader image's administrative CLI plus explicit operator-created, bounded
+PVC helper commands/Jobs. `tests/unit/storage-recovery-runbook.test.ts` checks
+its structure, not a live recovery. It includes interruption recovery and
 cleanup, pinned tool images, fixed Secret-key projections (never dumps), and
-matching reverse NetworkPolicy permissions where needed. No standing cluster
+matching temporary reverse NetworkPolicy permissions. No standing cluster
 mutation RBAC is added to the loader/module; privileged scaling, suspension and
 helper creation use the operator's kubeconfig. PostgreSQL dump/restore tools
 come from the existing pinned PostgreSQL image/helper, not a new npm dependency.
-New CLI runtime TypeScript is covered by `.dockerignore`'s existing
-`!loader/src/**/*.ts`; a new executable wrapper needs its own explicit entry.
-A/D remain after A0 and stores; no Job becomes a prerequisite of normal bootstrap.
+CLI runtime TypeScript is covered by `.dockerignore`'s existing
+`!loader/src/**/*.ts`. A0→A→B→C→D is unchanged; storage is in D after the stores,
+and no recovery Job becomes a prerequisite of normal bootstrap.
 
 The coordinator's WALK-STORAGE-RESTORE script must seed **32 deterministic
 4 MiB objects across two spaces plus two interrupted uploads**, with marked,

@@ -653,28 +653,34 @@ describe('module-owned allocation, verified binding and marked core reads', () =
 });
 
 describe('durable seal recovery at real process and store boundaries', () => {
-  it('seals while a foreign space has a live core read transport', async () => {
-    await prepare();
-    const data = await populate();
-    const reached = deferred();
-    const release = deferred();
-    releases.push(release.resolve);
-    backend.hooks.beforeGet = async () => {
-      reached.resolve();
-      await release.promise;
-    };
-    const downloading = call(
-      'read',
-      'GET',
-      `/spaces/${spaces.b}/objects/${data.b[0].receipt.id}`
-    ).catch(() => undefined);
-    await reached.promise;
-    const sealed = await call('control', 'POST', '/seal', sealInput());
-    expect(sealed.status).toBe(200);
-    expect(sealed.json.state).toBe('sealed');
-    release.resolve();
-    expect((await downloading)?.body).toEqual(data.b[0].bytes);
-  }, 30_000);
+  it.each(['a', 'b'] as const)(
+    'seals while space %s has a live retained core read transport',
+    async (readingSpace) => {
+      await prepare();
+      const data = await populate();
+      const reached = deferred();
+      const release = deferred();
+      releases.push(release.resolve);
+      backend.hooks.beforeGet = async () => {
+        reached.resolve();
+        await release.promise;
+      };
+      const downloading = call(
+        'read',
+        'GET',
+        `/spaces/${spaces[readingSpace]}/objects/${data[readingSpace][0].receipt.id}`
+      ).catch(() => undefined);
+      await reached.promise;
+      const sealed = await call('control', 'POST', '/seal', sealInput());
+      expect(sealed.status).toBe(200);
+      expect(sealed.json.state).toBe('sealed');
+      release.resolve();
+      const downloaded = await downloading;
+      expect(downloaded?.status).toBe(200);
+      expect(downloaded?.body.equals(data[readingSpace][0].bytes)).toBe(true);
+    },
+    30_000
+  );
 
   it.each(['failed', 'stopped'] as const)(
     'recovers a frozen checksum mismatch as %s using only persisted candidates',

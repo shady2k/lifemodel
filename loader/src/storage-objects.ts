@@ -618,7 +618,8 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
               offset,
               last,
               stream.signal,
-              progress
+              progress,
+              markedOnly ? 'retained-read' : 'space'
             );
             let received = 0;
             for await (const part of body) {
