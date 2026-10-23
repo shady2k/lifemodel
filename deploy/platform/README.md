@@ -122,6 +122,21 @@ before A. Only the gateway mounts this leaf, read-only without subPath at
 reloads it once a minute, like storage. Tasks trust the public `lifemodel-ca`
 copy; no key leaves the trusted platform Pods.
 
+Core's task-only mailbox uses a separate instance-CA leaf for
+`core.lifemodel.svc` and `core.lifemodel.svc.cluster.local` on TLS port 8447.
+A0 precreates `core-task-channel-tls` in `lifemodel` and grants loader only
+fixed-name `get`/`update`; the loader Secret admission permits only UPDATE of
+that leaf, not CREATE or DELETE. The namespace already exists in instance, so
+PKI boot never waits for A or D. Only the core process mounts this Secret,
+read-only without subPath at `/opt/lifemodel/task-channel-tls`
+(`LIFEMODEL_TASK_CHANNEL_TLS_DIR`); its migration init container does not.
+`LIFEMODEL_TASK_CHANNEL_PORT=8447` selects the task listener, separate from
+health on 8081. Tasks receive only the existing public CA ConfigMap. No CA
+private key or unrelated listener leaf is mounted in core. Step D grants the
+core a dedicated cluster-scoped `create` on TokenReviews only for task audience
+proof. Its existing namespaced Job/Pod reads supply live identity checks; no
+SubjectAccessReview, impersonation or generalized auth-delegator grant is added.
+
 The same CNPG copy phase that supplies storage's interim owner login fills
 `model-gateway-db-credentials`. The gateway mounts the Secret as an optional
 read-only directory without subPath at `/opt/lifemodel/database`, and reads

@@ -57,6 +57,14 @@ describe('storage module Kubernetes verification rights', () => {
       {
         apiVersion: 'rbac.authorization.k8s.io/v1',
         kind: 'ClusterRole',
+        metadata: { name: 'core-task-channel-token-review' },
+        rules: [
+          { apiGroups: ['authentication.k8s.io'], resources: ['tokenreviews'], verbs: ['create'] },
+        ],
+      },
+      {
+        apiVersion: 'rbac.authorization.k8s.io/v1',
+        kind: 'ClusterRole',
         metadata: { name: 'storage-module-token-review' },
         rules: [
           { apiGroups: ['authentication.k8s.io'], resources: ['tokenreviews'], verbs: ['create'] },
@@ -64,6 +72,17 @@ describe('storage module Kubernetes verification rights', () => {
       },
     ]);
     expect(stepD.filter((item) => item.kind === 'ClusterRoleBinding')).toEqual([
+      {
+        apiVersion: 'rbac.authorization.k8s.io/v1',
+        kind: 'ClusterRoleBinding',
+        metadata: { name: 'core-task-channel-token-review' },
+        subjects: [{ kind: 'ServiceAccount', name: 'core', namespace: 'lifemodel' }],
+        roleRef: {
+          apiGroup: 'rbac.authorization.k8s.io',
+          kind: 'ClusterRole',
+          name: 'core-task-channel-token-review',
+        },
+      },
       {
         apiVersion: 'rbac.authorization.k8s.io/v1',
         kind: 'ClusterRoleBinding',

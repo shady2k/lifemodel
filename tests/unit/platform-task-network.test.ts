@@ -159,6 +159,48 @@ describe('task namespace network and launch rights', () => {
       objects.find((o) => o.kind === 'ServiceAccount' && o.metadata.name === 'task')
     ).toMatchObject({ automountServiceAccountToken: false });
   });
+  it('grants core only TokenReview creation at cluster scope for task audience proof', () => {
+    const bindings = objects.filter(
+      (item) =>
+        item.kind === 'ClusterRoleBinding' &&
+        item.subjects?.some(
+          (subject: any) =>
+            subject.kind === 'ServiceAccount' &&
+            subject.name === 'core' &&
+            subject.namespace === 'lifemodel'
+        )
+    );
+    expect(bindings).toEqual([
+      {
+        apiVersion: 'rbac.authorization.k8s.io/v1',
+        kind: 'ClusterRoleBinding',
+        metadata: { name: 'core-task-channel-token-review' },
+        subjects: [{ kind: 'ServiceAccount', name: 'core', namespace: 'lifemodel' }],
+        roleRef: {
+          apiGroup: 'rbac.authorization.k8s.io',
+          kind: 'ClusterRole',
+          name: 'core-task-channel-token-review',
+        },
+      },
+    ]);
+    expect(
+      objects.find(
+        (item) =>
+          item.kind === 'ClusterRole' && item.metadata.name === 'core-task-channel-token-review'
+      )
+    ).toEqual({
+      apiVersion: 'rbac.authorization.k8s.io/v1',
+      kind: 'ClusterRole',
+      metadata: { name: 'core-task-channel-token-review' },
+      rules: [
+        {
+          apiGroups: ['authentication.k8s.io'],
+          resources: ['tokenreviews'],
+          verbs: ['create'],
+        },
+      ],
+    });
+  });
   it('grants core only namespaced Job control and read-only Pod observation', () => {
     const role = objects.find((o) => o.kind === 'Role' && o.metadata.name === 'core-task-launcher');
     expect(role?.metadata.namespace).toBe('lifemodel-motor');

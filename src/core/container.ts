@@ -79,6 +79,11 @@ import { createPostgresTaskRegistry } from '../storage/postgres-task-registry.js
 import type { TaskService } from '../ports/tasks.js';
 import { createKubernetesTaskExecutor } from './kubernetes-task-executor.js';
 import { createTaskLaunchReconciler, taskWorkbenchImage } from './task-launch.js';
+import { createTaskChannel } from './task-channel.js';
+import { createTaskKubernetesIdentity } from './task-kubernetes-identity.js';
+import { createPostgresTaskMailbox } from '../storage/postgres-task-mailbox.js';
+import { createTaskChannelReplay } from './task-channel-replay.js';
+import { readFile } from 'node:fs/promises';
 import { createScopedScriptRunner } from './scoped-script-runner.js';
 import { createBrowserAuthPrimitive } from './browser-auth-primitive.js';
 import { loadAllPlugins } from './plugin-discovery.js';
@@ -1242,6 +1247,7 @@ export async function createContainerAsync(
   let taskService: TaskService | null = null;
   let taskLaunch: ReturnType<typeof createTaskLaunchReconciler> | undefined;
   const taskLaunchController = new AbortController();
+  let stopTaskChannel: ((deadline: number) => Promise<void>) | undefined;
   if (!mergedConfig.motorCortex.enabled && controlTokenFile && controlCaFile) {
     const image = taskWorkbenchImage(process.env['LIFEMODEL_TASK_WORKBENCH_IMAGE']);
     const imageRevision = image.slice(image.indexOf('@') + 1);
@@ -1294,6 +1300,86 @@ export async function createContainerAsync(
     taskLaunch.start();
   }
 
+  const channelTlsDir = process.env['LIFEMODEL_TASK_CHANNEL_TLS_DIR'];
+  if (!mergedConfig.motorCortex.enabled && channelTlsDir) {
+    const settings = (await createPlatformSettingsReader({ logger }).read()).values;
+    const timeoutMs = settings['tasks.channel.ackTimeoutMs'];
+    const port = Number(process.env['LIFEMODEL_TASK_CHANNEL_PORT'] ?? '8447');
+    if (port !== 8447) throw new Error('Task channel configuration refused');
+    const readLeaf = async () => {
+      const [cert, key] = await Promise.all([
+        readFile(resolve(channelTlsDir, 'tls.crt'), { signal: AbortSignal.timeout(timeoutMs) }),
+        readFile(resolve(channelTlsDir, 'tls.key'), { signal: AbortSignal.timeout(timeoutMs) }),
+      ]);
+      return { cert, key };
+    };
+    const leaf = await readLeaf().catch(() => {
+      throw new Error('Task channel TLS unavailable');
+    });
+    // A physically separate pool: task intake/replay cannot spend owner SQL slots.
+    const channelPool = new Pool({
+      connectionString: databaseUrl,
+      max: settings['tasks.channel.sqlConnections'],
+      application_name: 'lifemodel-task-channel',
+      connectionTimeoutMillis: timeoutMs,
+      query_timeout: timeoutMs,
+      statement_timeout: timeoutMs,
+      lock_timeout: timeoutMs,
+    });
+    channelPool.on('error', () => undefined);
+    channelPool.on('connect', (client) => client.on('error', () => undefined));
+    const identity = createTaskKubernetesIdentity({ timeoutMs });
+    const mailbox = createPostgresTaskMailbox({
+      pool: channelPool,
+      epoch: snapshotEpoch,
+      operationTimeoutMs: timeoutMs,
+      onAppendSettled: () => {
+        void replay.resync();
+      },
+    });
+    const replay = createTaskChannelReplay({ mailbox, bus: busSignalStream, logger });
+    let channel: ReturnType<typeof createTaskChannel> | undefined;
+    stopTaskChannel = async (deadline) => {
+      // Cancel intake AND checked-out task SQL before draining owner work.
+      const listenerDrain = channel?.stop(deadline);
+      identity.close();
+      mailbox.stop();
+      await replay.stop(deadline);
+      await listenerDrain;
+      await channelPool.end();
+    };
+    try {
+      channel = createTaskChannel({
+        tls: { ...leaf, read: readLeaf },
+        settings,
+        mailbox,
+        identity,
+        logger,
+        onStored: () => {
+          void replay.resync();
+        },
+      });
+      const server = channel.server;
+      await new Promise<void>((resolveListen, reject) => {
+        const failed = () => {
+          clearTimeout(timer);
+          reject(new Error('Task channel listener unavailable'));
+        };
+        const timer = setTimeout(failed, timeoutMs);
+        server.once('error', failed);
+        server.listen(port, '0.0.0.0', () => {
+          clearTimeout(timer);
+          server.removeListener('error', failed);
+          resolveListen();
+        });
+      });
+      void replay.start();
+    } catch {
+      await stopTaskChannel(Date.now() + timeoutMs);
+      throw new Error('Task channel startup refused');
+    }
+  }
+
   // Prime the core queue with messages committed to the inbound stream.
   const replayedInbound = await inboundStream.readNew();
   for (const entry of replayedInbound) coreLoop.pushSignal(entry.signal);
@@ -1342,6 +1428,7 @@ export async function createContainerAsync(
     const deadline = Date.now() + budget;
     storageRetention?.stop();
     const taskDrain = taskLaunch?.stop(deadline);
+    const taskChannelDrain = stopTaskChannel?.(deadline);
     outboundDelivery.stop();
     return shutdownSequence({
       logger,
@@ -1355,6 +1442,7 @@ export async function createContainerAsync(
       // Worker-owned SQL was cancelled at intake stop; drain it inside the same
       // deadline before closing the shared pool, without touching turn clients.
       await taskDrain;
+      await taskChannelDrain;
       await snapshotRedis.quit();
       await postgres.end();
     });

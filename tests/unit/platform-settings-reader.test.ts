@@ -16,6 +16,13 @@ const defaults: PlatformSettingsValues = {
   'tasks.concurrency': 2,
   'tasks.harness': 'opencode',
   'tasks.wrapGraceSeconds': 300,
+  'tasks.channel.maxFrameBytes': 65_536,
+  'tasks.channel.maxUnackedFrames': 16,
+  'tasks.channel.maxUnackedBytes': 1_048_576,
+  'tasks.channel.maxBufferedBytes': 4_194_304,
+  'tasks.channel.ackTimeoutMs': 5_000,
+  'tasks.channel.workers': 2,
+  'tasks.channel.sqlConnections': 2,
   'storage.retention': '90d',
   'storage.warningLeadDays': 7,
   'storage.ceilingBytes': 20000000000,
@@ -63,6 +70,7 @@ describe('core platform settings reader', () => {
     expect(settings).toEqual({
       revision: 7,
       values: {
+        ...defaults,
         'tasks.concurrency': 3,
         'tasks.harness': 'prime-agent',
         'tasks.wrapGraceSeconds': 600,
@@ -232,6 +240,7 @@ describe('core reader parity with the loader registry', () => {
       expect(spec?.default).toEqual(declaration?.default);
       if (declaration?.control === 'number') {
         expect(spec).toMatchObject({ kind: 'number', min: declaration.min, max: declaration.max });
+        expect(spec?.kind === 'number' && spec.integer).toEqual(declaration.integer);
       }
       if (declaration?.control === 'select') {
         expect(spec).toMatchObject({

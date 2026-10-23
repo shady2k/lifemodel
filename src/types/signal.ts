@@ -63,7 +63,10 @@ export type SignalType =
   | 'thought' // Internal thought requiring processing
 
   // === MOTOR CORTEX (from runtime service) ===
-  | 'motor_result'; // Motor Cortex run completed, failed, or needs input
+  | 'motor_result' // Motor Cortex run completed, failed, or needs input
+
+  // === TASK CHANNEL (durable mailbox notifications, not cognition input) ===
+  | 'task_report'; // A task mailbox step or terminal report is ready
 
 /**
  * Signal sources - which "organ" emitted the signal.
@@ -109,7 +112,10 @@ export type SignalSource =
   | 'plugin.thought' // From plugin emitThought() API
 
   // === MOTOR CORTEX ===
-  | 'motor.cortex'; // From Motor Cortex runtime service
+  | 'motor.cortex' // From Motor Cortex runtime service
+
+  // === TASK CHANNEL ===
+  | 'task.channel'; // From the durable task event mailbox
 
 /**
  * Signal - structured data emitted by sensory organs and neurons.
@@ -169,7 +175,8 @@ export type SignalData =
   | PluginEventData
   | ThoughtData
   | FactBatchData
-  | MotorResultData;
+  | MotorResultData
+  | TaskReportData;
 
 /**
  * Image attached to a user message (e.g., Telegram photo).
@@ -559,6 +566,17 @@ export interface MotorResultData {
   isRecovery?: boolean | undefined;
 }
 
+/** Durable task notification. Payload bytes remain in the task mailbox.
+ * A terminal report wakes finalization, never the legacy Motor Cortex path.
+ */
+export interface TaskReportData {
+  kind: 'task_report';
+  taskId: string;
+  attemptId: string;
+  messageId: string;
+  eventKind: 'step' | 'terminal';
+}
+
 /**
  * Signal metrics - the actual measurements.
  *
@@ -626,6 +644,9 @@ export const SIGNAL_TTL: Record<SignalType, number | null> = {
 
   // Motor Cortex signals
   motor_result: 5 * 60_000, // 5 minutes - results are important
+
+  // Durable mailbox reports must survive delayed finalization.
+  task_report: null,
 };
 
 /**

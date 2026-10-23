@@ -40,34 +40,41 @@ describe('A0 PKI Kubernetes stores', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
-  it('writes and reads back the separate task model leaf without touching another Secret', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'kube-task-model-pki-'));
-    try {
-      writeFileSync(join(dir, 'token'), 'test-token');
-      const calls: { path: string; method: string }[] = [];
-      let secret: any = { metadata: { resourceVersion: '1' }, data: {} };
-      const stores = createKubernetesTlsStores({
-        apiServer: 'https://kubernetes.test',
-        tokenFile: join(dir, 'token'),
-        caFile: join(dir, 'ca'),
-        request: async (url, method, token, body) => {
-          expect(token).toBe('test-token');
-          calls.push({ path: url.pathname, method });
-          if (method === 'PUT') secret = JSON.parse(body!);
-          return { status: 200, body: JSON.stringify(secret) };
-        },
-      });
-      await stores.taskModelSecret.write('CA', 'CERT', 'KEY');
-      expect(await stores.taskModelSecret.read()).toEqual({ ca: 'CA', cert: 'CERT', key: 'KEY' });
-      expect(calls.map((call) => call.method)).toEqual(['GET', 'PUT', 'GET', 'GET']);
-      expect(new Set(calls.map((call) => call.path))).toEqual(
-        new Set(['/api/v1/namespaces/lifemodel-system/secrets/model-gateway-task-tls'])
-      );
-      expect(secret.metadata.name).toBe('model-gateway-task-tls');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
+  it.each([
+    ['taskModelSecret', 'lifemodel-system', 'model-gateway-task-tls'],
+    ['taskChannelSecret', 'lifemodel', 'core-task-channel-tls'],
+  ] as const)(
+    'writes and reads back %s without touching another Secret',
+    async (storeName, namespace, name) => {
+      const dir = mkdtempSync(join(tmpdir(), 'kube-task-model-pki-'));
+      try {
+        writeFileSync(join(dir, 'token'), 'test-token');
+        const calls: { path: string; method: string }[] = [];
+        let secret: any = { metadata: { resourceVersion: '1' }, data: {} };
+        const stores = createKubernetesTlsStores({
+          apiServer: 'https://kubernetes.test',
+          tokenFile: join(dir, 'token'),
+          caFile: join(dir, 'ca'),
+          request: async (url, method, token, body) => {
+            expect(token).toBe('test-token');
+            calls.push({ path: url.pathname, method });
+            if (method === 'PUT') secret = JSON.parse(body!);
+            return { status: 200, body: JSON.stringify(secret) };
+          },
+        });
+        await stores[storeName].write('CA', 'CERT', 'KEY');
+        expect(await stores[storeName].read()).toEqual({ ca: 'CA', cert: 'CERT', key: 'KEY' });
+        expect(calls.map((call) => call.method)).toEqual(['GET', 'PUT', 'GET', 'GET']);
+        expect(new Set(calls.map((call) => call.path))).toEqual(
+          new Set([`/api/v1/namespaces/${namespace}/secrets/${name}`])
+        );
+        expect(secret.metadata.name).toBe(name);
+        expect(secret.metadata.namespace).toBe(namespace);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     }
-  });
+  );
   it('gets and updates only the precreated Secret and ConfigMap by name', async () => {
     const calls: Array<{ url: string; method: string; body?: string }> = [];
     let secret: any = { metadata: { resourceVersion: '1' }, data: {} };

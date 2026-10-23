@@ -45,8 +45,15 @@ verified binding and updated monotonically in place. No state lives under
 `TaskExecutor` port, Kubernetes Jobs adapter and allocation-first launch
 reconciler. Deterministic names and exact template/UID adoption recover unknown
 create replies. Startup/watch resync removes unknown or tombstoned Jobs by exact
-UID; no Job status alone determines outcome. Binding, mailbox and sealed
-finalization remain later seams. See the [task registry contract](features/motor/task-registry.md)
+UID; no Job status alone determines outcome. Verified binding and the once-only
+start claim live in the platform model gateway. Sealed finalization remains a
+later seam. The task-only TLS listener on 8447 commits
+immutable step/terminal reports into the fenced Postgres mailbox before ACK.
+A separate bounded SQL pool and round-robin task workers preserve owner intake.
+Restart replay emits ID-only `task_report` Signals through the existing Valkey
+bus, atomically deduplicated by message ID before the mailbox emission receipt.
+See the [task channel contract](features/motor/task-channel.md) and
+[task registry contract](features/motor/task-registry.md)
 and [task launch contract](features/motor/task-launch.md).
 The existing Motor Cortex below remains unchanged until its removal task.
 
