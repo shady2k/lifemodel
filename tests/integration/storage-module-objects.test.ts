@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runStorageCli } from '../../loader/src/storage-cli.js';
 import { createServer as createTcpServer, connect, type Socket } from 'node:net';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createStorageModule } from '../../loader/src/storage-module-app.js';
 import { createStorageAccess } from '../../loader/src/storage-access.js';
 import { createCatalog } from '../../loader/src/storage-catalog.js';
@@ -557,6 +557,74 @@ describe('task immutable object API', () => {
       ).rows[0]
     ).toEqual({ charged_bytes: '4', reserved_bytes: '0' });
   });
+  it('replays the one receipt when a duplicate PUT loses its attempt to the completing sibling', async () => {
+    const bytes = Buffer.from('race');
+    const before = identity.reviews;
+    let reached: () => void = () => undefined;
+    let release: () => void = () => undefined;
+    const waiting = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // The initial dispatch, the reservation and the attempt publication are the
+    // first three guarded calls. The third one runs before begin_attempt, with
+    // the intent read already done and no lock or lease held while it waits.
+    identity.setReviewHook(async () => {
+      if (identity.reviews - before !== 3) return;
+      reached();
+      await gate;
+    });
+    const duplicate = put('race', bytes);
+    try {
+      await waiting;
+      const winner = await put('race', bytes);
+      expect(winner.status).toBe(200);
+      release();
+      const replay = await duplicate;
+      expect(replay.status).toBe(200);
+      expect(replay.json).toEqual(winner.json);
+      // The duplicate never reaches the backend: one transferred object only.
+      expect(backend.requests.filter((row) => row.method === 'PUT')).toHaveLength(1);
+      expect((await list()).json.objects).toHaveLength(1);
+      expect(
+        (
+          await stores.postgres.query(
+            "SELECT charged_bytes::text,reserved_bytes::text FROM storage.space_quota WHERE space_id='a'"
+          )
+        ).rows[0]
+      ).toEqual({ charged_bytes: '4', reserved_bytes: '0' });
+      // The replay is not a licence to overwrite: different bytes still conflict.
+      const different = await put('race', Buffer.from('other'));
+      expect(different.status).toBe(409);
+      expect(different.json.error.code).toBe('upload_conflict');
+    } finally {
+      release();
+    }
+  }, 20_000);
+  it('keeps a genuinely expired upload a retryable conflict, never a replay', async () => {
+    const bytes = Buffer.from('expire');
+    const name = 'out/expired.txt';
+    await stores.postgres.query('SELECT storage.reserve_upload($1,$2,$3,$4,$5,$6,$7)', [
+      'a',
+      'expired',
+      randomUUID(),
+      name,
+      bytes.length,
+      hash(bytes),
+      3600,
+    ]);
+    await stores.postgres.query(
+      "UPDATE storage.upload_intents SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE space_id='a' AND upload_id='expired'"
+    );
+    const expired = await put('expired', bytes);
+    expect(expired.status).toBe(409);
+    expect(expired.json.error.code).toBe('upload_expired');
+    const retried = await put('expired', bytes);
+    expect(retried.status).toBe(200);
+    expect(retried.json).toMatchObject({ name, size: bytes.length, sha256: hash(bytes) });
+  }, 20_000);
   it('bounds request headers and mark body before consuming unbounded input', async () => {
     const reply = await put('body', Buffer.from('a'));
     expect(reply.status).toBe(200);
