@@ -411,6 +411,59 @@ function latch() {
   });
   return { promise, resolve };
 }
+/**
+ * The gateway's timer queue under the test's hand: a deadline then fires once
+ * the test has seen the event it is measured against, never after a wall-clock
+ * race with a loaded event loop (lifemodel-pf3v).
+ */
+function controlledTimers() {
+  let now = 0;
+  let sequence = 0;
+  const scheduled = new Map<number, { at: number; callback: () => void }>();
+  const timers = {
+    set: ((callback: () => void, ms: number) => {
+      const id = ++sequence;
+      scheduled.set(id, { at: now + ms, callback });
+      return id;
+    }) as unknown as typeof setTimeout,
+    clear: ((id: number) => {
+      scheduled.delete(id);
+    }) as unknown as typeof clearTimeout,
+  };
+  const advance = (ms: number) => {
+    now += ms;
+    for (const [id, timer] of [...scheduled])
+      if (timer.at <= now) {
+        scheduled.delete(id);
+        timer.callback();
+      }
+  };
+  return {
+    timers,
+    advance,
+    scheduled,
+    get now() {
+      return now;
+    },
+  };
+}
+/**
+ * Await one event with a bound of its own: an event that never comes then fails
+ * in a second saying what did not happen, instead of ending the test at
+ * Vitest's 5 s timeout (lifemodel-pf3v).
+ */
+const EVENT_BOUND = 1_000;
+async function awaitEvent<T>(event: Promise<T>, missing: string): Promise<T> {
+  let bound: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    bound = setTimeout(() => reject(new Error(`${missing} within ${EVENT_BOUND} ms`)), EVENT_BOUND);
+  });
+  try {
+    return await Promise.race([event, deadline]);
+  } finally {
+    clearTimeout(bound);
+  }
+}
 
 describe('model gateway event stream boundary', () => {
   it('passes streamed deltas and tool metadata through without buffering a complete response', async () => {
@@ -596,18 +649,27 @@ describe('model gateway event stream boundary', () => {
 
 describe('model gateway deadlines and bounds', () => {
   it('switches on the first-byte timeout and aborts the old request', async () => {
-    const f = await fixture({ firstByte: 35 });
+    // The production budget is fired by the test once the upstream holds the
+    // request: a sub-second deadline races the request's own round trip, so the
+    // abort it waits for could happen before the upstream ever saw the request.
+    const clock = controlledTimers();
+    const f = await fixture(undefined, clock.timers);
+    const entered = latch();
     const closed = latch();
     f.handlers.primary = (_req, res) => {
       res.on('close', closed.resolve);
       res.writeHead(200, { 'content-type': 'application/json' });
       res.flushHeaders();
+      entered.resolve();
     };
-    const response = await f.post();
-    expect(response.status).toBe(200);
-    expect(response.headers.get('x-lifemodel-slot')).toBe('reserve');
-    await closed.promise;
-    expect(f.attempts).toHaveLength(2);
+    const response = f.post();
+    await awaitEvent(entered.promise, 'the primary upstream did not receive the request');
+    clock.advance(GATEWAY_LIMITS.firstByte);
+    const answered = await awaitEvent(response, 'the gateway did not answer');
+    expect(answered.status).toBe(200);
+    expect(answered.headers.get('x-lifemodel-slot')).toBe('reserve');
+    await awaitEvent(closed.promise, 'the primary request was not aborted');
+    expect(f.attempts.map((attempt) => attempt.slot)).toEqual(['primary', 'reserve']);
   });
   it('ends an idle stream without reserve replay', async () => {
     const f = await fixture({ idle: 35 });
@@ -625,20 +687,35 @@ describe('model gateway deadlines and bounds', () => {
     expect(f.attempts).toHaveLength(1);
   });
   it('shares the overall deadline across primary and reserve, aborting the final request', async () => {
-    const f = await fixture({ firstByte: 80, overall: 120 });
+    // Both deadlines are the test's to fire, each only once its request has
+    // arrived: the same wall-clock race would otherwise abort a request the
+    // upstream never saw, and the close this test waits for would never come.
+    const timeouts = { firstByte: 80, overall: 120 };
+    const clock = controlledTimers();
+    const f = await fixture(timeouts, clock.timers);
+    const primaryEntered = latch();
     const primaryClosed = latch();
+    const reserveEntered = latch();
     const reserveClosed = latch();
     f.handlers.primary = (_req, res) => {
       res.on('close', primaryClosed.resolve);
+      primaryEntered.resolve();
     };
     f.handlers.reserve = (_req, res) => {
       res.on('close', reserveClosed.resolve);
+      reserveEntered.resolve();
     };
-    const response = await f.post();
-    expect(response.status).toBe(502);
-    expect(await response.text()).toContain('timeout');
-    await Promise.all([primaryClosed.promise, reserveClosed.promise]);
-    expect(f.attempts.map((a) => a.slot)).toEqual(['primary', 'reserve']);
+    const response = f.post();
+    await awaitEvent(primaryEntered.promise, 'the primary upstream did not receive the request');
+    clock.advance(timeouts.firstByte);
+    await awaitEvent(primaryClosed.promise, 'the primary request was not aborted');
+    await awaitEvent(reserveEntered.promise, 'the reserve upstream did not receive the request');
+    clock.advance(timeouts.overall - timeouts.firstByte);
+    const answered = await awaitEvent(response, 'the gateway did not answer');
+    expect(answered.status).toBe(502);
+    expect(await answered.text()).toContain('timeout');
+    await awaitEvent(reserveClosed.promise, 'the reserve request was not aborted');
+    expect(f.attempts.map((attempt) => attempt.slot)).toEqual(['primary', 'reserve']);
   });
   it('aborts a buffered request on disconnect before its first upstream byte', async () => {
     const f = await fixture();
@@ -1188,27 +1265,8 @@ describe('model gateway production timer and inbound boundaries', () => {
   });
   it('enforces the default overall 110-second deadline across slots with no timeout override', async () => {
     // A controlled timer queue advances only gateway timers. Real HTTP uses the event loop normally.
-    let now = 0;
-    let sequence = 0;
-    const scheduled = new Map<number, { at: number; callback: () => void }>();
-    const timers = {
-      set: ((callback: () => void, ms: number) => {
-        const id = ++sequence;
-        scheduled.set(id, { at: now + ms, callback });
-        return id;
-      }) as unknown as typeof setTimeout,
-      clear: ((id: number) => {
-        scheduled.delete(id);
-      }) as unknown as typeof clearTimeout,
-    };
-    const advance = (ms: number) => {
-      now += ms;
-      for (const [id, timer] of [...scheduled])
-        if (timer.at <= now) {
-          scheduled.delete(id);
-          timer.callback();
-        }
-    };
+    const clock = controlledTimers();
+    const { timers, advance, scheduled } = clock;
     const f = await fixture(undefined, timers);
     const primaryEntered = latch();
     const primaryClosed = latch();
@@ -1242,7 +1300,7 @@ describe('model gateway production timer and inbound boundaries', () => {
       sendFrame();
       expect(new TextDecoder().decode((await reader.read()).value)).toContain('still active');
     }
-    expect(now).toBe(109999);
+    expect(clock.now).toBe(109999);
     expect([...scheduled.values()].some((timer) => timer.at === 110000)).toBe(true);
     expect(f.attempts.map((a) => a.slot)).toEqual(['primary', 'reserve']);
     advance(1);
