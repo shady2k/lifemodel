@@ -89,9 +89,14 @@ function trackTmp(dir: string): string {
   return dir;
 }
 
-const FIXTURE_FILES = { 'docker.tgz': 'a', 'rootless.tgz': 'b', 'node.tar.xz': 'c' };
+const FIXTURE_FILES = {
+  'docker.tgz': 'a',
+  'rootless.tgz': 'b',
+  'node.tar.xz': 'c',
+  'opencode.tar.gz': 'd',
+};
 const ARTIFACTS = Object.keys(FIXTURE_FILES).map((file) => ({
-  key: file,
+  key: file === 'opencode.tar.gz' ? 'opencode' : file,
   file,
   hostPath: `/cache/${file}`,
 }));
@@ -144,17 +149,25 @@ describe('parseArgs', () => {
   });
 
   it('rejects a non-numeric or non-positive timeout', () => {
-    expect(() => parseArgs(['--snapshot', '/s', '--timeout', 'abc', '--'])).toThrow(/positive integer/);
-    expect(() => parseArgs(['--snapshot', '/s', '--timeout', '0', '--'])).toThrow(/positive integer/);
+    expect(() => parseArgs(['--snapshot', '/s', '--timeout', 'abc', '--'])).toThrow(
+      /positive integer/
+    );
+    expect(() => parseArgs(['--snapshot', '/s', '--timeout', '0', '--'])).toThrow(
+      /positive integer/
+    );
   });
 
   it('rejects missing values and unknown options', () => {
     expect(() => parseArgs(['--snapshot', '--timeout', '1000', '--'])).toThrow(/missing value/);
-    expect(() => parseArgs(['--snapshot', '/s', '--timeout', '1000', '--wat', '--'])).toThrow(/unknown option/);
+    expect(() => parseArgs(['--snapshot', '/s', '--timeout', '1000', '--wat', '--'])).toThrow(
+      /unknown option/
+    );
   });
 
   it('rejects positionals before --', () => {
-    expect(() => parseArgs(['--snapshot', '/s', 'stray', '--timeout', '1000'])).toThrow(/unexpected positional/);
+    expect(() => parseArgs(['--snapshot', '/s', 'stray', '--timeout', '1000'])).toThrow(
+      /unexpected positional/
+    );
   });
 
   it('prints usage with --help and reserves exit codes 124/130/143/2', () => {
@@ -192,9 +205,9 @@ describe('validateSnapshot', () => {
   });
 
   it('rejects a missing directory', async () => {
-    await expect(validateSnapshot(path.join(os.tmpdir(), 'definitely-missing-dir-x9'))).rejects.toThrow(
-      /not readable/,
-    );
+    await expect(
+      validateSnapshot(path.join(os.tmpdir(), 'definitely-missing-dir-x9'))
+    ).rejects.toThrow(/not readable/);
   });
 
   it('rejects a missing package manifest', async () => {
@@ -238,14 +251,19 @@ describe('validateSnapshot', () => {
   it('rejects relative links and owner credentials on direct helper calls', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snapshot-direct-'));
     try {
-      fs.writeFileSync(path.join(dir, 'package.json'), '{}'); fs.writeFileSync(path.join(dir, 'package-lock.json'), '{}');
+      fs.writeFileSync(path.join(dir, 'package.json'), '{}');
+      fs.writeFileSync(path.join(dir, 'package-lock.json'), '{}');
       fs.symlinkSync('package.json', path.join(dir, 'inside-link'));
       await expect(validateSnapshot(dir)).rejects.toThrow(/symlink/);
-      fs.rmSync(path.join(dir, 'inside-link')); fs.writeFileSync(path.join(dir, '.env'), 'KEY=synthetic');
+      fs.rmSync(path.join(dir, 'inside-link'));
+      fs.writeFileSync(path.join(dir, '.env'), 'KEY=synthetic');
       await expect(validateSnapshot(dir)).rejects.toThrow(/forbidden/);
-      fs.rmSync(path.join(dir, '.env')); fs.writeFileSync(path.join(dir, '.npmrc'), '_authToken=synthetic');
+      fs.rmSync(path.join(dir, '.env'));
+      fs.writeFileSync(path.join(dir, '.npmrc'), '_authToken=synthetic');
       await expect(validateSnapshot(dir)).rejects.toThrow(/npmrc policy/);
-    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
   it('rejects a snapshot that is a file, not a directory', async () => {
     const file = path.join(os.tmpdir(), `snapshot-file-${Date.now()}.json`);
@@ -273,10 +291,14 @@ describe('machine identity', () => {
       'create',
       '--isolated',
       '--isolate-network',
-      '--cpus', MACHINE_CPUS,
-      '--memory', MACHINE_MEMORY,
-      '--disk', MACHINE_DISK,
-      '-u', MACHINE_USER,
+      '--cpus',
+      MACHINE_CPUS,
+      '--memory',
+      MACHINE_MEMORY,
+      '--disk',
+      MACHINE_DISK,
+      '-u',
+      MACHINE_USER,
       MACHINE_IMAGE,
       'lifemodel-test-abcdef0123456789',
     ]);
@@ -323,13 +345,19 @@ describe('buildPlan', () => {
         artifacts: ARTIFACTS,
         artifactsHostDir: '/cache',
         bootstrapScriptDir: '/repo/docker/test',
-      } as any),
+      } as any)
     ).toThrow(/owned prefix/);
   });
 
   it('rejects missing inputs instead of guessing', () => {
     expect(() =>
-      buildPlan({ machineName: machine, snapshotPath: '/s', artifacts: [], artifactsHostDir: '/c', bootstrapScriptDir: '/d' } as any),
+      buildPlan({
+        machineName: machine,
+        snapshotPath: '/s',
+        artifacts: [],
+        artifactsHostDir: '/c',
+        bootstrapScriptDir: '/d',
+      } as any)
     ).toThrow(/artifacts/);
     expect(() =>
       buildPlan({
@@ -338,7 +366,7 @@ describe('buildPlan', () => {
         artifacts: ARTIFACTS,
         artifactsHostDir: '/cache',
         bootstrapScriptDir: '/d',
-      } as any),
+      } as any)
     ).toThrow(/snapshot/);
   });
 
@@ -356,8 +384,16 @@ describe('buildPlan', () => {
     expect(transfer.hostTarArgs).toContain('/Users/owner/private-snapshot');
     // machine side: reads the tar stream from stdin
     expect(transfer.argv).toEqual([
-      'run', '-m', machine, '--user', MACHINE_USER, '--workdir', '/home/lifemodel/src',
-      'tar', '-xf', '-',
+      'run',
+      '-m',
+      machine,
+      '--user',
+      MACHINE_USER,
+      '--workdir',
+      '/home/lifemodel/src',
+      'tar',
+      '-xf',
+      '-',
     ]);
   });
 
@@ -396,6 +432,7 @@ describe('buildPlan', () => {
       'stage-artifacts',
       'transfer-source',
       'provision-root',
+      'provision-opencode',
       'provision-repo',
       'provision-daemon',
       'discover-uid',
@@ -451,22 +488,34 @@ describe('test environment inside the machine', () => {
   it('provisions both pinned stores on an internal network and waits for readiness', () => {
     const machine = makeMachineName('0123456789abcdef');
     const steps = storeProvisionSteps(machine, 1000);
-    expect(steps.some((step) => step.id === 'stores-network' && step.argv.includes('--internal'))).toBe(true);
+    expect(
+      steps.some((step) => step.id === 'stores-network' && step.argv.includes('--internal'))
+    ).toBe(true);
     expect(steps.some((step) => step.id === 'stores-valkey-ready' && step.poll)).toBe(true);
     expect(steps.some((step) => step.id === 'stores-postgres-ready' && step.poll)).toBe(true);
     expect(steps.some((step) => step.argv.includes(STORE_IMAGES.valkey))).toBe(true);
     expect(steps.some((step) => step.argv.includes(STORE_IMAGES.postgres))).toBe(true);
     expect(vitestEnv(1000, machine).LIFEMODEL_TEST_VALKEY_URL).toBe('redis://127.0.0.1:16379');
-    expect(vitestEnv(1000, machine).LIFEMODEL_TEST_DATABASE_URL).toContain(`:${machine}@127.0.0.1:15432/`);
+    expect(vitestEnv(1000, machine).LIFEMODEL_TEST_DATABASE_URL).toContain(
+      `:${machine}@127.0.0.1:15432/`
+    );
     expect(storeCleanupStep(machine, 1000).argv.join(' ')).toContain('docker network rm');
   });
 
   it('rejects a bogus machine uid', () => {
     expect(() =>
-      vitestSteps({ machineName: makeMachineName('0123456789abcdef'), uid: NaN, vitestArgs: [] } as any),
+      vitestSteps({
+        machineName: makeMachineName('0123456789abcdef'),
+        uid: NaN,
+        vitestArgs: [],
+      } as any)
     ).toThrow(/user id/);
     expect(() =>
-      vitestSteps({ machineName: makeMachineName('0123456789abcdef'), uid: 0, vitestArgs: [] } as any),
+      vitestSteps({
+        machineName: makeMachineName('0123456789abcdef'),
+        uid: 0,
+        vitestArgs: [],
+      } as any)
     ).toThrow(/user id/);
   });
 });
@@ -489,9 +538,9 @@ describe('host guard', () => {
   });
 
   it('finds orbctl and fails closed without it', () => {
-    expect(
-      findOrbctl({ existsSync: (p: string) => p === '/opt/homebrew/bin/orbctl' }),
-    ).toBe('/opt/homebrew/bin/orbctl');
+    expect(findOrbctl({ existsSync: (p: string) => p === '/opt/homebrew/bin/orbctl' })).toBe(
+      '/opt/homebrew/bin/orbctl'
+    );
     expect(() => findOrbctl({ existsSync: () => false })).toThrow(/orbctl not found/);
   });
 
@@ -529,12 +578,16 @@ describe('ensureArtifacts', () => {
       const crypto = await import('node:crypto');
       const content = Buffer.from('artifact-bytes');
       const real = crypto.createHash('sha256').update(content).digest('hex');
-      const saved = (PINNED.artifacts as any);
+      const saved = PINNED.artifacts as any;
       const originals = Object.fromEntries(
-        Object.entries(saved).map(([k, v]: any) => [k, { ...v }]),
+        Object.entries(saved).map(([k, v]: any) => [k, { ...v }])
       );
       for (const key of Object.keys(saved)) {
-        saved[key].aarch64 = { file: `${key}.bin`, url: `https://example/${key}.bin`, sha256: real };
+        saved[key].aarch64 = {
+          file: `${key}.bin`,
+          url: `https://example/${key}.bin`,
+          sha256: real,
+        };
       }
       try {
         const artifacts = await ensureArtifacts({
@@ -545,8 +598,8 @@ describe('ensureArtifacts', () => {
             return content;
           },
         });
-        expect(artifacts).toHaveLength(3);
-        expect(downloaded).toHaveLength(3);
+        expect(artifacts).toHaveLength(4);
+        expect(downloaded).toHaveLength(4);
         for (const a of artifacts) {
           expect(fs.existsSync(a.hostPath)).toBe(true);
         }
@@ -558,7 +611,7 @@ describe('ensureArtifacts', () => {
             throw new Error('must not download');
           },
         });
-        expect(again).toHaveLength(3);
+        expect(again).toHaveLength(4);
 
         // tampered cache file is re-verified and replaced
         fs.writeFileSync(artifacts[0].hostPath, 'tampered');
@@ -590,8 +643,10 @@ describe('ensureArtifacts', () => {
   it('fails closed when a download does not match the pinned digest', async () => {
     const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artifacts-bad-'));
     try {
-      const saved = (PINNED.artifacts as any);
-      const originals = Object.fromEntries(Object.entries(saved).map(([k, v]: any) => [k, { ...v }]));
+      const saved = PINNED.artifacts as any;
+      const originals = Object.fromEntries(
+        Object.entries(saved).map(([k, v]: any) => [k, { ...v }])
+      );
       for (const key of Object.keys(saved)) {
         saved[key].aarch64 = {
           file: `${key}.bin`,
@@ -605,7 +660,7 @@ describe('ensureArtifacts', () => {
             arch: 'aarch64',
             cacheDir,
             download: async () => Buffer.from('not-the-pinned-bytes'),
-          }),
+          })
         ).rejects.toThrow(/does not match the pinned digest/);
       } finally {
         Object.keys(saved).forEach((k) => {
@@ -668,8 +723,10 @@ describe('ownership: lock and claims', () => {
 
   it('an old owner cannot release a fresh claim, even from the same pid', () => {
     const dir = trackTmp(fs.mkdtempSync(path.join(os.tmpdir(), 'lock-token-')));
-    const old = acquireLock(dir); releaseLock(dir, old);
-    const current = acquireLock(dir); releaseLock(dir, old);
+    const old = acquireLock(dir);
+    releaseLock(dir, old);
+    const current = acquireLock(dir);
+    releaseLock(dir, old);
     expect(fs.existsSync(current.path)).toBe(true);
     releaseLock(dir, current);
   });
@@ -688,15 +745,15 @@ describe('ownership: lock and claims', () => {
       fs.mkdirSync(claims, { recursive: true });
       await fsp.writeFile(
         path.join(claims, 'lifemodel-test-aaaaaaaaaaaaaaaa.json'),
-        JSON.stringify({ machine: 'lifemodel-test-aaaaaaaaaaaaaaaa', pid: deadPid }),
+        JSON.stringify({ machine: 'lifemodel-test-aaaaaaaaaaaaaaaa', pid: deadPid })
       );
       await fsp.writeFile(
         path.join(claims, 'lifemodel-test-bbbbbbbbbbbbbbbb.json'),
-        JSON.stringify({ machine: 'lifemodel-test-bbbbbbbbbbbbbbbb', pid: process.pid }), // active run
+        JSON.stringify({ machine: 'lifemodel-test-bbbbbbbbbbbbbbbb', pid: process.pid }) // active run
       );
       await fsp.writeFile(
         path.join(claims, 'someone-elses-machine.json'),
-        JSON.stringify({ machine: 'someone-elses-machine', pid: deadPid }), // not our prefix
+        JSON.stringify({ machine: 'someone-elses-machine', pid: deadPid }) // not our prefix
       );
       const r = await recoverStale({ stateDir: dir, invoker, log: () => {} });
       expect(r.deleted).toEqual(['lifemodel-test-aaaaaaaaaaaaaaaa']);
@@ -716,17 +773,30 @@ describe('ownership: lock and claims', () => {
 describe('real local invoker mechanics (inside the ordinary test container)', () => {
   it('captures a short stdout response before the child closes', async () => {
     const invoker = createOrbInvoker({ orbctlPath: process.execPath });
-    const result = await invoker.runStep({ kind: 'orb', id: 'capture', capture: true, argv: ['-e', 'console.log(501)'] });
+    const result = await invoker.runStep({
+      kind: 'orb',
+      id: 'capture',
+      capture: true,
+      argv: ['-e', 'console.log(501)'],
+    });
     expect(result).toEqual({ code: 0, stdout: '501\n' });
   });
   it('awaits termination of a hanging control child', async () => {
     const invoker = createOrbInvoker({ orbctlPath: process.execPath });
-    const running = invoker.runStep({ kind: 'orb', id: 'hang', capture: true, argv: ['-e', 'setInterval(() => {}, 1000)'] });
+    const running = invoker.runStep({
+      kind: 'orb',
+      id: 'hang',
+      capture: true,
+      argv: ['-e', 'setInterval(() => {}, 1000)'],
+    });
     await invoker.killActive();
     expect((await running).code).not.toBe(0);
   });
   it('bootstrap extracts the exact versioned Node archive naming convention', () => {
-    const bootstrap = fs.readFileSync(new URL('../../docker/test/bootstrap-orb.sh', import.meta.url), 'utf8');
+    const bootstrap = fs.readFileSync(
+      new URL('../../docker/test/bootstrap-orb.sh', import.meta.url),
+      'utf8'
+    );
     expect(bootstrap).toContain('node-v"${NODE_VERSION}"-linux-*.tar.xz');
     expect(bootstrap).toContain('node_src=$(echo /opt/node-v"${NODE_VERSION}"-linux-*)');
   });
@@ -746,7 +816,11 @@ describe('runner with a fake orb', () => {
     const teardown = invoker.calls[invoker.calls.length - 1].step;
     expect(teardown.argv).toEqual(['delete', '--force', teardown.argv[2]]);
     // claim removed, lock released
-    expect(fs.existsSync(path.join(fs.realpathSync(runner.stateDirPath), 'claims', `${teardown.argv[2]}.json`))).toBe(false);
+    expect(
+      fs.existsSync(
+        path.join(fs.realpathSync(runner.stateDirPath), 'claims', `${teardown.argv[2]}.json`)
+      )
+    ).toBe(false);
     expect(fs.existsSync(path.join(fs.realpathSync(runner.stateDirPath), 'run.lock'))).toBe(false);
   });
 
@@ -754,7 +828,11 @@ describe('runner with a fake orb', () => {
     const invoker = fakeInvoker({ teardown: 1 });
     const runner = testRunner({}, invoker);
     expect(await runner.run()).toBe(EXIT_FAILURE);
-    expect(fs.existsSync(path.join(runner.stateDirPath, 'claims', `${makeMachineName('0123456789abcdef')}.json`))).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(runner.stateDirPath, 'claims', `${makeMachineName('0123456789abcdef')}.json`)
+      )
+    ).toBe(true);
   });
 
   it('a failed provisioning step still deletes the machine and exits nonzero', async () => {
@@ -815,20 +893,22 @@ describe('runner with a fake orb', () => {
       fs.mkdirSync(path.join(dir, 'claims'), { recursive: true });
       fs.writeFileSync(
         path.join(dir, 'claims', 'lifemodel-test-cccccccccccccccc.json'),
-        JSON.stringify({ machine: 'lifemodel-test-cccccccccccccccc', pid: process.pid }),
+        JSON.stringify({ machine: 'lifemodel-test-cccccccccccccccc', pid: process.pid })
       );
       fs.writeFileSync(path.join(dir, 'run.lock'), JSON.stringify({ pid: process.pid }));
       const invoker = fakeInvoker();
       const runner = testRunner(
         { stateDir: dir, machineName: makeMachineName('dddddddddddddddd') },
-        invoker,
+        invoker
       );
       const code = await runner.run();
       expect(code).toBe(EXIT_FAILURE);
       // nothing was created or deleted: the active run's machine is untouched
       expect(invoker.calls).toHaveLength(0); // no claim means no machine to delete
       // the other run's claim and lock survived
-      expect(fs.existsSync(path.join(dir, 'claims', 'lifemodel-test-cccccccccccccccc.json'))).toBe(true);
+      expect(fs.existsSync(path.join(dir, 'claims', 'lifemodel-test-cccccccccccccccc.json'))).toBe(
+        true
+      );
       expect(JSON.parse(fs.readFileSync(path.join(dir, 'run.lock'), 'utf8')).pid).toBe(process.pid);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -837,10 +917,7 @@ describe('runner with a fake orb', () => {
 
   it('the vitest environment in the executed plan never carries host credentials', async () => {
     const invoker = fakeInvoker();
-    const runner = testRunner(
-      { vitestArgs: ['tests/integration/docker.test.ts'] },
-      invoker,
-    );
+    const runner = testRunner({ vitestArgs: ['tests/integration/docker.test.ts'] }, invoker);
     await runner.run();
     const vitestCall = invoker.calls.find((c) => c.id === 'vitest');
     expect(vitestCall).toBeDefined();
@@ -858,7 +935,7 @@ describe('runner with a fake orb', () => {
       fs.mkdirSync(path.join(dir, 'claims'), { recursive: true });
       fs.writeFileSync(
         path.join(dir, 'claims', 'lifemodel-test-eeeeeeeeeeeeeeee.json'),
-        JSON.stringify({ machine: 'lifemodel-test-eeeeeeeeeeeeeeee', pid: -2 }),
+        JSON.stringify({ machine: 'lifemodel-test-eeeeeeeeeeeeeeee', pid: -2 })
       );
       const invoker = fakeInvoker();
       const runner = testRunner({ stateDir: dir }, invoker);

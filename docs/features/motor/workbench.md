@@ -69,7 +69,8 @@ the current ONNX download.
 ## Offline startup and private writes
 
 The image runs as UID/GID **1000**, with read-only root support, `WORKDIR /work`,
-`HOME=/work/home`, `TMPDIR=/work/tmp` and all XDG paths below HOME. The Job must
+`HOME=/work/home`, `TMPDIR=/work/tmp` and mutable XDG paths below HOME.
+The global XDG config path is the baked read-only `/etc/lifemodel/xdg`. The Job must
 mount its own writable work volume at `/work` and set UID/GID/fsGroup 1000.
 No shared workspace, keys, auth files, owner `.npmrc`, repository `.git`, source
 checkout or local data enters the build context. The Dockerfile-specific
@@ -79,10 +80,10 @@ loader context.
 Startup does not install dependencies or contact an external bootstrap service.
 `--self-check` creates only the private HOME/tmp directories, checks the baked
 CLI/config/dev-dependency files, runs `node --version`, `opencode --version`,
-`git --version` and `lifemodel-storage --help`, and exits 0. Any other invocation
-exits 1 with **`launcher_not_implemented`**. It cannot start a harness before
-653.8.7 implements the verified binding handshake. A successful version check
-is not proof that an OpenCode model/tool session is implemented or accepted.
+`git --version` and `lifemodel-storage --help`, and exits 0. With no arguments the launcher runs the [task harness](task-harness.md):
+authenticated identity discovery, one gateway start claim, one won-claim briefing
+read and one OpenCode session. Unknown arguments exit nonzero. A successful
+version check alone does not prove a model/tool session.
 
 The launcher shares `loader/src/` because that already builds Node CLI modules
 with a strict TypeScript config. Only the two storage modules and launcher
@@ -98,8 +99,9 @@ host or make every repository gate runnable inside a task Job.
 ## Baked non-secret OpenCode configuration
 
 `/etc/lifemodel/opencode.json` is selected by `OPENCODE_CONFIG`. It disables
-updates and sharing and records the task endpoint placeholder
-`https://model-gateway.lifemodel-system.svc:8446/v1`. No API key is configured.
+updates and sharing and selects the fixed `lifemodel/task` OpenAI-compatible
+provider/model. The launcher supplies its loopback relay URL per session.
+No API key is configured.
 `OPENCODE_DISABLE_AUTOUPDATE`, `OPENCODE_DISABLE_MODELS_FETCH`,
 `OPENCODE_DISABLE_PROJECT_CONFIG`, `OPENCODE_DISABLE_DEFAULT_PLUGINS`,
 `OPENCODE_DISABLE_LSP_DOWNLOAD`, `OPENCODE_DISABLE_EXTERNAL_SKILLS`,
@@ -107,26 +109,29 @@ updates and sharing and records the task endpoint placeholder
 update/catalog/project/plugin/download paths. System ripgrep avoids its native
 downloader. All are baked boolean `true` values.
 
-653.8.7 must finish provider/model selection and the transport relay if needed,
-add task identity only after the gateway's once-only start claim, reread rotating
-tokens and validate the projected public CA. It must verify real shell/model,
-steering and Stop behavior and any additional offline bootstrap needs. The
-placeholder alone is not a functioning OpenAI-compatible provider or permission
-to use the gateway. At this OpenCode pin, actual config loading can also install
-`@opencode-ai/plugin` in writable config directories even with pure/default
-plugins disabled. 653.8.7 must preprovision that exact config dependency or use
-validated read-only config directories and verify a real run without bootstrap
-network. The native version path does not load it. Disabling plugins is not a
-universal network sandbox.
+The baked provider/model is `lifemodel/task`; its per-session endpoint is the
+launcher's loopback relay. That relay alone adds the freshly read rotating task
+token and validates the projected public CA when connecting to the gateway.
+It starts only after the once-only claim and briefing read. Steering/wrap remain
+explicitly unsupported until stage 4.
+
+At this pin, config loading may try to install `@opencode-ai/plugin` even with
+plugins disabled. The image instead sets `XDG_CONFIG_HOME=/etc/lifemodel/xdg`
+and creates root-owned, mode-0555 config directories with `.gitignore` already
+present. OpenCode 1.19.4's `packages/core/src/npm.ts` checks writable access before
+Arborist reify and returns without installing if it fails. Config discovery
+only includes an existing HOME `.opencode`; the private fresh HOME has none.
+The adapter must preserve the read-only global path and must not create a writable
+`.opencode` or `OPENCODE_CONFIG_DIR`. Real offline config/session tests, not the
+version path, prove this boundary. Disabling plugins alone is not a network sandbox.
 
 The existing storage CLI reads `LIFEMODEL_STORAGE_ENDPOINT`,
 `LIFEMODEL_STORAGE_SPACE`, `LIFEMODEL_STORAGE_TOKEN_FILE` and
 `LIFEMODEL_STORAGE_CA_FILE`. None is supplied as an image credential. Admission
 permits only the ten literal endpoint/space/identity-file/CA-file names in the
 [task launch contract](task-launch.md). Arbitrary Job env, valueFrom and envFrom
-remain forbidden. The six channel/model names are the contract reserved for the
-launcher handshake in 653.8.7, not proof that today's inert launcher consumes
-them. Tokens/CA are read-only projected directories, never baked.
+remain forbidden. The six channel/model names are consumed by the launcher handshake,
+briefing/channel client and model relay. Tokens/CA are read-only projected directories, never baked.
 
 ## CI and release
 

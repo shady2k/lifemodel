@@ -33,6 +33,39 @@ Canonical active/wrapping intent is read under lock and its hard deadline is
 checked at database wall time after waits. Revocation or API/store outage denies.
 A replacement Pod that did not win the start claim cannot send reports.
 
+## Launcher discovery and briefing
+
+The same TLS listener accepts two bodyless GETs with the channel audience,
+projected-token reread and fresh live Kubernetes identity described above:
+
+- `GET /task/identity` returns exactly `{taskId,attemptId,launchId}`. This solves
+  the restricted Job's bootstrap: its ten allowed environment names contain no
+  registry IDs. The verified Job name and UID select the task, never a caller ID,
+  storage-space guess or token payload decoded without verification. The fenced
+  transaction checks the live nonterminal reserved launch, saved allocation and
+  storage catalog, active canonical intent, deadline and absence of a soft-stop
+  request. It needs no start claim and returns no briefing or profile. Repeating
+  discovery grants no start, does not write a claim and cannot replace the
+  gateway's once-only `POST /task/start`.
+- After its timely won start, the launcher calls `GET /task/briefing` once. It
+  returns exactly `{taskId,attemptId,launchId,briefing,profile}`, where profile has
+  `id`, `revision`, `timeoutSeconds`, `cpuMillis` and `memoryBytes`. This requires
+  the exact won Pod/Job start claim and projection, plus current active/wrapping
+  intent and matching allocation. A replacement/loser Pod cannot read it. The
+  launcher does not start a harness if this fetch fails and reports
+  `failed` / `briefing_unavailable` when the channel can accept a report.
+
+Both reads use the same bounded authentication workers, per-Job mailbox scheduler,
+separate fenced pool, operation/request deadlines and cancellation as frames.
+Task, launch, intent and storage locks follow the canonical order; database wall
+time is checked after waits. Reads emit no mailbox row or Signal. Responses use
+`Cache-Control: no-store`, are capped at 1 MiB (including JSON overhead), and hold
+that allowance against connection/process byte reservations until completion.
+Lower configured byte budgets lower the response allowance. Oversized results
+fail closed with a safe 503 code, before any briefing bytes are sent. Request
+bodies, query strings and unknown routes are refused. Errors/logs contain only
+safe status/codes, never tokens, briefing, profile content or raw SQL causes.
+
 ## Frame and ACK contract for the launcher
 
 POST with `Content-Type: application/json`, no content encoding:
@@ -173,4 +206,5 @@ This closes the mailbox-to-bus retry gap without claiming a cross-store transact
 The bus's existing ledger/turn IDs still own downstream processing and replay.
 
 Tests: `tests/integration/task-mailbox.test.ts`,
-`tests/integration/task-channel.test.ts`, `tests/integration/task-channel-replay.test.ts`.
+`tests/integration/task-channel.test.ts`, `tests/integration/task-channel-replay.test.ts`,
+`tests/integration/task-briefing.test.ts`.

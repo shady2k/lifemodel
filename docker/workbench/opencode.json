@@ -7,7 +7,21 @@
       "name": "lifemodel task gateway",
       "options": {
         "baseURL": "https://model-gateway.lifemodel-system.svc:8446/v1"
+      },
+      "npm": "@ai-sdk/openai-compatible",
+      "models": {
+        "task": {
+          "name": "task",
+          "tool_call": true,
+          "limit": {
+            "context": 128000,
+            "output": 16000
+          }
+        }
       }
     }
-  }
+  },
+  "model": "lifemodel/task",
+  "small_model": "lifemodel/task",
+  "enabled_providers": ["lifemodel"]
 }

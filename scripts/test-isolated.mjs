@@ -8,6 +8,27 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const BASE_IMAGE = 'node:24.21.0-bookworm-slim';
+// Exact native OpenCode fixtures, fetched only in network-enabled provisioning.
+// Asset digests: anomalyco/opencode GitHub release v1.19.4 metadata.
+export const OPENCODE_VERSION = '1.19.4';
+export const OPENCODE_ARCHIVES = Object.freeze({
+  x86_64: Object.freeze({
+    file: 'opencode-linux-x64-baseline.tar.gz',
+    url: `https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64-baseline.tar.gz`,
+    sha256: '1697ef40558d378bd2f72efa8fafe1bed1f0e664f09247b9357556b95dbc7cbc',
+  }),
+  aarch64: Object.freeze({
+    file: 'opencode-linux-arm64.tar.gz',
+    url: `https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-arm64.tar.gz`,
+    sha256: '8568230ccd847dc93e95b9f6894379077d3e014a16b48040743573e77c23e85f',
+  }),
+});
+
+export function opencodeProvisionScript(arch) {
+  const spec = OPENCODE_ARCHIVES[arch];
+  if (!spec) throw new Error(`No pinned OpenCode fixture for ${arch}`);
+  return `curl --fail --location --retry 3 '${spec.url}' -o /tmp/opencode.tar.gz; printf '%s  %s\\n' '${spec.sha256}' /tmp/opencode.tar.gz | sha256sum -c -; tar -xzf /tmp/opencode.tar.gz -C /usr/local/bin opencode; chmod 0555 /usr/local/bin/opencode; rm /tmp/opencode.tar.gz; test "$(/usr/local/bin/opencode --version)" = '${OPENCODE_VERSION}'`;
+}
 const LABEL = 'com.lifemodel.test-boundary';
 const LIMITS = ['--cpus', '2', '--memory', '3g', '--memory-swap', '3g', '--pids-limit', '256', '--init'];
 const SOURCE_LABEL = 'com.lifemodel.test-source';
@@ -281,7 +302,8 @@ export async function run(argv, dependencies = {}) {
       const inspect = await docker(['image', 'inspect', BASE_IMAGE, '--format', '{{.Id}}/{{.Architecture}}'], { mustSucceed: false, timeoutMs: 20_000 });
       if (inspect.code) await docker(['pull', BASE_IMAGE], { live: true });
       const base = inspect.code ? await docker(['image', 'inspect', BASE_IMAGE, '--format', '{{.Id}}/{{.Architecture}}']) : inspect;
-      const hash = createHash('sha256').update('recipe-v4-python\0' + base.stdout)
+      const hash = createHash('sha256').update('recipe-v6-opencode-ripgrep\0' + base.stdout)
+        .update(OPENCODE_VERSION).update(JSON.stringify(OPENCODE_ARCHIVES))
         .update(fs.readFileSync(path.join(snapshot, 'package.json')))
         .update(fs.readFileSync(path.join(snapshot, 'package-lock.json')))
         .update(fs.existsSync(path.join(snapshot, '.npmrc')) ? fs.readFileSync(path.join(snapshot, '.npmrc')) : '').digest('hex').slice(0, 24);
@@ -292,7 +314,10 @@ export async function run(argv, dependencies = {}) {
         owned.add(prep); // Before creation: even a timed-out create must be reaped.
         await docker([...containerArgs(prep, BASE_IMAGE, false), 'sleep', 'infinity']);
         await docker(['start', prep]);
-        await docker(['exec', prep, 'sh', '-ec', 'mkdir -p /opt/deps /snapshot; apt-get update -qq; apt-get install -y -qq --no-install-recommends git ca-certificates curl python3; chown node:node /opt/deps'], { live: true });
+        await docker(['exec', prep, 'sh', '-ec', 'mkdir -p /opt/deps /snapshot; apt-get update -qq; apt-get install -y -qq --no-install-recommends git ca-certificates curl python3 ripgrep; chown node:node /opt/deps'], { live: true });
+        const nativeArch = base.stdout.trim().split('/').at(-1);
+        const opencodeArch = nativeArch === 'amd64' ? 'x86_64' : nativeArch === 'arm64' ? 'aarch64' : nativeArch;
+        await docker(['exec', prep, 'sh', '-ec', opencodeProvisionScript(opencodeArch)], { live: true });
         for (const file of ['package.json', 'package-lock.json', ...(fs.existsSync(path.join(snapshot, '.npmrc')) ? ['.npmrc'] : [])]) await docker(['cp', path.join(snapshot, file), `${prep}:/opt/deps/${file}`]);
         await docker(['exec', '-u', 'node', '-w', '/opt/deps', '-e', 'HUSKY=0', '-e', 'HOME=/home/node', prep, 'npm', 'ci', '--no-audit', '--no-fund'], { live: true });
         await docker(['commit', prep, image], { live: true });

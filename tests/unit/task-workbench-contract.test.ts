@@ -49,6 +49,9 @@ function assertContext(text: string, ignore: string): void {
         source === 'loader/src/'
           ? [
               'loader/src/task-launcher-main.ts',
+              'loader/src/task-harness.ts',
+              'loader/src/task-opencode.ts',
+              'loader/src/task-model-relay.ts',
               'loader/src/storage-cli-main.ts',
               'loader/src/storage-cli.ts',
             ]
@@ -145,14 +148,67 @@ describe('task workbench image contract', () => {
     expect(read('docker/workbench/lifemodel-task-launcher')).toContain(
       'exec node /opt/lifemodel/loader/dist/task-launcher-main.js "$@"'
     );
-    expect(read('loader/src/task-launcher-main.ts')).toContain('launcher_not_implemented');
+    // All TaskHarness/relay/launcher modules must ship, not only the old stub.
+    expect(text).toContain('/build/dist/task-*.js');
+    expect(read('loader/src/task-launcher-main.ts')).not.toContain('launcher_not_implemented');
     const config = JSON.parse(read('docker/workbench/opencode.json'));
     expect(config.autoupdate).toBe(false);
     expect(config.share).toBe('disabled');
+    expect(config.model).toBe('lifemodel/task');
+    expect(config.small_model).toBe('lifemodel/task');
+    expect(config.enabled_providers).toEqual(['lifemodel']);
+    expect(config.provider.lifemodel.npm).toBe('@ai-sdk/openai-compatible');
+    expect(config.provider.lifemodel.models.task).toEqual({
+      name: 'task',
+      tool_call: true,
+      limit: { context: 128000, output: 16000 },
+    });
     expect(config.provider.lifemodel.options.baseURL).toBe(
       'https://model-gateway.lifemodel-system.svc:8446/v1'
     );
     expect(JSON.stringify(config)).not.toMatch(/apiKey|token|password/i);
+  });
+
+  it('keeps OpenCode config non-writable so its exact-pin bootstrap cannot install plugins', () => {
+    const text = dockerfile();
+    expect(text).toContain('XDG_CONFIG_HOME=/etc/lifemodel/xdg');
+    expect(text).toContain('mkdir -p /etc/lifemodel/xdg/opencode');
+    expect(text).toContain('> /etc/lifemodel/xdg/opencode/.gitignore');
+    expect(text).toContain('chmod 0555 /etc/lifemodel/xdg /etc/lifemodel/xdg/opencode');
+    expect(text).toContain('chmod 0444 /etc/lifemodel/xdg/opencode/.gitignore');
+    expect(text).not.toContain('XDG_CONFIG_HOME=/work/');
+    for (const flag of [
+      'OPENCODE_DISABLE_AUTOUPDATE',
+      'OPENCODE_DISABLE_MODELS_FETCH',
+      'OPENCODE_DISABLE_PROJECT_CONFIG',
+      'OPENCODE_DISABLE_DEFAULT_PLUGINS',
+      'OPENCODE_DISABLE_LSP_DOWNLOAD',
+      'OPENCODE_DISABLE_EXTERNAL_SKILLS',
+      'OPENCODE_DISABLE_CLAUDE_CODE',
+      'OPENCODE_PURE',
+    ]) {
+      expect(text).toContain(`${flag}=true`);
+    }
+    // This is a build-surface assertion. The real config-load/no-network receipt
+    // must come from running the pinned binary as uid 1000 in the built image.
+  });
+
+  it('provisions the same verified native binary before either isolated test runtime', () => {
+    const setup = read('scripts/test-isolated.mjs');
+    const machine = read('scripts/test-docker-isolated.mjs');
+    const version = dockerfile().match(/OPENCODE_VERSION=(\d+\.\d+\.\d+)/)![1];
+    const hash = dockerfile().match(/OPENCODE_SHA256=([0-9a-f]{64})/)![1];
+    expect(setup).toContain(`OPENCODE_VERSION = '${version}'`);
+    expect(setup).toContain(`sha256: '${hash}'`);
+    expect(setup).toContain('sha256sum -c -');
+    expect(setup).toContain('recipe-v6-opencode-ripgrep');
+    expect(setup).toContain('.update(OPENCODE_VERSION).update(JSON.stringify(OPENCODE_ARCHIVES))');
+    expect(setup.indexOf('opencodeProvisionScript(opencodeArch)')).toBeLessThan(
+      setup.indexOf("'npm', 'ci'")
+    );
+    expect(machine).toContain('opencode: { ...OPENCODE_ARCHIVES }');
+    expect(machine).toContain("id: 'provision-opencode'");
+    expect(machine).toContain('/usr/local/bin/opencode --version');
   });
 
   it('pins the reference in the core overlay and substitutes exactly that release digest', () => {

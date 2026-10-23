@@ -53,18 +53,28 @@ RUN npm ci --legacy-peer-deps --no-audit --no-fund --ignore-scripts --no-update-
  && npm cache clean --force
 RUN --network=none ONNXRUNTIME_NODE_INSTALL_CUDA=skip npm rebuild esbuild onnxruntime-node protobufjs sharp --foreground-scripts
 COPY --from=cli-build /build/package.json /opt/lifemodel/loader/package.json
-COPY --from=cli-build /build/dist/storage-cli-main.js /build/dist/storage-cli.js /build/dist/task-launcher-main.js /opt/lifemodel/loader/dist/
+COPY --from=cli-build /build/dist/storage-cli-main.js /build/dist/storage-cli.js /build/dist/task-*.js /opt/lifemodel/loader/dist/
 COPY --chown=root:root --chmod=0555 docker/loader/lifemodel-storage /usr/local/bin/lifemodel-storage
 COPY --chown=root:root --chmod=0555 docker/workbench/lifemodel-task-launcher /usr/local/bin/lifemodel-task-launcher
 COPY --chown=root:root docker/workbench/opencode.json /etc/lifemodel/opencode.json
 
+# OpenCode 1.19.4 Config always asks Npm.install for @opencode-ai/plugin,
+# even with plugins disabled. Its Npm.install checks directory writability
+# BEFORE constructing Arborist. Precreate the global config and .gitignore,
+# then make them root-owned/read-only: no dependency install or registry access.
+# Source: v1.19.4 packages/core/src/npm.ts and opencode/src/config/config.ts.
+RUN mkdir -p /etc/lifemodel/xdg/opencode \
+ && printf 'node_modules\npackage.json\npackage-lock.json\nbun.lock\n.gitignore\n' > /etc/lifemodel/xdg/opencode/.gitignore \
+ && chmod 0555 /etc/lifemodel/xdg /etc/lifemodel/xdg/opencode \
+ && chmod 0444 /etc/lifemodel/xdg/opencode/.gitignore
+
 # The Job mounts its PRIVATE working volume at /work (uid/gid/fsGroup 1000).
-# No /tmp write is needed: HOME, XDG and TMPDIR all live on that volume.
+# HOME, mutable XDG paths and TMPDIR live there; config stays immutable above.
 RUN mkdir -p /work/home /work/tmp \
  && chown -R 1000:1000 /work
 ENV HOME=/work/home \
     TMPDIR=/work/tmp \
-    XDG_CONFIG_HOME=/work/home/.config \
+    XDG_CONFIG_HOME=/etc/lifemodel/xdg \
     XDG_CACHE_HOME=/work/home/.cache \
     XDG_DATA_HOME=/work/home/.local/share \
     XDG_STATE_HOME=/work/home/.local/state \
