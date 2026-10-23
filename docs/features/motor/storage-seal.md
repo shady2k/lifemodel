@@ -38,8 +38,26 @@ Read TLS 8445 exposes `GET /spaces/:space/objects?limit=100&cursor=...` and
 `lifemodel-core-storage-read` audience / `lifemodel:core` identity. The existing
 object pagination/range/chunk limits apply. Only marked, non-tombstoned objects
 can be listed/read, including during a running task. Each chunk re-verifies the
-core Pod and current catalog object; web gets no object route permission here.
-Owner download authorization is later S08 work. `/identity` is unchanged.
+core Pod and current catalog object. Web gets no generic object or list permission.
+
+S08 adds one read-only route on this listener: `GET /artifacts/:artifactId` for
+`lifemodel-web-storage-read` / `lifemodel:web` only. An artifact ID is the marked
+object's canonical lowercase UUID. No space, backend key, query or path suffix is
+accepted. The module resolves its space and object in its own catalog. Unknown,
+unmarked, tombstoned, unavailable or deleting artifacts are not available (404).
+The web service must first derive owner permission from the attachment's message
+and conversation; possession of a UUID alone is not owner authorization.
+
+The artifact route reuses the object reader's bounded explicit `Range:
+bytes=start-end` (at most one transfer chunk), `200`/`206`, `Content-Length`,
+`Content-Range`, `X-Storage-Size`, `X-Storage-Sha256`, `no-store` and `nosniff`
+response contract. Each dispatched chunk re-verifies the web Pod, current marked
+object and retention state under the same space lock/read-lease guard as core
+reads. A stalled reader can reacquire an expired lease only while retention is
+still retained. Once a collector claims deletion, a tombstone appears or the Pod
+dies, the next chunk fails. If bytes were already sent, the response is destroyed,
+not ended as a complete file. The web adds safe download headers and content type
+at its authenticated same-origin boundary. `/identity` is unchanged.
 
 ## Durable state and receipt
 

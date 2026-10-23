@@ -3,6 +3,8 @@ import { createWebServer, type WebRuntimeMetrics } from './server.js';
 import { ModelStatusPoller } from './model-status-poller.js';
 import { createOwnerMessageIntakeFromEnv } from '../storage/owner-message-intake.js';
 import pino from 'pino';
+import { StorageTaskArtifactReader } from '../storage/task-artifact-reader.js';
+import { LoaderDownloadSessions } from '../storage/loader-download-sessions.js';
 
 /** The platform gateway's health listener, pinned by ADR-013 D5/D6. */
 const DEFAULT_MODEL_STATUS_URL = 'http://model-gateway.lifemodel-system.svc:8081/status';
@@ -51,6 +53,16 @@ async function main(): Promise<void> {
   if (internalPort === port)
     throw new Error('LIFEMODEL_WEB_INTERNAL_PORT must differ from LIFEMODEL_WEB_PORT');
   const stores = createOwnerMessageIntakeFromEnv();
+  const artifactReader = new StorageTaskArtifactReader({
+    endpoint: 'https://storage-module.lifemodel-system.svc.cluster.local:8445',
+    tokenFile:
+      process.env['LIFEMODEL_STORAGE_READ_TOKEN_FILE'] ??
+      '/var/run/secrets/lifemodel-storage/read-token',
+    caFile:
+      process.env['LIFEMODEL_STORAGE_READ_CA_FILE'] ??
+      '/var/run/secrets/lifemodel-storage-ca/ca.crt',
+  });
+  const downloadSessions = new LoaderDownloadSessions(instanceName);
   const modelStatus = new ModelStatusPoller({
     url: modelStatusUrl(process.env['LIFEMODEL_MODEL_GATEWAY_STATUS_URL']),
   });
@@ -62,6 +74,11 @@ async function main(): Promise<void> {
     runtimeMetrics,
     intake: stores.intake,
     transcript: stores.transcript,
+    attachments: {
+      authorizer: stores.attachments,
+      reader: artifactReader,
+      sessions: downloadSessions,
+    },
     creatureState: stores.creatureState,
     modelStatus,
     logger,
@@ -72,6 +89,8 @@ async function main(): Promise<void> {
   });
   const close = async () => {
     await Promise.all([server.close(), operations.close()]);
+    artifactReader.close();
+    downloadSessions.close();
     await stores.close();
   };
   process.once('SIGINT', () => void close().finally(() => process.exit(0)));

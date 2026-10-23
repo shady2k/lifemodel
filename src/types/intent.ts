@@ -6,6 +6,7 @@
  */
 
 import type { EvidenceSource } from './cognition.js';
+import type { MessageAttachment } from '../ports/message-attachment.js';
 
 /**
  * All possible intent types.
@@ -126,6 +127,8 @@ export interface SendMessageIntent {
     recipientId: string;
     /** Message content */
     text: string;
+    /** Metadata-only references to storage-module object UUIDs. */
+    attachments?: MessageAttachment[];
     /** Optional: reply to message ID */
     replyTo?: string;
     /** Conversation status for follow-up timing (avoids separate LLM call) */

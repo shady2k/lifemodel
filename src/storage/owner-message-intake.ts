@@ -6,6 +6,7 @@ import { CreatureStateStore } from './creature-state-store.js';
 import type { IOwnerMessageIntake, OwnerMessageAcceptance } from '../ports/owner-message-intake.js';
 import type { CreatureStateReader } from '../ports/creature-state.js';
 import type { TranscriptReader } from '../ports/transcript.js';
+import type { AttachmentAuthorizer } from '../ports/message-attachment.js';
 import type { WebOperationalMetrics } from '../web/operations.js';
 import type { WebRuntimeMetrics } from '../web/server.js';
 import { createUserMessageSignal } from '../types/signal.js';
@@ -173,6 +174,7 @@ export function createWebPool(connectionString: string): Pool {
 
 export function createOwnerMessageIntakeFromEnv(env: NodeJS.ProcessEnv = process.env): {
   intake: IOwnerMessageIntake;
+  attachments: AttachmentAuthorizer;
   transcript: TranscriptReader;
   creatureState: CreatureStateReader;
   close(): Promise<void>;
@@ -191,6 +193,7 @@ export function createOwnerMessageIntakeFromEnv(env: NodeJS.ProcessEnv = process
   const creatureState = new CreatureStateStore(redis);
   return {
     intake: new OwnerMessageIntake(redis, recipientId, { transcript }),
+    attachments: transcript,
     transcript,
     creatureState,
     async checkStores() {

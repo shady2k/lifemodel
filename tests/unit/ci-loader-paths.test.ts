@@ -28,6 +28,7 @@ describe('loader image CI path classification', () => {
     ['the context script the job runs', ['scripts/release/prepare-loader-context.sh']],
     ['a digest pinner the job calls', ['scripts/release/set-core-digest.sh']],
     ['a wire file the Dockerfile copies into the UI build', ['src/web/contract.ts']],
+    ['the attachment metadata type the wire contract imports', ['src/ports/message-attachment.ts']],
     ['the root manifest the UI build installs and runs from', ['package.json']],
     ['the root lockfile the UI build installs from', ['package-lock.json']],
   ])('%s selects the loader image through the producer contract', (_name, changed) => {

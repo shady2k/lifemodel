@@ -104,6 +104,7 @@ function assertStepANetworkPolicies(objects: Record<string, any>[]): void {
     'lifemodel-system': [
       'lifemodel-system-default-deny',
       'loader-access',
+      'loader-download-auth-ingress',
       'model-gateway-access',
       'seaweedfs-access',
       'storage-module-access',
@@ -1496,7 +1497,55 @@ describe('platform manifests', () => {
     }
   });
 
-  it('limits loader ingress to Traefik pods in kube-system', () => {
+  it('permits the download-session check only between web and loader pods on TCP 7000', () => {
+    const policies = sourceObjects().filter((item) => item.kind === 'NetworkPolicy');
+    // Both halves of one path: the web pod's egress and the loader pod's ingress.
+    const egress = policies.find(
+      (item) =>
+        item.metadata.namespace === 'lifemodel' && item.metadata.name === 'web-download-auth-egress'
+    );
+    expect(egress, 'missing web-download-auth-egress NetworkPolicy').toBeDefined();
+    expect(egress!.spec).toEqual({
+      podSelector: { matchLabels: { 'app.kubernetes.io/name': 'web' } },
+      policyTypes: ['Egress'],
+      egress: [
+        {
+          to: [
+            {
+              namespaceSelector: {
+                matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' },
+              },
+              podSelector: { matchLabels: { 'app.kubernetes.io/name': 'loader' } },
+            },
+          ],
+          ports: [{ protocol: 'TCP', port: 7000 }],
+        },
+      ],
+    });
+    const ingress = policies.find(
+      (item) =>
+        item.metadata.namespace === 'lifemodel-system' &&
+        item.metadata.name === 'loader-download-auth-ingress'
+    );
+    expect(ingress, 'missing loader-download-auth-ingress NetworkPolicy').toBeDefined();
+    expect(ingress!.spec).toEqual({
+      podSelector: { matchLabels: { 'app.kubernetes.io/name': 'loader' } },
+      policyTypes: ['Ingress'],
+      ingress: [
+        {
+          from: [
+            {
+              namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel' } },
+              podSelector: { matchLabels: { 'app.kubernetes.io/name': 'web' } },
+            },
+          ],
+          ports: [{ protocol: 'TCP', port: 7000 }],
+        },
+      ],
+    });
+  });
+
+  it('limits the original loader ingress permit to Traefik pods in kube-system', () => {
     const policies = sourceObjects().filter(
       (item) => item.kind === 'NetworkPolicy' && item.metadata.namespace === 'lifemodel-system'
     );

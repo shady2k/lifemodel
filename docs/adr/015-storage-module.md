@@ -11,8 +11,9 @@ scope and the coordinator's step-C verification of native Job controls and the
 configurable seven-day warning lead. The stage-2 module, object/control APIs,
 retention and core warning reconciler, recovery tooling and admission controls
 are implemented with repository tests. This is not deployed acceptance.
-Stage-3 task lifecycle/terminal integration (S05) and owner web downloads (S08)
-remain pending. Repository fixtures do not prove deployed Seaweed persistence,
+Stage-3 task lifecycle/terminal integration (S05) remains pending. The
+[owner attachment download path](../features/web/attachments.md) (S08) is
+implemented with repository fixtures; its deployed owner walk remains pending. Repository fixtures do not prove deployed Seaweed persistence,
 network enforcement or RSS; the deployment walks below still need acceptance.
 [ADR-014](014-task-runtime.md) owns launch, live steering and task outcomes;
 [this component/sequence view](../features/motor/tasks-design.md) joins them.

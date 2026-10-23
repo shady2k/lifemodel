@@ -16,6 +16,8 @@
 #     ui-build stage copies and builds;
 #   * src/web/model-status.ts and src/web/contract.ts — the shared status
 #     projection and its wire contract, copied into the ui-build stage;
+#   * src/ports/message-attachment.ts — the shared attachment metadata type
+#     imported by that wire contract;
 #   * package.json and package-lock.json — installed by the ui-build stage,
 #     which also runs the manifest's build:loader-ui script;
 #   * docker/loader/ — the Dockerfile the job builds;
@@ -46,7 +48,7 @@ while IFS= read -r line || [ -n "$line" ]; do
     esac
     read_any=true
     case "$path" in
-        loader/*|web/loader/*|web/kit/*|docker/loader/*|.dockerignore|deploy/platform/*|scripts/release/*|src/web/model-status.ts|src/web/contract.ts|package.json|package-lock.json)
+        loader/*|web/loader/*|web/kit/*|docker/loader/*|.dockerignore|deploy/platform/*|scripts/release/*|src/web/model-status.ts|src/web/contract.ts|src/ports/message-attachment.ts|package.json|package-lock.json)
             selected=true ;;
     esac
 done

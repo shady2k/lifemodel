@@ -1116,6 +1116,11 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         return;
       }
       const forwardedMethod = (header(req, 'x-forwarded-method') ?? '').toUpperCase();
+      // A missing session must never turn a file download into a saved login page.
+      if ((header(req, 'x-forwarded-uri') ?? '').startsWith('/api/attachments/')) {
+        sendText(res, 401, 'no session');
+        return;
+      }
       const next =
         forwardedMethod === 'GET' || forwardedMethod === 'HEAD'
           ? loginLocation(

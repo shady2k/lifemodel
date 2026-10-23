@@ -36,6 +36,7 @@ COPY web/loader/public/favicon.svg ./web/loader/public/favicon.svg
 # The loader UI reads the shared status projection and its wire contract (ADR-013 D6).
 COPY src/web/model-status.ts ./src/web/model-status.ts
 COPY src/web/contract.ts ./src/web/contract.ts
+COPY src/ports/message-attachment.ts ./src/ports/message-attachment.ts
 # The loader UI types its settings payload from the shared declaration library (ADR-014 D6).
 COPY loader/src/settings/registry.ts ./loader/src/settings/registry.ts
 RUN npm run build:loader-ui -- --emptyOutDir

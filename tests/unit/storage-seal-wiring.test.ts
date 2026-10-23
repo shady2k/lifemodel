@@ -57,6 +57,7 @@ describe('storage seal wiring', () => {
       bind: vi.fn(),
       seal: vi.fn(),
       openCoreStream,
+      openArtifactStream: vi.fn(),
       check: vi.fn(async () => true),
       close: vi.fn(async () => undefined),
     };
@@ -131,6 +132,104 @@ describe('storage seal wiring', () => {
       expect(openCoreStream.mock.calls[1]![0].signal).not.toBe(primary.signal);
       expect(recovery.chunk).toHaveBeenCalledOnce();
       expect(recovery.close).toHaveBeenCalledOnce();
+      expect(primary.close).toHaveBeenCalledOnce();
+    } finally {
+      app.task.close();
+      app.control.close();
+      app.read.close();
+      app.status.close();
+    }
+  });
+
+  it('routes a web artifact through its resolved marked object without invoking core or task authority', async () => {
+    const primary = stream();
+    const openArtifactStream = vi.fn(async () => ({
+      space: 'server-space',
+      objectId: 'server-object',
+      stream: primary,
+    }));
+    const openCoreStream = vi.fn();
+    const openTaskStream = vi.fn();
+    const access: StorageAccess = {
+      identity: { verify: vi.fn(), verifyBinding: vi.fn() },
+      openTaskStream,
+      revoke: vi.fn(),
+      settleSpace: vi.fn(),
+      quiesceSpace: vi.fn(),
+      check: vi.fn(async () => true),
+    };
+    const seal: StorageSeal = {
+      allocate: vi.fn(),
+      bind: vi.fn(),
+      seal: vi.fn(),
+      openArtifactStream,
+      openCoreStream,
+      check: vi.fn(async () => true),
+      close: vi.fn(async () => undefined),
+    };
+    const handle = vi.fn<StorageObjects['handle']>(async (_req, res) => {
+      res.writeHead(200);
+      res.end('artifact');
+    });
+    const objects: StorageObjects = {
+      handle,
+      expiredUploads: vi.fn(async () => []),
+      check: vi.fn(async () => true),
+      close: vi.fn(async () => undefined),
+    };
+    const app = createStorageModule({
+      access,
+      seal,
+      objects,
+      bucket: STORAGE_BUCKET,
+      catalog: { check: async () => ({ ok: true }) },
+      custody: { read: vi.fn() },
+      check: vi.fn(),
+      logger: createRecordingLogger([]),
+      tls: { cert: certificate.cert, key: certificate.key, read: async () => certificate },
+    });
+    try {
+      await new Promise<void>((resolve) => app.read.server.listen(0, '127.0.0.1', resolve));
+      const address = app.read.server.address();
+      if (!address || typeof address === 'string') throw Error('not listening');
+      const artifactId = 'a39c838e-2ee7-4b2f-ac53-fc13144bbefa';
+      const body = await new Promise<string>((resolve, reject) => {
+        const req = request(
+          {
+            hostname: '127.0.0.1',
+            port: address.port,
+            servername: 'storage-module.lifemodel-system.svc',
+            ca: certificate.ca,
+            path: `/artifacts/${artifactId}`,
+            agent: false,
+            headers: { authorization: 'Bearer web-token' },
+          },
+          (res) => {
+            const chunks: Buffer[] = [];
+            res.on('error', reject);
+            res.on('data', (part: Buffer) => chunks.push(part));
+            res.on('end', () => resolve(Buffer.concat(chunks).toString()));
+          }
+        );
+        req.on('error', reject);
+        req.on('socket', (socket) => socket.on('error', () => undefined));
+        req.setTimeout(5000, () => req.destroy(Error('wiring test deadline')));
+        req.end();
+      });
+      expect(body).toBe('artifact');
+      expect(openArtifactStream).toHaveBeenCalledExactlyOnceWith({
+        token: 'web-token',
+        artifactId,
+        signal: expect.any(AbortSignal),
+      });
+      expect(openTaskStream).not.toHaveBeenCalled();
+      expect(openCoreStream).not.toHaveBeenCalled();
+      const args = handle.mock.calls[0]!;
+      expect(args[2]).toBe('server-space');
+      expect(args[3]).toBe('/server-object');
+      expect(args[5]).toBeUndefined();
+      expect(args[7]).toBe(true);
+      expect(args[8]).toMatchObject({ role: 'read' });
       expect(primary.close).toHaveBeenCalledOnce();
     } finally {
       app.task.close();

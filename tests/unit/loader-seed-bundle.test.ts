@@ -200,6 +200,7 @@ describe('loader image release seed bundle', () => {
       'web/loader/public/favicon.svg',
       'src/web/model-status.ts',
       'src/web/contract.ts',
+      'src/ports/message-attachment.ts',
       'loader/src/settings/registry.ts',
     ]);
   });

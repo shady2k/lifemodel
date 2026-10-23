@@ -132,6 +132,15 @@ async function request(
 }
 
 describe('real boot-host onboarding redirects', () => {
+  it('returns 401 for attachment GETs without a session, never a downloadable login redirect', async () => {
+    const { base } = await start(null);
+    const result = await request(base, '/_auth/verify', {
+      'x-forwarded-method': 'GET',
+      'x-forwarded-uri': '/api/attachments/11111111-1111-4111-8111-111111111111',
+    });
+    expect(result.status).toBe(401);
+    expect(result.headers['location']).toBeUndefined();
+  });
   it.each([
     '/setup?next=https%3A%2F%2Flifemodel.local%2F',
     '/login?next=https%3A%2F%2Flifemodel.local%2F',

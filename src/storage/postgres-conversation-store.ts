@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
 import type { Storage } from './storage.js';
+import { validateMessageAttachments, type MessageAttachment } from '../ports/message-attachment.js';
 
 interface ConversationMessageRow {
   role: string;
   content: string | null;
+  attachments?: MessageAttachment[];
   timestamp: string;
   tool_calls?: { id: string }[];
   tool_call_id?: string;
@@ -113,6 +115,11 @@ export class PostgresConversationStore implements Storage {
   async save(key: string, data: unknown): Promise<void> {
     const recipientId = this.recipientId(key);
     const snapshot = data as ConversationSnapshot;
+    // Reject invalid references before opening a transaction or writing any event.
+    const messages = (snapshot.messages ?? []).map((message) => {
+      const attachments = validateMessageAttachments(message.attachments, message.role);
+      return { message, attachments };
+    });
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -145,13 +152,17 @@ export class PostgresConversationStore implements Storage {
         if (count !== snapshot.compactionMarker.expectedMessageCount)
           throw new ConversationCompactionConflictError();
       }
-      for (const message of snapshot.messages ?? []) {
+      for (const { message, attachments } of messages) {
         const messageId = message.messageId ?? this.messageId(message);
         message.messageId = messageId;
         await client.query(
           `INSERT INTO core.conversation_messages (recipient_id, message_id, kind, payload)
            VALUES ($1, $2, 'message', $3::jsonb) ON CONFLICT (recipient_id, message_id) DO NOTHING`,
-          [recipientId, messageId, JSON.stringify(message)]
+          [
+            recipientId,
+            messageId,
+            JSON.stringify({ ...message, ...(attachments !== undefined ? { attachments } : {}) }),
+          ]
         );
       }
       if (snapshot.compactionMarker) {

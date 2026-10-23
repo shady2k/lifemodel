@@ -27,6 +27,7 @@ import {
 import { CodeBlock, CodeBlockContent, CodeBlockLine } from '@kit/components/ui/code-block';
 import { useHighlightedCode } from '@kit/hooks/use-highlighted-code';
 import { freshCreatureState, type CreaturePresenceValue } from './components/CreaturePresence';
+import { MessageAttachments } from './components/MessageAttachments';
 import {
   httpTransport,
   mergeTranscript,
@@ -442,6 +443,7 @@ function ConversationContent({
                           >
                             <MessageText text={message.text} />
                           </Bubble>
+                          <MessageAttachments attachments={message.attachments} />
                           <time
                             className="px-2 pt-1 text-xs text-muted-foreground"
                             dateTime={message.createdAt}
