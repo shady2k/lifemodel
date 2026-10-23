@@ -86,6 +86,18 @@ starts a fresh initial queue budget. For second and later chunks, the one-second
 clock starts at that chunk's admission attempt, after the previous chunk drained;
 a long progressing upload is not measured from its original request arrival.
 
+That one second is the module's **queue-overload** refusal target: it is measured
+from parsed HTTP arrival and includes ordinary authority work, such as the usual
+TokenReview and catalog reads. A **dependency outage** lies outside that target.
+A Kubernetes TokenReview that itself takes longer than one second is not a queue
+overload, so the request waits for that proof instead of receiving a fresh initial
+budget or a queue `429`; an initial deadline that expired during the wait still
+refuses the request once the proof returns. Dependency work fails through its own
+bounded path instead, never through the one-second overload target: identity
+verification has its own bound and answers `503 identity_unavailable` when the
+Kubernetes API does not answer. ADR-015 states the same qualification
+(`docs/adr/015-storage-module.md`).
+
 A later-chunk refusal sends its HTTP response **before** transport settlement and
 guarded reservation release. The handler remains alive through bounded cleanup;
 its registered upload owner and authorization stream do not retire while they

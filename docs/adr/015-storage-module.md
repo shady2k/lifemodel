@@ -198,7 +198,11 @@ metadata (**64 KiB** aggregate), not extra artifact chunks. At most **32** queue
 requests, excess responds 429 within **1 s** (initial admission from parsed HTTP
 arrival, including authority work; later chunks from that chunk's admission
 attempt). The queue budget is at most **800 ms**, leaving a **200 ms** response
-margin. HTTP transport buffers have an explicit separate finite **8 MiB**
+margin. That **1 s** is the queue-overload refusal target only: a dependency
+outage — for example a Kubernetes TokenReview that itself takes more than
+**1 s** — is outside it and fails through its own bounded path (identity
+verification answers `503 identity_unavailable` on its own timeout), not through
+queue refusal. HTTP transport buffers have an explicit separate finite **8 MiB**
 default allowance (192 KiB × 40 object handlers plus 64 KiB × 8 worker scratch),
 not an uncharged 4 MiB request high-water mark. See transfer settings below.
 Per-chunk network/SQL deadline

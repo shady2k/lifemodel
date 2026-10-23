@@ -223,8 +223,11 @@ for a caller status.
 Phase 1 waits for both task overload barriers before starting control/read.
 Phase 2 waits for A's flushed partial-body barrier before starting B's twenty
 full 4 MiB PUTs and fresh control/read callers. This is a send barrier, **not**
-proof of module admission. Check the timestamp artifacts for overlap as described
-below; the isolated test observes admission directly.
+proof of module admission. A's stalled stream closes at its own **10 s**
+no-progress deadline, and twenty sequential 4 MiB B PUTs take about that long on
+a small VM, so the overlap rule below treats the request classes differently.
+Check the timestamp artifacts for overlap as described below; the isolated test
+observes admission directly.
 
 ```js
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
@@ -381,14 +384,21 @@ fails, keep the failed artifacts and repeat the complete walk, not phase 2 alone
 Read only these non-secret JSONL/status receipts. Verify that the sampler's
 `ready` precedes every caller start, and its end follows every caller end.
 Verify that each phase-1 control/read request interval lies inside the task
-pressure interval after the two overload barriers. In phase 2, all twenty B,
-control and read request intervals must overlap A's partial-body-to-settlement
-interval. Verify caller clocks agree with coordinator timestamps; if a task
-settles before the relevant operations start, or timestamp order is ambiguous,
-record the overlap check **BLOCKED** and repeat. A send barrier and timestamps
-cannot prove when A was admitted; do not claim that from VM evidence. The isolated
-admission test supplies that proof. Do not count saturated queued partial
-uploads as the second-task throughput proof.
+pressure interval after the two overload barriers. In phase 2, A's stalled
+stream closes at its own **10 s** no-progress deadline, which bounds A's
+partial-body-to-settlement interval. Require inside that interval all **twenty
+control** and all **twenty read** request intervals — 20/20 of each. Require each
+of B's twenty sequential 4 MiB PUTs to ACK in under **2 s** (the caller bounds
+each attempt at 2 s), and at least the **majority** of those twenty PUT intervals
+to lie inside the same window; a late B attempt can outlast it on a small VM.
+Verify caller clocks agree with coordinator timestamps. If a task settles before
+the relevant operations start, a control or read interval falls outside A's
+window, fewer than eleven of B's PUT intervals overlap it, or timestamp order is
+ambiguous, record the overlap check **BLOCKED** and repeat. A send barrier and
+timestamps cannot prove when A was admitted; do not claim that from VM evidence.
+The isolated test (`tests/integration/storage-module-pressure.test.ts`) is the
+20/20 proof that A holds a task worker throughout B's twenty PUTs. Do not count
+saturated queued partial uploads as the second-task throughput proof.
 
 ## Diagnostics and recovery
 
