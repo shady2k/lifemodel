@@ -154,10 +154,9 @@ export function createPostgresTaskRegistry(deps: {
       return await Promise.race([
         deps.settings.read(),
         new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(
-            () => reject(new TaskRegistryError('registry', 'storage_error')),
-            timeoutMs
-          );
+          timer = setTimeout(() => {
+            reject(new TaskRegistryError('registry', 'storage_error'));
+          }, timeoutMs);
         }),
       ]);
     } finally {
@@ -193,9 +192,10 @@ export function createPostgresTaskRegistry(deps: {
         // Session configuration only, BEFORE the seam's BEGIN/holder lock.
         // No domain read or write occurs outside the active-holder fence.
         await raw.query("SET lock_timeout='5s'; SET statement_timeout='10s'");
+        const acquired = raw;
         const singleConnectionPool = new Proxy(deps.pool, {
           get(target, property) {
-            if (property === 'connect') return async () => raw!;
+            if (property === 'connect') return () => Promise.resolve(acquired);
             return Reflect.get(target, property, target) as unknown;
           },
         });
@@ -296,7 +296,9 @@ export function createPostgresTaskRegistry(deps: {
           'INSERT INTO core.task_launches(task_id,attempt_id,launch_id,job_name) VALUES($1,$2,$3,$4)',
           [identity.id, identity.attemptId, identity.launchId, identity.jobName]
         );
-        return (await readTask(client, identity.id))!;
+        const accepted = await readTask(client, identity.id);
+        if (!accepted) throw new TaskRegistryError(identity.id, 'storage_error');
+        return accepted;
       });
     },
     read: async (taskId) => transaction(taskId, (client) => readTask(client, taskId)),
@@ -372,7 +374,9 @@ export function createPostgresTaskRegistry(deps: {
           'UPDATE core.tasks SET started_at=$2,updated_at=clock_timestamp() WHERE id=$1',
           [taskId, jobStartedAt]
         );
-        return (await readIntent(client, taskId))!;
+        const initialized = await readIntent(client, taskId);
+        if (!initialized) throw new TaskRegistryError(taskId, 'storage_error');
+        return initialized;
       });
     },
     readAccessIntent: async (taskId) => transaction(taskId, (client) => readIntent(client, taskId)),
@@ -406,7 +410,9 @@ export function createPostgresTaskRegistry(deps: {
           WHERE task_id=$1 RETURNING *`,
           [taskId, change.mode, change.softDueAt, change.hardStopAt]
         );
-        return intentRecord(updated.rows[0]!);
+        const intentRow = updated.rows[0];
+        if (!intentRow) throw new TaskRegistryError(taskId, 'storage_error');
+        return intentRecord(intentRow);
       });
     },
   };
