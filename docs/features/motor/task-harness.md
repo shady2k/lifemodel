@@ -106,3 +106,99 @@ Tests: `tests/integration/task-harness-contract.test.ts`,
 and `tests/unit/task-workbench-contract.test.ts`. The isolated test dependency
 setup installs the same checksum-verified pinned binary before network is
 removed; real harness tests do not fetch binaries at runtime.
+
+## OpenCode v2 facts
+
+Research pin: **2.1.4**, npm stable `@opencode/cli` observed for the owner's
+2026-10-24 decision (the worker host clock reads 2026-10-23). Source tag
+`v2.1.4` resolves to **68bc26b7da1990ce10ffecfbc1e09eb13aa5d824**.
+All upstream references below are relative to
+<https://github.com/anomalyco/opencode/tree/68bc26b7da1990ce10ffecfbc1e09eb13aa5d824>.
+The v2 docs <https://opencode.ai/v2/docs/> identify `@opencode/cli` and versioned
+2.x Docker tags. GitHub's 1.x Latest release is not this distribution.
+
+### Distribution and startup
+
+Use the native npm tarball at build time, not npm's platform-selecting
+postinstall at task startup:
+`https://registry.npmjs.org/@opencode/cli-linux-x64/-/cli-linux-x64-2.1.4.tgz`.
+The npm registry reports integrity
+`sha512-o8EJ0ZsT4dzDKN+0mpG2EKbNGzJyp+F1++Av28UReRVfiEv+N34eZEnN/unkiMoerKHad6W6Ii7k4ukTnPNmNQ==`.
+The downloaded archive was verified against that integrity; its SHA-256 is
+`ce05abe2dce1041391c8ec8cdb8da066f640fd471e72ac846dcb089c441e11e1`.
+Extract `package/bin/opencode`. No runtime package manager is needed.
+
+`opencode acp` uses NDJSON JSON-RPC over stdin/stdout:
+`packages/cli/src/commands/handlers/acp.ts:23-44`. It starts an internal
+standalone service (`packages/cli/src/services/standalone.ts:17-31,61-63`),
+with `serve --stdio --port 0`, a random lease password and stdin ownership.
+The service defaults to loopback and enforces its generated password:
+`packages/cli/src/server-process.ts:74-100`. This internal HTTP transport is
+an implementation detail, not a launcher API. Do not implement its native
+session/event routes. The owner selected **ACP only** on 2026-10-24.
+
+### ACP coverage and semantic outcome
+
+- `initialize`, `session/new`, `session/prompt`, `session/cancel` are registered
+  in `packages/cli/src/acp/agent.ts:68-118`; capabilities and sessions are
+  implemented in `packages/cli/src/acp/service.ts:106-150,238-239`.
+- Session updates are sent before the prompt response:
+  `packages/cli/src/acp/turn.ts:139,314-349`. Text deltas become
+  `agent_message_chunk`; tool events become `tool_call` and
+  `tool_call_update`: `packages/cli/src/acp/translate.ts:291-403`.
+- Tool failure is `failed`; successful tool output retains raw metadata:
+  `packages/cli/src/acp/tool.ts:100-153`. A shell nonzero exit can still be
+  `completed`: its `rawOutput.metadata.exit`, `signal` and `timeout` must
+  also be checked (`packages/core/src/shell/result.ts:30-42`). Treat any
+  failed or unsettled required call conservatively as failure. A final
+  prose apology cannot turn it into success.
+- Provider/auth failures become JSON-RPC prompt errors, not a successful
+  `end_turn`: `packages/cli/src/acp/translate.ts:161-172` and
+  `packages/cli/src/acp/turn.ts:314-349`. Content filters yield `refusal`;
+  interruption yields `cancelled`; token limits yield `max_tokens`:
+  `packages/cli/src/acp/translate.ts:503-512`.
+- Permission requests use the client's `session/request_permission` callback:
+  `packages/cli/src/acp/permission.ts:60-83`. The client must respond with an
+  offered permission option or cancelled, never leave the agent waiting.
+  Do not advertise client filesystem/terminal capabilities unless implemented.
+
+One generic ACP client implements the port. OpenCode is its first registry
+configuration; goose and other conforming agents must reuse the same client.
+Success requires `end_turn`, nonempty final agent text, no provider error and
+no failed/unsettled required tool call. Process exit status cannot prove it.
+Cancellation must return `aborted`, with bounded process-tree cleanup even if
+an agent fails to respond. No native protocol fallback is permitted.
+
+### Config and offline obligations
+
+v2 config is **not** the 1.x schema. It uses `providers`, `settings`, `agents`,
+`permissions`, `plugins`, `update`: `packages/schema/src/config.ts:25-117`,
+`packages/schema/src/config/provider.ts:131-143`. A custom built-in native
+OpenAI-compatible provider uses package
+`@opencode/ai/providers/openai-compatible` and `settings.baseURL` set to the
+launcher's loopback relay; no external SDK install. Provider/model overlays
+are applied in `packages/core/src/config/plugin/provider.ts:67-96,125-140`.
+The relay, not the agent, rereads the projected token per request.
+
+Set `update: "disable"`, `share: "disabled"`, `formatter: false`, `lsp: false`,
+no external plugins, MCP servers, URL skills or instructions, and no warming.
+Plugin disable selectors use `-<id>` (`packages/core/src/config/plugin/source.ts:125-132`);
+do not disable essential config/tool plugins with `-*`.
+`OPENCODE_DISABLE_MODELS_FETCH=true` is wired to the models source
+(`packages/cli/src/server-process.ts:116-120`); `packages/core/src/models-dev.ts:393`
+returns no fetch task when disabled. Disable project config and Claude skill
+roots with the flags actually consumed at `server-process.ts:122-139`.
+No v1 plugin-bootstrap dependency or obsolete v1 disable flags are assumed.
+
+Config names remain `opencode.json`/`opencode.jsonc`; roots include system,
+XDG global and explicit files (`packages/core/src/config/discovery.ts:12,27-31,64-144`).
+Keep config roots precreated and read-only. Mutable HOME/XDG cache, data, state,
+logs, repositories and TMPDIR live below private `/work`:
+`packages/util/src/global.ts:12-31,62-75`. Session database location comes from
+`packages/cli/src/server-process.ts:111-114`.
+
+**Runtime evidence is still required:** a rebuilt image must run ACP with the
+relay on loopback under `--network none`; trace all descendant `connect` calls
+(or equivalent deny-all attempt logging), allowing only loopback, and assert no
+package-manager bootstrap. Network isolation alone proves denial, not absence
+of attempted outbound fetches. This research section is not that receipt.
