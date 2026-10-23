@@ -33,6 +33,19 @@
 
 Most ticks: only AUTONOMIC and AGGREGATION run. COGNITION wakes for user messages or threshold crossings. Smart model used only on retry (low confidence + safe to retry).
 
+### Task registry (Job-runtime foundation)
+
+The core-only `TaskService` port (`src/ports/tasks.ts`) has a fenced Postgres
+adapter in `src/storage/postgres-task-registry.ts`. It owns accepted tasks,
+launch identity, normal FIFO slot reservation and the canonical access-intent
+writer. `core.tasks`, `core.task_launches` and `core.task_admission` hold durable
+state; `task_access.intents` is initialized from observed Job start time before
+verified binding and updated monotonically in place. No state lives under
+`DATA_PATH`. The adapter is not yet wired to cognition/Jobs: later task-runtime
+leaves add launch reconciliation, binding, mailbox and sealed finalization.
+See the [task registry contract](features/motor/task-registry.md).
+The existing Motor Cortex below remains unchanged until its removal task.
+
 ### Motor Cortex (Runtime Service)
 
 Motor Cortex is **not a brain layer** — it's a runtime service invoked by Cognition via `core.act`. It runs a separate agentic LLM loop with its own tools (code sandbox, filesystem, shell) and conversation context. Results flow back via `motor_result` signals through the standard pipeline.
