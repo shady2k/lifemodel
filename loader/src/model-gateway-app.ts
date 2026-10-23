@@ -1,12 +1,15 @@
 /** The platform-owned model gateway. No inbound headers or upstream errors are copied. */
 import {
   createServer,
+  Agent as HttpAgent,
   request as httpRequest,
   type IncomingMessage,
   type ServerResponse,
 } from 'node:http';
-import { request as httpsRequest } from 'node:https';
+import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
 import { once } from 'node:events';
+import { TLSSocket } from 'node:tls';
+import type { Socket } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import {
   renderAttemptHeaders,
@@ -26,6 +29,7 @@ import type { LoaderLogger } from './logger.js';
 import {
   badResponse,
   GatewayError,
+  TaskAuthorizationError,
   MAX_BODY,
   parseSafe,
   record,
@@ -190,6 +194,21 @@ function returnHeaders(
   return headers;
 }
 export function createModelGateway(options: GatewayOptions) {
+  const httpAgent = new HttpAgent({
+    keepAlive: true,
+    maxSockets: 16,
+    maxTotalSockets: 16,
+    maxFreeSockets: 2,
+  });
+  const httpsAgent = new HttpsAgent({
+    keepAlive: true,
+    maxSockets: 16,
+    maxTotalSockets: 16,
+    maxFreeSockets: 2,
+  });
+  httpAgent.on('error', () => undefined);
+  httpsAgent.on('error', () => undefined);
+  const sockets = new WeakSet<object>();
   const limits = { ...GATEWAY_LIMITS, ...options.timeouts };
   const recheck = { ...STATUS_RECHECK, ...options.recheck };
   const { set: schedule, clear: cancel } = options.timers ?? {
@@ -389,13 +408,14 @@ export function createModelGateway(options: GatewayOptions) {
     payload: Record<string, unknown> | undefined,
     res: ServerResponse,
     signal: AbortSignal,
-    session: { id: string; callerNamed: boolean }
+    session: { id: string; callerNamed: boolean },
+    authorizeTask?: (signal: AbortSignal) => Promise<void>
   ): Promise<void> {
     const rendered = renderAttemptHeaders(slot, session.id);
     if (slot.key) retain(activeKeys, slot.key);
     for (const secret of rendered.secrets) retain(activeHeaderSecrets, secret);
     try {
-      await sendAttempt(slot, name, payload, res, signal, session, rendered.headers);
+      await sendAttempt(slot, name, payload, res, signal, session, rendered.headers, authorizeTask);
     } finally {
       if (slot.key) release(activeKeys, slot.key);
       for (const secret of rendered.secrets) release(activeHeaderSecrets, secret);
@@ -409,7 +429,8 @@ export function createModelGateway(options: GatewayOptions) {
     res: ServerResponse,
     signal: AbortSignal,
     session: { id: string; callerNamed: boolean },
-    custom: Record<string, string>
+    custom: Record<string, string>,
+    authorizeTask?: (signal: AbortSignal) => Promise<void>
   ): Promise<void> {
     const startedAt = Date.now();
     const connectDeadline = startedAt + limits.connect;
@@ -442,7 +463,7 @@ export function createModelGateway(options: GatewayOptions) {
     const req = requestFn(url, {
       method: payload ? 'POST' : 'GET',
       hostname: resolved.address,
-      agent: false,
+      agent: url.protocol === 'https:' ? httpsAgent : httpAgent,
       signal: active,
       ...(url.protocol === 'https:'
         ? {
@@ -458,21 +479,33 @@ export function createModelGateway(options: GatewayOptions) {
     });
     // A permanent safe listener also handles destruction after the response event.
     req.on('error', () => {
-      /* Consumed by the response wait or the response iterator. */
+      // Also fail a socket/authorization wait if transport dies before response intake.
+      if (!active.aborted) controller.abort(new GatewayError('unreachable'));
     });
     const connectTimer = schedule(timeout, Math.max(1, connectDeadline - Date.now()));
     const byteTimer = schedule(timeout, Math.max(1, startedAt + limits.firstByte - Date.now()));
-    req.on('socket', (socket) =>
-      socket.once(url.protocol === 'https:' ? 'secureConnect' : 'connect', () => {
-        cancel(connectTimer);
-      })
-    );
     try {
+      // request() may wait in the bounded shared agent queue. It sends no HTTP
+      // bytes until end(): first obtain a connected (TLS-ready) socket, then
+      // refresh task authority after every network wait, including reuse.
+      const [socket] = await (once(req, 'socket', { signal: active }) as Promise<[Socket]>);
+      if (!sockets.has(socket)) {
+        sockets.add(socket);
+        socket.on('error', () => undefined);
+      }
+      if (socket instanceof TLSSocket ? !socket.authorized : socket.connecting)
+        await once(socket, url.protocol === 'https:' ? 'secureConnect' : 'connect', {
+          signal: active,
+        });
+      cancel(connectTimer);
+      if (authorizeTask) await wait(authorizeTask(active), active);
+      active.throwIfAborted();
       const responsePromise = once(req, 'response', { signal: active }) as Promise<
         [IncomingMessage]
       >;
       req.end(body);
       const [upstream] = await responsePromise;
+      upstream.on('error', () => undefined);
       const status = upstream.statusCode ?? 502;
       if (status === 401 || status === 403) options.slots.invalidate(name);
       if (status < 200 || status >= 300)
@@ -558,7 +591,14 @@ export function createModelGateway(options: GatewayOptions) {
     }
   }
 
-  async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  async function serve(
+    req: IncomingMessage,
+    res: ServerResponse,
+    trustedTaskId?: string,
+    authorizeTask?: (signal: AbortSignal) => Promise<void>
+  ): Promise<void> {
+    req.on('error', () => undefined);
+    res.on('error', () => undefined);
     if (
       !(
         (req.method === 'POST' && req.url === '/v1/chat/completions') ||
@@ -582,7 +622,7 @@ export function createModelGateway(options: GatewayOptions) {
     // The caller's session, read from this one inbound header and no other:
     // an id it names only when it is well formed, otherwise this process's own
     // fixed id (ADR-013, the custom-headers amendment).
-    const named = validSessionId(req.headers[SESSION_HEADER]);
+    const named = trustedTaskId ?? validSessionId(req.headers[SESSION_HEADER]);
     const session = { id: named ?? processSessionId, callerNamed: named !== undefined };
     const requestStartedAt = new Date().toISOString();
     // The slot whose read or attempt a recorded failure came from: a slot read
@@ -620,6 +660,13 @@ export function createModelGateway(options: GatewayOptions) {
         )
           throw new GatewayError('invalid_request', 400);
       }
+      if (payload && trustedTaskId !== undefined) {
+        // Task identity is gateway-owned. No caller session/user survives into
+        // the ADR-013 slot path, including reserve failover.
+        for (const key of ['session', 'session_id', 'conversation_id', 'taskId', 'task_id'])
+          Reflect.deleteProperty(payload, key);
+        payload['user'] = trustedTaskId;
+      }
       for (const name of slotNames) {
         signal.throwIfAborted();
         let identity: SlotIdentity | undefined;
@@ -637,7 +684,7 @@ export function createModelGateway(options: GatewayOptions) {
           // The failure names the slot that was really attempted, never one
           // whose read only came back absent.
           activeSlot = name;
-          await attempt(read.slot, name, payload, res, signal, session);
+          await attempt(read.slot, name, payload, res, signal, session, authorizeTask);
           failureRevisions[name]++;
           outcomeRevision++;
           health.lastAttemptAt = requestStartedAt;
@@ -648,7 +695,8 @@ export function createModelGateway(options: GatewayOptions) {
           return;
         } catch (error) {
           last = safeError(signal.aborted ? signal.reason : error);
-          if (last.code === 'client_disconnected') throw last;
+          if (last.code === 'client_disconnected' || last instanceof TaskAuthorizationError)
+            throw last;
           recordFailure(name, last.code, identity);
           if (
             signal.aborted ||
@@ -663,11 +711,9 @@ export function createModelGateway(options: GatewayOptions) {
       throw last;
     } catch (error) {
       const failure = safeError(signal.aborted ? signal.reason : error);
-      const callerOutcome = [
-        'client_disconnected',
-        'invalid_request',
-        'request_too_large',
-      ].includes(failure.code);
+      const callerOutcome =
+        failure instanceof TaskAuthorizationError ||
+        ['client_disconnected', 'invalid_request', 'request_too_large'].includes(failure.code);
       if (!callerOutcome) {
         outcomeRevision++;
         health.lastAttemptAt = requestStartedAt;
@@ -695,6 +741,7 @@ export function createModelGateway(options: GatewayOptions) {
   const api = createServer((req, res) => {
     void serve(req, res);
   });
+  api.on('connection', (socket) => socket.on('error', () => undefined));
   async function answerStatus(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (req.method !== 'GET' || req.url !== '/status') {
       res.writeHead(404);
@@ -710,5 +757,19 @@ export function createModelGateway(options: GatewayOptions) {
   const status = createServer((req, res) => {
     void answerStatus(req, res);
   });
-  return { api, status };
+  return {
+    api,
+    status,
+    close: () => {
+      httpAgent.destroy();
+      httpsAgent.destroy();
+    },
+    /** Internal trusted call only; never selected by any HTTP header. */
+    serveTask: (
+      req: IncomingMessage,
+      res: ServerResponse,
+      taskId: string,
+      authorize: (signal: AbortSignal) => Promise<void>
+    ) => serve(req, res, taskId, authorize),
+  };
 }

@@ -7,16 +7,45 @@ import { createKubernetesPostgresSecretPhase } from '../../loader/src/postgres.j
 const encode = (value: string) => Buffer.from(value).toString('base64');
 
 describe('CNPG application credential copy phase', () => {
-  it('copies only the generated login into the core and storage module namespaces', async () => {
+  it('rereads the API token and CA on every copy attempt', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cnpg-credential-rotation-'));
+    try {
+      const tokenFile = join(directory, 'token');
+      const caFile = join(directory, 'ca');
+      const seen: [string, string | undefined][] = [];
+      const phase = createKubernetesPostgresSecretPhase({
+        tokenFile,
+        caFile,
+        request: async (_url, _method, token, _body, ca) => {
+          seen.push([token, ca?.toString()]);
+          return { status: 404, body: '{}' };
+        },
+      });
+      await writeFile(tokenFile, 'first-token');
+      await writeFile(caFile, 'first-ca');
+      await expect(phase.run()).rejects.toThrow('CNPG application Secret read failed');
+      await writeFile(tokenFile, 'second-token');
+      await writeFile(caFile, 'second-ca');
+      await expect(phase.run()).rejects.toThrow('CNPG application Secret read failed');
+      expect(seen).toEqual([
+        ['first-token', 'first-ca'],
+        ['second-token', 'second-ca'],
+      ]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+  it('copies only the generated login into core and each module dedicated Secret', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'cnpg-credentials-'));
     try {
       const tokenFile = join(directory, 'token');
       await writeFile(tokenFile, 'test-token');
       const calls: { method: string; path: string; body?: any }[] = [];
-      // The platform precreates both targets, so both are replaced in place.
+      // The platform precreates all targets, so each is replaced in place.
       const targets = new Map<string, Record<string, string>>([
         ['/api/v1/namespaces/lifemodel/secrets/lifemodel-db-credentials', {}],
         ['/api/v1/namespaces/lifemodel-system/secrets/storage-module-db-credentials', {}],
+        ['/api/v1/namespaces/lifemodel-system/secrets/model-gateway-db-credentials', {}],
       ]);
       const phase = createKubernetesPostgresSecretPhase({
         apiServer: 'https://kubernetes.test',
@@ -72,6 +101,14 @@ describe('CNPG application credential copy phase', () => {
           }),
           data: { username: encode('lifemodel'), password: encode('generated-password') },
         }),
+        expect.objectContaining({
+          metadata: expect.objectContaining({
+            name: 'model-gateway-db-credentials',
+            namespace: 'lifemodel-system',
+            annotations: { 'kustomize.toolkit.fluxcd.io/prune': 'disabled' },
+          }),
+          data: { username: encode('lifemodel'), password: encode('generated-password') },
+        }),
       ]);
       for (const write of writes) expect(write.data).not.toHaveProperty('unrelated');
       // The core copy first, then the module's; each is read back.
@@ -83,6 +120,9 @@ describe('CNPG application credential copy phase', () => {
         ['GET', '/api/v1/namespaces/lifemodel-system/secrets/storage-module-db-credentials'],
         ['PUT', '/api/v1/namespaces/lifemodel-system/secrets/storage-module-db-credentials'],
         ['GET', '/api/v1/namespaces/lifemodel-system/secrets/storage-module-db-credentials'],
+        ['GET', '/api/v1/namespaces/lifemodel-system/secrets/model-gateway-db-credentials'],
+        ['PUT', '/api/v1/namespaces/lifemodel-system/secrets/model-gateway-db-credentials'],
+        ['GET', '/api/v1/namespaces/lifemodel-system/secrets/model-gateway-db-credentials'],
       ]);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -124,6 +164,7 @@ describe('CNPG application credential copy phase', () => {
       });
       await phase.run();
       expect([...created.keys()].sort()).toEqual([
+        '/api/v1/namespaces/lifemodel-system/secrets/model-gateway-db-credentials',
         '/api/v1/namespaces/lifemodel-system/secrets/storage-module-db-credentials',
         '/api/v1/namespaces/lifemodel/secrets/lifemodel-db-credentials',
       ]);
@@ -132,7 +173,7 @@ describe('CNPG application credential copy phase', () => {
           username: encode('lifemodel'),
           password: encode('generated-password'),
         });
-      expect(calls.filter((call) => call.method === 'POST')).toHaveLength(2);
+      expect(calls.filter((call) => call.method === 'POST')).toHaveLength(3);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

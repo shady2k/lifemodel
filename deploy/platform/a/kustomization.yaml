@@ -10,6 +10,7 @@ resources:
   - openbao/rendered.yaml
   # The model gateway arrives after OpenBao it logs in to (ADR-013 D1/D8).
   - model-gateway-service-account.yaml
+  - model-gateway-rbac.yaml
   - model-gateway.yaml
   # SeaweedFS arrives after OpenBao, whose custody record holds its identity
   # (ADR-015 S-D1): the identity Secret first, then the pod that mounts it. The

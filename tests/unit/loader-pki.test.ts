@@ -6,7 +6,12 @@ import { join } from 'node:path';
 import { createHash, createPrivateKey, X509Certificate } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import * as x509 from '@peculiar/x509';
-import { createPkiManager, instanceHosts, STORAGE_MODULE_TLS_HOSTS } from '../../loader/src/pki.js';
+import {
+  createPkiManager,
+  instanceHosts,
+  STORAGE_MODULE_TLS_HOSTS,
+  TASK_MODEL_TLS_HOSTS,
+} from '../../loader/src/pki.js';
 import { createNodeFileSystem } from '../../loader/src/fs.js';
 import { createTestClock } from '../../loader/src/clock.js';
 import { loadConfig } from '../../loader/src/config.js';
@@ -19,6 +24,7 @@ function setup() {
   roots.push(root);
   let secret: { ca?: string; cert?: string; key?: string } = {};
   let serviceSecret: { ca?: string; cert?: string; key?: string } = {};
+  let taskModelSecret: { ca?: string; cert?: string; key?: string } = {};
   let caMap: string | null = null;
   const events: string[] = [];
   const clock = createTestClock();
@@ -50,6 +56,16 @@ function setup() {
         },
       },
     },
+    taskModelService: {
+      hosts: TASK_MODEL_TLS_HOSTS,
+      secret: {
+        read: async () => taskModelSecret,
+        write: async (ca, cert, key) => {
+          events.push('task-model-leaf');
+          taskModelSecret = { ca, cert, key };
+        },
+      },
+    },
   });
   return {
     root,
@@ -63,6 +79,9 @@ function setup() {
     },
     set serviceSecret(value) {
       serviceSecret = value;
+    },
+    get taskModelSecret() {
+      return taskModelSecret;
     },
     get caMap() {
       return caMap;
@@ -150,7 +169,7 @@ describe('loader instance PKI', () => {
   it('creates and reads back CA before identity and publishes the leaf before ready', async () => {
     const s = setup();
     await s.manager.bootstrap();
-    expect(s.events).toEqual(['leaf', 'configmap', 'service-leaf']);
+    expect(s.events).toEqual(['leaf', 'configmap', 'service-leaf', 'task-model-leaf']);
     expect(await s.manager.report()).toMatchObject({
       identity: 'present',
       ca: 'present-matching',
@@ -535,6 +554,38 @@ describe('loader instance PKI', () => {
         new X509Certificate(await s.manager.caPem()).publicKey
       )
     ).toBe(true);
+  });
+  it('issues and renews the isolated task-model leaf under the same CA', async () => {
+    const s = setup();
+    await s.manager.bootstrap();
+    const ca = await s.manager.caPem();
+    const model = new X509Certificate(s.taskModelSecret.cert!);
+    expectStrictKeyIdentifiers(ca, s.taskModelSecret.cert!);
+    expect(model.subjectAltName?.split(', ').sort()).toEqual(
+      TASK_MODEL_TLS_HOSTS.map((host) => `DNS:${host}`).sort()
+    );
+    expect(s.taskModelSecret.key).not.toBe(s.serviceSecret.key);
+    expect(s.taskModelSecret.key).not.toBe(s.secret.key);
+    expect(await s.manager.report()).toMatchObject({
+      taskModelLeaf: 'valid',
+      taskModelSans: [...TASK_MODEL_TLS_HOSTS],
+    });
+    const before = s.taskModelSecret.cert;
+    await s.manager.bootstrap();
+    expect(s.taskModelSecret.cert).toBe(before);
+    s.clock.advance(370 * 24 * 60 * 60 * 1000);
+    await s.manager.bootstrap();
+    expect(s.taskModelSecret.cert).not.toBe(before);
+    expectStrictKeyIdentifiers(ca, s.taskModelSecret.cert!);
+    s.taskModelSecret.cert = undefined;
+    expect((await s.manager.report()).taskModelLeaf).toBe('missing');
+    await s.manager.bootstrap();
+    expectStrictKeyIdentifiers(ca, s.taskModelSecret.cert!);
+    s.taskModelSecret.cert = s.serviceSecret.cert;
+    s.taskModelSecret.key = s.serviceSecret.key;
+    expect((await s.manager.report()).taskModelLeaf).toBe('invalid');
+    await s.manager.bootstrap();
+    expect((await s.manager.report()).taskModelLeaf).toBe('valid');
   });
   it('reports a missing or foreign module leaf instead of calling it ready', async () => {
     const s = setup();

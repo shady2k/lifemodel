@@ -40,8 +40,7 @@ function one(value: unknown): string {
     throw new StorageAccessError(403, 'identity_denied');
   return value[0];
 }
-const NAME =
-  /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
+const NAME = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/;
 const SA = '/var/run/secrets/kubernetes.io/serviceaccount';
 export function createKubernetesStorageIdentity(
   options: IdentityOptions = {}

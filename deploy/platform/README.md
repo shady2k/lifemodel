@@ -12,8 +12,10 @@ instance ports and API-server webhook ingress. Step C depends on B and applies
 shared state resources, including the Postgres Cluster and Valkey StatefulSet.  This order
 lets the loader initialize OpenBao rather than requiring an already running
 Bao. Step D depends on C and applies the storage module, whose readiness reads
-the database's catalog (ADR-015 S-D7); it is last because it is the only
-platform workload that needs SQL. See
+the database's catalog (ADR-015 S-D7); it is last because its readiness needs SQL.
+The model gateway also uses SQL for task authorization, but starts in A and
+fails closed per task request until C and the migrations are available. SQL
+and its copied credentials never gate gateway startup or readiness. See
 [ADR-010](../../docs/adr/010-container-generations.md) for the decision.
 
 ## Release images
@@ -92,20 +94,50 @@ retried by the loader while its interface remains available.
 `model-gateway` is a Deployment and Service in `lifemodel-system`, part of the
 signed platform and applied after OpenBao: the loader image with its command
 overridden to `node /opt/lifemodel/loader/dist/model-gateway.js`, its own
-ServiceAccount, no loader volume, custody Secret or PKI, a read-only root
-filesystem and `GET /status` as readiness (a first start with no model slots is
-ready). `a/kustomization.yaml` pins the same loader image name, and the release
+ServiceAccount, no loader volume, custody Secret or CA private key, a read-only
+root filesystem and `GET /status` as readiness (a first start with no model slots
+or SQL is ready). `a/kustomization.yaml` pins the same loader image name, and the release
 flow writes the pushed loader digest into `a0/kustomization.yaml` and
 `a/kustomization.yaml` in one run. The Service publishes 8080 (the
-OpenAI-compatible API) and 8081 (`/status`); `model-gateway-access` admits 8080
-only from core pods and 8081 only from web and loader pods, and lets the
-gateway reach DNS, OpenBao and the loader's model exception. OpenBao admits the
+OpenAI-compatible core API), 8446 (the separate task TLS listener) and 8081
+(`/status`); `model-gateway-access` admits 8080 only from core pods and 8081
+only from web and loader pods. `task-model-ingress` admits 8446 only from
+`lifemodel-motor` AND task-labelled Pods, paired with task model egress in D.
+The gateway reaches DNS, OpenBao, the loader's model exception, Postgres 5432
+(`lifemodel-state` AND `cnpg.io/cluster: lifemodel`) and the existing k3s API
+TCP 6443 exception. Postgres explicitly admits only gateway-labelled Pods from
+the system namespace beside its existing clients. OpenBao admits the
 gateway on 8200 beside the loader. The core's `lifemodel-model-egress` allows
 the gateway's 8080 and nothing else for the model, and the web module reads the
 gateway's `/status`. The gateway logs in to OpenBao with role `model-gateway`,
 policy `read` on `lifemodel/data/model/*` only, provisioned and verified by the
 loader's bootstrap before the root token is retired. The core's endpoint comes
 from `LIFEMODEL_MODEL_BASE_URL` and carries no key.
+
+The task listener uses its own instance-CA leaf for
+`model-gateway.lifemodel-system.svc` and `.svc.cluster.local`. Loader PKI issues
+and renews it into `model-gateway-task-tls`, precreated in A0 because PKI runs
+before A. Only the gateway mounts this leaf, read-only without subPath at
+`/opt/lifemodel/task-model-tls` (`LIFEMODEL_TASK_MODEL_TLS_DIR`). The listener
+reloads it once a minute, like storage. Tasks trust the public `lifemodel-ca`
+copy; no key leaves the trusted platform Pods.
+
+The same CNPG copy phase that supplies storage's interim owner login fills
+`model-gateway-db-credentials`. The gateway mounts the Secret as an optional
+read-only directory without subPath at `/opt/lifemodel/database`, and reads
+`LIFEMODEL_DB_USERNAME_FILE` and `LIFEMODEL_DB_PASSWORD_FILE` when it needs SQL.
+It uses storage's fixed target `lifemodel-rw.lifemodel-state.svc.cluster.local:5432/lifemodel`.
+No Secret-backed environment value can freeze the empty pre-C state. This is
+the interim module login until lifemodel-2t5, not a new identity lease.
+
+Gateway RBAC grants only cluster-scoped `create` on TokenReviews for audience
+proof and namespaced `get` on Pods and Jobs in `lifemodel-motor` for current
+bound Pod/controller Job proof. Dynamic names cannot be pinned with
+`resourceNames`; there is no list/watch, Secret read, mutation, impersonation
+or general auth-delegator role. Each task request proves live identity and
+canonical SQL intent anew. See [task identity](../../docs/features/motor/task-identity.md)
+for the start claim and model routes. API/SQL outages deny task calls, not the
+core's existing model listener or gateway readiness.
 
 ## Step A: SeaweedFS
 
@@ -302,8 +334,9 @@ The post-init SQL enables pgvector in the application database.
 
 The loader copies only the generated username and password to the
 `lifemodel-db-credentials` Secret in the `lifemodel` namespace and to the
-storage module's `storage-module-db-credentials` Secret in `lifemodel-system`,
-in one resumable first-start phase. It also
+storage module's `storage-module-db-credentials` and gateway's
+`model-gateway-db-credentials` Secrets in `lifemodel-system`, in one resumable
+first-start phase. It also
 generates a random Valkey password only if the retained source Secret is
 absent, then copies it to the `lifemodel-valkey-credentials` Secret in the `lifemodel` namespace. This uses
 the existing loader ServiceAccount; it adds no controller. The credentials are
@@ -350,12 +383,12 @@ NetworkPolicies. The namespace default-denies ingress and egress. Pods labelled
 | --- | --- | --- |
 | `kube-system` AND `k8s-app=kube-dns` | UDP and TCP 53 | Resolve Service names, including `storage-module.lifemodel-system.svc`; no hostAliases |
 | `lifemodel-system` AND `app.kubernetes.io/name=storage-module` | TCP 8443 | Own-space storage TLS |
-| `lifemodel-system` AND `app.kubernetes.io/name=model-gateway` | TCP 8446 | Separate task model/identity TLS listener, implemented in 653.8.6 |
+| `lifemodel-system` AND `app.kubernetes.io/name=model-gateway` | TCP 8446 | Separate task model/identity TLS listener |
 | `lifemodel` AND `app.kubernetes.io/name=core` | TCP 8447 | Task-only durable control TLS channel, implemented in 653.8.8 |
 
-The last two listener ports are reserved here and exposed by their Services.
-They do not assert the listeners already run. Numeric targetPorts avoid a
-bootstrap dependency on those later application changes. Existing model API
+The model listener runs in A; task ingress and egress arrive in D. The task
+channel port 8447 remains reserved and exposed by its Service until 653.8.8.
+Numeric targetPorts avoid a bootstrap dependency on later application changes. Existing model API
 8080 and status 8081 stay unchanged and are not task routes. Each runtime
 listener's ingress is paired with the task egress and combines namespace AND
 Pod selectors. Tasks have no ingress, Internet/API route or direct

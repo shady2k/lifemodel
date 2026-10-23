@@ -22,6 +22,9 @@ export class GatewayError extends Error {
   }
 }
 
+/** A trusted task authorization failure, never a model-provider outcome. */
+export class TaskAuthorizationError extends GatewayError {}
+
 /** Only a JSON type name: the value itself never leaves the check. */
 function jsonType(value: unknown): string {
   if (value === null) return 'null';

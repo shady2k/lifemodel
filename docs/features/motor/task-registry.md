@@ -6,7 +6,8 @@ The core owns the registry through `src/ports/tasks.ts` and
 This is the durable record for the new Job runtime, not a replacement execution
 loop and not the old Motor Cortex `motor-state.ts`. The [task launch path](task-launch.md)
 now wires the registry and allocation/Job reconciliation in platform mode.
-Verified identity, mailbox and finalization are later leaves of stage 3.
+[Verified identity and once-only start](task-identity.md) are served by the model
+gateway. Mailbox and finalization remain later leaves of stage 3.
 
 ## Tables and ownership
 
@@ -16,7 +17,8 @@ Verified identity, mailbox and finalization are later leaves of stage 3.
 | `core.task_launches` | One initial attempt and launch per task, deterministic Job name, allocation receipt, template hash, nullable observed Job/Pod UIDs, irreversible launch tombstone, cleanup pending, soft-stop request and explicit slot reservation | Fenced core admission/reconciler; core observes Job UID, verified binding supplies Pod identity, never cognition |
 | `core.task_admission` | One permanent row, locked while accepting, counting/reserving or releasing | Fenced core registry |
 | `task_access.intents` | Stable `(task_id, attempt_id, launch_id)` primary key, revision, mode, finite absolute soft/hard deadlines | Fenced core registry initializes once and only UPDATEs afterward |
-| `task_access.projections` | Verified Job/Pod binding and once-only execution authority | Gateway identity writer in a later leaf; not this registry |
+| `task_access.projections` | Verified Job/Pod binding | Gateway identity writer; not this registry |
+| `task_access.start_claims` | Consumed launch/Pod/boot-nonce claim and verified Job-time deadline snapshot | Gateway identity writer in the same transaction as the projection |
 
 No file, `DATA_PATH` directory, Job status or process-local map is task authority.
 All adapter operations use the existing fenced Postgres pool. Write transactions
@@ -156,7 +158,7 @@ claimed by this leaf's registry integration tests.
 | Terminal outbox commit | .9 atomically CASes one terminal outcome and one unique outbox key; delivery deduplicates by key |
 | Job delete | .5/.9 retain exact-UID cleanup/tombstone intent, confirm termination, then release reservation; terminal never reopens |
 
-`.6` must consume canonical intent with live verified binding and once-only start
-claim; an intent alone never grants execution. `.11` uses `TaskService.accept`
+`.6` consumes canonical intent with live verified binding and a once-only start
+claim; an intent alone never grants execution. See [task identity](task-identity.md). `.11` uses `TaskService.accept`
 with a committed deciding-turn key. Later leaves must not bypass this writer
 with unfenced raw SQL or introduce another registry authority.
