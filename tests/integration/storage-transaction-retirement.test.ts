@@ -45,9 +45,36 @@ function fixture(path: Path) {
     settings: { read: async () => undefined },
     logger: createRecordingLogger([]),
   });
-  const name = path === 'control' || path === 'transfer' ? 'access' : path;
+  const application = {
+    control: 'lifemodel-storage-access-control',
+    transfer: 'lifemodel-storage-access',
+    seal: 'lifemodel-storage-seal',
+    retention: 'lifemodel-storage-retention-control',
+  }[path];
+  // Health intentionally uses noncontrol capacity. Probe the SAME operation
+  // class here so a fresh health connection cannot hide an unretired control
+  // session, or make an acknowledged rollback look like non-reuse.
+  const probe = async () => {
+    try {
+      if (path === 'control') {
+        await access.revoke('missing', '0', 'missing');
+      } else if (path === 'seal') {
+        await seal.allocate({
+          taskId: 'transaction-probe',
+          launchId: 'transaction-probe',
+          effectKey: 'transaction-probe',
+          retentionRevision: 'one',
+        });
+      } else if (path === 'retention') {
+        await retention.pending({});
+      } else return access.check(new AbortController().signal);
+      return true;
+    } catch (error) {
+      return path === 'control' && error instanceof StorageAccessError && error.status === 404;
+    }
+  };
   return {
-    application: `lifemodel-storage-${name}`,
+    application,
     refuse: () =>
       path === 'control'
         ? access.revoke('missing', '0', 'missing')
@@ -74,19 +101,8 @@ function fixture(path: Path) {
                 }
               })(),
     commit: () =>
-      path === 'control'
-        ? access.revoke('transaction-end', '0', 'transaction-end')
-        : path === 'seal'
-          ? seal.check(new AbortController().signal)
-          : path === 'retention'
-            ? retention.check(new AbortController().signal)
-            : access.check(new AbortController().signal),
-    check: () =>
-      path === 'seal'
-        ? seal.check(new AbortController().signal)
-        : path === 'retention'
-          ? retention.check(new AbortController().signal)
-          : access.check(new AbortController().signal),
+      path === 'control' ? access.revoke('transaction-end', '0', 'transaction-end') : probe(),
+    check: probe,
     close: () => Promise.all([seal.close(), retention.close(), access.close()]),
   };
 }

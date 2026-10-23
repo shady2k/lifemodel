@@ -51,6 +51,34 @@ changed requests conflict. Pin that wins the policy lock removes pending
 candidates. If deletion won, the new pin returns `409 already_deleting`; it
 never acknowledges protection of bytes being removed.
 
+### Persisted owner-notice receipt
+
+Core exposes `core.storage_owner_notices(message_id, committed_at)` through
+expanding migration `20261015000018_create_storage_owner_notices.sql`. The view
+selects only permanent nonempty assistant/web message rows with canonical
+storage-warning IDs and matching channel keys, joined to the durable
+`core.recipient_registry` row for channel `web`, destination `owner` — the same
+`getOrCreate('web', 'owner')` binding core uses. It does not expose message text
+or recipients and does not copy core state into the module catalog.
+
+Inside the same maintenance-fenced transaction that records a new warning, the
+module requires both the canonical ID (`storage-warning_` plus SHA-256 of
+`planId`) and a matching row in this view. A missing, wrong-recipient or
+wrong-plan receipt returns `503 warning_receipt_pending`, leaving the plan
+pending and retryable.
+The lead clock starts at module confirmation time plus the plan's lead days;
+`committed_at` is the persisted row's insertion timestamp (`created_at`), visible
+to the module only after commit, not the exact PostgreSQL commit wall time. It
+records receipt provenance, not permission to backdate that clock.
+An already saved matching warning receipt replays idempotently, including after
+a lost HTTP response, rather than starting a new clock.
+
+This is a narrow core read contract, like `task_access`, not module ownership of
+conversation tables. Lifemodel-2t5 must grant the module `SELECT` on exactly
+`core.storage_owner_notices`; no core conversation-table or whole-core-schema
+read grant is required. The interim database-owner login remains the explicit
+ADR amendment, not a reason to widen that future grant.
+
 ### Core side
 
 Core's `src/core/storage-control-client.ts` uses the control listener at
@@ -156,7 +184,8 @@ not into a message that did not mention it. Fetching does not start the warning
 clock or permit deletion. Pins can only remove protection candidates afterward.
 This closes the fetch/send/commit membership race without another claim route.
 
-`warningCommitted` starts the lead clock, never plan creation or fetch.
+Only a receipt-validated `warningCommitted` starts the lead clock, never plan
+creation, fetch or the older conversation timestamp.
 A later shorter setting cannot shorten an announced window. A larger lead
 observed during reconciliation persists a later deadline, which a subsequent
 decrease cannot undo. On deletion, the shared policy lock rechecks pins,
@@ -229,7 +258,10 @@ be unsafe. Orphan tombstones are revived and charged again if the backend key
 reappears. This is reconciliation of backend ambiguity, not a physical PVC bound.
 
 One bounded background reconciliation loop runs in the single-replica/Recreate
-module, with injected virtual clock and explicit `runOnce` in tests. Work pages
+module, with injected virtual clock and explicit `runOnce` in tests. Its
+four-client collector pool is separate from the two-client retention-control
+pool, so collector session locks and checkout pressure cannot consume control
+SQL capacity. This is not a universal control SLA under shared-store outages. Work pages
 are bounded to 100. SQL locks/CAS and session ownership, not local maps, protect
 against two healthy GC contenders. A failed orphan discovery or deletion keeps
 its durable accounting state for retry and does not stop other keys in the page.
@@ -247,8 +279,13 @@ under lock so it does not block independent spaces.
 
 `tests/integration/storage-module-retention.test.ts` covers policy/age/leads,
 coalescing, notices, quota proposals, identity refusal and 100-artifact restart.
-`storage-module-gc.test.ts` covers pin/delete ordering, revisions, two processes,
-active reads, lost replies, crashes and late private PUT reconciliation.
+The core/module integration coverage in
+`tests/integration/storage-owner-notices.test.ts` exercises the real core stores
+and module listener: missing and wrong-plan receipt refusal, the shipped core
+reconciler, and an idempotent retry after a dropped module reply. `tests/integration/core-storage-retention.test.ts`
+retains the core reconciler's transport/restart cases against its module fake. `storage-module-gc.test.ts` covers pin/delete
+ordering, revisions, two processes, active reads, lost replies, crashes and late
+private PUT reconciliation.
 `storage-module-lock-loss.test.ts` terminates the lock-owning SQL backend while
 a real child DELETE is held. It observes the first HTTP transport abort before a
 second child confirms a retry, with one candidate and one ledger release.
@@ -262,6 +299,9 @@ observes the first DELETE socket abort, then confirms an idempotent second DELET
 and a single ledger release. Unit settings and S3-list tests
 exercise projection/defaults/RBAC and bounded authenticated backend enumeration.
 
-This work does not implement consistent backup/restore (.7.4), prove
-pressure/fair workers/RSS (.7.7), or wire stage-3 task lifecycle and
-terminal outcomes. It does not replace independent stage review or deployment walks.
+Historically this retention leaf did not implement its sibling scopes. Current
+main includes [consistent storage-set backup/restore](storage-restore.md) (.7.4)
+and [bounded admission/fair workers](storage-objects.md#transfer-bounds) (.7.7).
+Stage-3 task lifecycle and terminal integration remain pending. Repository
+checks do not replace independent stage review, deployed restore checks or the
+RSS/network acceptance walks.

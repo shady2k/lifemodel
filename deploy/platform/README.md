@@ -134,8 +134,8 @@ default deny keeps them private to that pod.
 
 ## Step D: the storage module
 
-`storage-module` is a Deployment and Service in `lifemodel-system`, also the
-loader image with its own entry point
+`storage-module` is a single-replica Recreate Deployment and Service in
+`lifemodel-system`, also the loader image with its own entry point
 (`/opt/lifemodel/loader/dist/storage-module.js`), its own ServiceAccount and no
 loader volume. It is in step D, after the database, because its readiness reads
 its own Postgres catalog; in step A it would have made A wait for C while C
@@ -152,7 +152,12 @@ with valid auth; otherwise it is 503 with the reason (`catalog_unavailable`,
 `unreachable`, `auth_denied`, `bucket_missing`, `unexpected`,
 `credentials_unavailable`, `timeout`). A failed catalog read also records the
 repair in the log: `unreachable`, `auth_failed`, `schema_missing`, `forbidden`
-or `failed`. `GET /livez` is the process, so a stopped database or store never
+or `failed`. A non-normal restore hold also reports `catalog_unavailable`,
+with the safe logged cause `restore_pending`; health JSON does not expose
+maintenance generation, progress or unavailable counts. The recovery CLI exposes
+those separately. Listeners and the retention loop start under a hold, but
+durable transaction fences refuse ordinary writes/GC until explicit release.
+`GET /livez` is the process, so a stopped database or store never
 restarts the module that reports it. It logs status codes and identifiers only,
 never a key, a body or a password.
 
@@ -173,22 +178,29 @@ clients must trust the instance CA (`lifemodel-ca`), never disable certificate
 verification. No plaintext listener serves task or trusted operations.
 
 - Task 8443: `GET /spaces/:space/access` proves current own-space access;
-  `GET /ping` is a transport check only. Audience `lifemodel-task-storage`,
+  `GET /ping` is a transport check only. The [object API](../../docs/features/motor/storage-objects.md)
+  serves own-space immutable PUT/GET/list/mark. Audience `lifemodel-task-storage`,
   identity `lifemodel-motor:task`. Every operation/chunk performs a fresh
   audience-specific TokenReview and reads the current non-deleting bound Pod
   and its exact live controller Job. The SQL intent/projection/catalog guard
   checks binding, revision, mode and database-clock deadlines independently of
   the core process. No positive identity cache substitutes for these reads.
-- Trusted control 8444: `POST /revoke`, audience
+- Trusted control 8444: keyed allocate/bind/revoke/seal, retention policy/plan
+  routes and maintenance begin/status/release. Audience
   `lifemodel-core-storage-control`, exact SA `lifemodel:core` and fresh bound
   Pod verification. Revoke commits the revision and keyed receipt, then cancels
   active streams before ACK. A missing space is `404 space_not_found`; a stale
-  expected revision is `409 revision_conflict`.
+  expected revision is `409 revision_conflict`. The wired core retention client
+  persists owner warnings before confirming them; task lifecycle/terminal
+  integration remains stage 3.
 - Trusted read 8445: `GET /identity`, audiences
   `lifemodel-core-storage-read` and `lifemodel-web-storage-read`, matched to
   `lifemodel:core` and `lifemodel:web` respectively with fresh bound Pod checks.
-  Web cannot invoke control. The object API and marked-only owner reads remain
-  future work in lifemodel-653.7.5; these identity routes are not an object service.
+  Web cannot invoke control. Core also has marked, non-tombstoned object
+  GET/list routes on this listener, with fresh verification on each chunk.
+  Web has no object-route permission yet: owner download authorization and the
+  same-origin browser content boundary remain S08 integration work, not an
+  existing owner download service.
 
 `storage-module-access` and the caller-side egress policies admit these exact
 peers, combining namespaceSelector AND podSelector (the Pod label is

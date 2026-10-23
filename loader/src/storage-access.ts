@@ -43,7 +43,8 @@ export interface StorageAccessOptions {
   connectionString: string;
   identity: KubernetesStorageIdentity;
   timeoutMs?: number;
-  /** At most eight transfer guards plus two independent control guards. */
+  /** Task guard SQL capacity (default eight, configurable up to ten).
+   * The two control guards always use their own independent pool. */
   poolMax?: number;
 }
 export interface StorageAccess {
@@ -95,7 +96,7 @@ export function createStorageAccess(
   const settlements = new Map<AbortController, Promise<void>>();
   const writers = new Set<AbortController>();
   const timeoutMs = options.timeoutMs ?? 5_000;
-  const poolMax = options.poolMax ?? 10;
+  const poolMax = options.poolMax ?? 8;
   if (!Number.isSafeInteger(poolMax) || poolMax < 1 || poolMax > 10)
     throw new StorageAccessError(500, 'access_config');
   const pool = new Pool({
@@ -109,6 +110,20 @@ export function createStorageAccess(
     idleTimeoutMillis: 1_000,
     allowExitOnIdle: true,
   });
+  // Revoke must not queue behind unrelated task guards waiting on row locks.
+  const controlPool = new Pool({
+    connectionString: options.connectionString,
+    application_name: 'lifemodel-storage-access-control',
+    max: 2,
+    connectionTimeoutMillis: timeoutMs,
+    query_timeout: timeoutMs,
+    statement_timeout: timeoutMs,
+    lock_timeout: timeoutMs,
+    idleTimeoutMillis: 1_000,
+    allowExitOnIdle: true,
+  });
+  controlPool.on('error', () => undefined);
+  controlPool.on('connect', (client) => client.on('error', () => undefined));
   // Pool errors and client errors are independent of query promise rejections.
   // Install once per connection, never once per checkout, and keep through end().
   const failed = new WeakSet<PoolClient>();
@@ -179,7 +194,7 @@ export function createStorageAccess(
     if (control) {
       try {
         return await withStorageSqlClient(
-          pool,
+          controlPool,
           options.connectionString,
           parent,
           async (client, retire) => {
@@ -296,7 +311,7 @@ export function createStorageAccess(
     close: () => {
       closing = true;
       for (const space of streams.keys()) cancel(space);
-      closePromise ??= pool.end();
+      closePromise ??= Promise.all([pool.end(), controlPool.end()]).then(() => undefined);
       return closePromise;
     },
     identity: options.identity,

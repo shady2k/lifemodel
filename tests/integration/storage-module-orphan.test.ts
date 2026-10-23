@@ -175,7 +175,7 @@ describe('orphan accounting and expired attempt recovery', () => {
     const second = (await h.pending()).plans;
     expect(second).toHaveLength(1);
     expect(second[0].id).not.toBe(first.id);
-    await h.warn(second[0].id, 'second-page');
+    await h.warn(second[0].id);
     await h.clock(TERMINAL + 104 * DAY);
     await h.tick();
     for (const artifact of artifacts) expect(h.backend.objects.has(artifact.key)).toBe(false);

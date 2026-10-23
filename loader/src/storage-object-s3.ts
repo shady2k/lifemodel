@@ -12,6 +12,8 @@ import type { LoaderLogger } from './logger.js';
 import { StorageAccessError } from './storage-access-error.js';
 import { signS3Request } from './storage-s3.js';
 
+/** Retained core reads remain authorized across seal and do not join its barrier. */
+export type StorageObjectS3Lifecycle = 'space' | 'retained-read';
 export type StorageObjectS3Guard = (bytes: number, dispatch: () => undefined) => Promise<void>;
 export interface StorageObjectS3Listing {
   objects: { key: string; size: number; lastModified: number }[];
@@ -36,7 +38,8 @@ export interface StorageObjectS3 {
     start: number,
     end: number,
     signal: AbortSignal,
-    onProgress?: () => void
+    onProgress?: () => void,
+    lifecycle?: StorageObjectS3Lifecycle
   ): Promise<AsyncIterable<Buffer>>;
   verify(
     space: string,
@@ -46,7 +49,7 @@ export interface StorageObjectS3 {
     signal: AbortSignal
   ): Promise<void>;
   delete(space: string, key: string, signal: AbortSignal): Promise<void>;
-  /** Await this space’s operations and real request closure, including canceled handlers. */
+  /** Await task/collector operations and real request closure, never retained core reads. */
   settle(space: string, signal: AbortSignal): Promise<void>;
   close(): void;
 }
@@ -320,14 +323,17 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
   const observedSockets = { put: 0, read: 0, control: 0 };
   const active = new Set<() => void>();
   const pendingBySpace = new Map<string, Set<Promise<void>>>();
-  function track(space: string) {
-    const pending = pendingBySpace.get(space) ?? new Set<Promise<void>>();
+  function track(space: string, lifecycle: StorageObjectS3Lifecycle) {
+    const pending =
+      lifecycle === 'space'
+        ? (pendingBySpace.get(space) ?? new Set<Promise<void>>())
+        : new Set<Promise<void>>();
     let resolve: () => void = ignoreError;
     const promise = new Promise<void>((done) => {
       resolve = done;
     });
     pending.add(promise);
-    pendingBySpace.set(space, pending);
+    if (lifecycle === 'space') pendingBySpace.set(space, pending);
     return {
       promise,
       complete: () => {
@@ -343,11 +349,16 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
     if (!/^[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/.test(key) || key.length > 1024) throw invalid();
     return new URL(`/${options.bucket}/${key}`, endpoint);
   }
-  function operation(space: string, parent: AbortSignal, onProgress?: () => void) {
+  function operation(
+    space: string,
+    parent: AbortSignal,
+    onProgress?: () => void,
+    lifecycle: StorageObjectS3Lifecycle = 'space'
+  ) {
     if (closed || parent.aborted) throw unavailable();
     // Track before the custody await: no ClientRequest exists yet, but this
     // operation can still dispatch one unless it completes or is cancelled.
-    const ongoing = track(space);
+    const ongoing = track(space, lifecycle);
     const controller = new AbortController();
     const requests = new Set<ClientRequest>();
     const requestClosures: Promise<void>[] = [];
@@ -443,7 +454,7 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
       // Register before returning the request: cancellation is not settlement.
       // ClientRequest close also fires on normal completion with a pooled socket;
       // waiting for the reusable socket itself would block successful transfers.
-      const closure = track(space);
+      const closure = track(space, lifecycle);
       req.once('close', () => {
         requests.delete(req);
         closure.complete();
@@ -662,7 +673,7 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
         await op.settle();
       }
     },
-    async get(space, key, start, end, signal, onProgress) {
+    async get(space, key, start, end, signal, onProgress, lifecycle = 'space') {
       const url = path(key);
       if (
         !Number.isSafeInteger(start) ||
@@ -672,7 +683,7 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
         !Number.isSafeInteger(end - start + 1)
       )
         throw invalid();
-      const op = operation(space, signal, onProgress);
+      const op = operation(space, signal, onProgress, lifecycle);
       try {
         const { req, received } = await op.open('GET', url, {
           range: `bytes=${String(start)}-${String(end)}`,

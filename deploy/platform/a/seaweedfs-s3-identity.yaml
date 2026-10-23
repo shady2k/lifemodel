@@ -6,9 +6,10 @@
 # only this pod mounts. No caller, generation, task, core or web holds them.
 #
 # The platform creates the Secret empty and Flux never overwrites it
-# (`IfNotPresent`), so the loader's content survives every reconcile. An empty
-# file is a failed start, never an anonymous store: SeaweedFS refuses to serve
-# when its identity file yields no identity.
+# (`IfNotPresent`), so the loader's content survives every reconcile. A missing
+# or unreadable identity file stops the process; a file that yields no identity
+# denies every request, never serving anonymously. TCP probes do not prove S3
+# authentication; the storage module checks the bucket with signed requests.
 apiVersion: v1
 kind: Secret
 metadata:

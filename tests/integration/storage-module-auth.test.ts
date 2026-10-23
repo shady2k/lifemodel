@@ -561,7 +561,7 @@ describe('durable revision fencing and stream cancellation', () => {
         async () =>
           (
             await stores.postgres.query(
-              "SELECT count(*)::int AS n FROM pg_stat_activity WHERE application_name='lifemodel-storage-access' AND wait_event_type='Lock'"
+              "SELECT count(*)::int AS n FROM pg_stat_activity WHERE application_name='lifemodel-storage-access-control' AND wait_event_type='Lock'"
             )
           ).rows[0].n
       )

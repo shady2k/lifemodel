@@ -1,11 +1,12 @@
 /**
  * The loader's first-start phase order (ADR-010 R7-02, ADR-015 S-D1).
  *
- * Platform A waits for the storage module to become ready, and the module is
- * ready only after Seaweed custody exists. The Postgres credential phase
- * copies a Secret that CloudNativePG creates in platform C, and C waits for
- * B, which waits for A. So custody has to finish before any phase that waits
- * on a later platform step, or a fresh installation deadlocks.
+ * Platform A creates SeaweedFS; storage-module is in D, after the stores in
+ * B/C. Its authenticated readiness needs Seaweed custody and the SQL schema.
+ * The Postgres credential phase copies a Secret created in C. Custody runs
+ * first because it needs only the OpenBao handoff and A's identity Secret,
+ * not those later stores. This test protects that first-start order; it does
+ * not assert that A waits for storage-module readiness.
  */
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -46,8 +47,8 @@ describe('the loader first-start phase order', () => {
           record = next;
         },
       };
-      // The platform-C Secret is absent for as long as platform A is not
-      // ready, and platform A cannot be ready before custody exists.
+      // Model a later platform-C Secret that has not arrived. Custody must
+      // still complete first; storage-module readiness is checked only in D.
       const postgres = createKubernetesPostgresSecretPhase({
         tokenFile,
         caFile: join(directory, 'absent-ca.crt'),

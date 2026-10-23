@@ -48,8 +48,13 @@ Migration `20261015000014_create_storage_seals.sql` expands the catalog with
 `seal_operations`, `seal_manifests`, `seal_gc`, `object_tombstones`, and
 `seal_receipts`. All writes are fixed module-owned parameterized statements.
 No new SQL function, dependency, external endpoint or bootstrap dependency is
-introduced. The module uses a bounded reusable catalog pool and the existing
-signed keep-alive S3 adapter. Empty tables are ready; missing schema is not.
+introduced. Seal uses bounded reusable SQL pools separated by operation class:
+two control clients, four core-read clients and one lease-cleanup client. A read
+waiting on another space's row lock cannot consume control checkout capacity.
+This is not a universal control SLA when the database or that control operation's
+own rows are unavailable. The signed keep-alive S3 adapter is shared, with the
+operation lifecycle separation below. Empty tables are ready; missing schema is
+not.
 
 1. Normal completion/failure first waits for the current local writer/publication
    handler snapshot to settle, bounded to five seconds (`quiescence_pending` on
@@ -63,10 +68,12 @@ signed keep-alive S3 adapter. Empty tables are ready; missing schema is not.
    `cleanup_pending`. The one-replica/Recreate topology makes this process's
    local registry complete. The S3 adapter also retains actual ClientRequest
    close promises across operation disposal and settlement timeouts, carrying
-   each operation's space even before custody resolves. Seal waits only its own
-   space's operations/transports with a five-second bound before cleanup. Foreign
-   task uploads and core reads never enter that barrier. Reserved/fair worker
-   admission remains .7.7. Already saved seal
+   each operation's space even before custody resolves. Seal waits only for the
+   same-space task/collector operations and its own cleanup that it must settle,
+   with a five-second bound. Foreign task uploads and retained core reads never
+   enter that barrier. A same-space core read of retained immutable output stays
+   authorized and continues across seal. The current module also wires
+   [reserved/fair worker admission](storage-objects.md#transfer-bounds). Saved seal
    receipts replay before transfer barriers. Startup closes the previous
    process's sockets.
 3. Checksum-enabled S3 HEAD validates length and SHA-256 of every frozen marked
@@ -127,8 +134,11 @@ The coordinator explicitly accepted this residual in decision 2 for this task.
 [Storage retention](storage-retention.md) (lifemodel-653.7.3) now reconciles and sweeps this private residue with a bounded age grace and durable accounting.
 Do not infer backend quiescence from an upload lease, local cancellation or 404.
 
-Retention/pins/notices and global quota policy remain .7.3; consistent backup
-and restore remain .7.4; admission/fairness/reserved workers/RSS remain .7.7.
+Historically this seal leaf did not implement its sibling scopes. Current main
+includes [retention/pins/notices and global quota](storage-retention.md) (.7.3),
+[consistent storage-set backup/restore](storage-restore.md) (.7.4), and
+[admission/fairness/reserved workers](storage-objects.md#transfer-bounds) (.7.7).
+These source checks do not replace the deployed restore and RSS acceptance walks.
 No NetworkPolicy, RBAC, TLS projection, image context or A0→A→B→C→D chain changes
 are needed. New TypeScript runtime files are already admitted by the loader
 build-context allowlist. The gateway writer and core terminal integration are

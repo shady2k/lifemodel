@@ -109,15 +109,27 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 export function createStorageSeal(options: Options): StorageSeal {
   const boundedSignal = (ms: number, signal?: AbortSignal) =>
     AbortSignal.any([AbortSignal.timeout(ms), ...(signal ? [signal] : [])]);
+  // The two HTTP control workers never queue behind core-read SQL guards.
   const pool = new Pool({
     connectionString: options.connectionString,
-    max: 4,
+    max: 2,
     connectionTimeoutMillis: 5000,
     query_timeout: 5000,
     statement_timeout: 5000,
     lock_timeout: 5000,
     application_name: 'lifemodel-storage-seal',
   });
+  const readPool = new Pool({
+    connectionString: options.connectionString,
+    max: 4,
+    connectionTimeoutMillis: 5000,
+    query_timeout: 5000,
+    statement_timeout: 5000,
+    lock_timeout: 5000,
+    application_name: 'lifemodel-storage-seal-read',
+  });
+  readPool.on('error', () => undefined);
+  readPool.on('connect', (client) => client.on('error', () => undefined));
   // Cleanup has its own short budget and cannot sit behind normal seal work.
   // SQL expiry remains authoritative if cleanup or its bounded retry fails.
   const cleanupPool = new Pool({
@@ -798,53 +810,57 @@ export function createStorageSeal(options: Options): StorageSeal {
             signal
           );
           if (identity.role !== 'core') fail(403, 'identity_denied');
-          await tx(async (client, writable) => {
-            const row = (
-              await client.query<{ id: string; revision: string; mode: string }>(
-                'SELECT id,access_revision::text AS revision,mode FROM storage.spaces WHERE id=$1 FOR SHARE',
-                [space]
-              )
-            ).rows[0];
-            if (!row) fail(404, 'space_not_found');
-            if (options.retention) {
-              const policy = (
-                await client.query<{ state: string }>(
-                  'SELECT state FROM storage.retention_policies WHERE space_id=$1',
+          await tx(
+            async (client, writable) => {
+              const row = (
+                await client.query<{ id: string; revision: string; mode: string }>(
+                  'SELECT id,access_revision::text AS revision,mode FROM storage.spaces WHERE id=$1 FOR SHARE',
                   [space]
                 )
               ).rows[0];
-              if (policy && policy.state !== 'retained') fail(404, 'object_not_found');
-              // UPSERT on every writable chunk also reacquires a lease first
-              // admitted while held, or pruned after expiring during the hold.
-              leaseExpiresAt = now() + STORAGE_READ_LEASE_MS;
-              if (writable)
-                await client.query(
-                  'INSERT INTO storage.read_leases(id,space_id,expires_at) VALUES($1,$2,to_timestamp($3/1000.0)) ON CONFLICT(id) DO UPDATE SET expires_at=EXCLUDED.expires_at',
-                  [lease, space, leaseExpiresAt]
-                );
-            }
-            if (
-              objectId &&
-              !(
-                await client.query(
-                  `SELECT 1 FROM storage.objects o WHERE o.space_id=$1 AND o.id::text=$2 AND o.mark IS NOT NULL AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=o.id) AND NOT EXISTS(SELECT 1 FROM storage.version_availability av WHERE av.object_id=o.id AND av.status<>'available')`,
-                  [space, objectId]
-                )
-              ).rowCount
-            )
-              fail(404, 'object_not_found');
-            signal.throwIfAborted();
-            if (dispatch.constructor.name === 'AsyncFunction')
-              fail(500, 'async_dispatch_forbidden');
-            if (
-              (dispatch as (value: unknown) => unknown)({
-                space,
-                revision: row.revision,
-                mode: row.mode,
-              }) !== undefined
-            )
-              fail(500, 'async_dispatch_forbidden');
-          }, false);
+              if (!row) fail(404, 'space_not_found');
+              if (options.retention) {
+                const policy = (
+                  await client.query<{ state: string }>(
+                    'SELECT state FROM storage.retention_policies WHERE space_id=$1',
+                    [space]
+                  )
+                ).rows[0];
+                if (policy && policy.state !== 'retained') fail(404, 'object_not_found');
+                // UPSERT on every writable chunk also reacquires a lease first
+                // admitted while held, or pruned after expiring during the hold.
+                leaseExpiresAt = now() + STORAGE_READ_LEASE_MS;
+                if (writable)
+                  await client.query(
+                    'INSERT INTO storage.read_leases(id,space_id,expires_at) VALUES($1,$2,to_timestamp($3/1000.0)) ON CONFLICT(id) DO UPDATE SET expires_at=EXCLUDED.expires_at',
+                    [lease, space, leaseExpiresAt]
+                  );
+              }
+              if (
+                objectId &&
+                !(
+                  await client.query(
+                    `SELECT 1 FROM storage.objects o WHERE o.space_id=$1 AND o.id::text=$2 AND o.mark IS NOT NULL AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=o.id) AND NOT EXISTS(SELECT 1 FROM storage.version_availability av WHERE av.object_id=o.id AND av.status<>'available')`,
+                    [space, objectId]
+                  )
+                ).rowCount
+              )
+                fail(404, 'object_not_found');
+              signal.throwIfAborted();
+              if (dispatch.constructor.name === 'AsyncFunction')
+                fail(500, 'async_dispatch_forbidden');
+              if (
+                (dispatch as (value: unknown) => unknown)({
+                  space,
+                  revision: row.revision,
+                  mode: row.mode,
+                }) !== undefined
+              )
+                fail(500, 'async_dispatch_forbidden');
+            },
+            false,
+            readPool
+          );
         },
       };
     },
@@ -858,7 +874,7 @@ export function createStorageSeal(options: Options): StorageSeal {
             );
           },
           false,
-          pool,
+          readPool,
           signal
         );
         return !signal.aborted;
@@ -867,7 +883,7 @@ export function createStorageSeal(options: Options): StorageSeal {
       }
     },
     close: async () => {
-      await Promise.all([pool.end(), cleanupPool.end()]);
+      await Promise.all([pool.end(), readPool.end(), cleanupPool.end()]);
     },
   };
   return api;
