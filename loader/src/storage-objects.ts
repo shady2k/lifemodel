@@ -371,8 +371,25 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
               values: [attempt, space, uploadId, key, owner.bootId],
             });
             transferSignal.throwIfAborted();
-            if (begun?.rows[0]?.['accepted'] !== true)
+            if (begun?.rows[0]?.['accepted'] !== true) {
+              // begin_attempt waits on the intent row, so a duplicate PUT of the
+              // same upload can lose that wait to the sibling's publication:
+              // then "not accepted" means already completed, not expired. A
+              // completed intent never changes again, so re-read it and replay
+              // the one saved receipt instead of a false 409.
+              const settled = (
+                await query<{ state: string; object_id: string }>(
+                  'SELECT state,object_id FROM storage.upload_intents WHERE space_id=$1 AND upload_id=$2',
+                  [space, uploadId]
+                )
+              ).rows[0];
+              if (settled?.state === 'completed') {
+                const saved = await object(space, settled.object_id);
+                await answer(res, stream, saved.receipt);
+                return;
+              }
               throw new StorageAccessError(409, 'upload_expired');
+            }
             /** Never call read(chunkBytes): Node raises its HWM to that size
              * and can retain a second artifact chunk during dispatch/queueing.
              * Keep HTTP buffering within its explicit transport reservation;
