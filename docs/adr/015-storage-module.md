@@ -195,14 +195,27 @@ workers total, at most **2 per task** and **2 reserved for owner reads**, plus
 attempted streams therefore exercise refusal/backpressure, not twenty full
 buffers. Chunk buffers total **32 MiB** maximum; bounded queues hold only
 metadata (**64 KiB** aggregate), not extra artifact chunks. At most **32** queued
-requests, excess responds 429 within **1 s**; per-chunk network/SQL deadline
+requests, excess responds 429 within **1 s** (initial admission from parsed HTTP
+arrival, including authority work; later chunks from that chunk's admission
+attempt). The queue budget is at most **800 ms**, leaving a **200 ms** response
+margin. That **1 s** is the queue-overload refusal target only: a dependency
+outage — for example a Kubernetes TokenReview that itself takes more than
+**1 s** — is outside it and fails through its own bounded path (identity
+verification answers `503 identity_unavailable` on its own timeout), not through
+queue refusal. HTTP transport buffers have an explicit separate finite **8 MiB**
+default allowance (192 KiB × 40 object handlers plus 64 KiB × 8 worker scratch),
+not an uncharged 4 MiB request high-water mark. See transfer settings below.
+Per-chunk network/SQL deadline
 **10 s**, no progress ends that stream without occupying a worker forever.
 Workers select round-robin by space after each chunk; no stalled upload holds
 a control worker or web reserve. A revoke cancels all that space's workers.
 The **512 MiB** RSS bound is a fixture acceptance budget to measure on the
 specified single-node walk, not a vendor minimum or full-platform memory claim.
-Values are typed settings with finite hard bounds; changes rerun S10. Server
-bounds headers/body/listing before reading. Chunking is module protocol,
+Values are typed settings with finite hard bounds; changes rerun S10. The
+[transfer settings](../features/motor/storage-objects.md#transfer-bounds) define
+the environment schema; the pressure integration fixture checks admission and
+connection reuse. WALK-STORAGE-LOAD remains the deployed RSS/log acceptance
+receipt. Server bounds headers/body/listing before reading. Chunking is module protocol,
 not task-facing S3 multipart; objects commit only after every chunk/hash check.
 Reserve declared bytes transactionally against quota before accepting chunks;
 count actual bytes, reject surplus early. An upload ID cannot be reused to

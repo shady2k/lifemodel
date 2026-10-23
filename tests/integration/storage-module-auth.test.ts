@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createServer, request, type Server } from 'node:https';
 import { createStorageModule } from '../../loader/src/storage-module-app.js';
 import { createCatalog } from '../../loader/src/storage-catalog.js';
@@ -24,6 +24,8 @@ let apiServer: string;
 let tokenFile: string;
 let caFile: string;
 let access: ReturnType<typeof createStorageAccess>;
+const accessInstances = new Set<ReturnType<typeof createStorageAccess>>();
+const identities = new Set<ReturnType<typeof createKubernetesStorageIdentity>>();
 let invalid = false;
 let audienceWrong = false;
 let missingBoundUid = false;
@@ -87,6 +89,8 @@ function deferred() {
 
 beforeAll(async () => {
   stores = await createTestStores();
+  stores.postgres.on('error', () => undefined);
+  stores.postgres.on('connect', (client) => client.on('error', () => undefined));
   await applyTestMigrations(stores.postgres);
   certificate = await createStorageCertificate(['localhost']);
   root = mkdtempSync(join(tmpdir(), 'storage-identity-'));
@@ -212,12 +216,25 @@ afterAll(async () => {
   await stores.postgres.end();
   await stores.redis.quit();
 });
-function makeAccess(connectionString = workerDatabaseUrl()) {
-  return createStorageAccess({
-    connectionString,
-    identity: createKubernetesStorageIdentity({ apiServer, tokenFile, caFile }),
-  });
+function makeIdentity(options: Parameters<typeof createKubernetesStorageIdentity>[0]) {
+  const identity = createKubernetesStorageIdentity(options);
+  identities.add(identity);
+  return identity;
 }
+function makeAccess(connectionString = workerDatabaseUrl()) {
+  const instance = createStorageAccess({
+    connectionString,
+    identity: makeIdentity({ apiServer, tokenFile, caFile }),
+  });
+  accessInstances.add(instance);
+  return instance;
+}
+afterEach(async () => {
+  await Promise.all([...accessInstances].map((instance) => instance.close?.()));
+  accessInstances.clear();
+  for (const identity of identities) identity.close?.();
+  identities.clear();
+});
 beforeEach(async () => {
   invalid = audienceWrong = missingBoundUid = podDeleting = jobMissing = apiDown = false;
   podUid = 'pod-a';
@@ -355,7 +372,7 @@ describe('fresh task identity and independent SQL authorization', () => {
     'classifies %s as identity unavailable, never a permission denial',
     async (_case, kind, status, path) => {
       apiFailure = { kind, status, path };
-      const identity = createKubernetesStorageIdentity({
+      const identity = makeIdentity({
         apiServer,
         tokenFile,
         caFile,

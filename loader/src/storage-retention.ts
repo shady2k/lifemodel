@@ -6,6 +6,7 @@ import {
   STORAGE_READ_LEASE_MS,
 } from './storage-maintenance.js';
 import { Pool, type PoolClient, type QueryResultRow } from 'pg';
+import { storageSqlCompletion, withStorageSqlClient } from './storage-control-work.js';
 import { StorageAccessError } from './storage-access-error.js';
 import type { StorageObjectS3 } from './storage-object-s3.js';
 import type { LoaderLogger } from './logger.js';
@@ -27,10 +28,13 @@ interface Options {
 }
 export interface StorageRetention {
   snapshot(client: PoolClient, space: string, terminalAt?: number): Promise<void>;
-  pending(input: { limit?: number; cursor?: string }): Promise<Record<string, unknown>>;
-  warningCommitted(input: unknown): Promise<Record<string, unknown>>;
-  policy(input: unknown): Promise<Record<string, unknown>>;
-  reclaim(input: unknown): Promise<Record<string, unknown>>;
+  pending(
+    input: { limit?: number; cursor?: string },
+    signal?: AbortSignal
+  ): Promise<Record<string, unknown>>;
+  warningCommitted(input: unknown, signal?: AbortSignal): Promise<Record<string, unknown>>;
+  policy(input: unknown, signal?: AbortSignal): Promise<Record<string, unknown>>;
+  reclaim(input: unknown, signal?: AbortSignal): Promise<Record<string, unknown>>;
   runOnce(): Promise<void>;
   start(): void;
   check(signal: AbortSignal): Promise<boolean>;
@@ -88,30 +92,40 @@ export function createStorageRetention(options: Options): StorageRetention {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let running: Promise<void> | undefined;
   let sweepCursor: string | undefined;
-  async function tx<T>(run: (client: PoolClient) => Promise<T>, write = true): Promise<T> {
-    const client = await pool.connect().catch(() => fail(503, 'catalog_unavailable'));
-    let broken = false;
-    const onError = () => {
-      broken = true;
-    };
-    client.on('error', onError);
+  async function tx<T>(
+    run: (client: PoolClient) => Promise<T>,
+    write = true,
+    signal?: AbortSignal
+  ): Promise<T> {
     try {
-      await client.query('BEGIN');
-      await storageMaintenanceFence(client, write);
-      const result = await run(client);
-      if (broken) fail(503, 'catalog_unavailable');
-      await client.query('COMMIT');
-      return result;
+      return await withStorageSqlClient(
+        pool,
+        options.connectionString,
+        signal,
+        async (client, retire) => {
+          try {
+            await client.query('BEGIN');
+            await storageMaintenanceFence(client, write);
+            const result = await run(client);
+            signal?.throwIfAborted();
+            await storageSqlCompletion(client, 'COMMIT', retire);
+            return result;
+          } catch (error) {
+            if (!signal?.aborted)
+              await storageSqlCompletion(client, 'ROLLBACK', retire).catch(() => undefined);
+            throw error;
+          }
+        }
+      );
     } catch (error) {
-      await client.query('ROLLBACK').catch(() => undefined);
       if (error instanceof StorageAccessError) throw error;
       if (typeof error === 'object' && error && 'code' in error && error.code === '53000')
         fail(507, 'capacity_exhausted');
       fail(503, 'catalog_unavailable');
-    } finally {
-      client.removeListener('error', onError);
-      client.release(broken);
     }
+  }
+  function requestTransaction(signal: AbortSignal | undefined) {
+    return <T>(run: (client: PoolClient) => Promise<T>, write = true) => tx(run, write, signal);
   }
   /** SQL sessions serialize healthy contenders, but cannot fence S3 after loss.
    * DELETE is at-least-once and idempotent: private immutable random keys are
@@ -611,7 +625,9 @@ export function createStorageRetention(options: Options): StorageRetention {
         [space, setting.retention, setting.revision, terminalAt]
       );
     },
-    pending: async ({ limit = 100, cursor }) => {
+    pending: async ({ limit = 100, cursor }, signal) => {
+      signal?.throwIfAborted();
+      const tx = requestTransaction(signal);
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) fail(400, 'invalid_request');
       let sequence = '0';
       if (cursor !== undefined) {
@@ -654,7 +670,9 @@ export function createStorageRetention(options: Options): StorageRetention {
         };
       });
     },
-    warningCommitted: async (value) => {
+    warningCommitted: async (value, signal) => {
+      signal?.throwIfAborted();
+      const tx = requestTransaction(signal);
       const raw = record(value);
       fields(raw, ['planId', 'messageId']);
       const planId = id(raw['planId']),
@@ -687,7 +705,9 @@ export function createStorageRetention(options: Options): StorageRetention {
         return receipt;
       });
     },
-    policy: async (value) => {
+    policy: async (value, signal) => {
+      signal?.throwIfAborted();
+      const tx = requestTransaction(signal);
       const raw = record(value);
       const operation = raw['operation'];
       if (!['pin', 'unpin', 'retention'].includes(String(operation))) fail(400, 'invalid_request');
@@ -751,7 +771,9 @@ export function createStorageRetention(options: Options): StorageRetention {
         return receipt;
       });
     },
-    reclaim: async (value) => {
+    reclaim: async (value, signal) => {
+      signal?.throwIfAborted();
+      const tx = requestTransaction(signal);
       const raw = record(value);
       fields(raw, ['effectKey', 'bytes']);
       const effect = id(raw['effectKey']);
@@ -789,11 +811,15 @@ export function createStorageRetention(options: Options): StorageRetention {
     check: async (signal) => {
       try {
         if (signal.aborted) return false;
-        await tx(async (client) => {
-          await client.query(
-            'SELECT p.space_id,c.plan_id,r.effect_key,l.id,o.s3_key,t.object_id,rl.id FROM storage.retention_policies p,storage.deletion_candidates c,storage.deletion_plans d,storage.retention_receipts r,storage.instance_ledger l,storage.orphan_gc o,storage.retention_tombstones t,storage.read_leases rl,storage.attempt_gc ag,storage.reclaim_receipts rr WHERE false'
-          );
-        }, false);
+        await tx(
+          async (client) => {
+            await client.query(
+              'SELECT p.space_id,c.plan_id,r.effect_key,l.id,o.s3_key,t.object_id,rl.id FROM storage.retention_policies p,storage.deletion_candidates c,storage.deletion_plans d,storage.retention_receipts r,storage.instance_ledger l,storage.orphan_gc o,storage.retention_tombstones t,storage.read_leases rl,storage.attempt_gc ag,storage.reclaim_receipts rr WHERE false'
+            );
+          },
+          false,
+          signal
+        );
         return !signal.aborted;
       } catch {
         return false;

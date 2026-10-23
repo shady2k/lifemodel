@@ -21,6 +21,7 @@ let identity: Awaited<ReturnType<typeof storageObjectIdentity>>;
 let backend: Awaited<ReturnType<typeof createFakeStorageS3>>;
 let app: ReturnType<typeof createStorageModule>;
 let objects: ReturnType<typeof createStorageObjects>;
+let access: ReturnType<typeof createStorageAccess>;
 let s3: ReturnType<typeof createStorageObjectS3>;
 let port: number;
 
@@ -133,7 +134,7 @@ beforeEach(async ({ task }) => {
   );
   backend.reset();
   identity.setReviewHook(undefined);
-  const access = createStorageAccess({
+  access = createStorageAccess({
     connectionString: workerDatabaseUrl(),
     identity: identity.identity,
   });
@@ -164,6 +165,7 @@ afterEach(async () => {
   app.control.close();
   app.read.close();
   await objects.close();
+  await access.close();
   s3.close();
   await stores.postgres.query('DROP TRIGGER IF EXISTS reject_object ON storage.objects');
   await stores.postgres.query('DROP TRIGGER IF EXISTS notify_release ON storage.space_quota');

@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { Pool } from 'pg';
 import { storageMaintenanceFence } from './storage-maintenance.js';
+import { withStorageSqlClient, storageSqlCompletion } from './storage-control-work.js';
 import { StorageAccessError } from './storage-access-error.js';
 
 export const STORAGE_UPLOAD_OWNER_STALE_MS = 60_000;
@@ -85,42 +86,43 @@ export function createStorageUploadOwner(options: {
       check();
       // UPDATE takes the same owner row lock as begin and reclamation. A stale
       // row can never be revived, even after a long outage or a lock wait.
-      const client = await pool.connect();
       let renewed = false;
-      try {
-        await client.query('BEGIN');
-        if (!(await storageMaintenanceFence(client, false))) {
-          await client.query('COMMIT');
-          client.release();
-          return;
+      let held = false;
+      await withStorageSqlClient(
+        pool,
+        options.connectionString,
+        undefined,
+        async (client, retire) => {
+          try {
+            await client.query('BEGIN');
+            if (!(await storageMaintenanceFence(client, false))) {
+              held = true;
+              await storageSqlCompletion(client, 'COMMIT', retire);
+              return;
+            }
+            await client.query(
+              'SELECT boot_id FROM storage.upload_owners WHERE boot_id=$1 FOR UPDATE',
+              [bootId]
+            );
+            check();
+            // Test freshness AFTER obtaining the row lock. A predicate evaluated
+            // before a lock wait could otherwise resurrect a boot that just expired.
+            const result = await client.query(
+              `UPDATE storage.upload_owners SET heartbeat_at=clock_timestamp()
+             WHERE boot_id=$1 AND heartbeat_at>clock_timestamp()-interval '60 seconds'
+             RETURNING boot_id`,
+              [bootId]
+            );
+            renewed = result.rowCount === 1;
+            check();
+            await storageSqlCompletion(client, 'COMMIT', retire);
+          } catch (error) {
+            await storageSqlCompletion(client, 'ROLLBACK', retire).catch(() => undefined);
+            throw error;
+          }
         }
-        await client.query(
-          'SELECT boot_id FROM storage.upload_owners WHERE boot_id=$1 FOR UPDATE',
-          [bootId]
-        );
-        check();
-        // Test freshness AFTER obtaining the row lock. A predicate evaluated
-        // before a lock wait could otherwise resurrect a boot that just expired.
-        const result = await client.query(
-          `UPDATE storage.upload_owners SET heartbeat_at=clock_timestamp()
-           WHERE boot_id=$1 AND heartbeat_at>clock_timestamp()-interval '60 seconds'
-           RETURNING boot_id`,
-          [bootId]
-        );
-        renewed = result.rowCount === 1;
-        check();
-        await client.query('COMMIT');
-      } catch (error) {
-        try {
-          await client.query('ROLLBACK');
-        } catch {
-          client.release(true);
-          throw error;
-        }
-        client.release();
-        throw error;
-      }
-      client.release();
+      );
+      if (held) return;
       check();
       if (!renewed) {
         fail();
@@ -142,23 +144,27 @@ export function createStorageUploadOwner(options: {
     lastRenewalStart = started;
     armWatchdog();
     try {
-      const client = await pool.connect();
       let writable = false;
-      try {
-        await client.query('BEGIN');
-        writable = await storageMaintenanceFence(client, false);
-        if (writable)
-          await client.query(
-            'INSERT INTO storage.upload_owners(boot_id,heartbeat_at) VALUES($1,clock_timestamp())',
-            [bootId]
-          );
-        await client.query('COMMIT');
-      } catch (error) {
-        await client.query('ROLLBACK').catch(() => undefined);
-        throw error;
-      } finally {
-        client.release();
-      }
+      await withStorageSqlClient(
+        pool,
+        options.connectionString,
+        undefined,
+        async (client, retire) => {
+          try {
+            await client.query('BEGIN');
+            writable = await storageMaintenanceFence(client, false);
+            if (writable)
+              await client.query(
+                'INSERT INTO storage.upload_owners(boot_id,heartbeat_at) VALUES($1,clock_timestamp())',
+                [bootId]
+              );
+            await storageSqlCompletion(client, 'COMMIT', retire);
+          } catch (error) {
+            await storageSqlCompletion(client, 'ROLLBACK', retire).catch(() => undefined);
+            throw error;
+          }
+        }
+      );
       if (!writable) return;
       check();
       initialized = true;
@@ -175,32 +181,32 @@ export function createStorageUploadOwner(options: {
     // initialization can still insert a fresh row after the local abort.
     await Promise.allSettled([initialization, pendingRenewal]);
     if (closed) throw unavailable();
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      await client.query('SELECT boot_id FROM storage.upload_owners WHERE boot_id=$1 FOR UPDATE', [
-        bootId,
-      ]);
-      // Use the retirement predicate AFTER obtaining its same row lock. Local
-      // elapsed time cannot prove that a cross-process heartbeat has expired.
-      const result = await client.query<{ fresh: boolean }>(
-        `SELECT heartbeat_at>clock_timestamp()-interval '60 seconds' AS fresh
-         FROM storage.upload_owners WHERE boot_id=$1`,
-        [bootId]
-      );
-      if (result.rows[0]?.fresh) throw unavailable();
-      await client.query('COMMIT');
-    } catch {
-      try {
-        await client.query('ROLLBACK');
-      } catch {
-        client.release(true);
-        throw unavailable();
+    await withStorageSqlClient(
+      pool,
+      options.connectionString,
+      undefined,
+      async (client, retire) => {
+        try {
+          await client.query('BEGIN');
+          await client.query(
+            'SELECT boot_id FROM storage.upload_owners WHERE boot_id=$1 FOR UPDATE',
+            [bootId]
+          );
+          // Use the retirement predicate AFTER obtaining its same row lock. Local
+          // elapsed time cannot prove that a cross-process heartbeat has expired.
+          const result = await client.query<{ fresh: boolean }>(
+            `SELECT heartbeat_at>clock_timestamp()-interval '60 seconds' AS fresh
+           FROM storage.upload_owners WHERE boot_id=$1`,
+            [bootId]
+          );
+          if (result.rows[0]?.fresh) throw unavailable();
+          await storageSqlCompletion(client, 'COMMIT', retire);
+        } catch (error) {
+          await storageSqlCompletion(client, 'ROLLBACK', retire).catch(() => undefined);
+          throw error;
+        }
       }
-      client.release();
-      throw unavailable();
-    }
-    client.release();
+    );
     if (closed) throw unavailable();
     // The old identity is never revived. Its attempts retain their aborted
     // signal and remain subject to the durable staleness rule during cleanup.

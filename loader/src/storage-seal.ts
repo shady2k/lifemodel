@@ -1,5 +1,6 @@
 /** Module-owned allocation, verified binding and replayable seal. No caller SQL. */
 import { Pool, type PoolClient, type QueryResultRow } from 'pg';
+import { storageSqlCompletion, withStorageSqlClient } from './storage-control-work.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   storageMaintenanceFence,
@@ -66,9 +67,9 @@ interface Operation extends QueryResultRow {
   checksum_recovery: boolean;
 }
 export interface StorageSeal {
-  allocate(input: unknown): Promise<Record<string, unknown>>;
-  bind(input: unknown): Promise<Record<string, unknown>>;
-  seal(input: unknown): Promise<Record<string, unknown>>;
+  allocate(input: unknown, signal?: AbortSignal): Promise<Record<string, unknown>>;
+  bind(input: unknown, signal?: AbortSignal): Promise<Record<string, unknown>>;
+  seal(input: unknown, signal?: AbortSignal): Promise<Record<string, unknown>>;
   openCoreStream(input: {
     token: string;
     space: string;
@@ -106,7 +107,8 @@ function required<T>(value: T | undefined): T {
 }
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 export function createStorageSeal(options: Options): StorageSeal {
-  const boundedSignal = (ms: number) => AbortSignal.timeout(ms);
+  const boundedSignal = (ms: number, signal?: AbortSignal) =>
+    AbortSignal.any([AbortSignal.timeout(ms), ...(signal ? [signal] : [])]);
   const pool = new Pool({
     connectionString: options.connectionString,
     max: 4,
@@ -181,33 +183,38 @@ export function createStorageSeal(options: Options): StorageSeal {
   async function tx<T>(
     run: (client: PoolClient, writable: boolean) => Promise<T>,
     write = true,
-    connectionPool = pool
+    connectionPool = pool,
+    signal?: AbortSignal
   ): Promise<T> {
-    let client: PoolClient | undefined;
-    let broken = false;
-    const onError = () => {
-      broken = true;
-    };
     try {
-      client = await connectionPool.connect();
-      client.on('error', onError);
-      await client.query('BEGIN');
-      const writable = await storageMaintenanceFence(client, write);
-      const result = await run(client, writable);
-      if (broken) fail(503, 'catalog_unavailable');
-      await client.query('COMMIT');
-      return result;
+      return await withStorageSqlClient(
+        connectionPool,
+        options.connectionString,
+        signal,
+        async (client, retire) => {
+          try {
+            await client.query('BEGIN');
+            const writable = await storageMaintenanceFence(client, write);
+            const result = await run(client, writable);
+            signal?.throwIfAborted();
+            await storageSqlCompletion(client, 'COMMIT', retire);
+            return result;
+          } catch (error) {
+            if (!signal?.aborted)
+              await storageSqlCompletion(client, 'ROLLBACK', retire).catch(() => undefined);
+            throw error;
+          }
+        }
+      );
     } catch (error) {
-      await client?.query('ROLLBACK').catch(() => undefined);
-      // Cleanup owns its one sanitized warning and must retain the original
-      // SQLSTATE. Do not convert/log twice before cleanLeases handles it.
       if (error instanceof StorageAccessError || connectionPool === cleanupPool) throw error;
       logSqlFailure(error, 1, 'Storage seal SQL failed');
       return fail(503, 'catalog_unavailable');
-    } finally {
-      client?.removeListener('error', onError);
-      client?.release(broken);
     }
+  }
+  function requestTransaction(signal: AbortSignal | undefined) {
+    return <T>(run: (client: PoolClient, writable: boolean) => Promise<T>, write = true) =>
+      tx(run, write, pool, signal);
   }
   async function key(
     client: PoolClient,
@@ -332,7 +339,9 @@ export function createStorageSeal(options: Options): StorageSeal {
     return required(result.rows[0]);
   }
   const api: StorageSeal = {
-    allocate: async (value) => {
+    allocate: async (value, signal) => {
+      signal?.throwIfAborted();
+      const tx = requestTransaction(signal);
       const raw = input(value, ['taskId', 'launchId', 'effectKey', 'retentionRevision']);
       const request = {
         taskId: required(raw['taskId']),
@@ -384,7 +393,9 @@ export function createStorageSeal(options: Options): StorageSeal {
         return receipt;
       });
     },
-    bind: async (value) => {
+    bind: async (value, signal) => {
+      signal?.throwIfAborted();
+      const tx = requestTransaction(signal);
       const raw = input(value, ['space', 'taskId', 'attemptId', 'launchId', 'effectKey']);
       const request = {
         space: required(raw['space']),
@@ -430,12 +441,15 @@ export function createStorageSeal(options: Options): StorageSeal {
           ).rows[0]
       );
       if (!projection?.pod_name || !projection.job_name) fail(403, 'binding_denied');
-      await options.access.identity.verifyBinding({
-        podName: projection.pod_name,
-        jobName: projection.job_name,
-        podUid: projection.pod_uid,
-        jobUid: projection.job_uid,
-      });
+      await options.access.identity.verifyBinding(
+        {
+          podName: projection.pod_name,
+          jobName: projection.job_name,
+          podUid: projection.pod_uid,
+          jobUid: projection.job_uid,
+        },
+        signal
+      );
       return tx(async (client) => {
         await key(client, 'bind', request.effectKey);
         const saved = await replay(client, 'bind_receipts', request.effectKey, request);
@@ -521,7 +535,9 @@ export function createStorageSeal(options: Options): StorageSeal {
         return receipt;
       });
     },
-    seal: async (value) => {
+    seal: async (value, signal) => {
+      signal?.throwIfAborted();
+      const tx = requestTransaction(signal);
       const raw = input(value, ['space', 'effectKey', 'expectedRevision', 'outcome']);
       const request = {
         space: required(raw['space']),
@@ -541,10 +557,10 @@ export function createStorageSeal(options: Options): StorageSeal {
         return saved?.receipt;
       });
       if (savedReceipt) return savedReceipt;
-      if (request.outcome !== 'stopped') await options.access.quiesceSpace(request.space);
+      if (request.outcome !== 'stopped') await options.access.quiesceSpace(request.space, signal);
       let op = await tx((client) => operation(client, request));
-      await options.access.settleSpace(request.space);
-      await options.s3.settle(request.space, boundedSignal(5000));
+      await options.access.settleSpace(request.space, signal);
+      await options.s3.settle(request.space, boundedSignal(5000, signal));
       if (op.state === 'frozen') {
         const objects: Marked[] = [];
         const excluded: (Marked & { reason: 'checksum_mismatch' })[] = [];
@@ -564,7 +580,7 @@ export function createStorageSeal(options: Options): StorageSeal {
               key,
               candidate.size,
               candidate.sha256,
-              boundedSignal(10000)
+              boundedSignal(10000, signal)
             );
             objects.push(marked);
           } catch (error) {
@@ -660,7 +676,7 @@ export function createStorageSeal(options: Options): StorageSeal {
           });
           if (!ready) fail(503, 'cleanup_pending');
           try {
-            await options.s3.delete(request.space, entry.s3_key, boundedSignal(10000));
+            await options.s3.delete(request.space, entry.s3_key, boundedSignal(10000, signal));
           } catch {
             fail(503, 'cleanup_pending');
           }
@@ -835,11 +851,16 @@ export function createStorageSeal(options: Options): StorageSeal {
     check: async (signal) => {
       try {
         if (signal.aborted) return false;
-        await tx(async (client) => {
-          await client.query(
-            'SELECT r.receipt FROM storage.seal_receipts r,storage.allocations a,storage.allocate_receipts ar,storage.bindings b,storage.bind_receipts br,storage.seal_operations o,storage.seal_manifests m,storage.seal_gc g,storage.object_tombstones t WHERE false'
-          );
-        }, false);
+        await tx(
+          async (client) => {
+            await client.query(
+              'SELECT r.receipt FROM storage.seal_receipts r,storage.allocations a,storage.allocate_receipts ar,storage.bindings b,storage.bind_receipts br,storage.seal_operations o,storage.seal_manifests m,storage.seal_gc g,storage.object_tombstones t WHERE false'
+            );
+          },
+          false,
+          pool,
+          signal
+        );
         return !signal.aborted;
       } catch {
         return false;

@@ -63,6 +63,62 @@ async function put(
 }
 
 describe('the module private S3 byte backend', () => {
+  it('keeps GET independent of the fully occupied forty-socket PUT pool', async () => {
+    const { server, client } = await setup({ timeoutMs: 10_000 });
+    const bytes = Buffer.from('readable');
+    await put(client, bytes, 'readable');
+    const controllers = Array.from({ length: 40 }, () => new AbortController());
+    let entered = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const uploads = controllers.map((controller, n) =>
+      client
+        .put(
+          `space-${n}`,
+          `held-${n}`,
+          bytes.length,
+          hash(bytes),
+          (async function* () {
+            entered++;
+            await gate;
+            controller.signal.throwIfAborted();
+            yield bytes;
+          })(),
+          controller.signal,
+          dispatch
+        )
+        .catch(() => undefined)
+    );
+    try {
+      await expect.poll(() => entered).toBe(40);
+      // Wait for real socket assignment, not only source entry or the configured
+      // read-pool limit. A GET routed to the unchanged forty-socket PUT agent
+      // must queue here even if telemetry still labels that request as a read.
+      await expect.poll(() => client.transportSnapshot().put.sockets).toBe(40);
+      expect(client.transportSnapshot().put.limit).toBe(40);
+      const started = performance.now();
+      const body = await client.get(
+        'reader',
+        'readable',
+        0,
+        bytes.length - 1,
+        AbortSignal.timeout(1000)
+      );
+      expect(performance.now() - started).toBeLessThan(500);
+      expect((await read(body)).equals(bytes)).toBe(true);
+      expect(server.requests.some((request) => request.method === 'GET')).toBe(true);
+    } finally {
+      controllers.forEach((controller) => controller.abort());
+      release();
+      await Promise.all(uploads);
+    }
+    // A queued, canceled request can need the adapter's five-second transport
+    // settlement deadline. Preserve that specific failure instead of masking
+    // it with Vitest's default five-second test timeout.
+  }, 15_000);
+
   it('settles only the selected space while another space has an open upload', async () => {
     const { client } = await setup();
     const bytes = Buffer.from('held upload');
@@ -201,7 +257,8 @@ describe('the module private S3 byte backend', () => {
     );
     expect(fixture.server.requests[1]?.headers['x-amz-checksum-mode']).toBe('ENABLED');
     expect(fixture.reads).toBe(2);
-    expect(fixture.server.connections).toBe(1);
+    // PUT and checksum HEAD have independent bounded transport pools.
+    expect(fixture.server.connections).toBe(2);
   });
   it('never overwrites an immutable private key', async () => {
     const { client, server } = await setup();

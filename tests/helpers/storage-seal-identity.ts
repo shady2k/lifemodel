@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createStorageCertificate } from './storage-certificate.js';
 
-export async function createSealIdentity() {
+export async function createSealIdentity(taskSpaces: string[] = ['a', 'b']) {
   const certificate = await createStorageCertificate(['localhost']);
   const root = await mkdtemp(join(tmpdir(), 'storage-seal-identity-'));
   const tokenFile = join(root, 'token');
@@ -48,6 +48,15 @@ export async function createSealIdentity() {
       audience: 'lifemodel-web-storage-read',
     },
   };
+  for (const space of taskSpaces)
+    Object.assign(tokens, {
+      [space]: {
+        namespace: 'lifemodel-motor',
+        account: 'task',
+        pod: space,
+        audience: 'lifemodel-task-storage',
+      },
+    });
   const api = createServer({ cert: certificate.cert, key: certificate.key }, (req, res) => {
     req.on('error', () => undefined);
     res.on('error', () => undefined);
@@ -86,7 +95,7 @@ export async function createSealIdentity() {
           res.end();
           return;
         }
-        const task = name === 'a' || name === 'b';
+        const task = taskSpaces.includes(name);
         value = {
           metadata: {
             name,

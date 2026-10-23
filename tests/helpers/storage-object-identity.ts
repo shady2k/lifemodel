@@ -81,13 +81,14 @@ export async function storageObjectIdentity() {
   await new Promise<void>((resolve) => api.listen(0, '127.0.0.1', resolve));
   const address = api.address();
   if (!address || typeof address === 'string') throw Error('no API');
+  const identity = createKubernetesStorageIdentity({
+    apiServer: `https://localhost:${address.port}`,
+    tokenFile,
+    caFile,
+  });
   return {
     certificate,
-    identity: createKubernetesStorageIdentity({
-      apiServer: `https://localhost:${address.port}`,
-      tokenFile,
-      caFile,
-    }),
+    identity,
     get reviews() {
       return reviews;
     },
@@ -95,6 +96,7 @@ export async function storageObjectIdentity() {
       onReview = hook;
     },
     async close() {
+      identity.close();
       api.closeAllConnections();
       await new Promise<void>((resolve) => api.close(() => resolve()));
       certificate.cleanup();

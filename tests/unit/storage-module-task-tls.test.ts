@@ -1,5 +1,24 @@
 import { createStorageAccess } from '../../loader/src/storage-access.js';
 import { createKubernetesStorageIdentity } from '../../loader/src/storage-identity.js';
+
+const accessInstances = new Set<ReturnType<typeof createStorageAccess>>();
+const identityInstances = new Set<ReturnType<typeof createKubernetesStorageIdentity>>();
+function trackedAccess(options: Parameters<typeof createStorageAccess>[0]) {
+  const access = createStorageAccess(options);
+  accessInstances.add(access);
+  return access;
+}
+function trackedIdentity() {
+  const identity = createKubernetesStorageIdentity();
+  identityInstances.add(identity);
+  return identity;
+}
+async function closeAccess() {
+  await Promise.all([...accessInstances].map((access) => access.close()));
+  accessInstances.clear();
+  for (const identity of identityInstances) identity.close();
+  identityInstances.clear();
+}
 import { createTestStores, workerDatabaseUrl, type TestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
 /**
@@ -44,7 +63,8 @@ afterAll(async () => {
   await stores.postgres.end();
   await stores.redis.quit();
 });
-afterEach(() => {
+afterEach(async () => {
+  await closeAccess();
   for (const server of servers.splice(0)) {
     server.closeAllConnections();
     server.close();
@@ -79,9 +99,9 @@ async function fixture(read?: () => Promise<{ cert: string; key: string }>) {
   const lines: RecordedLine[] = [];
   const clock = manualTimers();
   const app = createStorageModule({
-    access: createStorageAccess({
+    access: trackedAccess({
       connectionString: workerDatabaseUrl(),
-      identity: createKubernetesStorageIdentity(),
+      identity: trackedIdentity(),
     }),
     bucket: STORAGE_BUCKET,
     catalog: { check: () => Promise.resolve({ ok: true }) },

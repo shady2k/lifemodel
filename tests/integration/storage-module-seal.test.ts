@@ -401,9 +401,10 @@ describe('module-owned allocation, verified binding and marked core reads', () =
       bucket: backend.bucket,
       custody: { read: async () => backend.credentials },
     });
+    const proof = createKubernetesStorageIdentity(identity.options);
     const access = createStorageAccess({
       connectionString: workerDatabaseUrl(),
-      identity: createKubernetesStorageIdentity(identity.options),
+      identity: proof,
     });
     const seal = createStorageSeal({ connectionString: workerDatabaseUrl(), s3, access });
     const stream = seal.openCoreStream({ token: 'coreRead', space: spaces.a });
@@ -423,6 +424,8 @@ describe('module-owned allocation, verified binding and marked core reads', () =
     } finally {
       stream.close();
       await seal.close();
+      await access.close();
+      proof.close();
       s3.close();
     }
   });

@@ -1,5 +1,24 @@
 import { createStorageAccess } from '../../loader/src/storage-access.js';
 import { createKubernetesStorageIdentity } from '../../loader/src/storage-identity.js';
+
+const accessInstances = new Set<ReturnType<typeof createStorageAccess>>();
+const identityInstances = new Set<ReturnType<typeof createKubernetesStorageIdentity>>();
+function trackedAccess(options: Parameters<typeof createStorageAccess>[0]) {
+  const access = createStorageAccess(options);
+  accessInstances.add(access);
+  return access;
+}
+function trackedIdentity() {
+  const identity = createKubernetesStorageIdentity();
+  identityInstances.add(identity);
+  return identity;
+}
+async function closeAccess() {
+  await Promise.all([...accessInstances].map((access) => access.close()));
+  accessInstances.clear();
+  for (const identity of identityInstances) identity.close();
+  identityInstances.clear();
+}
 import { createTestStores, workerDatabaseUrl, type TestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
 /**
@@ -45,6 +64,7 @@ afterAll(async () => {
   await stores.redis.quit();
 });
 afterEach(async () => {
+  await closeAccess();
   for (const server of servers.splice(0)) {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -74,9 +94,9 @@ async function fixture(
     },
   };
   const app = createStorageModule({
-    access: createStorageAccess({
+    access: trackedAccess({
       connectionString: workerDatabaseUrl(),
-      identity: createKubernetesStorageIdentity(),
+      identity: trackedIdentity(),
     }),
     bucket: STORAGE_BUCKET,
     catalog,
@@ -223,9 +243,9 @@ describe('the storage module status listener', () => {
     };
     const lines: RecordedLine[] = [];
     const app = createStorageModule({
-      access: createStorageAccess({
+      access: trackedAccess({
         connectionString: workerDatabaseUrl(),
-        identity: createKubernetesStorageIdentity(),
+        identity: trackedIdentity(),
       }),
       bucket: STORAGE_BUCKET,
       catalog: { check: () => Promise.resolve({ ok: true }) },
@@ -297,9 +317,9 @@ describe('the storage module status listener', () => {
 
 describe('storage stream quiescence', () => {
   it('waits for writers by default but not for task readers', async () => {
-    const access = createStorageAccess({
+    const access = trackedAccess({
       connectionString: workerDatabaseUrl(),
-      identity: createKubernetesStorageIdentity(),
+      identity: trackedIdentity(),
     });
     const reader = access.openTaskStream({ token: 'unused', space: 'reader-space', write: false });
     const writer = access.openTaskStream({ token: 'unused', space: 'writer-space' });
@@ -321,9 +341,9 @@ describe('storage stream quiescence', () => {
   });
 
   it('still cancels and settles task readers after the freeze', async () => {
-    const access = createStorageAccess({
+    const access = trackedAccess({
       connectionString: workerDatabaseUrl(),
-      identity: createKubernetesStorageIdentity(),
+      identity: trackedIdentity(),
     });
     const reader = access.openTaskStream({ token: 'unused', space: 'reader-space', write: false });
     const pending = access.settleSpace('reader-space');

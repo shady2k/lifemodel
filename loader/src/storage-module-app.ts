@@ -20,7 +20,8 @@ import type { S3Check } from './storage-s3.js';
 import type { StorageObjects } from './storage-objects.js';
 import type { StorageSeal } from './storage-seal.js';
 import type { StorageRetention } from './storage-retention.js';
-import { STORAGE_CORE_READ_PROGRESS_MS, type StorageMaintenance } from './storage-maintenance.js';
+import { type StorageMaintenance } from './storage-maintenance.js';
+import { createStorageAdmission, type StorageAdmission } from './storage-admission.js';
 
 /** The mounted instance-CA leaf: read at start, then re-read on every reload. */
 export interface StorageTaskTlsOptions {
@@ -41,6 +42,7 @@ export interface StorageTaskListener {
 
 export interface StorageModuleOptions {
   bucket: string;
+  admission?: StorageAdmission;
   /** Required authority: readiness and every data operation fail closed. */
   access: StorageAccess;
   /** Task object adapter. Absent only in identity/health-only fixtures. */
@@ -79,6 +81,7 @@ export const STORAGE_TASK_TLS_DEFAULTS = { reloadMs: 60_000 } as const;
 const JSON_HEADERS = { 'content-type': 'application/json', 'cache-control': 'no-store' };
 
 export function createStorageModule(options: StorageModuleOptions): StorageModule {
+  const admission = options.admission ?? createStorageAdmission();
   let custodyCode: string | null = null;
 
   /**
@@ -100,7 +103,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
     const catalog = await checkCatalog(signal);
     if (!catalog.ok) return catalog;
     if (options.maintenance) {
-      const hold = await options.maintenance.status();
+      const hold = await options.maintenance.status(signal);
       if (hold.purpose === 'restore' && hold.state !== 'normal')
         return { ok: false, code: 'catalog_unavailable', cause: 'restore_pending' };
     }
@@ -165,11 +168,19 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
   }
 
   const status = createServer((req, res) => {
-    void answer(req, res);
+    req.on('error', () => undefined);
+    res.on('error', () => undefined);
+    void answer(req, res).catch(() => {
+      res.destroy();
+    });
   });
+  status.on('connection', (socket) => socket.on('error', () => undefined));
   const serve =
     (role: 'task' | 'control' | 'read') =>
     async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+      // Parsed HTTP request arrival, before routing/auth and apiserver TLS work.
+      // Later chunks get their own attempt budget; initial admission does not.
+      const initialDeadline = performance.now() + admission.settings.queueWaitMs;
       req.on('error', () => undefined);
       res.on('error', () => undefined);
       let space: string | null = null;
@@ -240,6 +251,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           if (!res.writableEnded) control.abort();
         };
         res.on('close', disconnected);
+        req.on('aborted', disconnected);
         // ADR-015 bounds absence of progress, not the whole transfer. Each
         // successful guarded dispatch/publication or backend chunk earns a fresh
         // budget; fragments alone do not keep a stalled chunk alive.
@@ -248,16 +260,34 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
         const progress = (): void => {
           if (signal.aborted) return;
           if (idle !== undefined) clearTimeout(idle);
-          idle = setTimeout(
-            () => {
-              control.abort();
-            },
-            maintenanceRoute ? 25_000 : STORAGE_CORE_READ_PROGRESS_MS
-          );
+          idle = setTimeout(() => {
+            control.abort();
+          }, admission.settings.chunkDeadlineMs);
           idle.unref();
         };
         progress();
+        // A silent partial body never advances its iterator. End the transport
+        // on the request's own deadline, not on the next body fragment.
+        const abortControl = (): void => {
+          req.destroy();
+          res.destroy();
+        };
+        if (role === 'control') signal.addEventListener('abort', abortControl, { once: true });
+        let lease: Awaited<ReturnType<StorageAdmission['acquire']>> | undefined;
         try {
+          // Object handlers reserve before allocating their own bounded chunks.
+          // Other routes reserve before identity/SQL/body work, not after it.
+          if (!objectMatch)
+            lease = await admission.acquire({
+              space: space ?? role,
+              role,
+              bytes: 0,
+              signal,
+              deadline: initialDeadline,
+              metadataBytes:
+                Buffer.byteLength(req.url ?? '') +
+                req.rawHeaders.reduce((sum, part) => sum + Buffer.byteLength(part) + 4, 128),
+            });
           let result: unknown;
           if (objectMatch?.[1] && options.objects) {
             const objectSpace = objectMatch[1];
@@ -317,7 +347,8 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
                         signal: AbortSignal.timeout(10_000),
                       }),
                 progress,
-                role === 'read'
+                role === 'read',
+                { admission, role: role === 'read' ? 'read' : 'task', initialDeadline }
               );
             } finally {
               stream.signal.removeEventListener('abort', abortInput);
@@ -338,7 +369,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
             const identity = await access.identity.verify(token, STORAGE_AUDIENCES[role], signal);
             if (role === 'read') result = { role: identity.role };
             else if (maintenanceRoute && options.maintenance && req.method === 'GET')
-              result = await options.maintenance.status();
+              result = await options.maintenance.status(signal);
             else if (retentionRoute && options.retention && req.method === 'GET') {
               const url = new URL(req.url ?? '', 'https://storage.invalid');
               if (
@@ -351,12 +382,15 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
               const limit = url.searchParams.get('limit');
               if (limit !== null && !/^[1-9][0-9]{0,2}$/.test(limit))
                 throw new StorageAccessError(400, 'invalid_request');
-              result = await options.retention.pending({
-                ...(limit === null ? {} : { limit: Number(limit) }),
-                ...(url.searchParams.has('cursor')
-                  ? { cursor: url.searchParams.get('cursor') ?? '' }
-                  : {}),
-              });
+              result = await options.retention.pending(
+                {
+                  ...(limit === null ? {} : { limit: Number(limit) }),
+                  ...(url.searchParams.has('cursor')
+                    ? { cursor: url.searchParams.get('cursor') ?? '' }
+                    : {}),
+                },
+                signal
+              );
             } else {
               let size = 0;
               const chunks: Buffer[] = [];
@@ -379,8 +413,8 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
               if (maintenanceRoute && options.maintenance) {
                 result =
                   req.url === '/maintenance/begin'
-                    ? await options.maintenance.begin(input)
-                    : await options.maintenance.release(input);
+                    ? await options.maintenance.begin(input, signal)
+                    : await options.maintenance.release(input, signal);
                 if (!signal.aborted && !res.destroyed && !res.writableEnded) {
                   res.writeHead(200, JSON_HEADERS);
                   res.end(JSON.stringify(result));
@@ -390,20 +424,23 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
               if (retentionRoute && options.retention) {
                 const route = req.url;
                 if (route === '/retention/warningCommitted')
-                  result = await options.retention.warningCommitted(input);
+                  result = await options.retention.warningCommitted(input, signal);
                 else if (route === '/retention/reclaim')
-                  result = await options.retention.reclaim(input);
+                  result = await options.retention.reclaim(input, signal);
                 else {
                   if ('operation' in input) throw new StorageAccessError(400, 'invalid_request');
-                  result = await options.retention.policy({
-                    ...input,
-                    operation:
-                      route === '/retention/policy'
-                        ? 'retention'
-                        : route === '/retention/pin'
-                          ? 'pin'
-                          : 'unpin',
-                  });
+                  result = await options.retention.policy(
+                    {
+                      ...input,
+                      operation:
+                        route === '/retention/policy'
+                          ? 'retention'
+                          : route === '/retention/pin'
+                            ? 'pin'
+                            : 'unpin',
+                    },
+                    signal
+                  );
                 }
                 if (!signal.aborted && !res.destroyed && !res.writableEnded) {
                   res.writeHead(200, JSON_HEADERS);
@@ -415,10 +452,10 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
                 const route = req.url;
                 result =
                   route === '/allocate'
-                    ? await options.seal.allocate(input)
+                    ? await options.seal.allocate(input, signal)
                     : route === '/bind'
-                      ? await options.seal.bind(input)
-                      : await options.seal.seal(input);
+                      ? await options.seal.bind(input, signal)
+                      : await options.seal.seal(input, signal);
                 const receipt = result as { id: string; space: string };
                 space = receipt.space;
                 options.logger.info(
@@ -452,7 +489,8 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
               const receipt = await access.revoke(
                 input['space'],
                 input['expectedRevision'],
-                input['effectKey']
+                input['effectKey'],
+                signal
               );
               result = receipt;
               options.logger.info(
@@ -466,8 +504,11 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
             res.end(JSON.stringify(result));
           }
         } finally {
+          lease?.release();
+          signal.removeEventListener('abort', abortControl);
           if (idle !== undefined) clearTimeout(idle);
           res.removeListener('close', disconnected);
+          req.removeListener('aborted', disconnected);
         }
       } catch (error) {
         const failure =
@@ -479,11 +520,14 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           'Storage request denied'
         );
         if (res.headersSent) {
-          res.destroy();
+          if (!res.writableEnded) res.destroy();
           return;
         }
         if (!res.destroyed && !res.writableEnded) {
-          res.writeHead(failure.status, JSON_HEADERS);
+          res.writeHead(failure.status, {
+            ...JSON_HEADERS,
+            ...(failure.status === 429 ? { 'retry-after': '1', connection: 'close' } : {}),
+          });
           res.end(JSON.stringify({ error: { id: failure.id, code: failure.code } }));
         }
       }
@@ -521,6 +565,7 @@ function createTaskListener(
   });
   server.maxHeadersCount = 32;
   server.on('clientError', (_error, socket) => {
+    socket.on('error', () => undefined);
     socket.destroy();
   });
   server.headersTimeout = 5_000;

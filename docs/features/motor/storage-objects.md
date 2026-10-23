@@ -34,4 +34,113 @@ Configuration is mounted by the trusted launcher, not credential flags: `LIFEMOD
 
 Stage 3 must copy the wrapper and compiled CLI modules into the Linux workbench image (with Node runtime), mount the audience-specific rotating token and CA-only trust, and set the module origin and allocated space. It must not mount module TLS private keys or signing credentials.
 
-No platform dependency changed: A0→A→B→C→D still starts storage after SQL/Bao/Seaweed. Empty authorization/object tables are valid; no task Job or allocation is needed for startup. Allocate/bind/freeze/seal are described in [storage seal](storage-seal.md) (653.7.6). Worker admission, reserved capacity, fair scheduling, RSS and overload bounds belong to 653.7.7. Transfer chunk and deadline settings are typed and bounded but do not claim S10 acceptance.
+No platform dependency changed: A0→A→B→C→D still starts storage after SQL/Bao/Seaweed. Empty authorization/object tables are valid; no task Job or allocation is needed for startup. Allocate/bind/freeze/seal are described in [storage seal](storage-seal.md) (653.7.6). Worker admission, reserved capacity and fair scheduling are being implemented by 653.7.7. The integration fixture is not S10 acceptance; the deployed RSS budget still needs WALK-STORAGE-LOAD acceptance.
+
+## Transfer bounds
+
+One in-process admission scheduler covers all three TLS listeners. It stores only
+slot and queue metadata, never durable authority or artifact buffers. Each chunk
+releases its worker after the backend/socket drain and rejoins the space-fair
+queue before allocating the next buffer. Task traffic cannot borrow the read
+reserve. The per-space cap applies separately to task uploads/downloads on 8443
+and to owner/core reads on 8445 (at most two reads per space). Reads of the same
+space do not consume the task cap; they use the read reserve plus free general
+slots. Control traffic has its own workers. An aborted transfer frees its worker
+immediately. Control cancellation propagates to SQL/S3, but its execution slot
+stays occupied until the handler and cleanup settle. Control SQL cancellation
+terminates only its own captured PostgreSQL session and awaits the server's
+termination acknowledgement; closing a client socket alone is not settlement.
+The cancellation connection is bounded and does not wait behind the blocked
+operation's pool checkout. Partial control bodies close at their own progress
+deadline. Fresh authorization and the SQL maintenance
+fence still apply to every chunk and publication. Admission never replaces those
+guards.
+
+Configuration uses integer environment settings. Invalid values fail startup;
+values are never clamped. Defaults are also finite hard maxima unless noted:
+
+| Environment setting | Default | Allowed range |
+| --- | ---: | --- |
+| `LIFEMODEL_STORAGE_CHUNK_BYTES` | 4194304 | 1–4194304 |
+| `LIFEMODEL_STORAGE_TRANSFER_WORKERS` | 8 | 2–8 |
+| `LIFEMODEL_STORAGE_PER_SPACE_WORKERS` | 2 | 1–2 |
+| `LIFEMODEL_STORAGE_RESERVED_READ_WORKERS` | 2 | 1–2, less than total workers |
+| `LIFEMODEL_STORAGE_CONTROL_WORKERS` | 2 | 1–2 |
+| `LIFEMODEL_STORAGE_BUFFER_BYTES` | 33554432 | Must fit the read reserve and at least one task chunk; at most 33554432 |
+| `LIFEMODEL_STORAGE_QUEUE_REQUESTS` | 32 | 1–32 |
+| `LIFEMODEL_STORAGE_QUEUE_BYTES` | 65536 | 1–65536 |
+| `LIFEMODEL_STORAGE_QUEUE_WAIT_MS` | 800 | 1–800 |
+| `LIFEMODEL_STORAGE_CHUNK_DEADLINE_MS` | 10000 | 1–10000 |
+
+Queue accounting includes the request's header/path byte count, not artifact
+chunks. Requests wait without reading their bodies. An excess request, or one
+still queued at its own deadline, returns `429` with `Retry-After: 1`.
+
+The initial-admission clock starts when the module receives the parsed HTTP
+request, before any Kubernetes API TLS/authentication or catalog work. The first
+GET body allocation inherits that same absolute monotonic deadline even when
+zero-byte metadata admission already succeeded. Queue wait defaults to **800 ms**
+(and cannot exceed it), leaving **200 ms** of the one-second refusal bound for
+response dispatch and transport overhead. Time spent proving authority never
+starts a fresh initial queue budget. For second and later chunks, the one-second
+clock starts at that chunk's admission attempt, after the previous chunk drained;
+a long progressing upload is not measured from its original request arrival.
+
+That one second is the module's **queue-overload** refusal target: it is measured
+from parsed HTTP arrival and includes ordinary authority work, such as the usual
+TokenReview and catalog reads. A **dependency outage** lies outside that target.
+A Kubernetes TokenReview that itself takes longer than one second is not a queue
+overload, so the request waits for that proof instead of receiving a fresh initial
+budget or a queue `429`; an initial deadline that expired during the wait still
+refuses the request once the proof returns. Dependency work fails through its own
+bounded path instead, never through the one-second overload target: identity
+verification has its own bound and answers `503 identity_unavailable` when the
+Kubernetes API does not answer. ADR-015 states the same qualification
+(`docs/adr/015-storage-module.md`).
+
+A later-chunk refusal sends its HTTP response **before** transport settlement and
+guarded reservation release. The handler remains alive through bounded cleanup;
+its registered upload owner and authorization stream do not retire while they
+are still in use. Cleanup can finish after the client receives 429. S3 transport
+settlement has its own five-second bound; uncertain settlement keeps owner
+liveness rather than permitting unsafe deletion. SQL/identity cleanup remains
+request-bounded; an unavailable or revoked authority can leave a reservation for
+recovery. A successful response is not proof that cleanup has finished. Retrying
+after pressure clears follows normal authorization and idempotency rules. No
+transfer occupies a control worker. A stalled chunk is canceled after its own
+no-progress deadline, including while waiting for a source or backend response.
+
+PUT assembly uses one charged chunk buffer and reads at most **64 KiB** at a
+time, never `read(chunkBytes)`. Node's request Readable high-water mark therefore
+never grows to 4 MiB. HTTP transport buffering is not silently exempted: a
+separate finite allowance reserves **192 KiB per object request**: 128 KiB
+logical payload (64 KiB high-water mark plus one bounded parser push), plus
+64 KiB for a slice-retained backing-buffer prefix. It also reserves **64 KiB
+scratch per worker**. At defaults, at most **40 object handlers** (8 workers plus
+32 queued requests) hold this allowance, totaling **8 MiB**, separate from the
+**32 MiB** chunk pool and the **64 KiB** scheduler metadata queue. Task handlers
+cannot consume the reserved read handler slots (at defaults, at most 38 task
+handlers and two reserved read handlers). A handler with unread buffers keeps
+its reservation until its request actually closes, even after its HTTP refusal.
+Overlarge high-water marks, prebuffered logical payload beyond 128 KiB, or excess
+handlers fail closed with
+429 before reading or authenticating. Both queued and active request buffers
+are counted in the real-HTTP regression; they are process-owned bytes, not
+kernel memory. These fixed transport limits do not replace the deployed RSS
+measurement or claim that all process memory fits in the chunk budget.
+
+Kubernetes proof uses one keep-alive HTTPS agent with at most ten sockets. The
+access guard uses one PostgreSQL pool with at most ten clients. Neither caches
+positive TokenReview, Pod, Job or authorization decisions. Pool and socket error
+listeners survive request teardown. S3 uses separate bounded keep-alive pools
+for PUT (40 sockets: active plus queued request ceiling), GET (8 sockets) and
+HEAD/DELETE/list control (2 sockets), so a full PUT kept open between chunk
+turns cannot exhaust the read reserve. Write callbacks settle before chunk
+buffer ownership is released, even below the socket high-water mark.
+Readiness still fails closed on an inaccessible catalog or backend and reports recovery after the next successful
+check, never a failed store as an empty page.
+
+The integration pressure fixture checks admission, buffers, queue bounds,
+control/read isolation and connection reuse. It is not the deployed RSS receipt.
+The coordinator must run WALK-STORAGE-LOAD on the VM and record RSS ≤512 MiB plus
+a diagnostic log scan before accepting S10.

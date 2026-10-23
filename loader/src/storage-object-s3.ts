@@ -229,7 +229,16 @@ function parsePrivateListing(body: string): StorageObjectS3Listing & { skipped: 
   return { objects, nextCursor: cursor ?? null, skipped };
 }
 
-export function createStorageObjectS3(options: StorageObjectS3Options): StorageObjectS3 {
+export interface StorageObjectS3TransportSnapshot {
+  put: { sockets: number; observedSockets: number; limit: number };
+  read: { sockets: number; observedSockets: number; limit: number };
+  control: { sockets: number; observedSockets: number; limit: number };
+}
+
+export function createStorageObjectS3(options: StorageObjectS3Options): StorageObjectS3 & {
+  /** Numeric transport pressure only; never exposes keys, credentials or endpoints. */
+  transportSnapshot(): StorageObjectS3TransportSnapshot;
+} {
   let endpoint: URL;
   try {
     endpoint = new URL(options.endpoint);
@@ -254,8 +263,61 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
     timeoutMs > 10_000
   )
     throw invalid();
-  const httpAgent = new HttpAgent({ keepAlive: true, maxSockets: 16, maxFreeSockets: 4 });
-  const httpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 16, maxFreeSockets: 4 });
+  // A PUT stays open across chunk turns. Its socket must not block the GET
+  // reserve or control HEAD/DELETE, nor invert chunk/socket acquisition order.
+  // 40 is the hard 8-active + 32-queued admission ceiling, not 40 byte buffers.
+  const agents = {
+    put: {
+      http: new HttpAgent({
+        keepAlive: true,
+        maxSockets: 40,
+        maxTotalSockets: 40,
+        maxFreeSockets: 2,
+      }),
+      https: new HttpsAgent({
+        keepAlive: true,
+        maxSockets: 40,
+        maxTotalSockets: 40,
+        maxFreeSockets: 2,
+      }),
+    },
+    read: {
+      http: new HttpAgent({
+        keepAlive: true,
+        maxSockets: 8,
+        maxTotalSockets: 8,
+        maxFreeSockets: 2,
+      }),
+      https: new HttpsAgent({
+        keepAlive: true,
+        maxSockets: 8,
+        maxTotalSockets: 8,
+        maxFreeSockets: 2,
+      }),
+    },
+    control: {
+      http: new HttpAgent({
+        keepAlive: true,
+        maxSockets: 2,
+        maxTotalSockets: 2,
+        maxFreeSockets: 2,
+      }),
+      https: new HttpsAgent({
+        keepAlive: true,
+        maxSockets: 2,
+        maxTotalSockets: 2,
+        maxFreeSockets: 2,
+      }),
+    },
+  };
+  for (const pair of Object.values(agents))
+    for (const agent of Object.values(pair)) agent.on('error', ignoreError);
+  const transportSockets = {
+    put: new Set<object>(),
+    read: new Set<object>(),
+    control: new Set<object>(),
+  };
+  const observedSockets = { put: 0, read: 0, control: 0 };
   const active = new Set<() => void>();
   const pendingBySpace = new Map<string, Set<Promise<void>>>();
   function track(space: string) {
@@ -365,9 +427,11 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
       // but attach the rejection listener before dispatch to avoid an unhandled event.
       void received.catch(ignoreError);
       response = undefined;
+      const pool = method === 'PUT' ? 'put' : method === 'GET' ? 'read' : 'control';
+      const pair = agents[pool];
       const req = (url.protocol === 'https:' ? httpsRequest : httpRequest)(
         url,
-        { method, headers: signed, agent: url.protocol === 'https:' ? httpsAgent : httpAgent },
+        { method, headers: signed, agent: url.protocol === 'https:' ? pair.https : pair.http },
         (res) => {
           response = res;
           res.on('error', ignoreError);
@@ -394,6 +458,12 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
         if (!response) rejectResponse(unavailable());
       });
       req.on('socket', (socket) => {
+        const live = transportSockets[pool];
+        if (!live.has(socket)) {
+          live.add(socket);
+          observedSockets[pool] = Math.max(observedSockets[pool], live.size);
+          socket.once('close', () => live.delete(socket));
+        }
         if (!sockets.has(socket)) {
           sockets.add(socket);
           socket.on('error', ignoreError);
@@ -455,6 +525,14 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
     };
   }
   return {
+    transportSnapshot() {
+      const snapshot = (pool: keyof typeof agents) => ({
+        sockets: transportSockets[pool].size,
+        observedSockets: observedSockets[pool],
+        limit: agents[pool][endpoint.protocol === 'https:' ? 'https' : 'http'].maxTotalSockets,
+      });
+      return { put: snapshot('put'), read: snapshot('read'), control: snapshot('control') };
+    },
     async listPrivate(cursor, signal) {
       if (cursor !== undefined && !validCursor(cursor)) throw invalid();
       const url = new URL(`/${options.bucket}/`, endpoint);
@@ -526,48 +604,37 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
         let count = 0;
         iterator = source[Symbol.asyncIterator]();
         for (;;) {
-          const next = await op.wait(iterator.next());
+          let next: IteratorResult<Buffer> | undefined = await op.wait(iterator.next());
           if (next.done) break;
           if (!Buffer.isBuffer(next.value) || count + next.value.length > length) throw invalid();
           for (let offset = 0; offset < next.value.length; offset += chunkBytes) {
             const chunk = next.value.subarray(offset, offset + chunkBytes);
             op.live();
-            let writable = true;
-            // Authority encloses exactly the synchronous socket dispatch. Socket
-            // backpressure never retains the caller's decision or database lock.
+            let written: Promise<void> | undefined;
+            // Authority encloses exactly the synchronous socket dispatch. Await
+            // the write callback outside SQL, even below the high-water mark:
+            // only then can the next acquisition forget this chunk's buffer.
             await op.wait(
               guard(chunk.length, () => {
                 op.live();
-                writable = req.write(chunk);
+                written = new Promise<void>((resolve, reject) => {
+                  req.write(chunk, (error) => {
+                    if (error) reject(unavailable());
+                    else resolve();
+                  });
+                });
+                void written.catch(ignoreError);
                 return undefined;
               })
             );
+            if (!written) throw unavailable();
+            await op.wait(written);
             op.progress();
             measured.update(chunk);
             count += chunk.length;
-            if (!writable && req.writableNeedDrain)
-              await op.wait(
-                new Promise<void>((resolve, reject) => {
-                  const cleanup = (): void => {
-                    req.removeListener('drain', drained);
-                    req.removeListener('error', failed);
-                    req.removeListener('close', failed);
-                  };
-                  const drained = (): void => {
-                    cleanup();
-                    resolve();
-                  };
-                  const failed = (): void => {
-                    cleanup();
-                    reject(unavailable());
-                  };
-                  req.once('drain', drained);
-                  req.once('error', failed);
-                  req.once('close', failed);
-                  if (req.destroyed) failed();
-                })
-              );
           }
+          // Drop dispatched bytes before the source rejoins its metadata queue.
+          next = undefined;
         }
         if (count !== length || measured.digest('hex') !== sha256) throw invalid();
         op.live();
@@ -736,8 +803,8 @@ export function createStorageObjectS3(options: StorageObjectS3Options): StorageO
     close() {
       closed = true;
       for (const cancel of [...active]) cancel();
-      httpAgent.destroy();
-      httpsAgent.destroy();
+      for (const pair of Object.values(agents))
+        for (const agent of Object.values(pair)) agent.destroy();
     },
   };
 }
