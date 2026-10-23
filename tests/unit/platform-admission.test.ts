@@ -52,6 +52,8 @@ describe('platform admission policies', () => {
       'loader-secret-admission',
       'platform-settings-ownership-admission',
       'storage-ca-ownership-admission',
+      'task-job-admission',
+      'task-pod-admission',
     ]);
     expect(
       objects
@@ -64,6 +66,8 @@ describe('platform admission policies', () => {
       'loader-secret-admission',
       'platform-settings-ownership-admission',
       'storage-ca-ownership-admission',
+      'task-job-admission',
+      'task-pod-admission',
     ]);
   });
 

@@ -12,6 +12,11 @@ spec:
       port: 8080
       targetPort: api
       protocol: TCP
+    # Task-only TLS model/identity listener (653.8.6), never the core API.
+    - name: task
+      port: 8446
+      targetPort: 8446
+      protocol: TCP
     # Health, on its own listener: NetworkPolicies are L3/L4, so /status is not
     # exposed on the API port (ADR-013 D5).
     - name: status

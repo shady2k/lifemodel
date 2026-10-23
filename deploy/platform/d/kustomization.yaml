@@ -7,6 +7,7 @@ resources:
   # stay in A; only the workload that needs SQL moves here.
   - storage-module-service-account.yaml
   - task-service-account.yaml
+  - core-task-rbac.yaml
   - storage-module-rbac.yaml
   - storage-module.yaml
   - network-policy.yaml

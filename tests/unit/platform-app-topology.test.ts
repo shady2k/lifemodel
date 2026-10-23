@@ -21,8 +21,12 @@ describe('per-namespace application topology', () => {
     expect(instance.some((o) => o.kind === 'Namespace' && o.metadata.name === 'lifemodel')).toBe(
       true
     );
+    expect(namespaces).not.toContain('lifemodel-motor');
+    expect(
+      instance.some((o) => o.kind === 'Namespace' && o.metadata.name === 'lifemodel-motor')
+    ).toBe(true);
     expect(namespaces).toEqual(
-      expect.arrayContaining(['lifemodel-motor', 'lifemodel-releases', 'lifemodel-motor-releases'])
+      expect.arrayContaining(['lifemodel-releases', 'lifemodel-motor-releases'])
     );
     for (const ns of ['lifemodel', 'lifemodel-motor']) {
       expect(objects).toContainEqual(

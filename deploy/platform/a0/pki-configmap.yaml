@@ -19,6 +19,18 @@ metadata:
     kustomize.toolkit.fluxcd.io/prune: disabled
 data: {}
 ---
+# Task trust is the same public CA, never a private key. The instance step
+# creates this namespace; this A0 placeholder is ready before PKI bootstrap.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lifemodel-ca
+  namespace: lifemodel-motor
+  annotations:
+    kustomize.toolkit.fluxcd.io/ssa: IfNotPresent
+    kustomize.toolkit.fluxcd.io/prune: disabled
+data: {}
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:

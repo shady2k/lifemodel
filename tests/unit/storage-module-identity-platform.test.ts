@@ -79,7 +79,25 @@ describe('storage module Kubernetes verification rights', () => {
   });
 
   it('permits fresh Pod gets in caller namespaces and Job gets only for tasks', () => {
-    const roles = stepD.filter((item) => item.kind === 'Role');
+    const bindings = stepD.filter(
+      (item) =>
+        item.kind === 'RoleBinding' &&
+        item.subjects?.some(
+          (subject: Manifest) =>
+            subject.kind === 'ServiceAccount' &&
+            subject.name === moduleSubject.name &&
+            subject.namespace === moduleSubject.namespace
+        )
+    );
+    const roles = stepD.filter(
+      (item) =>
+        item.kind === 'Role' &&
+        bindings.some(
+          (binding) =>
+            binding.metadata.namespace === item.metadata.namespace &&
+            binding.roleRef.name === item.metadata.name
+        )
+    );
     expect(roles).toHaveLength(2);
     for (const namespace of ['lifemodel', 'lifemodel-motor']) {
       const role = roles.find((item) => item.metadata.namespace === namespace);
@@ -91,7 +109,6 @@ describe('storage module Kubernetes verification rights', () => {
           : []),
       ]);
     }
-    const bindings = stepD.filter((item) => item.kind === 'RoleBinding');
     expect(bindings).toHaveLength(2);
     for (const namespace of ['lifemodel', 'lifemodel-motor']) {
       expect(bindings.find((item) => item.metadata.namespace === namespace)).toEqual({
@@ -138,7 +155,7 @@ describe('storage module Kubernetes verification rights', () => {
 
 describe('service-audience caller projections', () => {
   for (const name of ['core', 'web']) {
-    it(`projects only ${name}'s storage audiences under its dedicated identity`, () => {
+    it(`projects only ${name}'s storage audiences in its dedicated storage volume`, () => {
       const resources = documents(`applications/lifemodel/${name}.yaml`);
       const account = resources.find((item) => item.kind === 'ServiceAccount');
       expect(account).toEqual({
@@ -151,9 +168,9 @@ describe('service-audience caller projections', () => {
       const pod = workload?.spec.template.spec;
       expect(pod?.serviceAccountName).toBe(name);
       expect(pod?.automountServiceAccountToken).toBe(false);
-      const sources = (pod?.volumes ?? []).flatMap(
-        (volume: Manifest) => volume.projected?.sources ?? []
-      );
+      const sources = (pod?.volumes ?? [])
+        .filter((volume: Manifest) => volume.name === 'storage-identity')
+        .flatMap((volume: Manifest) => volume.projected?.sources ?? []);
       expect(sources).toEqual([
         ...(name === 'core'
           ? [
@@ -243,7 +260,7 @@ describe('storage listener network isolation', () => {
       ]);
     }
     const taskPolicy = stepD.find(
-      (item) => item.kind === 'NetworkPolicy' && item.metadata.namespace === 'lifemodel-motor'
+      (item) => item.kind === 'NetworkPolicy' && item.metadata.name === 'task-storage-egress'
     );
     expect(taskPolicy?.spec).toEqual({
       podSelector: { matchLabels: { 'app.kubernetes.io/name': 'task' } },
@@ -251,7 +268,14 @@ describe('storage listener network isolation', () => {
       egress: [{ to: [modulePeer], ports: [{ protocol: 'TCP', port: 8443 }] }],
     });
     const reverse = stepD.filter(
-      (item) => item.kind === 'NetworkPolicy' && item.metadata.namespace !== 'lifemodel-system'
+      (item) =>
+        item.kind === 'NetworkPolicy' &&
+        item.spec.egress?.some((rule: Manifest) =>
+          rule.to?.some(
+            (target: Manifest) =>
+              target.podSelector?.matchLabels?.['app.kubernetes.io/name'] === 'storage-module'
+          )
+        )
     );
     expect(reverse).toHaveLength(3);
     for (const policy of reverse) {
@@ -284,6 +308,7 @@ describe('storage identity bootstrap order', () => {
     expect(step.resources).toEqual([
       'storage-module-service-account.yaml',
       'task-service-account.yaml',
+      'core-task-rbac.yaml',
       'storage-module-rbac.yaml',
       'storage-module.yaml',
       'network-policy.yaml',

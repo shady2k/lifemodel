@@ -191,3 +191,153 @@ spec:
       ports:
         - protocol: TCP
           port: 8445
+
+---
+# Task names resolve cluster Services only through kube-dns; no other DNS route.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: task-dns-egress
+  namespace: lifemodel-motor
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: task
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# Task model traffic has a separate authenticated TLS listener (653.8.6).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: task-model-egress
+  namespace: lifemodel-motor
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: task
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: model-gateway
+      ports:
+        - protocol: TCP
+          port: 8446
+
+---
+# Gateway task ingress never exposes core API 8080 or status 8081.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: task-model-ingress
+  namespace: lifemodel-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: model-gateway
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-motor
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: task
+      ports:
+        - protocol: TCP
+          port: 8446
+
+---
+# The durable task control stream is outbound to core, not core-to-task (653.8.8).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: task-channel-egress
+  namespace: lifemodel-motor
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: task
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: core
+      ports:
+        - protocol: TCP
+          port: 8447
+
+---
+# Only task Pods reach core task-channel TLS; owner/core health remains separate.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: task-channel-ingress
+  namespace: lifemodel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: core
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-motor
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: task
+      ports:
+        - protocol: TCP
+          port: 8447
+
+---
+# k3s DNATs API Service 443 to the unknown node address: the existing platform
+# pattern permits only TCP 6443. RBAC bounds the explicitly projected core token;
+# task Pods receive neither this route nor an API token.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: core-task-api-egress
+  namespace: lifemodel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: core
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 6443

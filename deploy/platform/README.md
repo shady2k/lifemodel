@@ -4,7 +4,7 @@ This directory is the root of the signed platform OCI artifact. The root
 `OCIRepository` and `platform` Kustomization apply the artifact in
 `flux-system`. The artifact declares the platform-instance bootstrap followed by five ordered
 steps: A0, A, B, C and D. A0 depends on platform-instance, which creates the
-loader namespace, app namespace, identity ConfigMaps and named Ingresses. Step A
+loader namespace, both application namespaces (including restricted `lifemodel-motor`), identity ConfigMaps and named Ingresses. Step A
 `dependsOn: platform-a0`, so OpenBao and Gitea arrive only after the loader
 can start. Step B installs CloudNativePG with its CRDs in a default-deny operator namespace;
 its only opened routes are DNS, the documented Kubernetes API port, Postgres
@@ -132,7 +132,7 @@ from the step that needs only A.
 master, volume and filer ports have no allow rule anywhere, so the namespace
 default deny keeps them private to that pod.
 
-## Step D: the storage module
+## Step D: the storage module and task ground
 
 `storage-module` is a single-replica Recreate Deployment and Service in
 `lifemodel-system`, also the loader image with its own entry point
@@ -323,3 +323,89 @@ Kubernetes `lifemodel-tls` Secret or regenerate a missing CA when
 CA SHA-256 fingerprint matches the fingerprint recorded with the backup
 before trusting the restored instance. If the volume is lost, reinstalling
 creates a new CA and every client must trust the new certificate.
+
+
+## Task launch boundary (ADR-014 D1/D3, lifemodel-653.8.2)
+
+Step D also supplies the unbound `lifemodel-motor:task` ServiceAccount,
+core's namespace-scoped task-launcher Role/Binding, and the task runtime
+NetworkPolicies. The namespace default-denies ingress and egress. Pods labelled
+`app.kubernetes.io/name=task` get exactly these outbound routes:
+
+| Destination namespace AND Pod selector | Protocol/port | Purpose |
+| --- | --- | --- |
+| `kube-system` AND `k8s-app=kube-dns` | UDP and TCP 53 | Resolve Service names, including `storage-module.lifemodel-system.svc`; no hostAliases |
+| `lifemodel-system` AND `app.kubernetes.io/name=storage-module` | TCP 8443 | Own-space storage TLS |
+| `lifemodel-system` AND `app.kubernetes.io/name=model-gateway` | TCP 8446 | Separate task model/identity TLS listener, implemented in 653.8.6 |
+| `lifemodel` AND `app.kubernetes.io/name=core` | TCP 8447 | Task-only durable control TLS channel, implemented in 653.8.8 |
+
+The last two listener ports are reserved here and exposed by their Services.
+They do not assert the listeners already run. Numeric targetPorts avoid a
+bootstrap dependency on those later application changes. Existing model API
+8080 and status 8081 stay unchanged and are not task routes. Each runtime
+listener's ingress is paired with the task egress and combines namespace AND
+Pod selectors. Tasks have no ingress, Internet/API route or direct
+Postgres/Valkey/SeaweedFS route. DNS is a resolver exception, not authority to
+connect to a resolved address; trusted service protocols enforce live identity.
+
+The `task` SA has no RoleBinding or ClusterRoleBinding. Default API-token
+mounting is disabled. Jobs explicitly project only the three service audiences
+`lifemodel-task-model`, `lifemodel-task-storage`, `lifemodel-task-channel`.
+Core alone gets a rotating API-audience token, explicitly mounted only in its
+main container (not the migration init container); default automount remains
+off. Its Role permits Jobs create/get/list/watch/patch/delete and Pods
+get/list/watch in `lifemodel-motor` only. Get supports exact adoption/identity,
+list/watch resync, patch monotone deadline shortening and delete exact-UID
+stop/cleanup. No Secrets, exec or cluster-wide grant is added. Core's TCP 6443
+API egress follows the existing k3s unknown-node-DNAT exception; tasks never
+inherit it. These network and RBAC guards do not prove caller-side UID/CAS use.
+
+### CA replication without a readiness cycle
+
+`platform-instance` owns both restricted application namespaces. A0 precreates
+`lifemodel-ca` placeholders in `lifemodel` and `lifemodel-motor`, with
+IfNotPresent SSA and prune disabled. Loader PKI writes the same public
+`ca.crt` to system, core and task copies on every issuance/rotation, then reads
+each back; missing/denied/mismatched copies fail closed. The fixed-name A0
+loader Roles allow only get/update of `lifemodel-ca`. Its admission rule allows
+only a single `ca.crt` data entry, no binaryData/key, and reserves update to the
+loader while refusing deletion. No TLS Secret or private key crosses namespaces.
+Tasks must mount the CA read-only, without subPath, so kubelet can rotate it.
+
+This bootstrap placement is necessary: loader PKI starts before A, and A waits
+for A0. Provisioning the task copy or rights in A or D would deadlock. No new
+wait edge is added: instance → A0 → A → B → C → D. Namespace ownership relocation
+is verified for fresh installation; an in-place Flux inventory transfer is not
+claimed here (the platform's current storage install also requires reinstall).
+
+### Service-free task admission
+
+A0 installs `task-job-admission` and `task-pod-admission` with failurePolicy
+Fail and Deny bindings, scoped to the entire task namespace, not just labelled
+objects or opted-in identities. They validate core-created one-shot Jobs and
+core/Job-controller-created Pods, explicit task SA/no automount, matching
+`lifemodel.dev/launch-id` and task labels, one workbench container, restricted
+security, finite deadlines, Never/0/Failed/fail-on-disruption/nonzero semantics,
+closed volume/token sources, and immutable launch/template on Job UPDATE.
+Deadline removal/increase, suspend, selector adoption and TTL cleanup are denied.
+Pod ephemeral-container subresource updates are guarded too. Status subresources
+are not intercepted; scheduler binding is not a new Pod CREATE.
+
+The fixed maximum Job `activeDeadlineSeconds` is **86400 seconds**, including
+snapshotted wrap grace. This is this leaf's platform engineering ceiling, not a
+claim that the settings registry has a total-timeout declaration (it currently
+has only a separate wrap-grace bound), and not ADR-014's 300-second wrap default.
+Raising it is an explicit platform policy change. The release pin point is the
+workbench image rule: repository `ghcr.io/shady2k/lifemodel-workbench`, any valid
+sha256 digest for now; 653.8.3 supplies the release digest. The trusted launcher
+is the image ENTRYPOINT. No command/args/env overrides or lifecycle hooks are
+accepted before the workbench/launcher tasks define a reviewed safe contract.
+
+CEL cannot query canonical SQL intent/epoch or resolve a live owner reference.
+Its controller Job owner reference is only a shape check, not proof that the
+named Job exists or owns this Pod, and labels are not authority. The model
+gateway's live Pod/Job binding and once-only SQL execution claim (653.8.6)
+provide that proof and keep delayed stale creates inert. Local tests evaluate
+actual CEL expressions with the existing evaluator. They do not replace API
+server CEL typechecking/defaulting or runtime network enforcement: the
+coordinator must run the VM probes before stage acceptance.

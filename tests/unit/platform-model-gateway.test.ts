@@ -201,6 +201,7 @@ describe('the platform model gateway', () => {
     ]);
     expect(service?.spec.ports).toEqual([
       { name: 'api', port: 8080, targetPort: 'api', protocol: 'TCP' },
+      { name: 'task', port: 8446, targetPort: 8446, protocol: 'TCP' },
       { name: 'status', port: 8081, targetPort: 'status', protocol: 'TCP' },
     ]);
     // /status answers whatever the slots are: a first start with none is ready.
@@ -374,7 +375,9 @@ describe('the platform model gateway', () => {
     expect(
       env.filter((entry: any) => /MODEL_KEY|LLM_KEY|API_KEY|OPENAI|OPENROUTER/i.test(entry.name))
     ).toEqual([]);
-    expect(JSON.stringify(core)).not.toMatch(/sk-|no-key-required|apiKey|Authorization/);
+    expect(JSON.stringify(core)).not.toMatch(
+      /sk-[A-Za-z0-9]{12,}|no-key-required|apiKey|Authorization/
+    );
     // The only Secret-backed values are the stores' credentials.
     expect(
       env

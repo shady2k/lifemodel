@@ -6,6 +6,7 @@ resources:
   - bootstrap-secrets.yaml
   - pki-configmap.yaml
   - admission-policies.yaml
+  - task-admission-policies.yaml
   - pvc.yaml
   - deployment.yaml
   - service.yaml
