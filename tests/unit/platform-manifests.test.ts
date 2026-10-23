@@ -104,6 +104,7 @@ function assertStepANetworkPolicies(objects: Record<string, any>[]): void {
     'lifemodel-system': [
       'lifemodel-system-default-deny',
       'loader-access',
+      'loader-download-auth-ingress',
       'model-gateway-access',
       'seaweedfs-access',
       'storage-module-access',
@@ -1496,7 +1497,31 @@ describe('platform manifests', () => {
     }
   });
 
-  it('limits loader ingress to Traefik pods in kube-system', () => {
+  it('limits the added download-session ingress to web pods in the application namespace', () => {
+    const policy = sourceObjects().find(
+      (item) =>
+        item.kind === 'NetworkPolicy' &&
+        item.metadata.namespace === 'lifemodel-system' &&
+        item.metadata.name === 'loader-download-auth-ingress'
+    );
+    expect(policy?.spec).toEqual({
+      podSelector: { matchLabels: { 'app.kubernetes.io/name': 'loader' } },
+      policyTypes: ['Ingress'],
+      ingress: [
+        {
+          from: [
+            {
+              namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel' } },
+              podSelector: { matchLabels: { 'app.kubernetes.io/name': 'web' } },
+            },
+          ],
+          ports: [{ protocol: 'TCP', port: 7000 }],
+        },
+      ],
+    });
+  });
+
+  it('limits the original loader ingress permit to Traefik pods in kube-system', () => {
     const policies = sourceObjects().filter(
       (item) => item.kind === 'NetworkPolicy' && item.metadata.namespace === 'lifemodel-system'
     );

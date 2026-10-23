@@ -27,6 +27,7 @@
 # The loader UI reads the shared status projection and its wire contract (ADR-013 D6).
 !src/web/model-status.ts
 !src/web/contract.ts
+!src/ports/message-attachment.ts
 !.docker-context/seed.bundle
 .docker-context/*
 !.docker-context/seed.bundle

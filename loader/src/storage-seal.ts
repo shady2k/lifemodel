@@ -227,6 +227,9 @@ export function createStorageSeal(options: Options): StorageSeal {
       );
     } catch (error) {
       if (error instanceof StorageAccessError || connectionPool === cleanupPool) throw error;
+      // Request cancellation is not a catalog failure. Preserve its exact reason;
+      // real driver failures still keep their bounded SQLSTATE diagnostic.
+      if (signal?.aborted && error === signal.reason) throw error;
       logSqlFailure(error, 1, 'Storage seal SQL failed');
       return fail(503, 'catalog_unavailable');
     }
