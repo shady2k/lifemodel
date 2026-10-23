@@ -1329,19 +1329,15 @@ export async function createContainerAsync(
     channelPool.on('error', () => undefined);
     channelPool.on('connect', (client) => client.on('error', () => undefined));
     const identity = createTaskKubernetesIdentity({ timeoutMs });
-    let notifyMailboxSettled = () => {};
     const mailbox = createPostgresTaskMailbox({
       pool: channelPool,
       epoch: snapshotEpoch,
       operationTimeoutMs: timeoutMs,
       onAppendSettled: () => {
-        notifyMailboxSettled();
+        void replay.resync();
       },
     });
     const replay = createTaskChannelReplay({ mailbox, bus: busSignalStream, logger });
-    notifyMailboxSettled = () => {
-      void replay.resync();
-    };
     let channel: ReturnType<typeof createTaskChannel> | undefined;
     stopTaskChannel = async (deadline) => {
       // Cancel intake AND checked-out task SQL before draining owner work.

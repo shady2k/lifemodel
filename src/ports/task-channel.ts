@@ -122,7 +122,8 @@ function line(value: unknown): boolean {
     typeof value === 'string' &&
     value.trim().length > 0 &&
     Buffer.byteLength(value) <= 1024 &&
-    !/[\r\n\u0000]/.test(value)
+    !/[\r\n]/.test(value) &&
+    !value.includes('\0')
   );
 }
 function id(value: unknown): boolean {

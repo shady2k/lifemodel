@@ -121,7 +121,7 @@ export function createPostgresTaskMailbox(deps: {
         // need not notice that disconnect while blocked on a lock until its SQL
         // timeout. Check the dead owned connection during execution as well.
         await raw.query(
-          `SET lock_timeout='${timeoutMs}ms'; SET statement_timeout='${timeoutMs}ms'; SET client_connection_check_interval='50ms'`
+          `SET lock_timeout='${String(timeoutMs)}ms'; SET statement_timeout='${String(timeoutMs)}ms'; SET client_connection_check_interval='50ms'`
         );
         const acquired = raw;
         const single = new Proxy(deps.pool, {
@@ -195,7 +195,9 @@ export function createPostgresTaskMailbox(deps: {
       denied();
   }
   return {
-    stop: () => closing.abort(),
+    stop: () => {
+      closing.abort();
+    },
     append: async (input, proof, parent) => {
       const frame = validateTaskChannelFrame(input);
       return transaction(
@@ -216,8 +218,7 @@ export function createPostgresTaskMailbox(deps: {
           );
           const binding = launch.rows[0];
           if (
-            !binding ||
-            binding.attempt_id !== frame.attemptId ||
+            binding?.attempt_id !== frame.attemptId ||
             binding.job_uid !== proof.jobUid ||
             binding.job_name !== proof.jobName ||
             !/^launch_[0-9a-f]{64}$/.test(binding.launch_id) ||

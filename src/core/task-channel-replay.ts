@@ -105,9 +105,13 @@ export function createTaskChannelReplay(options: {
           if (rows.length === batchSize) schedule(0);
         })(),
         new Promise<never>((_resolve, reject) => {
-          const abort = () => reject(new Error('Task channel replay interrupted'));
+          const abort = () => {
+            reject(new Error('Task channel replay interrupted'));
+          };
           signal.addEventListener('abort', abort, { once: true });
-          removeAbort = () => signal.removeEventListener('abort', abort);
+          removeAbort = () => {
+            signal.removeEventListener('abort', abort);
+          };
           if (signal.aborted) abort();
         }),
       ]);

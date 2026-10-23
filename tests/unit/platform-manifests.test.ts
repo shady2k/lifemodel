@@ -971,10 +971,14 @@ describe('platform manifests', () => {
           item.spec.rules.some((rule: any) => rule.host === 'boot-${LIFEMODEL_NAME}.local')
       )
     ).toBe(true);
-    // Only storage and the task model gateway define cluster roles, each
+    // Storage, task model and task channel define cluster roles, each
     // limited to TokenReview create, never broad auth-delegator access.
     expect(objects.filter((item) => item.kind === 'ClusterRole')).toEqual(
-      ['model-gateway-token-review', 'storage-module-token-review'].map((name) => ({
+      [
+        'model-gateway-token-review',
+        'core-task-channel-token-review',
+        'storage-module-token-review',
+      ].map((name) => ({
         apiVersion: 'rbac.authorization.k8s.io/v1',
         kind: 'ClusterRole',
         metadata: { name },
@@ -992,6 +996,17 @@ describe('platform manifests', () => {
       .filter((item) => item.kind === 'ClusterRoleBinding')
       .sort((left, right) => left.metadata.name.localeCompare(right.metadata.name));
     expect(clusterRoleBindings).toEqual([
+      {
+        apiVersion: 'rbac.authorization.k8s.io/v1',
+        kind: 'ClusterRoleBinding',
+        metadata: { name: 'core-task-channel-token-review' },
+        roleRef: {
+          apiGroup: 'rbac.authorization.k8s.io',
+          kind: 'ClusterRole',
+          name: 'core-task-channel-token-review',
+        },
+        subjects: [{ kind: 'ServiceAccount', name: 'core', namespace: 'lifemodel' }],
+      },
       {
         apiVersion: 'rbac.authorization.k8s.io/v1',
         kind: 'ClusterRoleBinding',

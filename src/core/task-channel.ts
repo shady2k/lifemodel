@@ -145,7 +145,6 @@ export function createTaskChannel(options: ChannelOptions): {
     let bytes = 0;
     let released = false;
     let queuedWork: Work | undefined;
-    let timer: ReturnType<typeof setTimeout>;
     const release = () => {
       if (released) return;
       released = true;
@@ -171,7 +170,7 @@ export function createTaskChannel(options: ChannelOptions): {
     res.once('finish', release);
     res.once('close', release);
     req.once('aborted', release);
-    timer = setTimeout(() => {
+    const timer = setTimeout(() => {
       refuse(res, 504, 'ack_timeout');
       release();
       // A peer that does not read ACKs never holds a worker or socket forever.
