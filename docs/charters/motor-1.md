@@ -66,8 +66,10 @@ for `generations-1`, where the deploy branch they concern is built on.
 
 ## Finding budget
 
-8 findings (owner, 2026-10-19); the value lives in `.backlog/config.json`
-(`findingBudget`). A ninth comes to the owner for a decision.
+9 findings: 8 agreed by the owner on 2026-10-19, raised to 9 on 2026-10-23
+to admit lifemodel-pf3v (a random model-gateway test timeout that turned main
+red), with no planned work displaced. The value lives in `.backlog/config.json`
+(`findingBudget`). A tenth comes to the owner for a decision.
 
 No target date: none was set from outside the work.
 
