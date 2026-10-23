@@ -16,6 +16,20 @@ the database's catalog (ADR-015 S-D7); it is last because it is the only
 platform workload that needs SQL. See
 [ADR-010](../../docs/adr/010-container-generations.md) for the decision.
 
+## Release images
+
+The signed platform artifact pins the loader (also model gateway and storage),
+core, web and **workbench** images by digest. The workbench is
+`ghcr.io/shady2k/lifemodel-workbench`: Node 24.21.0, OpenCode 1.19.4, git/build
+tools, this release's offline dev dependencies, storage CLI and task launcher.
+It is not a running platform Deployment. Its release digest is the core's
+`LIFEMODEL_TASK_WORKBENCH_IMAGE` launch input in
+`applications/lifemodel/kustomization.yaml`, pinned before loader seed bundling.
+The Job adapter consumes it in 653.8.5; the launcher stub fails closed until
+653.8.7. See [the workbench contract](../../docs/features/motor/workbench.md)
+for pins, private HOME/work-volume paths and offline checks. Prime Agent joins
+this one image in stage 4, not in the stage-3 image.
+
 ## A0: loader and admission
 
 A0 consumes the `lifemodel-system` namespace owned by `platform-instance` and creates restricted `lifemodel-git`,

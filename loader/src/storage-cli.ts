@@ -377,6 +377,17 @@ export async function runStorageCli(argv: string[], options: StorageCliOptions):
   let local: LocalFile | undefined;
   let partial = false;
   try {
+    // Offline CLI discovery needs neither service identity nor network access.
+    if (argv.length === 1 && argv[0] === '--help') {
+      await options.stdout(
+        'lifemodel-storage (this workbench release)\n' +
+          '  put <name> --upload-id <id>\n' +
+          '  get <id> <name>\n' +
+          '  list [--cursor <cursor>] [--limit <1..100>]\n' +
+          '  mark <id> <artifact|result|log>\n'
+      );
+      return 0;
+    }
     const command = parse(argv);
     const config = await connection(options.env);
     const base = `/spaces/${config.space}/objects`;

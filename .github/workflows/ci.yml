@@ -78,6 +78,7 @@ jobs:
       product: ${{ steps.classify.outputs.product }}
       web_app: ${{ steps.classify.outputs.web_app }}
       loader_image: ${{ steps.classify.outputs.loader_image }}
+      workbench_image: ${{ steps.classify.outputs.workbench_image }}
       nix_flake_check: ${{ steps.classify.outputs.nix_flake_check }}
     steps:
       - uses: actions/checkout@v7
@@ -142,6 +143,7 @@ jobs:
           echo "$verdict" >> "$GITHUB_OUTPUT"
           scripts/ci-web-provenance-paths.sh < "$out" >> "$GITHUB_OUTPUT"
           scripts/ci-loader-paths.sh < "$out" >> "$GITHUB_OUTPUT"
+          scripts/ci-workbench-paths.sh < "$out" >> "$GITHUB_OUTPUT"
           scripts/ci-nix-paths.sh < "$out" >> "$GITHUB_OUTPUT"
 
   # The product checks, as the one command a person runs before pushing. It is
@@ -415,6 +417,31 @@ jobs:
           scripts/build-web-image.sh main "$SHA"
           docker push "ghcr.io/shady2k/lifemodel-web:main"
           docker push "ghcr.io/shady2k/lifemodel-web:$SHA"
+
+  # Same read-only PR delivery rule as ci-loader-image. The signed platform
+  # release, not this job, publishes and pins the workbench.
+  ci-workbench-image:
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.workbench_image == 'true') && !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build the task workbench
+        env:
+          SHA: ${{ github.sha }}
+        run: docker build --file docker/workbench/Dockerfile --tag "ci-workbench-$SHA" .
+      - name: Verify offline non-root startup with a read-only root
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --tmpfs /work:uid=1000,gid=1000,mode=700 \
+            "ci-workbench-$SHA" --self-check
 
   # Build the platform loader image on pull requests that touch its inputs, so
   # a broken docker/loader/Dockerfile fails here instead of failing the signed
