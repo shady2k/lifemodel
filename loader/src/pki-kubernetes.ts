@@ -151,12 +151,18 @@ export function createKubernetesTlsStores(options: ApiOptions = {}): {
   secret: TlsSecretStore;
   serviceSecret: TlsSecretStore;
   taskModelSecret: TlsSecretStore;
+  taskChannelSecret: TlsSecretStore;
   configMap: CaConfigMapStore;
   status: PkiStatusStore;
 } {
   const sec = createApi(options, 'secrets', 'lifemodel-tls');
   const serviceSec = createApi(options, 'secrets', 'storage-module-tls');
   const taskModelSec = createApi(options, 'secrets', 'model-gateway-task-tls');
+  const taskChannelSec = createApi(
+    { ...options, namespace: 'lifemodel' },
+    'secrets',
+    'core-task-channel-tls'
+  );
   const cm = createApi(options, 'configmaps', 'lifemodel-ca');
   // A0 precreates these public-only replicas and their fixed-name write RBAC.
   // Both application namespaces exist in instance, before A0; PKI readiness
@@ -228,6 +234,7 @@ export function createKubernetesTlsStores(options: ApiOptions = {}): {
     secret: secretStore(sec, 'lifemodel-tls'),
     serviceSecret: secretStore(serviceSec, 'storage-module-tls'),
     taskModelSecret: secretStore(taskModelSec, 'model-gateway-task-tls'),
+    taskChannelSecret: secretStore(taskChannelSec, 'core-task-channel-tls'),
     configMap: {
       read: async () => {
         const obj = await read(cm);

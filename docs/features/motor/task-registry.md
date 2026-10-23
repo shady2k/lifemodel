@@ -7,7 +7,9 @@ This is the durable record for the new Job runtime, not a replacement execution
 loop and not the old Motor Cortex `motor-state.ts`. The [task launch path](task-launch.md)
 now wires the registry and allocation/Job reconciliation in platform mode.
 [Verified identity and once-only start](task-identity.md) are served by the model
-gateway. Mailbox and finalization remain later leaves of stage 3.
+gateway. The [task channel](task-channel.md) now persists step/terminal reports
+before ACK and replays normal Signals. Sealed finalization remains a later leaf
+of stage 3.
 
 ## Tables and ownership
 

@@ -466,14 +466,10 @@ describe('settings declaration registry', () => {
   });
 
   it('keeps every platform declaration in the one generated tasks section', () => {
-    expect(platformSettings.declarations().map((declaration) => declaration.section)).toEqual([
-      'tasks',
-      'tasks',
-      'tasks',
-      'tasks',
-      'tasks',
-      'tasks',
-    ]);
+    expect(platformSettings.declarations().length).toBeGreaterThan(0);
+    expect(
+      platformSettings.declarations().every((declaration) => declaration.section === 'tasks')
+    ).toBe(true);
   });
 });
 
@@ -1259,6 +1255,13 @@ describe('settings HTTP routes', () => {
       'tasks.concurrency': 2,
       'tasks.harness': 'opencode',
       'tasks.wrapGraceSeconds': 600,
+      'tasks.channel.maxFrameBytes': 65_536,
+      'tasks.channel.maxUnackedFrames': 16,
+      'tasks.channel.maxUnackedBytes': 1_048_576,
+      'tasks.channel.maxBufferedBytes': 4_194_304,
+      'tasks.channel.ackTimeoutMs': 5_000,
+      'tasks.channel.workers': 2,
+      'tasks.channel.sqlConnections': 2,
       'storage.retention': '90d',
       'storage.warningLeadDays': 14,
       'storage.ceilingBytes': 20000000000,

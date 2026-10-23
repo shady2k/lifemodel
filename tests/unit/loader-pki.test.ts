@@ -11,6 +11,7 @@ import {
   instanceHosts,
   STORAGE_MODULE_TLS_HOSTS,
   TASK_MODEL_TLS_HOSTS,
+  TASK_CHANNEL_TLS_HOSTS,
 } from '../../loader/src/pki.js';
 import { createNodeFileSystem } from '../../loader/src/fs.js';
 import { createTestClock } from '../../loader/src/clock.js';
@@ -25,6 +26,7 @@ function setup() {
   let secret: { ca?: string; cert?: string; key?: string } = {};
   let serviceSecret: { ca?: string; cert?: string; key?: string } = {};
   let taskModelSecret: { ca?: string; cert?: string; key?: string } = {};
+  let taskChannelSecret: { ca?: string; cert?: string; key?: string } = {};
   let caMap: string | null = null;
   const events: string[] = [];
   const clock = createTestClock();
@@ -66,6 +68,16 @@ function setup() {
         },
       },
     },
+    taskChannelService: {
+      hosts: TASK_CHANNEL_TLS_HOSTS,
+      secret: {
+        read: async () => taskChannelSecret,
+        write: async (ca, cert, key) => {
+          events.push('task-channel-leaf');
+          taskChannelSecret = { ca, cert, key };
+        },
+      },
+    },
   });
   return {
     root,
@@ -82,6 +94,9 @@ function setup() {
     },
     get taskModelSecret() {
       return taskModelSecret;
+    },
+    get taskChannelSecret() {
+      return taskChannelSecret;
     },
     get caMap() {
       return caMap;
@@ -169,7 +184,13 @@ describe('loader instance PKI', () => {
   it('creates and reads back CA before identity and publishes the leaf before ready', async () => {
     const s = setup();
     await s.manager.bootstrap();
-    expect(s.events).toEqual(['leaf', 'configmap', 'service-leaf', 'task-model-leaf']);
+    expect(s.events).toEqual([
+      'leaf',
+      'configmap',
+      'service-leaf',
+      'task-model-leaf',
+      'task-channel-leaf',
+    ]);
     expect(await s.manager.report()).toMatchObject({
       identity: 'present',
       ca: 'present-matching',
@@ -340,6 +361,7 @@ describe('loader instance PKI', () => {
     for (const [name, secret, host] of [
       ['edge', s.secret, instanceHosts('home')[0]],
       ['storage', s.serviceSecret, STORAGE_MODULE_TLS_HOSTS[0]],
+      ['task-channel', s.taskChannelSecret, TASK_CHANNEL_TLS_HOSTS[0]],
     ] as const) {
       expectStrictKeyIdentifiers(caPem, secret.cert!);
       if (!openssl.error) {
@@ -586,6 +608,38 @@ describe('loader instance PKI', () => {
     expect((await s.manager.report()).taskModelLeaf).toBe('invalid');
     await s.manager.bootstrap();
     expect((await s.manager.report()).taskModelLeaf).toBe('valid');
+  });
+  it('issues and renews the core task-channel leaf without reusing another private key', async () => {
+    const s = setup();
+    await s.manager.bootstrap();
+    const ca = await s.manager.caPem();
+    expectStrictKeyIdentifiers(ca, s.taskChannelSecret.cert!);
+    expect(
+      new X509Certificate(s.taskChannelSecret.cert!).subjectAltName?.split(', ').sort()
+    ).toEqual(TASK_CHANNEL_TLS_HOSTS.map((host) => `DNS:${host}`).sort());
+    for (const other of [s.secret, s.serviceSecret, s.taskModelSecret])
+      expect(s.taskChannelSecret.key).not.toBe(other.key);
+    expect(await s.manager.report()).toMatchObject({
+      taskChannelLeaf: 'valid',
+      taskChannelSans: [...TASK_CHANNEL_TLS_HOSTS],
+    });
+    const before = s.taskChannelSecret.cert;
+    await s.manager.bootstrap();
+    expect(s.taskChannelSecret.cert).toBe(before);
+    s.clock.advance(370 * 24 * 60 * 60 * 1000);
+    expect((await s.manager.report()).taskChannelLeaf).toBe('expiring');
+    await s.manager.bootstrap();
+    expect(s.taskChannelSecret.cert).not.toBe(before);
+    expectStrictKeyIdentifiers(ca, s.taskChannelSecret.cert!);
+    s.taskChannelSecret.cert = undefined;
+    expect((await s.manager.report()).taskChannelLeaf).toBe('missing');
+    await s.manager.bootstrap();
+    expectStrictKeyIdentifiers(ca, s.taskChannelSecret.cert!);
+    s.taskChannelSecret.cert = s.taskModelSecret.cert;
+    s.taskChannelSecret.key = s.taskModelSecret.key;
+    expect((await s.manager.report()).taskChannelLeaf).toBe('invalid');
+    await s.manager.bootstrap();
+    expect((await s.manager.report()).taskChannelLeaf).toBe('valid');
   });
   it('reports a missing or foreign module leaf instead of calling it ready', async () => {
     const s = setup();

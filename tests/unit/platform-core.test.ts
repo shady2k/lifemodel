@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import YAML from 'yaml';
+import { evaluate } from '@marcbachmann/cel-js';
 import { PLATFORM_SETTINGS_DIR } from '../../src/config/platform-settings.js';
 
 const root = fileURLToPath(new URL('../../deploy/platform/', import.meta.url));
@@ -50,6 +51,10 @@ describe('core application generation', () => {
           optional: true,
           items: [{ key: 'ca.crt', path: 'ca.crt' }],
         },
+      },
+      {
+        name: 'task-channel-tls',
+        secret: { secretName: 'core-task-channel-tls', defaultMode: 288 },
       },
       { name: 'tmp', emptyDir: { medium: 'Memory', sizeLimit: '256Mi' } },
       // The loader's settings projection, read-only (ADR-014 D6): the core
@@ -115,6 +120,7 @@ describe('core application generation', () => {
         readOnly: true,
       },
       { name: 'storage-ca', mountPath: '/var/run/secrets/lifemodel-storage-ca', readOnly: true },
+      { name: 'task-channel-tls', mountPath: '/opt/lifemodel/task-channel-tls', readOnly: true },
     ]);
     expect(pod.initContainers[0].command).toEqual([
       '/usr/local/bin/lifemodel-core-entrypoint',
@@ -129,6 +135,112 @@ describe('core application generation', () => {
     );
     expect(pod.containers[0].readinessProbe.httpGet.path).toBe('/healthz');
     expect(pod.containers[0].livenessProbe.httpGet.path).toBe('/healthz');
+  });
+
+  it('mounts the isolated task-channel server leaf only into core and keeps health separate', () => {
+    const pod = application.find((item: any) => item.kind === 'StatefulSet').spec.template.spec;
+    const core = pod.containers[0];
+    expect(core.env).toEqual(
+      expect.arrayContaining([
+        { name: 'LIFEMODEL_TASK_CHANNEL_TLS_DIR', value: '/opt/lifemodel/task-channel-tls' },
+        { name: 'LIFEMODEL_TASK_CHANNEL_PORT', value: '8447' },
+      ])
+    );
+    expect(core.ports).toContainEqual({
+      name: 'task-channel',
+      containerPort: 8447,
+      protocol: 'TCP',
+    });
+    expect(core.readinessProbe.httpGet.port).toBe('health');
+    expect(core.livenessProbe.httpGet.port).toBe('health');
+    const mount = core.volumeMounts.find((item: any) => item.name === 'task-channel-tls');
+    expect(mount).toEqual({
+      name: 'task-channel-tls',
+      mountPath: '/opt/lifemodel/task-channel-tls',
+      readOnly: true,
+    });
+    expect(pod.volumes.find((item: any) => item.name === mount.name)).toEqual({
+      name: 'task-channel-tls',
+      secret: { secretName: 'core-task-channel-tls', defaultMode: 288 },
+    });
+    for (const init of pod.initContainers)
+      expect(init.volumeMounts.some((item: any) => item.name === mount.name)).toBe(false);
+  });
+
+  it('precreates the core leaf in A0 and grants only fixed-name loader reads and updates', () => {
+    const docs = (file: string) =>
+      YAML.parseAllDocuments(readFileSync(join(root, file), 'utf8')).map((doc) => doc.toJSON());
+    const a0 = YAML.parse(readFileSync(join(root, 'a0/kustomization.yaml'), 'utf8'));
+    expect(a0.resources).toEqual(
+      expect.arrayContaining([
+        'bootstrap-secrets.yaml',
+        'service-account.yaml',
+        'admission-policies.yaml',
+      ])
+    );
+    const leaf = docs('a0/bootstrap-secrets.yaml').find(
+      (item: any) => item.kind === 'Secret' && item.metadata.name === 'core-task-channel-tls'
+    );
+    expect(leaf).toEqual({
+      apiVersion: 'v1',
+      kind: 'Secret',
+      metadata: {
+        name: 'core-task-channel-tls',
+        namespace: 'lifemodel',
+        annotations: {
+          'kustomize.toolkit.fluxcd.io/ssa': 'IfNotPresent',
+          'kustomize.toolkit.fluxcd.io/prune': 'disabled',
+        },
+      },
+      type: 'kubernetes.io/tls',
+      data: { 'tls.crt': '', 'tls.key': '' },
+    });
+    const rbac = docs('a0/service-account.yaml');
+    const role = rbac.find(
+      (item: any) => item.kind === 'Role' && item.metadata.name === 'loader-core-task-channel-tls'
+    );
+    expect(role).toMatchObject({
+      metadata: { namespace: 'lifemodel' },
+      rules: [
+        {
+          apiGroups: [''],
+          resources: ['secrets'],
+          resourceNames: ['core-task-channel-tls'],
+          verbs: ['get', 'update'],
+        },
+      ],
+    });
+    const binding = rbac.find(
+      (item: any) => item.kind === 'RoleBinding' && item.metadata.name === role.metadata.name
+    );
+    expect(binding).toMatchObject({
+      metadata: { namespace: 'lifemodel' },
+      subjects: [{ kind: 'ServiceAccount', name: 'loader', namespace: 'lifemodel-system' }],
+      roleRef: { apiGroup: 'rbac.authorization.k8s.io', kind: 'Role', name: role.metadata.name },
+    });
+    const admission = docs('a0/admission-policies.yaml').find(
+      (item: any) =>
+        item.kind === 'ValidatingAdmissionPolicy' &&
+        item.metadata.name === 'loader-secret-admission'
+    );
+    expect(admission.spec.matchConstraints.namespaceSelector.matchExpressions[0].values).toContain(
+      'lifemodel'
+    );
+    const expression = admission.spec.validations[0].expression;
+    for (const namespace of ['lifemodel', 'lifemodel-motor', 'lifemodel-system']) {
+      for (const name of ['core-task-channel-tls', 'unrelated']) {
+        for (const operation of ['CREATE', 'UPDATE', 'DELETE']) {
+          expect(
+            evaluate(expression, {
+              request: { namespace, name, operation },
+              object: { metadata: { name } },
+            })
+          ).toBe(
+            namespace === 'lifemodel' && name === 'core-task-channel-tls' && operation === 'UPDATE'
+          );
+        }
+      }
+    }
   });
 
   it('pins the application core image by digest, not by a mutable tag', () => {

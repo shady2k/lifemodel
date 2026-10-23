@@ -33,6 +33,11 @@ export const TASK_MODEL_TLS_HOSTS = [
   'model-gateway.lifemodel-system.svc',
   'model-gateway.lifemodel-system.svc.cluster.local',
 ] as const;
+/** The core task-only TLS mailbox listener (ADR-014 D2). */
+export const TASK_CHANNEL_TLS_HOSTS = [
+  'core.lifemodel.svc',
+  'core.lifemodel.svc.cluster.local',
+] as const;
 export interface ServiceLeafOptions {
   hosts: readonly string[];
   /** The one Secret the module's pod mounts; the loader is its only writer. */
@@ -55,6 +60,8 @@ export interface PkiReport {
   serviceSans: string[];
   taskModelLeaf?: 'valid' | 'missing' | 'invalid' | 'expiring';
   taskModelSans?: string[];
+  taskChannelLeaf?: 'valid' | 'missing' | 'invalid' | 'expiring';
+  taskChannelSans?: string[];
   fingerprint: string | null;
   caFingerprint?: string | null;
   leafNotAfter?: string | null;
@@ -159,9 +166,21 @@ export function createPkiManager(options: {
   service: ServiceLeafOptions;
   /** Additional in-cluster listener, absent for isolated storage-only fixtures. */
   taskModelService?: ServiceLeafOptions;
+  /** The core's task-only mailbox leaf, separate from model and edge TLS. */
+  taskChannelService?: ServiceLeafOptions;
   status?: PkiStatusStore;
 }): PkiManager {
-  const { config, fs, clock, secret, configMap, service, taskModelService, status } = options;
+  const {
+    config,
+    fs,
+    clock,
+    secret,
+    configMap,
+    service,
+    taskModelService,
+    taskChannelService,
+    status,
+  } = options;
   const directory = join(config.volumeRoot, 'pki');
   const caPath = join(directory, 'ca.crt');
   const keyPath = join(directory, 'ca.key');
@@ -367,12 +386,13 @@ export function createPkiManager(options: {
         const leaf = await issue(ca, serviceHosts);
         await service.secret.write(ca.cert, leaf.cert, leaf.key);
       }
-      if (taskModelService) {
-        const names = [...taskModelService.hosts];
-        const current = await taskModelService.secret.read();
+      for (const listener of [taskModelService, taskChannelService]) {
+        if (!listener) continue;
+        const names = [...listener.hosts];
+        const current = await listener.secret.read();
         if (certStatus(current.cert ?? null, current.key, ca.cert, names) !== 'valid') {
           const leaf = await issue(ca, names);
-          await taskModelService.secret.write(ca.cert, leaf.cert, leaf.key);
+          await listener.secret.write(ca.cert, leaf.cert, leaf.key);
         }
       }
     },
@@ -459,6 +479,28 @@ export function createPkiManager(options: {
         }
       }
       const taskModelReport = taskModelService ? { taskModelLeaf, taskModelSans } : {};
+      let taskChannelLeaf: PkiReport['leaf'] = 'missing';
+      let taskChannelSans: string[] = [];
+      let taskChannelLeafNotAfter = '';
+      if (taskChannelService) {
+        try {
+          const current = await taskChannelService.secret.read();
+          taskChannelLeaf = certStatus(current.cert ?? null, current.key, ca?.cert, [
+            ...taskChannelService.hosts,
+          ]);
+          if (current.cert) {
+            const cert = new NodeX509Certificate(current.cert);
+            taskChannelLeafNotAfter = cert.validTo;
+            taskChannelSans = (cert.subjectAltName ?? '')
+              .split(', ')
+              .filter(Boolean)
+              .map((value) => value.replace(/^DNS:/, ''));
+          }
+        } catch {
+          taskChannelLeaf = 'invalid';
+        }
+      }
+      const taskChannelReport = taskChannelService ? { taskChannelLeaf, taskChannelSans } : {};
       const result: PkiReport = {
         identity: identityState,
         ca: caState,
@@ -467,6 +509,7 @@ export function createPkiManager(options: {
         serviceLeaf,
         serviceSans,
         ...taskModelReport,
+        ...taskChannelReport,
         fingerprint: caFingerprint,
       };
       await status?.write({
@@ -480,7 +523,9 @@ export function createPkiManager(options: {
         serviceSans,
         serviceLeafNotAfter,
         ...taskModelReport,
+        ...taskChannelReport,
         ...(taskModelService ? { taskModelLeafNotAfter } : {}),
+        ...(taskChannelService ? { taskChannelLeafNotAfter } : {}),
         checkedAt: new Date(clock.now()).toISOString(),
         ...(caState === 'invalid' ? { error: 'invalid CA pair' } : {}),
       });

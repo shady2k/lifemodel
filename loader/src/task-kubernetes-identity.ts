@@ -19,10 +19,11 @@ export interface TaskKubernetesIdentityOptions {
   tokenFile?: string;
   caFile?: string;
   timeoutMs?: number;
+  /** Listener-specific projected token audience; identity checks stay identical. */
+  audience?: 'lifemodel-task-model' | 'lifemodel-task-channel';
 }
 type JsonObject = Record<string, unknown>;
 const NAMESPACE = 'lifemodel-motor';
-const AUDIENCE = 'lifemodel-task-model';
 const LAUNCH_LABEL = 'lifemodel.dev/launch-id';
 const TEMPLATE_HASH = 'lifemodel.dev/template-hash';
 const SA = '/var/run/secrets/kubernetes.io/serviceaccount';
@@ -154,6 +155,7 @@ export function createTaskKubernetesIdentity(options: TaskKubernetesIdentityOpti
 } {
   let base: URL;
   const timeoutMs = options.timeoutMs ?? 5_000;
+  const audience = options.audience ?? 'lifemodel-task-model';
   try {
     base = new URL(
       options.apiServer ??
@@ -291,7 +293,7 @@ export function createTaskKubernetesIdentity(options: TaskKubernetesIdentityOpti
               {
                 apiVersion: 'authentication.k8s.io/v1',
                 kind: 'TokenReview',
-                spec: { token, audiences: [AUDIENCE] },
+                spec: { token, audiences: [audience] },
               },
               signal
             )
@@ -300,7 +302,7 @@ export function createTaskKubernetesIdentity(options: TaskKubernetesIdentityOpti
         if (
           review['authenticated'] !== true ||
           !Array.isArray(review['audiences']) ||
-          !review['audiences'].includes(AUDIENCE)
+          !review['audiences'].includes(audience)
         )
           denied();
         const user = object(review['user']);

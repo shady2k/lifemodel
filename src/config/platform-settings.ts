@@ -40,6 +40,13 @@ export interface PlatformSettingsValues {
   'tasks.concurrency': number;
   'tasks.harness': TaskHarness;
   'tasks.wrapGraceSeconds': number;
+  'tasks.channel.maxFrameBytes': number;
+  'tasks.channel.maxUnackedFrames': number;
+  'tasks.channel.maxUnackedBytes': number;
+  'tasks.channel.maxBufferedBytes': number;
+  'tasks.channel.ackTimeoutMs': number;
+  'tasks.channel.workers': number;
+  'tasks.channel.sqlConnections': number;
   'storage.retention': StorageRetention;
   'storage.warningLeadDays': number;
   'storage.ceilingBytes': number;
@@ -69,6 +76,13 @@ const PLATFORM_SETTING_DEFAULTS = {
   'tasks.concurrency': 2,
   'tasks.harness': 'opencode',
   'tasks.wrapGraceSeconds': 300,
+  'tasks.channel.maxFrameBytes': 65_536,
+  'tasks.channel.maxUnackedFrames': 16,
+  'tasks.channel.maxUnackedBytes': 1_048_576,
+  'tasks.channel.maxBufferedBytes': 4_194_304,
+  'tasks.channel.ackTimeoutMs': 5_000,
+  'tasks.channel.workers': 2,
+  'tasks.channel.sqlConnections': 2,
   'storage.retention': '90d',
   'storage.warningLeadDays': 7,
   'storage.ceilingBytes': 20_000_000_000,
@@ -124,6 +138,62 @@ export const platformSettingSpecs: readonly PlatformSettingSpec[] = [
     default: PLATFORM_SETTING_DEFAULTS['tasks.wrapGraceSeconds'],
     min: 30,
     max: 3600,
+  },
+  {
+    kind: 'number',
+    key: 'tasks.channel.maxFrameBytes',
+    default: PLATFORM_SETTING_DEFAULTS['tasks.channel.maxFrameBytes'],
+    integer: true,
+    min: 1,
+    max: 65_536,
+  },
+  {
+    kind: 'number',
+    key: 'tasks.channel.maxUnackedFrames',
+    default: PLATFORM_SETTING_DEFAULTS['tasks.channel.maxUnackedFrames'],
+    integer: true,
+    min: 1,
+    max: 16,
+  },
+  {
+    kind: 'number',
+    key: 'tasks.channel.maxUnackedBytes',
+    default: PLATFORM_SETTING_DEFAULTS['tasks.channel.maxUnackedBytes'],
+    integer: true,
+    min: 1,
+    max: 1_048_576,
+  },
+  {
+    kind: 'number',
+    key: 'tasks.channel.maxBufferedBytes',
+    default: PLATFORM_SETTING_DEFAULTS['tasks.channel.maxBufferedBytes'],
+    integer: true,
+    min: 1,
+    max: 4_194_304,
+  },
+  {
+    kind: 'number',
+    key: 'tasks.channel.ackTimeoutMs',
+    default: PLATFORM_SETTING_DEFAULTS['tasks.channel.ackTimeoutMs'],
+    integer: true,
+    min: 1,
+    max: 5_000,
+  },
+  {
+    kind: 'number',
+    key: 'tasks.channel.workers',
+    default: PLATFORM_SETTING_DEFAULTS['tasks.channel.workers'],
+    integer: true,
+    min: 1,
+    max: 2,
+  },
+  {
+    kind: 'number',
+    key: 'tasks.channel.sqlConnections',
+    default: PLATFORM_SETTING_DEFAULTS['tasks.channel.sqlConnections'],
+    integer: true,
+    min: 1,
+    max: 2,
   },
   {
     kind: 'select',
