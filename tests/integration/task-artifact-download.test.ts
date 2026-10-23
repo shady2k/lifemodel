@@ -407,7 +407,9 @@ describe('recipient-scoped task artifact downloads over HTTP and verified storag
     expect(resumed.status).toBe(206);
     const remainder = await resumed.done;
     expect(remainder.complete).toBe(true);
-    expect(Buffer.concat([partial.bytes, remainder.bytes])).toEqual(bytes);
+    const reassembled = Buffer.concat([partial.bytes, remainder.bytes]);
+    expect(reassembled.length).toBe(bytes.length);
+    expect(reassembled.equals(bytes)).toBe(true);
   });
 
   it.each(['expired', 'tombstoned'])(

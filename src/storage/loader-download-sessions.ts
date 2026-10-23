@@ -1,9 +1,10 @@
 import { Agent, request } from 'node:http';
+import type { Socket } from 'node:net';
 import type { OwnerDownloadSessions } from '../ports/task-artifact-download.js';
 
 /** Uses the loader's existing verification operation over its private Service. */
 export class LoaderDownloadSessions implements OwnerDownloadSessions {
-  private readonly socketErrors = new WeakSet<import('node:net').Socket>();
+  private readonly socketErrors = new WeakSet<Socket>();
   private readonly agent = new Agent({ keepAlive: true, maxSockets: 8, maxFreeSockets: 2 });
   constructor(
     private readonly instanceName: string,
@@ -24,7 +25,9 @@ export class LoaderDownloadSessions implements OwnerDownloadSessions {
           'x-forwarded-host': `${this.instanceName}.local`,
         },
       });
-      req.on('error', () => reject(new Error('owner_auth_unavailable')));
+      req.on('error', () => {
+        reject(new Error('owner_auth_unavailable'));
+      });
       req.on('socket', (socket) => {
         if (!this.socketErrors.has(socket)) {
           this.socketErrors.add(socket);
@@ -33,7 +36,9 @@ export class LoaderDownloadSessions implements OwnerDownloadSessions {
       });
       const timer = setTimeout(() => req.destroy(new Error('owner_auth_deadline')), 2_000);
       timer.unref();
-      req.on('close', () => clearTimeout(timer));
+      req.on('close', () => {
+        clearTimeout(timer);
+      });
       req.on('response', (res) => {
         res.on('error', () => undefined);
         const status = res.statusCode;

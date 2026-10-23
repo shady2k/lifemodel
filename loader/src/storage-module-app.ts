@@ -307,8 +307,9 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
                     signal,
                   })
                 : undefined;
-            const objectSpace = artifact?.space ?? objectMatch![1]!;
-            const objectTail = artifact ? `/${artifact.objectId}` : objectMatch![2] || '/';
+            const objectSpace = artifact?.space ?? objectMatch?.[1];
+            if (!objectSpace) throw new StorageAccessError(404, 'invalid_request');
+            const objectTail = artifact ? `/${artifact.objectId}` : objectMatch?.[2] || '/';
             const objectId = artifact?.objectId ?? /^\/([^/?]+)$/.exec(objectTail)?.[1];
             space = objectSpace;
             // Resolution held a zero-byte read slot. The object handler takes

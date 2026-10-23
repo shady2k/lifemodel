@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { Agent, request } from 'node:https';
 import { PassThrough, Transform, pipeline } from 'node:stream';
+import type { Socket } from 'node:net';
 import type { TaskArtifactReader } from '../ports/task-artifact-download.js';
 import {
   ARTIFACT_ID,
@@ -10,7 +11,7 @@ import {
 
 /** The web's service identity can read one marked artifact, never S3 or object lists. */
 export class StorageTaskArtifactReader implements TaskArtifactReader {
-  private readonly socketErrors = new WeakSet<import('node:net').Socket>();
+  private readonly socketErrors = new WeakSet<Socket>();
   private readonly agent = new Agent({ keepAlive: true, maxSockets: 8, maxFreeSockets: 2 });
   private readonly endpoint: URL;
   constructor(
@@ -51,7 +52,9 @@ export class StorageTaskArtifactReader implements TaskArtifactReader {
       if (!token || /\s/.test(token)) throw new ArtifactUnavailableError(503);
       return await new Promise<Awaited<ReturnType<TaskArtifactReader['openTaskArtifact']>>>(
         (resolve, reject) => {
-          const fail = () => reject(new ArtifactUnavailableError(503));
+          const fail = () => {
+            reject(new ArtifactUnavailableError(503));
+          };
           const req = request(new URL(`/artifacts/${artifactId}`, this.endpoint), {
             agent: this.agent,
             ca,
@@ -70,7 +73,9 @@ export class StorageTaskArtifactReader implements TaskArtifactReader {
             this.options.requestTimeoutMs ?? 15 * 60_000
           );
           timer.unref();
-          req.on('close', () => clearTimeout(timer));
+          req.on('close', () => {
+            clearTimeout(timer);
+          });
           req.on('response', (res) => {
             res.on('error', () => undefined);
             if (res.statusCode !== 200 && res.statusCode !== 206) {
@@ -106,7 +111,8 @@ export class StorageTaskArtifactReader implements TaskArtifactReader {
               (partial &&
                 (start >= size ||
                   end >= size ||
-                  res.headers['content-range'] !== `bytes ${start}-${end}/${size}`)) ||
+                  res.headers['content-range'] !==
+                    `bytes ${String(start)}-${String(end)}/${String(size)}`)) ||
               length !== end - start + 1
             ) {
               res.destroy();

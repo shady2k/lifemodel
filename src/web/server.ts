@@ -200,8 +200,9 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
   });
   let artifactTransfers = 0;
   const artifactLifecycles = new Set<AbortController>();
-  server.addHook('preClose', async () => {
+  server.addHook('preClose', (done) => {
     for (const lifecycle of artifactLifecycles) lifecycle.abort();
+    done();
   });
   server.get<{ Params: { artifactId: string } }>(
     '/api/attachments/:artifactId',
@@ -232,18 +233,18 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
           request.headers.cookie,
           lifecycle.signal
         );
-        if (!authenticated) return reply.code(401).send({ error: 'session_expired' });
+        if (!authenticated) return await reply.code(401).send({ error: 'session_expired' });
         const id = request.params.artifactId;
         // Reject encoded IDs as well as traversal; only one canonical opaque ID enters storage.
         if (!ARTIFACT_ID.test(id) || request.raw.url !== `/api/attachments/${id}`)
-          return reply.code(404).send({ error: 'artifact_not_available' });
+          return await reply.code(404).send({ error: 'artifact_not_available' });
         const attachment = await downloads.authorizer.findAttachment(id);
-        if (!attachment) return reply.code(404).send({ error: 'artifact_not_available' });
+        if (!attachment) return await reply.code(404).send({ error: 'artifact_not_available' });
         const range = request.headers.range;
         if (range !== undefined && !validArtifactRange(range))
-          return reply.code(416).send({ error: 'invalid_range' });
+          return await reply.code(416).send({ error: 'invalid_range' });
         if (artifactTransfers >= 8)
-          return reply.code(503).send({ error: 'artifact_not_available' });
+          return await reply.code(503).send({ error: 'artifact_not_available' });
         artifactTransfers += 1;
         slot = true;
         const opened = await downloads.reader.openTaskArtifact(id, range, lifecycle.signal);
@@ -287,7 +288,10 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
         reply.header('Accept-Ranges', 'bytes');
         reply.header('Content-Length', opened.end - opened.start + 1);
         if (opened.partial)
-          reply.header('Content-Range', `bytes ${opened.start}-${opened.end}/${opened.size}`);
+          reply.header(
+            'Content-Range',
+            `bytes ${String(opened.start)}-${String(opened.end)}/${String(opened.size)}`
+          );
         reply.code(opened.partial ? 206 : 200);
         let checking = false;
         const stop = () => {
@@ -298,9 +302,12 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
           transform(chunk: Buffer, _encoding, callback) {
             // A current loader proof gates every outgoing chunk, including after logout.
             void downloads.sessions.verify(request.headers.cookie, lifecycle.signal).then(
-              (valid) =>
-                callback(valid ? null : new Error('session_expired'), valid ? chunk : undefined),
-              () => callback(new Error('owner_auth_unavailable'))
+              (valid) => {
+                callback(valid ? null : new Error('session_expired'), valid ? chunk : undefined);
+              },
+              () => {
+                callback(new Error('owner_auth_unavailable'));
+              }
             );
           },
         });
@@ -339,9 +346,9 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
         guarded.once('close', cleanup);
         handedOff = true;
         opened.body.pipe(guarded);
-        return reply.send(guarded);
+        return await reply.send(guarded);
       } catch (error) {
-        return reply
+        return await reply
           .code(error instanceof ArtifactUnavailableError ? error.status : 503)
           .send({ error: 'artifact_not_available' });
       } finally {

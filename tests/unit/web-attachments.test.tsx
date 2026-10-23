@@ -101,13 +101,16 @@ describe('conversation file attachments', () => {
     expect(container.querySelector('img, [onerror]')).toBeNull();
   });
 
-  it('formats bytes and larger files without excessive precision', () => {
-    expect(formatAttachmentSize(0, 'en')).toBe('0 byte');
-    expect(formatAttachmentSize(999, 'en')).toBe('999 byte');
-    expect(formatAttachmentSize(1500, 'en')).toBe('1.5 kB');
-    expect(formatAttachmentSize(2_500_000, 'en')).toBe('2.5 MB');
-    expect(formatAttachmentSize(1_000_000_000, 'en')).toBe('1 GB');
-  });
+  it.each([
+    ['en', ['0 B', '66 B', '999 B', '1.5 kB', '2.5 MB', '1 GB']],
+    ['ru', ['0 Б', '66 Б', '999 Б', '1,5 кБ', '2,5 МБ', '1 ГБ']],
+  ])(
+    'formats short byte units and larger files in %s without excessive precision',
+    (language, sizes) => {
+      const values = [0, 66, 999, 1500, 2_500_000, 1_000_000_000];
+      expect(values.map((size) => formatAttachmentSize(size, language))).toEqual(sizes);
+    }
+  );
 
   it('preserves attachment metadata in the live-message parser and HTTP page reader', async () => {
     expect(parseTranscriptMessage(message)).toEqual(message);

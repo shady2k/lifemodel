@@ -7,12 +7,17 @@ export function formatAttachmentSize(size: number, language: string): string {
   const units = ['byte', 'kilobyte', 'megabyte', 'gigabyte', 'terabyte'] as const;
   const unitIndex =
     size > 0 ? Math.max(0, Math.min(Math.floor(Math.log10(size) / 3), units.length - 1)) : 0;
-  return new Intl.NumberFormat(language, {
+  const formatter = new Intl.NumberFormat(language, {
     style: 'unit',
     unit: units[unitIndex] ?? 'byte',
     unitDisplay: 'short',
     maximumFractionDigits: unitIndex === 0 ? 0 : 1,
-  }).format(size / 1000 ** unitIndex);
+  });
+  // CLDR's English short byte label is "byte", unlike the other unit symbols.
+  return formatter
+    .formatToParts(size / 1000 ** unitIndex)
+    .map((part) => (part.type === 'unit' && part.value === 'byte' ? 'B' : part.value))
+    .join('');
 }
 
 export function MessageAttachments({
