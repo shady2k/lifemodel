@@ -101,9 +101,15 @@ export function createKubernetesTlsStores(options: ApiOptions = {}): {
   const sec = createApi(options, 'secrets', 'lifemodel-tls');
   const serviceSec = createApi(options, 'secrets', 'storage-module-tls');
   const cm = createApi(options, 'configmaps', 'lifemodel-ca');
-  // A0 precreates this public-only replica and its fixed-name write RBAC.
-  // The application namespace exists before A0; no dependency on step A or D.
+  // A0 precreates these public-only replicas and their fixed-name write RBAC.
+  // Both application namespaces exist in instance, before A0; PKI readiness
+  // must never depend on step A or D, which themselves wait for the loader.
   const coreCm = createApi({ ...options, namespace: 'lifemodel' }, 'configmaps', 'lifemodel-ca');
+  const motorCm = createApi(
+    { ...options, namespace: 'lifemodel-motor' },
+    'configmaps',
+    'lifemodel-ca'
+  );
   const statusCm = createApi(options, 'configmaps', 'lifemodel-pki-status');
   async function read(resource: ReturnType<typeof createApi>) {
     const r = await resource.send('GET');
@@ -170,7 +176,7 @@ export function createKubernetesTlsStores(options: ApiOptions = {}): {
         return obj?.data?.['ca.crt'] ? obj.data['ca.crt'] : null;
       },
       write: async (ca) => {
-        for (const resource of [cm, coreCm]) {
+        for (const resource of [cm, coreCm, motorCm]) {
           const old = await read(resource);
           if (!old?.metadata?.resourceVersion)
             throw new Error('A0 CA ConfigMap must exist before loader startup');

@@ -6,3 +6,14 @@ metadata:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted
+---
+# Both application namespaces precede A0 so loader CA publication cannot wait
+# on step A, whose readiness depends on that same loader.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lifemodel-motor
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

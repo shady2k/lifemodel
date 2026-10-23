@@ -1,0 +1,31 @@
+# Core owns launch/reconcile/cleanup, not task credentials or pod execution.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: core-task-launcher
+  namespace: lifemodel-motor
+rules:
+  # create: committed launch; get: deterministic adopt/CAS; list/watch: resync;
+  # patch: shorten the native deadline; delete: exact-UID stop/cleanup (ADR-014 D3).
+  - apiGroups: ['batch']
+    resources: ['jobs']
+    verbs: ['create', 'get', 'list', 'watch', 'patch', 'delete']
+  # get: bound live identity; list/watch: Job Pod observation/reconciliation.
+  # No pods/create, exec, logs, secrets or cluster-wide permission.
+  - apiGroups: ['']
+    resources: ['pods']
+    verbs: ['get', 'list', 'watch']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: core-task-launcher
+  namespace: lifemodel-motor
+subjects:
+  - kind: ServiceAccount
+    name: core
+    namespace: lifemodel
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: core-task-launcher

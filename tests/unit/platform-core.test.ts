@@ -34,6 +34,16 @@ describe('core application generation', () => {
     expect(statefulSet.spec.volumeClaimTemplates).toBeUndefined();
     expect(pod.volumes).toEqual([
       {
+        name: 'task-api-identity',
+        projected: {
+          defaultMode: 288,
+          sources: [
+            { serviceAccountToken: { expirationSeconds: 3600, path: 'token' } },
+            { configMap: { name: 'kube-root-ca.crt', items: [{ key: 'ca.crt', path: 'ca.crt' }] } },
+          ],
+        },
+      },
+      {
         name: 'storage-ca',
         configMap: {
           name: 'lifemodel-ca',
@@ -97,6 +107,11 @@ describe('core application generation', () => {
       {
         name: 'storage-identity',
         mountPath: '/var/run/secrets/lifemodel-storage',
+        readOnly: true,
+      },
+      {
+        name: 'task-api-identity',
+        mountPath: '/var/run/secrets/kubernetes.io/serviceaccount',
         readOnly: true,
       },
       { name: 'storage-ca', mountPath: '/var/run/secrets/lifemodel-storage-ca', readOnly: true },

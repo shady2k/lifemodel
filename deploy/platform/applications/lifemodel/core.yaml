@@ -18,6 +18,11 @@ spec:
     - name: health
       port: 8081
       targetPort: health
+    # Task-only TLS control stream (653.8.8); not the health listener.
+    - name: task-channel
+      port: 8447
+      targetPort: 8447
+      protocol: TCP
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -144,7 +149,7 @@ spec:
               mountPath: /tmp
             # The loader's platform settings projection (ADR-014 D6): read
             # -only, so the core reads the owner's values and can never write
-            # them; it holds no API-audience token and no ConfigMap RBAC.
+            # them; its task-launch API token has no ConfigMap RBAC.
             - name: platform-settings
               mountPath: /opt/lifemodel/platform-settings
               readOnly: true
@@ -152,11 +157,30 @@ spec:
             - name: storage-identity
               mountPath: /var/run/secrets/lifemodel-storage
               readOnly: true
+            # Only the core process, never its migration init container, gets
+            # a rotating API token for the namespaced task launcher Role.
+            - name: task-api-identity
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
             # Public instance CA only, never a TLS Secret or private key.
             - name: storage-ca
               mountPath: /var/run/secrets/lifemodel-storage-ca
               readOnly: true
       volumes:
+        # Omitted audience deliberately requests the API-server audience.
+        # automount stays false; service-specific storage tokens stay separate.
+        - name: task-api-identity
+          projected:
+            defaultMode: 288
+            sources:
+              - serviceAccountToken:
+                  expirationSeconds: 3600
+                  path: token
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
         - name: storage-ca
           configMap:
             name: lifemodel-ca

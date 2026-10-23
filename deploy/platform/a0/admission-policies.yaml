@@ -58,10 +58,11 @@ spec:
     - expression: >-
         request.operation != 'DELETE' &&
         ((request.namespace == 'lifemodel' &&
-          (object.metadata.name == 'lifemodel-platform-settings' ||
-           (request.operation == 'UPDATE' && object.metadata.name == 'lifemodel-ca' &&
-            has(object.data) && size(object.data) == 1 && 'ca.crt' in object.data &&
-            !has(object.binaryData)))) ||
+          object.metadata.name == 'lifemodel-platform-settings') ||
+         (request.namespace in ['lifemodel', 'lifemodel-motor'] &&
+          request.operation == 'UPDATE' && object.metadata.name == 'lifemodel-ca' &&
+          has(object.data) && size(object.data) == 1 && 'ca.crt' in object.data &&
+          !has(object.binaryData)) ||
          (request.namespace == 'lifemodel-system' &&
           (object.metadata.name == 'lifemodel-storage-settings' ||
            (request.operation == 'UPDATE' && object.metadata.name in ['lifemodel-ca', 'lifemodel-pki-status']))))
@@ -157,8 +158,9 @@ spec:
   policyName: application-kustomization-admission
   validationActions: [Deny]
 ---
-# Flux may CREATE the A0 placeholder. Only loader can UPDATE it afterwards;
-# nobody may DELETE it. request.name is available even without a new object.
+# Flux may CREATE the A0 public-CA placeholders in core and motor. Only loader
+# can UPDATE them afterwards; nobody may DELETE them. The loader ConfigMap
+# clamp above also rejects keys and binaryData. request.name covers DELETE.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -167,8 +169,10 @@ spec:
   failurePolicy: Fail
   matchConstraints:
     namespaceSelector:
-      matchLabels:
-        kubernetes.io/metadata.name: lifemodel
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: [lifemodel, lifemodel-motor]
     resourceRules:
       - apiGroups: ['']
         apiVersions: [v1]
@@ -176,10 +180,10 @@ spec:
         resources: [configmaps]
   matchConditions:
     - name: storage-ca-resource
-      expression: request.namespace == 'lifemodel' && request.name == 'lifemodel-ca'
+      expression: request.namespace in ['lifemodel', 'lifemodel-motor'] && request.name == 'lifemodel-ca'
   validations:
     - expression: request.operation == 'UPDATE' && request.userInfo.username == 'system:serviceaccount:lifemodel-system:loader'
-      message: only loader may update the core public CA ConfigMap; deletion is forbidden
+      message: only loader may update the core and task public CA ConfigMaps; deletion is forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
