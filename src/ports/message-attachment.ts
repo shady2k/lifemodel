@@ -44,7 +44,7 @@ export function validateMessageAttachments(
       typeof item['name'] !== 'string' ||
       item['name'].length === 0 ||
       item['name'].length > MAX_NAME_BYTES ||
-      !item['name'].isWellFormed() ||
+      /[\uD800-\uDFFF]/u.test(item['name']) ||
       Buffer.byteLength(item['name'], 'utf8') > MAX_NAME_BYTES ||
       typeof item['size'] !== 'number' ||
       !Number.isSafeInteger(item['size']) ||
