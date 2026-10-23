@@ -3,6 +3,18 @@ kind: Kustomization
 resources:
   - core.yaml
   - web.yaml
+# Launch input consumed by the core Job adapter (653.8.5). Kept in this overlay
+# so prepare-loader-context.sh carries the pushed digest into the Gitea seed.
+patches:
+  - target:
+      kind: StatefulSet
+      name: core
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: LIFEMODEL_TASK_WORKBENCH_IMAGE
+          value: ghcr.io/shady2k/lifemodel-workbench@sha256:0000000000000000000000000000000000000000000000000000000000000000
 images:
   - name: ghcr.io/shady2k/lifemodel-core
     newName: ghcr.io/shady2k/lifemodel-core

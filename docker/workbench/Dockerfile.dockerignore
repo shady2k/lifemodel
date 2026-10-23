@@ -1,0 +1,21 @@
+# Dedicated checkout-root workbench context. Admit files, never directories.
+*
+!docker/workbench/Dockerfile
+!docker/workbench/lifemodel-task-launcher
+!docker/workbench/opencode.json
+!docker/loader/lifemodel-storage
+!package.json
+!package-lock.json
+!loader/package.json
+!loader/package-lock.json
+!loader/tsconfig.json
+!loader/src/**/*.ts
+# Defense in depth even inside admitted source paths.
+**/.npmrc
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/.git*
+**/id_*
+**/secrets/**

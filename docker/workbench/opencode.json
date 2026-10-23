@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "autoupdate": false,
+  "share": "disabled",
+  "provider": {
+    "lifemodel": {
+      "name": "lifemodel task gateway",
+      "options": {
+        "baseURL": "https://model-gateway.lifemodel-system.svc:8446/v1"
+      }
+    }
+  }
+}

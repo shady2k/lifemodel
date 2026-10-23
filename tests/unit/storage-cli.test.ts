@@ -104,6 +104,27 @@ async function source() {
 }
 
 describe('lifemodel-storage', () => {
+  it('prints help offline without reading identity or configuration', async () => {
+    const code = await runStorageCli(['--help'], {
+      env: {},
+      cwd: '/nonexistent',
+      stdout: (value) => {
+        stdout += value;
+      },
+      stderr: (value) => {
+        stderr += value;
+      },
+    });
+    expect(code).toBe(0);
+    expect(stdout).toContain('lifemodel-storage');
+    expect(stdout).toContain('put <name> --upload-id <id>');
+    expect(stdout).toContain('get <id> <name>');
+    expect(stdout).toContain('list [--cursor <cursor>] [--limit <1..100>]');
+    expect(stdout).toContain('mark <id> <artifact|result|log>');
+    expect(stderr).toBe('');
+    expect(calls).toHaveLength(0);
+  });
+
   it.each([
     ['no arguments', []],
     ['path escape', ['put', '../escape', '--upload-id', 'escape']],
