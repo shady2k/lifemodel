@@ -1,4 +1,5 @@
 import type { Storage } from './storage.js';
+import { validateMessageAttachments, type MessageAttachment } from '../ports/message-attachment.js';
 import { ConversationCompactionConflictError } from './postgres-conversation-store.js';
 import type { Logger } from '../types/index.js';
 
@@ -47,6 +48,8 @@ export interface ConversationMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   /** Content - can be null for assistant messages with only tool_calls */
   content: string | null;
+  /** Metadata-only references on assistant messages. */
+  attachments?: MessageAttachment[];
   /** Timestamp when message was added */
   timestamp?: Date;
   /** Tool calls made by assistant (only for role: 'assistant') */
@@ -81,6 +84,7 @@ interface StoredMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string | null;
   timestamp: string;
+  attachments?: MessageAttachment[];
   /** Tool calls made by assistant (only for role: 'assistant') */
   tool_calls?: StoredToolCall[];
   /** Tool call ID this message is responding to (only for role: 'tool') */
@@ -251,6 +255,7 @@ export class ConversationManager {
     message: {
       role: 'system' | 'user' | 'assistant';
       content: string;
+      attachments?: MessageAttachment[];
     },
     channelMeta?: {
       channelMessageId?: string;
@@ -259,12 +264,14 @@ export class ConversationManager {
       replyTo?: { sequence: string; role: 'user' | 'assistant'; excerpt: string };
     }
   ): Promise<void> {
+    const attachments = validateMessageAttachments(message.attachments, message.role);
     const key = this.getKey(userId);
     const stored = await this.loadConversation(key);
 
     const storedMsg: StoredMessage = {
       role: message.role,
       content: message.content,
+      ...(attachments !== undefined ? { attachments } : {}),
       timestamp: new Date().toISOString(),
     };
     if (channelMeta?.messageId) storedMsg.messageId = channelMeta.messageId;
@@ -314,6 +321,7 @@ export class ConversationManager {
     assistantMessage: {
       content: string | null;
       tool_calls?: StoredToolCall[];
+      attachments?: MessageAttachment[];
     },
     toolResults?: {
       tool_call_id: string;
@@ -325,6 +333,7 @@ export class ConversationManager {
       messageId?: string;
     }
   ): Promise<void> {
+    const attachments = validateMessageAttachments(assistantMessage.attachments, 'assistant');
     const key = this.getKey(userId);
     const stored = await this.loadConversation(key);
     const timestamp = new Date().toISOString();
@@ -333,6 +342,7 @@ export class ConversationManager {
     const assistantMsg: StoredMessage = {
       role: 'assistant',
       content: assistantMessage.content,
+      ...(attachments !== undefined ? { attachments } : {}),
       timestamp,
     };
     if (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
@@ -424,6 +434,7 @@ export class ConversationManager {
         convMsg.tool_call_id = msg.tool_call_id;
       }
       if (msg.replyTo) convMsg.replyTo = msg.replyTo;
+      if (msg.attachments) convMsg.attachments = msg.attachments;
 
       result.push(convMsg);
     }
@@ -469,6 +480,7 @@ export class ConversationManager {
         convMsg.tool_call_id = msg.tool_call_id;
       }
       if (msg.replyTo) convMsg.replyTo = msg.replyTo;
+      if (msg.attachments) convMsg.attachments = msg.attachments;
       if (msg.channelMessageId) {
         convMsg.channelMessageId = msg.channelMessageId;
       }
@@ -513,6 +525,7 @@ export class ConversationManager {
           timestamp: new Date(msg.timestamp),
           channelMessageId: msg.channelMessageId,
           channel: msg.channel,
+          ...(msg.attachments ? { attachments: msg.attachments } : {}),
         };
       }
     }

@@ -89,6 +89,8 @@ spec:
               value: '8081'
             - name: LIFEMODEL_STORAGE_READ_TOKEN_FILE
               value: /var/run/secrets/lifemodel-storage/read-token
+            - name: LIFEMODEL_STORAGE_READ_CA_FILE
+              value: /var/run/secrets/lifemodel-storage-ca/ca.crt
             - name: LIFEMODEL_WEB_APP_DIRECTORY
               value: /opt/lifemodel/web/app
             # The gateway's health listener (ADR-013 D5/D6): the web module
@@ -123,6 +125,9 @@ spec:
             requests: { cpu: 50m, memory: 256Mi }
             limits: { cpu: 1, memory: 768Mi }
           volumeMounts:
+            - name: storage-ca
+              mountPath: /var/run/secrets/lifemodel-storage-ca
+              readOnly: true
             - name: tmp
               mountPath: /tmp
             # No subPath: kubelet rotates these bound service-audience tokens.
@@ -130,6 +135,10 @@ spec:
               mountPath: /var/run/secrets/lifemodel-storage
               readOnly: true
       volumes:
+        - name: storage-ca
+          configMap:
+            name: lifemodel-ca
+            optional: true
         - name: tmp
           emptyDir:
             medium: Memory

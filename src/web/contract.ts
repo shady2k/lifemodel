@@ -1,3 +1,5 @@
+import type { MessageAttachment } from '../ports/message-attachment.js';
+
 /** Wire contracts shared by the web server and browser app. */
 export interface TranscriptMessage {
   sequence: string;
@@ -5,6 +7,7 @@ export interface TranscriptMessage {
   role: 'user' | 'assistant';
   text: string;
   createdAt: string;
+  attachments?: MessageAttachment[];
   replyTo?: { sequence: string; role: 'user' | 'assistant'; excerpt: string };
 }
 

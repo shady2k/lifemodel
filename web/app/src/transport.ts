@@ -38,6 +38,23 @@ export function parseTranscriptMessage(value: unknown): TranscriptMessage {
     typeof message.createdAt !== 'string'
   )
     throw new Error('Transcript message has an invalid shape');
+  if (
+    message.attachments !== undefined &&
+    (!Array.isArray(message.attachments) ||
+      !message.attachments.every(
+        (attachment) =>
+          attachment !== null &&
+          typeof attachment === 'object' &&
+          typeof attachment.artifactId === 'string' &&
+          attachment.artifactId.length > 0 &&
+          typeof attachment.name === 'string' &&
+          typeof attachment.size === 'number' &&
+          Number.isSafeInteger(attachment.size) &&
+          attachment.size >= 0 &&
+          typeof attachment.contentType === 'string'
+      ))
+  )
+    throw new Error('Transcript attachments have an invalid shape');
   return message as TranscriptMessage;
 }
 
@@ -109,7 +126,7 @@ async function readTranscriptPage(
   const page = (await response.json()) as TranscriptPage;
   if (!Array.isArray(page.messages) || !(page.cursor === null || typeof page.cursor === 'string'))
     throw new Error('Transcript response has an invalid shape');
-  return page;
+  return { ...page, messages: page.messages.map(parseTranscriptMessage) };
 }
 
 /** Rows read per catch-up page; the server's page limit is 50. */

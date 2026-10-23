@@ -196,6 +196,12 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           options.objects
             ? /^\/spaces\/([a-z0-9][a-z0-9_-]{0,63})\/objects(?=\/|\?|$)(.*)$/.exec(req.url ?? '')
             : null;
+        const artifactMatch =
+          role === 'read' && req.method === 'GET' && options.seal && options.objects
+            ? /^\/artifacts\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(
+                req.url ?? ''
+              )
+            : null;
         const maintenanceRoute =
           role === 'control' &&
           options.maintenance &&
@@ -221,6 +227,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
             retentionRoute ||
             (role === 'task' && req.method === 'GET' && match) ||
             objectMatch ||
+            artifactMatch ||
             (role === 'control' &&
               req.method === 'POST' &&
               (req.url === '/revoke' ||
@@ -289,23 +296,40 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
                 req.rawHeaders.reduce((sum, part) => sum + Buffer.byteLength(part) + 4, 128),
             });
           let result: unknown;
-          if (objectMatch?.[1] && options.objects) {
-            const objectSpace = objectMatch[1];
-            const objectId = /^\/([^/?]+)$/.exec(objectMatch[2] ?? '')?.[1];
+          if ((objectMatch?.[1] || artifactMatch?.[1]) && options.objects) {
+            // Web never selects a space or gains the core's object/list routes.
+            // Its artifact UUID resolves through module-owned catalog SQL.
+            const artifact =
+              artifactMatch?.[1] && options.seal
+                ? await options.seal.openArtifactStream({
+                    token,
+                    artifactId: artifactMatch[1],
+                    signal,
+                  })
+                : undefined;
+            const objectSpace = artifact?.space ?? objectMatch![1]!;
+            const objectTail = artifact ? `/${artifact.objectId}` : objectMatch![2] || '/';
+            const objectId = artifact?.objectId ?? /^\/([^/?]+)$/.exec(objectTail)?.[1];
+            space = objectSpace;
+            // Resolution held a zero-byte read slot. The object handler takes
+            // its own bounded admission; never hold two slots for one request.
+            lease?.release();
+            lease = undefined;
             const stream =
-              role === 'read' && options.seal
+              artifact?.stream ??
+              (role === 'read' && options.seal
                 ? options.seal.openCoreStream({
                     token,
-                    space: objectMatch[1],
+                    space: objectSpace,
                     signal,
                     ...(objectId ? { objectId } : {}),
                   })
                 : access.openTaskStream({
                     token,
-                    space: objectMatch[1],
+                    space: objectSpace,
                     signal,
                     write: req.method !== 'GET',
-                  });
+                  }));
             const abortInput = (): void => {
               req.destroy();
               res.destroy();
@@ -328,24 +352,26 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
               await options.objects.handle(
                 req,
                 res,
-                objectMatch[1],
-                objectMatch[2] || '/',
+                objectSpace,
+                objectTail,
                 progressing,
                 // Failure cleanup re-proves the same token/space independently
                 // of the canceled transfer. The caller must close this stream.
-                () =>
-                  role === 'read' && options.seal
-                    ? options.seal.openCoreStream({
-                        token,
-                        space: objectSpace,
-                        signal: AbortSignal.timeout(10_000),
-                        ...(objectId ? { objectId } : {}),
-                      })
-                    : access.openTaskStream({
-                        token,
-                        space: objectSpace,
-                        signal: AbortSignal.timeout(10_000),
-                      }),
+                artifact
+                  ? undefined
+                  : () =>
+                      role === 'read' && options.seal
+                        ? options.seal.openCoreStream({
+                            token,
+                            space: objectSpace,
+                            signal: AbortSignal.timeout(10_000),
+                            ...(objectId ? { objectId } : {}),
+                          })
+                        : access.openTaskStream({
+                            token,
+                            space: objectSpace,
+                            signal: AbortSignal.timeout(10_000),
+                          }),
                 progress,
                 role === 'read',
                 { admission, role: role === 'read' ? 'read' : 'task', initialDeadline }

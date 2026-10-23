@@ -76,10 +76,17 @@ export interface StorageSeal {
     objectId?: string;
     signal?: AbortSignal;
   }): StorageTaskStream;
+  /** Web can resolve only one marked artifact UUID, never a caller-supplied space. */
+  openArtifactStream(input: {
+    token: string;
+    artifactId: string;
+    signal?: AbortSignal;
+  }): Promise<{ space: string; objectId: string; stream: StorageTaskStream }>;
   check(signal: AbortSignal): Promise<boolean>;
   close(): Promise<void>;
 }
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const ARTIFACT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const SPACE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const REV = /^(0|[1-9][0-9]{0,18})$/;
 const MAX = 9223372036854775807n;
@@ -349,6 +356,105 @@ export function createStorageSeal(options: Options): StorageSeal {
       ]
     );
     return required(result.rows[0]);
+  }
+  function openReadStream({
+    token,
+    space,
+    objectId,
+    signal: parent,
+    role,
+  }: {
+    token: string;
+    space: string;
+    objectId?: string;
+    signal?: AbortSignal;
+    role: 'core' | 'web';
+  }): StorageTaskStream {
+    if (!SPACE.test(space)) fail(400, 'invalid_request');
+    const lease = randomUUID();
+    let leaseExpiresAt = now() + STORAGE_READ_LEASE_MS;
+    let closing: Promise<void> | undefined;
+    let cleanupRetried = false;
+    const controller = new AbortController();
+    const signal = AbortSignal.any([controller.signal, ...(parent ? [parent] : [])]);
+    return {
+      signal,
+      close: () => {
+        controller.abort();
+        // Abort synchronously, then await one bounded cleanup attempt. A failed
+        // lease is retried by the next read request; expiry also releases it.
+        closing ??= options.retention ? cleanLeases([[lease, leaseExpiresAt]]) : Promise.resolve();
+        return closing;
+      },
+      publish: () => Promise.reject(new StorageAccessError(403, 'read_only')),
+      chunk: async (bytes, dispatch) => {
+        if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > 4 * 1024 * 1024)
+          fail(400, 'invalid_chunk');
+        signal.throwIfAborted();
+        if (options.retention && !cleanupRetried) {
+          cleanupRetried = true;
+          await retryCleanup();
+        }
+        const identity = await options.access.identity.verify(
+          token,
+          [STORAGE_AUDIENCES.read[role === 'core' ? 0 : 1]],
+          signal
+        );
+        if (identity.role !== role) fail(403, 'identity_denied');
+        await tx(
+          async (client, writable) => {
+            const row = (
+              await client.query<{ id: string; revision: string; mode: string }>(
+                'SELECT id,access_revision::text AS revision,mode FROM storage.spaces WHERE id=$1 FOR SHARE',
+                [space]
+              )
+            ).rows[0];
+            if (!row) fail(404, 'space_not_found');
+            if (options.retention) {
+              const policy = (
+                await client.query<{ state: string }>(
+                  'SELECT state FROM storage.retention_policies WHERE space_id=$1',
+                  [space]
+                )
+              ).rows[0];
+              if (policy && policy.state !== 'retained') fail(404, 'object_not_found');
+              // UPSERT on every writable chunk also reacquires a lease first
+              // admitted while held, or pruned after expiring during the hold.
+              leaseExpiresAt = now() + STORAGE_READ_LEASE_MS;
+              if (writable)
+                await client.query(
+                  'INSERT INTO storage.read_leases(id,space_id,expires_at) VALUES($1,$2,to_timestamp($3/1000.0)) ON CONFLICT(id) DO UPDATE SET expires_at=EXCLUDED.expires_at',
+                  [lease, space, leaseExpiresAt]
+                );
+            }
+            if (
+              objectId &&
+              !(
+                await client.query(
+                  `SELECT 1 FROM storage.objects o WHERE o.space_id=$1 AND o.id::text=$2 AND o.mark IS NOT NULL AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=o.id) AND NOT EXISTS(SELECT 1 FROM storage.version_availability av WHERE av.object_id=o.id AND av.status<>'available')`,
+                  [space, objectId]
+                )
+              ).rowCount
+            )
+              fail(404, 'object_not_found');
+            signal.throwIfAborted();
+            if (dispatch.constructor.name === 'AsyncFunction')
+              fail(500, 'async_dispatch_forbidden');
+            if (
+              (dispatch as (value: unknown) => unknown)({
+                space,
+                revision: row.revision,
+                mode: row.mode,
+              }) !== undefined
+            )
+              fail(500, 'async_dispatch_forbidden');
+          },
+          false,
+          readPool,
+          signal
+        );
+      },
+    };
   }
   const api: StorageSeal = {
     allocate: async (value, signal) => {
@@ -776,92 +882,40 @@ export function createStorageSeal(options: Options): StorageSeal {
         return receipt;
       });
     },
-    openCoreStream: ({ token, space, objectId, signal: parent }) => {
-      if (!SPACE.test(space)) fail(400, 'invalid_request');
-      const lease = randomUUID();
-      let leaseExpiresAt = now() + STORAGE_READ_LEASE_MS;
-      let closing: Promise<void> | undefined;
-      let cleanupRetried = false;
-      const controller = new AbortController();
-      const signal = AbortSignal.any([controller.signal, ...(parent ? [parent] : [])]);
+    openCoreStream: (input) => openReadStream({ ...input, role: 'core' }),
+    openArtifactStream: async ({ token, artifactId, signal }) => {
+      if (!ARTIFACT.test(artifactId)) fail(400, 'invalid_request');
+      const identity = await options.access.identity.verify(
+        token,
+        [STORAGE_AUDIENCES.read[1]],
+        signal
+      );
+      if (identity.role !== 'web') fail(403, 'identity_denied');
+      const object = await tx(
+        async (client) => {
+          const row = (
+            await client.query<{ space_id: string; id: string }>(
+              `SELECT o.space_id,o.id::text FROM storage.objects o WHERE o.id=$1::uuid AND o.mark IS NOT NULL AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=o.id) AND NOT EXISTS(SELECT 1 FROM storage.version_availability av WHERE av.object_id=o.id AND av.status<>'available')`,
+              [artifactId]
+            )
+          ).rows[0];
+          if (!row) fail(404, 'object_not_found');
+          return row;
+        },
+        false,
+        readPool,
+        signal
+      );
       return {
-        signal,
-        close: () => {
-          controller.abort();
-          // Abort synchronously, then await one bounded cleanup attempt. A failed
-          // lease is retried by the next read request; expiry also releases it.
-          closing ??= options.retention
-            ? cleanLeases([[lease, leaseExpiresAt]])
-            : Promise.resolve();
-          return closing;
-        },
-        publish: () => Promise.reject(new StorageAccessError(403, 'read_only')),
-        chunk: async (bytes, dispatch) => {
-          if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > 4 * 1024 * 1024)
-            fail(400, 'invalid_chunk');
-          signal.throwIfAborted();
-          if (options.retention && !cleanupRetried) {
-            cleanupRetried = true;
-            await retryCleanup();
-          }
-          const identity = await options.access.identity.verify(
-            token,
-            [STORAGE_AUDIENCES.read[0]],
-            signal
-          );
-          if (identity.role !== 'core') fail(403, 'identity_denied');
-          await tx(
-            async (client, writable) => {
-              const row = (
-                await client.query<{ id: string; revision: string; mode: string }>(
-                  'SELECT id,access_revision::text AS revision,mode FROM storage.spaces WHERE id=$1 FOR SHARE',
-                  [space]
-                )
-              ).rows[0];
-              if (!row) fail(404, 'space_not_found');
-              if (options.retention) {
-                const policy = (
-                  await client.query<{ state: string }>(
-                    'SELECT state FROM storage.retention_policies WHERE space_id=$1',
-                    [space]
-                  )
-                ).rows[0];
-                if (policy && policy.state !== 'retained') fail(404, 'object_not_found');
-                // UPSERT on every writable chunk also reacquires a lease first
-                // admitted while held, or pruned after expiring during the hold.
-                leaseExpiresAt = now() + STORAGE_READ_LEASE_MS;
-                if (writable)
-                  await client.query(
-                    'INSERT INTO storage.read_leases(id,space_id,expires_at) VALUES($1,$2,to_timestamp($3/1000.0)) ON CONFLICT(id) DO UPDATE SET expires_at=EXCLUDED.expires_at',
-                    [lease, space, leaseExpiresAt]
-                  );
-              }
-              if (
-                objectId &&
-                !(
-                  await client.query(
-                    `SELECT 1 FROM storage.objects o WHERE o.space_id=$1 AND o.id::text=$2 AND o.mark IS NOT NULL AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=o.id) AND NOT EXISTS(SELECT 1 FROM storage.version_availability av WHERE av.object_id=o.id AND av.status<>'available')`,
-                    [space, objectId]
-                  )
-                ).rowCount
-              )
-                fail(404, 'object_not_found');
-              signal.throwIfAborted();
-              if (dispatch.constructor.name === 'AsyncFunction')
-                fail(500, 'async_dispatch_forbidden');
-              if (
-                (dispatch as (value: unknown) => unknown)({
-                  space,
-                  revision: row.revision,
-                  mode: row.mode,
-                }) !== undefined
-              )
-                fail(500, 'async_dispatch_forbidden');
-            },
-            false,
-            readPool
-          );
-        },
+        space: object.space_id,
+        objectId: object.id,
+        stream: openReadStream({
+          token,
+          space: object.space_id,
+          objectId: object.id,
+          role: 'web',
+          ...(signal ? { signal } : {}),
+        }),
       };
     },
     check: async (signal) => {

@@ -7,6 +7,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { validateMessageAttachments } from '../ports/message-attachment.js';
 import type { SnapshotOutboxEvent } from '../storage/snapshot-store.js';
 import type {
   SignalType,
@@ -290,6 +291,7 @@ export class IntentApplicator {
 
   private applySendMessage(intent: SendMessageIntent): void {
     const { recipientId, text, replyTo } = intent.payload;
+    const attachments = validateMessageAttachments(intent.payload.attachments, 'assistant');
     const send = this.deps.resolveSendTurn?.(intent);
     const turnKey = send?.turnKey;
     const finalSend = send?.final ?? false;
@@ -311,6 +313,7 @@ export class IntentApplicator {
         channel,
         ...(route ? { destination: route.destination } : {}),
         text,
+        ...(attachments !== undefined ? { attachments } : {}),
         ...(replyTo ? { replyTo } : {}),
       },
     });

@@ -15,6 +15,15 @@ import type {
   TranscriptPage as WebTranscriptPage,
 } from './contract.js';
 import type { ModelStatusSource } from './model-status.js';
+import type { AttachmentAuthorizer } from '../ports/message-attachment.js';
+import {
+  ARTIFACT_ID,
+  ArtifactUnavailableError,
+  validArtifactRange,
+  type TaskArtifactReader,
+  type OwnerDownloadSessions,
+} from '../ports/task-artifact-download.js';
+import { Transform } from 'node:stream';
 
 const UUID_V7 =
   '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$';
@@ -69,6 +78,13 @@ export interface WebServerOptions {
   modelStatus: ModelStatusSource;
   logger: Pick<FastifyBaseLogger, 'info'>;
   bodyLimit?: number;
+  attachments?: {
+    authorizer: AttachmentAuthorizer;
+    reader: TaskArtifactReader;
+    sessions: OwnerDownloadSessions;
+    /** Recheck idle transfers too; bytes always require a fresh session proof. */
+    sessionCheckMs?: number;
+  };
   /** The ADR's 15 minutes; a test shortens it to watch a stream end on its own. */
   streamMaxAgeMs?: number;
   /** The lease's life; a test shortens it to watch a lapsed stream end. */
@@ -179,9 +195,165 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     }
   });
   server.addHook('onSend', async (_request, reply) => {
-    reply.header('Content-Security-Policy', csp);
+    if (!reply.hasHeader('Content-Security-Policy')) reply.header('Content-Security-Policy', csp);
     if (!reply.hasHeader('Cache-Control')) reply.header('Cache-Control', 'no-store');
   });
+  let artifactTransfers = 0;
+  const artifactLifecycles = new Set<AbortController>();
+  server.addHook('preClose', async () => {
+    for (const lifecycle of artifactLifecycles) lifecycle.abort();
+  });
+  server.get<{ Params: { artifactId: string } }>(
+    '/api/attachments/:artifactId',
+    async (request, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      const downloads = options.attachments;
+      if (!downloads) return reply.code(503).send({ error: 'artifact_not_available' });
+      const lifecycle = new AbortController();
+      artifactLifecycles.add(lifecycle);
+      request.raw.on('error', () => undefined);
+      reply.raw.on('error', () => undefined);
+      let timer: ReturnType<typeof setInterval> | undefined;
+      const finish = () => {
+        artifactLifecycles.delete(lifecycle);
+        lifecycle.abort();
+        if (timer) clearInterval(timer);
+      };
+      reply.raw.once('close', finish);
+      const deadline = setTimeout(() => {
+        lifecycle.abort();
+        reply.raw.destroy();
+      }, 15 * 60_000);
+      deadline.unref();
+      let handedOff = false;
+      let slot = false;
+      try {
+        const authenticated = await downloads.sessions.verify(
+          request.headers.cookie,
+          lifecycle.signal
+        );
+        if (!authenticated) return reply.code(401).send({ error: 'session_expired' });
+        const id = request.params.artifactId;
+        // Reject encoded IDs as well as traversal; only one canonical opaque ID enters storage.
+        if (!ARTIFACT_ID.test(id) || request.raw.url !== `/api/attachments/${id}`)
+          return reply.code(404).send({ error: 'artifact_not_available' });
+        const attachment = await downloads.authorizer.findAttachment(id);
+        if (!attachment) return reply.code(404).send({ error: 'artifact_not_available' });
+        const range = request.headers.range;
+        if (range !== undefined && !validArtifactRange(range))
+          return reply.code(416).send({ error: 'invalid_range' });
+        if (artifactTransfers >= 8)
+          return reply.code(503).send({ error: 'artifact_not_available' });
+        artifactTransfers += 1;
+        slot = true;
+        const opened = await downloads.reader.openTaskArtifact(id, range, lifecycle.signal);
+        opened.body.on('error', () => undefined);
+        if (
+          lifecycle.signal.aborted ||
+          opened.body.destroyed ||
+          opened.body.errored ||
+          opened.size !== attachment.size
+        ) {
+          opened.body.destroy();
+          throw new ArtifactUnavailableError(503);
+        }
+        const safeTypes = new Set([
+          'application/octet-stream',
+          'application/pdf',
+          'application/zip',
+          'text/plain',
+          'text/csv',
+          'application/json',
+          'image/png',
+          'image/jpeg',
+          'image/webp',
+        ]);
+        reply.header(
+          'Content-Type',
+          safeTypes.has(attachment.contentType)
+            ? attachment.contentType
+            : 'application/octet-stream'
+        );
+        const escapedName = encodeURIComponent(attachment.name).replace(
+          /[!'()*]/g,
+          (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`
+        );
+        reply.header(
+          'Content-Disposition',
+          `attachment; filename="download"; filename*=UTF-8''${escapedName}`
+        );
+        reply.header('X-Content-Type-Options', 'nosniff');
+        reply.header('Content-Security-Policy', 'sandbox');
+        reply.header('Accept-Ranges', 'bytes');
+        reply.header('Content-Length', opened.end - opened.start + 1);
+        if (opened.partial)
+          reply.header('Content-Range', `bytes ${opened.start}-${opened.end}/${opened.size}`);
+        reply.code(opened.partial ? 206 : 200);
+        let checking = false;
+        const stop = () => {
+          opened.body.destroy();
+          guarded.destroy(new Error('artifact_not_available'));
+        };
+        const guarded = new Transform({
+          transform(chunk: Buffer, _encoding, callback) {
+            // A current loader proof gates every outgoing chunk, including after logout.
+            void downloads.sessions.verify(request.headers.cookie, lifecycle.signal).then(
+              (valid) =>
+                callback(valid ? null : new Error('session_expired'), valid ? chunk : undefined),
+              () => callback(new Error('owner_auth_unavailable'))
+            );
+          },
+        });
+        guarded.on('error', () => undefined);
+        opened.body.on('error', (error) => guarded.destroy(error));
+        opened.body.once('close', () => {
+          if (!opened.body.readableEnded) guarded.destroy(new Error('artifact_incomplete'));
+        });
+        guarded.once('close', () => {
+          opened.body.destroy();
+          finish();
+        });
+        lifecycle.signal.addEventListener('abort', stop, { once: true });
+        timer = setInterval(() => {
+          if (checking) return;
+          checking = true;
+          void downloads.sessions
+            .verify(request.headers.cookie, lifecycle.signal)
+            .then((valid) => {
+              if (!valid) stop();
+            }, stop)
+            .finally(() => {
+              checking = false;
+            });
+        }, downloads.sessionCheckMs ?? 5_000);
+        timer.unref();
+        const cleanup = () => {
+          clearTimeout(deadline);
+          if (slot) {
+            artifactTransfers -= 1;
+            slot = false;
+          }
+          lifecycle.signal.removeEventListener('abort', stop);
+          finish();
+        };
+        guarded.once('close', cleanup);
+        handedOff = true;
+        opened.body.pipe(guarded);
+        return reply.send(guarded);
+      } catch (error) {
+        return reply
+          .code(error instanceof ArtifactUnavailableError ? error.status : 503)
+          .send({ error: 'artifact_not_available' });
+      } finally {
+        if (!handedOff) {
+          clearTimeout(deadline);
+          if (slot) artifactTransfers -= 1;
+          finish();
+        }
+      }
+    }
+  );
+
   server.get('/api/instance', async (_request, reply) => {
     const instance: InstanceResponse = {
       name: options.instanceName,

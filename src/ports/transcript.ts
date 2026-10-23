@@ -1,9 +1,13 @@
+import type { MessageAttachment } from './message-attachment.js';
+
 /** Owner-visible transcript row; internal conversation events are never exposed. */
 export interface TranscriptRow {
   sequence: string;
   clientId?: string;
   role: 'user' | 'assistant';
   text: string;
+  /** Metadata-only references; present only on assistant messages. */
+  attachments?: MessageAttachment[];
   createdAt: string;
   replyTo?: { sequence: string; role: 'user' | 'assistant'; excerpt: string };
 }

@@ -1,4 +1,5 @@
 import type { Redis } from 'iovalkey';
+import { validateMessageAttachments, type MessageAttachment } from '../ports/message-attachment.js';
 import { decodeSignal, type Signal } from '../types/signal.js';
 import type { SnapshotOutboxEvent, SnapshotSectionOwner } from '../storage/snapshot-store.js';
 import type { ConversationManager } from '../storage/conversation-manager.js';
@@ -302,6 +303,7 @@ export interface OutboundMessagePayload extends Record<string, unknown> {
   destination?: string;
   text: string;
   replyTo?: string;
+  attachments?: MessageAttachment[];
 }
 
 /**
@@ -395,9 +397,14 @@ export async function applyCommittedOutboundEvents(
       const payload = event.payload as OutboundMessagePayload;
       if (!payload.recipientId || !payload.channel || !payload.text)
         throw new Error(`Incomplete outbound message event ${event.eventId}`);
+      const attachments = validateMessageAttachments(payload.attachments, 'assistant');
       await conversations.addMessage(
         payload.recipientId,
-        { role: 'assistant', content: payload.text },
+        {
+          role: 'assistant',
+          content: payload.text,
+          ...(attachments !== undefined ? { attachments } : {}),
+        },
         { channelMessageId: event.eventId, channel: payload.channel }
       );
       await redis.set(offsetKey, streamId);

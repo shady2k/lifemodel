@@ -1,6 +1,12 @@
 import { randomUUID, createHash } from 'node:crypto';
 import type { Pool } from 'pg';
 import type { Redis } from 'iovalkey';
+import {
+  isArtifactId,
+  validateMessageAttachments,
+  type AttachmentAuthorizer,
+  type MessageAttachment,
+} from '../ports/message-attachment.js';
 import type {
   ReadTranscriptOptions,
   TranscriptPage,
@@ -173,11 +179,13 @@ interface TranscriptDbRow {
   created_at: Date | string;
   reply_to: unknown;
   has_reply_to: boolean;
+  attachments: unknown;
+  has_attachments: boolean;
   newest_sequence: string | null;
 }
 
 /** Direct, recipient-scoped transcript projection and wake-hint watcher. */
-export class PostgresTranscriptStore implements TranscriptReader {
+export class PostgresTranscriptStore implements TranscriptReader, AttachmentAuthorizer {
   constructor(
     private readonly pool: Pool,
     private readonly redis: Redis,
@@ -206,7 +214,8 @@ export class PostgresTranscriptStore implements TranscriptReader {
         : [this.recipientId, cursor, options.limit];
     const { rows } = await this.pool.query<TranscriptDbRow>(
       `SELECT page.sequence::text AS sequence, page.message_id, page.role, page.text,
-              page.created_at, page.reply_to, page.has_reply_to, newest.newest_sequence
+              page.created_at, page.reply_to, page.has_reply_to, page.attachments,
+              page.has_attachments, newest.newest_sequence
        FROM (
          SELECT sequence::text AS newest_sequence
          FROM core.conversation_messages
@@ -220,7 +229,8 @@ export class PostgresTranscriptStore implements TranscriptReader {
        LEFT JOIN LATERAL (
          SELECT sequence, message_id, payload->>'role' AS role,
                 payload->>'content' AS text, created_at, payload->'replyTo' AS reply_to,
-                payload ? 'replyTo' AS has_reply_to
+                payload ? 'replyTo' AS has_reply_to, payload->'attachments' AS attachments,
+                payload ? 'attachments' AS has_attachments
          FROM core.conversation_messages
          WHERE recipient_id = $1 AND kind = 'message'
            AND (payload->>'role' = 'user' OR
@@ -239,6 +249,27 @@ export class PostgresTranscriptStore implements TranscriptReader {
       rows: resultRows,
       cursor: newestSequence,
     };
+  }
+
+  async findAttachment(artifactId: string): Promise<MessageAttachment | null> {
+    if (!isArtifactId(artifactId)) return null;
+    const { rows } = await this.pool.query<{ attachment: unknown }>(
+      `SELECT attachment
+       FROM core.conversation_messages
+       CROSS JOIN LATERAL jsonb_array_elements(
+         CASE WHEN jsonb_typeof(payload->'attachments') = 'array'
+              THEN payload->'attachments' ELSE '[]'::jsonb END
+       ) AS attachments(attachment)
+       WHERE recipient_id = $1 AND kind = 'message'
+         AND payload->>'role' = 'assistant'
+         AND jsonb_typeof(payload->'content') = 'string'
+         AND (payload->'tool_calls' IS NULL OR payload->'tool_calls' = '[]'::jsonb)
+         AND lower(attachment->>'artifactId') = $2
+       ORDER BY sequence DESC LIMIT 1`,
+      [this.recipientId, artifactId.toLowerCase()]
+    );
+    if (!rows[0]) return null;
+    return validateMessageAttachments([rows[0].attachment], 'assistant')?.[0] ?? null;
   }
 
   async acquireStreamLease(session: string, expiresAt: number): Promise<string | null> {
@@ -352,8 +383,13 @@ export class PostgresTranscriptStore implements TranscriptReader {
     const clientId = row.message_id.startsWith('inbound:')
       ? row.message_id.slice('inbound:'.length)
       : undefined;
+    const attachments = validateMessageAttachments(
+      row.has_attachments ? row.attachments : undefined,
+      row.role
+    );
     return {
       sequence: row.sequence,
+      ...(attachments !== undefined ? { attachments } : {}),
       ...(clientId ? { clientId } : {}),
       role: row.role,
       text: row.text,
