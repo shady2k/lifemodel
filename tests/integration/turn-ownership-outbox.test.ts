@@ -488,13 +488,10 @@ describe('turn ownership and outbox durability', () => {
         response: undefined,
         disposition: 'error',
       });
-      let failedAttemptCommitted = false;
-      await waitFor(() => {
-        void store.read().then((current) => {
-          const state = current?.sections['inbound'] as { errorRetries?: Record<string, number> };
-          failedAttemptCommitted = state?.errorRetries?.['error-input'] === 1;
-        });
-        return failedAttemptCommitted;
+      await waitForAsync(async () => {
+        const current = await store.read();
+        const state = current?.sections['inbound'] as { errorRetries?: Record<string, number> };
+        return state?.errorRetries?.['error-input'] === 1;
       }, 'failed attempt is snapshotted');
       expect(inbound.exportSnapshot().recentMessageIds).not.toContain('error-input');
       const snapshot = await store.read();
@@ -507,15 +504,25 @@ describe('turn ownership and outbox durability', () => {
       expect(section?.errorRetries['error-input']).toBe(1);
       expect(await stores.redis.xlen(`${prefix}outbound`)).toBe(0);
 
+      // The retry belongs to a FRESH core (AGENTS.md: an inbound failure is
+      // retried once by a fresh core). The first core writes nothing more: while
+      // it runs, its own 10 ms tick reads the entry at the retry limit and
+      // completes it with the notice - the subject of the other test - so a tick
+      // landing between this commit and the read below must not be in this
+      // test's way (lifemodel-653.8.1).
+      await instance.coreLoop.fenceForTest();
+      const retryStore = createSnapshotStore(stores.redis, { keyPrefix: prefix });
       const retry = new InboundMessageStream(stores.redis, `${prefix}inbound`);
-      retry.hydrateSnapshot(section);
+      retryStore.register(retry);
+      await retryStore.hydrate(await retryStore.read());
+      const retryEpoch = await retryStore.takeEpoch();
       expect((await retry.readNew()).map((entry) => entry.messageId)).toEqual(['error-input']);
 
-      inbound.markFailedTurn([signal.id]);
-      await store.commitOwners(epoch, (snapshot?.tick ?? 0) + 1, []);
+      retry.markFailedTurn([signal.id]);
+      await retryStore.commitOwners(retryEpoch, (snapshot?.tick ?? 0) + 1, []);
       const afterRetryFailure = new InboundMessageStream(stores.redis, `${prefix}inbound`);
       afterRetryFailure.hydrateSnapshot(
-        (await store.read())?.sections['inbound'] as typeof section
+        (await retryStore.read())?.sections['inbound'] as typeof section
       );
       expect(await afterRetryFailure.readNew()).toEqual([]);
       expect(afterRetryFailure.exportSnapshot().pending).toHaveLength(1);
