@@ -144,11 +144,23 @@ export function createTaskChannel(options: ChannelOptions): {
     const parts: Buffer[] = [];
     let bytes = 0;
     let released = false;
+    let queuedWork: Work | undefined;
     let timer: ReturnType<typeof setTimeout>;
     const release = () => {
       if (released) return;
       released = true;
       clearTimeout(timer);
+      if (queuedWork) {
+        const queue = queues.get(queuedWork.taskId);
+        const index = queue?.indexOf(queuedWork) ?? -1;
+        if (queue && index >= 0) queue.splice(index, 1);
+        if (queue?.length === 0) {
+          queues.delete(queuedWork.taskId);
+          const readyIndex = ready.indexOf(queuedWork.taskId);
+          if (readyIndex >= 0) ready.splice(readyIndex, 1);
+        }
+        queuedWork = undefined;
+      }
       count.frames--;
       count.bytes -= frameLimit;
       buffered -= frameLimit;
@@ -207,11 +219,16 @@ export function createTaskChannel(options: ChannelOptions): {
             signal.throwIfAborted();
             const proof = await options.identity.verify(token, signal);
             signal.throwIfAborted();
-            const ack = await options.mailbox.append(frame, proof, signal);
+            let ack: TaskChannelAck;
+            try {
+              ack = await options.mailbox.append(frame, proof, signal);
+            } finally {
+              // A disconnect can race COMMIT. Replay must not depend on the ACK.
+              options.onStored?.();
+            }
             signal.throwIfAborted();
             // The committed mailbox row is the ACK boundary, not Signal emission.
             send(res, 200, ack);
-            options.onStored?.();
           } catch (error) {
             if (signal.aborted) return;
             const safe =
@@ -222,6 +239,7 @@ export function createTaskChannel(options: ChannelOptions): {
           }
         },
       };
+      queuedWork = work;
       const queue = queues.get(frame.taskId) ?? [];
       queue.push(work);
       queues.set(frame.taskId, queue);

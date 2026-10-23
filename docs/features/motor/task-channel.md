@@ -66,7 +66,8 @@ message ID for the same logical report.
 
 - 400: malformed frame or payload.
 - 403: identity, binding, won-claim, canonical intent or deadline denied.
-- 409: unknown/current-attempt mismatch, conflicting key/sequence, or terminal attempt.
+- 409: conflicting key/sequence, or terminal attempt. An unknown/current-attempt
+  mismatch is denied with 403.
 - 413: oversized frame.
 - 429 with `Retry-After: 1`: connection/process capacity exhausted.
 - 503: authority/store unavailable or stopping. No fallback execution.
@@ -154,6 +155,11 @@ insert but before append replays the row. A crash after append but before markin
 replays the append key and cannot insert a second Signal, including after bus
 trimming. The dedup receipt remains durable alongside the mailbox lifetime; its
 retention must be paired with future task/mailbox retention, not a short TTL.
+Append completion requests replay independently of the HTTP ACK or disconnect.
+If COMMIT's reply is lost, a fresh mailbox transaction waits for the affected task's
+row lock before scanning. This observes the settled database outcome instead of
+racing an unresolved server-side commit. Canceled queued requests are unlinked
+before their frame reservations are released.
 This closes the mailbox-to-bus retry gap without claiming a cross-store transaction.
 The bus's existing ledger/turn IDs still own downstream processing and replay.
 

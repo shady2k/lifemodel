@@ -11,6 +11,14 @@ describe('task-channel core reservations', () => {
     expect(source).toContain('counters.set(socket, count);');
   });
 
+  it('unlinks canceled queued work before releasing frame reservations', () => {
+    const source = readFileSync('src/core/task-channel.ts', 'utf8');
+    expect(source).toContain('queue.splice(index, 1)');
+    expect(source.indexOf('queue.splice(index, 1)')).toBeLessThan(
+      source.indexOf('buffered -= frameLimit')
+    );
+  });
+
   it('uses a separate bounded SQL pool and cancels it at intake stop', () => {
     const source = readFileSync('src/core/container.ts', 'utf8');
     expect(source).toContain('const channelPool = new Pool({');

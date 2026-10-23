@@ -267,6 +267,75 @@ describe('durable fenced task mailbox', () => {
     expect((await mailbox().listUnsignalled()).map((row) => row.frame.messageId)).toEqual(['late']);
   });
 
+  it('reconciles an ambiguous COMMIT only after its task lock is released', async () => {
+    const committing = Promise.withResolvers<void>();
+    const settled = Promise.withResolvers<void>();
+    const held = await stores.postgres.connect();
+    let intercepted = false;
+    let releaseHeld = false;
+    const ambiguousPool = new Proxy(stores.postgres, {
+      get(target, property) {
+        if (property === 'connect' && !intercepted) {
+          intercepted = true;
+          return async () =>
+            new Proxy(held, {
+              get(client, key) {
+                if (key === 'query')
+                  return async (...args: unknown[]) => {
+                    if (args[0] === 'COMMIT') {
+                      committing.resolve();
+                      throw new Error('simulated lost COMMIT reply');
+                    }
+                    // The server-side transaction remains in progress after the
+                    // simulated lost reply, until the fixture explicitly commits.
+                    if (args[0] === 'ROLLBACK') return { rows: [], rowCount: 0 };
+                    return Reflect.apply(client.query, client, args);
+                  };
+                if (key === 'release')
+                  return () => {
+                    releaseHeld = true;
+                  };
+                const value = Reflect.get(client, key, client) as unknown;
+                return typeof value === 'function' ? value.bind(client) : value;
+              },
+            });
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const current = createPostgresTaskMailbox({
+      pool: ambiguousPool,
+      epoch: 1,
+      onAppendSettled: () => settled.resolve(),
+    });
+    let scan: Promise<unknown> | undefined;
+    try {
+      await expect(current.append(frame(), identity)).rejects.toMatchObject({
+        code: 'storage_error',
+      });
+      await committing.promise;
+      await settled.promise;
+      expect(releaseHeld).toBe(true);
+      scan = current.listUnsignalled();
+      await expect
+        .poll(async () => {
+          const waiting = await stores.postgres.query(
+            `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT id FROM core.tasks WHERE id=ANY%'`
+          );
+          return waiting.rows[0].n;
+        })
+        .toBe(1);
+      await held.query('COMMIT');
+      expect(await scan).toMatchObject([{ frame: frame() }]);
+    } finally {
+      await held.query('ROLLBACK');
+      held.release();
+      await scan;
+      current.stop();
+    }
+  });
+
   it('fences reads and writes and never includes private data in errors', async () => {
     await mailbox().append(frame(), identity);
     await stores.postgres.query('UPDATE core.active_holder SET epoch=2');

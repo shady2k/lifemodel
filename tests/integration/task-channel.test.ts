@@ -790,6 +790,47 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
     expect((await call(channel.url, f.token, step(f.task, 2))).status).toBe(200);
   });
 
+  it('notifies replay when a peer disconnects after commit but before append settles', async () => {
+    const f = await fixture();
+    const committed = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    const notified = Promise.withResolvers<void>();
+    const finished = Promise.withResolvers<void>();
+    const frame = step(f.task);
+    const channel = createTaskChannel({
+      tls: { cert: certificate.cert, key: certificate.key },
+      mailbox: {
+        append: async (...args) => {
+          const ack = await mailbox.append(...args);
+          committed.resolve();
+          await resume.promise;
+          finished.resolve();
+          return ack;
+        },
+      },
+      identity,
+      settings: values,
+      logger: createTestLogger(),
+      onStored: () => notified.resolve(),
+    });
+    const url = await listen(channel.server);
+    cleanup.push(() => channel.stop(Date.now() + 1000));
+    const socket = await rawSocket(url);
+    const closed = Promise.withResolvers<void>();
+    channel.server.once('request', (_req, res) => res.once('close', () => closed.resolve()));
+    socket.write(wire(f.token, JSON.stringify(frame)));
+    try {
+      await bounded(committed.promise);
+      socket.destroy();
+      await bounded(closed.promise);
+    } finally {
+      resume.resolve();
+    }
+    await bounded(finished.promise);
+    await bounded(notified.promise);
+    expect(await rows(frame)).toHaveLength(1);
+  });
+
   it('reclaims partial-frame reservations when TLS peers disconnect', async () => {
     const f = await fixture();
     const channel = await listener({
