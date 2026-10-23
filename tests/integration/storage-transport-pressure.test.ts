@@ -70,9 +70,19 @@ describe('storage transport pressure across many task spaces (ADR-015 S10)', () 
       if (request.role !== 'task' || !spaces.includes(request.space)) return acquire(request);
       const round = rounds.get(request.space) ?? 0;
       rounds.set(request.space, round + 1);
+      const producerWaitStarted = performance.now();
       const releaseProducer = await producerPermit(request, round);
+      const producerWaitMs = performance.now() - producerWaitStarted;
+      // This barrier is fixture-only producer pacing, not production admission.
+      // Exclude exactly its wait from an initial arrival deadline. Preserve all
+      // real pre-admission elapsed time and the scheduler's unchanged queue cap;
+      // later chunks without an arrival deadline still use normal admission.
+      const admittedRequest =
+        request.deadline === undefined
+          ? request
+          : { ...request, deadline: request.deadline + producerWaitMs };
       try {
-        const lease = await acquire(request);
+        const lease = await acquire(admittedRequest);
         return {
           release() {
             lease.release();

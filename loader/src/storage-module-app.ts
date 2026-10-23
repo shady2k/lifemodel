@@ -178,6 +178,9 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
   const serve =
     (role: 'task' | 'control' | 'read') =>
     async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+      // Parsed HTTP request arrival, before routing/auth and apiserver TLS work.
+      // Later chunks get their own attempt budget; initial admission does not.
+      const initialDeadline = performance.now() + admission.settings.queueWaitMs;
       req.on('error', () => undefined);
       res.on('error', () => undefined);
       let space: string | null = null;
@@ -280,6 +283,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
               role,
               bytes: 0,
               signal,
+              deadline: initialDeadline,
               metadataBytes:
                 Buffer.byteLength(req.url ?? '') +
                 req.rawHeaders.reduce((sum, part) => sum + Buffer.byteLength(part) + 4, 128),
@@ -344,7 +348,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
                       }),
                 progress,
                 role === 'read',
-                { admission, role: role === 'read' ? 'read' : 'task' }
+                { admission, role: role === 'read' ? 'read' : 'task', initialDeadline }
               );
             } finally {
               stream.signal.removeEventListener('abort', abortInput);
@@ -516,7 +520,7 @@ export function createStorageModule(options: StorageModuleOptions): StorageModul
           'Storage request denied'
         );
         if (res.headersSent) {
-          res.destroy();
+          if (!res.writableEnded) res.destroy();
           return;
         }
         if (!res.destroyed && !res.writableEnded) {

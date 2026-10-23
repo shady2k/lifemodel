@@ -63,11 +63,11 @@ async function put(
 }
 
 describe('the module private S3 byte backend', () => {
-  it('keeps a backend read socket available while sixteen PUT sockets wait for their next chunks', async () => {
-    const { server, client } = await setup({ timeoutMs: 1000 });
+  it('keeps GET independent of the fully occupied forty-socket PUT pool', async () => {
+    const { server, client } = await setup({ timeoutMs: 10_000 });
     const bytes = Buffer.from('readable');
     await put(client, bytes, 'readable');
-    const controllers = Array.from({ length: 16 }, () => new AbortController());
+    const controllers = Array.from({ length: 40 }, () => new AbortController());
     let entered = 0;
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -92,14 +92,19 @@ describe('the module private S3 byte backend', () => {
         .catch(() => undefined)
     );
     try {
-      await expect.poll(() => entered).toBe(16);
+      await expect.poll(() => entered).toBe(40);
+      // Wait for real socket assignment, not only source entry or the configured
+      // read-pool limit. A GET routed to the unchanged forty-socket PUT agent
+      // must queue here even if telemetry still labels that request as a read.
+      await expect.poll(() => client.transportSnapshot().put.sockets).toBe(40);
+      expect(client.transportSnapshot().put.limit).toBe(40);
       const started = performance.now();
       const body = await client.get(
         'reader',
         'readable',
         0,
         bytes.length - 1,
-        new AbortController().signal
+        AbortSignal.timeout(1000)
       );
       expect(performance.now() - started).toBeLessThan(500);
       expect((await read(body)).equals(bytes)).toBe(true);
@@ -109,7 +114,10 @@ describe('the module private S3 byte backend', () => {
       release();
       await Promise.all(uploads);
     }
-  });
+    // A queued, canceled request can need the adapter's five-second transport
+    // settlement deadline. Preserve that specific failure instead of masking
+    // it with Vitest's default five-second test timeout.
+  }, 15_000);
 
   it('settles only the selected space while another space has an open upload', async () => {
     const { client } = await setup();

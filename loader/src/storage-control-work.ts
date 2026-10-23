@@ -26,11 +26,26 @@ export async function terminateStorageQuery(connectionString: string, pid: numbe
   }
 }
 
+/** A rejected terminal query is never an acknowledgement, even with SQLSTATE.
+ * Mark retirement before a caller converts the error to a public refusal. */
+export async function storageSqlCompletion(
+  client: PoolClient,
+  command: 'COMMIT' | 'ROLLBACK',
+  retire: () => void
+): Promise<void> {
+  try {
+    await client.query(command);
+  } catch (error) {
+    retire();
+    throw error;
+  }
+}
+
 export async function withStorageSqlClient<T>(
   pool: Pool,
   connectionString: string,
   signal: AbortSignal | undefined,
-  run: (client: PoolClient) => Promise<T>
+  run: (client: PoolClient, retire: () => void) => Promise<T>
 ): Promise<T> {
   signal?.throwIfAborted();
   // Do not detach a pending checkout: it is still executing work for this slot.
@@ -55,7 +70,7 @@ export async function withStorageSqlClient<T>(
     pid = (await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]?.pid;
     if (signal?.aborted) abort();
     signal?.throwIfAborted();
-    const result = await run(client);
+    const result = await run(client, failed);
     signal?.throwIfAborted();
     if (broken) throw new StorageAccessError(503, 'catalog_unavailable');
     return result;

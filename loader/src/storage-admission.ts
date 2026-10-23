@@ -15,7 +15,8 @@ export const STORAGE_ADMISSION_DEFAULTS = Object.freeze({
   bufferBytes: 32 * MiB,
   queueRequests: 32,
   queueBytes: 64 * 1024,
-  queueWaitMs: 900,
+  // Leave 200 ms for scheduling and the HTTP refusal to leave before one second.
+  queueWaitMs: 800,
   chunkDeadlineMs: 10_000,
 });
 export type StorageAdmissionSettings = {
@@ -94,6 +95,8 @@ export interface StorageAdmissionRequest {
   bytes: number;
   signal: AbortSignal;
   metadataBytes?: number;
+  /** Absolute performance.now() deadline; initial work includes time since arrival. */
+  deadline?: number;
 }
 export interface StorageAdmissionLease {
   release(): void;
@@ -125,6 +128,7 @@ interface Pending {
   bytes: number;
   signal: AbortSignal;
   metadataBytes: number;
+  deadline: number;
   resolve(lease: StorageAdmissionLease): void;
   reject(error: Error): void;
   abort: () => void;
@@ -192,6 +196,12 @@ export function createStorageAdmission(
   }
   function grant(pending: Pending): void {
     remove(pending);
+    // A release/drain can run before an overdue timer callback. Never grant
+    // stale initial work merely because the event loop delayed its refusal.
+    if (performance.now() >= pending.deadline) {
+      pending.reject(new StorageAdmissionError());
+      return;
+    }
     if (pending.role === 'control') {
       current.control += 1;
       lastControlSpace = pending.space;
@@ -264,10 +274,16 @@ export function createStorageAdmission(
         request.bytes > settings.chunkBytes ||
         (request.role === 'control' && request.bytes !== 0) ||
         (request.metadataBytes !== undefined &&
-          (!Number.isSafeInteger(request.metadataBytes) || request.metadataBytes < 0))
+          (!Number.isSafeInteger(request.metadataBytes) || request.metadataBytes < 0)) ||
+        (request.deadline !== undefined && !Number.isFinite(request.deadline))
       )
         throw new StorageAccessError(400, 'invalid_admission');
       if (request.signal.aborted) throw aborted();
+      const deadline = Math.min(
+        performance.now() + settings.queueWaitMs,
+        request.deadline ?? Infinity
+      );
+      if (performance.now() >= deadline) throw new StorageAdmissionError();
       // Charge a finite minimum for the scheduler's own metadata. Caller-supplied
       // overhead may increase this charge but can never reduce it.
       const metadataBytes = Math.max(
@@ -281,6 +297,7 @@ export function createStorageAdmission(
           bytes: request.bytes,
           signal: request.signal,
           metadataBytes,
+          deadline,
           resolve,
           reject,
           abort: () => {
@@ -311,11 +328,14 @@ export function createStorageAdmission(
         current.queueBytes += metadataBytes;
         observe();
         pending.signal.addEventListener('abort', pending.abort, { once: true });
-        pending.timer = setTimeout(() => {
-          remove(pending);
-          reject(new StorageAdmissionError());
-          drain();
-        }, settings.queueWaitMs);
+        pending.timer = setTimeout(
+          () => {
+            remove(pending);
+            reject(new StorageAdmissionError());
+            drain();
+          },
+          Math.max(0, deadline - performance.now())
+        );
         pending.timer.unref();
       });
     },

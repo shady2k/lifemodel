@@ -5,7 +5,11 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { StorageAccessError, type StorageTaskStream } from './storage-access.js';
 import type { StorageObjectS3 } from './storage-object-s3.js';
 import { createStorageUploadOwner, type StorageUploadOwner } from './storage-upload-owner.js';
-import { createStorageAdmission, type StorageAdmission } from './storage-admission.js';
+import {
+  createStorageAdmission,
+  StorageAdmissionError,
+  type StorageAdmission,
+} from './storage-admission.js';
 
 export interface StorageTransferSettings {
   chunkBytes: number;
@@ -17,6 +21,15 @@ export const STORAGE_TRANSFER_DEFAULTS: Readonly<StorageTransferSettings> = {
   timeoutMs: 10_000,
   leaseSeconds: 3600,
 };
+/** Separate from admitted artifact chunks: Node 24 HTTP parser buffers are JS
+ * body bytes too. A paused request can hold one 64 KiB HWM plus one parser
+ * push. A suffix slice may also retain a consumed 64 KiB backing-buffer prefix.
+ * Small read copies need at most one further 64 KiB per active worker. */
+export const STORAGE_REQUEST_BODY_BUDGET = Object.freeze({
+  readBytes: 64 * 1024,
+  perRequestBytes: 128 * 1024,
+  reservedPerRequestBytes: 192 * 1024,
+});
 export interface StorageObjectsOptions {
   connectionString: string;
   s3: StorageObjectS3;
@@ -36,7 +49,7 @@ export interface StorageObjects {
     recover?: () => StorageTaskStream,
     progress?: () => void,
     markedOnly?: boolean,
-    capacity?: { admission: StorageAdmission; role: 'task' | 'read' }
+    capacity?: { admission: StorageAdmission; role: 'task' | 'read'; initialDeadline?: number }
   ): Promise<void>;
   expiredUploads(): Promise<{ space: string; uploadId: string }[]>;
   check(signal: AbortSignal): Promise<boolean>;
@@ -131,6 +144,8 @@ function parseCursor(value: string, space: string): string {
 }
 export function createStorageObjects(options: StorageObjectsOptions): StorageObjects {
   const defaultAdmission = options.admission ?? createStorageAdmission();
+  let bodyRequests = 0;
+  let taskBodyRequests = 0;
   const settings: StorageTransferSettings = {
     chunkBytes: options.chunkBytes ?? defaultAdmission.settings.chunkBytes,
     timeoutMs: options.timeoutMs ?? defaultAdmission.settings.chunkDeadlineMs,
@@ -225,23 +240,62 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
     ) => {
       const admission = capacity?.admission ?? defaultAdmission;
       const role = capacity?.role ?? (markedOnly ? 'read' : 'task');
+      // Reserve transport buffers before admission/auth can await. Slots cover
+      // queued requests as well as active work, including GETs with a body.
+      // Task transport buffers cannot consume the reserved read worker slots.
+      // Default finite reserve: (8 + 32) * 192 KiB + 8 * 64 KiB = 8 MiB,
+      // separate from the 32 MiB admitted chunk pool. Reject exotic/unbounded
+      // streams rather than silently enlarging this process-owned body budget.
+      if (
+        bodyRequests >= admission.settings.transferWorkers + admission.settings.queueRequests ||
+        (role === 'task' &&
+          taskBodyRequests >=
+            admission.settings.transferWorkers -
+              admission.settings.reservedReadWorkers +
+              admission.settings.queueRequests) ||
+        req.readableHighWaterMark > STORAGE_REQUEST_BODY_BUDGET.readBytes ||
+        req.readableLength > STORAGE_REQUEST_BODY_BUDGET.perRequestBytes
+      )
+        throw new StorageAdmissionError();
+      bodyRequests += 1;
+      if (role === 'task') taskBodyRequests += 1;
       const metadataBytes =
         Buffer.byteLength(req.url ?? '') +
         req.rawHeaders.reduce((sum, part) => sum + Buffer.byteLength(part) + 4, 128);
       let lease: Awaited<ReturnType<StorageAdmission['acquire']>> | undefined;
-      async function acquire(bytes: number): Promise<void> {
+      async function acquire(bytes: number, initial = false): Promise<void> {
         lease?.release();
         lease = undefined;
-        lease = await admission.acquire({
-          space,
-          role,
-          bytes,
-          signal: stream.signal,
-          metadataBytes,
-        });
+        try {
+          lease = await admission.acquire({
+            space,
+            role,
+            bytes,
+            signal: stream.signal,
+            metadataBytes,
+            ...(initial && capacity?.initialDeadline !== undefined
+              ? { deadline: capacity.initialDeadline }
+              : {}),
+          });
+        } catch (error) {
+          if (
+            error instanceof StorageAccessError &&
+            error.status === 429 &&
+            !res.headersSent &&
+            !res.destroyed &&
+            !res.writableEnded
+          ) {
+            // Refusal is an HTTP outcome, not proof of transport/SQL settlement.
+            // Answer before unwinding S3 or guarded release. This handler keeps
+            // its owner/stream registrations until those bounded waits finish.
+            res.writeHead(429, { ...JSON_HEADERS, 'retry-after': '1', connection: 'close' });
+            res.end(JSON.stringify({ error: { id: error.id, code: error.code } }));
+          }
+          throw error;
+        }
       }
       try {
-        await acquire(req.method === 'PUT' ? settings.chunkBytes : 0);
+        await acquire(req.method === 'PUT' ? settings.chunkBytes : 0, true);
         if (markedOnly && req.method !== 'GET')
           throw new StorageAccessError(404, 'route_not_found');
         await stream.chunk(0, () => undefined);
@@ -319,10 +373,10 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
             transferSignal.throwIfAborted();
             if (begun?.rows[0]?.['accepted'] !== true)
               throw new StorageAccessError(409, 'upload_expired');
-            /** Stay paused and pull only bytes covered by the current lease.
-             * An async iterator can pull a whole TCP fragment and retain its
-             * suffix across the next admission wait. read(n) leaves that suffix
-             * in the transport instead of the queued upload coroutine. */
+            /** Never call read(chunkBytes): Node raises its HWM to that size
+             * and can retain a second artifact chunk during dispatch/queueing.
+             * Keep HTTP buffering within its explicit transport reservation;
+             * the separate admitted chunk is assembled from bounded reads. */
             async function readBody(bytes: number): Promise<Buffer | undefined> {
               return new Promise((resolve, reject) => {
                 const cleanup = (): void => {
@@ -352,7 +406,20 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
                   try {
                     owner.assertActive();
                     transferSignal.throwIfAborted();
-                    const part = req.read(bytes) as Buffer | null;
+                    if (
+                      req.readableHighWaterMark > STORAGE_REQUEST_BODY_BUDGET.readBytes ||
+                      req.readableLength > STORAGE_REQUEST_BODY_BUDGET.perRequestBytes
+                    )
+                      throw new StorageAdmissionError();
+                    // Reading only available bytes also handles a short final
+                    // fragment without raising HWM or waiting for a full chunk.
+                    const available = Math.min(
+                      bytes,
+                      STORAGE_REQUEST_BODY_BUDGET.readBytes,
+                      req.readableLength
+                    );
+                    // read(0) requests progress/EOF without changing the HWM.
+                    const part = req.read(available) as Buffer | null;
                     if (part !== null) {
                       cleanup();
                       resolve(part);
@@ -376,9 +443,17 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
               const hash = createHash('sha256');
               while (emitted < size) {
                 const remaining = Math.min(settings.chunkBytes, size - emitted);
-                let chunk = await readBody(remaining);
-                if (chunk?.length !== remaining)
-                  throw new StorageAccessError(400, 'length_mismatch');
+                // Allocate once under the current lease. Buffer.concat would
+                // temporarily retain both fragments and another full chunk.
+                let chunk: Buffer | undefined = Buffer.allocUnsafe(remaining);
+                let filled = 0;
+                while (filled < remaining) {
+                  let part = await readBody(remaining - filled);
+                  if (!part) throw new StorageAccessError(400, 'length_mismatch');
+                  part.copy(chunk, filled);
+                  filled += part.length;
+                  part = undefined;
+                }
                 hash.update(chunk);
                 emitted += chunk.length;
                 yield chunk;
@@ -536,7 +611,7 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
           let headers = false;
           for (let offset = start; offset <= end; offset += settings.chunkBytes) {
             const last = Math.min(end, offset + settings.chunkBytes - 1);
-            await acquire(last - offset + 1);
+            await acquire(last - offset + 1, offset === start);
             const body = await options.s3.get(
               space,
               saved.s3_key,
@@ -625,6 +700,15 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
         throw new StorageAccessError(404, 'route_not_found');
       } finally {
         lease?.release();
+        // Ending a handler/429 is not proof its unread HTTP buffers went away.
+        // Keep their reservation until the request closes, including a complete
+        // but unconsumed body. A fully drained or destroyed request owns none.
+        const releaseBody = (): void => {
+          bodyRequests -= 1;
+          if (role === 'task') taskBodyRequests -= 1;
+        };
+        if (req.destroyed || (req.complete && req.readableLength === 0)) releaseBody();
+        else req.once('close', releaseBody);
       }
     },
   };

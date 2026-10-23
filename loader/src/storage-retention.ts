@@ -6,7 +6,7 @@ import {
   STORAGE_READ_LEASE_MS,
 } from './storage-maintenance.js';
 import { Pool, type PoolClient, type QueryResultRow } from 'pg';
-import { withStorageSqlClient } from './storage-control-work.js';
+import { storageSqlCompletion, withStorageSqlClient } from './storage-control-work.js';
 import { StorageAccessError } from './storage-access-error.js';
 import type { StorageObjectS3 } from './storage-object-s3.js';
 import type { LoaderLogger } from './logger.js';
@@ -98,19 +98,25 @@ export function createStorageRetention(options: Options): StorageRetention {
     signal?: AbortSignal
   ): Promise<T> {
     try {
-      return await withStorageSqlClient(pool, options.connectionString, signal, async (client) => {
-        try {
-          await client.query('BEGIN');
-          await storageMaintenanceFence(client, write);
-          const result = await run(client);
-          signal?.throwIfAborted();
-          await client.query('COMMIT');
-          return result;
-        } catch (error) {
-          if (!signal?.aborted) await client.query('ROLLBACK').catch(() => undefined);
-          throw error;
+      return await withStorageSqlClient(
+        pool,
+        options.connectionString,
+        signal,
+        async (client, retire) => {
+          try {
+            await client.query('BEGIN');
+            await storageMaintenanceFence(client, write);
+            const result = await run(client);
+            signal?.throwIfAborted();
+            await storageSqlCompletion(client, 'COMMIT', retire);
+            return result;
+          } catch (error) {
+            if (!signal?.aborted)
+              await storageSqlCompletion(client, 'ROLLBACK', retire).catch(() => undefined);
+            throw error;
+          }
         }
-      });
+      );
     } catch (error) {
       if (error instanceof StorageAccessError) throw error;
       if (typeof error === 'object' && error && 'code' in error && error.code === '53000')

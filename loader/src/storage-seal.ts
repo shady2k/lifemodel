@@ -1,6 +1,6 @@
 /** Module-owned allocation, verified binding and replayable seal. No caller SQL. */
 import { Pool, type PoolClient, type QueryResultRow } from 'pg';
-import { withStorageSqlClient } from './storage-control-work.js';
+import { storageSqlCompletion, withStorageSqlClient } from './storage-control-work.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   storageMaintenanceFence,
@@ -191,16 +191,17 @@ export function createStorageSeal(options: Options): StorageSeal {
         connectionPool,
         options.connectionString,
         signal,
-        async (client) => {
+        async (client, retire) => {
           try {
             await client.query('BEGIN');
             const writable = await storageMaintenanceFence(client, write);
             const result = await run(client, writable);
             signal?.throwIfAborted();
-            await client.query('COMMIT');
+            await storageSqlCompletion(client, 'COMMIT', retire);
             return result;
           } catch (error) {
-            if (!signal?.aborted) await client.query('ROLLBACK').catch(() => undefined);
+            if (!signal?.aborted)
+              await storageSqlCompletion(client, 'ROLLBACK', retire).catch(() => undefined);
             throw error;
           }
         }

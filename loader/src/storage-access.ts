@@ -3,7 +3,7 @@
  * work with the decision. Await socket drain/S3 outside this guard and reenter
  * for every next chunk. Untrusted code never supplies a callback or SQL. */
 import { Pool, type PoolClient } from 'pg';
-import { withStorageSqlClient } from './storage-control-work.js';
+import { storageSqlCompletion, withStorageSqlClient } from './storage-control-work.js';
 import { randomUUID } from 'node:crypto';
 import { storageMaintenanceFence } from './storage-maintenance.js';
 import { StorageAccessError } from './storage-access-error.js';
@@ -176,24 +176,37 @@ export function createStorageAccess(
     write = true,
     control = false
   ): Promise<T> {
-    if (control)
-      return withStorageSqlClient(pool, options.connectionString, parent, async (client) => {
-        try {
-          await client.query('BEGIN');
-          await storageMaintenanceFence(client);
-          const assertLive = (): void => {
-            parent?.throwIfAborted();
-          };
-          const result = await run(client, assertLive);
-          assertLive();
-          await client.query('COMMIT');
-          return result;
-        } catch (error) {
-          if (!parent?.aborted) await client.query('ROLLBACK').catch(() => undefined);
-          if (error instanceof StorageAccessError) throw error;
-          throw new StorageAccessError(503, 'access_unavailable');
-        }
-      });
+    if (control) {
+      try {
+        return await withStorageSqlClient(
+          pool,
+          options.connectionString,
+          parent,
+          async (client, retire) => {
+            try {
+              await client.query('BEGIN');
+              await storageMaintenanceFence(client);
+              const assertLive = (): void => {
+                parent?.throwIfAborted();
+              };
+              const result = await run(client, assertLive);
+              assertLive();
+              await storageSqlCompletion(client, 'COMMIT', retire);
+              return result;
+            } catch (error) {
+              if (!parent?.aborted)
+                await storageSqlCompletion(client, 'ROLLBACK', retire).catch(() => undefined);
+              throw error;
+            }
+          }
+        );
+      } catch (error) {
+        // Checkout sees raw protocol errors and decides retirement BEFORE the
+        // public error is normalized. Business refusals stay unchanged.
+        if (error instanceof StorageAccessError) throw error;
+        throw new StorageAccessError(503, 'access_unavailable');
+      }
+    }
     const signal = AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(parent ? [parent] : [])]);
     let client: PoolClient | undefined;
     let retired = false;
@@ -220,7 +233,7 @@ export function createStorageAccess(
       if (write) await storageMaintenanceFence(client);
       const value = await run(client, assertLive);
       assertLive();
-      await client.query('COMMIT');
+      await storageSqlCompletion(client, 'COMMIT', () => failed.add(connected));
       assertLive();
       return value;
     } catch (error) {

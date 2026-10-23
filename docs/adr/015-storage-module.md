@@ -195,7 +195,13 @@ workers total, at most **2 per task** and **2 reserved for owner reads**, plus
 attempted streams therefore exercise refusal/backpressure, not twenty full
 buffers. Chunk buffers total **32 MiB** maximum; bounded queues hold only
 metadata (**64 KiB** aggregate), not extra artifact chunks. At most **32** queued
-requests, excess responds 429 within **1 s**; per-chunk network/SQL deadline
+requests, excess responds 429 within **1 s** (initial admission from parsed HTTP
+arrival, including authority work; later chunks from that chunk's admission
+attempt). The queue budget is at most **800 ms**, leaving a **200 ms** response
+margin. HTTP transport buffers have an explicit separate finite **8 MiB**
+default allowance (192 KiB × 40 object handlers plus 64 KiB × 8 worker scratch),
+not an uncharged 4 MiB request high-water mark. See transfer settings below.
+Per-chunk network/SQL deadline
 **10 s**, no progress ends that stream without occupying a worker forever.
 Workers select round-robin by space after each chunk; no stalled upload holds
 a control worker or web reserve. A revoke cancels all that space's workers.

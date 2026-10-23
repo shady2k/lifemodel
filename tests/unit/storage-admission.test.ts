@@ -17,7 +17,10 @@ function request(
 ) {
   return admission.acquire({ space, role, bytes, signal: signal() });
 }
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 describe('storage admission settings', () => {
   it('declares bounded defaults and accepts validated environment settings', () => {
@@ -30,7 +33,7 @@ describe('storage admission settings', () => {
       bufferBytes: 32 * MiB,
       queueRequests: 32,
       queueBytes: 64 * 1024,
-      queueWaitMs: 900,
+      queueWaitMs: 800,
       chunkDeadlineMs: 10_000,
     });
     expect(
@@ -274,6 +277,79 @@ describe('storage admission scheduler', () => {
     (await request(admission, 'a')).release();
   });
 
+  it('charges time already spent against an absolute monotonic admission deadline', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    const admission = createStorageAdmission({ perSpaceWorkers: 1 });
+    const held = await request(admission, 'a');
+    const arrived = performance.now();
+    await vi.advanceTimersByTimeAsync(350);
+    const pending = admission.acquire({
+      space: 'a',
+      role: 'task',
+      bytes: MiB,
+      signal: signal(),
+      deadline: arrived + 800,
+    });
+    const refused = expect(pending).rejects.toMatchObject({ status: 429, retryAfter: 1 });
+    await vi.advanceTimersByTimeAsync(449);
+    expect(admission.snapshot().queued).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(admission.snapshot().queued).toBe(0);
+    await refused;
+    expect(performance.now() - arrived).toBe(800);
+    expect(admission.snapshot()).toMatchObject({ active: 1, queued: 0, queueBytes: 0 });
+    held.release();
+    // Later chunks omit the initial deadline and earn their own bounded attempt.
+    const next = await request(admission, 'a');
+    next.release();
+  });
+
+  it('never extends a short queue budget or grants an already expired deadline', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    const admission = createStorageAdmission({ perSpaceWorkers: 1, queueWaitMs: 100 });
+    const held = await request(admission, 'a');
+    const pending = admission.acquire({
+      space: 'a',
+      role: 'task',
+      bytes: MiB,
+      signal: signal(),
+      deadline: performance.now() + 800,
+    });
+    const refused = expect(pending).rejects.toMatchObject({ status: 429 });
+    await vi.advanceTimersByTimeAsync(100);
+    await refused;
+    held.release();
+    await expect(
+      admission.acquire({
+        space: 'a',
+        role: 'task',
+        bytes: MiB,
+        signal: signal(),
+        deadline: performance.now(),
+      })
+    ).rejects.toMatchObject({ status: 429 });
+    expect(admission.snapshot()).toMatchObject({ active: 0, queued: 0 });
+  });
+
+  it('does not grant expired queued work when its timer callback has not run', async () => {
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(100);
+    const admission = createStorageAdmission({ perSpaceWorkers: 1 });
+    const held = await request(admission, 'a');
+    const pending = admission.acquire({
+      space: 'a',
+      role: 'task',
+      bytes: MiB,
+      signal: signal(),
+      deadline: 200,
+    });
+    const refused = expect(pending).rejects.toMatchObject({ status: 429 });
+    clock.mockReturnValue(201);
+    held.release();
+    await refused;
+    clock.mockRestore();
+    expect(admission.snapshot()).toMatchObject({ active: 0, queued: 0, queueBytes: 0 });
+  });
+
   it('rejects impossible chunks and unbounded request metadata without recording private content', async () => {
     const admission = createStorageAdmission();
     for (const bytes of [-1, 4 * MiB + 1, Infinity, NaN, 1.5])
@@ -284,6 +360,10 @@ describe('storage admission scheduler', () => {
     await expect(request(admission, 'control', 'control', 1)).rejects.toMatchObject({
       status: 400,
     });
+    for (const deadline of [NaN, Infinity, -Infinity])
+      await expect(
+        admission.acquire({ space: 'a', role: 'task', bytes: MiB, signal: signal(), deadline })
+      ).rejects.toMatchObject({ status: 400 });
     expect(admission.snapshot()).toMatchObject({ active: 0, queued: 0, bySpace: {} });
     const held = await request(admission, 'a');
     const snapshot = admission.snapshot();
