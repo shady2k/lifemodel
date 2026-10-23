@@ -107,6 +107,7 @@ function assertStepANetworkPolicies(objects: Record<string, any>[]): void {
       'model-gateway-access',
       'seaweedfs-access',
       'storage-module-access',
+      'task-model-ingress',
     ],
   };
   for (const [namespace, names] of Object.entries(expected)) {

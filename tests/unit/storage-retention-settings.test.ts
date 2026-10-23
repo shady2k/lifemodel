@@ -499,6 +499,7 @@ describe('storage settings bootstrap and authority', () => {
     expect(placeholders.map((item) => [item.metadata.namespace, item.metadata.name])).toEqual([
       ['lifemodel-system', 'lifemodel-ca'],
       ['lifemodel', 'lifemodel-ca'],
+      ['lifemodel-motor', 'lifemodel-ca'],
       ['lifemodel-system', 'lifemodel-pki-status'],
     ]);
     // A0 creates these as Flux, before loader's UPDATE-only bootstrap writes.

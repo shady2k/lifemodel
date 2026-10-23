@@ -73,7 +73,7 @@ describe('platform dependency structure', () => {
     const namespaceOwners = [...owned.entries()].flatMap(([directory, names]) =>
       names.map((name) => ({ directory, name }))
     );
-    for (const name of ['lifemodel-system', 'lifemodel']) {
+    for (const name of ['lifemodel-system', 'lifemodel', 'lifemodel-motor']) {
       expect(namespaceOwners.filter((owner) => owner.name === name)).toEqual([
         { directory: 'instance', name },
       ]);

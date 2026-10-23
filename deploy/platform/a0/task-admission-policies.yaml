@@ -1,0 +1,351 @@
+# ADR-014 D1/D3 static launch guards. Installed in A0 after instance namespaces
+# and before any core Job writer; no service dependency and no bootstrap cycle.
+# Policies cover EVERY creator; identity belongs in validations, never a match
+# condition (which would exempt an attacker). DELETE and Job/Pod status updates
+# remain available to controllers. Pod ephemeralcontainers is guarded explicitly.
+# k3s v1.35.8+k3s1 pkg/daemons/control/server.go sets
+# use-service-account-credentials=true: the actual Job controller principal is
+# system:serviceaccount:kube-system:job-controller (not controller-manager).
+# CEL proves shape only, not current SQL intent, owner existence/UID resolution,
+# admission provenance or exactly-once execution. Gateway live binding and the
+# SQL start claim in 653.8.6 provide those checks; stale Jobs stay inert.
+# ADS ceiling: 86400s INCLUDING wrap grace, engineering bound for 653.8.2.
+# loader/src/settings/platform.ts has wrapGraceSeconds max=3600 but no total
+# task-lifetime maximum; that setting is NOT an ADS ceiling. A later explicit
+# platform policy change may replace 86400, never a core-owned setting.
+# RELEASE PIN POINT 653.8.3: accept only the workbench repository and a complete
+# SHA-256 digest here; .8.3/.5 must pin its released digest in launch inputs.
+# TRUSTED LAUNCHER CONTRACT .8.3/.5: image ENTRYPOINT owns the inert binding
+# handshake. No command/args/env/hook/probe override can run code before it.
+# Add configuration only through an explicitly reviewed safe allowlist, not
+# arbitrary environment (NODE_OPTIONS/LD_PRELOAD would bypass the start fence).
+# manualSelector/suspend default false in Kubernetes, so false is permitted.
+# Generic ephemeral claims cannot select/prebind/clone another task's storage.
+# CA/identity mounts must be read-only; only fresh working volumes are writable.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: task-job-admission
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: lifemodel-motor
+    resourceRules:
+      - apiGroups:
+          - batch
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - jobs
+  variables:
+    - name: p
+      expression: object.spec.template.spec
+  validations:
+    - expression: >-
+        request.operation != 'CREATE' || request.userInfo.username == 'system:serviceaccount:lifemodel:core'
+      message: 'task creator: only core creates Jobs; only core or the Job controller creates Pods'
+    - expression: >-
+        has(object.metadata.labels) && 'lifemodel.dev/launch-id' in object.metadata.labels && object.metadata.labels['lifemodel.dev/launch-id'].matches('^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$')
+        && 'app.kubernetes.io/name' in object.metadata.labels && object.metadata.labels['app.kubernetes.io/name']
+        == 'task' && has(object.spec.template.metadata.labels) && 'lifemodel.dev/launch-id' in object.spec.template.metadata.labels
+        && object.spec.template.metadata.labels['lifemodel.dev/launch-id'] == object.metadata.labels['lifemodel.dev/launch-id']
+        && 'app.kubernetes.io/name' in object.spec.template.metadata.labels && object.spec.template.metadata.labels['app.kubernetes.io/name']
+        == 'task'
+      message: 'task launch: required task and launch labels must agree'
+    - expression: >-
+        has(object.spec.parallelism) && object.spec.parallelism == 1 &&
+
+        has(object.spec.completions) && object.spec.completions == 1 &&
+
+        has(object.spec.backoffLimit) && object.spec.backoffLimit == 0 &&
+
+        has(object.spec.podReplacementPolicy) && object.spec.podReplacementPolicy == 'Failed' &&
+
+        has(object.spec.activeDeadlineSeconds) && object.spec.activeDeadlineSeconds > 0 && object.spec.activeDeadlineSeconds
+        <= 86400 &&
+
+        (!has(object.spec.suspend) || object.spec.suspend == false) &&
+
+        (!has(object.spec.manualSelector) || object.spec.manualSelector == false) &&
+
+        !has(object.spec.ttlSecondsAfterFinished) && !has(object.spec.managedBy) &&
+
+        (!has(object.spec.completionMode) || object.spec.completionMode == 'NonIndexed')
+      message:
+        'task execution: Never/1/1/0/Failed, positive deadline at most 86400s; no suspend, manual adoption,
+        TTL or alternate controller'
+    - expression: >-
+        has(object.spec.podFailurePolicy) && size(object.spec.podFailurePolicy.rules) == 2 &&
+
+        object.spec.podFailurePolicy.rules.all(r, r.action == 'FailJob') &&
+
+        object.spec.podFailurePolicy.rules.exists(r, has(r.onPodConditions) && size(r.onPodConditions) == 1 && r.onPodConditions[0].type
+        == 'DisruptionTarget' && r.onPodConditions[0].status == 'True') &&
+
+        object.spec.podFailurePolicy.rules.exists(r, has(r.onExitCodes) && r.onExitCodes.operator == 'NotIn' && r.onExitCodes.values
+        == [0] && !has(r.onExitCodes.containerName))
+      message: 'task failure: disruption and every nonzero exit must FailJob; no Ignore or filtered container rule'
+    - expression: >-
+        request.operation != 'UPDATE' ||
+
+        (has(object.spec.activeDeadlineSeconds) && has(oldObject.spec.activeDeadlineSeconds) &&
+         object.spec.activeDeadlineSeconds <= oldObject.spec.activeDeadlineSeconds &&
+         has(object.metadata.labels) && has(oldObject.metadata.labels) &&
+         'lifemodel.dev/launch-id' in object.metadata.labels && 'lifemodel.dev/launch-id' in oldObject.metadata.labels
+        &&
+         object.metadata.labels['lifemodel.dev/launch-id'] == oldObject.metadata.labels['lifemodel.dev/launch-id']
+        &&
+         object.spec.template == oldObject.spec.template && (!has(object.spec.suspend) || object.spec.suspend == false))
+      message: 'task update: deadline may only shorten; launch label/template immutable; suspend forbidden'
+    - expression: >-
+        has(variables.p.serviceAccountName) && variables.p.serviceAccountName == 'task' && has(variables.p.automountServiceAccountToken)
+        && variables.p.automountServiceAccountToken == false
+      message: 'task identity: use task SA and explicitly disable automount'
+    - expression: >-
+        size(variables.p.containers) == 1 &&
+
+        (!has(variables.p.initContainers) || size(variables.p.initContainers) == 0) &&
+
+        (!has(variables.p.ephemeralContainers) || size(variables.p.ephemeralContainers) == 0) &&
+
+        variables.p.containers.all(c,
+         c.name == 'task' && c.image.matches('^ghcr[.]io/shady2k/lifemodel-workbench@sha256:[0-9a-f]{64}$') &&
+         (!has(c.command) || size(c.command) == 0) && (!has(c.args) || size(c.args) == 0) &&
+         !has(c.lifecycle) && !has(c.livenessProbe) && !has(c.readinessProbe) && !has(c.startupProbe))
+      message: 'task launcher: one trusted image ENTRYPOINT only; no command, args, hooks, probes, init or sidecars'
+    - expression: >-
+        variables.p.containers.all(c, (!has(c.env) || size(c.env) == 0) && (!has(c.envFrom) || size(c.envFrom) ==
+        0))
+      message: 'task environment: no env or envFrom injection; launcher configuration must be baked into the image'
+    - expression: >-
+        variables.p.restartPolicy == 'Never' &&
+
+        has(variables.p.terminationGracePeriodSeconds) && variables.p.terminationGracePeriodSeconds == 0 &&
+
+        has(variables.p.enableServiceLinks) && variables.p.enableServiceLinks == false &&
+
+        (!has(variables.p.hostNetwork) || variables.p.hostNetwork == false) &&
+
+        (!has(variables.p.hostPID) || variables.p.hostPID == false) &&
+
+        (!has(variables.p.hostIPC) || variables.p.hostIPC == false) &&
+
+        (!has(variables.p.shareProcessNamespace) || variables.p.shareProcessNamespace == false) &&
+
+        (!has(variables.p.hostAliases) || size(variables.p.hostAliases) == 0) &&
+
+        !has(variables.p.dnsConfig) && variables.p.dnsPolicy == 'ClusterFirst' &&
+
+        (request.operation != 'CREATE' || !has(variables.p.nodeName) || variables.p.nodeName == '') &&
+
+        (!has(variables.p.imagePullSecrets) || size(variables.p.imagePullSecrets) == 0) &&
+
+        has(variables.p.securityContext) && has(variables.p.securityContext.runAsNonRoot) && variables.p.securityContext.runAsNonRoot
+        == true &&
+
+        has(variables.p.securityContext.runAsUser) && variables.p.securityContext.runAsUser > 0 &&
+
+        has(variables.p.securityContext.runAsGroup) && variables.p.securityContext.runAsGroup > 0 &&
+
+        has(variables.p.securityContext.fsGroup) && variables.p.securityContext.fsGroup > 0 &&
+
+        has(variables.p.securityContext.seccompProfile) && variables.p.securityContext.seccompProfile.type == 'RuntimeDefault'
+        &&
+
+        (!has(variables.p.securityContext.sysctls) || size(variables.p.securityContext.sysctls) == 0) &&
+
+        variables.p.containers.all(c,
+         has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation
+        == false &&
+         has(c.securityContext.readOnlyRootFilesystem) && c.securityContext.readOnlyRootFilesystem == true &&
+         (!has(c.securityContext.privileged) || c.securityContext.privileged == false) &&
+         has(c.securityContext.capabilities) && has(c.securityContext.capabilities.drop) && c.securityContext.capabilities.drop
+        == ['ALL'] &&
+         (!has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0) &&
+         (!has(c.securityContext.runAsNonRoot) || c.securityContext.runAsNonRoot == true) &&
+         (!has(c.securityContext.runAsUser) || c.securityContext.runAsUser > 0) &&
+         (!has(c.securityContext.runAsGroup) || c.securityContext.runAsGroup > 0) &&
+         (!has(c.securityContext.seccompProfile) || c.securityContext.seccompProfile.type == 'RuntimeDefault') &&
+         (!has(c.securityContext.procMount) || c.securityContext.procMount == 'Default') &&
+         (!has(c.ports) || c.ports.all(port, !has(port.hostPort) || port.hostPort == 0)))
+      message: 'task security: explicit restricted context, native termination and cluster DNS only; no host escape'
+    - expression: >-
+        (!has(variables.p.volumes) || variables.p.volumes.all(v,
+         has(v.emptyDir) ||
+         (has(v.ephemeral) && has(v.ephemeral.volumeClaimTemplate) &&
+          !has(v.ephemeral.volumeClaimTemplate.spec.volumeName) &&
+          !has(v.ephemeral.volumeClaimTemplate.spec.dataSource) &&
+          !has(v.ephemeral.volumeClaimTemplate.spec.dataSourceRef) &&
+          !has(v.ephemeral.volumeClaimTemplate.spec.selector) &&
+          (!has(v.ephemeral.volumeClaimTemplate.spec.storageClassName) || v.ephemeral.volumeClaimTemplate.spec.storageClassName
+        == 'local-path') &&
+          v.ephemeral.volumeClaimTemplate.spec.accessModes == ['ReadWriteOnce']) ||
+         (has(v.configMap) && v.configMap.name == 'lifemodel-ca') ||
+         (has(v.projected) && size(v.projected.sources) > 0 && v.projected.sources.all(s,
+          (has(s.serviceAccountToken) && has(s.serviceAccountToken.audience) &&
+           s.serviceAccountToken.audience in ['lifemodel-task-model', 'lifemodel-task-storage', 'lifemodel-task-channel'])
+        ||
+          (has(s.configMap) && s.configMap.name == 'lifemodel-ca'))))) &&
+        variables.p.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m,
+         variables.p.volumes.exists(v, v.name == m.name &&
+          ((has(v.emptyDir) || has(v.ephemeral)) || (has(m.readOnly) && m.readOnly == true)))))
+      message: 'task volumes: private emptyDir/ephemeral and read-only public CA or closed-audience identity only'
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: task-job-admission
+spec:
+  policyName: task-job-admission
+  validationActions:
+    - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: task-pod-admission
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: lifemodel-motor
+    resourceRules:
+      - apiGroups:
+          - ''
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - pods
+          - pods/ephemeralcontainers
+  variables:
+    - name: p
+      expression: object.spec
+  validations:
+    - expression: >-
+        request.operation != 'CREATE' || request.userInfo.username in ['system:serviceaccount:lifemodel:core', 'system:serviceaccount:kube-system:job-controller']
+      message: 'task creator: only core creates Jobs; only core or the Job controller creates Pods'
+    - expression: >-
+        has(object.metadata.labels) && 'lifemodel.dev/launch-id' in object.metadata.labels && object.metadata.labels['lifemodel.dev/launch-id'].matches('^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$')
+        && 'app.kubernetes.io/name' in object.metadata.labels && object.metadata.labels['app.kubernetes.io/name']
+        == 'task'
+      message: 'task launch: required task and launch labels must agree'
+    - expression: >-
+        has(object.metadata.ownerReferences) && size(object.metadata.ownerReferences) == 1 && object.metadata.ownerReferences.all(o,
+        o.apiVersion == 'batch/v1' && o.kind == 'Job' && has(o.controller) && o.controller == true && size(o.name)
+        > 0 && has(o.uid) && size(o.uid) > 0)
+      message: 'task owner: one controller Job owner reference with nonempty name and UID required'
+    - expression: >-
+        request.operation != 'UPDATE' || (object.metadata.labels['lifemodel.dev/launch-id'] == oldObject.metadata.labels['lifemodel.dev/launch-id']
+        && object.metadata.ownerReferences == oldObject.metadata.ownerReferences)
+      message: 'task update: launch identity and owner references immutable'
+    - expression: >-
+        has(variables.p.serviceAccountName) && variables.p.serviceAccountName == 'task' && has(variables.p.automountServiceAccountToken)
+        && variables.p.automountServiceAccountToken == false
+      message: 'task identity: use task SA and explicitly disable automount'
+    - expression: >-
+        size(variables.p.containers) == 1 &&
+
+        (!has(variables.p.initContainers) || size(variables.p.initContainers) == 0) &&
+
+        (!has(variables.p.ephemeralContainers) || size(variables.p.ephemeralContainers) == 0) &&
+
+        variables.p.containers.all(c,
+         c.name == 'task' && c.image.matches('^ghcr[.]io/shady2k/lifemodel-workbench@sha256:[0-9a-f]{64}$') &&
+         (!has(c.command) || size(c.command) == 0) && (!has(c.args) || size(c.args) == 0) &&
+         !has(c.lifecycle) && !has(c.livenessProbe) && !has(c.readinessProbe) && !has(c.startupProbe))
+      message: 'task launcher: one trusted image ENTRYPOINT only; no command, args, hooks, probes, init or sidecars'
+    - expression: >-
+        variables.p.containers.all(c, (!has(c.env) || size(c.env) == 0) && (!has(c.envFrom) || size(c.envFrom) ==
+        0))
+      message: 'task environment: no env or envFrom injection; launcher configuration must be baked into the image'
+    - expression: >-
+        variables.p.restartPolicy == 'Never' &&
+
+        has(variables.p.terminationGracePeriodSeconds) && variables.p.terminationGracePeriodSeconds == 0 &&
+
+        has(variables.p.enableServiceLinks) && variables.p.enableServiceLinks == false &&
+
+        (!has(variables.p.hostNetwork) || variables.p.hostNetwork == false) &&
+
+        (!has(variables.p.hostPID) || variables.p.hostPID == false) &&
+
+        (!has(variables.p.hostIPC) || variables.p.hostIPC == false) &&
+
+        (!has(variables.p.shareProcessNamespace) || variables.p.shareProcessNamespace == false) &&
+
+        (!has(variables.p.hostAliases) || size(variables.p.hostAliases) == 0) &&
+
+        !has(variables.p.dnsConfig) && variables.p.dnsPolicy == 'ClusterFirst' &&
+
+        (request.operation != 'CREATE' || !has(variables.p.nodeName) || variables.p.nodeName == '') &&
+
+        (!has(variables.p.imagePullSecrets) || size(variables.p.imagePullSecrets) == 0) &&
+
+        has(variables.p.securityContext) && has(variables.p.securityContext.runAsNonRoot) && variables.p.securityContext.runAsNonRoot
+        == true &&
+
+        has(variables.p.securityContext.runAsUser) && variables.p.securityContext.runAsUser > 0 &&
+
+        has(variables.p.securityContext.runAsGroup) && variables.p.securityContext.runAsGroup > 0 &&
+
+        has(variables.p.securityContext.fsGroup) && variables.p.securityContext.fsGroup > 0 &&
+
+        has(variables.p.securityContext.seccompProfile) && variables.p.securityContext.seccompProfile.type == 'RuntimeDefault'
+        &&
+
+        (!has(variables.p.securityContext.sysctls) || size(variables.p.securityContext.sysctls) == 0) &&
+
+        variables.p.containers.all(c,
+         has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation
+        == false &&
+         has(c.securityContext.readOnlyRootFilesystem) && c.securityContext.readOnlyRootFilesystem == true &&
+         (!has(c.securityContext.privileged) || c.securityContext.privileged == false) &&
+         has(c.securityContext.capabilities) && has(c.securityContext.capabilities.drop) && c.securityContext.capabilities.drop
+        == ['ALL'] &&
+         (!has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0) &&
+         (!has(c.securityContext.runAsNonRoot) || c.securityContext.runAsNonRoot == true) &&
+         (!has(c.securityContext.runAsUser) || c.securityContext.runAsUser > 0) &&
+         (!has(c.securityContext.runAsGroup) || c.securityContext.runAsGroup > 0) &&
+         (!has(c.securityContext.seccompProfile) || c.securityContext.seccompProfile.type == 'RuntimeDefault') &&
+         (!has(c.securityContext.procMount) || c.securityContext.procMount == 'Default') &&
+         (!has(c.ports) || c.ports.all(port, !has(port.hostPort) || port.hostPort == 0)))
+      message: 'task security: explicit restricted context, native termination and cluster DNS only; no host escape'
+    - expression: >-
+        (!has(variables.p.volumes) || variables.p.volumes.all(v,
+         has(v.emptyDir) ||
+         (has(v.ephemeral) && has(v.ephemeral.volumeClaimTemplate) &&
+          !has(v.ephemeral.volumeClaimTemplate.spec.volumeName) &&
+          !has(v.ephemeral.volumeClaimTemplate.spec.dataSource) &&
+          !has(v.ephemeral.volumeClaimTemplate.spec.dataSourceRef) &&
+          !has(v.ephemeral.volumeClaimTemplate.spec.selector) &&
+          (!has(v.ephemeral.volumeClaimTemplate.spec.storageClassName) || v.ephemeral.volumeClaimTemplate.spec.storageClassName
+        == 'local-path') &&
+          v.ephemeral.volumeClaimTemplate.spec.accessModes == ['ReadWriteOnce']) ||
+         (has(v.configMap) && v.configMap.name == 'lifemodel-ca') ||
+         (has(v.projected) && size(v.projected.sources) > 0 && v.projected.sources.all(s,
+          (has(s.serviceAccountToken) && has(s.serviceAccountToken.audience) &&
+           s.serviceAccountToken.audience in ['lifemodel-task-model', 'lifemodel-task-storage', 'lifemodel-task-channel'])
+        ||
+          (has(s.configMap) && s.configMap.name == 'lifemodel-ca'))))) &&
+        variables.p.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m,
+         variables.p.volumes.exists(v, v.name == m.name &&
+          ((has(v.emptyDir) || has(v.ephemeral)) || (has(m.readOnly) && m.readOnly == true)))))
+      message: 'task volumes: private emptyDir/ephemeral and read-only public CA or closed-audience identity only'
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: task-pod-admission
+spec:
+  policyName: task-pod-admission
+  validationActions:
+    - Deny
