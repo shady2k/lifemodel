@@ -184,6 +184,49 @@ describe('fenced durable task registry', () => {
     expect(await dynamic.admitNext()).toMatchObject({ id: second.id });
   });
 
+  it('rechecks a lowered cap after a waiting admission reaches the serialized decision', async () => {
+    const base = await settings.read();
+    let snapshot = base;
+    const currentSettings = { read: async () => snapshot };
+    const dynamic = createPostgresTaskRegistry({
+      pool: stores.postgres,
+      epoch: 1,
+      settings: currentSettings,
+    });
+    const first = await dynamic.accept(request('cap-race-first'));
+    const second = await dynamic.accept(request('cap-race-second'));
+    const reachedAcquisition = Promise.withResolvers<void>();
+    const resumeAcquisition = Promise.withResolvers<void>();
+    const delayedPool = new Proxy(stores.postgres, {
+      get(target, property) {
+        if (property === 'connect')
+          return async () => {
+            reachedAcquisition.resolve();
+            await resumeAcquisition.promise;
+            return target.connect();
+          };
+        return Reflect.get(target, property, target);
+      },
+    });
+    const waiting = createPostgresTaskRegistry({
+      pool: delayedPool,
+      epoch: 1,
+      settings: currentSettings,
+    }).admitNext();
+    try {
+      // Before the fix A has already read cap 2 here. After the fix it cannot
+      // read the cap until it owns the admission lock, after this barrier.
+      await reachedAcquisition.promise;
+      snapshot = { ...base, revision: 1, values: { ...base.values, 'tasks.concurrency': 1 } };
+      expect(await dynamic.admitNext()).toMatchObject({ id: first.id, slotReserved: true });
+    } finally {
+      resumeAcquisition.resolve();
+    }
+    expect(await waiting).toBeNull();
+    expect(await dynamic.read(second.id)).toMatchObject({ state: 'queued', slotReserved: false });
+    expect(await dynamic.read(first.id)).toMatchObject({ state: 'starting', slotReserved: true });
+  });
+
   const starting = async (): Promise<TaskRecord> => {
     await registry.accept(request('intent'));
     const task = (await registry.admitNext())!;
@@ -205,14 +248,67 @@ describe('fenced durable task registry', () => {
     const before = await stores.postgres.query(
       'SELECT task_id, attempt_id, launch_id FROM task_access.intents'
     );
-    const second = await registry.advanceAccessIntent(task.id, { ...first, mode: 'wrapping' });
-    expect(second.revision).toBe('1');
-    const after = await stores.postgres.query(
-      'SELECT task_id, attempt_id, launch_id FROM task_access.intents'
-    );
-    expect(after.rows).toEqual(before.rows);
-    expect(after.rowCount).toBe(1);
-    expect(second.softDueAt).toEqual(first.softDueAt);
+    const locker = await stores.postgres.connect();
+    const reader = await stores.postgres.connect();
+    const pending: Promise<unknown>[] = [];
+    try {
+      await locker.query('BEGIN');
+      await locker.query('SELECT * FROM task_access.intents WHERE task_id=$1 FOR UPDATE', [
+        task.id,
+      ]);
+      const advancing = registry.advanceAccessIntent(task.id, { ...first, mode: 'wrapping' });
+      pending.push(advancing);
+      await expect
+        .poll(async () => {
+          const result = await stores.postgres.query(
+            `SELECT count(*)::int AS waiting FROM pg_stat_activity
+            WHERE datname=current_database() AND wait_event_type='Lock' AND query=$1`,
+            ['SELECT * FROM task_access.intents WHERE task_id=$1 FOR UPDATE']
+          );
+          return result.rows[0].waiting;
+        })
+        .toBe(1);
+      const pid = await reader.query('SELECT pg_backend_pid() AS pid');
+      // This statement targets the old tuple, behind the queued writer. An
+      // UPDATE lets it follow the tuple to revision 1; DELETE+INSERT loses it.
+      const reading = reader.query(
+        'SELECT task_id, attempt_id, launch_id, revision, mode FROM task_access.intents WHERE task_id=$1 FOR SHARE',
+        [task.id]
+      );
+      pending.push(reading);
+      await expect
+        .poll(async () => {
+          const result = await stores.postgres.query(
+            'SELECT cardinality(pg_blocking_pids($1)) > 0 AS blocked',
+            [pid.rows[0].pid]
+          );
+          return result.rows[0].blocked;
+        })
+        .toBe(true);
+      await locker.query('ROLLBACK');
+      const second = await advancing;
+      expect(second.revision).toBe('1');
+      expect((await reading).rows).toEqual([
+        {
+          task_id: task.id,
+          attempt_id: task.attemptId,
+          launch_id: task.launchId,
+          revision: '1',
+          mode: 'wrapping',
+        },
+      ]);
+      const after = await stores.postgres.query(
+        'SELECT task_id, attempt_id, launch_id FROM task_access.intents'
+      );
+      expect(after.rows).toEqual(before.rows);
+      expect(after.rowCount).toBe(1);
+      expect(second.softDueAt).toEqual(first.softDueAt);
+    } finally {
+      await locker.query('ROLLBACK');
+      await Promise.allSettled(pending);
+      locker.release();
+      reader.release();
+    }
   });
 
   it('initializes once from observed Job start, replay never resets or extends it', async () => {

@@ -26,10 +26,13 @@ have a shared finite 15-second SQL-phase bound; lock/statement limits are instal
 the acquired session before entering the fenced seam. Connections are discarded
 after each operation (including a late acquisition after timeout), so abandoned
 queries cannot retain locks and no session settings leak to another pool borrower.
-Settings reads have a separate 15-second bound and occur before acquiring SQL
-locks (at most 30 seconds across both phases). The production settings reader
-fails to defaults, but an injected failing reader can refuse even a replay before
-SQL is reached; a replay never replaces the stored snapshot.
+Acceptance reads settings before acquiring SQL locks, with a separate 15-second
+bound (at most 30 seconds across its settings and SQL phases). Admission instead
+reads settings after acquiring the admission lock, inside its shared 15-second
+SQL-phase bound; a slow read cannot hold that lock beyond the operation deadline.
+The production settings reader fails to defaults, but an injected failing reader
+can refuse even an acceptance replay before SQL is reached; a replay never
+replaces the stored snapshot.
 Invalid input and conflicting key reuse are deterministic errors.
 The port is core-only and is not added to `PluginPrimitives`.
 
@@ -66,12 +69,15 @@ contenders cannot spend the same capacity. Accept uses the same lock so accepted
 sequence assignment and commit order cannot invert FIFO. Identity sequence gaps
 on transaction abort are harmless. Public reads sort by accepted order and ID.
 
-The cap comes from the existing platform reader's `tasks.concurrency` on each
-admission, not a new key or process cache. The read supplies the cap snapshot for
-that admission attempt; a setting changed while the attempt waits on the SQL
-lock applies to the next attempt. Its current declaration permits a
-fraction; admission floors the cap so integer reservations never exceed it.
-Lowering the cap does not remove existing reservations. Pending/unknown creates
+The cap comes from the existing platform reader's `tasks.concurrency`, not a new
+key or process cache. Admission reads it inside the fenced transaction, after
+acquiring the singleton admission lock and before counting/reserving. A setting
+changed while an attempt waits on that lock therefore applies to that attempt's
+serialized reservation decision, not just the next attempt. This uses the
+existing reader without adding a separate policy-revision fence. Its current
+declaration permits a fraction; admission floors the cap so integer reservations
+never exceed it. Lowering the cap does not remove existing reservations; new
+admission waits until their count falls below the new effective cap. Pending/unknown creates
 continue to consume capacity. `releaseSlot` is an explicit idempotent operation
 for the finalizer/reconciler **after confirmed compute termination**. Terminal
 state, reply, or storage GC does not implicitly release it. Unknown task IDs fail.

@@ -141,7 +141,7 @@ export function createPostgresTaskRegistry(deps: {
   pool: Pool;
   epoch: number;
   settings: PlatformSettingsReader;
-  /** Per-phase bound: settings read, then SQL including acquisition/holder lock. */
+  /** Bounds settings reads and SQL including acquisition/holder lock and admission's settings read. */
   operationTimeoutMs?: number;
 }): TaskRegistry {
   const timeoutMs = deps.operationTimeoutMs ?? 15_000;
@@ -308,12 +308,14 @@ export function createPostgresTaskRegistry(deps: {
         return rows.rows.map(taskRecord);
       }),
     admitNext: async () => {
-      const settings = await boundedSettings();
-      // The platform number declaration permits fractions. Flooring ensures an
-      // integer reservation count never exceeds its configured upper bound.
-      const cap = Math.floor(settings.values['tasks.concurrency']);
       return transaction('registry', async (client) => {
         await client.query('SELECT id FROM core.task_admission WHERE id FOR UPDATE');
+        // Read policy at the serialized reservation decision, not before a wait
+        // on the pool/holder/admission lock. Lowering the cap keeps existing
+        // reservations but must prevent a stale waiter spending the old cap.
+        const settings = await boundedSettings();
+        // The platform declaration permits fractions; floor the upper bound.
+        const cap = Math.floor(settings.values['tasks.concurrency']);
         const count = await client.query<{ count: string }>(
           'SELECT count(*) FROM core.task_launches WHERE slot_reserved'
         );
