@@ -1,5 +1,6 @@
 /** Restart-safe OpenBao initialization and unseal custody (ADR-010 R7-02). */
 import { request as httpsRequest } from 'node:https';
+import { ZOT_CUSTODY_PATH, type ZotCredential } from './zot-custody.js';
 import { readFile } from 'node:fs/promises';
 import type { ModelSlot } from './model.js';
 import { createRoleBaoClient, BaoStorageError, type RoleBaoOptions } from './model-bao.js';
@@ -28,6 +29,9 @@ export interface BaoApi {
   ensureModelPolicy?(rootToken: string): Promise<void>;
   /** The storage module's read-only identity and the loader's custody write (ADR-015 S-D1). */
   ensureStoragePolicy(rootToken: string): Promise<void>;
+  ensureRegistryPolicy(rootToken: string): Promise<void>;
+  readRegistryCustody(): Promise<Record<string, unknown> | null>;
+  writeRegistryCustody(value: ZotCredential): Promise<void>;
   /** The SeaweedFS S3 custody record, or null when it does not exist yet. */
   readStorageCustody(): Promise<Record<string, unknown> | null>;
   writeStorageCustody(value: StorageS3Credentials): Promise<void>;
@@ -137,6 +141,7 @@ export function createOpenBaoBootstrap(deps: OpenBaoBootstrapDeps): {
         throw new Error('OpenBao model policy provisioner is unavailable');
       await bao.ensureModelPolicy(saved.rootToken);
       await bao.ensureStoragePolicy(saved.rootToken);
+      await bao.ensureRegistryPolicy(saved.rootToken);
       await bao.revokeRootToken(saved.rootToken);
     }
     if (!(await bao.rootTokenActive(saved.rootToken))) await bao.login();
@@ -583,6 +588,57 @@ export function createOpenBaoApi(
       if (!Array.isArray(model) || !model.includes('read'))
         throw new Error('OpenBao loader login lost its model-slot rights');
       await ensureStorageModuleIdentity(rootToken);
+    },
+    ensureRegistryPolicy: async (rootToken) => {
+      const policy = `path "${ZOT_CUSTODY_PATH}" { capabilities = ["create", "update", "read"] }`;
+      await asToken(rootToken, 'sys/policies/acl/loader-registry', 'PUT', { policy });
+      await asToken(rootToken, 'auth/kubernetes/role/loader', 'POST', {
+        bound_service_account_names: ['loader'],
+        bound_service_account_namespaces: ['lifemodel-system'],
+        policies: ['loader', 'loader-model', 'loader-storage', 'loader-registry'],
+        ttl: '1h',
+      });
+      await client.login();
+      const capabilities = await asRole('sys/capabilities-self', 'POST', {
+        paths: [ZOT_CUSTODY_PATH],
+      });
+      const granted = capabilities[ZOT_CUSTODY_PATH];
+      if (
+        !Array.isArray(granted) ||
+        granted.length !== 3 ||
+        !['create', 'update', 'read'].every((capability) => granted.includes(capability))
+      )
+        throw new Error('zot_policy_denied');
+    },
+    readRegistryCustody: async () => {
+      let result: Record<string, unknown>;
+      try {
+        result = await asRole(ZOT_CUSTODY_PATH, 'GET');
+      } catch (error) {
+        if (error instanceof BaoStorageError && error.code === 'not_found') return null;
+        throw new Error('zot_custody_unavailable');
+      }
+      const data = result['data'];
+      if (!data || typeof data !== 'object' || Array.isArray(data))
+        throw new Error('zot_custody_invalid');
+      const entry = data as Record<string, unknown>;
+      const metadata = entry['metadata'] as Record<string, unknown> | undefined;
+      if (
+        metadata?.['destroyed'] === true ||
+        (typeof metadata?.['deletion_time'] === 'string' && metadata['deletion_time'] !== '')
+      )
+        return null;
+      const value = entry['data'];
+      if (!value || typeof value !== 'object' || Array.isArray(value))
+        throw new Error('zot_custody_invalid');
+      return value as Record<string, unknown>;
+    },
+    writeRegistryCustody: async (value) => {
+      try {
+        await asRole(ZOT_CUSTODY_PATH, 'POST', { data: value });
+      } catch {
+        throw new Error('zot_custody_unavailable');
+      }
     },
     readStorageCustody: async () =>
       readCustodyRecord((path, method) => asRole(path, method ?? 'GET')),

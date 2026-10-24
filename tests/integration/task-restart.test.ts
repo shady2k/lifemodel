@@ -151,7 +151,7 @@ describe('task restart finalization (real Postgres and Valkey, TLS storage)', ()
   const launch = (task: TaskRecord): TaskLaunch => ({
     task,
     spaceId: task.allocationReceipt?.space ?? 'space_1',
-    workbenchImage: `ghcr.io/shady2k/lifemodel-workbench@${task.imageRevision}`,
+    workbenchImage: `zot.lifemodel-system.svc:5001/lifemodel/workbench@${task.imageRevision}`,
   });
   async function running(taskId: string): Promise<TaskChannelProof> {
     const task = (await registry.read(taskId))!;

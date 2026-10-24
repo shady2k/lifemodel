@@ -15,6 +15,11 @@ resources:
   # inherits only what step A allows it (ADR-013 D5).
   - namespace-default-deny.yaml
   - network-policy.yaml
+configMapGenerator:
+  - name: workbench-origin
+    namespace: lifemodel-system
+    envs:
+      - workbench-origin.env
 images:
   - name: ghcr.io/shady2k/lifemodel-loader
     newName: ghcr.io/shady2k/lifemodel-loader

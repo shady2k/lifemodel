@@ -283,7 +283,7 @@ describe('task launcher identity and briefing (real stores and live TLS identity
     const job = renderTaskJob({
       task,
       spaceId: space,
-      workbenchImage: `ghcr.io/shady2k/lifemodel-workbench@${task.imageRevision}`,
+      workbenchImage: `zot.lifemodel-system.svc:5001/lifemodel/workbench@${task.imageRevision}`,
     });
     job.metadata.uid = `job-${key}`;
     job.metadata.resourceVersion = '1';

@@ -47,6 +47,77 @@ storage leg is superseded — now served by CloudNativePG.
 Affects: docs/features/instance/containers-design.md (the views), the
 future implementation stages of instance-1 outcome 5.
 
+## Amendment: zot workbench delivery (2026-10-24)
+
+The owner chose **password-protected zot, then TLS** on 2026-10-19
+(lifemodel-pwe: “zot по паролю, но потом TLS”), and moved zot into the
+current task workbench delivery on 2026-10-24 (lifemodel-653.8.13:
+“Ну это же глупость. Подними zot сейчас” / “Да, давай”). This closes
+question 4 below: zot replaces `registry:2`, not a second registry beside it.
+TLS remains lifemodel-pwe.2. The interim trusted single-node network uses
+plain HTTP, anonymous pull, and one password-authenticated push identity.
+
+The immutable task repository is
+`zot.lifemodel-system.svc:5001/lifemodel/workbench`. In-cluster pushers resolve
+the Service name. The installer writes the same authority into k3s
+`registries.yaml`, resolving it to `http://10.43.0.51:5001`, zot's fixed
+ClusterIP in the explicitly pinned `10.43.0.0/16` service CIDR. Containerd
+uses node kube-proxy routing, not cluster DNS; default registry endpoint
+fallback is disabled. This is node-local delivery on the sole node, without
+an externally exposed hostPort or a Pod Security exception. It does not use
+port 5000 (the disposable VM walk's platform-artifact registry).
+
+zot v2.1.22 is the current upstream stable main line at implementation
+(2026-10-06 release), pinned by its OCI index digest in platform step A.
+It has one retained local-path PVC. Dedupe and GC are enabled, with explicit
+`gcDelay: "2h"` and `gcInterval: "1h"`. The matching `lifemodel/workbench`
+retention policy sets `deleteUntagged: false` and `deleteReferrers: false`,
+so GC preserves digest-only release roots and their referenced graph instead
+of applying upstream's default untagged-manifest deletion. Uploads idle for
+two hours and unreferenced blobs are reclaimed by later GC passes. The grace
+exceeds the importer's 30-minute phase cap. After a hard stop, retry reuses
+completed objects; stale partial uploads normally disappear within three
+hours of their last write while zot runs, plus scheduler/runtime delay.
+This is not a filesystem quota or release-expiry policy: retained releases
+still consume space. Back up the registry volume and Bao before deliberate
+pruning or recovery; repair storage and restore the volume or reimport the
+pinned release, rather than manually deleting roots/shared blobs.
+A0 precreates its htpasswd Secret. After Bao policy handoff the loader stores
+one random 256-bit `loader` password in OpenBao, verifies its read-back,
+and projects only a bcrypt hash to zot. No task or node receives that
+password. Anonymous authorization grants `read` only; the one push user is
+restricted to the workbench repository. Default-deny and zot ingress admit
+only loader pods; node-origin traffic uses Kubernetes' node-network exception.
+Future pwe builder admission is a commented slot, not a permission today.
+
+Final step order stays **instance → A0 → A → B → C → D**. Zot waits only
+for its A0 Secret to be filled by the post-Bao custody phase, not Gitea or
+SQL. First-start order after Bao init/unseal/policy is **Seaweed custody →
+zot custody → workbench import → Gitea bootstrap/application sources →
+Postgres credential copy → Valkey credential copy**. Application sources
+are not created before a verified import, so core cannot start tasks before
+that boundary. No phase waiting on C is moved in front of A's readiness.
+
+The release still publishes the workbench to its public digest-pinned origin.
+Before creating application sources, the loader copies the exact manifest,
+index, config and layer bytes into zot, verifies SHA-256 on both sides, and
+keeps the original release digest. Existing verified objects are resume keys.
+A failed/mismatched/unreachable import retries with safe codes; there is no
+public-origin fallback in the Job path. Import requests have deadlines and
+size/count bounds; temporary bytes use the loader's disk-backed volume.
+There is no temporary import-egress policy or phase-only network enforcement.
+Kubernetes policies are additive: the existing loader model-check egress
+already reaches the public origin. The importer's own host confinement is
+the boundary: HTTPS to `ghcr.io` and the exact blob host
+`pkg-containers.githubusercontent.com`, checked redirects and token realms,
+and no registry credential forwarding to redirect hosts. The zot push
+password is used only at the destination.
+
+k3s, Flux, zot itself and the loader remain release-pinned bootstrap images
+outside zot. Serving core/web/loader/gateway, air-gap installation, and in-cluster
+build/push credentials are not part of this amendment. Future pwe builds use
+the same zot, with their own least-privilege identity and explicit network row.
+
 ## Open questions for the owner
 
 The eight decision points of the morning, the six simplification points
@@ -71,23 +142,11 @@ or a measurement; none changes a mechanism below):
    milestone. The job mechanics here (consumer groups + XAUTOCLAIM + done
    records) are deliberately plain so the research can move them wholesale
    to a dedicated engine without touching the core.
-4. **The local registry: which implementation, and its node-side trust
-   setup.** The platform decision names "a local registry" (in-cluster,
-   private) without naming the software; a single-node k3s needs the
-   node-resolvable endpoint and the kubelet's trust configuration decided
-   (R5-08). The operator's tag-write rule (tag = build-input hash) does
-   not depend on the choice; the design records the requirement (Q1): a
-   STABLE endpoint resolvable by BOTH BuildKit (push) and the node's
-   kubelet (pull) — the node network, not a module pod's DNS/policy
-   context, is where pulls happen — plus the pull trust and auth the node
-   needs (`/etc/rancher/k3s/registries.yaml` naming the registry endpoint
-   with its TLS trust; on a single node the lighter option is plain HTTP
-   on a node-local address with no TLS machinery, R5-08), written by the
-   one-command installer; no credentials inside module environments.
-   Implementation: OCI `registry:2` behind the default-deny boundary,
-   ONE registry volume on the sole node (the lighter option — not
-   replicated storage), the registry's persistence and recovery recorded
-   and checked separately from image delivery.
+4. **The local registry — CLOSED (owner, 2026-10-19 and 2026-10-24).**
+   zot, password push from OpenBao, anonymous node pull, interim plain HTTP.
+   The amendment above records the stable node/pusher endpoint, one retained
+   volume, bootstrap order and the separate TLS task. Persistence/recovery
+   remains separately checked from cold-node image delivery (R5-08).
 5. **The deploy branch's shape and home — CLOSED (owner, 2026-10-13,
    "Gitea").** The deploy branch is a branch of the SAME repository, held
    by an internal Gitea running in the cluster. The operator is the only
@@ -520,8 +579,10 @@ Dockerfile — and nothing of its launch: the launch shape (probes, grace,
 strategy, network policy, RBAC) lives in the Helm chart in the same
 commit, and Flux is the only applier. The operator builds each module
 image with BuildKit inside the cluster — a rootless BuildKit pod with NO
-cluster mutation rights and NO credentials, normal network — pushing to
-the local registry. The image tag is the hash of the module's CANONICAL
+cluster mutation rights, normal network — pushing to
+zot with a scoped push identity supplied from OpenBao in pwe. This amends
+the earlier “NO credentials” wording: password push requires a registry
+credential, never a cluster-mutation or module credential. The image tag is the hash of the module's CANONICAL
 BUILD IDENTITY — the git tree id of the build context, the selected
 Dockerfile's path and content, each named additional context's name and
 tree id, and the admitted build options (the R3-18 rule, kept) — so an

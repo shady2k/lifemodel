@@ -1,0 +1,178 @@
+# zot v2.1.22, the current upstream stable main release (2026-10-06).
+# Primary sources: https://github.com/project-zot/zot/releases/tag/v2.1.22
+# https://ghcr.io/v2/project-zot/zot/manifests/v2.1.22
+# https://github.com/project-zot/zot/blob/v2.1.22/build/stacker.yaml
+# https://github.com/project-zot/zot/blob/v2.1.22/examples/config-policy.json
+# The OCI index digest below was verified against the upstream response bytes.
+# Bootstrap image: never served by the registry it must start.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zot-config
+  namespace: lifemodel-system
+data:
+  # v2.1.22 keys: https://github.com/project-zot/zot/blob/v2.1.22/pkg/api/config/config.go
+  # RunGCTasks schedules GC only with gc=true (pkg/api/controller.go).
+  # deleteBlobUploads uses gcDelay and upload mtime (pkg/storage/gc/gc.go).
+  # HasDeleteUntagged honors the explicit matching policy below (pkg/retention/retention.go).
+  # All source paths above are at https://github.com/project-zot/zot/blob/v2.1.22/ .
+  # Preserve digest-only roots and their graph; reclaim uploads idle >2h,
+  # well beyond the importer's 30min phase cap, on the hourly GC pass.
+  config.json: |-
+    {
+      "storage": {
+        "rootDirectory": "/var/lib/registry",
+        "gc": true,
+        "gcDelay": "2h",
+        "gcInterval": "1h",
+        "dedupe": true,
+        "retention": {
+          "policies": [{
+            "repositories": ["lifemodel/workbench"],
+            "deleteUntagged": false,
+            "deleteReferrers": false
+          }]
+        }
+      },
+      "http": {
+        "address": "0.0.0.0",
+        "port": "5001",
+        "auth": { "htpasswd": { "path": "/etc/zot/auth/htpasswd" } },
+        "accessControl": {
+          "repositories": {
+            "lifemodel/workbench": {
+              "anonymousPolicy": ["read"],
+              "policies": [{ "users": ["loader"], "actions": ["read", "create", "update"] }]
+            }
+          }
+        }
+      },
+      "log": { "level": "warn" }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zot
+  namespace: lifemodel-system
+spec:
+  type: ClusterIP
+  # Reserved from the static service-address band of the pinned k3s service
+  # CIDR. The node's containerd mirror uses this address, not cluster DNS.
+  clusterIP: 10.43.0.51
+  selector:
+    app.kubernetes.io/name: zot
+  ports:
+    - name: registry
+      port: 5001
+      targetPort: registry
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: zot
+  namespace: lifemodel-system
+spec:
+  replicas: 1
+  serviceName: zot
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zot
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zot
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: zot
+          image: ghcr.io/project-zot/zot@sha256:96cda11459ce6f8c60da3b03f03e9f67fd11b3ae2d82c4c04c92b3c608996080
+          imagePullPolicy: IfNotPresent
+          # Use the release image's architecture-specific entrypoint. GHCR
+          # releases use stacker (/usr/local/bin/zot-linux-<arch>), not the
+          # separate build/Dockerfile's /usr/bin/zot.
+          args: ['serve', '/etc/zot/config.json']
+          ports:
+            - name: registry
+              containerPort: 5001
+              protocol: TCP
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          # zot permits the unauthenticated /v2/ discovery request. A registry
+          # can be ready before the loader publishes its push credential; the
+          # missing identity can never gain create/update permission.
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: registry
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /v2/
+              port: registry
+            periodSeconds: 20
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: '1', memory: 512Mi }
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/registry
+            - name: config
+              mountPath: /etc/zot
+              readOnly: true
+            # A directory mount preserves live Kubernetes Secret projection.
+            # v2.1.22 watches ..data symlink swaps; subPath would freeze it.
+            - name: htpasswd
+              mountPath: /etc/zot/auth
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: zot-config
+        - name: htpasswd
+          secret:
+            # A0 creates the empty placeholder before step A; the loader fills
+            # the sole bcrypt entry after Bao custody, before workbench import.
+            secretName: zot-htpasswd
+            defaultMode: 288
+            items:
+              - key: htpasswd
+                path: htpasswd
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 20Gi

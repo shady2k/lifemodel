@@ -22,7 +22,7 @@ and its copied credentials never gate gateway startup or readiness. See
 
 The signed platform artifact pins the loader (also model gateway and storage),
 core, web and **workbench** images by digest. The workbench is
-`ghcr.io/shady2k/lifemodel-workbench`: Node 24.21.0, OpenCode 1.19.4, git/build
+`zot.lifemodel-system.svc:5001/lifemodel/workbench`: Node 24.21.0, OpenCode 2.1.4, git/build
 tools, this release's offline dev dependencies, storage CLI and task launcher.
 It is not a running platform Deployment. Its release digest is the core's
 `LIFEMODEL_TASK_WORKBENCH_IMAGE` launch input in
@@ -31,6 +31,64 @@ The Job adapter consumes it in 653.8.5; the launcher stub fails closed until
 653.8.7. See [the workbench contract](../../docs/features/motor/workbench.md)
 for pins, private HOME/work-volume paths and offline checks. Prime Agent joins
 this one image in stage 4, not in the stage-3 image.
+
+## Zot and the first-start import
+
+The step order remains **instance → A0 → A → B → C → D**. A contains zot,
+with one retained 20Gi local-path PVC and no host networking. Its upstream
+v2.1.22 OCI index is digest-pinned (current stable main release, released
+2026-10-06), not a mutable “latest” image. Deduplication and GC are enabled.
+GC runs hourly with a two-hour `gcDelay`, longer than the importer's entire
+30-minute phase budget. It reclaims uploads idle beyond that grace and
+unreferenced blobs. An explicit retention policy for `lifemodel/workbench`
+sets `deleteUntagged: false` and `deleteReferrers: false`: digest-only release
+roots and their referenced graph remain pullable across GC and restart.
+After a hard crash, retry the import; completed objects are reused and stale
+partial uploads are reclaimed on a later GC pass (normally within three
+hours of their last write while zot is healthy, plus scheduler/runtime delay).
+This is not a disk quota: retained releases are not automatically expired.
+Before deliberate release pruning or store recovery, back up the registry
+volume and OpenBao; never delete roots or shared blobs by hand. Restore the
+volume or reimport the pinned public release after storage repair.
+The Service is `zot.lifemodel-system.svc:5001`, with fixed ClusterIP
+`10.43.0.51` in the installers' explicit `10.43.0.0/16` service CIDR.
+
+Both installers write k3s `registries.yaml` for this exact authority with
+plain-HTTP mirror `http://10.43.0.51:5001`, and disable default-registry-endpoint
+fallback. Node containerd uses kube-proxy routing rather than cluster DNS.
+Port 5000, used by the clean-VM walk for its platform artifact, is unchanged.
+No hostPort or Pod Security exception is added. Bootstrap images (k3s, Flux,
+zot itself and loader) remain externally release-pinned, never served by zot.
+Core, web and gateway images do not move in this task.
+
+A0 precreates `zot-htpasswd`; its key is initially absent so zot cannot start
+unauthenticated. After Bao init/unseal/policy, phases run:
+
+1. Seaweed custody (only Bao and A's identity Secret).
+2. Zot custody: generate/reuse one random password in
+   `lifemodel/data/registry/zot`, verify read-back, project only a bcrypt hash
+   for the sole `loader` user into `zot-htpasswd`.
+3. Workbench import: read the release pin from A0's generated `workbench-origin`
+   ConfigMap, read the push credential from Bao at use, and copy the public
+   release origin's exact index/manifests/config/layers to zot. Verify digest
+   bytes after pushing too. Already verified objects are resume keys after a
+   kill. Per-request/whole-phase deadlines and size bounds fail with safe codes.
+4. Gitea bootstrap, seeding and application source/Kustomization creation.
+5. CNPG credential copy (waits for C), then Valkey credential copy.
+
+Zot waits on neither Gitea nor C, and import completes before core's source
+exists. Import failure retries; Jobs never fall back to ghcr.io. Anonymous
+pull has `read` only. Push requires the sole password, repository authorization,
+and loader-only pod ingress. Node-origin pull uses Kubernetes' node exception.
+A commented builder slot grants no rights. TLS remains lifemodel-pwe.2.
+
+The existing loader model-check egress also reaches the public import origin.
+NetworkPolicy is additive; no phase-only network enforcement is claimed and
+there is no temporary import-egress policy. The importer's own host confinement
+is the boundary: HTTPS to `ghcr.io` and the exact blob host
+`pkg-containers.githubusercontent.com`, with checked redirects and token realms.
+Registry credentials are never forwarded to redirect hosts; zot's password is
+used only at the destination.
 
 ## A0: loader and admission
 
@@ -458,9 +516,11 @@ snapshotted wrap grace. This is this leaf's platform engineering ceiling, not a
 claim that the settings registry has a total-timeout declaration (it currently
 has only a separate wrap-grace bound), and not ADR-014's 300-second wrap default.
 Raising it is an explicit platform policy change. The release pin point is the
-workbench image rule: repository `ghcr.io/shady2k/lifemodel-workbench`, any valid
-sha256 digest for now; 653.8.3 supplies the release digest. The trusted launcher
-is the image ENTRYPOINT. Command/args overrides and lifecycle hooks remain
+workbench image rule: only repository
+`zot.lifemodel-system.svc:5001/lifemodel/workbench` with a valid sha256 digest.
+The release supplies the pin and core requires that exact pinned image.
+`ghcr.io/shady2k/lifemodel-workbench` is the public import origin, not an
+admitted Job or Pod image. The trusted launcher is the image ENTRYPOINT. Command/args overrides and lifecycle hooks remain
 forbidden. Both Job and Pod policies permit only these literal environment names:
 
 - `LIFEMODEL_STORAGE_ENDPOINT`

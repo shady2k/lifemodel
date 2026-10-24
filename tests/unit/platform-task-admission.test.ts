@@ -53,7 +53,7 @@ function job(): any {
           containers: [
             {
               name: 'task',
-              image: `ghcr.io/shady2k/lifemodel-workbench@sha256:${'a'.repeat(64)}`,
+              image: `zot.lifemodel-system.svc:5001/lifemodel/workbench@sha256:${'a'.repeat(64)}`,
               // Entrypoint is baked into the trusted digest-pinned image (653.8.3).
               securityContext: {
                 allowPrivilegeEscalation: false,
@@ -170,6 +170,21 @@ describe('task admission (actual CEL expression evaluation; API-server typecheck
       expect(outcomes(kind, object)).toContainEqual(expect.stringMatching(/^task launcher:/));
     }
   );
+  it.each(
+    (['Job', 'Pod'] as const).flatMap((kind) =>
+      ['valid', 'image', 'image-ghcr', 'image-repository', 'image-registry'].map(
+        (variant) => [kind, variant] as const
+      )
+    )
+  )('%s VM probe %s enforces the same sole zot repository', (kind, variant) => {
+    const object = JSON.parse(
+      execFileSync(process.execPath, ['tests/fixtures/task-admission/probe.mjs', variant, kind], {
+        encoding: 'utf8',
+      })
+    );
+    if (variant === 'valid') expect(outcomes(kind, object)).toEqual([]);
+    else expect(outcomes(kind, object)).toContainEqual(expect.stringMatching(/^task launcher:/));
+  });
   it('permits core Job creation and actual k3s per-controller Pod identity only', () => {
     expect(outcomes('Job', job())).toEqual([]);
     expect(outcomes('Pod', pod(), 'CREATE', null, core)).toEqual([]);
@@ -344,7 +359,7 @@ describe('task admission (actual CEL expression evaluation; API-server typecheck
           s.ephemeralContainers = [{ ...structuredClone(s.containers[0]), name: 'task-debug' }];
         },
         (s: any) => {
-          s.containers[0].image = 'ghcr.io/shady2k/lifemodel-workbench:latest';
+          s.containers[0].image = 'zot.lifemodel-system.svc:5001/lifemodel/workbench:latest';
         },
         (s: any) => {
           s.containers[0].image = `evil.example/workbench@sha256:${'a'.repeat(64)}`;
@@ -362,6 +377,27 @@ describe('task admission (actual CEL expression evaluation; API-server typecheck
         reject(kind, (o) => mutate(spec(o)), 'launcher');
     }
   );
+  it.each(
+    (['Job', 'Pod'] as const).flatMap((kind) =>
+      [
+        `ghcr.io/shady2k/lifemodel-workbench@sha256:${'a'.repeat(64)}`,
+        'zot.lifemodel-system.svc:5001/lifemodel/workbench:latest',
+        `zot.lifemodel-system.svc:5001/lifemodel/other@sha256:${'a'.repeat(64)}`,
+        `other.example:5001/lifemodel/workbench@sha256:${'a'.repeat(64)}`,
+        `zot.lifemodel-system.svc:5001/lifemodel/workbench@sha256:${'A'.repeat(64)}`,
+        `zot.lifemodel-system.svc:5001/lifemodel/workbench@sha256:${'a'.repeat(63)}`,
+      ].map((image) => [kind, image] as const)
+    )
+  )('%s refuses any image outside the digest-pinned local zot repository: %s', (kind, image) => {
+    reject(
+      kind,
+      (object) => {
+        const spec = kind === 'Job' ? object.spec.template.spec : object.spec;
+        spec.containers[0].image = image;
+      },
+      'launcher'
+    );
+  });
   it.each(['Job', 'Pod'] as const)(
     '%s requires explicit restricted contexts and refuses host escape/exfil fields',
     (kind) => {

@@ -40,7 +40,7 @@ const podSpec = {
   containers: [
     {
       name: 'task',
-      image: `ghcr.io/shady2k/lifemodel-workbench@sha256:${'0'.repeat(64)}`,
+      image: `zot.lifemodel-system.svc:5001/lifemodel/workbench@sha256:${'0'.repeat(64)}`,
       securityContext: {
         allowPrivilegeEscalation: false,
         privileged: false,
@@ -142,7 +142,16 @@ const variants = {
     podSpec.containers[0].command = ['/bin/sh'];
   },
   image() {
-    podSpec.containers[0].image = 'ghcr.io/shady2k/lifemodel-workbench:latest';
+    podSpec.containers[0].image = 'zot.lifemodel-system.svc:5001/lifemodel/workbench:latest';
+  },
+  'image-ghcr'() {
+    podSpec.containers[0].image = `ghcr.io/shady2k/lifemodel-workbench@sha256:${'0'.repeat(64)}`;
+  },
+  'image-repository'() {
+    podSpec.containers[0].image = `zot.lifemodel-system.svc:5001/lifemodel/other@sha256:${'0'.repeat(64)}`;
+  },
+  'image-registry'() {
+    podSpec.containers[0].image = `other.example:5001/lifemodel/workbench@sha256:${'0'.repeat(64)}`;
   },
   sidecar() {
     podSpec.initContainers = [{ ...structuredClone(podSpec.containers[0]), name: 'task-init' }];

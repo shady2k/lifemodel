@@ -8,7 +8,10 @@ import YAML from 'yaml';
 
 const read = (path: string): string => readFileSync(path, 'utf8');
 const dockerfile = () => read('docker/workbench/Dockerfile');
-const image = 'ghcr.io/shady2k/lifemodel-workbench';
+const image = 'zot.lifemodel-system.svc:5001/lifemodel/workbench';
+const originImage = 'ghcr.io/shady2k/lifemodel-workbench';
+const originPlaceholder = `LIFEMODEL_WORKBENCH_ORIGIN_IMAGE=${originImage}@sha256:${'0'.repeat(64)}\n`;
+const originPinFile = 'deploy/platform/a0/workbench-origin.env';
 const placeholder = `${image}@sha256:${'0'.repeat(64)}`;
 const pinFile = 'deploy/platform/applications/lifemodel/kustomization.yaml';
 
@@ -193,8 +196,11 @@ describe('task workbench image contract', () => {
 
   it('pins the reference in the core overlay and substitutes exactly that release digest', () => {
     const text = read(pinFile);
+    expect(read(originPinFile)).toBe(originPlaceholder);
     expect(text).toContain('name: LIFEMODEL_TASK_WORKBENCH_IMAGE');
-    const references = text.match(/ghcr\.io\/shady2k\/lifemodel-workbench[^\s"']*/g);
+    const references = text.match(
+      /zot[.]lifemodel-system[.]svc:5001\/lifemodel\/workbench[^\s"']*/g
+    );
     expect(references).toEqual([placeholder]);
     // The overlay targets the actual core, not an unused ConfigMap.
     expect(text).toMatch(/kind: StatefulSet\s+name: core/);
@@ -230,26 +236,36 @@ describe('task workbench image contract', () => {
     );
     const dir = mkdtempSync(join(tmpdir(), 'workbench-pin-'));
     const file = join(dir, 'kustomization.yaml');
+    const originFile = join(dir, 'workbench-origin.env');
     try {
       writeFileSync(file, text);
+      writeFileSync(originFile, originPlaceholder);
       const digest = `sha256:${'a'.repeat(64)}`;
-      execFileSync('bash', ['scripts/release/set-workbench-digest.sh', digest, file]);
+      execFileSync('bash', ['scripts/release/set-workbench-digest.sh', digest, file, originFile]);
       const pinned = read(file);
       expect(pinned).toContain(`${image}@${digest}`);
+      const pinnedOrigin = `LIFEMODEL_WORKBENCH_ORIGIN_IMAGE=${originImage}@${digest}\n`;
+      expect(read(originFile)).toBe(pinnedOrigin);
       expect(pinned).not.toContain(placeholder);
       expect(pinned.replace(`${image}@${digest}`, placeholder)).toBe(text);
       expect(
-        spawnSync('bash', ['scripts/release/set-workbench-digest.sh', digest, file]).status
+        spawnSync('bash', ['scripts/release/set-workbench-digest.sh', digest, file, originFile])
+          .status
       ).not.toBe(0);
       expect(read(file)).toBe(pinned);
+      expect(read(originFile)).toBe(pinnedOrigin);
       writeFileSync(file, text);
+      writeFileSync(originFile, originPlaceholder);
       expect(
-        spawnSync('bash', ['scripts/release/set-workbench-digest.sh', 'latest', file]).status
+        spawnSync('bash', ['scripts/release/set-workbench-digest.sh', 'latest', file, originFile])
+          .status
       ).not.toBe(0);
       expect(read(file)).toBe(text);
+      expect(read(originFile)).toBe(originPlaceholder);
       writeFileSync(file, text + `\n# ${placeholder}\n`);
       expect(
-        spawnSync('bash', ['scripts/release/set-workbench-digest.sh', digest, file]).status
+        spawnSync('bash', ['scripts/release/set-workbench-digest.sh', digest, file, originFile])
+          .status
       ).not.toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -265,6 +281,7 @@ describe('task workbench image contract', () => {
   ])('refuses %s without modifying the overlay', (scenario) => {
     const dir = mkdtempSync(join(tmpdir(), 'workbench-pin-invalid-'));
     const file = join(dir, 'kustomization.yaml');
+    const originFile = join(dir, 'workbench-origin.env');
     const original = read(pinFile);
     const text =
       scenario === 'malformed suffix'
@@ -280,10 +297,55 @@ describe('task workbench image contract', () => {
     const digest = `sha256:${(scenario === 'zero digest' ? '0' : 'a').repeat(64)}`;
     try {
       writeFileSync(file, text);
+      writeFileSync(originFile, originPlaceholder);
       expect(
-        spawnSync('bash', ['scripts/release/set-workbench-digest.sh', digest, file]).status
+        spawnSync('bash', ['scripts/release/set-workbench-digest.sh', digest, file, originFile])
+          .status
       ).not.toBe(0);
       expect(read(file)).toBe(text);
+      expect(read(originFile)).toBe(originPlaceholder);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    'missing origin file',
+    'wrong origin repository',
+    'malformed origin digest',
+    'already pinned origin',
+    'duplicate origin entry',
+    'commented placeholder',
+  ])('refuses %s before changing either release pin', (scenario) => {
+    const dir = mkdtempSync(join(tmpdir(), 'workbench-origin-invalid-'));
+    const file = join(dir, 'kustomization.yaml');
+    const originFile = join(dir, 'workbench-origin.env');
+    const original = read(pinFile);
+    const origin =
+      scenario === 'wrong origin repository'
+        ? originPlaceholder.replace(originImage, image)
+        : scenario === 'malformed origin digest'
+          ? originPlaceholder.trimEnd() + 'f\n'
+          : scenario === 'already pinned origin'
+            ? originPlaceholder.replace('0'.repeat(64), 'b'.repeat(64))
+            : scenario === 'duplicate origin entry'
+              ? originPlaceholder + originPlaceholder
+              : scenario === 'commented placeholder'
+                ? '# ' + originPlaceholder
+                : originPlaceholder;
+    try {
+      writeFileSync(file, original);
+      if (scenario !== 'missing origin file') writeFileSync(originFile, origin);
+      expect(
+        spawnSync('bash', [
+          'scripts/release/set-workbench-digest.sh',
+          `sha256:${'a'.repeat(64)}`,
+          file,
+          originFile,
+        ]).status
+      ).not.toBe(0);
+      expect(read(file)).toBe(original);
+      if (scenario !== 'missing origin file') expect(read(originFile)).toBe(origin);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -304,6 +366,10 @@ describe('task workbench image contract', () => {
     expect(section).toContain('lifemodel-workbench:${{ github.ref_name }}');
     expect(section).toContain('WORKBENCH_DIGEST: ${{ steps.workbench.outputs.digest }}');
     expect(section).toContain(pinFile);
+    expect(section).toContain(originPinFile);
+    expect(section).toContain(
+      'tags: ghcr.io/${{ github.repository_owner }}/lifemodel-workbench:${{ github.ref_name }}'
+    );
     expect(release).toContain('cosign sign --yes "ghcr.io/$OWNER/lifemodel-platform@$DIGEST"');
     expect(read('scripts/release/prepare-loader-context.sh')).toContain('git add -- "$seed_file"');
   });

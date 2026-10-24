@@ -15,7 +15,7 @@ import type {
 
 export const TASK_LAUNCH_LABEL = 'lifemodel.dev/launch-id';
 export const TASK_TEMPLATE_HASH = 'lifemodel.dev/template-hash';
-const IMAGE_REPOSITORY = 'ghcr.io/shady2k/lifemodel-workbench';
+const IMAGE_REPOSITORY = 'zot.lifemodel-system.svc:5001/lifemodel/workbench';
 const MAX_LIST_PAGES = 100;
 const MAX_LIST_CONTINUATION_BYTES = 4096;
 const LIST_TIMEOUT_MS = 30_000;
@@ -540,6 +540,7 @@ export class KubernetesTaskExecutor implements TaskExecutor {
   }
   requestSoftStop(launch: TaskLaunch, signal?: AbortSignal): Promise<TaskSoftStopIntent> {
     return Promise.resolve().then((): TaskSoftStopIntent => {
+      checkLaunch(launch);
       if (signal?.aborted) throw new TaskExecutorError('aborted');
       return { taskId: launch.task.id, launchId: launch.task.launchId, intent: 'soft-stop' };
     });

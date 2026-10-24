@@ -61,6 +61,9 @@ function fixture(
     ensureStoragePolicy: async (_token) => {
       events.push('storage-policy');
     },
+    ensureRegistryPolicy: async () => {},
+    readRegistryCustody: async () => null,
+    writeRegistryCustody: async () => {},
     readStorageCustody: async () => null,
     writeStorageCustody: async () => {
       throw new Error('bootstrap never writes the storage custody record');
@@ -255,6 +258,7 @@ function gatewayBoundary(
           'lifemodel/metadata/model/primary': ['read'],
           'lifemodel/metadata/model/reserve': ['read'],
           'lifemodel/data/storage/seaweed': ['create', 'update', 'read'],
+          'lifemodel/data/registry/zot': ['create', 'update', 'read'],
         };
         return { status: 200, body: JSON.stringify({ ...caps, data: caps }) };
       }
@@ -933,6 +937,7 @@ describe('OpenBao bootstrap', () => {
               'lifemodel/metadata/model/reserve': ['read'],
               'lifemodel/metadata/model/primary': ['read'],
               'lifemodel/data/storage/seaweed': ['create', 'update', 'read'],
+              'lifemodel/data/registry/zot': ['create', 'update', 'read'],
             }),
           };
         if (url.pathname.endsWith('/sys/capabilities')) {
@@ -1030,6 +1035,9 @@ describe('OpenBao bootstrap', () => {
         ensureStoragePolicy: async () => {
           events.push('storage-policy');
         },
+        ensureRegistryPolicy: async () => {},
+        readRegistryCustody: async () => null,
+        writeRegistryCustody: async () => {},
         readStorageCustody: async () => null,
         writeStorageCustody: async () => {},
         login: async () => {
@@ -1110,6 +1118,9 @@ describe('OpenBao bootstrap', () => {
         ensureLoaderPolicy: async () => {},
         ensureModelPolicy: (root) => api.ensureModelPolicy!(root),
         ensureStoragePolicy: (root) => api.ensureStoragePolicy(root),
+        ensureRegistryPolicy: (root) => api.ensureRegistryPolicy(root),
+        readRegistryCustody: () => api.readRegistryCustody(),
+        writeRegistryCustody: (value) => api.writeRegistryCustody(value),
         readStorageCustody: () => api.readStorageCustody(),
         writeStorageCustody: (value) => api.writeStorageCustody(value),
         login: () => api.login(),
@@ -1263,6 +1274,9 @@ describe('OpenBao bootstrap', () => {
       readModelSlot: async () => {
         throw new Error('must not read a model slot');
       },
+      ensureRegistryPolicy: async () => {},
+      readRegistryCustody: async () => null,
+      writeRegistryCustody: async () => {},
       readStorageCustody: async () => null,
       writeStorageCustody: async () => {
         throw new Error('must not write the storage custody record');
@@ -1379,6 +1393,7 @@ describe('the storage module custody identity', () => {
             status: 200,
             body: legacyResponse({
               'lifemodel/data/storage/seaweed': ['create', 'update', 'read'],
+              'lifemodel/data/registry/zot': ['create', 'update', 'read'],
               'lifemodel/data/model/primary': ['create', 'update', 'read'],
             }),
           };
@@ -1474,6 +1489,7 @@ describe('the storage module custody identity', () => {
             status: 200,
             body: legacyResponse({
               'lifemodel/data/storage/seaweed': ['create', 'update', 'read'],
+              'lifemodel/data/registry/zot': ['create', 'update', 'read'],
               'lifemodel/data/model/primary': ['read'],
             }),
           };

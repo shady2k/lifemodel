@@ -162,3 +162,20 @@ contract and network-attempt tracing. Never update a harness at task start.
 
 The former v1 image measurements are superseded; v2 measurements and final
 acceptance receipts are recorded in the worker report, not inferred here.
+
+## Local registry delivery
+
+The release publishes the workbench at the digest-pinned public origin
+`ghcr.io/shady2k/lifemodel-workbench`. The loader's first-start `workbench-import`
+phase copies its exact OCI bytes to the platform's zot before creating the
+application sources. Jobs name only
+`zot.lifemodel-system.svc:5001/lifemodel/workbench@sha256:<digest>`.
+The digest is unchanged; no tag resolution or public-registry fallback happens
+at Job start. Both core validation and both CEL guards reject ghcr.io and all
+other repositories. Missing/mismatched imports block bootstrap and retry.
+
+The node's installer-written k3s mirror routes that authority to
+`http://10.43.0.51:5001`. Pull is anonymous, while the loader reads the sole
+push password from OpenBao at use. Plain HTTP is the owner's interim choice;
+TLS is lifemodel-pwe.2. See [ADR-010's amendment](../../adr/010-container-generations.md#amendment-zot-workbench-delivery-2026-10-24)
+for trust, phase order and the cold-node acceptance boundary.

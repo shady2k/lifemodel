@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import YAML from 'yaml';
 
 const script = fileURLToPath(new URL('../../scripts/ci-loader-paths.sh', import.meta.url));
 const producer = fileURLToPath(new URL('../../scripts/ci-product-paths.sh', import.meta.url));
@@ -81,6 +82,20 @@ describe('loader image CI path classification', () => {
     expect(workflow).toContain('scripts/ci-loader-paths.sh < "$out" >> "$GITHUB_OUTPUT"');
     expect(workflow).toContain('loader_image: ${{ steps.classify.outputs.loader_image }}');
   });
+  it('prepares the unpublished loader build without requiring release workbench pins', () => {
+    const workflow = YAML.parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
+    const steps = workflow.jobs['ci-loader-image'].steps;
+    const prepare = steps.find(
+      (step: { name?: string }) => step.name === 'Prepare the full-history loader seed bundle'
+    );
+    expect(prepare.run).toBe('scripts/release/prepare-loader-context.sh');
+    const dummy = steps.find(
+      (step: { name?: string }) => step.name === 'Pin dummy digests for this build only'
+    );
+    expect(dummy.run).toContain('scripts/release/set-core-digest.sh');
+    expect(dummy.run).toContain('scripts/release/set-web-digest.sh');
+  });
+
   it('gates the ci-loader-image job on the selector verdict', () => {
     const workflow = readFileSync(
       fileURLToPath(new URL('../../.github/workflows/ci.yml', import.meta.url)),

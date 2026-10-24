@@ -454,7 +454,9 @@ jobs:
   # web digests before it bundles. This build publishes nothing, so the job
   # stamps an obviously dummy non-zero digest into its own checkout first,
   # through the release digest scripts; the placeholders stay in the
-  # committed tree and the release refusal is not weakened.
+  # committed tree and the release refusal is not weakened. The matching
+  # workbench placeholders remain zero here; only the release passes --release
+  # to require a real workbench digest as well.
   ci-loader-image:
     needs: changes
     if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.loader_image == 'true') && !github.event.pull_request.draft }}

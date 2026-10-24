@@ -1,5 +1,12 @@
 /** Platform bootstrap loader wiring (ADR-010, platform step A0). */
 import type { Clock } from './clock.js';
+import { join } from 'node:path';
+import {
+  createZotCustodyPhase,
+  createKubernetesZotIdentitySecret,
+  parseZotCredential,
+} from './zot-custody.js';
+import { createWorkbenchImportPhase } from './workbench-import.js';
 import type { LoaderConfig } from './config.js';
 import type { CommandRunner } from './exec.js';
 import type { FileSystem } from './fs.js';
@@ -68,6 +75,8 @@ export interface LoaderAppDeps {
 export interface FirstStartPhaseDeps {
   gitea: PlatformPhase[];
   storageCustody: PlatformPhase;
+  zotCustody: PlatformPhase;
+  workbenchImport: PlatformPhase;
   postgres?: PlatformPhase;
   valkey?: PlatformPhase;
 }
@@ -76,9 +85,10 @@ export interface FirstStartPhaseDeps {
  * The loader's first-start phase order after OpenBao's policy phase
  * (ADR-010 R7-02, ADR-015 S-D1).
  *
- * Seaweed custody comes first. It needs only OpenBao, which the policy phase
- * has just prepared, and the platform Secret. Every phase after it may wait on
- * a later platform step: the Postgres and Valkey credential phases copy
+ * Seaweed and zot custody need only OpenBao and their platform Secrets.
+ * Workbench import follows before Gitea creates application sources: core
+ * cannot launch a Job until the release digest is verified in zot. None of
+ * these phases waits for C. The Postgres and Valkey credential phases copy
  * Secrets that only exist once `lifemodel-state` (platform C) has run.
  *
  * The storage module lives in its own step after C (platform D, ADR-015 S-D1)
@@ -90,6 +100,8 @@ export interface FirstStartPhaseDeps {
 export function platformFirstStartPhases(deps: FirstStartPhaseDeps): PlatformPhase[] {
   return [
     deps.storageCustody,
+    deps.zotCustody,
+    deps.workbenchImport,
     ...deps.gitea,
     deps.postgres ?? createKubernetesPostgresSecretPhase(),
     deps.valkey ?? createKubernetesValkeySecretPhase(),
@@ -157,6 +169,11 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
   const platformBootstrap =
     deps.platformBootstrap ??
     (() => {
+      const importer = createWorkbenchImportPhase({
+        originImage: process.env['LIFEMODEL_WORKBENCH_ORIGIN_IMAGE'] ?? '',
+        readCredential: async () => parseZotCredential(await bao.api.readRegistryCustody()),
+        tempDirectory: join(config.volumeRoot, 'workbench-import'),
+      });
       const bootstrap = createOpenBaoBootstrap({
         bao: bao.api,
         custody: bao.custody,
@@ -166,12 +183,17 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
           platformFirstStartPhases({
             gitea: giteaBootstrap.phases(),
             storageCustody: platformStorageCustody,
+            zotCustody: createZotCustodyPhase({
+              bao: {
+                read: () => bao.api.readRegistryCustody(),
+                write: (value) => bao.api.writeRegistryCustody(value),
+              },
+              identity: createKubernetesZotIdentitySecret(),
+            }),
+            workbenchImport: importer,
           }),
       });
-      return {
-        runInitial: () => bootstrap.runInitial(),
-        unsealIfSealed: () => bootstrap.unsealIfSealed(),
-      };
+      return bootstrap;
     })();
 
   const settings: SettingsStore =

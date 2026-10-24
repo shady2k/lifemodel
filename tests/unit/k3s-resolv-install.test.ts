@@ -160,6 +160,17 @@ describe('the installer hands k3s a resolv.conf it accepts', () => {
     expect(first.systemctl).toContain('enable lifemodel-k3s-resolv.service');
     expect(first.systemctl).toContain('enable --now lifemodel-k3s-resolv.path');
 
+    const mirror = readFileSync(join(root, 'install-root/etc/rancher/k3s/registries.yaml'), 'utf8');
+    expect(mirror).toContain('zot.lifemodel-system.svc:5001');
+    expect(mirror).toContain('http://10.43.0.51:5001');
+    expect(mirror).not.toContain('password');
+    const registryConfig = readFileSync(
+      join(root, 'install-root/etc/rancher/k3s/config.yaml.d/lifemodel-registry.yaml'),
+      'utf8'
+    );
+    expect(registryConfig).toContain('disable-default-registry-endpoint: true');
+    expect(registryConfig).toContain('service-cidr: 10.43.0.0/16');
+
     const written = readFileSync(join(root, 'install-root', resolvConf), 'utf8');
     expect(written.endsWith('\n')).toBe(true);
     const nameservers = written.split('\n').filter((line) => line.startsWith('nameserver '));
@@ -182,6 +193,8 @@ describe('the installer hands k3s a resolv.conf it accepts', () => {
   it.each([
     'etc/systemd/system/k3s.service.d/lifemodel-resolv.conf',
     'etc/rancher/k3s/config.yaml.d/lifemodel-resolv-conf.yaml',
+    'etc/rancher/k3s/config.yaml.d/lifemodel-registry.yaml',
+    'etc/rancher/k3s/registries.yaml',
   ])(
     'restarts exactly once on a drop-in-only upgrade (%s), then zero times unchanged',
     (relativeDropin) => {

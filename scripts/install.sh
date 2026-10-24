@@ -348,11 +348,30 @@ render_k3s_resolv_files() {
     "$render_dir/k3s/config.yaml.d/lifemodel-resolv-conf.yaml"
 }
 
+# Containerd resolves the canonical image authority through this explicit
+# mirror, not host DNS. The fixed Service IP is reachable from the node through
+# kube-proxy and opens no host listener. No credentials are needed for pulls.
+render_k3s_registry_files() {
+  render_dir=$1
+  install -d -m 0755 "$render_dir/k3s/config.yaml.d"
+  cat > "$render_dir/k3s/registries.yaml" <<'EOF'
+mirrors:
+  "zot.lifemodel-system.svc:5001":
+    endpoint:
+      - "http://10.43.0.51:5001"
+EOF
+  cat > "$render_dir/k3s/config.yaml.d/lifemodel-registry.yaml" <<'EOF'
+disable-default-registry-endpoint: true
+service-cidr: 10.43.0.0/16
+EOF
+}
+
 # Render-only mode: write the rendered objects and exit, touching nothing.
 if [ -n "$RENDER_ONLY_DIR" ]; then
   mkdir -p "$RENDER_ONLY_DIR"
   render_root_objects "$RENDER_ONLY_DIR"
   render_k3s_resolv_files "$RENDER_ONLY_DIR"
+  render_k3s_registry_files "$RENDER_ONLY_DIR"
   exit 0
 fi
 
@@ -479,6 +498,7 @@ command -v flock >/dev/null 2>&1 || die "flock is required"
 resolv_render=$(mktemp -d)
 trap 'rm -rf "$resolv_render"' EXIT HUP INT TERM
 render_k3s_resolv_files "$resolv_render"
+render_k3s_registry_files "$resolv_render"
 install -d -m 0755 "$host_root/usr/lib/lifemodel" "$host_root/etc/systemd/system" \
   "$host_root/etc/rancher/k3s/config.yaml.d" "$host_root/run/lifemodel" \
   "$host_root/etc/systemd/system/k3s.service.d"
@@ -502,6 +522,16 @@ if ! cmp -s "$resolv_render/k3s/config.yaml.d/lifemodel-resolv-conf.yaml" \
     "$host_root$K3S_RESOLV_DROPIN"
   k3s_resolv_changed=1
 fi
+# Registry trust and the CIDR exist before either the first k3s start or a
+# restart. Changed bytes participate in the same one-restart decision as DNS.
+for registry_file in registries.yaml config.yaml.d/lifemodel-registry.yaml; do
+  if ! cmp -s "$resolv_render/k3s/$registry_file" \
+      "$host_root/etc/rancher/k3s/$registry_file" 2>/dev/null; then
+    install -m 0644 "$resolv_render/k3s/$registry_file" \
+      "$host_root/etc/rancher/k3s/$registry_file"
+    k3s_resolv_changed=1
+  fi
+done
 # The same two sources and order the unit names, so the file k3s reads at
 # install time is the one it would read after a boot.
 resolv_result=$(flock "$host_root/run/lifemodel/k3s-resolv.lock" node "$resolv_render/resolv/resolv-conf.mjs" "$host_root$K3S_RESOLV_CONF" \

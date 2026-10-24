@@ -1,0 +1,549 @@
+/** Release-pinned, byte-identical OCI import. No registry errors or credentials escape this boundary. */
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { mkdir, mkdtemp, open, rm } from 'node:fs/promises';
+import { request as httpRequest, type IncomingHttpHeaders } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pipeline } from 'node:stream/promises';
+import { PlatformPhaseError, type PlatformPhase } from './platform-bootstrap.js';
+
+const SOURCE_REPOSITORY = 'shady2k/lifemodel-workbench';
+const DIGEST = /^sha256:[0-9a-f]{64}$/;
+const MANIFEST_TYPES = [
+  'application/vnd.oci.image.index.v1+json',
+  'application/vnd.oci.image.manifest.v1+json',
+  'application/vnd.docker.distribution.manifest.list.v2+json',
+  'application/vnd.docker.distribution.manifest.v2+json',
+];
+const INDEX_TYPES = new Set([MANIFEST_TYPES[0], MANIFEST_TYPES[2]]);
+
+export interface WorkbenchImportOptions {
+  originImage: string;
+  readCredential(): Promise<{ username: string; password: string }>;
+  destinationOrigin?: string;
+  destinationRepository?: string;
+  /** Loopback HTTP registry override for tests; the pinned release name is still validated. */
+  originRegistry?: string;
+  signal?: AbortSignal;
+  requestTimeoutMs?: number;
+  phaseTimeoutMs?: number;
+  maxManifestBytes?: number;
+  /** Raw manifest bytes retained across the recursive traversal (parsed JSON adds overhead). */
+  maxActiveManifestBytes?: number;
+  maxBlobBytes?: number;
+  /** Includes origin downloads and destination read-back, not just final image size. */
+  maxTotalBytes?: number;
+  maxObjects?: number;
+  /** Dedicated disk-backed directory. Abandoned files are removed on the next run. */
+  tempDirectory?: string;
+}
+
+type Reason =
+  | 'configuration'
+  | 'credential'
+  | 'unauthorized'
+  | 'unavailable'
+  | 'deadline'
+  | 'aborted'
+  | 'redirect'
+  | 'digest-mismatch'
+  | 'size-limit'
+  | 'manifest'
+  | 'protocol';
+function failure(reason: Reason): PlatformPhaseError {
+  return new PlatformPhaseError('workbench-import', `workbench-import:${reason}`);
+}
+interface Descriptor {
+  digest: string;
+  size: number;
+}
+interface Result {
+  status: number;
+  headers: IncomingHttpHeaders;
+  bytes: Buffer;
+  digest: string;
+  size: number;
+}
+interface RequestOptions {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: Buffer | { path: string; size: number };
+  limit?: number;
+  file?: string;
+  discard?: boolean;
+}
+
+/** Copies child manifests before their parent and verifies the complete destination graph. */
+export function createWorkbenchImportPhase(options: WorkbenchImportOptions): PlatformPhase {
+  return {
+    name: 'workbench-import',
+    run: async () => {
+      const controller = new AbortController();
+      let phaseExpired = false;
+      const abort = () => {
+        controller.abort();
+      };
+      options.signal?.addEventListener('abort', abort, { once: true });
+      if (options.signal?.aborted) controller.abort();
+      const phaseTimer = setTimeout(
+        () => {
+          phaseExpired = true;
+          controller.abort();
+        },
+        options.phaseTimeoutMs ?? 30 * 60_000
+      );
+      const temporary = options.tempDirectory ?? join(tmpdir(), 'lifemodel-workbench-import');
+      let workspace: string | undefined;
+      try {
+        const match = /^ghcr\.io\/shady2k\/lifemodel-workbench@(sha256:[0-9a-f]{64})$/.exec(
+          options.originImage
+        );
+        if (match?.[1] === undefined) throw failure('configuration');
+        const pinnedDigest = match[1];
+        const source = parseOrigin(options.originRegistry ?? 'https://ghcr.io');
+        if (options.originRegistry !== undefined && !loopback(source))
+          throw failure('configuration');
+        const destination = parseOrigin(
+          options.destinationOrigin ?? 'http://zot.lifemodel-system.svc:5001'
+        );
+        const repository = options.destinationRepository ?? 'lifemodel/workbench';
+        if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/.test(repository))
+          throw failure('configuration');
+        const timeoutMs = options.requestTimeoutMs ?? 120_000;
+        const manifestLimit = options.maxManifestBytes ?? 1024 * 1024;
+        const activeManifestLimit = options.maxActiveManifestBytes ?? 8 * 1024 * 1024;
+        const blobLimit = options.maxBlobBytes ?? 4 * 1024 ** 3;
+        const totalLimit = options.maxTotalBytes ?? 16 * 1024 ** 3;
+        const objectLimit = options.maxObjects ?? 2048;
+        for (const value of [
+          timeoutMs,
+          options.phaseTimeoutMs ?? 30 * 60_000,
+          manifestLimit,
+          activeManifestLimit,
+          blobLimit,
+          totalLimit,
+          objectLimit,
+        ]) {
+          if (!Number.isSafeInteger(value) || value <= 0) throw failure('configuration');
+        }
+        checkAbort();
+        // A platform phase has one owner. Never accumulate killed-run layer files on its PVC.
+        await rm(temporary, { force: true, recursive: true });
+        await mkdir(temporary, { recursive: true, mode: 0o700 });
+        workspace = await mkdtemp(join(temporary, 'run-'));
+        let transferred = 0;
+        let activeManifestBytes = 0;
+        let objectCount = 0;
+        let wrote = false;
+        let audit = false;
+        let token: string | undefined;
+        const completed = new Map<string, number>();
+        const visiting = new Set<string>();
+
+        function checkAbort(): void {
+          if (controller.signal.aborted) throw failure(phaseExpired ? 'deadline' : 'aborted');
+        }
+        function charge(size: number): void {
+          transferred += size;
+          if (transferred > totalLimit) throw failure('size-limit');
+        }
+        function checkedUrl(value: string, base: URL): URL {
+          const url = new URL(value, base);
+          if (
+            url.username !== '' ||
+            url.password !== '' ||
+            url.hash !== '' ||
+            url.origin !== base.origin
+          )
+            throw failure('redirect');
+          return url;
+        }
+        async function credentials(): Promise<string> {
+          try {
+            const credential = await interruptible(options.readCredential());
+            if (
+              credential.username !== 'loader' ||
+              credential.password.trim() === '' ||
+              /[\r\n]/.test(credential.password)
+            )
+              throw failure('credential');
+            return `Basic ${Buffer.from(`loader:${credential.password}`).toString('base64')}`;
+          } catch {
+            checkAbort();
+            throw failure('credential');
+          }
+        }
+        async function interruptible<T>(work: Promise<T>): Promise<T> {
+          checkAbort();
+          return new Promise<T>((resolve, reject) => {
+            const onAbort = () => {
+              reject(failure(phaseExpired ? 'deadline' : 'aborted'));
+            };
+            controller.signal.addEventListener('abort', onAbort, { once: true });
+            void work.then(resolve, reject).finally(() => {
+              controller.signal.removeEventListener('abort', onAbort);
+            });
+          });
+        }
+        async function request(url: URL, spec: RequestOptions = {}): Promise<Result> {
+          checkAbort();
+          return new Promise<Result>((resolve, reject) => {
+            const method = spec.method ?? 'GET';
+            const limit = spec.limit ?? manifestLimit;
+            let expired = false;
+            const headers = {
+              ...spec.headers,
+              'accept-encoding': 'identity',
+              ...(spec.body === undefined
+                ? {}
+                : {
+                    'content-length': String(
+                      Buffer.isBuffer(spec.body) ? spec.body.length : spec.body.size
+                    ),
+                  }),
+            };
+            const req = (url.protocol === 'https:' ? httpsRequest : httpRequest)(
+              url,
+              { method, headers },
+              (res) => {
+                void (async () => {
+                  const status = res.statusCode ?? 0;
+                  if (status !== 200 || method === 'HEAD') {
+                    res.destroy();
+                    return {
+                      status,
+                      headers: res.headers,
+                      bytes: Buffer.alloc(0),
+                      digest: '',
+                      size: 0,
+                    };
+                  }
+                  if (
+                    res.headers['content-encoding'] !== undefined &&
+                    res.headers['content-encoding'] !== 'identity'
+                  )
+                    throw failure('protocol');
+                  const length = Number(res.headers['content-length']);
+                  if (Number.isFinite(length) && length > limit) throw failure('size-limit');
+                  const hash = createHash('sha256');
+                  const chunks: Buffer[] = [];
+                  const file =
+                    spec.file === undefined ? undefined : await open(spec.file, 'w', 0o600);
+                  let size = 0;
+                  try {
+                    for await (const chunk of res) {
+                      checkAbort();
+                      const bytes = Buffer.from(chunk as Uint8Array);
+                      size += bytes.length;
+                      if (size > limit) throw failure('size-limit');
+                      charge(bytes.length);
+                      hash.update(bytes);
+                      if (file !== undefined) await file.writeFile(bytes);
+                      else if (!spec.discard) chunks.push(bytes);
+                    }
+                  } finally {
+                    await file?.close();
+                  }
+                  return {
+                    status,
+                    headers: res.headers,
+                    bytes: Buffer.concat(chunks),
+                    digest: `sha256:${hash.digest('hex')}`,
+                    size,
+                  };
+                })()
+                  .then(resolve, (error: unknown) => {
+                    res.destroy();
+                    reject(error instanceof Error ? error : failure('unavailable'));
+                  })
+                  .finally(cleanup);
+              }
+            );
+            const timer = setTimeout(() => {
+              expired = true;
+              req.destroy(failure('deadline'));
+            }, timeoutMs);
+            const onAbort = () => req.destroy(failure(phaseExpired ? 'deadline' : 'aborted'));
+            function cleanup(): void {
+              clearTimeout(timer);
+              controller.signal.removeEventListener('abort', onAbort);
+            }
+            controller.signal.addEventListener('abort', onAbort, { once: true });
+            req.on('error', () => {
+              cleanup();
+              reject(
+                failure(
+                  controller.signal.aborted
+                    ? phaseExpired
+                      ? 'deadline'
+                      : 'aborted'
+                    : expired
+                      ? 'deadline'
+                      : 'unavailable'
+                )
+              );
+            });
+            if (spec.body !== undefined && !Buffer.isBuffer(spec.body)) {
+              void pipeline(createReadStream(spec.body.path), req).catch(() => {
+                req.destroy(failure('unavailable'));
+              });
+            } else req.end(spec.body);
+          });
+        }
+        function status(response: Result, expected: number[]): void {
+          if (response.status === 401 || response.status === 403) throw failure('unauthorized');
+          if (response.status >= 300 && response.status < 400) throw failure('redirect');
+          if (!expected.includes(response.status)) throw failure('unavailable');
+        }
+        async function destinationRequest(
+          path: string | URL,
+          spec: RequestOptions = {}
+        ): Promise<Result> {
+          const url =
+            typeof path === 'string'
+              ? new URL(`/v2/${repository}/${path}`, destination)
+              : checkedUrl(path.href, destination);
+          const response = await request(url, {
+            ...spec,
+            headers: { ...spec.headers, authorization: await credentials() },
+          });
+          if (response.status >= 300 && response.status < 400) throw failure('redirect');
+          if (response.status === 401 || response.status === 403) throw failure('unauthorized');
+          return response;
+        }
+        async function sourceRequest(path: string, spec: RequestOptions): Promise<Result> {
+          const url = new URL(`/v2/${SOURCE_REPOSITORY}/${path}`, source);
+          const send = () =>
+            request(url, {
+              ...spec,
+              headers: {
+                ...spec.headers,
+                ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
+              },
+            });
+          let response = await send();
+          if (response.status === 401) {
+            const challenge = response.headers['www-authenticate'];
+            if (typeof challenge !== 'string') throw failure('unauthorized');
+            // Never trust a realm, service or scope supplied by an arbitrary registry.
+            const realm = /(?:^|[,\s])realm="([^"]+)"/.exec(challenge)?.[1];
+            const service = /(?:^|[,\s])service="([^"]+)"/.exec(challenge)?.[1];
+            const scope = /(?:^|[,\s])scope="([^"]+)"/.exec(challenge)?.[1];
+            if (
+              !/^Bearer /i.test(challenge) ||
+              service !== 'ghcr.io' ||
+              (scope !== undefined && scope !== `repository:${SOURCE_REPOSITORY}:pull`)
+            )
+              throw failure('unauthorized');
+            const expectedRealm = new URL('/token', source);
+            if (realm !== expectedRealm.href) throw failure('redirect');
+            expectedRealm.searchParams.set('service', 'ghcr.io');
+            expectedRealm.searchParams.set('scope', `repository:${SOURCE_REPOSITORY}:pull`);
+            const grant = await request(expectedRealm, { limit: 64 * 1024 });
+            status(grant, [200]);
+            const parsed: unknown = JSON.parse(grant.bytes.toString('utf8'));
+            if (!record(parsed)) throw failure('unauthorized');
+            const value = parsed['token'] ?? parsed['access_token'];
+            if (
+              typeof value !== 'string' ||
+              !/^[A-Za-z0-9._~+/-]+=*$/.test(value) ||
+              value.length > 32 * 1024
+            )
+              throw failure('unauthorized');
+            token = value;
+            response = await send();
+          }
+          if (response.status >= 300 && response.status < 400) {
+            const location = response.headers.location;
+            if (typeof location !== 'string' || !path.startsWith('blobs/'))
+              throw failure('redirect');
+            const redirected = new URL(location, source);
+            // GHCR serves large blobs from this GitHub-owned host. Never suffix-match an arbitrary host.
+            if (
+              redirected.protocol !== 'https:' ||
+              redirected.hostname !== 'pkg-containers.githubusercontent.com' ||
+              redirected.port !== '' ||
+              redirected.username !== '' ||
+              redirected.password !== '' ||
+              redirected.hash !== '' ||
+              source.origin !== 'https://ghcr.io'
+            )
+              throw failure('redirect');
+            response = await request(redirected, spec); // Deliberately omit the registry Bearer header.
+            if (response.status >= 300 && response.status < 400) throw failure('redirect');
+          }
+          status(response, [200]);
+          return response;
+        }
+        function verify(response: Result, digest: string, expectedSize?: number): void {
+          if (response.digest !== digest) throw failure('digest-mismatch');
+          if (expectedSize !== undefined && response.size !== expectedSize)
+            throw failure('digest-mismatch');
+        }
+        function descriptor(value: unknown): Descriptor {
+          if (
+            !record(value) ||
+            typeof value['digest'] !== 'string' ||
+            !DIGEST.test(value['digest']) ||
+            typeof value['size'] !== 'number' ||
+            !Number.isSafeInteger(value['size']) ||
+            value['size'] < 0
+          )
+            throw failure('manifest');
+          return { digest: value['digest'], size: value['size'] };
+        }
+        function begin(key: string, size?: number): boolean {
+          const existing = completed.get(key);
+          if (existing !== undefined) {
+            if (size !== undefined && existing !== size) throw failure('digest-mismatch');
+            return false;
+          }
+          if (visiting.has(key)) throw failure('manifest');
+          if (++objectCount > objectLimit) throw failure('size-limit');
+          visiting.add(key);
+          return true;
+        }
+        async function blob(item: Descriptor): Promise<void> {
+          const key = `blob:${item.digest}`;
+          if (!begin(key, item.size)) return;
+          if (item.size > blobLimit) throw failure('size-limit');
+          const path = `blobs/${item.digest}`;
+          const head = await destinationRequest(path, { method: 'HEAD' });
+          status(head, [200, 404]);
+          if (head.status === 404) {
+            if (audit) throw failure('unavailable');
+            const file = join(workspace as string, 'blob');
+            try {
+              const original = await sourceRequest(path, { limit: blobLimit, file });
+              verify(original, item.digest, item.size);
+              const start = await destinationRequest('blobs/uploads/', { method: 'POST' });
+              status(start, [202]);
+              if (start.headers.location === undefined) throw failure('protocol');
+              const upload = checkedUrl(
+                start.headers.location,
+                new URL(`/v2/${repository}/blobs/uploads/`, destination)
+              );
+              if (!upload.pathname.startsWith(`/v2/${repository}/blobs/uploads/`))
+                throw failure('redirect');
+              upload.searchParams.set('digest', item.digest);
+              const pushed = await destinationRequest(upload, {
+                method: 'PUT',
+                headers: { 'content-type': 'application/octet-stream' },
+                body: { path: file, size: item.size },
+              });
+              status(pushed, [201]);
+              wrote = true;
+            } finally {
+              await rm(file, { force: true });
+            }
+          }
+          const stored = await destinationRequest(path, { limit: blobLimit, discard: true });
+          status(stored, [200]);
+          verify(stored, item.digest, item.size);
+          visiting.delete(key);
+          completed.set(key, item.size);
+        }
+        async function manifest(digest: string, expectedSize?: number, depth = 0): Promise<void> {
+          if (depth > 16) throw failure('size-limit');
+          const key = `manifest:${digest}`;
+          if (!begin(key, expectedSize)) return;
+          const path = `manifests/${digest}`;
+          let bytes = await destinationRequest(path, {
+            headers: { accept: MANIFEST_TYPES.join(', ') },
+          });
+          status(bytes, [200, 404]);
+          const missing = bytes.status === 404;
+          if (missing) {
+            if (audit) throw failure('unavailable');
+            bytes = await sourceRequest(path, { headers: { accept: MANIFEST_TYPES.join(', ') } });
+          }
+          verify(bytes, digest, expectedSize);
+          activeManifestBytes += bytes.size;
+          if (activeManifestBytes > activeManifestLimit) throw failure('size-limit');
+          const document: unknown = JSON.parse(bytes.bytes.toString('utf8'));
+          if (
+            !record(document) ||
+            document['schemaVersion'] !== 2 ||
+            typeof document['mediaType'] !== 'string' ||
+            !MANIFEST_TYPES.includes(document['mediaType'])
+          )
+            throw failure('manifest');
+          const mediaType = document['mediaType'];
+          if (document['subject'] !== undefined) {
+            const subject = descriptor(document['subject']);
+            await manifest(subject.digest, subject.size, depth + 1);
+          }
+          if (INDEX_TYPES.has(mediaType)) {
+            if (!Array.isArray(document['manifests'])) throw failure('manifest');
+            for (const value of document['manifests']) {
+              const child = descriptor(value);
+              await manifest(child.digest, child.size, depth + 1);
+            }
+          } else {
+            await blob(descriptor(document['config']));
+            if (!Array.isArray(document['layers'])) throw failure('manifest');
+            for (const value of document['layers']) await blob(descriptor(value));
+          }
+          if (missing) {
+            const pushed = await destinationRequest(path, {
+              method: 'PUT',
+              headers: { 'content-type': mediaType },
+              body: bytes.bytes,
+            });
+            status(pushed, [201]);
+            wrote = true;
+            const stored = await destinationRequest(path, {
+              headers: { accept: MANIFEST_TYPES.join(', ') },
+            });
+            status(stored, [200]);
+            verify(stored, digest, bytes.size);
+          }
+          activeManifestBytes -= bytes.size;
+          visiting.delete(key);
+          completed.set(key, bytes.size);
+        }
+        await manifest(pinnedDigest);
+        if (wrote) {
+          // A later manifest write must not hide a blob that changed after its first verification.
+          audit = true;
+          completed.clear();
+          visiting.clear();
+          objectCount = 0;
+          await manifest(pinnedDigest);
+        }
+        checkAbort();
+      } catch (error) {
+        if (controller.signal.aborted) throw failure(phaseExpired ? 'deadline' : 'aborted');
+        if (error instanceof PlatformPhaseError && error.phase === 'workbench-import') throw error;
+        throw failure('unavailable');
+      } finally {
+        clearTimeout(phaseTimer);
+        options.signal?.removeEventListener('abort', abort);
+        if (workspace !== undefined)
+          await rm(workspace, { recursive: true, force: true }).catch(() => undefined);
+      }
+    },
+  };
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+function loopback(url: URL): boolean {
+  return url.protocol === 'http:' && (url.hostname === '127.0.0.1' || url.hostname === '[::1]');
+}
+function parseOrigin(value: string): URL {
+  const url = new URL(value);
+  if (
+    (url.protocol !== 'http:' && url.protocol !== 'https:') ||
+    url.username !== '' ||
+    url.password !== '' ||
+    url.pathname !== '/' ||
+    url.search !== '' ||
+    url.hash !== ''
+  )
+    throw failure('configuration');
+  return url;
+}
