@@ -32,6 +32,12 @@ The Job adapter consumes it in 653.8.5; the launcher stub fails closed until
 for pins, private HOME/work-volume paths and offline checks. Prime Agent joins
 this one image in stage 4, not in the stage-3 image.
 
+CI also publishes the workbench on a push to main whose inputs changed, as
+`ghcr.io/shady2k/lifemodel-workbench:main` and `:<commit sha>`
+(lifemodel-653.8.15). Those are moving tags for inspecting the current build,
+not a release: no manifest or platform artifact refers to them, and the loader
+import still copies exactly the release digest.
+
 ## Zot and the background workbench import
 
 The step order remains **instance → A0 → A → B → C → D**. A contains zot,

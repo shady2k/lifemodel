@@ -303,12 +303,15 @@ the repository's installation, and each person's plugin and hooks are their own.
   pull request and for a cancelled run. A skipped job reports as success to a required check, so branch
   protection requires **`changes`, `ci-product` and `ci-backlog`**: requiring
   `changes` is what makes a failed `changes` job a red check rather than a
-  quiet skip. The image pipeline has two core-only jobs: `ci-core-image` builds
-  the standalone core image on product pull requests without write permission;
-  `ci-core-image-publish` builds and publishes the core image on every push to
-  `main` and is the only job that asks for `packages: write`. The platform
-  loader image is built by the release workflow. There is no instance image or
-  host-side test exception; tests stay inside the isolated launcher.
+  quiet skip. The image jobs follow one pattern: `ci-core-image`,
+  `ci-web-image` and `ci-workbench-image` build the standalone core, web and
+  task workbench images on their pull requests without a write permission, and
+  the three matching `-publish` jobs publish them on a push to `main` — core and
+  web on every push, the workbench when its selector says the change reaches its
+  inputs — and are the only jobs that ask for `packages: write`
+  (lifemodel-653.8.15). The platform loader image is built by the release
+  workflow. There is no instance image or host-side test exception; tests stay
+  inside the isolated launcher.
 
 - **Bulk-edit age correction:** none yet; no bulk edit has run. When one does,
   keep paired `--ages-from`/`--ages-through` snapshots of the export before

@@ -129,8 +129,20 @@ read-only root and a private writable `/work`. Its selector fails safe when the
 changed range is unknown. Like `ci-loader-image`, this is a conditional PR image
 job; the existing branch-protection required checks are unchanged.
 
-The release workflow builds and pushes the workbench, then
-`scripts/release/set-workbench-digest.sh` substitutes its digest in
+`ci-workbench-image-publish` (lifemodel-653.8.15) publishes the image on a push
+to main, and only when the selector says the change reaches the workbench's
+inputs; a missing or failed classification counts as owed, never as not owed,
+and a pull request never reaches this job. It builds
+`docker/workbench/Dockerfile`, runs the same offline, non-root, read-only-root
+`--self-check`, and only then pushes
+`ghcr.io/shady2k/lifemodel-workbench:main` and
+`ghcr.io/shady2k/lifemodel-workbench:<commit sha>`, showing the pushed digest in
+its log, as `ci-core-image-publish` and `ci-web-image-publish` do. It asks for
+`packages: write` and nothing else. Those moving tags are not a release: nothing
+pins them and no platform artifact names them.
+
+The release workflow still builds and pushes the workbench under its release
+tag, then `scripts/release/set-workbench-digest.sh` substitutes its digest in
 `deploy/platform/applications/lifemodel/kustomization.yaml`. The overlay adds
 `LIFEMODEL_TASK_WORKBENCH_IMAGE` to the **core** container. 653.8.5 must read and
 validate that immutable launch input. The zero digest is a source placeholder,
@@ -166,11 +178,12 @@ acceptance receipts are recorded in the worker report, not inferred here.
 ## Local registry delivery
 
 The release publishes the workbench at the default source
-`ghcr.io/shady2k/lifemodel-workbench`. The loader settings can select another
-HTTPS registry and OCI repository, with an optional Bao-held pull credential.
-The digest is still the release pin (`LIFEMODEL_WORKBENCH_DIGEST`), not a setting.
-An independent retriable loader task copies the exact OCI bytes into zot;
-import does not hold application-source creation or first start.
+`ghcr.io/shady2k/lifemodel-workbench`; CI also publishes the moving `main` and
+commit tags there, which the import never reads. The loader settings can select
+another HTTPS registry and OCI repository, with an optional Bao-held pull
+credential. The digest is still the release pin (`LIFEMODEL_WORKBENCH_DIGEST`),
+not a setting. An independent retriable loader task copies the exact OCI bytes
+into zot; import does not hold application-source creation or first start.
 Jobs name only
 `zot.lifemodel-system.svc:5001/lifemodel/workbench@sha256:<digest>`.
 The digest is unchanged; no tag resolution or external-registry fallback happens
