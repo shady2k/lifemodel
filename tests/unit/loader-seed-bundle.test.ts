@@ -327,7 +327,7 @@ describe('loader image release seed bundle', () => {
     const workflow = await readFile('.github/workflows/release.yml', 'utf8');
     const checkout = workflow.indexOf('uses: actions/checkout@');
     const login = workflow.indexOf('name: Log in to GitHub Container Registry');
-    const build = workflow.indexOf('name: Build and push loader image');
+    const build = workflow.indexOf('name: Build loader image locally');
     const cleanup = workflow.indexOf('name: Remove the temporary loader build context');
     expect(workflow.slice(checkout, login)).toContain('fetch-depth: 0');
     expect(cleanup).toBeGreaterThan(build);

@@ -6,6 +6,9 @@ import pino from 'pino';
 import { StorageTaskArtifactReader } from '../storage/task-artifact-reader.js';
 import { LoaderDownloadSessions } from '../storage/loader-download-sessions.js';
 
+// The bundled graph has loaded; smoke checks must not create clients or listeners.
+if (process.argv.includes('--check-modules')) process.exit(0);
+
 /** The platform gateway's health listener, pinned by ADR-013 D5/D6. */
 const DEFAULT_MODEL_STATUS_URL = 'http://model-gateway.lifemodel-system.svc:8081/status';
 

@@ -176,7 +176,7 @@ disposable test boundary, `scripts/test-isolated.mjs
   refuses a
   raw vitest start on the host in every CI job.
 
-CI builds and publishes the standalone core and web images. It also builds the platform loader image on pull requests that touch its inputs, without publishing it, and runs `nix flake check` on pull requests that touch what the flake reads (the `ci-nix` job); all tests run through the isolated launcher.
+CI builds the standalone core and web images and checks their runtime entrypoint module graphs offline before publishing them. The loader PR build and signed core/web/loader releases run the same `scripts/smoke-image-modules.sh` check before any push. `--check-modules` loads static imports and exits before configuration, stores or service startup; it does not exercise dynamic plugin imports or model loading. The core compiler explicitly includes the shared validator `.mjs` in `tsconfig.json` because wildcard discovery prefers its sibling `.d.mts`. CI also builds the platform loader image on pull requests that touch its inputs, without publishing it, and runs `nix flake check` on pull requests that touch what the flake reads (the `ci-nix` job); all tests run through the isolated launcher.
 
 Prerequisites for test runs and checks: **Node.js ≥ 24 and Docker**. Watch
 (`test:watch`) is explicitly unsupported, never a host fallback.

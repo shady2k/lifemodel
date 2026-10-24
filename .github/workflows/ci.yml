@@ -346,7 +346,10 @@ jobs:
       - name: Build the standalone core image
         env:
           SHA: ${{ github.sha }}
-        run: scripts/build-core-image.sh "ci-core-$SHA"
+        run: |
+          set -eu
+          scripts/build-core-image.sh "ci-core-$SHA"
+          scripts/smoke-image-modules.sh core "ghcr.io/shady2k/lifemodel-core:ci-core-$SHA"
 
   # Publish the standalone core image on main. This is the only job that asks
   # for packages: write; it runs on every push, including documents-only pushes.
@@ -374,6 +377,7 @@ jobs:
         run: |
           set -eu
           scripts/build-core-image.sh main "$SHA"
+          scripts/smoke-image-modules.sh core "ghcr.io/shady2k/lifemodel-core:$SHA"
           docker push "ghcr.io/shady2k/lifemodel-core:main"
           docker push "ghcr.io/shady2k/lifemodel-core:$SHA"
 
@@ -390,7 +394,10 @@ jobs:
       - name: Build the standalone web image
         env:
           SHA: ${{ github.sha }}
-        run: scripts/build-web-image.sh "ci-web-$SHA"
+        run: |
+          set -eu
+          scripts/build-web-image.sh "ci-web-$SHA"
+          scripts/smoke-image-modules.sh web "ghcr.io/shady2k/lifemodel-web:ci-web-$SHA"
 
   # Publish the standalone web image on main.
   ci-web-image-publish:
@@ -417,6 +424,7 @@ jobs:
         run: |
           set -eu
           scripts/build-web-image.sh main "$SHA"
+          scripts/smoke-image-modules.sh web "ghcr.io/shady2k/lifemodel-web:$SHA"
           docker push "ghcr.io/shady2k/lifemodel-web:main"
           docker push "ghcr.io/shady2k/lifemodel-web:$SHA"
 
@@ -551,7 +559,10 @@ jobs:
       - name: Build the platform loader image
         env:
           SHA: ${{ github.sha }}
-        run: docker build --file docker/loader/Dockerfile --tag "ci-loader-$SHA" .
+        run: |
+          set -eu
+          docker build --file docker/loader/Dockerfile --tag "ci-loader-$SHA" .
+          scripts/smoke-image-modules.sh loader "ci-loader-$SHA"
       - name: Remove the temporary loader build context
         if: always()
         run: rm -rf .docker-context

@@ -309,7 +309,7 @@ export async function run(argv, dependencies = {}) {
         await docker(['exec', prep, 'sh', '-ec', agentProvisionScript(nativeAgentArch(nativeArch), testAgentRegistry, '/snapshot')], { live: true });
         await docker(['exec', prep, 'sh', '-ec', 'rm -rf /snapshot; mkdir /snapshot'], { live: true });
         for (const file of ['package.json', 'package-lock.json', ...(fs.existsSync(path.join(snapshot, '.npmrc')) ? ['.npmrc'] : [])]) await docker(['cp', path.join(snapshot, file), `${prep}:/opt/deps/${file}`]);
-        await docker(['exec', '-u', 'node', '-w', '/opt/deps', '-e', 'HUSKY=0', '-e', 'HOME=/home/node', prep, 'npm', 'ci', '--no-audit', '--no-fund'], { live: true });
+        await docker(['exec', '-u', 'node', '-w', '/opt/deps', '-e', 'HUSKY=0', '-e', 'ONNXRUNTIME_NODE_INSTALL_CUDA=skip', '-e', 'HOME=/home/node', prep, 'npm', 'ci', '--no-audit', '--no-fund'], { live: true });
         await docker(['commit', prep, image], { live: true });
         await docker(['rm', '-f', prep]);
         owned.delete(prep);

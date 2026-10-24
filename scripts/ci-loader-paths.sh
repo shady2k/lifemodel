@@ -48,7 +48,7 @@ while IFS= read -r line || [ -n "$line" ]; do
     esac
     read_any=true
     case "$path" in
-        loader/*|web/loader/*|web/kit/*|docker/loader/*|.dockerignore|deploy/platform/*|scripts/release/*|src/web/model-status.ts|src/web/contract.ts|src/ports/message-attachment.ts|src/ports/task-harness-registry.json|src/ports/task-agent-validation.*|package.json|package-lock.json)
+        scripts/smoke-image-modules.sh|.github/workflows/ci.yml|loader/*|web/loader/*|web/kit/*|docker/loader/*|.dockerignore|deploy/platform/*|scripts/release/*|src/web/model-status.ts|src/web/contract.ts|src/ports/message-attachment.ts|src/ports/task-harness-registry.json|src/ports/task-agent-validation.*|package.json|package-lock.json)
             selected=true ;;
     esac
 done

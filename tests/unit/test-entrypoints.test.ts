@@ -43,6 +43,10 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
     expect(launcher).toContain('git ca-certificates curl python3 ripgrep');
     expect(launcher).toContain('recipe-v8-registry-acp');
     expect(machine).toContain('python3 ripgrep uidmap');
+    expect(launcher).toContain('ONNXRUNTIME_NODE_INSTALL_CUDA=skip');
+    expect(readFileSync(join(repoRoot, 'scripts/test-docker-isolated.mjs'), 'utf8')).toContain(
+      'ONNXRUNTIME_NODE_INSTALL_CUDA=skip'
+    );
   });
   it('npm test runs the whole suite through the isolated launcher', () => {
     expect(scripts.test).toBe(`${LAUNCHER} test`);

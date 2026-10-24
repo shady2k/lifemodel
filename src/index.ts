@@ -23,6 +23,9 @@ import {
   type SettingsServerOptions,
 } from './settings/server.js';
 
+// Resolve and evaluate the built static module graph without starting the service.
+if (process.argv.includes('--check-modules')) process.exit(0);
+
 let container: Container | undefined;
 let settingsServer: SettingsServer | undefined;
 let healthServer: Server | undefined;
