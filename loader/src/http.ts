@@ -586,6 +586,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
                 'credential',
                 'unauthorized',
                 'unavailable',
+                'rejected',
                 'deadline',
                 'aborted',
                 'redirect',

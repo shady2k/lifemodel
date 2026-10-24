@@ -81,6 +81,10 @@ describe('the platform zot registry', () => {
     expect(container?.readinessProbe.httpGet).toEqual({ path: '/v2/', port: 'registry' });
   });
 
+  it('accepts Docker schema 2 manifests alongside OCI for configurable workbench sources', () => {
+    expect(config.http.compat).toEqual(['docker2s2']);
+  });
+
   it('permits anonymous reads only, and only the loader identity may push the workbench', () => {
     expect(config.http.auth).toEqual({ htpasswd: { path: '/etc/zot/auth/htpasswd' } });
     // Exact equality detects the required mutation: an anonymous create/update permission.

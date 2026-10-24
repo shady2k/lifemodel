@@ -32,7 +32,9 @@ afterEach(async () => {
   globalAgent.options.ca = originalCa;
 });
 
-function fixture() {
+function fixture(docker = false) {
+  const imageType = docker ? 'application/vnd.docker.distribution.manifest.v2+json' : manifestType;
+  const listType = docker ? 'application/vnd.docker.distribution.manifest.list.v2+json' : indexType;
   const blobs = new Map<string, Buffer>();
   const manifests = new Map<string, Buffer>();
   const add = (map: Map<string, Buffer>, bytes: Buffer) => {
@@ -47,19 +49,28 @@ function fixture() {
         manifests,
         json({
           schemaVersion: 2,
-          mediaType: manifestType,
-          config: { ...config, mediaType: 'application/vnd.oci.image.config.v1+json' },
-          layers: [{ ...layer, mediaType: 'application/vnd.oci.image.layer.v1.tar+gzip' }],
+          mediaType: imageType,
+          config: {
+            ...config,
+            mediaType: docker
+              ? 'application/vnd.docker.container.image.v1+json'
+              : 'application/vnd.oci.image.config.v1+json',
+          },
+          layers: [
+            {
+              ...layer,
+              mediaType: docker
+                ? 'application/vnd.docker.image.rootfs.diff.tar.gzip'
+                : 'application/vnd.oci.image.layer.v1.tar+gzip',
+            },
+          ],
         })
       ),
-      mediaType: manifestType,
+      mediaType: imageType,
       platform: { architecture, os: 'linux' },
     };
   });
-  const root = add(
-    manifests,
-    json({ schemaVersion: 2, mediaType: indexType, manifests: children })
-  );
+  const root = add(manifests, json({ schemaVersion: 2, mediaType: listType, manifests: children }));
   return { blobs, manifests, root: root.digest };
 }
 
@@ -139,8 +150,8 @@ async function registry(
   };
 }
 
-async function setup() {
-  const data = fixture();
+async function setup(docker = false) {
+  const data = fixture(docker);
   const source = await registry({ data });
   const target = await registry({ auth: true });
   const temporary = await mkdtemp(join(tmpdir(), 'workbench-import-test-'));
@@ -276,17 +287,20 @@ describe('workbench byte-identical OCI import', () => {
     });
   });
 
-  it('copies raw multi-platform manifests including attestations, configs and shared layers', async () => {
-    const { data, target, options, temporary } = await setup();
-    const phase = createWorkbenchImportPhase(options);
-    expect(phase.name).toBe('workbench-import');
-    await phase.run();
-    expect(target.manifests).toEqual(data.manifests);
-    expect(target.blobs).toEqual(data.blobs);
-    expect(await readdir(temporary)).toEqual([]);
-    for (const [key, bytes] of [...target.manifests, ...target.blobs])
-      expect(digest(bytes)).toBe(key);
-  });
+  it.each([false, true])(
+    'copies raw multi-platform manifests including attestations, configs and shared layers (Docker: %s)',
+    async (docker) => {
+      const { data, target, options, temporary } = await setup(docker);
+      const phase = createWorkbenchImportPhase(options);
+      expect(phase.name).toBe('workbench-import');
+      await phase.run();
+      expect(target.manifests).toEqual(data.manifests);
+      expect(target.blobs).toEqual(data.blobs);
+      expect(await readdir(temporary)).toEqual([]);
+      for (const [key, bytes] of [...target.manifests, ...target.blobs])
+        expect(digest(bytes)).toBe(key);
+    }
+  );
 
   it('reruns without writes, but verifies every destination manifest and blob even when HEAD says present', async () => {
     const { data, source, target, options } = await setup();
@@ -354,6 +368,88 @@ describe('workbench byte-identical OCI import', () => {
       expect(String(error)).not.toContain('http');
     }
   );
+
+  it.each([
+    {
+      method: 'PUT',
+      path: '/manifests/',
+      status: 415,
+      mediaType: 'application/vnd.docker.distribution.manifest.v2+json',
+    },
+    { method: 'PUT', path: '/uploads/', status: 422, mediaType: 'application/octet-stream' },
+    { method: 'POST', path: '/blobs/uploads/', status: 400, mediaType: 'none' },
+  ])(
+    'records destination $method $status as rejected with safe HTTP metadata',
+    async ({ method, path, status, mediaType }) => {
+      const { options, target, data, temporary } = await setup(true);
+      target.intercept((req, res) => {
+        if (req.method !== method || !(req.url ?? '').includes(path)) return false;
+        res.writeHead(status, { 'content-type': `text/plain; secret=${password}` });
+        res.end(`${password} ${authorization} https://registry.example/?token=SECRET_CANARY`);
+        return true;
+      });
+      const fs = createNodeFileSystem();
+      const entries: Parameters<typeof createRecordingLogger>[0] = [];
+      const task = createWorkbenchImportTask({
+        fs,
+        config: { loaderDir: temporary },
+        clock: { now: Date.now, sleep: () => new Promise(() => undefined) },
+        logger: createRecordingLogger(entries),
+        pinnedDigest: data.root,
+        run: (signal) =>
+          createWorkbenchImportPhase({
+            ...options,
+            signal,
+            tempDirectory: join(temporary, 'downloads'),
+          }).run(),
+      });
+      cleanups.push(() => task.stop());
+      await task.start();
+      await vi.waitFor(() => expect(task.status().state).toBe('failed'));
+      expect(task.status().reason).toBe('rejected');
+      const saved = await fs.readFile(join(temporary, 'workbench-import.json'));
+      expect(JSON.parse(saved)).toMatchObject({ state: 'failed', reason: 'rejected' });
+      expect(entries).toContainEqual({
+        level: 'warn',
+        fields: { code: 'rejected', status, mediaType },
+        message: 'workbench import failed; retrying',
+      });
+      expect(saved + JSON.stringify(entries)).not.toMatch(
+        /SECRET_CANARY|https?:|private-password-never-print|Basic /
+      );
+    }
+  );
+
+  it.each([
+    [401, 'unauthorized'],
+    [403, 'unauthorized'],
+    [429, 'rejected'],
+    [500, 'unavailable'],
+    [503, 'unavailable'],
+  ])('keeps the destination write status %s mapped to %s', async (status, reason) => {
+    const { options, target } = await setup();
+    target.intercept((req, res) => {
+      if (req.method !== 'PUT') return false;
+      res.writeHead(Number(status));
+      res.end(password);
+      return true;
+    });
+    await expect(createWorkbenchImportPhase(options).run()).rejects.toThrow(
+      `workbench-import:${reason}`
+    );
+  });
+
+  it('does not classify source read failures as destination rejections', async () => {
+    const { options, source } = await setup();
+    source.intercept((_req, res) => {
+      res.writeHead(415);
+      res.end(password);
+      return true;
+    });
+    await expect(createWorkbenchImportPhase(options).run()).rejects.toThrow(
+      'workbench-import:unavailable'
+    );
+  });
 
   it('sanitizes credential provider failures', async () => {
     const { options } = await setup();

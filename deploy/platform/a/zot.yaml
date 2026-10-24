@@ -12,6 +12,9 @@ metadata:
   namespace: lifemodel-system
 data:
   # v2.1.22 keys: https://github.com/project-zot/zot/blob/v2.1.22/pkg/api/config/config.go
+  # docker2s2 enables Docker schema 2 manifests AND manifest lists alongside OCI;
+  # no extra list option (pkg/storage/common/common.go IsSupportedMediaType).
+  # https://github.com/project-zot/zot/blob/v2.1.22/pkg/storage/common/common.go#L1070-L1081
   # RunGCTasks schedules GC only with gc=true (pkg/api/controller.go).
   # deleteBlobUploads uses gcDelay and upload mtime (pkg/storage/gc/gc.go).
   # HasDeleteUntagged honors the explicit matching policy below (pkg/retention/retention.go).
@@ -37,6 +40,7 @@ data:
       "http": {
         "address": "0.0.0.0",
         "port": "5001",
+        "compat": ["docker2s2"],
         "auth": { "htpasswd": { "path": "/etc/zot/auth/htpasswd" } },
         "accessControl": {
           "repositories": {

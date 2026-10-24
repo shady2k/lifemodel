@@ -4,6 +4,7 @@ import type { Clock } from './clock.js';
 import type { FileSystem } from './fs.js';
 import type { LoaderLogger } from './logger.js';
 
+import { WorkbenchDestinationRejection } from './workbench-import.js';
 import type { WorkbenchImportStatus } from './workbench-status.js';
 export type { WorkbenchImportStatus } from './workbench-status.js';
 export interface WorkbenchImportTask {
@@ -25,6 +26,7 @@ const REASONS = new Set([
   'credential',
   'unauthorized',
   'unavailable',
+  'rejected',
   'deadline',
   'aborted',
   'redirect',
@@ -109,7 +111,15 @@ export function createWorkbenchImportTask(deps: WorkbenchImportTaskDeps): Workbe
             reason: 'state-store',
           };
         }
-        deps.logger.warn({ code: current.reason ?? reason }, 'workbench import failed; retrying');
+        deps.logger.warn(
+          {
+            code: current.reason ?? reason,
+            ...(error instanceof WorkbenchDestinationRejection
+              ? { status: error.status, mediaType: error.mediaType }
+              : {}),
+          },
+          'workbench import failed; retrying'
+        );
         if (attemptGeneration === generation && !stopping) await wait(delayMs);
         delayMs = Math.min(delayMs * 2, 60000);
       } finally {

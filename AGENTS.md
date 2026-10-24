@@ -33,6 +33,11 @@ tick), Energy & state are physiology. Start with `README.md` and
 - `deploy/nixos/` — the `services.lifemodel` NixOS module and setup guide
 - `deploy/platform/` — the signed platform OCI artifact applied by Flux: A0 starts the loader before dependent step A creates OpenBao, Gitea and application namespaces, step B installs CloudNativePG and step C creates the shared stores; step D, last, runs the storage module whose readiness reads the database catalog; loader first-start phases establish Bao custody, seed protected Gitea branches and create the application sources and Kustomizations (ADR-010, ADR-015)
 - `deploy/cli/` — `lifemodel doctor` recovery and health-diagnosis CLI
+- `deploy/platform/a/zot.yaml` — the private workbench registry: OCI and Docker
+  schema 2 images/manifest lists (`http.compat: ["docker2s2"]`), anonymous read,
+  loader-only push, and GC that preserves digest-only release roots. Loader
+  destination upload 4xx failures other than 401/403 surface as `rejected`, with
+  safe HTTP status and request media type in its retry warning.
 - `docker/loader/` — the loader's OCI image, including platform-mode packaging
 - `scripts/install.sh` — generic-Linux platform installer
 - `scripts/release/` and `.github/workflows/release.yml` — signed platform release workflow and digest pinning helper
