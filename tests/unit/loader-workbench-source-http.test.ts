@@ -13,7 +13,12 @@ const servers: ReturnType<typeof createLoaderHttp>[] = [];
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((s) => s.close()));
 });
-async function fixture() {
+async function fixture(
+  hooks: {
+    onAuthRead?: () => void;
+    beforeWrite?: (value: WorkbenchSource) => Promise<void>;
+  } = {}
+) {
   const record = await hashPassword('owner password');
   const clock = createTestClock();
   const token = createSession(record, clock.now());
@@ -25,10 +30,14 @@ async function fixture() {
     password: 'SECRET_CANARY',
   };
   let triggers = 0;
+  const writes: WorkbenchSource[] = [];
   const loader = createLoaderHttp({
     state: {
       ensureLayout: async () => {},
-      readAuth: async () => record,
+      readAuth: async () => {
+        hooks.onAuthRead?.();
+        return record;
+      },
       writeAuth: async () => {},
       replaceAuth: async () => {},
     },
@@ -56,7 +65,9 @@ async function fixture() {
     workbench: {
       read: async () => source,
       write: async (v) => {
+        await hooks.beforeWrite?.(v);
         source = v;
+        writes.push({ ...v });
       },
       status: async () => ({
         state: 'failed',
@@ -116,6 +127,7 @@ async function fixture() {
   return {
     request,
     logs,
+    writes,
     get source() {
       return source;
     },
@@ -170,6 +182,73 @@ describe('workbench source HTTP boundary', () => {
     expect(f.source.password).toBeUndefined();
     expect(f.source.username).toBeUndefined();
   });
+  it.each([
+    { name: 'cleared', password: '' },
+    { name: 'replaced', password: 'REPLACEMENT_CANARY' },
+  ])(
+    'never restores a $name credential from an overlapping preserving save',
+    async ({ password }) => {
+      let releaseA!: () => void;
+      let aRead!: () => void;
+      let bAuthenticated!: () => void;
+      const held = new Promise<void>((resolve) => {
+        releaseA = resolve;
+      });
+      const aPreserved = new Promise<void>((resolve) => {
+        aRead = resolve;
+      });
+      const bArrived = new Promise<void>((resolve) => {
+        bAuthenticated = resolve;
+      });
+      let authReads = 0;
+      let writeCalls = 0;
+      const f = await fixture({
+        onAuthRead: () => {
+          if (++authReads === 2) bAuthenticated();
+        },
+        beforeWrite: async (value) => {
+          if (++writeCalls === 1) {
+            // A has read and validated the old credential, but Bao has not committed it.
+            expect(value.password).toBe('SECRET_CANARY');
+            aRead();
+            await held;
+          }
+        },
+      });
+      const identity = {
+        registry: 'https://registry.example',
+        repository: 'team/workbench',
+        username: 'reader',
+      };
+      const a = f.request('/api/workbench-source', 'PUT', identity);
+      await aPreserved;
+      const b = f.request('/api/workbench-source', 'PUT', { ...identity, password });
+      let writesWhileAHeld: WorkbenchSource[] = [];
+      try {
+        await bArrived;
+        // A separate HTTP round trip drains B's ready continuations. With no
+        // serialization B commits here; with serialization it waits behind A.
+        expect((await f.request('/api/workbench-status')).status).toBe(200);
+        writesWhileAHeld = [...f.writes];
+      } finally {
+        releaseA();
+        await Promise.all([a, b]);
+      }
+      expect((await a).status).toBe(200);
+      expect((await b).status).toBe(200);
+      const final =
+        password === ''
+          ? { registry: identity.registry, repository: identity.repository }
+          : { ...identity, password };
+      expect(f.source).toEqual(final);
+      expect(writesWhileAHeld).toEqual([]);
+      expect(f.writes).toEqual([{ ...identity, password: 'SECRET_CANARY' }, final]);
+      expect(f.triggers).toBe(2);
+      expect(JSON.stringify(f.logs) + (await a).body + (await b).body).not.toMatch(
+        /SECRET_CANARY|REPLACEMENT_CANARY/
+      );
+    }
+  );
   it('refuses missing replacement password on changed source or username', async () => {
     const f = await fixture();
     for (const candidate of [

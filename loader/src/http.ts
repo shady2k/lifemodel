@@ -173,6 +173,22 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       release();
     }
   }
+  // One Recreate loader replica owns this source. Keep secret preservation and
+  // the import wakeup in the same serial operation; never queue a built candidate.
+  let workbenchSourceTransition: Promise<void> = Promise.resolve();
+  async function withWorkbenchSourceTransition<T>(action: () => Promise<T>): Promise<T> {
+    const previous = workbenchSourceTransition;
+    let release!: () => void;
+    workbenchSourceTransition = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release();
+    }
+  }
   const header = (req: IncomingMessage, name: string): string | undefined => {
     const value = req.headers[name];
     return typeof value === 'string' ? value : undefined;
@@ -631,10 +647,14 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           return;
         }
         try {
-          if (!deps.workbench) throw new Error('unavailable');
-          const candidate = validateWorkbenchSource(payload, await deps.workbench.read());
-          await deps.workbench.write(candidate);
-          await deps.workbench.retrigger();
+          const workbench = deps.workbench;
+          if (!workbench) throw new Error('unavailable');
+          const candidate = await withWorkbenchSourceTransition(async () => {
+            const candidate = validateWorkbenchSource(payload, await workbench.read());
+            await workbench.write(candidate);
+            await workbench.retrigger();
+            return candidate;
+          });
           json(200, { ok: true, source: publicWorkbenchSource(candidate) });
         } catch (error) {
           if (error instanceof WorkbenchSourceError)
