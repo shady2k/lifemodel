@@ -31,7 +31,7 @@ export interface Tool {
    * fresh calls must still pass both validation gates before execute can write.
    * The executor applies its capability boundary before invoking this read seam.
    */
-  recoverAcceptedEffect?: (context: ToolContext) => Promise<unknown | undefined>;
+  recoverAcceptedEffect?: (context: ToolContext) => Promise<unknown>;
   /**
    * Validate arguments before execution.
    * Returns ValidationResult with data on success, or error message on failure.
