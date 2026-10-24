@@ -26,14 +26,9 @@ describe('the loader first-start phase order', () => {
       gitea: [{ name: 'gitea-ready', run: async () => {} }],
       storageCustody: { name: 'storage-seaweed-custody', run: async () => {} },
       zotCustody: { name: 'zot-custody', run: async () => {} },
-      workbenchImport: { name: 'workbench-import', run: async () => {} },
     }).map((phase) => phase.name);
-    expect(names.slice(0, 3)).toEqual([
-      'storage-seaweed-custody',
-      'zot-custody',
-      'workbench-import',
-    ]);
-    expect(names.indexOf('workbench-import')).toBeLessThan(names.indexOf('gitea-ready'));
+    expect(names.slice(0, 3)).toEqual(['storage-seaweed-custody', 'zot-custody', 'gitea-ready']);
+    expect(names).not.toContain('workbench-import');
     // The two phases whose source Secret only exists once a later platform
     // step has run (lifemodel-state is platform C).
     for (const waiting of ['cnpg-copy-core-credentials', 'valkey-password'])
@@ -73,7 +68,6 @@ describe('the loader first-start phase order', () => {
           },
         },
         zotCustody: { name: 'zot-custody', run: async () => {} },
-        workbenchImport: { name: 'workbench-import', run: async () => {} },
         postgres,
         valkey: { name: 'valkey-password', run: async () => {} },
       });
@@ -85,7 +79,6 @@ describe('the loader first-start phase order', () => {
         'custody-effect',
         'storage-seaweed-custody',
         'zot-custody',
-        'workbench-import',
         'gitea-ready',
       ]);
       expect(record).toEqual({ phase: 'cnpg-copy-core-credentials', status: 'failed' });

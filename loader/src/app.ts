@@ -7,6 +7,8 @@ import {
   parseZotCredential,
 } from './zot-custody.js';
 import { createWorkbenchImportPhase } from './workbench-import.js';
+import { DEFAULT_WORKBENCH_SOURCE } from './workbench-source.js';
+import { createWorkbenchImportTask, type WorkbenchImportTask } from './workbench-task.js';
 import type { LoaderConfig } from './config.js';
 import type { CommandRunner } from './exec.js';
 import type { FileSystem } from './fs.js';
@@ -70,13 +72,13 @@ export interface LoaderAppDeps {
   pki?: PkiManager;
   settingsProjection?: SettingsProjection;
   settingsStore?: SettingsStore;
+  workbenchTask?: WorkbenchImportTask;
 }
 
 export interface FirstStartPhaseDeps {
   gitea: PlatformPhase[];
   storageCustody: PlatformPhase;
   zotCustody: PlatformPhase;
-  workbenchImport: PlatformPhase;
   postgres?: PlatformPhase;
   valkey?: PlatformPhase;
 }
@@ -86,9 +88,10 @@ export interface FirstStartPhaseDeps {
  * (ADR-010 R7-02, ADR-015 S-D1).
  *
  * Seaweed and zot custody need only OpenBao and their platform Secrets.
- * Workbench import follows before Gitea creates application sources: core
- * cannot launch a Job until the release digest is verified in zot. None of
- * these phases waits for C. The Postgres and Valkey credential phases copy
+ * Workbench import is independent background work: a source outage must not
+ * hold application source creation. Core checks zot before task admission.
+ * None of these custody phases waits for C. The Postgres and Valkey
+ * credential phases copy
  * Secrets that only exist once `lifemodel-state` (platform C) has run.
  *
  * The storage module lives in its own step after C (platform D, ADR-015 S-D1)
@@ -101,7 +104,6 @@ export function platformFirstStartPhases(deps: FirstStartPhaseDeps): PlatformPha
   return [
     deps.storageCustody,
     deps.zotCustody,
-    deps.workbenchImport,
     ...deps.gitea,
     deps.postgres ?? createKubernetesPostgresSecretPhase(),
     deps.valkey ?? createKubernetesValkeySecretPhase(),
@@ -169,11 +171,6 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
   const platformBootstrap =
     deps.platformBootstrap ??
     (() => {
-      const importer = createWorkbenchImportPhase({
-        originImage: process.env['LIFEMODEL_WORKBENCH_ORIGIN_IMAGE'] ?? '',
-        readCredential: async () => parseZotCredential(await bao.api.readRegistryCustody()),
-        tempDirectory: join(config.volumeRoot, 'workbench-import'),
-      });
       const bootstrap = createOpenBaoBootstrap({
         bao: bao.api,
         custody: bao.custody,
@@ -190,7 +187,6 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
               },
               identity: createKubernetesZotIdentitySecret(),
             }),
-            workbenchImport: importer,
           }),
       });
       return bootstrap;
@@ -205,6 +201,25 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       clock,
       logger,
       projection: deps.settingsProjection ?? createPlatformSettingsProjection(),
+    });
+  const readWorkbenchSource = async () =>
+    (await bao.api.readWorkbenchSource()) ?? { ...DEFAULT_WORKBENCH_SOURCE };
+  const workbenchTask =
+    deps.workbenchTask ??
+    createWorkbenchImportTask({
+      fs,
+      config,
+      clock,
+      logger,
+      pinnedDigest: process.env['LIFEMODEL_WORKBENCH_DIGEST'] ?? '',
+      run: (signal) =>
+        createWorkbenchImportPhase({
+          pinnedDigest: process.env['LIFEMODEL_WORKBENCH_DIGEST'] ?? '',
+          readSource: readWorkbenchSource,
+          readCredential: async () => parseZotCredential(await bao.api.readRegistryCustody()),
+          tempDirectory: join(config.volumeRoot, 'workbench-import'),
+          signal,
+        }).run(),
     });
   const modelSlots: ModelSlots = {
     read: (slot) => bao.api.readModelSlot(slot),
@@ -303,7 +318,21 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
           throw error;
         }
         await settings.load();
-        http = createLoaderHttp({ state, logger, clock, pki, config, modelSlots, settings });
+        http = createLoaderHttp({
+          state,
+          logger,
+          clock,
+          pki,
+          config,
+          modelSlots,
+          settings,
+          workbench: {
+            read: readWorkbenchSource,
+            write: (value) => bao.api.writeWorkbenchSource(value),
+            status: () => Promise.resolve(workbenchTask.status()),
+            retrigger: () => workbenchTask.trigger(),
+          },
+        });
         await new Promise<void>((resolve, reject) => {
           const server = http?.server;
           if (server === undefined) {
@@ -317,6 +346,8 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
           });
         });
         logger.info({ port: config.httpPort, volume: config.volumeRoot }, 'platform loader is up');
+        // Start an independent worker. Its failures retry and never hold first start.
+        await workbenchTask.start();
         void bootstrapUntilStopped();
         void renewPkiUntilStopped();
         void projectSettingsUntilStopped();
@@ -330,6 +361,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       stopping = true;
       resolveStop();
       logger.info({ reason }, 'platform loader is stopping');
+      await workbenchTask.stop();
       if (http !== null) await http.close();
       return 0;
     },

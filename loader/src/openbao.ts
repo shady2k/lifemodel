@@ -3,6 +3,11 @@ import { request as httpsRequest } from 'node:https';
 import { ZOT_CUSTODY_PATH, type ZotCredential } from './zot-custody.js';
 import { readFile } from 'node:fs/promises';
 import type { ModelSlot } from './model.js';
+import {
+  WORKBENCH_SOURCE_PATH,
+  validateWorkbenchSource,
+  type WorkbenchSource,
+} from './workbench-source.js';
 import { createRoleBaoClient, BaoStorageError, type RoleBaoOptions } from './model-bao.js';
 import {
   readCustodyRecord,
@@ -39,6 +44,8 @@ export interface BaoApi {
   readModelSlot(slot: 'primary' | 'reserve'): Promise<ModelSlot | null>;
   writeModelSlot(slot: 'primary' | 'reserve', value: ModelSlot): Promise<void>;
   deleteModelReserve(): Promise<void>;
+  readWorkbenchSource(): Promise<WorkbenchSource | null>;
+  writeWorkbenchSource(value: WorkbenchSource): Promise<void>;
 }
 export interface BaoCustody {
   read(): Promise<BaoKeys | null>;
@@ -590,7 +597,7 @@ export function createOpenBaoApi(
       await ensureStorageModuleIdentity(rootToken);
     },
     ensureRegistryPolicy: async (rootToken) => {
-      const policy = `path "${ZOT_CUSTODY_PATH}" { capabilities = ["create", "update", "read"] }`;
+      const policy = `path "${ZOT_CUSTODY_PATH}" { capabilities = ["create", "update", "read"] }\npath "${WORKBENCH_SOURCE_PATH}" { capabilities = ["create", "update", "read"] }`;
       await asToken(rootToken, 'sys/policies/acl/loader-registry', 'PUT', { policy });
       await asToken(rootToken, 'auth/kubernetes/role/loader', 'POST', {
         bound_service_account_names: ['loader'],
@@ -600,15 +607,40 @@ export function createOpenBaoApi(
       });
       await client.login();
       const capabilities = await asRole('sys/capabilities-self', 'POST', {
-        paths: [ZOT_CUSTODY_PATH],
+        paths: [ZOT_CUSTODY_PATH, WORKBENCH_SOURCE_PATH],
       });
-      const granted = capabilities[ZOT_CUSTODY_PATH];
-      if (
-        !Array.isArray(granted) ||
-        granted.length !== 3 ||
-        !['create', 'update', 'read'].every((capability) => granted.includes(capability))
-      )
-        throw new Error('zot_policy_denied');
+      for (const path of [ZOT_CUSTODY_PATH, WORKBENCH_SOURCE_PATH]) {
+        const granted = capabilities[path];
+        if (
+          !Array.isArray(granted) ||
+          granted.length !== 3 ||
+          !['create', 'update', 'read'].every((capability) => granted.includes(capability))
+        )
+          throw new Error('zot_policy_denied');
+      }
+    },
+    readWorkbenchSource: async () => {
+      try {
+        const result = await asRole(WORKBENCH_SOURCE_PATH, 'GET');
+        const data = result['data'] as Record<string, unknown> | undefined;
+        const metadata = data?.['metadata'] as Record<string, unknown> | undefined;
+        if (
+          metadata?.['destroyed'] === true ||
+          (typeof metadata?.['deletion_time'] === 'string' && metadata['deletion_time'] !== '')
+        )
+          return null;
+        return validateWorkbenchSource(data?.['data']);
+      } catch (error) {
+        if (error instanceof BaoStorageError && error.code === 'not_found') return null;
+        throw new Error('workbench_source_unavailable');
+      }
+    },
+    writeWorkbenchSource: async (value) => {
+      try {
+        await asRole(WORKBENCH_SOURCE_PATH, 'POST', { data: validateWorkbenchSource(value) });
+      } catch {
+        throw new Error('workbench_source_unavailable');
+      }
     },
     readRegistryCustody: async () => {
       let result: Record<string, unknown>;

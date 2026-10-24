@@ -39,6 +39,8 @@ COPY src/web/contract.ts ./src/web/contract.ts
 COPY src/ports/message-attachment.ts ./src/ports/message-attachment.ts
 # The loader UI types its settings payload from the shared declaration library (ADR-014 D6).
 COPY loader/src/settings/registry.ts ./loader/src/settings/registry.ts
+# Pure workbench status contract; never copy the server task and its I/O into the UI stage.
+COPY loader/src/workbench-status.ts ./loader/src/workbench-status.ts
 RUN npm run build:loader-ui -- --emptyOutDir
 
 # Compile the TypeScript loader with its isolated manifests.

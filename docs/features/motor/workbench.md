@@ -165,14 +165,22 @@ acceptance receipts are recorded in the worker report, not inferred here.
 
 ## Local registry delivery
 
-The release publishes the workbench at the digest-pinned public origin
-`ghcr.io/shady2k/lifemodel-workbench`. The loader's first-start `workbench-import`
-phase copies its exact OCI bytes to the platform's zot before creating the
-application sources. Jobs name only
+The release publishes the workbench at the default source
+`ghcr.io/shady2k/lifemodel-workbench`. The loader settings can select another
+HTTPS registry and OCI repository, with an optional Bao-held pull credential.
+The digest is still the release pin (`LIFEMODEL_WORKBENCH_DIGEST`), not a setting.
+An independent retriable loader task copies the exact OCI bytes into zot;
+import does not hold application-source creation or first start.
+Jobs name only
 `zot.lifemodel-system.svc:5001/lifemodel/workbench@sha256:<digest>`.
-The digest is unchanged; no tag resolution or public-registry fallback happens
-at Job start. Both core validation and both CEL guards reject ghcr.io and all
-other repositories. Missing/mismatched imports block bootstrap and retry.
+The digest is unchanged; no tag resolution or external-registry fallback happens
+at Job start. Core validation and both CEL guards reject all other repositories.
+Core anonymously HEADs the pinned zot manifest with a short deadline before task
+acceptance. A missing/unreachable image refuses with `workbench_unavailable`,
+creating neither a Job nor a task registry row. The same request proceeds after
+import succeeds. Loader settings show `pending`, `importing`, `ready` or `failed`,
+a safe reason and last attempt time. Saves trigger retry without restart; kills
+resume from verified objects rather than a process-memory completion flag.
 
 The node's installer-written k3s mirror routes that authority to
 `http://10.43.0.51:5001`. Pull is anonymous, while the loader reads the sole

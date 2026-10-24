@@ -9,7 +9,8 @@ import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { PlatformPhaseError, type PlatformPhase } from './platform-bootstrap.js';
 
-const SOURCE_REPOSITORY = 'shady2k/lifemodel-workbench';
+const REPOSITORY =
+  /^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:\/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const MANIFEST_TYPES = [
   'application/vnd.oci.image.index.v1+json',
@@ -20,11 +21,17 @@ const MANIFEST_TYPES = [
 const INDEX_TYPES = new Set([MANIFEST_TYPES[0], MANIFEST_TYPES[2]]);
 
 export interface WorkbenchImportOptions {
-  originImage: string;
+  pinnedDigest: string;
+  readSource(): Promise<{
+    registry: string;
+    repository: string;
+    username?: string;
+    password?: string;
+  }>;
   readCredential(): Promise<{ username: string; password: string }>;
   destinationOrigin?: string;
   destinationRepository?: string;
-  /** Loopback HTTP registry override for tests; the pinned release name is still validated. */
+  /** Explicit loopback HTTP transport override for tests; the configured HTTPS source is still validated. */
   originRegistry?: string;
   signal?: AbortSignal;
   requestTimeoutMs?: number;
@@ -97,20 +104,22 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
       const temporary = options.tempDirectory ?? join(tmpdir(), 'lifemodel-workbench-import');
       let workspace: string | undefined;
       try {
-        const match = /^ghcr\.io\/shady2k\/lifemodel-workbench@(sha256:[0-9a-f]{64})$/.exec(
-          options.originImage
-        );
-        if (match?.[1] === undefined) throw failure('configuration');
-        const pinnedDigest = match[1];
-        const source = parseOrigin(options.originRegistry ?? 'https://ghcr.io');
+        if (!DIGEST.test(options.pinnedDigest)) throw failure('configuration');
+        const pinnedDigest = options.pinnedDigest;
+        const configuredSource = await readSource();
+        const configuredOrigin = parseOrigin(configuredSource.registry);
+        const source =
+          options.originRegistry === undefined
+            ? configuredOrigin
+            : parseOrigin(options.originRegistry);
         if (options.originRegistry !== undefined && !loopback(source))
           throw failure('configuration');
+        const sourceRepository = configuredSource.repository;
         const destination = parseOrigin(
           options.destinationOrigin ?? 'http://zot.lifemodel-system.svc:5001'
         );
         const repository = options.destinationRepository ?? 'lifemodel/workbench';
-        if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/.test(repository))
-          throw failure('configuration');
+        if (!REPOSITORY.test(repository)) throw failure('configuration');
         const timeoutMs = options.requestTimeoutMs ?? 120_000;
         const manifestLimit = options.maxManifestBytes ?? 1024 * 1024;
         const activeManifestLimit = options.maxActiveManifestBytes ?? 8 * 1024 * 1024;
@@ -138,7 +147,7 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
         let objectCount = 0;
         let wrote = false;
         let audit = false;
-        let token: string | undefined;
+        let sourceAuthorization: string | undefined;
         const completed = new Map<string, number>();
         const visiting = new Set<string>();
 
@@ -159,6 +168,53 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
           )
             throw failure('redirect');
           return url;
+        }
+        async function readSource(): Promise<
+          Awaited<ReturnType<WorkbenchImportOptions['readSource']>>
+        > {
+          let value: Awaited<ReturnType<WorkbenchImportOptions['readSource']>>;
+          try {
+            value = await interruptible(options.readSource());
+          } catch {
+            checkAbort();
+            throw failure('credential');
+          }
+          if (
+            !record(value) ||
+            typeof value.registry !== 'string' ||
+            typeof value.repository !== 'string'
+          )
+            throw failure('configuration');
+          const origin = parseOrigin(value.registry);
+          if (origin.protocol !== 'https:' || !REPOSITORY.test(value.repository))
+            throw failure('configuration');
+          const hasUser = value.username !== undefined;
+          const hasPassword = value.password !== undefined;
+          if (
+            hasUser !== hasPassword ||
+            (hasUser &&
+              (typeof value.username !== 'string' ||
+                value.username.trim() === '' ||
+                /[:\r\n]/.test(value.username))) ||
+            (hasPassword &&
+              (typeof value.password !== 'string' ||
+                value.password.trim() === '' ||
+                /[\r\n]/.test(value.password)))
+          )
+            throw failure('configuration');
+          return value;
+        }
+        async function pullCredential(): Promise<string | undefined> {
+          // Read the current secret per use. A source change belongs to the next run;
+          // it must not send a new registry's secret to the previous registry.
+          const current = await readSource();
+          if (
+            parseOrigin(current.registry).origin !== configuredOrigin.origin ||
+            current.repository !== sourceRepository
+          )
+            throw failure('configuration');
+          if (current.username === undefined || current.password === undefined) return undefined;
+          return `Basic ${Buffer.from(`${current.username}:${current.password}`).toString('base64')}`;
         }
         async function credentials(): Promise<string> {
           try {
@@ -314,45 +370,77 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
           return response;
         }
         async function sourceRequest(path: string, spec: RequestOptions): Promise<Result> {
-          const url = new URL(`/v2/${SOURCE_REPOSITORY}/${path}`, source);
-          const send = () =>
-            request(url, {
+          const url = new URL(`/v2/${sourceRepository}/${path}`, source);
+          // Only the registry itself ever receives the cached source authorization.
+          const send = async () => {
+            if (sourceAuthorization?.startsWith('Basic ')) {
+              sourceAuthorization = await pullCredential();
+              if (sourceAuthorization === undefined) throw failure('credential');
+            }
+            return request(url, {
               ...spec,
               headers: {
                 ...spec.headers,
-                ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
+                ...(sourceAuthorization === undefined
+                  ? {}
+                  : { authorization: sourceAuthorization }),
               },
             });
+          };
           let response = await send();
           if (response.status === 401) {
             const challenge = response.headers['www-authenticate'];
             if (typeof challenge !== 'string') throw failure('unauthorized');
-            // Never trust a realm, service or scope supplied by an arbitrary registry.
-            const realm = /(?:^|[,\s])realm="([^"]+)"/.exec(challenge)?.[1];
-            const service = /(?:^|[,\s])service="([^"]+)"/.exec(challenge)?.[1];
-            const scope = /(?:^|[,\s])scope="([^"]+)"/.exec(challenge)?.[1];
-            if (
-              !/^Bearer /i.test(challenge) ||
-              service !== 'ghcr.io' ||
-              (scope !== undefined && scope !== `repository:${SOURCE_REPOSITORY}:pull`)
-            )
-              throw failure('unauthorized');
-            const expectedRealm = new URL('/token', source);
-            if (realm !== expectedRealm.href) throw failure('redirect');
-            expectedRealm.searchParams.set('service', 'ghcr.io');
-            expectedRealm.searchParams.set('scope', `repository:${SOURCE_REPOSITORY}:pull`);
-            const grant = await request(expectedRealm, { limit: 64 * 1024 });
-            status(grant, [200]);
-            const parsed: unknown = JSON.parse(grant.bytes.toString('utf8'));
-            if (!record(parsed)) throw failure('unauthorized');
-            const value = parsed['token'] ?? parsed['access_token'];
-            if (
-              typeof value !== 'string' ||
-              !/^[A-Za-z0-9._~+/-]+=*$/.test(value) ||
-              value.length > 32 * 1024
-            )
-              throw failure('unauthorized');
-            token = value;
+            if (/^Basic(?:\s|$)/i.test(challenge)) {
+              sourceAuthorization = await pullCredential();
+              if (sourceAuthorization === undefined) throw failure('unauthorized');
+            } else if (/^Bearer /i.test(challenge)) {
+              const realm = /(?:^|[,\s])realm="([^"]+)"/.exec(challenge)?.[1];
+              const service = /(?:^|[,\s])service="([^"]+)"/.exec(challenge)?.[1];
+              const scope = /(?:^|[,\s])scope="([^"]+)"/.exec(challenge)?.[1];
+              if (
+                realm === undefined ||
+                (scope !== undefined && scope !== `repository:${sourceRepository}:pull`)
+              )
+                throw failure('unauthorized');
+              let tokenUrl: URL;
+              try {
+                tokenUrl = new URL(realm);
+              } catch {
+                throw failure('redirect');
+              }
+              if (
+                (tokenUrl.protocol !== 'https:' &&
+                  !(loopback(source) && tokenUrl.origin === source.origin)) ||
+                tokenUrl.username !== '' ||
+                tokenUrl.password !== '' ||
+                tokenUrl.hash !== ''
+              )
+                throw failure('redirect');
+              const credential = await pullCredential();
+              // A registry may name its external HTTPS token service for public pulls.
+              // That challenge is not authority to disclose a stored registry secret:
+              // require the exact origin (including port), or remain anonymous.
+              if (credential !== undefined && tokenUrl.origin !== source.origin)
+                throw failure('redirect');
+              if (service !== undefined) tokenUrl.searchParams.set('service', service);
+              tokenUrl.searchParams.set('scope', `repository:${sourceRepository}:pull`);
+              const grant = await request(tokenUrl, {
+                limit: 64 * 1024,
+                ...(credential === undefined ? {} : { headers: { authorization: credential } }),
+              });
+              status(grant, [200]);
+              const parsed: unknown = JSON.parse(grant.bytes.toString('utf8'));
+              if (!record(parsed)) throw failure('unauthorized');
+              const value = parsed['token'] ?? parsed['access_token'];
+              if (
+                typeof value !== 'string' ||
+                !/^[A-Za-z0-9._~+/-]+=*$/.test(value) ||
+                value.length > 32 * 1024
+              )
+                throw failure('unauthorized');
+              sourceAuthorization = `Bearer ${value}`;
+            } else throw failure('unauthorized');
             response = await send();
           }
           if (response.status >= 300 && response.status < 400) {
@@ -360,18 +448,22 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
             if (typeof location !== 'string' || !path.startsWith('blobs/'))
               throw failure('redirect');
             const redirected = new URL(location, source);
-            // GHCR serves large blobs from this GitHub-owned host. Never suffix-match an arbitrary host.
             if (
               redirected.protocol !== 'https:' ||
-              redirected.hostname !== 'pkg-containers.githubusercontent.com' ||
-              redirected.port !== '' ||
               redirected.username !== '' ||
               redirected.password !== '' ||
-              redirected.hash !== '' ||
-              source.origin !== 'https://ghcr.io'
+              redirected.hash !== ''
             )
               throw failure('redirect');
-            response = await request(redirected, spec); // Deliberately omit the registry Bearer header.
+            // Redirects receive neither Authorization nor Cookie, including headers
+            // added to the original request in future. Never follow a second hop.
+            const headers = Object.fromEntries(
+              Object.entries(spec.headers ?? {}).filter(
+                ([name]) =>
+                  !['authorization', 'cookie', 'proxy-authorization'].includes(name.toLowerCase())
+              )
+            );
+            response = await request(redirected, { ...spec, headers });
             if (response.status >= 300 && response.status < 400) throw failure('redirect');
           }
           status(response, [200]);
@@ -535,7 +627,12 @@ function loopback(url: URL): boolean {
   return url.protocol === 'http:' && (url.hostname === '127.0.0.1' || url.hostname === '[::1]');
 }
 function parseOrigin(value: string): URL {
-  const url = new URL(value);
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw failure('configuration');
+  }
   if (
     (url.protocol !== 'http:' && url.protocol !== 'https:') ||
     url.username !== '' ||

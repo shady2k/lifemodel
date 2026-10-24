@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Jobs pull only from local zot. The loader imports these exact release bytes
-# from the public origin before core can launch a Job. Pin both inputs together.
+# from the configured source before core can launch a Job. Pin both inputs together.
 if [ "$#" -ne 3 ]; then
   echo "usage: $0 sha256:<64 lowercase hex digits> <core-kustomization-file> <origin-env-file>" >&2
   exit 2
@@ -29,9 +29,8 @@ node - "$digest" "$file" "$origin_file" "$tmp" "$origin_tmp" <<'NODE'
 const fs = require('node:fs');
 const [digest, file, originFile, tmp, originTmp] = process.argv.slice(2);
 const image = 'zot.lifemodel-system.svc:5001/lifemodel/workbench';
-const originImage = 'ghcr.io/shady2k/lifemodel-workbench';
 const placeholder = `${image}@sha256:${'0'.repeat(64)}`;
-const originPlaceholder = `LIFEMODEL_WORKBENCH_ORIGIN_IMAGE=${originImage}@sha256:${'0'.repeat(64)}\n`;
+const originPlaceholder = `LIFEMODEL_WORKBENCH_DIGEST=sha256:${'0'.repeat(64)}\n`;
 const text = fs.readFileSync(file, 'utf8');
 const originText = fs.readFileSync(originFile, 'utf8');
 const operation = /^(  )- target:\n\1    kind: StatefulSet\n\1    name: core\n\1  patch: \|-\n\1    - op: add\n\1      path: \/spec\/template\/spec\/containers\/0\/env\/-\n\1      value:\n\1        name: LIFEMODEL_TASK_WORKBENCH_IMAGE\n\1        value: ([^\n]+)$/gm;
@@ -43,11 +42,11 @@ if (names.length !== 1 || matches.length !== 1 || matches[0][2] !== placeholder 
   process.exit(1);
 }
 if (originText !== originPlaceholder) {
-  console.error('expected exactly one complete workbench origin placeholder env entry');
+  console.error('expected exactly one complete workbench digest placeholder env entry');
   process.exit(1);
 }
 const reference = `${image}@${digest}`;
-const originReference = `LIFEMODEL_WORKBENCH_ORIGIN_IMAGE=${originImage}@${digest}\n`;
+const originReference = `LIFEMODEL_WORKBENCH_DIGEST=${digest}\n`;
 const result = text.replace(operation, (block) => block.replace(placeholder, reference));
 const verified = [...result.matchAll(operation)];
 if (verified.length !== 1 || verified[0][2] !== reference || result.includes(placeholder) ||

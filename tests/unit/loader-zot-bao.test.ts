@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { createOpenBaoApi } from '../../loader/src/openbao.js';
 
 const path = 'lifemodel/data/registry/zot';
+const sourcePath = 'lifemodel/data/workbench/source';
 function fixture(allow = true) {
   const calls: { path: string; method: string; payload: Record<string, unknown> }[] = [];
   let value: unknown = { username: 'loader', password: 'P'.repeat(43) };
@@ -20,7 +21,10 @@ function fixture(allow = true) {
       if (url.pathname.endsWith('/sys/capabilities-self'))
         return {
           status: 200,
-          body: JSON.stringify({ [path]: allow ? ['create', 'update', 'read'] : ['read'] }),
+          body: JSON.stringify({
+            [path]: allow ? ['create', 'update', 'read'] : ['read'],
+            [sourcePath]: ['create', 'update', 'read'],
+          }),
         };
       if (url.pathname.endsWith('/' + path) && method === 'GET')
         return {
@@ -44,7 +48,9 @@ describe('zot OpenBao custody policy', () => {
     await f.api.ensureRegistryPolicy('root');
     expect(
       f.calls.find((c) => c.path.endsWith('/sys/policies/acl/loader-registry'))?.payload
-    ).toEqual({ policy: `path "${path}" { capabilities = ["create", "update", "read"] }` });
+    ).toEqual({
+      policy: `path "${path}" { capabilities = ["create", "update", "read"] }\npath "${sourcePath}" { capabilities = ["create", "update", "read"] }`,
+    });
     expect(
       f.calls.find((c) => c.path.endsWith('/auth/kubernetes/role/loader'))?.payload
     ).toMatchObject({

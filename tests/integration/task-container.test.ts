@@ -52,6 +52,8 @@ describe('platform task container wiring', { timeout: 30_000 }, () => {
   let stores: Awaited<ReturnType<typeof createTestStores>>;
   let active: Container | undefined;
   let blocker: Awaited<ReturnType<Pool['connect']>> | undefined;
+  const availableWorkbenchDigests = new Set<string>();
+  const workbenchChecks: string[] = [];
   const previous = new Map<string, string | undefined>();
   beforeAll(async () => {
     stores = await createTestStores();
@@ -59,6 +61,32 @@ describe('platform task container wiring', { timeout: 30_000 }, () => {
   });
   beforeEach(async () => {
     for (const key of envKeys) previous.set(key, process.env[key]);
+    availableWorkbenchDigests.clear();
+    availableWorkbenchDigests.add(imageA);
+    availableWorkbenchDigests.add(imageB);
+    workbenchChecks.length = 0;
+    // Keep the real readiness gate. Only replace its fixed zot wire boundary;
+    // no cluster DNS or registry is available in the isolated test network.
+    const nativeFetch = globalThis.fetch;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((resource, init) => {
+      const url = new URL(resource instanceof Request ? resource.url : String(resource));
+      if (url.origin === 'http://zot.lifemodel-system.svc:5001') {
+        expect(init?.method).toBe('HEAD');
+        expect(init?.credentials).toBe('omit');
+        expect(init?.redirect).toBe('manual');
+        const prefix = '/v2/lifemodel/workbench/manifests/';
+        expect(url.pathname.startsWith(prefix)).toBe(true);
+        const digest = url.pathname.slice(prefix.length);
+        workbenchChecks.push(digest);
+        return Promise.resolve(
+          new Response(null, {
+            status: availableWorkbenchDigests.has(digest) ? 200 : 404,
+            headers: { 'docker-content-digest': digest },
+          })
+        );
+      }
+      return nativeFetch(resource, init);
+    });
     const db = new URL(process.env['LIFEMODEL_TEST_DATABASE_URL']!);
     db.pathname = `/lifemodel_test_worker_${stores.workerId}`;
     process.env['LIFEMODEL_DATABASE_URL'] = db.toString();
@@ -101,6 +129,10 @@ describe('platform task container wiring', { timeout: 30_000 }, () => {
     process.env['LIFEMODEL_TASK_WORKBENCH_IMAGE'] =
       `zot.lifemodel-system.svc:5001/lifemodel/workbench@${imageB}`;
     active = await createContainerAsync({ logLevel: 'error', logToFile: false });
+    // Replaying an accepted effect is not a new launch: a rollout's not-yet
+    // imported image must not hide its receipt or change conflict validation.
+    availableWorkbenchDigests.delete(imageB);
+    const checksBeforeReplay = workbenchChecks.length;
     const replayed = await active.taskService!.accept(input);
     expect(replayed.id).toBe(accepted.id);
     expect(replayed.imageRevision).toBe(imageA);
@@ -112,10 +144,27 @@ describe('platform task container wiring', { timeout: 30_000 }, () => {
       await expect(active.taskService!.accept(changed)).rejects.toMatchObject({
         code: 'launch_key_conflict',
       });
+    expect(workbenchChecks).toHaveLength(checksBeforeReplay);
     const freshInput = { ...input, launchKey: 'new-after-deployment' };
+    await expect(active.taskService!.accept(freshInput)).rejects.toMatchObject({
+      code: 'workbench_unavailable',
+    });
+    availableWorkbenchDigests.add(imageB);
     const fresh = await active.taskService!.accept(freshInput);
     expect(fresh.imageRevision).toBe(imageB);
     expect((await active.taskService!.accept(freshInput)).id).toBe(fresh.id);
+    expect(workbenchChecks).toContain(imageA);
+    expect(workbenchChecks).toContain(imageB);
+  });
+
+  it('refuses a new task through the real container readiness gate before any registry row', async () => {
+    availableWorkbenchDigests.delete(imageA);
+    active = await createContainerAsync({ logLevel: 'error', logToFile: false });
+    await expect(active.taskService!.accept(input)).rejects.toMatchObject({
+      code: 'workbench_unavailable',
+    });
+    expect(await active.taskService!.list()).toEqual([]);
+    expect(workbenchChecks).toEqual([imageA]);
   });
 
   it('cancels only reconciler SQL and drains it before pool close within the shared stop budget', async () => {

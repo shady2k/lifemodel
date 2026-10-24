@@ -16,6 +16,7 @@ import {
 
 import i18n, { languageFor } from './i18n';
 import { ModelStatus } from './ModelStatus';
+import { WorkbenchSourceSettings } from './WorkbenchSourceSettings';
 import { parseModelStatus } from '../../../src/web/model-status.js';
 import type { ModelStatusEvent } from '../../../src/web/contract.js';
 import type {
@@ -1063,6 +1064,7 @@ export default function App() {
                   {t('modelAccess')}
                 </h2>
                 {modelStatus !== undefined && <ModelStatus value={modelStatus} saved={slotSaved} />}
+                <WorkbenchSourceSettings csrfToken={state.csrfToken ?? ''} />
               </section>
               <section className="mt-8 space-y-4" aria-labelledby="platform-settings-title">
                 <h2 id="platform-settings-title" className="text-lg font-semibold">

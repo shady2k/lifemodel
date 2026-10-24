@@ -272,6 +272,24 @@ describe('loader settings section', () => {
         return { ok: true, json: async () => ({ primary: null, reserve: null }) };
       if (url === '/api/model-status') return { ok: true, json: async () => ({}) };
       if (url === '/api/settings') return { ok: true, json: async () => sectionPayload() };
+      if (url === '/api/workbench-source')
+        return {
+          ok: true,
+          json: async () => ({
+            registry: 'https://registry.example',
+            repository: 'team/workbench',
+            hasPassword: false,
+          }),
+        };
+      if (url === '/api/workbench-status')
+        return {
+          ok: true,
+          json: async () => ({
+            state: 'pending',
+            lastAttemptAt: null,
+            pinnedDigest: 'sha256:' + 'a'.repeat(64),
+          }),
+        };
       if (url === '/api/settings/tasks.concurrency' && options?.method === 'PUT')
         return {
           ok: false,

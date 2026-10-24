@@ -85,6 +85,8 @@ function fixture(
     deleteModelReserve: async () => {
       throw new Error('bootstrap never deletes the reserve');
     },
+    readWorkbenchSource: async () => null,
+    writeWorkbenchSource: async () => {},
   };
   const store: PlatformPhaseStore = {
     read: async () => record,
@@ -259,6 +261,7 @@ function gatewayBoundary(
           'lifemodel/metadata/model/reserve': ['read'],
           'lifemodel/data/storage/seaweed': ['create', 'update', 'read'],
           'lifemodel/data/registry/zot': ['create', 'update', 'read'],
+          'lifemodel/data/workbench/source': ['create', 'update', 'read'],
         };
         return { status: 200, body: JSON.stringify({ ...caps, data: caps }) };
       }
@@ -938,6 +941,7 @@ describe('OpenBao bootstrap', () => {
               'lifemodel/metadata/model/primary': ['read'],
               'lifemodel/data/storage/seaweed': ['create', 'update', 'read'],
               'lifemodel/data/registry/zot': ['create', 'update', 'read'],
+              'lifemodel/data/workbench/source': ['create', 'update', 'read'],
             }),
           };
         if (url.pathname.endsWith('/sys/capabilities')) {
@@ -1287,6 +1291,8 @@ describe('OpenBao bootstrap', () => {
       deleteModelReserve: async () => {
         throw new Error('must not delete the reserve');
       },
+      readWorkbenchSource: async () => null,
+      writeWorkbenchSource: async () => {},
     };
     const custody: BaoCustody = {
       read: async () => ({ keys: ['share'], rootToken: null }),
@@ -1394,6 +1400,7 @@ describe('the storage module custody identity', () => {
             body: legacyResponse({
               'lifemodel/data/storage/seaweed': ['create', 'update', 'read'],
               'lifemodel/data/registry/zot': ['create', 'update', 'read'],
+              'lifemodel/data/workbench/source': ['create', 'update', 'read'],
               'lifemodel/data/model/primary': ['create', 'update', 'read'],
             }),
           };
@@ -1490,6 +1497,7 @@ describe('the storage module custody identity', () => {
             body: legacyResponse({
               'lifemodel/data/storage/seaweed': ['create', 'update', 'read'],
               'lifemodel/data/registry/zot': ['create', 'update', 'read'],
+              'lifemodel/data/workbench/source': ['create', 'update', 'read'],
               'lifemodel/data/model/primary': ['read'],
             }),
           };

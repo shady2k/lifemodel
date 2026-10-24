@@ -343,13 +343,11 @@ describe('storage identity bootstrap order', () => {
       platformFirstStartPhases({
         storageCustody: { name: 'storage-custody', run: async () => {} },
         zotCustody: { name: 'zot-custody', run: async () => {} },
-        workbenchImport: { name: 'workbench-import', run: async () => {} },
         gitea: [{ name: 'gitea', run: async () => {} }],
       }).map((phase) => phase.name)
     ).toEqual([
       'storage-custody',
       'zot-custody',
-      'workbench-import',
       'gitea',
       'cnpg-copy-core-credentials',
       'valkey-password',

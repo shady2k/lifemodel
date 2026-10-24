@@ -28,6 +28,7 @@ import {
   taskWorkbenchImage,
 } from '../../src/core/task-launch.js';
 import type { TaskExecutor, TaskLaunch } from '../../src/core/task-executor.js';
+import { createWorkbenchTaskService } from '../../src/core/task-workbench.js';
 
 // Kubernetes is deliberately simulated at its wire boundary. Postgres and its
 // active holder, receipt persistence and migration guards are real isolated stores.
@@ -273,6 +274,39 @@ describe('task launch fence (real Postgres, HTTPS Kubernetes API)', () => {
     closers.push(result.stop);
     return result;
   }
+
+  it('refuses an unavailable workbench before accepting any row or creating a Job, then launches after import', async () => {
+    let ready = false;
+    const runtime = component();
+    const service = createWorkbenchTaskService({
+      service: registry,
+      imageRevision: `sha256:${'a'.repeat(64)}`,
+      ready: async () => ready,
+      onAccepted: () => undefined,
+    });
+    const input = {
+      launchKey: 'readiness-refusal',
+      briefing: 'private-briefing-canary',
+      profile: {
+        id: 'small',
+        revision: '1',
+        timeoutSeconds: 600,
+        cpuMillis: 500,
+        memoryBytes: 536870912,
+      },
+      imageRevision: `sha256:${'a'.repeat(64)}`,
+    };
+    await expect(service.accept(input)).rejects.toMatchObject({ code: 'workbench_unavailable' });
+    expect(await registry.list()).toEqual([]);
+    expect(await runtime.runOnce()).toBe(true);
+    expect(creates).toBe(0);
+    expect(storageCalls).toBe(0);
+    ready = true;
+    const task = await service.accept(input);
+    expect(await runtime.resync()).toBe(true);
+    expect(creates).toBe(1);
+    expect(await registry.read(task.id)).toMatchObject({ jobUid: 'job-uid-1' });
+  });
 
   it.each(['drop-create', 'conflict-create'] as const)(
     'GET/adopts one exact Job on %s and replay',

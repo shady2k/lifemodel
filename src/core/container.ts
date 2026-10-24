@@ -79,6 +79,7 @@ import { createPostgresTaskRegistry } from '../storage/postgres-task-registry.js
 import type { TaskService } from '../ports/tasks.js';
 import { createKubernetesTaskExecutor } from './kubernetes-task-executor.js';
 import { createTaskLaunchReconciler, taskWorkbenchImage } from './task-launch.js';
+import { createTaskWorkbenchReadiness, createWorkbenchTaskService } from './task-workbench.js';
 import { createTaskChannel } from './task-channel.js';
 import { createTaskKubernetesIdentity } from './task-kubernetes-identity.js';
 import { createPostgresTaskMailbox } from '../storage/postgres-task-mailbox.js';
@@ -1266,16 +1267,14 @@ export async function createContainerAsync(
       settings: createPlatformSettingsReader({ logger }),
       signal: taskLaunchController.signal,
     });
-    taskService = {
-      accept: async (request) => {
-        const task = await registry.accept(request);
+    taskService = createWorkbenchTaskService({
+      service: registry,
+      imageRevision,
+      ready: createTaskWorkbenchReadiness(),
+      onAccepted: () => {
         void taskLaunch?.resync();
-        return task;
       },
-      read: (id) => registry.read(id),
-      readByLaunchKey: (launchKey) => registry.readByLaunchKey(launchKey),
-      list: () => registry.list(),
-    };
+    });
     coreLoop.setTaskService(taskService);
     layers.cognition.getToolRegistry().registerTool(
       createStartTaskTool({
