@@ -50,6 +50,20 @@ import {
 } from './model-status.js';
 import { SettingsWriteError, type SettingsSectionSnapshot } from './settings/store.js';
 import { SETTING_KEY_PATTERN } from './settings/registry.js';
+import {
+  publicWorkbenchSource,
+  validateWorkbenchSource,
+  WorkbenchSourceError,
+  type WorkbenchSource,
+} from './workbench-source.js';
+import type { WorkbenchImportStatus } from './workbench-task.js';
+
+export interface WorkbenchHttp {
+  read(): Promise<WorkbenchSource>;
+  write(value: WorkbenchSource): Promise<void>;
+  status(): Promise<WorkbenchImportStatus>;
+  retrigger(): Promise<void>;
+}
 
 /** The settings seam the HTTP layer sees: the section and one validated write. */
 export interface SettingsHttp {
@@ -68,6 +82,7 @@ export interface LoaderHttpDeps {
   modelStatus?: ModelStatusReader;
   modelChecker?: (slot: ModelSlot, slotName?: ModelSlotName) => Promise<void>;
   settings?: SettingsHttp;
+  workbench?: WorkbenchHttp;
 }
 export interface LoaderHttp {
   server: Server;
@@ -83,6 +98,8 @@ const API_METHODS: Record<string, string> = {
   '/api/onboarding/device': 'POST',
   '/api/model': 'GET',
   '/api/model-status': 'GET',
+  '/api/workbench-source': 'GET',
+  '/api/workbench-status': 'GET',
   '/api/model/primary': 'PUT',
   '/api/model/reserve': 'PUT',
   '/api/settings': 'GET',
@@ -156,6 +173,22 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       release();
     }
   }
+  // One Recreate loader replica owns this source. Keep secret preservation and
+  // the import wakeup in the same serial operation; never queue a built candidate.
+  let workbenchSourceTransition: Promise<void> = Promise.resolve();
+  async function withWorkbenchSourceTransition<T>(action: () => Promise<T>): Promise<T> {
+    const previous = workbenchSourceTransition;
+    let release!: () => void;
+    workbenchSourceTransition = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release();
+    }
+  }
   const header = (req: IncomingMessage, name: string): string | undefined => {
     const value = req.headers[name];
     return typeof value === 'string' ? value : undefined;
@@ -218,9 +251,11 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         return;
       }
       const validMethod =
-        path === '/api/model/reserve'
-          ? method === 'PUT' || method === 'DELETE'
-          : method === expectedMethod;
+        path === '/api/workbench-source'
+          ? method === 'GET' || method === 'PUT'
+          : path === '/api/model/reserve'
+            ? method === 'PUT' || method === 'DELETE'
+            : method === expectedMethod;
       if (!validMethod) {
         sendText(res, 405, 'method not allowed');
         return;
@@ -236,6 +271,8 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           path === '/api/state' ||
           path === '/api/model' ||
           path === '/api/model-status' ||
+          path === '/api/workbench-source' ||
+          path === '/api/workbench-status' ||
           path.startsWith('/assets/'))) ||
       (method === 'POST' &&
         (path === '/api/setup' ||
@@ -243,7 +280,10 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           path === '/api/password' ||
           path === '/api/logout' ||
           path === '/api/onboarding/device')) ||
-      (method === 'PUT' && (path === '/api/model/primary' || path === '/api/model/reserve')) ||
+      (method === 'PUT' &&
+        (path === '/api/model/primary' ||
+          path === '/api/model/reserve' ||
+          path === '/api/workbench-source')) ||
       (method === 'DELETE' && path === '/api/model/reserve') ||
       (method === 'GET' && path === '/api/settings') ||
       (method === 'PUT' && settingsKeyOf(path) !== null);
@@ -506,6 +546,121 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           'cache-control': 'no-store',
         });
         res.end('{"ok":true}');
+        return;
+      }
+      if (path === '/api/workbench-source' || path === '/api/workbench-status') {
+        const record = await state.readAuth();
+        const token = record === null ? null : sessionToken(req, record);
+        const json = (status: number, value: unknown): void => {
+          res.writeHead(status, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+          });
+          res.end(JSON.stringify(value));
+        };
+        if (record === null || token === null) {
+          json(method === 'GET' ? 403 : 401, { error: 'authentication_required' });
+          return;
+        }
+        if (method === 'GET') {
+          const origin = header(req, 'origin');
+          const site = header(req, 'sec-fetch-site');
+          if (
+            (origin !== undefined &&
+              !sameOrigin(origin, undefined, `boot-${config.instanceName}.local`)) ||
+            (site !== undefined && site !== 'same-origin')
+          ) {
+            json(403, { error: 'origin' });
+            return;
+          }
+          try {
+            if (!deps.workbench) throw new Error('unavailable');
+            if (path === '/api/workbench-source')
+              json(200, publicWorkbenchSource(await deps.workbench.read()));
+            else {
+              // Re-project even an injected status. Never trust arbitrary reason text.
+              const status = await deps.workbench.status();
+              const states = ['pending', 'importing', 'ready', 'failed'];
+              const reasons = [
+                'configuration',
+                'credential',
+                'unauthorized',
+                'unavailable',
+                'deadline',
+                'aborted',
+                'redirect',
+                'digest-mismatch',
+                'size-limit',
+                'manifest',
+                'protocol',
+                'state-store',
+              ];
+              json(200, {
+                state: states.includes(status.state) ? status.state : 'failed',
+                lastAttemptAt:
+                  typeof status.lastAttemptAt === 'number' && Number.isFinite(status.lastAttemptAt)
+                    ? status.lastAttemptAt
+                    : null,
+                ...(status.reason === undefined
+                  ? {}
+                  : { reason: reasons.includes(status.reason) ? status.reason : 'unavailable' }),
+                ...(/^sha256:[a-f0-9]{64}$/.test(status.pinnedDigest)
+                  ? { pinnedDigest: status.pinnedDigest }
+                  : {}),
+              });
+            }
+          } catch {
+            json(503, { error: 'storage_unavailable' });
+          }
+          return;
+        }
+        if (
+          refuseOrigin(req) !== null ||
+          !verifyCsrf(header(req, 'x-csrf-token') ?? '', record, token)
+        ) {
+          json(403, { error: 'origin_or_csrf' });
+          return;
+        }
+        if (
+          header(req, 'content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json'
+        ) {
+          json(415, { error: 'content_type' });
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let size = 0;
+        for await (const chunk of req) {
+          const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          size += bytes.length;
+          if (size > MAX_FORM_BYTES) break;
+          chunks.push(Buffer.from(bytes));
+        }
+        if (size > MAX_FORM_BYTES) {
+          json(413, { error: 'body_too_large' });
+          return;
+        }
+        let payload: unknown;
+        try {
+          payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        } catch {
+          json(400, { error: 'invalid_body' });
+          return;
+        }
+        try {
+          const workbench = deps.workbench;
+          if (!workbench) throw new Error('unavailable');
+          const candidate = await withWorkbenchSourceTransition(async () => {
+            const candidate = validateWorkbenchSource(payload, await workbench.read());
+            await workbench.write(candidate);
+            await workbench.retrigger();
+            return candidate;
+          });
+          json(200, { ok: true, source: publicWorkbenchSource(candidate) });
+        } catch (error) {
+          if (error instanceof WorkbenchSourceError)
+            json(400, { error: 'invalid_source', fields: error.fields });
+          else json(503, { error: 'storage_unavailable' });
+        }
         return;
       }
       if (path === '/api/model' && method === 'GET') {

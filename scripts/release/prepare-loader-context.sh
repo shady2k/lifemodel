@@ -58,21 +58,22 @@ if ! grep -Eq '^    digest: sha256:[a-f0-9]{64}$' "$seed_file" || grep -Eq '^   
     exit 2
 fi
 
-# New platform releases carry both the local launch pin and the public import
-# pin. A generic seed fixture without either workbench input needs only core.
-# Once either input exists, never silently omit a missing/untracked origin file.
+# New platform releases carry the local launch image and loader digest pin.
+# The external source is a loader setting, never part of the release pin.
+# A generic seed fixture without either workbench input needs only core.
+# Once either input exists, never silently omit a missing/untracked digest file.
 origin_file=deploy/platform/a0/workbench-origin.env
 include_origin=false
 if [ -e "$origin_file" ] || git ls-files --error-unmatch "$origin_file" >/dev/null 2>&1 || grep -q 'name: LIFEMODEL_TASK_WORKBENCH_IMAGE' "$seed_file"; then
     if ! git ls-files --error-unmatch "$origin_file" >/dev/null 2>&1 || [ ! -f "$origin_file" ]; then
-        printf '%s\n' 'prepare-loader-context: missing tracked workbench origin pin' >&2
+        printf '%s\n' 'prepare-loader-context: missing tracked workbench digest pin' >&2
         exit 2
     fi
     node - "$seed_file" "$origin_file" "$release" <<'NODE'
 const fs = require('node:fs');
 const [seedFile, originFile, release] = process.argv.slice(2);
 const origin = fs.readFileSync(originFile, 'utf8');
-const match = /^LIFEMODEL_WORKBENCH_ORIGIN_IMAGE=ghcr[.]io\/shady2k\/lifemodel-workbench@(sha256:[0-9a-f]{64})\n$/.exec(origin);
+const match = /^LIFEMODEL_WORKBENCH_DIGEST=(sha256:[0-9a-f]{64})\n$/.exec(origin);
 const text = fs.readFileSync(seedFile, 'utf8');
 const operation = /^(  )- target:\n\1    kind: StatefulSet\n\1    name: core\n\1  patch: \|-\n\1    - op: add\n\1      path: \/spec\/template\/spec\/containers\/0\/env\/-\n\1      value:\n\1        name: LIFEMODEL_TASK_WORKBENCH_IMAGE\n\1        value: ([^\n]+)$/gm;
 const operations = [...text.matchAll(operation)];
@@ -80,7 +81,7 @@ const names = text.match(/^ *name: LIFEMODEL_TASK_WORKBENCH_IMAGE *$/gm) ?? [];
 if (!match || origin !== match[0] ||
     names.length !== 1 || operations.length !== 1 ||
     operations[0][2] !== `zot.lifemodel-system.svc:5001/lifemodel/workbench@${match[1]}`) {
-    console.error('prepare-loader-context: matching local and origin workbench pins required');
+    console.error('prepare-loader-context: matching local and loader workbench digest pins required');
     process.exit(2);
 }
 if (release === 'true' && match[1] === `sha256:${'0'.repeat(64)}`) {

@@ -1,10 +1,15 @@
 import { createHash } from 'node:crypto';
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer, globalAgent } from 'node:https';
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createWorkbenchImportPhase } from '../../loader/src/workbench-import.js';
+import { createWorkbenchImportTask } from '../../loader/src/workbench-task.js';
+import { createNodeFileSystem } from '../../loader/src/fs.js';
+import { createRecordingLogger } from '../../loader/src/logger.js';
 
 const digest = (bytes: Buffer) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 const json = (value: unknown) => Buffer.from(JSON.stringify(value, null, 2));
@@ -13,8 +18,18 @@ const indexType = 'application/vnd.oci.image.index.v1+json';
 const password = 'private-password-never-print';
 const authorization = `Basic ${Buffer.from(`loader:${password}`).toString('base64')}`;
 const cleanups: (() => Promise<void>)[] = [];
+const tls = {
+  key: readFileSync('tests/fixtures/workbench-registry.key'),
+  cert: readFileSync('tests/fixtures/workbench-registry.crt'),
+};
+const originalCa = globalAgent.options.ca;
+beforeEach(() => {
+  // Trust only this test certificate. Production uses Node's normal verified TLS trust.
+  globalAgent.options.ca = tls.cert;
+});
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  globalAgent.options.ca = originalCa;
 });
 
 function fixture() {
@@ -48,16 +63,23 @@ function fixture() {
   return { blobs, manifests, root: root.digest };
 }
 
-async function registry(options: { auth?: boolean; data?: ReturnType<typeof fixture> } = {}) {
+async function registry(
+  options: { auth?: boolean; data?: ReturnType<typeof fixture>; host?: string } = {}
+) {
   const blobs = new Map(options.data?.blobs);
   const manifests = new Map(options.data?.manifests);
-  const calls: { method: string; path: string; auth: string | undefined }[] = [];
+  const calls: {
+    method: string;
+    path: string;
+    auth: string | undefined;
+    cookie: string | undefined;
+  }[] = [];
   let hook: ((req: IncomingMessage, res: ServerResponse) => boolean) | undefined;
-  const server = createServer((req, res) => {
+  const server = createServer(tls, (req, res) => {
     void (async () => {
       const path = (req.url ?? '').split('?')[0] ?? '';
       const method = req.method ?? '';
-      calls.push({ method, path, auth: req.headers.authorization });
+      calls.push({ method, path, auth: req.headers.authorization, cookie: req.headers.cookie });
       if (hook?.(req, res)) return;
       if (options.auth && req.headers.authorization !== authorization) {
         res.writeHead(401);
@@ -99,7 +121,7 @@ async function registry(options: { auth?: boolean; data?: ReturnType<typeof fixt
       res.destroy();
     });
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await new Promise<void>((resolve) => server.listen(0, options.host ?? '127.0.0.1', resolve));
   const address = server.address();
   if (address === null || typeof address === 'string') throw new Error('test listener failed');
   cleanups.push(async () => {
@@ -107,7 +129,7 @@ async function registry(options: { auth?: boolean; data?: ReturnType<typeof fixt
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
   return {
-    origin: `http://127.0.0.1:${address.port}`,
+    origin: `https://${options.host ?? '127.0.0.1'}:${address.port}`,
     blobs,
     manifests,
     calls,
@@ -124,8 +146,8 @@ async function setup() {
   const temporary = await mkdtemp(join(tmpdir(), 'workbench-import-test-'));
   cleanups.push(() => rm(temporary, { recursive: true, force: true }));
   const options = {
-    originImage: `ghcr.io/shady2k/lifemodel-workbench@${data.root}`,
-    originRegistry: source.origin,
+    pinnedDigest: data.root,
+    readSource: async () => ({ registry: source.origin, repository: 'custom/team-workbench' }),
     destinationOrigin: target.origin,
     tempDirectory: temporary,
     readCredential: async () => ({ username: 'loader' as const, password }),
@@ -135,6 +157,125 @@ async function setup() {
 }
 
 describe('workbench byte-identical OCI import', () => {
+  it('retries the real HTTPS importer after an unreachable source is changed without restarting the task', async () => {
+    const { options, source, target, data, temporary } = await setup();
+    const replacement = await registry({ data });
+    source.intercept((_req, res) => {
+      res.writeHead(503);
+      res.end(password);
+      return true;
+    });
+    const fs = createNodeFileSystem();
+    let selectedSource = source.origin;
+    const entries: Parameters<typeof createRecordingLogger>[0] = [];
+    const task = createWorkbenchImportTask({
+      fs,
+      config: { loaderDir: temporary },
+      clock: { now: Date.now, sleep: () => new Promise(() => undefined) },
+      logger: createRecordingLogger(entries),
+      pinnedDigest: data.root,
+      run: (signal) =>
+        createWorkbenchImportPhase({
+          ...options,
+          // Import cleanup owns its own subdirectory, never the durable loader status.
+          tempDirectory: join(temporary, 'downloads'),
+          readSource: async () => ({
+            registry: selectedSource,
+            repository: 'custom/team-workbench',
+          }),
+          signal,
+        }).run(),
+    });
+    cleanups.push(() => task.stop());
+    await task.start();
+    await vi.waitFor(() => expect(task.status().state).toBe('failed'));
+    expect(task.status()).toMatchObject({ reason: 'unavailable' });
+    expect(target.blobs.size + target.manifests.size).toBe(0);
+    const savedFailure = await fs.readFile(join(temporary, 'workbench-import.json'));
+    expect(JSON.parse(savedFailure)).toMatchObject({
+      state: 'failed',
+      pinnedDigest: data.root,
+      reason: 'unavailable',
+    });
+    expect(savedFailure + JSON.stringify(entries)).not.toContain(password);
+    selectedSource = replacement.origin;
+    await task.trigger();
+    await vi.waitFor(() => expect(task.status().state).toBe('ready'));
+    expect(target.blobs).toEqual(data.blobs);
+    expect(target.manifests).toEqual(data.manifests);
+    expect(JSON.parse(await fs.readFile(join(temporary, 'workbench-import.json')))).toMatchObject({
+      state: 'ready',
+      pinnedDigest: data.root,
+    });
+    expect(replacement.calls.length).toBeGreaterThan(0);
+  });
+
+  it('resumes a real interrupted import with a fresh durable task instance and the same zot', async () => {
+    const { options, source, target, data, temporary } = await setup();
+    const fs = createNodeFileSystem();
+    let interrupt!: () => void;
+    const interrupted = new Promise<void>((resolve) => {
+      interrupt = resolve;
+    });
+    target.intercept((req) => {
+      if (req.method === 'POST' && target.blobs.size >= 1) {
+        // Leave the upload unfinished. Cancelling the owner models the lost
+        // process: no terminal state is written over its durable importing row.
+        interrupt();
+        return true;
+      }
+      return false;
+    });
+    const deps = {
+      fs,
+      config: { loaderDir: temporary },
+      clock: { now: Date.now, sleep: () => new Promise<void>(() => undefined) },
+      logger: createRecordingLogger([]),
+      pinnedDigest: data.root,
+      run: (signal: AbortSignal) =>
+        createWorkbenchImportPhase({
+          ...options,
+          tempDirectory: join(temporary, 'downloads'),
+          signal,
+        }).run(),
+    };
+    const first = createWorkbenchImportTask(deps);
+    cleanups.push(() => first.stop());
+    await first.start();
+    await interrupted;
+    const retained = [...target.blobs.keys()];
+    expect(retained.length).toBeGreaterThan(0);
+    await first.stop();
+    expect(JSON.parse(await fs.readFile(join(temporary, 'workbench-import.json')))).toMatchObject({
+      state: 'importing',
+      pinnedDigest: data.root,
+    });
+    // Killed import files can survive outside orderly shutdown; the new
+    // importer must remove them while preserving its task's durable row.
+    await mkdir(join(temporary, 'downloads', 'abandoned'), { recursive: true });
+    await writeFile(join(temporary, 'downloads', 'abandoned', 'blob'), 'incomplete');
+    target.intercept(undefined);
+    source.calls.length = 0;
+    target.calls.length = 0;
+    const restarted = createWorkbenchImportTask(deps);
+    cleanups.push(() => restarted.stop());
+    await restarted.start();
+    await vi.waitFor(() => expect(restarted.status().state).toBe('ready'));
+    expect(target.blobs).toEqual(data.blobs);
+    expect(target.manifests).toEqual(data.manifests);
+    for (const key of retained) {
+      expect(target.calls.some(({ method, path }) => method === 'GET' && path.endsWith(key))).toBe(
+        true
+      );
+      expect(source.calls.some(({ path }) => path.endsWith(key))).toBe(false);
+    }
+    expect(await readdir(join(temporary, 'downloads'))).toEqual([]);
+    expect(JSON.parse(await fs.readFile(join(temporary, 'workbench-import.json')))).toMatchObject({
+      state: 'ready',
+      pinnedDigest: data.root,
+    });
+  });
+
   it('copies raw multi-platform manifests including attestations, configs and shared layers', async () => {
     const { data, target, options, temporary } = await setup();
     const phase = createWorkbenchImportPhase(options);
@@ -292,7 +433,7 @@ describe('workbench byte-identical OCI import', () => {
       if ((req.url ?? '').startsWith('/token?')) {
         expect(req.headers.authorization).toBeUndefined();
         expect(new URL(req.url ?? '', source.origin).searchParams.get('scope')).toBe(
-          'repository:shady2k/lifemodel-workbench:pull'
+          'repository:custom/team-workbench:pull'
         );
         res.writeHead(200);
         res.end(JSON.stringify({ token: 'public-pull-token' }));
@@ -300,7 +441,7 @@ describe('workbench byte-identical OCI import', () => {
       }
       if (req.headers.authorization === 'Bearer public-pull-token') return false;
       res.writeHead(401, {
-        'www-authenticate': `Bearer realm="${source.origin}/token",service="ghcr.io",scope="repository:shady2k/lifemodel-workbench:pull"`,
+        'www-authenticate': `Bearer realm="${source.origin}/token",service="ghcr.io",scope="repository:custom/team-workbench:pull"`,
       });
       res.end(password);
       return true;
@@ -322,11 +463,206 @@ describe('workbench byte-identical OCI import', () => {
       res.end();
       return true;
     });
-    await expect(createWorkbenchImportPhase(options).run()).rejects.toThrow(
-      'workbench-import:redirect'
-    );
+    await expect(
+      createWorkbenchImportPhase({
+        ...options,
+        readSource: async () => ({
+          ...(await options.readSource()),
+          username: 'pull-user',
+          password,
+        }),
+      }).run()
+    ).rejects.toThrow('workbench-import:redirect');
     expect(observer.calls).toEqual([]);
   });
+
+  it.each(['basic', 'bearer'])(
+    'uses stored pull credentials only for same-origin %s authentication',
+    async (kind) => {
+      const { options, source, target, data } = await setup();
+      const pullAuth = `Basic ${Buffer.from(`pull-user:${password}`).toString('base64')}`;
+      let credentialReads = 0;
+      source.intercept((req, res) => {
+        if ((req.url ?? '').startsWith('/auth/token?')) {
+          expect(req.headers.authorization).toBe(pullAuth);
+          const query = new URL(req.url ?? '', source.origin).searchParams;
+          expect(query.get('service')).toBe('custom-registry');
+          expect(query.get('scope')).toBe('repository:custom/team-workbench:pull');
+          res.end(JSON.stringify({ access_token: 'private-pull-token' }));
+          return true;
+        }
+        if (
+          req.headers.authorization === (kind === 'basic' ? pullAuth : 'Bearer private-pull-token')
+        )
+          return false;
+        res.writeHead(401, {
+          'www-authenticate':
+            kind === 'basic'
+              ? 'Basic realm="registry"'
+              : `Bearer realm="${source.origin}/auth/token",service="custom-registry"`,
+        });
+        res.end(password);
+        return true;
+      });
+      await createWorkbenchImportPhase({
+        ...options,
+        readSource: async () => {
+          credentialReads++;
+          return { ...(await options.readSource()), username: 'pull-user', password };
+        },
+      }).run();
+      expect(credentialReads).toBeGreaterThan(1);
+      expect(target.blobs).toEqual(data.blobs);
+      expect(source.calls.some(({ auth }) => auth === pullAuth)).toBe(true);
+      expect(source.calls.every(({ auth }) => auth !== authorization)).toBe(true);
+    }
+  );
+
+  it('accepts a registry-named HTTPS realm anonymously without forwarding destination credentials', async () => {
+    const { options, source } = await setup();
+    const realm = await registry({ host: '127.0.0.2' });
+    realm.intercept((req, res) => {
+      expect(req.headers.authorization).toBeUndefined();
+      expect(req.headers.cookie).toBeUndefined();
+      res.end(JSON.stringify({ token: 'anonymous-off-origin-token' }));
+      return true;
+    });
+    source.intercept((req, res) => {
+      if (req.headers.authorization === 'Bearer anonymous-off-origin-token') return false;
+      res.writeHead(401, {
+        'www-authenticate': `Bearer realm="${realm.origin}/token",service="custom-registry"`,
+      });
+      res.end();
+      return true;
+    });
+    await createWorkbenchImportPhase(options).run();
+    expect(realm.calls).toHaveLength(1);
+  });
+
+  it('follows GitHub-style off-host HTTPS blob redirects without auth or cookies and verifies bytes', async () => {
+    const { options, source, target, data } = await setup();
+    const mirror = await registry({ data, host: '127.0.0.2' });
+    source.intercept((req, res) => {
+      if (req.headers.authorization === undefined) {
+        res.writeHead(401, { 'www-authenticate': 'Basic realm="source"' });
+        res.end();
+        return true;
+      }
+      if ((req.url ?? '').includes('/blobs/')) {
+        res.writeHead(307, {
+          location: `${mirror.origin}${req.url}`,
+          'set-cookie': 'secret-source-cookie=canary',
+        });
+        res.end();
+        return true;
+      }
+      return false;
+    });
+    const authenticated = {
+      ...options,
+      readSource: async () => ({
+        ...(await options.readSource()),
+        username: 'pull-user',
+        password,
+      }),
+    };
+    await createWorkbenchImportPhase(authenticated).run();
+    expect(mirror.calls.length).toBe(data.blobs.size);
+    expect(
+      mirror.calls.every(({ auth, cookie }) => auth === undefined && cookie === undefined)
+    ).toBe(true);
+    expect(target.blobs).toEqual(data.blobs);
+    target.blobs.clear();
+    target.manifests.clear();
+    mirror.intercept((_req, res) => {
+      res.end('tampered redirected blob');
+      return true;
+    });
+    await expect(createWorkbenchImportPhase(authenticated).run()).rejects.toThrow(
+      'workbench-import:digest-mismatch'
+    );
+  });
+
+  it.each([
+    { registry: 'not a registry URL', repository: 'valid/repo' },
+    { registry: 'http://registry.example', repository: 'valid/repo' },
+    { registry: 'https://user:secret@registry.example', repository: 'valid/repo' },
+    { registry: 'https://registry.example/path', repository: 'valid/repo' },
+    { registry: 'https://registry.example?query', repository: 'valid/repo' },
+    { registry: 'https://registry.example#fragment', repository: 'valid/repo' },
+    { registry: 'https://registry.example', repository: '../escape' },
+    { registry: 'https://registry.example', repository: '' },
+    { registry: 'https://registry.example', repository: 'valid/repo', username: 'user' },
+  ])('refuses invalid source configuration before making requests: %j', async (source) => {
+    const { options, target } = await setup();
+    await expect(
+      createWorkbenchImportPhase({ ...options, readSource: async () => source }).run()
+    ).rejects.toThrow('workbench-import:configuration');
+    expect(target.calls).toEqual([]);
+  });
+
+  it('sanitizes source provider failures and bounds a stalled source read', async () => {
+    const { options } = await setup();
+    await expect(
+      createWorkbenchImportPhase({
+        ...options,
+        readSource: async () => {
+          throw new Error(password);
+        },
+      }).run()
+    ).rejects.toThrow('workbench-import:credential');
+    await expect(
+      createWorkbenchImportPhase({
+        ...options,
+        phaseTimeoutMs: 30,
+        readSource: () => new Promise(() => undefined),
+      }).run()
+    ).rejects.toThrow('workbench-import:deadline');
+  });
+
+  it('does not send a changed source secret to the source captured at run start', async () => {
+    const { options, source } = await setup();
+    source.intercept((_req, res) => {
+      res.writeHead(401, { 'www-authenticate': 'Basic realm="source"' });
+      res.end();
+      return true;
+    });
+    let reads = 0;
+    await expect(
+      createWorkbenchImportPhase({
+        ...options,
+        readSource: async () => ({
+          ...(await options.readSource()),
+          registry: ++reads === 1 ? source.origin : 'https://changed-registry.example',
+          username: 'changed-user',
+          password,
+        }),
+      }).run()
+    ).rejects.toThrow('workbench-import:configuration');
+    expect(source.calls.every(({ auth }) => auth === undefined)).toBe(true);
+  });
+
+  it.each(['http:', 'userinfo', 'fragment', 'scope'])(
+    'rejects an unsafe bearer challenge: %s',
+    async (kind) => {
+      const { options, source } = await setup();
+      const realm = new URL('/token', source.origin);
+      if (kind === 'http:') realm.protocol = 'http:';
+      if (kind === 'userinfo') realm.username = 'attacker';
+      if (kind === 'fragment') realm.hash = 'attacker';
+      source.intercept((_req, res) => {
+        res.writeHead(401, {
+          'www-authenticate': `Bearer realm="${realm.href}"${kind === 'scope' ? ',scope="repository:other/repo:pull"' : ''}`,
+        });
+        res.end();
+        return true;
+      });
+      await expect(createWorkbenchImportPhase(options).run()).rejects.toThrow(
+        kind === 'scope' ? 'workbench-import:unauthorized' : 'workbench-import:redirect'
+      );
+      expect(source.calls.some(({ path }) => path === '/token')).toBe(false);
+    }
+  );
 
   it('removes abandoned layer files, rereads credentials, and bounds the whole phase', async () => {
     const { options, temporary } = await setup();
@@ -367,7 +703,7 @@ describe('workbench byte-identical OCI import', () => {
 
   it('defers invalid pins to the retryable phase boundary', async () => {
     const { options } = await setup();
-    const phase = createWorkbenchImportPhase({ ...options, originImage: '' });
+    const phase = createWorkbenchImportPhase({ ...options, pinnedDigest: '' });
     await expect(phase.run()).rejects.toThrow('workbench-import:configuration');
   });
 

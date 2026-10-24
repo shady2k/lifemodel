@@ -38,7 +38,7 @@ CI also publishes the workbench on a push to main whose inputs changed, as
 not a release: no manifest or platform artifact refers to them, and the loader
 import still copies exactly the release digest.
 
-## Zot and the first-start import
+## Zot and the background workbench import
 
 The step order remains **instance → A0 → A → B → C → D**. A contains zot,
 with one retained 20Gi local-path PVC and no host networking. Its upstream
@@ -74,27 +74,44 @@ unauthenticated. After Bao init/unseal/policy, phases run:
 2. Zot custody: generate/reuse one random password in
    `lifemodel/data/registry/zot`, verify read-back, project only a bcrypt hash
    for the sole `loader` user into `zot-htpasswd`.
-3. Workbench import: read the release pin from A0's generated `workbench-origin`
-   ConfigMap, read the push credential from Bao at use, and copy the public
-   release origin's exact index/manifests/config/layers to zot. Verify digest
-   bytes after pushing too. Already verified objects are resume keys after a
-   kill. Per-request/whole-phase deadlines and size bounds fail with safe codes.
-4. Gitea bootstrap, seeding and application source/Kustomization creation.
-5. CNPG credential copy (waits for C), then Valkey credential copy.
+3. Gitea bootstrap, seeding and application source/Kustomization creation.
+4. CNPG credential copy (waits for C), then Valkey credential copy.
 
-Zot waits on neither Gitea nor C, and import completes before core's source
-exists. Import failure retries; Jobs never fall back to ghcr.io. Anonymous
-pull has `read` only. Push requires the sole password, repository authorization,
-and loader-only pod ingress. Node-origin pull uses Kubernetes' node exception.
+Workbench import is an independent loader task, not a first-start phase. It
+reads the release digest from A0's `workbench-origin` ConfigMap as
+`LIFEMODEL_WORKBENCH_DIGEST`, and the source registry/repository plus optional
+pull credential from the loader's OpenBao setting. The default source is
+`ghcr.io/shady2k/lifemodel-workbench`; an instance may select another HTTPS
+registry. The source credential stays in `lifemodel/data/workbench/source`.
+The sole zot push credential remains in `lifemodel/data/registry/zot`.
+
+The worker copies exact index/manifests/config/layer bytes, verifies SHA-256
+and size after pushing, and reuses verified objects after a kill. Request and
+whole-attempt deadlines and size/count budgets fail with safe codes. Status
+on the loader volume is `pending`, `importing`, `ready` or `failed`, with last
+attempt time. Failures back off from one second to one minute; a settings save
+cancels the old attempt and retries immediately without restart. The loader
+shows the source and status in English and Russian; secret values never return.
+
+Zot waits on neither Gitea nor C. Application sources are created even if the
+source is unreachable or refuses the credential. Core checks the pinned
+manifest with a bounded anonymous HEAD before task acceptance. A missing digest
+refuses start with `workbench_unavailable` and creates no Job or task row. Jobs
+never fall back to the external source. Anonymous pull has `read` only. Push
+requires the sole password and repository authorization. Pod ingress admits
+loader and core; core receives only anonymous read access. Node-origin pull
+uses Kubernetes' node exception.
 A commented builder slot grants no rights. TLS remains lifemodel-pwe.2.
 
 The existing loader model-check egress also reaches the public import origin.
 NetworkPolicy is additive; no phase-only network enforcement is claimed and
 there is no temporary import-egress policy. The importer's own host confinement
-is the boundary: HTTPS to `ghcr.io` and the exact blob host
-`pkg-containers.githubusercontent.com`, with checked redirects and token realms.
-Registry credentials are never forwarded to redirect hosts; zot's password is
-used only at the destination.
+is the boundary: HTTPS to the configured registry, checked token realms and
+anonymous HTTPS blob redirects. Pull credentials are sent only to the configured
+registry or its same-origin token realm. A registry-named off-host HTTPS realm
+may be used anonymously only; a configured credential makes it a refusal.
+Redirects never carry Authorization or cookies, and bytes remain digest/size
+verified. Zot's password is used only at the destination.
 
 ## A0: loader and admission
 
@@ -525,7 +542,7 @@ Raising it is an explicit platform policy change. The release pin point is the
 workbench image rule: only repository
 `zot.lifemodel-system.svc:5001/lifemodel/workbench` with a valid sha256 digest.
 The release supplies the pin and core requires that exact pinned image.
-`ghcr.io/shady2k/lifemodel-workbench` is the public import origin, not an
+`ghcr.io/shady2k/lifemodel-workbench` is the default import origin, not an
 admitted Job or Pod image. The trusted launcher is the image ENTRYPOINT. Command/args overrides and lifecycle hooks remain
 forbidden. Both Job and Pod policies permit only these literal environment names:
 

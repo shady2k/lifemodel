@@ -126,7 +126,7 @@ describe('the platform zot registry', () => {
     expect(container?.resources.limits).toBeDefined();
   });
 
-  it('denies all pod sources except the loader and has no egress or broad IP exception', () => {
+  it('allows only loader and core readiness ingress, with no egress or broad IP exception', () => {
     const deny = docs('deploy/platform/a0/namespace-default-deny.yaml').find(
       (doc) => doc.metadata.name === 'lifemodel-system-default-deny'
     );
@@ -150,11 +150,38 @@ describe('the platform zot registry', () => {
               },
               podSelector: { matchLabels: { 'app.kubernetes.io/name': 'loader' } },
             },
+            {
+              namespaceSelector: {
+                matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel' },
+              },
+              podSelector: { matchLabels: { 'app.kubernetes.io/name': 'core' } },
+            },
           ],
           ports: [{ protocol: 'TCP', port: 5001 }],
         },
       ],
       egress: [],
+    });
+    const egress = docs('deploy/platform/a/applications.yaml').find(
+      (doc) => doc.kind === 'NetworkPolicy' && doc.metadata.name === 'lifemodel-workbench-egress'
+    );
+    expect(egress?.spec).toEqual({
+      podSelector: { matchLabels: { 'app.kubernetes.io/name': 'core' } },
+      policyTypes: ['Egress'],
+      ingress: [],
+      egress: [
+        {
+          to: [
+            {
+              namespaceSelector: {
+                matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' },
+              },
+              podSelector: { matchLabels: { 'app.kubernetes.io/name': 'zot' } },
+            },
+          ],
+          ports: [{ protocol: 'TCP', port: 5001 }],
+        },
+      ],
     });
     expect(JSON.stringify(policies)).not.toContain('ipBlock');
     // Node-origin containerd pulls use Kubernetes' implicit same-node ingress exemption.

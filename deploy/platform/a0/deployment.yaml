@@ -27,11 +27,11 @@ spec:
           image: ghcr.io/shady2k/lifemodel-loader:release-placeholder
           imagePullPolicy: IfNotPresent
           env:
-            - name: LIFEMODEL_WORKBENCH_ORIGIN_IMAGE
+            - name: LIFEMODEL_WORKBENCH_DIGEST
               valueFrom:
                 configMapKeyRef:
                   name: workbench-origin
-                  key: LIFEMODEL_WORKBENCH_ORIGIN_IMAGE
+                  key: LIFEMODEL_WORKBENCH_DIGEST
             - name: LIFEMODEL_NAME
               valueFrom:
                 configMapKeyRef:

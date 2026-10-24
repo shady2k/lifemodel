@@ -23,9 +23,7 @@ const preparerPath = fileURLToPath(
 
 const originPin = 'deploy/platform/a0/workbench-origin.env';
 const workbenchRepository = 'zot.lifemodel-system.svc:5001/lifemodel/workbench';
-const workbenchOrigin = 'ghcr.io/shady2k/lifemodel-workbench';
-const originEnv = (digest: string) =>
-  `LIFEMODEL_WORKBENCH_ORIGIN_IMAGE=${workbenchOrigin}@${digest}\n`;
+const originEnv = (digest: string) => `LIFEMODEL_WORKBENCH_DIGEST=${digest}\n`;
 const workbenchPatch = (digest: string) => `patches:
   - target:
       kind: StatefulSet
@@ -47,7 +45,7 @@ function runPreparer(options: {
     | 'zero'
     | 'matching zero'
     | 'tag'
-    | 'wrong origin'
+    | 'origin reference instead of digest'
     | 'untracked'
     | 'deleted'
     | 'mismatched'
@@ -111,14 +109,14 @@ function runPreparer(options: {
       );
     }
     if (options.origin === 'tag')
+      writeFileSync(join(repo, originPin), `LIFEMODEL_WORKBENCH_DIGEST=latest\n`);
+    if (options.origin === 'origin reference instead of digest')
       writeFileSync(
         join(repo, originPin),
-        `LIFEMODEL_WORKBENCH_ORIGIN_IMAGE=${workbenchOrigin}:latest\n`
-      );
-    if (options.origin === 'wrong origin')
-      writeFileSync(
-        join(repo, originPin),
-        originEnv(`sha256:${'b'.repeat(64)}`).replace(workbenchOrigin, workbenchRepository)
+        originEnv(`sha256:${'b'.repeat(64)}`).replace(
+          'LIFEMODEL_WORKBENCH_DIGEST=',
+          `LIFEMODEL_WORKBENCH_DIGEST=${workbenchRepository}@`
+        )
       );
     if (options.origin === 'duplicate')
       writeFileSync(join(repo, originPin), originEnv(`sha256:${'b'.repeat(64)}`).repeat(2));
@@ -274,6 +272,7 @@ describe('loader image release seed bundle', () => {
       'src/web/contract.ts',
       'src/ports/message-attachment.ts',
       'loader/src/settings/registry.ts',
+      'loader/src/workbench-status.ts',
     ]);
   });
 
@@ -496,7 +495,7 @@ describe('loader image release seed bundle', () => {
     it.each([
       'zero',
       'tag',
-      'wrong origin',
+      'origin reference instead of digest',
       'untracked',
       'deleted',
       'mismatched',

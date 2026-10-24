@@ -87,31 +87,47 @@ one random 256-bit `loader` password in OpenBao, verifies its read-back,
 and projects only a bcrypt hash to zot. No task or node receives that
 password. Anonymous authorization grants `read` only; the one push user is
 restricted to the workbench repository. Default-deny and zot ingress admit
-only loader pods; node-origin traffic uses Kubernetes' node-network exception.
+loader and core pods; only loader holds push authority, and node-origin traffic
+uses Kubernetes' node-network exception.
 Future pwe builder admission is a commented slot, not a permission today.
 
 Final step order stays **instance → A0 → A → B → C → D**. Zot waits only
 for its A0 Secret to be filled by the post-Bao custody phase, not Gitea or
 SQL. First-start order after Bao init/unseal/policy is **Seaweed custody →
-zot custody → workbench import → Gitea bootstrap/application sources →
-Postgres credential copy → Valkey credential copy**. Application sources
-are not created before a verified import, so core cannot start tasks before
-that boundary. No phase waiting on C is moved in front of A's readiness.
+zot custody → Gitea bootstrap/application sources → Postgres credential copy →
+Valkey credential copy**. No phase waiting on C moves in front of A's readiness.
 
-The release still publishes the workbench to its public digest-pinned origin.
-Before creating application sources, the loader copies the exact manifest,
-index, config and layer bytes into zot, verifies SHA-256 on both sides, and
-keeps the original release digest. Existing verified objects are resume keys.
-A failed/mismatched/unreachable import retries with safe codes; there is no
-public-origin fallback in the Job path. Import requests have deadlines and
-size/count bounds; temporary bytes use the loader's disk-backed volume.
-There is no temporary import-egress policy or phase-only network enforcement.
-Kubernetes policies are additive: the existing loader model-check egress
-already reaches the public origin. The importer's own host confinement is
-the boundary: HTTPS to `ghcr.io` and the exact blob host
-`pkg-containers.githubusercontent.com`, checked redirects and token realms,
-and no registry credential forwarding to redirect hosts. The zot push
-password is used only at the destination.
+**Source-setting amendment (lifemodel-653.8.14, owner 2026-10-24):** external
+sources belong to loader settings, not a hard-coded registry. The shipped
+default is `ghcr.io/shady2k/lifemodel-workbench`; HTTPS registry origin and OCI
+repository are editable. An optional username/password or token is held with
+the source in OpenBao at `lifemodel/data/workbench/source`, following model-key
+custody and safe display. The digest remains release-pinned, not a setting:
+`LIFEMODEL_WORKBENCH_DIGEST` matches the core's canonical zot image pin.
+
+Import is a separate durable loader task. It copies exact manifest/index,
+config and layer bytes into zot, checks SHA-256 and size on both sides, and
+keeps the original release digest. Verified objects are restart resume keys.
+Its loader-volume record shows `pending`, `importing`, `ready` or `failed`,
+a safe reason code and last attempt time. Unreachable sources and bad credentials
+back off and retry without holding first start. Saving settings cancels the old
+attempt and wakes the worker. Startup re-verifies even a saved ready record.
+
+Core admits a task only after a bounded anonymous HEAD finds the pinned
+manifest in zot. Until then its existing tool refusal path reports
+`workbench_unavailable` honestly, without a Job or task registry row. This is
+cheaper than copying manifests and avoids trusting a stale status projection.
+There is no external-source fallback in the Job path.
+
+Import requests retain deadlines, size/count bounds, and disk-backed temporary
+bytes. There is no temporary import-egress policy or phase-only network claim:
+Kubernetes policies are additive and the existing loader model-check egress
+already reaches external HTTPS sources. Registry requests stay on the configured
+origin. Stored credentials may reach only its same-origin token realm; a named
+off-host HTTPS realm is anonymous-only and refused when credentials are set.
+This prevents a challenge from delegating a saved secret to an attacker host.
+Blob redirects may use another HTTPS host but carry no Authorization or cookie;
+all bytes still pass digest/size checks. Zot's push password is destination-only.
 
 k3s, Flux, zot itself and the loader remain release-pinned bootstrap images
 outside zot. Serving core/web/loader/gateway, air-gap installation, and in-cluster

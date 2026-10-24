@@ -132,6 +132,7 @@ export interface TaskRecord {
 }
 
 export type TaskRegistryErrorCode =
+  | 'workbench_unavailable'
   | 'invalid_input'
   | 'launch_key_conflict'
   | 'not_found'

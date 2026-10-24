@@ -4,6 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request as httpRequest } from 'node:http';
 import { createLoaderApp, type LoaderApp } from '../../loader/src/app.js';
+import {
+  createWorkbenchImportTask,
+  type WorkbenchImportTask,
+} from '../../loader/src/workbench-task.js';
 import { loadConfig } from '../../loader/src/config.js';
 import { systemClock } from '../../loader/src/clock.js';
 import { createNodeFileSystem } from '../../loader/src/fs.js';
@@ -20,6 +24,7 @@ function appFor(
     runInitial?: () => Promise<void>;
     unseal?: () => Promise<void>;
     lines?: RecordedLine[];
+    workbenchTask?: WorkbenchImportTask;
   } = {}
 ): LoaderApp {
   const root = options.root ?? mkdtempSync(join(tmpdir(), 'platform-loader-'));
@@ -50,6 +55,7 @@ function appFor(
       }),
       caPem: async () => 'CA',
     },
+    workbenchTask: options.workbenchTask,
     platformBootstrap: {
       runInitial: options.runInitial ?? (async () => {}),
       unsealIfSealed: options.unseal ?? (async () => {}),
@@ -103,6 +109,47 @@ async function localRequest(
 }
 
 describe('the platform loader', () => {
+  it('finishes first start while an unreachable workbench source retries independently', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'platform-loader-background-'));
+    roots.push(root);
+    let complete!: () => void;
+    const bootstrapComplete = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    let attempted!: () => void;
+    const importAttempted = new Promise<void>((resolve) => {
+      attempted = resolve;
+    });
+    const task = createWorkbenchImportTask({
+      fs: createNodeFileSystem(),
+      config: { loaderDir: root },
+      clock: systemClock,
+      logger: createRecordingLogger([]),
+      pinnedDigest: `sha256:${'a'.repeat(64)}`,
+      run: async () => {
+        attempted();
+        throw new Error('workbench-import:unavailable');
+      },
+    });
+    const app = appFor({
+      root,
+      workbenchTask: task,
+      unseal: async () => {
+        complete();
+      },
+    });
+    try {
+      await app.start();
+      await bootstrapComplete;
+      await importAttempted;
+      expect(app.host()).toBe('0.0.0.0');
+      expect((await localRequest(app.port(), '/api/state', 'GET', '')).status).toBe(200);
+      expect(task.status().state).not.toBe('ready');
+    } finally {
+      await app.shutdown('test');
+    }
+  });
+
   it('sets up authentication and preserves it across a restart through the JSON API', async () => {
     const root = mkdtempSync(join(tmpdir(), 'platform-loader-'));
     roots.push(root);

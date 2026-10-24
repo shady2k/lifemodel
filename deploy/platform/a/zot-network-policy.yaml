@@ -1,6 +1,7 @@
 # Inherits lifemodel-system-default-deny from A0. The registry initiates no
-# network calls. Only the loader pod can push (and zot separately authenticates
-# and authorizes that push). No unrelated pod receives even anonymous pull.
+# network calls. Only the loader can push (zot authenticates that identity).
+# Core may anonymously HEAD the pinned manifest before accepting a task;
+# no unrelated pod receives even anonymous pull.
 # Node-origin kubelet/containerd pulls and probes are exempt from ingress
 # isolation on this sole node under Kubernetes NetworkPolicy semantics; do not
 # add a broad ipBlock rule to imitate that implicit node exemption.
@@ -24,6 +25,12 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: loader
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: core
         # Future pwe builder: add its explicit namespace AND pod selector here
         # with a separately scoped registry identity; never a namespace wildcard.
       ports:

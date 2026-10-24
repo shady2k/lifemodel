@@ -9,8 +9,7 @@ import YAML from 'yaml';
 const read = (path: string): string => readFileSync(path, 'utf8');
 const dockerfile = () => read('docker/workbench/Dockerfile');
 const image = 'zot.lifemodel-system.svc:5001/lifemodel/workbench';
-const originImage = 'ghcr.io/shady2k/lifemodel-workbench';
-const originPlaceholder = `LIFEMODEL_WORKBENCH_ORIGIN_IMAGE=${originImage}@sha256:${'0'.repeat(64)}\n`;
+const originPlaceholder = `LIFEMODEL_WORKBENCH_DIGEST=sha256:${'0'.repeat(64)}\n`;
 const originPinFile = 'deploy/platform/a0/workbench-origin.env';
 const placeholder = `${image}@sha256:${'0'.repeat(64)}`;
 const pinFile = 'deploy/platform/applications/lifemodel/kustomization.yaml';
@@ -197,6 +196,15 @@ describe('task workbench image contract', () => {
   it('pins the reference in the core overlay and substitutes exactly that release digest', () => {
     const text = read(pinFile);
     expect(read(originPinFile)).toBe(originPlaceholder);
+    const loader = YAML.parseAllDocuments(read('deploy/platform/a0/deployment.yaml'))
+      .map((doc) => doc.toJSON())
+      .find((doc) => doc.kind === 'Deployment');
+    expect(loader.spec.template.spec.containers[0].env).toContainEqual({
+      name: 'LIFEMODEL_WORKBENCH_DIGEST',
+      valueFrom: {
+        configMapKeyRef: { name: 'workbench-origin', key: 'LIFEMODEL_WORKBENCH_DIGEST' },
+      },
+    });
     expect(text).toContain('name: LIFEMODEL_TASK_WORKBENCH_IMAGE');
     const references = text.match(
       /zot[.]lifemodel-system[.]svc:5001\/lifemodel\/workbench[^\s"']*/g
@@ -244,7 +252,7 @@ describe('task workbench image contract', () => {
       execFileSync('bash', ['scripts/release/set-workbench-digest.sh', digest, file, originFile]);
       const pinned = read(file);
       expect(pinned).toContain(`${image}@${digest}`);
-      const pinnedOrigin = `LIFEMODEL_WORKBENCH_ORIGIN_IMAGE=${originImage}@${digest}\n`;
+      const pinnedOrigin = `LIFEMODEL_WORKBENCH_DIGEST=${digest}\n`;
       expect(read(originFile)).toBe(pinnedOrigin);
       expect(pinned).not.toContain(placeholder);
       expect(pinned.replace(`${image}@${digest}`, placeholder)).toBe(text);
@@ -311,7 +319,7 @@ describe('task workbench image contract', () => {
 
   it.each([
     'missing origin file',
-    'wrong origin repository',
+    'origin reference instead of digest',
     'malformed origin digest',
     'already pinned origin',
     'duplicate origin entry',
@@ -322,8 +330,11 @@ describe('task workbench image contract', () => {
     const originFile = join(dir, 'workbench-origin.env');
     const original = read(pinFile);
     const origin =
-      scenario === 'wrong origin repository'
-        ? originPlaceholder.replace(originImage, image)
+      scenario === 'origin reference instead of digest'
+        ? originPlaceholder.replace(
+            'LIFEMODEL_WORKBENCH_DIGEST=',
+            `LIFEMODEL_WORKBENCH_DIGEST=${image}@`
+          )
         : scenario === 'malformed origin digest'
           ? originPlaceholder.trimEnd() + 'f\n'
           : scenario === 'already pinned origin'
