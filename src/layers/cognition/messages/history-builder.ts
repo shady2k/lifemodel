@@ -112,7 +112,10 @@ export function buildInitialMessages(
     }
     messages.push({ role: 'user', content: triggerPrompt, contentParts: parts });
   } else {
-    messages.push({ role: isUserInteraction ? 'user' : 'system', content: triggerPrompt });
+    messages.push({
+      role: isUserInteraction || context.triggerSignal.type === 'task_outcome' ? 'user' : 'system',
+      content: triggerPrompt,
+    });
   }
 
   if (context.triggerSignal.type === 'user_message') {

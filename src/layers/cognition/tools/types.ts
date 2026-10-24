@@ -26,6 +26,13 @@ export interface Tool {
   parameters: ToolParameter[];
   execute: ToolExecutor;
   /**
+   * Read an already accepted durable effect using trusted turn context only.
+   * Runs before argument validation. Undefined means no accepted effect exists:
+   * fresh calls must still pass both validation gates before execute can write.
+   * The executor applies its capability boundary before invoking this read seam.
+   */
+  recoverAcceptedEffect?: (context: ToolContext) => Promise<unknown>;
+  /**
    * Validate arguments before execution.
    * Returns ValidationResult with data on success, or error message on failure.
    * Used to catch invalid LLM outputs and enable graceful retry.

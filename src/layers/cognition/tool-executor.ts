@@ -23,7 +23,7 @@ import { MAX_REPEATED_FAILED_CALLS, MAX_REPEATED_IDENTICAL_CALLS } from '../../t
 import { unsanitizeToolName } from '../../llm/tool-schema.js';
 import type { Message, ToolCall } from '../../llm/provider.js';
 import type { ToolRegistry } from './tools/registry.js';
-import type { ToolContext, ToolParameter } from './tools/types.js';
+import { createToolResult, type ToolContext, type ToolParameter } from './tools/types.js';
 import type { LoopContext, LoopCallbacks, ToolExecutionOutcome } from './agentic-loop-types.js';
 import { prevalidateToolArgs } from './tools/validation.js';
 
@@ -255,11 +255,23 @@ export async function executeToolCalls(
     const toolName = unsanitizeToolName(toolCall.function.name);
     let args: Record<string, unknown>;
 
+    const tool = toolRegistry.getTools().find((t) => t.name === toolName);
+    // Recover committed effects by trusted recipient/turn/slot, before either
+    // regenerated-argument gate. Outcome turns have no read/write capabilities.
+    const recovered =
+      context.triggerSignal.type !== 'task_outcome'
+        ? await tool?.recoverAcceptedEffect?.(buildCtx(context))
+        : undefined;
+    const recoveredResult =
+      recovered === undefined
+        ? undefined
+        : createToolResult(toolCall.id, toolName, true, recovered);
+
     // Handle empty arguments string as empty object
     const argsString = toolCall.function.arguments.trim();
     const parsedArgs = robustJsonParse(argsString);
 
-    if (parsedArgs === null && argsString.length > 2) {
+    if (!recoveredResult && parsedArgs === null && argsString.length > 2) {
       // Genuinely malformed JSON (robustJsonParse exhausted all recovery attempts).
       // Include schema since the model may have failed to parse the tool definition.
       logger.error(
@@ -287,9 +299,8 @@ export async function executeToolCalls(
 
     args = parsedArgs ?? {};
 
-    // Validate args against tool schema before execution
-    const tool = toolRegistry.getTools().find((t) => t.name === toolName);
-    if (tool) {
+    // Fresh calls retain both shared argument-validation gates.
+    if (tool && !recoveredResult) {
       const prevalidation = prevalidateToolArgs(args, tool.parameters, tool.rawParameterSchema);
       if (!prevalidation.success) {
         const outcome = processToolValidationFailure(
@@ -360,6 +371,19 @@ export async function executeToolCalls(
         );
       }
 
+      continue;
+    }
+
+    // Response-only capability boundary: no tool, including terminal/control tools,
+    // may act on task-produced text. Enforce even if the provider ignores schemas.
+    if (context.triggerSignal.type === 'task_outcome') {
+      state.toolCallCount++;
+      messages.push({
+        role: 'tool',
+        tool_call_id: toolCall.id,
+        tool_name: toolCall.function.name,
+        content: JSON.stringify({ success: false, code: 'task_outcome_requires_final_reply' }),
+      });
       continue;
     }
 
@@ -507,12 +531,14 @@ export async function executeToolCalls(
 
     // Execute non-terminal tool
     state.toolCallCount++;
-    const result = await toolRegistry.execute({
-      toolCallId: toolCall.id,
-      name: toolName,
-      args,
-      context: buildCtx(context),
-    });
+    const result =
+      recoveredResult ??
+      (await toolRegistry.execute({
+        toolCallId: toolCall.id,
+        name: toolName,
+        args,
+        context: buildCtx(context),
+      }));
 
     state.toolResults.push(result);
 

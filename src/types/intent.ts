@@ -7,11 +7,13 @@
 
 import type { EvidenceSource } from './cognition.js';
 import type { MessageAttachment } from '../ports/message-attachment.js';
+import type { AcceptTask } from '../ports/tasks.js';
 
 /**
  * All possible intent types.
  */
 export type IntentType =
+  | 'START_TASK'
   | 'UPDATE_STATE'
   | 'SAVE_TO_MEMORY'
   | 'SCHEDULE_EVENT'
@@ -404,7 +406,14 @@ export interface PluginControlIntent {
 /**
  * Union of all intent types.
  */
+export interface StartTaskIntent {
+  type: 'START_TASK';
+  payload: AcceptTask;
+  trace?: IntentTrace | undefined;
+}
+
 export type Intent =
+  | StartTaskIntent
   | UpdateStateIntent
   | SaveToMemoryIntent
   | ScheduleEventIntent

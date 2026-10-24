@@ -6,6 +6,7 @@
  */
 
 import type { Logger } from '../../../types/logger.js';
+import { UncertainMutationError } from './mutation-error.js';
 import type { ToolName, ToolResult } from '../../../types/cognition.js';
 import type { Tool, ToolRequest, ToolParameter } from './types.js';
 import { createToolResult } from './types.js';
@@ -148,6 +149,7 @@ export class ToolRegistry {
 
       return createToolResult(request.toolCallId, request.name, true, result);
     } catch (error) {
+      if (error instanceof UncertainMutationError) throw error;
       const duration = Date.now() - startTime;
       const errorMessage = error instanceof Error ? error.message : String(error);
 

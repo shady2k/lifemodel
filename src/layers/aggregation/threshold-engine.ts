@@ -212,6 +212,17 @@ export class ThresholdEngine {
       };
     }
 
+    // A sealed outcome needs its own turn. Never complete a second task's
+    // outcome merely because its neighbour was reported in the same tick.
+    const taskOutcome = signals.find((signal) => signal.type === 'task_outcome');
+    if (taskOutcome)
+      return {
+        shouldWake: true,
+        trigger: 'task_outcome',
+        reason: 'Sealed task outcome',
+        triggerSignals: [taskOutcome],
+      };
+
     // Motor Cortex results — always wake immediately (user is waiting)
     // Filter out already-handled results (prevents re-processing on subsequent ticks)
     const motorResults = signals.filter((s) => {

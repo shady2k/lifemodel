@@ -151,6 +151,8 @@ export class TaskRegistryError extends Error {
 export interface TaskService {
   accept(request: AcceptTask): Promise<TaskRecord>;
   read(taskId: string): Promise<TaskRecord | null>;
+  /** Recover an already accepted deciding-turn effect without resubmitting its payload. */
+  readByLaunchKey(launchKey: string): Promise<TaskRecord | null>;
   list(): Promise<readonly TaskRecord[]>;
 }
 

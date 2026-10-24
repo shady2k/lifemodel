@@ -375,6 +375,8 @@ export interface HarnessOptions {
   inboundStream?: CoreLoopDeps['inboundStream'];
   initialBusOffset?: BusSnapshot;
   conversationManager?: ConversationManager;
+  memoryProvider?: CoreLoopDeps['memoryProvider'];
+  userModel?: CoreLoopDeps['userModel'];
   recipientRegistry?: IRecipientRegistry;
   creatureStateEpoch?: number;
   publishCreatureState?: CoreLoopDeps['publishCreatureState'];
@@ -449,6 +451,8 @@ export async function startInstance(
       onStaleSnapshot: opts.onStaleSnapshot,
       onFatalError: opts.onFatalError,
       conversationManager: opts.conversationManager,
+      memoryProvider: opts.memoryProvider,
+      userModel: opts.userModel,
       creatureStateEpoch: opts.creatureStateEpoch,
       publishCreatureState: opts.publishCreatureState,
     } as CoreLoopDeps

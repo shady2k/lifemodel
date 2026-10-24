@@ -80,6 +80,8 @@ export function filterToolsForContext(
   context: LoopContext,
   useSmart: boolean
 ): (OpenAIChatTool | MinimalOpenAIChatTool)[] {
+  // Outcome turns have an empty capability allowlist, not a tool denylist.
+  if (context.triggerSignal.type === 'task_outcome') return [];
   const isThoughtTrigger = context.triggerSignal.type === 'thought';
   const isProactive =
     context.triggerSignal.type === 'contact_urge' || isProactiveTrigger(context.triggerSignal);

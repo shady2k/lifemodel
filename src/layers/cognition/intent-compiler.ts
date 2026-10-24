@@ -7,6 +7,7 @@
 
 import type { Logger } from '../../types/logger.js';
 import type { Intent } from '../../types/intent.js';
+import type { MessageAttachment } from '../../ports/message-attachment.js';
 import type {
   ToolResult,
   LoopState,
@@ -17,6 +18,7 @@ import type {
 import { THOUGHT_LIMITS } from '../../types/signal.js';
 import type { ThoughtData } from '../../types/signal.js';
 import type { LoopContext, LoopResult } from './agentic-loop-types.js';
+import { validateTaskOutcome, taskOutcomeAttachments } from '../../ports/task-outcome.js';
 
 /**
  * Compile intents from tool results.
@@ -78,15 +80,39 @@ export function compileIntentsFromToolResults(
 
   // Add response intent if terminal is respond
   if (terminal.type === 'respond' && context.recipientId) {
-    intents.push({
-      type: 'SEND_MESSAGE',
-      payload: {
-        recipientId: context.recipientId,
-        text: terminal.text,
-        conversationStatus: terminal.conversationStatus,
-      },
-      trace: baseTrace,
-    });
+    const event =
+      context.triggerSignal.type === 'task_outcome'
+        ? validateTaskOutcome(context.triggerSignal.data)
+        : undefined;
+    let groups: MessageAttachment[][] = [];
+    let attachmentFailure = false;
+    if (event) {
+      try {
+        groups = taskOutcomeAttachments(event);
+      } catch {
+        attachmentFailure = true;
+      }
+    }
+    // The web contract bounds each message to 20 files. Keep every result in
+    // ordered continuation messages rather than dead-ending a valid outcome.
+    const pages = groups.length > 0 ? groups : [undefined];
+    for (const [index, attachments] of pages.entries())
+      intents.push({
+        type: 'SEND_MESSAGE',
+        payload: {
+          recipientId: context.recipientId,
+          text:
+            index === 0
+              ? terminal.text +
+                (attachmentFailure
+                  ? '\nThe result files could not be attached because their metadata is invalid.'
+                  : '')
+              : `More result files (${String(index + 1)}/${String(pages.length)}).`,
+          conversationStatus: terminal.conversationStatus,
+          ...(attachments ? { attachments } : {}),
+        },
+        trace: baseTrace,
+      });
 
     logger.debug(
       {
