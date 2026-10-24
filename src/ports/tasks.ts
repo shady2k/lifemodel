@@ -44,6 +44,55 @@ export interface TaskAllocationReceipt {
   readonly effectKey: string;
 }
 
+/** Immutable retained metadata from the storage module's seal manifest. */
+export interface TaskManifestObject {
+  readonly id: string;
+  readonly name: string;
+  readonly size: number;
+  readonly sha256: string;
+  readonly mark: string;
+  readonly contentType?: string;
+}
+export interface TaskSealRequest {
+  readonly space: string;
+  readonly effectKey: string;
+  readonly expectedRevision: string;
+  readonly intentRevision: string;
+  readonly outcome: 'completed' | 'failed' | 'stopped';
+  /** Candidate version when this exact request was prepared. */
+  readonly candidateRevision: string;
+}
+export interface TaskSealReceipt {
+  readonly id: string;
+  readonly space: string;
+  readonly effectKey: string;
+  readonly revision: string;
+  readonly outcome: TaskSealRequest['outcome'];
+  readonly state: 'sealed';
+  readonly reason: string | null;
+  readonly manifest: {
+    readonly id: string;
+    readonly version: 1;
+    readonly sha256: string;
+    readonly objects: readonly TaskManifestObject[];
+    readonly excluded?: readonly (TaskManifestObject & { readonly reason: string })[];
+  };
+}
+export interface TaskFinalizationCandidate {
+  readonly state: TaskTerminalState;
+  readonly reasonCode: string;
+  readonly summary: string;
+}
+/** Durable logical event; delivery is at-least-once, deduplicated by outcomeKey. */
+export interface TaskOutcomeEvent {
+  readonly taskId: string;
+  readonly outcomeKey: string;
+  readonly state: TaskTerminalState;
+  readonly reasonCode: string;
+  readonly summary: string;
+  readonly objects: readonly TaskManifestObject[];
+}
+
 export interface TaskRecord {
   readonly id: string;
   readonly launchKey: string;
@@ -59,6 +108,12 @@ export interface TaskRecord {
   readonly terminalCandidate: TaskTerminalState | null;
   readonly terminalReasonCode: string | null;
   readonly finalizationPending: boolean;
+  readonly terminalSummary: string | null;
+  readonly candidateRevision: string;
+  readonly finalizationFailureCode: string | null;
+  readonly terminationConfirmedAt: Date | null;
+  readonly sealRequest: TaskSealRequest | null;
+  readonly sealReceipt: TaskSealReceipt | null;
   readonly acceptedAt: Date;
   readonly updatedAt: Date;
   readonly startedAt: Date | null;
@@ -103,6 +158,41 @@ export interface TaskService {
 export interface TaskRegistry extends TaskService {
   /** Bounded launch/cleanup work page, ordered by immutable accepted order. */
   listLaunchWork(afterOrder?: string, limit?: number): Promise<readonly TaskRecord[]>;
+  /** Includes terminal mailbox rows even after signalled_at; cursor is accepted order. */
+  listFinalizationWork(afterOrder?: string, limit?: number): Promise<readonly TaskRecord[]>;
+  /** Candidate + irreversible launch tombstone + canonical revocation commit together. */
+  beginFinalization(
+    taskId: string,
+    launchId: string,
+    candidate: TaskFinalizationCandidate
+  ): Promise<TaskRecord>;
+  /** Caller has observed exact-UID Pod termination/absence, not merely Job completion. */
+  confirmComputeTerminated(taskId: string, launchId: string): Promise<TaskRecord>;
+  /** Saves the current storage revision and exact keyed request before HTTP. */
+  prepareSeal(taskId: string, launchId: string): Promise<TaskRecord>;
+  /** Explicit refusal only: missing_result/checksum_mismatch downgrade; revision_conflict
+   * retries the same outcome only after proving storage has no frozen operation. */
+  abandonSeal(
+    taskId: string,
+    launchId: string,
+    candidateRevision: string,
+    reasonCode: string
+  ): Promise<TaskRecord>;
+  recordSealReceipt(
+    taskId: string,
+    launchId: string,
+    candidateRevision: string,
+    receipt: TaskSealReceipt
+  ): Promise<TaskRecord>;
+  /** Requires a receipt, revoked intent and termination; atomically inserts one immutable outbox event. */
+  commitFinalization(
+    taskId: string,
+    launchId: string,
+    candidateRevision: string
+  ): Promise<TaskOutcomeEvent>;
+  setFinalizationPending(taskId: string, launchId: string, code: string): Promise<void>;
+  listOutcomeWork(limit?: number): Promise<readonly TaskOutcomeEvent[]>;
+  markOutcomeSignalled(outcomeKey: string): Promise<void>;
   /** Fenced exact deterministic-name lookup for orphan reconciliation. */
   readByJobName(jobName: string): Promise<TaskRecord | null>;
   /** Locks the shared admission row; reserves one FIFO task. */
@@ -120,7 +210,14 @@ export interface TaskRegistry extends TaskService {
     jobUid: string,
     templateHash: string
   ): Promise<TaskRecord>;
-  /** Irreversible launch stop; re-arms cleanup for late CREATE observations. */
+  /** Adopt an observed exact UID only for cleanup after tombstone, never execution. */
+  bindCleanupJob(
+    taskId: string,
+    launchId: string,
+    jobUid: string,
+    templateHash: string
+  ): Promise<TaskRecord>;
+  /** Irreversible launch stop; re-arms cleanup and clears old termination proof. */
   tombstoneLaunch(taskId: string, launchId: string): Promise<TaskRecord>;
   /** Caller must confirm exact-UID termination/absence; never releases the slot. */
   completeLaunchCleanup(taskId: string, launchId: string): Promise<void>;

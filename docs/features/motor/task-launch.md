@@ -84,7 +84,7 @@ canonical-intent and once-only binding gate must keep the launcher inert.
 Deletion never clears identities/tombstones, changes outcome or releases a slot.
 A Job DELETE reply is not proof that every owned Pod has terminated. Finalization
 must confirm compute termination before `releaseSlot`; seal and terminal outbox
-remain the finalizer's job. Cleanup stays pending until that later confirmation.
+are now the [finalizer's job](task-finalize.md). Cleanup stays pending until that confirmation.
 
 Each HTTPS client has one keep-alive agent, a deadline per call and rereads the
 projected token and CA for every call. Errors/logs contain safe codes, IDs and
@@ -112,4 +112,4 @@ claim of a deployed API-server admission test.
   launcher remains inert.
 - .8.8 supplies the durable live channel.
 - .8.9 owns sealing, terminal outcome, exact-UID final deletion, confirmed Pod
-  termination and reservation release. No terminal outcome is inferred here.
+  termination and reservation release. The [finalizer](task-finalize.md) now owns these steps. No terminal outcome is inferred here.

@@ -108,3 +108,43 @@ describe('task Kubernetes LIST bounds', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+describe('task Kubernetes transport resource allowlist', () => {
+  it.each([
+    '/api/v1/namespaces/lifemodel-motor/pods?limit=100',
+    '/api/v1/namespaces/lifemodel-motor/pods/task-pod',
+    '/api/v1/namespaces/lifemodel-motor/persistentvolumeclaims?limit=100',
+  ])('admits the cleanup resource path %s', async (path) => {
+    const reading = Promise.withResolvers<void>();
+    const client = createTaskKubernetesClient({
+      apiServer: 'https://localhost:1',
+      readProjection: async (_path, signal) => {
+        reading.resolve();
+        return new Promise<Buffer>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true });
+        });
+      },
+    });
+    const outcome = client.request('GET', path).catch((error: unknown) => error);
+    await reading.promise;
+    client.close();
+    expect(await outcome).toMatchObject({ code: 'aborted' });
+  });
+
+  it.each([
+    '/api/v1/namespaces/lifemodel-motor/secrets',
+    '/api/v1/namespaces/lifemodel-motor/pods/../../secrets',
+    '/api/v1/namespaces/lifemodel-motor/pods/%2e%2e',
+    '/apis/batch/v1/namespaces/lifemodel-motor/jobs/../secrets',
+    '//elsewhere/api/v1/namespaces/lifemodel-motor/pods',
+  ])('refuses unrelated or escaped resource path %s before reading credentials', async (path) => {
+    const readProjection = vi.fn(async () => Buffer.from('not-read'));
+    const client = createTaskKubernetesClient({ readProjection });
+    try {
+      await expect(client.request('GET', path)).rejects.toMatchObject({ code: 'invalid_launch' });
+      expect(readProjection).not.toHaveBeenCalled();
+    } finally {
+      client.close();
+    }
+  });
+});

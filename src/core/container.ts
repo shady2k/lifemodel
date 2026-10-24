@@ -83,6 +83,7 @@ import { createTaskChannel } from './task-channel.js';
 import { createTaskKubernetesIdentity } from './task-kubernetes-identity.js';
 import { createPostgresTaskMailbox } from '../storage/postgres-task-mailbox.js';
 import { createTaskChannelReplay } from './task-channel-replay.js';
+import { createTaskFinalizer } from './task-finalize.js';
 import { readFile } from 'node:fs/promises';
 import { createScopedScriptRunner } from './scoped-script-runner.js';
 import { createBrowserAuthPrimitive } from './browser-auth-primitive.js';
@@ -1246,6 +1247,7 @@ export async function createContainerAsync(
   // keeps the legacy Docker loop disabled; this Job path is separate from it.
   let taskService: TaskService | null = null;
   let taskLaunch: ReturnType<typeof createTaskLaunchReconciler> | undefined;
+  let stopTaskFinalizer: ((deadline: number) => Promise<void>) | undefined;
   const taskLaunchController = new AbortController();
   let stopTaskChannel: ((deadline: number) => Promise<void>) | undefined;
   if (!mergedConfig.motorCortex.enabled && controlTokenFile && controlCaFile) {
@@ -1272,8 +1274,45 @@ export async function createContainerAsync(
       read: (id) => registry.read(id),
       list: () => registry.list(),
     };
+    const finalizerController = new AbortController();
+    const finalizerRegistry = createPostgresTaskRegistry({
+      pool: rawPostgres,
+      epoch: snapshotEpoch,
+      settings: createPlatformSettingsReader({ logger }),
+      signal: finalizerController.signal,
+    });
+    const finalizerMailbox = createPostgresTaskMailbox({ pool: rawPostgres, epoch: snapshotEpoch });
+    const finalizerExecutor = createKubernetesTaskExecutor();
+    const finalizer = createTaskFinalizer({
+      registry: finalizerRegistry,
+      mailbox: finalizerMailbox,
+      executor: finalizerExecutor,
+      storage: createStorageControlClient({
+        origin: 'https://storage-module.lifemodel-system.svc:8444',
+        tokenFile: controlTokenFile,
+        caFile: controlCaFile,
+      }),
+      bus: busSignalStream,
+      logger,
+      cancelRegistry: () => {
+        finalizerController.abort();
+        finalizerMailbox.stop();
+      },
+      closeExecutor: () => {
+        finalizerExecutor.close();
+      },
+    });
+    stopTaskFinalizer = (deadline) => finalizer.stop(deadline);
+    coreLoop.setTaskReportConsumer((signal) => finalizer.consumeSignal(signal));
+    await finalizer.start();
     const executor = createKubernetesTaskExecutor();
     taskLaunch = createTaskLaunchReconciler({
+      onCleanup: () => {
+        void finalizer.resync();
+      },
+      onTerminal: async (id, reason) => {
+        await finalizer.finalize(id, reason);
+      },
       registry: launchRegistry,
       cancelRegistry: () => {
         taskLaunchController.abort();
@@ -1428,6 +1467,7 @@ export async function createContainerAsync(
     const deadline = Date.now() + budget;
     storageRetention?.stop();
     const taskDrain = taskLaunch?.stop(deadline);
+    const taskFinalizerDrain = stopTaskFinalizer?.(deadline);
     const taskChannelDrain = stopTaskChannel?.(deadline);
     outboundDelivery.stop();
     return shutdownSequence({
@@ -1443,6 +1483,7 @@ export async function createContainerAsync(
       // deadline before closing the shared pool, without touching turn clients.
       await taskDrain;
       await taskChannelDrain;
+      await taskFinalizerDrain;
       await snapshotRedis.quit();
       await postgres.end();
     });

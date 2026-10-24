@@ -2119,8 +2119,22 @@ export class CoreLoop {
    * Normalize a single signal (side effects + enrichment).
    * This should be called inside a per-signal trace context.
    */
+  private taskReportConsumer: ((signal: Signal) => Promise<void>) | undefined;
+
+  /** Infrastructure handoff must settle before tick-local bus completion. */
+  setTaskReportConsumer(consumer: (signal: Signal) => Promise<void>): void {
+    this.taskReportConsumer = consumer;
+  }
+
   private async normalizeSignal(signal: Signal): Promise<Signal> {
     let normalized = signal;
+    if (
+      signal.type === 'task_report' &&
+      signal.data?.kind === 'task_report' &&
+      signal.data.eventKind === 'terminal'
+    ) {
+      await this.taskReportConsumer?.(signal);
+    }
 
     // Special handling for user messages
     if (normalized.type === 'user_message') {

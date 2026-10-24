@@ -66,7 +66,15 @@ export class ValkeyBusSignalStream implements BusSignalStream {
 
   /** Atomic admission closes the append-before-mailbox-mark crash window. */
   async appendTaskSignal(signal: Signal, key: string): Promise<string> {
-    if (!key || signal.type !== 'task_report' || signal.data?.kind !== 'task_report') {
+    if (
+      !key ||
+      !(
+        (signal.type === 'task_report' && signal.data?.kind === 'task_report') ||
+        (signal.type === 'task_outcome' &&
+          signal.data?.kind === 'task_outcome' &&
+          signal.data.outcomeKey === key)
+      )
+    ) {
       throw new Error('Invalid task bus signal');
     }
     return (await this.redis.eval(

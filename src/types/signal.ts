@@ -17,6 +17,7 @@
 
 import type { Priority } from './priority.js';
 import type { FailureSummary } from '../runtime/motor-cortex/motor-protocol.js';
+import type { TaskOutcomeEvent } from '../ports/tasks.js';
 
 /**
  * Signal types - what the signal represents.
@@ -66,7 +67,8 @@ export type SignalType =
   | 'motor_result' // Motor Cortex run completed, failed, or needs input
 
   // === TASK CHANNEL (durable mailbox notifications, not cognition input) ===
-  | 'task_report'; // A task mailbox step or terminal report is ready
+  | 'task_report' // A task mailbox step or terminal report is ready
+  | 'task_outcome'; // A sealed, immutable terminal task outcome
 
 /**
  * Signal sources - which "organ" emitted the signal.
@@ -115,7 +117,8 @@ export type SignalSource =
   | 'motor.cortex' // From Motor Cortex runtime service
 
   // === TASK CHANNEL ===
-  | 'task.channel'; // From the durable task event mailbox
+  | 'task.channel' // From the durable task event mailbox
+  | 'task.finalizer'; // From the terminal Postgres outbox
 
 /**
  * Signal - structured data emitted by sensory organs and neurons.
@@ -176,7 +179,8 @@ export type SignalData =
   | ThoughtData
   | FactBatchData
   | MotorResultData
-  | TaskReportData;
+  | TaskReportData
+  | TaskOutcomeData;
 
 /**
  * Image attached to a user message (e.g., Telegram photo).
@@ -569,6 +573,10 @@ export interface MotorResultData {
 /** Durable task notification. Payload bytes remain in the task mailbox.
  * A terminal report wakes finalization, never the legacy Motor Cortex path.
  */
+export type TaskOutcomeData = TaskOutcomeEvent & {
+  kind: 'task_outcome';
+};
+
 export interface TaskReportData {
   kind: 'task_report';
   taskId: string;
@@ -647,6 +655,7 @@ export const SIGNAL_TTL: Record<SignalType, number | null> = {
 
   // Durable mailbox reports must survive delayed finalization.
   task_report: null,
+  task_outcome: null,
 };
 
 /**

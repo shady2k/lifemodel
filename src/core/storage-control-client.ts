@@ -2,6 +2,7 @@ import { Agent, request } from 'node:https';
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import type { Socket } from 'node:net';
+import type { TaskSealReceipt } from '../ports/tasks.js';
 
 export interface DeletionPlan {
   id: string;
@@ -18,7 +19,8 @@ export class StorageControlError extends Error {
   readonly id = randomUUID();
   constructor(
     readonly route: string,
-    readonly status?: number
+    readonly status?: number,
+    readonly code?: string
   ) {
     super(
       `Storage control request failed: ${route}${status === undefined ? '' : ` (${String(status)})`}`
@@ -39,7 +41,14 @@ export interface StorageAllocationRequest {
   readonly retentionRevision: string;
 }
 
+export interface StorageSealRequest {
+  readonly space: string;
+  readonly effectKey: string;
+  readonly expectedRevision: string;
+  readonly outcome: 'completed' | 'failed' | 'stopped';
+}
 export interface StorageControlClient {
+  seal(request: StorageSealRequest, signal?: AbortSignal): Promise<TaskSealReceipt>;
   allocate(
     request: StorageAllocationRequest,
     signal?: AbortSignal
@@ -74,6 +83,48 @@ function validPlan(value: unknown): value is DeletionPlan {
     typeof value['totalBytes'] === 'number' &&
     Number.isSafeInteger(value['totalBytes']) &&
     value['totalBytes'] >= 0
+  );
+}
+
+/** Validate the module receipt before it can cross the terminal CAS boundary. */
+function validSealReceipt(value: unknown, request: StorageSealRequest): value is TaskSealReceipt {
+  if (!record(value) || !record(value['manifest'])) return false;
+  const manifest = value['manifest'];
+  const object = (o: unknown) =>
+    record(o) &&
+    typeof o['id'] === 'string' &&
+    ID.test(o['id']) &&
+    typeof o['name'] === 'string' &&
+    Buffer.byteLength(o['name']) <= 1024 &&
+    typeof o['size'] === 'number' &&
+    Number.isSafeInteger(o['size']) &&
+    o['size'] >= 0 &&
+    typeof o['sha256'] === 'string' &&
+    /^[a-f0-9]{64}$/.test(o['sha256']) &&
+    ['result', 'log', 'artifact'].includes(o['mark'] as string);
+  return (
+    typeof value['id'] === 'string' &&
+    ID.test(value['id']) &&
+    value['space'] === request.space &&
+    value['effectKey'] === request.effectKey &&
+    typeof value['revision'] === 'string' &&
+    /^(0|[1-9][0-9]{0,18})$/.test(value['revision']) &&
+    value['outcome'] === request.outcome &&
+    value['state'] === 'sealed' &&
+    (value['reason'] === null ||
+      (typeof value['reason'] === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(value['reason']))) &&
+    typeof manifest['id'] === 'string' &&
+    ID.test(manifest['id']) &&
+    manifest['version'] === 1 &&
+    typeof manifest['sha256'] === 'string' &&
+    /^[a-f0-9]{64}$/.test(manifest['sha256']) &&
+    Array.isArray(manifest['objects']) &&
+    manifest['objects'].every(object) &&
+    new Set(manifest['objects'].map((o) => (o as Record<string, unknown>)['id'])).size ===
+      manifest['objects'].length &&
+    (request.outcome !== 'completed' ||
+      (value['reason'] === null &&
+        manifest['objects'].some((o) => (o as Record<string, unknown>)['mark'] === 'result')))
   );
 }
 
@@ -186,12 +237,6 @@ export function createStorageControlClient(options: {
           res.on('error', fail);
           res.on('aborted', fail);
           status = res.statusCode;
-          if (status === undefined || status < 200 || status >= 300) {
-            fail();
-            res.destroy();
-            req.destroy();
-            return;
-          }
           const chunks: Buffer[] = [];
           let size = 0;
           res.on('data', (chunk: Buffer) => {
@@ -205,7 +250,21 @@ export function createStorageControlClient(options: {
           });
           res.on('end', () => {
             try {
-              resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown);
+              const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+              if (status === undefined || status < 200 || status >= 300) {
+                // Consume only a bounded structured code. Never retain remote text,
+                // IDs, response bodies or transport causes in an error.
+                const code =
+                  record(parsed) &&
+                  record(parsed['error']) &&
+                  typeof parsed['error']['code'] === 'string' &&
+                  /^[a-z][a-z0-9_]{0,63}$/.test(parsed['error']['code'])
+                    ? parsed['error']['code']
+                    : undefined;
+                reject(new StorageControlError(route, status, code));
+                return;
+              }
+              resolve(parsed);
             } catch {
               fail();
             }
@@ -223,6 +282,19 @@ export function createStorageControlClient(options: {
     }
   }
   return {
+    seal: async (seal, signal) => {
+      const route = '/seal';
+      if (
+        !ID.test(seal.space) ||
+        !ID.test(seal.effectKey) ||
+        !/^(0|[1-9][0-9]{0,18})$/.test(seal.expectedRevision) ||
+        !['completed', 'failed', 'stopped'].includes(seal.outcome)
+      )
+        throw new StorageControlError(route);
+      const result = await call(route, route, seal, signal);
+      if (!validSealReceipt(result, seal)) throw new StorageControlError(route, 200);
+      return result;
+    },
     allocate: async (allocation, signal) => {
       const route = '/allocate';
       if (
