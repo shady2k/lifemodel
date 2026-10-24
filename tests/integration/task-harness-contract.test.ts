@@ -3,7 +3,6 @@ import { createServer, type Server } from 'node:https';
 import { mkdtemp, writeFile, chmod, mkdir, readFile, rm, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { Socket } from 'node:net';
@@ -22,9 +21,35 @@ const exec = promisify(execFile);
 const TOKEN = 'TASK-MODEL-TOKEN-PRIVATE-CANARY';
 const BRIEFING = 'TASK-BRIEFING-PRIVATE-CANARY';
 const RESULT = 'The task result is durable.';
-const BINARY = '/usr/local/bin/opencode';
 const briefing = { text: BRIEFING, model: 'lifemodel/task' };
-type Scenario = 'success' | 'provider' | 'tool' | 'storage' | 'descendant' | 'abort' | 'permission';
+type Scenario =
+  | 'success'
+  | 'provider'
+  | 'tool'
+  | 'storage'
+  | 'descendant'
+  | 'abort'
+  | 'permission'
+  | 'background';
+const fixtureRegistry = JSON.parse(
+  await readFile('tests/fixtures/task-agent-registry.json', 'utf8')
+);
+Object.assign(taskHarnessRegistry, fixtureRegistry);
+type ContractFixture = {
+  usesModelEndpoint: boolean;
+  prepare?: (work: string, mode: string) => Promise<void>;
+  checkProvisioned: () => Promise<void>;
+  checkOffline: (work: string) => Promise<void>;
+};
+const contractFixtures: Record<string, ContractFixture> = {};
+for (const [name, agent] of Object.entries(taskHarnessRegistry)) {
+  contractFixtures[name] = (await import(
+    new URL(
+      agent.contractModule!,
+      new URL('../../loader/src/task-harness-registry.ts', import.meta.url)
+    ).href
+  )) as ContractFixture;
+}
 
 /** Both adapters use exactly the same public port assertions. The real adapter
  * speaks to a TLS fake of the task gateway, never to a model on the Internet.
@@ -43,6 +68,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
   let requests: { path: string; token: string | undefined; body: string }[];
   let events: TaskHarnessEvent[];
   let work: string;
+  let activeFixture: ContractFixture | undefined;
   const sockets = new Set<Socket>();
   const cleanup: (() => Promise<void>)[] = [];
   let oldConfigHome: string | undefined;
@@ -53,18 +79,6 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
     directory = await mkdtemp(join(tmpdir(), 'task-harness-'));
     await writeFile(join(directory, 'ca'), certificate.ca);
     await writeFile(join(directory, 'token'), TOKEN);
-    const immutable = join(directory, 'xdg/opencode');
-    await mkdir(immutable, { recursive: true });
-    await writeFile(join(immutable, '.gitignore'), 'node_modules\npackage.json\n');
-    await chmod(immutable, 0o555);
-    await writeFile(
-      join(directory, 'opencode.json'),
-      JSON.stringify({
-        $schema: 'https://opencode.ai/v2/config.json',
-        ...JSON.parse(await readFile('docker/workbench/opencode.json', 'utf8')),
-        share: 'disabled',
-      })
-    );
     const traps = join(directory, 'traps');
     await mkdir(traps);
     for (const command of ['npm', 'bun', 'curl', 'wget']) {
@@ -77,7 +91,6 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
     }
     oldConfigHome = process.env.XDG_CONFIG_HOME;
     oldPath = process.env.PATH;
-    process.env.XDG_CONFIG_HOME = join(directory, 'xdg');
     process.env.PATH = `${traps}:${oldPath}`;
     api = createServer({ cert: certificate.cert, key: certificate.key }, (req, res) => {
       req.on('error', () => undefined);
@@ -124,10 +137,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
             })}\n\n`
           );
         chunk({ role: 'assistant' });
-        if (
-          (scenario === 'tool' || scenario === 'storage' || scenario === 'descendant') &&
-          !toolSent
-        ) {
+        if (['tool', 'storage', 'descendant', 'background'].includes(scenario) && !toolSent) {
           toolSent = true;
           chunk({
             tool_calls: [
@@ -143,7 +153,10 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
                         ? 'test "$LIFEMODEL_STORAGE_ENDPOINT" = "https://storage.invalid" && test "$LIFEMODEL_STORAGE_SPACE" = "task-space" && test "$LIFEMODEL_STORAGE_TOKEN_FILE" = "/projected/storage/token" && test "$LIFEMODEL_STORAGE_CA_FILE" = "/projected/storage/ca" && test -z "$LIFEMODEL_TASK_MODEL_TOKEN_FILE" && test -z "$LIFEMODEL_TASK_CHANNEL_TOKEN_FILE" && printf storage-capability-ok'
                         : scenario === 'descendant'
                           ? `python3 -c 'import subprocess; p=subprocess.Popen(["python3","-c","import time; time.sleep(90)"], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); open("detached.pid","w").write(str(p.pid))'`
-                          : 'exit 42',
+                          : scenario === 'background'
+                            ? 'sleep 90'
+                            : 'exit 42',
+                    ...(scenario === 'background' ? { background: true } : {}),
                     description: 'Required task operation',
                   }),
                 },
@@ -168,36 +181,30 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
     const address = api.address();
     if (!address || typeof address === 'string') throw new Error('fake_gateway_bind_failed');
     endpoint = `https://localhost:${address.port}`;
-    // Provisioning checks the official archive SHA256 before extraction. Verify
-    // the executable pin again; no package resolution occurs during this test.
-    expect(
-      (
-        await exec(BINARY, ['--version'], {
-          env: {
-            ...process.env,
-            HOME: directory,
-            TMPDIR: directory,
-            XDG_DATA_HOME: join(directory, 'version-data'),
-            XDG_STATE_HOME: join(directory, 'version-state'),
-            XDG_CACHE_HOME: join(directory, 'version-cache'),
-          },
-        })
-      ).stdout.trim()
-    ).toBe('opencode v2.1.4');
-    expect(
-      createHash('sha256')
-        .update(await readFile(BINARY))
-        .digest('hex')
-    ).toMatch(/^[a-f0-9]{64}$/);
+    // Every registry configuration owns its fixture. No shared agent override.
+    for (const agent of Object.values(taskHarnessRegistry)) {
+      await access(agent.configFile);
+      expect(
+        (
+          await exec(agent.command, agent.versionArgs, {
+            env: {
+              ...process.env,
+              HOME: directory,
+              TMPDIR: directory,
+              XDG_DATA_HOME: join(directory, 'version-data'),
+              XDG_STATE_HOME: join(directory, 'version-state'),
+              XDG_CACHE_HOME: join(directory, 'version-cache'),
+            },
+          })
+        ).stdout.trim()
+      ).toBe(agent.versionOutput);
+    }
+    for (const fixture of Object.values(contractFixtures)) await fixture.checkProvisioned();
   }, 30_000);
 
   afterEach(async () => {
     for (const close of cleanup.splice(0).reverse()) await close();
-    if (work) {
-      await expect(access(join(work, 'home/bootstrap-attempt'))).rejects.toThrow();
-      await expect(access(join(directory, 'xdg/opencode/package.json'))).rejects.toThrow();
-      await expect(access(join(work, '.opencode'))).rejects.toThrow();
-    }
+    if (work) await activeFixture?.checkOffline(work);
   });
 
   afterAll(async () => {
@@ -208,13 +215,13 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
     for (const socket of sockets) socket.destroy();
     if (api) await new Promise<void>((resolve) => api.close(() => resolve()));
     if (directory) {
-      await chmod(join(directory, 'xdg/opencode'), 0o755);
       await rm(directory, { recursive: true, force: true });
     }
     certificate?.cleanup();
   });
 
   async function harness(kind: string, mode: Scenario): Promise<TaskHarness> {
+    activeFixture = contractFixtures[kind];
     scenario = mode;
     expectedToken = TOKEN;
     requests = [];
@@ -225,50 +232,26 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
     work = await mkdtemp(join(directory, 'work-'));
     const onEvent = async (event: TaskHarnessEvent) => {
       events.push(event);
-      if (kind === 'scripted' && event.type === 'tool') requestSeen?.();
+      if (!activeFixture?.usesModelEndpoint && event.type === 'tool') requestSeen?.();
     };
-    if (kind === 'scripted')
-      return new AcpTaskHarness({
-        modelEndpoint: endpoint,
-        modelTokenFile: join(directory, 'token'),
-        modelCaFile: join(directory, 'ca'),
-        workDirectory: work,
-        timeoutMs: 45000,
-        onEvent,
-        agent: {
-          label: 'Scripted ACP',
-          protocol: 'acp',
-          command: 'python3',
-          args: [resolve('tests/fixtures/task-scripted-acp.py'), mode],
-          configFile: '',
-          version: '',
-          versionOutput: '',
-          versionArgs: [],
-          adapterModule: '',
-        },
-        configure: () => ({}),
-      });
-    return createRegisteredHarness(
-      kind,
-      {
-        modelEndpoint: endpoint,
-        modelTokenFile: join(directory, 'token'),
-        modelCaFile: join(directory, 'ca'),
-        workDirectory: work,
-        onEvent,
-        timeoutMs: 45000,
-        storageEnv: {
-          LIFEMODEL_STORAGE_ENDPOINT: 'https://storage.invalid',
-          LIFEMODEL_STORAGE_SPACE: 'task-space',
-          LIFEMODEL_STORAGE_TOKEN_FILE: '/projected/storage/token',
-          LIFEMODEL_STORAGE_CA_FILE: '/projected/storage/ca',
-        },
+    await contractFixtures[kind]?.prepare?.(work, mode);
+    return createRegisteredHarness(kind, {
+      modelEndpoint: endpoint,
+      modelTokenFile: join(directory, 'token'),
+      modelCaFile: join(directory, 'ca'),
+      workDirectory: work,
+      onEvent,
+      timeoutMs: 45000,
+      storageEnv: {
+        LIFEMODEL_STORAGE_ENDPOINT: 'https://storage.invalid',
+        LIFEMODEL_STORAGE_SPACE: 'task-space',
+        LIFEMODEL_STORAGE_TOKEN_FILE: '/projected/storage/token',
+        LIFEMODEL_STORAGE_CA_FILE: '/projected/storage/ca',
       },
-      { configFile: join(directory, 'opencode.json') }
-    );
+    });
   }
 
-  for (const kind of [...Object.keys(taskHarnessRegistry), 'scripted']) {
+  for (const kind of Object.keys(taskHarnessRegistry)) {
     describe(kind, () => {
       it('returns one semantic success with a result and refuses a second start', async () => {
         const task = await harness(kind, 'success');
@@ -279,7 +262,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
         expect(JSON.stringify(events)).not.toContain(TOKEN);
         expect(JSON.stringify(events)).not.toContain(BRIEFING);
         expect(JSON.stringify(events)).not.toContain(RESULT);
-        if (kind !== 'scripted') {
+        if (contractFixtures[kind]!.usesModelEndpoint) {
           expect(requests.length).toBeGreaterThan(0);
           expect(
             requests.every(
@@ -305,7 +288,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
           result: '',
           reasonCode: 'required_tool_failed',
         });
-        if (kind !== 'scripted') expect(toolSent).toBe(true);
+        if (contractFixtures[kind]!.usesModelEndpoint) expect(toolSent).toBe(true);
       }, 60_000);
 
       it('aborts an in-flight turn and declares unsupported stage-4 operations', async () => {
@@ -445,6 +428,20 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
     }
   });
 
+  it.each(['background'] as const)(
+    'rejects a real shell %s result without observed completion',
+    async (mode) => {
+      const task = await harness('opencode', mode);
+      expect(await task.start(briefing)).toEqual({
+        outcome: 'failed',
+        result: '',
+        reasonCode: 'required_tool_failed',
+      });
+      expect(toolSent).toBe(true);
+    },
+    60000
+  );
+
   it('passes only the storage capability to a real shell tool, not model or channel token paths', async () => {
     const task = await harness('opencode', 'storage');
     expect(await task.start(briefing)).toEqual({ outcome: 'succeeded', result: RESULT });
@@ -482,7 +479,7 @@ ${mode === 'crash' ? 'os.kill(os.getpid(), signal.SIGKILL)' : 'raise SystemExit(
         workDirectory: work,
         agent: {
           ...taskHarnessRegistry['opencode']!,
-          configFile: join(directory, 'opencode.json'),
+          configFile: taskHarnessRegistry['opencode']!.configFile,
           command: binary,
         },
         configure: configureAgent,
@@ -507,7 +504,7 @@ ${mode === 'crash' ? 'os.kill(os.getpid(), signal.SIGKILL)' : 'raise SystemExit(
       workDirectory: work,
       agent: {
         ...taskHarnessRegistry['opencode']!,
-        configFile: join(directory, 'opencode.json'),
+        configFile: taskHarnessRegistry['opencode']!.configFile,
         command: binary,
       },
       configure: configureAgent,
@@ -569,6 +566,7 @@ describe('ACP semantic terminal boundary', () => {
       { status: 'completed', rawOutput: { metadata: { signal: 'SIGKILL' } } },
       { status: 'completed', rawOutput: { metadata: { timeout: true } } },
       { status: 'completed', rawInput: { background: true } },
+      { status: 'completed', rawOutput: { metadata: { status: 'running' } } },
     ]) {
       const turn = new AcpTurn(toolOutputFailed);
       turn.update({ sessionUpdate: 'tool_call', toolCallId: 'required', ...update });

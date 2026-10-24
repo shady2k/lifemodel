@@ -43,12 +43,13 @@ describe('replaceable task agent boundary', () => {
     const registry = JSON.parse(read('src/ports/task-harness-registry.json'));
     for (const agent of Object.values(registry) as {
       protocol: string;
-      version: string;
-      imageSha256: string;
+      provision: { archives: Record<string, { sha256: string }> };
     }[]) {
       expect(agent.protocol).toBe('acp');
-      expect(read('docker/workbench/Dockerfile')).toContain(agent.imageSha256);
-      expect(read('docker/workbench/Dockerfile')).toContain(agent.version);
+      expect(Object.keys(agent.provision.archives)).toEqual(['x86_64', 'aarch64']);
     }
+    expect(read('docker/workbench/Dockerfile')).toContain('task-agent-provision.mjs');
+    expect(read('scripts/test-isolated.mjs')).toContain('agentProvisionScript');
+    expect(read('scripts/test-docker-isolated.mjs')).toContain('agentInstallScript');
   });
 });

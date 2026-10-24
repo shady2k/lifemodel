@@ -96,7 +96,7 @@ const FIXTURE_FILES = {
   'opencode.tar.gz': 'd',
 };
 const ARTIFACTS = Object.keys(FIXTURE_FILES).map((file) => ({
-  key: file === 'opencode.tar.gz' ? 'opencode' : file,
+  key: file === 'opencode.tar.gz' ? 'agent-opencode' : file,
   file,
   hostPath: `/cache/${file}`,
 }));
@@ -432,7 +432,8 @@ describe('buildPlan', () => {
       'stage-artifacts',
       'transfer-source',
       'provision-root',
-      'provision-opencode',
+      'provision-agent-opencode',
+      'provision-agent-scripted',
       'provision-repo',
       'provision-daemon',
       'discover-uid',

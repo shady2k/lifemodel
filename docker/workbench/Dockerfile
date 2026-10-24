@@ -29,16 +29,11 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
  && apt-get install -y --no-install-recommends ca-certificates curl git build-essential python3 ripgrep strace \
  && rm -rf /var/lib/apt/lists/* /tmp/debian.InRelease
 
-# Pinned native v2 npm archive. Registry SHA-512 was verified during research;
-# its independently recorded SHA-256 below is checked before extraction.
-ENV OPENCODE_VERSION=2.1.4 \
-    OPENCODE_SHA256=ce05abe2dce1041391c8ec8cdb8da066f640fd471e72ac846dcb089c441e11e1
-RUN test "$(dpkg --print-architecture)" = amd64 \
- && curl --fail --location --retry 3 "https://registry.npmjs.org/@opencode/cli-linux-x64/-/cli-linux-x64-${OPENCODE_VERSION}.tgz" -o /tmp/opencode.tar.gz \
- && echo "${OPENCODE_SHA256}  /tmp/opencode.tar.gz" | sha256sum -c - \
- && tar -xzf /tmp/opencode.tar.gz -C /tmp package/bin/opencode \
- && install -m 0555 /tmp/package/bin/opencode /usr/local/bin/opencode \
- && rm -rf /tmp/package /tmp/opencode.tar.gz
+# Registry-owned architecture pins, extraction and immutable agent configuration.
+COPY src/ports/task-harness-registry.json /opt/lifemodel/src/ports/task-harness-registry.json
+COPY scripts/task-agent-provision.mjs /opt/lifemodel/scripts/task-agent-provision.mjs
+COPY docker/workbench/ /opt/lifemodel/docker/workbench/
+RUN node /opt/lifemodel/scripts/task-agent-provision.mjs > /tmp/install-agents.sh  && sh -ec "$(cat /tmp/install-agents.sh)"  && rm /tmp/install-agents.sh
 
 # Keep all development dependencies, including native modules, from THIS source
 # lock. Do not copy an owner .npmrc (it could contain credentials). The only
@@ -56,13 +51,6 @@ COPY --from=cli-build /build/package.json /opt/lifemodel/loader/package.json
 COPY --from=cli-build /build/dist/storage-cli-main.js /build/dist/storage-cli.js /build/dist/task-*.js /opt/lifemodel/loader/dist/
 COPY --chown=root:root --chmod=0555 docker/loader/lifemodel-storage /usr/local/bin/lifemodel-storage
 COPY --chown=root:root --chmod=0555 docker/workbench/lifemodel-task-launcher /usr/local/bin/lifemodel-task-launcher
-COPY --chown=root:root docker/workbench/opencode.json /etc/lifemodel/opencode.json
-
-# Config roots are immutable. v2 has no v1 plugin bootstrap dependency.
-RUN mkdir -p /etc/lifemodel/xdg/opencode \
- && chmod 0555 /etc/lifemodel/xdg /etc/lifemodel/xdg/opencode
-COPY src/ports/task-harness-registry.json /opt/lifemodel/src/ports/task-harness-registry.json
-
 # The Job mounts its PRIVATE working volume at /work (uid/gid/fsGroup 1000).
 # HOME, mutable XDG paths and TMPDIR live there; config stays immutable above.
 RUN mkdir -p /work/home /work/tmp \

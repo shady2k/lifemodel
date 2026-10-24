@@ -41,7 +41,7 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
     const launcher = readFileSync(join(repoRoot, 'scripts/test-isolated.mjs'), 'utf8');
     const machine = readFileSync(join(repoRoot, 'docker/test/bootstrap-orb.sh'), 'utf8');
     expect(launcher).toContain('git ca-certificates curl python3 ripgrep');
-    expect(launcher).toContain('recipe-v7-acp-v2');
+    expect(launcher).toContain('recipe-v8-registry-acp');
     expect(machine).toContain('python3 ripgrep uidmap');
   });
   it('npm test runs the whole suite through the isolated launcher', () => {

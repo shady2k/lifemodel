@@ -1,7 +1,12 @@
 #!/usr/bin/python3
 """Deterministic ACP agent. No model/network/config dependency."""
-import json, sys
-scenario = sys.argv[1]
+import json, sys, os
+if "--version" in sys.argv:
+    print("scripted-acp 1")
+    raise SystemExit(0)
+scenario = sys.argv[1] if len(sys.argv) > 1 else open(os.environ["SCRIPTED_SCENARIO_FILE"]).read().strip()
+if "SCRIPTED_CONFIG" in os.environ:
+    assert json.load(open(os.environ["SCRIPTED_CONFIG"]))["fixture"] == "second-distinct-agent"
 session = "scripted-session"
 prompt_id = None
 def send(value):

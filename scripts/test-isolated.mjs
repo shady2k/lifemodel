@@ -8,28 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const BASE_IMAGE = 'node:24.21.0-bookworm-slim';
-// Exact native v2 npm archives, fetched only during network-enabled provisioning.
-export const OPENCODE_VERSION = '2.1.4';
-export const OPENCODE_ARCHIVES = Object.freeze({
-  aarch64: Object.freeze({
-    file: 'cli-linux-arm64-2.1.4.tgz',
-    url: 'https://registry.npmjs.org/@opencode/cli-linux-arm64/-/cli-linux-arm64-2.1.4.tgz',
-    sha256: 'e9acb4e23a9ac432139693aa166455a6add8946533394cbe083459a48e788861',
-  }),
-  x86_64: Object.freeze({
-    file: 'cli-linux-x64-2.1.4.tgz',
-    url: 'https://registry.npmjs.org/@opencode/cli-linux-x64/-/cli-linux-x64-2.1.4.tgz',
-    sha256: 'ce05abe2dce1041391c8ec8cdb8da066f640fd471e72ac846dcb089c441e11e1',
-  }),
-});
-export function opencodeExtractScript(archive) {
-  return `tar -xzf "${archive}" -C /tmp package/bin/opencode; install -m 0555 /tmp/package/bin/opencode /usr/local/bin/opencode; rm -rf /tmp/package; test "$(/usr/local/bin/opencode --version)" = 'opencode v${OPENCODE_VERSION}'`;
-}
-export function opencodeProvisionScript(arch) {
-  const spec = OPENCODE_ARCHIVES[arch];
-  if (!spec) throw new Error(`No pinned OpenCode fixture for ${arch}`);
-  return `curl --fail --location --retry 3 '${spec.url}' -o /tmp/opencode.tar.gz; printf '%s  %s\\n' '${spec.sha256}' /tmp/opencode.tar.gz | sha256sum -c -; ${opencodeExtractScript('/tmp/opencode.tar.gz')}; rm /tmp/opencode.tar.gz`;
-}
+import { testAgentRegistry, agentProvisionScript, nativeAgentArch } from './task-agent-provision.mjs';
 const LABEL = 'com.lifemodel.test-boundary';
 const LIMITS = ['--cpus', '2', '--memory', '3g', '--memory-swap', '3g', '--pids-limit', '256', '--init'];
 const SOURCE_LABEL = 'com.lifemodel.test-source';
@@ -303,8 +282,10 @@ export async function run(argv, dependencies = {}) {
       const inspect = await docker(['image', 'inspect', BASE_IMAGE, '--format', '{{.Id}}/{{.Architecture}}'], { mustSucceed: false, timeoutMs: 20_000 });
       if (inspect.code) await docker(['pull', BASE_IMAGE], { live: true });
       const base = inspect.code ? await docker(['image', 'inspect', BASE_IMAGE, '--format', '{{.Id}}/{{.Architecture}}']) : inspect;
-      const hash = createHash('sha256').update('recipe-v7-acp-v2\0' + base.stdout)
-        .update(OPENCODE_VERSION).update(JSON.stringify(OPENCODE_ARCHIVES))
+      const hash = createHash('sha256').update('recipe-v8-registry-acp\0' + base.stdout)
+        .update(JSON.stringify(testAgentRegistry))
+        .update(fs.readFileSync(path.join(ROOT, 'scripts/task-agent-provision.mjs')))
+        .update(Object.values(testAgentRegistry).flatMap(agent => agent.provision.files ?? []).map(file => fs.readFileSync(path.join(snapshot, file.source))).reduce((all, bytes) => Buffer.concat([all, bytes]), Buffer.alloc(0)))
         .update(fs.readFileSync(path.join(snapshot, 'package.json')))
         .update(fs.readFileSync(path.join(snapshot, 'package-lock.json')))
         .update(fs.existsSync(path.join(snapshot, '.npmrc')) ? fs.readFileSync(path.join(snapshot, '.npmrc')) : '').digest('hex').slice(0, 24);
@@ -317,8 +298,13 @@ export async function run(argv, dependencies = {}) {
         await docker(['start', prep]);
         await docker(['exec', prep, 'sh', '-ec', 'mkdir -p /opt/deps /snapshot; apt-get update -qq; apt-get install -y -qq --no-install-recommends git ca-certificates curl python3 ripgrep; chown node:node /opt/deps'], { live: true });
         const nativeArch = base.stdout.trim().split('/').at(-1);
-        const opencodeArch = nativeArch === 'amd64' ? 'x86_64' : nativeArch === 'arm64' ? 'aarch64' : nativeArch;
-        await docker(['exec', prep, 'sh', '-ec', opencodeProvisionScript(opencodeArch)], { live: true });
+        for (const file of Object.values(testAgentRegistry).flatMap(agent => agent.provision.files ?? [])) {
+          const destination = path.posix.join('/snapshot', file.source);
+          await docker(['exec', prep, 'mkdir', '-p', path.posix.dirname(destination)]);
+          await docker(['cp', path.join(snapshot, file.source), `${prep}:${destination}`]);
+        }
+        await docker(['exec', prep, 'sh', '-ec', agentProvisionScript(nativeAgentArch(nativeArch), testAgentRegistry, '/snapshot')], { live: true });
+        await docker(['exec', prep, 'sh', '-ec', 'rm -rf /snapshot; mkdir /snapshot'], { live: true });
         for (const file of ['package.json', 'package-lock.json', ...(fs.existsSync(path.join(snapshot, '.npmrc')) ? ['.npmrc'] : [])]) await docker(['cp', path.join(snapshot, file), `${prep}:/opt/deps/${file}`]);
         await docker(['exec', '-u', 'node', '-w', '/opt/deps', '-e', 'HUSKY=0', '-e', 'HOME=/home/node', prep, 'npm', 'ci', '--no-audit', '--no-fund'], { live: true });
         await docker(['commit', prep, image], { live: true });

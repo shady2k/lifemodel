@@ -6,8 +6,11 @@ A second ACP agent joins this same image in stage 4. No second task image is sel
 
 ## Contents and pins
 
-`docker/workbench/Dockerfile` builds Linux/amd64 from the same release commit
-as the core, loader and web images. Unsupported architectures fail closed.
+`docker/workbench/Dockerfile` consumes architecture pins and extraction/config
+inputs from `src/ports/task-harness-registry.json` through
+`scripts/task-agent-provision.mjs`. The same input provisions both isolated test
+paths. Missing architectures fail closed. Linux/amd64 has the local offline
+receipt; the arm64 archive pin is recorded but execution is not accepted here.
 
 | Input | Pin / location |
 | --- | --- |

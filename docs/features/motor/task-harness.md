@@ -214,17 +214,41 @@ would prove denial, not absence of attempted outbound fetches.
 
 1. Add one configuration module beside `task-opencode.ts`. Export
    `configureAgent({workDirectory, configFile, relayBaseURL})` and
-   `toolOutputFailed(rawOutput)` for agent-specific command status; return only the
-   agent's scoped environment. Do not implement another native protocol client.
-2. Add one entry in `src/ports/task-harness-registry.json`: name, display label,
+   `toolOutputFailed(rawOutput, rawInput)` for agent-specific command status;
+   return only the agent's scoped environment. Do not implement a native client.
+2. Add one entry in `src/ports/task-harness-registry.json`: name, label,
    ACP command/args, module path, immutable config path, version/versionArgs,
-   and checksum-pinned image archive. Settings names, core types, launcher
-   selection and offline self-check derive from this single list.
-3. Bake its checksum-verified executable into the workbench (build-time only).
-4. Bake its non-secret read-only config and admit it in the Docker allowlist.
+   exact version output, and `provision`. The latter owns architecture-keyed
+   archive URLs/SHA-256, extraction member, config source/destination/mode, and
+   immutable config directories. Settings, launcher selection and self-check
+   derive from this list. Missing architecture pins fail closed.
+3. Add its non-secret config under `docker/workbench/` (JSON files are admitted
+   by the dedicated allowlist). `scripts/task-agent-provision.mjs` consumes the
+   registry directly for the Dockerfile and both isolated test paths. There is
+   no second binary list, Dockerfile pin or agent-specific extraction branch.
+4. Add the agent-owned `contractModule` fixture. It owns any test setup and
+   offline assertions for that agent. The shared suite uses its normal registry
+   configuration without replacing its config with another agent's JSON.
 
-The shared contract iterates registered names plus the scripted fake. Provision
-the binary in the isolated test setup as well. Every added real agent must pass
-success, provider error, abort, tool failure and process-tree cleanup before it
-can be offered. If its ACP surface lacks a required signal, stop: no native API
-fallback. The scripted port fake is test-only and not offered as an owner setting.
+The shared contract iterates the shipped registry plus
+`tests/fixtures/task-agent-registry.json`. The latter adds a distinct scripted
+ACP configuration with its own executable, module, config and version check;
+normal test provisioning installs it using the same registry-driven path. It is
+not an owner setting and is not shipped in the workbench. Every real agent must
+pass success, provider error, abort and required-tool failure before being
+offered. Missing ACP signals block integration; there is no native fallback.
+
+### ACP patch and framing boundary
+
+ACP v1 `ToolCallUpdate` requires only `toolCallId`; null/omitted patch fields
+leave retained call state unchanged. Retained input and output feed the agent's
+semantic guard. Metadata-only updates of settled calls preserve the final
+answer, while new or continuing work invalidates earlier prose. See the
+[upstream schema](https://github.com/agentclientprotocol/agent-client-protocol/blob/main/schema/v1/schema.json).
+
+Success remains provisional until the process tree stops and stdout reaches
+EOF. Fatal UTF-8 decoding and the final frame boundary reject non-whitespace
+unterminated bytes, even when received during teardown. No quiet-time timer is
+used as evidence that stdout has drained. The scripted contract includes live
+agents writing end_turn plus malformed, late-tool, truncated and incomplete
+UTF-8 tails, then waiting for the shutdown signal.

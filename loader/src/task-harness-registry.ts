@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 
 export interface AgentConfiguration {
   adapterModule: string;
+  contractModule?: string;
   label: string;
   protocol: string;
   command: string;

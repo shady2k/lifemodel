@@ -2,7 +2,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { StringDecoder } from 'node:string_decoder';
 import { createTaskModelRelay } from './task-model-relay.js';
 import { TASK_PROCESS_SUPERVISOR } from './task-process.js';
 import type { AgentConfiguration } from './task-harness-registry.js';
@@ -29,7 +28,7 @@ const aborted = (): TaskHarnessResult => ({
 
 /** One turn only. Calls are required until completed; failure is sticky. */
 export class AcpTurn {
-  private readonly tools = new Map<string, string>();
+  private readonly tools = new Map<string, Json & { status: string }>();
   private toolFailed = false;
   private final = '';
   private providerFailed = false;
@@ -49,24 +48,45 @@ export class AcpTurn {
     }
     if (update['sessionUpdate'] === 'tool_call' || update['sessionUpdate'] === 'tool_call_update') {
       const id = update['toolCallId'];
-      if (typeof id !== 'string' || !id || this.tools.size >= 10000)
+      if (typeof id !== 'string' || !id || (!this.tools.has(id) && this.tools.size >= 10000))
         throw new Error('harness_protocol_error');
+      const previous = this.tools.get(id);
       const status = update['status'];
-      if (status !== undefined) {
-        if (
-          typeof status !== 'string' ||
-          !['pending', 'in_progress', 'completed', 'failed'].includes(status)
-        )
-          throw new Error('harness_protocol_error');
-        this.tools.set(id, status);
-      } else if (!this.tools.has(id)) this.tools.set(id, 'pending');
-      if (status === 'failed' || this.toolOutputFailed(update['rawOutput'], update['rawInput']))
+      if (
+        status !== undefined &&
+        status !== null &&
+        (typeof status !== 'string' ||
+          !['pending', 'in_progress', 'completed', 'failed'].includes(status))
+      )
+        throw new Error('harness_protocol_error');
+      // ACP v1 updates are patches: omitted/null fields leave prior values in
+      // place, including rawInput needed to interpret a later rawOutput.
+      const tool: Json & { status: string } = {
+        ...previous,
+        status: previous?.status ?? 'pending',
+      };
+      for (const [key, value] of Object.entries(update)) {
+        if (key !== 'sessionUpdate' && value !== undefined && value !== null) tool[key] = value;
+      }
+      this.tools.set(id, tool);
+      if (tool.status === 'failed' || this.toolOutputFailed(tool['rawOutput'], tool['rawInput']))
         this.toolFailed = true;
-      // Earlier assistant prose is not a final answer after a tool call.
-      this.final = '';
+      // Work invalidates earlier prose. Presentation/output patches for an
+      // already settled call do not erase the final answer that followed it.
+      if (
+        !previous ||
+        previous.status === 'pending' ||
+        previous.status === 'in_progress' ||
+        tool.status === 'pending' ||
+        tool.status === 'in_progress'
+      )
+        this.final = '';
       return 'tool';
     }
     return undefined;
+  }
+  toolStatus(id: unknown): string | undefined {
+    return typeof id === 'string' ? this.tools.get(id)?.status : undefined;
   }
   error(): void {
     this.providerFailed = true;
@@ -74,7 +94,7 @@ export class AcpTurn {
   result(stopReason: unknown): TaskHarnessResult {
     if (stopReason === 'cancelled') return aborted();
     if (this.providerFailed) return failed('provider_error');
-    if (this.toolFailed || [...this.tools.values()].some((s) => s !== 'completed'))
+    if (this.toolFailed || [...this.tools.values()].some((tool) => tool.status !== 'completed'))
       return failed('required_tool_failed');
     if (stopReason !== 'end_turn' || !this.final.trim()) return failed('no_final_result');
     return { outcome: 'succeeded', result: this.final.trim() };
@@ -130,6 +150,8 @@ export class AcpTaskHarness implements TaskHarness {
     const timeout = this.options.timeoutMs ?? 3600000;
     const signal = AbortSignal.any([this.cancellation.signal, AbortSignal.timeout(timeout)]);
     let child: ChildProcess | undefined;
+    let processClosed: Promise<void> | undefined;
+    let stdoutEnded = false;
     let relay: Awaited<ReturnType<typeof createTaskModelRelay>> | undefined;
     const turn = new AcpTurn(this.options.toolOutputFailed);
     let result: TaskHarnessResult = failed('harness_failed');
@@ -227,6 +249,12 @@ export class AcpTaskHarness implements TaskHarness {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
       const running = child;
+      // Unlike exit, close waits for the stdout pipe to finish draining.
+      processClosed = new Promise<void>((resolve) => {
+        running.once('close', () => {
+          resolve();
+        });
+      });
       const { stdin, stdout, stderr } = running;
       if (!stdin || !stdout || !stderr) throw new Error('harness_stream_failed');
       child.on('error', () => {
@@ -285,10 +313,11 @@ export class AcpTaskHarness implements TaskHarness {
           const event = turn.update(update);
           if (event === 'step') await emit({ type: 'step', text: 'Task is working' });
           if (event === 'tool') {
+            const toolStatus = turn.toolStatus(update['toolCallId']);
             const status =
-              update['status'] === 'failed'
+              toolStatus === 'failed'
                 ? 'error'
-                : update['status'] === 'completed'
+                : toolStatus === 'completed'
                   ? 'completed'
                   : 'running';
             await emit({ type: 'tool', name: 'task_tool', status });
@@ -328,10 +357,15 @@ export class AcpTaskHarness implements TaskHarness {
           waiter.reject(new Error('harness_protocol_error'));
         else waiter.resolve(record(message['result']));
       };
-      const decoder = new StringDecoder('utf8');
+      const decoder = new TextDecoder('utf-8', { fatal: true });
       let buffered = '';
       stdout.on('data', (chunk: Buffer) => {
-        buffered += decoder.write(chunk);
+        try {
+          buffered += decoder.decode(chunk, { stream: true });
+        } catch {
+          fail('harness_protocol_error');
+          return;
+        }
         if (Buffer.byteLength(buffered) > 4_194_304) {
           fail('harness_frame_limit');
           return;
@@ -357,6 +391,14 @@ export class AcpTaskHarness implements TaskHarness {
         }
       });
       stdout.on('end', () => {
+        stdoutEnded = true;
+        try {
+          buffered += decoder.decode();
+          if (buffered.trim()) fail('harness_protocol_error');
+        } catch {
+          // Fatal decoding also rejects an incomplete UTF-8 code point at EOF.
+          fail('harness_protocol_error');
+        }
         if (!closing) fail('harness_process_failed');
       });
       const initialized = await request('initialize', {
@@ -408,21 +450,14 @@ export class AcpTaskHarness implements TaskHarness {
       let cleanupFailed = false;
       try {
         const cleanupChild = child;
-        if (
-          cleanupChild?.pid &&
-          cleanupChild.exitCode === null &&
-          cleanupChild.signalCode === null
-        ) {
+        if (cleanupChild?.pid) {
           const cleanupPid = cleanupChild.pid;
-          const exited = new Promise<void>((resolve) =>
-            cleanupChild.once('exit', () => {
-              resolve();
-            })
-          );
-          try {
-            process.kill(-cleanupChild.pid, 'SIGTERM');
-          } catch {
-            /* already exited */
+          if (cleanupChild.exitCode === null && cleanupChild.signalCode === null) {
+            try {
+              process.kill(-cleanupPid, 'SIGTERM');
+            } catch {
+              /* already exited */
+            }
           }
           const hard = setTimeout(() => {
             try {
@@ -434,7 +469,7 @@ export class AcpTaskHarness implements TaskHarness {
           let last: ReturnType<typeof setTimeout> | undefined;
           try {
             await Promise.race([
-              exited,
+              processClosed,
               new Promise<never>((_resolve, reject) => {
                 last = setTimeout(() => {
                   reject(new Error('harness_cleanup_timeout'));
@@ -446,11 +481,10 @@ export class AcpTaskHarness implements TaskHarness {
             clearTimeout(last);
           }
         }
-        child?.stdin?.destroy();
-        child?.stdout?.destroy();
-        child?.stderr?.destroy();
+        // Keep stdout live until close/EOF, then validate every queued frame
+        // and the final framing/UTF-8 boundary before accepting success.
         await queue;
-        if (fault) cleanupFailed = true;
+        if (fault || (child && !stdoutEnded)) cleanupFailed = true;
         await relay?.close();
         cleanupFailed ||=
           !!child &&

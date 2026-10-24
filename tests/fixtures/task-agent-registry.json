@@ -1,0 +1,30 @@
+{
+  "scripted": {
+    "label": "Scripted ACP fixture",
+    "protocol": "acp",
+    "command": "/usr/local/bin/task-scripted-acp",
+    "args": [],
+    "configFile": "/etc/lifemodel/scripted-contract.json",
+    "version": "1",
+    "versionOutput": "scripted-acp 1",
+    "versionArgs": [
+      "--version"
+    ],
+    "adapterModule": "../../tests/fixtures/task-scripted-config.mjs",
+    "contractModule": "../../tests/fixtures/task-scripted-contract.ts",
+    "provision": {
+      "files": [
+        {
+          "source": "tests/fixtures/task-scripted-acp.py",
+          "destination": "/usr/local/bin/task-scripted-acp",
+          "mode": "0555"
+        },
+        {
+          "source": "tests/fixtures/task-scripted-config.json",
+          "destination": "/etc/lifemodel/scripted-contract.json",
+          "mode": "0444"
+        }
+      ]
+    }
+  }
+}

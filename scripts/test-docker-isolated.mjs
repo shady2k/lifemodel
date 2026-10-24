@@ -38,7 +38,8 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseArgs as parseLaunchArgs, STORE_IMAGES, networkCreateArgs, storeContainerArgs, OPENCODE_ARCHIVES, OPENCODE_VERSION, opencodeExtractScript } from './test-isolated.mjs';
+import { parseArgs as parseLaunchArgs, STORE_IMAGES, networkCreateArgs, storeContainerArgs } from './test-isolated.mjs';
+import { testAgentRegistry, agentArtifacts, agentInstallScript } from './task-agent-provision.mjs';
 
 // ---------------------------------------------------------------------------
 // Machine identity and filesystem layout inside the disposable machine
@@ -101,7 +102,7 @@ export const PINNED = {
   dockerVersion: '29.9.0',
   nodeVersion: 'v24.21.0',
   artifacts: {
-    opencode: { ...OPENCODE_ARCHIVES },
+    ...agentArtifacts(testAgentRegistry),
     docker: {
       aarch64: {
         file: 'docker-29.9.0.tgz',
@@ -479,8 +480,16 @@ export function buildPlan(input) {
   if (!artifactsHostDir || !bootstrapScriptDir || !bootstrapScriptName) {
     throw new IsolationError('missing artifact host dir or bootstrap script');
   }
-  const opencodeArchive = artifacts.find((artifact) => artifact.key === 'opencode');
-  if (!opencodeArchive) throw new IsolationError('missing pinned OpenCode artifact');
+  const agentSteps = Object.entries(testAgentRegistry).map(([name, agent]) => {
+    const archive = artifacts.find(artifact => artifact.key === `agent-${name}`);
+    if (agent.provision.archives && !archive) throw new IsolationError(`missing pinned agent artifact: ${name}`);
+    return {
+      id: `provision-agent-${name}`,
+      kind: 'orb',
+      argv: runArgv(machineName, 'root', PROVISION_DIR, ['sh', '-ec', agentInstallScript(name, agent, archive ? `${PROVISION_DIR}/${archive.file}` : undefined, SRC_DIR)]),
+      timeoutMs: PHASE_TIMEOUTS_MS.provision,
+    };
+  });
 
   // Host-side tar arguments: the bootstrap script and the pinned artifacts,
   // relative to their own -C roots. These host paths never appear in any
@@ -542,19 +551,7 @@ export function buildPlan(input) {
       argv: runArgv(machineName, 'root', PROVISION_DIR, ['bash', `./${bootstrapScriptName}`, 'root']),
       timeoutMs: PHASE_TIMEOUTS_MS.provision,
     },
-    {
-      // ensureArtifacts verified this exact archive before streaming it in.
-      // Extraction happens as root during provisioning, never in a test run.
-      id: 'provision-opencode',
-      kind: 'orb',
-      argv: runArgv(machineName, 'root', PROVISION_DIR, [
-        'sh', '-ec',
-        opencodeExtractScript('$1'),
-        'provision-opencode',
-        `${PROVISION_DIR}/${opencodeArchive.file}`,
-      ]),
-      timeoutMs: PHASE_TIMEOUTS_MS.provision,
-    },
+    ...agentSteps,
     {
       id: 'provision-repo',
       kind: 'orb',

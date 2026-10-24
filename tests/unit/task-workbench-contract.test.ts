@@ -18,10 +18,8 @@ function assertPinnedBuild(text: string): void {
   for (const line of from) {
     expect(line).toMatch(/^FROM node:24\.21\.0-bookworm-slim@sha256:[0-9a-f]{64}$/);
   }
-  expect(text).toMatch(/^ENV OPENCODE_VERSION=\d+\.\d+\.\d+\s*\\$/m);
-  expect(text).toMatch(/OPENCODE_SHA256=[0-9a-f]{64}/);
-  expect(text).toContain('sha256sum -c -');
-  expect(text).toContain('${OPENCODE_VERSION}');
+  expect(text).toContain('node /opt/lifemodel/scripts/task-agent-provision.mjs');
+  expect(text).not.toMatch(/OPENCODE_VERSION|OPENCODE_SHA256|registry.npmjs.org/);
   expect(text).not.toMatch(/(?:latest|curl[^\n]*\|\s*(?:sh|bash))/);
   // Check continuation lines too, not only the first assignment of an ENV.
   const instructions = text.replace(/\\\n\s*/g, ' ').split('\n');
@@ -46,16 +44,18 @@ function assertContext(text: string, ignore: string): void {
       .filter((part) => !part.startsWith('--'));
     for (const source of parts.slice(0, -1)) {
       const paths =
-        source === 'loader/src/'
-          ? [
-              'loader/src/task-launcher-main.ts',
-              'loader/src/task-harness.ts',
-              'loader/src/task-opencode.ts',
-              'loader/src/task-model-relay.ts',
-              'loader/src/storage-cli-main.ts',
-              'loader/src/storage-cli.ts',
-            ]
-          : [source];
+        source === 'docker/workbench/'
+          ? ['docker/workbench/opencode.json']
+          : source === 'loader/src/'
+            ? [
+                'loader/src/task-launcher-main.ts',
+                'loader/src/task-harness.ts',
+                'loader/src/task-opencode.ts',
+                'loader/src/task-model-relay.ts',
+                'loader/src/storage-cli-main.ts',
+                'loader/src/storage-cli.ts',
+              ]
+            : [source];
       for (const path of paths)
         expect(filter.ignores(path), `COPY input excluded: ${path}`).toBe(false);
     }
@@ -163,7 +163,9 @@ describe('task workbench image contract', () => {
   it('keeps agent config immutable and consumes only v2 startup flags in its configuration module', () => {
     const text = dockerfile();
     expect(text).toContain('XDG_CONFIG_HOME=/etc/lifemodel/xdg');
-    expect(text).toContain('chmod 0555 /etc/lifemodel/xdg /etc/lifemodel/xdg/opencode');
+    expect(
+      JSON.parse(read('src/ports/task-harness-registry.json')).opencode.provision.directories
+    ).toContain('/etc/lifemodel/xdg/opencode');
     const adapter = read('loader/src/task-opencode.ts');
     for (const flag of [
       'OPENCODE_DISABLE_MODELS_FETCH',
@@ -179,21 +181,14 @@ describe('task workbench image contract', () => {
   it('provisions the same verified native binary before either isolated test runtime', () => {
     const setup = read('scripts/test-isolated.mjs');
     const machine = read('scripts/test-docker-isolated.mjs');
-    const version = dockerfile().match(/OPENCODE_VERSION=(\d+\.\d+\.\d+)/)![1];
-    const hash = dockerfile().match(/OPENCODE_SHA256=([0-9a-f]{64})/)![1];
-    expect(setup).toContain(`OPENCODE_VERSION = '${version}'`);
-    expect(setup).toContain(`sha256: '${hash}'`);
-    expect(setup).toContain('sha256sum -c -');
-    expect(setup).toContain('recipe-v7-acp-v2');
-    expect(setup.replace(/\s/g, '')).toContain(
-      '.update(OPENCODE_VERSION).update(JSON.stringify(OPENCODE_ARCHIVES))'
-    );
-    expect(setup.indexOf('opencodeProvisionScript(opencodeArch)')).toBeLessThan(
-      setup.indexOf("'npm', 'ci'")
-    );
-    expect(machine).toContain('opencode: { ...OPENCODE_ARCHIVES }');
-    expect(machine).toContain("id: 'provision-opencode'");
-    expect(machine).toContain("opencodeExtractScript('$1')");
+    expect(setup).toContain('agentProvisionScript(nativeAgentArch(nativeArch), testAgentRegistry');
+    expect(setup).toContain('recipe-v8-registry-acp');
+    expect(setup).toContain('.update(JSON.stringify(testAgentRegistry))');
+    expect(machine).toContain('...agentArtifacts(testAgentRegistry)');
+    expect(machine).toContain('agentInstallScript(name, agent');
+    expect(read('scripts/task-agent-provision.mjs')).toContain('sha256sum -c -');
+    for (const source of [setup, machine, dockerfile()])
+      expect(source).not.toMatch(/opencode|2\.1\.4|cli-linux-/i);
   });
 
   it('pins the reference in the core overlay and substitutes exactly that release digest', () => {
