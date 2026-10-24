@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createTestStores, workerDatabaseUrl, type TestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
+import { finalizeTaskFixture } from '../helpers/finalized-task.js';
 import {
   createStorageCertificate,
   type TestStorageCertificate,
@@ -427,10 +428,11 @@ describe('task launcher identity and briefing (real stores and live TLS identity
       );
     if (fault === 'tombstoned') await registry.tombstoneLaunch(f.task.id, f.task.launchId);
     if (fault === 'terminal')
-      await stores.postgres.query(
-        "UPDATE core.tasks SET state='failed',terminal_candidate='failed',terminal_reason_code='failed',terminal_at=clock_timestamp() WHERE id=$1",
-        [f.task.id]
-      );
+      await finalizeTaskFixture(stores.postgres, registry, f.task, {
+        state: 'failed',
+        reasonCode: 'failed',
+        summary: 'Failed fixture',
+      });
     if (fault === 'missing-allocation')
       await stores.postgres.query('DELETE FROM storage.allocations');
     if (fault === 'wrong-job') jobs.get(f.task.jobName).metadata.uid = 'different-job';

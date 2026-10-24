@@ -94,7 +94,8 @@ paired in any future task-history collector.
 
 ## Shutdown and cleanup limits
 
-Finalizer SQL has its own cancellable registry instance. It never destroys a
+Finalizer SQL has its own bounded two-connection pool and cancellable registry
+instance, separate from task intake and owner capacity. It never destroys a
 shared pool or an unrelated drained-turn client. A blocked owned SQL backend is
 terminated through an independent short-lived, deadline-bound control connection;
 closing its socket alone does not promptly cancel a PostgreSQL lock wait. Stop aborts only owned SQL and

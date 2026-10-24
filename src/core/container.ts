@@ -1275,13 +1275,28 @@ export async function createContainerAsync(
       list: () => registry.list(),
     };
     const finalizerController = new AbortController();
+    // Infrastructure finalization must not spend owner-intake SQL capacity.
+    const finalizerPool = new Pool({
+      connectionString: databaseUrl,
+      max: 2,
+      application_name: 'lifemodel-task-finalizer',
+      connectionTimeoutMillis: 5000,
+      query_timeout: 10000,
+      statement_timeout: 10000,
+      lock_timeout: 5000,
+    });
+    finalizerPool.on('error', () => undefined);
+    finalizerPool.on('connect', (client) => client.on('error', () => undefined));
     const finalizerRegistry = createPostgresTaskRegistry({
-      pool: rawPostgres,
+      pool: finalizerPool,
       epoch: snapshotEpoch,
       settings: createPlatformSettingsReader({ logger }),
       signal: finalizerController.signal,
     });
-    const finalizerMailbox = createPostgresTaskMailbox({ pool: rawPostgres, epoch: snapshotEpoch });
+    const finalizerMailbox = createPostgresTaskMailbox({
+      pool: finalizerPool,
+      epoch: snapshotEpoch,
+    });
     const finalizerExecutor = createKubernetesTaskExecutor();
     const finalizer = createTaskFinalizer({
       registry: finalizerRegistry,
@@ -1302,7 +1317,10 @@ export async function createContainerAsync(
         finalizerExecutor.close();
       },
     });
-    stopTaskFinalizer = (deadline) => finalizer.stop(deadline);
+    stopTaskFinalizer = async (deadline) => {
+      await finalizer.stop(deadline);
+      await finalizerPool.end();
+    };
     coreLoop.setTaskReportConsumer((signal) => finalizer.consumeSignal(signal));
     await finalizer.start();
     const executor = createKubernetesTaskExecutor();
