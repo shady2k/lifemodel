@@ -186,6 +186,12 @@ export async function createFinalizerStorage(pool: Pool) {
               },
             };
             seals.set(input.effectKey, { request: input, receipt });
+            // The real module saves this immutable catalog receipt before its
+            // HTTP response, including when that response is lost or too large.
+            await pool.query(
+              'INSERT INTO storage.seal_receipts(space_id,effect_key,receipt) VALUES($1,$2,$3::jsonb)',
+              [input.space, input.effectKey, JSON.stringify(receipt)]
+            );
             await pool.query(
               "UPDATE storage.spaces SET mode='sealed',access_revision=$2 WHERE id=$1",
               [input.space, receipt.revision]

@@ -445,6 +445,39 @@ describe('task restart finalization (real Postgres and Valkey, TLS storage)', ()
     expect(attempts.map((call) => call.body.outcome)).toEqual(['completed', 'failed']);
     expect(new Set(attempts.map((call) => call.body.effectKey)).size).toBe(2);
   });
+  it('recovers a sealed manifest larger than the bounded HTTP response after restart without losing metadata', async () => {
+    const { task, proof } = await startTask();
+    await storage.mark(result);
+    const artifacts: TaskManifestObject[] = Array.from({ length: 200 }, (_, index) => ({
+      id: `artifact_${index}`,
+      name: `${String(index).padStart(3, '0')}-${'long-name-'.repeat(100)}.txt`,
+      size: index + 1,
+      sha256: 'c'.repeat(64),
+      mark: 'artifact',
+      contentType: 'text/plain',
+    }));
+    // These are module-side acknowledged immutable marks; use its public test
+    // fixture map to avoid 200 unrelated TLS setup operations in this test.
+    for (const object of artifacts) storage.marks.set(object.id, object);
+    await mailbox.append(report(task), proof);
+    expect(await finalizer().runOnce()).toBe(false);
+    expect(storage.seals.size).toBe(1);
+    expect(await outcomes(task.id)).toHaveLength(0);
+    const receipt = [...storage.seals.values()][0]!.receipt;
+    expect(Buffer.byteLength(JSON.stringify(receipt))).toBeGreaterThan(131072);
+    expect((await registry.read(task.id))!.sealReceipt).toBeNull();
+    const saved = await stores.postgres.query(
+      'SELECT receipt FROM storage.seal_receipts WHERE space_id=$1 AND effect_key=$2',
+      ['space_1', receipt.effectKey]
+    );
+    expect(saved.rows).toEqual([{ receipt }]);
+    await takeover();
+    expect(await finalizer().runOnce()).toBe(true);
+    const done = await assertFinished(task);
+    expect(done.sealReceipt).toEqual(receipt);
+    expect((await outcomes(task.id))[0].event.objects).toEqual([result, ...artifacts]);
+    expect(storage.calls.filter((call) => call.path === '/seal')).toHaveLength(1);
+  });
   it('retries a module revoke revision conflict with a new seal key while preserving semantic success', async () => {
     const { task, proof } = await startTask();
     await storage.mark(result);

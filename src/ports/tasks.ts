@@ -184,6 +184,12 @@ export interface TaskRegistry extends TaskService {
     candidateRevision: string,
     receipt: TaskSealReceipt
   ): Promise<TaskRecord>;
+  /** Recover only the exact prepared key's immutable module-catalog receipt, if present. */
+  recoverSealReceipt(
+    taskId: string,
+    launchId: string,
+    candidateRevision: string
+  ): Promise<TaskRecord>;
   /** Requires a receipt, revoked intent and termination; atomically inserts one immutable outbox event. */
   commitFinalization(
     taskId: string,

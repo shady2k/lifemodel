@@ -136,6 +136,14 @@ export function createTaskFinalizer(options: {
       task = await options.registry.recordAllocation(task.id, task.launchId, receipt);
     }
     if (!terminal(task)) {
+      if (!task.sealReceipt && task.sealRequest) {
+        task = await options.registry.recoverSealReceipt(
+          task.id,
+          task.launchId,
+          task.sealRequest.candidateRevision
+        );
+        active();
+      }
       if (!task.sealReceipt) {
         task = await options.registry.prepareSeal(task.id, task.launchId);
         active();

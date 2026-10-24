@@ -10,7 +10,8 @@ message. The later task tool consumes its durable outcome to make that reply.
 storage control HTTPS client and exact-UID executor. Startup scans terminal
 mailbox rows without consulting `signalled_at` or the bus watermark. Terminal
 `task_report` Signals hand off a saved candidate before tick-local completion.
-The launch reconciler also hands off failed, missing and completed Jobs. A
+The launch reconciler also hands off failed, missing and completed Jobs, plus
+loss or failure of the already bound Pod even if its Job still says running. A
 completed Job without a semantic report is `failed/semantic_report_missing`,
 never success. A stored semantic report wins over the Job observation.
 
@@ -24,7 +25,12 @@ never success. A stored semantic report wins over the Job observation.
 3. Persist the exact seal request before HTTPS: a deterministic candidate-version
    effect key, storage-space access revision and requested outcome. This revision
    is **not** the canonical task intent revision. Unknown responses replay the
-   same request. A rejected `revision_conflict` may refresh the request only after
+   same request. If the HTTPS receipt was lost or exceeds the bounded transport
+   response, recovery reads the module's exact saved `storage.seal_receipts` row
+   by space and effect key under the same bounded SQL fence, validates it, then
+   saves the unmodified receipt. This narrow read-only catalog seam also avoids
+   an arbitrary maximum on the number of retained manifest members. It does not
+   authorize core to write the module catalog. A rejected `revision_conflict` may refresh the request only after
    checking that the module has no frozen/sealed operation for that space; its
    candidate and summary stay unchanged. Explicit `missing_result` or `checksum_mismatch` refusal changes
    an uncommitted success candidate to failure and allows a new recovery key.

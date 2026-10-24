@@ -413,6 +413,40 @@ export function createPostgresTaskRegistry(deps: {
     if (!task) throw new TaskRegistryError(taskId, 'storage_error');
     return task;
   }
+  async function persistSealReceipt(
+    client: PoolClient,
+    task: TaskRecord,
+    candidateRevision: string,
+    receipt: TaskSealReceipt
+  ): Promise<TaskRecord> {
+    const taskId = task.id;
+    if (!validSealReceipt(receipt)) throw new TaskRegistryError(taskId, 'invalid_input');
+    const request = task.sealRequest;
+    if (
+      request?.candidateRevision !== candidateRevision ||
+      receipt.effectKey !== request.effectKey ||
+      receipt.space !== request.space ||
+      receipt.outcome !== request.outcome ||
+      BigInt(receipt.revision) < BigInt(request.expectedRevision) ||
+      (request.outcome === 'completed' &&
+        BigInt(receipt.revision) === BigInt(request.expectedRevision))
+    )
+      throw new TaskRegistryError(taskId, 'intent_conflict');
+    if (task.sealReceipt) {
+      const same = await client.query<{ matches: boolean }>(
+        'SELECT seal_receipt=$2::jsonb AS matches FROM core.tasks WHERE id=$1',
+        [taskId, JSON.stringify(receipt)]
+      );
+      if (!same.rows[0]?.matches) throw new TaskRegistryError(taskId, 'intent_conflict');
+      return task;
+    }
+    if (TERMINAL.has(task.state)) throw new TaskRegistryError(taskId, 'invalid_transition');
+    await client.query(
+      'UPDATE core.tasks SET seal_receipt=$2::jsonb,updated_at=clock_timestamp() WHERE id=$1',
+      [taskId, JSON.stringify(receipt)]
+    );
+    return rereadTask(client, taskId);
+  }
   return {
     accept: async (request) => {
       const identity = taskIdentity(typeof request.launchKey === 'string' ? request.launchKey : '');
@@ -638,35 +672,29 @@ export function createPostgresTaskRegistry(deps: {
       });
     },
     recordSealReceipt: async (taskId, launchId, candidateRevision, receipt) => {
-      if (!validRevision(candidateRevision) || !validSealReceipt(receipt))
-        throw new TaskRegistryError(taskId, 'invalid_input');
+      if (!validRevision(candidateRevision)) throw new TaskRegistryError(taskId, 'invalid_input');
       return transaction(taskId, async (client) => {
         const task = await lockLaunch(client, taskId, launchId);
-        const request = task.sealRequest;
-        if (
-          request?.candidateRevision !== candidateRevision ||
-          receipt.effectKey !== request.effectKey ||
-          receipt.space !== request.space ||
-          receipt.outcome !== request.outcome ||
-          BigInt(receipt.revision) < BigInt(request.expectedRevision) ||
-          (request.outcome === 'completed' &&
-            BigInt(receipt.revision) === BigInt(request.expectedRevision))
-        )
+        return persistSealReceipt(client, task, candidateRevision, receipt);
+      });
+    },
+    recoverSealReceipt: async (taskId, launchId, candidateRevision) => {
+      if (!validRevision(candidateRevision)) throw new TaskRegistryError(taskId, 'invalid_input');
+      return transaction(taskId, async (client) => {
+        const task = await lockLaunch(client, taskId, launchId);
+        if (task.sealRequest?.candidateRevision !== candidateRevision)
           throw new TaskRegistryError(taskId, 'intent_conflict');
-        if (task.sealReceipt) {
-          const same = await client.query<{ matches: boolean }>(
-            'SELECT seal_receipt=$2::jsonb AS matches FROM core.tasks WHERE id=$1',
-            [taskId, JSON.stringify(receipt)]
-          );
-          if (!same.rows[0]?.matches) throw new TaskRegistryError(taskId, 'intent_conflict');
-          return task;
-        }
-        if (TERMINAL.has(task.state)) throw new TaskRegistryError(taskId, 'invalid_transition');
-        await client.query(
-          'UPDATE core.tasks SET seal_receipt=$2::jsonb,updated_at=clock_timestamp() WHERE id=$1',
-          [taskId, JSON.stringify(receipt)]
+        if (task.sealReceipt) return task;
+        // Exact immutable module receipt recovery. No rescan, remote response
+        // buffering, authority mutation or alternative effect key is involved.
+        const saved = await client.query<{ receipt: TaskSealReceipt }>(
+          'SELECT receipt FROM storage.seal_receipts WHERE space_id=$1 AND effect_key=$2',
+          [task.sealRequest.space, task.sealRequest.effectKey]
         );
-        return rereadTask(client, taskId);
+        const receipt = saved.rows[0]?.receipt;
+        return receipt === undefined
+          ? task
+          : persistSealReceipt(client, task, candidateRevision, receipt);
       });
     },
     commitFinalization: async (taskId, launchId, candidateRevision) => {
