@@ -69,7 +69,19 @@ port 5000 (the disposable VM walk's platform-artifact registry).
 
 zot v2.1.22 is the current upstream stable main line at implementation
 (2026-10-06 release), pinned by its OCI index digest in platform step A.
-It has one retained local-path PVC; GC and dedupe retain upstream defaults.
+It has one retained local-path PVC. Dedupe and GC are enabled, with explicit
+`gcDelay: "2h"` and `gcInterval: "1h"`. The matching `lifemodel/workbench`
+retention policy sets `deleteUntagged: false` and `deleteReferrers: false`,
+so GC preserves digest-only release roots and their referenced graph instead
+of applying upstream's default untagged-manifest deletion. Uploads idle for
+two hours and unreferenced blobs are reclaimed by later GC passes. The grace
+exceeds the importer's 30-minute phase cap. After a hard stop, retry reuses
+completed objects; stale partial uploads normally disappear within three
+hours of their last write while zot runs, plus scheduler/runtime delay.
+This is not a filesystem quota or release-expiry policy: retained releases
+still consume space. Back up the registry volume and Bao before deliberate
+pruning or recovery; repair storage and restore the volume or reimport the
+pinned release, rather than manually deleting roots/shared blobs.
 A0 precreates its htpasswd Secret. After Bao policy handoff the loader stores
 one random 256-bit `loader` password in OpenBao, verifies its read-back,
 and projects only a bcrypt hash to zot. No task or node receives that
@@ -93,11 +105,13 @@ keeps the original release digest. Existing verified objects are resume keys.
 A failed/mismatched/unreachable import retries with safe codes; there is no
 public-origin fallback in the Job path. Import requests have deadlines and
 size/count bounds; temporary bytes use the loader's disk-backed volume.
-The dedicated import egress policy is enabled only around the phase and reset
-on process restart. Kubernetes policies are additive: the pre-existing loader
-public-model-check grant also reaches public HTTPS. Therefore fixed-origin
-application validation, not DNS filtering by NetworkPolicy, confines import
-requests. A kill can leave the dedicated grant until restart resets it.
+There is no temporary import-egress policy or phase-only network enforcement.
+Kubernetes policies are additive: the existing loader model-check egress
+already reaches the public origin. The importer's own host confinement is
+the boundary: HTTPS to `ghcr.io` and the exact blob host
+`pkg-containers.githubusercontent.com`, checked redirects and token realms,
+and no registry credential forwarding to redirect hosts. The zot push
+password is used only at the destination.
 
 k3s, Flux, zot itself and the loader remain release-pinned bootstrap images
 outside zot. Serving core/web/loader/gateway, air-gap installation, and in-cluster

@@ -104,7 +104,6 @@ function assertStepANetworkPolicies(objects: Record<string, any>[]): void {
     'lifemodel-system': [
       'lifemodel-system-default-deny',
       'loader-access',
-      'workbench-import-origin-egress',
       'zot-access',
       'loader-download-auth-ingress',
       'model-gateway-access',

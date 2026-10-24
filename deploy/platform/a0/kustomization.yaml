@@ -4,7 +4,6 @@ resources:
   - core-priority-class.yaml
   - service-account.yaml
   - bootstrap-secrets.yaml
-  - workbench-import-egress.yaml
   - pki-configmap.yaml
   - admission-policies.yaml
   - task-admission-policies.yaml

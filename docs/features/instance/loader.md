@@ -27,15 +27,31 @@ The platform loader performs resumable setup in the order defined by
 1. Initialize OpenBao, persist and verify custody, unseal it, configure the
    loader Kubernetes-auth policy, and revoke the bootstrap root token after
    hand-off.
-2. Create the initial Gitea administrator Secret, wait for Gitea, and verify
+2. Establish Seaweed custody, then zot custody. Store the sole zot push
+   password in OpenBao and project only its bcrypt hash into `zot-htpasswd`.
+3. Import the release-pinned workbench into zot byte-identically, verifying
+   its full graph before creating application sources. Verified objects are
+   resume keys after a kill; failed imports retry without a public pull fallback.
+4. Create the initial Gitea administrator Secret, wait for Gitea, and verify
    administrator access.
-3. Seed protected `main` from the release's full-history git bundle, create
+5. Seed protected `main` from the release's full-history git bundle, create
    and protect `deploy`, then create read-only source credentials and the
    application Kustomizations.
 
 Each phase is persisted in the platform-created `loader-bootstrap-state`
 Secret. On restart, the loader resumes from the recorded phase. Failures remain
 visible and retry with backoff while the interface stays available.
+
+The importer uses the loader's existing model-check egress. NetworkPolicy is
+additive; there is no temporary import-egress policy and no phase-only network
+enforcement is claimed. The importer's own host confinement is the boundary:
+HTTPS to `ghcr.io` and the exact blob host `pkg-containers.githubusercontent.com`,
+checked redirects and token realms, and no registry credentials forwarded to
+redirect hosts. The zot push password is read from Bao at use and sent only
+to zot. Requests, total phase time, and object sizes are bounded. Zot's hourly
+GC reclaims partial uploads idle for two hours, beyond the 30-minute phase
+budget, while explicit retention preserves digest-only release roots and
+their referenced graph. See the platform README for storage recovery.
 
 ## Interface
 

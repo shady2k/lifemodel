@@ -7,7 +7,6 @@ import {
   parseZotCredential,
 } from './zot-custody.js';
 import { createWorkbenchImportPhase } from './workbench-import.js';
-import { createWorkbenchImportEgress } from './workbench-import-egress.js';
 import type { LoaderConfig } from './config.js';
 import type { CommandRunner } from './exec.js';
 import type { FileSystem } from './fs.js';
@@ -170,7 +169,6 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
   const platformBootstrap =
     deps.platformBootstrap ??
     (() => {
-      const egress = createWorkbenchImportEgress();
       const importer = createWorkbenchImportPhase({
         originImage: process.env['LIFEMODEL_WORKBENCH_ORIGIN_IMAGE'] ?? '',
         readCredential: async () => parseZotCredential(await bao.api.readRegistryCustody()),
@@ -192,32 +190,10 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
               },
               identity: createKubernetesZotIdentitySecret(),
             }),
-            workbenchImport: {
-              name: 'workbench-import',
-              run: async () => {
-                try {
-                  await egress.enable();
-                  await importer.run();
-                } finally {
-                  await egress.disable();
-                }
-              },
-            },
+            workbenchImport: importer,
           }),
       });
-      let egressReset = false;
-      return {
-        runInitial: async () => {
-          // A killed import can leave the temporary grant enabled. Clear it
-          // before reading a durable completed plan on this process's first pass.
-          if (!egressReset) {
-            await egress.disable();
-            egressReset = true;
-          }
-          await bootstrap.runInitial();
-        },
-        unsealIfSealed: () => bootstrap.unsealIfSealed(),
-      };
+      return bootstrap;
     })();
 
   const settings: SettingsStore =

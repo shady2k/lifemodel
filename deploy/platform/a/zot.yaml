@@ -11,16 +11,28 @@ metadata:
   name: zot-config
   namespace: lifemodel-system
 data:
-  # Digest-only release roots have no tags. Upstream v2.1.22 GC defaults to
-  # deleting untagged manifests (pkg/retention/retention.go HasDeleteUntagged).
-  # Preserve those roots: disable GC until lifecycle-aware retention exists.
-  # Dedupe remains enabled; interrupted imports can leave unused blobs behind.
+  # v2.1.22 keys: https://github.com/project-zot/zot/blob/v2.1.22/pkg/api/config/config.go
+  # RunGCTasks schedules GC only with gc=true (pkg/api/controller.go).
+  # deleteBlobUploads uses gcDelay and upload mtime (pkg/storage/gc/gc.go).
+  # HasDeleteUntagged honors the explicit matching policy below (pkg/retention/retention.go).
+  # All source paths above are at https://github.com/project-zot/zot/blob/v2.1.22/ .
+  # Preserve digest-only roots and their graph; reclaim uploads idle >2h,
+  # well beyond the importer's 30min phase cap, on the hourly GC pass.
   config.json: |-
     {
       "storage": {
         "rootDirectory": "/var/lib/registry",
-        "gc": false,
-        "dedupe": true
+        "gc": true,
+        "gcDelay": "2h",
+        "gcInterval": "1h",
+        "dedupe": true,
+        "retention": {
+          "policies": [{
+            "repositories": ["lifemodel/workbench"],
+            "deleteUntagged": false,
+            "deleteReferrers": false
+          }]
+        }
       },
       "http": {
         "address": "0.0.0.0",

@@ -47,8 +47,25 @@ describe('the platform zot registry', () => {
     // The GHCR release uses an architecture-specific stacker entrypoint.
     expect(container?.command).toBeUndefined();
     expect(container?.args).toEqual(['serve', '/etc/zot/config.json']);
-    // Digest-only root manifests are untagged; upstream default GC deletes them.
-    expect(config.storage).toEqual({ rootDirectory: '/var/lib/registry', gc: false, dedupe: true });
+  });
+
+  it('reclaims stale uploads without deleting digest-only roots or their referenced graph', () => {
+    expect(config.storage).toEqual({
+      rootDirectory: '/var/lib/registry',
+      gc: true,
+      gcDelay: '2h',
+      gcInterval: '1h',
+      dedupe: true,
+      retention: {
+        policies: [
+          {
+            repositories: ['lifemodel/workbench'],
+            deleteUntagged: false,
+            deleteReferrers: false,
+          },
+        ],
+      },
+    });
   });
 
   it('serves the same canonical authority to pods and a stable ClusterIP to the node', () => {
@@ -142,6 +159,17 @@ describe('the platform zot registry', () => {
     expect(JSON.stringify(policies)).not.toContain('ipBlock');
     // Node-origin containerd pulls use Kubernetes' implicit same-node ingress exemption.
     expect(read('deploy/platform/a/zot-network-policy.yaml')).toContain('node');
+  });
+});
+
+describe('the loader import network boundary', () => {
+  it('uses existing loader egress without a temporary policy or policy-write permission', () => {
+    const a0 = YAML.parse(read('deploy/platform/a0/kustomization.yaml'));
+    expect(a0.resources).not.toContain('workbench-import-egress.yaml');
+    const role = docs('deploy/platform/a0/service-account.yaml').find(
+      (doc) => doc.kind === 'Role' && doc.metadata.name === 'loader-bootstrap'
+    );
+    expect(role?.rules.some((rule: any) => rule.resources.includes('networkpolicies'))).toBe(false);
   });
 });
 

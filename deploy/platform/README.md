@@ -37,10 +37,19 @@ this one image in stage 4, not in the stage-3 image.
 The step order remains **instance → A0 → A → B → C → D**. A contains zot,
 with one retained 20Gi local-path PVC and no host networking. Its upstream
 v2.1.22 OCI index is digest-pinned (current stable main release, released
-2026-10-06), not a mutable “latest” image. Deduplication stays enabled. GC is
-disabled because its default untagged-manifest cleanup would delete the
-digest-only workbench root; unused image bytes therefore need deliberate
-operator cleanup.
+2026-10-06), not a mutable “latest” image. Deduplication and GC are enabled.
+GC runs hourly with a two-hour `gcDelay`, longer than the importer's entire
+30-minute phase budget. It reclaims uploads idle beyond that grace and
+unreferenced blobs. An explicit retention policy for `lifemodel/workbench`
+sets `deleteUntagged: false` and `deleteReferrers: false`: digest-only release
+roots and their referenced graph remain pullable across GC and restart.
+After a hard crash, retry the import; completed objects are reused and stale
+partial uploads are reclaimed on a later GC pass (normally within three
+hours of their last write while zot is healthy, plus scheduler/runtime delay).
+This is not a disk quota: retained releases are not automatically expired.
+Before deliberate release pruning or store recovery, back up the registry
+volume and OpenBao; never delete roots or shared blobs by hand. Restore the
+volume or reimport the pinned public release after storage repair.
 The Service is `zot.lifemodel-system.svc:5001`, with fixed ClusterIP
 `10.43.0.51` in the installers' explicit `10.43.0.0/16` service CIDR.
 
@@ -73,11 +82,13 @@ pull has `read` only. Push requires the sole password, repository authorization,
 and loader-only pod ingress. Node-origin pull uses Kubernetes' node exception.
 A commented builder slot grants no rights. TLS remains lifemodel-pwe.2.
 
-The import has its own temporary egress policy and restores its empty state
-on completion/failure and loader restart. Kubernetes policy is additive: the
-existing public model-check route remains broader, so the importer's fixed
-origin/redirect checks are the host allowlist, not this L3 policy. A killed
-loader can leave that policy enabled until the next loader resets it.
+The existing loader model-check egress also reaches the public import origin.
+NetworkPolicy is additive; no phase-only network enforcement is claimed and
+there is no temporary import-egress policy. The importer's own host confinement
+is the boundary: HTTPS to `ghcr.io` and the exact blob host
+`pkg-containers.githubusercontent.com`, with checked redirects and token realms.
+Registry credentials are never forwarded to redirect hosts; zot's password is
+used only at the destination.
 
 ## A0: loader and admission
 
@@ -505,9 +516,11 @@ snapshotted wrap grace. This is this leaf's platform engineering ceiling, not a
 claim that the settings registry has a total-timeout declaration (it currently
 has only a separate wrap-grace bound), and not ADR-014's 300-second wrap default.
 Raising it is an explicit platform policy change. The release pin point is the
-workbench image rule: repository `ghcr.io/shady2k/lifemodel-workbench`, any valid
-sha256 digest for now; 653.8.3 supplies the release digest. The trusted launcher
-is the image ENTRYPOINT. Command/args overrides and lifecycle hooks remain
+workbench image rule: only repository
+`zot.lifemodel-system.svc:5001/lifemodel/workbench` with a valid sha256 digest.
+The release supplies the pin and core requires that exact pinned image.
+`ghcr.io/shady2k/lifemodel-workbench` is the public import origin, not an
+admitted Job or Pod image. The trusted launcher is the image ENTRYPOINT. Command/args overrides and lifecycle hooks remain
 forbidden. Both Job and Pod policies permit only these literal environment names:
 
 - `LIFEMODEL_STORAGE_ENDPOINT`
