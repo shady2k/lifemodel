@@ -392,6 +392,43 @@ describe('task workbench image contract', () => {
     expect(job).not.toMatch(/packages: write|docker push|docker login/);
   });
 
+  it('publishes on main only when the selector says its inputs changed, after the self-check', () => {
+    const ci = read('.github/workflows/ci.yml');
+    const start = ci.indexOf('\n  ci-workbench-image-publish:');
+    expect(start).toBeGreaterThan(0);
+    const job = ci.slice(start + 1).split(/\n(?=  [a-z][a-z0-9-]*:\n)/)[0]!;
+    // Main pushes only: a pull request never reaches this job.
+    expect(job).toContain("github.event_name == 'push'");
+    expect(job).not.toContain('pull_request');
+    // Gated by the workbench selector, and a missing or failed classification
+    // is read as owed, never as not owed.
+    expect(job).toContain('needs: changes');
+    expect(job).toContain("needs.changes.result != 'success'");
+    expect(job).toContain("needs.changes.outputs.workbench_image == 'true'");
+    // The build and the offline self-check of the pull-request job, and both
+    // before anything leaves the runner.
+    const build = job.indexOf('docker build --file docker/workbench/Dockerfile');
+    const selfCheck = job.indexOf('--self-check');
+    const push = job.indexOf('docker push');
+    const digest = job.indexOf('docker image inspect');
+    expect(build).toBeGreaterThan(0);
+    expect(selfCheck).toBeGreaterThan(build);
+    expect(push).toBeGreaterThan(selfCheck);
+    expect(digest).toBeGreaterThan(push);
+    expect(job).toContain('--network none');
+    expect(job).toContain('--read-only');
+    // The moving main tag and the pushed commit's own tag, on the reference
+    // the release publishes, with the pushed digest said in the log.
+    expect(job).toContain('ghcr.io/shady2k/lifemodel-workbench:main');
+    expect(job).toContain('ghcr.io/shady2k/lifemodel-workbench:$SHA');
+    expect(job).toContain('SHA: ${{ github.sha }}');
+    // A write token only where the core and web publish jobs take one, and no
+    // credential left in the checkout.
+    expect(job).toContain('packages: write');
+    expect(job).toContain('docker login ghcr.io');
+    expect(job).toContain('persist-credentials: false');
+  });
+
   it.each([
     'docker/workbench/Dockerfile',
     'docker/workbench/Dockerfile.dockerignore',
