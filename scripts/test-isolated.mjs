@@ -8,7 +8,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const BASE_IMAGE = 'node:24.21.0-bookworm-slim';
-import { testAgentRegistry, agentProvisionScript, nativeAgentArch } from './task-agent-provision.mjs';
+import { testAgentRegistry, agentSourceFiles, agentProvisionScript, nativeAgentArch } from './task-agent-provision.mjs';
+import { realPathWithin } from './task-agent-paths.mjs';
 const LABEL = 'com.lifemodel.test-boundary';
 const LIMITS = ['--cpus', '2', '--memory', '3g', '--memory-swap', '3g', '--pids-limit', '256', '--init'];
 const SOURCE_LABEL = 'com.lifemodel.test-source';
@@ -285,7 +286,9 @@ export async function run(argv, dependencies = {}) {
       const hash = createHash('sha256').update('recipe-v8-registry-acp\0' + base.stdout)
         .update(JSON.stringify(testAgentRegistry))
         .update(fs.readFileSync(path.join(ROOT, 'scripts/task-agent-provision.mjs')))
-        .update(Object.values(testAgentRegistry).flatMap(agent => agent.provision.files ?? []).map(file => fs.readFileSync(path.join(snapshot, file.source))).reduce((all, bytes) => Buffer.concat([all, bytes]), Buffer.alloc(0)))
+        .update(fs.readFileSync(path.join(ROOT, 'src/ports/task-agent-validation.mjs')))
+        .update(fs.readFileSync(path.join(ROOT, 'scripts/task-agent-paths.mjs')))
+        .update(agentSourceFiles(snapshot).map(file => fs.readFileSync(realPathWithin(snapshot, file.source))).reduce((all, bytes) => Buffer.concat([all, bytes]), Buffer.alloc(0)))
         .update(fs.readFileSync(path.join(snapshot, 'package.json')))
         .update(fs.readFileSync(path.join(snapshot, 'package-lock.json')))
         .update(fs.existsSync(path.join(snapshot, '.npmrc')) ? fs.readFileSync(path.join(snapshot, '.npmrc')) : '').digest('hex').slice(0, 24);
@@ -298,10 +301,10 @@ export async function run(argv, dependencies = {}) {
         await docker(['start', prep]);
         await docker(['exec', prep, 'sh', '-ec', 'mkdir -p /opt/deps /snapshot; apt-get update -qq; apt-get install -y -qq --no-install-recommends git ca-certificates curl python3 ripgrep; chown node:node /opt/deps'], { live: true });
         const nativeArch = base.stdout.trim().split('/').at(-1);
-        for (const file of Object.values(testAgentRegistry).flatMap(agent => agent.provision.files ?? [])) {
+        for (const file of agentSourceFiles(snapshot)) {
           const destination = path.posix.join('/snapshot', file.source);
           await docker(['exec', prep, 'mkdir', '-p', path.posix.dirname(destination)]);
-          await docker(['cp', path.join(snapshot, file.source), `${prep}:${destination}`]);
+          await docker(['cp', realPathWithin(snapshot, file.source), `${prep}:${destination}`]);
         }
         await docker(['exec', prep, 'sh', '-ec', agentProvisionScript(nativeAgentArch(nativeArch), testAgentRegistry, '/snapshot')], { live: true });
         await docker(['exec', prep, 'sh', '-ec', 'rm -rf /snapshot; mkdir /snapshot'], { live: true });

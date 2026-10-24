@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { access } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
+import { validateAgentRegistry } from '../../src/ports/task-agent-validation.mjs';
 
 export interface AgentConfiguration {
   adapterModule: string;
@@ -15,9 +16,11 @@ export interface AgentConfiguration {
   versionOutput: string;
   versionArgs: string[];
 }
-export const taskHarnessRegistry = JSON.parse(
-  readFileSync(new URL('../../src/ports/task-harness-registry.json', import.meta.url), 'utf8')
-) as Record<string, AgentConfiguration>;
+export const taskHarnessRegistry = validateAgentRegistry(
+  JSON.parse(
+    readFileSync(new URL('../../src/ports/task-harness-registry.json', import.meta.url), 'utf8')
+  ) as Record<string, AgentConfiguration>
+);
 export const taskHarnessNames = Object.keys(taskHarnessRegistry);
 const firstHarness = taskHarnessNames[0];
 if (!firstHarness) throw new Error('harness_registry_empty');

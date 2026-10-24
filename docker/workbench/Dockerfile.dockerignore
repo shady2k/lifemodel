@@ -22,3 +22,6 @@
 **/secrets/**
 
 !src/ports/task-harness-registry.json
+
+!src/ports/task-agent-validation.*
+!scripts/task-agent-paths.mjs
