@@ -25,8 +25,15 @@ describe('the loader first-start phase order', () => {
     const names = platformFirstStartPhases({
       gitea: [{ name: 'gitea-ready', run: async () => {} }],
       storageCustody: { name: 'storage-seaweed-custody', run: async () => {} },
+      zotCustody: { name: 'zot-custody', run: async () => {} },
+      workbenchImport: { name: 'workbench-import', run: async () => {} },
     }).map((phase) => phase.name);
-    expect(names[0]).toBe('storage-seaweed-custody');
+    expect(names.slice(0, 3)).toEqual([
+      'storage-seaweed-custody',
+      'zot-custody',
+      'workbench-import',
+    ]);
+    expect(names.indexOf('workbench-import')).toBeLessThan(names.indexOf('gitea-ready'));
     // The two phases whose source Secret only exists once a later platform
     // step has run (lifemodel-state is platform C).
     for (const waiting of ['cnpg-copy-core-credentials', 'valkey-password'])
@@ -65,6 +72,8 @@ describe('the loader first-start phase order', () => {
             finished.push('custody-effect');
           },
         },
+        zotCustody: { name: 'zot-custody', run: async () => {} },
+        workbenchImport: { name: 'workbench-import', run: async () => {} },
         postgres,
         valkey: { name: 'valkey-password', run: async () => {} },
       });
@@ -72,7 +81,13 @@ describe('the loader first-start phase order', () => {
         /CNPG application Secret read failed/
       );
       // Custody completed before the wait that cannot finish on a fresh install.
-      expect(finished).toEqual(['custody-effect', 'storage-seaweed-custody', 'gitea-ready']);
+      expect(finished).toEqual([
+        'custody-effect',
+        'storage-seaweed-custody',
+        'zot-custody',
+        'workbench-import',
+        'gitea-ready',
+      ]);
       expect(record).toEqual({ phase: 'cnpg-copy-core-credentials', status: 'failed' });
     } finally {
       rmSync(directory, { recursive: true, force: true });

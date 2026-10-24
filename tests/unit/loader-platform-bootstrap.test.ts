@@ -252,7 +252,7 @@ describe('platform bootstrap phases', () => {
     expect(record).toEqual({ phase: 'bao', status: 'complete' });
   });
 
-  it('allows DNS, k3s API, OpenBao, gateway status, model checks and Gitea only', async () => {
+  it('allows zot, DNS, k3s API, OpenBao, gateway status, model checks and Gitea only', async () => {
     const policy = await readFile('deploy/platform/a0/network-policy.yaml', 'utf8');
     const egress = policy.split('  egress:\n')[1] ?? '';
     expect(egress).toContain('k8s-app: kube-dns');
@@ -268,7 +268,16 @@ describe('platform bootstrap phases', () => {
     expect(egress).toContain('kubernetes.io/metadata.name: openbao');
     expect(egress).toContain('port: 8200');
     const parsed = YAML.parse(policy);
-    expect(parsed.spec.egress).toHaveLength(8);
+    expect(parsed.spec.egress).toHaveLength(9);
+    expect(parsed.spec.egress[0]).toEqual({
+      to: [
+        {
+          namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' } },
+          podSelector: { matchLabels: { 'app.kubernetes.io/name': 'zot' } },
+        },
+      ],
+      ports: [{ protocol: 'TCP', port: 5001 }],
+    });
     expect(
       parsed.spec.egress
         .flatMap((rule: any) =>
@@ -278,6 +287,7 @@ describe('platform bootstrap phases', () => {
     ).toEqual([
       'TCP/11434',
       'TCP/3000',
+      'TCP/5001',
       'TCP/53',
       'TCP/6443',
       // The model gateway's health listener and the storage module's.
@@ -289,19 +299,19 @@ describe('platform bootstrap phases', () => {
     expect(egress).toContain(
       '# No port restriction: owner endpoints may use LAN Ollama 11434 or custom HTTPS ports.'
     );
-    expect(parsed.spec.egress[5].ports).toBeUndefined();
-    expect(parsed.spec.egress[5].to[0].ipBlock.except).toEqual([
+    expect(parsed.spec.egress[6].ports).toBeUndefined();
+    expect(parsed.spec.egress[6].to[0].ipBlock.except).toEqual([
       '10.42.0.0/16',
       '10.43.0.0/16',
       '169.254.0.0/16',
     ]);
     // The unported rule admits 192.168.1.20:11434; its exceptions deny cluster and metadata ranges.
-    expect(parsed.spec.egress[5].to[0].ipBlock.except).toContain('169.254.0.0/16');
-    expect(parsed.spec.egress[1].to).toEqual([{ ipBlock: { cidr: '0.0.0.0/0' } }]);
+    expect(parsed.spec.egress[6].to[0].ipBlock.except).toContain('169.254.0.0/16');
+    expect(parsed.spec.egress[2].to).toEqual([{ ipBlock: { cidr: '0.0.0.0/0' } }]);
     expect(
-      parsed.spec.egress[6].to[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name']
+      parsed.spec.egress[7].to[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name']
     ).toBe('ollama');
-    expect(parsed.spec.egress[1].ports).toEqual([{ protocol: 'TCP', port: 6443 }]);
+    expect(parsed.spec.egress[2].ports).toEqual([{ protocol: 'TCP', port: 6443 }]);
   });
 
   it('declares only phase and custody Secret grants for the loader ServiceAccount and mounts its token', async () => {

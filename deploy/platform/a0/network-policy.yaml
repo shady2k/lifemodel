@@ -25,6 +25,18 @@ spec:
         - protocol: TCP
           port: 7000
   egress:
+    # The import's only authenticated push destination; node pulls use the
+    # node network, not task Pod egress.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: zot
+      ports:
+        - protocol: TCP
+          port: 5001
     # CoreDNS for openbao.openbao.svc; kube-dns label is used by k3s.
     - to:
         - namespaceSelector:

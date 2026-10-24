@@ -1,0 +1,22 @@
+# Precreated resource: loader RBAC can only GET/UPDATE this fixed name.
+# Empty by default; startup disables it before bootstrap/resume, then import
+# enables it only around the importer and disables it in finally.
+# A killed process may leave it enabled until restart. There is no temporal
+# guarantee between a process kill and that startup reconciliation.
+# NetworkPolicy permits are additive: legacy loader-access already grants
+# public model endpoint access on all ports. This object is NOT an absolute
+# origin deny outside import and does not remove or narrow that legacy grant.
+# NetworkPolicy cannot enforce DNS hostnames. The importer must enforce its
+# fixed origin allowlist (ghcr.io and pkg-containers.githubusercontent.com).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: workbench-import-origin-egress
+  namespace: lifemodel-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: loader
+  policyTypes:
+    - Egress
+  egress: []

@@ -22,7 +22,7 @@ and its copied credentials never gate gateway startup or readiness. See
 
 The signed platform artifact pins the loader (also model gateway and storage),
 core, web and **workbench** images by digest. The workbench is
-`ghcr.io/shady2k/lifemodel-workbench`: Node 24.21.0, OpenCode 1.19.4, git/build
+`zot.lifemodel-system.svc:5001/lifemodel/workbench`: Node 24.21.0, OpenCode 2.1.4, git/build
 tools, this release's offline dev dependencies, storage CLI and task launcher.
 It is not a running platform Deployment. Its release digest is the core's
 `LIFEMODEL_TASK_WORKBENCH_IMAGE` launch input in
@@ -31,6 +31,53 @@ The Job adapter consumes it in 653.8.5; the launcher stub fails closed until
 653.8.7. See [the workbench contract](../../docs/features/motor/workbench.md)
 for pins, private HOME/work-volume paths and offline checks. Prime Agent joins
 this one image in stage 4, not in the stage-3 image.
+
+## Zot and the first-start import
+
+The step order remains **instance → A0 → A → B → C → D**. A contains zot,
+with one retained 20Gi local-path PVC and no host networking. Its upstream
+v2.1.22 OCI index is digest-pinned (current stable main release, released
+2026-10-06), not a mutable “latest” image. Deduplication stays enabled. GC is
+disabled because its default untagged-manifest cleanup would delete the
+digest-only workbench root; unused image bytes therefore need deliberate
+operator cleanup.
+The Service is `zot.lifemodel-system.svc:5001`, with fixed ClusterIP
+`10.43.0.51` in the installers' explicit `10.43.0.0/16` service CIDR.
+
+Both installers write k3s `registries.yaml` for this exact authority with
+plain-HTTP mirror `http://10.43.0.51:5001`, and disable default-registry-endpoint
+fallback. Node containerd uses kube-proxy routing rather than cluster DNS.
+Port 5000, used by the clean-VM walk for its platform artifact, is unchanged.
+No hostPort or Pod Security exception is added. Bootstrap images (k3s, Flux,
+zot itself and loader) remain externally release-pinned, never served by zot.
+Core, web and gateway images do not move in this task.
+
+A0 precreates `zot-htpasswd`; its key is initially absent so zot cannot start
+unauthenticated. After Bao init/unseal/policy, phases run:
+
+1. Seaweed custody (only Bao and A's identity Secret).
+2. Zot custody: generate/reuse one random password in
+   `lifemodel/data/registry/zot`, verify read-back, project only a bcrypt hash
+   for the sole `loader` user into `zot-htpasswd`.
+3. Workbench import: read the release pin from A0's generated `workbench-origin`
+   ConfigMap, read the push credential from Bao at use, and copy the public
+   release origin's exact index/manifests/config/layers to zot. Verify digest
+   bytes after pushing too. Already verified objects are resume keys after a
+   kill. Per-request/whole-phase deadlines and size bounds fail with safe codes.
+4. Gitea bootstrap, seeding and application source/Kustomization creation.
+5. CNPG credential copy (waits for C), then Valkey credential copy.
+
+Zot waits on neither Gitea nor C, and import completes before core's source
+exists. Import failure retries; Jobs never fall back to ghcr.io. Anonymous
+pull has `read` only. Push requires the sole password, repository authorization,
+and loader-only pod ingress. Node-origin pull uses Kubernetes' node exception.
+A commented builder slot grants no rights. TLS remains lifemodel-pwe.2.
+
+The import has its own temporary egress policy and restores its empty state
+on completion/failure and loader restart. Kubernetes policy is additive: the
+existing public model-check route remains broader, so the importer's fixed
+origin/redirect checks are the host allowlist, not this L3 policy. A killed
+loader can leave that policy enabled until the next loader resets it.
 
 ## A0: loader and admission
 

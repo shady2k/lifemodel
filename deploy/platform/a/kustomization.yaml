@@ -19,6 +19,9 @@ resources:
   - seaweedfs-s3-identity.yaml
   - seaweedfs-rbac.yaml
   - seaweedfs.yaml
+  # A0 precreates zot's live credential Secret; the loader fills it after Bao.
+  - zot.yaml
+  - zot-network-policy.yaml
   - gitea
   - network-policy.yaml
 images:

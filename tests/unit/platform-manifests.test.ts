@@ -104,6 +104,8 @@ function assertStepANetworkPolicies(objects: Record<string, any>[]): void {
     'lifemodel-system': [
       'lifemodel-system-default-deny',
       'loader-access',
+      'workbench-import-origin-egress',
+      'zot-access',
       'loader-download-auth-ingress',
       'model-gateway-access',
       'seaweedfs-access',
@@ -1579,6 +1581,17 @@ describe('platform manifests', () => {
       {
         to: [
           {
+            namespaceSelector: {
+              matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' },
+            },
+            podSelector: { matchLabels: { 'app.kubernetes.io/name': 'zot' } },
+          },
+        ],
+        ports: [{ protocol: 'TCP', port: 5001 }],
+      },
+      {
+        to: [
+          {
             namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } },
             podSelector: { matchLabels: { 'k8s-app': 'kube-dns' } },
           },
@@ -1672,6 +1685,7 @@ describe('platform manifests', () => {
     ).toEqual([
       'TCP/11434',
       'TCP/3000',
+      'TCP/5001',
       'TCP/53',
       'TCP/6443',
       // The model gateway's health listener and the storage module's.

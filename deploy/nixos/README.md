@@ -94,6 +94,78 @@ before any host change. The installer also recovers identity from
 ConfigMap, and refuses conflicts between surviving records. Do not edit the
 saved record as shell code; only validated literal assignments are accepted.
 
+## Instance registry and node trust
+
+Both install paths write `/etc/rancher/k3s/registries.yaml` before k3s starts:
+
+```yaml
+mirrors:
+  "zot.lifemodel-system.svc:5001":
+    endpoint:
+      - "http://10.43.0.51:5001"
+```
+
+They also write `/etc/rancher/k3s/config.yaml.d/lifemodel-registry.yaml`:
+
+```yaml
+disable-default-registry-endpoint: true
+service-cidr: 10.43.0.0/16
+```
+
+`zot.lifemodel-system.svc:5001/lifemodel/workbench@sha256:<digest>`
+is the single workbench image reference authority. The loader resolves that
+Service name inside the cluster. The node's containerd does **not** need
+cluster DNS: its explicit mirror maps the same authority to the fixed zot
+Service address `10.43.0.51:5001`, routed by kube-proxy on the node. The service
+CIDR is fixed on fresh installations so this address is stable. The address is
+in Kubernetes' lower, static-allocation service band. No other platform Service
+reserves it. Do not change the service CIDR or allocate that address elsewhere.
+This is ADR-010's shared node-reachable endpoint, not a claim that host DNS
+resolves `.svc`. Disabling the default registry endpoint prevents an implicit
+HTTPS fallback when zot is unavailable. Jobs never fall back to GHCR.
+
+zot has no hostPort, NodePort, ingress or host networking. No LAN firewall port
+is opened, and the VM walk's separate artifact registry on port 5000 is unchanged.
+Only the loader pod can reach zot under the pod NetworkPolicy. Kubernetes
+permits ingress from the pod's own node, which covers containerd pulls on this
+single-node platform without a broad IP allow rule. Anonymous reads of the
+workbench repository are permitted. Push requires the sole `loader` identity
+and cannot target any other repository. Plain HTTP plus password push is the
+owner's interim choice (2026-10-19, confirmed 2026-10-24); TLS is deferred to pwe.
+Do not use this network as a confidentiality boundary against a compromised
+node. There are no node-side registry credentials.
+
+Platform step A deploys upstream zot **v2.1.22**, published 2026-10-06, pinned by
+its OCI index digest. The release and registry are the primary sources:
+
+- <https://github.com/project-zot/zot/releases/tag/v2.1.22>
+- `ghcr.io/project-zot/zot@sha256:96cda11459ce6f8c60da3b03f03e9f67fd11b3ae2d82c4c04c92b3c608996080`
+
+This is the current stable main release, not a `latest` pin. It includes live
+htpasswd reload for Kubernetes Secret projection. The pod mounts the
+`zot-htpasswd` Secret directory read-only (no `subPath`), runs without API
+credentials or root privileges, and keeps one retained 20 GiB local-path
+volume. Deduplication stays enabled. Garbage collection is explicitly disabled:
+the v2.1.22 default retention policy deletes untagged root manifests, but the
+imported release root is intentionally addressed only by digest. Enabling GC
+would eventually remove a valid workbench. Interrupted imports can therefore
+leave unused blobs on this volume; disk reclamation needs a later lifecycle-aware
+retention policy, not a deletion timer. See the upstream primary source
+[HasDeleteUntagged](https://github.com/project-zot/zot/blob/v2.1.22/pkg/retention/retention.go)
+and the untagged-manifest pass in
+[gc.go](https://github.com/project-zot/zot/blob/v2.1.22/pkg/storage/gc/gc.go).
+There is no upstream sync extension.
+
+A0 precreates an empty, protected `zot-htpasswd` Secret. The loader establishes
+OpenBao custody first, stores the generated push password there, then publishes
+one bcrypt htpasswd entry under Secret key `htpasswd`. It does this before Gitea
+bootstrap and workbench import. zot can start safely with zero users; no caller
+can then push. The live Secret projection loads the identity without a pod
+restart. The importer reads the password from OpenBao at use, verifies the
+release-pinned image bytes and destination digests, and must finish before task
+Jobs launch. Bootstrap images (k3s, Flux, zot and the loader) remain externally
+release-pinned because they must start before this import.
+
 ## NixOS
 
 

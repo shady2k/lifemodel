@@ -125,6 +125,19 @@ in
       package = lifemodelK3s;
       extraFlags = [ "--resolv-conf ${k3sResolvConf}" ];
     };
+    # The canonical image authority is identical in the loader, Jobs and
+    # containerd. Host DNS is not involved: kube-proxy routes this fixed Service
+    # IP on the sole node. There is no hostPort or external registry listener.
+    environment.etc."rancher/k3s/registries.yaml".text = ''
+      mirrors:
+        "zot.lifemodel-system.svc:5001":
+          endpoint:
+            - "http://10.43.0.51:5001"
+    '';
+    environment.etc."rancher/k3s/config.yaml.d/lifemodel-registry.yaml".text = ''
+      disable-default-registry-endpoint: true
+      service-cidr: 10.43.0.0/16
+    '';
     environment.systemPackages = [ lifemodelK3s lifemodelCli publisher ];
     services.avahi = {
       enable = true;

@@ -14,7 +14,7 @@ snapshots the digest from the validated `LIFEMODEL_TASK_WORKBENCH_IMAGE` only on
 first acceptance. It stores the caller image digest separately for payload-conflict
 checks; identical replay returns the original selected image after deployment.
 The repository is the fixed admission-policy repository
-`ghcr.io/shady2k/lifemodel-workbench`; repository plus persisted digest therefore
+`zot.lifemodel-system.svc:5001/lifemodel/workbench`; repository plus persisted digest therefore
 reconstructs the same immutable image after restart. Missing, tagged or malformed
 configuration refuses startup. A later repository change needs a reviewed policy
 and storage-contract change, not an environment-only override.
@@ -113,3 +113,20 @@ claim of a deployed API-server admission test.
 - .8.8 supplies the durable live channel.
 - .8.9 owns sealing, terminal outcome, exact-UID final deletion, confirmed Pod
   termination and reservation release. The [finalizer](task-finalize.md) now owns these steps. No terminal outcome is inferred here.
+
+## Local registry delivery
+
+The release publishes the workbench at the digest-pinned public origin
+`ghcr.io/shady2k/lifemodel-workbench`. The loader's first-start `workbench-import`
+phase copies its exact OCI bytes to the platform's zot before creating the
+application sources. Jobs name only
+`zot.lifemodel-system.svc:5001/lifemodel/workbench@sha256:<digest>`.
+The digest is unchanged; no tag resolution or public-registry fallback happens
+at Job start. Both core validation and both CEL guards reject ghcr.io and all
+other repositories. Missing/mismatched imports block bootstrap and retry.
+
+The node's installer-written k3s mirror routes that authority to
+`http://10.43.0.51:5001`. Pull is anonymous, while the loader reads the sole
+push password from OpenBao at use. Plain HTTP is the owner's interim choice;
+TLS is lifemodel-pwe.2. See [ADR-010's amendment](../../adr/010-container-generations.md#amendment-zot-workbench-delivery-2026-10-24)
+for trust, phase order and the cold-node acceptance boundary.

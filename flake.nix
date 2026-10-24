@@ -120,6 +120,27 @@
         fi
         touch $out
       '';
+      # The node does not resolve Kubernetes DNS. Its containerd mirror maps
+      # the same image authority used by the loader and Jobs to a fixed Service
+      # IP, reachable through kube-proxy without any host-network pod/listener.
+      registryModuleFiles = keyless.config.environment.etc;
+      registryInstallerAgreement =
+        assert lib.hasInfix "zot.lifemodel-system.svc:5001" registryModuleFiles."rancher/k3s/registries.yaml".text;
+        assert lib.hasInfix "http://10.43.0.51:5001" registryModuleFiles."rancher/k3s/registries.yaml".text;
+        assert !(builtins.elem 5001 keyless.config.networking.firewall.interfaces.eth0.allowedTCPPorts);
+        pkgs.runCommand "lifemodel-zot-node-registry-trust" {
+          nativeBuildInputs = [ pkgs.diffutils pkgs.gnugrep ];
+        } ''
+          set -eu
+          diff -u ${pkgs.writeText "nixos-registries.yaml" registryModuleFiles."rancher/k3s/registries.yaml".text} ${scriptKeyless}/k3s/registries.yaml
+          diff -u ${pkgs.writeText "nixos-registry-config.yaml" registryModuleFiles."rancher/k3s/config.yaml.d/lifemodel-registry.yaml".text} ${scriptKeyless}/k3s/config.yaml.d/lifemodel-registry.yaml
+          grep -Fx 'disable-default-registry-endpoint: true' ${scriptKeyless}/k3s/config.yaml.d/lifemodel-registry.yaml
+          grep -Fx 'service-cidr: 10.43.0.0/16' ${scriptKeyless}/k3s/config.yaml.d/lifemodel-registry.yaml
+          if grep -E 'password|username|insecure_skip_verify' ${scriptKeyless}/k3s/registries.yaml; then
+            echo 'node registry trust contains credentials or TLS bypass' >&2; exit 1
+          fi
+          touch $out
+        '';
       # The same scripts the NixOS module and the installer run.
       resolvConfBehaviour = pkgs.runCommand "lifemodel-k3s-resolv-conf-behaviour" {
         nativeBuildInputs = [ pkgs.nodejs pkgs.gnugrep pkgs.diffutils pkgs.coreutils ];
@@ -271,6 +292,8 @@
         grep -F 'name: lifemodel-system' instance.yaml >/dev/null
         grep -F 'name: lifemodel' instance.yaml >/dev/null
         grep -F 'boot-' instance.yaml >/dev/null
+        kustomize build ${./deploy/platform/a} > step-a.yaml
+        python -c 'import yaml,sys,json; ds=list(yaml.safe_load_all(open(sys.argv[1]))); get=lambda k,n: next(d for d in ds if d.get("kind")==k and d["metadata"]["name"]==n); s=get("StatefulSet","zot"); assert s["spec"]["replicas"]==1; assert s["spec"]["volumeClaimTemplates"][0]["spec"]["storageClassName"]=="local-path"; assert s["spec"]["template"]["spec"]["containers"][0]["image"]=="ghcr.io/project-zot/zot@sha256:96cda11459ce6f8c60da3b03f03e9f67fd11b3ae2d82c4c04c92b3c608996080"; assert get("Service","zot")["spec"]["clusterIP"]=="10.43.0.51"; p=get("NetworkPolicy","zot-access"); assert p["spec"]["egress"]==[]; assert p["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"]=={"app.kubernetes.io/name":"loader"}; c=json.loads(get("ConfigMap","zot-config")["data"]["config.json"]); assert c["http"]["accessControl"]["repositories"]["lifemodel/workbench"]["anonymousPolicy"]==["read"]; assert c["storage"]["gc"] is False; assert c["storage"]["dedupe"] is True' step-a.yaml
         kustomize build ${./deploy/platform/a0} > a0.yaml
         grep -F 'name: lifemodel-system-default-deny' a0.yaml >/dev/null
         grep -F 'name: loader-access' a0.yaml >/dev/null
@@ -616,6 +639,7 @@
         k3s-resolv-installer-render = resolvConfInstallerUnits;
         k3s-resolv-behaviour = resolvConfBehaviour;
         platform-kustomize-wiring = renderedPlatform;
+        zot-node-registry-trust = registryInstallerAgreement;
         openbao-platform-render = renderedOpenBao;
         cnpg-platform-render = renderedCNPG;
         gitea-platform-render = renderedGitea;
