@@ -19,3 +19,5 @@
 **/.git*
 **/id_*
 **/secrets/**
+
+!src/ports/task-harness-registry.json

@@ -1,0 +1,15 @@
+{
+  "opencode": {
+    "label": "OpenCode",
+    "protocol": "acp",
+    "command": "opencode",
+    "args": ["acp"],
+    "configFile": "/etc/lifemodel/opencode.json",
+    "version": "2.1.4",
+    "versionArgs": ["--version"],
+    "imageArchive": "https://registry.npmjs.org/@opencode/cli-linux-x64/-/cli-linux-x64-2.1.4.tgz",
+    "imageSha256": "ce05abe2dce1041391c8ec8cdb8da066f640fd471e72ac846dcb089c441e11e1",
+    "adapterModule": "./task-opencode.js",
+    "versionOutput": "opencode v2.1.4"
+  }
+}

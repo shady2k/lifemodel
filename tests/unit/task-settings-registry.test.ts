@@ -1,3 +1,4 @@
+import { TASK_HARNESS_NAMES } from '../../src/ports/task-harness-names.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -289,11 +290,11 @@ describe('settings declaration registry', () => {
       authority: 'owner',
       apply: 'nextAdmission',
     });
-    expect(harness?.options?.map((option) => option.value)).toEqual(['opencode', 'prime-agent']);
+    expect(harness?.options?.map((option) => option.value)).toEqual(TASK_HARNESS_NAMES);
     expect(harness?.options?.every((option) => option.label.en && option.label.ru)).toBe(true);
-    expect(platformSettings.validate('tasks.harness', 'prime-agent')).toEqual({
+    expect(platformSettings.validate('tasks.harness', TASK_HARNESS_NAMES[0])).toEqual({
       ok: true,
-      value: 'prime-agent',
+      value: TASK_HARNESS_NAMES[0],
     });
     expect(platformSettings.validate('tasks.harness', 'codex')).toMatchObject({
       ok: false,

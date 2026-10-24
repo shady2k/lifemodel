@@ -10,7 +10,7 @@ while IFS= read -r line || [ -n "$line" ]; do
     esac
     read_any=true
     case "$path" in
-        docker/workbench/*|docker/loader/lifemodel-storage|loader/*|package.json|package-lock.json|.github/workflows/ci.yml|.github/workflows/release.yml|scripts/ci-workbench-paths.sh|scripts/release/set-workbench-digest.sh)
+        docker/workbench/*|docker/loader/lifemodel-storage|loader/*|src/ports/task-harness-registry.json|package.json|package-lock.json|.github/workflows/ci.yml|.github/workflows/release.yml|scripts/ci-workbench-paths.sh|scripts/release/set-workbench-digest.sh)
             selected=true ;;
     esac
 done

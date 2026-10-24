@@ -304,8 +304,8 @@ export function createTaskChannel(options: ChannelOptions): {
                   if (read) {
                     const operation =
                       req.url === '/task/identity'
-                        ? options.mailbox.readIdentity
-                        : options.mailbox.readBriefing;
+                        ? options.mailbox.readIdentity?.bind(options.mailbox)
+                        : options.mailbox.readBriefing?.bind(options.mailbox);
                     if (!operation) throw new TaskChannelError(503, 'channel_unavailable');
                     const result = await operation(proof, signal);
                     signal.throwIfAborted();

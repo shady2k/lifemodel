@@ -38,7 +38,7 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseArgs as parseLaunchArgs, STORE_IMAGES, networkCreateArgs, storeContainerArgs, OPENCODE_ARCHIVES, OPENCODE_VERSION } from './test-isolated.mjs';
+import { parseArgs as parseLaunchArgs, STORE_IMAGES, networkCreateArgs, storeContainerArgs, OPENCODE_ARCHIVES, OPENCODE_VERSION, opencodeExtractScript } from './test-isolated.mjs';
 
 // ---------------------------------------------------------------------------
 // Machine identity and filesystem layout inside the disposable machine
@@ -549,7 +549,7 @@ export function buildPlan(input) {
       kind: 'orb',
       argv: runArgv(machineName, 'root', PROVISION_DIR, [
         'sh', '-ec',
-        `tar -xzf "$1" -C /usr/local/bin opencode; chmod 0555 /usr/local/bin/opencode; test "$(/usr/local/bin/opencode --version)" = '${OPENCODE_VERSION}'`,
+        opencodeExtractScript('$1'),
         'provision-opencode',
         `${PROVISION_DIR}/${opencodeArchive.file}`,
       ]),

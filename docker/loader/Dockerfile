@@ -74,6 +74,7 @@ RUN groupmod --new-name loader node \
 # sources, not the toolchain. Root-owned; the `loader` user runs it and
 # cannot change it.
 COPY --from=build --chown=root:root /build /opt/lifemodel/loader
+COPY src/ports/task-harness-registry.json /opt/lifemodel/src/ports/task-harness-registry.json
 # Stage 3 copies this CLI and its compiled modules into the workbench image.
 COPY --chown=root:root --chmod=0555 docker/loader/lifemodel-storage /usr/local/bin/lifemodel-storage
 COPY --chown=root:root --chmod=0555 docker/loader/lifemodel-storage-recovery /usr/local/bin/lifemodel-storage-recovery

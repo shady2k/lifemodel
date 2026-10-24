@@ -43,26 +43,27 @@ start returns one semantic result: `succeeded`, `failed` or `aborted`, with
 result text and a safe failure reason. `ScriptedTaskHarness` implements the
 same port for caller tests; it is not a second production agent.
 
-`OpenCodeTaskHarness` runs the pinned OpenCode 1.19.4 `serve` binary, bound to
-loopback only, with its working directory under `/work` and private HOME/TMPDIR.
-It drives one session through HTTP/SSE. Those raw APIs never leave the Pod.
-Tool subprocesses receive the four storage CLI environment values explicitly,
-not the model/channel environment values. They can upload and mark artifacts
-through task-scoped storage authority. No provider key is available.
+`AcpTaskHarness` is the only real protocol adapter. It runs a named registry
+configuration over stdio JSON-RPC, in `/work` with private HOME/TMPDIR. Agent
+command, config, version check and image pin are registry/config inputs, never
+launcher conditionals. The won briefing supplies the accepted `harness` name;
+an unknown/missing name fails closed. No new Job env value is introduced.
+Tool subprocesses receive only the four storage CLI capability values, not
+model/channel token paths. Raw ACP content never enters launcher diagnostics.
 
 The fixed baked provider/model is `lifemodel/task`. A loopback relay adds the
 fresh projected model token on `x-lifemodel-task-token` for each gateway request;
-OpenCode never holds a provider key. The relay verifies the projected instance
+The agent never holds a provider key. The relay verifies the projected instance
 CA. Only `/v1/chat/completions` and `/v1/models` can reach the gateway.
 
-Success requires final assistant text and no provider error or unresolved
+Success requires ACP `end_turn`, final assistant text and no provider error or unresolved
 required tool failure. Process exit 0, idle, `step_finish` or an ended agent
 alone does not prove success. Abort normalizes to `aborted`. Provider and tool
 failures normalize to `failed`; raw errors never enter launcher diagnostics.
 The accepted hard deadline bounds the adapter; the Job's native deadline remains
-the final compute bound. A Linux Python subreaper supervises OpenCode and reaps
+the final compute bound. A Linux Python subreaper supervises the agent and reaps
 its adopted detached tool descendants before adapter completion, including after
-server failure. Failure to establish or finish that cleanup fails closed.
+agent failure. Failure to establish or finish that cleanup fails closed.
 
 ## Durable outputs before the report
 
@@ -97,7 +98,7 @@ lifemodel-653.8.9 must read the stored mailbox report, validate marks, stop the
 exact compute instance, revoke task writes, seal storage and commit the keyed
 public outcome. It must also reconcile failed Jobs with no accepted report
 (e.g. a lost start or unavailable core). It must never infer success from exit 0.
-Stage 4 adds the second real adapter and steering/wrap with ACK only after the
+Stage 4 adds a second real ACP agent configuration and steering/wrap with ACK only after the
 adapter accepts it. It must preserve the single-start boundary and the same
 semantic-result contract.
 
@@ -153,10 +154,10 @@ session/event routes. The owner selected **ACP only** on 2026-10-24.
   failed or unsettled required call conservatively as failure. A final
   prose apology cannot turn it into success.
 - Provider/auth failures become JSON-RPC prompt errors, not a successful
-  `end_turn`: `packages/cli/src/acp/translate.ts:161-172` and
+  `end_turn`: `packages/cli/src/acp/translate.ts:137-147` and
   `packages/cli/src/acp/turn.ts:314-349`. Content filters yield `refusal`;
   interruption yields `cancelled`; token limits yield `max_tokens`:
-  `packages/cli/src/acp/translate.ts:503-512`.
+  `packages/cli/src/acp/translate.ts:470-478`.
 - Permission requests use the client's `session/request_permission` callback:
   `packages/cli/src/acp/permission.ts:60-83`. The client must respond with an
   offered permission option or cancelled, never leave the agent waiting.
@@ -173,7 +174,7 @@ an agent fails to respond. No native protocol fallback is permitted.
 
 v2 config is **not** the 1.x schema. It uses `providers`, `settings`, `agents`,
 `permissions`, `plugins`, `update`: `packages/schema/src/config.ts:25-117`,
-`packages/schema/src/config/provider.ts:131-143`. A custom built-in native
+`packages/schema/src/config/provider.ts:116-125`. A custom built-in native
 OpenAI-compatible provider uses package
 `@opencode/ai/providers/openai-compatible` and `settings.baseURL` set to the
 launcher's loopback relay; no external SDK install. Provider/model overlays
@@ -197,8 +198,33 @@ logs, repositories and TMPDIR live below private `/work`:
 `packages/util/src/global.ts:12-31,62-75`. Session database location comes from
 `packages/cli/src/server-process.ts:111-114`.
 
-**Runtime evidence is still required:** a rebuilt image must run ACP with the
-relay on loopback under `--network none`; trace all descendant `connect` calls
-(or equivalent deny-all attempt logging), allowing only loopback, and assert no
-package-manager bootstrap. Network isolation alone proves denial, not absence
-of attempted outbound fetches. This research section is not that receipt.
+Runtime receipt, 2026-10-24: the rebuilt uid-1000 image ran its actual launcher
+with fake gateway/channel/storage on loopback, `--network none --read-only`,
+all capabilities dropped, private `/work`, and descendant `strace -f -e
+trace=connect`. The smoke completed with one start, one briefing, one model
+request, two marked objects and one ACKed success (exit 0). All 42 AF_INET
+connect attempts were loopback; no outbound address was attempted (44 total
+connect calls including Unix sockets). The fixture is
+`tests/fixtures/task-launcher-image-smoke.mjs`; the run log is
+`/tmp/task-harness-v2-smoke2.log`. Isolated real-session tests additionally trap
+npm/bun/curl/wget startup and assert no invocation. Network isolation by itself
+would prove denial, not absence of attempted outbound fetches.
+
+## Adding a harness
+
+1. Add one configuration module beside `task-opencode.ts`. Export
+   `configureAgent({workDirectory, configFile, relayBaseURL})` and
+   `toolOutputFailed(rawOutput)` for agent-specific command status; return only the
+   agent's scoped environment. Do not implement another native protocol client.
+2. Add one entry in `src/ports/task-harness-registry.json`: name, display label,
+   ACP command/args, module path, immutable config path, version/versionArgs,
+   and checksum-pinned image archive. Settings names, core types, launcher
+   selection and offline self-check derive from this single list.
+3. Bake its checksum-verified executable into the workbench (build-time only).
+4. Bake its non-secret read-only config and admit it in the Docker allowlist.
+
+The shared contract iterates registered names plus the scripted fake. Provision
+the binary in the isolated test setup as well. Every added real agent must pass
+success, provider error, abort, tool failure and process-tree cleanup before it
+can be offered. If its ACP surface lacks a required signal, stop: no native API
+fallback. The scripted port fake is test-only and not offered as an owner setting.

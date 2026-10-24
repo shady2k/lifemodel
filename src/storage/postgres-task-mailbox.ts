@@ -213,8 +213,7 @@ export function createPostgresTaskMailbox(deps: {
     );
     const binding = launch.rows[0];
     if (
-      !binding ||
-      binding.job_uid !== proof.jobUid ||
+      binding?.job_uid !== proof.jobUid ||
       binding.job_name !== proof.jobName ||
       !/^launch_[0-9a-f]{64}$/.test(binding.launch_id) ||
       binding.launch_id.slice(7, 65) !== proof.launchLabel ||
@@ -291,8 +290,8 @@ export function createPostgresTaskMailbox(deps: {
         await authority(client, binding);
         await allocation(client, binding);
         await wonClaim(client, binding, proof);
-        const result = await client.query<{ briefing: string }>(
-          'SELECT briefing FROM core.tasks WHERE id=$1 AND octet_length(briefing)<=1048576',
+        const result = await client.query<{ briefing: string; harness: string }>(
+          'SELECT briefing,harness FROM core.tasks WHERE id=$1 AND octet_length(briefing)<=1048576',
           [binding.task_id]
         );
         await authority(client, binding);
@@ -302,6 +301,7 @@ export function createPostgresTaskMailbox(deps: {
         const response = {
           ...locators(binding),
           briefing,
+          harness: result.rows[0]?.harness ?? '',
           profile: { id, revision, timeoutSeconds, cpuMillis, memoryBytes },
         };
         if (Buffer.byteLength(JSON.stringify(response)) > 1_048_576)

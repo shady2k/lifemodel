@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:https';
 import { mkdtemp, writeFile, chmod, mkdir, readFile, rm, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -11,12 +11,11 @@ import {
   createStorageCertificate,
   type TestStorageCertificate,
 } from '../helpers/storage-certificate.js';
-import {
-  ScriptedTaskHarness,
-  type TaskHarness,
-  type TaskHarnessEvent,
-} from '../../loader/src/task-harness.js';
-import { OpenCodeTaskHarness, openCodeSemanticResult } from '../../loader/src/task-opencode.js';
+import { type TaskHarness, type TaskHarnessEvent } from '../../loader/src/task-harness.js';
+import { AcpTaskHarness, AcpTurn } from '../../loader/src/task-acp.js';
+import { configureAgent, toolOutputFailed } from '../../loader/src/task-opencode.js';
+import { createRegisteredHarness } from '../../loader/src/task-harness-factory.js';
+import { taskHarnessRegistry } from '../../loader/src/task-harness-registry.js';
 import { createTaskModelRelay } from '../../loader/src/task-model-relay.js';
 
 const exec = promisify(execFile);
@@ -25,7 +24,7 @@ const BRIEFING = 'TASK-BRIEFING-PRIVATE-CANARY';
 const RESULT = 'The task result is durable.';
 const BINARY = '/usr/local/bin/opencode';
 const briefing = { text: BRIEFING, model: 'lifemodel/task' };
-type Scenario = 'success' | 'provider' | 'tool' | 'storage' | 'descendant' | 'abort';
+type Scenario = 'success' | 'provider' | 'tool' | 'storage' | 'descendant' | 'abort' | 'permission';
 
 /** Both adapters use exactly the same public port assertions. The real adapter
  * speaks to a TLS fake of the task gateway, never to a model on the Internet.
@@ -61,8 +60,8 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
     await writeFile(
       join(directory, 'opencode.json'),
       JSON.stringify({
-        $schema: 'https://opencode.ai/config.json',
-        autoupdate: false,
+        $schema: 'https://opencode.ai/v2/config.json',
+        ...JSON.parse(await readFile('docker/workbench/opencode.json', 'utf8')),
         share: 'disabled',
       })
     );
@@ -137,7 +136,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
                 id: 'call_required',
                 type: 'function',
                 function: {
-                  name: 'bash',
+                  name: 'shell',
                   arguments: JSON.stringify({
                     command:
                       scenario === 'storage'
@@ -184,7 +183,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
           },
         })
       ).stdout.trim()
-    ).toBe('1.19.4');
+    ).toBe('opencode v2.1.4');
     expect(
       createHash('sha256')
         .update(await readFile(BINARY))
@@ -215,7 +214,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
     certificate?.cleanup();
   });
 
-  async function harness(kind: 'OpenCode' | 'scripted', mode: Scenario): Promise<TaskHarness> {
+  async function harness(kind: string, mode: Scenario): Promise<TaskHarness> {
     scenario = mode;
     expectedToken = TOKEN;
     requests = [];
@@ -226,37 +225,50 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
     work = await mkdtemp(join(directory, 'work-'));
     const onEvent = async (event: TaskHarnessEvent) => {
       events.push(event);
+      if (kind === 'scripted' && event.type === 'tool') requestSeen?.();
     };
     if (kind === 'scripted')
-      return new ScriptedTaskHarness({
+      return new AcpTaskHarness({
+        modelEndpoint: endpoint,
+        modelTokenFile: join(directory, 'token'),
+        modelCaFile: join(directory, 'ca'),
+        workDirectory: work,
+        timeoutMs: 45000,
         onEvent,
-        waitForAbort: mode === 'abort',
-        terminal:
-          mode === 'provider'
-            ? { outcome: 'failed', result: '', reasonCode: 'provider_error' }
-            : mode === 'tool'
-              ? { outcome: 'failed', result: '', reasonCode: 'required_tool_failed' }
-              : { outcome: 'succeeded', result: RESULT },
+        agent: {
+          label: 'Scripted ACP',
+          protocol: 'acp',
+          command: 'python3',
+          args: [resolve('tests/fixtures/task-scripted-acp.py'), mode],
+          configFile: '',
+          version: '',
+          versionOutput: '',
+          versionArgs: [],
+          adapterModule: '',
+        },
+        configure: () => ({}),
       });
-    return new OpenCodeTaskHarness({
-      modelEndpoint: endpoint,
-      modelTokenFile: join(directory, 'token'),
-      modelCaFile: join(directory, 'ca'),
-      workDirectory: work,
-      configFile: join(directory, 'opencode.json'),
-      binary: BINARY,
-      onEvent,
-      timeoutMs: 45_000,
-      storageEnv: {
-        LIFEMODEL_STORAGE_ENDPOINT: 'https://storage.invalid',
-        LIFEMODEL_STORAGE_SPACE: 'task-space',
-        LIFEMODEL_STORAGE_TOKEN_FILE: '/projected/storage/token',
-        LIFEMODEL_STORAGE_CA_FILE: '/projected/storage/ca',
+    return createRegisteredHarness(
+      kind,
+      {
+        modelEndpoint: endpoint,
+        modelTokenFile: join(directory, 'token'),
+        modelCaFile: join(directory, 'ca'),
+        workDirectory: work,
+        onEvent,
+        timeoutMs: 45000,
+        storageEnv: {
+          LIFEMODEL_STORAGE_ENDPOINT: 'https://storage.invalid',
+          LIFEMODEL_STORAGE_SPACE: 'task-space',
+          LIFEMODEL_STORAGE_TOKEN_FILE: '/projected/storage/token',
+          LIFEMODEL_STORAGE_CA_FILE: '/projected/storage/ca',
+        },
       },
-    });
+      { configFile: join(directory, 'opencode.json') }
+    );
   }
 
-  for (const kind of ['OpenCode', 'scripted'] as const) {
+  for (const kind of [...Object.keys(taskHarnessRegistry), 'scripted']) {
     describe(kind, () => {
       it('returns one semantic success with a result and refuses a second start', async () => {
         const task = await harness(kind, 'success');
@@ -267,7 +279,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
         expect(JSON.stringify(events)).not.toContain(TOKEN);
         expect(JSON.stringify(events)).not.toContain(BRIEFING);
         expect(JSON.stringify(events)).not.toContain(RESULT);
-        if (kind === 'OpenCode') {
+        if (kind !== 'scripted') {
           expect(requests.length).toBeGreaterThan(0);
           expect(
             requests.every(
@@ -293,7 +305,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
           result: '',
           reasonCode: 'required_tool_failed',
         });
-        if (kind === 'OpenCode') expect(toolSent).toBe(true);
+        if (kind !== 'scripted') expect(toolSent).toBe(true);
       }, 60_000);
 
       it('aborts an in-flight turn and declares unsupported stage-4 operations', async () => {
@@ -302,9 +314,8 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
         const active = new Promise<void>((resolve) => {
           reached = resolve;
         });
-        if (kind === 'OpenCode') requestSeen = reached;
+        requestSeen = reached;
         const terminal = task.start(briefing);
-        if (kind === 'scripted') reached();
         await Promise.race([
           active,
           terminal.then((result) => {
@@ -319,15 +330,130 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
     });
   }
 
+  it('answers an ACP permission callback fail-closed rather than hanging or granting owner authority', async () => {
+    const task = await harness('scripted', 'permission');
+    expect(await task.start(briefing)).toEqual({
+      outcome: 'aborted',
+      result: '',
+      reasonCode: 'aborted',
+    });
+  }, 60000);
+
+  it.each(['malformed', 'late-tool'])(
+    'fails closed on coalesced post-terminal frames: %s',
+    async (mode) => {
+      await harness('scripted', 'success');
+      const task = new AcpTaskHarness({
+        modelEndpoint: endpoint,
+        modelTokenFile: join(directory, 'token'),
+        modelCaFile: join(directory, 'ca'),
+        workDirectory: work,
+        timeoutMs: 5000,
+        agent: {
+          label: 'Scripted ACP',
+          protocol: 'acp',
+          command: 'python3',
+          args: [resolve('tests/fixtures/task-scripted-acp.py'), mode],
+          configFile: '',
+          version: '',
+          versionOutput: '',
+          versionArgs: [],
+          adapterModule: '',
+        },
+        configure: () => ({}),
+      });
+      expect((await task.start(briefing)).outcome).toBe('failed');
+    }
+  );
+
+  it('aborts a never-settling event sink and discards queued notifications within the cleanup bound', async () => {
+    await harness('scripted', 'success');
+    let reached!: () => void;
+    const active = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let count = 0;
+    const task = new AcpTaskHarness({
+      modelEndpoint: endpoint,
+      modelTokenFile: join(directory, 'token'),
+      modelCaFile: join(directory, 'ca'),
+      workDirectory: work,
+      timeoutMs: 10000,
+      agent: {
+        label: 'Scripted ACP',
+        protocol: 'acp',
+        command: 'python3',
+        args: [resolve('tests/fixtures/task-scripted-acp.py'), 'backlog'],
+        configFile: '',
+        version: '',
+        versionOutput: '',
+        versionArgs: [],
+        adapterModule: '',
+      },
+      configure: () => ({}),
+      onEvent: () => {
+        if (++count === 1) return;
+        reached();
+        return new Promise<void>(() => {});
+      },
+    });
+    const result = task.start(briefing);
+    await Promise.race([
+      active,
+      result.then(() => {
+        throw new Error('premature_terminal');
+      }),
+    ]);
+    await task.abort();
+    expect(await result).toEqual({ outcome: 'aborted', result: '', reasonCode: 'aborted' });
+    expect(count).toBe(2);
+  }, 10000);
+
+  it('replaces an ACP agent through one registry entry and its own output rule', async () => {
+    await harness('scripted', 'success');
+    const modulePath = join(work, 'different-agent.mjs');
+    await writeFile(
+      modulePath,
+      'export const configureAgent = () => ({}); export const toolOutputFailed = output => output?.customFailure === true;\n'
+    );
+    taskHarnessRegistry['different'] = {
+      label: 'Different ACP',
+      protocol: 'acp',
+      command: 'python3',
+      args: [resolve('tests/fixtures/task-scripted-acp.py'), 'custom-failure'],
+      configFile: '',
+      version: '',
+      versionOutput: '',
+      versionArgs: [],
+      adapterModule: modulePath,
+    };
+    try {
+      const task = await createRegisteredHarness('different', {
+        modelEndpoint: endpoint,
+        modelTokenFile: join(directory, 'token'),
+        modelCaFile: join(directory, 'ca'),
+        workDirectory: work,
+        timeoutMs: 5000,
+      });
+      expect(await task.start(briefing)).toEqual({
+        outcome: 'failed',
+        result: '',
+        reasonCode: 'required_tool_failed',
+      });
+    } finally {
+      delete taskHarnessRegistry['different'];
+    }
+  });
+
   it('passes only the storage capability to a real shell tool, not model or channel token paths', async () => {
-    const task = await harness('OpenCode', 'storage');
+    const task = await harness('opencode', 'storage');
     expect(await task.start(briefing)).toEqual({ outcome: 'succeeded', result: RESULT });
     expect(toolSent).toBe(true);
     expect(requests.some((request) => request.body.includes('storage-capability-ok'))).toBe(true);
   }, 60_000);
 
   it('reaps a real shell tool detached grandchild before returning its result', async () => {
-    const task = await harness('OpenCode', 'descendant');
+    const task = await harness('opencode', 'descendant');
     expect(await task.start(briefing)).toEqual({ outcome: 'succeeded', result: RESULT });
     const pid = Number(await readFile(join(work, 'detached.pid'), 'utf8'));
     expect(pid).toBeGreaterThan(1);
@@ -349,13 +475,18 @@ ${mode === 'crash' ? 'os.kill(os.getpid(), signal.SIGKILL)' : 'raise SystemExit(
 `
       );
       await chmod(binary, 0o755);
-      const task = new OpenCodeTaskHarness({
+      const task = new AcpTaskHarness({
         modelEndpoint: endpoint,
         modelTokenFile: join(directory, 'token'),
         modelCaFile: join(directory, 'ca'),
         workDirectory: work,
-        configFile: join(directory, 'opencode.json'),
-        binary,
+        agent: {
+          ...taskHarnessRegistry['opencode']!,
+          configFile: join(directory, 'opencode.json'),
+          command: binary,
+        },
+        configure: configureAgent,
+        toolOutputFailed,
         timeoutMs: 5_000,
       });
       expect((await task.start(briefing)).outcome).toBe('failed');
@@ -369,13 +500,18 @@ ${mode === 'crash' ? 'os.kill(os.getpid(), signal.SIGKILL)' : 'raise SystemExit(
     const binary = join(work, 'zero-exit');
     await writeFile(binary, '#!/bin/sh\nexit 0\n');
     await chmod(binary, 0o755);
-    const task = new OpenCodeTaskHarness({
+    const task = new AcpTaskHarness({
       modelEndpoint: endpoint,
       modelTokenFile: join(directory, 'token'),
       modelCaFile: join(directory, 'ca'),
       workDirectory: work,
-      configFile: join(directory, 'opencode.json'),
-      binary,
+      agent: {
+        ...taskHarnessRegistry['opencode']!,
+        configFile: join(directory, 'opencode.json'),
+        command: binary,
+      },
+      configure: configureAgent,
+      toolOutputFailed,
       timeoutMs: 5_000,
     });
     expect(await task.start(briefing)).toEqual({
@@ -409,48 +545,55 @@ ${mode === 'crash' ? 'os.kill(os.getpid(), signal.SIGKILL)' : 'raise SystemExit(
   });
 });
 
-describe('OpenCode semantic terminal boundary', () => {
-  const assistant = (
-    extra: Record<string, unknown> = {},
-    parts: unknown[] = [{ type: 'text', text: RESULT }]
-  ) => ({
-    info: { role: 'assistant', finish: 'stop', time: { created: 1, completed: 2 }, ...extra },
-    parts,
+describe('ACP semantic terminal boundary', () => {
+  const text = (turn: AcpTurn) =>
+    turn.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: RESULT } });
+  it('rejects exit zero alone, truncation, refusal and provider errors after partial output', () => {
+    expect(new AcpTurn(toolOutputFailed).result('end_turn').outcome).toBe('failed');
+    for (const reason of ['max_tokens', 'refusal', undefined]) {
+      const turn = new AcpTurn(toolOutputFailed);
+      text(turn);
+      expect(turn.result(reason).outcome).toBe('failed');
+    }
+    const turn = new AcpTurn(toolOutputFailed);
+    text(turn);
+    turn.error();
+    expect(turn.result('end_turn').reasonCode).toBe('provider_error');
   });
-  it('rejects CLI zero/step_finish/idle alone, truncated output and provider failures', () => {
-    expect(openCodeSemanticResult([]).outcome).toBe('failed');
-    expect(openCodeSemanticResult([assistant({}, [{ type: 'step-finish' }])]).outcome).toBe(
-      'failed'
-    );
-    expect(openCodeSemanticResult([assistant({ finish: 'length' })]).outcome).toBe('failed');
-    expect(openCodeSemanticResult([assistant()], true).outcome).toBe('failed');
-    expect(openCodeSemanticResult([assistant({ error: { name: 'APIError' } })]).reasonCode).toBe(
-      'provider_error'
-    );
-  });
-  it('detects native tool errors, unfinished tools, and completed shell tools with a nonzero exit', () => {
-    for (const state of [
-      { status: 'error' },
-      { status: 'running' },
-      { status: 'completed', metadata: { exit: 42 } },
-      { status: 'completed', metadata: { exit: null } },
+  it('rejects failed, unfinished, nonzero-exit and killed required calls even after final text', () => {
+    for (const update of [
+      { status: 'failed' },
+      { status: 'in_progress' },
+      { status: 'completed', rawOutput: { metadata: { exit: 42 } } },
+      { status: 'completed', rawOutput: { metadata: { exit: null } } },
+      { status: 'completed', rawOutput: { metadata: { signal: 'SIGKILL' } } },
+      { status: 'completed', rawOutput: { metadata: { timeout: true } } },
+      { status: 'completed', rawInput: { background: true } },
     ]) {
-      expect(
-        openCodeSemanticResult([
-          assistant({ finish: 'tool-calls' }, [{ type: 'tool', state }]),
-          assistant(),
-        ])
-      ).toEqual({ outcome: 'failed', result: '', reasonCode: 'required_tool_failed' });
+      const turn = new AcpTurn(toolOutputFailed);
+      turn.update({ sessionUpdate: 'tool_call', toolCallId: 'required', ...update });
+      text(turn);
+      expect(turn.result('end_turn')).toEqual({
+        outcome: 'failed',
+        result: '',
+        reasonCode: 'required_tool_failed',
+      });
     }
   });
-  it('accepts a completed required tool followed by a complete assistant answer', () => {
-    expect(
-      openCodeSemanticResult([
-        assistant({ finish: 'tool-calls' }, [
-          { type: 'tool', state: { status: 'completed', metadata: { exit: 0 } } },
-        ]),
-        assistant(),
-      ])
-    ).toEqual({ outcome: 'succeeded', result: RESULT });
+  it('accepts a settled tool then final assistant text; cancelled overrides partial text', () => {
+    const turn = new AcpTurn(toolOutputFailed);
+    turn.update({
+      sessionUpdate: 'tool_call',
+      toolCallId: 'required',
+      status: 'completed',
+      rawOutput: { metadata: { exit: 0 } },
+    });
+    text(turn);
+    expect(turn.result('end_turn')).toEqual({ outcome: 'succeeded', result: RESULT });
+    expect(turn.result('cancelled')).toEqual({
+      outcome: 'aborted',
+      result: '',
+      reasonCode: 'aborted',
+    });
   });
 });

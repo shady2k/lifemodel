@@ -4,7 +4,7 @@ import { mkdir, writeFile, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import { TaskJsonClient, LauncherError, type TaskEndpoint } from './task-launcher-http.js';
 import { runStorageCli } from './storage-cli.js';
-import { OpenCodeTaskHarness } from './task-opencode.js';
+import { createRegisteredHarness } from './task-harness-factory.js';
 import type { TaskHarness, TaskHarnessEvent, TaskHarnessResult } from './task-harness.js';
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -240,26 +240,29 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
     const modelConfig = endpoint(options.env, 'MODEL');
     harness =
       options.harness?.(onEvent) ??
-      new OpenCodeTaskHarness({
-        modelEndpoint: modelConfig.endpoint,
-        modelTokenFile: modelConfig.tokenFile,
-        modelCaFile: modelConfig.caFile,
-        workDirectory: cwd,
-        storageEnv: {
-          LIFEMODEL_STORAGE_ENDPOINT: options.env['LIFEMODEL_STORAGE_ENDPOINT'] ?? '',
-          LIFEMODEL_STORAGE_SPACE: options.env['LIFEMODEL_STORAGE_SPACE'] ?? '',
-          LIFEMODEL_STORAGE_TOKEN_FILE: options.env['LIFEMODEL_STORAGE_TOKEN_FILE'] ?? '',
-          LIFEMODEL_STORAGE_CA_FILE: options.env['LIFEMODEL_STORAGE_CA_FILE'] ?? '',
-        },
-        onEvent,
-        timeoutMs: Math.max(1, Date.parse(claim['hardStopAt'] as string) - Date.now() - 10_000),
-      });
+      (await createRegisteredHarness(
+        typeof briefing['harness'] === 'string' ? briefing['harness'] : '',
+        {
+          modelEndpoint: modelConfig.endpoint,
+          modelTokenFile: modelConfig.tokenFile,
+          modelCaFile: modelConfig.caFile,
+          workDirectory: cwd,
+          storageEnv: {
+            LIFEMODEL_STORAGE_ENDPOINT: options.env['LIFEMODEL_STORAGE_ENDPOINT'] ?? '',
+            LIFEMODEL_STORAGE_SPACE: options.env['LIFEMODEL_STORAGE_SPACE'] ?? '',
+            LIFEMODEL_STORAGE_TOKEN_FILE: options.env['LIFEMODEL_STORAGE_TOKEN_FILE'] ?? '',
+            LIFEMODEL_STORAGE_CA_FILE: options.env['LIFEMODEL_STORAGE_CA_FILE'] ?? '',
+          },
+          onEvent,
+          timeoutMs: Math.max(1, Date.parse(claim['hardStopAt']) - Date.now() - 10_000),
+        }
+      ));
     if (options.signal?.aborted) {
       await harness.abort();
       throw new LauncherError('launcher_aborted');
     }
     const result: TaskHarnessResult = await harness.start({
-      text: briefing['briefing'] as string,
+      text: briefing['briefing'],
       model: 'lifemodel/task',
     });
     await log.sync();

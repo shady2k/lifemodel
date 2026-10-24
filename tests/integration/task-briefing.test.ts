@@ -381,7 +381,12 @@ describe('task launcher identity and briefing (real stores and live TLS identity
     await access.start({ ...ids(f.task), bootNonce: randomUUID() }, f.modelToken);
     const briefing = await get(channel.url, f.token);
     expect(briefing.status).toBe(200);
-    expect(briefing.body).toEqual({ ...ids(f.task), briefing: PAYLOAD, profile: f.task.profile });
+    expect(briefing.body).toEqual({
+      ...ids(f.task),
+      briefing: PAYLOAD,
+      profile: f.task.profile,
+      harness: f.task.harness,
+    });
     expect(briefing.headers['cache-control']).toBe('no-store');
     expect((await get(channel.url, f.token)).body).toEqual(briefing.body);
     expect(reviews.every((audiences) => audiences.length === 1)).toBe(true);
@@ -493,6 +498,7 @@ describe('task launcher identity and briefing (real stores and live TLS identity
       ...ids(f.task),
       briefing: PAYLOAD,
       profile: f.task.profile,
+      harness: f.task.harness,
     });
     expect((await get(channel.url, f.token, '/task/identity')).status).toBe(403);
   });

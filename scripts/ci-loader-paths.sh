@@ -48,7 +48,7 @@ while IFS= read -r line || [ -n "$line" ]; do
     esac
     read_any=true
     case "$path" in
-        loader/*|web/loader/*|web/kit/*|docker/loader/*|.dockerignore|deploy/platform/*|scripts/release/*|src/web/model-status.ts|src/web/contract.ts|src/ports/message-attachment.ts|package.json|package-lock.json)
+        loader/*|web/loader/*|web/kit/*|docker/loader/*|.dockerignore|deploy/platform/*|scripts/release/*|src/web/model-status.ts|src/web/contract.ts|src/ports/message-attachment.ts|src/ports/task-harness-registry.json|package.json|package-lock.json)
             selected=true ;;
     esac
 done

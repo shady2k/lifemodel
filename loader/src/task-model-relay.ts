@@ -48,7 +48,9 @@ export async function createTaskModelRelay(options: TaskModelRelayOptions): Prom
       outgoing.destroy();
     };
     deadline.addEventListener('abort', timedOut, { once: true });
-    outgoing.on('close', () => deadline.removeEventListener('abort', timedOut));
+    outgoing.on('close', () => {
+      deadline.removeEventListener('abort', timedOut);
+    });
     void (async () => {
       try {
         const [rawToken, ca] = await Promise.all([
@@ -115,11 +117,15 @@ export async function createTaskModelRelay(options: TaskModelRelayOptions): Prom
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('relay_bind_failed');
   return {
-    baseURL: `http://127.0.0.1:${address.port}/v1`,
+    baseURL: `http://127.0.0.1:${String(address.port)}/v1`,
     async close() {
       for (const upstream of upstreams) upstream.destroy();
       for (const socket of sockets) socket.destroy();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await new Promise<void>((resolve) =>
+        server.close(() => {
+          resolve();
+        })
+      );
     },
   };
 }

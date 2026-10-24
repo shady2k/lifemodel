@@ -1,3 +1,4 @@
+import { TASK_HARNESS_NAMES } from '../../src/ports/task-harness-names.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -60,7 +61,7 @@ describe('core platform settings reader', () => {
       join(dir, PLATFORM_SETTINGS_FILE),
       document(7, {
         'tasks.concurrency': 3,
-        'tasks.harness': 'prime-agent',
+        'tasks.harness': TASK_HARNESS_NAMES[0],
         'tasks.wrapGraceSeconds': 600,
         'storage.retention': 'forever',
         'storage.warningLeadDays': 14,
@@ -72,7 +73,7 @@ describe('core platform settings reader', () => {
       values: {
         ...defaults,
         'tasks.concurrency': 3,
-        'tasks.harness': 'prime-agent',
+        'tasks.harness': TASK_HARNESS_NAMES[0],
         'tasks.wrapGraceSeconds': 600,
         'storage.retention': 'forever',
         'storage.warningLeadDays': 14,
@@ -157,18 +158,22 @@ describe('core platform settings reader', () => {
     const file = join(dir, PLATFORM_SETTINGS_FILE);
     const reader = readerFor(dir, calls);
     await expect(reader.read()).resolves.toEqual({ revision: 0, values: defaults });
-    writeFileSync(file, document(1, { 'tasks.harness': 'prime-agent' }));
+    writeFileSync(file, document(1, { 'tasks.harness': TASK_HARNESS_NAMES[0] }));
     await expect(reader.read()).resolves.toEqual({
       revision: 1,
-      values: { ...defaults, 'tasks.harness': 'prime-agent' },
+      values: { ...defaults, 'tasks.harness': TASK_HARNESS_NAMES[0] },
     });
     writeFileSync(
       file,
-      document(2, { 'tasks.harness': 'prime-agent', 'storage.retention': 'forever' })
+      document(2, { 'tasks.harness': TASK_HARNESS_NAMES[0], 'storage.retention': 'forever' })
     );
     await expect(reader.read()).resolves.toEqual({
       revision: 2,
-      values: { ...defaults, 'tasks.harness': 'prime-agent', 'storage.retention': 'forever' },
+      values: {
+        ...defaults,
+        'tasks.harness': TASK_HARNESS_NAMES[0],
+        'storage.retention': 'forever',
+      },
     });
   });
 
@@ -265,7 +270,7 @@ describe('core reader parity with the loader registry', () => {
     '',
     'x',
     'opencode',
-    'prime-agent',
+    TASK_HARNESS_NAMES[0],
     'codex',
     '90d',
     'forever',

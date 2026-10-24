@@ -41,3 +41,5 @@
 **/id_*
 **/secrets/**
 **/.dockerignore
+
+!src/ports/task-harness-registry.json

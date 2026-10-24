@@ -1,5 +1,5 @@
 # One release-commit workbench, separate from core. No installs at task startup.
-# Linux/amd64 baseline binary supports hosts without AVX2. Other architectures
+# Linux/amd64 native v2 binary is checksum pinned. Other architectures
 # fail closed until they have a reviewed binary/checksum and offline receipt.
 FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS cli-build
 WORKDIR /build
@@ -26,19 +26,19 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
  && printf 'deb http://snapshot.debian.org/archive/debian/20261015T000000Z bookworm main\n' > /etc/apt/sources.list \
  && apt-get update -o APT::Update::Error-Mode=any \
  && cmp /tmp/debian.InRelease /var/lib/apt/lists/*_InRelease \
- && apt-get install -y --no-install-recommends ca-certificates curl git build-essential python3 ripgrep \
+ && apt-get install -y --no-install-recommends ca-certificates curl git build-essential python3 ripgrep strace \
  && rm -rf /var/lib/apt/lists/* /tmp/debian.InRelease
 
-# Official native release archive; no npm postinstall platform selection or
-# downloader at runtime. Checksum from the exact release's asset metadata.
-ENV OPENCODE_VERSION=1.19.4 \
-    OPENCODE_SHA256=1697ef40558d378bd2f72efa8fafe1bed1f0e664f09247b9357556b95dbc7cbc
+# Pinned native v2 npm archive. Registry SHA-512 was verified during research;
+# its independently recorded SHA-256 below is checked before extraction.
+ENV OPENCODE_VERSION=2.1.4 \
+    OPENCODE_SHA256=ce05abe2dce1041391c8ec8cdb8da066f640fd471e72ac846dcb089c441e11e1
 RUN test "$(dpkg --print-architecture)" = amd64 \
- && curl --fail --location --retry 3 "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64-baseline.tar.gz" -o /tmp/opencode.tar.gz \
+ && curl --fail --location --retry 3 "https://registry.npmjs.org/@opencode/cli-linux-x64/-/cli-linux-x64-${OPENCODE_VERSION}.tgz" -o /tmp/opencode.tar.gz \
  && echo "${OPENCODE_SHA256}  /tmp/opencode.tar.gz" | sha256sum -c - \
- && tar -xzf /tmp/opencode.tar.gz -C /usr/local/bin opencode \
- && chmod 0555 /usr/local/bin/opencode \
- && rm /tmp/opencode.tar.gz
+ && tar -xzf /tmp/opencode.tar.gz -C /tmp package/bin/opencode \
+ && install -m 0555 /tmp/package/bin/opencode /usr/local/bin/opencode \
+ && rm -rf /tmp/package /tmp/opencode.tar.gz
 
 # Keep all development dependencies, including native modules, from THIS source
 # lock. Do not copy an owner .npmrc (it could contain credentials). The only
@@ -58,15 +58,10 @@ COPY --chown=root:root --chmod=0555 docker/loader/lifemodel-storage /usr/local/b
 COPY --chown=root:root --chmod=0555 docker/workbench/lifemodel-task-launcher /usr/local/bin/lifemodel-task-launcher
 COPY --chown=root:root docker/workbench/opencode.json /etc/lifemodel/opencode.json
 
-# OpenCode 1.19.4 Config always asks Npm.install for @opencode-ai/plugin,
-# even with plugins disabled. Its Npm.install checks directory writability
-# BEFORE constructing Arborist. Precreate the global config and .gitignore,
-# then make them root-owned/read-only: no dependency install or registry access.
-# Source: v1.19.4 packages/core/src/npm.ts and opencode/src/config/config.ts.
+# Config roots are immutable. v2 has no v1 plugin bootstrap dependency.
 RUN mkdir -p /etc/lifemodel/xdg/opencode \
- && printf 'node_modules\npackage.json\npackage-lock.json\nbun.lock\n.gitignore\n' > /etc/lifemodel/xdg/opencode/.gitignore \
- && chmod 0555 /etc/lifemodel/xdg /etc/lifemodel/xdg/opencode \
- && chmod 0444 /etc/lifemodel/xdg/opencode/.gitignore
+ && chmod 0555 /etc/lifemodel/xdg /etc/lifemodel/xdg/opencode
+COPY src/ports/task-harness-registry.json /opt/lifemodel/src/ports/task-harness-registry.json
 
 # The Job mounts its PRIVATE working volume at /work (uid/gid/fsGroup 1000).
 # HOME, mutable XDG paths and TMPDIR live there; config stays immutable above.
@@ -77,16 +72,7 @@ ENV HOME=/work/home \
     XDG_CONFIG_HOME=/etc/lifemodel/xdg \
     XDG_CACHE_HOME=/work/home/.cache \
     XDG_DATA_HOME=/work/home/.local/share \
-    XDG_STATE_HOME=/work/home/.local/state \
-    OPENCODE_CONFIG=/etc/lifemodel/opencode.json \
-    OPENCODE_DISABLE_AUTOUPDATE=true \
-    OPENCODE_DISABLE_MODELS_FETCH=true \
-    OPENCODE_DISABLE_PROJECT_CONFIG=true \
-    OPENCODE_DISABLE_DEFAULT_PLUGINS=true \
-    OPENCODE_DISABLE_LSP_DOWNLOAD=true \
-    OPENCODE_DISABLE_EXTERNAL_SKILLS=true \
-    OPENCODE_DISABLE_CLAUDE_CODE=true \
-    OPENCODE_PURE=true
+    XDG_STATE_HOME=/work/home/.local/state
 USER 1000:1000
 WORKDIR /work
 ENTRYPOINT ["/usr/local/bin/lifemodel-task-launcher"]

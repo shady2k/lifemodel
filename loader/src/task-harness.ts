@@ -56,15 +56,16 @@ export class ScriptedTaskHarness implements TaskHarness {
       : (this.options.terminal ?? { outcome: 'succeeded', result: 'Task completed.' });
   }
 
-  async abort(): Promise<void> {
+  abort(): Promise<void> {
     this.aborted = true;
     this.release?.();
+    return Promise.resolve();
   }
 
-  async steer(_text: string): Promise<'not_supported'> {
-    return 'not_supported';
+  steer(_text: string): Promise<'not_supported'> {
+    return Promise.resolve('not_supported');
   }
-  async wrap(): Promise<'not_supported'> {
-    return 'not_supported';
+  wrap(): Promise<'not_supported'> {
+    return Promise.resolve('not_supported');
   }
 }

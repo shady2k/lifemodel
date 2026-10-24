@@ -39,7 +39,9 @@ export class TaskJsonClient {
   async call(path: string, body?: unknown): Promise<Record<string, unknown>> {
     const controller = new AbortController();
     const deadline = performance.now() + this.timeoutMs;
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = setTimeout(() => {
+      controller.abort();
+    }, this.timeoutMs);
     try {
       const [token, ca] = await Promise.all([
         readFile(this.config.tokenFile, { encoding: 'utf8', signal: controller.signal }),
@@ -64,10 +66,14 @@ export class TaskJsonClient {
               : {}),
           },
         });
-        req.on('error', () => reject(new LauncherError('request_unavailable')));
+        req.on('error', () => {
+          reject(new LauncherError('request_unavailable'));
+        });
         req.on('socket', (socket) => socket.on('error', () => undefined));
         req.on('response', (res) => {
-          res.on('error', () => reject(new LauncherError('request_unavailable')));
+          res.on('error', () => {
+            reject(new LauncherError('request_unavailable'));
+          });
           const chunks: Buffer[] = [];
           let length = 0;
           res.on('data', (chunk: Buffer) => {

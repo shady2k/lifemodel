@@ -1,0 +1,475 @@
+/** Generic ACP JSON-RPC client. Agent-specific launch/config lives in registry modules. */
+import { spawn, type ChildProcess } from 'node:child_process';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
+import { createTaskModelRelay } from './task-model-relay.js';
+import { TASK_PROCESS_SUPERVISOR } from './task-process.js';
+import type { AgentConfiguration } from './task-harness-registry.js';
+import type {
+  TaskBriefing,
+  TaskHarness,
+  TaskHarnessEventSink,
+  TaskHarnessResult,
+} from './task-harness.js';
+
+type Json = Record<string, unknown>;
+const record = (v: unknown): Json =>
+  v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Json) : {};
+const failed = (reasonCode: string): TaskHarnessResult => ({
+  outcome: 'failed',
+  result: '',
+  reasonCode,
+});
+const aborted = (): TaskHarnessResult => ({
+  outcome: 'aborted',
+  result: '',
+  reasonCode: 'aborted',
+});
+
+/** One turn only. Calls are required until completed; failure is sticky. */
+export class AcpTurn {
+  private readonly tools = new Map<string, string>();
+  private toolFailed = false;
+  private final = '';
+  private providerFailed = false;
+  constructor(
+    private readonly toolOutputFailed: (output: unknown, input?: unknown) => boolean = () => false
+  ) {}
+
+  update(value: unknown): 'step' | 'tool' | undefined {
+    const update = record(value);
+    if (update['sessionUpdate'] === 'agent_message_chunk') {
+      const content = record(update['content']);
+      if (content['type'] === 'text' && typeof content['text'] === 'string') {
+        this.final += content['text'];
+        if (Buffer.byteLength(this.final) > 1_048_576) throw new Error('harness_result_limit');
+      }
+      return 'step';
+    }
+    if (update['sessionUpdate'] === 'tool_call' || update['sessionUpdate'] === 'tool_call_update') {
+      const id = update['toolCallId'];
+      if (typeof id !== 'string' || !id || this.tools.size >= 10000)
+        throw new Error('harness_protocol_error');
+      const status = update['status'];
+      if (status !== undefined) {
+        if (
+          typeof status !== 'string' ||
+          !['pending', 'in_progress', 'completed', 'failed'].includes(status)
+        )
+          throw new Error('harness_protocol_error');
+        this.tools.set(id, status);
+      } else if (!this.tools.has(id)) this.tools.set(id, 'pending');
+      if (status === 'failed' || this.toolOutputFailed(update['rawOutput'], update['rawInput']))
+        this.toolFailed = true;
+      // Earlier assistant prose is not a final answer after a tool call.
+      this.final = '';
+      return 'tool';
+    }
+    return undefined;
+  }
+  error(): void {
+    this.providerFailed = true;
+  }
+  result(stopReason: unknown): TaskHarnessResult {
+    if (stopReason === 'cancelled') return aborted();
+    if (this.providerFailed) return failed('provider_error');
+    if (this.toolFailed || [...this.tools.values()].some((s) => s !== 'completed'))
+      return failed('required_tool_failed');
+    if (stopReason !== 'end_turn' || !this.final.trim()) return failed('no_final_result');
+    return { outcome: 'succeeded', result: this.final.trim() };
+  }
+}
+
+export interface AcpTaskHarnessOptions {
+  modelEndpoint: string;
+  modelTokenFile: string;
+  modelCaFile: string;
+  workDirectory?: string;
+  onEvent?: TaskHarnessEventSink;
+  agent?: AgentConfiguration;
+  configure?: (input: {
+    workDirectory: string;
+    configFile: string;
+    relayBaseURL: string;
+  }) => NodeJS.ProcessEnv;
+  toolOutputFailed?: (output: unknown, input?: unknown) => boolean;
+  timeoutMs?: number;
+  storageEnv?: {
+    LIFEMODEL_STORAGE_ENDPOINT: string;
+    LIFEMODEL_STORAGE_SPACE: string;
+    LIFEMODEL_STORAGE_TOKEN_FILE: string;
+    LIFEMODEL_STORAGE_CA_FILE: string;
+  };
+}
+
+export class AcpTaskHarness implements TaskHarness {
+  private started = false;
+  private cancelled = false;
+  private cancelRequest: (() => Promise<void>) | undefined;
+  private readonly cancellation = new AbortController();
+  constructor(private readonly options: AcpTaskHarnessOptions) {}
+  steer(_text: string): Promise<'not_supported'> {
+    return Promise.resolve('not_supported');
+  }
+  wrap(): Promise<'not_supported'> {
+    return Promise.resolve('not_supported');
+  }
+  async abort(): Promise<void> {
+    this.cancelled = true;
+    await this.cancelRequest?.().catch(() => undefined);
+    this.cancellation.abort();
+  }
+  async start(briefing: TaskBriefing): Promise<TaskHarnessResult> {
+    if (this.started) throw new Error('harness_already_started');
+    this.started = true;
+    if (this.cancelled) return aborted();
+    const agent = this.options.agent;
+    if (!agent || !this.options.configure) return failed('harness_not_configured');
+    const work = this.options.workDirectory ?? '/work';
+    const timeout = this.options.timeoutMs ?? 3600000;
+    const signal = AbortSignal.any([this.cancellation.signal, AbortSignal.timeout(timeout)]);
+    let child: ChildProcess | undefined;
+    let relay: Awaited<ReturnType<typeof createTaskModelRelay>> | undefined;
+    const turn = new AcpTurn(this.options.toolOutputFailed);
+    let result: TaskHarnessResult = failed('harness_failed');
+    const pending = new Map<
+      number,
+      {
+        resolve: (v: Json) => void;
+        reject: (e: Error) => void;
+        timer: ReturnType<typeof setTimeout>;
+      }
+    >();
+    let nextID = 0;
+    let sessionID: string | undefined;
+    let fault: Error | undefined;
+    let queue = Promise.resolve();
+    let queuedBytes = 0;
+    let closing = false;
+    let promptSettled = false;
+    let stopReason: unknown;
+    const fail = (code: string) => {
+      fault ??= new Error(code);
+      for (const waiter of pending.values()) {
+        clearTimeout(waiter.timer);
+        waiter.reject(fault ?? new Error('harness_write_timeout'));
+      }
+      pending.clear();
+    };
+    const stop = () => {
+      fail(this.cancelled ? 'aborted' : 'harness_timeout');
+    };
+    signal.addEventListener('abort', stop, { once: true });
+    const emit = async (event: Parameters<TaskHarnessEventSink>[0]): Promise<void> => {
+      if (fault || signal.aborted) throw fault ?? new Error('harness_timeout');
+      await new Promise<void>((resolve, reject) => {
+        const done = (error?: unknown) => {
+          clearTimeout(timer);
+          signal.removeEventListener('abort', cancel);
+          if (error) reject(error instanceof Error ? error : new Error('harness_event_failed'));
+          else resolve();
+        };
+        const cancel = () => {
+          done(new Error('harness_timeout'));
+        };
+        const timer = setTimeout(() => {
+          fail('harness_event_timeout');
+          done(fault);
+        }, 5000);
+        signal.addEventListener('abort', cancel, { once: true });
+        Promise.resolve()
+          .then(() => this.options.onEvent?.(event))
+          .then(() => {
+            done();
+          }, done);
+        if (signal.aborted) cancel();
+      });
+    };
+
+    try {
+      await Promise.all(
+        ['home', 'tmp'].map((name) => mkdir(join(work, name), { recursive: true, mode: 0o700 }))
+      );
+      relay = await createTaskModelRelay({
+        modelEndpoint: this.options.modelEndpoint,
+        modelTokenFile: this.options.modelTokenFile,
+        modelCaFile: this.options.modelCaFile,
+        timeoutMs: Math.min(timeout, 300000),
+        onError: () => {
+          turn.error();
+        },
+      });
+      const storage = this.options.storageEnv;
+      const env: NodeJS.ProcessEnv = {
+        ...(storage
+          ? {
+              LIFEMODEL_STORAGE_ENDPOINT: storage.LIFEMODEL_STORAGE_ENDPOINT,
+              LIFEMODEL_STORAGE_SPACE: storage.LIFEMODEL_STORAGE_SPACE,
+              LIFEMODEL_STORAGE_TOKEN_FILE: storage.LIFEMODEL_STORAGE_TOKEN_FILE,
+              LIFEMODEL_STORAGE_CA_FILE: storage.LIFEMODEL_STORAGE_CA_FILE,
+            }
+          : {}),
+        PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+        HOME: join(work, 'home'),
+        TMPDIR: join(work, 'tmp'),
+        ...this.options.configure({
+          workDirectory: work,
+          configFile: agent.configFile,
+          relayBaseURL: relay.baseURL,
+        }),
+      };
+      if (signal.aborted) throw new Error('aborted');
+      child = spawn('python3', ['-c', TASK_PROCESS_SUPERVISOR, agent.command, ...agent.args], {
+        cwd: work,
+        env,
+        detached: true,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      const running = child;
+      const { stdin, stdout, stderr } = running;
+      if (!stdin || !stdout || !stderr) throw new Error('harness_stream_failed');
+      child.on('error', () => {
+        fail('harness_process_failed');
+      });
+      child.on('exit', () => {
+        if (!closing) fail('harness_process_failed');
+      });
+      for (const stream of [stdin, stdout, stderr])
+        stream.on('error', () => {
+          fail('harness_stream_failed');
+        });
+      stderr.resume(); // raw agent logs never reach launcher diagnostics
+      const write = (message: Json): Promise<void> =>
+        new Promise((resolve, reject) => {
+          if (fault || !child?.stdin?.writable) {
+            reject(fault ?? new Error('harness_stream_failed'));
+            return;
+          }
+          const timer = setTimeout(() => {
+            fail('harness_write_timeout');
+            reject(fault ?? new Error('harness_write_timeout'));
+          }, 2000);
+          child.stdin.write(`${JSON.stringify(message)}\n`, (error) => {
+            clearTimeout(timer);
+            if (error) {
+              fail('harness_stream_failed');
+              reject(error);
+            } else resolve();
+          });
+        });
+      const request = (method: string, params: Json, deadline = 30000): Promise<Json> => {
+        if (fault) return Promise.reject(fault ?? new Error('harness_write_timeout'));
+        const id = ++nextID;
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(
+            () => {
+              fail('harness_request_timeout');
+            },
+            Math.min(deadline, timeout)
+          );
+          pending.set(id, { resolve, reject, timer });
+          void write({ jsonrpc: '2.0', id, method, params }).catch(() => {
+            fail('harness_stream_failed');
+          });
+        });
+      };
+      const dispatch = async (message: Json) => {
+        if (fault) return;
+        if (promptSettled) throw new Error('harness_after_terminal');
+        if (message['jsonrpc'] !== '2.0') throw new Error('harness_protocol_error');
+        if (message['method'] === 'session/update') {
+          const params = record(message['params']);
+          if (params['sessionId'] !== sessionID) throw new Error('harness_session_invalid');
+          const update = record(params['update']);
+          const event = turn.update(update);
+          if (event === 'step') await emit({ type: 'step', text: 'Task is working' });
+          if (event === 'tool') {
+            const status =
+              update['status'] === 'failed'
+                ? 'error'
+                : update['status'] === 'completed'
+                  ? 'completed'
+                  : 'running';
+            await emit({ type: 'tool', name: 'task_tool', status });
+          }
+          return;
+        }
+        if (typeof message['method'] === 'string') {
+          if (!Object.hasOwn(message, 'id')) return; // unknown optional notification
+          if (message['method'] === 'session/request_permission') {
+            const params = record(message['params']);
+            // Noninteractive, task-scoped permission only; reject every requested approval.
+            // Normal task tools use the baked allow rules; questions/external paths stay denied.
+            if (params['sessionId'] !== sessionID) throw new Error('harness_session_invalid');
+            await write({
+              jsonrpc: '2.0',
+              id: message['id'],
+              result: { outcome: { outcome: 'cancelled' } },
+            });
+          } else
+            await write({
+              jsonrpc: '2.0',
+              id: message['id'],
+              error: { code: -32601, message: 'Method not supported' },
+            });
+          return;
+        }
+        const id = message['id'];
+        if (typeof id !== 'number' || !pending.has(id)) throw new Error('harness_protocol_error');
+        const waiter = pending.get(id);
+        if (!waiter) throw new Error('harness_protocol_error');
+        pending.delete(id);
+        clearTimeout(waiter.timer);
+        if (Object.hasOwn(message, 'error')) {
+          turn.error();
+          waiter.reject(new Error('provider_error'));
+        } else if (!Object.hasOwn(message, 'result'))
+          waiter.reject(new Error('harness_protocol_error'));
+        else waiter.resolve(record(message['result']));
+      };
+      const decoder = new StringDecoder('utf8');
+      let buffered = '';
+      stdout.on('data', (chunk: Buffer) => {
+        buffered += decoder.write(chunk);
+        if (Buffer.byteLength(buffered) > 4_194_304) {
+          fail('harness_frame_limit');
+          return;
+        }
+        let newline: number;
+        while ((newline = buffered.indexOf('\n')) >= 0) {
+          const line = buffered.slice(0, newline).trim();
+          buffered = buffered.slice(newline + 1);
+          if (!line) continue;
+          queuedBytes += Buffer.byteLength(line);
+          if (queuedBytes > 4_194_304) {
+            fail('harness_frame_limit');
+            return;
+          }
+          queue = queue
+            .then(() => dispatch(record(JSON.parse(line))))
+            .catch(() => {
+              fail('harness_protocol_error');
+            })
+            .finally(() => {
+              queuedBytes -= Buffer.byteLength(line);
+            });
+        }
+      });
+      stdout.on('end', () => {
+        if (!closing) fail('harness_process_failed');
+      });
+      const initialized = await request('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: {},
+        clientInfo: { name: 'lifemodel', version: '1' },
+      });
+      if (initialized['protocolVersion'] !== 1) throw new Error('harness_protocol_error');
+      const created = await request('session/new', { cwd: work, mcpServers: [] });
+      if (typeof created['sessionId'] !== 'string' || !created['sessionId'])
+        throw new Error('harness_session_invalid');
+      sessionID = created['sessionId'];
+      this.cancelRequest = () =>
+        write({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: sessionID } });
+      await emit({ type: 'step', text: 'Running task' });
+      const response = await request(
+        'session/prompt',
+        { sessionId: sessionID, prompt: [{ type: 'text', text: briefing.text }] },
+        timeout
+      );
+      stopReason = response['stopReason'];
+      // Finish the batch containing the reply before planning shutdown. Frames
+      // coalesced behind it cannot hide a malformed message or late tool error.
+      await queue;
+      if (fault) throw fault;
+      promptSettled = true;
+      result = this.cancelled ? aborted() : turn.result(stopReason);
+    } catch (error) {
+      result = this.cancelled ? aborted() : turn.result(undefined);
+      if (result.reasonCode !== 'provider_error')
+        result = this.cancelled
+          ? aborted()
+          : failed(
+              error instanceof Error && error.message === 'provider_error'
+                ? 'provider_error'
+                : (fault?.message ?? 'harness_failed')
+            );
+      try {
+        await emit({
+          type: 'error',
+          code: result.reasonCode ?? 'harness_failed',
+        });
+      } catch {
+        /* preserve cleanup */
+      }
+    } finally {
+      closing = true;
+      this.cancelRequest = undefined;
+      let cleanupFailed = false;
+      try {
+        const cleanupChild = child;
+        if (
+          cleanupChild?.pid &&
+          cleanupChild.exitCode === null &&
+          cleanupChild.signalCode === null
+        ) {
+          const cleanupPid = cleanupChild.pid;
+          const exited = new Promise<void>((resolve) =>
+            cleanupChild.once('exit', () => {
+              resolve();
+            })
+          );
+          try {
+            process.kill(-cleanupChild.pid, 'SIGTERM');
+          } catch {
+            /* already exited */
+          }
+          const hard = setTimeout(() => {
+            try {
+              process.kill(-cleanupPid, 'SIGKILL');
+            } catch {
+              /* already exited */
+            }
+          }, 5000);
+          let last: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([
+              exited,
+              new Promise<never>((_resolve, reject) => {
+                last = setTimeout(() => {
+                  reject(new Error('harness_cleanup_timeout'));
+                }, 6000);
+              }),
+            ]);
+          } finally {
+            clearTimeout(hard);
+            clearTimeout(last);
+          }
+        }
+        child?.stdin?.destroy();
+        child?.stdout?.destroy();
+        child?.stderr?.destroy();
+        await queue;
+        if (fault) cleanupFailed = true;
+        await relay?.close();
+        cleanupFailed ||=
+          !!child &&
+          (child.signalCode !== null || (child.exitCode !== 0 && child.exitCode !== 143));
+      } catch {
+        cleanupFailed = true;
+      } finally {
+        child?.stdin?.destroy();
+        child?.stdout?.destroy();
+        child?.stderr?.destroy();
+        await relay?.close().catch(() => {
+          cleanupFailed = true;
+        });
+      }
+      signal.removeEventListener('abort', stop);
+      fail('harness_closed');
+      if (cleanupFailed && result.outcome === 'succeeded')
+        result = failed('harness_cleanup_failed');
+    }
+    return result;
+  }
+}

@@ -233,7 +233,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
         json(res, 403, {});
         return;
       }
-      json(res, briefingStatus, { ...IDS, briefing: BRIEFING });
+      json(res, briefingStatus, { ...IDS, briefing: BRIEFING, harness: 'opencode' });
       return;
     }
     if (service === 'channel' && call.method === 'POST' && call.path === '/task/events') {

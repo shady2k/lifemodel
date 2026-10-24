@@ -9,6 +9,7 @@ export interface TaskLaunchIdentity {
 }
 export interface TaskBriefing extends TaskLaunchIdentity {
   readonly briefing: string;
+  readonly harness: string;
   readonly profile: TaskProfile;
 }
 

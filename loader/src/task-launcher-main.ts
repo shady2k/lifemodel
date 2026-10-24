@@ -2,6 +2,7 @@
 import { execFileSync } from 'node:child_process';
 import { access, mkdir, readFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
+import { selfCheckHarnesses } from './task-harness-registry.js';
 
 // Keep listeners through teardown, including late EPIPE after a write callback.
 function write(stream: NodeJS.WriteStream, text: string): void {
@@ -33,7 +34,9 @@ async function main(): Promise<void> {
   if (process.argv.length === 2) {
     const { runTaskLauncher } = await import('./task-launcher.js');
     const controller = new AbortController();
-    const abort = () => controller.abort();
+    const abort = () => {
+      controller.abort();
+    };
     process.on('SIGTERM', abort);
     process.on('SIGINT', abort);
     try {
@@ -60,7 +63,6 @@ async function main(): Promise<void> {
     '/opt/lifemodel/node_modules/vitest/vitest.mjs',
     '/opt/lifemodel/loader/dist/storage-cli-main.js',
     '/opt/lifemodel/loader/dist/storage-cli.js',
-    '/etc/lifemodel/opencode.json',
   ]) {
     await access(path, constants.R_OK);
   }
@@ -72,7 +74,6 @@ async function main(): Promise<void> {
   }
   for (const [command, args] of [
     ['node', ['--version']],
-    ['opencode', ['--version']],
     ['git', ['--version']],
     ['lifemodel-storage', ['--help']],
   ] as const) {
@@ -84,6 +85,7 @@ async function main(): Promise<void> {
     });
     write(process.stdout, `${command}: ${output.trim()}\n`);
   }
+  for (const checked of await selfCheckHarnesses()) write(process.stdout, `${checked}\n`);
   write(process.stdout, 'workbench_self_check_ok\n');
 }
 
