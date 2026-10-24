@@ -635,7 +635,7 @@ export function vitestSteps({ machineName, uid, vitestArgs }) {
       id: 'npm-ci',
       kind: 'orb',
       argv: runArgv(machineName, MACHINE_USER, SRC_DIR, [
-        'env', '-i', ...envKvs, 'npm', 'ci',
+        'env', '-i', ...envKvs, 'ONNXRUNTIME_NODE_INSTALL_CUDA=skip', 'npm', 'ci',
       ]),
       timeoutMs: PHASE_TIMEOUTS_MS.npmCi,
     },

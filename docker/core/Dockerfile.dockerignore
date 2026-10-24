@@ -1,0 +1,21 @@
+# Dedicated checkout-root core context; the root filter belongs to the loader.
+*
+!docker/core/Dockerfile
+!docker/core/entrypoint.sh
+!package.json
+!package-lock.json
+!tsconfig.json
+!.npmrc
+!src/**/*.ts
+!src/**/*.mts
+!src/**/*.mjs
+!src/**/*.json
+!src/runtime/builtin-skills/**
+!scripts/apply-migrations.js
+!db/migrations/*.sql
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/.git*
+**/node_modules/**

@@ -39,14 +39,25 @@ jobs:
       - name: Prepare the core image context
         run: scripts/prepare-core-image-context.sh .docker-core-context
 
-      - name: Build and push core image
-        id: core
+      - name: Build core image locally
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
         with:
           context: .docker-core-context
           file: docker/core/Dockerfile
-          push: true
+          load: true
+          push: false
           tags: ghcr.io/${{ github.repository_owner }}/lifemodel-core:${{ github.ref_name }}
+
+      - name: Check core runtime modules before publishing
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/lifemodel-core:${{ github.ref_name }}
+        run: scripts/smoke-image-modules.sh core "$IMAGE"
+
+      - name: Push the checked core image
+        id: core
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/lifemodel-core:${{ github.ref_name }}
+        run: scripts/release/push-checked-image.sh "$IMAGE"
 
       - name: Remove the temporary core build context
         if: always()
@@ -60,14 +71,25 @@ jobs:
       - name: Prepare the web image context
         run: scripts/prepare-web-image-context.sh .docker-web-context
 
-      - name: Build and push web image
-        id: web
+      - name: Build web image locally
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
         with:
           context: .docker-web-context
           file: docker/web/Dockerfile
-          push: true
+          load: true
+          push: false
           tags: ghcr.io/${{ github.repository_owner }}/lifemodel-web:${{ github.ref_name }}
+
+      - name: Check web runtime modules before publishing
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/lifemodel-web:${{ github.ref_name }}
+        run: scripts/smoke-image-modules.sh web "$IMAGE"
+
+      - name: Push the checked web image
+        id: web
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/lifemodel-web:${{ github.ref_name }}
+        run: scripts/release/push-checked-image.sh "$IMAGE"
 
       - name: Remove the temporary web build context
         if: always()
@@ -96,14 +118,25 @@ jobs:
         id: prepare-seed
         run: scripts/release/prepare-loader-context.sh --release
 
-      - name: Build and push loader image
-        id: loader
+      - name: Build loader image locally
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
         with:
           context: .
           file: docker/loader/Dockerfile
-          push: true
+          load: true
+          push: false
           tags: ghcr.io/${{ github.repository_owner }}/lifemodel-loader:${{ github.ref_name }}
+
+      - name: Check loader runtime modules before publishing
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/lifemodel-loader:${{ github.ref_name }}
+        run: scripts/smoke-image-modules.sh loader "$IMAGE"
+
+      - name: Push the checked loader image
+        id: loader
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/lifemodel-loader:${{ github.ref_name }}
+        run: scripts/release/push-checked-image.sh "$IMAGE"
 
       - name: Remove the temporary loader build context
         if: always()

@@ -3,7 +3,8 @@ ARG NODE_IMAGE=node:24-bookworm-slim
 FROM ${NODE_IMAGE} AS build
 WORKDIR /opt/lifemodel
 COPY package.json package-lock.json tsconfig.json .npmrc ./
-RUN npm ci
+# CPU inference uses the bundled runtime; do not fetch unused CUDA libraries.
+RUN ONNXRUNTIME_NODE_INSTALL_CUDA=skip npm ci
 COPY src ./src
 RUN npm run build && npm prune --omit=dev
 

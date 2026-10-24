@@ -7,6 +7,9 @@ import { createStdoutLogger } from './logger.js';
 import { createLoaderApp } from './app.js';
 import { describe } from './state.js';
 
+// Static imports have loaded; do not read config, start listeners or contact stores.
+if (process.argv.includes('--check-modules')) process.exit(0);
+
 function writeLine(line: string): void {
   process.stdout.write(`${line}\n`);
 }

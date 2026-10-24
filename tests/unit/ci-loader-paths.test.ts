@@ -21,6 +21,8 @@ describe('loader image CI path classification', () => {
     ['the loader UI', ['web/loader/src/app.tsx']],
     ['the shared UI kit the Dockerfile copies', ['web/kit/components/ui/button.tsx']],
     ['the Dockerfile itself', ['docker/loader/Dockerfile']],
+    ['the runtime smoke command', ['scripts/smoke-image-modules.sh']],
+    ['the image workflow', ['.github/workflows/ci.yml']],
     ['the context filter Docker reads when it assembles the build context', ['.dockerignore']],
     [
       'the release tree the seed bundle carries',
