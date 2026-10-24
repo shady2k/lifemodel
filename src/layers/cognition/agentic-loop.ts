@@ -395,8 +395,11 @@ export class AgenticLoop {
           state.everForcedRespond = true;
         }
 
-        if (response.toolCalls.length === 0 && context.triggerSignal.type === 'user_message') {
-          this.logger.debug('Truncated response with no tools for user message, forcing retry');
+        if (
+          context.triggerSignal.type === 'task_outcome' ||
+          (response.toolCalls.length === 0 && context.triggerSignal.type === 'user_message')
+        ) {
+          this.logger.debug('Truncated reply is incomplete, forcing bounded retry');
           state.forceRespond = true;
           continue;
         }

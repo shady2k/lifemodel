@@ -34,6 +34,7 @@ import { PostgresVectorStore } from '../../src/storage/postgres-memory-store.js'
 import { createTestEmbedder } from '../helpers/test-embedder.js';
 import { UserModel } from '../../src/models/user-model.js';
 import { createUser, type User } from '../../src/types/user/user.js';
+import type { ScriptedResponse } from '../helpers/scripted-llm.js';
 
 const imageRevision = `sha256:${'a'.repeat(64)}`;
 const startScript = [
@@ -75,7 +76,11 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
     await stores.redis.quit();
   });
 
-  async function boot(prefix: string, script = startScript, crashBeforeAnswerCommit = false) {
+  async function boot(
+    prefix: string,
+    script: ScriptedResponse[] = startScript,
+    crashBeforeAnswerCommit = false
+  ) {
     const snapshot = createSnapshotStore(stores.redis, { keyPrefix: prefix });
     const bus = createBusSignalStream(stores.redis, prefix);
     snapshot.register(bus);
@@ -263,62 +268,115 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
     expect((await restarted.events())[0]!.payload).toMatchObject({ text: 'Still here.' });
     expect((await restarted.events())[0]!.payload.attachments).toBeUndefined();
   });
-  it('reuses the deciding turn effect after a crash before commit: one task and one immediate reply', async () => {
-    const prefix = `task-reply-crash:${randomUUID()}:`;
-    const first = await boot(prefix, startScript, true);
-    first.coreLoop.pushSignal(
+  it.each([
+    {
+      name: 'reworded briefing',
+      args: { briefing: 'Please investigate and save the answer.', profile: 'small' },
+    },
+    { name: 'missing profile', args: { briefing: 'Please investigate and save the answer.' } },
+    { name: 'missing briefing', args: { profile: 'small' } },
+    {
+      name: 'unknown profile',
+      args: { briefing: 'Research and save the answer.', profile: 'unknown' },
+    },
+    { name: 'null fields', args: { briefing: null, profile: null } },
+    { name: 'placeholder fields', args: { briefing: '<UNKNOWN>', profile: '<UNKNOWN>' } },
+    { name: 'wrong-typed fields', args: { briefing: 42, profile: false } },
+    {
+      name: 'unknown argument names',
+      args: { instructions: 'Research and save the answer.', resource: 'small' },
+    },
+  ])(
+    'recovers accepted effect before validation with $name after a crash: one task and one truthful reply',
+    async ({ args }) => {
+      const prefix = `task-reply-crash:${randomUUID()}:`;
+      const first = await boot(prefix, startScript, true);
+      first.coreLoop.pushSignal(
+        createUserMessageSignal({
+          text: 'Do long research',
+          recipientId: first.recipientId,
+          channel: 'test',
+          updateId: randomUUID(),
+        })
+      );
+      await waitFor(() => first.coreLoop.stopReport().loopStopped, 'failed answer CAS');
+      expect(await first.events()).toHaveLength(0);
+      const turn = first.cognition.calls[0]!.context.tickId;
+      const before = await first.registry.list();
+      expect(before).toHaveLength(1);
+      expect(before[0]!.launchKey).toBe(`task|${first.recipientId}|${turn}|0`);
+      const replayBriefing = 'Please investigate the topic and write the result file.';
+      const restarted = await boot(prefix, [
+        {
+          toolCalls: [
+            {
+              name: 'core.startTask',
+              args,
+            },
+          ],
+        },
+        { content: 'Started. I will reply when it is done.' },
+      ]);
+      await expect.poll(async () => (await restarted.events()).length).toBe(1);
+      expect(restarted.cognition.calls[0]!.context.tickId).toBe(turn);
+      const after = await restarted.registry.list();
+      expect(after).toHaveLength(1);
+      expect(after[0]!.launchKey).toBe(`task|${first.recipientId}|${turn}|0`);
+      expect(after.map((t) => t.id)).toEqual(before.map((t) => t.id));
+      expect(after).toEqual(before);
+      expect(after[0]!.briefing).toBe('Research and save the answer.');
+      const receipt = restarted.cognition.provider.requests
+        .flatMap((request) => request.messages)
+        .find((message) => message.role === 'tool' && message.tool_name === 'core.startTask');
+      expect(JSON.parse(receipt!.content!)).toMatchObject({
+        success: true,
+        taskId: before[0]!.id,
+        state: 'queued',
+      });
+      expect((await restarted.events())[0]!.payload.text).toBe(
+        'Started. I will reply when it is done.'
+      );
+      // Direct callers still cannot overwrite the immutable accepted payload.
+      await expect(
+        restarted.registry.accept({
+          launchKey: before[0]!.launchKey,
+          briefing: replayBriefing,
+          profile: before[0]!.profile,
+          imageRevision,
+        })
+      ).rejects.toMatchObject({ code: 'launch_key_conflict' });
+    }
+  );
+  it.each([
+    { briefing: 'Research and save the answer.' },
+    { profile: 'small' },
+    { briefing: null, profile: null },
+    { briefing: '<UNKNOWN>', profile: '<UNKNOWN>' },
+    { briefing: 42, profile: false },
+    { instructions: 'Research and save the answer.', resource: 'small' },
+  ])('keeps strict fresh-call validation for malformed start arguments %#', async (args) => {
+    const instance = await boot(`task-fresh-invalid:${randomUUID()}:`, [
+      { toolCalls: [{ name: 'core.startTask', args }] },
+      { content: 'The task was not started; please provide the missing information.' },
+    ]);
+    instance.coreLoop.pushSignal(
       createUserMessageSignal({
         text: 'Do long research',
-        recipientId: first.recipientId,
+        recipientId: instance.recipientId,
         channel: 'test',
         updateId: randomUUID(),
       })
     );
-    await waitFor(() => first.coreLoop.stopReport().loopStopped, 'failed answer CAS');
-    expect(await first.events()).toHaveLength(0);
-    const turn = first.cognition.calls[0]!.context.tickId;
-    const before = await first.registry.list();
-    expect(before).toHaveLength(1);
-    expect(before[0]!.launchKey).toBe(`task|${first.recipientId}|${turn}|0`);
-    const replayBriefing = 'Please investigate the topic and write the result file.';
-    const restarted = await boot(prefix, [
-      {
-        toolCalls: [
-          {
-            name: 'core.startTask',
-            args: { briefing: replayBriefing, profile: 'small' },
-          },
-        ],
-      },
-      { content: 'Started. I will reply when it is done.' },
-    ]);
-    await expect.poll(async () => (await restarted.events()).length).toBe(1);
-    expect(restarted.cognition.calls[0]!.context.tickId).toBe(turn);
-    const after = await restarted.registry.list();
-    expect(after).toHaveLength(1);
-    expect(after[0]!.launchKey).toBe(`task|${first.recipientId}|${turn}|0`);
-    expect(after.map((t) => t.id)).toEqual(before.map((t) => t.id));
-    expect(after[0]!.briefing).toBe('Research and save the answer.');
-    const receipt = restarted.cognition.provider.requests
+    await expect.poll(async () => (await instance.events()).length).toBe(1);
+    expect(await instance.registry.list()).toEqual([]);
+    const receipt = instance.cognition.provider.requests
       .flatMap((request) => request.messages)
       .find((message) => message.role === 'tool' && message.tool_name === 'core.startTask');
     expect(JSON.parse(receipt!.content!)).toMatchObject({
-      success: true,
-      taskId: before[0]!.id,
-      state: 'queued',
+      success: false,
+      error: { type: 'validation_error' },
     });
-    expect((await restarted.events())[0]!.payload.text).toBe(
-      'Started. I will reply when it is done.'
-    );
-    // Direct callers still cannot overwrite the immutable accepted payload.
-    await expect(
-      restarted.registry.accept({
-        launchKey: before[0]!.launchKey,
-        briefing: replayBriefing,
-        profile: before[0]!.profile,
-        imageRevision,
-      })
-    ).rejects.toMatchObject({ code: 'launch_key_conflict' });
+    expect((await instance.events())[0]!.payload.text).toContain('not started');
   });
   it('replays an outcome turn after a crash before the reply commit with the same attachment and one event', async () => {
     const prefix = `task-outcome-crash:${randomUUID()}:`;
@@ -701,6 +759,55 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
     });
     expect(Object.values(instance.bus.exportSnapshot().entries)).toEqual([]);
   });
+  it.each(['done', 'failed', 'stopped'] as const)(
+    'retries nonempty length-truncated %s replies then commits the complete trusted fallback',
+    async (state) => {
+      const instance = await boot(
+        `task-truncated:${randomUUID()}:`,
+        Array.from({ length: 6 }, () => ({
+          content: 'The background task',
+          finishReason: 'length' as const,
+        }))
+      );
+      instance.coreLoop.pushSignal(outcome('task_truncated', 'outcome_truncated', state));
+      await expect.poll(async () => (await instance.events()).length).toBe(1);
+      await instance.coreLoop.fenceForTest();
+      expect(instance.cognition.provider.requests).toHaveLength(4);
+      const replies = await instance.events();
+      expect(replies).toHaveLength(1);
+      expect(replies[0]!.payload.text).toBe(
+        state === 'done'
+          ? 'Task completed. The work completed.\nTask output (quoted): "The answer is 42."'
+          : `Task ${state === 'failed' ? 'failed' : 'stopped'}. The task ran out of time.\nTask output (quoted): "The task ran out of time."\nNo completed result is available.`
+      );
+      if (state === 'done')
+        expect(replies[0]!.payload.attachments).toEqual([
+          {
+            artifactId: object.id,
+            name: object.name,
+            size: object.size,
+            contentType: 'application/octet-stream',
+          },
+        ]);
+      else expect(replies[0]!.payload.attachments).toBeUndefined();
+      expect(Object.values(instance.bus.exportSnapshot().entries)).toEqual([]);
+    }
+  );
+  it('retries a truncated outcome and commits the next complete model reply', async () => {
+    const instance = await boot(`task-truncated-retry:${randomUUID()}:`, [
+      { content: 'The background task', finishReason: 'length' },
+      { content: 'The answer is 42.' },
+    ]);
+    instance.coreLoop.pushSignal(outcome('task_retry', 'outcome_retry'));
+    await expect.poll(async () => (await instance.events()).length).toBe(1);
+    await instance.coreLoop.fenceForTest();
+    expect(instance.cognition.provider.requests).toHaveLength(2);
+    expect((await instance.events())[0]!.payload).toMatchObject({
+      text: 'The answer is 42.',
+      attachments: [{ artifactId: object.id }],
+    });
+    expect(Object.values(instance.bus.exportSnapshot().entries)).toEqual([]);
+  });
   it.each(['failed', 'stopped'] as const)(
     'falls back for %s after model failure without a false result',
     async (state) => {
@@ -711,6 +818,21 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
       expect((await instance.events())[0]!.payload.text).toContain('The task ran out of time.');
       expect((await instance.events())[0]!.payload.text).toContain(
         'Task output (quoted): "The task ran out of time."'
+      );
+      expect((await instance.events())[0]!.payload.attachments).toBeUndefined();
+      expect(Object.values(instance.bus.exportSnapshot().entries)).toEqual([]);
+    }
+  );
+  it.each(['constructor', 'unknown_failure'])(
+    'commits a generic failure explanation for allowed unknown reason %s',
+    async (reasonCode) => {
+      const instance = await boot(`task-unknown-reason:${randomUUID()}:`, []);
+      const signal = outcome('task_unknown_reason', 'outcome_unknown_reason', 'failed');
+      instance.coreLoop.pushSignal({ ...signal, data: { ...signal.data, reasonCode } } as never);
+      await expect.poll(async () => (await instance.events()).length).toBe(1);
+      await instance.coreLoop.fenceForTest();
+      expect((await instance.events())[0]!.payload.text).toBe(
+        'Task failed. The task ended without a more specific explanation.\nTask output (quoted): "The task ran out of time."\nNo completed result is available.'
       );
       expect((await instance.events())[0]!.payload.attachments).toBeUndefined();
       expect(Object.values(instance.bus.exportSnapshot().entries)).toEqual([]);

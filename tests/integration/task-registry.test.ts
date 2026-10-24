@@ -158,6 +158,7 @@ describe('fenced durable task registry', () => {
       () => registry.initializeAccessIntent(task.id, new Date()),
       () => registry.releaseSlot(task.id),
       () => registry.read(task.id),
+      () => registry.readByLaunchKey(task.launchKey),
       () => registry.readByJobName(task.jobName),
       () => registry.listLaunchWork(),
       () => registry.recordAllocation(task.id, task.launchId, allocation),

@@ -100,6 +100,8 @@ export function taskOutcomeFallback(event: TaskOutcomeEvent): string {
       : event.state === 'stopped'
         ? 'Task stopped.'
         : 'Task failed.';
-  const reason = reasons[event.reasonCode] ?? 'The task ended without a more specific explanation.';
+  const reason = Object.hasOwn(reasons, event.reasonCode)
+    ? reasons[event.reasonCode]
+    : 'The task ended without a more specific explanation.';
   return `${state} ${reason}\nTask output (quoted): ${JSON.stringify(event.summary)}${event.state === 'done' ? '' : '\nNo completed result is available.'}`;
 }

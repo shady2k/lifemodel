@@ -17,9 +17,12 @@ The tool applies an explicit `START_TASK` intent through the core applicator and
 awaits registry acceptance only. Its launch key is the recipient plus the already
 persisted deciding turn id and the one task-effect slot. A replay retains that
 key; model-generated tool call ids never define task identity. Before accepting a
-new request, the tool looks up that key in the fenced registry. An existing task
-returns accepted with its original ID and current state, even if replay generates
-a different briefing/profile or the caller image changes. It is not resubmitted.
+new request, a replay-aware execution seam looks up that key in the fenced registry
+before both shared argument-validation gates (`prevalidateToolArgs` and
+`tool.validate`). An existing task returns accepted with its original ID and current
+state even if replay generates missing, null, placeholder, wrong-typed or misnamed
+arguments, a different briefing/profile, or a changed caller image. It is not
+resubmitted. Fresh calls keep both required fields and strict validation.
 The registry's immutable-payload conflict protection remains in place for direct
 acceptance requests. The registry persists briefing/profile/settings before dispatch. Acceptance is tracked through
 the durable-effect drain. Uncertain infrastructure failures propagate out of the
@@ -53,9 +56,13 @@ message, never interpolated into system-role instructions. They cannot authorize
 owner-state, schedule or task mutations.
 
 An empty/missing final response is not an acknowledgement, even after a rejected
-`core.say` attempt. The model gets the bounded response retries. If those retries
+`core.say` attempt. A `length`-truncated outcome reply is incomplete even when it
+contains plain text. The model gets the bounded response retries. If those retries
 or model execution fail, a deterministic reply reports the trusted event's terminal
-state, maps the reason code to owner words and quotes the summary as task output.
+state, maps the reason code to owner words using only own dictionary entries, and
+quotes the summary as task output. Unknown codes (including `constructor`) get a
+fixed generic explanation, never inherited JavaScript implementation text. This
+fallback is fixed English; ordinary model replies still follow the owner's language.
 That fallback uses the same trusted result-attachment compiler as a normal reply.
 Only the committed answer completes the outcome; neither deferral nor silence does.
 
@@ -80,5 +87,9 @@ scripted cognition and a fake executor with real launch/finalization infrastruct
 It checks immediate acceptance/reply, sealed outcome/attachment message binding,
 crash before each answer commit, duplicate delivery after trimming, concurrent
 outcomes, low-energy wake and failure without a fake result. Regressions cover
-reworded launch replay, forbidden deferral, rejected say followed by empty finals,
-deterministic fallback, and adversarial task output with no store side effects.
+accepted-launch replay before argument validation, strict fresh-call validation,
+forbidden deferral, rejected say followed by empty finals, length-truncated replies
+with bounded retry and complete fallback, and adversarial task output with no store
+side effects. `tests/unit/task-outcome.test.ts` covers allowed unknown reason codes.
+The stale-operation matrix in `tests/integration/task-registry.test.ts` also verifies
+that `readByLaunchKey` rejects a stale epoch.
