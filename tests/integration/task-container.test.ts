@@ -69,7 +69,8 @@ describe('platform task container wiring', { timeout: 30_000 }, () => {
     process.env['MOTOR_CORTEX_ENABLED'] = 'false';
     process.env['LIFEMODEL_STORAGE_CONTROL_TOKEN_FILE'] = '/nonexistent-task-token';
     process.env['LIFEMODEL_STORAGE_CONTROL_CA_FILE'] = '/nonexistent-task-ca';
-    process.env['LIFEMODEL_TASK_WORKBENCH_IMAGE'] = `ghcr.io/shady2k/lifemodel-workbench@${imageA}`;
+    process.env['LIFEMODEL_TASK_WORKBENCH_IMAGE'] =
+      `zot.lifemodel-system.svc:5001/lifemodel/workbench@${imageA}`;
     await stores.postgres.query('TRUNCATE core.tasks CASCADE');
   });
   afterEach(async () => {
@@ -97,7 +98,8 @@ describe('platform task container wiring', { timeout: 30_000 }, () => {
     const accepted = await active.taskService!.accept(input);
     await active.shutdown();
     active = undefined;
-    process.env['LIFEMODEL_TASK_WORKBENCH_IMAGE'] = `ghcr.io/shady2k/lifemodel-workbench@${imageB}`;
+    process.env['LIFEMODEL_TASK_WORKBENCH_IMAGE'] =
+      `zot.lifemodel-system.svc:5001/lifemodel/workbench@${imageB}`;
     active = await createContainerAsync({ logLevel: 'error', logToFile: false });
     const replayed = await active.taskService!.accept(input);
     expect(replayed.id).toBe(accepted.id);

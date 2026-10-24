@@ -115,7 +115,7 @@ spec:
         (!has(variables.p.ephemeralContainers) || size(variables.p.ephemeralContainers) == 0) &&
 
         variables.p.containers.all(c,
-         c.name == 'task' && c.image.matches('^ghcr[.]io/shady2k/lifemodel-workbench@sha256:[0-9a-f]{64}$') &&
+         c.name == 'task' && c.image.matches('^zot[.]lifemodel-system[.]svc:5001/lifemodel/workbench@sha256:[0-9a-f]{64}$') &&
          (!has(c.command) || size(c.command) == 0) && (!has(c.args) || size(c.args) == 0) &&
          !has(c.lifecycle) && !has(c.livenessProbe) && !has(c.readinessProbe) && !has(c.startupProbe))
       message: 'task launcher: one trusted image ENTRYPOINT only; no command, args, hooks, probes, init or sidecars'
@@ -269,7 +269,7 @@ spec:
         (!has(variables.p.ephemeralContainers) || size(variables.p.ephemeralContainers) == 0) &&
 
         variables.p.containers.all(c,
-         c.name == 'task' && c.image.matches('^ghcr[.]io/shady2k/lifemodel-workbench@sha256:[0-9a-f]{64}$') &&
+         c.name == 'task' && c.image.matches('^zot[.]lifemodel-system[.]svc:5001/lifemodel/workbench@sha256:[0-9a-f]{64}$') &&
          (!has(c.command) || size(c.command) == 0) && (!has(c.args) || size(c.args) == 0) &&
          !has(c.lifecycle) && !has(c.livenessProbe) && !has(c.readinessProbe) && !has(c.startupProbe))
       message: 'task launcher: one trusted image ENTRYPOINT only; no command, args, hooks, probes, init or sidecars'

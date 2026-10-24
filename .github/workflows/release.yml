@@ -90,7 +90,7 @@ jobs:
       - name: Pin the workbench image to its pushed digest in the seed source
         env:
           WORKBENCH_DIGEST: ${{ steps.workbench.outputs.digest }}
-        run: scripts/release/set-workbench-digest.sh "$WORKBENCH_DIGEST" deploy/platform/applications/lifemodel/kustomization.yaml
+        run: scripts/release/set-workbench-digest.sh "$WORKBENCH_DIGEST" deploy/platform/applications/lifemodel/kustomization.yaml deploy/platform/a0/workbench-origin.env
 
       - name: Prepare the full-history loader seed bundle
         id: prepare-seed

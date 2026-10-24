@@ -58,6 +58,13 @@ node tests/fixtures/task-admission/probe.mjs audience Job | kubectl --as=system:
 node tests/fixtures/task-admission/probe.mjs owner Pod | kubectl --as=system:serviceaccount:kube-system:job-controller create --dry-run=server -f -
 ```
 
+The `image` variant uses a local mutable tag. The `image-ghcr`,
+`image-repository` and `image-registry` variants test a digest at the public
+origin, a different local repository and a different registry. Run each variant
+for both Job and Pod, using the corresponding core/controller CREATE command
+above. All must fail with `task launcher:`. Only the local zot repository by
+full digest is admitted.
+
 PSA may reject privileged/hostPath violations before this policy. Such a refusal
 proves the combined boundary, but not that a CEL expression compiled or ran.
 Run the baseline and inspect policy status; use the safe `security` variant
@@ -116,12 +123,12 @@ start claim. Set WORKBENCH_IMAGE to the actual signed release digest from
 653.8.3, never a mutable tag. Node must be present in that workbench.
 
 ```sh
-export WORKBENCH_IMAGE=ghcr.io/shady2k/lifemodel-workbench@sha256:REPLACE_WITH_RELEASE_DIGEST
+export WORKBENCH_IMAGE=zot.lifemodel-system.svc:5001/lifemodel/workbench@sha256:REPLACE_WITH_RELEASE_DIGEST
 node tests/fixtures/task-admission/probe.mjs valid Job | node --input-type=module -e '
 import {readFileSync} from "node:fs";
 const job=JSON.parse(readFileSync(0,"utf8"));
 const image=process.env.WORKBENCH_IMAGE;
-if (!/^ghcr[.]io\/shady2k\/lifemodel-workbench@sha256:[0-9a-f]{64}$/.test(image ?? "")) throw Error("released workbench digest required");
+if (!/^zot[.]lifemodel-system[.]svc:5001\/lifemodel\/workbench@sha256:[0-9a-f]{64}$/.test(image ?? "")) throw Error("released workbench digest required");
 job.spec.template.spec.containers[0].image=image;
 console.log(JSON.stringify(job));' > /tmp/task-network-probe.json
 kubectl --as=system:serviceaccount:lifemodel:core create -f /tmp/task-network-probe.json

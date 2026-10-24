@@ -14,7 +14,7 @@ patches:
         path: /spec/template/spec/containers/0/env/-
         value:
           name: LIFEMODEL_TASK_WORKBENCH_IMAGE
-          value: ghcr.io/shady2k/lifemodel-workbench@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          value: zot.lifemodel-system.svc:5001/lifemodel/workbench@sha256:0000000000000000000000000000000000000000000000000000000000000000
 images:
   - name: ghcr.io/shady2k/lifemodel-core
     newName: ghcr.io/shady2k/lifemodel-core

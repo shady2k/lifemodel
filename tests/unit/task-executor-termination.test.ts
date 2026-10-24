@@ -26,7 +26,7 @@ const task = {
 const launch: TaskLaunch = {
   task,
   spaceId: 'space-1',
-  workbenchImage: `ghcr.io/shady2k/lifemodel-workbench@${task.imageRevision}`,
+  workbenchImage: `zot.lifemodel-system.svc:5001/lifemodel/workbench@${task.imageRevision}`,
 };
 function owner(kind = 'Job', uid = 'job-uid', name = task.jobName) {
   return { apiVersion: kind === 'Job' ? 'batch/v1' : 'v1', kind, uid, name, controller: true };
@@ -102,6 +102,31 @@ function fixture() {
 
 describe('exact-UID compute and volume cleanup confirmation', () => {
   afterEach(() => vi.useRealTimers());
+
+  it.each([
+    `ghcr.io/shady2k/lifemodel-workbench@${task.imageRevision}`,
+    'zot.lifemodel-system.svc:5001/lifemodel/workbench:latest',
+    `zot.lifemodel-system.svc:5001/lifemodel/other@${task.imageRevision}`,
+    `other.example:5001/lifemodel/workbench@${task.imageRevision}`,
+    `zot.lifemodel-system.svc:5001/lifemodel/workbench@sha256:${'A'.repeat(64)}`,
+    `zot.lifemodel-system.svc:5001/lifemodel/workbench@sha256:${'a'.repeat(63)}`,
+  ])(
+    'refuses noncanonical image %s with a safe code before any Kubernetes call',
+    async (workbenchImage) => {
+      const { api, request } = fixture();
+      const invalid = { ...launch, workbenchImage };
+      expect(() => renderTaskJob(invalid)).toThrow('TaskExecutorError: invalid_launch');
+      await expect(api.ensureStarted(invalid)).rejects.toMatchObject({ code: 'invalid_launch' });
+      await expect(api.observe(invalid)).rejects.toMatchObject({ code: 'invalid_launch' });
+      await expect(api.requestSoftStop(invalid)).rejects.toMatchObject({ code: 'invalid_launch' });
+      await expect(api.deleteNow(invalid)).rejects.toMatchObject({ code: 'invalid_launch' });
+      await expect(api.confirmTerminated(invalid)).rejects.toMatchObject({
+        code: 'invalid_launch',
+      });
+      await expect(api.confirmCleanup(invalid)).rejects.toMatchObject({ code: 'invalid_launch' });
+      expect(request).not.toHaveBeenCalled();
+    }
+  );
 
   it.each(['Pending', 'Running', 'Unknown', undefined])(
     'Job 404 does not confirm an owned %s Pod has terminated',

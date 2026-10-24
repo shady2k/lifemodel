@@ -241,7 +241,7 @@ describe('task launch fence (real Postgres, HTTPS Kubernetes API)', () => {
   const launch = (task: TaskRecord): TaskLaunch => ({
     task,
     spaceId: 'space-1',
-    workbenchImage: `ghcr.io/shady2k/lifemodel-workbench@${task.imageRevision}`,
+    workbenchImage: `zot.lifemodel-system.svc:5001/lifemodel/workbench@${task.imageRevision}`,
   });
   function executor() {
     const value = createKubernetesTaskExecutor({
@@ -350,7 +350,7 @@ describe('task launch fence (real Postgres, HTTPS Kubernetes API)', () => {
       await api.ensureStarted(launch(task));
       const existing = jobs.get(task.jobName);
       if (field === 'hash')
-        existing.spec.template.spec.containers[0].image = `ghcr.io/shady2k/lifemodel-workbench@sha256:${'b'.repeat(64)}`;
+        existing.spec.template.spec.containers[0].image = `zot.lifemodel-system.svc:5001/lifemodel/workbench@sha256:${'b'.repeat(64)}`;
       else existing.metadata.labels['lifemodel.dev/launch-id'] = 'wrong-launch';
       await expect(executor().ensureStarted(launch(task))).rejects.toBeInstanceOf(Error);
       expect(await component().runOnce()).toBe(false);
@@ -657,16 +657,22 @@ describe('task launch fence (real Postgres, HTTPS Kubernetes API)', () => {
     expect(rendered.spec['activeDeadlineSeconds']).toBe(630);
   });
   it('validates the image at startup (full repository plus lowercase digest)', () => {
-    const image = `ghcr.io/shady2k/lifemodel-workbench@sha256:${'a'.repeat(64)}`;
+    const image = `zot.lifemodel-system.svc:5001/lifemodel/workbench@sha256:${'a'.repeat(64)}`;
     expect(taskWorkbenchImage(image)).toBe(image);
     for (const value of [
       undefined,
       '',
       'image:latest',
       `other@sha256:${'a'.repeat(64)}`,
+      `ghcr.io/shady2k/lifemodel-workbench@sha256:${'a'.repeat(64)}`,
+      'zot.lifemodel-system.svc:5001/lifemodel/workbench:latest',
+      `zot.lifemodel-system.svc:5001/lifemodel/other@sha256:${'a'.repeat(64)}`,
+      `other.example:5001/lifemodel/workbench@sha256:${'a'.repeat(64)}`,
+      `${image}\n`,
+      `${image}\r\n`,
       image.toUpperCase(),
     ])
-      expect(() => taskWorkbenchImage(value)).toThrow('Invalid task workbench');
+      expect(() => taskWorkbenchImage(value)).toThrow('TaskExecutorError: invalid_launch');
   });
 
   describe.each(['kubernetes', 'fake'] as const)(

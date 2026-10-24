@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   watch,
   writeFileSync,
@@ -20,7 +21,37 @@ const preparerPath = fileURLToPath(
   new URL('../../scripts/release/prepare-loader-context.sh', import.meta.url)
 );
 
-function runPreparer(options: { commit: boolean; existingContext?: boolean }): {
+const originPin = 'deploy/platform/a0/workbench-origin.env';
+const workbenchRepository = 'zot.lifemodel-system.svc:5001/lifemodel/workbench';
+const workbenchOrigin = 'ghcr.io/shady2k/lifemodel-workbench';
+const originEnv = (digest: string) =>
+  `LIFEMODEL_WORKBENCH_ORIGIN_IMAGE=${workbenchOrigin}@${digest}\n`;
+const workbenchPatch = (digest: string) => `patches:
+  - target:
+      kind: StatefulSet
+      name: core
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: LIFEMODEL_TASK_WORKBENCH_IMAGE
+          value: ${workbenchRepository}@${digest}
+`;
+
+function runPreparer(options: {
+  commit: boolean;
+  existingContext?: boolean;
+  origin?:
+    | 'valid'
+    | 'zero'
+    | 'tag'
+    | 'wrong origin'
+    | 'untracked'
+    | 'deleted'
+    | 'mismatched'
+    | 'missing local pin'
+    | 'duplicate';
+}): {
   status: number;
   contextExists: boolean;
   contextContents: string[];
@@ -43,6 +74,14 @@ function runPreparer(options: { commit: boolean; existingContext?: boolean }): {
         join(repo, 'deploy/platform/applications/lifemodel/core.yaml'),
         'apiVersion: v1\nkind: Pod\n'
       );
+      if (options.origin) {
+        mkdirSync(join(repo, 'deploy/platform/a0'), { recursive: true });
+        writeFileSync(join(repo, originPin), originEnv(`sha256:${'b'.repeat(64)}`));
+        if (options.origin !== 'missing local pin') {
+          const localDigest = `sha256:${(options.origin === 'mismatched' ? 'c' : 'b').repeat(64)}`;
+          writeFileSync(seedFile, readFileSync(seedFile, 'utf8') + workbenchPatch(localDigest));
+        }
+      }
       execFileSync('git', ['-C', repo, 'add', 'deploy']);
       execFileSync('git', [
         '-C',
@@ -57,6 +96,23 @@ function runPreparer(options: { commit: boolean; existingContext?: boolean }): {
         'seed',
       ]);
     }
+    if (options.origin === 'untracked')
+      execFileSync('git', ['-C', repo, 'rm', '--cached', originPin]);
+    if (options.origin === 'deleted') rmSync(join(repo, originPin));
+    if (options.origin === 'zero')
+      writeFileSync(join(repo, originPin), originEnv(`sha256:${'0'.repeat(64)}`));
+    if (options.origin === 'tag')
+      writeFileSync(
+        join(repo, originPin),
+        `LIFEMODEL_WORKBENCH_ORIGIN_IMAGE=${workbenchOrigin}:latest\n`
+      );
+    if (options.origin === 'wrong origin')
+      writeFileSync(
+        join(repo, originPin),
+        originEnv(`sha256:${'b'.repeat(64)}`).replace(workbenchOrigin, workbenchRepository)
+      );
+    if (options.origin === 'duplicate')
+      writeFileSync(join(repo, originPin), originEnv(`sha256:${'b'.repeat(64)}`).repeat(2));
     const context = join(repo, '.docker-context');
     if (options.existingContext) {
       mkdirSync(context);
@@ -267,7 +323,7 @@ describe('loader image release seed bundle', () => {
     );
   });
 
-  it('carries the pushed core digest through the seed bundle into both rendered pod images', async () => {
+  it('carries pushed core and both workbench pins into the seed bundle while retaining source history', async () => {
     const temporary = mkdtempSync(join(tmpdir(), 'lifemodel-release-render-'));
     const repo = join(temporary, 'repo');
     const clone = join(temporary, 'clone');
@@ -299,9 +355,27 @@ describe('loader image release seed bundle', () => {
         '-m',
         'tagged source',
       ]);
+      mkdirSync(join(repo, 'deploy/platform/a0'), { recursive: true });
+      writeFileSync(join(repo, originPin), originEnv(`sha256:${'0'.repeat(64)}`));
+      execFileSync('git', ['-C', repo, 'add', originPin]);
+      execFileSync('git', [
+        '-C',
+        repo,
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.com',
+        'commit',
+        '--quiet',
+        '-m',
+        'source origin placeholder',
+      ]);
       const source = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], {
         encoding: 'utf8',
       }).trim();
+      const overlayFile = join(repo, 'deploy/platform/applications/lifemodel/kustomization.yaml');
+      writeFileSync(overlayFile, readFileSync(overlayFile, 'utf8') + workbenchPatch(digest));
+      writeFileSync(join(repo, originPin), originEnv(digest));
       execFileSync('sh', [join(repo, 'scripts/release/prepare-loader-context.sh')], {
         cwd: repo,
         stdio: 'pipe',
@@ -337,6 +411,16 @@ describe('loader image release seed bundle', () => {
       );
       expect(seedHead).not.toBe(source);
       expect(imagePin.digest).toBe(digest);
+      expect(seedKustomization).toContain(`${workbenchRepository}@${digest}`);
+      expect(
+        execFileSync('git', ['-C', clone, 'show', `HEAD:${originPin}`], { encoding: 'utf8' })
+      ).toBe(originEnv(digest));
+      expect(
+        execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+      ).toBe(source);
+      expect(
+        execFileSync('git', ['-C', repo, 'show', `HEAD:${originPin}`], { encoding: 'utf8' })
+      ).toBe(originEnv(`sha256:${'0'.repeat(64)}`));
       expect(images).toEqual([renderedImage, renderedImage]);
     } finally {
       rmSync(temporary, { recursive: true, force: true });
@@ -389,6 +473,27 @@ describe('loader image release seed bundle', () => {
     } finally {
       rmSync(temporary, { recursive: true, force: true });
     }
+  });
+
+  it.each([
+    'zero',
+    'tag',
+    'wrong origin',
+    'untracked',
+    'deleted',
+    'mismatched',
+    'missing local pin',
+    'duplicate',
+  ] as const)('refuses a %s workbench origin pin and removes its context', (origin) => {
+    const result = runPreparer({ commit: true, origin });
+    expect(result.status).not.toBe(0);
+    expect(result.contextExists).toBe(false);
+  });
+
+  it('accepts a tracked, nonzero origin pin matching the local workbench pin', () => {
+    const result = runPreparer({ commit: true, origin: 'valid' });
+    expect(result.status).toBe(0);
+    expect(result.contextContents).toEqual(['seed.bundle']);
   });
 
   it('refuses a pre-existing context without deleting it', async () => {

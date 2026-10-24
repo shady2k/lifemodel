@@ -301,7 +301,7 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
     const job = renderTaskJob({
       task,
       spaceId: space,
-      workbenchImage: `ghcr.io/shady2k/lifemodel-workbench@${task.imageRevision}`,
+      workbenchImage: `zot.lifemodel-system.svc:5001/lifemodel/workbench@${task.imageRevision}`,
     });
     job.metadata.uid = `job-${key}`;
     job.metadata.resourceVersion = '1';
@@ -674,7 +674,7 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
       f.job.metadata.annotations![TASK_TEMPLATE_HASH] = 'b'.repeat(64);
     if (fault === 'actual-template')
       (f.job.spec['template'] as any).spec.containers[0].image =
-        `ghcr.io/shady2k/lifemodel-workbench@sha256:${'b'.repeat(64)}`;
+        `zot.lifemodel-system.svc:5001/lifemodel/workbench@sha256:${'b'.repeat(64)}`;
     if (fault === 'job-start-time')
       f.job.status!.startTime = new Date(f.startedAt.getTime() + 1000).toISOString();
     await expect(access.start(startBody(f.task), f.token)).rejects.toMatchObject({ status: 403 });

@@ -6,10 +6,14 @@ import { TaskExecutorError } from './task-executor.js';
 import type { StorageControlClient } from './storage-control-client.js';
 import type { TaskExecutor, TaskLaunch } from './task-executor.js';
 
-export const TASK_WORKBENCH_REPOSITORY = 'ghcr.io/shady2k/lifemodel-workbench';
+export const TASK_WORKBENCH_REPOSITORY = 'zot.lifemodel-system.svc:5001/lifemodel/workbench';
 export function taskWorkbenchImage(value: string | undefined): string {
-  if (!value || !/^ghcr\.io\/shady2k\/lifemodel-workbench@sha256:[0-9a-f]{64}$/.test(value))
-    throw new Error('Invalid task workbench image configuration');
+  if (
+    !value?.trim() ||
+    value !== value.trim() ||
+    !/^zot[.]lifemodel-system[.]svc:5001\/lifemodel\/workbench@sha256:[0-9a-f]{64}$/.test(value)
+  )
+    throw new TaskExecutorError('invalid_launch');
   return value;
 }
 export function allocationEffectKey(task: TaskRecord): string {
