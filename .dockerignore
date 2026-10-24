@@ -41,3 +41,7 @@
 **/id_*
 **/secrets/**
 **/.dockerignore
+
+!src/ports/task-harness-registry.json
+
+!src/ports/task-agent-validation.*

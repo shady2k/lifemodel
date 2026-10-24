@@ -1,13 +1,35 @@
 {
-  "$schema": "https://opencode.ai/config.json",
-  "autoupdate": false,
+  "$schema": "https://opencode.ai/v2/config.json",
+  "update": "disable",
   "share": "disabled",
-  "provider": {
-    "lifemodel": {
-      "name": "lifemodel task gateway",
-      "options": {
-        "baseURL": "https://model-gateway.lifemodel-system.svc:8446/v1"
-      }
+  "formatter": false,
+  "lsp": false,
+  "warming": false,
+  "snapshots": false,
+  "plugins": ["-opencode.browser"],
+  "permissions": [
+    {
+      "action": "*",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "question",
+      "resource": "*",
+      "effect": "deny"
+    },
+    {
+      "action": "external_directory",
+      "resource": "*",
+      "effect": "deny"
+    }
+  ],
+  "agents": {
+    "title": {
+      "disabled": true
+    },
+    "summary": {
+      "disabled": true
     }
   }
 }

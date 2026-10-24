@@ -1,4 +1,18 @@
 /** Core-only task channel. Never exposed through PluginPrimitives. */
+import type { TaskProfile } from './tasks.js';
+
+/** Locators only; discovery is not a start grant. */
+export interface TaskLaunchIdentity {
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly launchId: string;
+}
+export interface TaskBriefing extends TaskLaunchIdentity {
+  readonly briefing: string;
+  readonly harness: string;
+  readonly profile: TaskProfile;
+}
+
 export type TaskChannelDirection = 'task_to_core';
 
 /** Structural live Kubernetes proof; callers must verify it freshly for each request. */
@@ -80,6 +94,10 @@ export class TaskChannelError extends Error {
   }
 }
 export interface TaskMailbox {
+  /** Fresh Job binding, active intent and allocation; no claim or briefing. */
+  readIdentity(proof: TaskChannelProof, signal?: AbortSignal): Promise<TaskLaunchIdentity>;
+  /** Same live authority plus the exact won start claim and projection. */
+  readBriefing(proof: TaskChannelProof, signal?: AbortSignal): Promise<TaskBriefing>;
   append(
     frame: TaskChannelFrame,
     proof: TaskChannelProof,

@@ -45,6 +45,13 @@ export default tseslint.config(
     },
   },
   {
+    // This pure JS policy also runs in Node before dependencies are installed.
+    // Its adjacent declaration gives TS callers types, not a typed JS lint project.
+    files: ['src/ports/task-agent-validation.mjs'],
+    languageOptions: { globals: { URL: 'readonly' } },
+    extends: [tseslint.configs.disableTypeChecked],
+  },
+  {
     // Relax strict rules for test files — tests naturally use JSON.parse, template literals, etc.
     files: ['**/*.test.ts', '**/__tests__/**/*.ts', 'tests/**/*.ts'],
     rules: {

@@ -14,6 +14,7 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "resolveJsonModule": true,
+    "allowJs": true,
 
     // Emit
     "target": "ES2024",

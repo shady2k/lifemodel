@@ -1,3 +1,4 @@
+import type { TaskHarnessName } from './task-harness-names.js';
 /** Core task authority. Deliberately not exposed through PluginPrimitives. */
 export type TaskState =
   | 'queued'
@@ -49,7 +50,7 @@ export interface TaskRecord {
   readonly briefing: string;
   readonly profile: TaskProfile;
   readonly settingsRevision: number;
-  readonly harness: 'opencode' | 'prime-agent';
+  readonly harness: TaskHarnessName;
   readonly imageRevision: string;
   readonly wrapGraceSeconds: number;
   readonly acceptedOrder: string;

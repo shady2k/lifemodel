@@ -1,3 +1,8 @@
+import {
+  DEFAULT_TASK_HARNESS,
+  TASK_HARNESS_NAMES,
+  type TaskHarnessName,
+} from '../ports/task-harness-names.js';
 /**
  * The core's read-only view of the platform settings (ADR-014 D6, T10): the
  * loader projects the owner's values into the `lifemodel-platform-settings`
@@ -32,7 +37,7 @@ export const PLATFORM_SETTINGS_FILE = 'settings.json';
 
 const DOCUMENT_VERSION = 1;
 
-export type TaskHarness = 'opencode' | 'prime-agent';
+export type TaskHarness = TaskHarnessName;
 export type StorageRetention = '90d' | 'forever';
 
 /** The effective platform values, typed per declaration. */
@@ -74,7 +79,7 @@ export type PlatformValueCheck =
 /** The declarations' defaults, typed by the same keys the effective values use. */
 const PLATFORM_SETTING_DEFAULTS = {
   'tasks.concurrency': 2,
-  'tasks.harness': 'opencode',
+  'tasks.harness': DEFAULT_TASK_HARNESS,
   'tasks.wrapGraceSeconds': 300,
   'tasks.channel.maxFrameBytes': 65_536,
   'tasks.channel.maxUnackedFrames': 16,
@@ -130,7 +135,7 @@ export const platformSettingSpecs: readonly PlatformSettingSpec[] = [
     kind: 'select',
     key: 'tasks.harness',
     default: PLATFORM_SETTING_DEFAULTS['tasks.harness'],
-    options: ['opencode', 'prime-agent'],
+    options: TASK_HARNESS_NAMES,
   },
   {
     kind: 'number',

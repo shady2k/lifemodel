@@ -1,3 +1,4 @@
+import { TASK_HARNESS_NAMES } from '../../src/ports/task-harness-names.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -84,7 +85,7 @@ describe('the storage module settings reader', () => {
       document(4, {
         'storage.retention': 'forever',
         'storage.warningLeadDays': 3,
-        'tasks.harness': 'prime-agent',
+        'tasks.harness': TASK_HARNESS_NAMES[0],
         'private-unknown-canary': 'do-not-log',
       })
     );

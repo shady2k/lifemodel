@@ -1,5 +1,6 @@
 /** The platform's own setting declarations (ADR-014 D6): the single declaration site. */
 import { createSettingsRegistry, type SettingDeclaration } from './registry.js';
+import { taskHarnessRegistry, defaultTaskHarness } from '../task-harness-registry.js';
 
 /** How many tasks may run at the same time; admission waits below the cap. */
 const tasksConcurrency: SettingDeclaration = {
@@ -26,16 +27,16 @@ const tasksHarness: SettingDeclaration = {
   section: 'tasks',
   label: { en: 'Task harness', ru: 'Исполнитель задач' },
   description: {
-    en: 'Which harness runs new tasks: OpenCode or Prime Agent. Running tasks keep their harness.',
-    ru: 'Какой исполнитель запускает новые задачи: OpenCode или Prime Agent. Запущенные задачи сохраняют свой исполнитель.',
+    en: 'Which registered harness runs new tasks. Running tasks keep their harness.',
+    ru: 'Какой зарегистрированный исполнитель запускает новые задачи. Запущенные задачи сохраняют свой исполнитель.',
   },
   control: 'select',
   dataClass: 'publicConfig',
-  default: 'opencode',
-  options: [
-    { value: 'opencode', label: { en: 'OpenCode', ru: 'OpenCode' } },
-    { value: 'prime-agent', label: { en: 'Prime Agent', ru: 'Prime Agent' } },
-  ],
+  default: defaultTaskHarness,
+  options: Object.entries(taskHarnessRegistry).map(([value, agent]) => ({
+    value,
+    label: { en: agent.label, ru: agent.label },
+  })),
   authority: 'owner',
   apply: 'nextAdmission',
 };

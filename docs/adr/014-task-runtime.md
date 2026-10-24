@@ -78,7 +78,7 @@ ADR-015. Fixture sizes specify evidence, not a maximum number of owner tasks.
 | T04 | Persist task registry/mailbox in **Postgres**, tick/outbox signals in existing **Valkey** seams; no file state or task store client (frame, standing durable-home rule) | `tests/integration/task-restart.test.ts`: read-only DATA_PATH and kill/restart core at **eight boundaries** named in D3; zero lost ACKs and one terminal event key |
 | T05 | Commit launch/profile/effect intent before dispatch; one launch authorizes **at most one harness execution**, including controller replacement Pods (ADR-010 keyed effects) | `tests/integration/task-launch-fence.test.ts`: **two core epochs + two candidate Pod UIDs**, delayed create/AlreadyExists/adopt/stop/delete, controller restart or lost Pod-create observation, duplicate/lost start reply and authority restart; render Never/0/Failed plus fail-on-disruption/nonzero policy; WALK-TASK-RESTART verifies one claim, zero replacement harness starts, failed partial outcome and cleanup |
 | T06 | Network is deny-first; task can reach only scoped runtime services and granted egress; internal cluster targets/other files/keys remain hard-denied (owner, ADR-013) | `tests/integration/task-consent-contract.test.ts` plus WALK-TASK-ISOLATION: **two profiles**, no-network and one approved domain, forbidden methods/private IP/redirect/domain denied |
-| T07 | Both harnesses expose live commands/events/one semantic terminal result; one stalled task cannot block owner intake (owner) | `tests/integration/task-harness-contract.test.ts`: **two real adapters + one scripted adapter**; with one blocked stream, 20 owner intakes and 20 second-task control messages each ACK **within 2 s**, frame/buffer/timeout limits in D2 hold; mid-tool steer/question/abort/error and duplicate replay |
+| T07 | Both harnesses expose live commands/events/one semantic terminal result; one stalled task cannot block owner intake (owner) | `tests/integration/task-harness-contract.test.ts`: **one shared ACP client, two real agent configurations + one scripted ACP agent**; with one blocked stream, 20 owner intakes and 20 second-task control messages each ACK **within 2 s**, frame/buffer/timeout limits in D2 hold; mid-tool steer/question/abort/error and duplicate replay |
 | T08 | Soft Stop and agent timeout wrap up without new external effects; hard deadline defaults to **300 s**; hard Stop deletes immediately; stop-all soft-stops current tasks, not core (owner answer) | `tests/integration/task-stop.test.ts`: virtual clock, **two running + one queued + one starting**, repeated Stop/timeout/hard/all; WALK-TASK-STOPS checks mutable Job deadline shortening from startTime, no extension/suspend, delayed patch/conflict/restart and core-down timeout/soft Stop; observes native deadline termination, real hard-delete requests, retained marked bytes and no remaining Pod/PVC |
 | T09 | Urgent precedes normal; FIFO in each class, owner or agent can mark urgent, no preemption; concurrency is platform bounded (owner answer) | `tests/integration/task-admission.test.ts`: **100 queued tasks, cap 2, two dispatch contenders**, mixed urgent/normal and cap decrease/restart; no third live reservation, stable class FIFO |
 | T10 | Registry descriptors are typed, loader/platform-owned; secrets set/delete/exists only; ceilings cannot be raised by core (owner/nocx) | `tests/unit/task-settings-registry.test.ts`: duplicate/unknown/type/bounds/secret-read refusal; WALK-TASK-SETTINGS: add **one declaration**, render bounds/errors in deployed Chromium + Firefox, core unavailable |
@@ -95,9 +95,17 @@ requestSoftStop and deleteNow by immutable task/launch identity. First adapter:
 Kubernetes Jobs. Fake adapter proves the caller contract; SkyPilot remains a
 later backend, not a dependency. `TaskHarness` lives inside the Job launcher:
 start/steer/wrap/abort, normalized events and one semantic terminal report.
-OpenCode loopback HTTP/SSE and Prime stdin/stdout RPC implement it. Raw harness
-APIs never leave the pod. CLI 0, `agent_end` or `step_finish` alone is not success;
-normalize provider errors, aborts and unresolved required tool failures [R].
+**Owner decision, 2026-10-24:** one generic Agent Client Protocol (ACP) client
+implements this port over agent stdio (NDJSON JSON-RPC). OpenCode v2 (`opencode
+acp`) is its first configuration; goose and other conforming agents reuse the
+same adapter. Per-agent native HTTP/SSE or stdin RPC adapters are not used.
+ACP is an open standard and avoids rebuilding the launcher when replacing an
+agent. Registry entries own command line, baked config, self-check and image pin;
+launcher/core code know only the port and registered names. Raw agent protocols
+never leave the pod. Success requires ACP `end_turn`, final assistant text, no
+provider error and no unresolved required tool failure; CLI 0 or a completed
+step alone is not success. `cancelled` maps to aborted. Missing ACP capability
+blocks that agent rather than enabling a native fallback [R].
 
 Jobs use restricted security context, one generic ephemeral working volume,
 private HOME/session directories, `parallelism: 1`, `completions: 1`,
@@ -109,7 +117,7 @@ retry and wait for terminal Pods rather than replacing a terminating Pod.
 They are supported by the pinned k3s v1.35.8+k3s1 / Kubernetes v1.35.8; the
 replacement policy is GA/locked on since 1.34 [K]. They are not a documented
 at-most-once program-start guarantee; D3 covers the remaining ambiguity. No shared source/workspace volume. Both harnesses
-use baked mounted non-secret endpoint/model configuration; Prime's ignored
+use baked mounted non-secret endpoint/model configuration; an agent's ignored
 placeholder is not authorization. Skills are versioned Postgres instructions,
 not executable shared files or hot-installed plugins. Workbench inputs pin the
 harness/runtime/native libraries and offline dev dependencies [R].

@@ -2,7 +2,8 @@
 *
 !docker/workbench/Dockerfile
 !docker/workbench/lifemodel-task-launcher
-!docker/workbench/opencode.json
+!docker/workbench/*.json
+!scripts/task-agent-provision.mjs
 !docker/loader/lifemodel-storage
 !package.json
 !package-lock.json
@@ -19,3 +20,8 @@
 **/.git*
 **/id_*
 **/secrets/**
+
+!src/ports/task-harness-registry.json
+
+!src/ports/task-agent-validation.*
+!scripts/task-agent-paths.mjs

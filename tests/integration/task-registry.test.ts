@@ -1,3 +1,4 @@
+import { TASK_HARNESS_NAMES } from '../../src/ports/task-harness-names.js';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AcceptTask, TaskRegistry, TaskRecord } from '../../src/ports/tasks.js';
@@ -256,7 +257,7 @@ describe('fenced durable task registry', () => {
       values: {
         ...base.values,
         'tasks.concurrency': 1,
-        'tasks.harness': 'prime-agent',
+        'tasks.harness': TASK_HARNESS_NAMES[0],
         'tasks.wrapGraceSeconds': 30,
       },
     };
@@ -264,7 +265,7 @@ describe('fenced durable task registry', () => {
     const second = await dynamic.accept(request('snapshot-2'));
     expect(second).toMatchObject({
       settingsRevision: 7,
-      harness: 'prime-agent',
+      harness: TASK_HARNESS_NAMES[0],
       wrapGraceSeconds: 30,
     });
     expect(await dynamic.admitNext()).toMatchObject({ id: task.id });

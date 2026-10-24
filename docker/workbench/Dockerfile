@@ -1,11 +1,12 @@
 # One release-commit workbench, separate from core. No installs at task startup.
-# Linux/amd64 baseline binary supports hosts without AVX2. Other architectures
+# Linux/amd64 native v2 binary is checksum pinned. Other architectures
 # fail closed until they have a reviewed binary/checksum and offline receipt.
 FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS cli-build
 WORKDIR /build
 COPY loader/package.json loader/package-lock.json ./
 RUN npm ci --no-audit --no-fund --ignore-scripts --no-update-notifier --loglevel=http
 COPY loader/tsconfig.json ./
+COPY src/ports/task-agent-validation.* /src/ports/
 COPY loader/src/ ./src/
 RUN npm run build
 
@@ -26,19 +27,15 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
  && printf 'deb http://snapshot.debian.org/archive/debian/20261015T000000Z bookworm main\n' > /etc/apt/sources.list \
  && apt-get update -o APT::Update::Error-Mode=any \
  && cmp /tmp/debian.InRelease /var/lib/apt/lists/*_InRelease \
- && apt-get install -y --no-install-recommends ca-certificates curl git build-essential python3 ripgrep \
+ && apt-get install -y --no-install-recommends ca-certificates curl git build-essential python3 ripgrep strace \
  && rm -rf /var/lib/apt/lists/* /tmp/debian.InRelease
 
-# Official native release archive; no npm postinstall platform selection or
-# downloader at runtime. Checksum from the exact release's asset metadata.
-ENV OPENCODE_VERSION=1.19.4 \
-    OPENCODE_SHA256=1697ef40558d378bd2f72efa8fafe1bed1f0e664f09247b9357556b95dbc7cbc
-RUN test "$(dpkg --print-architecture)" = amd64 \
- && curl --fail --location --retry 3 "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64-baseline.tar.gz" -o /tmp/opencode.tar.gz \
- && echo "${OPENCODE_SHA256}  /tmp/opencode.tar.gz" | sha256sum -c - \
- && tar -xzf /tmp/opencode.tar.gz -C /usr/local/bin opencode \
- && chmod 0555 /usr/local/bin/opencode \
- && rm /tmp/opencode.tar.gz
+# Registry-owned architecture pins, extraction and immutable agent configuration.
+COPY src/ports/task-harness-registry.json /opt/lifemodel/src/ports/task-harness-registry.json
+COPY src/ports/task-agent-validation.mjs /opt/lifemodel/src/ports/task-agent-validation.mjs
+COPY scripts/task-agent-provision.mjs scripts/task-agent-paths.mjs /opt/lifemodel/scripts/
+COPY docker/workbench/ /opt/lifemodel/docker/workbench/
+RUN node /opt/lifemodel/scripts/task-agent-provision.mjs > /tmp/install-agents.sh  && sh -ec "$(cat /tmp/install-agents.sh)"  && rm /tmp/install-agents.sh
 
 # Keep all development dependencies, including native modules, from THIS source
 # lock. Do not copy an owner .npmrc (it could contain credentials). The only
@@ -53,30 +50,19 @@ RUN npm ci --legacy-peer-deps --no-audit --no-fund --ignore-scripts --no-update-
  && npm cache clean --force
 RUN --network=none ONNXRUNTIME_NODE_INSTALL_CUDA=skip npm rebuild esbuild onnxruntime-node protobufjs sharp --foreground-scripts
 COPY --from=cli-build /build/package.json /opt/lifemodel/loader/package.json
-COPY --from=cli-build /build/dist/storage-cli-main.js /build/dist/storage-cli.js /build/dist/task-launcher-main.js /opt/lifemodel/loader/dist/
+COPY --from=cli-build /build/dist/storage-cli-main.js /build/dist/storage-cli.js /build/dist/task-*.js /opt/lifemodel/loader/dist/
 COPY --chown=root:root --chmod=0555 docker/loader/lifemodel-storage /usr/local/bin/lifemodel-storage
 COPY --chown=root:root --chmod=0555 docker/workbench/lifemodel-task-launcher /usr/local/bin/lifemodel-task-launcher
-COPY --chown=root:root docker/workbench/opencode.json /etc/lifemodel/opencode.json
-
 # The Job mounts its PRIVATE working volume at /work (uid/gid/fsGroup 1000).
-# No /tmp write is needed: HOME, XDG and TMPDIR all live on that volume.
+# HOME, mutable XDG paths and TMPDIR live there; config stays immutable above.
 RUN mkdir -p /work/home /work/tmp \
  && chown -R 1000:1000 /work
 ENV HOME=/work/home \
     TMPDIR=/work/tmp \
-    XDG_CONFIG_HOME=/work/home/.config \
+    XDG_CONFIG_HOME=/etc/lifemodel/xdg \
     XDG_CACHE_HOME=/work/home/.cache \
     XDG_DATA_HOME=/work/home/.local/share \
-    XDG_STATE_HOME=/work/home/.local/state \
-    OPENCODE_CONFIG=/etc/lifemodel/opencode.json \
-    OPENCODE_DISABLE_AUTOUPDATE=true \
-    OPENCODE_DISABLE_MODELS_FETCH=true \
-    OPENCODE_DISABLE_PROJECT_CONFIG=true \
-    OPENCODE_DISABLE_DEFAULT_PLUGINS=true \
-    OPENCODE_DISABLE_LSP_DOWNLOAD=true \
-    OPENCODE_DISABLE_EXTERNAL_SKILLS=true \
-    OPENCODE_DISABLE_CLAUDE_CODE=true \
-    OPENCODE_PURE=true
+    XDG_STATE_HOME=/work/home/.local/state
 USER 1000:1000
 WORKDIR /work
 ENTRYPOINT ["/usr/local/bin/lifemodel-task-launcher"]

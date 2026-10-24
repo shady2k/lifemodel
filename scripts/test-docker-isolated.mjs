@@ -39,6 +39,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs as parseLaunchArgs, STORE_IMAGES, networkCreateArgs, storeContainerArgs } from './test-isolated.mjs';
+import { testAgentRegistry, validateProvisionRegistry, agentSourceFiles, agentArtifacts, agentInstallScript } from './task-agent-provision.mjs';
+
+import { validateArtifact, safeRelativePath } from '../src/ports/task-agent-validation.mjs';
+import { realPathWithin } from './task-agent-paths.mjs';
 
 // ---------------------------------------------------------------------------
 // Machine identity and filesystem layout inside the disposable machine
@@ -101,6 +105,7 @@ export const PINNED = {
   dockerVersion: '29.9.0',
   nodeVersion: 'v24.21.0',
   artifacts: {
+    ...agentArtifacts(testAgentRegistry),
     docker: {
       aarch64: {
         file: 'docker-29.9.0.tgz',
@@ -478,6 +483,20 @@ export function buildPlan(input) {
   if (!artifactsHostDir || !bootstrapScriptDir || !bootstrapScriptName) {
     throw new IsolationError('missing artifact host dir or bootstrap script');
   }
+  validateProvisionRegistry(testAgentRegistry);
+  for (const artifact of artifacts) {
+    if (!safeRelativePath(artifact.file) || artifact.file.includes('/')) throw new IsolationError('unsafe artifact file');
+  }
+  const agentSteps = Object.entries(testAgentRegistry).map(([name, agent]) => {
+    const archive = artifacts.find(artifact => artifact.key === `agent-${name}`);
+    if (agent.provision.archives && !archive) throw new IsolationError(`missing pinned agent artifact: ${name}`);
+    return {
+      id: `provision-agent-${name}`,
+      kind: 'orb',
+      argv: runArgv(machineName, 'root', PROVISION_DIR, ['sh', '-ec', agentInstallScript(name, agent, archive ? `${PROVISION_DIR}/${archive.file}` : undefined, SRC_DIR)]),
+      timeoutMs: PHASE_TIMEOUTS_MS.provision,
+    };
+  });
 
   // Host-side tar arguments: the bootstrap script and the pinned artifacts,
   // relative to their own -C roots. These host paths never appear in any
@@ -523,6 +542,7 @@ export function buildPlan(input) {
       id: 'stage-artifacts',
       kind: 'tar-stdin',
       hostTarArgs: artifactTarArgs,
+      hostFiles: artifacts.map(artifact => ({ root: artifactsHostDir, relative: artifact.file })),
       argv: runArgv(machineName, 'root', null, ['tar', '-xf', '-', '-C', PROVISION_DIR]),
       timeoutMs: PHASE_TIMEOUTS_MS.transfer,
     },
@@ -530,6 +550,7 @@ export function buildPlan(input) {
       id: 'transfer-source',
       kind: 'tar-stdin',
       hostTarArgs: ['-C', snapshotPath, '-cf', '-', '.'],
+      agentSourceRoot: snapshotPath,
       argv: runArgv(machineName, MACHINE_USER, SRC_DIR, ['tar', '-xf', '-']),
       timeoutMs: PHASE_TIMEOUTS_MS.transfer,
     },
@@ -539,6 +560,7 @@ export function buildPlan(input) {
       argv: runArgv(machineName, 'root', PROVISION_DIR, ['bash', `./${bootstrapScriptName}`, 'root']),
       timeoutMs: PHASE_TIMEOUTS_MS.provision,
     },
+    ...agentSteps,
     {
       id: 'provision-repo',
       kind: 'orb',
@@ -698,6 +720,8 @@ export function createOrbInvoker({ orbctlPath, log = () => {} }) {
     async runStep(step) {
       if (step.kind === 'orb') return runOrb(step, null);
       if (step.kind === 'tar-stdin') {
+        for (const file of step.hostFiles ?? []) realPathWithin(file.root, file.relative);
+        if (step.agentSourceRoot) agentSourceFiles(step.agentSourceRoot);
         // Safe transfer: a host-side tar of the sanitized input piped into
         // `orbctl run ... tar -xf -`. The host path lives only in the host
         // tar arguments; the machine-side argv never names a host path.
@@ -742,18 +766,24 @@ function sha256File(file) {
  * HTTPS from the official distribution points only.
  */
 export async function ensureArtifacts({ arch, cacheDir, download, log = () => {} }) {
+  validateProvisionRegistry(testAgentRegistry);
+  if (!['x86_64', 'aarch64'].includes(arch)) throw new IsolationError('unsupported artifact architecture');
   const specs = PINNED.artifacts;
   const wanted = [];
   for (const key of Object.keys(specs)) {
     const spec = specs[key][arch];
     if (!spec) throw new IsolationError(`no pinned ${key} artifact for ${arch}`);
+    validateArtifact(spec);
     wanted.push({ key, ...spec });
   }
+  // Preflight every path before creating directories or reading a cached byte.
+  await fsp.mkdir(cacheDir, { recursive: true });
+  for (const spec of wanted) realPathWithin(cacheDir, `${arch}/${spec.file}`, true);
   const out = [];
   for (const spec of wanted) {
-    const dir = path.join(cacheDir, arch);
+    const dir = realPathWithin(cacheDir, arch, true);
     await fsp.mkdir(dir, { recursive: true });
-    const target = path.join(dir, spec.file);
+    const target = realPathWithin(cacheDir, `${arch}/${spec.file}`, true);
     let ok = false;
     if (fs.existsSync(target)) {
       ok = (await sha256File(target)) === spec.sha256;
@@ -770,7 +800,9 @@ export async function ensureArtifacts({ arch, cacheDir, download, log = () => {}
         );
       }
       const tmp = `${target}.tmp-${randomBytes(4).toString('hex')}`;
-      await fsp.writeFile(tmp, bytes);
+      realPathWithin(cacheDir, `${arch}/${path.basename(tmp)}`, true);
+      await fsp.writeFile(tmp, bytes, { flag: 'wx', mode: 0o600 });
+      realPathWithin(cacheDir, `${arch}/${spec.file}`, true);
       await fsp.rename(tmp, target);
     }
     out.push({ key: spec.key, file: spec.file, hostPath: target });
@@ -1131,7 +1163,7 @@ export async function main(argv) {
     cacheDir: artifactsDir,
     download: async (url) => {
       // bounded: a hung artifact download must not outlive the helper
-      const res = await fetch(url, { signal: AbortSignal.timeout(300_000) });
+      const res = await fetch(url, { signal: AbortSignal.timeout(300_000), redirect: 'error' });
       if (!res.ok) throw new IsolationError(`download failed (${res.status}): ${url}`);
       return Buffer.from(await res.arrayBuffer());
     },

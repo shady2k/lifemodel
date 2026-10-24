@@ -1,0 +1,43 @@
+{
+  "opencode": {
+    "label": "OpenCode",
+    "protocol": "acp",
+    "command": "/usr/local/bin/opencode",
+    "args": [
+      "acp"
+    ],
+    "configFile": "/etc/lifemodel/opencode.json",
+    "version": "2.1.4",
+    "versionArgs": [
+      "--version"
+    ],
+    "adapterModule": "./task-opencode.js",
+    "versionOutput": "opencode v2.1.4",
+    "provision": {
+      "archives": {
+        "x86_64": {
+          "file": "cli-linux-x64-2.1.4.tgz",
+          "url": "https://registry.npmjs.org/@opencode/cli-linux-x64/-/cli-linux-x64-2.1.4.tgz",
+          "sha256": "ce05abe2dce1041391c8ec8cdb8da066f640fd471e72ac846dcb089c441e11e1"
+        },
+        "aarch64": {
+          "file": "cli-linux-arm64-2.1.4.tgz",
+          "url": "https://registry.npmjs.org/@opencode/cli-linux-arm64/-/cli-linux-arm64-2.1.4.tgz",
+          "sha256": "e9acb4e23a9ac432139693aa166455a6add8946533394cbe083459a48e788861"
+        }
+      },
+      "archiveMember": "package/bin/opencode",
+      "files": [
+        {
+          "source": "docker/workbench/opencode.json",
+          "destination": "/etc/lifemodel/opencode.json",
+          "mode": "0444"
+        }
+      ],
+      "directories": [
+        "/etc/lifemodel/xdg/opencode"
+      ]
+    },
+    "contractModule": "../../tests/fixtures/task-opencode-contract.ts"
+  }
+}

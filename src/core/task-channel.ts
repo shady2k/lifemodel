@@ -7,7 +7,13 @@ import type { Socket } from 'node:net';
 import type { PlatformSettingsValues } from '../config/platform-settings.js';
 import { platformSettingSpecs, validatePlatformValue } from '../config/platform-settings.js';
 import { TaskChannelError, validateTaskChannelFrame } from '../ports/task-channel.js';
-import type { TaskChannelFrame, TaskChannelAck, TaskChannelProof } from '../ports/task-channel.js';
+import type {
+  TaskChannelFrame,
+  TaskChannelAck,
+  TaskChannelProof,
+  TaskBriefing,
+  TaskLaunchIdentity,
+} from '../ports/task-channel.js';
 import type { Logger } from '../types/logger.js';
 
 interface ChannelOptions {
@@ -18,6 +24,8 @@ interface ChannelOptions {
   };
   settings: PlatformSettingsValues;
   mailbox: {
+    readIdentity?(proof: TaskChannelProof, signal?: AbortSignal): Promise<TaskLaunchIdentity>;
+    readBriefing?(proof: TaskChannelProof, signal?: AbortSignal): Promise<TaskBriefing>;
     append(
       frame: TaskChannelFrame,
       proof: TaskChannelProof,
@@ -139,11 +147,24 @@ export function createTaskChannel(options: ChannelOptions): {
       refuse(res, 503, 'channel_stopped');
       return;
     }
-    if (req.method !== 'POST' || req.url !== '/task/events') {
+    const read =
+      req.method === 'GET' && (req.url === '/task/identity' || req.url === '/task/briefing');
+    if (!read && (req.method !== 'POST' || req.url !== '/task/events')) {
       refuse(res, 404, 'route_absent');
       return;
     }
-    if (req.headers['content-encoding'] || req.headers['content-type'] !== 'application/json') {
+    if (
+      read &&
+      (req.headers['transfer-encoding'] !== undefined ||
+        (req.headers['content-length'] !== undefined && req.headers['content-length'] !== '0'))
+    ) {
+      refuse(res, 400, 'invalid_request');
+      return;
+    }
+    if (
+      req.headers['content-encoding'] ||
+      (!read && req.headers['content-type'] !== 'application/json')
+    ) {
       refuse(res, 400, 'invalid_request');
       return;
     }
@@ -153,13 +174,18 @@ export function createTaskChannel(options: ChannelOptions): {
       return;
     }
     const capacity = Math.min(
-      frameLimit,
+      read ? 1_048_576 : frameLimit,
       settings['tasks.channel.maxUnackedBytes'],
       settings['tasks.channel.maxBufferedBytes']
     );
     // Fixed-length frames reserve their actual wire size. Chunked requests reserve
     // the entire admissible allowance and are cut off at that allowance.
-    const reservedBytes = length === undefined ? capacity : Math.max(1, Number(length));
+    // Reads reserve their response allowance in the same bounded queue.
+    const reservedBytes = read
+      ? capacity
+      : length === undefined
+        ? capacity
+        : Math.max(1, Number(length));
     if (reservedBytes > capacity) {
       refuse(res, 413, 'frame_too_large');
       return;
@@ -226,11 +252,12 @@ export function createTaskChannel(options: ChannelOptions): {
     });
     req.once('end', () => {
       if (signal.aborted || res.writableEnded) return;
-      let frame: TaskChannelFrame;
+      let frame: TaskChannelFrame | undefined;
       try {
-        frame = validateTaskChannelFrame(
-          JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(parts)))
-        );
+        if (!read)
+          frame = validateTaskChannelFrame(
+            JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(parts)))
+          );
       } catch {
         refuse(res, 400, 'invalid_frame');
         return;
@@ -274,16 +301,31 @@ export function createTaskChannel(options: ChannelOptions): {
               run: async () => {
                 try {
                   signal.throwIfAborted();
-                  let ack: TaskChannelAck;
-                  try {
-                    ack = await options.mailbox.append(frame, proof, signal);
-                  } finally {
-                    // A disconnect can race COMMIT. Replay must not depend on the ACK.
-                    options.onStored?.();
+                  if (read) {
+                    const operation =
+                      req.url === '/task/identity'
+                        ? options.mailbox.readIdentity?.bind(options.mailbox)
+                        : options.mailbox.readBriefing?.bind(options.mailbox);
+                    if (!operation) throw new TaskChannelError(503, 'channel_unavailable');
+                    const result = await operation(proof, signal);
+                    signal.throwIfAborted();
+                    // Bound response work independently of frame limits. Never log content.
+                    if (Buffer.byteLength(JSON.stringify(result)) > reservedBytes)
+                      throw new TaskChannelError(503, 'channel_unavailable');
+                    send(res, 200, result);
+                  } else {
+                    if (!frame) throw new TaskChannelError(400, 'invalid_frame');
+                    let ack: TaskChannelAck;
+                    try {
+                      ack = await options.mailbox.append(frame, proof, signal);
+                    } finally {
+                      // A disconnect can race COMMIT. Replay must not depend on the ACK.
+                      options.onStored?.();
+                    }
+                    signal.throwIfAborted();
+                    // The committed mailbox row is the ACK boundary, not Signal emission.
+                    send(res, 200, ack);
                   }
-                  signal.throwIfAborted();
-                  // The committed mailbox row is the ACK boundary, not Signal emission.
-                  send(res, 200, ack);
                 } catch (error) {
                   fail(error);
                 }

@@ -2,28 +2,30 @@
 
 Task: lifemodel-653.8.3. This is the stage-3 OpenCode workbench of
 [ADR-014 D1/T02](../../adr/014-task-runtime.md). It is **not** the core image.
-Prime Agent joins this same image in stage 4. No second task image is selected.
+A second ACP agent joins this same image in stage 4. No second task image is selected.
 
 ## Contents and pins
 
-`docker/workbench/Dockerfile` builds Linux/amd64 from the same release commit
-as the core, loader and web images. Unsupported architectures fail closed.
+`docker/workbench/Dockerfile` consumes architecture pins and extraction/config
+inputs from `src/ports/task-harness-registry.json` through
+`scripts/task-agent-provision.mjs`. The same input provisions both isolated test
+paths. Missing architectures fail closed. Linux/amd64 has the local offline
+receipt; the arm64 archive pin is recorded but execution is not accepted here.
 
 | Input | Pin / location |
 | --- | --- |
 | Node | `24.21.0-bookworm-slim`, manifest digest `sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20` (same version as the isolated test boundary) |
 | Native tools/libraries | Debian bookworm archive `20261015T000000Z`; signed apt indexes freeze git, build-essential, Python 3, ripgrep, curl, CA certificates and their dependencies |
-| OpenCode | `1.19.4`, official Linux x64 **baseline** archive; SHA-256 `1697ef40558d378bd2f72efa8fafe1bed1f0e664f09247b9357556b95dbc7cbc` |
+| OpenCode | `2.1.4`, native npm Linux x64 archive; SHA-256 `ce05abe2dce1041391c8ec8cdb8da066f640fd471e72ac846dcb089c441e11e1` |
 | Development dependencies | Root `package-lock.json` from this commit, installed by `npm ci --legacy-peer-deps` at `/opt/lifemodel/node_modules`, with native install steps completed during build |
 | Storage CLI | This commit's compiled `loader/src/storage-cli*.ts` at `/opt/lifemodel/loader/dist/`, wrapper `/usr/local/bin/lifemodel-storage` |
 | Launcher | This commit's compiled `loader/src/task-launcher-main.ts`, wrapper `/usr/local/bin/lifemodel-task-launcher` (the image ENTRYPOINT) |
 
-The OpenCode archive is the [official release asset](https://github.com/anomalyco/opencode/releases/tag/v1.19.4).
-The checksum comes from its [asset metadata](https://api.github.com/repos/anomalyco/opencode/releases/tags/v1.19.4)
-and is checked before extraction. The baseline binary avoids a build-host AVX2
-selection. A direct archive avoids the official `opencode-ai` npm package's
-postinstall platform probing and fallback npm install. No remote installer,
-`npx` resolution or mutable version selector is used for the harness.
+The OpenCode archive is the exact `@opencode/cli-linux-x64@2.1.4` npm
+platform package. Registry integrity and tagged source references are recorded
+in [OpenCode v2 facts](task-harness.md#opencode-v2-facts). Build verifies SHA-256
+before extracting the native executable. No postinstall, remote installer,
+`npx` resolution or mutable version selector runs at task startup.
 These pins reproduce the installed inputs; they do not assert byte-for-byte
 reproducible upstream binaries or OCI timestamps.
 
@@ -69,7 +71,8 @@ the current ONNX download.
 ## Offline startup and private writes
 
 The image runs as UID/GID **1000**, with read-only root support, `WORKDIR /work`,
-`HOME=/work/home`, `TMPDIR=/work/tmp` and all XDG paths below HOME. The Job must
+`HOME=/work/home`, `TMPDIR=/work/tmp` and mutable XDG paths below HOME.
+The global XDG config path is the baked read-only `/etc/lifemodel/xdg`. The Job must
 mount its own writable work volume at `/work` and set UID/GID/fsGroup 1000.
 No shared workspace, keys, auth files, owner `.npmrc`, repository `.git`, source
 checkout or local data enters the build context. The Dockerfile-specific
@@ -78,15 +81,14 @@ loader context.
 
 Startup does not install dependencies or contact an external bootstrap service.
 `--self-check` creates only the private HOME/tmp directories, checks the baked
-CLI/config/dev-dependency files, runs `node --version`, `opencode --version`,
-`git --version` and `lifemodel-storage --help`, and exits 0. Any other invocation
-exits 1 with **`launcher_not_implemented`**. It cannot start a harness before
-653.8.7 implements the verified binding handshake. A successful version check
-is not proof that an OpenCode model/tool session is implemented or accepted.
+CLI/config/dev-dependency files, runs generic tool checks and each registered
+agent's version/config self-check, and exits 0. With no arguments the launcher runs the [task harness](task-harness.md):
+authenticated identity discovery, one gateway start claim, one won-claim briefing
+read and one ACP session. Unknown arguments exit nonzero. A successful
+version check alone does not prove a model/tool session.
 
 The launcher shares `loader/src/` because that already builds Node CLI modules
-with a strict TypeScript config. Only the two storage modules and launcher
-module ship, not the loader server, its dependencies, custody or seed bundle.
+with a strict TypeScript config. Only the storage and task runtime modules ship, not the loader server, its dependencies, custody or seed bundle.
 
 A self-change checkout can link its `node_modules` to the baked dependencies and
 use their local binaries without npm network. The image does **not** ship Docker,
@@ -97,36 +99,27 @@ host or make every repository gate runnable inside a task Job.
 
 ## Baked non-secret OpenCode configuration
 
-`/etc/lifemodel/opencode.json` is selected by `OPENCODE_CONFIG`. It disables
-updates and sharing and records the task endpoint placeholder
-`https://model-gateway.lifemodel-system.svc:8446/v1`. No API key is configured.
-`OPENCODE_DISABLE_AUTOUPDATE`, `OPENCODE_DISABLE_MODELS_FETCH`,
-`OPENCODE_DISABLE_PROJECT_CONFIG`, `OPENCODE_DISABLE_DEFAULT_PLUGINS`,
-`OPENCODE_DISABLE_LSP_DOWNLOAD`, `OPENCODE_DISABLE_EXTERNAL_SKILLS`,
-`OPENCODE_DISABLE_CLAUDE_CODE` and `OPENCODE_PURE` disable their respective
-update/catalog/project/plugin/download paths. System ripgrep avoids its native
-downloader. All are baked boolean `true` values.
+`/etc/lifemodel/opencode.json` is the first agent's registry-selected config.
+v2 uses `update: "disable"`, no sharing, no LSP/formatter, no warming and no
+external plugins. The agent module supplies the native OpenAI-compatible
+provider with its loopback relay URL at launch. Only the relay rereads the
+projected model token and validates the gateway CA; a non-secret placeholder
+API key in agent configuration is not authority.
 
-653.8.7 must finish provider/model selection and the transport relay if needed,
-add task identity only after the gateway's once-only start claim, reread rotating
-tokens and validate the projected public CA. It must verify real shell/model,
-steering and Stop behavior and any additional offline bootstrap needs. The
-placeholder alone is not a functioning OpenAI-compatible provider or permission
-to use the gateway. At this OpenCode pin, actual config loading can also install
-`@opencode-ai/plugin` in writable config directories even with pure/default
-plugins disabled. 653.8.7 must preprovision that exact config dependency or use
-validated read-only config directories and verify a real run without bootstrap
-network. The native version path does not load it. Disabling plugins is not a
-universal network sandbox.
+The config module owns all v2 environment flags. Project config, Claude skills,
+models catalog fetch and update checks are disabled. Config roots remain
+read-only. Private data/cache/state/log paths stay under `/work`. The v1 plugin
+bootstrap workaround is removed, not carried as compatibility code. Real ACP
+runs must prove no startup egress attempt; a version check alone is insufficient.
+See the task harness document for the exact pin and source evidence.
 
 The existing storage CLI reads `LIFEMODEL_STORAGE_ENDPOINT`,
 `LIFEMODEL_STORAGE_SPACE`, `LIFEMODEL_STORAGE_TOKEN_FILE` and
 `LIFEMODEL_STORAGE_CA_FILE`. None is supplied as an image credential. Admission
 permits only the ten literal endpoint/space/identity-file/CA-file names in the
 [task launch contract](task-launch.md). Arbitrary Job env, valueFrom and envFrom
-remain forbidden. The six channel/model names are the contract reserved for the
-launcher handshake in 653.8.7, not proof that today's inert launcher consumes
-them. Tokens/CA are read-only projected directories, never baked.
+remain forbidden. The six channel/model names are consumed by the launcher handshake,
+briefing/channel client and model relay. Tokens/CA are read-only projected directories, never baked.
 
 ## CI and release
 
@@ -161,20 +154,11 @@ docker run --rm --network none --read-only --cap-drop ALL \
   lifemodel-workbench:local --self-check
 ```
 
-To update OpenCode, choose one exact official release, read its baseline Linux
-asset SHA-256 from the tagged release metadata, update both Dockerfile constants
-and this document, and inspect that release's config/bootstrap changes. Rebuild,
-verify the checksum and repeat the no-network/read-only checks. Run the contract
-test and full isolated check. Add another architecture only with its own pinned
-archive/checksum and offline receipt. Never update a harness at task start.
+To update OpenCode, choose the latest stable **v2** npm version, verify its
+registry integrity, record the archive checksum and exact source commit, and
+inspect its ACP/config/startup changes. Update the registry, image pin, test
+provisioning and docs together. Rebuild and repeat offline self-check, real ACP
+contract and network-attempt tracing. Never update a harness at task start.
 
-Local Linux/amd64 measurement (2026-10-23, audited CPU-only rebuild): Docker
-reports **2,208,704,446 bytes** (2.06 GiB, uncompressed), after a **296 s** build.
-The Node base was cached; apt, OpenCode, both dependency installs and the
-network-denied native setup were rerun. The install log contains 1,008 npm
-fetches (941 unique URLs), all matching integrity-pinned resolved URLs in the
-two lockfiles; no ONNX GitHub release download occurred. The separate OpenCode
-GitHub archive download is intentional and checksum-verified. This is a
-development workbench, not a slim production core image. The build cache is
-retained; local image tags are removed after verification. Registry compression
-and a cold CI build have different size/time costs.
+The former v1 image measurements are superseded; v2 measurements and final
+acceptance receipts are recorded in the worker report, not inferred here.
