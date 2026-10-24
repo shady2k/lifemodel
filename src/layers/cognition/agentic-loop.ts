@@ -67,6 +67,7 @@ import { validateToolCallPairs } from './messages/tool-call-validators.js';
 import { buildSystemPrompt } from './prompts/system-prompt.js';
 import { buildTriggerPrompt } from './prompts/trigger-prompt.js';
 import { getTraceContext } from '../../core/trace-context.js';
+import { taskOutcomeFallback, validateTaskOutcome } from '../../ports/task-outcome.js';
 
 /**
  * Resolve per-request LLM timeout based on trigger type.
@@ -139,14 +140,37 @@ export class AgenticLoop {
     const useSmart = context.previousAttempt !== undefined;
 
     try {
-      return await this.runInternal(context, useSmart);
+      const result = await this.runInternal(context, useSmart);
+      if (
+        context.triggerSignal.type === 'task_outcome' &&
+        (result.terminal.type !== 'respond' ||
+          !result.terminal.text.trim() ||
+          result.state.disposition === 'error')
+      )
+        return this.outcomeFallback(context, result.state);
+      return result;
     } catch (error) {
+      // Model retries/limits exhausted: the trusted outcome still owes a reply.
+      // Sending this deterministic reply is a successful answer, not silence.
+      if (context.triggerSignal.type === 'task_outcome')
+        return this.outcomeFallback(context, createLoopState());
       this.logger.error(
         { error: error instanceof Error ? error.message : String(error) },
         'Agentic loop failed'
       );
       throw error;
     }
+  }
+
+  private outcomeFallback(context: LoopContext, state: LoopState): LoopResult {
+    const event = validateTaskOutcome(context.triggerSignal.data);
+    state.disposition = 'answer';
+    return buildFinalResultFromNaturalCompletion(
+      taskOutcomeFallback(event),
+      state,
+      context,
+      this.logger
+    );
   }
 
   /**
@@ -471,6 +495,7 @@ export class AgenticLoop {
         // Gate on recipientId + onImmediateIntent to ensure the response can actually be delivered;
         // otherwise fall through to normal return (message will spawn its own COGNITION run).
         if (
+          context.triggerSignal.type === 'user_message' &&
           result.terminal.type === 'respond' &&
           result.terminal.text &&
           context.drainPendingUserMessages &&
@@ -670,7 +695,15 @@ export class AgenticLoop {
       context.triggerSignal.type === 'user_message' ||
       context.triggerSignal.type === 'motor_result' ||
       context.triggerSignal.type === 'task_outcome';
-    const saySent = (state.toolCallCounts.get('core.say') ?? 0) > 0;
+    const saySent =
+      context.triggerSignal.type !== 'task_outcome' &&
+      state.toolResults.some(
+        (result) =>
+          result.toolName === 'core.say' &&
+          result.success &&
+          typeof (result.data as { delivered_text?: unknown } | undefined)?.delivered_text ===
+            'string'
+      );
     if (!messageText && requiresResponse) {
       if (saySent) {
         this.logger.debug(

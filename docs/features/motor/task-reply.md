@@ -16,8 +16,12 @@ A title is optional at the feature level and is not introduced in this leaf.
 The tool applies an explicit `START_TASK` intent through the core applicator and
 awaits registry acceptance only. Its launch key is the recipient plus the already
 persisted deciding turn id and the one task-effect slot. A replay retains that
-key; model-generated tool call ids never define task identity. The registry
-persists briefing/profile/settings before dispatch. Acceptance is tracked through
+key; model-generated tool call ids never define task identity. Before accepting a
+new request, the tool looks up that key in the fenced registry. An existing task
+returns accepted with its original ID and current state, even if replay generates
+a different briefing/profile or the caller image changes. It is not resubmitted.
+The registry's immutable-payload conflict protection remains in place for direct
+acceptance requests. The registry persists briefing/profile/settings before dispatch. Acceptance is tracked through
 the durable-effect drain. Uncertain infrastructure failures propagate out of the
 tool registry so the owned turn fails rather than claiming a refusal after a
 possibly committed write. Deterministic registry refusals are safe tool results.
@@ -41,8 +45,19 @@ allowed. The configured primary owner recipient receives this outcome, as with
 other infrastructure signals; no task chooses a recipient. CoreLoop captures that
 recipient for the outcome turn so the owner's send and the bus-entry completion
 share the same snapshot commit, including after outbound receipts are trimmed.
-Intermediate `core.say` and recursive `core.startTask` calls are refused on this
-trigger.
+This is a response-only turn. No tools are advertised, and an empty capability
+allowlist rejects every tool at execution time, including `core.defer`,
+`core.remember`, `core.schedule`, `core.say` and `core.startTask`. Task summaries
+and object names are delimited, XML-escaped lower-trust data in a user-role
+message, never interpolated into system-role instructions. They cannot authorize
+owner-state, schedule or task mutations.
+
+An empty/missing final response is not an acknowledgement, even after a rejected
+`core.say` attempt. The model gets the bounded response retries. If those retries
+or model execution fail, a deterministic reply reports the trusted event's terminal
+state, maps the reason code to owner words and quotes the summary as task output.
+That fallback uses the same trusted result-attachment compiler as a normal reply.
+Only the committed answer completes the outcome; neither deferral nor silence does.
 
 For `done`, the intent compiler attaches only `result`-marked sealed object IDs,
 with name, size and MIME type (`application/octet-stream` if absent), to the actual
@@ -64,4 +79,6 @@ metadata never blocks result delivery. No bytes, storage URLs or paths enter cha
 scripted cognition and a fake executor with real launch/finalization infrastructure.
 It checks immediate acceptance/reply, sealed outcome/attachment message binding,
 crash before each answer commit, duplicate delivery after trimming, concurrent
-outcomes, low-energy wake and failure without a fake result.
+outcomes, low-energy wake and failure without a fake result. Regressions cover
+reworded launch replay, forbidden deferral, rejected say followed by empty finals,
+deterministic fallback, and adversarial task output with no store side effects.

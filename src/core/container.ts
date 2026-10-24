@@ -1273,11 +1273,13 @@ export async function createContainerAsync(
         return task;
       },
       read: (id) => registry.read(id),
+      readByLaunchKey: (launchKey) => registry.readByLaunchKey(launchKey),
       list: () => registry.list(),
     };
     coreLoop.setTaskService(taskService);
     layers.cognition.getToolRegistry().registerTool(
       createStartTaskTool({
+        readByLaunchKey: (launchKey) => registry.readByLaunchKey(launchKey),
         applyStartTask: (intent) => coreLoop.applyStartTask(intent),
         imageRevision,
       })

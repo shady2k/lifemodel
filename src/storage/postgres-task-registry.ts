@@ -498,6 +498,13 @@ export function createPostgresTaskRegistry(deps: {
       });
     },
     read: async (taskId) => transaction(taskId, (client) => readTask(client, taskId)),
+    readByLaunchKey: async (launchKey) =>
+      transaction('registry', async (client) => {
+        const rows = await client.query<TaskRow>(`${TASK_SELECT} WHERE t.launch_key=$1`, [
+          launchKey,
+        ]);
+        return rows.rows[0] ? taskRecord(rows.rows[0]) : null;
+      }),
     list: async () =>
       transaction('registry', async (client) => {
         const rows = await client.query<TaskRow>(`${TASK_SELECT} ORDER BY t.accepted_order,t.id`);

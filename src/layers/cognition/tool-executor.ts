@@ -363,6 +363,19 @@ export async function executeToolCalls(
       continue;
     }
 
+    // Response-only capability boundary: no tool, including terminal/control tools,
+    // may act on task-produced text. Enforce even if the provider ignores schemas.
+    if (context.triggerSignal.type === 'task_outcome') {
+      state.toolCallCount++;
+      messages.push({
+        role: 'tool',
+        tool_call_id: toolCall.id,
+        tool_name: toolCall.function.name,
+        content: JSON.stringify({ success: false, code: 'task_outcome_requires_final_reply' }),
+      });
+      continue;
+    }
+
     // Intercept core.escalate - restart with smart model
     if (toolName === 'core.escalate') {
       const reason =
@@ -393,20 +406,6 @@ export async function executeToolCalls(
 
       const intents = compileIntents(terminal, context, state);
       return { type: 'defer', result: { success: true, terminal, intents, state } };
-    }
-
-    if (
-      context.triggerSignal.type === 'task_outcome' &&
-      (toolName === 'core.say' || toolName === 'core.startTask')
-    ) {
-      state.toolCallCount++;
-      messages.push({
-        role: 'tool',
-        tool_call_id: toolCall.id,
-        tool_name: toolCall.function.name,
-        content: JSON.stringify({ success: false, code: 'task_outcome_requires_final_reply' }),
-      });
-      continue;
     }
 
     // Intercept core.say - send intermediate message, continue loop

@@ -78,3 +78,28 @@ export function taskOutcomeAttachments(event: TaskOutcomeEvent): MessageAttachme
   }
   return groups;
 }
+
+/** Fixed owner-facing explanation; task text is quoted, never used as instructions. */
+export function taskOutcomeFallback(event: TaskOutcomeEvent): string {
+  const reasons: Record<string, string> = {
+    completed: 'The work completed.',
+    timeout: 'The task ran out of time.',
+    stopped: 'The task was stopped.',
+    aborted: 'The task stopped before finishing.',
+    compute_missing: 'The running task could no longer be found.',
+    job_failed: 'The task failed while running.',
+    semantic_report_missing: 'The task ended without confirming its result.',
+    missing_result: 'The task did not produce a result file.',
+    checksum_mismatch: 'The result file could not be verified.',
+    executor_failed: 'The task could not finish running.',
+    launch_failed: 'The task could not start.',
+  };
+  const state =
+    event.state === 'done'
+      ? 'Task completed.'
+      : event.state === 'stopped'
+        ? 'Task stopped.'
+        : 'Task failed.';
+  const reason = reasons[event.reasonCode] ?? 'The task ended without a more specific explanation.';
+  return `${state} ${reason}\nTask output (quoted): ${JSON.stringify(event.summary)}${event.state === 'done' ? '' : '\nNo completed result is available.'}`;
+}

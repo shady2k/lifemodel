@@ -80,6 +80,8 @@ export function filterToolsForContext(
   context: LoopContext,
   useSmart: boolean
 ): (OpenAIChatTool | MinimalOpenAIChatTool)[] {
+  // Outcome turns have an empty capability allowlist, not a tool denylist.
+  if (context.triggerSignal.type === 'task_outcome') return [];
   const isThoughtTrigger = context.triggerSignal.type === 'thought';
   const isProactive =
     context.triggerSignal.type === 'contact_urge' || isProactiveTrigger(context.triggerSignal);
@@ -126,16 +128,6 @@ export function filterToolsForContext(
       if (name === 'core.agent' || name === 'core_agent') return false;
       if (name === 'core.say' || name === 'core_say') return false;
     }
-
-    // Task outcomes produce one final reply with trusted attachments, never teasers.
-    if (
-      context.triggerSignal.type === 'task_outcome' &&
-      (name === 'core.say' ||
-        name === 'core_say' ||
-        name === 'core.startTask' ||
-        name === 'core_startTask')
-    )
-      return false;
 
     // Plugin events (news delivery, etc.): no teasers — compose full message as final response
     if (context.triggerSignal.type === 'plugin_event') {
