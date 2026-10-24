@@ -14,6 +14,8 @@ export class FakeTaskExecutor implements TaskExecutor {
     { launch: TaskLaunch; observation: TaskJobObservation }
   >();
   private sequence = 0;
+  private readonly terminating = new Set<string>();
+  private readonly cleaning = new Set<string>();
   readonly calls: { operation: string; taskId: string; launchId: string }[] = [];
 
   private record(operation: string, launch: TaskLaunch, signal?: AbortSignal): void {
@@ -90,10 +92,37 @@ export class FakeTaskExecutor implements TaskExecutor {
       if (this.match(launch)) this.jobs.delete(launch.task.jobName);
     });
   }
+  confirmTerminated(launch: TaskLaunch, signal?: AbortSignal): Promise<boolean> {
+    return Promise.resolve().then(() => {
+      this.record('confirmTerminated', launch, signal);
+      return (
+        !this.match(launch) && (!launch.task.jobUid || !this.terminating.has(launch.task.jobUid))
+      );
+    });
+  }
+  confirmCleanup(launch: TaskLaunch, signal?: AbortSignal): Promise<boolean> {
+    return Promise.resolve().then(() => {
+      this.record('confirmCleanup', launch, signal);
+      return (
+        !this.match(launch) &&
+        (!launch.task.jobUid ||
+          (!this.terminating.has(launch.task.jobUid) && !this.cleaning.has(launch.task.jobUid)))
+      );
+    });
+  }
+  /** Script delayed Pod termination or ephemeral claim GC, independently of Job loss. */
+  setTerminationPending(jobUid: string, pending: boolean): void {
+    if (pending) this.terminating.add(jobUid);
+    else this.terminating.delete(jobUid);
+  }
+  setCleanupPending(jobUid: string, pending: boolean): void {
+    if (pending) this.cleaning.add(jobUid);
+    else this.cleaning.delete(jobUid);
+  }
   /** Script external progress/loss without teaching production callers another backend. */
   setObservation(
     jobName: string,
-    change: Pick<Partial<TaskJobObservation>, 'phase' | 'startedAt'>
+    change: Pick<Partial<TaskJobObservation>, 'phase' | 'startedAt' | 'failureReason'>
   ): void {
     const job = this.jobs.get(jobName);
     if (!job) throw new TaskExecutorError('bound_job_missing');
@@ -104,6 +133,8 @@ export class FakeTaskExecutor implements TaskExecutor {
   }
   close(): void {
     this.jobs.clear();
+    this.terminating.clear();
+    this.cleaning.clear();
   }
 }
 export function createFakeTaskExecutor(): FakeTaskExecutor {

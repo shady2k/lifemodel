@@ -453,12 +453,14 @@ export function validateTaskJob(
 export class KubernetesTaskExecutor implements TaskExecutor {
   private readonly client: TaskKubernetesClient;
   private readonly collection: string;
+  private readonly coreCollection: string;
   private watchResourceVersion = '0';
   constructor(private readonly options: KubernetesTaskExecutorOptions = {}) {
     const namespace = options.namespace ?? 'lifemodel-motor';
     if (!/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(namespace) || namespace.length > 63)
       throw new TaskExecutorError('invalid_launch');
     this.collection = `/apis/batch/v1/namespaces/${encodeURIComponent(namespace)}/jobs`;
+    this.coreCollection = `/api/v1/namespaces/${encodeURIComponent(namespace)}`;
     this.client =
       options.client ??
       createTaskKubernetesClient({
@@ -489,7 +491,23 @@ export class KubernetesTaskExecutor implements TaskExecutor {
     );
     if (result.status === 404) return null;
     if (result.status !== 200) throw new TaskExecutorError('api_error');
-    return validateTaskJob(result.body as TaskKubernetesJob, launch, this.options);
+    const observed = validateTaskJob(result.body as TaskKubernetesJob, launch, this.options);
+    // Before runtime binding, a pending Job need not have created its Pod yet.
+    // After binding, loss of that exact Pod is failure evidence even if Job
+    // status has not caught up. A different Pod must never stand in for it.
+    if (!launch.task.podUid) return observed;
+    const pods = await this.ownedPods(launch, signal);
+    const bound = pods.find((pod) => object(pod['metadata'])['uid'] === launch.task.podUid);
+    if (!bound) return { ...observed, phase: 'failed', failureReason: 'compute_missing' };
+    const status = bound['status'];
+    if (
+      status &&
+      typeof status === 'object' &&
+      !Array.isArray(status) &&
+      (status as JsonObject)['phase'] === 'Failed'
+    )
+      return { ...observed, phase: 'failed', failureReason: 'pod_failed' };
+    return observed;
   }
   async ensureStarted(launch: TaskLaunch, signal?: AbortSignal): Promise<TaskJobObservation> {
     if (launch.task.tombstonedAt || ['done', 'failed', 'stopped'].includes(launch.task.state))
@@ -529,29 +547,188 @@ export class KubernetesTaskExecutor implements TaskExecutor {
   async deleteNow(launch: TaskLaunch, signal?: AbortSignal): Promise<void> {
     if (!launch.task.jobUid) throw new TaskExecutorError('identity_mismatch');
     const observed = await this.observe(launch, signal);
-    if (!observed) return;
-    await this.deleteIdentity(observed.jobName, observed.jobUid, observed.resourceVersion, signal);
+    // Begin graceful Pod deletion before foreground Job GC can apply the native
+    // zero-grace template. Repeat afterward to cover newly observed dependants.
+    await this.deleteOwnedPods(launch, signal);
+    if (observed)
+      await this.deleteIdentity(
+        observed.jobName,
+        observed.jobUid,
+        observed.resourceVersion,
+        signal
+      );
+    await this.deleteOwnedPods(launch, signal);
+  }
+  private async deleteOwnedPods(launch: TaskLaunch, signal?: AbortSignal): Promise<void> {
+    // A Job may already be absent. Controller UID still identifies orphan Pods,
+    // independently of mutable labels. Orphan propagation would erase this link.
+    for (const pod of await this.ownedPods(launch, signal)) {
+      const metadata = object(pod['metadata']);
+      await this.deleteIdentity(
+        metadata['name'] as string,
+        metadata['uid'] as string,
+        metadata['resourceVersion'] as string,
+        signal,
+        `${this.coreCollection}/pods`
+      );
+    }
+  }
+  async confirmTerminated(launch: TaskLaunch, signal?: AbortSignal): Promise<boolean> {
+    // This confirms the Kubernetes API boundary, not partitioned node processes.
+    // Native zero-grace GC and in-flight controller CREATE remain Kubernetes
+    // residuals; durable tombstones keep any late launcher inert and reconciled.
+    // An extant controller, including a deleting or terminal Job, is not yet a
+    // stable absence boundary. It could still have a Pod CREATE in flight.
+    if (await this.observe(launch, signal)) return false;
+    return (await this.ownedPods(launch, signal)).every((pod) => {
+      const status = pod['status'];
+      if (!status || typeof status !== 'object' || Array.isArray(status)) return false;
+      const phase = (status as JsonObject)['phase'];
+      return phase === 'Succeeded' || phase === 'Failed';
+    });
+  }
+  async confirmCleanup(launch: TaskLaunch, signal?: AbortSignal): Promise<boolean> {
+    if (await this.observe(launch, signal)) return false;
+    if ((await this.ownedPods(launch, signal)).length) return false;
+    // Generic ephemeral PVCs are owned by Pods, not Jobs. The owner-name check
+    // deliberately only blocks cleanup; it never authorizes deleting a claim.
+    // It survives Pod GC and duplicate Pods without a process-local UID ledger.
+    const claims = await this.listCoreResources('persistentvolumeclaims', signal);
+    return !claims.some((claim) => {
+      const metadata = object(claim['metadata']);
+      return this.owners(metadata).some(
+        (owner) =>
+          owner['apiVersion'] === 'v1' &&
+          owner['kind'] === 'Pod' &&
+          owner['controller'] === true &&
+          (owner['uid'] === launch.task.podUid ||
+            (typeof owner['name'] === 'string' &&
+              owner['name'].startsWith(launch.task.jobName.slice(0, 58)) &&
+              metadata['name'] === `${owner['name']}-work`))
+      );
+    });
+  }
+  private owners(metadata: JsonObject): JsonObject[] {
+    if (metadata['ownerReferences'] === undefined) return [];
+    if (!Array.isArray(metadata['ownerReferences'])) throw new TaskExecutorError('api_error');
+    return metadata['ownerReferences'].map((value) => object(value));
+  }
+  private async ownedPods(launch: TaskLaunch, signal?: AbortSignal): Promise<JsonObject[]> {
+    const pods = await this.listCoreResources('pods', signal);
+    return pods.filter(
+      (pod) =>
+        object(pod['metadata'])['uid'] === launch.task.podUid ||
+        this.owners(object(pod['metadata'])).some(
+          (owner) =>
+            owner['apiVersion'] === 'batch/v1' &&
+            owner['kind'] === 'Job' &&
+            owner['controller'] === true &&
+            (launch.task.jobUid
+              ? owner['uid'] === launch.task.jobUid
+              : // Before CREATE binding, deterministic owner name can only deny
+                // confirmation. deleteNow still requires a persisted exact UID.
+                owner['name'] === launch.task.jobName)
+        )
+    );
+  }
+  /** One bounded namespace snapshot: labels are not authoritative ownership. */
+  private async listCoreResources(
+    resource: 'pods' | 'persistentvolumeclaims',
+    signal?: AbortSignal
+  ): Promise<JsonObject[]> {
+    const controller = new AbortController();
+    const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+    const deadline = performance.now() + LIST_TIMEOUT_MS;
+    const timer = setTimeout(() => {
+      controller.abort();
+    }, LIST_TIMEOUT_MS);
+    timer.unref();
+    try {
+      const items: JsonObject[] = [];
+      const seen = new Set<string>();
+      let continuation = '';
+      let version: unknown;
+      let pages = 0;
+      do {
+        if (combined.aborted || performance.now() >= deadline)
+          throw new TaskExecutorError('aborted');
+        if (pages++ >= MAX_LIST_PAGES) throw new TaskExecutorError('api_error');
+        const query = new URLSearchParams({ limit: '100' });
+        if (continuation) query.set('continue', continuation);
+        const response = await this.send(
+          'GET',
+          `${this.coreCollection}/${resource}?${query}`,
+          undefined,
+          combined
+        );
+        if (combined.aborted || performance.now() >= deadline)
+          throw new TaskExecutorError('aborted');
+        if (response.status !== 200) throw new TaskExecutorError('api_error');
+        const body = object(response.body);
+        const metadata = object(body['metadata']);
+        if (
+          typeof metadata['resourceVersion'] !== 'string' ||
+          !metadata['resourceVersion'] ||
+          metadata['resourceVersion'].length > 1024 ||
+          (pages > 1 && metadata['resourceVersion'] !== version) ||
+          !Array.isArray(body['items'])
+        )
+          throw new TaskExecutorError('api_error');
+        version = metadata['resourceVersion'];
+        for (const value of body['items']) {
+          const item = object(value);
+          const identity = object(item['metadata']);
+          if (
+            typeof identity['name'] !== 'string' ||
+            !identity['name'] ||
+            typeof identity['uid'] !== 'string' ||
+            !identity['uid'] ||
+            typeof identity['resourceVersion'] !== 'string' ||
+            !identity['resourceVersion'] ||
+            identity['namespace'] !== (this.options.namespace ?? 'lifemodel-motor')
+          )
+            throw new TaskExecutorError('api_error');
+          items.push(item);
+        }
+        if (items.length > 10_000) throw new TaskExecutorError('api_error');
+        const next = metadata['continue'];
+        if (
+          next !== undefined &&
+          (typeof next !== 'string' || Buffer.byteLength(next) > MAX_LIST_CONTINUATION_BYTES)
+        )
+          throw new TaskExecutorError('api_error');
+        continuation = next ?? '';
+        if (continuation && seen.has(continuation)) throw new TaskExecutorError('api_error');
+        if (continuation) seen.add(continuation);
+      } while (continuation);
+      return items;
+    } finally {
+      clearTimeout(timer);
+    }
   }
   private async deleteIdentity(
     name: string,
     uid: string,
     resourceVersion: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    collection = this.collection
   ): Promise<void> {
     if (
-      !/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(name) ||
-      name.length > 63 ||
+      !/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(name) ||
+      name.length > (collection === this.collection ? 63 : 253) ||
       !uid ||
       !resourceVersion
     )
       throw new TaskExecutorError('identity_mismatch');
     const response = await this.send(
       'DELETE',
-      `${this.collection}/${name}`,
+      `${collection}/${name}`,
       {
         apiVersion: 'v1',
         kind: 'DeleteOptions',
-        gracePeriodSeconds: 0,
+        // Avoid explicitly force-deleting Pods. Kubernetes API disappearance
+        // still cannot prove a partitioned node has stopped its processes.
+        gracePeriodSeconds: collection === this.collection ? 0 : 1,
         propagationPolicy: 'Foreground',
         preconditions: { uid, resourceVersion },
       },

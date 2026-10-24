@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createTestStores, workerDatabaseUrl, type TestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
+import { finalizeTaskFixture } from '../helpers/finalized-task.js';
 import {
   createStorageCertificate,
   type TestStorageCertificate,
@@ -490,16 +491,12 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
     if (fault === 'unbound') tokens.get(token)!.bound = false;
     if (fault === 'loser-pod') token = registerPod(f.task, 'loser').token;
     if (fault === 'unknown-attempt') frame = { ...frame, attemptId: randomUUID() };
-    if (fault === 'terminal') {
-      await stores.postgres.query("UPDATE core.tasks SET state='running' WHERE id=$1", [f.task.id]);
-      await stores.postgres.query("UPDATE core.tasks SET state='wrapping-up' WHERE id=$1", [
-        f.task.id,
-      ]);
-      await stores.postgres.query(
-        "UPDATE core.tasks SET state='done', terminal_candidate='done', terminal_reason_code='succeeded', terminal_at=clock_timestamp() WHERE id=$1",
-        [f.task.id]
-      );
-    }
+    if (fault === 'terminal')
+      await finalizeTaskFixture(stores.postgres, registry, f.task, {
+        state: 'done',
+        reasonCode: 'succeeded',
+        summary: 'Completed fixture',
+      });
     const channel = await listener();
     const response = await call(channel.url, token, frame);
     expect([403, 409]).toContain(response.status);

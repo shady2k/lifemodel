@@ -191,6 +191,7 @@ describe('fenced durable task registry', () => {
       active.id,
       pending.id,
     ]);
+    await registry.confirmComputeTerminated(pending.id, pending.launchId);
     await registry.completeLaunchCleanup(pending.id, pending.launchId);
     expect((await registry.listLaunchWork()).map((task) => task.id)).toEqual([active.id]);
     expect(await registry.readByJobName(queued.jobName)).toEqual(await registry.read(queued.id));
@@ -234,6 +235,11 @@ describe('fenced durable task registry', () => {
       [tasks[1].id, 'starting', true],
       [tasks[2].id, 'queued', false],
     ]);
+    await expect(registry.releaseSlot(tasks[0].id)).rejects.toMatchObject({
+      code: 'invalid_transition',
+    });
+    await registry.tombstoneLaunch(tasks[0].id, tasks[0].launchId);
+    await registry.confirmComputeTerminated(tasks[0].id, tasks[0].launchId);
     await registry.releaseSlot(tasks[0].id);
     await registry.releaseSlot(tasks[0].id);
     expect(await makeRegistry().admitNext()).toMatchObject({
@@ -270,6 +276,8 @@ describe('fenced durable task registry', () => {
     });
     expect(await dynamic.admitNext()).toMatchObject({ id: task.id });
     expect(await dynamic.admitNext()).toBeNull();
+    await dynamic.tombstoneLaunch(task.id, task.launchId);
+    await dynamic.confirmComputeTerminated(task.id, task.launchId);
     await dynamic.releaseSlot(task.id);
     expect(await dynamic.admitNext()).toMatchObject({ id: second.id });
   });
@@ -465,19 +473,46 @@ describe('fenced durable task registry', () => {
         [task.id]
       )
     ).rejects.toMatchObject({ code: '23514' });
-    await stores.postgres.query(
-      "UPDATE core.tasks SET terminal_candidate='stopped', terminal_reason_code='owner_stop', finalization_pending=true WHERE id=$1",
-      [task.id]
-    );
+    await registry.beginFinalization(task.id, task.launchId, {
+      state: 'stopped',
+      reasonCode: 'owner_stop',
+      summary: 'Stopped',
+    });
     expect(await registry.read(task.id)).toMatchObject({
       state: 'queued',
       terminalCandidate: 'stopped',
       finalizationPending: true,
     });
+    await expect(
+      stores.postgres.query(
+        "UPDATE core.tasks SET state='stopped', terminal_at=clock_timestamp(), finalization_pending=false WHERE id=$1",
+        [task.id]
+      )
+    ).rejects.toMatchObject({ code: '23514' });
+    await registry.beginFinalization(task.id, task.launchId, {
+      state: 'stopped',
+      reasonCode: 'owner_stop',
+      summary: 'Stopped',
+    });
+    await registry.confirmComputeTerminated(task.id, task.launchId);
+    await registry.recordAllocation(task.id, task.launchId, allocation);
     await stores.postgres.query(
-      "UPDATE core.tasks SET state='stopped', terminal_at=clock_timestamp(), finalization_pending=false WHERE id=$1",
-      [task.id]
+      'INSERT INTO storage.spaces(id) VALUES($1) ON CONFLICT DO NOTHING',
+      [allocation.space]
     );
+    const prepared = await registry.prepareSeal(task.id, task.launchId);
+    const seal = prepared.sealRequest!;
+    await registry.recordSealReceipt(task.id, task.launchId, seal.candidateRevision, {
+      id: 'seal_receipt',
+      space: allocation.space,
+      effectKey: seal.effectKey,
+      revision: String(BigInt(seal.expectedRevision) + 1n),
+      outcome: 'stopped',
+      state: 'sealed',
+      reason: 'stopped_missing_result',
+      manifest: { id: 'manifest', version: 1, sha256: 'a'.repeat(64), objects: [] },
+    });
+    await registry.commitFinalization(task.id, task.launchId, prepared.candidateRevision);
     for (const assignment of [
       "state='done'",
       "state='queued'",
@@ -578,6 +613,7 @@ describe('fenced durable task registry', () => {
     await expect(
       registry.bindJob(task.id, task.launchId, 'exact-job-uid', templateHash)
     ).rejects.toMatchObject({ code: 'invalid_transition' });
+    await registry.confirmComputeTerminated(task.id, task.launchId);
     await registry.completeLaunchCleanup(task.id, task.launchId);
     await makeRegistry().completeLaunchCleanup(task.id, task.launchId);
     expect(await registry.read(task.id)).toMatchObject({
@@ -616,6 +652,7 @@ describe('fenced durable task registry', () => {
     await expect(
       registry.bindJob(task.id, task.launchId, 'late-job', templateHash)
     ).rejects.toMatchObject({ code: 'invalid_transition' });
+    await registry.confirmComputeTerminated(task.id, task.launchId);
     await registry.completeLaunchCleanup(task.id, task.launchId);
     expect(await makeRegistry().read(task.id)).toMatchObject({
       jobUid: null,

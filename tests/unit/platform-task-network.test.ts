@@ -201,7 +201,7 @@ describe('task namespace network and launch rights', () => {
       ],
     });
   });
-  it('grants core only namespaced Job control and read-only Pod observation', () => {
+  it('grants core namespaced Job and exact-Pod cleanup with read-only claim observation', () => {
     const role = objects.find((o) => o.kind === 'Role' && o.metadata.name === 'core-task-launcher');
     expect(role?.metadata.namespace).toBe('lifemodel-motor');
     expect(role?.rules).toEqual([
@@ -210,7 +210,8 @@ describe('task namespace network and launch rights', () => {
         resources: ['jobs'],
         verbs: ['create', 'get', 'list', 'watch', 'patch', 'delete'],
       },
-      { apiGroups: [''], resources: ['pods'], verbs: ['get', 'list', 'watch'] },
+      { apiGroups: [''], resources: ['pods'], verbs: ['get', 'list', 'watch', 'delete'] },
+      { apiGroups: [''], resources: ['persistentvolumeclaims'], verbs: ['get', 'list'] },
     ]);
     expect(
       objects.find((o) => o.kind === 'RoleBinding' && o.metadata.name === 'core-task-launcher')

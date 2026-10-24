@@ -110,7 +110,11 @@ export function createTaskKubernetesClient(
       timer.unref();
       try {
         if (combined.aborted) throw new TaskExecutorError('aborted');
-        if (!path.startsWith('/apis/batch/v1/namespaces/') || path.startsWith('//'))
+        if (
+          !/^\/(?:apis\/batch\/v1\/namespaces\/[a-z0-9-]+\/jobs|api\/v1\/namespaces\/[a-z0-9-]+\/(?:pods|persistentvolumeclaims))(?:\/[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)?(?:\?[^#]*)?$/.test(
+            path
+          )
+        )
           throw new TaskExecutorError('invalid_launch');
         const [tokenBytes, ca] = await withAbort(
           Promise.all([

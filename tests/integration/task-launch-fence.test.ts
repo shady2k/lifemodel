@@ -115,6 +115,10 @@ describe('task launch fence (real Postgres, HTTPS Kubernetes API)', () => {
           watchSeen.resolve();
           return;
         }
+        if (req.method === 'GET' && ['pods', 'persistentvolumeclaims'].includes(name)) {
+          send(200, { items: [], metadata: { resourceVersion: '1' } });
+          return;
+        }
         if (req.method === 'GET' && name === 'jobs') {
           send(200, { items: [...jobs.values()], metadata: {} });
           return;
@@ -685,9 +689,13 @@ describe('task launch fence (real Postgres, HTTPS Kubernetes API)', () => {
           intent: 'soft-stop',
         });
         const bound = launch({ ...task, jobUid: first.jobUid });
+        expect(await api.confirmTerminated(bound)).toBe(false);
+        expect(await api.confirmCleanup(bound)).toBe(false);
         await api.deleteNow(bound);
         await api.deleteNow(bound);
         expect(await api.observe(bound)).toBeNull();
+        expect(await api.confirmTerminated(bound)).toBe(true);
+        expect(await api.confirmCleanup(bound)).toBe(true);
       });
       it('refuses tombstone or missing already-bound compute rather than inventing replacement', async () => {
         await expect(

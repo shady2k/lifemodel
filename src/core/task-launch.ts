@@ -29,6 +29,8 @@ export function createTaskLaunchReconciler(options: {
   logger: Logger;
   resyncMs?: number;
   retryMs?: number;
+  onTerminal?: (taskId: string, reasonCode: string) => Promise<void>;
+  onCleanup?: () => void;
   scanJobs?: (signal: AbortSignal) => Promise<
     readonly {
       name: string;
@@ -78,6 +80,7 @@ export function createTaskLaunchReconciler(options: {
       await options.executor.deleteNow(launch(task), controller.signal);
       active();
     }
+    options.onCleanup?.();
     // .9 confirms Pod termination before releaseSlot; Job disappearance alone
     // cannot release a reservation or imply a retained task outcome.
   }
@@ -97,7 +100,14 @@ export function createTaskLaunchReconciler(options: {
       if (task.allocationReceipt && task.jobUid) {
         const observed = await options.executor.observe(launch(task), controller.signal);
         active();
-        if (!observed) throw new Error('Bound task compute missing');
+        if (!observed) await options.onTerminal?.(task.id, 'compute_missing');
+        else if (observed.failureReason)
+          await options.onTerminal?.(task.id, observed.failureReason);
+        else if (observed.phase === 'failed' || observed.phase === 'succeeded')
+          await options.onTerminal?.(
+            task.id,
+            observed.phase === 'failed' ? 'job_failed' : 'semantic_report_missing'
+          );
       }
       return;
     }
@@ -139,6 +149,12 @@ export function createTaskLaunchReconciler(options: {
     active();
     if (observed.startedAt)
       await options.registry.initializeAccessIntent(task.id, observed.startedAt);
+    if (observed.phase === 'failed' || observed.phase === 'succeeded')
+      await options.onTerminal?.(
+        task.id,
+        observed.failureReason ??
+          (observed.phase === 'failed' ? 'job_failed' : 'semantic_report_missing')
+      );
   }
   async function pass(): Promise<boolean> {
     if (stopped) return false;
@@ -160,6 +176,8 @@ export function createTaskLaunchReconciler(options: {
           await ensure(task);
         } catch (error) {
           if (error instanceof StalePostgresEpochError) throw error;
+          if (error instanceof TaskExecutorError && error.code === 'bound_job_missing')
+            await options.onTerminal?.(task.id, 'compute_missing');
           success = false;
           options.logger.warn(
             {
@@ -192,6 +210,7 @@ export function createTaskLaunchReconciler(options: {
             if (fresh) await options.registry.tombstoneLaunch(fresh.id, fresh.launchId);
             active();
             await job.remove(controller.signal);
+            options.onCleanup?.();
           }
         }
       }

@@ -8,8 +8,8 @@ loop and not the old Motor Cortex `motor-state.ts`. The [task launch path](task-
 now wires the registry and allocation/Job reconciliation in platform mode.
 [Verified identity and once-only start](task-identity.md) are served by the model
 gateway. The [task channel](task-channel.md) now persists step/terminal reports
-before ACK and replays normal Signals. Sealed finalization remains a later leaf
-of stage 3.
+before ACK and replays normal Signals. [Sealed finalization](task-finalize.md) now commits one fenced terminal outcome and
+its Postgres outbox event after compute termination and a storage receipt.
 
 ## Tables and ownership
 
@@ -137,12 +137,16 @@ cannot change once committed. Before terminal commit, candidate/reason remain
 separate from public state and may change (hard Stop can supersede success).
 `finalization_pending` annotates a nonterminal task; it is not a new public state.
 
-This leaf deliberately exposes no public terminal setter. The later finalizer
-must obtain a sealed receipt and commit terminal CAS plus unique outcome outbox
-key in **one fenced transaction**. Table checks alone do not prove storage seal.
-It must persist revocation, compute termination and cleanup work independently;
-a storage outage cannot justify leaving compute running. Retain launch tombstones
-through late-create, adopt and deletion paths. No direct Job-name-only deletion.
+There is no public terminal setter. The [finalizer](task-finalize.md) uses
+`beginFinalization` to save its candidate with canonical revocation and the launch
+tombstone. `confirmComputeTerminated` records executor proof; `releaseSlot` refuses
+without it. `prepareSeal` saves the storage revision and immutable keyed request;
+`recordSealReceipt` validates its match. `commitFinalization` compares the candidate
+version and atomically writes terminal state plus one `core.task_outcomes` event.
+SQL guards reject an unsealed transition or a terminal transaction without its
+outbox row. Cleanup and delivery have separate durable fields. A storage outage
+cannot justify leaving compute running. Tombstones survive late-create adoption
+through `bindCleanupJob`, which grants no execution rights. No Job-name-only deletion.
 
 ## Eight T04 crash boundaries
 

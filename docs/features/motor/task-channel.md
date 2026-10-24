@@ -185,7 +185,8 @@ sequence gap cannot be skipped. Core emits a normal `task_report` Signal from
 `task.channel` through the existing Valkey bus. Signal data contains task,
 attempt and message IDs plus `eventKind`, not report content. Step reports remain
 available for later status views. Terminal reports identify finalization work.
-The next finalization leaf supplies its consumer; this leaf does not wake the old
+The [finalizer](task-finalize.md) consumes terminal reports before tick-local
+completion and scans all unfinalized terminal rows at startup; this does not wake the old
 Motor Cortex cognition path or introduce another event model. `signalled_at` proves
 bus admission only, not finalization. The finalizer must scan every unfinalized
 terminal mailbox report at startup regardless of `signalled_at` or the bus

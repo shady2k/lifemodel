@@ -8,6 +8,7 @@ import { StalePostgresEpochError } from '../../src/storage/fenced-postgres.js';
 import { createPlatformSettingsReader } from '../../src/config/platform-settings.js';
 import { createTestLogger } from '../helpers/test-logger.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
+import { finalizeTaskFixture } from '../helpers/finalized-task.js';
 import { createTestStores } from '../helpers/test-stores.js';
 
 describe('durable fenced task mailbox', () => {
@@ -155,9 +156,9 @@ describe('durable fenced task mailbox', () => {
     expect(await mailbox().listUnsignalled()).toHaveLength(1);
   });
 
-  it('stores only one terminal report, blocks new frames but permits exact duplicates after terminal finalization', async () => {
+  it('stores only one terminal report and denies even exact duplicates after finalization revokes access', async () => {
     const step = frame();
-    const ack = await mailbox().append(step, identity);
+    await mailbox().append(step, identity);
     const report = terminal();
     const terminalAck = await mailbox().append(report, identity);
     expect(await mailbox().readTerminal(identity.taskId, identity.attemptId)).toMatchObject({
@@ -170,12 +171,21 @@ describe('durable fenced task mailbox', () => {
     await expect(
       mailbox().append({ ...report, messageId: 'other-terminal', sequence: 22 }, identity)
     ).rejects.toMatchObject({ code: 'terminal_attempt' });
-    await stores.postgres.query(
-      `UPDATE core.tasks SET state='stopped',terminal_candidate='stopped',terminal_reason_code='owner_stop',terminal_at=now() WHERE id=$1`,
-      [identity.taskId]
+    const registry = createPostgresTaskRegistry({ pool: stores.postgres, epoch: 1, settings });
+    await finalizeTaskFixture(
+      stores.postgres,
+      registry,
+      { id: identity.taskId, launchId: identity.launchId },
+      { state: 'stopped', reasonCode: 'owner_stop', summary: 'Stopped by owner' }
     );
-    expect(await mailbox().append(step, identity)).toEqual(ack);
-    expect(await mailbox().append(report, identity)).toEqual(terminalAck);
+    for (const stored of [step, report])
+      await expect(mailbox().append(stored, identity)).rejects.toMatchObject({
+        code: 'identity_mismatch',
+      });
+    expect(await mailbox().readTerminal(identity.taskId, identity.attemptId)).toMatchObject({
+      frame: report,
+      ack: terminalAck,
+    });
   });
 
   it('requires current attempt and exact durable won claim even for already stored frames', async () => {

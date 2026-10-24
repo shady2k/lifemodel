@@ -16,6 +16,8 @@ export interface TaskJobObservation {
   readonly templateHash: string;
   readonly startedAt: Date | null;
   readonly phase: 'pending' | 'running' | 'succeeded' | 'failed' | 'deleting';
+  /** Runtime failure evidence only; never a semantic task outcome. */
+  readonly failureReason?: 'compute_missing' | 'pod_failed';
 }
 
 export interface TaskSoftStopIntent {
@@ -31,6 +33,10 @@ export interface TaskExecutor {
   requestSoftStop(launch: TaskLaunch, signal?: AbortSignal): Promise<TaskSoftStopIntent>;
   /** Caller must persist irreversible cleanup intent before invoking this operation. */
   deleteNow(launch: TaskLaunch, signal?: AbortSignal): Promise<void>;
+  /** Job absence alone is insufficient: exact-UID-owned Pods must no longer run. */
+  confirmTerminated(launch: TaskLaunch, signal?: AbortSignal): Promise<boolean>;
+  /** Separate from compute: also wait for Pod and generic ephemeral claim removal. */
+  confirmCleanup(launch: TaskLaunch, signal?: AbortSignal): Promise<boolean>;
 }
 
 export type TaskExecutorErrorCode =
