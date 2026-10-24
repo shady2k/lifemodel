@@ -506,8 +506,9 @@ jobs:
           docker push "ghcr.io/shady2k/lifemodel-workbench:$SHA"
           # The digest the registry holds for this commit, said in the log the
           # way the core and web publish jobs' push output says theirs. The
-          # format is a variable, never a literal in the script: `${{` would
-          # begin a GitHub expression here.
+          # format string stays in a variable and is never written literally:
+          # a dollar sign before an open brace would begin a GitHub expression
+          # here, even inside a comment.
           format='{{range .RepoDigests}}{{println .}}{{end}}'
           docker image inspect --format "$format" "ghcr.io/shady2k/lifemodel-workbench:$SHA"
 

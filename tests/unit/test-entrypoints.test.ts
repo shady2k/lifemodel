@@ -164,6 +164,42 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
     expect(ci).not.toContain('  ci-migrations:');
   });
 
+  // GitHub expands `${{ ... }}` over a whole string before it runs anything, so
+  // a comment inside a `run:` script is read as an expression too. One `${{`
+  // with no closing `}}` leaves GitHub unable to parse the workflow at all:
+  // the run fails with "This run likely failed because of a workflow file
+  // issue" and not one job starts (lifemodel-653.8.15). No `yml` linter catches
+  // it - actionlint reads the expression syntax, not the comments - so these
+  // files are held to the shape GitHub accepts.
+  const unclosedExpressions = (text: string): number[] => {
+    const unclosed: number[] = [];
+    text.split('\n').forEach((line, index) => {
+      const opens = line.split('${{').length - 1;
+      if (opens === 0) return;
+      // Every expression in these files closes on its own line; a `${{` with
+      // no `}}` after it on the same line is the failure above.
+      if (!/\}\}/.test(line.slice(line.indexOf('${{') + 3))) unclosed.push(index + 1);
+      else if (line.split('}}').length - 1 < opens) unclosed.push(index + 1);
+    });
+    return unclosed;
+  };
+
+  it('closes every workflow expression on its line, comments included (lifemodel-653.8.15)', () => {
+    for (const file of ['.github/workflows/ci.yml', '.github/workflows/release.yml']) {
+      expect(
+        unclosedExpressions(readFileSync(join(repoRoot, file), 'utf8')),
+        `${file} holds an unclosed expression`
+      ).toEqual([]);
+    }
+    // The comment that broke PR #132's run, word for word.
+    expect(
+      unclosedExpressions('  run: |\n    # `${{` would begin a GitHub expression here.\n')
+    ).toEqual([2]);
+    expect(unclosedExpressions("    if: ${{ github.event_name == 'push' }}\n")).toEqual([]);
+    expect(unclosedExpressions('    x: ${{ a }} and ${{ b }}\n')).toEqual([]);
+    expect(unclosedExpressions('    x: ${{ a }} and ${{ b\n')).toEqual([1]);
+  });
+
   it('rejects raw host test or install commands in every CI job', () => {
     const ci = readFileSync(join(repoRoot, '.github/workflows/ci.yml'), 'utf8');
     const mutations = [
