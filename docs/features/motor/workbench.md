@@ -184,6 +184,9 @@ another HTTPS registry and OCI repository, with an optional Bao-held pull
 credential. The digest is still the release pin (`LIFEMODEL_WORKBENCH_DIGEST`),
 not a setting. An independent retriable loader task copies the exact OCI bytes
 into zot; import does not hold application-source creation or first start.
+Zot's `http.compat: ["docker2s2"]` also accepts Docker schema 2 images and
+manifest lists from these configurable sources, without rewriting their bytes
+or digest. Manifest lists need no additional compatibility option.
 Jobs name only
 `zot.lifemodel-system.svc:5001/lifemodel/workbench@sha256:<digest>`.
 The digest is unchanged; no tag resolution or external-registry fallback happens
@@ -192,7 +195,11 @@ Core anonymously HEADs the pinned zot manifest with a short deadline before task
 acceptance. A missing/unreachable image refuses with `workbench_unavailable`,
 creating neither a Job nor a task registry row. The same request proceeds after
 import succeeds. Loader settings show `pending`, `importing`, `ready` or `failed`,
-a safe reason and last attempt time. Saves trigger retry without restart; kills
+a safe reason and last attempt time. Destination upload 4xx responses other than
+401/403 show `rejected`; the loader logs the HTTP status and request media type
+without credentials or token-bearing URLs. Access failures remain `unauthorized`
+and unreachable registries/server failures remain `unavailable`.
+Saves trigger retry without restart; kills
 resume from verified objects rather than a process-memory completion flag.
 
 The node's installer-written k3s mirror routes that authority to

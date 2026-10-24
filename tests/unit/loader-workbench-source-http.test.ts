@@ -15,6 +15,7 @@ afterEach(async () => {
 });
 async function fixture(
   hooks: {
+    reason?: string;
     onAuthRead?: () => void;
     beforeWrite?: (value: WorkbenchSource) => Promise<void>;
   } = {}
@@ -72,7 +73,7 @@ async function fixture(
       status: async () => ({
         state: 'failed',
         lastAttemptAt: 123,
-        reason: 'unavailable',
+        reason: hooks.reason ?? 'unavailable',
         pinnedDigest: 'sha256:' + 'a'.repeat(64),
         password: 'SECRET_CANARY',
       }),
@@ -158,6 +159,18 @@ describe('workbench source HTTP boundary', () => {
     expect(JSON.parse(dump.body).values).not.toHaveProperty('workbench.source');
     expect(response.headers['cache-control']).toBe('no-store');
   });
+  it.each(['rejected', 'SECRET_CANARY'])(
+    'projects the safe destination rejection reason without trusting arbitrary text: %s',
+    async (reason) => {
+      const f = await fixture({ reason });
+      const response = await f.request('/api/workbench-status');
+      expect(response.status).toBe(200);
+      expect(JSON.parse(response.body).reason).toBe(
+        reason === 'rejected' ? 'rejected' : 'unavailable'
+      );
+      expect(response.body).not.toContain('SECRET_CANARY');
+    }
+  );
   it('saves before retrigger, preserves omitted password, and clears explicitly', async () => {
     const f = await fixture();
     const response = await f.request('/api/workbench-source', 'PUT', {

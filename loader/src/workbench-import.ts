@@ -52,6 +52,7 @@ type Reason =
   | 'credential'
   | 'unauthorized'
   | 'unavailable'
+  | 'rejected'
   | 'deadline'
   | 'aborted'
   | 'redirect'
@@ -61,6 +62,20 @@ type Reason =
   | 'protocol';
 function failure(reason: Reason): PlatformPhaseError {
   return new PlatformPhaseError('workbench-import', `workbench-import:${reason}`);
+}
+/** Only bounded protocol metadata crosses the import boundary, never URLs or response bodies. */
+export class WorkbenchDestinationRejection extends PlatformPhaseError {
+  readonly mediaType: string;
+  constructor(
+    readonly status: number,
+    mediaType: string | undefined
+  ) {
+    super('workbench-import', 'workbench-import:rejected');
+    this.mediaType =
+      mediaType !== undefined && [...MANIFEST_TYPES, 'application/octet-stream'].includes(mediaType)
+        ? mediaType
+        : 'none';
+  }
 }
 interface Descriptor {
   digest: string;
@@ -367,6 +382,15 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
           });
           if (response.status >= 300 && response.status < 400) throw failure('redirect');
           if (response.status === 401 || response.status === 403) throw failure('unauthorized');
+          if (
+            (spec.method === 'PUT' || spec.method === 'POST') &&
+            response.status >= 400 &&
+            response.status < 500
+          )
+            throw new WorkbenchDestinationRejection(
+              response.status,
+              spec.headers?.['content-type']
+            );
           return response;
         }
         async function sourceRequest(path: string, spec: RequestOptions): Promise<Result> {

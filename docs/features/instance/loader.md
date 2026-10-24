@@ -49,7 +49,10 @@ registry may be used anonymously only; with a stored credential it is refused.
 This keeps registry configuration from delegating its secret to an attacker realm.
 Blob redirects carry neither Authorization nor cookies; digest and size checks
 still verify every downloaded byte. The zot push password is read from Bao at use and sent only
-to zot. Requests, total phase time, and object sizes are bounded. Zot's hourly
+to zot. Zot enables `http.compat: ["docker2s2"]` so configurable sources may
+serve Docker schema 2 images or manifest lists as well as OCI manifests and
+indexes. No separate manifest-list option is needed. The importer preserves
+the original bytes and digest. Requests, total phase time, and object sizes are bounded. Zot's hourly
 GC reclaims partial uploads idle for two hours, beyond the 30-minute phase
 budget, while explicit retention preserves digest-only release roots and
 their referenced graph. See the platform README for storage recovery.
@@ -76,6 +79,11 @@ exact graph into zot. It never blocks Gitea or application source creation.
 The task records `pending`, `importing`, `ready` or `failed`, the last attempt
 time and a safe reason code in `workbench-import.json` on the loader volume.
 The settings page shows this status beside model settings in English and Russian.
+A destination manifest/blob PUT or upload POST rejected with a 4xx other than
+401/403 records `rejected`; 401/403 remains `unauthorized`. The retry warning
+includes the rejection's HTTP `status` and request `mediaType` (`none` for the
+bodyless upload POST), never a registry URL, response body or credential.
+Unreachable registries and server failures remain `unavailable`.
 Failures retry with exponential backoff (one second to one minute). A save
 cancels the old attempt and wakes the retry. On restart, even a saved `ready`
 record is verified against zot again; verified destination objects are resume

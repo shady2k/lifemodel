@@ -11,11 +11,23 @@ afterEach(() => {
 });
 describe('workbench source settings UI', () => {
   it.each([
-    ['en', 'Workbench image source', 'Import failed', 'Last attempt'],
-    ['ru', 'Источник образа рабочего окружения', 'Импорт не удался', 'Последняя попытка'],
+    [
+      'en',
+      'Workbench image source',
+      'Import failed',
+      'Last attempt',
+      'The local registry rejected the image upload.',
+    ],
+    [
+      'ru',
+      'Источник образа рабочего окружения',
+      'Импорт не удался',
+      'Последняя попытка',
+      'Локальный реестр отклонил загрузку образа.',
+    ],
   ] as const)(
     'shows localized status and last attempt in %s',
-    async (language, title, status, last) => {
+    async (language, title, status, last, reason) => {
       await i18n.changeLanguage(language);
       vi.stubGlobal(
         'fetch',
@@ -25,7 +37,7 @@ describe('workbench source settings UI', () => {
             url.endsWith('status')
               ? {
                   state: 'failed',
-                  reason: 'unauthorized',
+                  reason: 'rejected',
                   lastAttemptAt: 1000,
                   pinnedDigest: 'sha256:abc',
                 }
@@ -41,6 +53,7 @@ describe('workbench source settings UI', () => {
       expect(await screen.findByRole('heading', { name: title })).toBeInTheDocument();
       expect(await screen.findByText(new RegExp(status))).toBeInTheDocument();
       expect(screen.getByText(new RegExp(last))).toBeInTheDocument();
+      expect(screen.getByText(new RegExp(reason))).toBeInTheDocument();
       expect(screen.getByDisplayValue('https://registry.example')).toBeInTheDocument();
     }
   );
