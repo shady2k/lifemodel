@@ -64,7 +64,7 @@ import type { AlertnessMode } from '../types/agent/state.js';
 import type { SchedulerService } from './scheduler-service.js';
 import type { IRecipientRegistry } from './recipient-registry.js';
 import { runSleepMaintenance } from '../layers/cognition/soul/sleep-maintenance.js';
-import { setPrimaryRecipientId } from './globals.js';
+import { getPrimaryRecipientId, setPrimaryRecipientId } from './globals.js';
 import { StatusUpdateService } from './status-update-service.js';
 import { DomainTrackerService } from './domain-trackers.js';
 import { IntentApplicator, type SendOutcome } from './intent-applicator.js';
@@ -211,6 +211,8 @@ interface PendingCognition {
    * whose inbound log entries the turn's answer commits.
    */
   triggerSignals: Signal[];
+  /** Recipient this turn answers, captured before any effects. */
+  recipientId: string | undefined;
   /** The wake's first trigger (trace/typing/routing) */
   primaryTrigger: Signal | undefined;
   /**
@@ -693,10 +695,7 @@ export class CoreLoop {
    * the queue for their own turn; they can never be committed by it.
    */
   private answeredRecipientOf(state: PendingTurnCommits): string | undefined {
-    const first = state.turn.triggerSignals[0];
-    if (!first) return undefined;
-    const data = first.data as { recipientId?: unknown } | undefined;
-    return typeof data?.recipientId === 'string' ? data.recipientId : undefined;
+    return state.turn.recipientId;
   }
 
   /**
@@ -2517,6 +2516,18 @@ export class CoreLoop {
       tickId: context.tickId,
       startedAt,
       triggerSignals,
+      // Task outcomes route to the configured owner just as cognition does.
+      // Capture that owner here so its send settles the durable bus entry in
+      // the same snapshot as the answer, even after outbound dedup is trimmed.
+      recipientId: (() => {
+        const first = triggerSignals[0];
+        const data = first?.data as { recipientId?: unknown } | undefined;
+        return typeof data?.recipientId === 'string'
+          ? data.recipientId
+          : first?.type === 'task_outcome'
+            ? getPrimaryRecipientId()
+            : undefined;
+      })(),
       primaryTrigger: triggerSignal ?? context.triggerSignals[0] ?? undefined,
       absorbedSignals: [],
       traceContext,

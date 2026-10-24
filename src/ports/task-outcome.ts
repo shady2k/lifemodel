@@ -1,47 +1,62 @@
-import type { TaskOutcomeEvent } from './tasks.js';
+import type { TaskManifestObject, TaskOutcomeEvent } from './tasks.js';
 import { validateMessageAttachments, type MessageAttachment } from './message-attachment.js';
 
 /** Terminal events are private data, not instructions or model-selected file IDs. */
 export function validateTaskOutcome(value: unknown): TaskOutcomeEvent {
-  if (!value || typeof value !== 'object') throw new Error('Invalid task outcome');
-  const event = value as TaskOutcomeEvent;
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Invalid task outcome');
+  const event = value as Record<string, unknown>;
   if (
-    typeof event.taskId !== 'string' ||
-    !event.taskId ||
-    typeof event.outcomeKey !== 'string' ||
-    !event.outcomeKey.startsWith('outcome_') ||
-    event.outcomeKey.length > 256 ||
-    !['done', 'failed', 'stopped'].includes(event.state) ||
-    typeof event.reasonCode !== 'string' ||
-    !event.reasonCode ||
-    typeof event.summary !== 'string' ||
-    !event.summary.trim() ||
-    !Array.isArray(event.objects)
+    typeof event['taskId'] !== 'string' ||
+    !event['taskId'] ||
+    typeof event['outcomeKey'] !== 'string' ||
+    !event['outcomeKey'].startsWith('outcome_') ||
+    event['outcomeKey'].length > 256 ||
+    (event['state'] !== 'done' && event['state'] !== 'failed' && event['state'] !== 'stopped') ||
+    typeof event['reasonCode'] !== 'string' ||
+    !event['reasonCode'] ||
+    typeof event['summary'] !== 'string' ||
+    !event['summary'].trim() ||
+    !Array.isArray(event['objects'])
   )
     throw new Error('Invalid task outcome');
-  for (const object of event.objects) {
+  const objects = Array.from(event['objects'], (raw: unknown): TaskManifestObject => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+      throw new Error('Invalid task outcome object');
+    const object = raw as Record<string, unknown>;
     if (
-      !object ||
-      typeof object !== 'object' ||
-      !['result', 'log', 'artifact'].includes(object.mark) ||
-      typeof object.sha256 !== 'string' ||
-      !/^[a-f0-9]{64}$/.test(object.sha256)
+      (object['mark'] !== 'result' && object['mark'] !== 'log' && object['mark'] !== 'artifact') ||
+      typeof object['sha256'] !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(object['sha256']) ||
+      typeof object['id'] !== 'string' ||
+      !object['id'] ||
+      typeof object['name'] !== 'string' ||
+      !object['name'] ||
+      typeof object['size'] !== 'number' ||
+      !Number.isSafeInteger(object['size']) ||
+      object['size'] < 0 ||
+      (object['contentType'] !== undefined && typeof object['contentType'] !== 'string')
     )
       throw new Error('Invalid task outcome object');
-    if (
-      typeof object.id !== 'string' ||
-      !object.id ||
-      typeof object.name !== 'string' ||
-      !object.name ||
-      !Number.isSafeInteger(object.size) ||
-      object.size < 0 ||
-      (object.contentType !== undefined && typeof object.contentType !== 'string')
-    )
-      throw new Error('Invalid task outcome object');
-  }
-  if (event.state === 'done' && !event.objects.some((object) => object.mark === 'result'))
+    return {
+      id: object['id'],
+      name: object['name'],
+      size: object['size'],
+      sha256: object['sha256'],
+      mark: object['mark'],
+      ...(object['contentType'] !== undefined ? { contentType: object['contentType'] } : {}),
+    };
+  });
+  if (event['state'] === 'done' && !objects.some((object) => object.mark === 'result'))
     throw new Error('Task outcome missing result');
-  return event;
+  return {
+    taskId: event['taskId'],
+    outcomeKey: event['outcomeKey'],
+    state: event['state'],
+    reasonCode: event['reasonCode'],
+    summary: event['summary'],
+    objects,
+  };
 }
 
 export function taskOutcomeAttachments(event: TaskOutcomeEvent): MessageAttachment[][] {
@@ -49,17 +64,17 @@ export function taskOutcomeAttachments(event: TaskOutcomeEvent): MessageAttachme
   const groups: MessageAttachment[][] = [];
   const results = event.objects.filter((object) => object.mark === 'result');
   for (let index = 0; index < results.length; index += 20) {
-    groups.push(
-      validateMessageAttachments(
-        results.slice(index, index + 20).map((object) => ({
-          artifactId: object.id,
-          name: object.name,
-          size: object.size,
-          contentType: object.contentType ?? 'application/octet-stream',
-        })),
-        'assistant'
-      )!
+    const attachments = validateMessageAttachments(
+      results.slice(index, index + 20).map((object) => ({
+        artifactId: object.id,
+        name: object.name,
+        size: object.size,
+        contentType: object.contentType ?? 'application/octet-stream',
+      })),
+      'assistant'
     );
+    if (!attachments) throw new Error('Missing task result attachments');
+    groups.push(attachments);
   }
   return groups;
 }

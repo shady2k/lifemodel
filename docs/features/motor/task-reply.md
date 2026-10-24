@@ -8,8 +8,9 @@ No task chip or task composer is added. The legacy Motor Cortex loop is unchange
 Platform-mode cognition exposes `core.startTask(briefing, profile)`. The complete
 briefing includes the goal, context, constraints and the file to produce.
 `src/ports/task-profiles.ts` owns the versioned allowed profile catalogue: `small`
-revision 1 is 600 seconds, 500 millicores and 512 MiB. Unknown profile names and
-missing briefing/turn context return explicit refusal codes; no default is chosen.
+revision 1 is 600 seconds, 500 millicores and 512 MiB. Stage 3 deliberately exposes
+only this explicit profile. Unknown profile names and missing briefing/turn context
+return explicit refusal codes; no default is chosen.
 A title is optional at the feature level and is not introduced in this leaf.
 
 The tool applies an explicit `START_TASK` intent through the core applicator and
@@ -37,8 +38,11 @@ The outcome wakes cognition before the energy gate, one outcome per turn. Other
 outcomes wait, including when an owner message wins the tick. State, reason code,
 summary and all retained objects reach the trigger prompt as data. Plain text is
 allowed. The configured primary owner recipient receives this outcome, as with
-other infrastructure signals; no task chooses a recipient. Intermediate `core.say`
-and recursive `core.startTask` calls are refused on this trigger.
+other infrastructure signals; no task chooses a recipient. CoreLoop captures that
+recipient for the outcome turn so the owner's send and the bus-entry completion
+share the same snapshot commit, including after outbound receipts are trimmed.
+Intermediate `core.say` and recursive `core.startTask` calls are refused on this
+trigger.
 
 For `done`, the intent compiler attaches only `result`-marked sealed object IDs,
 with name, size and MIME type (`application/octet-stream` if absent), to the actual

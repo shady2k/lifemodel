@@ -28,6 +28,7 @@ import { applyCommittedOutboundEvents } from '../../src/core/message-streams.js'
 import { ThresholdEngine } from '../../src/layers/aggregation/threshold-engine.js';
 import { createAgent } from '../../src/core/agent.js';
 import { createMetrics } from '../../src/core/metrics.js';
+import { RecipientRegistry } from '../../src/core/recipient-registry.js';
 
 const imageRevision = `sha256:${'a'.repeat(64)}`;
 const startScript = [
@@ -146,10 +147,12 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
     );
     await expect.poll(async () => (await first.events()).length).toBe(1);
     const tasks = await first.registry.list();
-    const task = tasks.find((t) => t.launchKey.includes(first.cognition.calls[0]!.context.tickId));
-    expect(task).toBeDefined();
-    expect(task!.state).toBe('queued');
-    expect(tasks.filter((t) => t.id === task!.id)).toHaveLength(1);
+    expect(tasks).toHaveLength(1);
+    const task = tasks[0]!;
+    expect(task.launchKey).toBe(
+      `task|${first.recipientId}|${first.cognition.calls[0]!.context.tickId}|0`
+    );
+    expect(task.state).toBe('queued');
     const storage = await createFinalizerStorage(stores.postgres);
     const control = createStorageControlClient(storage);
     const executor = createFakeTaskExecutor();
@@ -199,8 +202,12 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
       ],
     });
     expect(reply.eventId).not.toBe((await first.events())[0]!.eventId);
-    first.coreLoop.haltForTest();
-    const restarted = await boot(prefix, [{ content: 'duplicate must not be requested' }]);
+    await first.coreLoop.fenceForTest();
+    const beforeRestart = await first.snapshot.read();
+    expect(beforeRestart?.sections['busOffset']).toEqual(first.bus.exportSnapshot());
+    expect(Object.values(first.bus.exportSnapshot().entries)).toEqual([]);
+    const restarted = await boot(prefix, [{ content: 'Still here.' }]);
+    expect(restarted.bus.exportSnapshot()).toEqual(beforeRestart?.sections['busOffset']);
     const receipt = await restarted.bus.append({ ...signal, id: randomUUID() });
     expect(
       (await restarted.bus.readAfter('0-0', 100)).filter((e) => e.signal.type === 'task_outcome')
@@ -223,10 +230,32 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
     );
     expect(bound).toHaveLength(1);
     expect(bound[0]!.content).toBe('The answer is 42.');
+    // Applying the committed rows trims outbound; verify the actual boundary.
+    expect(await restarted.events()).toEqual([]);
     // Durable admission receipt survives both bus and outbound trimming.
     await restarted.bus.trimBefore('9999999999999999-0');
     await restarted.bus.append({ ...signal, id: randomUUID() });
     expect(await restarted.bus.readAfter('0-0', 100)).toEqual([]);
+    // Observe a subsequent committed turn, not a timer or a tick count: the
+    // duplicate must not consume a model turn or recreate an attached reply.
+    const followUp = createUserMessageSignal({
+      text: 'Are you still here?',
+      recipientId: restarted.recipientId,
+      channel: 'test',
+      updateId: randomUUID(),
+    });
+    restarted.coreLoop.pushSignal(followUp);
+    await expect.poll(async () => (await restarted.events()).length).toBe(1);
+    expect(
+      restarted.cognition.calls.map((call) =>
+        call.context.triggerSignals.map((entry) => ({
+          id: entry.id,
+          type: entry.type,
+        }))
+      )
+    ).toEqual([[{ id: followUp.id, type: 'user_message' }]]);
+    expect((await restarted.events())[0]!.payload).toMatchObject({ text: 'Still here.' });
+    expect((await restarted.events())[0]!.payload.attachments).toBeUndefined();
   });
   it('reuses the deciding turn effect after a crash before commit: one task and one immediate reply', async () => {
     const prefix = `task-reply-crash:${randomUUID()}:`;
@@ -242,12 +271,15 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
     await waitFor(() => first.coreLoop.stopReport().loopStopped, 'failed answer CAS');
     expect(await first.events()).toHaveLength(0);
     const turn = first.cognition.calls[0]!.context.tickId;
-    const before = (await first.registry.list()).filter((t) => t.launchKey.includes(turn));
+    const before = await first.registry.list();
     expect(before).toHaveLength(1);
+    expect(before[0]!.launchKey).toBe(`task|${first.recipientId}|${turn}|0`);
     const restarted = await boot(prefix);
     await expect.poll(async () => (await restarted.events()).length).toBe(1);
     expect(restarted.cognition.calls[0]!.context.tickId).toBe(turn);
-    const after = (await restarted.registry.list()).filter((t) => t.launchKey.includes(turn));
+    const after = await restarted.registry.list();
+    expect(after).toHaveLength(1);
+    expect(after[0]!.launchKey).toBe(`task|${first.recipientId}|${turn}|0`);
     expect(after.map((t) => t.id)).toEqual(before.map((t) => t.id));
   });
   it('replays an outcome turn after a crash before the reply commit with the same attachment and one event', async () => {
@@ -279,6 +311,56 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
       'outcome_1',
       'outcome_2',
     ]);
+  });
+  it('answers owner input first in a mixed batch and keeps the task outcome for its attached reply', async () => {
+    const prefix = `task-mixed-batch:${randomUUID()}:`;
+    const bus = createBusSignalStream(stores.redis, prefix);
+    const recipientId = new RecipientRegistry().getOrCreate('test', 'chat-42');
+    const message = createUserMessageSignal({
+      text: 'How are you?',
+      recipientId,
+      channel: 'test',
+      updateId: randomUUID(),
+    });
+    // Queue both before start, outcome first: priority must follow the real
+    // threshold decision, not arrival order or the harness's wake-all double.
+    await bus.append(outcome('task_mixed', 'outcome_mixed'));
+    await bus.append(message);
+    const instance = await boot(prefix, [
+      { content: 'I am here.' },
+      { content: 'The answer is 42.' },
+    ]);
+    const engine = new ThresholdEngine(logger);
+    instance.aggregation.process = async (signals, state) => {
+      instance.aggregation.batches.push([...signals]);
+      const wake = await engine.evaluate(
+        signals,
+        [],
+        state as Parameters<typeof engine.evaluate>[2]
+      );
+      return {
+        wakeCognition: wake.shouldWake,
+        wakeReason: wake.reason ?? 'test',
+        aggregates: [],
+        triggerSignals: wake.triggerSignals,
+        intents: [],
+      };
+    };
+    await expect.poll(async () => (await instance.events()).length).toBe(2);
+    expect(instance.aggregation.batches[0]!.map((signal) => signal.type)).toEqual([
+      'task_outcome',
+      'user_message',
+    ]);
+    expect(
+      instance.cognition.calls.map((call) => call.context.triggerSignals.map((signal) => signal.id))
+    ).toEqual([[message.id], ['outcome_mixed']]);
+    const replies = await instance.events();
+    expect(replies[0]!.payload).toMatchObject({ text: 'I am here.' });
+    expect(replies[0]!.payload.attachments).toBeUndefined();
+    expect(replies[1]!.payload).toMatchObject({
+      text: 'The answer is 42.',
+      attachments: [{ artifactId: object.id }],
+    });
   });
   it('wakes for one task outcome even below the energy gate', async () => {
     const engine = new ThresholdEngine(logger);

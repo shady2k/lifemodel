@@ -7,6 +7,7 @@
 
 import type { Logger } from '../../types/logger.js';
 import type { Intent } from '../../types/intent.js';
+import type { MessageAttachment } from '../../ports/message-attachment.js';
 import type {
   ToolResult,
   LoopState,
@@ -83,7 +84,7 @@ export function compileIntentsFromToolResults(
       context.triggerSignal.type === 'task_outcome'
         ? validateTaskOutcome(context.triggerSignal.data)
         : undefined;
-    let groups: import('../../ports/message-attachment.js').MessageAttachment[][] = [];
+    let groups: MessageAttachment[][] = [];
     let attachmentFailure = false;
     if (event) {
       try {
