@@ -182,6 +182,7 @@ Uses native OpenAI tool calling with **Codex-style natural termination**:
 - Smart retry: Low confidence and no side-effects → retry with expensive model
 - Conversation status: JSON schema `{"response": "...", "status": "..."}` controls follow-up timing
 - Proactive deferral: `core.defer` allows LLM to postpone proactive contact
+- Background task acceptance: platform-mode `core.startTask(briefing, profile)` queues work through an explicit keyed intent and returns before execution. The agent answers now and later handles a sealed `task_outcome` with result attachments on its ordinary reply. See [task replies](features/motor/task-reply.md).
 
 ```
 Request: messages + tools (tool_choice: "auto")

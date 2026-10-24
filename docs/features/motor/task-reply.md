@@ -1,0 +1,63 @@
+# Task replies
+
+Task: lifemodel-653.8.11. The owner delegates long work in ordinary chat.
+No task chip or task composer is added. The legacy Motor Cortex loop is unchanged.
+
+## Start
+
+Platform-mode cognition exposes `core.startTask(briefing, profile)`. The complete
+briefing includes the goal, context, constraints and the file to produce.
+`src/ports/task-profiles.ts` owns the versioned allowed profile catalogue: `small`
+revision 1 is 600 seconds, 500 millicores and 512 MiB. Unknown profile names and
+missing briefing/turn context return explicit refusal codes; no default is chosen.
+A title is optional at the feature level and is not introduced in this leaf.
+
+The tool applies an explicit `START_TASK` intent through the core applicator and
+awaits registry acceptance only. Its launch key is the recipient plus the already
+persisted deciding turn id and the one task-effect slot. A replay retains that
+key; model-generated tool call ids never define task identity. The registry
+persists briefing/profile/settings before dispatch. Acceptance is tracked through
+the durable-effect drain. Uncertain infrastructure failures propagate out of the
+tool registry so the owned turn fails rather than claiming a refusal after a
+possibly committed write. Deterministic registry refusals are safe tool results.
+
+After acceptance, the model tells the owner now that the work has started and
+that a result reply will follow. It does not wait for allocation, the executor,
+sealing or downloads. The initial reply uses the existing committed outbox.
+
+## End
+
+The [finalizer](task-finalize.md) publishes a sealed `task_outcome`. Both normal
+bus append and finalizer relay use its durable keyed admission operation, keyed
+by `outcomeKey`, with canonical signal identity. That receipt survives bus and
+outbound trimming. Existing snapshot-owned turn ids and atomic snapshot/outbox
+commits cover a crash before the reply commit. No in-memory ACK owns deduplication.
+
+The outcome wakes cognition before the energy gate, one outcome per turn. Other
+outcomes wait, including when an owner message wins the tick. State, reason code,
+summary and all retained objects reach the trigger prompt as data. Plain text is
+allowed. The configured primary owner recipient receives this outcome, as with
+other infrastructure signals; no task chooses a recipient. Intermediate `core.say`
+and recursive `core.startTask` calls are refused on this trigger.
+
+For `done`, the intent compiler attaches only `result`-marked sealed object IDs,
+with name, size and MIME type (`application/octet-stream` if absent), to the actual
+assistant reply. Models cannot choose attachment IDs. The ordinary outbound
+consumer stores those references on the message. The existing authenticated
+[attachment download](../web/attachments.md) resolves them independently of core.
+Failed/stopped replies explain the cause in owner words and attach no objects,
+even if partial result marks survived sealing.
+
+The web attachment contract permits 20 files per message. More results use ordered
+continuation messages of at most 20 files under the same turn/outbox commit; none
+are silently omitted. Invalid result metadata does not strand an immutable outcome
+in relay: the reply explicitly says the files could not be attached. Non-result
+metadata never blocks result delivery. No bytes, storage URLs or paths enter chat.
+
+## Evidence
+
+`tests/integration/task-reply.test.ts` uses real isolated Postgres and Valkey,
+scripted cognition and a fake executor with real launch/finalization infrastructure.
+It checks immediate acceptance/reply, sealed outcome/attachment message binding,
+crash before each answer commit, duplicate delivery after trimming, concurrent
+outcomes, low-energy wake and failure without a fake result.

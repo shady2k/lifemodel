@@ -236,6 +236,7 @@ export type WakeTrigger =
   | 'channel_error' // Channel reported an error
   | 'scheduled' // Scheduled wake (reminder, follow-up)
   | 'forced' // Forced wake (testing, debug)
+  | 'task_outcome' // Sealed task completion requires an owner reply
   | 'thought'; // Internal thought requires processing
 
 /**

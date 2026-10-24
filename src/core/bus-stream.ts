@@ -1,4 +1,5 @@
 import type { Redis } from 'iovalkey';
+import { validateTaskOutcome } from '../ports/task-outcome.js';
 import { decodeSignal, type Signal } from '../types/signal.js';
 import type { SnapshotSectionOwner } from '../storage/snapshot-store.js';
 
@@ -61,6 +62,10 @@ export class ValkeyBusSignalStream implements BusSignalStream {
   }
 
   async append(signal: Signal): Promise<string> {
+    if (signal.type === 'task_outcome') {
+      const event = validateTaskOutcome(signal.data);
+      return this.appendTaskSignal(signal, event.outcomeKey);
+    }
     return (await this.redis.xadd(this.key, '*', 'signal', JSON.stringify(signal))) as string;
   }
 
@@ -76,6 +81,10 @@ export class ValkeyBusSignalStream implements BusSignalStream {
       )
     ) {
       throw new Error('Invalid task bus signal');
+    }
+    if (signal.type === 'task_outcome') {
+      validateTaskOutcome(signal.data);
+      signal = { ...signal, id: key };
     }
     return (await this.redis.eval(
       APPEND_TASK_SIGNAL,

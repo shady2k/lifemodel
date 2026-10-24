@@ -98,7 +98,11 @@ function getTimeoutForTrigger(triggerType: SignalType): number | undefined {
  *   prevent prompt leakage from weaker models
  */
 function shouldAllowPlainText(triggerType: SignalType): boolean {
-  return triggerType === 'user_message' || triggerType === 'motor_result';
+  return (
+    triggerType === 'user_message' ||
+    triggerType === 'motor_result' ||
+    triggerType === 'task_outcome'
+  );
 }
 
 /**
@@ -208,7 +212,8 @@ export class AgenticLoop {
         if (state.forceRespondAttempts >= 3) {
           const requiresResponse =
             context.triggerSignal.type === 'user_message' ||
-            context.triggerSignal.type === 'motor_result';
+            context.triggerSignal.type === 'motor_result' ||
+            context.triggerSignal.type === 'task_outcome';
 
           if (requiresResponse && context.recipientId) {
             this.logger.warn(
@@ -607,7 +612,6 @@ export class AgenticLoop {
       this.logger.info(
         {
           contentLength: content.length,
-          contentPreview: content.slice(0, 100),
           ...(didRealWork && { salvaged: true, toolCallCount: state.toolCallCount }),
         },
         didRealWork
@@ -664,7 +668,8 @@ export class AgenticLoop {
     // (e.g. "extracting transcript..." before a background motor run).
     const requiresResponse =
       context.triggerSignal.type === 'user_message' ||
-      context.triggerSignal.type === 'motor_result';
+      context.triggerSignal.type === 'motor_result' ||
+      context.triggerSignal.type === 'task_outcome';
     const saySent = (state.toolCallCounts.get('core.say') ?? 0) > 0;
     if (!messageText && requiresResponse) {
       if (saySent) {

@@ -68,6 +68,8 @@ import { setPrimaryRecipientId } from './globals.js';
 import { StatusUpdateService } from './status-update-service.js';
 import { DomainTrackerService } from './domain-trackers.js';
 import { IntentApplicator, type SendOutcome } from './intent-applicator.js';
+import type { TaskService, TaskRecord } from '../ports/tasks.js';
+import type { StartTaskIntent } from '../types/intent.js';
 import type { Storage } from '../storage/storage.js';
 import type { PluginLoader } from './plugin-loader.js';
 import type { PluginStatus } from '../layers/cognition/tools/core/manage.js';
@@ -1437,6 +1439,9 @@ export class CoreLoop {
    * Called by channels when they receive data.
    */
   pushSignal(signal: Signal): void {
+    if (signal.type === 'task_outcome' && signal.data?.kind === 'task_outcome') {
+      signal = { ...signal, id: signal.data.outcomeKey };
+    }
     const durableBusSignal =
       this.busSignalStream && !(signal.type === 'user_message' && this.inboundStream);
     if (!durableBusSignal) this.pendingSignals.push({ signal, timestamp: new Date() });
@@ -1644,7 +1649,13 @@ export class CoreLoop {
 
       // Defer signals that need LLM processing if COGNITION is busy or disabled by stress
       // These signals must wait for COGNITION to be free — otherwise they're consumed and lost
-      const deferrableTypes = ['thought', 'message_reaction', 'user_message', 'motor_result'];
+      const deferrableTypes = [
+        'thought',
+        'message_reaction',
+        'user_message',
+        'motor_result',
+        'task_outcome',
+      ];
       const hasDeferrableSignals = allSignals.some((s) => deferrableTypes.includes(s.type));
       const cognitionAvailable = !this.pendingCognition && activeLayers.cognition;
       if (!cognitionAvailable && hasDeferrableSignals) {
@@ -1698,6 +1709,22 @@ export class CoreLoop {
             },
             'AGGREGATION layer disabled due to stress'
           );
+        });
+      }
+
+      // Cognition consumes one task outcome per turn. Any unselected outcome
+      // remains owned by the durable bus, including a batch with owner input.
+      if (aggregationResult?.triggerSignals[0]?.type === 'task_outcome') {
+        aggregationResult.triggerSignals = [aggregationResult.triggerSignals[0]];
+      }
+      const selected = new Set(aggregationResult?.triggerSignals.map((signal) => signal.id) ?? []);
+      for (const signal of allSignals) {
+        if (signal.type !== 'task_outcome' || selected.has(signal.id)) continue;
+        const streamId = this.signalStreamIds.get(signal.id);
+        this.pendingSignals.push({
+          signal,
+          timestamp: signal.timestamp,
+          ...(streamId ? { streamId } : {}),
         });
       }
 
@@ -2119,6 +2146,14 @@ export class CoreLoop {
    * Normalize a single signal (side effects + enrichment).
    * This should be called inside a per-signal trace context.
    */
+  setTaskService(service: TaskService): void {
+    this.intentApplicator.setTaskService(service);
+  }
+
+  applyStartTask(intent: StartTaskIntent): Promise<TaskRecord> {
+    return this.intentApplicator.applyStartTask(intent);
+  }
+
   private taskReportConsumer: ((signal: Signal) => Promise<void>) | undefined;
 
   /** Infrastructure handoff must settle before tick-local bus completion. */

@@ -49,6 +49,8 @@ import type { DomainTrackerService } from './domain-trackers.js';
 import type { Storage } from '../storage/storage.js';
 import type { PluginLoader } from './plugin-loader.js';
 import type { DurableEffectRegistry } from './durable-effect-registry.js';
+import type { StartTaskIntent } from '../types/intent.js';
+import type { TaskService, TaskRecord } from '../ports/tasks.js';
 
 /**
  * Dependencies injected into IntentApplicator.
@@ -158,6 +160,19 @@ export class IntentApplicator {
     strong_negative: -0.5,
   };
 
+  private taskService: TaskService | undefined;
+
+  setTaskService(service: TaskService): void {
+    this.taskService = service;
+  }
+
+  async applyStartTask(intent: StartTaskIntent): Promise<TaskRecord> {
+    if (!this.taskService) throw new Error('Task service unavailable');
+    const acceptance = this.taskService.accept(intent.payload);
+    this.trackDurableEffect('START_TASK', acceptance);
+    return acceptance;
+  }
+
   constructor(deps: IntentApplicatorDeps) {
     this.deps = deps;
   }
@@ -202,6 +217,9 @@ export class IntentApplicator {
 
       withTraceContext(intentCtx, () => {
         switch (intent.type) {
+          case 'START_TASK':
+            void this.applyStartTask(intent).catch(() => undefined);
+            break;
           case 'UPDATE_STATE':
             this.deps.agent.applyIntent(intent);
             break;

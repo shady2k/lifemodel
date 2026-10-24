@@ -2,7 +2,7 @@
 
 Task: lifemodel-653.8.9. This is the core infrastructure end of ADR-014 D3,
 not a cognition tool or a replacement execution loop. It does not send an owner
-message. The later task tool consumes its durable outcome to make that reply.
+message. The [task reply path](task-reply.md) consumes its durable outcome to make that reply.
 
 ## Authority and order
 

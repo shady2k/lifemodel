@@ -101,6 +101,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createActTool } from '../layers/cognition/tools/core/act.js';
 import { createTaskTool } from '../layers/cognition/tools/core/task.js';
+import { createStartTaskTool } from '../layers/cognition/tools/core/start-task.js';
 import { createCredentialTool } from '../layers/cognition/tools/core/credential.js';
 import { createSkillTool } from '../layers/cognition/tools/core/skill.js';
 import { fetchPage } from '../plugins/web-fetch/fetcher.js';
@@ -1274,6 +1275,13 @@ export async function createContainerAsync(
       read: (id) => registry.read(id),
       list: () => registry.list(),
     };
+    coreLoop.setTaskService(taskService);
+    layers.cognition.getToolRegistry().registerTool(
+      createStartTaskTool({
+        applyStartTask: (intent) => coreLoop.applyStartTask(intent),
+        imageRevision,
+      })
+    );
     const finalizerController = new AbortController();
     // Infrastructure finalization must not spend owner-intake SQL capacity.
     const finalizerPool = new Pool({

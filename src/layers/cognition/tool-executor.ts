@@ -395,6 +395,20 @@ export async function executeToolCalls(
       return { type: 'defer', result: { success: true, terminal, intents, state } };
     }
 
+    if (
+      context.triggerSignal.type === 'task_outcome' &&
+      (toolName === 'core.say' || toolName === 'core.startTask')
+    ) {
+      state.toolCallCount++;
+      messages.push({
+        role: 'tool',
+        tool_call_id: toolCall.id,
+        tool_name: toolCall.function.name,
+        content: JSON.stringify({ success: false, code: 'task_outcome_requires_final_reply' }),
+      });
+      continue;
+    }
+
     // Intercept core.say - send intermediate message, continue loop
     if (toolName === 'core.say') {
       const text = typeof args['text'] === 'string' ? args['text'].trim() : '';

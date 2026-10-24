@@ -127,6 +127,16 @@ export function filterToolsForContext(
       if (name === 'core.say' || name === 'core_say') return false;
     }
 
+    // Task outcomes produce one final reply with trusted attachments, never teasers.
+    if (
+      context.triggerSignal.type === 'task_outcome' &&
+      (name === 'core.say' ||
+        name === 'core_say' ||
+        name === 'core.startTask' ||
+        name === 'core_startTask')
+    )
+      return false;
+
     // Plugin events (news delivery, etc.): no teasers — compose full message as final response
     if (context.triggerSignal.type === 'plugin_event') {
       if (name === 'core.say' || name === 'core_say') return false;
