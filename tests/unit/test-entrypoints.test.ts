@@ -177,6 +177,11 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
       ci +
         '\n  unexpected:\n    steps:\n      - name: Bad\n        run: |\n          npx vitest run\n',
       ci.replace('\n  ci-core-image:\n', '\n  renamed-core-image:\n'),
+      ci.replace('\n  ci-workbench-image-publish:\n', '\n  renamed-workbench-publish:\n'),
+      ci.replace(
+        '          docker push ghcr.io/shady2k/lifemodel-workbench:main\n',
+        '          npm ci\n'
+      ),
     ];
     for (const changed of mutations) {
       expect(changed).not.toBe(ci);

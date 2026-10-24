@@ -38,7 +38,13 @@ export function ciEntrypointPolicy(source: string): void {
       current.push(line);
     }
   }
-  for (const required of ['ci-product', 'ci-backlog', 'ci-core-image', 'ci-core-image-publish']) {
+  for (const required of [
+    'ci-product',
+    'ci-backlog',
+    'ci-core-image',
+    'ci-core-image-publish',
+    'ci-workbench-image-publish',
+  ]) {
     if (!jobs.has(required)) fail(`missing ${required}`);
   }
   for (const [name, body] of jobs) {

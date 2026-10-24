@@ -3,14 +3,16 @@
 # `changes` classifies the change. `ci-product` runs the isolated full check when
 # product code changed. `ci-backlog` runs the tracked-work gates and the
 # present-documents check. `ci-core-image` builds the standalone core image on
-# product pull requests with read-only permissions. `ci-core-image-publish`
-# publishes only that core image on every push to main and is the only job that
-# asks for packages: write. The platform loader image is built by the release
-# workflow and, without pushing it, by `ci-loader-image` on pull requests that
-# touch its inputs. `ci-nix` runs `nix flake check` on pull requests that touch
-# what the flake reads, so a broken platform resource list cannot merge green
-# (lifemodel-lut.3.6). There is no Docker-run instance image or host-side test
-# exception.
+# product pull requests with read-only permissions. Three publish jobs ask for
+# packages: write, and only they do: `ci-core-image-publish` and
+# `ci-web-image-publish` publish their image on every push to main, and
+# `ci-workbench-image-publish` publishes the task workbench on a push to main
+# whose inputs changed (lifemodel-653.8.15). The platform loader image is built
+# by the release workflow and, without pushing it, by `ci-loader-image` on pull
+# requests that touch its inputs. `ci-nix` runs `nix flake check` on pull
+# requests that touch what the flake reads, so a broken platform resource list
+# cannot merge green (lifemodel-lut.3.6). There is no Docker-run instance image
+# or host-side test exception.
 #
 # `--no-renames` in the first job is not a detail: `git diff --name-only`
 # reports a detected rename by its destination alone, so moving product code
@@ -418,8 +420,10 @@ jobs:
           docker push "ghcr.io/shady2k/lifemodel-web:main"
           docker push "ghcr.io/shady2k/lifemodel-web:$SHA"
 
-  # Same read-only PR delivery rule as ci-loader-image. The signed platform
-  # release, not this job, publishes and pins the workbench.
+  # Same read-only PR delivery rule as ci-loader-image. This job publishes
+  # nothing: ci-workbench-image-publish below publishes the moving tags on
+  # main, and the signed platform release builds, pushes and pins its release
+  # digest.
   ci-workbench-image:
     needs: changes
     if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.workbench_image == 'true') && !github.event.pull_request.draft }}
@@ -442,6 +446,70 @@ jobs:
           docker run --rm --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges --tmpfs /work:uid=1000,gid=1000,mode=700 \
             "ci-workbench-$SHA" --self-check
+
+  # Publish the task workbench image on main, when its inputs changed. The
+  # workbench selector (scripts/ci-workbench-paths.sh, the `workbench_image`
+  # output of `changes`) decides: it selects a change that can alter what the
+  # Dockerfile builds, and a missing or failed classification is read as
+  # "owed", never as "not owed". A pull request never reaches this job; it
+  # builds without a write token in ci-workbench-image above.
+  #
+  # The tags are the moving `main` and the pushed commit's own tag, as
+  # ci-core-image-publish and ci-web-image-publish publish theirs. The release
+  # workflow still builds the release, pushes it under its tag and pins that
+  # digest in the platform artifact: nothing here pins a digest, and no
+  # platform artifact refers to these tags.
+  ci-workbench-image-publish:
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'push' && (needs.changes.result != 'success' || needs.changes.outputs.workbench_image == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Log in to GitHub Container Registry
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -eu
+          printf '%s' "$TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+      - name: Build the task workbench
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          docker build --file docker/workbench/Dockerfile \
+            --tag ghcr.io/shady2k/lifemodel-workbench:main \
+            --tag "ghcr.io/shady2k/lifemodel-workbench:$SHA" .
+      # The same verification ci-workbench-image runs on a pull request, before
+      # anything is pushed: an image that cannot start offline as a non-root
+      # user with a read-only root is never published.
+      - name: Verify offline non-root startup with a read-only root
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --tmpfs /work:uid=1000,gid=1000,mode=700 \
+            "ghcr.io/shady2k/lifemodel-workbench:$SHA" --self-check
+      - name: Push the main and commit tags
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          docker push ghcr.io/shady2k/lifemodel-workbench:main
+          docker push "ghcr.io/shady2k/lifemodel-workbench:$SHA"
+          # The digest the registry holds for this commit, said in the log the
+          # way the core and web publish jobs' push output says theirs. The
+          # format is a variable, never a literal in the script: `${{` would
+          # begin a GitHub expression here.
+          format='{{range .RepoDigests}}{{println .}}{{end}}'
+          docker image inspect --format "$format" "ghcr.io/shady2k/lifemodel-workbench:$SHA"
 
   # Build the platform loader image on pull requests that touch its inputs, so
   # a broken docker/loader/Dockerfile fails here instead of failing the signed
