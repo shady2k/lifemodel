@@ -2,6 +2,15 @@
 # Prepare the full-history bundle consumed by the platform loader image.
 set -eu
 
+# Unpublished CI builds may retain matching workbench placeholders. The release
+# must opt into the stricter check after pinning the pushed workbench digest.
+release=false
+case "$#:$*" in
+    0:) ;;
+    1:--release) release=true ;;
+    *) printf '%s\n' 'usage: prepare-loader-context.sh [--release]' >&2; exit 2 ;;
+esac
+
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$root"
 
@@ -59,19 +68,23 @@ if [ -e "$origin_file" ] || git ls-files --error-unmatch "$origin_file" >/dev/nu
         printf '%s\n' 'prepare-loader-context: missing tracked workbench origin pin' >&2
         exit 2
     fi
-    node - "$seed_file" "$origin_file" <<'NODE'
+    node - "$seed_file" "$origin_file" "$release" <<'NODE'
 const fs = require('node:fs');
-const [seedFile, originFile] = process.argv.slice(2);
+const [seedFile, originFile, release] = process.argv.slice(2);
 const origin = fs.readFileSync(originFile, 'utf8');
 const match = /^LIFEMODEL_WORKBENCH_ORIGIN_IMAGE=ghcr[.]io\/shady2k\/lifemodel-workbench@(sha256:[0-9a-f]{64})\n$/.exec(origin);
 const text = fs.readFileSync(seedFile, 'utf8');
 const operation = /^(  )- target:\n\1    kind: StatefulSet\n\1    name: core\n\1  patch: \|-\n\1    - op: add\n\1      path: \/spec\/template\/spec\/containers\/0\/env\/-\n\1      value:\n\1        name: LIFEMODEL_TASK_WORKBENCH_IMAGE\n\1        value: ([^\n]+)$/gm;
 const operations = [...text.matchAll(operation)];
 const names = text.match(/^ *name: LIFEMODEL_TASK_WORKBENCH_IMAGE *$/gm) ?? [];
-if (!match || origin !== match[0] || match[1] === `sha256:${'0'.repeat(64)}` ||
+if (!match || origin !== match[0] ||
     names.length !== 1 || operations.length !== 1 ||
     operations[0][2] !== `zot.lifemodel-system.svc:5001/lifemodel/workbench@${match[1]}`) {
-    console.error('prepare-loader-context: matching non-zero local and origin workbench pins required');
+    console.error('prepare-loader-context: matching local and origin workbench pins required');
+    process.exit(2);
+}
+if (release === 'true' && match[1] === `sha256:${'0'.repeat(64)}`) {
+    console.error('prepare-loader-context: non-zero workbench pins required for a release');
     process.exit(2);
 }
 NODE

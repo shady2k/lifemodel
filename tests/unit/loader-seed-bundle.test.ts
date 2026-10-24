@@ -41,9 +41,11 @@ const workbenchPatch = (digest: string) => `patches:
 function runPreparer(options: {
   commit: boolean;
   existingContext?: boolean;
+  release?: boolean;
   origin?:
     | 'valid'
     | 'zero'
+    | 'matching zero'
     | 'tag'
     | 'wrong origin'
     | 'untracked'
@@ -99,8 +101,15 @@ function runPreparer(options: {
     if (options.origin === 'untracked')
       execFileSync('git', ['-C', repo, 'rm', '--cached', originPin]);
     if (options.origin === 'deleted') rmSync(join(repo, originPin));
-    if (options.origin === 'zero')
+    if (options.origin === 'zero' || options.origin === 'matching zero')
       writeFileSync(join(repo, originPin), originEnv(`sha256:${'0'.repeat(64)}`));
+    if (options.origin === 'matching zero') {
+      const seedFile = join(repo, 'deploy/platform/applications/lifemodel/kustomization.yaml');
+      writeFileSync(
+        seedFile,
+        readFileSync(seedFile, 'utf8').replaceAll('b'.repeat(64), '0'.repeat(64))
+      );
+    }
     if (options.origin === 'tag')
       writeFileSync(
         join(repo, originPin),
@@ -120,10 +129,17 @@ function runPreparer(options: {
     }
     let status = 0;
     try {
-      execFileSync('sh', [join(repo, 'scripts/release/prepare-loader-context.sh')], {
-        cwd: repo,
-        stdio: 'pipe',
-      });
+      execFileSync(
+        'sh',
+        [
+          join(repo, 'scripts/release/prepare-loader-context.sh'),
+          ...(options.release ? ['--release'] : []),
+        ],
+        {
+          cwd: repo,
+          stdio: 'pipe',
+        }
+      );
     } catch (error) {
       status = (error as { status?: number }).status ?? -1;
     }
@@ -266,6 +282,7 @@ describe('loader image release seed bundle', () => {
     const prepare = workflow.indexOf('scripts/release/prepare-loader-context.sh');
     const build = workflow.indexOf('file: docker/loader/Dockerfile');
     expect(prepare).toBeGreaterThanOrEqual(0);
+    expect(workflow).toContain('run: scripts/release/prepare-loader-context.sh --release');
     expect(build).toBeGreaterThan(prepare);
     const coreBuild = workflow.indexOf('id: core');
     const digestPin = workflow.indexOf('run: scripts/release/set-core-digest.sh');
@@ -376,7 +393,7 @@ describe('loader image release seed bundle', () => {
       const overlayFile = join(repo, 'deploy/platform/applications/lifemodel/kustomization.yaml');
       writeFileSync(overlayFile, readFileSync(overlayFile, 'utf8') + workbenchPatch(digest));
       writeFileSync(join(repo, originPin), originEnv(digest));
-      execFileSync('sh', [join(repo, 'scripts/release/prepare-loader-context.sh')], {
+      execFileSync('sh', [join(repo, 'scripts/release/prepare-loader-context.sh'), '--release'], {
         cwd: repo,
         stdio: 'pipe',
       });
@@ -475,25 +492,39 @@ describe('loader image release seed bundle', () => {
     }
   });
 
-  it.each([
-    'zero',
-    'tag',
-    'wrong origin',
-    'untracked',
-    'deleted',
-    'mismatched',
-    'missing local pin',
-    'duplicate',
-  ] as const)('refuses a %s workbench origin pin and removes its context', (origin) => {
-    const result = runPreparer({ commit: true, origin });
-    expect(result.status).not.toBe(0);
-    expect(result.contextExists).toBe(false);
+  describe.each([false, true])('workbench pin validation with release=%s', (release) => {
+    it.each([
+      'zero',
+      'tag',
+      'wrong origin',
+      'untracked',
+      'deleted',
+      'mismatched',
+      'missing local pin',
+      'duplicate',
+    ] as const)('refuses a %s workbench origin pin and removes its context', (origin) => {
+      const result = runPreparer({ commit: true, origin, release });
+      expect(result.status).toBe(2);
+      expect(result.contextExists).toBe(false);
+    });
+
+    it('accepts a tracked, nonzero origin pin matching the local workbench pin', () => {
+      const result = runPreparer({ commit: true, origin: 'valid', release });
+      expect(result.status).toBe(0);
+      expect(result.contextContents).toEqual(['seed.bundle']);
+    });
   });
 
-  it('accepts a tracked, nonzero origin pin matching the local workbench pin', () => {
-    const result = runPreparer({ commit: true, origin: 'valid' });
+  it('accepts matching zero workbench placeholders for the unpublished CI loader build', () => {
+    const result = runPreparer({ commit: true, origin: 'matching zero' });
     expect(result.status).toBe(0);
     expect(result.contextContents).toEqual(['seed.bundle']);
+  });
+
+  it('refuses matching zero workbench placeholders for a release and removes its context', () => {
+    const result = runPreparer({ commit: true, origin: 'matching zero', release: true });
+    expect(result.status).toBe(2);
+    expect(result.contextExists).toBe(false);
   });
 
   it('refuses a pre-existing context without deleting it', async () => {
