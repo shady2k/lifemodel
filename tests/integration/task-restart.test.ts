@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { Pool } from 'pg';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createTestStores, type TestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
@@ -7,7 +8,8 @@ import { createFinalizerStorage } from '../helpers/finalizer-storage.js';
 import { createPlatformSettingsReader } from '../../src/config/platform-settings.js';
 import { createPostgresTaskRegistry } from '../../src/storage/postgres-task-registry.js';
 import { createPostgresTaskMailbox } from '../../src/storage/postgres-task-mailbox.js';
-import { createBusSignalStream } from '../../src/core/bus-stream.js';
+import { createBusSignalStream, type BusSignalStream } from '../../src/core/bus-stream.js';
+import { createSnapshotStore } from '../../src/storage/snapshot-store.js';
 import { createTaskChannelReplay } from '../../src/core/task-channel-replay.js';
 import {
   createFakeTaskExecutor,
@@ -23,6 +25,7 @@ import type {
   TaskTerminalReport,
 } from '../../src/ports/task-channel.js';
 import type { TaskExecutor, TaskLaunch } from '../../src/core/task-executor.js';
+import { createSignal } from '../../src/types/signal.js';
 
 // Only external compute and the storage service are simulated. Each takeover
 // replaces the actual fenced registry/mailbox/launch/finalizer/Valkey bus objects.
@@ -115,13 +118,17 @@ describe('task restart finalization (real Postgres and Valkey, TLS storage)', ()
     stops.push(() => component.stop());
     return component;
   }
-  function finalizer(r = registry, exec: TaskExecutor = executor) {
+  function finalizer(
+    r = registry,
+    exec: TaskExecutor = executor,
+    outcomeBus: Pick<BusSignalStream, 'appendTaskSignal'> = bus
+  ) {
     const component = createTaskFinalizer({
       registry: r,
       mailbox,
       executor: exec,
       storage: control(),
-      bus,
+      bus: outcomeBus,
       logger,
     });
     stops.push(() => component.stop());
@@ -249,12 +256,10 @@ describe('task restart finalization (real Postgres and Valkey, TLS storage)', ()
       state,
     });
     expect(
-      new Set(
-        (await bus.readAfter('0-0', 100))
-          .filter(({ signal }) => signal.type === 'task_outcome')
-          .map(({ signal }) => (signal.data as { outcomeKey: string }).outcomeKey)
-      )
-    ).toEqual(new Set([rows[0].outcome_key]));
+      (await bus.readAfter('0-0', 100))
+        .filter(({ signal }) => signal.type === 'task_outcome')
+        .map(({ signal }) => (signal.data as { outcomeKey: string }).outcomeKey)
+    ).toEqual([rows[0].outcome_key]);
     expect(storage.seals.size).toBe(1);
     // Reconciliation cannot create a second execution after finalization.
     expect(await launcher().resync()).toBe(true);
@@ -264,7 +269,7 @@ describe('task restart finalization (real Postgres and Valkey, TLS storage)', ()
     expect(stored.jobUid).toBe('fake-1');
     return stored;
   }
-  function crashRegistry(method: 'recordSealReceipt' | 'commitFinalization') {
+  function crashRegistry(method: 'recordSealReceipt' | 'commitFinalization', onCrash?: () => void) {
     let reached = 0;
     const proxy = new Proxy(registry, {
       get(target, property) {
@@ -274,6 +279,7 @@ describe('task restart finalization (real Postgres and Valkey, TLS storage)', ()
             // seal response exists, but was never saved by this core. Conversely
             // the terminal/outbox transaction really commits before reply loss.
             if (method === 'commitFinalization') await Reflect.apply(target[method], target, args);
+            onCrash?.();
             throw new Error('simulated core death');
           };
         const value = Reflect.get(target, property, target) as unknown;
@@ -348,13 +354,28 @@ describe('task restart finalization (real Postgres and Valkey, TLS storage)', ()
       const terminalAck = await mailbox.append(report(task), proof);
       let crash: ReturnType<typeof crashRegistry> | undefined;
       if (boundary === 'seal response' || boundary === 'terminal outbox commit') {
+        // Abort the dying component immediately after the terminal transaction,
+        // before its per-row catch can proceed to relay(). No bus admission is
+        // allowed until components are replaced and the startup scan runs.
+        let dying: ReturnType<typeof finalizer>;
         crash = crashRegistry(
-          boundary === 'seal response' ? 'recordSealReceipt' : 'commitFinalization'
+          boundary === 'seal response' ? 'recordSealReceipt' : 'commitFinalization',
+          boundary === 'terminal outbox commit'
+            ? () => {
+                void dying.stop(Date.now());
+              }
+            : undefined
         );
-        await finalizer(crash.proxy).runOnce();
+        dying = finalizer(crash.proxy);
+        await dying.runOnce();
         expect(crash.reached()).toBe(1);
         expect(storage.seals.size).toBe(1);
         expect(await outcomes(task.id)).toHaveLength(boundary === 'seal response' ? 0 : 1);
+        if (boundary === 'terminal outbox commit') {
+          expect(await stores.redis.xlen(`${prefix}bus`)).toBe(0);
+          expect(await bus.readAfter('0-0', 100)).toEqual([]);
+          expect(await registry.listOutcomeWork()).toHaveLength(1);
+        }
       } else if (boundary === 'Job delete') {
         let deleted = 0;
         const crashExecutor = new Proxy(executor, {
@@ -379,7 +400,8 @@ describe('task restart finalization (real Postgres and Valkey, TLS storage)', ()
       expect(
         (await mailbox.listUnsignalled()).find((row) => row.frame.messageId === step.messageId)?.ack
       ).toEqual(ack);
-      expect(await finalizer().runOnce()).toBe(true);
+      expect(await finalizer().start()).toBe(true);
+      expect(await registry.listOutcomeWork()).toHaveLength(0);
       const finished = await assertFinished(task);
       expect(finished.sealReceipt!.manifest.objects).toEqual([result, log]);
       const event = (await outcomes(task.id))[0].event;
@@ -395,6 +417,181 @@ describe('task restart finalization (real Postgres and Valkey, TLS storage)', ()
         sealReceipt: finished.sealReceipt,
       });
       expect(await outcomes(task.id)).toHaveLength(1);
+    }
+  );
+
+  it.each(['succeeded', 'failed', 'aborted'] as const)(
+    'a semantic %s report committing before candidate persistence beats a stale compute observation',
+    async (outcome) => {
+      const { task, proof } = await startTask();
+      await storage.mark(result);
+      await storage.mark(log);
+      const beforeCommit = Promise.withResolvers<void>();
+      const commitAppend = Promise.withResolvers<void>();
+      const beforeCandidate = Promise.withResolvers<void>();
+      const persistCandidate = Promise.withResolvers<void>();
+      // Hold the real append transaction after INSERT, before COMMIT, while it
+      // still owns the same task-row lock as beginFinalization. No timer race.
+      const heldPool = new Proxy(stores.postgres, {
+        get(target, property) {
+          if (property === 'connect')
+            return async () => {
+              const client = await target.connect();
+              return new Proxy(client, {
+                get(target, property) {
+                  if (property === 'query')
+                    return async (sql: string, values?: unknown[]) => {
+                      if (sql === 'COMMIT') {
+                        beforeCommit.resolve();
+                        await commitAppend.promise;
+                      }
+                      return target.query(sql, values);
+                    };
+                  const value = Reflect.get(target, property, target) as unknown;
+                  return typeof value === 'function' ? value.bind(target) : value;
+                },
+              });
+            };
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      }) as Pool;
+      const heldMailbox = createPostgresTaskMailbox({ pool: heldPool, epoch });
+      stops.push(heldMailbox.stop);
+      const racingRegistry = new Proxy(registry, {
+        get(target, property) {
+          if (property === 'beginFinalization')
+            return async (...args: Parameters<TaskRegistry['beginFinalization']>) => {
+              // This is the stale infrastructure choice made after readTerminal
+              // saw no committed report. The locked persistence must supersede it.
+              expect(args[2]).toMatchObject({ state: 'failed', reasonCode: 'compute_missing' });
+              beforeCandidate.resolve();
+              await persistCandidate.promise;
+              return target.beginFinalization(...args);
+            };
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const append = heldMailbox.append(
+        report(task, {
+          outcome,
+          summary: 'Committed semantic decision',
+          resultObjectId: outcome === 'succeeded' ? result.id : null,
+          logObjectId: log.id,
+          artifactObjectIds: [],
+          ...(outcome === 'failed' ? { reasonCode: 'provider_error' } : {}),
+        } as TaskTerminalReport),
+        proof
+      );
+      let finishing: Promise<boolean> | undefined;
+      try {
+        await beforeCommit.promise;
+        expect(await mailbox.readTerminal(task.id, task.attemptId)).toBeNull();
+        finishing = finalizer(racingRegistry).finalize(task.id, 'compute_missing');
+        await beforeCandidate.promise;
+        commitAppend.resolve();
+        await append;
+        expect((await mailbox.readTerminal(task.id, task.attemptId))?.frame.payload).toMatchObject({
+          outcome,
+        });
+        persistCandidate.resolve();
+        expect(await finishing).toBe(true);
+      } finally {
+        commitAppend.resolve();
+        persistCandidate.resolve();
+        await Promise.allSettled([append, finishing]);
+      }
+      const state = outcome === 'succeeded' ? 'done' : outcome === 'aborted' ? 'stopped' : 'failed';
+      const reasonCode =
+        outcome === 'succeeded'
+          ? 'completed'
+          : outcome === 'aborted'
+            ? 'aborted'
+            : 'provider_error';
+      const stored = await assertFinished(task, state);
+      expect(stored.terminalReasonCode).toBe(reasonCode);
+      expect((await outcomes(task.id))[0].event).toMatchObject({
+        state,
+        reasonCode,
+        summary: 'Committed semantic decision',
+      });
+      await takeover();
+      expect(await finalizer().start()).toBe(true);
+      await assertFinished(task, state);
+      expect((await outcomes(task.id))[0].event.reasonCode).toBe(reasonCode);
+    }
+  );
+
+  it.each(['append reply', 'Postgres mark'] as const)(
+    'restarts after losing the outcome %s: a trimmed admission is not appended again',
+    async (lost) => {
+      const { task, proof } = await startTask();
+      await storage.mark(result);
+      await mailbox.append(report(task), proof);
+      let appends = 0;
+      let marks = 0;
+      const losingBus: Pick<BusSignalStream, 'appendTaskSignal'> = {
+        appendTaskSignal: async (...args) => {
+          const id = await bus.appendTaskSignal(...args);
+          appends++;
+          if (lost === 'append reply') throw new Error('lost outcome append reply');
+          return id;
+        },
+      };
+      const losingRegistry = new Proxy(registry, {
+        get(target, property) {
+          if (property === 'markOutcomeSignalled')
+            return async () => {
+              marks++;
+              throw new Error('lost outcome Postgres mark');
+            };
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      expect(await finalizer(losingRegistry, executor, losingBus).runOnce()).toBe(false);
+      expect(appends).toBe(1);
+      expect(marks).toBe(lost === 'append reply' ? 0 : 1);
+      const rows = await outcomes(task.id);
+      expect(rows).toHaveLength(1);
+      expect(await registry.listOutcomeWork()).toEqual([rows[0].event]);
+      const entries = await bus.readAfter('0-0', 100);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]!.signal.data).toMatchObject({ outcomeKey: rows[0].outcome_key });
+      expect(await stores.redis.xlen(`${prefix}bus`)).toBe(1);
+      bus.ensureOwned(entries[0]!.id, 'outcome-turn');
+      bus.markCompleted([entries[0]!.id]);
+      // Advance past the outcome and persist the actual epoch-checked snapshot
+      // before trimming. Replacement hydrates that committed watermark.
+      const nextId = await bus.append(createSignal('tick', 'test', { value: 1, confidence: 1 }));
+      bus.ensureOwned(nextId, 'next-turn');
+      bus.markCompleted([nextId]);
+      const snapshots = createSnapshotStore(stores.redis, { keyPrefix: prefix });
+      snapshots.register(bus);
+      const snapshotEpoch = await snapshots.takeEpoch();
+      expect(await snapshots.commitOwners(snapshotEpoch, 1)).toBe(true);
+      await bus.trimBefore(bus.committedOffset());
+      expect(await stores.redis.xlen(`${prefix}bus`)).toBe(1);
+      expect((await bus.readAfter('0-0', 100)).map(({ id }) => id)).toEqual([nextId]);
+      await takeover();
+      const restartedSnapshots = createSnapshotStore(stores.redis, { keyPrefix: prefix });
+      restartedSnapshots.register(bus);
+      await restartedSnapshots.takeEpoch();
+      await restartedSnapshots.hydrate(await restartedSnapshots.read());
+      expect(bus.committedOffset()).toBe(nextId);
+      expect(await finalizer().start()).toBe(true);
+      expect(await registry.listOutcomeWork()).toEqual([]);
+      expect(await outcomes(task.id)).toEqual(rows);
+      // Raw stream lengths/rows catch a second admission even with the same key.
+      expect(await stores.redis.xlen(`${prefix}bus`)).toBe(1);
+      expect((await bus.readAfter('0-0', 100)).map(({ id }) => id)).toEqual([nextId]);
+      expect(await bus.readAfter(bus.committedOffset(), 100)).toEqual([]);
+      expect(await stores.redis.hlen(`${prefix}bus:task-dedup`)).toBe(1);
+      expect(await stores.redis.hget(`${prefix}bus:task-dedup`, rows[0].outcome_key)).toBe(
+        entries[0]!.id
+      );
+      expect((await registry.read(task.id))!.state).toBe('done');
     }
   );
 

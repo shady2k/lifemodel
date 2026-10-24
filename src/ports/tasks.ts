@@ -160,7 +160,9 @@ export interface TaskRegistry extends TaskService {
   listLaunchWork(afterOrder?: string, limit?: number): Promise<readonly TaskRecord[]>;
   /** Includes terminal mailbox rows even after signalled_at; cursor is accepted order. */
   listFinalizationWork(afterOrder?: string, limit?: number): Promise<readonly TaskRecord[]>;
-  /** Candidate + irreversible launch tombstone + canonical revocation commit together. */
+  /** Under the mailbox append's task lock, a stored semantic report wins over
+   * the proposed compute candidate; an explicit Stop keeps precedence.
+   * Candidate + irreversible launch tombstone + canonical revocation commit together. */
   beginFinalization(
     taskId: string,
     launchId: string,

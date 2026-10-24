@@ -13,7 +13,10 @@ mailbox rows without consulting `signalled_at` or the bus watermark. Terminal
 The launch reconciler also hands off failed, missing and completed Jobs, plus
 loss or failure of the already bound Pod even if its Job still says running. A
 completed Job without a semantic report is `failed/semantic_report_missing`,
-never success. A stored semantic report wins over the Job observation.
+never success. A stored semantic report wins over the Job observation. The
+registry chooses under the same task-row lock as mailbox append, in the
+candidate transaction before revocation, so an in-flight committed report wins
+over a stale observation too. A committed terminal outcome never changes.
 
 1. Save candidate, summary and reason separately from public state. In the same
    fenced transaction, tombstone the launch and advance canonical intent to
@@ -110,6 +113,13 @@ Native Kubernetes garbage collection owns ephemeral volume removal. As ADR-014
 states, a delayed stale CREATE may temporarily create an inert launcher; launch
 tombstones persist and reconciliation re-arms exact-identity cleanup. API state
 is not proof against arbitrary node partitions or an external force-delete.
+
+An unbound launch with no saved Job UID and only orphan Pods is a residual:
+the finalizer does not adopt a controller UID from those Pods or delete them by
+guessed identity. It waits for Kubernetes garbage collection. A nonterminal Pod
+keeps termination pending; terminal Pods keep cleanup pending until removed.
+Retries back off to 30 seconds. There is no finalizer-owned completion bound
+when Kubernetes garbage collection does not progress.
 
 Evidence lives in `tests/integration/task-restart.test.ts` (same-store component
 restart at T04's eight boundaries), `tests/unit/task-executor-termination.test.ts`

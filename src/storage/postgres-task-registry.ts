@@ -14,6 +14,7 @@ import type {
   TaskOutcomeEvent,
 } from '../ports/tasks.js';
 import { TaskRegistryError } from '../ports/tasks.js';
+import type { TaskTerminalReport } from '../ports/task-channel.js';
 import { createFencedPostgres, StalePostgresEpochError } from './fenced-postgres.js';
 
 interface TaskRow {
@@ -550,6 +551,34 @@ export function createPostgresTaskRegistry(deps: {
       return transaction(taskId, async (client) => {
         const task = await lockLaunch(client, taskId, launchId);
         if (TERMINAL.has(task.state)) return task;
+        // Mailbox append takes this same task-row lock. Its terminal report may
+        // have committed after the caller's unlocked read/compute observation.
+        // Choose before saving/revoking authority, never from that stale view.
+        // An explicit Stop still wins over a semantic report.
+        if (!task.terminalCandidate && candidate.state !== 'stopped') {
+          const terminal = await client.query<{ payload: TaskTerminalReport }>(
+            `SELECT payload FROM core.task_mailbox WHERE task_id=$1 AND attempt_id=$2 AND direction='task_to_core' AND kind='terminal'`,
+            [taskId, task.attemptId]
+          );
+          const report = terminal.rows[0]?.payload;
+          if (report) {
+            candidate = {
+              state:
+                report.outcome === 'succeeded'
+                  ? 'done'
+                  : report.outcome === 'aborted'
+                    ? 'stopped'
+                    : 'failed',
+              reasonCode:
+                report.outcome === 'failed'
+                  ? report.reasonCode
+                  : report.outcome === 'aborted'
+                    ? 'aborted'
+                    : 'completed',
+              summary: report.summary,
+            };
+          }
+        }
         // A report replay cannot undo a failure or hard stop. Only Stop may
         // supersede an already saved candidate; explicit seal refusals use abandonSeal.
         if (
