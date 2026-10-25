@@ -66,6 +66,7 @@ function address() {
 }
 function help() {
   console.log(`Usage: lifemodel doctor [--repin previous|clear]
+       lifemodel doctor trace <trace_id | last [N]>
        lifemodel address
        lifemodel --help
 
@@ -486,6 +487,140 @@ function report() {
   }
   return 0;
 }
+// Runs in the existing core container. Credentials stay in its environment and
+// are never fetched as Kubernetes Secrets or printed by the operator command.
+const traceQuery = `
+import pg from 'pg';
+const request = JSON.parse(Buffer.from(process.argv[1], 'base64').toString('utf8'));
+const e = encodeURIComponent;
+const connectionString = process.env.LIFEMODEL_DATABASE_URL ||
+  ('postgresql://' + e(process.env.LIFEMODEL_DB_USERNAME) + ':' + e(process.env.LIFEMODEL_DB_PASSWORD) +
+   '@lifemodel-rw.lifemodel-state.svc.cluster.local:5432/lifemodel');
+const pool = new pg.Pool({connectionString, max:1, connectionTimeoutMillis:3000, query_timeout:5000});
+try {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN READ ONLY');
+    await client.query("SET LOCAL statement_timeout = '5s'");
+    const ids = request.id ? [request.id] : (await client.query(
+      'SELECT trace_id FROM (SELECT trace_id,started_at AS ts FROM observability.trace_spans UNION ALL SELECT trace_id,ts FROM observability.trace_events) records GROUP BY trace_id ORDER BY min(ts) DESC,trace_id DESC LIMIT $1',
+      [request.last])).rows.map(r => r.trace_id);
+    const traces = [];
+    for (const id of ids) {
+      const spans = (await client.query('SELECT * FROM observability.trace_spans WHERE trace_id=$1 ORDER BY started_at,span_id LIMIT 10001',[id])).rows;
+      const events = (await client.query('SELECT * FROM observability.trace_events WHERE trace_id=$1 ORDER BY ts,record_id LIMIT 10001',[id])).rows;
+      traces.push({id,spans:spans.slice(0,10000),events:events.slice(0,10000),truncated:spans.length>10000||events.length>10000});
+    }
+    await client.query('COMMIT');
+    process.stdout.write(JSON.stringify(traces));
+  } finally { client.release(); }
+} catch { process.stderr.write('trace store unavailable\\n'); process.exitCode=1; }
+finally { await pool.end(); }
+`;
+
+function doctorTrace(args) {
+  let request;
+  if (args[0] === 'last' && args.length <= 2) {
+    const count = args[1] === undefined ? 1 : Number(args[1]);
+    if (!Number.isInteger(count) || count < 1 || count > 20)
+      throw new Error('trace last count must be an integer from 1 to 20');
+    request = { last: count };
+  } else if (args.length === 1 && /^[A-Za-z0-9_-]{1,128}$/.test(args[0])) {
+    request = { id: args[0] };
+  } else throw new Error('Usage: lifemodel doctor trace <trace_id | last [N]>');
+  let traces;
+  try {
+    traces = JSON.parse(
+      execFileSync(
+        kubectl[0],
+        [
+          ...kubectl.slice(1),
+          'exec',
+          '-n',
+          'lifemodel',
+          'core-0',
+          '-c',
+          'core',
+          '--',
+          'node',
+          '--input-type=module',
+          '-e',
+          traceQuery,
+          Buffer.from(JSON.stringify(request)).toString('base64'),
+        ],
+        {
+          encoding: 'utf8',
+          timeout: 15000,
+          maxBuffer: 16 * 1024 * 1024,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }
+      )
+    );
+  } catch {
+    console.error(
+      'Trace store unavailable. The core pod and observability schema must be available.'
+    );
+    return 1;
+  }
+  if (!traces.length) {
+    console.log('No traces recorded.');
+    return 0;
+  }
+  const safe = (value) =>
+    String(value)
+      .replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')
+      .slice(0, 1000);
+  const fields = (bag) =>
+    Object.entries(bag || {})
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, value]) => `${safe(key)}=${safe(JSON.stringify(value))}`)
+      .join(' ');
+  for (const trace of traces) {
+    console.log(`trace ${safe(trace.id)}`);
+    if (!trace.spans.length && !trace.events.length) console.log('  (no spans or events recorded)');
+    const nodes = new Map(trace.spans.map((span) => [span.span_id, span]));
+    const visited = new Set();
+    const emitted = new Set();
+    // Iterative traversal also tolerates malformed cycles and very deep traces.
+    const roots = trace.spans.filter((span) => !nodes.has(span.parent_span_id));
+    const render = (root) => {
+      const stack = [{ span: root, depth: 1 }];
+      while (stack.length) {
+        const { span, depth } = stack.pop();
+        if (visited.has(span.span_id)) continue;
+        visited.add(span.span_id);
+        const indent = '  '.repeat(Math.min(depth, 32));
+        const status = span.ended_at && span.status ? span.status : 'incomplete';
+        const duration = span.ended_at
+          ? `${Math.max(0, Date.parse(span.ended_at) - Date.parse(span.started_at))}ms`
+          : 'open';
+        console.log(
+          `${indent}${safe(span.component)} [${safe(status)}] ${duration} span=${safe(span.span_id)} ${fields(span.attrs)}`.trimEnd()
+        );
+        for (const event of trace.events.filter((event) => event.span_id === span.span_id)) {
+          emitted.add(event.record_id);
+          console.log(`${indent}  · ${safe(event.event)} ${fields(event.fields)}`.trimEnd());
+        }
+        const children = trace.spans.filter((child) => child.parent_span_id === span.span_id);
+        for (const child of children.reverse()) stack.push({ span: child, depth: depth + 1 });
+      }
+    };
+    for (const span of roots) render(span);
+    for (const span of trace.spans)
+      if (!visited.has(span.span_id)) {
+        console.log('  (unlinked/cyclic spans)');
+        render(span);
+      }
+    for (const event of trace.events)
+      if (!emitted.has(event.record_id))
+        console.log(
+          `  · ${safe(event.event)} (missing span ${safe(event.span_id)}) ${fields(event.fields)}`.trimEnd()
+        );
+    if (trace.truncated) console.log('  (display truncated at 10000 records per table)');
+  }
+  return 0;
+}
+
 function readHistory() {
   if (!existsSync(historyFile)) return [];
   const lines = readFileSync(historyFile, 'utf8').split(/\r?\n/).filter(Boolean);
@@ -639,6 +774,9 @@ try {
   if (args.length === 1 && args[0] === 'address') {
     locked(args);
     process.exit(address());
+  }
+  if (args[0] === 'doctor' && args[1] === 'trace') {
+    process.exit(doctorTrace(args.slice(2)));
   }
   if (args.length === 1 && args[0] === 'doctor') {
     locked(args);

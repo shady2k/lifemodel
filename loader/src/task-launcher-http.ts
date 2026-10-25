@@ -53,7 +53,11 @@ export class TaskJsonClient {
         (signal) => this.attempt(path, body, signal),
         this.timeoutMs,
         // The once-only start contract deliberately remains stricter than transport safety.
-        { retry: path !== '/task/start', hardStopAt: this.hardStopAt, signal }
+        {
+          retry: path !== '/task/start' && path !== '/task/trace',
+          hardStopAt: this.hardStopAt,
+          signal,
+        }
       );
     } catch (error) {
       if (error instanceof ConnectionFailure)

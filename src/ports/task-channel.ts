@@ -1,5 +1,6 @@
 /** Core-only task channel. Never exposed through PluginPrimitives. */
 import type { TaskProfile } from './tasks.js';
+import type { TraceSpan } from './observability.js';
 
 /** Locators only; discovery is not a start grant. */
 export interface TaskLaunchIdentity {
@@ -8,6 +9,8 @@ export interface TaskLaunchIdentity {
   readonly launchId: string;
 }
 export interface TaskBriefing extends TaskLaunchIdentity {
+  readonly traceId: string;
+  readonly parentSpanId: string | null;
   readonly briefing: string;
   readonly harness: string;
   readonly profile: TaskProfile;
@@ -29,7 +32,6 @@ export interface TaskChannelProof {
 interface TerminalObjects {
   readonly summary: string;
   readonly resultObjectId: string | null;
-  readonly logObjectId: string | null;
   readonly artifactObjectIds: readonly string[];
 }
 /** Semantic outcome only. Object contents and URLs never belong on this channel. */
@@ -98,6 +100,8 @@ export interface TaskMailbox {
   readIdentity(proof: TaskChannelProof, signal?: AbortSignal): Promise<TaskLaunchIdentity>;
   /** Same live authority plus the exact won start claim and projection. */
   readBriefing(proof: TaskChannelProof, signal?: AbortSignal): Promise<TaskBriefing>;
+  /** Disposable trace authority. Must not exclusively lock task or launch rows. */
+  readTraceAuthority?(proof: TaskChannelProof, signal?: AbortSignal): Promise<TaskBriefing>;
   append(
     frame: TaskChannelFrame,
     proof: TaskChannelProof,
@@ -183,14 +187,13 @@ export function validateTaskChannelFrame(value: unknown): TaskChannelFrame {
         'outcome',
         'summary',
         'resultObjectId',
-        'logObjectId',
         'artifactObjectIds',
         ...(failed ? ['reasonCode'] : []),
       ]) ||
       (failed &&
         (typeof payload['reasonCode'] !== 'string' || !CODE.test(payload['reasonCode']))) ||
       !line(payload['summary']) ||
-      ![payload['resultObjectId'], payload['logObjectId']].every((v) => v === null || id(v)) ||
+      !(payload['resultObjectId'] === null || id(payload['resultObjectId'])) ||
       !Array.isArray(payload['artifactObjectIds']) ||
       payload['artifactObjectIds'].length > 64 ||
       !payload['artifactObjectIds'].every(id) ||
@@ -204,6 +207,70 @@ export function validateTaskChannelFrame(value: unknown): TaskChannelFrame {
     const encoded = JSON.stringify(value);
     if (Buffer.byteLength(encoded) > 65_536) return invalid();
     return JSON.parse(encoded) as TaskChannelFrame;
+  } catch {
+    return invalid();
+  }
+}
+
+/** Best-effort observation, not a durable step/terminal frame. */
+export interface TaskTraceFrame extends TaskLaunchIdentity {
+  readonly span: TraceSpan;
+}
+export function validateTaskTraceFrame(value: unknown): TaskTraceFrame {
+  const invalid = (): never => {
+    throw new TaskChannelError(400, 'invalid_frame');
+  };
+  if (
+    !object(value) ||
+    !keys(value, ['taskId', 'attemptId', 'launchId', 'span']) ||
+    !id(value['taskId']) ||
+    !id(value['attemptId']) ||
+    !id(value['launchId']) ||
+    !object(value['span'])
+  )
+    return invalid();
+  const span = value['span'];
+  if (
+    !keys(span, [
+      'traceId',
+      'spanId',
+      'parentSpanId',
+      'component',
+      'startedAt',
+      'endedAt',
+      'status',
+      'attrs',
+    ]) ||
+    !id(span['traceId']) ||
+    !id(span['spanId']) ||
+    !(span['parentSpanId'] === null || id(span['parentSpanId'])) ||
+    typeof span['component'] !== 'string' ||
+    !/^task(?:[.][a-z_]+)?$/.test(span['component']) ||
+    typeof span['startedAt'] !== 'string' ||
+    !Number.isFinite(Date.parse(span['startedAt'])) ||
+    !(
+      span['endedAt'] === null ||
+      (typeof span['endedAt'] === 'string' && Number.isFinite(Date.parse(span['endedAt'])))
+    ) ||
+    ![null, 'ok', 'failed', 'suppressed'].includes(span['status'] as null | string) ||
+    (span['endedAt'] === null) !== (span['status'] === null) ||
+    !object(span['attrs'])
+  )
+    return invalid();
+  try {
+    const encoded = JSON.stringify(value);
+    if (Buffer.byteLength(encoded) > 32768 || Object.keys(span['attrs']).length > 32)
+      return invalid();
+    for (const [key, field] of Object.entries(span['attrs'])) {
+      if (
+        key.length > 128 ||
+        (!['string', 'number', 'boolean'].includes(typeof field) && field !== null) ||
+        (typeof field === 'string' && Buffer.byteLength(field) > 8192) ||
+        (typeof field === 'number' && !Number.isFinite(field))
+      )
+        return invalid();
+    }
+    return JSON.parse(encoded) as TaskTraceFrame;
   } catch {
     return invalid();
   }

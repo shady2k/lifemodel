@@ -1,9 +1,10 @@
 /** One process, one start transition, one immutable semantic terminal frame. */
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, writeFile, open, opendir, lstat } from 'node:fs/promises';
+import { mkdir, writeFile, opendir, lstat } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { TaskJsonClient, LauncherError, type TaskEndpoint } from './task-launcher-http.js';
 import { runStorageCli, storageNameValid } from './storage-cli.js';
+import { createTaskTraceChannel } from './task-trace-channel.js';
 import { createRegisteredHarness } from './task-harness-factory.js';
 import type { TaskHarness, TaskHarnessEvent, TaskHarnessResult } from './task-harness.js';
 
@@ -18,7 +19,6 @@ interface Terminal {
   outcome: 'succeeded' | 'failed' | 'aborted';
   summary: string;
   resultObjectId: string | null;
-  logObjectId: string | null;
   artifactObjectIds: string[];
   reasonCode?: string;
 }
@@ -29,7 +29,7 @@ export interface LauncherOptions {
   signal?: AbortSignal;
   startupWindowMs?: number;
   harness?: (onEvent: (event: TaskHarnessEvent) => Promise<void>) => TaskHarness;
-  diagnostic?: (code: string) => void;
+  diagnostic?: (code: string, context?: { taskId?: string; traceId?: string }) => void;
 }
 function endpoint(env: NodeJS.ProcessEnv, service: string): TaskEndpoint {
   const prefix = `LIFEMODEL_TASK_${service}`;
@@ -82,7 +82,7 @@ async function storage(
 }
 async function save(
   name: string,
-  role: 'result' | 'log' | 'artifact',
+  role: 'result' | 'artifact',
   env: NodeJS.ProcessEnv,
   cwd: string,
   launchId: string
@@ -183,17 +183,24 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
   let harness: TaskHarness | undefined;
   let sequence = 0;
   let started = false;
-  let log: Awaited<ReturnType<typeof open>> | undefined;
-  let logName: string | undefined;
+  let trace: ReturnType<typeof createTaskTraceChannel> | undefined;
+  let traceId: string | undefined;
+  let root: Extract<TaskHarnessEvent, { type: 'trace' }>['span'] | undefined;
+  let failureSpanId: string | undefined;
+  let outputsStartedAt: string | undefined;
   let terminalAttempted = false;
   const terminal: Terminal = {
     outcome: 'failed',
     summary: 'Task could not complete',
     resultObjectId: null,
-    logObjectId: null,
     artifactObjectIds: [],
     reasonCode: 'launcher_failed',
   };
+  const diagnostic = (code: string) =>
+    options.diagnostic?.(code, {
+      ...(ids ? { taskId: ids.taskId } : {}),
+      ...(traceId ? { traceId } : {}),
+    });
   const onAbort = () => {
     void harness?.abort().catch(() => undefined);
   };
@@ -240,6 +247,23 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
   }
   async function report(): Promise<void> {
     terminalAttempted = true;
+    if (root)
+      trace?.enqueue({
+        ...root,
+        endedAt: new Date().toISOString(),
+        status:
+          terminal.outcome === 'succeeded'
+            ? 'ok'
+            : terminal.outcome === 'aborted'
+              ? 'suppressed'
+              : 'failed',
+        attrs: {
+          ...root.attrs,
+          outcome: terminal.outcome,
+          reasonCode: terminal.reasonCode ?? null,
+          failureSpanId: failureSpanId ?? null,
+        },
+      });
     await send('terminal', terminal);
   }
   try {
@@ -300,20 +324,48 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
     await mkdir(join(cwd, 'outputs'), { mode: 0o700 });
     const directory = `launcher_${randomUUID()}`;
     await mkdir(join(cwd, directory), { mode: 0o700 });
-    logName = `${directory}/log.jsonl`;
-    log = await open(join(cwd, logName), 'wx', 0o600);
+    traceId = typeof briefing['traceId'] === 'string' ? briefing['traceId'] : ids.taskId;
+    trace = createTaskTraceChannel({
+      endpoint: endpoint(options.env, 'CHANNEL'),
+      env: options.env,
+      identity: ids,
+      traceId,
+    });
+    root = {
+      spanId: ids.launchId,
+      parentSpanId: typeof briefing['parentSpanId'] === 'string' ? briefing['parentSpanId'] : null,
+      component: 'task',
+      startedAt: new Date().toISOString(),
+      endedAt: null,
+      status: null,
+      attrs: {
+        taskId: ids.taskId,
+        launchId: ids.launchId,
+        harness: typeof briefing['harness'] === 'string' ? briefing['harness'] : '',
+      },
+    };
+    trace.enqueue(root);
+    const launchId = ids.launchId;
     let eventCount = 0;
     const onEvent = async (event: TaskHarnessEvent): Promise<void> => {
+      if (event.type === 'trace') {
+        trace?.enqueue({
+          ...event.span,
+          spanId: `${launchId}_${event.span.spanId}`,
+          parentSpanId: event.span.parentSpanId
+            ? `${launchId}_${event.span.parentSpanId}`
+            : launchId,
+        });
+        return;
+      }
       if (++eventCount > 10_000) throw new LauncherError('event_limit');
-      // Payload text/tool output never enters launcher diagnostics or the channel.
+      // Progress remains fixed-code diagnostics; private content uses only traces.
       const line =
         event.type === 'step'
           ? 'Task is working'
           : event.type === 'tool'
             ? 'Task is using a tool'
             : 'Harness reported an error';
-      // Fixed fields also prevent unbounded or secret-bearing harness payloads.
-      await log?.write(`${JSON.stringify({ type: event.type, line })}\n`);
       await send('step', { line });
     };
     const modelConfig = endpoint(options.env, 'MODEL');
@@ -344,13 +396,11 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       text: `${outputInstructions(cwd)}\n\n${briefing['briefing']}`,
       model: 'lifemodel/task',
     });
-    await log.sync();
-    await log.close();
-    log = undefined;
+    failureSpanId = result.failureSpanId ? `${ids.launchId}_${result.failureSpanId}` : undefined;
+    outputsStartedAt = new Date().toISOString();
     const resultName = `${directory}/result.txt`;
     await writeFile(join(cwd, resultName), result.result, { flag: 'wx', mode: 0o600 });
     terminal.resultObjectId = await save(resultName, 'result', options.env, cwd, ids.launchId);
-    terminal.logObjectId = await save(logName, 'log', options.env, cwd, ids.launchId);
     if (result.outcome === 'succeeded') {
       await collectOutputs(options.env, cwd, ids.launchId);
       terminal.artifactObjectIds = await artifacts(options.env, cwd);
@@ -378,36 +428,36 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
         : options.signal?.aborted
           ? 'launcher_aborted'
           : 'launcher_failed';
-    options.diagnostic?.(code);
+    if (root && ids) {
+      failureSpanId = `${ids.launchId}_launcher`;
+      trace?.enqueue({
+        spanId: failureSpanId,
+        parentSpanId: ids.launchId,
+        component: 'task.launcher',
+        startedAt: outputsStartedAt ?? root.startedAt,
+        endedAt: new Date().toISOString(),
+        status: 'failed',
+        attrs: { reasonCode: code },
+      });
+    }
+    diagnostic(code);
     if (error instanceof LauncherError && error.connectionAttempts !== undefined)
-      options.diagnostic?.(`connection_attempts=${String(error.connectionAttempts)}`);
+      diagnostic(`connection_attempts=${String(error.connectionAttempts)}`);
     if (!terminalAttempted) {
       terminal.outcome = 'failed';
       terminal.reasonCode = code;
-      if (log) {
-        await log.sync().catch(() => undefined);
-        await log.close().catch(() => undefined);
-        log = undefined;
-      }
-      if (started && ids && logName && !terminal.logObjectId) {
-        try {
-          terminal.logObjectId = await save(logName, 'log', options.env, cwd, ids.launchId);
-        } catch {
-          /* best report retains only durable marks */
-        }
-      }
       try {
         await report();
       } catch (reportError) {
-        options.diagnostic?.('terminal_unavailable');
+        diagnostic('terminal_unavailable');
         if (reportError instanceof LauncherError && reportError.connectionAttempts !== undefined)
-          options.diagnostic?.(`connection_attempts=${String(reportError.connectionAttempts)}`);
+          diagnostic(`connection_attempts=${String(reportError.connectionAttempts)}`);
       }
     }
     return 1;
   } finally {
     options.signal?.removeEventListener('abort', onAbort);
-    await log?.close().catch(() => undefined);
+    trace?.close();
     channel?.close();
     model?.close();
   }

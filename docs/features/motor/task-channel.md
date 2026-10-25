@@ -18,8 +18,15 @@ A0 precreates the Secret; the loader can read/update only that name in the
 application namespace. It cannot create arbitrary application Secrets.
 
 Each request carries `Authorization: Bearer <lifemodel-task-channel token>`.
-The launcher must reread its projected token for every request, verify the instance
-CA, and replay the same immutable message after an ambiguous response. No token
+The launcher must reread its projected token for every request and verify the instance
+CA. Mailbox frames replay the same immutable message after an ambiguous response;
+trace frames are best effort and are never replayed.
+Trace intake has its own authentication worker and authority worker, with at
+most two admitted requests. Its physically separate one-connection authority
+pool uses a 250 ms deadline and the active-holder fence; it never borrows the
+terminal channel pool. Trace storage uses a separate unfenced one-connection
+pool. Trace authority or storage waits therefore cannot occupy terminal
+mailbox workers or SQL connections. No token
 or positive identity result is cached. TokenReview must return the channel audience,
 exact task service account, and bound Pod name/UID. Fresh Pod/Job GETs validate
 nondeletion, controller ownership, actual controlled template hash, launch label
@@ -49,7 +56,9 @@ projected-token reread and fresh live Kubernetes identity described above:
   gateway's once-only `POST /task/start`.
 - After its timely won start, the launcher reads `GET /task/briefing` (with the
   [startup connection-only retries](task-harness.md) when no connection opened). It
-  returns exactly `{taskId,attemptId,launchId,briefing,profile}`, where profile has
+  returns `{taskId,attemptId,launchId,briefing,profile,harness,traceId,parentSpanId}`,
+  where `traceId` is the stable task trace and `parentSpanId` links the launch root
+  to its recorded parent (or is null). The accepted resource profile has
   `id`, `revision`, `timeoutSeconds`, `cpuMillis` and `memoryBytes`. This requires
   the exact won Pod/Job start claim and projection, plus current active/wrapping
   intent and matching allocation. A replacement/loser Pod cannot read it. The
@@ -112,6 +121,38 @@ already stored frame can replay its ACK while current identity/intent still
 permits access. Terminal/revoked task authority does not become reusable merely
 because a caller presents an old message ID.
 
+## Disposable task trace route
+
+`POST /task/trace` carries `{taskId,attemptId,launchId,span}`. The span contains
+`traceId`, `spanId`, `parentSpanId`, `component`, `startedAt`, `endedAt`, `status`
+and `attrs`. It uses the channel audience and current bound launch authority,
+but is not a mailbox event. A 200 `{accepted:true}` acknowledges trace intake,
+not durable task work. Trace intake emits no Signal and owns no mailbox sequence,
+terminal report, retry or finalization state. Trace authentication and authority
+have independent single-worker queues and admit at most two requests. Their
+buffered-byte allowance is separate from mailbox intake. Production trace
+authority has its own one-connection fenced pool with a 250 ms operation bound;
+it reads task/launch rows without the exclusive locks needed by terminal append.
+Shared canonical authority checks still deny stale, revoked or unclaimed pods.
+The unfenced observation writer uses another one-connection pool. The trace
+route never falls back to the briefing reader's exclusive locks.
+
+The launch root span ID is `launchId`; its parent comes from the won briefing.
+Harness child IDs and their non-null parent IDs are namespaced as
+`launchId_rawSpanId`. A null harness parent binds to the launch root. A failed
+root preserves the namespaced `attrs.failureSpanId` of the required tool that
+failed, even when a later tool succeeded. Tool commands, bounded output tails,
+model usage and completion text are trace observations, not authority or results.
+
+Launcher intake is capped at 2048 observations per run, 128 queued spans and
+30000 encoded bytes per span. Oversized or excess observations are dropped.
+The launcher scrubs projected token contents before sending. It uses a separate
+500 ms trace client and no connection or ACK replay. A trace failure never blocks
+the terminal report or changes the semantic outcome. After terminal settlement,
+the independent trace drain closes within one second; remaining spans may be
+lost. There is no fixed `log.jsonl` journal or log object upload. See
+[observability](observability.md) for the trace storage and content policy.
+
 ## Semantic terminal report and finalizer handoff
 
 Use `kind: "terminal"` and the same frame identity fields. Payload:
@@ -121,14 +162,14 @@ Use `kind: "terminal"` and the same frame identity fields. Payload:
   "outcome": "succeeded",
   "summary": "The requested report is ready",
   "resultObjectId": "object_result_id",
-  "logObjectId": "object_log_id",
   "artifactObjectIds": ["object_attachment_id"]
 }
 ```
 
 `outcome` is `succeeded`, `failed`, or `aborted`. Failed requires a `reasonCode`
 matching `[a-z][a-z0-9_]{0,63}`; other outcomes do not carry it. Summary follows
-the step-line bound. Result/log IDs are an object ID or null. Artifacts are at
+the step-line bound. `resultObjectId` is an object ID or null. `logObjectId` is
+not part of the terminal protocol. Artifacts are at
 most 64 distinct object IDs. Only IDs are allowed: no object bytes, signed URLs,
 stdout or log chunks. The launcher marks those objects through storage before
 reporting their IDs. A terminal report is unique per attempt. Semantic success

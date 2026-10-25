@@ -6,6 +6,7 @@ import {
 } from '../../src/core/task-workbench.js';
 import { createStartTaskTool } from '../../src/layers/cognition/tools/core/start-task.js';
 import { TASK_PROFILES } from '../../src/ports/task-profiles.js';
+import { withTraceContext } from '../../src/core/trace-context.js';
 import { TaskRegistryError, type TaskRecord, type TaskService } from '../../src/ports/tasks.js';
 
 const digest = `sha256:${'a'.repeat(64)}`;
@@ -16,7 +17,12 @@ const request = {
   profile: TASK_PROFILES['small']!,
   imageRevision: digest,
 };
-const record = { id: 'task-one', state: 'queued' } as TaskRecord;
+const record = {
+  id: 'task-one',
+  traceId: 'trace-one',
+  parentSpanId: null,
+  state: 'queued',
+} as TaskRecord;
 const servers: Server[] = [];
 afterEach(async () => {
   vi.useRealTimers();
@@ -41,6 +47,36 @@ async function registryProbe(handler: RequestListener) {
 }
 
 describe('task workbench readiness', () => {
+  it('captures the deciding trace and span without adding trace arguments to the tool', async () => {
+    const applyStartTask = vi.fn(async () => record);
+    const tool = createStartTaskTool({
+      imageRevision: digest,
+      readByLaunchKey: async () => null,
+      applyStartTask,
+    });
+    await withTraceContext({ traceId: 'incoming-signal', spanId: 'deciding-span' }, () =>
+      tool.execute({ briefing: request.briefing, profile: 'small' }, context)
+    );
+    expect(applyStartTask).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          traceId: 'incoming-signal',
+          parentSpanId: 'deciding-span',
+        }),
+      })
+    );
+    await tool.execute({ briefing: request.briefing, profile: 'small' }, context);
+    expect(applyStartTask).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          traceId: context.correlationId,
+          parentSpanId: context.correlationId,
+        }),
+      })
+    );
+    expect(tool.parameters.map((parameter) => parameter.name)).toEqual(['briefing', 'profile']);
+  });
+
   it('checks only the pinned local manifest using an anonymous HEAD', async () => {
     const seen: unknown[] = [];
     const local = await registryProbe((req, res) => {

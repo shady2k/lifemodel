@@ -6,7 +6,7 @@ import type { Socket } from 'node:net';
 import { createHash } from 'node:crypto';
 import { TaskJsonClient } from '../../loader/src/task-launcher-http.js';
 import { createTaskModelRelay } from '../../loader/src/task-model-relay.js';
-import { mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runTaskLauncher, type LauncherOptions } from '../../loader/src/task-launcher.js';
@@ -14,6 +14,7 @@ import {
   ScriptedTaskHarness,
   type TaskBriefing,
   type TaskHarnessResult,
+  type TaskHarnessTraceSpan,
 } from '../../loader/src/task-harness.js';
 import {
   createStorageCertificate,
@@ -48,16 +49,21 @@ interface Frame {
     summary?: string;
     line?: string;
     resultObjectId?: string | null;
-    logObjectId?: string | null;
     artifactObjectIds?: string[];
   };
+}
+interface TraceFrame {
+  taskId: string;
+  attemptId: string;
+  launchId: string;
+  span: TaskHarnessTraceSpan & { traceId: string };
 }
 interface StoredObject {
   id: string;
   name: string;
   size: number;
   sha256: string;
-  mark: 'result' | 'log' | 'artifact' | null;
+  mark: 'result' | 'artifact' | null;
   bytes: Buffer;
 }
 interface Call {
@@ -101,6 +107,8 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
   let expectedTokens: Record<Service, string>;
   let objects: Map<string, StoredObject>;
   let terminalFrames: Frame[];
+  let traceFrames: TraceFrame[];
+  let traceMode: 'ok' | 'timeout' | 'lost_ack';
   let reports: Map<string, Frame>;
   let durableAtReport: string[][];
   let diagnostics: string[];
@@ -134,6 +142,8 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     expectedTokens = { ...TOKENS };
     objects = new Map();
     terminalFrames = [];
+    traceFrames = [];
+    traceMode = 'ok';
     reports = new Map();
     durableAtReport = [];
     diagnostics = [];
@@ -248,7 +258,23 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
         json(res, 403, {});
         return;
       }
-      json(res, briefingStatus, { ...IDS, briefing: BRIEFING, harness: 'opencode' });
+      json(res, briefingStatus, {
+        ...IDS,
+        briefing: BRIEFING,
+        harness: 'opencode',
+        traceId: IDS.taskId,
+        parentSpanId: null,
+      });
+      return;
+    }
+    if (service === 'channel' && call.method === 'POST' && call.path === '/task/trace') {
+      traceFrames.push(JSON.parse(body.toString()) as TraceFrame);
+      if (traceMode === 'timeout') return;
+      if (traceMode === 'lost_ack') {
+        res.destroy();
+        return;
+      }
+      json(res, 200, { accepted: true });
       return;
     }
     if (service === 'channel' && call.method === 'POST' && call.path === '/task/events') {
@@ -534,7 +560,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     }
   );
 
-  it('takes one start, fetches the briefing after it, and stores exact result/log bytes and artifact IDs', async () => {
+  it('takes one start, fetches the briefing after it, and stores only result bytes and artifact IDs', async () => {
     artifactPages = [
       [artifact('artifact_a'), artifact('unmarked', null)],
       [artifact('artifact_b')],
@@ -567,30 +593,202 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
         outcome: 'succeeded',
         summary: 'Task result is ready',
         resultObjectId: 'object_1',
-        logObjectId: 'object_2',
         artifactObjectIds: ['artifact_a', 'artifact_b'],
       },
     });
     expect(objects.get('object_1')).toMatchObject({ bytes: Buffer.from(RESULT), mark: 'result' });
-    expect(objects.get('object_2')).toMatchObject({
-      bytes: Buffer.from(`${JSON.stringify({ type: 'step', line: 'Task is working' })}\n`),
-      mark: 'log',
-    });
-    expect(durableAtReport).toEqual([['object_1', 'object_2']]);
+    expect(objects.size).toBe(1);
+    expect(report.payload).not.toHaveProperty('logObjectId');
+    expect(durableAtReport).toEqual([['object_1']]);
     const storageCalls = calls.filter((call) => call.service === 'storage');
-    expect(storageCalls.map((call) => call.method)).toEqual([
-      'PUT',
-      'POST',
-      'PUT',
-      'POST',
-      'GET',
-      'GET',
-    ]);
+    expect(storageCalls.map((call) => call.method)).toEqual(['PUT', 'POST', 'GET', 'GET']);
     expect(
       new Set(storageCalls.filter((call) => call.method === 'PUT').map((call) => call.path)).size
-    ).toBe(2);
+    ).toBe(1);
     expect(diagnostics).toEqual([]);
   });
+
+  it('preserves failed tool evidence and its failure span after a later successful tool', async () => {
+    const startedAt = new Date().toISOString();
+    const spans: TaskHarnessTraceSpan[] = [
+      {
+        spanId: 'model',
+        parentSpanId: null,
+        component: 'task.model',
+        startedAt,
+        endedAt: startedAt,
+        status: 'ok',
+        attrs: { model: 'lifemodel/task', stopReason: 'end_turn', inputTokens: 12 },
+      },
+      {
+        spanId: 'failed_tool',
+        parentSpanId: 'model',
+        component: 'task.tool',
+        startedAt,
+        endedAt: startedAt,
+        status: 'failed',
+        attrs: {
+          command: `private-command ${TOKENS.model} ${TOKENS.channel} ${TOKENS.storage}`,
+          outputTail: `private-output ${TOKENS.storage}`,
+          exitCode: 7,
+        },
+      },
+      {
+        spanId: 'successful_tool',
+        parentSpanId: 'model',
+        component: 'task.tool',
+        startedAt,
+        endedAt: startedAt,
+        status: 'ok',
+        attrs: { command: 'later-command', outputTail: 'later-output', exitCode: 0 },
+      },
+    ];
+    expect(
+      await run({
+        events: spans.map((span) => ({ type: 'trace' as const, span })),
+        terminal: {
+          outcome: 'failed',
+          result: '',
+          reasonCode: 'required_tool_failed',
+          failureSpanId: 'failed_tool',
+        },
+      })
+    ).toBe(1);
+    await expect
+      .poll(() =>
+        traceFrames.some(
+          (frame) => frame.span.spanId === IDS.launchId && frame.span.endedAt !== null
+        )
+      )
+      .toBe(true);
+    expect(traceFrames).toHaveLength(5); // Task start/end, model and two tools.
+    for (const frame of traceFrames) {
+      expect(Object.keys(frame).sort()).toEqual(['attemptId', 'launchId', 'span', 'taskId']);
+      expect(frame).toMatchObject({ ...IDS, span: { traceId: IDS.taskId } });
+      expect(Buffer.byteLength(JSON.stringify(frame.span))).toBeLessThanOrEqual(30_000);
+    }
+    expect(
+      traceFrames.find((frame) => frame.span.spanId === `${IDS.launchId}_failed_tool`)?.span
+    ).toMatchObject({
+      parentSpanId: `${IDS.launchId}_model`,
+      component: 'task.tool',
+      status: 'failed',
+      attrs: { exitCode: 7, command: expect.stringContaining('private-command') },
+    });
+    expect(
+      traceFrames.find((frame) => frame.span.spanId === `${IDS.launchId}_successful_tool`)?.span
+    ).toMatchObject({
+      parentSpanId: `${IDS.launchId}_model`,
+      status: 'ok',
+      attrs: { exitCode: 0 },
+    });
+    expect(
+      traceFrames.find((frame) => frame.span.spanId === `${IDS.launchId}_model`)?.span
+    ).toMatchObject({ parentSpanId: IDS.launchId, status: 'ok' });
+    const root = traceFrames.find(
+      (frame) => frame.span.spanId === IDS.launchId && frame.span.endedAt !== null
+    )?.span;
+    expect(root).toMatchObject({
+      parentSpanId: null,
+      component: 'task',
+      status: 'failed',
+      attrs: {
+        outcome: 'failed',
+        reasonCode: 'required_tool_failed',
+        failureSpanId: `${IDS.launchId}_failed_tool`,
+      },
+    });
+    for (const token of Object.values(TOKENS))
+      expect(JSON.stringify(traceFrames)).not.toContain(token);
+    expect(terminal().payload).toMatchObject({
+      outcome: 'failed',
+      reasonCode: 'required_tool_failed',
+    });
+    expect(terminal().sequence).toBe(1); // Trace frames never occupy mailbox sequence numbers.
+    expect(calls.filter((call) => call.path === '/task/events')).toHaveLength(1);
+    expect(objects.size).toBe(1);
+    expect(diagnostics).toEqual([]);
+  });
+
+  it('scrubs projected credential fragments at text boundaries and nested trace fields', async () => {
+    const startedAt = new Date().toISOString();
+    const spans: TaskHarnessTraceSpan[] = Object.entries(TOKENS).map(([service, token]) => ({
+      spanId: `credential_${service}`,
+      parentSpanId: null,
+      component: 'task.tool',
+      startedAt,
+      endedAt: startedAt,
+      status: 'ok',
+      attrs: {
+        command: `safe-command ${token.slice(0, 20)}`,
+        outputTail: `${token.slice(-20)} safe-output`,
+        nested: [{ quoted: `"${token}"`, [token]: token }],
+      },
+    }));
+    expect(
+      await run({
+        events: spans.map((span) => ({ type: 'trace' as const, span })),
+        terminal: { outcome: 'succeeded', result: RESULT },
+      })
+    ).toBe(0);
+    await expect
+      .poll(() =>
+        traceFrames.some(
+          (frame) => frame.span.spanId === IDS.launchId && frame.span.endedAt !== null
+        )
+      )
+      .toBe(true);
+    expect(traceFrames).toHaveLength(5);
+    for (const [service, token] of Object.entries(TOKENS)) {
+      const frame = traceFrames.find(
+        (candidate) => candidate.span.spanId === `${IDS.launchId}_credential_${service}`
+      );
+      expect(frame?.span.attrs).toEqual({
+        command: 'safe-command [REDACTED]',
+        outputTail: '[REDACTED] safe-output',
+        nested: [{ quoted: '"[REDACTED]"', '[REDACTED]': '[REDACTED]' }],
+      });
+      const encoded = JSON.stringify(traceFrames);
+      expect(encoded).not.toContain(token);
+      expect(encoded).not.toContain(token.slice(0, 20));
+      expect(encoded).not.toContain(token.slice(-20));
+    }
+    expect(diagnostics).toEqual([]);
+    expect(terminal().payload.outcome).toBe('succeeded');
+  });
+
+  it.each(['timeout', 'lost_ack'] as const)(
+    'does not let a trace %s block or retry a semantic terminal report',
+    async (mode) => {
+      traceMode = mode;
+      const traceStarted = deferred();
+      let activeTraceRequests = 0;
+      let terminalWhileTraceOpen = false;
+      afterCall = async (call) => {
+        if (call.path === '/task/trace') traceStarted.resolve();
+        if (call.service === 'storage' && call.method === 'POST') await traceStarted.promise;
+        if (call.path === '/task/events' && JSON.parse(call.body.toString()).kind === 'terminal')
+          terminalWhileTraceOpen = activeTraceRequests > 0;
+      };
+      const channelServer = servers[1]!;
+      channelServer.on('request', (req, res) => {
+        if (req.url !== '/task/trace') return;
+        activeTraceRequests++;
+        res.on('close', () => activeTraceRequests--);
+      });
+      expect(await run({ events: [], terminal: { outcome: 'succeeded', result: RESULT } })).toBe(0);
+      expect(terminal().payload.outcome).toBe('succeeded');
+      expect(terminalFrames).toHaveLength(1);
+      if (mode === 'timeout') expect(terminalWhileTraceOpen).toBe(true);
+      expect(diagnostics).toEqual([]);
+      // The trace client has its own 500 ms deadline and at most a one-second
+      // post-terminal drain. Its timed-out/lost frames are never ACK-replayed.
+      await expect.poll(() => traceFrames.length, { timeout: 2000 }).toBe(2);
+      await expect.poll(() => activeTraceRequests, { timeout: 2000 }).toBe(0);
+      expect(traceFrames.map((frame) => frame.span.endedAt === null)).toEqual([true, false]);
+      expect(calls.filter((call) => call.path === '/task/events')).toHaveLength(1);
+    }
+  );
 
   it.each(['409', 'timeout', 'lost_ack'] as const)(
     'never retries an uncertain %s start or enters the harness',
@@ -608,7 +806,6 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
         summary: 'Task could not complete',
         reasonCode: 'start_lost',
         resultObjectId: null,
-        logObjectId: null,
         artifactObjectIds: [],
       });
       expect(diagnostics).toEqual(
@@ -630,31 +827,47 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     });
   });
 
-  it('does not send the terminal report until the log mark response is durable', async () => {
-    const markingLog = deferred();
+  it('does not send the terminal report until the result mark response is durable', async () => {
+    const markingResult = deferred();
     const commitMark = deferred();
     beforeMark = async (object) => {
-      if (object.name === 'log.jsonl') {
-        markingLog.resolve();
+      if (object.name === 'result.txt') {
+        markingResult.resolve();
         await commitMark.promise;
       }
     };
     const execution = run();
     try {
-      await markingLog.promise;
+      await markingResult.promise;
+      await expect
+        .poll(() => traceFrames.some((frame) => frame.span.spanId === IDS.launchId))
+        .toBe(true);
       expect(terminalFrames).toEqual([]);
-      expect(objects.get('object_1')?.mark).toBe('result');
-      expect(objects.get('object_2')?.mark).toBeNull();
+      expect(objects.get('object_1')?.mark).toBeNull();
+      const roots = traceFrames.filter((frame) => frame.span.spanId === IDS.launchId);
+      expect(roots).toHaveLength(1);
+      expect(roots[0]?.span).toMatchObject({ endedAt: null, status: null });
     } finally {
       commitMark.resolve();
     }
     expect(await execution).toBe(0);
-    expect(durableAtReport).toEqual([['object_1', 'object_2']]);
+    expect(durableAtReport).toEqual([['object_1']]);
+    await expect
+      .poll(() =>
+        traceFrames.some(
+          (frame) => frame.span.spanId === IDS.launchId && frame.span.endedAt !== null
+        )
+      )
+      .toBe(true);
+    expect(
+      traceFrames.find((frame) => frame.span.spanId === IDS.launchId && frame.span.endedAt !== null)
+        ?.span.status
+    ).toBe('ok');
   });
 
   it.each([
     ['provider error', 'provider_error'],
-    ['unresolved required tool error', 'unresolved_tool_failure'],
+    ['unresolved required tool error', 'required_tool_failed'],
   ])(
     'preserves a semantic failed result for %s rather than treating harness completion as success',
     async (_label, reasonCode) => {
@@ -667,11 +880,10 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
         summary: 'Task could not complete',
         reasonCode,
         resultObjectId: 'object_1',
-        logObjectId: 'object_2',
         artifactObjectIds: [],
       });
       expect(objects.get('object_1')?.bytes.toString()).toBe(RESULT);
-      expect(durableAtReport).toEqual([['object_1', 'object_2']]);
+      expect(durableAtReport).toEqual([['object_1']]);
     }
   );
 
@@ -691,10 +903,9 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       outcome: 'aborted',
       summary: 'Task was aborted',
       resultObjectId: 'object_1',
-      logObjectId: 'object_2',
       artifactObjectIds: [],
     });
-    expect(durableAtReport).toEqual([['object_1', 'object_2']]);
+    expect(durableAtReport).toEqual([['object_1']]);
   });
 
   it('replays the identical terminal frame after a stored report loses its ACK, not a second outcome', async () => {
@@ -705,7 +916,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     expect(reports.size).toBe(1);
     expect(startCalls()).toHaveLength(1);
     expect(harnessStarts).toHaveLength(1);
-    expect(objects.size).toBe(2);
+    expect(objects.size).toBe(1);
   });
 
   it('does not exit successfully if every terminal ACK is lost, even if the channel stored the outcome', async () => {
@@ -733,8 +944,18 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
         call.path === '/task/events' &&
         JSON.parse(call.body.toString()).kind === 'terminal' &&
         terminalCalls++ === 0
-      )
+      ) {
+        // Finish the independent trace request before changing the fake's sole
+        // accepted token. Real token rotation overlaps validity windows.
+        await expect
+          .poll(() =>
+            traceFrames.some(
+              (frame) => frame.span.spanId === IDS.launchId && frame.span.endedAt !== null
+            )
+          )
+          .toBe(true);
         await rotate('channel', 'REPLAY-CHANNEL-CANARY');
+      }
     };
     expect(await run()).toBe(0);
     expect(startCalls()[0]?.authorization).toBe('Bearer ROTATED-MODEL-CANARY');
@@ -743,7 +964,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     );
     expect(
       calls.filter((call) => call.path.endsWith('/mark')).map((call) => call.authorization)
-    ).toEqual([`Bearer ${TOKENS.storage}-next`, `Bearer ${TOKENS.storage}-next-next`]);
+    ).toEqual([`Bearer ${TOKENS.storage}-next`]);
     expect(
       calls
         .filter((call) => call.path === '/task/events')
@@ -759,7 +980,6 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       outcome: 'failed',
       reasonCode: 'storage_unavailable',
       resultObjectId: null,
-      logObjectId: null,
     });
     expect(durableAtReport).toEqual([[]]);
     expect(abortCalls).toBe(1);
@@ -775,7 +995,6 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
         summary: 'Task could not complete',
         reasonCode: 'storage_mark_invalid',
         resultObjectId: null,
-        logObjectId: null,
         artifactObjectIds: [],
       });
       expect(durableAtReport).toEqual([[]]);
@@ -802,16 +1021,12 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       for (const secret of [...Object.values(TOKENS), BRIEFING, EVENT, RESULT])
         expect(publicOutput).not.toContain(secret);
       expect(objects.get('object_1')?.bytes.toString()).toBe(RESULT);
-      const logObject = objects.get('object_2')!;
-      expect(logObject.name).toBe('log.jsonl');
+      expect(objects.size).toBe(1);
       const privateDirectory = (await readdir(directory)).find((name) =>
         name.startsWith('launcher_')
       )!;
-      const storedLog = await readFile(join(directory, privateDirectory, 'log.jsonl'), 'utf8');
-      expect(logObject.bytes.toString()).toBe(storedLog);
-      expect(storedLog).toBe(`${JSON.stringify({ type: 'step', line: 'Task is working' })}\n`);
-      for (const secret of [...Object.values(TOKENS), BRIEFING, EVENT, RESULT])
-        expect(storedLog).not.toContain(secret);
+      expect(await readdir(join(directory, privateDirectory))).toEqual(['result.txt']);
+      expect(calls.some((call) => call.path.includes('log.jsonl'))).toBe(false);
     } finally {
       consoleLog.mockRestore();
       consoleError.mockRestore();

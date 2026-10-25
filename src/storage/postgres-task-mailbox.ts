@@ -7,6 +7,7 @@ import type {
   TaskMailbox,
   StoredTaskChannelFrame,
   TaskChannelProof,
+  TaskBriefing,
 } from '../ports/task-channel.js';
 import { TaskChannelError, validateTaskChannelFrame } from '../ports/task-channel.js';
 import { createFencedPostgres, StalePostgresEpochError } from './fenced-postgres.js';
@@ -34,6 +35,9 @@ interface Binding {
   slot_reserved: boolean;
   state: string;
   terminal_candidate: string | null;
+  trace_id: string;
+  parent_span_id: string | null;
+  harness: string;
   started_at: Date | null;
   profile: TaskProfile;
   wrap_grace_seconds: number;
@@ -70,7 +74,9 @@ export function createPostgresTaskMailbox(deps: {
   signal?: AbortSignal;
   operationTimeoutMs?: number;
   onAppendSettled?: () => void;
-}): TaskMailbox {
+}): TaskMailbox & {
+  readTraceAuthority(proof: TaskChannelProof, signal?: AbortSignal): Promise<TaskBriefing>;
+} {
   const timeoutMs = deps.operationTimeoutMs ?? 5_000;
   if (
     !Number.isSafeInteger(timeoutMs) ||
@@ -197,7 +203,11 @@ export function createPostgresTaskMailbox(deps: {
     )
       denied();
   }
-  async function resolveBinding(client: PoolClient, proof: TaskChannelProof): Promise<Binding> {
+  async function resolveBinding(
+    client: PoolClient,
+    proof: TaskChannelProof,
+    lock = true
+  ): Promise<Binding> {
     // Resolve authority by freshly verified Job identity, not supplied task IDs.
     const found = await client.query<{ task_id: string }>(
       'SELECT task_id FROM core.task_launches WHERE job_name=$1 AND job_uid=$2',
@@ -205,10 +215,14 @@ export function createPostgresTaskMailbox(deps: {
     );
     const taskId = found.rows[0]?.task_id;
     if (found.rowCount !== 1 || !taskId) denied();
-    const locked = await client.query('SELECT id FROM core.tasks WHERE id=$1 FOR UPDATE', [taskId]);
-    if (locked.rowCount !== 1) denied();
+    if (lock) {
+      const locked = await client.query('SELECT id FROM core.tasks WHERE id=$1 FOR UPDATE', [
+        taskId,
+      ]);
+      if (locked.rowCount !== 1) denied();
+    }
     const launch = await client.query<Binding>(
-      `SELECT l.*,t.state,t.terminal_candidate,t.started_at,t.profile,t.wrap_grace_seconds FROM core.task_launches l JOIN core.tasks t ON t.id=l.task_id WHERE l.task_id=$1 FOR UPDATE OF l`,
+      `SELECT l.*,t.state,t.terminal_candidate,t.started_at,t.profile,t.wrap_grace_seconds,t.trace_id,t.parent_span_id,t.harness FROM core.task_launches l JOIN core.tasks t ON t.id=l.task_id WHERE l.task_id=$1${lock ? ' FOR UPDATE OF l' : ''}`,
       [taskId]
     );
     const binding = launch.rows[0];
@@ -290,8 +304,13 @@ export function createPostgresTaskMailbox(deps: {
         await authority(client, binding);
         await allocation(client, binding);
         await wonClaim(client, binding, proof);
-        const result = await client.query<{ briefing: string; harness: string }>(
-          'SELECT briefing,harness FROM core.tasks WHERE id=$1 AND octet_length(briefing)<=1048576',
+        const result = await client.query<{
+          briefing: string;
+          harness: string;
+          trace_id: string;
+          parent_span_id: string | null;
+        }>(
+          'SELECT briefing,harness,trace_id,parent_span_id FROM core.tasks WHERE id=$1 AND octet_length(briefing)<=1048576',
           [binding.task_id]
         );
         await authority(client, binding);
@@ -301,12 +320,35 @@ export function createPostgresTaskMailbox(deps: {
         const response = {
           ...locators(binding),
           briefing,
+          traceId: result.rows[0]?.trace_id ?? binding.task_id,
+          parentSpanId: result.rows[0]?.parent_span_id ?? null,
           harness: result.rows[0]?.harness ?? '',
           profile: { id, revision, timeoutSeconds, cpuMillis, memoryBytes },
         };
         if (Buffer.byteLength(JSON.stringify(response)) > 1_048_576)
           throw new TaskChannelError(503, 'channel_unavailable');
         return response;
+      }, parent),
+    readTraceAuthority: async (proof, parent) =>
+      transaction(async (client) => {
+        // Evidence cannot hold the task/launch UPDATE locks used by terminal
+        // append. Only the shared authority locks remain; terminal takes the
+        // same compatible locks on intents, allocations and the won claim.
+        const binding = await resolveBinding(client, proof, false);
+        liveAttempt(binding);
+        await authority(client, binding);
+        await allocation(client, binding);
+        await wonClaim(client, binding, proof);
+        await authority(client, binding);
+        const { id, revision, timeoutSeconds, cpuMillis, memoryBytes } = binding.profile;
+        return {
+          ...locators(binding),
+          briefing: '',
+          traceId: binding.trace_id,
+          parentSpanId: binding.parent_span_id,
+          harness: binding.harness,
+          profile: { id, revision, timeoutSeconds, cpuMillis, memoryBytes },
+        };
       }, parent),
     stop: () => {
       closing.abort();

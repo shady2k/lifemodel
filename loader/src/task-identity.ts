@@ -18,6 +18,8 @@ export interface TaskIdentityOptions {
 }
 interface Binding {
   task_id: string;
+  trace_id: string;
+  parent_span_id: string | null;
   attempt_id: string;
   launch_id: string;
   job_name: string;
@@ -175,7 +177,7 @@ export function createTaskIdentity(options: TaskIdentityOptions) {
         );
         if (task.rowCount !== 1) denied();
         const result = await client.query<Binding>(
-          `SELECT l.*,t.started_at,t.profile,t.wrap_grace_seconds
+          `SELECT l.*,t.started_at,t.profile,t.wrap_grace_seconds,t.trace_id,t.parent_span_id
           FROM core.task_launches l JOIN core.tasks t ON t.id=l.task_id
           WHERE l.task_id=$1 AND l.slot_reserved AND l.tombstoned_at IS NULL
           FOR SHARE OF l`,
@@ -335,7 +337,11 @@ export function createTaskIdentity(options: TaskIdentityOptions) {
         );
         if (claim.rowCount !== 1) denied();
         await intent(client, binding, false);
-        return { taskId: binding.task_id };
+        return {
+          taskId: binding.task_id,
+          traceId: binding.trace_id,
+          parentSpanId: binding.parent_span_id,
+        };
       }),
   };
 }

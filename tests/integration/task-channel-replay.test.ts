@@ -193,7 +193,6 @@ describe('durable task channel signal replay', () => {
             outcome: 'aborted',
             summary: 'Stopped',
             resultObjectId: null,
-            logObjectId: 'log_1',
             artifactObjectIds: [],
           },
         },

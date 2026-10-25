@@ -387,6 +387,8 @@ describe('task launcher identity and briefing (real stores and live TLS identity
       briefing: PAYLOAD,
       profile: f.task.profile,
       harness: f.task.harness,
+      traceId: f.task.traceId,
+      parentSpanId: f.task.parentSpanId,
     });
     expect(briefing.headers['cache-control']).toBe('no-store');
     expect((await get(channel.url, f.token)).body).toEqual(briefing.body);
@@ -501,6 +503,8 @@ describe('task launcher identity and briefing (real stores and live TLS identity
       briefing: PAYLOAD,
       profile: f.task.profile,
       harness: f.task.harness,
+      traceId: f.task.traceId,
+      parentSpanId: f.task.parentSpanId,
     });
     expect((await get(channel.url, f.token, '/task/identity')).status).toBe(403);
   });

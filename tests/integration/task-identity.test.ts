@@ -578,7 +578,11 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
         hard_stop_at: intent.hardStopAt,
       });
       expect((await registry.read(f.task.id))?.startedAt).toEqual(f.startedAt);
-      expect(await access.authorize(f.token)).toEqual({ taskId: f.task.id });
+      expect(await access.authorize(f.token)).toEqual({
+        taskId: f.task.id,
+        traceId: f.task.traceId,
+        parentSpanId: f.task.parentSpanId,
+      });
     }
   });
 
@@ -628,7 +632,11 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
     claim.spec.volumeMode = 'Filesystem';
     claim.spec.resources.requests.storage = '10Gi';
     expect(await access.start(startBody(f.task), f.token)).toMatchObject({ start: true });
-    expect(await access.authorize(f.token)).toEqual({ taskId: f.task.id });
+    expect(await access.authorize(f.token)).toEqual({
+      taskId: f.task.id,
+      traceId: f.task.traceId,
+      parentSpanId: f.task.parentSpanId,
+    });
     expect((await projection(f.task.id))[0]).toMatchObject({
       job_uid: f.task.jobUid,
       pod_uid: f.podUid,
@@ -733,7 +741,11 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
       status: expect.any(Number),
     });
     await expect(restarted.authorize(loser.token)).rejects.toMatchObject({ status: 403 });
-    expect(await restarted.authorize(winner.token)).toEqual({ taskId: f.task.id });
+    expect(await restarted.authorize(winner.token)).toEqual({
+      taskId: f.task.id,
+      traceId: f.task.traceId,
+      parentSpanId: f.task.parentSpanId,
+    });
   });
   it('rolls the once-only claim back when writing its projection fails, then grants the same launch once after repair', async () => {
     const f = await fixture();
@@ -767,7 +779,11 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
     const f = await fixture();
     await access.start(startBody(f.task), f.token);
     for (let index = 0; index < 3; index++)
-      expect(await access.authorize(f.token)).toEqual({ taskId: f.task.id });
+      expect(await access.authorize(f.token)).toEqual({
+        taskId: f.task.id,
+        traceId: f.task.traceId,
+        parentSpanId: f.task.parentSpanId,
+      });
     expect(reviews).toHaveLength(4);
     expect(podGets).toBe(4);
     expect(jobGets).toBe(4);
@@ -788,7 +804,11 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
     tokens.delete(f.token);
     expectedApiToken = 'MODULE-ROTATED-PRIVATE-CANARY';
     await writeFile(tokenFile, expectedApiToken);
-    expect(await access.authorize(rotated)).toEqual({ taskId: f.task.id });
+    expect(await access.authorize(rotated)).toEqual({
+      taskId: f.task.id,
+      traceId: f.task.traceId,
+      parentSpanId: f.task.parentSpanId,
+    });
     await expect(access.authorize(f.token)).rejects.toMatchObject({ status: 403 });
     expect(reviews.map((review) => review.token)).toEqual([f.token, rotated, f.token]);
   });
@@ -804,7 +824,11 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
     await access.start(startBody(f.task), f.token);
     await changeIntent(f.task, 'wrapping');
     expect((await projection(f.task.id))[0].mode).toBe('active');
-    expect(await access.authorize(f.token)).toEqual({ taskId: f.task.id });
+    expect(await access.authorize(f.token)).toEqual({
+      taskId: f.task.id,
+      traceId: f.task.traceId,
+      parentSpanId: f.task.parentSpanId,
+    });
     await changeIntent(f.task, 'revoked');
     expect((await projection(f.task.id))[0].mode).toBe('active');
     await expect(access.authorize(f.token)).rejects.toMatchObject({ status: 403 });
@@ -1096,6 +1120,11 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
       expect(response.status).toBe(400);
       expect(response.body).toEqual({ error: { type: 'gateway_error', code: 'invalid_request' } });
       expect(g.attempts).toEqual([]);
+      expect(g.logs).toContainEqual({
+        level: 'warn',
+        message: 'Task model gateway request refused',
+        fields: { code: 'invalid_request', taskId: f.task.id, traceId: f.task.traceId },
+      });
     }
   );
   it.each(['revoke', 'deadline'] as const)(

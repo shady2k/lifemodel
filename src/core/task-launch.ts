@@ -162,6 +162,7 @@ export function createTaskLaunchReconciler(options: {
   }
   async function pass(): Promise<boolean> {
     if (stopped) return false;
+    let taskContext: { taskId: string; traceId: string } | undefined;
     try {
       // Takeover reconciles existing reservations before admitting more work.
       // Capture the watch resourceVersion BEFORE per-task GETs. A later Job
@@ -176,6 +177,7 @@ export function createTaskLaunchReconciler(options: {
       for (const task of tasks) {
         if (stopped) return false;
         if (terminal(task) && !task.cleanupPending) continue;
+        taskContext = { taskId: task.id, traceId: task.traceId };
         try {
           await ensure(task);
         } catch (error) {
@@ -186,6 +188,7 @@ export function createTaskLaunchReconciler(options: {
           options.logger.warn(
             {
               taskId: task.id,
+              traceId: task.traceId,
               launchId: task.launchId,
               count: 1,
               code:
@@ -196,6 +199,7 @@ export function createTaskLaunchReconciler(options: {
             'Task launch remains pending'
           );
         }
+        taskContext = undefined;
       }
       if (options.scanJobs) {
         for (const job of jobs) {
@@ -203,6 +207,7 @@ export function createTaskLaunchReconciler(options: {
           // The lookup itself is fenced and exact; a paged registry snapshot
           // cannot classify a launch on a different page as an orphan.
           const fresh = await options.registry.readByJobName(job.name);
+          taskContext = fresh ? { taskId: fresh.id, traceId: fresh.traceId } : undefined;
           active();
           if (
             !fresh ||
@@ -216,6 +221,7 @@ export function createTaskLaunchReconciler(options: {
             await job.remove(controller.signal);
             options.onCleanup?.();
           }
+          taskContext = undefined;
         }
       }
       if (success) {
@@ -223,7 +229,9 @@ export function createTaskLaunchReconciler(options: {
         for (let count = 0; count < 8 && !stopped; count++) {
           const next = await options.registry.admitNext();
           if (!next) break;
+          taskContext = { taskId: next.id, traceId: next.traceId };
           await ensure(next);
+          taskContext = undefined;
         }
       }
       return success;
@@ -232,7 +240,8 @@ export function createTaskLaunchReconciler(options: {
         void stop();
         return false;
       }
-      if (!stopped) options.logger.warn({ count: 1 }, 'Task reconciliation remains pending');
+      if (!stopped)
+        options.logger.warn({ count: 1, ...taskContext }, 'Task reconciliation remains pending');
       return false;
     }
   }

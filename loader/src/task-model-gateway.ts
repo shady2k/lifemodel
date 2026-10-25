@@ -83,6 +83,7 @@ export function createTaskModelGateway(options: Options) {
     };
     res.on('close', disconnect);
     req.on('aborted', disconnect);
+    let taskContext: { taskId: string; traceId: string } | undefined;
     try {
       const credential = token(req, start);
       if (start) {
@@ -96,20 +97,27 @@ export function createTaskModelGateway(options: Options) {
         res.end(JSON.stringify(result));
       } else {
         const trusted = await options.access.authorize(credential, controller.signal);
+        taskContext = { taskId: trusted.taskId, traceId: trusted.traceId };
         controller.signal.throwIfAborted();
         clearTimeout(timer); // ADR-013 owns its own complete forwarding deadline.
-        await options.gateway.serveTask(req, res, trusted.taskId, async (signal) => {
-          try {
-            const fresh = await options.access.authorize(credential, signal);
-            if (fresh.taskId !== trusted.taskId) throw new StorageAccessError(403, 'task_denied');
-          } catch (error) {
-            const failure =
-              error instanceof StorageAccessError
-                ? error
-                : new StorageAccessError(503, 'task_unavailable');
-            throw new TaskAuthorizationError(failure.code, failure.status);
-          }
-        });
+        await options.gateway.serveTask(
+          req,
+          res,
+          trusted.taskId,
+          async (signal) => {
+            try {
+              const fresh = await options.access.authorize(credential, signal);
+              if (fresh.taskId !== trusted.taskId) throw new StorageAccessError(403, 'task_denied');
+            } catch (error) {
+              const failure =
+                error instanceof StorageAccessError
+                  ? error
+                  : new StorageAccessError(503, 'task_unavailable');
+              throw new TaskAuthorizationError(failure.code, failure.status);
+            }
+          },
+          taskContext
+        );
       }
     } catch (error) {
       const failure =
@@ -118,7 +126,7 @@ export function createTaskModelGateway(options: Options) {
           : new StorageAccessError(503, 'task_unavailable');
       const id = randomUUID();
       options.logger.warn(
-        { id, code: failure.code, status: failure.status },
+        { id, code: failure.code, status: failure.status, ...taskContext },
         'Task gateway request refused'
       );
       if (!res.headersSent && !res.destroyed) {

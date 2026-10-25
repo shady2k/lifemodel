@@ -24,7 +24,6 @@ describe('task outcome fallback', () => {
             reasonCode,
             summary,
             resultObjectId: null,
-            logObjectId: null,
             artifactObjectIds: [],
           },
         })

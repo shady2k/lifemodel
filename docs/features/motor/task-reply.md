@@ -71,7 +71,9 @@ object IDs, with their plain name, size and MIME type (`application/octet-stream
 if absent), to the actual assistant reply. Artifact files reported through
 `artifactObjectIds` reach the reply through the seal manifest, not model-selected
 attachment IDs. A completed outcome still requires a sealed `result`; artifacts
-cannot substitute for it. Logs are not attached. The ordinary outbound consumer
+cannot substitute for it. The launcher no longer produces a fixed log object
+or reports `logObjectId`; task traces are observability data, not attachments.
+Explicit `log`-marked objects are not attached. The ordinary outbound consumer
 stores those references on the message. The existing web attachment component
 renders the plain name and uses the object ID only for its authenticated
 [attachment download](../web/attachments.md). Failed/stopped replies explain the
@@ -82,7 +84,7 @@ The web attachment contract permits 20 files per message. More result and artifa
 files use ordered continuation messages of at most 20 files under the same
 turn/outbox commit; none are silently omitted. Invalid output metadata does not
 strand an immutable outcome in relay: the reply explicitly says the files could
-not be attached. Log metadata never blocks output delivery. No bytes, storage
+not be attached. Trace availability and log metadata never block output delivery. No bytes, storage
 URLs or paths enter chat.
 
 ## Evidence
