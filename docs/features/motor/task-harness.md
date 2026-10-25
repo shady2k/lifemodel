@@ -80,8 +80,18 @@ Result text and a bounded structured event log (fixed event types and lines,
 not raw provider/tool payloads) are written to private temporary work
 files and passed through the shipped `lifemodel-storage put` implementation.
 Each saved object is then durably `mark`ed `result` or `log`. Files the agent
-uploads and marks `artifact` are discovered by bounded own-space listing. No
-object bytes, prompt, stdout, provider response or log chunk is sent through
+uploads and marks `artifact` are discovered by bounded own-space listing (at most
+100 pages, 100 rows per request and 64 artifact IDs). Follow the opaque cursor
+until `nextCursor: null`; a short page is not EOF because encoded metadata has
+a separate 64 KiB bound. A 65th artifact fails with `artifact_limit`. Result text
+is written, uploaded and marked before artifact collection; a later collection
+failure retains its already-durable result/log IDs and bytes in the failed
+report. An empty `result.txt` therefore reflects an empty harness result, not
+artifact collection truncating the file. The ACP adapter deliberately returns
+empty result text for failed/aborted turns, including required-tool failure or
+missing final text; earlier prose alone is not an accepted final answer. A
+storage failure can mask that earlier semantic reason in the terminal report.
+No object bytes, prompt, stdout, provider response or log chunk is sent through
 the channel. The terminal payload contains only semantic outcome, a fixed short
 summary, safe failure code when applicable, and the exact marked object IDs.
 An unsuccessful storage mark prevents a successful terminal report.
