@@ -1415,17 +1415,20 @@ export async function createContainerAsync(
       connectionString: databaseUrl,
       max: 1,
       application_name: 'lifemodel-trace-authority',
-      connectionTimeoutMillis: 250,
-      query_timeout: 250,
-      statement_timeout: 250,
-      lock_timeout: 250,
+      connectionTimeoutMillis: 1000,
+      query_timeout: 1000,
+      statement_timeout: 1000,
+      lock_timeout: 1000,
     });
     traceAuthorityPool.on('error', () => undefined);
     traceAuthorityPool.on('connect', (client) => client.on('error', () => undefined));
     const traceAuthority = createPostgresTaskMailbox({
       pool: traceAuthorityPool,
       epoch: snapshotEpoch,
-      operationTimeoutMs: 250,
+      // This fenced read takes 13 sequential SQL round trips plus connection
+      // setup. 250 ms fails even at 20 ms RTT. One second covers 40 ms RTT
+      // with setup margin, independently of terminal SQL and worker capacity.
+      operationTimeoutMs: 1000,
     });
     stopTaskTraces = async (deadline, signal) => {
       traceAuthority.stop();

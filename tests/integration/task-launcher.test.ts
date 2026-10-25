@@ -790,11 +790,15 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       expect(terminalFrames).toHaveLength(1);
       if (mode === 'timeout') expect(terminalWhileTraceOpen).toBe(true);
       expect(diagnostics).toEqual([]);
-      // The trace client has its own 500 ms deadline and at most a one-second
-      // post-terminal drain. Its timed-out/lost frames are never ACK-replayed.
-      await expect.poll(() => traceFrames.length, { timeout: 2000 }).toBe(2);
+      // The trace client has its own 1500 ms deadline and at most a one-second
+      // post-terminal drain. A hung first frame is cut off by close before its
+      // timeout; queued evidence is dropped, not replayed or made authoritative.
+      if (mode === 'lost_ack')
+        await expect.poll(() => traceFrames.length, { timeout: 2000 }).toBe(2);
       await expect.poll(() => activeTraceRequests, { timeout: 2000 }).toBe(0);
-      expect(traceFrames.map((frame) => frame.span.endedAt === null)).toEqual([true, false]);
+      expect(traceFrames.map((frame) => frame.span.endedAt === null)).toEqual(
+        mode === 'timeout' ? [true] : [true, false]
+      );
       expect(calls.filter((call) => call.path === '/task/events')).toHaveLength(1);
     }
   );

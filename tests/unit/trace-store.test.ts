@@ -207,17 +207,52 @@ describe('bounded disposable trace queue', () => {
   it('preserves bounded backslash runs while scrubbing assignments after them', () => {
     const slashes = '\\'.repeat(4000);
     const record = span('trace', 'root', {
-      command: `${slashes} Authorization: Bearer opaque-backslash-bearer safe-command`,
+      command: `${slashes} Authorization: Bearer opaque-backslash-bearer\nsafe-command`,
       outputTail: `${slashes} password="opaque-backslash-password" safe-output`,
     });
     const clean = scrubTraceRecord(record);
     expect(clean.kind).toBe('span');
     if (clean.kind !== 'span') return;
     expect(clean.span.attrs).toEqual({
-      command: `${slashes} Authorization: [REDACTED] safe-command`,
+      command: `${slashes} Authorization: [REDACTED]\nsafe-command`,
       outputTail: `${slashes} password="[REDACTED]" safe-output`,
     });
   });
+
+  it.each([
+    ['Authorization: Token opaque-value\r\nsafe', 'Authorization: [REDACTED]\r\nsafe'],
+    [
+      'Authorization: Digest username="opaque", response="opaque two,three"\nsafe',
+      'Authorization: [REDACTED]\nsafe',
+    ],
+    ['Authorization: CustomProof opaque-value', 'Authorization: [REDACTED]'],
+    [
+      "curl -H 'Authorization: Token opaque-value' safe",
+      "curl -H 'Authorization: [REDACTED]' safe",
+    ],
+    [
+      'curl -H "Authorization: Digest response=\\"opaque-value\\"" safe',
+      'curl -H "Authorization: [REDACTED]" safe',
+    ],
+    [
+      "curl -H 'Authorization: CustomProof opaque-value\nsafe",
+      "curl -H 'Authorization: [REDACTED]\nsafe",
+    ],
+    ['Authorization: "CustomProof opaque-value" safe', 'Authorization: "[REDACTED]" safe'],
+    [
+      'Authorization: Token opaque-value\nAuthorization: ApiKey opaque-other\nsafe',
+      'Authorization: [REDACTED]\nAuthorization: [REDACTED]\nsafe',
+    ],
+  ])(
+    'redacts a complete scheme-independent header with its true boundary: %s',
+    (input, expected) => {
+      const record = scrubTraceRecord(
+        span('header', 'root', { command: input, outputTail: input })
+      );
+      if (record.kind !== 'span') throw new Error('span missing');
+      expect(record.span.attrs).toEqual({ command: expected, outputTail: expected });
+    }
+  );
 
   it('scrubs canaries in every nested value and key without mutating callers', () => {
     const secret = 'canary-known-secret-0123456789';
@@ -402,13 +437,37 @@ describe('Postgres trace persistence and whole-trace retention', () => {
       ['authorization', (secret: string) => JSON.stringify({ Authorization: `Basic ${secret}` })],
       ['unquoted-bearer', (secret: string) => `Authorization: Bearer ${secret}`],
       ['unquoted-basic', (secret: string) => `Authorization: Basic ${secret}`],
+      ['unquoted-token', (secret: string) => `Authorization: Token ${secret}`],
+      ['unquoted-custom', (secret: string) => `aUtHoRiZaTiOn: CustomProof ${secret}`],
+      [
+        'digest',
+        (secret: string) =>
+          `Authorization: Digest username="${secret}", response="${secret} with spaces,commas"`,
+      ],
+      [
+        'shell-header',
+        (secret: string) => `curl -H 'Authorization: ApiKey ${secret}' safe-header-suffix`,
+      ],
+      [
+        'nested-header',
+        (secret: string) =>
+          JSON.stringify(
+            JSON.stringify(
+              `curl -H 'Authorization: Digest response="${secret}"' safe-nested-suffix`
+            )
+          ),
+      ],
+      [
+        'json-custom',
+        (secret: string) => JSON.stringify({ Authorization: `CustomProof ${secret}` }),
+      ],
     ] as const;
     const store = writer();
     const canaries: string[] = [];
     for (const [name, encode] of cases) {
       const canary = `opaque-CANARY-${name}-5e9d`;
       canaries.push(canary);
-      const content = `safe-prefix ${encode(canary)} safe-suffix`;
+      const content = `safe-prefix ${encode(canary)}\nsafe-suffix`;
       expect(
         store.enqueue(span('quoted-credentials', name, { command: content, outputTail: content }))
       ).toBe(true);

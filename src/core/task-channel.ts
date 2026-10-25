@@ -153,23 +153,33 @@ export function createTaskChannel(options: ChannelOptions): {
     res: ServerResponse,
     status: number,
     code: string,
-    context: { taskId?: string; traceId?: string } = {}
+    context: { route: string; taskId?: string; traceId?: string }
   ): void {
     logger.warn({ status, code, ...context }, 'Task channel request refused');
     send(res, status, { code });
   }
   function receive(req: IncomingMessage, res: ServerResponse): void {
+    // Never log a raw URL: unknown paths and query strings can carry secrets.
+    const route =
+      (req.method === 'POST' && ['/task/trace', '/task/events'].includes(req.url ?? '')) ||
+      (req.method === 'GET' && ['/task/identity', '/task/briefing'].includes(req.url ?? ''))
+        ? `${req.method ?? ''} ${req.url ?? ''}`
+        : 'unknown';
+    let diagnosticContext: { taskId?: string; traceId?: string } = {};
+    const rejectRequest = (status: number, code: string) => {
+      refuse(res, status, code, { route, ...diagnosticContext });
+    };
     req.on('error', () => undefined);
     res.on('error', () => undefined);
     if (closed) {
-      refuse(res, 503, 'channel_stopped');
+      rejectRequest(503, 'channel_stopped');
       return;
     }
     const read =
       req.method === 'GET' && (req.url === '/task/identity' || req.url === '/task/briefing');
     const trace = req.method === 'POST' && req.url === '/task/trace';
     if (!read && !trace && (req.method !== 'POST' || req.url !== '/task/events')) {
-      refuse(res, 404, 'route_absent');
+      rejectRequest(404, 'route_absent');
       return;
     }
     if (
@@ -177,19 +187,19 @@ export function createTaskChannel(options: ChannelOptions): {
       (req.headers['transfer-encoding'] !== undefined ||
         (req.headers['content-length'] !== undefined && req.headers['content-length'] !== '0'))
     ) {
-      refuse(res, 400, 'invalid_request');
+      rejectRequest(400, 'invalid_request');
       return;
     }
     if (
       req.headers['content-encoding'] ||
       (!read && req.headers['content-type'] !== 'application/json')
     ) {
-      refuse(res, 400, 'invalid_request');
+      rejectRequest(400, 'invalid_request');
       return;
     }
     const length = req.headers['content-length'];
     if (length !== undefined && (!/^\d+$/.test(length) || Number(length) > frameLimit)) {
-      refuse(res, 413, 'frame_too_large');
+      rejectRequest(413, 'frame_too_large');
       return;
     }
     const capacity = Math.min(
@@ -206,7 +216,7 @@ export function createTaskChannel(options: ChannelOptions): {
         ? capacity
         : Math.max(1, Number(length));
     if (reservedBytes > capacity) {
-      refuse(res, 413, 'frame_too_large');
+      rejectRequest(413, 'frame_too_large');
       return;
     }
     const socket = req.socket;
@@ -220,7 +230,7 @@ export function createTaskChannel(options: ChannelOptions): {
       (trace ? traceBuffered : buffered) + reservedBytes >
         settings['tasks.channel.maxBufferedBytes']
     ) {
-      refuse(res, 429, 'channel_saturated');
+      rejectRequest(429, 'channel_saturated');
       return;
     }
     count.frames++;
@@ -263,7 +273,7 @@ export function createTaskChannel(options: ChannelOptions): {
     res.once('close', release);
     req.once('aborted', release);
     const timer = setTimeout(() => {
-      refuse(res, 504, 'ack_timeout');
+      rejectRequest(504, 'ack_timeout');
       release();
       // A peer that does not read ACKs never holds a worker or socket forever.
       socket.destroy();
@@ -272,7 +282,7 @@ export function createTaskChannel(options: ChannelOptions): {
       if (signal.aborted) return;
       bytes += chunk.length;
       if (bytes > reservedBytes) {
-        refuse(res, 413, 'frame_too_large');
+        rejectRequest(413, 'frame_too_large');
         parts.length = 0;
       } else parts.push(chunk);
     });
@@ -290,7 +300,7 @@ export function createTaskChannel(options: ChannelOptions): {
             JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(parts)))
           );
       } catch {
-        refuse(res, 400, 'invalid_frame');
+        rejectRequest(400, 'invalid_frame');
         return;
       } finally {
         parts.length = 0;
@@ -304,18 +314,17 @@ export function createTaskChannel(options: ChannelOptions): {
         typeof authorization !== 'string' ||
         !/^Bearer [^\s]+$/.test(authorization)
       ) {
-        refuse(res, 403, 'identity_denied');
+        rejectRequest(403, 'identity_denied');
         return;
       }
       const token = authorization.slice(7);
-      let diagnosticContext: { taskId?: string; traceId?: string } = {};
       const fail = (error: unknown) => {
         if (signal.aborted) return;
         const safe =
           error instanceof TaskChannelError
             ? error
             : new TaskChannelError(503, 'channel_unavailable');
-        refuse(res, safe.status, safe.code, diagnosticContext);
+        rejectRequest(safe.status, safe.code);
       };
       const work: Work = {
         taskId: createHash('sha256').update(token).digest('hex'),
@@ -325,6 +334,19 @@ export function createTaskChannel(options: ChannelOptions): {
             signal.throwIfAborted();
             const proof = await options.identity.verify(token, signal);
             signal.throwIfAborted();
+            // Before storage succeeds these are diagnostic input, not authority.
+            // Log only canonical generated locator shapes, never arbitrary text
+            // that a verified pod could place in the more permissive wire IDs.
+            const taskId = traceFrame?.taskId ?? frame?.taskId;
+            const traceId = traceFrame?.span.traceId;
+            if (taskId && /^task_[0-9a-f]{64}$/.test(taskId)) diagnosticContext.taskId = taskId;
+            if (
+              traceId &&
+              /^(?:task_[0-9a-f]{64}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.test(
+                traceId
+              )
+            )
+              diagnosticContext.traceId = traceId;
             const stored: Work = {
               // Kubernetes verifies the Job UID freshly. Different frame IDs,
               // Pod credentials and token rotations cannot create extra shares.
