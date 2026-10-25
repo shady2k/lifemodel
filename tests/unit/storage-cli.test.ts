@@ -395,19 +395,22 @@ describe('lifemodel-storage', () => {
       `partial_retained dev=${String(retained.dev)} ino=${String(retained.ino)}`
     );
   });
-  it('lists a bounded page and passes its opaque cursor without reinterpretation', async () => {
-    const page = { objects: [receipt], nextCursor: 'next_cursor' };
-    answer = (_req, res) => res.end(JSON.stringify(page));
-    expect(
-      await run(['list', '--cursor', 'opaque/+=?', '--limit', '12']),
-      `${stderr} requestCount=${calls.length}`
-    ).toBe(0);
-    const url = new URL(calls[0]!.path, endpoint);
-    expect(url.pathname).toBe('/spaces/space-a/objects');
-    expect(url.searchParams.get('cursor')).toBe('opaque/+=?');
-    expect(url.searchParams.get('limit')).toBe('12');
-    expect(JSON.parse(stdout)).toEqual(page);
-  });
+  it.each(['next_cursor', null])(
+    'lists a bounded page and preserves nextCursor=%s',
+    async (nextCursor) => {
+      const page = { objects: [receipt], nextCursor };
+      answer = (_req, res) => res.end(JSON.stringify(page));
+      expect(
+        await run(['list', '--cursor', 'opaque/+=?', '--limit', '12']),
+        `${stderr} requestCount=${calls.length}`
+      ).toBe(0);
+      const url = new URL(calls[0]!.path, endpoint);
+      expect(url.pathname).toBe('/spaces/space-a/objects');
+      expect(url.searchParams.get('cursor')).toBe('opaque/+=?');
+      expect(url.searchParams.get('limit')).toBe('12');
+      expect(JSON.parse(stdout)).toEqual(page);
+    }
+  );
   it.each(['artifact', 'result', 'log'])('marks a completed object as %s', async (role) => {
     answer = (_req, res) => res.end(JSON.stringify({ ...receipt, mark: role }));
     expect(await run(['mark', 'object-a', role]), `${stderr} requestCount=${calls.length}`).toBe(0);

@@ -111,6 +111,7 @@ async function artifacts(env: NodeJS.ProcessEnv, cwd: string): Promise<string[]>
         ids.push(id);
       }
     }
+    // Row count cannot prove EOF: encoded metadata may cut a page short.
     if (page['nextCursor'] === null) return ids;
     cursor = page['nextCursor'] as string;
   }

@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { request } from 'node:https';
+import { createServer as createHttpsServer, request } from 'node:https';
 import { Pool } from 'pg';
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runStorageCli } from '../../loader/src/storage-cli.js';
+import { runTaskLauncher } from '../../loader/src/task-launcher.js';
+import { ScriptedTaskHarness } from '../../loader/src/task-harness.js';
 import { createServer as createTcpServer, connect, type Socket } from 'node:net';
 import { createHash, randomUUID } from 'node:crypto';
 import { createStorageModule } from '../../loader/src/storage-module-app.js';
@@ -334,8 +336,8 @@ describe('task immutable object API', () => {
       expect(full.json.objects).toEqual(receipts[space]);
       let cursor = '';
       const seen = [];
-      // Two one-row pages and the terminal empty page; bounded even if cursors regress.
-      for (let pageIndex = 0; pageIndex < 3; pageIndex++) {
+      // Exactly two one-row pages; the full final page is already terminal.
+      for (let pageIndex = 0; pageIndex < 2; pageIndex++) {
         const page = await call(
           'GET',
           `/spaces/${space}/objects?limit=1${cursor ? `&cursor=${cursor}` : ''}`,
@@ -346,17 +348,188 @@ describe('task immutable object API', () => {
         expect(page.status).toBe(200);
         assertNoForeignMetadata(page.json.objects);
         expect(page.json.objects).toEqual(receipts[space].slice(pageIndex, pageIndex + 1));
-        expect(typeof page.json.nextCursor).toBe('string');
-        if (pageIndex < 2) expect(page.json.nextCursor).not.toBe(cursor);
-        else expect(page.json.nextCursor).toBe(cursor);
-        cursor = page.json.nextCursor;
+        if (pageIndex === 0) {
+          expect(typeof page.json.nextCursor).toBe('string');
+          expect(page.json.nextCursor).not.toBe(cursor);
+          cursor = page.json.nextCursor;
+        } else expect(page.json.nextCursor).toBeNull();
         seen.push(...page.json.objects);
       }
       expect(seen.map((row: any) => row.id)).toEqual(receipts[space].map((row) => row.id));
       assertNoForeignMetadata(seen);
     }
   });
+  it.each([0, 1, 2, 3])('returns null exactly at the end of a %i-object list', async (count) => {
+    const ids = [];
+    for (let n = 0; n < count; n++) {
+      const uploaded = await put(`end-${n}`, Buffer.alloc(0));
+      expect(uploaded.status).toBe(200);
+      ids.push(uploaded.json.id);
+    }
+    const first = await call('GET', '/spaces/a/objects?limit=2');
+    expect(first.status).toBe(200);
+    expect(first.json.objects.map((row: any) => row.id)).toEqual(ids.slice(0, 2));
+    if (count <= 2) expect(first.json.nextCursor).toBeNull();
+    else {
+      expect(typeof first.json.nextCursor).toBe('string');
+      const last = await call('GET', `/spaces/a/objects?limit=2&cursor=${first.json.nextCursor}`);
+      expect(last.status).toBe(200);
+      expect(last.json.objects.map((row: any) => row.id)).toEqual(ids.slice(2));
+      expect(last.json.nextCursor).toBeNull();
+      // A valid previous cursor is still usable after its remaining rows disappear.
+      await stores.postgres.query('DELETE FROM storage.objects WHERE id=$1', [ids[2]]);
+      const empty = await call('GET', `/spaces/a/objects?limit=2&cursor=${first.json.nextCursor}`);
+      expect(empty.status).toBe(200);
+      expect(empty.json).toEqual({ objects: [], nextCursor: null });
+    }
+  });
+
+  it.each([0, 1, 64, 65])(
+    'launcher collects exactly %i artifacts through the real module and Postgres catalog',
+    async (count) => {
+      // Cross a decimal-width boundary: ordering the selected sequence::text
+      // alias lexically would skip/repeat rows despite a correct end marker.
+      await stores.postgres.query(
+        "SELECT setval(pg_get_serial_sequence('storage.objects','sequence'),90,false)"
+      );
+      const ids: string[] = [];
+      for (let n = 0; n < count; n++) {
+        // Escaping expands these legal names enough to force the 64 KiB cut,
+        // even though the launcher requests 100 rows and allows 64 artifacts.
+        const uploaded = await put(
+          `artifact-${n}`,
+          Buffer.from(`artifact ${n}`),
+          `${n}-${'"'.repeat(1000)}`
+        );
+        expect(uploaded.status).toBe(200);
+        const marked = await call(
+          'POST',
+          `/spaces/a/objects/${uploaded.json.id}/mark`,
+          Buffer.from('{"role":"artifact"}')
+        );
+        expect(marked.status).toBe(200);
+        ids.push(uploaded.json.id);
+      }
+      const first = await list();
+      expect(first.status).toBe(200);
+      expect(first.body.length).toBeLessThanOrEqual(64 * 1024);
+      if (count >= 64) {
+        expect(first.json.objects.length).toBeLessThan(count);
+        expect(typeof first.json.nextCursor).toBe('string');
+      }
+
+      const directory = await mkdtemp(join(tmpdir(), 'launcher-real-storage-'));
+      const taskIds = {
+        taskId: `task_${'a'.repeat(64)}`,
+        attemptId: `attempt_${'b'.repeat(64)}`,
+        launchId: `launch_${'c'.repeat(64)}`,
+      };
+      const reports: any[] = [];
+      const gateway = createHttpsServer(identity.certificate, (req, res) => {
+        req.on('error', () => undefined);
+        res.on('error', () => undefined);
+        void (async () => {
+          const chunks: Buffer[] = [];
+          for await (const part of req) chunks.push(Buffer.from(part));
+          let reply: unknown;
+          if (req.url === '/task/identity') reply = taskIds;
+          else if (req.url === '/task/start')
+            reply = {
+              ...taskIds,
+              start: true,
+              space: 'a',
+              hardStopAt: new Date(Date.now() + 60_000).toISOString(),
+            };
+          else if (req.url === '/task/briefing')
+            reply = { ...taskIds, briefing: 'Produce artifacts' };
+          else if (req.url === '/task/events') {
+            const frame = JSON.parse(Buffer.concat(chunks).toString());
+            if (frame.kind === 'terminal') reports.push(frame.payload);
+            reply = { ...frame, receivedAt: new Date().toISOString() };
+          } else {
+            res.writeHead(404);
+            res.end();
+            return;
+          }
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify(reply));
+        })().catch(() => res.destroy());
+      });
+      try {
+        await new Promise<void>((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+        const address = gateway.address();
+        if (!address || typeof address === 'string') throw Error('no gateway listener');
+        const caFile = join(directory, 'ca.pem');
+        const tokenFile = join(directory, 'token');
+        await writeFile(caFile, identity.certificate.ca);
+        await writeFile(tokenFile, 'a');
+        const env: NodeJS.ProcessEnv = {
+          LIFEMODEL_STORAGE_SPACE: 'a',
+          LIFEMODEL_STORAGE_ENDPOINT: `https://localhost:${port}`,
+          LIFEMODEL_STORAGE_CA_FILE: caFile,
+          LIFEMODEL_STORAGE_TOKEN_FILE: tokenFile,
+        };
+        for (const service of ['MODEL', 'CHANNEL']) {
+          env[`LIFEMODEL_TASK_${service}_ENDPOINT`] = `https://localhost:${address.port}`;
+          env[`LIFEMODEL_TASK_${service}_CA_FILE`] = caFile;
+          env[`LIFEMODEL_TASK_${service}_TOKEN_FILE`] = tokenFile;
+        }
+        const resultText = 'The final answer survives artifact collection.';
+        const status = await runTaskLauncher({
+          env,
+          workDirectory: directory,
+          harness: (onEvent) =>
+            new ScriptedTaskHarness({
+              onEvent,
+              events: [{ type: 'step', text: 'working' }],
+              terminal: { outcome: 'succeeded', result: resultText },
+            }),
+        });
+        expect(status, JSON.stringify(reports)).toBe(count === 65 ? 1 : 0);
+        expect(reports).toHaveLength(1);
+        expect(reports[0]).toMatchObject(
+          count === 65
+            ? { outcome: 'failed', reasonCode: 'artifact_limit', artifactObjectIds: [] }
+            : { outcome: 'succeeded', artifactObjectIds: ids }
+        );
+        if (count !== 65) expect(reports[0]).not.toHaveProperty('reasonCode');
+        for (const [id, mark] of [
+          [reports[0].resultObjectId, 'result'],
+          [reports[0].logObjectId, 'log'],
+        ]) {
+          expect(typeof id).toBe('string');
+          const row = await stores.postgres.query('SELECT mark FROM storage.objects WHERE id=$1', [
+            id,
+          ]);
+          expect(row.rows[0].mark).toBe(mark);
+        }
+        const result = await call('GET', `/spaces/a/objects/${reports[0].resultObjectId}`);
+        expect(result.status).toBe(200);
+        expect(result.body.toString()).toBe(resultText);
+      } finally {
+        gateway.closeAllConnections();
+        await new Promise<void>((resolve) => gateway.close(() => resolve()));
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+    30_000
+  );
+
   it('refuses a cursor minted for a different space', async () => {
+    for (const id of ['one', 'two']) {
+      const reply = await call(
+        'PUT',
+        `/spaces/b/objects/${id}`,
+        Buffer.alloc(0),
+        {
+          'x-storage-name': Buffer.from(`${id}.txt`).toString('base64url'),
+          'x-storage-length': '0',
+          'x-storage-sha256': hash(Buffer.alloc(0)),
+        },
+        'b'
+      );
+      expect(reply.status).toBe(200);
+    }
     const foreign = await call('GET', '/spaces/b/objects?limit=1', undefined, {}, 'b');
     expect(foreign.status).toBe(200);
     expect(typeof foreign.json.nextCursor).toBe('string');
@@ -420,9 +593,10 @@ describe('task immutable object API', () => {
       ).toBe(416);
     for (const query of ['limit=101', 'limit=0', 'cursor=bad', 'bucket=other', 'prefix=root'])
       expect((await call('GET', `/spaces/a/objects?${query}`)).status).toBe(400);
+    await put('second', Buffer.from('second'));
     const first = await call('GET', '/spaces/a/objects?limit=1');
     expect(first.json.objects).toHaveLength(1);
-    await put('second', Buffer.from('second'));
+    expect(typeof first.json.nextCursor).toBe('string');
     const next = await call('GET', `/spaces/a/objects?limit=1&cursor=${first.json.nextCursor}`);
     expect(next.json.objects[0].id).not.toBe(reply.json.id);
   });

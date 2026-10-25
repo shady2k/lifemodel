@@ -577,14 +577,15 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
             : '0';
           const rows = (
             await query<PageRow>(
-              `SELECT id,name,size::float8 AS size,sha256,mark,sequence::text FROM storage.objects o WHERE space_id=$1 AND sequence>$2 AND ($4::boolean=false OR mark IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=o.id) AND NOT EXISTS(SELECT 1 FROM storage.version_availability av WHERE av.object_id=o.id AND av.status<>'available') ORDER BY sequence LIMIT $3`,
-              [space, after, limit, markedOnly]
+              `SELECT id,name,size::float8 AS size,sha256,mark,sequence::text FROM storage.objects o WHERE space_id=$1 AND sequence>$2 AND ($4::boolean=false OR mark IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM storage.object_tombstones t WHERE t.object_id=o.id) AND NOT EXISTS(SELECT 1 FROM storage.version_availability av WHERE av.object_id=o.id AND av.status<>'available') ORDER BY o.sequence LIMIT $3`,
+              [space, after, limit + 1, markedOnly]
             )
           ).rows;
           // Names may need JSON escaping. Bound the encoded page as well as rows.
           const page: PageRow[] = [];
           let encodedBytes = 256;
           for (const row of rows) {
+            if (page.length === limit) break;
             const { sequence: _, ...item } = row;
             const bytes = Buffer.byteLength(JSON.stringify(item)) + 1;
             if (encodedBytes + bytes > 64 * 1024) break;
@@ -594,7 +595,10 @@ export function createStorageObjects(options: StorageObjectsOptions): StorageObj
           const objects = page.map(({ sequence: _, ...row }) => row);
           await answer(res, stream, {
             objects,
-            nextCursor: cursor(space, page.at(-1)?.sequence ?? after),
+            // Lookahead also detects a page cut by the encoded-byte bound.
+            // Null ends this traversal, including an exactly-full last page.
+            nextCursor:
+              rows.length > page.length ? cursor(space, page.at(-1)?.sequence ?? after) : null,
           });
           return;
         }
