@@ -28,7 +28,8 @@ for finalization. It is not a semantic success or permission to rerun.
 
 After winning, the launcher reads `GET /task/briefing` on the same core
 listener. Its authority additionally checks the exact won claim and projection.
-The reply contains IDs, `briefing` and the accepted resource `profile`; there is
+The reply contains IDs, `briefing`, the accepted resource `profile`, the
+accepted `harness`, and `traceId`/`parentSpanId` for the launch trace. There is
 no prompt in the Job spec or task storage. A refused/failed read starts no
 harness and reports `failed` / `briefing_unavailable`. Responses are capped at
 1 MiB. Both GET routes share the channel's reservations, deadlines and dedicated
@@ -38,9 +39,12 @@ SQL/identity workers. Neither caches positive authority.
 
 `loader/src/task-harness.ts` declares `TaskHarness.start(briefing)`, `abort()`,
 `steer(text)` and `wrap()`. Stage 3 returns `not_supported` for steer/wrap.
-Normalized events are short `step`, `tool` and safe-code `error` events. One
+Normalized events are short `step`, `tool`, safe-code `error` and best-effort
+`trace` events. Trace callbacks cannot gate the harness protocol or outcome. One
 start returns one semantic result: `succeeded`, `failed` or `aborted`, with
-result text and a safe failure reason. `ScriptedTaskHarness` implements the
+result text and a safe failure reason. A required-tool failure also carries
+`failureSpanId`, identifying the failed tool observation rather than whichever
+tool ran last. `ScriptedTaskHarness` implements the
 same port for caller tests; it is not a second production agent.
 
 `AcpTaskHarness` is the only real protocol adapter. It runs a named registry
@@ -101,17 +105,18 @@ CLI also reject replacement links and non-regular files.
 
 Failed and aborted harness outcomes do not collect the folder or list artifacts.
 Their files may be incomplete and must not be offered as successful work. Result
-text and a bounded structured event log (fixed event types and lines, not raw
-provider/tool payloads) are still uploaded and marked `result` and `log` for
-finalization diagnostics. The core attaches result and artifact objects only for
-a sealed `done` outcome, never for failed/stopped work.
+text is still uploaded and marked `result` for finalization diagnostics. The
+launcher does not write or upload a fixed event journal or `log` object. Private
+harness observations use the best-effort trace path instead. The core attaches
+result and artifact objects only for a sealed `done` outcome, never for
+failed/stopped work.
 
-Every saved object has its plain leaf name as display metadata: `fib.txt`,
-`result.txt`, or `log.jsonl`, never the private `launcher_<uuid>/` work path.
+Every saved object has its plain leaf name as display metadata: `fib.txt` or
+`result.txt`, never the private `launcher_<uuid>/` work path.
 Display names are not unique catalog slots. Immutable object IDs distinguish
 objects, including an agent output also called `result.txt`. Upload IDs are
 `upload_` plus the SHA-256 of the JSON array `[launchId, role, fileName]`.
-This separates launcher result/log roles from artifacts without changing visible
+This separates the launcher result role from artifacts without changing visible
 names. Up to three attempts reuse that upload ID and mark after a missing storage
 ACK; the module replays its original receipt and the mark is idempotent. Changed
 bytes under that ID conflict rather than creating a second object.
@@ -122,7 +127,7 @@ request and 64 artifact IDs in total. Follow the opaque cursor until
 `nextCursor: null`; a short page is not EOF because encoded metadata has a
 separate 64 KiB bound. A 65th marked artifact fails with `artifact_limit`.
 Result text is written, uploaded and marked before collection; a later collection
-failure retains its already-durable result/log IDs and bytes in the failed
+failure retains its already-durable result ID and bytes in the failed
 report, not owner attachments. A storage failure can leave already marked
 partial objects, but never produces a successful report or partial owner reply.
 An empty `result.txt` therefore reflects an empty harness result, not collection
@@ -159,9 +164,30 @@ resend it. The relay applies the same connection-only rule to idempotent
 The separate, existing three-attempt identical-frame ACK replay remains unchanged.
 
 Launcher diagnostics contain fixed codes and safe `connection_attempts=N` counts, not token bytes, briefings,
-prompts or model output. Harness content belongs in task storage. TLS is never
+prompts or model output. Result text belongs in task storage; private command,
+output and completion observations belong in bounded traces, not diagnostics. TLS is never
 disabled. HTTP requests, sockets and child streams keep error listeners through
 teardown and have finite deadlines.
+
+## Best-effort traces, not a journal
+
+The launcher sends [task trace frames](task-channel.md#disposable-task-trace-route)
+to `/task/trace`, independently of progress and terminal mailbox frames. The
+launch root is `launchId`, under the briefing's `parentSpanId`; every harness
+span ID is prefixed with `launchId_`. A null harness parent attaches to that
+root. Final root attributes retain the namespaced `failureSpanId` supplied by
+the semantic result. A later successful tool never erases that failure link.
+
+Trace observations include model status and usage, tool command and bounded
+output tail, and final completion text. Before sending, the launcher scrubs
+projected token contents. Trace intake permits at most 2048 observations per
+run, 128 queued spans and 30000 encoded bytes per span. An independent 500 ms
+client sends each frame once, with no mailbox row, Signal, connection retry or
+ACK replay. Intake or transport failures drop observations without changing
+task execution, result storage or terminal reporting. After terminal settlement,
+trace draining has at most one second to finish before the client closes.
+There is no replacement `log.jsonl` object: traces can be incomplete or lost and
+must never prove success, replay work or own finalization.
 
 ## Finalizer and later stages
 

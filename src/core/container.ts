@@ -82,6 +82,7 @@ import { createTaskLaunchReconciler, taskWorkbenchImage } from './task-launch.js
 import { createTaskWorkbenchReadiness, createWorkbenchTaskService } from './task-workbench.js';
 import { createTaskChannel } from './task-channel.js';
 import { createTaskKubernetesIdentity } from './task-kubernetes-identity.js';
+import { createPostgresTraceStore } from '../storage/postgres-trace-store.js';
 import { createPostgresTaskMailbox } from '../storage/postgres-task-mailbox.js';
 import { createTaskChannelReplay } from './task-channel-replay.js';
 import { createTaskFinalizer } from './task-finalize.js';
@@ -1251,6 +1252,7 @@ export async function createContainerAsync(
   let taskLaunch: ReturnType<typeof createTaskLaunchReconciler> | undefined;
   let stopTaskFinalizer: ((deadline: number) => Promise<void>) | undefined;
   const taskLaunchController = new AbortController();
+  let stopTaskTraces: ((deadline: number) => Promise<void>) | undefined;
   let stopTaskChannel: ((deadline: number) => Promise<void>) | undefined;
   if (!mergedConfig.motorCortex.enabled && controlTokenFile && controlCaFile) {
     const image = taskWorkbenchImage(process.env['LIFEMODEL_TASK_WORKBENCH_IMAGE']);
@@ -1394,6 +1396,46 @@ export async function createContainerAsync(
     });
     channelPool.on('error', () => undefined);
     channelPool.on('connect', (client) => client.on('error', () => undefined));
+    // Disposable observations never spend state/owner-intake SQL capacity.
+    const tracePool = new Pool({
+      connectionString: databaseUrl,
+      max: 1,
+      application_name: 'lifemodel-observability',
+      connectionTimeoutMillis: 1000,
+      query_timeout: 2000,
+      statement_timeout: 2000,
+      lock_timeout: 1000,
+    });
+    tracePool.on('error', () => undefined);
+    tracePool.on('connect', (client) => client.on('error', () => undefined));
+    const traces = createPostgresTraceStore({ pool: tracePool });
+    const traceAuthorityPool = new Pool({
+      connectionString: databaseUrl,
+      max: 1,
+      application_name: 'lifemodel-trace-authority',
+      connectionTimeoutMillis: 250,
+      query_timeout: 250,
+      statement_timeout: 250,
+      lock_timeout: 250,
+    });
+    traceAuthorityPool.on('error', () => undefined);
+    traceAuthorityPool.on('connect', (client) => client.on('error', () => undefined));
+    const traceAuthority = createPostgresTaskMailbox({
+      pool: traceAuthorityPool,
+      epoch: snapshotEpoch,
+      operationTimeoutMs: 250,
+    });
+    stopTaskTraces = async (deadline) => {
+      await traces.close(deadline);
+      if (traces.droppedCount)
+        logger.warn(
+          { code: 'trace_records_dropped', count: traces.droppedCount },
+          'Task trace records dropped'
+        );
+      traceAuthority.stop();
+      await traceAuthorityPool.end();
+      await tracePool.end();
+    };
     const identity = createTaskKubernetesIdentity({ timeoutMs });
     const mailbox = createPostgresTaskMailbox({
       pool: channelPool,
@@ -1421,6 +1463,27 @@ export async function createContainerAsync(
         mailbox,
         identity,
         logger,
+        readTraceAuthority: (proof, signal) => traceAuthority.readBriefing(proof, signal),
+        onTrace: (frame, briefing) => {
+          traces.enqueue({
+            kind: 'span',
+            span: {
+              ...frame.span,
+              traceId: briefing.traceId,
+              ...(frame.span.component === 'task'
+                ? {
+                    parentSpanId: briefing.parentSpanId,
+                    attrs: {
+                      ...frame.span.attrs,
+                      taskId: briefing.taskId,
+                      launchId: briefing.launchId,
+                      harness: briefing.harness,
+                    },
+                  }
+                : {}),
+            },
+          });
+        },
         onStored: () => {
           void replay.resync();
         },
@@ -1511,6 +1574,7 @@ export async function createContainerAsync(
       await taskDrain;
       await taskChannelDrain;
       await taskFinalizerDrain;
+      await stopTaskTraces?.(deadline);
       await snapshotRedis.quit();
       await postgres.end();
     });

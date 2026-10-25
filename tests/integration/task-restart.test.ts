@@ -214,7 +214,6 @@ describe('task restart finalization (real Postgres and Valkey, TLS storage)', ()
       outcome: 'succeeded',
       summary: 'Finished task',
       resultObjectId: result.id,
-      logObjectId: log.id,
       artifactObjectIds: [],
     }
   ): TaskChannelFrame {
@@ -478,7 +477,6 @@ describe('task restart finalization (real Postgres and Valkey, TLS storage)', ()
           outcome,
           summary: 'Committed semantic decision',
           resultObjectId: outcome === 'succeeded' ? result.id : null,
-          logObjectId: log.id,
           artifactObjectIds: [],
           ...(outcome === 'failed' ? { reasonCode: 'provider_error' } : {}),
         } as TaskTerminalReport),
@@ -605,7 +603,6 @@ describe('task restart finalization (real Postgres and Valkey, TLS storage)', ()
           outcome,
           summary: 'Partial task output',
           resultObjectId: null,
-          logObjectId: log.id,
           artifactObjectIds: [],
           ...(outcome === 'failed' ? { reasonCode: 'provider_error' } : {}),
         } as TaskTerminalReport),

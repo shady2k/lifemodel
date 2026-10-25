@@ -43,8 +43,8 @@ async function main(): Promise<void> {
       process.exitCode = await runTaskLauncher({
         env: process.env,
         signal: controller.signal,
-        diagnostic: (code) => {
-          write(process.stderr, `${code}\n`);
+        diagnostic: (code, context) => {
+          write(process.stderr, `${JSON.stringify({ code, ...context })}\n`);
         },
       });
     } finally {

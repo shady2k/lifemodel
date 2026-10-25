@@ -25,6 +25,9 @@ export interface AcceptTask {
   readonly briefing: string;
   readonly profile: TaskProfile;
   readonly imageRevision: string;
+  /** Causal context is captured only on first acceptance, never replaced on replay. */
+  readonly traceId?: string;
+  readonly parentSpanId?: string | null;
 }
 
 export interface TaskAccessIntent {
@@ -95,6 +98,8 @@ export interface TaskOutcomeEvent {
 
 export interface TaskRecord {
   readonly id: string;
+  readonly traceId: string;
+  readonly parentSpanId: string | null;
   readonly launchKey: string;
   readonly briefing: string;
   readonly profile: TaskProfile;

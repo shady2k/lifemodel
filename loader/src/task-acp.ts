@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createTaskModelRelay } from './task-model-relay.js';
+import { AcpTaskTrace } from './task-trace.js';
 import { TASK_PROCESS_SUPERVISOR } from './task-process.js';
 import type { AgentConfiguration } from './task-harness-registry.js';
 import type {
@@ -30,14 +31,34 @@ const aborted = (): TaskHarnessResult => ({
 export class AcpTurn {
   private readonly tools = new Map<string, Json & { status: string }>();
   private toolFailed = false;
+  private failedToolId: string | undefined;
+  private protocolFailureSpanId: string | undefined;
+  private readonly trace: AcpTaskTrace;
   private final = '';
   private providerFailed = false;
   constructor(
-    private readonly toolOutputFailed: (output: unknown, input?: unknown) => boolean = () => false
-  ) {}
+    private readonly toolOutputFailed: (output: unknown, input?: unknown) => boolean = () => false,
+    onEvent?: TaskHarnessEventSink
+  ) {
+    this.trace = new AcpTaskTrace(onEvent);
+  }
+
+  begin(model: string): void {
+    this.trace.begin(model);
+  }
+  cleanupFailed(): void {
+    this.trace.failModel('harness_cleanup_failed');
+  }
+  failureSpanId(): string | undefined {
+    return this.protocolFailureSpanId ?? this.trace.modelSpanId();
+  }
+  finish(result: TaskHarnessResult, response: Json): void {
+    this.trace.finish(result, response, this.final, this.providerFailed);
+  }
 
   update(value: unknown): 'step' | 'tool' | undefined {
     const update = record(value);
+    if (update['sessionUpdate'] === 'usage_update') this.trace.reportUsage(update);
     if (update['sessionUpdate'] === 'agent_message_chunk') {
       const content = record(update['content']);
       if (content['type'] === 'text' && typeof content['text'] === 'string') {
@@ -57,8 +78,12 @@ export class AcpTurn {
         status !== null &&
         (typeof status !== 'string' ||
           !['pending', 'in_progress', 'completed', 'failed'].includes(status))
-      )
+      ) {
+        // Preserve the bad host status as failed evidence before rejecting ACP.
+        this.trace.tool(id, { ...previous, ...update }, true);
+        this.protocolFailureSpanId = this.trace.toolSpanId(id);
         throw new Error('harness_protocol_error');
+      }
       // ACP v1 updates are patches: omitted/null fields leave prior values in
       // place, including rawInput needed to interpret a later rawOutput.
       const tool: Json & { status: string } = {
@@ -69,8 +94,12 @@ export class AcpTurn {
         if (key !== 'sessionUpdate' && value !== undefined && value !== null) tool[key] = value;
       }
       this.tools.set(id, tool);
-      if (tool.status === 'failed' || this.toolOutputFailed(tool['rawOutput'], tool['rawInput']))
+      const outputFailed = this.toolOutputFailed(tool['rawOutput'], tool['rawInput']);
+      this.trace.tool(id, tool, outputFailed);
+      if (tool.status === 'failed' || outputFailed) {
         this.toolFailed = true;
+        this.failedToolId ??= id;
+      }
       // Work invalidates earlier prose. Presentation/output patches for an
       // already settled call do not erase the final answer that followed it.
       if (
@@ -94,8 +123,13 @@ export class AcpTurn {
   result(stopReason: unknown): TaskHarnessResult {
     if (stopReason === 'cancelled') return aborted();
     if (this.providerFailed) return failed('provider_error');
-    if (this.toolFailed || [...this.tools.values()].some((tool) => tool.status !== 'completed'))
-      return failed('required_tool_failed');
+    const offendingId =
+      this.failedToolId ?? [...this.tools].find(([, tool]) => tool.status !== 'completed')?.[0];
+    if (this.toolFailed || offendingId !== undefined) {
+      const failureSpanId =
+        offendingId === undefined ? undefined : this.trace.toolSpanId(offendingId);
+      return { ...failed('required_tool_failed'), ...(failureSpanId ? { failureSpanId } : {}) };
+    }
     if (stopReason !== 'end_turn' || !this.final.trim()) return failed('no_final_result');
     return { outcome: 'succeeded', result: this.final.trim() };
   }
@@ -153,7 +187,7 @@ export class AcpTaskHarness implements TaskHarness {
     let processClosed: Promise<void> | undefined;
     let stdoutEnded = false;
     let relay: Awaited<ReturnType<typeof createTaskModelRelay>> | undefined;
-    const turn = new AcpTurn(this.options.toolOutputFailed);
+    const turn = new AcpTurn(this.options.toolOutputFailed, this.options.onEvent);
     let result: TaskHarnessResult = failed('harness_failed');
     const pending = new Map<
       number,
@@ -171,6 +205,7 @@ export class AcpTaskHarness implements TaskHarness {
     let closing = false;
     let promptSettled = false;
     let stopReason: unknown;
+    let promptResponse: Json = {};
     const fail = (code: string) => {
       fault ??= new Error(code);
       for (const waiter of pending.values()) {
@@ -414,11 +449,13 @@ export class AcpTaskHarness implements TaskHarness {
       this.cancelRequest = () =>
         write({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: sessionID } });
       await emit({ type: 'step', text: 'Running task' });
+      turn.begin(briefing.model);
       const response = await request(
         'session/prompt',
         { sessionId: sessionID, prompt: [{ type: 'text', text: briefing.text }] },
         timeout
       );
+      promptResponse = response;
       stopReason = response['stopReason'];
       // Finish the batch containing the reply before planning shutdown. Frames
       // coalesced behind it cannot hide a malformed message or late tool error.
@@ -445,6 +482,7 @@ export class AcpTaskHarness implements TaskHarness {
         /* preserve cleanup */
       }
     } finally {
+      turn.finish(result, promptResponse);
       closing = true;
       this.cancelRequest = undefined;
       let cleanupFailed = false;
@@ -501,9 +539,12 @@ export class AcpTaskHarness implements TaskHarness {
       }
       signal.removeEventListener('abort', stop);
       fail('harness_closed');
-      if (cleanupFailed && result.outcome === 'succeeded')
+      if (cleanupFailed && result.outcome === 'succeeded') {
         result = failed('harness_cleanup_failed');
+        turn.cleanupFailed();
+      }
     }
-    return result;
+    const failureSpanId = result.outcome === 'failed' ? turn.failureSpanId() : undefined;
+    return failureSpanId && !result.failureSpanId ? { ...result, failureSpanId } : result;
   }
 }

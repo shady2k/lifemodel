@@ -13,6 +13,8 @@ const launchId = `launch_${'a'.repeat(64)}`;
 const namespace = 'lifemodel-motor';
 const task = {
   id: `task_${'b'.repeat(64)}`,
+  traceId: 'task-executor-trace',
+  parentSpanId: null,
   launchId,
   jobName: `task-${'a'.repeat(58)}`,
   jobUid: 'job-uid',

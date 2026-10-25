@@ -4,15 +4,39 @@ export interface TaskBriefing {
   model: string;
 }
 
+export interface TaskHarnessTraceSpan {
+  spanId: string;
+  /** Null binds the span to the launcher's task root. */
+  parentSpanId: string | null;
+  component: string;
+  startedAt: string;
+  endedAt: string | null;
+  status: null | 'ok' | 'failed' | 'suppressed';
+  attrs: Record<string, unknown>;
+}
+
+/** Trace callbacks are best effort and must never gate protocol or outcome. */
+export function emitTaskTrace(
+  sink: TaskHarnessEventSink | undefined,
+  span: TaskHarnessTraceSpan
+): void {
+  void Promise.resolve()
+    .then(() => sink?.({ type: 'trace', span }))
+    .catch(() => undefined);
+}
+
 export type TaskHarnessEvent =
   | { type: 'step'; text: string }
   | { type: 'tool'; name: string; status: 'running' | 'completed' | 'error' }
-  | { type: 'error'; code: string };
+  | { type: 'error'; code: string }
+  | { type: 'trace'; span: TaskHarnessTraceSpan };
 
 export interface TaskHarnessResult {
   outcome: 'succeeded' | 'failed' | 'aborted';
   result: string;
   reasonCode?: string;
+  /** Culprit span, when recorded; required_tool_failed names its exact tool. */
+  failureSpanId?: string;
 }
 
 export type TaskHarnessEventSink = (event: TaskHarnessEvent) => void | Promise<void>;
@@ -44,7 +68,8 @@ export class ScriptedTaskHarness implements TaskHarness {
     this.started = true;
     for (const event of this.options.events ?? [{ type: 'step', text: 'Running task' }]) {
       if (this.aborted) break;
-      await this.options.onEvent?.(event);
+      if (event.type === 'trace') emitTaskTrace(this.options.onEvent, event.span);
+      else await this.options.onEvent?.(event);
     }
     if (this.options.waitForAbort && !this.aborted) {
       await new Promise<void>((resolve) => {

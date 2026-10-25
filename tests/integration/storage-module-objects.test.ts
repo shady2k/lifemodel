@@ -512,7 +512,13 @@ describe('task immutable object API', () => {
               hardStopAt: new Date(Date.now() + 60_000).toISOString(),
             };
           else if (req.url === '/task/briefing')
-            reply = { ...taskIds, briefing: 'Produce artifacts' };
+            reply = {
+              ...taskIds,
+              briefing: 'Produce artifacts',
+              traceId: taskIds.taskId,
+              parentSpanId: null,
+            };
+          else if (req.url === '/task/trace') reply = { accepted: true };
           else if (req.url === '/task/events') {
             const frame = JSON.parse(Buffer.concat(chunks).toString());
             if (frame.kind === 'terminal') reports.push(frame.payload);
@@ -621,7 +627,9 @@ describe('task immutable object API', () => {
         expect(catalog.some((row: any) => row.name === 'outside.txt')).toBe(false);
         expect(catalog.some((row: any) => row.name.startsWith('launcher_'))).toBe(false);
         expect(catalog.find((row: any) => row.mark === 'result').name).toBe('result.txt');
-        expect(catalog.find((row: any) => row.mark === 'log').name).toBe('log.jsonl');
+        expect(catalog.some((row: any) => row.mark === 'log')).toBe(false);
+        expect(catalog.some((row: any) => row.name === 'log.jsonl')).toBe(false);
+        expect(reports[0]).not.toHaveProperty('logObjectId');
         if (['lost_ack', 'lost_mark_ack'].includes(fault)) {
           expect(lostAck).toBe(true);
           expect(uploadedOutputs).toHaveLength(1);
@@ -630,16 +638,12 @@ describe('task immutable object API', () => {
           const downloaded = await call('GET', `/spaces/a/objects/${row.id}`);
           expect(downloaded.body.toString()).toBe(`contents of ${row.name}`);
         }
-        for (const [id, mark] of [
-          [reports[0].resultObjectId, 'result'],
-          [reports[0].logObjectId, 'log'],
-        ]) {
-          expect(typeof id).toBe('string');
-          const row = await stores.postgres.query('SELECT mark FROM storage.objects WHERE id=$1', [
-            id,
-          ]);
-          expect(row.rows[0].mark).toBe(mark);
-        }
+        expect(typeof reports[0].resultObjectId).toBe('string');
+        const resultRow = await stores.postgres.query(
+          'SELECT mark FROM storage.objects WHERE id=$1',
+          [reports[0].resultObjectId]
+        );
+        expect(resultRow.rows[0].mark).toBe('result');
         const result = await call('GET', `/spaces/a/objects/${reports[0].resultObjectId}`);
         expect(result.status).toBe(200);
         expect(result.body.toString()).toBe(resultText);

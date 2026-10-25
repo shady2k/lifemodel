@@ -35,7 +35,6 @@ describe('durable fenced task mailbox', () => {
       outcome: 'succeeded',
       summary: 'Finished',
       resultObjectId: 'result_1',
-      logObjectId: 'log_1',
       artifactObjectIds: ['artifact_1'],
     },
   });

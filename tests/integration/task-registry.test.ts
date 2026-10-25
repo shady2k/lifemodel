@@ -78,6 +78,33 @@ describe('fenced durable task registry', () => {
     expect(await registry.readAccessIntent(accepted[0].id)).toBeNull();
   });
 
+  it('keeps the first trace across restart and replay with different causal context', async () => {
+    const input = {
+      ...request('trace-replay'),
+      traceId: 'incoming-signal',
+      parentSpanId: 'deciding-span',
+    };
+    const task = await registry.accept(input);
+    expect(task).toMatchObject({ traceId: input.traceId, parentSpanId: input.parentSpanId });
+    expect(await makeRegistry().read(task.id)).toEqual(task);
+    expect(
+      await makeRegistry().accept({
+        ...input,
+        traceId: 'replay-signal',
+        parentSpanId: 'replay-span',
+      })
+    ).toEqual(task);
+    expect(await makeRegistry().accept(request('trace-replay'))).toEqual(task);
+    for (const column of ['trace_id', 'parent_span_id'])
+      await expect(
+        stores.postgres.query(`UPDATE core.tasks SET ${column}='changed' WHERE id=$1`, [task.id])
+      ).rejects.toMatchObject({ code: '23514' });
+    const untraced = await registry.accept(request('trace-default'));
+    expect(untraced.traceId).toBe(untraced.id);
+    expect(untraced.parentSpanId).toBeNull();
+    expect(await makeRegistry().read(untraced.id)).toEqual(untraced);
+  });
+
   it('cancels an owned checked-out SQL client without destroying an unrelated shared-pool client', async () => {
     const controller = new AbortController();
     const cancellable = createPostgresTaskRegistry({
@@ -137,8 +164,8 @@ describe('fenced durable task registry', () => {
     await expect(
       stores.postgres.query(
         `INSERT INTO core.tasks
-      (id, launch_key, briefing, profile, image_revision, harness, settings_revision, wrap_grace_seconds, request_image_revision)
-      SELECT 'other-task', launch_key, briefing, profile, image_revision, harness, settings_revision, wrap_grace_seconds, request_image_revision
+      (id, launch_key, briefing, profile, image_revision, harness, settings_revision, wrap_grace_seconds, request_image_revision, trace_id)
+      SELECT 'other-task', launch_key, briefing, profile, image_revision, harness, settings_revision, wrap_grace_seconds, request_image_revision, trace_id
       FROM core.tasks WHERE id=$1`,
         [task.id]
       )

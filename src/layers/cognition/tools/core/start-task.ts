@@ -4,6 +4,7 @@ import { validateAgainstParameters } from '../validation.js';
 import { TASK_PROFILES } from '../../../../ports/task-profiles.js';
 import { TaskRegistryError, type TaskRecord } from '../../../../ports/tasks.js';
 import type { StartTaskIntent } from '../../../../types/intent.js';
+import { getTraceContext } from '../../../../core/trace-context.js';
 
 export interface StartTaskToolDeps {
   readByLaunchKey: (launchKey: string) => Promise<TaskRecord | null>;
@@ -70,6 +71,7 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
         if (!profile) return { success: false, code: 'unknown_profile' };
         if (typeof args['briefing'] !== 'string' || !args['briefing'].trim())
           return { success: false, code: 'invalid_briefing' };
+        const trace = getTraceContext();
         const task = await deps.applyStartTask({
           type: 'START_TASK',
           payload: {
@@ -77,6 +79,8 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
             briefing: args['briefing'],
             profile,
             imageRevision: deps.imageRevision,
+            traceId: trace?.traceId ?? context.correlationId,
+            parentSpanId: trace?.spanId ?? context.correlationId,
           },
           trace: { tickId: context.correlationId },
         });

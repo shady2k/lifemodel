@@ -261,7 +261,9 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
         expect(events.some((event) => event.type === 'step')).toBe(true);
         expect(JSON.stringify(events)).not.toContain(TOKEN);
         expect(JSON.stringify(events)).not.toContain(BRIEFING);
-        expect(JSON.stringify(events)).not.toContain(RESULT);
+        expect(JSON.stringify(events.filter((event) => event.type !== 'trace'))).not.toContain(
+          RESULT
+        );
         if (contractFixtures[kind]!.usesModelEndpoint) {
           expect(requests.length).toBeGreaterThan(0);
           expect(
@@ -278,6 +280,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
           outcome: 'failed',
           result: '',
           reasonCode: 'provider_error',
+          failureSpanId: expect.any(String),
         });
       }, 60_000);
 
@@ -287,6 +290,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
           outcome: 'failed',
           result: '',
           reasonCode: 'required_tool_failed',
+          failureSpanId: expect.any(String),
         });
         if (contractFixtures[kind]!.usesModelEndpoint) expect(toolSent).toBe(true);
       }, 60_000);
@@ -374,7 +378,8 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
         adapterModule: '',
       },
       configure: () => ({}),
-      onEvent: () => {
+      onEvent: (event) => {
+        if (event.type === 'trace') return;
         if (++count === 1) return;
         reached();
         return new Promise<void>(() => {});
@@ -422,6 +427,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
         outcome: 'failed',
         result: '',
         reasonCode: 'required_tool_failed',
+        failureSpanId: expect.any(String),
       });
     } finally {
       delete taskHarnessRegistry['different'];
@@ -436,6 +442,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
         outcome: 'failed',
         result: '',
         reasonCode: 'required_tool_failed',
+        failureSpanId: expect.any(String),
       });
       expect(toolSent).toBe(true);
     },
@@ -575,6 +582,7 @@ describe('ACP semantic terminal boundary', () => {
         outcome: 'failed',
         result: '',
         reasonCode: 'required_tool_failed',
+        failureSpanId: expect.any(String),
       });
     }
   });

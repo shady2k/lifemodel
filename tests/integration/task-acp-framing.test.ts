@@ -241,16 +241,28 @@ describe('scripted ACP framing and patch contract', () => {
         outcome: 'failed',
         result: '',
         reasonCode: 'required_tool_failed',
+        failureSpanId: expect.any(String),
       });
     },
     10000
   );
 
   it('fails closed on a malformed tail written only by the shutdown signal handler', async () => {
-    expect((await run('teardown-tail')).result).toEqual({
+    const { result, events } = await run('teardown-tail');
+    const culprit = events
+      .flatMap((event) =>
+        event.type === 'trace' && event.span.spanId === result.failureSpanId ? [event.span] : []
+      )
+      .at(-1);
+    expect(culprit).toMatchObject({
+      status: 'failed',
+      attrs: { reasonCode: 'harness_cleanup_failed' },
+    });
+    expect(result).toEqual({
       outcome: 'failed',
       result: '',
       reasonCode: 'harness_cleanup_failed',
+      failureSpanId: expect.any(String),
     });
   }, 10000);
 
@@ -261,6 +273,7 @@ describe('scripted ACP framing and patch contract', () => {
         outcome: 'failed',
         result: '',
         reasonCode: 'harness_cleanup_failed',
+        failureSpanId: expect.any(String),
       });
     },
     10000

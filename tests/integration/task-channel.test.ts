@@ -22,6 +22,9 @@ import {
 import { createPostgresTaskRegistry } from '../../src/storage/postgres-task-registry.js';
 import { createPostgresTaskMailbox } from '../../src/storage/postgres-task-mailbox.js';
 import { OwnerMessageIntake } from '../../src/storage/owner-message-intake.js';
+import { createPostgresTraceStore } from '../../src/storage/postgres-trace-store.js';
+import { AcpTurn } from '../../loader/src/task-acp.js';
+import type { TaskHarnessEvent } from '../../loader/src/task-harness.js';
 import { createTaskChannel } from '../../src/core/task-channel.js';
 import { createTaskKubernetesIdentity } from '../../src/core/task-kubernetes-identity.js';
 import { createTaskKubernetesIdentity as createModelIdentity } from '../../loader/src/task-kubernetes-identity.js';
@@ -331,11 +334,13 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
       mailbox?: TaskMailbox;
       settings?: Partial<PlatformSettingsValues>;
       identity?: typeof identity;
+      onTrace?: Parameters<typeof createTaskChannel>[0]['onTrace'];
     } = {}
   ) {
     const channel = createTaskChannel({
       tls: { cert: certificate.cert, key: certificate.key },
       mailbox: overrides.mailbox ?? mailbox,
+      onTrace: overrides.onTrace,
       identity: overrides.identity ?? identity,
       settings: { ...values, ...overrides.settings },
       logger: recordingLogger(createTestLogger('silent'), logs),
@@ -447,6 +452,190 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
     return `${time.slice(0, 8)}-${time.slice(8)}-7${randomUUID().slice(0, 3)}-8${randomUUID().slice(0, 3)}-${randomUUID().replaceAll('-', '').slice(0, 12)}`;
   }
 
+  it('persists an ACP failed/successful tool tree without mailbox rows and names the culprit', async () => {
+    const f = await fixture();
+    const writer = createPostgresTraceStore({
+      pool: stores.postgres,
+      knownSecrets: ['TRACE-SECRET-CANARY'],
+    });
+    cleanup.push(() => writer.close());
+    const channel = await listener({
+      onTrace: (frame) => {
+        writer.enqueue({ kind: 'span', span: frame.span });
+      },
+    });
+    const events: TaskHarnessEvent[] = [];
+    const turn = new AcpTurn(
+      (output) => {
+        const exit = (output as any)?.metadata?.exit;
+        return typeof exit === 'number' && exit !== 0;
+      },
+      (event) => {
+        events.push(event);
+      }
+    );
+    turn.begin('lifemodel/task');
+    for (const [id, exit] of [
+      ['bad', 7],
+      ['good', 0],
+    ] as const) {
+      turn.update({
+        sessionUpdate: 'tool_call',
+        toolCallId: id,
+        status: 'in_progress',
+        kind: 'execute',
+        title: `command ${id}`,
+        rawInput: { command: `echo ${id}` },
+      });
+      turn.update({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: id,
+        status: 'completed',
+        rawOutput: { metadata: { exit }, output: 'TRACE-SECRET-CANARY output' },
+      });
+    }
+    turn.update({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'Finished after probing' },
+    });
+    const result = turn.result('end_turn');
+    turn.finish(result, { stopReason: 'end_turn' });
+    await Promise.resolve(); // detached trace callbacks, not a timer/tick guess
+    expect(result).toMatchObject({
+      outcome: 'failed',
+      reasonCode: 'required_tool_failed',
+      failureSpanId: expect.any(String),
+    });
+    const now = new Date().toISOString();
+    const spans = [
+      {
+        spanId: f.task.launchId,
+        parentSpanId: f.task.parentSpanId,
+        component: 'task',
+        startedAt: now,
+        endedAt: now,
+        status: 'failed' as const,
+        attrs: {
+          taskId: f.task.id,
+          launchId: f.task.launchId,
+          failureSpanId: `${f.task.launchId}_${result.failureSpanId}`,
+          outcome: result.outcome,
+          reasonCode: result.reasonCode,
+        },
+      },
+      ...events.flatMap((event) =>
+        event.type === 'trace'
+          ? [
+              {
+                ...event.span,
+                spanId: `${f.task.launchId}_${event.span.spanId}`,
+                parentSpanId: event.span.parentSpanId
+                  ? `${f.task.launchId}_${event.span.parentSpanId}`
+                  : f.task.launchId,
+              },
+            ]
+          : []
+      ),
+    ];
+    for (const span of spans) {
+      const response = await call(channel.url, f.token, step(f.task), {
+        path: '/task/trace',
+        raw: JSON.stringify({
+          taskId: f.task.id,
+          attemptId: f.task.attemptId,
+          launchId: f.task.launchId,
+          span: { ...span, traceId: f.task.traceId },
+        }),
+      });
+      expect(response.status).toBe(200);
+    }
+    await writer.flush();
+    const persisted = (
+      await stores.postgres.query('SELECT * FROM observability.trace_spans WHERE trace_id=$1', [
+        f.task.traceId,
+      ])
+    ).rows;
+    const tools = persisted.filter((row) => row.component === 'task.tool');
+    expect(tools).toHaveLength(2);
+    expect(tools.find((row) => row.attrs.exitCode === 7)).toMatchObject({ status: 'failed' });
+    expect(tools.find((row) => row.attrs.exitCode === 0)).toMatchObject({ status: 'ok' });
+    const root = persisted.find((row) => row.component === 'task');
+    expect(root.attrs.failureSpanId).toBe(tools.find((row) => row.attrs.exitCode === 7).span_id);
+    expect(JSON.stringify(persisted)).not.toContain('TRACE-SECRET-CANARY');
+    expect((await stores.postgres.query('SELECT * FROM core.task_mailbox')).rows).toEqual([]);
+    // A different trace identity cannot insert observations into another run.
+    expect(
+      (
+        await call(channel.url, f.token, step(f.task), {
+          path: '/task/trace',
+          raw: JSON.stringify({
+            taskId: f.task.id,
+            attemptId: f.task.attemptId,
+            launchId: f.task.launchId,
+            span: { ...spans[0], traceId: 'other_trace' },
+          }),
+        })
+      ).status
+    ).toBe(403);
+  });
+
+  it('a stalled trace body cannot consume the terminal byte reservation', async () => {
+    const f = await fixture();
+    const frame: TaskChannelFrame = {
+      ...step(f.task),
+      kind: 'terminal',
+      payload: {
+        outcome: 'succeeded',
+        summary: 'ready',
+        resultObjectId: null,
+        artifactObjectIds: [],
+      },
+    };
+    const budget = Buffer.byteLength(JSON.stringify(frame));
+    const channel = await listener({ settings: { 'tasks.channel.maxBufferedBytes': budget } });
+    const held = await rawSocket(channel.url);
+    const admitted = new Promise<void>((resolve) => {
+      channel.server.once('request', () => {
+        resolve();
+      });
+    });
+    held.write(
+      `POST /task/trace HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ${f.token}\r\nContent-Type: application/json\r\nContent-Length: ${budget}\r\n\r\n{`
+    );
+    await admitted; // receive() already reserved trace bytes before this listener ran
+    // Send a second request after the first socket's headers/body entered intake.
+    // A 429 would prove trace traffic spent the mailbox reservation.
+    const response = await call(channel.url, f.token, frame);
+    expect(response.status).toBe(200);
+    expect(await rows(frame)).toHaveLength(1);
+  });
+
+  it('trace authority never waits on an exclusive task/launch row owner', async () => {
+    const f = await fixture();
+    const lock = await stores.postgres.connect();
+    try {
+      await lock.query('BEGIN');
+      await lock.query('SELECT id FROM core.tasks WHERE id=$1 FOR UPDATE', [f.task.id]);
+      await lock.query('SELECT launch_id FROM core.task_launches WHERE task_id=$1 FOR UPDATE', [
+        f.task.id,
+      ]);
+      const proof = {
+        podUid: f.podUid,
+        podName: f.podName,
+        jobUid: f.task.jobUid!,
+        jobName: f.task.jobName,
+        launchLabel: f.task.launchId.slice(7, 65),
+        templateHash: f.task.templateHash!,
+        startedAt: f.job.status.startTime,
+      };
+      const authority = await mailbox.readTraceAuthority!(proof, AbortSignal.timeout(500));
+      expect(authority).toMatchObject({ taskId: f.task.id, traceId: f.task.traceId, briefing: '' });
+    } finally {
+      await lock.query('ROLLBACK');
+      lock.release();
+    }
+  });
+
   it('commits before ACK headers, stores replay once, and accepts gaps and lower sequences', async () => {
     const f = await fixture();
     const channel = await listener();
@@ -513,7 +702,6 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
         outcome: 'succeeded',
         summary: PAYLOAD,
         resultObjectId: 'object-result',
-        logObjectId: 'object-log',
         artifactObjectIds: ['object-artifact'],
       },
     };

@@ -595,7 +595,8 @@ export function createModelGateway(options: GatewayOptions) {
     req: IncomingMessage,
     res: ServerResponse,
     trustedTaskId?: string,
-    authorizeTask?: (signal: AbortSignal) => Promise<void>
+    authorizeTask?: (signal: AbortSignal) => Promise<void>,
+    taskContext?: { taskId: string; traceId: string }
   ): Promise<void> {
     req.on('error', () => undefined);
     res.on('error', () => undefined);
@@ -723,10 +724,20 @@ export function createModelGateway(options: GatewayOptions) {
         health.outageSince ??= new Date().toISOString();
         health.lastErrorCode = failure.code;
         options.logger.warn(
-          { code: failure.code, slot: failureSlot ?? activeSlot, reason: failure.reason },
+          {
+            code: failure.code,
+            slot: failureSlot ?? activeSlot,
+            reason: failure.reason,
+            ...taskContext,
+          },
           'Model gateway request failed'
         );
       }
+      if (callerOutcome && taskContext)
+        options.logger.warn(
+          { code: failure.code, ...taskContext },
+          'Task model gateway request refused'
+        );
       if (!req.complete) {
         res.setHeader('connection', 'close');
         res.once('finish', () => {
@@ -771,7 +782,8 @@ export function createModelGateway(options: GatewayOptions) {
       req: IncomingMessage,
       res: ServerResponse,
       taskId: string,
-      authorize: (signal: AbortSignal) => Promise<void>
-    ) => serve(req, res, taskId, authorize),
+      authorize: (signal: AbortSignal) => Promise<void>,
+      taskContext?: { taskId: string; traceId: string }
+    ) => serve(req, res, taskId, authorize, taskContext),
   };
 }

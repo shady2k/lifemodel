@@ -19,6 +19,8 @@ import { createFencedPostgres, StalePostgresEpochError } from './fenced-postgres
 
 interface TaskRow {
   id: string;
+  trace_id: string;
+  parent_span_id: string | null;
   launch_key: string;
   briefing: string;
   profile: TaskProfile;
@@ -71,6 +73,8 @@ const TASK_SELECT = `SELECT t.*, l.attempt_id,l.launch_id,l.job_name,l.job_uid,l
 function taskRecord(row: TaskRow): TaskRecord {
   return {
     id: row.id,
+    traceId: row.trace_id,
+    parentSpanId: row.parent_span_id,
     launchKey: row.launch_key,
     briefing: row.briefing,
     profile: row.profile,
@@ -474,8 +478,8 @@ export function createPostgresTaskRegistry(deps: {
           return taskRecord(row);
         }
         await client.query(
-          `INSERT INTO core.tasks(id,launch_key,briefing,profile,settings_revision,harness,image_revision,wrap_grace_seconds,request_image_revision)
-          VALUES($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9)`,
+          `INSERT INTO core.tasks(id,launch_key,briefing,profile,settings_revision,harness,image_revision,wrap_grace_seconds,request_image_revision,trace_id,parent_span_id)
+          VALUES($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11)`,
           [
             identity.id,
             request.launchKey,
@@ -486,6 +490,8 @@ export function createPostgresTaskRegistry(deps: {
             imageRevision,
             settings.values['tasks.wrapGraceSeconds'],
             request.imageRevision,
+            request.traceId ?? identity.id,
+            request.parentSpanId ?? null,
           ]
         );
         await client.query(

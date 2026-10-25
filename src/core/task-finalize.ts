@@ -199,50 +199,68 @@ export function createTaskFinalizer(options: {
     const events = await options.registry.listOutcomeWork(100);
     if (events.length === 100) requested = true;
     for (const event of events) {
-      active();
-      if (pendingAppend && pendingAppend.key !== event.outcomeKey) {
+      try {
+        active();
+        if (pendingAppend && pendingAppend.key !== event.outcomeKey) {
+          await pendingAppend.promise;
+          active();
+        }
+        if (!pendingAppend) {
+          const signal = createSignal(
+            'task_outcome',
+            'task.finalizer',
+            { value: 1, confidence: 1 },
+            {
+              priority: 1,
+              correlationId: event.taskId,
+              data: { kind: 'task_outcome', ...event },
+            }
+          );
+          signal.id = event.outcomeKey;
+          const append = {
+            key: event.outcomeKey,
+            promise: options.bus.appendTaskSignal(signal, event.outcomeKey),
+          };
+          pendingAppend = append;
+          void append.promise.then(
+            () => {
+              if (pendingAppend === append) pendingAppend = undefined;
+            },
+            () => {
+              if (pendingAppend === append) pendingAppend = undefined;
+            }
+          );
+        }
         await pendingAppend.promise;
         active();
-      }
-      if (!pendingAppend) {
-        const signal = createSignal(
-          'task_outcome',
-          'task.finalizer',
-          { value: 1, confidence: 1 },
+        await options.registry.markOutcomeSignalled(event.outcomeKey);
+      } catch (error) {
+        // Diagnostics never change relay retry/outcome behavior. The durable
+        // event supplies task identity; only the fenced registry supplies trace.
+        const task = await options.registry.read(event.taskId).catch(() => null);
+        options.logger.warn(
           {
-            priority: 1,
-            correlationId: event.taskId,
-            data: { kind: 'task_outcome', ...event },
-          }
-        );
-        signal.id = event.outcomeKey;
-        const append = {
-          key: event.outcomeKey,
-          promise: options.bus.appendTaskSignal(signal, event.outcomeKey),
-        };
-        pendingAppend = append;
-        void append.promise.then(
-          () => {
-            if (pendingAppend === append) pendingAppend = undefined;
+            taskId: event.taskId,
+            ...(task ? { traceId: task.traceId } : {}),
+            code: 'outcome_relay_pending',
+            count: 1,
           },
-          () => {
-            if (pendingAppend === append) pendingAppend = undefined;
-          }
+          'Task outcome relay remains pending'
         );
+        throw error;
       }
-      await pendingAppend.promise;
-      active();
-      await options.registry.markOutcomeSignalled(event.outcomeKey);
     }
   }
   async function pass(): Promise<boolean> {
     let success = true;
+    let taskContext: { taskId: string; traceId: string } | undefined;
     try {
       const tasks = await options.registry.listFinalizationWork(cursor, 100);
       active();
       cursor = tasks.length === 100 ? (tasks.at(-1)?.acceptedOrder ?? '0') : '0';
       if (tasks.length === 100) requested = true;
       for (const task of tasks) {
+        taskContext = { taskId: task.id, traceId: task.traceId };
         try {
           await finalizeRow(task);
         } catch (error) {
@@ -258,10 +276,11 @@ export function createTaskFinalizer(options: {
                   'finalization_retry')
           );
           options.logger.warn(
-            { taskId: task.id, code: 'finalization_pending', count: 1 },
+            { taskId: task.id, traceId: task.traceId, code: 'finalization_pending', count: 1 },
             'Task finalization remains pending'
           );
         }
+        taskContext = undefined;
       }
       await relay();
       return success;
@@ -269,7 +288,7 @@ export function createTaskFinalizer(options: {
       if (error instanceof StalePostgresEpochError) void stop(Date.now());
       else if (!stopped)
         options.logger.warn(
-          { code: 'finalization_retry', count: 1 },
+          { code: 'finalization_retry', count: 1, ...taskContext },
           'Task finalization scan remains pending'
         );
       return false;
