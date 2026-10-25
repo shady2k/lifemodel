@@ -298,6 +298,7 @@ describe('production task trace container wiring', { timeout: 30_000 }, () => {
     const started = performance.now();
     const wallStarted = Date.now();
     const stopping = runStopSequence({ reason: 'trace shutdown test', code: 0, container: active });
+    const wallAfter = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let stoppedBeforeRescue: boolean;
     let elapsed: number;
@@ -322,7 +323,8 @@ describe('production task trace container wiring', { timeout: 30_000 }, () => {
     expect(cleanup).toEqual(['state-valkey-closed', 'state-postgres-closed']);
     const deadline = (shutdownCall.mock.calls as unknown[][])[0]?.[0];
     expect(deadline).toBeTypeOf('number');
-    expect(Number(deadline)).toBeLessThanOrEqual(wallStarted + budget);
+    expect(Number(deadline)).toBeGreaterThanOrEqual(wallStarted + budget);
+    expect(Number(deadline)).toBeLessThanOrEqual(wallAfter + budget);
     expect(loopStop).toHaveBeenCalledWith(deadline);
     expect(elapsed).toBeLessThan(budget);
     await expect
