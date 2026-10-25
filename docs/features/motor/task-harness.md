@@ -76,25 +76,64 @@ agent failure. Failure to establish or finish that cleanup fails closed.
 
 ## Durable outputs before the report
 
-Result text and a bounded structured event log (fixed event types and lines,
-not raw provider/tool payloads) are written to private temporary work
-files and passed through the shipped `lifemodel-storage put` implementation.
-Each saved object is then durably `mark`ed `result` or `log`. Files the agent
-uploads and marks `artifact` are discovered by bounded own-space listing (at most
-100 pages, 100 rows per request and 64 artifact IDs). Follow the opaque cursor
-until `nextCursor: null`; a short page is not EOF because encoded metadata has
-a separate 64 KiB bound. A 65th artifact fails with `artifact_limit`. Result text
-is written, uploaded and marked before artifact collection; a later collection
+The launcher creates `/work/outputs/` before starting the harness. It prepends
+these standing instructions to every briefing through the harness-neutral port,
+not the OpenCode configuration (the owner-facing goal remains unchanged):
+
+```text
+Files for the owner go in /work/outputs/, flat, with their final file names.
+Only regular files are allowed; no subfolders or symlinks. Maximum: 64 files.
+Files elsewhere are not delivered. Outputs are delivered only if the task succeeds.
+```
+
+A custom launcher work directory uses its own `outputs/` child in these
+instructions. Nothing is declared up front. After harness success the launcher
+validates the whole flat folder, then uploads each regular file through the
+shipped `lifemodel-storage put` implementation and durably marks it `artifact`.
+Files elsewhere are not automatically uploaded. The folder and its entries must
+not be symlinks. A subdirectory is `output_subdirectory`; a symlink is
+`output_symlink`; a FIFO, device or other non-regular entry is
+`output_not_regular`; a 65th entry is `output_limit`; a name rejected by the
+storage CLI's canonical-name validator is `output_name_invalid`. These fixed
+codes expose no file names or contents. Validation finishes before the first
+output upload. Transfer-time no-follow, nonblocking file opens in the shipped
+CLI also reject replacement links and non-regular files.
+
+Failed and aborted harness outcomes do not collect the folder or list artifacts.
+Their files may be incomplete and must not be offered as successful work. Result
+text and a bounded structured event log (fixed event types and lines, not raw
+provider/tool payloads) are still uploaded and marked `result` and `log` for
+finalization diagnostics. The core attaches result and artifact objects only for
+a sealed `done` outcome, never for failed/stopped work.
+
+Every saved object has its plain leaf name as display metadata: `fib.txt`,
+`result.txt`, or `log.jsonl`, never the private `launcher_<uuid>/` work path.
+Display names are not unique catalog slots. Immutable object IDs distinguish
+objects, including an agent output also called `result.txt`. Upload IDs are
+`upload_` plus the SHA-256 of the JSON array `[launchId, role, fileName]`.
+This separates launcher result/log roles from artifacts without changing visible
+names. Up to three attempts reuse that upload ID and mark after a missing storage
+ACK; the module replays its original receipt and the mark is idempotent. Changed
+bytes under that ID conflict rather than creating a second object.
+
+After output collection, bounded own-space listing discovers all objects marked
+`artifact` (including explicit CLI uploads): at most 100 pages, 100 rows per
+request and 64 artifact IDs in total. Follow the opaque cursor until
+`nextCursor: null`; a short page is not EOF because encoded metadata has a
+separate 64 KiB bound. A 65th marked artifact fails with `artifact_limit`.
+Result text is written, uploaded and marked before collection; a later collection
 failure retains its already-durable result/log IDs and bytes in the failed
-report. An empty `result.txt` therefore reflects an empty harness result, not
-artifact collection truncating the file. The ACP adapter deliberately returns
-empty result text for failed/aborted turns, including required-tool failure or
-missing final text; earlier prose alone is not an accepted final answer. A
-storage failure can mask that earlier semantic reason in the terminal report.
-No object bytes, prompt, stdout, provider response or log chunk is sent through
-the channel. The terminal payload contains only semantic outcome, a fixed short
-summary, safe failure code when applicable, and the exact marked object IDs.
-An unsuccessful storage mark prevents a successful terminal report.
+report, not owner attachments. A storage failure can leave already marked
+partial objects, but never produces a successful report or partial owner reply.
+An empty `result.txt` therefore reflects an empty harness result, not collection
+truncating the file. The ACP adapter deliberately returns empty result text for
+failed/aborted turns, including required-tool failure or missing final text;
+earlier prose alone is not an accepted final answer. A storage failure can mask
+that earlier semantic reason in the terminal report. No object bytes, prompt,
+stdout, provider response or log chunk is sent through the channel. The terminal
+payload contains only semantic outcome, a fixed short summary, safe failure code
+when applicable, and the exact marked object IDs. An unsuccessful storage mark
+prevents a successful terminal report.
 
 One frame is in flight at a time. The launcher rereads the channel token and CA
 per request. Ambiguous ACKs replay the identical frame, message ID and sequence,

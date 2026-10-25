@@ -55,6 +55,19 @@ const object = {
   sha256: 'a'.repeat(64),
   mark: 'result',
 };
+const artifact = {
+  ...object,
+  id: '22222222-2222-4222-8222-222222222222',
+  name: 'quarterly report.pdf',
+  mark: 'artifact',
+  contentType: 'application/pdf',
+};
+const log = {
+  ...object,
+  id: '33333333-3333-4333-8333-333333333333',
+  name: 'execution.log',
+  mark: 'log',
+};
 
 describe('task conversation replies (real Postgres and Valkey)', () => {
   let stores: TestStores;
@@ -127,7 +140,12 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
       );
     return { ...instance, snapshot, bus, registry, cognition, events };
   }
-  function outcome(taskId: string, outcomeKey: string, state: TaskOutcomeEvent['state'] = 'done') {
+  function outcome(
+    taskId: string,
+    outcomeKey: string,
+    state: TaskOutcomeEvent['state'] = 'done',
+    objects: TaskOutcomeEvent['objects'] = [object]
+  ) {
     return createSignal(
       'task_outcome',
       'task.finalizer',
@@ -140,12 +158,12 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
           state,
           reasonCode: state === 'done' ? 'completed' : 'timeout',
           summary: state === 'done' ? 'The answer is 42.' : 'The task ran out of time.',
-          objects: [object],
+          objects,
         },
       }
     );
   }
-  it('answers at once with one queued task, then binds a result to one outcome reply, including duplicate relay and restart', async () => {
+  it('answers at once, then binds sealed result and artifact files with plain names to one reply across duplicate relay and restart', async () => {
     const prefix = `task-reply:${randomUUID()}:`;
     const first = await boot(prefix, [...startScript, { content: 'The answer is 42.' }]);
     first.coreLoop.pushSignal(
@@ -185,6 +203,8 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
       // Compute remains fake; actual launch, seal, terminal outbox and relay run.
       expect(await launcher.runOnce()).toBe(true);
       await storage.mark(object);
+      await storage.mark(artifact);
+      await storage.mark(log);
       await first.registry.beginFinalization(task!.id, task!.launchId, {
         state: 'done',
         reasonCode: 'completed',
@@ -198,7 +218,7 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
       control.close();
       await storage.close();
     }
-    const signal = outcome(task!.id, `outcome_${task!.launchId}`);
+    const signal = outcome(task!.id, `outcome_${task!.launchId}`, 'done', [object, artifact, log]);
     await expect.poll(async () => (await first.events()).length).toBe(2);
     const reply = (await first.events())[1]!;
     expect(reply.payload).toMatchObject({
@@ -210,8 +230,15 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
           size: object.size,
           contentType: 'application/octet-stream',
         },
+        {
+          artifactId: artifact.id,
+          name: artifact.name,
+          size: artifact.size,
+          contentType: artifact.contentType,
+        },
       ],
     });
+    expect(reply.payload.attachments).toHaveLength(2);
     expect(reply.eventId).not.toBe((await first.events())[0]!.eventId);
     await first.coreLoop.fenceForTest();
     const beforeRestart = await first.snapshot.read();
@@ -241,6 +268,7 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
     );
     expect(bound).toHaveLength(1);
     expect(bound[0]!.content).toBe('The answer is 42.');
+    expect(bound[0]!.attachments).toEqual(reply.payload.attachments);
     // Applying the committed rows trims outbound; verify the actual boundary.
     expect(await restarted.events()).toEqual([]);
     // Durable admission receipt survives both bus and outbound trimming.
@@ -382,7 +410,7 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
     const prefix = `task-outcome-crash:${randomUUID()}:`;
     const script = [{ content: 'The answer is 42.' }];
     const first = await boot(prefix, script, true);
-    const signal = outcome('task_outcome_crash', 'outcome_crash');
+    const signal = outcome('task_outcome_crash', 'outcome_crash', 'done', [object, artifact, log]);
     first.coreLoop.pushSignal(signal);
     await waitFor(() => first.coreLoop.stopReport().loopStopped, 'outcome answer CAS failed');
     const turn = first.cognition.calls[0]!.context.tickId;
@@ -390,7 +418,20 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
     const restarted = await boot(prefix, script);
     await expect.poll(async () => (await restarted.events()).length).toBe(1);
     expect(restarted.cognition.calls[0]!.context.tickId).toBe(turn);
-    expect((await restarted.events())[0]!.payload.attachments).toHaveLength(1);
+    expect((await restarted.events())[0]!.payload.attachments).toEqual([
+      {
+        artifactId: object.id,
+        name: object.name,
+        size: object.size,
+        contentType: 'application/octet-stream',
+      },
+      {
+        artifactId: artifact.id,
+        name: artifact.name,
+        size: artifact.size,
+        contentType: artifact.contentType,
+      },
+    ]);
   });
   it('reports two outcomes from the same batch in separate turns, without losing the second', async () => {
     const prefix = `task-outcome-batch:${randomUUID()}:`;
@@ -681,15 +722,26 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
       { success: false, code: 'task_outcome_requires_final_reply' },
     ]);
   });
-  it('keeps all 21 results in bounded attachment continuations and does not strand unpresentable metadata', async () => {
+  it('keeps the result and all 20 artifacts in bounded continuations and does not strand unpresentable metadata', async () => {
     const prefix = `task-reply-many:${randomUUID()}:`;
     const instance = await boot(prefix, [
       { content: 'All files are ready.' },
       { content: 'The work ended.' },
     ]);
     const signal = outcome('task_many', 'outcome_many');
-    const objects = Array.from({ length: 21 }, () => ({ ...object, id: randomUUID() }));
-    await instance.bus.append({ ...signal, data: { ...signal.data, objects } } as never);
+    const objects = [
+      object,
+      ...Array.from({ length: 20 }, (_, index) => ({
+        ...artifact,
+        id: randomUUID(),
+        name: `chart ${String(index + 1)}.pdf`,
+      })),
+    ];
+    // Log metadata is never presented and must not block valid output files.
+    await instance.bus.append({
+      ...signal,
+      data: { ...signal.data, objects: [...objects, { ...log, name: 'я'.repeat(1000) }] },
+    } as never);
     await expect.poll(async () => (await instance.events()).length).toBe(2);
     const pages = await instance.events();
     expect(pages.map((page) => page.payload.attachments?.length)).toEqual([20, 1]);
@@ -703,7 +755,7 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
       data: {
         ...signal.data,
         outcomeKey: 'outcome_bad_metadata',
-        objects: [{ ...object, name: 'я'.repeat(1000) }],
+        objects: [object, { ...artifact, name: 'я'.repeat(1000) }],
       },
     } as never);
     await expect.poll(async () => (await instance.events()).length).toBe(3);
@@ -748,14 +800,16 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
       { toolCalls: [{ name: 'core.say', args: { text: 'unattached teaser' } }] },
       ...Array.from({ length: 5 }, () => ({ content: '{"response":""}' })),
     ]);
-    instance.coreLoop.pushSignal(outcome('task_empty', 'outcome_empty'));
+    instance.coreLoop.pushSignal(
+      outcome('task_empty', 'outcome_empty', 'done', [object, artifact, log])
+    );
     await expect.poll(async () => (await instance.events()).length).toBe(1);
     await instance.coreLoop.fenceForTest();
     expect(instance.cognition.provider.requests).toHaveLength(6);
     expect(await instance.events()).toHaveLength(1);
     expect((await instance.events())[0]!.payload).toMatchObject({
       text: 'Task completed. The work completed.\nTask output (quoted): "The answer is 42."',
-      attachments: [{ artifactId: object.id }],
+      attachments: [{ artifactId: object.id }, { artifactId: artifact.id, name: artifact.name }],
     });
     expect(Object.values(instance.bus.exportSnapshot().entries)).toEqual([]);
   });
@@ -857,7 +911,9 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
       const instance = await boot(prefix, [
         { content: 'The task ran out of time. No completed result is available.' },
       ]);
-      instance.coreLoop.pushSignal(outcome('task_failed', 'outcome_failed', state));
+      instance.coreLoop.pushSignal(
+        outcome('task_failed', 'outcome_failed', state, [object, artifact, log])
+      );
       await expect.poll(async () => (await instance.events()).length).toBe(1);
       expect((await instance.events())[0]!.payload).toMatchObject({
         text: expect.stringContaining('ran out of time'),

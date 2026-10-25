@@ -49,7 +49,7 @@ function hasControl(value: string): boolean {
   });
 }
 
-function nameValid(name: string): boolean {
+export function storageNameValid(name: string): boolean {
   return (
     name.length > 0 &&
     Buffer.byteLength(name) <= 1024 &&
@@ -70,7 +70,7 @@ function parse(argv: string[]): Command {
     kind === 'put' &&
     argv.length === 4 &&
     a !== undefined &&
-    nameValid(a) &&
+    storageNameValid(a) &&
     b === '--upload-id' &&
     c !== undefined &&
     ID.test(c)
@@ -82,7 +82,7 @@ function parse(argv: string[]): Command {
     a !== undefined &&
     ID.test(a) &&
     b !== undefined &&
-    nameValid(b)
+    storageNameValid(b)
   )
     return { kind, id: a, name: b };
   if (
@@ -325,7 +325,7 @@ function receipt(value: unknown): Receipt {
     typeof value['id'] !== 'string' ||
     !ID.test(value['id']) ||
     typeof value['name'] !== 'string' ||
-    !nameValid(value['name']) ||
+    !storageNameValid(value['name']) ||
     typeof value['size'] !== 'number' ||
     !Number.isSafeInteger(value['size']) ||
     value['size'] < 0 ||

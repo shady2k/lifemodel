@@ -62,10 +62,14 @@ export function validateTaskOutcome(value: unknown): TaskOutcomeEvent {
 export function taskOutcomeAttachments(event: TaskOutcomeEvent): MessageAttachment[][] {
   if (event.state !== 'done') return [];
   const groups: MessageAttachment[][] = [];
-  const results = event.objects.filter((object) => object.mark === 'result');
-  for (let index = 0; index < results.length; index += 20) {
+  // Only sealed owner-facing outputs are eligible. Logs stay private, and the
+  // done validator still requires a result; artifacts never make a task succeed.
+  const outputs = event.objects.filter(
+    (object) => object.mark === 'result' || object.mark === 'artifact'
+  );
+  for (let index = 0; index < outputs.length; index += 20) {
     const attachments = validateMessageAttachments(
-      results.slice(index, index + 20).map((object) => ({
+      outputs.slice(index, index + 20).map((object) => ({
         artifactId: object.id,
         name: object.name,
         size: object.size,

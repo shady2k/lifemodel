@@ -6,7 +6,7 @@ import type { Socket } from 'node:net';
 import { createHash } from 'node:crypto';
 import { TaskJsonClient } from '../../loader/src/task-launcher-http.js';
 import { createTaskModelRelay } from '../../loader/src/task-model-relay.js';
-import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runTaskLauncher, type LauncherOptions } from '../../loader/src/task-launcher.js';
@@ -432,7 +432,12 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       if (call.service === 'storage' && call.method === 'GET') await pause('channel', 250);
     };
     expect(await run({ terminal: { outcome: 'succeeded', result: RESULT } })).toBe(0);
-    expect(harnessStarts).toEqual([{ text: BRIEFING, model: 'lifemodel/task' }]);
+    expect(harnessStarts).toEqual([
+      {
+        text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\nFiles elsewhere are not delivered. Outputs are delivered only if the task succeeds.\n\n${BRIEFING}`,
+        model: 'lifemodel/task',
+      },
+    ]);
     expect(stoppedProgress).toBe(true);
     expect(terminal().payload.outcome).toBe('succeeded');
     expect(startCalls()).toHaveLength(1);
@@ -536,7 +541,12 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     ];
     expect(await run({ terminal: { outcome: 'succeeded', result: RESULT } })).toBe(0);
     expect(harnessCreations).toBe(1);
-    expect(harnessStarts).toEqual([{ text: BRIEFING, model: 'lifemodel/task' }]);
+    expect(harnessStarts).toEqual([
+      {
+        text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\nFiles elsewhere are not delivered. Outputs are delivered only if the task succeeds.\n\n${BRIEFING}`,
+        model: 'lifemodel/task',
+      },
+    ]);
     expect(startCalls()).toHaveLength(1);
     const claim = JSON.parse(startCalls()[0]!.body.toString());
     expect(claim).toEqual({ ...IDS, bootNonce: expect.stringMatching(/^[0-9a-f-]{36}$/) });
@@ -624,7 +634,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     const markingLog = deferred();
     const commitMark = deferred();
     beforeMark = async (object) => {
-      if (object.name.endsWith('/log.jsonl')) {
+      if (object.name === 'log.jsonl') {
         markingLog.resolve();
         await commitMark.promise;
       }
@@ -793,7 +803,11 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
         expect(publicOutput).not.toContain(secret);
       expect(objects.get('object_1')?.bytes.toString()).toBe(RESULT);
       const logObject = objects.get('object_2')!;
-      const storedLog = await readFile(join(directory, logObject.name), 'utf8');
+      expect(logObject.name).toBe('log.jsonl');
+      const privateDirectory = (await readdir(directory)).find((name) =>
+        name.startsWith('launcher_')
+      )!;
+      const storedLog = await readFile(join(directory, privateDirectory, 'log.jsonl'), 'utf8');
       expect(logObject.bytes.toString()).toBe(storedLog);
       expect(storedLog).toBe(`${JSON.stringify({ type: 'step', line: 'Task is working' })}\n`);
       for (const secret of [...Object.values(TOKENS), BRIEFING, EVENT, RESULT])
