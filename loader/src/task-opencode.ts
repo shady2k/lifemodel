@@ -42,7 +42,8 @@ export function configureAgent(input: {
 /** v2's completed shell call may still carry a failed process exit. */
 export function toolOutputFailed(output: unknown, input?: unknown): boolean {
   // Background commands do not carry their eventual exit in the prompt's ACP
-  // terminal. Fail closed rather than claim an unobserved result succeeded.
+  // terminal. Record uncertainty as failed tool evidence. The generic ACP
+  // classifier decides whether later agent work recovered that observation.
   if (
     input &&
     typeof input === 'object' &&

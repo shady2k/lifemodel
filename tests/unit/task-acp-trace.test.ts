@@ -24,7 +24,7 @@ const flush = async () => {
 };
 
 describe('ACP trace mapping behind the harness port', () => {
-  it('records failed then successful calls without changing sticky outcome; failure points to exact span', async () => {
+  it('recovers after a failed call while preserving its failed span', async () => {
     const events: TaskHarnessEvent[] = [];
     const turn = new AcpTurn(toolOutputFailed, (event) => {
       events.push(event);
@@ -57,7 +57,7 @@ describe('ACP trace mapping behind the harness port', () => {
     const result = turn.result('end_turn');
     turn.finish(result, { stopReason: 'end_turn', usage: { inputTokens: 11, outputTokens: 7 } });
     await flush();
-    expect(result).toMatchObject({ outcome: 'failed', reasonCode: 'required_tool_failed' });
+    expect(result).toEqual({ outcome: 'succeeded', result: 'Recovered final answer' });
     const spans = traces(events);
     const model = spans.find((span) => span.component === 'task.model' && span.endedAt);
     expect(model).toMatchObject({
@@ -90,7 +90,7 @@ describe('ACP trace mapping behind the harness port', () => {
         outputTail: 'failed output',
       },
     });
-    expect(result.failureSpanId).toBe(bad[1]!.spanId);
+    expect(result.failureSpanId).toBeUndefined();
     expect(spans.find((span) => span.attrs['toolCallId'] === 'good')).toMatchObject({
       status: 'ok',
       attrs: { exitCode: 0 },
@@ -99,6 +99,161 @@ describe('ACP trace mapping behind the harness port', () => {
       parentSpanId: model!.spanId,
       attrs: { finalText: 'Recovered final answer' },
     });
+  });
+
+  it('names the trailing failure rather than an earlier recovered failure', async () => {
+    const events: TaskHarnessEvent[] = [];
+    const turn = new AcpTurn(toolOutputFailed, (event) => {
+      events.push(event);
+    });
+    turn.begin('model');
+    turn.update({ sessionUpdate: 'tool_call', toolCallId: 'earlier', status: 'failed' });
+    final(turn);
+    turn.update({ sessionUpdate: 'tool_call', toolCallId: 'trailing', status: 'pending' });
+    turn.update({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'trailing',
+      status: 'completed',
+      rawOutput: { metadata: { exit: 1 } },
+    });
+    // Whitespace, usage and presentation updates are not agent recovery.
+    final(turn, '  ');
+    turn.update({ sessionUpdate: 'usage_update', used: 10 });
+    turn.update({ sessionUpdate: 'tool_call_update', toolCallId: 'trailing', title: 'Done' });
+    const result = turn.result('end_turn');
+    turn.finish(result, { stopReason: 'end_turn' });
+    await flush();
+    expect(result).toMatchObject({ outcome: 'failed', reasonCode: 'required_tool_failed' });
+    expect(
+      traces(events)
+        .filter((span) => span.spanId === result.failureSpanId)
+        .at(-1)
+    ).toMatchObject({
+      component: 'task.tool',
+      status: 'failed',
+      attrs: { toolCallId: 'trailing' },
+    });
+  });
+
+  it.each(['failed', 'exit', 'background', 'running', 'signal', 'timeout'])(
+    'accepts nonempty assistant work after a settled %s failure',
+    (mode) => {
+      const turn = new AcpTurn(toolOutputFailed);
+      turn.update({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'probe',
+        status: mode === 'failed' ? 'failed' : 'completed',
+        rawInput: mode === 'background' ? { background: true } : {},
+        rawOutput: {
+          metadata: {
+            ...(mode === 'exit' ? { exit: 42 } : {}),
+            ...(mode === 'running' ? { status: 'running' } : {}),
+            ...(mode === 'signal' ? { signal: 'SIGKILL' } : {}),
+            ...(mode === 'timeout' ? { timeout: true } : {}),
+          },
+        },
+      });
+      final(turn);
+      turn.update({ sessionUpdate: 'tool_call_update', toolCallId: 'probe', status: null });
+      expect(turn.result('end_turn')).toEqual({
+        outcome: 'succeeded',
+        result: 'Recovered final answer',
+      });
+    }
+  );
+
+  it('does not treat another already-running call settling as later agent work', () => {
+    const turn = new AcpTurn();
+    turn.update({ sessionUpdate: 'tool_call', toolCallId: 'other', status: 'in_progress' });
+    turn.update({ sessionUpdate: 'tool_call', toolCallId: 'bad', status: 'failed' });
+    turn.update({ sessionUpdate: 'tool_call_update', toolCallId: 'other', status: 'completed' });
+    expect(turn.result('end_turn').reasonCode).toBe('required_tool_failed');
+  });
+
+  it.each(['new', 'resumed'])(
+    'counts %s tool work as recovery but still requires final text',
+    (mode) => {
+      const turn = new AcpTurn();
+      turn.update({ sessionUpdate: 'tool_call', toolCallId: 'retry', status: 'completed' });
+      turn.update({ sessionUpdate: 'tool_call', toolCallId: 'bad', status: 'failed' });
+      const toolCallId = mode === 'new' ? 'next' : 'retry';
+      turn.update({ sessionUpdate: 'tool_call', toolCallId, status: 'in_progress' });
+      turn.update({ sessionUpdate: 'tool_call_update', toolCallId, status: 'completed' });
+      expect(turn.result('end_turn').reasonCode).toBe('no_final_result');
+      final(turn);
+      expect(turn.result('end_turn').outcome).toBe('succeeded');
+    }
+  );
+
+  it('recovers resumed failed work once its new result is successful', () => {
+    const turn = new AcpTurn(toolOutputFailed);
+    turn.update({
+      sessionUpdate: 'tool_call',
+      toolCallId: 'retry',
+      status: 'completed',
+      rawOutput: { metadata: { exit: 42 } },
+    });
+    final(turn);
+    turn.update({ sessionUpdate: 'tool_call_update', toolCallId: 'retry', status: 'in_progress' });
+    turn.update({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'retry',
+      status: 'completed',
+      rawOutput: { metadata: { exit: 0 } },
+    });
+    expect(turn.result('end_turn').reasonCode).toBe('no_final_result');
+    final(turn);
+    expect(turn.result('end_turn').outcome).toBe('succeeded');
+  });
+
+  it.each(['background', 'failed'])(
+    'reopens recovered %s failure on newly reported exit evidence',
+    (mode) => {
+      const turn = new AcpTurn(toolOutputFailed);
+      turn.update({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'probe',
+        status: mode === 'failed' ? 'failed' : 'completed',
+        rawInput: mode === 'background' ? { background: true } : {},
+      });
+      final(turn);
+      expect(turn.result('end_turn').outcome).toBe('succeeded');
+      turn.update({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'probe',
+        rawOutput: { metadata: { exit: 42 } },
+      });
+      expect(turn.result('end_turn').reasonCode).toBe('required_tool_failed');
+      final(turn);
+      // Structurally identical retransmission is still the same failure evidence.
+      turn.update({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'probe',
+        rawOutput: { metadata: { exit: 42 } },
+      });
+      expect(turn.result('end_turn').outcome).toBe('succeeded');
+    }
+  );
+
+  it('requires new work after a late output patch newly reveals failure', () => {
+    const turn = new AcpTurn(toolOutputFailed);
+    turn.update({ sessionUpdate: 'tool_call', toolCallId: 'probe', status: 'completed' });
+    final(turn);
+    turn.update({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'probe',
+      rawOutput: { metadata: { exit: 1 } },
+    });
+    expect(turn.result('end_turn').reasonCode).toBe('required_tool_failed');
+    final(turn);
+    expect(turn.result('end_turn').outcome).toBe('succeeded');
+  });
+
+  it.each(['pending', 'in_progress'])('never recovers a still %s call', (status) => {
+    const turn = new AcpTurn();
+    turn.update({ sessionUpdate: 'tool_call', toolCallId: 'unfinished', status });
+    final(turn);
+    expect(turn.result('end_turn').reasonCode).toBe('required_tool_failed');
   });
 
   it('closes an unsettled tool as failed and retains its exact culprit id', async () => {
@@ -201,10 +356,12 @@ for line in sys.stdin:
     elif msg.get("method") == "session/new":
         send({"id": msg["id"], "result": {"sessionId": session}})
     elif msg.get("method") == "session/prompt":
-        if mode == "failed":
+        if mode in ("recovered", "trailing"):
             update({"sessionUpdate": "tool_call", "toolCallId": "failed-probe", "kind": "execute", "status": "completed", "rawInput": {"command": "exit 42"}, "rawOutput": {"metadata": {"exit": 42}, "output": "bad output"}})
+        if mode == "recovered":
             update({"sessionUpdate": "tool_call", "toolCallId": "recovered", "kind": "execute", "status": "completed", "rawInput": {"command": "true"}, "rawOutput": {"metadata": {"exit": 0}}})
-        update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Real ACP final answer"}})
+        if mode != "trailing":
+            update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Real ACP final answer"}})
         send({"id": msg["id"], "result": {"stopReason": "end_turn", "usage": {"inputTokens": 9, "outputTokens": 4}}})
 `;
 
@@ -219,7 +376,7 @@ describe('real ACP wire mapping and fail-open tracing', () => {
   afterAll(async () => {
     await rm(directory, { recursive: true, force: true });
   });
-  async function run(onEvent: TaskHarnessEventSink, mode = 'failed') {
+  async function run(onEvent: TaskHarnessEventSink, mode = 'trailing') {
     const work = await mkdtemp(join(directory, 'work-'));
     return new AcpTaskHarness({
       modelEndpoint: 'https://model.invalid',
@@ -243,7 +400,7 @@ describe('real ACP wire mapping and fail-open tracing', () => {
       onEvent,
     }).start({ text: 'Fixture task', model: 'model' });
   }
-  it('maps actual protocol frames with exact offending span and both exit codes', async () => {
+  it('maps actual trailing failure frames with the exact offending span', async () => {
     const events: TaskHarnessEvent[] = [];
     const result = await run((event) => {
       events.push(event);
@@ -270,10 +427,6 @@ describe('real ACP wire mapping and fail-open tracing', () => {
         outputTail: 'bad output',
       },
     });
-    expect(spans.find((span) => span.attrs['toolCallId'] === 'recovered')).toMatchObject({
-      attrs: { exitCode: 0 },
-      status: 'ok',
-    });
     expect(spans.find((span) => span.component === 'task.model' && span.endedAt)).toMatchObject({
       attrs: { stopReason: 'end_turn', inputTokens: 9, outputTokens: 4 },
     });
@@ -298,6 +451,19 @@ describe('real ACP wire mapping and fail-open tracing', () => {
     },
     10000
   );
+  it('accepts actual recovered failure frames and keeps the failed tool observation', async () => {
+    const events: TaskHarnessEvent[] = [];
+    const result = await run((event) => {
+      events.push(event);
+    }, 'recovered');
+    expect(result).toEqual({ outcome: 'succeeded', result: 'Real ACP final answer' });
+    expect(
+      traces(events).find((span) => span.attrs['toolCallId'] === 'failed-probe')
+    ).toMatchObject({ status: 'failed' });
+    expect(
+      traces(events).find((span) => span.component === 'task.model' && span.endedAt)
+    ).toMatchObject({ status: 'ok' });
+  }, 10000);
   it('a hanging trace sink cannot turn a successful prompt into failure', async () => {
     const result = await run(
       (event) => (event.type === 'trace' ? new Promise<void>(() => {}) : undefined),

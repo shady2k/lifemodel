@@ -179,6 +179,7 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
       'TRUNCATE task_access.projections, task_access.intents, task_access.start_claims'
     );
     await stores.postgres.query('TRUNCATE core.tasks CASCADE');
+    await stores.postgres.query('TRUNCATE observability.trace_spans, observability.trace_events');
     await stores.postgres.query('TRUNCATE storage.spaces CASCADE');
     await stores.postgres.query(
       'INSERT INTO core.active_holder VALUES(true,1) ON CONFLICT(id) DO UPDATE SET epoch=1'
@@ -457,132 +458,146 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
     return `${time.slice(0, 8)}-${time.slice(8)}-7${randomUUID().slice(0, 3)}-8${randomUUID().slice(0, 3)}-${randomUUID().replaceAll('-', '').slice(0, 12)}`;
   }
 
-  it('persists an ACP failed/successful tool tree without mailbox rows and names the culprit', async () => {
-    const f = await fixture();
-    const writer = createPostgresTraceStore({
-      pool: stores.postgres,
-      knownSecrets: ['TRACE-SECRET-CANARY'],
-    });
-    cleanup.push(() => writer.close());
-    const channel = await listener({
-      onTrace: (frame) => {
-        writer.enqueue({ kind: 'span', span: frame.span });
-      },
-    });
-    const events: TaskHarnessEvent[] = [];
-    const turn = new AcpTurn(
-      (output) => {
-        const exit = (output as any)?.metadata?.exit;
-        return typeof exit === 'number' && exit !== 0;
-      },
-      (event) => {
-        events.push(event);
-      }
-    );
-    turn.begin('lifemodel/task');
-    for (const [id, exit] of [
-      ['bad', 7],
-      ['good', 0],
-    ] as const) {
-      turn.update({
-        sessionUpdate: 'tool_call',
-        toolCallId: id,
-        status: 'in_progress',
-        kind: 'execute',
-        title: `command ${id}`,
-        rawInput: { command: `echo ${id}` },
+  it.each([false, true])(
+    'persists an ACP tool tree without mailbox rows, recovered=%s',
+    async (recovered) => {
+      const f = await fixture();
+      const writer = createPostgresTraceStore({
+        pool: stores.postgres,
+        knownSecrets: ['TRACE-SECRET-CANARY'],
       });
-      turn.update({
-        sessionUpdate: 'tool_call_update',
-        toolCallId: id,
-        status: 'completed',
-        rawOutput: { metadata: { exit }, output: 'TRACE-SECRET-CANARY output' },
-      });
-    }
-    turn.update({
-      sessionUpdate: 'agent_message_chunk',
-      content: { type: 'text', text: 'Finished after probing' },
-    });
-    const result = turn.result('end_turn');
-    turn.finish(result, { stopReason: 'end_turn' });
-    await Promise.resolve(); // detached trace callbacks, not a timer/tick guess
-    expect(result).toMatchObject({
-      outcome: 'failed',
-      reasonCode: 'required_tool_failed',
-      failureSpanId: expect.any(String),
-    });
-    const now = new Date().toISOString();
-    const spans = [
-      {
-        spanId: f.task.launchId,
-        parentSpanId: f.task.parentSpanId,
-        component: 'task',
-        startedAt: now,
-        endedAt: now,
-        status: 'failed' as const,
-        attrs: {
-          taskId: f.task.id,
-          launchId: f.task.launchId,
-          failureSpanId: `${f.task.launchId}_${result.failureSpanId}`,
-          outcome: result.outcome,
-          reasonCode: result.reasonCode,
+      cleanup.push(() => writer.close());
+      const channel = await listener({
+        onTrace: (frame) => {
+          writer.enqueue({ kind: 'span', span: frame.span });
         },
-      },
-      ...events.flatMap((event) =>
-        event.type === 'trace'
-          ? [
-              {
-                ...event.span,
-                spanId: `${f.task.launchId}_${event.span.spanId}`,
-                parentSpanId: event.span.parentSpanId
-                  ? `${f.task.launchId}_${event.span.parentSpanId}`
-                  : f.task.launchId,
-              },
-            ]
-          : []
-      ),
-    ];
-    for (const span of spans) {
-      const response = await call(channel.url, f.token, step(f.task), {
-        path: '/task/trace',
-        raw: JSON.stringify({
-          taskId: f.task.id,
-          attemptId: f.task.attemptId,
-          launchId: f.task.launchId,
-          span: { ...span, traceId: f.task.traceId },
-        }),
       });
-      expect(response.status).toBe(200);
-    }
-    await writer.flush();
-    const persisted = (
-      await stores.postgres.query('SELECT * FROM observability.trace_spans WHERE trace_id=$1', [
-        f.task.traceId,
-      ])
-    ).rows;
-    const tools = persisted.filter((row) => row.component === 'task.tool');
-    expect(tools).toHaveLength(2);
-    expect(tools.find((row) => row.attrs.exitCode === 7)).toMatchObject({ status: 'failed' });
-    expect(tools.find((row) => row.attrs.exitCode === 0)).toMatchObject({ status: 'ok' });
-    const root = persisted.find((row) => row.component === 'task');
-    expect(root.attrs.failureSpanId).toBe(tools.find((row) => row.attrs.exitCode === 7).span_id);
-    expect(JSON.stringify(persisted)).not.toContain('TRACE-SECRET-CANARY');
-    expect((await stores.postgres.query('SELECT * FROM core.task_mailbox')).rows).toEqual([]);
-    // A different trace identity cannot insert observations into another run.
-    expect(
-      (
-        await call(channel.url, f.token, step(f.task), {
+      const events: TaskHarnessEvent[] = [];
+      const turn = new AcpTurn(
+        (output) => {
+          const exit = (output as any)?.metadata?.exit;
+          return typeof exit === 'number' && exit !== 0;
+        },
+        (event) => {
+          events.push(event);
+        }
+      );
+      turn.begin('lifemodel/task');
+      for (const [id, exit] of [
+        ['bad', 7],
+        ['good', 0],
+      ] as const) {
+        turn.update({
+          sessionUpdate: 'tool_call',
+          toolCallId: id,
+          status: 'in_progress',
+          kind: 'execute',
+          title: `command ${id}`,
+          rawInput: { command: `echo ${id}` },
+        });
+        turn.update({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: id,
+          status: 'completed',
+          rawOutput: { metadata: { exit }, output: 'TRACE-SECRET-CANARY output' },
+        });
+      }
+      if (recovered)
+        turn.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Finished after probing' },
+        });
+      else turn.update({ sessionUpdate: 'tool_call', toolCallId: 'trailing', status: 'failed' });
+      const result = turn.result('end_turn');
+      turn.finish(result, { stopReason: 'end_turn' });
+      await Promise.resolve(); // detached trace callbacks, not a timer/tick guess
+      expect(result).toMatchObject(
+        recovered
+          ? { outcome: 'succeeded', result: 'Finished after probing' }
+          : {
+              outcome: 'failed',
+              reasonCode: 'required_tool_failed',
+              failureSpanId: expect.any(String),
+            }
+      );
+      const now = new Date().toISOString();
+      const spans = [
+        {
+          spanId: f.task.launchId,
+          parentSpanId: f.task.parentSpanId,
+          component: 'task',
+          startedAt: now,
+          endedAt: now,
+          status: recovered ? ('ok' as const) : ('failed' as const),
+          attrs: {
+            taskId: f.task.id,
+            launchId: f.task.launchId,
+            failureSpanId: result.failureSpanId
+              ? `${f.task.launchId}_${result.failureSpanId}`
+              : null,
+            outcome: result.outcome,
+            reasonCode: result.reasonCode,
+          },
+        },
+        ...events.flatMap((event) =>
+          event.type === 'trace'
+            ? [
+                {
+                  ...event.span,
+                  spanId: `${f.task.launchId}_${event.span.spanId}`,
+                  parentSpanId: event.span.parentSpanId
+                    ? `${f.task.launchId}_${event.span.parentSpanId}`
+                    : f.task.launchId,
+                },
+              ]
+            : []
+        ),
+      ];
+      for (const span of spans) {
+        const response = await call(channel.url, f.token, step(f.task), {
           path: '/task/trace',
           raw: JSON.stringify({
             taskId: f.task.id,
             attemptId: f.task.attemptId,
             launchId: f.task.launchId,
-            span: { ...spans[0], traceId: 'other_trace' },
+            span: { ...span, traceId: f.task.traceId },
           }),
-        })
-      ).status
-    ).toBe(403);
-  });
+        });
+        expect(response.status).toBe(200);
+      }
+      await writer.flush();
+      const persisted = (
+        await stores.postgres.query('SELECT * FROM observability.trace_spans WHERE trace_id=$1', [
+          f.task.traceId,
+        ])
+      ).rows;
+      const tools = persisted.filter((row) => row.component === 'task.tool');
+      expect(tools).toHaveLength(recovered ? 2 : 3);
+      expect(tools.find((row) => row.attrs.exitCode === 7)).toMatchObject({ status: 'failed' });
+      expect(tools.find((row) => row.attrs.exitCode === 0)).toMatchObject({ status: 'ok' });
+      const root = persisted.find((row) => row.component === 'task');
+      expect(root.status).toBe(recovered ? 'ok' : 'failed');
+      expect(root.attrs.failureSpanId).toBe(
+        recovered ? null : tools.find((row) => row.attrs.toolCallId === 'trailing').span_id
+      );
+      expect(JSON.stringify(persisted)).not.toContain('TRACE-SECRET-CANARY');
+      expect((await stores.postgres.query('SELECT * FROM core.task_mailbox')).rows).toEqual([]);
+      // A different trace identity cannot insert observations into another run.
+      expect(
+        (
+          await call(channel.url, f.token, step(f.task), {
+            path: '/task/trace',
+            raw: JSON.stringify({
+              taskId: f.task.id,
+              attemptId: f.task.attemptId,
+              launchId: f.task.launchId,
+              span: { ...spans[0], traceId: 'other_trace' },
+            }),
+          })
+        ).status
+      ).toBe(403);
+    }
+  );
 
   it('scrubs quoted and unquoted auth credentials through ACP, launcher trace transport and database rows', async () => {
     const f = await fixture('quoted-credentials');

@@ -608,107 +608,116 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     expect(diagnostics).toEqual([]);
   });
 
-  it('preserves failed tool evidence and its failure span after a later successful tool', async () => {
-    const startedAt = new Date().toISOString();
-    const spans: TaskHarnessTraceSpan[] = [
-      {
-        spanId: 'model',
-        parentSpanId: null,
-        component: 'task.model',
-        startedAt,
-        endedAt: startedAt,
-        status: 'ok',
-        attrs: { model: 'lifemodel/task', stopReason: 'end_turn', inputTokens: 12 },
-      },
-      {
-        spanId: 'failed_tool',
-        parentSpanId: 'model',
-        component: 'task.tool',
-        startedAt,
-        endedAt: startedAt,
-        status: 'failed',
-        attrs: {
-          command: `private-command ${TOKENS.model} ${TOKENS.channel} ${TOKENS.storage}`,
-          outputTail: `private-output ${TOKENS.storage}`,
-          exitCode: 7,
+  it.each([false, true])(
+    'preserves failed tool evidence with recovered=%s and classifies the root',
+    async (recovered) => {
+      const startedAt = new Date().toISOString();
+      const spans: TaskHarnessTraceSpan[] = [
+        {
+          spanId: 'model',
+          parentSpanId: null,
+          component: 'task.model',
+          startedAt,
+          endedAt: startedAt,
+          status: 'ok',
+          attrs: { model: 'lifemodel/task', stopReason: 'end_turn', inputTokens: 12 },
         },
-      },
-      {
-        spanId: 'successful_tool',
-        parentSpanId: 'model',
-        component: 'task.tool',
-        startedAt,
-        endedAt: startedAt,
-        status: 'ok',
-        attrs: { command: 'later-command', outputTail: 'later-output', exitCode: 0 },
-      },
-    ];
-    expect(
-      await run({
-        events: spans.map((span) => ({ type: 'trace' as const, span })),
-        terminal: {
-          outcome: 'failed',
-          result: '',
-          reasonCode: 'required_tool_failed',
-          failureSpanId: 'failed_tool',
+        {
+          spanId: 'failed_tool',
+          parentSpanId: 'model',
+          component: 'task.tool',
+          startedAt,
+          endedAt: startedAt,
+          status: 'failed',
+          attrs: {
+            command: `private-command ${TOKENS.model} ${TOKENS.channel} ${TOKENS.storage}`,
+            outputTail: `private-output ${TOKENS.storage}`,
+            exitCode: 7,
+          },
         },
-      })
-    ).toBe(1);
-    await expect
-      .poll(() =>
-        traceFrames.some(
-          (frame) => frame.span.spanId === IDS.launchId && frame.span.endedAt !== null
+        {
+          spanId: 'successful_tool',
+          parentSpanId: 'model',
+          component: 'task.tool',
+          startedAt,
+          endedAt: startedAt,
+          status: 'ok',
+          attrs: { command: 'later-command', outputTail: 'later-output', exitCode: 0 },
+        },
+      ];
+      expect(
+        await run({
+          events: spans.map((span) => ({ type: 'trace' as const, span })),
+          terminal: recovered
+            ? { outcome: 'succeeded', result: RESULT }
+            : {
+                outcome: 'failed',
+                result: '',
+                reasonCode: 'required_tool_failed',
+                failureSpanId: 'failed_tool',
+              },
+        })
+      ).toBe(recovered ? 0 : 1);
+      await expect
+        .poll(() =>
+          traceFrames.some(
+            (frame) => frame.span.spanId === IDS.launchId && frame.span.endedAt !== null
+          )
         )
-      )
-      .toBe(true);
-    expect(traceFrames).toHaveLength(5); // Task start/end, model and two tools.
-    for (const frame of traceFrames) {
-      expect(Object.keys(frame).sort()).toEqual(['attemptId', 'launchId', 'span', 'taskId']);
-      expect(frame).toMatchObject({ ...IDS, span: { traceId: IDS.taskId } });
-      expect(Buffer.byteLength(JSON.stringify(frame.span))).toBeLessThanOrEqual(30_000);
+        .toBe(true);
+      expect(traceFrames).toHaveLength(5); // Task start/end, model and two tools.
+      for (const frame of traceFrames) {
+        expect(Object.keys(frame).sort()).toEqual(['attemptId', 'launchId', 'span', 'taskId']);
+        expect(frame).toMatchObject({ ...IDS, span: { traceId: IDS.taskId } });
+        expect(Buffer.byteLength(JSON.stringify(frame.span))).toBeLessThanOrEqual(30_000);
+      }
+      expect(
+        traceFrames.find((frame) => frame.span.spanId === `${IDS.launchId}_failed_tool`)?.span
+      ).toMatchObject({
+        parentSpanId: `${IDS.launchId}_model`,
+        component: 'task.tool',
+        status: 'failed',
+        attrs: { exitCode: 7, command: expect.stringContaining('private-command') },
+      });
+      expect(
+        traceFrames.find((frame) => frame.span.spanId === `${IDS.launchId}_successful_tool`)?.span
+      ).toMatchObject({
+        parentSpanId: `${IDS.launchId}_model`,
+        status: 'ok',
+        attrs: { exitCode: 0 },
+      });
+      expect(
+        traceFrames.find((frame) => frame.span.spanId === `${IDS.launchId}_model`)?.span
+      ).toMatchObject({ parentSpanId: IDS.launchId, status: 'ok' });
+      const root = traceFrames.find(
+        (frame) => frame.span.spanId === IDS.launchId && frame.span.endedAt !== null
+      )?.span;
+      expect(root).toMatchObject({
+        parentSpanId: null,
+        component: 'task',
+        status: recovered ? 'ok' : 'failed',
+        attrs: recovered
+          ? { outcome: 'succeeded' }
+          : {
+              outcome: 'failed',
+              reasonCode: 'required_tool_failed',
+              failureSpanId: `${IDS.launchId}_failed_tool`,
+            },
+      });
+      if (recovered) expect(root?.attrs['failureSpanId']).toBeNull();
+      for (const token of Object.values(TOKENS))
+        expect(JSON.stringify(traceFrames)).not.toContain(token);
+      expect(terminal().payload).toMatchObject(
+        recovered
+          ? { outcome: 'succeeded' }
+          : { outcome: 'failed', reasonCode: 'required_tool_failed' }
+      );
+      expect(terminal().sequence).toBe(1); // Trace frames never occupy mailbox sequence numbers.
+      expect(calls.filter((call) => call.path === '/task/events')).toHaveLength(1);
+      expect(objects.size).toBe(1);
+      expect(diagnostics).toEqual([]);
     }
-    expect(
-      traceFrames.find((frame) => frame.span.spanId === `${IDS.launchId}_failed_tool`)?.span
-    ).toMatchObject({
-      parentSpanId: `${IDS.launchId}_model`,
-      component: 'task.tool',
-      status: 'failed',
-      attrs: { exitCode: 7, command: expect.stringContaining('private-command') },
-    });
-    expect(
-      traceFrames.find((frame) => frame.span.spanId === `${IDS.launchId}_successful_tool`)?.span
-    ).toMatchObject({
-      parentSpanId: `${IDS.launchId}_model`,
-      status: 'ok',
-      attrs: { exitCode: 0 },
-    });
-    expect(
-      traceFrames.find((frame) => frame.span.spanId === `${IDS.launchId}_model`)?.span
-    ).toMatchObject({ parentSpanId: IDS.launchId, status: 'ok' });
-    const root = traceFrames.find(
-      (frame) => frame.span.spanId === IDS.launchId && frame.span.endedAt !== null
-    )?.span;
-    expect(root).toMatchObject({
-      parentSpanId: null,
-      component: 'task',
-      status: 'failed',
-      attrs: {
-        outcome: 'failed',
-        reasonCode: 'required_tool_failed',
-        failureSpanId: `${IDS.launchId}_failed_tool`,
-      },
-    });
-    for (const token of Object.values(TOKENS))
-      expect(JSON.stringify(traceFrames)).not.toContain(token);
-    expect(terminal().payload).toMatchObject({
-      outcome: 'failed',
-      reasonCode: 'required_tool_failed',
-    });
-    expect(terminal().sequence).toBe(1); // Trace frames never occupy mailbox sequence numbers.
-    expect(calls.filter((call) => call.path === '/task/events')).toHaveLength(1);
-    expect(objects.size).toBe(1);
-    expect(diagnostics).toEqual([]);
-  });
+  );
 
   it('scrubs projected credential fragments at text boundaries and nested trace fields', async () => {
     const startedAt = new Date().toISOString();
