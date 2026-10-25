@@ -46,7 +46,7 @@ for line in sys.stdin:
             update({"sessionUpdate": "tool_call", "toolCallId": "t", "title": "Working", "status": "pending", "rawInput": {"mustCheck": True}})
             patch = {"sessionUpdate": "tool_call_update", "toolCallId": "t", "status": "completed"}
             if scenario.startswith("input-"):
-                patch["rawOutput"] = {"failed": True}
+                patch["rawOutput"] = {"failed": False}
                 if scenario == "input-null":
                     patch["rawInput"] = None
             update(patch)
@@ -55,6 +55,12 @@ for line in sys.stdin:
             patch = {"sessionUpdate": "tool_call_update", "toolCallId": "t", "title": "Finished", "locations": [], "rawOutput": {"finished": True}}
             if scenario == "patch-null":
                 patch["status"] = None
+                patch["rawInput"] = None
+            update(patch)
+        if scenario.startswith("input-"):
+            # New failure evidence after the answer, validated against retained input.
+            patch = {"sessionUpdate": "tool_call_update", "toolCallId": "t", "rawOutput": {"failed": True}}
+            if scenario == "input-null":
                 patch["rawInput"] = None
             update(patch)
         terminal = frame({"id": message["id"], "result": {"stopReason": "end_turn"}}).encode()
@@ -116,8 +122,9 @@ describe('ACP nullable per-tool patches', () => {
       rawOutput: { failed: true },
       ...patch,
     });
-    text(turn);
     expect(turn.result('end_turn').reasonCode).toBe('required_tool_failed');
+    text(turn);
+    expect(turn.result('end_turn')).toEqual({ outcome: 'succeeded', result: RESULT });
   });
 
   it.each([{}, { rawOutput: null }])(

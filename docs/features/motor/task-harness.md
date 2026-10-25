@@ -69,10 +69,34 @@ for each gateway request. The agent never holds a provider key. The relay verifi
 the projected instance CA. Only `/v1/chat/completions` and `/v1/models` can reach
 the gateway.
 
-Success requires ACP `end_turn`, final assistant text and no provider error or unresolved
-required tool failure. Process exit 0, idle, `step_finish` or an ended agent
-alone does not prove success. Abort normalizes to `aborted`. Provider and tool
-failures normalize to `failed`; raw errors never enter launcher diagnostics.
+Success requires ACP `end_turn`, nonempty final assistant text and no provider
+error or unresolved required tool failure. A settled tool failure is recovered
+when later agent work is observed: an `agent_message_chunk` with non-whitespace
+text, or a new tool call / a settled call resuming as `pending` or `in_progress`.
+A completion update for an already running call, usage, thought chunks, empty or
+whitespace text, and metadata-only patches are not later agent work. Recovery
+requires no claim that the failed command itself succeeded; its tool span stays
+`failed` while a successful task root is `ok` and its `failureSpanId` is null.
+
+Any tool still `pending` or `in_progress` at turn end blocks success, even after
+later prose. A newly observed tool failure remains unresolved until later agent
+work. For a call still classified as failed, structurally changed `rawInput`
+or `rawOutput`, a transition into explicit `failed` status, or a new failed
+settlement is new evidence. Structurally identical raw values and presentation
+patches do not reopen a recovered failure. A resumed call does not reopen a
+failure from retained old output alone; its new evidence or settlement decides. A trailing failure with no later agent work fails with
+`required_tool_failed` and names that tool span. With no unresolved tool failure,
+a missing `end_turn` or empty final text fails with `no_final_result`. Provider
+errors always fail. New/resumed tool work clears earlier final text; settled
+presentation patches do not. Process exit 0, idle, `step_finish` or an ended
+agent alone does not prove success. Abort normalizes to `aborted`. Raw errors
+never enter launcher diagnostics.
+
+An adapter may flag an unobserved background command result as failed evidence.
+It follows the same recovery rule: later agent work can accept that uncertainty
+and finish the task. This is not proof of background process completion; ACP
+pending/in-progress calls still block success, and supervised process-tree
+cleanup must still finish before any successful result is accepted.
 The accepted hard deadline bounds the adapter; the Job's native deadline remains
 the final compute bound. A Linux Python subreaper supervises the agent and reaps
 its adopted detached tool descendants before adapter completion, including after
@@ -175,8 +199,9 @@ The launcher sends [task trace frames](task-channel.md#disposable-task-trace-rou
 to `/task/trace`, independently of progress and terminal mailbox frames. The
 launch root is `launchId`, under the briefing's `parentSpanId`; every harness
 span ID is prefixed with `launchId_`. A null harness parent attaches to that
-root. Final root attributes retain the namespaced `failureSpanId` supplied by
-the semantic result. A later successful tool never erases that failure link.
+root. A failed semantic result supplies its culprit's namespaced `failureSpanId`
+in final root attributes. Recovered tool failures remain visible as failed child
+spans but do not supply a failure link on a successful root.
 
 Trace observations include model status and usage, tool command and bounded
 output tail, and final completion text. Before sending, the launcher scrubs
@@ -249,9 +274,10 @@ session/event routes. The owner selected **ACP only** on 2026-10-24.
 - Tool failure is `failed`; successful tool output retains raw metadata:
   `packages/cli/src/acp/tool.ts:100-153`. A shell nonzero exit can still be
   `completed`: its `rawOutput.metadata.exit`, `signal` and `timeout` must
-  also be checked (`packages/core/src/shell/result.ts:30-42`). Treat any
-  failed or unsettled required call conservatively as failure. A final
-  prose apology cannot turn it into success.
+  also be checked (`packages/core/src/shell/result.ts:30-42`). These produce
+  failed tool observations, not permanent task failure. Later agent work can
+  recover a settled failure under the generic ACP rule above; an unsettled
+  required call still blocks success.
 - Provider/auth failures become JSON-RPC prompt errors, not a successful
   `end_turn`: `packages/cli/src/acp/translate.ts:137-147` and
   `packages/cli/src/acp/turn.ts:314-349`. Content filters yield `refusal`;
@@ -265,7 +291,8 @@ session/event routes. The owner selected **ACP only** on 2026-10-24.
 One generic ACP client implements the port. OpenCode is its first registry
 configuration; goose and other conforming agents must reuse the same client.
 Success requires `end_turn`, nonempty final agent text, no provider error and
-no failed/unsettled required tool call. Process exit status cannot prove it.
+no unresolved failure or unsettled required tool call. Process exit status
+cannot prove it.
 Cancellation must return `aborted`, with bounded process-tree cleanup even if
 an agent fails to respond. No native protocol fallback is permitted.
 

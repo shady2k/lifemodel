@@ -2,6 +2,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { createTaskModelRelay } from './task-model-relay.js';
 import { AcpTaskTrace } from './task-trace.js';
 import { TASK_PROCESS_SUPERVISOR } from './task-process.js';
@@ -27,11 +28,10 @@ const aborted = (): TaskHarnessResult => ({
   reasonCode: 'aborted',
 });
 
-/** One turn only. Calls are required until completed; failure is sticky. */
+/** One turn only. Unsettled calls block success; later agent work can recover failures. */
 export class AcpTurn {
   private readonly tools = new Map<string, Json & { status: string }>();
-  private toolFailed = false;
-  private failedToolId: string | undefined;
+  private unresolvedFailureId: string | undefined;
   private protocolFailureSpanId: string | undefined;
   private readonly trace: AcpTaskTrace;
   private final = '';
@@ -62,6 +62,7 @@ export class AcpTurn {
     if (update['sessionUpdate'] === 'agent_message_chunk') {
       const content = record(update['content']);
       if (content['type'] === 'text' && typeof content['text'] === 'string') {
+        if (content['text'].trim()) this.unresolvedFailureId = undefined;
         this.final += content['text'];
         if (Buffer.byteLength(this.final) > 1_048_576) throw new Error('harness_result_limit');
       }
@@ -96,10 +97,27 @@ export class AcpTurn {
       this.tools.set(id, tool);
       const outputFailed = this.toolOutputFailed(tool['rawOutput'], tool['rawInput']);
       this.trace.tool(id, tool, outputFailed);
-      if (tool.status === 'failed' || outputFailed) {
-        this.toolFailed = true;
-        this.failedToolId ??= id;
-      }
+      const previousPending = previous?.status === 'pending' || previous?.status === 'in_progress';
+      const pending = tool.status === 'pending' || tool.status === 'in_progress';
+      // Only new/resumed work is an agent action. A concurrent call settling,
+      // or a presentation patch for a settled call, is not recovery evidence.
+      const agentWork = !previous || (!previousPending && pending);
+      if (agentWork) this.unresolvedFailureId = undefined;
+      const previousFailed =
+        previous?.status === 'failed' ||
+        (previous !== undefined &&
+          this.toolOutputFailed(previous['rawOutput'], previous['rawInput']));
+      const changedEvidence =
+        !isDeepStrictEqual(previous?.['rawInput'], tool['rawInput']) ||
+        !isDeepStrictEqual(previous?.['rawOutput'], tool['rawOutput']) ||
+        (tool.status === 'failed' && previous?.status !== 'failed');
+      // Do not reopen a recovered call from retained failed output when it
+      // resumes. Its eventual settlement (or changed raw evidence) decides anew.
+      if (
+        (tool.status === 'failed' || outputFailed) &&
+        (!previousFailed || changedEvidence || (previousPending && !pending))
+      )
+        this.unresolvedFailureId = id;
       // Work invalidates earlier prose. Presentation/output patches for an
       // already settled call do not erase the final answer that followed it.
       if (
@@ -124,10 +142,11 @@ export class AcpTurn {
     if (stopReason === 'cancelled') return aborted();
     if (this.providerFailed) return failed('provider_error');
     const offendingId =
-      this.failedToolId ?? [...this.tools].find(([, tool]) => tool.status !== 'completed')?.[0];
-    if (this.toolFailed || offendingId !== undefined) {
-      const failureSpanId =
-        offendingId === undefined ? undefined : this.trace.toolSpanId(offendingId);
+      [...this.tools].find(
+        ([, tool]) => tool.status === 'pending' || tool.status === 'in_progress'
+      )?.[0] ?? this.unresolvedFailureId;
+    if (offendingId !== undefined) {
+      const failureSpanId = this.trace.toolSpanId(offendingId);
       return { ...failed('required_tool_failed'), ...(failureSpanId ? { failureSpanId } : {}) };
     }
     if (stopReason !== 'end_turn' || !this.final.trim()) return failed('no_final_result');

@@ -284,14 +284,17 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
         });
       }, 60_000);
 
-      it('does not count a final answer after an unresolved required tool failure as success', async () => {
+      it('recovers a failed command when the agent continues with its final answer', async () => {
         const task = await harness(kind, 'tool');
-        expect(await task.start(briefing)).toEqual({
-          outcome: 'failed',
-          result: '',
-          reasonCode: 'required_tool_failed',
-          failureSpanId: expect.any(String),
-        });
+        expect(await task.start(briefing)).toEqual({ outcome: 'succeeded', result: RESULT });
+        expect(
+          events.some(
+            (event) =>
+              event.type === 'trace' &&
+              event.span.component === 'task.tool' &&
+              event.span.status === 'failed'
+          )
+        ).toBe(true);
         if (contractFixtures[kind]!.usesModelEndpoint) expect(toolSent).toBe(true);
       }, 60_000);
 
@@ -423,27 +426,25 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
         workDirectory: work,
         timeoutMs: 5000,
       });
-      expect(await task.start(briefing)).toEqual({
-        outcome: 'failed',
-        result: '',
-        reasonCode: 'required_tool_failed',
-        failureSpanId: expect.any(String),
-      });
+      expect(await task.start(briefing)).toEqual({ outcome: 'succeeded', result: RESULT });
     } finally {
       delete taskHarnessRegistry['different'];
     }
   });
 
   it.each(['background'] as const)(
-    'rejects a real shell %s result without observed completion',
+    'accepts later agent work after an unobserved shell %s result',
     async (mode) => {
       const task = await harness('opencode', mode);
-      expect(await task.start(briefing)).toEqual({
-        outcome: 'failed',
-        result: '',
-        reasonCode: 'required_tool_failed',
-        failureSpanId: expect.any(String),
-      });
+      expect(await task.start(briefing)).toEqual({ outcome: 'succeeded', result: RESULT });
+      expect(
+        events.some(
+          (event) =>
+            event.type === 'trace' &&
+            event.span.component === 'task.tool' &&
+            event.span.status === 'failed'
+        )
+      ).toBe(true);
       expect(toolSent).toBe(true);
     },
     60000
@@ -564,7 +565,7 @@ describe('ACP semantic terminal boundary', () => {
     turn.error();
     expect(turn.result('end_turn').reasonCode).toBe('provider_error');
   });
-  it('rejects failed, unfinished, nonzero-exit and killed required calls even after final text', () => {
+  it('rejects failed, unfinished, nonzero-exit and killed calls without later agent work', () => {
     for (const update of [
       { status: 'failed' },
       { status: 'in_progress' },
@@ -576,8 +577,8 @@ describe('ACP semantic terminal boundary', () => {
       { status: 'completed', rawOutput: { metadata: { status: 'running' } } },
     ]) {
       const turn = new AcpTurn(toolOutputFailed);
-      turn.update({ sessionUpdate: 'tool_call', toolCallId: 'required', ...update });
       text(turn);
+      turn.update({ sessionUpdate: 'tool_call', toolCallId: 'required', ...update });
       expect(turn.result('end_turn')).toEqual({
         outcome: 'failed',
         result: '',
