@@ -661,8 +661,10 @@ export function createModelGateway(options: GatewayOptions) {
           throw new GatewayError('invalid_request', 400);
       }
       if (payload && trustedTaskId !== undefined) {
-        // Task identity is gateway-owned. No caller session/user survives into
-        // the ADR-013 slot path, including reserve failover.
+        // Task model and identity are gateway-owned. Resolve this neutral model
+        // to each attempted slot's configuration, including reserve failover.
+        payload['model'] = 'default';
+        // No caller session/user survives into the ADR-013 slot path.
         for (const key of ['session', 'session_id', 'conversation_id', 'taskId', 'task_id'])
           Reflect.deleteProperty(payload, key);
         payload['user'] = trustedTaskId;
