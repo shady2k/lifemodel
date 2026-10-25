@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createServer as createHttpsServer, request } from 'node:https';
 import { Pool } from 'pg';
-import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm, mkdir, symlink } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runStorageCli } from '../../loader/src/storage-cli.js';
@@ -384,9 +385,46 @@ describe('task immutable object API', () => {
     }
   });
 
-  it.each([0, 1, 64, 65])(
-    'launcher collects exactly %i artifacts through the real module and Postgres catalog',
-    async (count) => {
+  it.each([
+    ...[0, 1, 64, 65].map((count) => ({
+      label: `listed ${count}`,
+      count,
+      outputCount: 0,
+      fault: '',
+      outcome: 'succeeded' as const,
+    })),
+    ...[0, 1, 2, 64, 65].map((outputCount) => ({
+      label: `outputs ${outputCount}`,
+      count: 0,
+      outputCount,
+      fault: '',
+      outcome: 'succeeded' as const,
+    })),
+    ...[
+      'symlink',
+      'subdirectory',
+      'not_regular',
+      'name_invalid',
+      'folder_symlink',
+      'lost_ack',
+      'lost_mark_ack',
+    ].map((fault) => ({
+      label: fault,
+      count: 0,
+      outputCount: 1,
+      fault,
+      outcome: 'succeeded' as const,
+    })),
+    ...(['failed', 'aborted'] as const).map((outcome) => ({
+      label: outcome,
+      count: 0,
+      outputCount: 2,
+      fault: '',
+      outcome,
+    })),
+  ])(
+    'launcher collects $label through the real module and Postgres catalog',
+    async ({ count, outputCount, fault, outcome }) => {
       // Cross a decimal-width boundary: ordering the selected sequence::text
       // alias lexically would skip/repeat rows despite a correct end marker.
       await stores.postgres.query(
@@ -425,12 +463,45 @@ describe('task immutable object API', () => {
         launchId: `launch_${'c'.repeat(64)}`,
       };
       const reports: any[] = [];
+      let lostAck = false;
+      const outputNames = [
+        'fib.txt',
+        'result.txt',
+        ...Array.from({ length: 63 }, (_, n) => `file-${n}.txt`),
+      ].slice(0, outputCount);
       const gateway = createHttpsServer(identity.certificate, (req, res) => {
         req.on('error', () => undefined);
         res.on('error', () => undefined);
         void (async () => {
           const chunks: Buffer[] = [];
           for await (const part of req) chunks.push(Buffer.from(part));
+          if (req.url?.startsWith('/spaces/')) {
+            const forwarded = await call(req.method!, req.url, Buffer.concat(chunks), {
+              ...(typeof req.headers['x-storage-name'] === 'string'
+                ? { 'x-storage-name': req.headers['x-storage-name'] }
+                : {}),
+              ...(typeof req.headers['x-storage-length'] === 'string'
+                ? { 'x-storage-length': req.headers['x-storage-length'] }
+                : {}),
+              ...(typeof req.headers['x-storage-sha256'] === 'string'
+                ? { 'x-storage-sha256': req.headers['x-storage-sha256'] }
+                : {}),
+            });
+            // Lose the committed artifact PUT or mark ACK, not the operation.
+            if (
+              !lostAck &&
+              forwarded.json?.name === 'fib.txt' &&
+              ((fault === 'lost_ack' && req.method === 'PUT') ||
+                (fault === 'lost_mark_ack' && req.method === 'POST'))
+            ) {
+              lostAck = true;
+              res.destroy();
+              return;
+            }
+            res.writeHead(forwarded.status, { 'content-type': 'application/json' });
+            res.end(forwarded.body);
+            return;
+          }
           let reply: unknown;
           if (req.url === '/task/identity') reply = taskIds;
           else if (req.url === '/task/start')
@@ -465,7 +536,7 @@ describe('task immutable object API', () => {
         await writeFile(tokenFile, 'a');
         const env: NodeJS.ProcessEnv = {
           LIFEMODEL_STORAGE_SPACE: 'a',
-          LIFEMODEL_STORAGE_ENDPOINT: `https://localhost:${port}`,
+          LIFEMODEL_STORAGE_ENDPOINT: `https://localhost:${address.port}`,
           LIFEMODEL_STORAGE_CA_FILE: caFile,
           LIFEMODEL_STORAGE_TOKEN_FILE: tokenFile,
         };
@@ -478,21 +549,87 @@ describe('task immutable object API', () => {
         const status = await runTaskLauncher({
           env,
           workDirectory: directory,
-          harness: (onEvent) =>
-            new ScriptedTaskHarness({
+          harness: (onEvent) => {
+            const scripted = new ScriptedTaskHarness({
               onEvent,
-              events: [{ type: 'step', text: 'working' }],
-              terminal: { outcome: 'succeeded', result: resultText },
-            }),
+              terminal: { outcome, result: resultText },
+            });
+            return {
+              start: async (briefing) => {
+                expect(briefing.text).toContain(`${join(directory, 'outputs')}/`);
+                expect(briefing.text.endsWith('\n\nProduce artifacts')).toBe(true);
+                const outputs = join(directory, 'outputs');
+                // Folder must exist before the agent starts. A file elsewhere
+                // must never enter the catalog or owner attachments.
+                await writeFile(join(directory, 'outside.txt'), 'not delivered');
+                for (const name of outputNames)
+                  await writeFile(join(outputs, name), `contents of ${name}`);
+                if (fault === 'symlink') await symlink('../outside.txt', join(outputs, 'link'));
+                if (fault === 'subdirectory') await mkdir(join(outputs, 'nested'));
+                if (fault === 'not_regular') execFileSync('mkfifo', [join(outputs, 'pipe')]);
+                if (fault === 'name_invalid')
+                  await writeFile(join(outputs, 'bad\u202ename.txt'), 'not delivered');
+                if (fault === 'folder_symlink') {
+                  await rm(outputs, { recursive: true });
+                  await symlink(directory, outputs);
+                }
+                return scripted.start(briefing);
+              },
+              abort: () => scripted.abort(),
+              steer: (text) => scripted.steer(text),
+              wrap: () => scripted.wrap(),
+            };
+          },
         });
-        expect(status, JSON.stringify(reports)).toBe(count === 65 ? 1 : 0);
-        expect(reports).toHaveLength(1);
-        expect(reports[0]).toMatchObject(
+        const reason =
           count === 65
-            ? { outcome: 'failed', reasonCode: 'artifact_limit', artifactObjectIds: [] }
-            : { outcome: 'succeeded', artifactObjectIds: ids }
+            ? 'artifact_limit'
+            : outputCount === 65
+              ? 'output_limit'
+              : fault && !['lost_ack', 'lost_mark_ack'].includes(fault)
+                ? `output_${fault === 'folder_symlink' ? 'symlink' : fault}`
+                : undefined;
+        expect(status, JSON.stringify(reports)).toBe(reason || outcome !== 'succeeded' ? 1 : 0);
+        expect(reports).toHaveLength(1);
+        const catalog: any[] = [];
+        let next: string | null = null;
+        do {
+          const page = await call(
+            'GET',
+            `/spaces/a/objects?limit=100${next ? `&cursor=${next}` : ''}`
+          );
+          expect(page.status).toBe(200);
+          catalog.push(...page.json.objects);
+          next = page.json.nextCursor;
+        } while (next !== null);
+        const uploadedOutputs = catalog.filter(
+          (row: any) => row.mark === 'artifact' && outputNames.includes(row.name)
         );
-        if (count !== 65) expect(reports[0]).not.toHaveProperty('reasonCode');
+        const expectedOutputs = !reason && outcome === 'succeeded' ? outputNames : [];
+        expect(uploadedOutputs.map((row: any) => row.name).sort()).toEqual(
+          [...expectedOutputs].sort()
+        );
+        expect(reports[0]).toMatchObject({
+          outcome: reason ? 'failed' : outcome,
+          artifactObjectIds:
+            reason || outcome !== 'succeeded'
+              ? []
+              : [...ids, ...uploadedOutputs.map((row: any) => row.id)],
+          ...(reason ? { reasonCode: reason } : {}),
+        });
+        if (!reason && outcome !== 'failed') expect(reports[0]).not.toHaveProperty('reasonCode');
+        expect(catalog.some((row: any) => row.name === 'outside.txt')).toBe(false);
+        expect(catalog.some((row: any) => row.name.startsWith('launcher_'))).toBe(false);
+        expect(catalog.find((row: any) => row.mark === 'result').name).toBe('result.txt');
+        expect(catalog.find((row: any) => row.mark === 'log').name).toBe('log.jsonl');
+        if (['lost_ack', 'lost_mark_ack'].includes(fault)) {
+          expect(lostAck).toBe(true);
+          expect(uploadedOutputs).toHaveLength(1);
+        }
+        for (const row of uploadedOutputs) {
+          const downloaded = await call('GET', `/spaces/a/objects/${row.id}`);
+          expect(downloaded.body.toString()).toBe(`contents of ${row.name}`);
+        }
         for (const [id, mark] of [
           [reports[0].resultObjectId, 'result'],
           [reports[0].logObjectId, 'log'],

@@ -1,9 +1,9 @@
 /** One process, one start transition, one immutable semantic terminal frame. */
-import { randomUUID } from 'node:crypto';
-import { mkdir, writeFile, open } from 'node:fs/promises';
-import { join } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, writeFile, open, opendir, lstat } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import { TaskJsonClient, LauncherError, type TaskEndpoint } from './task-launcher-http.js';
-import { runStorageCli } from './storage-cli.js';
+import { runStorageCli, storageNameValid } from './storage-cli.js';
 import { createRegisteredHarness } from './task-harness-factory.js';
 import type { TaskHarness, TaskHarnessEvent, TaskHarnessResult } from './task-harness.js';
 
@@ -82,17 +82,73 @@ async function storage(
 }
 async function save(
   name: string,
-  role: 'result' | 'log',
+  role: 'result' | 'log' | 'artifact',
   env: NodeJS.ProcessEnv,
-  cwd: string
+  cwd: string,
+  launchId: string
 ): Promise<string> {
-  const receipt = await storage(['put', name, '--upload-id', `upload_${randomUUID()}`], env, cwd);
-  const id = receipt['id'];
-  if (typeof id !== 'string' || !ID.test(id)) throw new LauncherError('storage_response_invalid');
-  const marked = await storage(['mark', id, role], env, cwd);
-  if (marked['id'] !== id || marked['mark'] !== role)
-    throw new LauncherError('storage_mark_invalid');
-  return id;
+  // Names are display metadata, not unique slots. Separate role/launch upload
+  // identities keep even an output named result.txt distinct from our result.
+  const uploadId = `upload_${createHash('sha256')
+    .update(JSON.stringify([launchId, role, basename(name)]))
+    .digest('hex')}`;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const receipt = await storage(
+        ['put', basename(name), '--upload-id', uploadId],
+        env,
+        join(cwd, dirname(name))
+      );
+      const id = receipt['id'];
+      if (typeof id !== 'string' || !ID.test(id))
+        throw new LauncherError('storage_response_invalid');
+      const marked = await storage(['mark', id, role], env, cwd);
+      if (marked['id'] !== id || marked['mark'] !== role)
+        throw new LauncherError('storage_mark_invalid');
+      return id;
+    } catch (error) {
+      // An ACK can be lost after PUT or mark committed. Reuse exactly the same
+      // upload identity and role; the shipped module replays the saved receipt.
+      if (
+        !(error instanceof LauncherError) ||
+        error.code !== 'storage_unavailable' ||
+        attempt === 2
+      )
+        throw error;
+    }
+  }
+}
+
+async function collectOutputs(
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  launchId: string
+): Promise<void> {
+  const outputDirectory = join(cwd, 'outputs');
+  const stat = await lstat(outputDirectory);
+  if (stat.isSymbolicLink()) throw new LauncherError('output_symlink');
+  if (!stat.isDirectory()) throw new LauncherError('output_not_regular');
+  const names: string[] = [];
+  const directory = await opendir(outputDirectory);
+  for await (const entry of directory) {
+    if (names.length === 64) throw new LauncherError('output_limit');
+    if (entry.isSymbolicLink()) throw new LauncherError('output_symlink');
+    if (entry.isDirectory()) throw new LauncherError('output_subdirectory');
+    if (!entry.isFile()) throw new LauncherError('output_not_regular');
+    if (!storageNameValid(entry.name)) throw new LauncherError('output_name_invalid');
+    names.push(entry.name);
+  }
+  // Validate the entire flat folder before the first upload. The shipped CLI
+  // also uses no-follow, nonblocking opens and fstat at transfer time, so a
+  // replacement symlink/FIFO cannot bypass this scan or hang the launcher.
+  for (const name of names.sort())
+    await save(join('outputs', name), 'artifact', env, cwd, launchId);
+}
+
+function outputInstructions(cwd: string): string {
+  return `Files for the owner go in ${join(cwd, 'outputs')}/, flat, with their final file names.
+Only regular files are allowed; no subfolders or symlinks. Maximum: 64 files.
+Files elsewhere are not delivered. Outputs are delivered only if the task succeeds.`;
 }
 async function artifacts(env: NodeJS.ProcessEnv, cwd: string): Promise<string[]> {
   const ids: string[] = [];
@@ -241,6 +297,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       );
     }
     options.signal?.throwIfAborted();
+    await mkdir(join(cwd, 'outputs'), { mode: 0o700 });
     const directory = `launcher_${randomUUID()}`;
     await mkdir(join(cwd, directory), { mode: 0o700 });
     logName = `${directory}/log.jsonl`;
@@ -284,7 +341,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       throw new LauncherError('launcher_aborted');
     }
     const result: TaskHarnessResult = await harness.start({
-      text: briefing['briefing'],
+      text: `${outputInstructions(cwd)}\n\n${briefing['briefing']}`,
       model: 'lifemodel/task',
     });
     await log.sync();
@@ -292,9 +349,12 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
     log = undefined;
     const resultName = `${directory}/result.txt`;
     await writeFile(join(cwd, resultName), result.result, { flag: 'wx', mode: 0o600 });
-    terminal.resultObjectId = await save(resultName, 'result', options.env, cwd);
-    terminal.logObjectId = await save(logName, 'log', options.env, cwd);
-    terminal.artifactObjectIds = await artifacts(options.env, cwd);
+    terminal.resultObjectId = await save(resultName, 'result', options.env, cwd, ids.launchId);
+    terminal.logObjectId = await save(logName, 'log', options.env, cwd, ids.launchId);
+    if (result.outcome === 'succeeded') {
+      await collectOutputs(options.env, cwd, ids.launchId);
+      terminal.artifactObjectIds = await artifacts(options.env, cwd);
+    }
     terminal.outcome = result.outcome;
     terminal.summary =
       result.outcome === 'succeeded'
@@ -329,9 +389,9 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
         await log.close().catch(() => undefined);
         log = undefined;
       }
-      if (started && logName && !terminal.logObjectId) {
+      if (started && ids && logName && !terminal.logObjectId) {
         try {
-          terminal.logObjectId = await save(logName, 'log', options.env, cwd);
+          terminal.logObjectId = await save(logName, 'log', options.env, cwd, ids.launchId);
         } catch {
           /* best report retains only durable marks */
         }

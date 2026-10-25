@@ -18,7 +18,7 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
       name: 'briefing',
       type: 'string',
       required: true,
-      description: 'Complete task briefing: goal, context, constraints and result file to save.',
+      description: 'Complete task briefing: goal, context, constraints and output files to save.',
     },
     {
       name: 'profile',
@@ -37,7 +37,7 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
     taskId: task.id,
     state: task.state,
     message:
-      'Accepted in background. Reply now; the outcome will arrive later with the result attachment.',
+      'Accepted in background. Reply now; the outcome will arrive later with the result and artifact attachments if the task succeeds.',
   });
   return {
     name: 'core.startTask',
@@ -46,7 +46,7 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
     hasSideEffects: true,
     maxCallsPerTurn: 1,
     description:
-      'Start long work in the background with a briefing and an explicit profile. Returns queued immediately, without waiting for execution. After acceptance, tell the owner now that work has started and you will reply with the result file when done. A refusal is not a started task.',
+      'Start long work in the background with a briefing and an explicit profile. Returns queued immediately, without waiting for execution. After acceptance, tell the owner now that work has started and you will reply when it ends. Successful replies include the result and artifact files. A refusal is not a started task.',
     validate: (args) => validateAgainstParameters(args as Record<string, unknown>, parameters),
     recoverAcceptedEffect: async (context) => {
       const launchKey = launchKeyFor(context);

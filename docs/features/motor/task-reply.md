@@ -1,12 +1,12 @@
 # Task replies
 
-Task: lifemodel-653.8.11. The owner delegates long work in ordinary chat.
+Tasks: lifemodel-653.8.11, lifemodel-653.8.22. The owner delegates long work in ordinary chat.
 No task chip or task composer is added. The legacy Motor Cortex loop is unchanged.
 
 ## Start
 
 Platform-mode cognition exposes `core.startTask(briefing, profile)`. The complete
-briefing includes the goal, context, constraints and the file to produce.
+briefing includes the goal, context, constraints and the output files to produce.
 `src/ports/task-profiles.ts` owns the versioned allowed profile catalogue: `small`
 revision 1 is 600 seconds, 500 millicores and 512 MiB. Stage 3 deliberately exposes
 only this explicit profile. Unknown profile names and missing briefing/turn context
@@ -63,28 +63,34 @@ state, maps the reason code to owner words using only own dictionary entries, an
 quotes the summary as task output. Unknown codes (including `constructor`) get a
 fixed generic explanation, never inherited JavaScript implementation text. This
 fallback is fixed English; ordinary model replies still follow the owner's language.
-That fallback uses the same trusted result-attachment compiler as a normal reply.
+That fallback uses the same trusted output-attachment compiler as a normal reply.
 Only the committed answer completes the outcome; neither deferral nor silence does.
 
-For `done`, the intent compiler attaches only `result`-marked sealed object IDs,
-with name, size and MIME type (`application/octet-stream` if absent), to the actual
-assistant reply. Models cannot choose attachment IDs. The ordinary outbound
-consumer stores those references on the message. The existing authenticated
-[attachment download](../web/attachments.md) resolves them independently of core.
-Failed/stopped replies explain the cause in owner words and attach no objects,
-even if partial result marks survived sealing.
+For `done`, the intent compiler attaches `result`- and `artifact`-marked sealed
+object IDs, with their plain name, size and MIME type (`application/octet-stream`
+if absent), to the actual assistant reply. Artifact files reported through
+`artifactObjectIds` reach the reply through the seal manifest, not model-selected
+attachment IDs. A completed outcome still requires a sealed `result`; artifacts
+cannot substitute for it. Logs are not attached. The ordinary outbound consumer
+stores those references on the message. The existing web attachment component
+renders the plain name and uses the object ID only for its authenticated
+[attachment download](../web/attachments.md). Failed/stopped replies explain the
+cause in owner words and attach no objects, even if partial result or artifact
+marks survived sealing.
 
-The web attachment contract permits 20 files per message. More results use ordered
-continuation messages of at most 20 files under the same turn/outbox commit; none
-are silently omitted. Invalid result metadata does not strand an immutable outcome
-in relay: the reply explicitly says the files could not be attached. Non-result
-metadata never blocks result delivery. No bytes, storage URLs or paths enter chat.
+The web attachment contract permits 20 files per message. More result and artifact
+files use ordered continuation messages of at most 20 files under the same
+turn/outbox commit; none are silently omitted. Invalid output metadata does not
+strand an immutable outcome in relay: the reply explicitly says the files could
+not be attached. Log metadata never blocks output delivery. No bytes, storage
+URLs or paths enter chat.
 
 ## Evidence
 
 `tests/integration/task-reply.test.ts` uses real isolated Postgres and Valkey,
 scripted cognition and a fake executor with real launch/finalization infrastructure.
-It checks immediate acceptance/reply, sealed outcome/attachment message binding,
+It checks immediate acceptance/reply, sealed result and artifact attachment binding
+with plain names (without logs), ordered output continuations,
 crash before each answer commit, duplicate delivery after trimming, concurrent
 outcomes, low-energy wake and failure without a fake result. Regressions cover
 accepted-launch replay before argument validation, strict fresh-call validation,
