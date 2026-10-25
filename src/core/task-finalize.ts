@@ -235,13 +235,11 @@ export function createTaskFinalizer(options: {
         active();
         await options.registry.markOutcomeSignalled(event.outcomeKey);
       } catch (error) {
-        // Diagnostics never change relay retry/outcome behavior. The durable
-        // event supplies task identity; only the fenced registry supplies trace.
-        const task = await options.registry.read(event.taskId).catch(() => null);
+        // The durable event already supplies task identity. Do not read state
+        // just for diagnostics: evidence must never delay outcome relay/retry.
         options.logger.warn(
           {
             taskId: event.taskId,
-            ...(task ? { traceId: task.traceId } : {}),
             code: 'outcome_relay_pending',
             count: 1,
           },

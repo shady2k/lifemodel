@@ -297,17 +297,27 @@ logs, repositories and TMPDIR live below private `/work`:
 `packages/util/src/global.ts:12-31,62-75`. Session database location comes from
 `packages/cli/src/server-process.ts:111-114`.
 
-Runtime receipt, 2026-10-24: the rebuilt uid-1000 image ran its actual launcher
-with fake gateway/channel/storage on loopback, `--network none --read-only`,
-all capabilities dropped, private `/work`, and descendant `strace -f -e
-trace=connect`. The smoke completed with one start, one briefing, one model
-request, two marked objects and one ACKed success (exit 0). All 42 AF_INET
-connect attempts were loopback; no outbound address was attempted (44 total
-connect calls including Unix sockets). The fixture is
-`tests/fixtures/task-launcher-image-smoke.mjs`; the run log is
-`/tmp/task-harness-v2-smoke2.log`. Isolated real-session tests additionally trap
-npm/bun/curl/wget startup and assert no invocation. Network isolation by itself
-would prove denial, not absence of attempted outbound fetches.
+Historical runtime receipt, 2026-10-24 (before task-trace log removal): the
+rebuilt uid-1000 image ran its actual launcher with fake gateway/channel/storage
+on loopback, `--network none --read-only`, all capabilities dropped, private
+`/work`, and descendant `strace -f -e trace=connect`. It completed with one start,
+one briefing, one model request, result plus legacy log storage, and one ACKed
+success (exit 0). All 42 AF_INET connect attempts were loopback; no outbound
+address was attempted (44 total connect calls including Unix sockets). The run
+log is `/tmp/task-harness-v2-smoke2.log`; this historical receipt does not prove
+the updated trace contract.
+
+The current fixture, `tests/fixtures/task-launcher-image-smoke.mjs`, expects one
+marked result object and no artifacts for its text-only model response. A terminal
+must reference marked result/artifact objects only; `logObjectId` and a launcher
+log object must be absent. Disposable observations go separately to `/task/trace`;
+the fixture checks their task/launch identity and projected-token scrubbing without
+counting them as durable terminal events or storage objects. It observes the root
+but does not require best-effort root closure to arrive before terminal completion.
+Isolated real-session tests additionally trap npm/bun/curl/wget startup and assert
+no invocation. Network isolation by itself would prove denial, not absence of
+attempted outbound fetches. The updated image smoke still needs a fresh real-image
+receipt.
 
 ## Adding a harness
 

@@ -4,6 +4,19 @@ SET statement_timeout = '5s';
 ALTER TABLE core.tasks
   ADD COLUMN IF NOT EXISTS trace_id text,
   ADD COLUMN IF NOT EXISTS parent_span_id text;
+-- Only a trace-only change may skip the deferred outbox check. Keep every
+-- authoritative column (including future columns) in the comparison. A no-op or
+-- any non-trace update still checks terminal proof exactly as before.
+-- This avoids queued row events before the ALTER below. Pre-23 terminal tasks
+-- may lack outbox proof: do not invent it or revalidate it for this backfill.
+DROP TRIGGER IF EXISTS check_task_terminal_outbox ON core.tasks;
+CREATE CONSTRAINT TRIGGER check_task_terminal_outbox AFTER UPDATE ON core.tasks
+  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+  WHEN (NEW.state IN ('done','failed','stopped') AND (
+    ROW(NEW.trace_id,NEW.parent_span_id) IS NOT DISTINCT FROM ROW(OLD.trace_id,OLD.parent_span_id)
+    OR (to_jsonb(NEW) - 'trace_id' - 'parent_span_id')
+      IS DISTINCT FROM (to_jsonb(OLD) - 'trace_id' - 'parent_span_id')
+  )) EXECUTE FUNCTION core.check_task_terminal_outbox();
 -- Existing tasks have no earlier trace to recover. Their immutable id provides
 -- a deterministic root, shared by every resumed diagnostic for that task.
 UPDATE core.tasks SET trace_id=id WHERE trace_id IS NULL;

@@ -3,6 +3,45 @@ import { readFile } from 'node:fs/promises';
 import { TaskJsonClient, type TaskEndpoint } from './task-launcher-http.js';
 import type { TaskHarnessEvent } from './task-harness.js';
 type Span = Extract<TaskHarnessEvent, { type: 'trace' }>['span'];
+
+/** Redact assignments even inside quoted tool output or nested JSON serialization. */
+function scrubTraceAssignments(input: string): string {
+  const assignment =
+    /(?:\\*["'])?\b(?:api[_-]?key|password|secret|token|authorization)(?:\\*["'])?\s*[=:]\s*/gi;
+  let output = '';
+  let cursor = 0;
+  while (assignment.exec(input) !== null) {
+    const start = assignment.lastIndex;
+    if (start < cursor) continue;
+    const opening = /^(\\*)(["'])/.exec(input.slice(start));
+    let end = start;
+    if (opening) {
+      const depth = opening[1]?.length ?? 0;
+      const quote = opening[2] ?? '"';
+      end = input.length;
+      for (let i = start + opening[0].length; i < input.length; i++) {
+        if (input[i] !== quote) continue;
+        let slashes = 0;
+        while (input[i - slashes - 1] === '\\') slashes++;
+        // Each JSON encoding doubles escape width. Embedded escaped quotes
+        // have a different depth from the value's closing delimiter.
+        if (slashes >= depth && (slashes - depth) % (2 * (depth + 1)) === 0) {
+          end = i - slashes;
+          break;
+        }
+      }
+      output += input.slice(cursor, start) + opening[0] + '[REDACTED]';
+    } else {
+      const value = /^[^\s,;"'}]+/.exec(input.slice(start));
+      end = start + (value?.[0].length ?? 0);
+      output += input.slice(cursor, start) + '[REDACTED]';
+    }
+    cursor = end;
+    assignment.lastIndex = Math.max(end, start + 1);
+  }
+  return output + input.slice(cursor);
+}
+
 export function createTaskTraceChannel(options: {
   endpoint: TaskEndpoint;
   env: NodeJS.ProcessEnv;
@@ -47,7 +86,7 @@ export function createTaskTraceChannel(options: {
             if (text.endsWith(token.slice(0, n))) text = text.slice(0, -n) + '[REDACTED]';
           }
         }
-        return text
+        return scrubTraceAssignments(text)
           .replace(/(?:Bearer\s+)[A-Za-z0-9._~+/-]+/gi, 'Bearer [REDACTED]')
           .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[REDACTED]')
           .replace(/(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]{16,}/g, '[REDACTED]')

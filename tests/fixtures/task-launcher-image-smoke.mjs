@@ -26,6 +26,7 @@ const sockets = new Set();
 const calls = [];
 const objects = new Map();
 const terminalFrames = [];
+const traceFrames = [];
 const violations = [];
 let child;
 let startWon = false;
@@ -142,7 +143,45 @@ async function handler(service, req, res) {
       fail('briefing_gate', res);
       return;
     }
-    json(res, 200, { ...ids, briefing, harness: 'opencode' });
+    json(res, 200, {
+      ...ids,
+      briefing,
+      harness: 'opencode',
+      traceId: ids.taskId,
+      parentSpanId: null,
+    });
+    return;
+  }
+  // Disposable observations use their own route, not durable event ACKs or
+  // storage marks. The image smoke checks transport/identity and token scrubbing.
+  if (service === 'channel' && req.method === 'POST' && req.url === '/task/trace') {
+    const frame = JSON.parse(body.toString());
+    const span = frame.span;
+    if (
+      frame.taskId !== ids.taskId ||
+      frame.attemptId !== ids.attemptId ||
+      frame.launchId !== ids.launchId ||
+      span?.traceId !== ids.taskId ||
+      typeof span.spanId !== 'string' ||
+      !(span.spanId === ids.launchId || span.spanId.startsWith(`${ids.launchId}_`)) ||
+      !(
+        span.parentSpanId === null ||
+        span.parentSpanId === ids.launchId ||
+        (typeof span.parentSpanId === 'string' && span.parentSpanId.startsWith(`${ids.launchId}_`))
+      ) ||
+      typeof span.startedAt !== 'string' ||
+      !Number.isFinite(Date.parse(span.startedAt)) ||
+      ![null, 'ok', 'failed', 'suppressed'].includes(span.status)
+    ) {
+      fail('trace_identity', res);
+      return;
+    }
+    if (Object.values(tokens).some((secret) => JSON.stringify(frame).includes(secret))) {
+      fail('trace_token_canary', res);
+      return;
+    }
+    traceFrames.push(frame);
+    json(res, 200, { accepted: true });
     return;
   }
   if (service === 'channel' && req.method === 'POST' && req.url === '/task/events') {
@@ -168,7 +207,10 @@ async function handler(service, req, res) {
       }
       if (
         objects.get(frame.payload.resultObjectId)?.mark !== 'result' ||
-        objects.get(frame.payload.logObjectId)?.mark !== 'log'
+        !Array.isArray(frame.payload.artifactObjectIds) ||
+        frame.payload.artifactObjectIds.some((id) => objects.get(id)?.mark !== 'artifact') ||
+        Object.hasOwn(frame.payload, 'logObjectId') ||
+        [...objects.values()].some((object) => object.mark === 'log' || object.name === 'log.jsonl')
       ) {
         fail('terminal_before_marks', res);
         return;
@@ -318,16 +360,26 @@ try {
   assert.equal(briefingGets, 1);
   assert.equal(modelCalls, 1);
   assert.equal(terminalFrames.length, 1);
-  assert.equal(objects.size, 2);
+  assert.equal(objects.size, 1);
   const report = terminalFrames[0].payload;
   assert.deepEqual(report.artifactObjectIds, []);
-  assert.deepEqual(durableAtTerminal, [report.resultObjectId, report.logObjectId]);
+  assert.equal(Object.hasOwn(report, 'logObjectId'), false, 'removed_log_field');
+  assert.deepEqual(durableAtTerminal, [report.resultObjectId]);
   assert.equal(objects.get(report.resultObjectId).bytes.toString(), result);
-  const log = objects.get(report.logObjectId).bytes.toString();
-  assert.ok(log.length > 0);
+  assert.ok(
+    [...objects.values()].every((object) => object.mark !== 'log' && object.name !== 'log.jsonl'),
+    'removed_log_object'
+  );
+  assert.ok(traceFrames.length > 0, 'trace_requests_observed');
+  assert.ok(
+    traceFrames.some((frame) => frame.span.spanId === ids.launchId),
+    'trace_root_observed'
+  );
   for (const secret of [briefing, result, ...Object.values(tokens)]) {
     assert.ok(!stdout.includes(secret) && !stderr.includes(secret), 'launcher_output_canary');
-    assert.ok(!log.includes(secret), 'launcher_log_canary');
+  }
+  for (const secret of Object.values(tokens)) {
+    assert.ok(!JSON.stringify(traceFrames).includes(secret), 'trace_token_canary');
   }
   assert.deepEqual(violations, []);
   const trace = await readFile('/work/startup-connect.trace', 'utf8');
@@ -361,6 +413,7 @@ try {
       modelCalls,
       objects: objects.size,
       terminalReports: terminalFrames.length,
+      traceRequests: traceFrames.length,
       childExit: exit.code,
       calls,
     })
@@ -376,6 +429,7 @@ try {
       modelCalls,
       objects: objects.size,
       terminalReports: terminalFrames.length,
+      traceRequests: traceFrames.length,
       violations,
       calls,
     })

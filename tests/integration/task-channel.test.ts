@@ -24,6 +24,7 @@ import { createPostgresTaskMailbox } from '../../src/storage/postgres-task-mailb
 import { OwnerMessageIntake } from '../../src/storage/owner-message-intake.js';
 import { createPostgresTraceStore } from '../../src/storage/postgres-trace-store.js';
 import { AcpTurn } from '../../loader/src/task-acp.js';
+import { createTaskTraceChannel } from '../../loader/src/task-trace-channel.js';
 import type { TaskHarnessEvent } from '../../loader/src/task-harness.js';
 import { createTaskChannel } from '../../src/core/task-channel.js';
 import { createTaskKubernetesIdentity } from '../../src/core/task-kubernetes-identity.js';
@@ -577,6 +578,104 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
         })
       ).status
     ).toBe(403);
+  });
+
+  it('scrubs quoted tool credentials through ACP, launcher trace transport and database rows', async () => {
+    const f = await fixture('quoted-credentials');
+    // These opaque credentials are not projected tokens or test-only knownSecrets.
+    const canaries = [
+      'opaque-CANARY-json-password-5e9d',
+      'opaque-CANARY-json-token-5e9d',
+      'opaque-CANARY-shell-password-5e9d',
+      'opaque-CANARY-shell-secret-5e9d',
+      'opaque-CANARY-escaped-json-5e9d',
+      'opaque-CANARY-nested-json-5e9d',
+      'opaque-CANARY-escaped-shell-5e9d',
+    ];
+    const content = [
+      JSON.stringify({ password: canaries[0] }),
+      JSON.stringify({ token: canaries[1] }),
+      `password="${canaries[2]} with spaces"`,
+      `secret='${canaries[3]} with spaces'`,
+      JSON.stringify(JSON.stringify({ api_key: canaries[4] })),
+      JSON.stringify({ output: JSON.stringify({ password: canaries[5] }) }),
+      JSON.stringify(`token="${canaries[6]} with spaces"`),
+    ].join('\n');
+    const writer = createPostgresTraceStore({ pool: stores.postgres });
+    cleanup.push(() => writer.close());
+    const received: unknown[] = [];
+    let receivedAll!: () => void;
+    const allFrames = new Promise<void>((resolve) => {
+      receivedAll = resolve;
+    });
+    const channel = await listener({
+      onTrace: (frame) => {
+        received.push(frame.span);
+        writer.enqueue({ kind: 'span', span: frame.span });
+        // Model open, tool open, tool close and model close.
+        if (received.length === 4) receivedAll();
+      },
+    });
+    const taskTokenFile = join(directory, `trace-token-${f.task.id}`);
+    await writeFile(taskTokenFile, f.token);
+    const transport = createTaskTraceChannel({
+      endpoint: { endpoint: channel.url, tokenFile: taskTokenFile, caFile },
+      env: {},
+      identity: { taskId: f.task.id, attemptId: f.task.attemptId, launchId: f.task.launchId },
+      traceId: f.task.traceId,
+    });
+    cleanup.push(() => transport.close());
+    const turn = new AcpTurn(undefined, (event) => {
+      if (event.type !== 'trace') return;
+      transport.enqueue({
+        ...event.span,
+        spanId: `${f.task.launchId}_${event.span.spanId}`,
+        parentSpanId: event.span.parentSpanId
+          ? `${f.task.launchId}_${event.span.parentSpanId}`
+          : f.task.launchId,
+      });
+    });
+    turn.begin('lifemodel/task');
+    turn.update({
+      sessionUpdate: 'tool_call',
+      toolCallId: 'quoted-credentials',
+      status: 'in_progress',
+      kind: 'execute',
+      rawInput: { command: `safe-command-prefix ${content} safe-command-suffix` },
+    });
+    turn.update({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'quoted-credentials',
+      status: 'completed',
+      rawOutput: {
+        metadata: { exit: 0 },
+        output: `safe-output-prefix ${content} safe-output-suffix`,
+      },
+    });
+    turn.finish(turn.result('end_turn'), { stopReason: 'end_turn' });
+    await bounded(allFrames);
+    await writer.flush();
+    expect(transport.droppedCount).toBe(0);
+    expect(writer.droppedCount).toBe(0);
+    const persisted = (
+      await stores.postgres.query(
+        "SELECT attrs FROM observability.trace_spans WHERE trace_id=$1 AND component='task.tool'",
+        [f.task.traceId]
+      )
+    ).rows;
+    expect(persisted).toHaveLength(1);
+    // Assert both boundaries: safe storage must not mask an unsafe launcher request.
+    for (const canary of canaries) {
+      expect(JSON.stringify(persisted)).not.toContain(canary);
+      expect(JSON.stringify(received)).not.toContain(canary);
+    }
+    expect(persisted[0].attrs).toMatchObject({
+      command: expect.stringContaining('safe-command-prefix'),
+      outputTail: expect.stringContaining('safe-output-suffix'),
+      exitCode: 0,
+    });
+    expect(persisted[0].attrs.command).toContain('[REDACTED]');
+    expect(persisted[0].attrs.outputTail).toContain('[REDACTED]');
   });
 
   it('a stalled trace body cannot consume the terminal byte reservation', async () => {

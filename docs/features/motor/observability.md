@@ -39,10 +39,12 @@ contents before transport; this independent writer boundary is defense in depth.
 
 `flush()` drains queued writes for tests or an explicit read-after-write barrier.
 `close(deadlineMs?)` stops intake and drains. A supplied deadline is an absolute
-Unix time in milliseconds; it bounds waiting, not the shared pool lifetime.
-The caller owns the pool and its connection/statement timeouts. A deadline may
-leave an already running disposable write to settle later. The core must not
-wait for this evidence past its overall shutdown deadline.
+Unix time in milliseconds. At the deadline, the writer drops queued/in-flight
+records and destroys its owned checked-out client. A connection acquired after
+the deadline is destroyed too. The caller owns the pool and its timeouts.
+Core stops trace intake at shutdown start, drains alongside state work, and
+bounds disposal of both trace pools by that same overall stop deadline.
+Disposable evidence cannot hold subsequent state-pool cleanup.
 
 ## Retention
 

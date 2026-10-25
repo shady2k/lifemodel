@@ -69,6 +69,80 @@ describe('bounded disposable trace queue', () => {
     expect(writer.droppedCount).toBe(2);
   });
 
+  it('does not count a committed batch as dropped when the close deadline expires during retention', async () => {
+    const retentionEntered = Promise.withResolvers<void>();
+    const releaseRetention = Promise.withResolvers<void>();
+    const client = Object.assign(new EventEmitter(), {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('SELECT trace_id, bool_and(closed)')) {
+          retentionEntered.resolve();
+          await releaseRetention.promise;
+        }
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    });
+    const store = createPostgresTraceStore({
+      pool: { connect: vi.fn().mockResolvedValue(client) } as unknown as Pool,
+      retention: noRetention,
+    });
+    store.enqueue(span('committed-before-retention'));
+    const flushing = store.flush();
+    let droppedAtDeadline: number;
+    try {
+      await retentionEntered.promise;
+      // The first COMMIT persisted the record; only disposable pruning is held.
+      expect(client.query).toHaveBeenCalledWith('COMMIT');
+      await store.close(Date.now());
+      droppedAtDeadline = store.droppedCount;
+    } finally {
+      // Resolve fake SQL before assertions so even red code leaves no pending work.
+      releaseRetention.resolve();
+      await flushing;
+    }
+    expect(droppedAtDeadline).toBe(0);
+    expect(store.droppedCount).toBe(0);
+    expect(client.release).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
+  it('counts a failed batch once when the close deadline expires during its rollback', async () => {
+    const rollbackEntered = Promise.withResolvers<void>();
+    const releaseRollback = Promise.withResolvers<void>();
+    const client = Object.assign(new EventEmitter(), {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('INSERT INTO observability.trace_spans'))
+          throw new Error('disposable batch failed');
+        if (sql === 'ROLLBACK') {
+          rollbackEntered.resolve();
+          await releaseRollback.promise;
+        }
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    });
+    const store = createPostgresTraceStore({
+      pool: { connect: vi.fn().mockResolvedValue(client) } as unknown as Pool,
+      retention: noRetention,
+    });
+    store.enqueue(span('failed-before-rollback'));
+    const flushing = store.flush();
+    let droppedBeforeDeadline: number;
+    let droppedAtDeadline: number;
+    try {
+      await rollbackEntered.promise;
+      droppedBeforeDeadline = store.droppedCount;
+      await store.close(Date.now());
+      droppedAtDeadline = store.droppedCount;
+    } finally {
+      releaseRollback.resolve();
+      await flushing;
+    }
+    expect(droppedBeforeDeadline).toBe(1);
+    expect(droppedAtDeadline).toBe(1);
+    expect(store.droppedCount).toBe(1);
+    expect(client.release).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
   it('absorbs a checked-out client disconnect and continues writing later batches', async () => {
     const client = Object.assign(new EventEmitter(), {
       query: vi.fn().mockResolvedValue({ rows: [] }),
@@ -267,6 +341,55 @@ describe('Postgres trace persistence and whole-trace retention', () => {
     for (const value of [canary, 'canary-bearer', 'sk-abcdefghijklmnopqrstuvwxyz'])
       expect(persisted).not.toContain(value);
     expect(persisted).toContain('[REDACTED]');
+  });
+
+  it('scrubs quoted and escaped credentials in command/outputTail before database persistence', async () => {
+    // No knownSecrets: production cannot know credentials printed by an arbitrary tool.
+    const cases = [
+      ['json-password', (secret: string) => JSON.stringify({ password: secret })],
+      ['json-token', (secret: string) => JSON.stringify({ token: secret })],
+      ['json-api-key', (secret: string) => JSON.stringify({ 'api-key': secret })],
+      ['shell-double', (secret: string) => `PASSWORD="${secret} with spaces"`],
+      ['shell-single', (secret: string) => `secret='${secret} with spaces'`],
+      ['escaped-json', (secret: string) => JSON.stringify(JSON.stringify({ token: secret }))],
+      [
+        'nested-json',
+        (secret: string) => JSON.stringify({ output: JSON.stringify({ password: secret }) }),
+      ],
+      [
+        'deep-escaped-json',
+        (secret: string) => JSON.stringify(JSON.stringify(JSON.stringify({ api_key: secret }))),
+      ],
+      ['escaped-shell', (secret: string) => JSON.stringify(`token="${secret} with spaces"`)],
+      ['authorization', (secret: string) => JSON.stringify({ Authorization: `Basic ${secret}` })],
+    ] as const;
+    const store = writer();
+    const canaries: string[] = [];
+    for (const [name, encode] of cases) {
+      const canary = `opaque-CANARY-${name}-5e9d`;
+      canaries.push(canary);
+      const content = `safe-prefix ${encode(canary)} safe-suffix`;
+      expect(
+        store.enqueue(span('quoted-credentials', name, { command: content, outputTail: content }))
+      ).toBe(true);
+    }
+    await store.flush();
+    expect(store.droppedCount).toBe(0);
+    const rows = (
+      await stores.postgres.query('SELECT attrs FROM observability.trace_spans WHERE trace_id=$1', [
+        'quoted-credentials',
+      ])
+    ).rows;
+    expect(rows).toHaveLength(cases.length);
+    const persisted = JSON.stringify(rows);
+    for (const canary of canaries) expect(persisted).not.toContain(canary);
+    for (const row of rows) {
+      for (const field of ['command', 'outputTail']) {
+        expect(row.attrs[field]).toContain('[REDACTED]');
+        expect(row.attrs[field]).toContain('safe-prefix');
+        expect(row.attrs[field]).toContain('safe-suffix');
+      }
+    }
   });
 
   it.each([

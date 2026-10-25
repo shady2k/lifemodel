@@ -1426,15 +1426,26 @@ export async function createContainerAsync(
       operationTimeoutMs: 250,
     });
     stopTaskTraces = async (deadline) => {
+      traceAuthority.stop();
       await traces.close(deadline);
       if (traces.droppedCount)
         logger.warn(
           { code: 'trace_records_dropped', count: traces.droppedCount },
           'Task trace records dropped'
         );
-      traceAuthority.stop();
-      await traceAuthorityPool.end();
-      await tracePool.end();
+      // Pool.end() waits for checked-out clients. Disposal shares the same
+      // absolute budget as the writer; late connects cannot hold state cleanup.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.all([traceAuthorityPool.end(), tracePool.end()]),
+          new Promise<void>((resolveStop) => {
+            timer = setTimeout(resolveStop, Math.max(0, deadline - Date.now()));
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     };
     const identity = createTaskKubernetesIdentity({ timeoutMs });
     const mailbox = createPostgresTaskMailbox({
@@ -1463,7 +1474,7 @@ export async function createContainerAsync(
         mailbox,
         identity,
         logger,
-        readTraceAuthority: (proof, signal) => traceAuthority.readBriefing(proof, signal),
+        readTraceAuthority: (proof, signal) => traceAuthority.readTraceAuthority(proof, signal),
         onTrace: (frame, briefing) => {
           traces.enqueue({
             kind: 'span',
@@ -1559,6 +1570,8 @@ export async function createContainerAsync(
     const taskDrain = taskLaunch?.stop(deadline);
     const taskFinalizerDrain = stopTaskFinalizer?.(deadline);
     const taskChannelDrain = stopTaskChannel?.(deadline);
+    // Stop disposable intake immediately and drain alongside authoritative work.
+    const taskTraceDrain = stopTaskTraces?.(deadline);
     outboundDelivery.stop();
     return shutdownSequence({
       logger,
@@ -1574,7 +1587,7 @@ export async function createContainerAsync(
       await taskDrain;
       await taskChannelDrain;
       await taskFinalizerDrain;
-      await stopTaskTraces?.(deadline);
+      await taskTraceDrain;
       await snapshotRedis.quit();
       await postgres.end();
     });

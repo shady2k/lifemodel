@@ -19,6 +19,44 @@ export interface PostgresTraceStoreOptions {
 
 const REDACTED = '[REDACTED]';
 
+/** Redact assignments even inside quoted tool output or nested JSON serialization. */
+function scrubTraceAssignments(input: string): string {
+  const assignment =
+    /(?:\\*["'])?\b(?:api[_-]?key|password|secret|token|authorization)(?:\\*["'])?\s*[=:]\s*/gi;
+  let output = '';
+  let cursor = 0;
+  while (assignment.exec(input) !== null) {
+    const start = assignment.lastIndex;
+    if (start < cursor) continue;
+    const opening = /^(\\*)(["'])/.exec(input.slice(start));
+    let end = start;
+    if (opening) {
+      const depth = opening[1]?.length ?? 0;
+      const quote = opening[2] ?? '"';
+      end = input.length;
+      for (let i = start + opening[0].length; i < input.length; i++) {
+        if (input[i] !== quote) continue;
+        let slashes = 0;
+        while (input[i - slashes - 1] === '\\') slashes++;
+        // Each JSON encoding doubles escape width. Embedded escaped quotes
+        // have a different depth from the value's closing delimiter.
+        if (slashes >= depth && (slashes - depth) % (2 * (depth + 1)) === 0) {
+          end = i - slashes;
+          break;
+        }
+      }
+      output += input.slice(cursor, start) + opening[0] + '[REDACTED]';
+    } else {
+      const value = /^[^\s,;"'}]+/.exec(input.slice(start));
+      end = start + (value?.[0].length ?? 0);
+      output += input.slice(cursor, start) + '[REDACTED]';
+    }
+    cursor = end;
+    assignment.lastIndex = Math.max(end, start + 1);
+  }
+  return output + input.slice(cursor);
+}
+
 /** Scrub before queueing, including nested bags and their keys. Returns a detached copy. */
 export function scrubTraceRecord(
   record: TraceRecord,
@@ -28,15 +66,14 @@ export function scrubTraceRecord(
   const text = (input: string): string => {
     let value = input;
     for (const secret of secrets) value = value.split(secret).join(REDACTED);
-    return value
+    return scrubTraceAssignments(value)
       .replace(/\bBearer\s+[^\s"'<>]+/gi, `Bearer ${REDACTED}`)
       .replace(
         /\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,}|xox[baprs]-[A-Za-z0-9-]{12,})\b/g,
         REDACTED
       )
       .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, REDACTED)
-      .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+:[^\s/@]+@/gi, `$1${REDACTED}@`)
-      .replace(/((?:api[_-]?key|password|secret|token)\s*[=:]\s*)[^\s,;"']+/gi, `$1${REDACTED}`);
+      .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+:[^\s/@]+@/gi, `$1${REDACTED}@`);
   };
   let nodes = 0;
   const walk = (value: unknown, depth: number): unknown => {
@@ -79,6 +116,8 @@ export class PostgresTraceStore implements TraceWriter {
   private inFlight = 0;
   private batches = 0;
   private closed = false;
+  private expired = false;
+  private activeClient: PoolClient | undefined;
   private dropped = 0;
 
   constructor(
@@ -162,6 +201,12 @@ export class PostgresTraceStore implements TraceWriter {
       let client: PoolClient | undefined;
       try {
         client = await this.pool.connect();
+        if (this.expired) {
+          client.release(true);
+          client = undefined;
+          throw new Error('trace deadline');
+        }
+        this.activeClient = client;
         // pg removes its idle-client error listener while a client is checked
         // out. Socket failures between queries must not escape as unhandled
         // EventEmitter errors and terminate the authoritative core process.
@@ -169,13 +214,20 @@ export class PostgresTraceStore implements TraceWriter {
           client.on('error', () => undefined);
           this.observedClients.add(client);
         }
+        await client.query("SET client_connection_check_interval = '50ms'");
         await client.query('BEGIN');
         await client.query("SET LOCAL statement_timeout = '2s'");
         await client.query("SET LOCAL lock_timeout = '1s'");
         // Serializes retention with other disposable writers, not an active-holder fence.
         await client.query("SELECT pg_advisory_xact_lock(hashtext('lifemodel-observability'))");
-        for (const record of batch) await this.write(client, record);
+        for (const record of batch) {
+          if (this.expired) throw new Error('trace deadline');
+          await this.write(client, record);
+        }
+        if (this.expired) throw new Error('trace deadline');
         await client.query('COMMIT');
+        // Persistence is settled even if disposable retention still owns SQL.
+        this.inFlight = 0;
         this.batches++;
         if (this.batches === 1 || this.batches % this.pruneEvery === 0) {
           try {
@@ -194,8 +246,10 @@ export class PostgresTraceStore implements TraceWriter {
           }
         }
       } catch {
-        this.dropped += batch.length;
-        if (client) {
+        if (!this.expired) this.dropped += batch.length;
+        // A held rollback must not count this already-settled failure twice.
+        this.inFlight = 0;
+        if (client && !this.expired) {
           try {
             await client.query('ROLLBACK');
           } catch {
@@ -204,7 +258,10 @@ export class PostgresTraceStore implements TraceWriter {
         }
       } finally {
         try {
-          client?.release();
+          if (client && this.activeClient === client) {
+            this.activeClient = undefined;
+            client.release();
+          }
         } catch {
           /* never fail the caller on cleanup */
         }
@@ -303,8 +360,19 @@ export class PostgresTraceStore implements TraceWriter {
       }),
     ]);
     if (timeout) clearTimeout(timeout);
-    this.dropped += this.queue.length;
+    // Cancel only our checked-out socket. No state/owner client belongs here.
+    // A late connect also checks expired and destroys its own client.
+    this.expired = true;
+    this.dropped += this.queue.length + this.inFlight;
     this.queue.length = 0;
+    this.inFlight = 0;
+    const client = this.activeClient;
+    this.activeClient = undefined;
+    try {
+      client?.release(true);
+    } catch {
+      /* disposable cleanup must not delay state cleanup */
+    }
   }
 }
 
