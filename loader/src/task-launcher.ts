@@ -389,9 +389,9 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
         await log.close().catch(() => undefined);
         log = undefined;
       }
-      if (started && logName && !terminal.logObjectId) {
+      if (started && ids && logName && !terminal.logObjectId) {
         try {
-          terminal.logObjectId = await save(logName, 'log', options.env, cwd, ids!.launchId);
+          terminal.logObjectId = await save(logName, 'log', options.env, cwd, ids.launchId);
         } catch {
           /* best report retains only durable marks */
         }
