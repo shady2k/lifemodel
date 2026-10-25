@@ -4,6 +4,8 @@ import { createServer, type Server } from 'node:https';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
 import { createHash } from 'node:crypto';
+import { TaskJsonClient } from '../../loader/src/task-launcher-http.js';
+import { createTaskModelRelay } from '../../loader/src/task-model-relay.js';
 import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -115,6 +117,8 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
   let beforeMark: ((object: StoredObject) => Promise<void>) | undefined;
   let afterCall: ((call: Call) => Promise<void>) | undefined;
   let artifactPages: StoredObject[][];
+  let beforeHarness: (() => Promise<void>) | undefined;
+  let restartTimers: ReturnType<typeof setTimeout>[];
 
   beforeAll(async () => {
     certificate = await createStorageCertificate(['localhost']);
@@ -123,6 +127,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
   beforeEach(async () => {
     directory = await mkdtemp(join(tmpdir(), 'task-launcher-'));
     servers = [];
+    restartTimers = [];
     sockets = new Set();
     calls = [];
     wireErrors = [];
@@ -145,6 +150,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     beforeMark = undefined;
     afterCall = undefined;
     artifactPages = [[]];
+    beforeHarness = undefined;
     const caFile = join(directory, 'ca.pem');
     await writeFile(caFile, certificate.ca);
     env = { LIFEMODEL_STORAGE_SPACE: SPACE };
@@ -178,6 +184,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     }
   });
   afterEach(async () => {
+    for (const timer of restartTimers) clearTimeout(timer);
     for (const socket of sockets) socket.destroy();
     await Promise.all(
       servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve())))
@@ -198,6 +205,14 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       body,
     };
     calls.push(call);
+    if (
+      service === 'model' &&
+      call.path === '/v1/models' &&
+      req.headers['x-lifemodel-task-token'] === expectedTokens.model
+    ) {
+      json(res, 200, { data: [] });
+      return;
+    }
     if (call.authorization !== `Bearer ${expectedTokens[service]}`) {
       wireErrors.push(`${service} bearer did not match current token`);
       json(res, 401, {});
@@ -346,6 +361,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
         return {
           start: async (briefing) => {
             harnessStarts.push(briefing);
+            await beforeHarness?.();
             return script.start(briefing);
           },
           abort: async () => {
@@ -382,6 +398,136 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     await rename(`${file}.new`, file);
     expectedTokens[service] = value;
   }
+
+  async function pause(service: Service, restartMs?: number) {
+    const server = servers[['model', 'channel', 'storage'].indexOf(service)]!;
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('listener missing');
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (restartMs !== undefined)
+      restartTimers.push(setTimeout(() => server.listen(address.port, '127.0.0.1'), restartMs));
+  }
+  function client(service: Service, windowMs = 2000) {
+    const prefix = `LIFEMODEL_TASK_${service.toUpperCase()}`;
+    return new TaskJsonClient(
+      {
+        endpoint: env[`${prefix}_ENDPOINT`]!,
+        tokenFile: env[`${prefix}_TOKEN_FILE`]!,
+        caFile: env[`${prefix}_CA_FILE`]!,
+      },
+      1000,
+      windowMs
+    );
+  }
+
+  it('survives refused connections before identity, briefing, progress and terminal', async () => {
+    await pause('channel', 250);
+    let stoppedProgress = false;
+    beforeHarness = () => pause('channel', 250);
+    afterCall = async (call) => {
+      if (call.path === '/task/start') await pause('channel', 250);
+      if (call.path === '/task/events' && JSON.parse(call.body.toString()).kind === 'step')
+        stoppedProgress = true;
+      if (call.service === 'storage' && call.method === 'GET') await pause('channel', 250);
+    };
+    expect(await run({ terminal: { outcome: 'succeeded', result: RESULT } })).toBe(0);
+    expect(harnessStarts).toEqual([{ text: BRIEFING, model: 'lifemodel/task' }]);
+    expect(stoppedProgress).toBe(true);
+    expect(terminal().payload.outcome).toBe('succeeded');
+    expect(startCalls()).toHaveLength(1);
+    expect(diagnostics).toEqual([]);
+  });
+
+  it('never retries a JSON request after bytes reached the server and the peer resets', async () => {
+    const transport = client('channel');
+    afterCall = async (call) => {
+      if (call.path === '/task/identity') for (const socket of sockets) socket.destroy();
+    };
+    try {
+      await expect(transport.call('/task/identity')).rejects.toMatchObject({
+        code: 'request_unavailable',
+        connectionAttempts: 1,
+      });
+      expect(calls.filter((call) => call.path === '/task/identity')).toHaveLength(1);
+    } finally {
+      transport.close();
+    }
+  });
+
+  it('does not retry even a never-connected start', async () => {
+    await pause('model');
+    const transport = client('model');
+    try {
+      await expect(
+        transport.call('/task/start', { ...IDS, bootNonce: 'nonce' })
+      ).rejects.toMatchObject({
+        code: 'request_unavailable',
+        connectionAttempts: 1,
+      });
+      expect(startCalls()).toHaveLength(0);
+    } finally {
+      transport.close();
+    }
+  });
+
+  it.each(['startup', 'hardStopAt'] as const)(
+    'bounds refused connects by %s and reports safe attempt counts',
+    async (bound) => {
+      await pause('channel');
+      const transport = client('channel', bound === 'startup' ? 250 : 2000);
+      if (bound === 'hardStopAt') transport.hardStopAt = Date.now() + 250;
+      const begin = performance.now();
+      try {
+        await expect(transport.call('/task/identity')).rejects.toMatchObject({
+          code: 'request_unavailable',
+          connectionAttempts: expect.any(Number),
+        });
+        expect(performance.now() - begin).toBeLessThan(750);
+        expect(calls).toHaveLength(0);
+      } finally {
+        transport.close();
+      }
+    }
+  );
+
+  it('preserves failure codes and adds only connection counts on exhausted startup', async () => {
+    await pause('channel');
+    expect(await run({}, { startupWindowMs: 180 })).toBe(1);
+    expect(diagnostics[0]).toBe('request_unavailable');
+    expect(diagnostics[1]).toMatch(/^connection_attempts=[2-9]$/);
+    expect(diagnostics[2]).toBe('terminal_unavailable');
+  });
+
+  it.each(['GET', 'POST'] as const)(
+    'retries only idempotent model-list connections, not %s completion streams',
+    async (method) => {
+      // The fake model-list handler is below. Completions must not reach it after refusal.
+      await pause('model', 250);
+      const relay = await createTaskModelRelay({
+        modelEndpoint: env['LIFEMODEL_TASK_MODEL_ENDPOINT']!,
+        modelTokenFile: env['LIFEMODEL_TASK_MODEL_TOKEN_FILE']!,
+        modelCaFile: env['LIFEMODEL_TASK_MODEL_CA_FILE']!,
+        timeoutMs: 1500,
+      });
+      try {
+        const response = await fetch(
+          `${relay.baseURL}/${method === 'GET' ? 'models' : 'chat/completions'}`,
+          {
+            method,
+            ...(method === 'POST' ? { body: '{"messages":[]}' } : {}),
+          }
+        );
+        expect(response.status).toBe(method === 'GET' ? 200 : 502);
+        await response.text();
+        expect(calls.filter((call) => call.path === '/v1/models')).toHaveLength(
+          method === 'GET' ? 1 : 0
+        );
+      } finally {
+        await relay.close();
+      }
+    }
+  );
 
   it('takes one start, fetches the briefing after it, and stores exact result/log bytes and artifact IDs', async () => {
     artifactPages = [
@@ -455,7 +601,9 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
         logObjectId: null,
         artifactObjectIds: [],
       });
-      expect(diagnostics).toEqual(['start_lost']);
+      expect(diagnostics).toEqual(
+        mode === '409' ? ['start_lost'] : ['start_lost', 'connection_attempts=1']
+      );
     }
   );
 
@@ -558,7 +706,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       terminalFrames.every((frame) => JSON.stringify(frame) === JSON.stringify(terminalFrames[0]))
     ).toBe(true);
     expect(reports.size).toBe(1);
-    expect(diagnostics).toEqual(['channel_unavailable']);
+    expect(diagnostics).toEqual(['channel_unavailable', 'connection_attempts=3']);
   });
 
   it('rereads rotated model, channel and storage token files, including on terminal replay', async () => {

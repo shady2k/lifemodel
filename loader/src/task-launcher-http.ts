@@ -1,6 +1,12 @@
 /** Bounded task-only JSON transport. Identity and trust files rotate per call. */
 import { request, Agent } from 'node:https';
 import { readFile } from 'node:fs/promises';
+import {
+  ConnectionFailure,
+  StartupConnectionRetry,
+  connectionState,
+  connectionFailure,
+} from './task-connection-retry.js';
 
 export interface TaskEndpoint {
   endpoint: string;
@@ -10,17 +16,22 @@ export interface TaskEndpoint {
 export class LauncherError extends Error {
   constructor(
     readonly code: string,
-    readonly status?: number
+    readonly status?: number,
+    readonly connectionAttempts?: number
   ) {
     super(code);
   }
 }
 export class TaskJsonClient {
   private readonly agent = new Agent({ keepAlive: true, maxSockets: 1 });
+  private readonly retry: StartupConnectionRetry;
+  hardStopAt?: number;
   constructor(
     private readonly config: TaskEndpoint,
-    private readonly timeoutMs = 5_000
+    private readonly timeoutMs = 5_000,
+    startupWindowMs = 30_000
   ) {
+    this.retry = new StartupConnectionRetry(startupWindowMs);
     const url = new URL(config.endpoint);
     if (
       url.protocol !== 'https:' ||
@@ -36,26 +47,40 @@ export class TaskJsonClient {
   close(): void {
     this.agent.destroy();
   }
-  async call(path: string, body?: unknown): Promise<Record<string, unknown>> {
-    const controller = new AbortController();
+  async call(path: string, body?: unknown, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    try {
+      return await this.retry.run(
+        (signal) => this.attempt(path, body, signal),
+        this.timeoutMs,
+        // The once-only start contract deliberately remains stricter than transport safety.
+        { retry: path !== '/task/start', hardStopAt: this.hardStopAt, signal }
+      );
+    } catch (error) {
+      if (error instanceof ConnectionFailure)
+        throw new LauncherError('request_unavailable', undefined, error.attempts);
+      throw error instanceof LauncherError ? error : new LauncherError('request_unavailable');
+    }
+  }
+  private async attempt(
+    path: string,
+    body: unknown,
+    signal: AbortSignal
+  ): Promise<Record<string, unknown>> {
     const deadline = performance.now() + this.timeoutMs;
-    const timer = setTimeout(() => {
-      controller.abort();
-    }, this.timeoutMs);
     try {
       const [token, ca] = await Promise.all([
-        readFile(this.config.tokenFile, { encoding: 'utf8', signal: controller.signal }),
-        readFile(this.config.caFile, { signal: controller.signal }),
+        readFile(this.config.tokenFile, { encoding: 'utf8', signal: signal }),
+        readFile(this.config.caFile, { signal: signal }),
       ]);
       if (!token.trim() || /\s/.test(token.trim())) throw new LauncherError('identity_unavailable');
-      controller.signal.throwIfAborted();
+      signal.throwIfAborted();
       const bytes = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
       return await new Promise<Record<string, unknown>>((resolve, reject) => {
         const req = request(new URL(path, this.config.endpoint), {
           method: bytes === undefined ? 'GET' : 'POST',
           agent: this.agent,
           ca,
-          signal: controller.signal,
+          signal: signal,
           headers: {
             authorization: `Bearer ${token.trim()}`,
             ...(bytes
@@ -66,10 +91,10 @@ export class TaskJsonClient {
               : {}),
           },
         });
-        req.on('error', () => {
-          reject(new LauncherError('request_unavailable'));
+        const connected = connectionState(req);
+        req.on('error', (error) => {
+          reject(connectionFailure(error, connected(), signal.aborted));
         });
-        req.on('socket', (socket) => socket.on('error', () => undefined));
         req.on('response', (res) => {
           res.on('error', () => {
             reject(new LauncherError('request_unavailable'));
@@ -85,7 +110,11 @@ export class TaskJsonClient {
           });
           res.on('end', () => {
             // A queued timer is not proof a late start ACK was timely.
-            if (controller.signal.aborted || performance.now() >= deadline) {
+            if (
+              signal.aborted ||
+              performance.now() >= deadline ||
+              (this.hardStopAt !== undefined && Date.now() >= this.hardStopAt)
+            ) {
               reject(new LauncherError('request_unavailable'));
               return;
             }
@@ -114,9 +143,8 @@ export class TaskJsonClient {
         req.end(bytes);
       });
     } catch (error) {
-      throw error instanceof LauncherError ? error : new LauncherError('request_unavailable');
-    } finally {
-      clearTimeout(timer);
+      if (error instanceof ConnectionFailure || error instanceof LauncherError) throw error;
+      throw new LauncherError('request_unavailable');
     }
   }
 }

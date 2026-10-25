@@ -47,7 +47,8 @@ projected-token reread and fresh live Kubernetes identity described above:
   request. It needs no start claim and returns no briefing or profile. Repeating
   discovery grants no start, does not write a claim and cannot replace the
   gateway's once-only `POST /task/start`.
-- After its timely won start, the launcher calls `GET /task/briefing` once. It
+- After its timely won start, the launcher reads `GET /task/briefing` (with the
+  [startup connection-only retries](task-harness.md) when no connection opened). It
   returns exactly `{taskId,attemptId,launchId,briefing,profile}`, where profile has
   `id`, `revision`, `timeoutSeconds`, `cpuMillis` and `memoryBytes`. This requires
   the exact won Pod/Job start claim and projection, plus current active/wrapping

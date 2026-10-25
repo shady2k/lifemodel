@@ -27,6 +27,7 @@ export interface LauncherOptions {
   workDirectory?: string;
   requestTimeoutMs?: number;
   signal?: AbortSignal;
+  startupWindowMs?: number;
   harness?: (onEvent: (event: TaskHarnessEvent) => Promise<void>) => TaskHarness;
   diagnostic?: (code: string) => void;
 }
@@ -152,6 +153,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       payload,
     };
     // Never change the immutable frame after an ambiguous ACK. One in flight.
+    let connectionAttempts = 0;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const ack = await channel.call('/task/events', frame);
@@ -167,13 +169,15 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
           throw new LauncherError('ack_invalid');
         return;
       } catch (error) {
+        connectionAttempts += error instanceof LauncherError ? (error.connectionAttempts ?? 1) : 1;
         if (
           error instanceof LauncherError &&
           error.status &&
           ![429, 500, 502, 503, 504].includes(error.status)
         )
           throw error;
-        if (attempt === 2) throw new LauncherError('channel_unavailable');
+        if (attempt === 2)
+          throw new LauncherError('channel_unavailable', undefined, connectionAttempts);
       }
     }
   }
@@ -184,16 +188,28 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
   try {
     await mkdir(join(cwd, 'home'), { recursive: true, mode: 0o700 });
     await mkdir(join(cwd, 'tmp'), { recursive: true, mode: 0o700 });
-    channel = new TaskJsonClient(endpoint(options.env, 'CHANNEL'), options.requestTimeoutMs);
-    model = new TaskJsonClient(endpoint(options.env, 'MODEL'), options.requestTimeoutMs);
-    ids = identity(await channel.call('/task/identity'));
+    channel = new TaskJsonClient(
+      endpoint(options.env, 'CHANNEL'),
+      options.requestTimeoutMs,
+      options.startupWindowMs
+    );
+    model = new TaskJsonClient(
+      endpoint(options.env, 'MODEL'),
+      options.requestTimeoutMs,
+      options.startupWindowMs
+    );
+    ids = identity(await channel.call('/task/identity', undefined, options.signal));
     options.signal?.throwIfAborted();
     // Exactly one call. Never retry timeout, lost response, 409 or late ACK.
     let claim: Record<string, unknown>;
     try {
-      claim = await model.call('/task/start', { ...ids, bootNonce });
-    } catch {
-      throw new LauncherError('start_lost');
+      claim = await model.call('/task/start', { ...ids, bootNonce }, options.signal);
+    } catch (error) {
+      throw new LauncherError(
+        'start_lost',
+        undefined,
+        error instanceof LauncherError ? error.connectionAttempts : undefined
+      );
     }
     if (
       claim['start'] !== true ||
@@ -206,17 +222,22 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       throw new LauncherError('start_lost');
     if (started) throw new LauncherError('start_lost');
     started = true;
+    channel.hardStopAt = model.hardStopAt = Date.parse(claim['hardStopAt']);
     let briefing: Record<string, unknown>;
     try {
-      briefing = await channel.call('/task/briefing');
+      briefing = await channel.call('/task/briefing', undefined, options.signal);
       if (
         !same(ids, identity(briefing)) ||
         typeof briefing['briefing'] !== 'string' ||
         !briefing['briefing'].trim()
       )
         throw new Error();
-    } catch {
-      throw new LauncherError('briefing_unavailable');
+    } catch (error) {
+      throw new LauncherError(
+        'briefing_unavailable',
+        undefined,
+        error instanceof LauncherError ? error.connectionAttempts : undefined
+      );
     }
     options.signal?.throwIfAborted();
     const directory = `launcher_${randomUUID()}`;
@@ -297,6 +318,8 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
           ? 'launcher_aborted'
           : 'launcher_failed';
     options.diagnostic?.(code);
+    if (error instanceof LauncherError && error.connectionAttempts !== undefined)
+      options.diagnostic?.(`connection_attempts=${String(error.connectionAttempts)}`);
     if (!terminalAttempted) {
       terminal.outcome = 'failed';
       terminal.reasonCode = code;
@@ -314,8 +337,10 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       }
       try {
         await report();
-      } catch {
+      } catch (reportError) {
         options.diagnostic?.('terminal_unavailable');
+        if (reportError instanceof LauncherError && reportError.connectionAttempts !== undefined)
+          options.diagnostic?.(`connection_attempts=${String(reportError.connectionAttempts)}`);
       }
     }
     return 1;
