@@ -33,7 +33,11 @@ A full queue, invalid record or failed batch increments `droppedCount` and
 returns or continues without failing the task. Failed batches are not retried.
 Every record is detached and scrubbed before entering the queue. String values
 and keys are scrubbed recursively. Token-shaped strings, authorization values,
-URL user credentials and configured known secret values are removed. Bags,
+URL user credentials and configured known secret values are removed. Authorization
+header values are removed for every scheme, including comma-separated Digest
+parameters. A quoted header ends at its enclosing delimiter; a bare header ends
+at CR/LF or the end of the string. Same-line text after a bare header is part of
+that value, not a safe suffix. Bags,
 strings and records have size bounds. The launcher also removes known token-file
 contents before transport; this independent writer boundary is defense in depth.
 

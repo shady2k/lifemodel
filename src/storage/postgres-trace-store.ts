@@ -26,41 +26,51 @@ function scrubTraceAssignments(input: string): string {
   const assignment = /\b(api[_-]?key|password|secret|token|authorization)(?:\\*["'])?\s*[=:]\s*/gi;
   const quoted = /(\\*)(["'])/y;
   const unquoted = /[^\s,;"'}]+/y;
-  const authorization = /(?:Bearer|Basic)[ \t]+[^\s,;"'}]+/iy;
+  // Scan each consumed value once. Quotes inside Digest parameters are content
+  // unless they close the surrounding shell/serialized header delimiter.
+  function endOfValue(start: number, quote?: string, depth = 0, header = false): number {
+    let slashes = 0;
+    for (let i = start; i < input.length; i++) {
+      const char = input[i];
+      if (header && (char === '\r' || char === '\n')) return i;
+      if (
+        quote &&
+        char === quote &&
+        slashes >= depth &&
+        (slashes - depth) % (2 * (depth + 1)) === 0
+      )
+        return i - slashes;
+      slashes = char === '\\' ? slashes + 1 : 0;
+    }
+    return input.length;
+  }
   let output = '';
   let cursor = 0;
   let match: RegExpExecArray | null;
   while ((match = assignment.exec(input)) !== null) {
     const start = assignment.lastIndex;
     if (start < cursor) continue;
+    const header = match[1]?.toLowerCase() === 'authorization';
     quoted.lastIndex = start;
     const opening = quoted.exec(input);
     let end = start;
     if (opening) {
-      const depth = opening[1]?.length ?? 0;
-      const quote = opening[2] ?? '"';
-      end = input.length;
-      for (let i = start + opening[0].length; i < input.length; i++) {
-        if (input[i] !== quote) continue;
-        let slashes = 0;
-        while (input[i - slashes - 1] === '\\') slashes++;
-        // Each JSON encoding doubles escape width. Embedded escaped quotes
-        // have a different depth from the value's closing delimiter.
-        if (slashes >= depth && (slashes - depth) % (2 * (depth + 1)) === 0) {
-          end = i - slashes;
-          break;
-        }
-      }
+      end = endOfValue(start + opening[0].length, opening[2], opening[1]?.length, header);
       output += input.slice(cursor, start) + opening[0] + '[REDACTED]';
+    } else if (header) {
+      // A whole curl -H 'Authorization: ...' header has its delimiter BEFORE
+      // the key. Without a delimiter the HTTP value ends only at CR/LF or EOF,
+      // never at a space/comma/quote belonging to an unknown scheme's value.
+      const before = input[match.index - 1];
+      let depth = 0;
+      if (before === '"' || before === "'") {
+        for (let i = match.index - 2; i >= cursor && input[i] === '\\'; i--) depth++;
+      }
+      end = endOfValue(start, before === '"' || before === "'" ? before : undefined, depth, true);
+      output += input.slice(cursor, start) + '[REDACTED]';
     } else {
-      // Consume an unquoted Authorization scheme and credential together.
-      // Redacting only the first word would hide the scheme and leak its credential.
-      authorization.lastIndex = start;
       unquoted.lastIndex = start;
-      const value =
-        (match[1]?.toLowerCase() === 'authorization' ? authorization.exec(input) : null) ??
-        unquoted.exec(input);
-      end = start + (value?.[0].length ?? 0);
+      end = start + (unquoted.exec(input)?.[0].length ?? 0);
       output += input.slice(cursor, start) + '[REDACTED]';
     }
     cursor = end;

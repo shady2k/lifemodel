@@ -613,6 +613,12 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
       'opaque-CANARY-escaped-shell-5e9d',
       'opaque-CANARY-unquoted-bearer-5e9d',
       'opaque-CANARY-unquoted-basic-5e9d',
+      'opaque-CANARY-token-scheme-5e9d',
+      'opaque-CANARY-digest-username-5e9d',
+      'opaque-CANARY-digest-response-5e9d',
+      'opaque-CANARY-unknown-scheme-5e9d',
+      'opaque-CANARY-quoted-header-5e9d',
+      'opaque-CANARY-nested-header-5e9d',
     ];
     const content = [
       JSON.stringify({ password: canaries[0] }),
@@ -624,6 +630,16 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
       JSON.stringify(`token="${canaries[6]} with spaces"`),
       `Authorization: Bearer ${canaries[7]}`,
       `Authorization: Basic ${canaries[8]}`,
+      `Authorization: Token ${canaries[9]}`,
+      `Authorization: Digest username="${canaries[10]}", response="${canaries[11]} with spaces,commas"`,
+      `aUtHoRiZaTiOn: CustomProof ${canaries[12]}`,
+      `curl -H 'Authorization: ApiKey ${canaries[13]}' safe-header-suffix`,
+      JSON.stringify(
+        JSON.stringify(
+          `curl -H 'Authorization: Digest response="${canaries[14]}"' safe-nested-suffix`
+        )
+      ),
+      '', // A bare header ends at newline, not at the end of its first word.
     ].join('\n');
     const writer = createPostgresTraceStore({ pool: stores.postgres });
     cleanup.push(() => writer.close());
