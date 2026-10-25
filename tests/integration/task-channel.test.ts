@@ -32,7 +32,11 @@ import { createTaskKubernetesIdentity as createModelIdentity } from '../../loade
 import { createTaskIdentity } from '../../loader/src/task-identity.js';
 import { renderTaskJob, TASK_TEMPLATE_HASH } from '../../src/core/kubernetes-task-executor.js';
 import type { TaskRecord, TaskRegistry } from '../../src/ports/tasks.js';
-import type { TaskChannelFrame, TaskMailbox } from '../../src/ports/task-channel.js';
+import type {
+  TaskChannelFrame,
+  TaskMailbox,
+  TaskTraceFrame,
+} from '../../src/ports/task-channel.js';
 
 // All durable assertions use migrated Postgres/Valkey. Only Kubernetes is fake,
 // at its real TLS boundary, including the model listener's once-only start claim.
@@ -580,7 +584,7 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
     ).toBe(403);
   });
 
-  it('scrubs quoted tool credentials through ACP, launcher trace transport and database rows', async () => {
+  it('scrubs quoted and unquoted auth credentials through ACP, launcher trace transport and database rows', async () => {
     const f = await fixture('quoted-credentials');
     // These opaque credentials are not projected tokens or test-only knownSecrets.
     const canaries = [
@@ -591,6 +595,8 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
       'opaque-CANARY-escaped-json-5e9d',
       'opaque-CANARY-nested-json-5e9d',
       'opaque-CANARY-escaped-shell-5e9d',
+      'opaque-CANARY-unquoted-bearer-5e9d',
+      'opaque-CANARY-unquoted-basic-5e9d',
     ];
     const content = [
       JSON.stringify({ password: canaries[0] }),
@@ -600,10 +606,12 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
       JSON.stringify(JSON.stringify({ api_key: canaries[4] })),
       JSON.stringify({ output: JSON.stringify({ password: canaries[5] }) }),
       JSON.stringify(`token="${canaries[6]} with spaces"`),
+      `Authorization: Bearer ${canaries[7]}`,
+      `Authorization: Basic ${canaries[8]}`,
     ].join('\n');
     const writer = createPostgresTraceStore({ pool: stores.postgres });
     cleanup.push(() => writer.close());
-    const received: unknown[] = [];
+    const received: TaskTraceFrame['span'][] = [];
     let receivedAll!: () => void;
     const allFrames = new Promise<void>((resolve) => {
       receivedAll = resolve;
@@ -664,10 +672,21 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
       )
     ).rows;
     expect(persisted).toHaveLength(1);
-    // Assert both boundaries: safe storage must not mask an unsafe launcher request.
-    for (const canary of canaries) {
-      expect(JSON.stringify(persisted)).not.toContain(canary);
-      expect(JSON.stringify(received)).not.toContain(canary);
+    // Assert every field and boundary independently: safe storage must not mask
+    // an unsafe launcher request, nor may a command check mask an output-tail leak.
+    const receivedTool = received.find(
+      (span) => span.component === 'task.tool' && span.endedAt !== null
+    );
+    expect(receivedTool).toBeDefined();
+    for (const [boundary, attrs] of [
+      ['transport', receivedTool?.attrs],
+      ['database', persisted[0].attrs],
+    ] as const) {
+      for (const field of ['command', 'outputTail']) {
+        for (const canary of canaries) {
+          expect.soft(attrs?.[field], `${boundary} ${field}: ${canary}`).not.toContain(canary);
+        }
+      }
     }
     expect(persisted[0].attrs).toMatchObject({
       command: expect.stringContaining('safe-command-prefix'),

@@ -6,14 +6,20 @@ type Span = Extract<TaskHarnessEvent, { type: 'trace' }>['span'];
 
 /** Redact assignments even inside quoted tool output or nested JSON serialization. */
 function scrubTraceAssignments(input: string): string {
-  const assignment =
-    /(?:\\*["'])?\b(?:api[_-]?key|password|secret|token|authorization)(?:\\*["'])?\s*[=:]\s*/gi;
+  // Start at the key, not an optional run of backslashes before its quote.
+  // Retrying that greedy prefix at every offset makes plain backslash runs quadratic.
+  const assignment = /\b(api[_-]?key|password|secret|token|authorization)(?:\\*["'])?\s*[=:]\s*/gi;
+  const quoted = /(\\*)(["'])/y;
+  const unquoted = /[^\s,;"'}]+/y;
+  const authorization = /(?:Bearer|Basic)[ \t]+[^\s,;"'}]+/iy;
   let output = '';
   let cursor = 0;
-  while (assignment.exec(input) !== null) {
+  let match: RegExpExecArray | null;
+  while ((match = assignment.exec(input)) !== null) {
     const start = assignment.lastIndex;
     if (start < cursor) continue;
-    const opening = /^(\\*)(["'])/.exec(input.slice(start));
+    quoted.lastIndex = start;
+    const opening = quoted.exec(input);
     let end = start;
     if (opening) {
       const depth = opening[1]?.length ?? 0;
@@ -32,7 +38,13 @@ function scrubTraceAssignments(input: string): string {
       }
       output += input.slice(cursor, start) + opening[0] + '[REDACTED]';
     } else {
-      const value = /^[^\s,;"'}]+/.exec(input.slice(start));
+      // Consume an unquoted Authorization scheme and credential together.
+      // Redacting only the first word would hide the scheme and leak its credential.
+      authorization.lastIndex = start;
+      unquoted.lastIndex = start;
+      const value =
+        (match[1]?.toLowerCase() === 'authorization' ? authorization.exec(input) : null) ??
+        unquoted.exec(input);
       end = start + (value?.[0].length ?? 0);
       output += input.slice(cursor, start) + '[REDACTED]';
     }

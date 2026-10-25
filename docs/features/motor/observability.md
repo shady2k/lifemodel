@@ -38,13 +38,17 @@ strings and records have size bounds. The launcher also removes known token-file
 contents before transport; this independent writer boundary is defense in depth.
 
 `flush()` drains queued writes for tests or an explicit read-after-write barrier.
-`close(deadlineMs?)` stops intake and drains. A supplied deadline is an absolute
-Unix time in milliseconds. At the deadline, the writer drops queued/in-flight
-records and destroys its owned checked-out client. A connection acquired after
+`close(deadlineMs?, signal?)` stops intake and drains. A supplied deadline is an
+absolute Unix time in milliseconds. At the deadline or abort signal, the writer
+drops queued/in-flight records and destroys its owned checked-out client. A connection acquired after
 the deadline is destroyed too. The caller owns the pool and its timeouts.
-Core stops trace intake at shutdown start, drains alongside state work, and
-bounds disposal of both trace pools by that same overall stop deadline.
-Disposable evidence cannot hold subsequent state-pool cleanup.
+Core stops trace intake at shutdown start and drains alongside authoritative
+work. The stop coordinator passes one absolute deadline into the container,
+including time spent closing intake. When authoritative work finishes, an abort
+signal cancels the remaining trace writes and stops waiting for disposable pool
+disposal. Trace work gets no later budget and cannot hold state-pool cleanup
+until the hard-exit deadline. A direct container stop uses the same cancellation
+but derives its deadline locally.
 
 ## Retention
 

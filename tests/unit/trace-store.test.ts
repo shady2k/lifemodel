@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import { EventEmitter } from 'node:events';
 import type { TraceRecord, TraceSpan } from '../../src/ports/observability.js';
 import {
@@ -67,6 +67,29 @@ describe('bounded disposable trace queue', () => {
     rejectConnect(new Error('offline'));
     await flushing;
     expect(writer.droppedCount).toBe(2);
+  });
+
+  it('cancels drain before its deadline and destroys a successful late connection exactly once', async () => {
+    const connection = Promise.withResolvers<PoolClient>();
+    const client = Object.assign(new EventEmitter(), {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      release: vi.fn(),
+    });
+    const store = createPostgresTraceStore({
+      pool: { connect: vi.fn(() => connection.promise) } as unknown as Pool,
+    });
+    store.enqueue(span('late-after-cancellation'));
+    const flushing = store.flush();
+    const controller = new AbortController();
+    const closing = store.close(Date.now() + 10_000, controller.signal);
+    controller.abort();
+    await closing;
+    expect(store.droppedCount).toBe(1);
+    connection.resolve(client as unknown as PoolClient);
+    await flushing;
+    expect(client.query).not.toHaveBeenCalled();
+    expect(client.release).toHaveBeenCalledExactlyOnceWith(true);
+    expect(store.droppedCount).toBe(1);
   });
 
   it('does not count a committed batch as dropped when the close deadline expires during retention', async () => {
@@ -179,6 +202,21 @@ describe('bounded disposable trace queue', () => {
     expect(client.listenerCount('error')).toBe(1);
     expect(client.release).toHaveBeenCalledTimes(2);
     await store.close();
+  });
+
+  it('preserves bounded backslash runs while scrubbing assignments after them', () => {
+    const slashes = '\\'.repeat(4000);
+    const record = span('trace', 'root', {
+      command: `${slashes} Authorization: Bearer opaque-backslash-bearer safe-command`,
+      outputTail: `${slashes} password="opaque-backslash-password" safe-output`,
+    });
+    const clean = scrubTraceRecord(record);
+    expect(clean.kind).toBe('span');
+    if (clean.kind !== 'span') return;
+    expect(clean.span.attrs).toEqual({
+      command: `${slashes} Authorization: [REDACTED] safe-command`,
+      outputTail: `${slashes} password="[REDACTED]" safe-output`,
+    });
   });
 
   it('scrubs canaries in every nested value and key without mutating callers', () => {
@@ -343,7 +381,7 @@ describe('Postgres trace persistence and whole-trace retention', () => {
     expect(persisted).toContain('[REDACTED]');
   });
 
-  it('scrubs quoted and escaped credentials in command/outputTail before database persistence', async () => {
+  it('scrubs quoted, escaped and unquoted auth credentials in command/outputTail before database persistence', async () => {
     // No knownSecrets: production cannot know credentials printed by an arbitrary tool.
     const cases = [
       ['json-password', (secret: string) => JSON.stringify({ password: secret })],
@@ -362,6 +400,8 @@ describe('Postgres trace persistence and whole-trace retention', () => {
       ],
       ['escaped-shell', (secret: string) => JSON.stringify(`token="${secret} with spaces"`)],
       ['authorization', (secret: string) => JSON.stringify({ Authorization: `Basic ${secret}` })],
+      ['unquoted-bearer', (secret: string) => `Authorization: Bearer ${secret}`],
+      ['unquoted-basic', (secret: string) => `Authorization: Basic ${secret}`],
     ] as const;
     const store = writer();
     const canaries: string[] = [];
@@ -381,10 +421,11 @@ describe('Postgres trace persistence and whole-trace retention', () => {
       ])
     ).rows;
     expect(rows).toHaveLength(cases.length);
-    const persisted = JSON.stringify(rows);
-    for (const canary of canaries) expect(persisted).not.toContain(canary);
     for (const row of rows) {
       for (const field of ['command', 'outputTail']) {
+        for (const canary of canaries) {
+          expect.soft(row.attrs[field], `${field}: ${canary}`).not.toContain(canary);
+        }
         expect(row.attrs[field]).toContain('[REDACTED]');
         expect(row.attrs[field]).toContain('safe-prefix');
         expect(row.attrs[field]).toContain('safe-suffix');

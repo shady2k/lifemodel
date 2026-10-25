@@ -52,6 +52,8 @@ export interface StopDeadlineExitOptions {
   logger: Logger;
   /** The stop budget in ms: the timer fires this long after arming. */
   budgetMs: number;
+  /** Absolute stop deadline, shared with the container by the coordinator. */
+  deadline?: number;
   /**
    * Read at the deadline, never earlier: what the stop had not finished. The
    * caller composes it from the shutdown sequence's step and the loop's
@@ -88,13 +90,16 @@ export function armStopDeadlineExit(options: StopDeadlineExitOptions): ArmedStop
     ((value: number): void => {
       process.exit(value);
     });
-  const timer = setTimeout(() => {
-    options.logger.error(
-      { deadlineMs: options.budgetMs, pending: options.pending() },
-      STOP_DEADLINE_MESSAGE
-    );
-    exit(code);
-  }, options.budgetMs);
+  const timer = setTimeout(
+    () => {
+      options.logger.error(
+        { deadlineMs: options.budgetMs, pending: options.pending() },
+        STOP_DEADLINE_MESSAGE
+      );
+      exit(code);
+    },
+    options.deadline === undefined ? options.budgetMs : Math.max(0, options.deadline - Date.now())
+  );
   return {
     disarm: (): void => {
       clearTimeout(timer);

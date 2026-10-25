@@ -1,7 +1,8 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { PoolClient } from 'pg';
+import { Pool, type PoolClient } from 'pg';
+import { Redis } from 'iovalkey';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createContainerAsync, type Container } from '../../src/core/container.js';
 import { createTaskChannel } from '../../src/core/task-channel.js';
@@ -45,6 +46,7 @@ const envKeys = [
   'LIFEMODEL_TASK_CHANNEL_TLS_DIR',
   'LIFEMODEL_TASK_CHANNEL_PORT',
   'LIFEMODEL_CORE_STOP_DEADLINE_MS',
+  'LIFEMODEL_ENTRYPOINT_AUTOSTART',
 ] as const;
 
 describe('production task trace container wiring', { timeout: 30_000 }, () => {
@@ -216,7 +218,7 @@ describe('production task trace container wiring', { timeout: 30_000 }, () => {
     expect((await blocker.query('SELECT 42 AS value')).rows[0].value).toBe(42);
   });
 
-  it('finishes full container shutdown within the stop budget with an onTrace write held in real SQL', async () => {
+  it('stops through the real coordinator without hard exit and closes state stores despite held trace SQL', async () => {
     const budget = 400;
     process.env['LIFEMODEL_CORE_STOP_DEADLINE_MS'] = String(budget);
     active = await createContainerAsync({
@@ -272,8 +274,30 @@ describe('production task trace container wiring', { timeout: 30_000 }, () => {
       })
       .toBe(1);
 
+    process.env['LIFEMODEL_ENTRYPOINT_AUTOSTART'] = '0';
+    const { runStopSequence } = await import('../../src/index.js');
+    const exits: number[] = [];
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      exits.push(Number(code));
+      return undefined as never;
+    });
+    const cleanup: string[] = [];
+    const originalEnd = Pool.prototype.end;
+    vi.spyOn(Pool.prototype, 'end').mockImplementation(async function (this: Pool) {
+      await originalEnd.call(this);
+      if (!this.options.application_name) cleanup.push('state-postgres-closed');
+    });
+    const originalQuit = Redis.prototype.quit;
+    vi.spyOn(Redis.prototype, 'quit').mockImplementation(async function (this: Redis) {
+      const result = await originalQuit.call(this);
+      cleanup.push('state-valkey-closed');
+      return result;
+    });
+    const shutdownCall = vi.spyOn(active, 'shutdown');
+    const loopStop = vi.spyOn(active.coreLoop, 'stop');
     const started = performance.now();
-    const stopping = active.shutdown();
+    const wallStarted = Date.now();
+    const stopping = runStopSequence({ reason: 'trace shutdown test', code: 0, container: active });
     let timer: ReturnType<typeof setTimeout> | undefined;
     let stoppedBeforeRescue: boolean;
     let elapsed: number;
@@ -294,7 +318,13 @@ describe('production task trace container wiring', { timeout: 30_000 }, () => {
       active = undefined;
     }
     expect(stoppedBeforeRescue).toBe(true);
-    expect(elapsed).toBeLessThan(budget + 150);
+    expect(exits).toEqual([0]); // The same recorder sees the real hard-exit path (code 1).
+    expect(cleanup).toEqual(['state-valkey-closed', 'state-postgres-closed']);
+    const deadline = (shutdownCall.mock.calls as unknown[][])[0]?.[0];
+    expect(deadline).toBeTypeOf('number');
+    expect(Number(deadline)).toBeLessThanOrEqual(wallStarted + budget);
+    expect(loopStop).toHaveBeenCalledWith(deadline);
+    expect(elapsed).toBeLessThan(budget);
     await expect
       .poll(async () => {
         const result = await stores.postgres.query<{ n: number }>(

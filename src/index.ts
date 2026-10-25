@@ -96,7 +96,7 @@ export interface StopTargets {
   logger: Container['logger'];
   coreLoop: { getStopDrainTimeoutMs(): number; stopReport(): StopReport };
   stopProgress: () => StopStep;
-  shutdown: () => Promise<void>;
+  shutdown: (deadline?: number) => Promise<void>;
 }
 
 /**
@@ -180,18 +180,21 @@ export async function runStopSequence(options: {
   // enough) stalled this await, the deadline never started, and the loader
   // killed lifemodel instead of letting it drain.
   let hardExit: ArmedStopDeadlineExit | undefined;
+  let deadline: number | undefined;
   if (error) {
     active?.logger.fatal({ err: error }, 'Shutdown triggered: %s', reason);
   } else {
     active?.logger.info('Shutdown triggered: %s', reason);
   }
   if (active) {
-    // Armed BEFORE the stop starts and disarmed when it resolved: the same
-    // budget the container's own stop deadline uses (its deadline starts a
-    // moment later, so this timer can only fire while the stop is unfinished).
+    // Compute ONE absolute deadline before any awaited stop work. The
+    // container receives this same deadline, including time spent closing intake.
+    const budgetMs = active.coreLoop.getStopDrainTimeoutMs();
+    deadline = Date.now() + budgetMs;
     hardExit = armStopDeadlineExit({
       logger: active.logger,
-      budgetMs: active.coreLoop.getStopDrainTimeoutMs(),
+      budgetMs,
+      deadline,
       pending: () => ({ step: active.stopProgress(), ...active.coreLoop.stopReport() }),
     });
   } else {
@@ -222,7 +225,7 @@ export async function runStopSequence(options: {
   // still leaves at the deadline (with the exit code of the hard exit)
   // instead of hanging on a stop that will never finish.
   if (active) {
-    await active.shutdown();
+    await active.shutdown(deadline);
     hardExit?.disarm();
   }
   process.exit(code);

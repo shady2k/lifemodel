@@ -231,8 +231,8 @@ export interface Container {
    * (src/core/hard-exit.ts) - together with coreLoop.stopReport().
    */
   stopProgress: () => StopStep;
-  /** Shutdown function */
-  shutdown: () => Promise<void>;
+  /** Shutdown function; the stop coordinator supplies its absolute deadline. */
+  shutdown: (deadline?: number) => Promise<void>;
 }
 
 /**
@@ -250,8 +250,8 @@ export interface ShutdownSequenceDeps {
    * turn, sends), state, the full channel stop and the final flush. Each wait
    * inside is bounded by it and the stop then goes on; what still hangs at it
    * is abandoned - `src/index.ts` arms a hard exit at the same deadline
-   * (src/core/hard-exit.ts). The container derives it from
-   * coreLoop.getStopDrainTimeoutMs().
+   * (src/core/hard-exit.ts). The coordinator supplies it; a direct container
+   * stop derives it from coreLoop.getStopDrainTimeoutMs().
    */
   deadline: number;
   /** Registered channels: stopping them stops intake */
@@ -371,12 +371,14 @@ export async function shutdownSequence(deps: ShutdownSequenceDeps): Promise<void
  * released once, and the first caller's outcome is what the process acts on).
  * A failed shutdown clears the memo so a later attempt can retry the sequence.
  */
-export function makeIdempotentShutdown(run: () => Promise<void>): () => Promise<void> {
+export function makeIdempotentShutdown(
+  run: (deadline?: number) => Promise<void>
+): (deadline?: number) => Promise<void> {
   let shutdownPromise: Promise<void> | null = null;
-  return () => {
+  return (deadline) => {
     // ??= : the first caller runs the sequence; the catch clears the memo so
     // a FAILED shutdown can be retried by a later call.
-    shutdownPromise ??= run().catch((error: unknown) => {
+    shutdownPromise ??= run(deadline).catch((error: unknown) => {
       shutdownPromise = null;
       throw error;
     });
@@ -1101,7 +1103,7 @@ export async function createContainerAsync(
     throw new Error('LIFEMODEL_CORE_STOP_DEADLINE_MS must be a positive integer');
   }
   coreLoopConfig.shutdownDrainTimeoutMs = stopDeadlineMs;
-  let shutdown: (() => Promise<void>) | null = null;
+  let shutdown: ((deadline?: number) => Promise<void>) | null = null;
   // Create core loop
   const coreLoop = createCoreLoop(agent, eventBus, layers, logger, metrics, coreLoopConfig, {
     messageComposer: messageComposer ?? undefined,
@@ -1252,7 +1254,7 @@ export async function createContainerAsync(
   let taskLaunch: ReturnType<typeof createTaskLaunchReconciler> | undefined;
   let stopTaskFinalizer: ((deadline: number) => Promise<void>) | undefined;
   const taskLaunchController = new AbortController();
-  let stopTaskTraces: ((deadline: number) => Promise<void>) | undefined;
+  let stopTaskTraces: ((deadline: number, signal: AbortSignal) => Promise<void>) | undefined;
   let stopTaskChannel: ((deadline: number) => Promise<void>) | undefined;
   if (!mergedConfig.motorCortex.enabled && controlTokenFile && controlCaFile) {
     const image = taskWorkbenchImage(process.env['LIFEMODEL_TASK_WORKBENCH_IMAGE']);
@@ -1425,26 +1427,35 @@ export async function createContainerAsync(
       epoch: snapshotEpoch,
       operationTimeoutMs: 250,
     });
-    stopTaskTraces = async (deadline) => {
+    stopTaskTraces = async (deadline, signal) => {
       traceAuthority.stop();
-      await traces.close(deadline);
+      await traces.close(deadline, signal);
       if (traces.droppedCount)
         logger.warn(
           { code: 'trace_records_dropped', count: traces.droppedCount },
           'Task trace records dropped'
         );
-      // Pool.end() waits for checked-out clients. Disposal shares the same
-      // absolute budget as the writer; late connects cannot hold state cleanup.
+      // Start disposal even if the cancellation already fired. Checked-out
+      // trace sockets are destroyed by close; late connects destroy themselves.
+      // Never wait for disposable pool shutdown once authoritative work is done.
+      const poolsClosed = Promise.all([traceAuthorityPool.end(), tracePool.end()]).catch(
+        () => undefined
+      );
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let onAbort: (() => void) | undefined;
       try {
         await Promise.race([
-          Promise.all([traceAuthorityPool.end(), tracePool.end()]),
+          poolsClosed,
           new Promise<void>((resolveStop) => {
+            onAbort = resolveStop;
+            if (signal.aborted) resolveStop();
+            else signal.addEventListener('abort', onAbort, { once: true });
             timer = setTimeout(resolveStop, Math.max(0, deadline - Date.now()));
           }),
         ]);
       } finally {
         if (timer) clearTimeout(timer);
+        if (onAbort) signal.removeEventListener('abort', onAbort);
       }
     };
     const identity = createTaskKubernetesIdentity({ timeoutMs });
@@ -1563,15 +1574,16 @@ export async function createContainerAsync(
   // Idempotent (see makeIdempotentShutdown): the first call wins; a later
   // caller gets the same promise.
   const stopProgress: StopProgress = { step: 'done' };
-  shutdown = makeIdempotentShutdown(() => {
-    const budget = coreLoop.getStopDrainTimeoutMs();
-    const deadline = Date.now() + budget;
+  shutdown = makeIdempotentShutdown((stopDeadline) => {
+    const deadline = stopDeadline ?? Date.now() + coreLoop.getStopDrainTimeoutMs();
     storageRetention?.stop();
     const taskDrain = taskLaunch?.stop(deadline);
     const taskFinalizerDrain = stopTaskFinalizer?.(deadline);
     const taskChannelDrain = stopTaskChannel?.(deadline);
-    // Stop disposable intake immediately and drain alongside authoritative work.
-    const taskTraceDrain = stopTaskTraces?.(deadline);
+    // Trace drain gets no independent stop budget. It may run only while
+    // authoritative work remains, and cannot postpone state-store cleanup.
+    const traceStop = new AbortController();
+    const taskTraceDrain = stopTaskTraces?.(deadline, traceStop.signal);
     outboundDelivery.stop();
     return shutdownSequence({
       logger,
@@ -1587,6 +1599,7 @@ export async function createContainerAsync(
       await taskDrain;
       await taskChannelDrain;
       await taskFinalizerDrain;
+      traceStop.abort();
       await taskTraceDrain;
       await snapshotRedis.quit();
       await postgres.end();

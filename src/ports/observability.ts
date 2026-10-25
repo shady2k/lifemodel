@@ -26,6 +26,6 @@ export interface TraceWriter {
   enqueue(record: TraceRecord): boolean;
   readonly droppedCount: number;
   flush(): Promise<void>;
-  /** Stop intake and drain. Optional deadline is absolute Unix milliseconds. */
-  close(deadlineMs?: number): Promise<void>;
+  /** Stop intake and drain until the absolute Unix deadline or cancellation. */
+  close(deadlineMs?: number, signal?: AbortSignal): Promise<void>;
 }

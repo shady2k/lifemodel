@@ -21,14 +21,20 @@ const REDACTED = '[REDACTED]';
 
 /** Redact assignments even inside quoted tool output or nested JSON serialization. */
 function scrubTraceAssignments(input: string): string {
-  const assignment =
-    /(?:\\*["'])?\b(?:api[_-]?key|password|secret|token|authorization)(?:\\*["'])?\s*[=:]\s*/gi;
+  // Start at the key, not an optional run of backslashes before its quote.
+  // Retrying that greedy prefix at every offset makes plain backslash runs quadratic.
+  const assignment = /\b(api[_-]?key|password|secret|token|authorization)(?:\\*["'])?\s*[=:]\s*/gi;
+  const quoted = /(\\*)(["'])/y;
+  const unquoted = /[^\s,;"'}]+/y;
+  const authorization = /(?:Bearer|Basic)[ \t]+[^\s,;"'}]+/iy;
   let output = '';
   let cursor = 0;
-  while (assignment.exec(input) !== null) {
+  let match: RegExpExecArray | null;
+  while ((match = assignment.exec(input)) !== null) {
     const start = assignment.lastIndex;
     if (start < cursor) continue;
-    const opening = /^(\\*)(["'])/.exec(input.slice(start));
+    quoted.lastIndex = start;
+    const opening = quoted.exec(input);
     let end = start;
     if (opening) {
       const depth = opening[1]?.length ?? 0;
@@ -47,7 +53,13 @@ function scrubTraceAssignments(input: string): string {
       }
       output += input.slice(cursor, start) + opening[0] + '[REDACTED]';
     } else {
-      const value = /^[^\s,;"'}]+/.exec(input.slice(start));
+      // Consume an unquoted Authorization scheme and credential together.
+      // Redacting only the first word would hide the scheme and leak its credential.
+      authorization.lastIndex = start;
+      unquoted.lastIndex = start;
+      const value =
+        (match[1]?.toLowerCase() === 'authorization' ? authorization.exec(input) : null) ??
+        unquoted.exec(input);
       end = start + (value?.[0].length ?? 0);
       output += input.slice(cursor, start) + '[REDACTED]';
     }
@@ -345,21 +357,30 @@ export class PostgresTraceStore implements TraceWriter {
     }
   }
 
-  async close(deadlineMs?: number): Promise<void> {
+  async close(deadlineMs?: number, signal?: AbortSignal): Promise<void> {
     this.closed = true;
     const drained = this.flush();
-    if (deadlineMs === undefined) {
+    if (deadlineMs === undefined && !signal) {
       await drained;
       return;
     }
     let timeout: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([
-      drained,
-      new Promise<void>((resolve) => {
-        timeout = setTimeout(resolve, Math.max(0, deadlineMs - Date.now()));
-      }),
-    ]);
-    if (timeout) clearTimeout(timeout);
+    let onAbort: (() => void) | undefined;
+    try {
+      await Promise.race([
+        drained,
+        new Promise<void>((resolve) => {
+          onAbort = resolve;
+          if (signal?.aborted) resolve();
+          else signal?.addEventListener('abort', onAbort, { once: true });
+          if (deadlineMs !== undefined)
+            timeout = setTimeout(resolve, Math.max(0, deadlineMs - Date.now()));
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      if (onAbort) signal?.removeEventListener('abort', onAbort);
+    }
     // Cancel only our checked-out socket. No state/owner client belongs here.
     // A late connect also checks expired and destroys its own client.
     this.expired = true;
