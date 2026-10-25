@@ -61,7 +61,7 @@ export function createTaskTraceChannel(options: {
   traceId: string;
   timeoutMs?: number;
 }) {
-  const client = new TaskJsonClient(options.endpoint, options.timeoutMs ?? 500, 0);
+  const client = new TaskJsonClient(options.endpoint, options.timeoutMs ?? 1500, 0);
   const queue: Span[] = [];
   const secrets = new Set<string>();
   let active = false;

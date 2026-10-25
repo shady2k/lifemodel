@@ -32,6 +32,7 @@ import { createTaskKubernetesIdentity as createModelIdentity } from '../../loade
 import { createTaskIdentity } from '../../loader/src/task-identity.js';
 import { renderTaskJob, TASK_TEMPLATE_HASH } from '../../src/core/kubernetes-task-executor.js';
 import type { TaskRecord, TaskRegistry } from '../../src/ports/tasks.js';
+import { TaskChannelError } from '../../src/ports/task-channel.js';
 import type {
   TaskChannelFrame,
   TaskMailbox,
@@ -741,6 +742,76 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
     const response = await call(channel.url, f.token, frame);
     expect(response.status).toBe(200);
     expect(await rows(frame)).toHaveLength(1);
+  });
+
+  it('logs fixed routes and authenticated trace locators on storage refusal without content', async () => {
+    const f = await fixture('trace-diagnostic');
+    const channel = await listener({
+      mailbox: {
+        ...mailbox,
+        readTraceAuthority: async () => {
+          throw new TaskChannelError(503, 'storage_error');
+        },
+      },
+    });
+    const span = {
+      traceId: f.task.traceId,
+      spanId: f.task.launchId,
+      parentSpanId: null,
+      component: 'task',
+      startedAt: new Date().toISOString(),
+      endedAt: null,
+      status: null,
+      attrs: { command: PAYLOAD },
+    };
+    const options = {
+      path: '/task/trace',
+      raw: JSON.stringify({
+        taskId: f.task.id,
+        attemptId: f.task.attemptId,
+        launchId: f.task.launchId,
+        span,
+      }),
+    };
+    expect((await call(channel.url, 'unverified', step(f.task), options)).status).toBe(403);
+    expect(logs.at(-1)?.obj).toMatchObject({ route: 'POST /task/trace', code: 'identity_denied' });
+    expect(logs.at(-1)?.obj).not.toHaveProperty('taskId');
+    const forged = JSON.parse(options.raw);
+    forged.taskId = PAYLOAD;
+    forged.span.traceId = MODULE_TOKEN;
+    expect(
+      (await call(channel.url, f.token, step(f.task), { ...options, raw: JSON.stringify(forged) }))
+        .status
+    ).toBe(503);
+    expect(logs.at(-1)?.obj).not.toHaveProperty('taskId');
+    expect(logs.at(-1)?.obj).not.toHaveProperty('traceId');
+    expect((await call(channel.url, f.token, step(f.task), options)).status).toBe(503);
+    expect(logs.at(-1)?.obj).toMatchObject({
+      route: 'POST /task/trace',
+      status: 503,
+      code: 'storage_error',
+      taskId: f.task.id,
+      traceId: f.task.traceId,
+    });
+    expect(
+      (await call(channel.url, f.token, step(f.task), { path: `/private?${URL_CANARY}` })).status
+    ).toBe(404);
+    expect(logs.at(-1)?.obj).toMatchObject({ route: 'unknown', code: 'route_absent' });
+    for (const secret of [PAYLOAD, URL_CANARY, f.token, MODULE_TOKEN])
+      expect(JSON.stringify(logs)).not.toContain(secret);
+    // Disposable evidence failure did not consume the terminal channel.
+    const terminal: TaskChannelFrame = {
+      ...step(f.task),
+      kind: 'terminal',
+      payload: {
+        outcome: 'succeeded',
+        summary: 'done',
+        resultObjectId: null,
+        artifactObjectIds: [],
+      },
+    };
+    expect((await call(channel.url, f.token, terminal)).status).toBe(200);
+    expect(await rows(terminal)).toHaveLength(1);
   });
 
   it('trace authority never waits on an exclusive task/launch row owner', async () => {

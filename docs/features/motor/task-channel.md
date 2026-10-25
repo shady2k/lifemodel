@@ -23,7 +23,7 @@ CA. Mailbox frames replay the same immutable message after an ambiguous response
 trace frames are best effort and are never replayed.
 Trace intake has its own authentication worker and authority worker, with at
 most two admitted requests. Its physically separate one-connection authority
-pool uses a 250 ms deadline and the active-holder fence; it never borrows the
+pool uses a one-second deadline and the active-holder fence; it never borrows the
 terminal channel pool. Trace storage uses a separate unfenced one-connection
 pool. Trace authority or storage waits therefore cannot occupy terminal
 mailbox workers or SQL connections. No token
@@ -73,8 +73,11 @@ time is checked after waits. Reads emit no mailbox row or Signal. Responses use
 that allowance against connection/process byte reservations until completion.
 Lower configured byte budgets lower the response allowance. Oversized results
 fail closed with a safe 503 code, before any briefing bytes are sent. Request
-bodies, query strings and unknown routes are refused. Errors/logs contain only
-safe status/codes, never tokens, briefing, profile content or raw SQL causes.
+bodies, query strings and unknown routes are refused. Refusal logs name a fixed route (unknown paths are `unknown`), and authenticated
+frames include canonical generated task/trace locators even if the authority
+lookup fails. Arbitrary wire locator text is omitted until storage resolves it.
+These locators are diagnostic input, not a grant of authority. Errors/logs contain only
+safe status/codes and locators, never tokens, briefing, profile content or raw SQL causes.
 
 ## Frame and ACK contract for the launcher
 
@@ -131,9 +134,13 @@ not durable task work. Trace intake emits no Signal and owns no mailbox sequence
 terminal report, retry or finalization state. Trace authentication and authority
 have independent single-worker queues and admit at most two requests. Their
 buffered-byte allowance is separate from mailbox intake. Production trace
-authority has its own one-connection fenced pool with a 250 ms operation bound;
+authority has its own one-connection fenced pool with a one-second operation bound;
 it reads task/launch rows without the exclusive locks needed by terminal append.
 Shared canonical authority checks still deny stale, revoked or unclaimed pods.
+The authority transaction makes 13 sequential SQL round trips plus connection
+setup. Its one-second budget covers 40 ms round trips with setup margin; it is
+not a terminal budget. The independent launcher client allows 1500 ms for this
+check, authentication and HTTPS, with no retry.
 The unfenced observation writer uses another one-connection pool. The trace
 route never falls back to the briefing reader's exclusive locks.
 
@@ -147,7 +154,7 @@ model usage and completion text are trace observations, not authority or results
 Launcher intake is capped at 2048 observations per run, 128 queued spans and
 30000 encoded bytes per span. Oversized or excess observations are dropped.
 The launcher scrubs projected token contents before sending. It uses a separate
-500 ms trace client and no connection or ACK replay. A trace failure never blocks
+1500 ms trace client and no connection or ACK replay. A trace failure never blocks
 the terminal report or changes the semantic outcome. After terminal settlement,
 the independent trace drain closes within one second; remaining spans may be
 lost. There is no fixed `log.jsonl` journal or log object upload. See

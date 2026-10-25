@@ -1,11 +1,14 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer as tcpServer, connect as tcpConnect, type Socket } from 'node:net';
 import { Pool, type PoolClient } from 'pg';
 import { Redis } from 'iovalkey';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createContainerAsync, type Container } from '../../src/core/container.js';
 import { createTaskChannel } from '../../src/core/task-channel.js';
+import { createTaskTraceChannel } from '../../loader/src/task-trace-channel.js';
+import { TaskJsonClient } from '../../loader/src/task-launcher-http.js';
 import { createPlatformSettingsReader } from '../../src/config/platform-settings.js';
 import { createPostgresTaskRegistry } from '../../src/storage/postgres-task-registry.js';
 import type {
@@ -216,6 +219,132 @@ describe('production task trace container wiring', { timeout: 30_000 }, () => {
     const authority = await captured.channel!.readTraceAuthority!(proof, AbortSignal.timeout(750));
     expect(authority).toMatchObject({ taskId: task.id, traceId: task.traceId, briefing: '' });
     expect((await blocker.query('SELECT 42 AS value')).rows[0].value).toBe(42);
+  });
+
+  it('accepts cold and repeated trace authority reads at 20 ms database round-trip latency', async () => {
+    const upstream = new URL(workerDatabaseUrl(stores.workerId));
+    const sockets = new Set<Socket>();
+    const timers = new Set<ReturnType<typeof setTimeout>>();
+    const proxy = tcpServer((downstream) => {
+      const upstreamSocket = tcpConnect(Number(upstream.port), upstream.hostname);
+      for (const socket of [downstream, upstreamSocket]) {
+        sockets.add(socket);
+        socket.on('error', () => undefined);
+        socket.on('close', () => sockets.delete(socket));
+      }
+      downstream.pipe(upstreamSocket);
+      upstreamSocket.on('data', (chunk) => {
+        const timer = setTimeout(() => {
+          timers.delete(timer);
+          if (!downstream.destroyed) downstream.write(chunk);
+        }, 20);
+        timers.add(timer);
+      });
+      upstreamSocket.on('end', () => downstream.end());
+      downstream.on('close', () => upstreamSocket.destroy());
+    });
+    await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+    const address = proxy.address();
+    if (!address || typeof address === 'string') throw new Error('proxy address missing');
+    try {
+      // Only production trace authority traverses the latency proxy. All SQL,
+      // authentication and fencing still execute on the isolated real Postgres.
+      active = await createContainerAsync({ logLevel: 'error', logToFile: false });
+      const { task, proof } = await liveTask();
+      const originalConnect = Pool.prototype.connect;
+      vi.spyOn(Pool.prototype, 'connect').mockImplementation(function (this: Pool, ...args: any[]) {
+        if (this.options.application_name === 'lifemodel-trace-authority') {
+          const routed = new URL(upstream);
+          routed.hostname = '127.0.0.1';
+          routed.port = String(address.port);
+          this.options.connectionString = routed.toString();
+        }
+        return (originalConnect as any).apply(this, args);
+      });
+      for (let i = 0; i < 3; i++) {
+        const authority = await captured.channel!.readTraceAuthority!(
+          proof,
+          AbortSignal.timeout(1500)
+        );
+        expect(authority).toMatchObject({ taskId: task.id, traceId: task.traceId, briefing: '' });
+      }
+      vi.spyOn(captured.channel!.identity, 'verify').mockResolvedValue(proof);
+      const tokenFile = join(directory, 'channel-token');
+      const caFile = join(directory, 'channel-ca');
+      await writeFile(tokenFile, 'trace-container-token');
+      await writeFile(caFile, certificate.ca);
+      const endpoint = { endpoint: 'https://localhost:8447', tokenFile, caFile };
+      const transport = createTaskTraceChannel({
+        endpoint,
+        env: {},
+        traceId: task.traceId,
+        identity: { taskId: task.id, attemptId: task.attemptId, launchId: task.launchId },
+      });
+      const terminal = new TaskJsonClient(endpoint);
+      try {
+        const at = new Date().toISOString();
+        for (const endedAt of [null, at]) {
+          transport.enqueue({
+            traceId: task.traceId,
+            spanId: `${task.launchId}_tool`,
+            parentSpanId: task.launchId,
+            component: 'task.tool',
+            startedAt: at,
+            endedAt,
+            status: endedAt ? 'ok' : null,
+            attrs: { command: 'true', exitCode: 0 },
+          });
+        }
+        await expect
+          .poll(async () =>
+            Number(
+              (
+                await stores.postgres.query(
+                  `SELECT count(*) AS n FROM pg_stat_activity WHERE datname=current_database()
+           AND application_name='lifemodel-trace-authority' AND state='idle in transaction'`
+                )
+              ).rows[0].n
+            )
+          )
+          .toBe(1);
+        // Terminal ACK runs on its separate pool while trace authority is slow.
+        await terminal.call('/task/events', {
+          taskId: task.id,
+          attemptId: task.attemptId,
+          direction: 'task_to_core',
+          messageId: 'latency-terminal',
+          sequence: 1,
+          kind: 'terminal',
+          payload: {
+            outcome: 'succeeded',
+            summary: 'done',
+            resultObjectId: null,
+            artifactObjectIds: [],
+          },
+        });
+        transport.close(); // Same ordering as the launcher: terminal settles, then bounded drain.
+        await expect
+          .poll(async () =>
+            (
+              await stores.postgres.query(
+                'SELECT status FROM observability.trace_spans WHERE trace_id=$1 AND ended_at IS NOT NULL',
+                [task.traceId]
+              )
+            ).rows.map((row) => row.status)
+          )
+          .toEqual(['ok']);
+        expect(transport.droppedCount).toBe(0);
+      } finally {
+        transport.close();
+        terminal.close();
+      }
+    } finally {
+      await active?.shutdown();
+      active = undefined;
+      for (const timer of timers) clearTimeout(timer);
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => proxy.close(() => resolve()));
+    }
   });
 
   it('stops through the real coordinator without hard exit and closes state stores despite held trace SQL', async () => {
