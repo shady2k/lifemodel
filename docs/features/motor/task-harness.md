@@ -51,10 +51,19 @@ an unknown/missing name fails closed. No new Job env value is introduced.
 Tool subprocesses receive only the four storage CLI capability values, not
 model/channel token paths. Raw ACP content never enters launcher diagnostics.
 
-The fixed baked provider/model is `lifemodel/task`. A loopback relay adds the
-fresh projected model token on `x-lifemodel-task-token` for each gateway request;
-The agent never holds a provider key. The relay verifies the projected instance
-CA. Only `/v1/chat/completions` and `/v1/models` can reach the gateway.
+The fixed baked provider/model is `lifemodel/task`. This remains a neutral,
+local harness alias, not an upstream model name or a provider choice. The task
+model gateway owns model selection: after validating a nonempty model string,
+it replaces any harness-supplied name with the configured model of each attempted
+slot, on primary and on reserve failover. Changing the harness alias is not
+needed for routing and would not enforce this rule for other task callers.
+Core's separate listener still resolves `default` to the primary slot model,
+passes explicit names on primary, and uses the configured reserve model on failover.
+
+A loopback relay adds the fresh projected model token on `x-lifemodel-task-token`
+for each gateway request. The agent never holds a provider key. The relay verifies
+the projected instance CA. Only `/v1/chat/completions` and `/v1/models` can reach
+the gateway.
 
 Success requires ACP `end_turn`, final assistant text and no provider error or unresolved
 required tool failure. Process exit 0, idle, `step_finish` or an ended agent

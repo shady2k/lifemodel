@@ -208,6 +208,18 @@ describe('model gateway buffered HTTP contract', () => {
     expect(f.logins).toEqual([{ role: 'model-gateway', jwt: 'projected-jwt' }]);
     expect(JSON.stringify(f.lines)).not.toContain('SECRET');
   });
+  it.each([
+    ['default', 'primary-model'],
+    ['owner-fast', 'owner-fast'],
+  ])('routes core model %s to %s on primary', async (model, expected) => {
+    const f = await fixture();
+    const response = await f.post({ model, messages: [] });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(answer());
+    expect(f.attempts.map((attempt) => [attempt.slot, attempt.body.model])).toEqual([
+      ['primary', expected],
+    ]);
+  });
   it.each([500, 503, 429, 'malformed', 'connection'] as const)(
     'fails over exactly once on %s, replacing an explicit role model on reserve',
     async (failure) => {

@@ -1063,6 +1063,41 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
       expect(ack.text).not.toContain(value);
     }
   });
+  it.each([
+    ['task', false],
+    ['another-harness-model', false],
+    ['task', true],
+    ['another-harness-model', true],
+  ] as const)(
+    'uses the configured slot model for task model %s (primary failure: %s)',
+    async (model, failPrimary) => {
+      const f = await fixture();
+      const g = await gateway();
+      expect((await g.start(f.task, f.token)).status).toBe(200);
+      if (failPrimary) g.failPrimary();
+      const response = await g.model(f.token, { model });
+      expect(response.status).toBe(200);
+      expect(g.attempts.map((attempt) => attempt.body.model)).toEqual(
+        failPrimary ? ['primary-model', 'reserve-model'] : ['primary-model']
+      );
+      for (const attempt of g.attempts) {
+        expect(attempt.body.user).toBe(f.task.id);
+        expect(attempt.headers['x-task-session']).toBe(f.task.id);
+      }
+    }
+  );
+  it.each([undefined, '', 42])(
+    'rejects invalid task model %s before slot selection',
+    async (model) => {
+      const f = await fixture();
+      const g = await gateway();
+      expect((await g.start(f.task, f.token)).status).toBe(200);
+      const response = await g.model(f.token, { model });
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({ error: { type: 'gateway_error', code: 'invalid_request' } });
+      expect(g.attempts).toEqual([]);
+    }
+  );
   it.each(['revoke', 'deadline'] as const)(
     'rechecks %s after a model body held across the initial authorization',
     async (change) => {
