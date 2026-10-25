@@ -1,14 +1,20 @@
-/** Loopback transport glue. No provider keys, catalog discovery or retries. */
+/** Loopback transport glue. No provider keys or catalog discovery. Only model-list connects can retry. */
 import { createServer, type Server } from 'node:http';
 import { request } from 'node:https';
 import { readFile } from 'node:fs/promises';
 import type { Socket } from 'node:net';
+import {
+  StartupConnectionRetry,
+  connectionState,
+  connectionFailure,
+} from './task-connection-retry.js';
 
 export interface TaskModelRelayOptions {
   modelEndpoint: string;
   modelTokenFile: string;
   modelCaFile: string;
   timeoutMs?: number;
+  startupWindowMs?: number;
   onError?: () => void;
 }
 
@@ -27,6 +33,7 @@ export async function createTaskModelRelay(options: TaskModelRelayOptions): Prom
   ) {
     throw new Error('model_endpoint_invalid');
   }
+  const retry = new StartupConnectionRetry(options.startupWindowMs);
   const sockets = new Set<Socket>();
   const upstreams = new Set<ReturnType<typeof request>>();
   const server: Server = createServer((incoming, outgoing) => {
@@ -42,7 +49,11 @@ export async function createTaskModelRelay(options: TaskModelRelayOptions): Prom
       outgoing.writeHead(404).end();
       return;
     }
-    const deadline = AbortSignal.timeout(options.timeoutMs ?? 300_000);
+    const cancellation = new AbortController();
+    const deadline = AbortSignal.any([
+      AbortSignal.timeout(options.timeoutMs ?? 300_000),
+      cancellation.signal,
+    ]);
     const timedOut = () => {
       incoming.destroy();
       outgoing.destroy();
@@ -50,51 +61,67 @@ export async function createTaskModelRelay(options: TaskModelRelayOptions): Prom
     deadline.addEventListener('abort', timedOut, { once: true });
     outgoing.on('close', () => {
       deadline.removeEventListener('abort', timedOut);
+      cancellation.abort();
     });
     void (async () => {
       try {
-        const [rawToken, ca] = await Promise.all([
-          readFile(options.modelTokenFile, { encoding: 'utf8', signal: deadline }),
-          readFile(options.modelCaFile, { signal: deadline }),
-        ]);
-        const token = rawToken.trim();
-        if (!token || /[\r\n]/.test(token)) throw new Error('token_invalid');
-        if (outgoing.destroyed) return;
-        // Ignore all caller authentication and forwarding headers. Token is read
-        // afresh, never placed in OpenCode configuration or its environment.
-        const upstream = request(new URL(path, origin), {
-          method: incoming.method,
-          ca,
-          headers: {
-            'content-type': 'application/json',
-            'x-lifemodel-task-token': token,
+        await retry.run(
+          async (signal) => {
+            const [rawToken, ca] = await Promise.all([
+              readFile(options.modelTokenFile, { encoding: 'utf8', signal }),
+              readFile(options.modelCaFile, { signal }),
+            ]);
+            const token = rawToken.trim();
+            if (!token || /[\r\n]/.test(token)) throw new Error('token_invalid');
+            signal.throwIfAborted();
+            if (outgoing.destroyed) return;
+            // Ignore caller auth. Every connection attempt reads projected files afresh.
+            await new Promise<void>((resolve, reject) => {
+              const upstream = request(new URL(path, origin), {
+                method: incoming.method,
+                ca,
+                headers: {
+                  'content-type': 'application/json',
+                  'x-lifemodel-task-token': token,
+                },
+                signal,
+              });
+              const connected = connectionState(upstream);
+              const abort = () => upstream.destroy();
+              incoming.once('aborted', abort);
+              upstream.on('error', (error) => {
+                if (outgoing.headersSent) {
+                  options.onError?.();
+                  outgoing.destroy();
+                }
+                reject(connectionFailure(error, connected(), signal.aborted));
+              });
+              upstreams.add(upstream);
+              upstream.once('close', () => {
+                upstreams.delete(upstream);
+                incoming.off('aborted', abort);
+              });
+              upstream.on('response', (response) => {
+                response.on('error', () => outgoing.destroy());
+                if ((response.statusCode ?? 500) >= 400) options.onError?.();
+                outgoing.writeHead(response.statusCode ?? 502, {
+                  'content-type': response.headers['content-type'] ?? 'application/json',
+                });
+                response.pipe(outgoing);
+                resolve();
+              });
+              // Only GET is replayable. Never buffer or resend a streamed completion.
+              if (incoming.method === 'GET') upstream.end();
+              else incoming.pipe(upstream);
+            });
           },
-          signal: deadline,
-        });
-        upstream.on('socket', (socket) => socket.on('error', () => undefined));
-        incoming.on('aborted', () => upstream.destroy());
-        upstream.on('error', () => {
-          options.onError?.();
-          if (!outgoing.headersSent)
-            outgoing.writeHead(502, { 'content-type': 'application/json' });
-          outgoing.end('{"error":{"message":"model_transport_failed"}}');
-        });
-        upstreams.add(upstream);
-        upstream.on('close', () => upstreams.delete(upstream));
-        outgoing.on('close', () => upstream.destroy());
-        upstream.on('response', (response) => {
-          response.on('error', () => outgoing.destroy());
-          if ((response.statusCode ?? 500) >= 400) options.onError?.();
-          outgoing.writeHead(response.statusCode ?? 502, {
-            'content-type': response.headers['content-type'] ?? 'application/json',
-          });
-          response.pipe(outgoing);
-        });
-        incoming.pipe(upstream);
+          options.timeoutMs ?? 300_000,
+          { retry: incoming.method === 'GET', signal: deadline }
+        );
       } catch {
         options.onError?.();
-        if (!outgoing.headersSent) outgoing.writeHead(502);
-        outgoing.end();
+        if (!outgoing.headersSent) outgoing.writeHead(502, { 'content-type': 'application/json' });
+        outgoing.end('{"error":{"message":"model_transport_failed"}}');
       }
     })();
   });

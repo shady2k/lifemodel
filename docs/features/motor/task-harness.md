@@ -26,7 +26,7 @@ failed report is attempted; channel authority may correctly refuse it if this
 Pod did not win the claim. The Job's nonzero exit then remains the observation
 for finalization. It is not a semantic success or permission to rerun.
 
-After winning, the launcher calls `GET /task/briefing` once on the same core
+After winning, the launcher reads `GET /task/briefing` on the same core
 listener. Its authority additionally checks the exact won claim and projection.
 The reply contains IDs, `briefing` and the accepted resource `profile`; there is
 no prompt in the Job spec or task storage. A refused/failed read starts no
@@ -86,7 +86,21 @@ exits nonzero. Only an ACKed semantic success exits 0; ACKed failed/aborted
 outcomes still exit nonzero. Earlier failures attempt the best failed report
 with any already durably marked IDs.
 
-Launcher diagnostics contain fixed codes only, not token bytes, briefings,
+New-pod network policy can take time to admit the pod IP. Identity and briefing
+reads and channel sends retry only allowlisted connection failures before the
+TCP socket connects: refused, host/network unreachable, reset, or connect timeout.
+A TCP `connect` (or a reused socket) ends this permission, even before TLS finishes;
+no request that may have written bytes is replayed by this transport rule.
+Exponential backoff starts at 100 ms, caps at 2 s and uses 50–100% jitter.
+Retries share a 30 s client-startup window and respect the known `hardStopAt`;
+each attempt also has its existing request timeout. Projected token and CA files
+are read again on each attempt. `/task/start` remains strictly single-shot,
+even for a refused connection. No timeout, lost response, 409 or late ACK can
+resend it. The relay applies the same connection-only rule to idempotent
+`GET /v1/models`, never streaming `POST /v1/chat/completions`.
+The separate, existing three-attempt identical-frame ACK replay remains unchanged.
+
+Launcher diagnostics contain fixed codes and safe `connection_attempts=N` counts, not token bytes, briefings,
 prompts or model output. Harness content belongs in task storage. TLS is never
 disabled. HTTP requests, sockets and child streams keep error listeners through
 teardown and have finite deadlines.
@@ -104,7 +118,8 @@ semantic-result contract.
 
 Tests: `tests/integration/task-harness-contract.test.ts`,
 `tests/integration/task-launcher.test.ts`, `tests/integration/task-briefing.test.ts`
-and `tests/unit/task-workbench-contract.test.ts`. The isolated test dependency
+`tests/unit/task-connection-retry.test.ts` and
+`tests/unit/task-workbench-contract.test.ts`. The isolated test dependency
 setup installs the same checksum-verified pinned binary before network is
 removed; real harness tests do not fetch binaries at runtime.
 
