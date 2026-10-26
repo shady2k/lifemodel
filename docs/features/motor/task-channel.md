@@ -39,6 +39,10 @@ binding. The task/attempt, Job, Pod, immutable start time, saved allocation,
 Canonical active/wrapping intent is read under lock and its hard deadline is
 checked at database wall time after waits. Revocation or API/store outage denies.
 A replacement Pod that did not win the start claim cannot send reports.
+This authenticates the task Pod, not the launcher process within it. Launcher,
+agent and shell commands share one untrusted zone; any of them can make claims
+under that task's identity. Events, outcomes and trace content are not verified
+facts ([ADR-014 amendment](../../adr/014-task-runtime.md#amendment--2026-10-26-the-task-pod-is-one-untrusted-zone)).
 
 ## Launcher discovery and briefing
 
@@ -179,9 +183,10 @@ the step-line bound. `resultObjectId` is an object ID or null. `logObjectId` is
 not part of the terminal protocol. Artifacts are at
 most 64 distinct object IDs. Only IDs are allowed: no object bytes, signed URLs,
 stdout or log chunks. The launcher marks those objects through storage before
-reporting their IDs. A terminal report is unique per attempt. Semantic success
-is not public task success: the finalizer must validate marks, stop compute,
-revoke writes, obtain a seal, and commit its keyed outcome separately.
+reporting their IDs. A terminal report is unique per attempt. A claimed semantic
+success is not yet public `done`: the finalizer must validate marks, stop compute,
+revoke writes, obtain a seal, and commit its keyed outcome separately. Those
+checks establish finalization and retention, not the truth of the success claim.
 
 `TaskMailbox.readTerminal(taskId, attemptId)` returns the committed frame and
 ACK for lifemodel-653.8.9. This leaf does not seal, publish, change public task

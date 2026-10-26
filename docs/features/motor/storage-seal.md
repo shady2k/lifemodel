@@ -130,8 +130,8 @@ Receipt shape: `{id,space,effectKey,revision,outcome,state:"sealed",reason,
 manifest:{id,version:1,sha256,objects}}`. `completed` has a result and null reason;
 `failed` uses `partial_output` / `missing_result`; `stopped` uses
 `stopped_partial_output` / `stopped_missing_result`. Sealed means retained marked
-output, not semantic harness success. Core owns its terminal outcome/outbox and
-must record the returned receipt ID and manifest hash. Checksum-recovery receipts
+output, not the truth of the task's semantic success claim. Core owns its terminal
+outcome/outbox and must record the returned receipt ID and manifest hash. Checksum-recovery receipts
 have `reason:checksum_mismatch` and include `manifest.excluded` with every corrupt
 candidate, while `manifest.objects` contains only verified retained bytes.
 

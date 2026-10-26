@@ -2,7 +2,11 @@
 
 Serves: lifemodel-653.8.24.
 
-A task run writes execution evidence to the Postgres `observability` schema.
+A task run writes task-reported observations to the Postgres `observability` schema.
+Task traces, events and outcomes are claims from one untrusted Pod, including its
+launcher, agent and commands, not independently verified execution facts
+([ADR-014 amendment](../../adr/014-task-runtime.md#amendment--2026-10-26-the-task-pod-is-one-untrusted-zone)).
+Authentication binds them to that task; it does not certify their truth.
 This is private content, not process diagnostic logging. Commands, tool output
 and final agent text can appear here. Limit access as for conversations.
 Core tick tracing onto this store is deferred to lifemodel-vbog.2.
@@ -21,10 +25,10 @@ Migration `db/migrations/20261015000024_create_observability.sql` creates:
 unknown closed statuses to `failed`, never to `ok`.
 
 `src/storage/postgres-trace-store.ts` uses the raw Postgres pool. It deliberately
-has no active-holder fence. These rows are disposable evidence, not task state,
+has no active-holder fence. These rows are disposable observations, not task state,
 completion records, replay offsets or outcome authority. An overlapping old
 writer must not gain the right to write authoritative state from this API.
-A transaction advisory lock only serializes evidence writes with retention.
+A transaction advisory lock only serializes observation writes with retention.
 
 `enqueue(record)` is synchronous and does not wait for I/O. The default queue
 holds at most 10,000 records, including the batch in flight. It writes batches
@@ -101,9 +105,9 @@ trace 9e739f
 
 Open spans display `[incomplete] open`. A missing parent becomes a displayed
 root. Orphan events and malformed span cycles remain visible. Control characters
-are removed from terminal output. This command reads committed evidence only;
+are removed from terminal output. This command reads committed observations only;
 a recent frame can still be queued or lost. An empty trace is not proof that a
-run did nothing.
+run did nothing; a closed `ok` trace is not proof that its work succeeded.
 
 ## Checks
 

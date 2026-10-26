@@ -78,6 +78,12 @@ boundary has approved tool destinations. Module credentials never cross back.
 Web raw DB arrows above denote **implementation behind domain ports**, not pg
 clients in handlers. Core schema task operations and storage/schema grants are
 separate. No task script can query any schema or choose a bucket/prefix.
+The whole task Pod (launcher, agent and commands) is one untrusted zone, not
+separate report-authority zones. Outcomes, events and traces are the task's
+claims; identity/access checks and sealed bytes do not verify their truth
+([ADR-014 amendment, 2026-10-26](../../adr/014-task-runtime.md#amendment--2026-10-26-the-task-pod-is-one-untrusted-zone)).
+The kube-dns UDP/TCP 53 exception also permits arbitrary query names and remains
+a DNS-mediated egress residual (owner, 2026-10-21).
 
 Pinned k3s 1.35.8+k3s1 supports Never/0/Failed and fail-on-disruption/nonzero
 Pod policy. These prevent ordinary retries/overlap, not all duplicate program
@@ -145,7 +151,7 @@ stateDiagram-v2
     starting --> wrapping_up: soft Stop / control handler
     wrapping_up --> stopped: owner-stop candidate + sealed receipt / core CAS
     wrapping_up --> failed: timeout/error candidate + sealed receipt / core CAS
-    running --> done: semantic success + sealed receipt / core CAS
+    running --> done: reported success + sealed receipt / core CAS
     running --> failed: error/lost Job + sealed partial receipt / core CAS
     starting --> failed: launch failure + sealed empty or partial receipt / core CAS
     queued --> stopped: canceled before dispatch + empty seal / core CAS
@@ -170,7 +176,7 @@ removed; this cannot keep a slot occupied after Pod termination is confirmed.
 | queued→starting | Core locks admission row, checks cap/priority/profile, reserves, allocates storage | Allocation/Job create retries by key; no second launch ID on lost response |
 | starting→running | Core observes verified Job/Pod UID + durable one-execution claim by launch/Pod/process nonce | Existing gateway binding CAS permits one launcher only; replacement Pod stays inert; deterministic name adopts delayed Job create |
 | running/starting→wrapping-up | Persist owner Stop or due timeout, deny new effects, command harness wrap, set absolute hardStopAt | Repeat cannot extend deadline; confirmed native Job ADS patch works while core down; pending patch is visible/replayed |
-| nonterminal→terminal candidate | Core/reconciler persists semantic success/error or stop reason; remove compute as needed | Hard stop beats an uncommitted success candidate; terminal CAS never changes afterward |
+| nonterminal→terminal candidate | Core/reconciler persists reported success/error or stop reason; remove compute as needed | Hard stop beats an uncommitted success candidate; terminal CAS never changes afterward |
 | candidate→done/failed/stopped | Core freezes/revokes storage, ends compute, obtains seal receipt, CAS terminal + outcome outbox | One terminal key, duplicate result/Job watch/seal replies harmless; missing result never fake success |
 | cleanup pending→complete | Existing core registry reconciler or owner control handler confirms Pod/ephemeral PVC gone, module confirms unmarked bytes deleted | Independently replayable; no terminal task reopened, no slot released for unknown live compute |
 
@@ -297,8 +303,9 @@ sequenceDiagram
     W-->>O: no-store attachment download
 ```
 
-A successful Job alone is not a successful task. No task decides its final
-published status or can bypass seal. Hard Stop may interrupt this sequence at
+A successful Job alone is not a successful task. Core owns final publication
+and requires seal, but accepts the task's semantic success claim; it does not
+independently verify the work. Hard Stop may interrupt this sequence at
 any point: storage keeps only pre-freeze stored marks; candidate/cleanup
 reconciliation finishes without the removed Job. The core does not wait for
 artifact bytes during a conversation turn. Allocation/seal are keyed async

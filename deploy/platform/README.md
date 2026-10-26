@@ -508,6 +508,12 @@ listener's ingress is paired with the task egress and combines namespace AND
 Pod selectors. Tasks have no ingress, Internet/API route or direct
 Postgres/Valkey/SeaweedFS route. DNS is a resolver exception, not authority to
 connect to a resolved address; trusted service protocols enforce live identity.
+The kube-dns exception does not restrict query names and leaves DNS-mediated
+egress possible (owner, 2026-10-21). The whole task Pod, including its launcher,
+agent and commands, is untrusted. Runtime listeners verify Pod/launch authority,
+scoped access and retained bytes, not the truth of task outcomes, events or
+traces; `done` grants nothing beyond sealing its own result and the reply
+([ADR-014 amendment](../../docs/adr/014-task-runtime.md#amendment--2026-10-26-the-task-pod-is-one-untrusted-zone)).
 
 The `task` SA has no RoleBinding or ClusterRoleBinding. Default API-token
 mounting is disabled. Jobs explicitly project only the three service audiences
@@ -561,7 +567,8 @@ workbench image rule: only repository
 `zot.lifemodel-system.svc:5001/lifemodel/workbench` with a valid sha256 digest.
 The release supplies the pin and core requires that exact pinned image.
 `ghcr.io/shady2k/lifemodel-workbench` is the default import origin, not an
-admitted Job or Pod image. The trusted launcher is the image ENTRYPOINT. Command/args overrides and lifecycle hooks remain
+admitted Job or Pod image. The pod-local launcher is the image ENTRYPOINT, not
+a separately trusted reporter. Command/args overrides and lifecycle hooks remain
 forbidden. Both Job and Pod policies permit only these literal environment names:
 
 - `LIFEMODEL_STORAGE_ENDPOINT`
@@ -579,7 +586,7 @@ Each entry must have a literal `value`; `valueFrom`, nonempty `envFrom`, and all
 other names (including `NODE_OPTIONS`, `LD_PRELOAD` and `PATH`) are denied.
 Values carry non-secret endpoints, space identity and projected token/CA file
 paths, never token contents. This is a closed launch-configuration contract, not
-permission to override the trusted launcher. The existing storage CLI consumes
+permission to override the image ENTRYPOINT. The existing storage CLI consumes
 the four storage names; the six channel/model names are reserved for the
 verified launcher handshake in 653.8.7. Admission validates the static shape;
 it does not verify endpoint trust or that a literal value contains no secret.

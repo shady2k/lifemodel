@@ -1,7 +1,9 @@
 # Task trace schema upgrades
 
-Task traces are disposable evidence. They do not replace terminal task state or
-its sealed-outcome outbox proof.
+Task traces are disposable task claims, not verified execution facts. They do not
+replace terminal task state or its sealed-outcome outbox consistency checks.
+Those checks establish finalization, not the truth of reported success
+([ADR-014 amendment](../../adr/014-task-runtime.md#amendment--2026-10-26-the-task-pod-is-one-untrusted-zone)).
 
 Migration `20261015000025_task_trace_context.sql` assigns each existing task its
 immutable task id as a deterministic trace id. Its parent span remains absent:

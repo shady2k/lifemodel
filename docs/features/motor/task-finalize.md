@@ -17,6 +17,10 @@ never success. A stored semantic report wins over the Job observation. The
 registry chooses under the same task-row lock as mailbox append, in the
 candidate transaction before revocation, so an in-flight committed report wins
 over a stale observation too. A committed terminal outcome never changes.
+The report's semantic outcome remains the task's claim. The channel verifies
+Pod/launch authority, not which process sent it or whether the work is correct.
+The launcher shares the untrusted Pod with the agent and its commands
+([ADR-014 amendment](../../adr/014-task-runtime.md#amendment--2026-10-26-the-task-pod-is-one-untrusted-zone)).
 
 1. Save candidate, summary and reason separately from public state. In the same
    fenced transaction, tombstone the launch and advance canonical intent to
@@ -52,8 +56,9 @@ invented or substituted. Stage 5 supplies the owner Stop control operation.
 
 Storage down or refusal leaves a nonterminal task with `finalization_pending`,
 a saved candidate and a safe failure code. Compute is still stopped first.
-Retries back off to 30 seconds. A done outcome requires semantic success **and**
-a sealed manifest containing a marked result. Failures preserve sealed partial
+Retries back off to 30 seconds. A `done` outcome requires a task report claiming
+semantic success **and** a sealed manifest containing a marked result, not
+independent verification of that result. Failures preserve sealed partial
 output and their reason. No Job status, exit code or private process map owns an
 outcome. No automatic new attempt is created.
 
