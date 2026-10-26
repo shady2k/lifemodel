@@ -56,6 +56,18 @@ This is not a disk quota: retained releases are not automatically expired.
 Before deliberate release pruning or store recovery, back up the registry
 volume and OpenBao; never delete roots or shared blobs by hand. Restore the
 volume or reimport the pinned public release after storage repair.
+zot's configuration is `a/zot/config.json`, which the platform artifact renders
+through a `configMapGenerator`: the generated ConfigMap's name carries a hash of
+the file, kustomize rewrites the pod template's reference to that name, and a
+configuration change therefore replaces `zot-0` on the next reconcile. This is
+needed because v2.1.22 reloads its config file live only for a subset of fields:
+`http.compat`, the listener address and port, `rootDirectory` and a newly added
+subpath stay at their startup values, and the process only logs that difference
+as needing a restart. Flux prunes the previous ConfigMap name under step A's `prune: true`.
+The one input zot re-reads live is the `zot-htpasswd` Secret: v2.1.22's
+`HTPasswdWatcher` reloads the file, which is why the pod mounts its directory
+(no `subPath`) and an identity rotation needs no replace.
+
 The Service is `zot.lifemodel-system.svc:5001`, with fixed ClusterIP
 `10.43.0.51` in the installers' explicit `10.43.0.0/16` service CIDR.
 

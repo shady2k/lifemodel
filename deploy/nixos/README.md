@@ -142,15 +142,21 @@ its OCI index digest. The release and registry are the primary sources:
 - `ghcr.io/project-zot/zot@sha256:96cda11459ce6f8c60da3b03f03e9f67fd11b3ae2d82c4c04c92b3c608996080`
 
 This is the current stable main release, not a `latest` pin. It includes live
-htpasswd reload for Kubernetes Secret projection. The pod mounts the
-`zot-htpasswd` Secret directory read-only (no `subPath`), runs without API
+htpasswd reload for Kubernetes Secret projection. zot's own configuration
+(`deploy/platform/a/zot/config.json`) is rendered through a `configMapGenerator`,
+so its content hash renames the ConfigMap and a configuration change replaces
+`zot-0` on the next reconcile: v2.1.22 reloads the config file live for only a
+subset of fields, and `http.compat` is not one of them. The pod mounts the
+`zot-htpasswd` Secret directory read-only (no `subPath`) — the one input it
+re-reads live, so rotating the push identity needs no restart — runs without API
 credentials or root privileges, and keeps one retained 20 GiB local-path
-volume. Deduplication stays enabled. Garbage collection is explicitly disabled:
-the v2.1.22 default retention policy deletes untagged root manifests, but the
-imported release root is intentionally addressed only by digest. Enabling GC
-would eventually remove a valid workbench. Interrupted imports can therefore
-leave unused blobs on this volume; disk reclamation needs a later lifecycle-aware
-retention policy, not a deletion timer. See the upstream primary source
+volume. Deduplication stays enabled. Garbage collection runs hourly with a
+two-hour `gcDelay`, longer than the importer's 30-minute phase budget, and it
+reclaims interrupted imports' abandoned uploads. The imported release root is
+addressed only by digest, so an explicit retention policy for
+`lifemodel/workbench` sets `deleteUntagged: false` and `deleteReferrers: false`:
+digest-only roots and their referenced graph stay pullable across GC and
+restart. See the upstream primary source
 [HasDeleteUntagged](https://github.com/project-zot/zot/blob/v2.1.22/pkg/retention/retention.go)
 and the untagged-manifest pass in
 [gc.go](https://github.com/project-zot/zot/blob/v2.1.22/pkg/storage/gc/gc.go).

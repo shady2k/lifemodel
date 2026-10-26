@@ -1,0 +1,31 @@
+{
+  "storage": {
+    "rootDirectory": "/var/lib/registry",
+    "gc": true,
+    "gcDelay": "2h",
+    "gcInterval": "1h",
+    "dedupe": true,
+    "retention": {
+      "policies": [{
+        "repositories": ["lifemodel/workbench"],
+        "deleteUntagged": false,
+        "deleteReferrers": false
+      }]
+    }
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5001",
+    "compat": ["docker2s2"],
+    "auth": { "htpasswd": { "path": "/etc/zot/auth/htpasswd" } },
+    "accessControl": {
+      "repositories": {
+        "lifemodel/workbench": {
+          "anonymousPolicy": ["read"],
+          "policies": [{ "users": ["loader"], "actions": ["read", "create", "update"] }]
+        }
+      }
+    }
+  },
+  "log": { "level": "warn" }
+}
