@@ -236,6 +236,11 @@ the repository's installation, and each person's plugin and hooks are their own.
   `implemented` under a stage, with the revision that delivered it. The
   adapter's command output carries the same list (`readWithLanded`). Tests:
   `node --test .backlog/landed.test.mjs`.
+- **Recordings read in both formats:** a revision's recording is a whole state
+  (sections, mechanism before 0.126.0) or a reference to the store commit that
+  holds it (`tracker-sync-recording/1`); `readAt` reads both, from this
+  machine's store or from `refs/tracker/state` in CI (tested in
+  `.backlog/adapter.test.mjs`).
 - **JSON report:** `npm run backlog:json`.
 - **Commit-link input and check:** `node .backlog/commits.mjs
   --message-file <f>` (the pending message), `--range <base>..<head>` (every

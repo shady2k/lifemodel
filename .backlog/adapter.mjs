@@ -159,17 +159,40 @@ export function storeDir() {
 // A place a store can be read from: this machine's store worktree, or a ref's
 // tree (CI fetches refs/tracker/state; it has no store of its own).
 function placeOf(ref) {
-  if (ref) {
-    return {
-      name: ref,
-      read: (p) => {
-        const r = spawnSync('git', ['show', `${ref}:${p}`], { encoding: 'utf8', maxBuffer: 1 << 30 });
-        return r.status === 0 ? r.stdout : null;
-      },
-    };
-  }
+  const show = (cwd, spec) => {
+    const r = spawnSync('git', ['show', spec], { cwd, encoding: 'utf8', maxBuffer: 1 << 30 });
+    return r.status === 0 ? r.stdout : null;
+  };
+  if (ref) return { name: ref, read: (p) => show(undefined, `${ref}:${p}`), at: (oid, p) => show(undefined, `${oid}:${p}`) };
   const store = storeDir();
-  return { name: store, read: (p) => (existsSync(join(store, p)) ? readFileSync(join(store, p), 'utf8') : null) };
+  return {
+    name: store,
+    read: (p) => (existsSync(join(store, p)) ? readFileSync(join(store, p), 'utf8') : null),
+    at: (oid, p) => show(store, `${oid}:${p}`),
+  };
+}
+
+// A recording is either a whole state (sections, the format before mechanism
+// 0.126.0) or a reference to the store commit that holds it
+// (`tracker-sync-recording/1`, JSON naming `store`). Both read to the items.
+const RECORDING_FORMAT = 'tracker-sync-recording/1';
+function rowsOfRecording(place, text, sha) {
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{')) {
+    let d = null;
+    try {
+      d = JSON.parse(trimmed);
+    } catch {
+      /* not a reference: read as sections below, which says what is wrong */
+    }
+    if (d && d.format === RECORDING_FORMAT && typeof d.store === 'string') {
+      const items = place.at(d.store, EXPORT);
+      if (items === null)
+        throw new Error(`the recording of ${sha} names store commit ${d.store.slice(0, 12)}, which ${place.name} does not hold (fetch the tracker ref's history)`);
+      return parseJsonl(items);
+    }
+  }
+  return parseJsonl(exportSection(text, `the recording of ${sha}`));
 }
 
 function commitOf(rev) {
@@ -186,7 +209,7 @@ export function readAt(rev, { ref, orBefore = false } = {}) {
   const place = placeOf(ref);
   const sha = commitOf(rev);
   const own = recordingOf(place, sha);
-  if (own !== null) return { rows: parseJsonl(exportSection(own, `the recording of ${sha}`)), source: `store ${place.name} @ ${sha}`, at: sha };
+  if (own !== null) return { rows: rowsOfRecording(place, own, sha), source: `store ${place.name} @ ${sha}`, at: sha };
   if (!orBefore)
     throw new Error(
       `the store (${place.name}) never recorded ${sha.slice(0, 12)}, so its tracker state is unknown and is not guessed from a later one. ` +
@@ -199,7 +222,7 @@ export function readAt(rev, { ref, orBefore = false } = {}) {
     const text = recordingOf(place, a);
     if (text !== null)
       return {
-        rows: parseJsonl(exportSection(text, `the recording of ${a}`)),
+        rows: rowsOfRecording(place, text, a),
         source: `store ${place.name} @ ${a} (newest recording at or before ${sha.slice(0, 12)})`,
         at: a,
       };

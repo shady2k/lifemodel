@@ -2,7 +2,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { normalize, record } from './adapter.mjs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { normalize, readAt, record } from './adapter.mjs';
 
 const N = (rows) => normalize(rows).issues;
 
@@ -111,4 +115,45 @@ test('record: the latest by the tracker clock, not the export order', () => {
     'submitted',
   );
   assert.deepEqual(r, { revision: 'new999', evidence: 'b' });
+});
+
+// readAt over a ref, as CI reads it: a recording is a whole state (sections) or,
+// from mechanism 0.126.0, a reference to the store commit holding the state.
+test('readAt reads both a whole-state recording and a reference recording', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'adapter-readat-'));
+  const cwd = process.cwd();
+  const git = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8' }).trim();
+  const row = (id) => JSON.stringify({ id, title: id, status: 'open', issue_type: 'task' });
+  try {
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.email', 't@example.invalid');
+    git('config', 'user.name', 'test');
+    git('commit', '-q', '--allow-empty', '-m', 'code one');
+    const one = git('rev-parse', 'HEAD');
+    git('commit', '-q', '--allow-empty', '-m', 'code two');
+    const two = git('rev-parse', 'HEAD');
+    // The store: its state commit, then the recordings of both code commits.
+    git('checkout', '-q', '--orphan', 'store');
+    git('rm', '-rqf', '--ignore-unmatch', '.');
+    mkdirSync(join(dir, '.beads'), { recursive: true });
+    writeFileSync(join(dir, '.beads/issues.jsonl'), row('x-ref') + '\n');
+    git('add', '.beads/issues.jsonl');
+    git('commit', '-q', '-m', 'state');
+    const state = git('rev-parse', 'HEAD');
+    mkdirSync(join(dir, '.tracker-sync/recordings'), { recursive: true });
+    writeFileSync(join(dir, `.tracker-sync/recordings/${one}.jsonl`), `=== .beads/issues.jsonl\n${row('x-whole')}\n`);
+    writeFileSync(
+      join(dir, `.tracker-sync/recordings/${two}.jsonl`),
+      JSON.stringify({ format: 'tracker-sync-recording/1', store: state, digest: 'sha256:0' }) + '\n',
+    );
+    git('add', '.tracker-sync');
+    git('commit', '-q', '-m', 'recordings');
+    git('update-ref', 'refs/tracker/state', 'HEAD');
+    process.chdir(dir);
+    assert.deepEqual(readAt(one, { ref: 'refs/tracker/state' }).rows.map((r) => r.id), ['x-whole']);
+    assert.deepEqual(readAt(two, { ref: 'refs/tracker/state' }).rows.map((r) => r.id), ['x-ref']);
+  } finally {
+    process.chdir(cwd);
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
