@@ -35,7 +35,10 @@ tick), Energy & state are physiology. Start with `README.md` and
 - `deploy/cli/` — `lifemodel doctor` recovery and health-diagnosis CLI
 - `deploy/platform/a/zot.yaml` — the private workbench registry: OCI and Docker
   schema 2 images/manifest lists (`http.compat: ["docker2s2"]`), anonymous read,
-  loader-only push, and GC that preserves digest-only release roots. Loader
+  loader-only push, and GC that preserves digest-only release roots. Its
+  configuration is `a/zot/config.json`, rendered through a `configMapGenerator`
+  whose content hash renames the ConfigMap and so replaces `zot-0` on a
+  configuration change; only the `zot-htpasswd` Secret is re-read live. Loader
   destination upload 4xx failures other than 401/403 surface as `rejected`, with
   safe HTTP status and request media type in its retry warning.
 - `docker/loader/` — the loader's OCI image, including platform-mode packaging

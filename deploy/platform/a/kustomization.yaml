@@ -24,6 +24,17 @@ resources:
   - zot-network-policy.yaml
   - gitea
   - network-policy.yaml
+# zot's configuration is a generated object, not a fixed name: the generator's
+# content hash suffixes the ConfigMap name and the pod template's reference is
+# rewritten to match, so changing zot/config.json replaces zot-0 on the next
+# reconcile. zot v2.1.22 reloads its config file live only for a subset of
+# fields (http.compat and other startup fields need a restart), so the replace
+# is what makes every configuration change take effect.
+configMapGenerator:
+  - name: zot-config
+    namespace: lifemodel-system
+    files:
+      - config.json=zot/config.json
 images:
   # The gateway runs the loader's image with its own entry point; the release
   # flow pins this digest to the same pushed loader digest A0 uses (ADR-013 D8).

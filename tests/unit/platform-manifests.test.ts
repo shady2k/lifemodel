@@ -1148,7 +1148,13 @@ describe('platform manifests', () => {
     ) as { resources: string[]; configMapGenerator?: any[] };
     expect(kustomization.resources).toContain('openbao/rendered.yaml');
     expect(kustomization.resources).not.toContain('openbao-release.yaml');
-    expect(kustomization.configMapGenerator).toBeUndefined();
+    // The chart render is applied verbatim: no generator re-packages OpenBao's
+    // configuration, so its config keeps the chart's own fixed name.
+    expect(
+      (kustomization.configMapGenerator ?? []).filter((generator) =>
+        String(generator.name).startsWith('openbao')
+      )
+    ).toEqual([]);
     const rendered = parseYamlFiles([join(platformRoot, 'a/openbao/rendered.yaml')]);
     const openbaoPodSpec = rendered.find(
       (item) => item.kind === 'StatefulSet' && item.metadata?.name === 'openbao'

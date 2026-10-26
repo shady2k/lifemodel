@@ -5,55 +5,25 @@
 # https://github.com/project-zot/zot/blob/v2.1.22/examples/config-policy.json
 # The OCI index digest below was verified against the upstream response bytes.
 # Bootstrap image: never served by the registry it must start.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: zot-config
-  namespace: lifemodel-system
-data:
-  # v2.1.22 keys: https://github.com/project-zot/zot/blob/v2.1.22/pkg/api/config/config.go
-  # docker2s2 enables Docker schema 2 manifests AND manifest lists alongside OCI;
-  # no extra list option (pkg/storage/common/common.go IsSupportedMediaType).
-  # https://github.com/project-zot/zot/blob/v2.1.22/pkg/storage/common/common.go#L1070-L1081
-  # RunGCTasks schedules GC only with gc=true (pkg/api/controller.go).
-  # deleteBlobUploads uses gcDelay and upload mtime (pkg/storage/gc/gc.go).
-  # HasDeleteUntagged honors the explicit matching policy below (pkg/retention/retention.go).
-  # All source paths above are at https://github.com/project-zot/zot/blob/v2.1.22/ .
-  # Preserve digest-only roots and their graph; reclaim uploads idle >2h,
-  # well beyond the importer's 30min phase cap, on the hourly GC pass.
-  config.json: |-
-    {
-      "storage": {
-        "rootDirectory": "/var/lib/registry",
-        "gc": true,
-        "gcDelay": "2h",
-        "gcInterval": "1h",
-        "dedupe": true,
-        "retention": {
-          "policies": [{
-            "repositories": ["lifemodel/workbench"],
-            "deleteUntagged": false,
-            "deleteReferrers": false
-          }]
-        }
-      },
-      "http": {
-        "address": "0.0.0.0",
-        "port": "5001",
-        "compat": ["docker2s2"],
-        "auth": { "htpasswd": { "path": "/etc/zot/auth/htpasswd" } },
-        "accessControl": {
-          "repositories": {
-            "lifemodel/workbench": {
-              "anonymousPolicy": ["read"],
-              "policies": [{ "users": ["loader"], "actions": ["read", "create", "update"] }]
-            }
-          }
-        }
-      },
-      "log": { "level": "warn" }
-    }
----
+#
+# zot's configuration is zot/config.json, and it reaches the cluster only
+# through the configMapGenerator in kustomization.yaml: its content hash renames
+# the ConfigMap, so a configuration change replaces zot-0 on the next reconcile
+# instead of leaving a running pod on the old configuration. Do not declare a
+# configuration object in this file; a fixed name here would keep the old name
+# and the old pod.
+# v2.1.22 keys: https://github.com/project-zot/zot/blob/v2.1.22/pkg/api/config/config.go
+# docker2s2 enables Docker schema 2 manifests AND manifest lists alongside OCI;
+# no extra list option (pkg/storage/common/common.go IsSupportedMediaType).
+# RunGCTasks schedules GC only with gc=true (pkg/api/controller.go);
+# deleteBlobUploads uses gcDelay and upload mtime (pkg/storage/gc/gc.go);
+# HasDeleteUntagged honors the explicit matching policy (pkg/retention/retention.go).
+# Preserve digest-only roots and their graph; reclaim uploads idle >2h, well
+# beyond the importer's 30min phase cap, on the hourly GC pass.
+# The htpasswd identity is the one input zot re-reads live (v2.1.22
+# HTPasswdWatcher, pkg/api/htpasswd.go), so rotating it needs no pod replace;
+# the directory mount below is what keeps that true.
+
 apiVersion: v1
 kind: Service
 metadata:
