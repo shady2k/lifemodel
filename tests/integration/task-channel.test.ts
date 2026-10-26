@@ -24,6 +24,7 @@ import { createPostgresTaskMailbox } from '../../src/storage/postgres-task-mailb
 import { OwnerMessageIntake } from '../../src/storage/owner-message-intake.js';
 import { createPostgresTraceStore } from '../../src/storage/postgres-trace-store.js';
 import { AcpTurn } from '../../loader/src/task-acp.js';
+import { credentialNameCases } from '../helpers/trace-credential-names.js';
 import { createTaskTraceChannel } from '../../loader/src/task-trace-channel.js';
 import type { TaskHarnessEvent } from '../../loader/src/task-harness.js';
 import { createTaskChannel } from '../../src/core/task-channel.js';
@@ -599,6 +600,56 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
       ).toBe(403);
     }
   );
+
+  it('scrubs credential-name parts in all four fields and structured keys in real transport', async () => {
+    const f = await fixture('credential-name-parts');
+    const sample = credentialNameCases('transport');
+    const { structured, ...fields } = sample.attrs;
+    // The wire schema permits only scalar attrs; exercise structured sensitive
+    // keys directly in that bag, not an invalid nested transport frame.
+    const attrs = { ...fields, ...structured };
+    const { canaries } = sample;
+    const received = Promise.withResolvers<TaskTraceFrame['span']>();
+    const channel = await listener({
+      onTrace: (frame) => {
+        received.resolve(frame.span);
+      },
+    });
+    const tokenFile = join(directory, `trace-token-${f.task.id}`);
+    await writeFile(tokenFile, f.token);
+    const transport = createTaskTraceChannel({
+      endpoint: { endpoint: channel.url, tokenFile, caFile },
+      env: {},
+      identity: { taskId: f.task.id, attemptId: f.task.attemptId, launchId: f.task.launchId },
+      traceId: f.task.traceId,
+    });
+    cleanup.push(() => transport.close());
+    transport.enqueue({
+      traceId: f.task.traceId,
+      spanId: `${f.task.launchId}_names`,
+      parentSpanId: f.task.launchId,
+      component: 'task.tool',
+      startedAt: new Date().toISOString(),
+      endedAt: new Date().toISOString(),
+      status: 'ok',
+      attrs,
+    });
+    const captured = await bounded(received.promise);
+    expect(transport.droppedCount).toBe(0);
+    for (const field of [
+      'command',
+      'outputTail',
+      'finalText',
+      'model',
+      ...Object.keys(structured),
+    ]) {
+      const text = JSON.stringify(captured.attrs[field]);
+      for (const canary of canaries)
+        expect.soft(text.includes(canary), `transport ${field} leaked`).toBe(false);
+      expect(text).toContain('[REDACTED]');
+    }
+    expect(captured.attrs['ordinary']).toBe(attrs.ordinary);
+  });
 
   it('scrubs quoted and unquoted auth credentials through ACP, launcher trace transport and database rows', async () => {
     const f = await fixture('quoted-credentials');

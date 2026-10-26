@@ -4,11 +4,19 @@ import { TaskJsonClient, type TaskEndpoint } from './task-launcher-http.js';
 import type { TaskHarnessEvent } from './task-harness.js';
 type Span = Extract<TaskHarnessEvent, { type: 'trace' }>['span'];
 
+// Match complete name parts, not ordinary words such as tokenizer or secretary.
+function sensitiveTraceKey(key: string): boolean {
+  return /(?:^|[_.-])(?:authorization|password|passwd|secret|token|api[_.-]?key|access[_.-]?key|credentials?)(?:$|[_.-])/i.test(
+    key
+  );
+}
+
 /** Redact assignments even inside quoted tool output or nested JSON serialization. */
 function scrubTraceAssignments(input: string): string {
-  // Start at the key, not an optional run of backslashes before its quote.
-  // Retrying that greedy prefix at every offset makes plain backslash runs quadratic.
-  const assignment = /\b(api[_-]?key|password|secret|token|authorization)(?:\\*["'])?\s*[=:]\s*/gi;
+  // Consume whole names once, even when no assignment follows. Searching for a
+  // sensitive suffix at each offset of a long name/backslash run is quadratic.
+  const names = /[a-z0-9_.-]+/gi;
+  const assignment = /(?:\\*["'])?\s*[=:]\s*/y;
   const quoted = /(\\*)(["'])/y;
   const unquoted = /[^\s,;"'}]+/y;
   // Scan each consumed value once. Quotes inside Digest parameters are content
@@ -32,10 +40,12 @@ function scrubTraceAssignments(input: string): string {
   let output = '';
   let cursor = 0;
   let match: RegExpExecArray | null;
-  while ((match = assignment.exec(input)) !== null) {
+  while ((match = names.exec(input)) !== null) {
+    if (!sensitiveTraceKey(match[0])) continue;
+    assignment.lastIndex = names.lastIndex;
+    if (!assignment.exec(input)) continue;
     const start = assignment.lastIndex;
-    if (start < cursor) continue;
-    const header = match[1]?.toLowerCase() === 'authorization';
+    const header = match[0].toLowerCase() === 'authorization';
     quoted.lastIndex = start;
     const opening = quoted.exec(input);
     let end = start;
@@ -59,7 +69,7 @@ function scrubTraceAssignments(input: string): string {
       output += input.slice(cursor, start) + '[REDACTED]';
     }
     cursor = end;
-    assignment.lastIndex = Math.max(end, start + 1);
+    names.lastIndex = Math.max(end, start + 1);
   }
   return output + input.slice(cursor);
 }
@@ -117,7 +127,10 @@ export function createTaskTraceChannel(options: {
       if (Array.isArray(value)) return value.map(clean);
       if (value && typeof value === 'object')
         return Object.fromEntries(
-          Object.entries(value).map(([k, v]) => [String(clean(k)), clean(v)])
+          Object.entries(value).map(([k, v]) => [
+            String(clean(k)),
+            sensitiveTraceKey(k) ? '[REDACTED]' : clean(v),
+          ])
         );
       return value;
     };

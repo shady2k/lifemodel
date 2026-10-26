@@ -19,11 +19,19 @@ export interface PostgresTraceStoreOptions {
 
 const REDACTED = '[REDACTED]';
 
+// Match complete name parts, not ordinary words such as tokenizer or secretary.
+function sensitiveTraceKey(key: string): boolean {
+  return /(?:^|[_.-])(?:authorization|password|passwd|secret|token|api[_.-]?key|access[_.-]?key|credentials?)(?:$|[_.-])/i.test(
+    key
+  );
+}
+
 /** Redact assignments even inside quoted tool output or nested JSON serialization. */
 function scrubTraceAssignments(input: string): string {
-  // Start at the key, not an optional run of backslashes before its quote.
-  // Retrying that greedy prefix at every offset makes plain backslash runs quadratic.
-  const assignment = /\b(api[_-]?key|password|secret|token|authorization)(?:\\*["'])?\s*[=:]\s*/gi;
+  // Consume whole names once, even when no assignment follows. Searching for a
+  // sensitive suffix at each offset of a long name/backslash run is quadratic.
+  const names = /[a-z0-9_.-]+/gi;
+  const assignment = /(?:\\*["'])?\s*[=:]\s*/y;
   const quoted = /(\\*)(["'])/y;
   const unquoted = /[^\s,;"'}]+/y;
   // Scan each consumed value once. Quotes inside Digest parameters are content
@@ -47,10 +55,12 @@ function scrubTraceAssignments(input: string): string {
   let output = '';
   let cursor = 0;
   let match: RegExpExecArray | null;
-  while ((match = assignment.exec(input)) !== null) {
+  while ((match = names.exec(input)) !== null) {
+    if (!sensitiveTraceKey(match[0])) continue;
+    assignment.lastIndex = names.lastIndex;
+    if (!assignment.exec(input)) continue;
     const start = assignment.lastIndex;
-    if (start < cursor) continue;
-    const header = match[1]?.toLowerCase() === 'authorization';
+    const header = match[0].toLowerCase() === 'authorization';
     quoted.lastIndex = start;
     const opening = quoted.exec(input);
     let end = start;
@@ -74,7 +84,7 @@ function scrubTraceAssignments(input: string): string {
       output += input.slice(cursor, start) + '[REDACTED]';
     }
     cursor = end;
-    assignment.lastIndex = Math.max(end, start + 1);
+    names.lastIndex = Math.max(end, start + 1);
   }
   return output + input.slice(cursor);
 }
@@ -110,9 +120,7 @@ export function scrubTraceRecord(
         .slice(0, 256)
         .map(([key, item]) => [
           text(key),
-          /^(?:authorization|password|secret|token|api[_-]?key)$/i.test(key)
-            ? REDACTED
-            : walk(item, depth + 1),
+          sensitiveTraceKey(key) ? REDACTED : walk(item, depth + 1),
         ])
     );
   };
