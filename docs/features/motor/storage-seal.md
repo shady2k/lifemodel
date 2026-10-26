@@ -19,7 +19,8 @@ Task and web identities cannot call them. Requests reject unknown or missing fie
   GET checks. Missing names/projection, stale access revision, revoked intent,
   hard deadline or non-live/mismatched resources fail closed. A second attempt
   or launch conflicts. A saved receipt replays even after later Pod death; it
-  does not grant access. Stage 3 owns the verified projection writer.
+  does not grant access. `loader/src/task-identity.ts` writes the verified
+  projection using live Pod/Job proof from `loader/src/task-kubernetes-identity.ts`.
 - `POST /seal {space,effectKey,expectedRevision,outcome}` accepts `completed`,
   `failed`, or `stopped`. Access revisions are nonnegative decimal strings.
   A stale revision or changed keyed request conflicts. A new key with the current
@@ -159,6 +160,7 @@ includes [retention/pins/notices and global quota](storage-retention.md) (.7.3),
 These source checks do not replace the deployed restore and RSS acceptance walks.
 No NetworkPolicy, RBAC, TLS projection, image context or A0→A→B→C→D chain changes
 are needed. New TypeScript runtime files are already admitted by the loader
-build-context allowlist. The gateway writer and core terminal integration are
-stage 3; module binding is acknowledgement of verified gateway authority, not
+build-context allowlist. `loader/src/task-identity.ts` writes verified gateway
+bindings; `src/core/task-finalize.ts` integrates storage sealing with terminal
+outcomes. Module binding is acknowledgement of verified gateway authority, not
 an independent authority to start a harness.

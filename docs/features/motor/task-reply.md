@@ -8,7 +8,7 @@ No task chip or task composer is added. The legacy Motor Cortex loop is unchange
 Platform-mode cognition exposes `core.startTask(briefing, profile)`. The complete
 briefing includes the goal, context, constraints and the output files to produce.
 `src/ports/task-profiles.ts` owns the versioned allowed profile catalogue: `small`
-revision 1 is 600 seconds, 500 millicores and 512 MiB. Stage 3 deliberately exposes
+revision 1 is 600 seconds, 500 millicores and 512 MiB. The catalogue exposes
 only this explicit profile. Unknown profile names and missing briefing/turn context
 return explicit refusal codes; no default is chosen.
 A title is optional at the feature level and is not introduced in this leaf.

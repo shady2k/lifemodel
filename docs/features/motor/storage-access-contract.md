@@ -10,18 +10,20 @@ This is not a deployed acceptance record.
 Migration `20261015000012_create_task_access.sql` adds these tables:
 
 - `task_access.intents`: stable canonical access authority for one
-  `(task_id, attempt_id, launch_id)`. The future core fenced lifecycle writer
-  initializes it before verified binding, then **UPDATEs in place**. It must
-  never delete/reinsert it or append a new authority row to evade its lock.
-  Revisions increase, terminal revoke never reopens, and deadlines are finite
-  canonical absolute timestamps. Stage 3 owns that writer, not this module.
+  `(task_id, attempt_id, launch_id)`. The fenced registry in
+  `src/storage/postgres-task-registry.ts` initializes it before verified binding,
+  then **UPDATEs in place**. It never deletes/reinserts it or appends a new
+  authority row to evade its lock. Revisions increase, terminal revoke never
+  reopens, and deadlines are finite canonical absolute timestamps. The storage
+  module reads this authority; it does not write it.
 - `task_access.projections`: gateway-verified immutable binding from those IDs
   to actual Job UID, Pod UID and space. `intent_revision` orders the lifecycle
   projection; `access_revision` is the independent storage catalog fence. The
   projection also carries mode and deadline fields. Migration
   `20261015000014_create_storage_seals.sql` adds nullable `pod_name` and
-  `job_name` locators. Stage 3's gateway writer must persist both together with
-  the verified UIDs: Pod name comes from its TokenReview
+  `job_name` locators. The gateway writer in `loader/src/task-identity.ts`
+  persists both together with the verified UIDs from
+  `loader/src/task-kubernetes-identity.ts`: Pod name comes from its TokenReview
   `authentication.kubernetes.io/pod-name` claim; Job name is deterministic from
   launch ID under ADR-014 D3 and must match the actual controller reference.
   Both names must be Kubernetes DNS names. Namespace is fixed to
@@ -141,12 +143,16 @@ not a Pod-selector peer. Cluster RBAC permits only
 TokenReview creation; namespaced RBAC permits Pod GET in the two caller namespaces
 and Job GET only in `lifemodel-motor`. No list/watch, Secret or mutation rights.
 The k3s API egress follows the platform's port-6443 exception; it grants no API
-right. Task SA has zero RBAC; Job token projection is stage 3's launcher work.
+right. Task SA has zero RBAC; `src/core/kubernetes-task-executor.ts` projects
+separate model, storage and channel audience tokens into each Job.
 
 Core/web service-audience token projections and rotating read-only mounts define
 the integration contract. The wired core retention reconciler already uses the
 control token and public CA through `src/core/storage-control-client.ts` (see
-[core warnings](storage-retention.md#core-side)). Core read and owner web download
+[core warnings](storage-retention.md#core-side)). `src/web/server.ts` authorizes
+owner attachment downloads; `src/storage/task-artifact-reader.ts` reads each
+artifact through the web-only artifact route with fresh projected tokens and
+CA-only trust. Web has no generic object GET/list permission. Core object-read
 consumers remain later integration work. Every consumer must load fresh tokens
 and verify TLS against CA-only instance trust, not disable verification or mount
 the module's private key.

@@ -18,11 +18,13 @@ owner instance or change its NetworkPolicies to make a test pass.
 4. Confirm Node is available in these caller Pods. Run from their existing
    network identities; do not mount a kubeconfig or storage credentials in them.
    Task-pod egress **must include DNS** for
-   `storage-module.lifemodel-system.svc`, as real stage-3 task Pods do. Verify
+   `storage-module.lifemodel-system.svc`, as task Pods do through
+   `task-dns-egress` in `deploy/platform/d/network-policy.yaml`. Verify
    resolution from both task Pods; a Pod that can reach only the Service IP is
    not a usable fixture. Do not bypass DNS or relax NetworkPolicy for this walk.
-   If these fixtures are not available, record **BLOCKED**. Stage 3 owns real
-   gateway/Job creation; do not invent catalog bindings with ad-hoc SQL.
+   If these fixtures are not available, record **BLOCKED**. Use Jobs created by
+   `src/core/task-launch.ts` and bound by `loader/src/task-identity.ts`; do not
+   invent catalog bindings with ad-hoc SQL.
 
 The isolated counterpart is:
 
