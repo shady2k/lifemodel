@@ -1,0 +1,5 @@
+artifacts/
+runs/
+!evidence/**/*.log
+!evidence/*.log
+__pycache__/

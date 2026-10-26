@@ -1,0 +1,52 @@
+{
+  "candidate": "prime-agent",
+  "scenario": "provider-error",
+  "client": "real",
+  "result": {
+    "outcome": "failed",
+    "result": "",
+    "reasonCode": "provider_error",
+    "failureSpanId": "5d31f2bf-8395-49c4-9773-d27c4d18449f"
+  },
+  "events": [
+    {
+      "type": "step",
+      "text": "Running task"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "5d31f2bf-8395-49c4-9773-d27c4d18449f",
+        "parentSpanId": null,
+        "component": "task.model",
+        "startedAt": "2026-10-26T18:02:06.485Z",
+        "endedAt": null,
+        "status": null,
+        "attrs": {
+          "model": "task",
+          "durationMs": 0.1744829999997819
+        }
+      }
+    },
+    {
+      "type": "error",
+      "code": "provider_error"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "5d31f2bf-8395-49c4-9773-d27c4d18449f",
+        "parentSpanId": null,
+        "component": "task.model",
+        "startedAt": "2026-10-26T18:02:06.485Z",
+        "endedAt": "2026-10-26T18:02:06.727Z",
+        "status": "failed",
+        "attrs": {
+          "model": "task",
+          "stopReason": "unknown",
+          "durationMs": 239.05944499999987
+        }
+      }
+    }
+  ]
+}

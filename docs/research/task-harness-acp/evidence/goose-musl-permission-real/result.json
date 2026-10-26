@@ -1,0 +1,117 @@
+{
+  "candidate": "goose",
+  "scenario": "permission",
+  "client": "real",
+  "result": {
+    "outcome": "succeeded",
+    "result": "PROBE_FINAL: finished."
+  },
+  "events": [
+    {
+      "type": "step",
+      "text": "Running task"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "226acf23-9e70-4d9a-9d53-88496be11fde",
+        "parentSpanId": null,
+        "component": "task.model",
+        "startedAt": "2026-10-26T18:02:16.230Z",
+        "endedAt": null,
+        "status": null,
+        "attrs": {
+          "model": "task",
+          "durationMs": 0.11109099999998762
+        }
+      }
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "97b92a00-6667-44a9-952b-8eb6a5a5eca7",
+        "parentSpanId": "226acf23-9e70-4d9a-9d53-88496be11fde",
+        "component": "task.tool",
+        "startedAt": "2026-10-26T18:02:16.522Z",
+        "endedAt": null,
+        "status": null,
+        "attrs": {
+          "toolCallId": "call_probe_1",
+          "title": "shell · echo probe-tool-ok > /work/probe/probe-tool-marker; ec...…",
+          "command": "echo probe-tool-ok > /work/probe/probe-tool-marker; echo probe-tool-ok",
+          "hostStatus": "pending",
+          "durationMs": 0.008189000000015767
+        }
+      }
+    },
+    {
+      "type": "tool",
+      "name": "task_tool",
+      "status": "running"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "97b92a00-6667-44a9-952b-8eb6a5a5eca7",
+        "parentSpanId": "226acf23-9e70-4d9a-9d53-88496be11fde",
+        "component": "task.tool",
+        "startedAt": "2026-10-26T18:02:16.522Z",
+        "endedAt": "2026-10-26T18:02:16.574Z",
+        "status": "failed",
+        "attrs": {
+          "toolCallId": "call_probe_1",
+          "title": "shell · echo probe-tool-ok > /work/probe/probe-tool-marker; ec...…",
+          "command": "echo probe-tool-ok > /work/probe/probe-tool-marker; echo probe-tool-ok",
+          "hostStatus": "failed",
+          "durationMs": 52.01483099999996,
+          "outputTail": "The user has declined to run this tool. DO NOT attempt to call this tool again. If there are no alternative methods to proceed, clearly explain the situation and STOP."
+        }
+      }
+    },
+    {
+      "type": "tool",
+      "name": "task_tool",
+      "status": "error"
+    },
+    {
+      "type": "step",
+      "text": "Task is working"
+    },
+    {
+      "type": "step",
+      "text": "Task is working"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "226acf23-9e70-4d9a-9d53-88496be11fde",
+        "parentSpanId": null,
+        "component": "task.model",
+        "startedAt": "2026-10-26T18:02:16.230Z",
+        "endedAt": "2026-10-26T18:02:16.646Z",
+        "status": "ok",
+        "attrs": {
+          "model": "task",
+          "stopReason": "end_turn",
+          "durationMs": 414.85916899999995,
+          "used": 0,
+          "size": 128000
+        }
+      }
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "ddaf6572-180f-4a21-805e-56712875bc4b",
+        "parentSpanId": "226acf23-9e70-4d9a-9d53-88496be11fde",
+        "component": "task.completion",
+        "startedAt": "2026-10-26T18:02:16.646Z",
+        "endedAt": "2026-10-26T18:02:16.646Z",
+        "status": "ok",
+        "attrs": {
+          "finalText": "PROBE_FINAL: finished."
+        }
+      }
+    }
+  ]
+}

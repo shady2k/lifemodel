@@ -1,0 +1,17 @@
+{
+  "goose": {
+    "command": "docker run --rm --name probe-6539-version-goose --network none -v /home/dev/.herdr/worktrees/lifemodel/probe-653-9-1-goose-acp/docs/research/task-harness-acp/artifacts/goose:/candidate:ro --entrypoint /candidate/goose probe-6539/workbench:stock --version",
+    "exitCode": 0,
+    "output": "1.56.0"
+  },
+  "goose-musl": {
+    "command": "docker run --rm --name probe-6539-version-goose-musl --network none -v /home/dev/.herdr/worktrees/lifemodel/probe-653-9-1-goose-acp/docs/research/task-harness-acp/artifacts/goose-musl:/candidate:ro --entrypoint /candidate/goose probe-6539/workbench:stock --version",
+    "exitCode": 0,
+    "output": "1.56.0"
+  },
+  "prime-agent": {
+    "command": "docker run --rm --name probe-6539-version-prime-agent --network none -v /home/dev/.herdr/worktrees/lifemodel/probe-653-9-1-goose-acp/docs/research/task-harness-acp/artifacts/prime-agent:/candidate:ro --entrypoint /candidate/prime-agent probe-6539/workbench:stock --version",
+    "exitCode": 0,
+    "output": "0.10.1"
+  }
+}

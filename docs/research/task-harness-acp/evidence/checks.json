@@ -1,0 +1,20 @@
+{
+  "verifyEvidence": {
+    "command": "node docs/research/task-harness-acp/verify-evidence.mjs",
+    "exitCode": 0,
+    "output": "PASS: 21 retained run receipts; expected startup, cancellation, tool-status and permission failures reproduced.\n"
+  },
+  "scriptSyntax": {
+    "probe-agents.mjs": 0,
+    "stub-model-server.mjs": 0,
+    "raw-acp-driver.mjs": 0,
+    "verify-evidence.mjs": 0,
+    "run-probe.mjs": 0
+  },
+  "pythonSyntax": 0,
+  "cleanup": {
+    "containersBefore": "",
+    "imageRemovalExitCode": 0,
+    "imageRemovalOutput": "Untagged: probe-6539/prime:0.10.1\nDeleted: sha256:4a557c8103a576614be52724799f3e1dd697ca9794decd88b32385d38ca1450b\nUntagged: probe-6539/workbench:stock\nDeleted: sha256:5fe107c1dd8f56870a658cda7a93ebddc9e41768ca089a3168a0113fa5184728\n"
+  }
+}

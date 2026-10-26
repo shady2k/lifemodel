@@ -1,0 +1,234 @@
+16    18:05:05.017918 +++ exited with 0 +++
+24    18:05:05.101964 +++ exited with 0 +++
+25    18:05:05.149629 connect(9, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = -1 ENOENT (No such file or directory)
+25    18:05:05.149835 connect(9, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = -1 ENOENT (No such file or directory)
+25    18:05:05.151241 connect(9, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = -1 ENOENT (No such file or directory)
+25    18:05:05.154026 connect(9, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = -1 ENOENT (No such file or directory)
+25    18:05:05.156814 connect(9, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = -1 ENOENT (No such file or directory)
+25    18:05:05.159298 connect(9, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = -1 ENOENT (No such file or directory)
+25    18:05:05.161711 connect(9, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = -1 ENOENT (No such file or directory)
+25    18:05:05.165808 connect(9, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = -1 ENOENT (No such file or directory)
+25    18:05:05.169565 connect(9, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = -1 ENOENT (No such file or directory)
+25    18:05:05.172009 connect(9, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = -1 ENOENT (No such file or directory)
+25    18:05:05.173355 connect(9, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = -1 ECONNREFUSED (Connection refused)
+25    18:05:05.175668 connect(9, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = 0
+25    18:05:05.180810 connect(10, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = 0
+28    18:05:05.190358 connect(14, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/prime-agent-1000/worker-57c1f4bc5b52-e255464ad8e8.sock"}, 73) = -1 ENOENT (No such file or directory)
+28    18:05:05.192367 connect(14, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/prime-agent-1000/worker-57c1f4bc5b52-e255464ad8e8.sock"}, 73) = -1 ENOENT (No such file or directory)
+33    18:05:05.193971 connect(10, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = 0
+28    18:05:05.194165 connect(14, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/prime-agent-1000/worker-57c1f4bc5b52-e255464ad8e8.sock"}, 73) = -1 ENOENT (No such file or directory)
+28    18:05:05.196531 connect(14, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/prime-agent-1000/worker-57c1f4bc5b52-e255464ad8e8.sock"}, 73) = -1 ENOENT (No such file or directory)
+28    18:05:05.198808 connect(14, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/prime-agent-1000/worker-57c1f4bc5b52-e255464ad8e8.sock"}, 73) = -1 ENOENT (No such file or directory)
+28    18:05:05.201104 connect(14, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/prime-agent-1000/worker-57c1f4bc5b52-e255464ad8e8.sock"}, 73) = 0
+28    18:05:05.201540 connect(12, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/prime-agent-1000/worker-57c1f4bc5b52-e255464ad8e8.sock"}, 73) = 0
+37    18:05:05.466467 +++ exited with 0 +++
+33    18:05:05.466550 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=37, si_uid=1000, si_status=0, si_utime=8 /* 0.08 s */, si_stime=3 /* 0.03 s */} ---
+38    18:05:05.702464 +++ exited with 0 +++
+33    18:05:05.702566 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=38, si_uid=1000, si_status=0, si_utime=10 /* 0.10 s */, si_stime=4 /* 0.04 s */} ---
+39    18:05:05.911490 +++ exited with 0 +++
+33    18:05:05.911566 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=39, si_uid=1000, si_status=0, si_utime=8 /* 0.08 s */, si_stime=4 /* 0.04 s */} ---
+40    18:05:06.001881 +++ exited with 0 +++
+33    18:05:06.001991 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=40, si_uid=1000, si_status=0, si_utime=2 /* 0.02 s */, si_stime=1 /* 0.01 s */} ---
+41    18:05:06.064849 +++ exited with 0 +++
+33    18:05:06.065253 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=41, si_uid=1000, si_status=0, si_utime=1 /* 0.01 s */, si_stime=1 /* 0.01 s */} ---
+42    18:05:06.178637 +++ exited with 0 +++
+33    18:05:06.178713 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=42, si_uid=1000, si_status=0, si_utime=3 /* 0.03 s */, si_stime=1 /* 0.01 s */} ---
+44    18:05:07.044758 +++ exited with 0 +++
+45    18:05:07.044883 +++ exited with 0 +++
+47    18:05:07.044975 +++ exited with 0 +++
+48    18:05:07.045081 +++ exited with 0 +++
+46    18:05:07.045131 +++ exited with 0 +++
+43    18:05:07.050102 +++ exited with 0 +++
+33    18:05:07.050196 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=43, si_uid=1000, si_status=0, si_utime=45 /* 0.45 s */, si_stime=13 /* 0.13 s */} ---
+50    18:05:07.341619 +++ exited with 0 +++
+51    18:05:07.341666 +++ exited with 0 +++
+52    18:05:07.341807 +++ exited with 0 +++
+53    18:05:07.341879 +++ exited with 0 +++
+54    18:05:07.341902 +++ exited with 0 +++
+49    18:05:07.343637 +++ exited with 0 +++
+33    18:05:07.343686 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=49, si_uid=1000, si_status=0, si_utime=20 /* 0.20 s */, si_stime=2 /* 0.02 s */} ---
+57    18:05:07.612539 +++ exited with 0 +++
+58    18:05:07.612619 +++ exited with 0 +++
+59    18:05:07.612683 +++ exited with 0 +++
+56    18:05:07.613076 +++ exited with 0 +++
+60    18:05:07.613108 +++ exited with 0 +++
+55    18:05:07.615204 +++ exited with 0 +++
+33    18:05:07.615285 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=55, si_uid=1000, si_status=0, si_utime=20 /* 0.20 s */, si_stime=4 /* 0.04 s */} ---
+61    18:05:07.754081 +++ exited with 0 +++
+33    18:05:07.754154 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=61, si_uid=1000, si_status=0, si_utime=5 /* 0.05 s */, si_stime=3 /* 0.03 s */} ---
+62    18:05:07.794278 +++ exited with 0 +++
+33    18:05:07.794334 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=62, si_uid=1000, si_status=0, si_utime=0, si_stime=1 /* 0.01 s */} ---
+63    18:05:07.913826 +++ exited with 0 +++
+33    18:05:07.913897 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=63, si_uid=1000, si_status=0, si_utime=4 /* 0.04 s */, si_stime=1 /* 0.01 s */} ---
+64    18:05:08.072411 +++ exited with 0 +++
+33    18:05:08.072489 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=64, si_uid=1000, si_status=0, si_utime=5 /* 0.05 s */, si_stime=3 /* 0.03 s */} ---
+65    18:05:08.099715 +++ exited with 1 +++
+33    18:05:08.099780 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=65, si_uid=1000, si_status=1, si_utime=0, si_stime=1 /* 0.01 s */} ---
+66    18:05:08.129787 +++ exited with 1 +++
+33    18:05:08.129864 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=66, si_uid=1000, si_status=1, si_utime=0, si_stime=0} ---
+67    18:05:08.158373 +++ exited with 1 +++
+33    18:05:08.158432 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=67, si_uid=1000, si_status=1, si_utime=0, si_stime=0} ---
+68    18:05:08.184109 +++ exited with 1 +++
+33    18:05:08.184167 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=68, si_uid=1000, si_status=1, si_utime=0, si_stime=0} ---
+69    18:05:08.211156 +++ exited with 1 +++
+33    18:05:08.211229 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=69, si_uid=1000, si_status=1, si_utime=1 /* 0.01 s */, si_stime=0} ---
+70    18:05:08.241084 +++ exited with 1 +++
+33    18:05:08.241167 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=70, si_uid=1000, si_status=1, si_utime=0, si_stime=0} ---
+71    18:05:08.270035 +++ exited with 1 +++
+33    18:05:08.270109 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=71, si_uid=1000, si_status=1, si_utime=0, si_stime=0} ---
+72    18:05:08.300898 +++ exited with 1 +++
+33    18:05:08.300970 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=72, si_uid=1000, si_status=1, si_utime=1 /* 0.01 s */, si_stime=0} ---
+73    18:05:08.348086 +++ exited with 1 +++
+33    18:05:08.348151 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=73, si_uid=1000, si_status=1, si_utime=0, si_stime=0} ---
+33    18:05:08.402072 connect(20, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = 0
+33    18:05:08.409911 connect(22, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = 0
+34    18:05:08.525896 connect(20, {sa_family=AF_INET, sin_port=htons(40957), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+9     18:05:08.538361 connect(23, {sa_family=AF_INET, sin_port=htons(8443), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+33    18:05:08.561247 connect(22, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = 0
+86    18:05:08.583912 connect(3, {sa_family=AF_UNIX, sun_path="/var/run/nscd/socket"}, 110) = -1 ENOENT (No such file or directory)
+86    18:05:08.584167 connect(3, {sa_family=AF_UNIX, sun_path="/var/run/nscd/socket"}, 110) = -1 ENOENT (No such file or directory)
+91    18:05:08.593750 +++ exited with 0 +++
+86    18:05:08.593901 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=91, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+74    18:05:09.569951 --- SIGINT {si_signo=SIGINT, si_code=SI_TKILL, si_pid=74, si_uid=1000} ---
+86    18:05:09.571470 --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=74, si_uid=1000} ---
+86    18:05:09.571818 +++ killed by SIGTERM +++
+74    18:05:09.571896 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_KILLED, si_pid=86, si_uid=1000, si_status=SIGTERM, si_utime=0, si_stime=0} ---
+90    18:05:09.571930 --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=74, si_uid=1000} ---
+90    18:05:09.572095 +++ killed by SIGTERM +++
+33    18:05:09.574599 connect(22, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = 0
+87    18:05:09.578209 +++ exited with 0 +++
+88    18:05:09.579072 +++ exited with 0 +++
+89    18:05:09.584657 +++ exited with 0 +++
+33    18:05:09.590049 connect(22, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = 0
+92    18:05:10.078897 +++ exited with 0 +++
+77    18:05:18.409492 +++ exited with 0 +++
+30    18:05:18.563832 +++ exited with 0 +++
+31    18:05:19.576239 +++ exited with 0 +++
+35    18:05:19.578303 +++ exited with 0 +++
+36    18:05:19.587675 +++ exited with 0 +++
+29    18:05:19.591487 +++ exited with 0 +++
+75    18:05:19.595412 +++ exited with 0 +++
+25    18:05:41.603953 --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=9, si_uid=1000} ---
+26    18:05:41.604084 +++ killed by SIGTERM +++
+76    18:05:41.604782 +++ killed by SIGTERM +++
+25    18:05:41.604793 +++ killed by SIGTERM +++
+9     18:05:41.604804 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_KILLED, si_pid=25, si_uid=1000, si_status=SIGTERM, si_utime=0, si_stime=1 /* 0.01 s */} ---
+17    18:05:41.908133 --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=9, si_uid=1000} ---
+17    18:05:41.908598 --- SIGTERM {si_signo=SIGTERM, si_code=SI_TKILL, si_pid=17, si_uid=1000} ---
+21    18:05:41.908754 +++ killed by SIGTERM +++
+22    18:05:41.908775 +++ killed by SIGTERM +++
+20    18:05:41.908783 +++ killed by SIGTERM +++
+19    18:05:41.908790 +++ killed by SIGTERM +++
+18    18:05:41.908797 +++ killed by SIGTERM +++
+23    18:05:41.912326 +++ killed by SIGTERM +++
+17    18:05:41.912362 +++ killed by SIGTERM +++
+9     18:05:41.912390 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_KILLED, si_pid=17, si_uid=1000, si_status=SIGTERM, si_utime=5 /* 0.05 s */, si_stime=2 /* 0.02 s */} ---
+94    18:05:41.927546 +++ exited with 127 +++
+93    18:05:41.927690 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=94, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+95    18:05:41.932534 +++ exited with 127 +++
+93    18:05:41.932672 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=95, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+96    18:05:41.937388 +++ exited with 127 +++
+93    18:05:41.938334 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=96, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+97    18:05:41.949016 +++ exited with 127 +++
+93    18:05:41.949197 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=97, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+93    18:05:41.950180 connect(3, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = 0
+99    18:05:41.961248 +++ exited with 127 +++
+93    18:05:41.961447 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=99, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+100   18:05:41.966332 +++ exited with 127 +++
+93    18:05:41.966472 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=100, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+101   18:05:41.970850 +++ exited with 127 +++
+93    18:05:41.970990 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=101, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+102   18:05:41.981751 +++ exited with 127 +++
+93    18:05:41.981929 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=102, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+93    18:05:41.982680 connect(3, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = 0
+93    18:05:41.986166 connect(3, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = 0
+93    18:05:41.987881 connect(5, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = 0
+85    18:05:42.003389 +++ exited with 0 +++
+84    18:05:42.003437 +++ exited with 0 +++
+83    18:05:42.004998 +++ exited with 0 +++
+82    18:05:42.005023 +++ exited with 0 +++
+74    18:05:42.005030 +++ exited with 0 +++
+33    18:05:42.005061 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=74, si_uid=1000, si_status=0, si_utime=9 /* 0.09 s */, si_stime=3 /* 0.03 s */} ---
+32    18:05:42.007013 --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=27, si_uid=1000} ---
+34    18:05:42.007090 +++ killed by SIGTERM +++
+33    18:05:42.009363 +++ killed by SIGTERM +++
+32    18:05:42.009381 +++ killed by SIGTERM +++
+27    18:05:42.009415 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_KILLED, si_pid=32, si_uid=1000, si_status=SIGTERM, si_utime=4 /* 0.04 s */, si_stime=5 /* 0.05 s */} ---
+27    18:05:42.009764 connect(9, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = -1 ECONNREFUSED (Connection refused)
+98    18:05:42.010364 +++ exited with 0 +++
+28    18:05:42.011395 +++ exited with 0 +++
+27    18:05:42.012767 +++ exited with 0 +++
+93    18:05:42.041928 connect(5, {sa_family=AF_UNIX, sun_path="/work/probe/tmp/daemon.sock"}, 30) = -1 ENOENT (No such file or directory)
+103   18:05:42.047261 +++ exited with 127 +++
+93    18:05:42.047392 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=103, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+104   18:05:42.051888 +++ exited with 127 +++
+93    18:05:42.052032 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=104, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+105   18:05:42.056446 +++ exited with 127 +++
+93    18:05:42.056589 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=105, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+106   18:05:42.162369 +++ exited with 127 +++
+93    18:05:42.162540 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=106, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+107   18:05:42.167239 +++ exited with 127 +++
+93    18:05:42.167390 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=107, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+108   18:05:42.172243 +++ exited with 127 +++
+93    18:05:42.172371 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=108, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+109   18:05:42.277617 +++ exited with 127 +++
+93    18:05:42.277819 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=109, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+110   18:05:42.282747 +++ exited with 127 +++
+93    18:05:42.282880 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=110, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+111   18:05:42.287848 +++ exited with 127 +++
+93    18:05:42.287986 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=111, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+112   18:05:42.393318 +++ exited with 127 +++
+93    18:05:42.393482 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=112, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+113   18:05:42.398305 +++ exited with 127 +++
+93    18:05:42.398457 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=113, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+114   18:05:42.403346 +++ exited with 127 +++
+93    18:05:42.403494 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=114, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+115   18:05:42.508557 +++ exited with 127 +++
+93    18:05:42.508724 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=115, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+116   18:05:42.513434 +++ exited with 127 +++
+93    18:05:42.513606 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=116, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+117   18:05:42.518288 +++ exited with 127 +++
+93    18:05:42.518443 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=117, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+118   18:05:42.624702 +++ exited with 127 +++
+93    18:05:42.624889 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=118, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+119   18:05:42.629926 +++ exited with 127 +++
+93    18:05:42.630082 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=119, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+120   18:05:42.635787 +++ exited with 127 +++
+93    18:05:42.635944 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=120, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+121   18:05:42.741337 +++ exited with 127 +++
+93    18:05:42.741522 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=121, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+122   18:05:42.747271 +++ exited with 127 +++
+93    18:05:42.747409 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=122, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+123   18:05:42.752405 +++ exited with 127 +++
+93    18:05:42.752560 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=123, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+124   18:05:42.857857 +++ exited with 127 +++
+93    18:05:42.858013 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=124, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+125   18:05:42.862457 +++ exited with 127 +++
+93    18:05:42.862598 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=125, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+126   18:05:42.866976 +++ exited with 127 +++
+93    18:05:42.867098 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=126, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+127   18:05:42.973828 +++ exited with 127 +++
+93    18:05:42.974008 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=127, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+128   18:05:42.978993 +++ exited with 127 +++
+93    18:05:42.979138 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=128, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+129   18:05:42.984569 +++ exited with 127 +++
+93    18:05:42.984736 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=129, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+130   18:05:43.090086 +++ exited with 127 +++
+93    18:05:43.090284 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=130, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+131   18:05:43.095343 +++ exited with 127 +++
+93    18:05:43.095482 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=131, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+132   18:05:43.100581 +++ exited with 127 +++
+93    18:05:43.100719 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=132, si_uid=1000, si_status=127, si_utime=0, si_stime=0} ---
+93    18:05:43.102080 +++ exited with 0 +++
+9     18:05:43.102098 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=93, si_uid=1000, si_status=0, si_utime=0, si_stime=1 /* 0.01 s */} ---
+13    18:05:43.112330 +++ exited with 0 +++
+14    18:05:43.112373 +++ exited with 0 +++
+12    18:05:43.112439 +++ exited with 0 +++
+11    18:05:43.112445 +++ exited with 0 +++
+10    18:05:43.112674 +++ exited with 0 +++
+81    18:05:43.115531 +++ exited with 0 +++
+79    18:05:43.115565 +++ exited with 0 +++
+78    18:05:43.115571 +++ exited with 0 +++
+80    18:05:43.115583 +++ exited with 0 +++
+15    18:05:43.118374 +++ exited with 0 +++
+9     18:05:43.118410 +++ exited with 0 +++

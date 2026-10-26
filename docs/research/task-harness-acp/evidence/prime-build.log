@@ -1,0 +1,269 @@
+lifemodel-heavy: waiting for the machine (docker build -t probe-6539/prime:0.10.1 -f /home/dev/.herdr/worktrees/lifemodel/probe-653-9-1-goose-acp/docs/research/task-harness-acp/Dockerfile.probe /home/dev/.herdr/worktrees/lifemodel/probe-653-9-1-goose-acp/docs/research/task-harness-acp/artifacts)
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.probe
+#1 transferring dockerfile: 616B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/probe-6539/workbench:stock
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/6] FROM docker.io/probe-6539/workbench:stock@sha256:5fe107c1dd8f56870a658cda7a93ebddc9e41768ca089a3168a0113fa5184728
+#4 resolve docker.io/probe-6539/workbench:stock@sha256:5fe107c1dd8f56870a658cda7a93ebddc9e41768ca089a3168a0113fa5184728 0.0s done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 5.50kB 0.0s done
+#5 DONE 0.0s
+
+#6 [2/6] COPY prime-agent /opt/probe/prime-agent
+#6 CACHED
+
+#7 [3/6] RUN apt-get update -o APT::Update::Error-Mode=any && apt-get install -y --no-install-recommends python3-venv && rm -rf /var/lib/apt/lists/*
+#7 0.653 Get:1 http://snapshot.debian.org/archive/debian/20261015T000000Z bookworm InRelease [151 kB]
+#7 1.084 Get:2 http://snapshot.debian.org/archive/debian/20261015T000000Z bookworm/main amd64 Packages [8790 kB]
+#7 10.60 Fetched 8941 kB in 10s (866 kB/s)
+#7 10.60 Reading package lists...
+#7 11.04 Reading package lists...
+#7 11.44 Building dependency tree...
+#7 11.58 Reading state information...
+#7 11.75 The following additional packages will be installed:
+#7 11.75   python3-distutils python3-lib2to3 python3-pip-whl python3-setuptools-whl
+#7 11.75   python3.11-venv
+#7 11.83 The following NEW packages will be installed:
+#7 11.83   python3-distutils python3-lib2to3 python3-pip-whl python3-setuptools-whl
+#7 11.83   python3-venv python3.11-venv
+#7 12.23 0 upgraded, 6 newly installed, 0 to remove and 0 not upgraded.
+#7 12.23 Need to get 3044 kB of archives.
+#7 12.23 After this operation, 4198 kB of additional disk space will be used.
+#7 12.23 Get:1 http://snapshot.debian.org/archive/debian/20261015T000000Z bookworm/main amd64 python3-lib2to3 all 3.11.2-3 [76.3 kB]
+#7 12.30 Get:2 http://snapshot.debian.org/archive/debian/20261015T000000Z bookworm/main amd64 python3-distutils all 3.11.2-3 [131 kB]
+#7 12.37 Get:3 http://snapshot.debian.org/archive/debian/20261015T000000Z bookworm/main amd64 python3-pip-whl all 23.0.1+dfsg-1 [1717 kB]
+#7 12.77 Get:4 http://snapshot.debian.org/archive/debian/20261015T000000Z bookworm/main amd64 python3-setuptools-whl all 66.1.1-1+deb12u2 [1112 kB]
+#7 12.78 Get:5 http://snapshot.debian.org/archive/debian/20261015T000000Z bookworm/main amd64 python3.11-venv amd64 3.11.2-6+deb12u8 [5888 B]
+#7 12.78 Get:6 http://snapshot.debian.org/archive/debian/20261015T000000Z bookworm/main amd64 python3-venv amd64 3.11.2-1+b1 [1200 B]
+#7 12.95 debconf: delaying package configuration, since apt-utils is not installed
+#7 12.98 Fetched 3044 kB in 1s (3240 kB/s)
+#7 13.01 Selecting previously unselected package python3-lib2to3.
+#7 13.01 (Reading database ...
+(Reading database ... 5%
+(Reading database ... 10%
+(Reading database ... 15%
+(Reading database ... 20%
+(Reading database ... 25%
+(Reading database ... 30%
+(Reading database ... 35%
+(Reading database ... 40%
+(Reading database ... 45%
+(Reading database ... 50%
+(Reading database ... 55%
+(Reading database ... 60%
+(Reading database ... 65%
+(Reading database ... 70%
+(Reading database ... 75%
+(Reading database ... 80%
+(Reading database ... 85%
+(Reading database ... 90%
+(Reading database ... 95%
+(Reading database ... 100%
+(Reading database ... 14681 files and directories currently installed.)
+#7 13.06 Preparing to unpack .../0-python3-lib2to3_3.11.2-3_all.deb ...
+#7 13.06 Unpacking python3-lib2to3 (3.11.2-3) ...
+#7 13.10 Selecting previously unselected package python3-distutils.
+#7 13.11 Preparing to unpack .../1-python3-distutils_3.11.2-3_all.deb ...
+#7 13.11 Unpacking python3-distutils (3.11.2-3) ...
+#7 13.15 Selecting previously unselected package python3-pip-whl.
+#7 13.15 Preparing to unpack .../2-python3-pip-whl_23.0.1+dfsg-1_all.deb ...
+#7 13.15 Unpacking python3-pip-whl (23.0.1+dfsg-1) ...
+#7 13.24 Selecting previously unselected package python3-setuptools-whl.
+#7 13.24 Preparing to unpack .../3-python3-setuptools-whl_66.1.1-1+deb12u2_all.deb ...
+#7 13.25 Unpacking python3-setuptools-whl (66.1.1-1+deb12u2) ...
+#7 13.31 Selecting previously unselected package python3.11-venv.
+#7 13.31 Preparing to unpack .../4-python3.11-venv_3.11.2-6+deb12u8_amd64.deb ...
+#7 13.31 Unpacking python3.11-venv (3.11.2-6+deb12u8) ...
+#7 13.34 Selecting previously unselected package python3-venv.
+#7 13.34 Preparing to unpack .../5-python3-venv_3.11.2-1+b1_amd64.deb ...
+#7 13.34 Unpacking python3-venv (3.11.2-1+b1) ...
+#7 13.37 Setting up python3-setuptools-whl (66.1.1-1+deb12u2) ...
+#7 13.38 Setting up python3-pip-whl (23.0.1+dfsg-1) ...
+#7 13.39 Setting up python3-lib2to3 (3.11.2-3) ...
+#7 13.50 Setting up python3-distutils (3.11.2-3) ...
+#7 13.61 Setting up python3.11-venv (3.11.2-6+deb12u8) ...
+#7 13.65 Setting up python3-venv (3.11.2-1+b1) ...
+#7 DONE 13.7s
+
+#8 [4/6] RUN python3 -m venv /opt/probe/python
+#8 DONE 3.0s
+
+#9 [5/6] RUN /opt/probe/python/bin/python -m pip install --no-cache-dir /opt/probe/prime-agent/prime-agent-runtime dill requests httpx pyyaml tomli python-dotenv pandas numpy scipy beautifulsoup4 lxml pydantic tyro
+#9 0.618 Processing /opt/probe/prime-agent/prime-agent-runtime
+#9 0.628   Installing build dependencies: started
+#9 4.292   Installing build dependencies: finished with status 'done'
+#9 4.297   Getting requirements to build wheel: started
+#9 4.393   Getting requirements to build wheel: finished with status 'done'
+#9 4.394   Preparing metadata (pyproject.toml): started
+#9 4.556   Preparing metadata (pyproject.toml): finished with status 'done'
+#9 4.866 Collecting dill
+#9 5.161   Downloading dill-0.4.1-py3-none-any.whl (120 kB)
+#9 5.316      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 120.0/120.0 kB 723.0 kB/s eta 0:00:00
+#9 5.460 Collecting requests
+#9 5.540   Downloading requests-2.34.2-py3-none-any.whl (73 kB)
+#9 5.560      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 73.1/73.1 kB 4.1 MB/s eta 0:00:00
+#9 5.684 Collecting httpx
+#9 5.771   Downloading httpx-0.28.1-py3-none-any.whl (73 kB)
+#9 5.786      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 73.5/73.5 kB 4.6 MB/s eta 0:00:00
+#9 5.964 Collecting pyyaml
+#9 6.046   Downloading pyyaml-6.0.3-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (806 kB)
+#9 6.371      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 806.6/806.6 kB 2.5 MB/s eta 0:00:00
+#9 6.510 Collecting tomli
+#9 6.590   Downloading tomli-2.5.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (276 kB)
+#9 6.674      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 276.4/276.4 kB 3.3 MB/s eta 0:00:00
+#9 6.781 Collecting python-dotenv
+#9 6.861   Downloading python_dotenv-1.2.4-py3-none-any.whl (23 kB)
+#9 7.400 Collecting pandas
+#9 7.479   Downloading pandas-3.1.0-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (12.3 MB)
+#9 70.77      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 12.3/12.3 MB 143.9 kB/s eta 0:00:00
+#9 71.96 Collecting numpy
+#9 72.03   Downloading numpy-2.4.6-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (16.9 MB)
+#9 142.5      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 16.9/16.9 MB 268.6 kB/s eta 0:00:00
+#9 143.4 Collecting scipy
+#9 143.5   Downloading scipy-1.17.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (35.3 MB)
+#9 386.4      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 35.3/35.3 MB 133.0 kB/s eta 0:00:00
+#9 386.6 Collecting beautifulsoup4
+#9 386.7   Downloading beautifulsoup4-4.15.0-py3-none-any.whl (109 kB)
+#9 387.2      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 109.9/109.9 kB 233.0 kB/s eta 0:00:00
+#9 391.9 Collecting lxml
+#9 391.9   Downloading lxml-6.1.3-cp311-cp311-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl (5.2 MB)
+#9 415.9      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 5.2/5.2 MB 217.4 kB/s eta 0:00:00
+#9 418.0 Collecting pydantic
+#9 418.0   Downloading pydantic-2.14.1-py3-none-any.whl (488 kB)
+#9 419.5      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 488.1/488.1 kB 338.4 kB/s eta 0:00:00
+#9 419.8 Collecting tyro
+#9 419.9   Downloading tyro-1.0.16-py3-none-any.whl (216 kB)
+#9 420.5      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 216.9/216.9 kB 469.7 kB/s eta 0:00:00
+#9 421.1 Collecting mcp<3,>=2
+#9 421.2   Downloading mcp-2.3.0-py3-none-any.whl (368 kB)
+#9 422.1      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 368.7/368.7 kB 487.3 kB/s eta 0:00:00
+#9 444.6 Collecting charset_normalizer<4,>=2
+#9 444.7   Downloading charset_normalizer-3.5.2-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (269 kB)
+#9 445.3      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 270.0/270.0 kB 433.5 kB/s eta 0:00:00
+#9 445.5 Collecting idna<4,>=2.5
+#9 445.6   Downloading idna-3.20-py3-none-any.whl (69 kB)
+#9 445.8      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 69.6/69.6 kB 397.4 kB/s eta 0:00:00
+#9 446.1 Collecting urllib3<3,>=1.26
+#9 446.1   Downloading urllib3-2.8.0-py3-none-any.whl (135 kB)
+#9 446.5      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 135.7/135.7 kB 416.6 kB/s eta 0:00:00
+#9 446.7 Collecting certifi>=2023.5.7
+#9 446.8   Downloading certifi-2026.10.23-py3-none-any.whl (135 kB)
+#9 447.1      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 135.1/135.1 kB 466.7 kB/s eta 0:00:00
+#9 447.3 Collecting anyio
+#9 447.4   Downloading anyio-4.15.1-py3-none-any.whl (132 kB)
+#9 447.8      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 132.1/132.1 kB 502.8 kB/s eta 0:00:00
+#9 447.9 Collecting httpcore==1.*
+#9 448.0   Downloading httpcore-1.0.9-py3-none-any.whl (78 kB)
+#9 448.3      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 78.8/78.8 kB 306.2 kB/s eta 0:00:00
+#9 448.4 Collecting h11>=0.16
+#9 448.5   Downloading h11-0.16.0-py3-none-any.whl (37 kB)
+#9 448.8 Collecting python-dateutil>=2.9.0
+#9 448.8   Downloading python_dateutil-3.0.0-py2.py3-none-any.whl (94 kB)
+#9 449.1      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 94.7/94.7 kB 336.7 kB/s eta 0:00:00
+#9 449.4 Collecting soupsieve>=1.6.1
+#9 449.4   Downloading soupsieve-2.10-py3-none-any.whl (38 kB)
+#9 449.7 Collecting typing-extensions>=4.0.0
+#9 449.8   Downloading typing_extensions-4.16.0-py3-none-any.whl (45 kB)
+#9 450.0      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 45.6/45.6 kB 263.5 kB/s eta 0:00:00
+#9 450.2 Collecting annotated-types>=0.6.0
+#9 450.3   Downloading annotated_types-0.8.0-py3-none-any.whl (13 kB)
+#9 474.0 Collecting pydantic-core==2.50.1
+#9 474.1   Downloading pydantic_core-2.50.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (2.2 MB)
+#9 483.8      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.2/2.2 MB 222.3 kB/s eta 0:00:00
+#9 484.0 Collecting typing-inspection>=0.4.4
+#9 484.0   Downloading typing_inspection-0.4.4-py3-none-any.whl (14 kB)
+#9 484.3 Collecting docstring-parser>=0.16
+#9 484.3   Downloading docstring_parser-0.18.0-py3-none-any.whl (22 kB)
+#9 484.7 Collecting typeguard>=4.0.0
+#9 484.8   Downloading typeguard-4.6.0-py3-none-any.whl (36 kB)
+#9 485.1 Collecting httpx2>=2.10.0
+#9 485.1   Downloading httpx2-2.16.0-py3-none-any.whl (97 kB)
+#9 485.5      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 97.9/97.9 kB 301.4 kB/s eta 0:00:00
+#9 485.9 Collecting jsonschema>=4.20.0
+#9 486.0   Downloading jsonschema-4.26.0-py3-none-any.whl (90 kB)
+#9 486.3      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 90.6/90.6 kB 340.4 kB/s eta 0:00:00
+#9 486.4 Collecting mcp-types==2.3.0
+#9 486.5   Downloading mcp_types-2.3.0-py3-none-any.whl (69 kB)
+#9 486.7      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 69.1/69.1 kB 300.1 kB/s eta 0:00:00
+#9 487.0 Collecting opentelemetry-api>=1.28.0
+#9 487.1   Downloading opentelemetry_api-1.45.1-py3-none-any.whl (60 kB)
+#9 487.3      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 60.3/60.3 kB 339.8 kB/s eta 0:00:00
+#9 487.6 Collecting pyjwt[crypto]>=2.10.1
+#9 487.6   Downloading pyjwt-2.15.1-py3-none-any.whl (33 kB)
+#9 487.9 Collecting python-multipart>=0.0.9
+#9 488.0   Downloading python_multipart-0.0.32-py3-none-any.whl (30 kB)
+#9 488.4 Collecting sse-starlette>=3.0.0
+#9 488.5   Downloading sse_starlette-3.6.0-py3-none-any.whl (17 kB)
+#9 489.0 Collecting starlette>=0.27
+#9 489.0   Downloading starlette-1.10.0-py3-none-any.whl (80 kB)
+#9 489.4      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 80.6/80.6 kB 226.3 kB/s eta 0:00:00
+#9 489.8 Collecting uvicorn>=0.31.1
+#9 489.9   Downloading uvicorn-0.54.0-py3-none-any.whl (87 kB)
+#9 490.3      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 87.4/87.4 kB 233.4 kB/s eta 0:00:00
+#9 490.4 Collecting six>=1.6
+#9 490.5   Downloading six-1.17.0-py2.py3-none-any.whl (11 kB)
+#9 490.8 Collecting tzdata
+#9 490.8   Downloading tzdata-2026.5-py2.py3-none-any.whl (347 kB)
+#9 492.2      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 348.0/348.0 kB 268.6 kB/s eta 0:00:00
+#9 492.3 Collecting httpcore2==2.16.0
+#9 492.4   Downloading httpcore2-2.16.0-py3-none-any.whl (85 kB)
+#9 492.8      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 85.1/85.1 kB 233.9 kB/s eta 0:00:00
+#9 492.9 Collecting truststore>=0.10
+#9 493.0   Downloading truststore-0.10.5-py3-none-any.whl (19 kB)
+#9 493.2 Collecting attrs>=22.2.0
+#9 493.3   Downloading attrs-26.1.0-py3-none-any.whl (67 kB)
+#9 493.6      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 67.5/67.5 kB 271.0 kB/s eta 0:00:00
+#9 493.7 Collecting jsonschema-specifications>=2023.03.6
+#9 493.8   Downloading jsonschema_specifications-2025.9.1-py3-none-any.whl (18 kB)
+#9 494.2 Collecting referencing>=0.28.4
+#9 494.3   Downloading referencing-0.37.0-py3-none-any.whl (26 kB)
+#9 497.8 Collecting rpds-py>=0.25.0
+#9 497.9   Downloading rpds_py-2026.9.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (375 kB)
+#9 499.3      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 375.4/375.4 kB 289.4 kB/s eta 0:00:00
+#9 501.7 Collecting cryptography>=3.4.0
+#9 501.7   Downloading cryptography-50.0.2-cp311-abi3-manylinux_2_34_x86_64.whl (4.8 MB)
+#9 514.4      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.8/4.8 MB 374.9 kB/s eta 0:00:00
+#9 514.6 Collecting click>=7.0
+#9 514.7   Downloading click-8.5.0-py3-none-any.whl (125 kB)
+#9 515.0      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 125.3/125.3 kB 472.4 kB/s eta 0:00:00
+#9 516.0 Collecting cffi>=2.0.0
+#9 516.1   Downloading cffi-2.1.1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (217 kB)
+#9 517.1      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 217.8/217.8 kB 217.3 kB/s eta 0:00:00
+#9 517.2 Collecting pycparser
+#9 517.3   Downloading pycparser-3.12-py3-none-any.whl (62 kB)
+#9 518.1      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 62.6/62.6 kB 73.2 kB/s eta 0:00:00
+#9 518.1 Building wheels for collected packages: prime-agent-runtime
+#9 518.1   Building wheel for prime-agent-runtime (pyproject.toml): started
+#9 518.2   Building wheel for prime-agent-runtime (pyproject.toml): finished with status 'done'
+#9 518.2   Created wheel for prime-agent-runtime: filename=prime_agent_runtime-0.1.0-py3-none-any.whl size=167080 sha256=25c2fc97a06c26ca332ee242e2a124600604c101a7c9d97c32ea323b680bcd1e
+#9 518.2   Stored in directory: /work/tmp/pip-ephem-wheel-cache-6lysicth/wheels/8f/3b/49/e70a860d6b774219df5aabdd49a632c20f3c1724a0c7f6ce9b
+#9 518.2 Successfully built prime-agent-runtime
+#9 518.5 Installing collected packages: urllib3, tzdata, typing-extensions, truststore, tomli, soupsieve, six, rpds-py, pyyaml, python-multipart, python-dotenv, pyjwt, pycparser, numpy, lxml, idna, h11, docstring-parser, dill, click, charset_normalizer, certifi, attrs, annotated-types, uvicorn, typing-inspection, typeguard, scipy, requests, referencing, python-dateutil, pydantic-core, opentelemetry-api, httpcore2, httpcore, cffi, beautifulsoup4, anyio, tyro, starlette, pydantic, pandas, jsonschema-specifications, httpx2, httpx, cryptography, sse-starlette, mcp-types, jsonschema, mcp, prime-agent-runtime
+#9 529.9 Successfully installed annotated-types-0.8.0 anyio-4.15.1 attrs-26.1.0 beautifulsoup4-4.15.0 certifi-2026.10.23 cffi-2.1.1 charset_normalizer-3.5.2 click-8.5.0 cryptography-50.0.2 dill-0.4.1 docstring-parser-0.18.0 h11-0.16.0 httpcore-1.0.9 httpcore2-2.16.0 httpx-0.28.1 httpx2-2.16.0 idna-3.20 jsonschema-4.26.0 jsonschema-specifications-2025.9.1 lxml-6.1.3 mcp-2.3.0 mcp-types-2.3.0 numpy-2.4.6 opentelemetry-api-1.45.1 pandas-3.1.0 prime-agent-runtime-0.1.0 pycparser-3.12 pydantic-2.14.1 pydantic-core-2.50.1 pyjwt-2.15.1 python-dateutil-3.0.0 python-dotenv-1.2.4 python-multipart-0.0.32 pyyaml-6.0.3 referencing-0.37.0 requests-2.34.2 rpds-py-2026.9.1 scipy-1.17.1 six-1.17.0 soupsieve-2.10 sse-starlette-3.6.0 starlette-1.10.0 tomli-2.5.0 truststore-0.10.5 typeguard-4.6.0 typing-extensions-4.16.0 typing-inspection-0.4.4 tyro-1.0.16 tzdata-2026.5 urllib3-2.8.0 uvicorn-0.54.0
+#9 DONE 531.1s
+
+#10 [6/6] RUN chmod -R a+rX /opt/probe
+#10 DONE 43.9s
+
+#11 exporting to image
+#11 exporting layers
+#11 exporting layers 24.8s done
+#11 exporting manifest sha256:4850a5c41f6f91a1358e7cce26f1b5f17800bf1a18c430da6c6cdd63eafc4cf5 0.0s done
+#11 exporting config sha256:17d389b4bf201c534e890009780dcd630c4dfd6d4c15b357b367dd3169fc21dd 0.0s done
+#11 exporting attestation manifest sha256:b3346dc4fb8579a904f0887cfc0cc69ffd630d7acce6d2f7a652aba717c6479c 0.0s done
+#11 exporting manifest list sha256:4a557c8103a576614be52724799f3e1dd697ca9794decd88b32385d38ca1450b 0.0s done
+#11 naming to docker.io/probe-6539/prime:0.10.1 done
+#11 unpacking to docker.io/probe-6539/prime:0.10.1
+#11 unpacking to docker.io/probe-6539/prime:0.10.1 3.6s done
+#11 DONE 28.5s

@@ -1,0 +1,39 @@
+{
+  "candidate": "prime-agent",
+  "scenario": "provider-error",
+  "transcript": "/out/acp.transcript.jsonl",
+  "markerCreated": false,
+  "initialize": {
+    "protocolVersion": 1,
+    "agentInfo": {
+      "name": "prime-agent",
+      "title": "Prime Agent",
+      "version": "0.10.1"
+    },
+    "authMethods": [],
+    "capabilities": {
+      "loadSession": false,
+      "promptCapabilities": {
+        "image": true,
+        "embeddedContext": true
+      },
+      "mcpCapabilities": {
+        "http": true
+      },
+      "sessionCapabilities": {
+        "close": {}
+      }
+    }
+  },
+  "sessionId": "a141b3a7-dd5d-44bb-af1a-1db984fb197b",
+  "sessionNewResultKeys": [
+    "sessionId",
+    "configOptions"
+  ],
+  "error": "rpc_error:{\"code\":-32603,\"message\":\"Internal error\",\"data\":{\"details\":\"prime-agent turn failed: 400 PROBE_PROVIDER_FAILURE\"}}",
+  "processExit": {
+    "code": null,
+    "signal": "SIGTERM"
+  },
+  "stderrTail": "pa-daemon: acp turn failed: 400 PROBE_PROVIDER_FAILURE\n"
+}

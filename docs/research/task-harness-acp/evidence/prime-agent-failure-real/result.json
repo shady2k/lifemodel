@@ -1,0 +1,111 @@
+{
+  "candidate": "prime-agent",
+  "scenario": "failure",
+  "client": "real",
+  "result": {
+    "outcome": "succeeded",
+    "result": "PROBE_FINAL: shell failed."
+  },
+  "events": [
+    {
+      "type": "step",
+      "text": "Running task"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "101849f8-0d76-4039-bca7-f49dc9fde693",
+        "parentSpanId": null,
+        "component": "task.model",
+        "startedAt": "2026-10-26T18:01:19.710Z",
+        "endedAt": null,
+        "status": null,
+        "attrs": {
+          "model": "task",
+          "durationMs": 0.1665530000000217
+        }
+      }
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "1e12fdca-cb1e-4405-8341-5b8a56c809a7",
+        "parentSpanId": "101849f8-0d76-4039-bca7-f49dc9fde693",
+        "component": "task.tool",
+        "startedAt": "2026-10-26T18:01:19.900Z",
+        "endedAt": null,
+        "status": null,
+        "attrs": {
+          "toolCallId": "call_probe_1",
+          "kind": "execute",
+          "title": "Python cell",
+          "hostStatus": "in_progress",
+          "durationMs": 0.007351000000198837
+        }
+      }
+    },
+    {
+      "type": "tool",
+      "name": "task_tool",
+      "status": "running"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "1e12fdca-cb1e-4405-8341-5b8a56c809a7",
+        "parentSpanId": "101849f8-0d76-4039-bca7-f49dc9fde693",
+        "component": "task.tool",
+        "startedAt": "2026-10-26T18:01:19.900Z",
+        "endedAt": "2026-10-26T18:01:19.935Z",
+        "status": "ok",
+        "attrs": {
+          "toolCallId": "call_probe_1",
+          "kind": "execute",
+          "title": "Python cell",
+          "hostStatus": "completed",
+          "durationMs": 35.61282299999948,
+          "outputTail": "PROBE_SHELL_FAILURE\n\n\nTraceback (most recent call last):\n\n  File \"<cell-2>\", line 4, in <module>\n    if result.exit_code != 0: raise RuntimeError(f'Shell exit {result.exit_code}')\n                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\nRuntimeError: Shell exit 7\n"
+        }
+      }
+    },
+    {
+      "type": "tool",
+      "name": "task_tool",
+      "status": "completed"
+    },
+    {
+      "type": "step",
+      "text": "Task is working"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "101849f8-0d76-4039-bca7-f49dc9fde693",
+        "parentSpanId": null,
+        "component": "task.model",
+        "startedAt": "2026-10-26T18:01:19.710Z",
+        "endedAt": "2026-10-26T18:01:19.955Z",
+        "status": "ok",
+        "attrs": {
+          "model": "task",
+          "stopReason": "end_turn",
+          "durationMs": 230.92982399999983
+        }
+      }
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "b97fd14c-79d8-4a8f-a72f-d7d792f80b19",
+        "parentSpanId": "101849f8-0d76-4039-bca7-f49dc9fde693",
+        "component": "task.completion",
+        "startedAt": "2026-10-26T18:01:19.955Z",
+        "endedAt": "2026-10-26T18:01:19.955Z",
+        "status": "ok",
+        "attrs": {
+          "finalText": "PROBE_FINAL: shell failed."
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,133 @@
+{
+  "goose-musl-cancel-raw": {
+    "allConnectCalls": 8,
+    "inetConnectCalls": 6,
+    "nonLoopbackConnectCalls": 0,
+    "nonLoopbackExcerpts": []
+  },
+  "goose-musl-failure-raw": {
+    "allConnectCalls": 8,
+    "inetConnectCalls": 6,
+    "nonLoopbackConnectCalls": 0,
+    "nonLoopbackExcerpts": []
+  },
+  "goose-musl-failure-real": {
+    "allConnectCalls": 6,
+    "inetConnectCalls": 4,
+    "nonLoopbackConnectCalls": 0,
+    "nonLoopbackExcerpts": []
+  },
+  "goose-musl-permission-allow-raw": {
+    "allConnectCalls": 8,
+    "inetConnectCalls": 6,
+    "nonLoopbackConnectCalls": 0,
+    "nonLoopbackExcerpts": []
+  },
+  "goose-musl-permission-raw": {
+    "allConnectCalls": 6,
+    "inetConnectCalls": 6,
+    "nonLoopbackConnectCalls": 0,
+    "nonLoopbackExcerpts": []
+  },
+  "goose-musl-permission-real": {
+    "allConnectCalls": 6,
+    "inetConnectCalls": 6,
+    "nonLoopbackConnectCalls": 0,
+    "nonLoopbackExcerpts": []
+  },
+  "goose-musl-provider-error-raw": {
+    "allConnectCalls": 7,
+    "inetConnectCalls": 7,
+    "nonLoopbackConnectCalls": 0,
+    "nonLoopbackExcerpts": []
+  },
+  "goose-musl-provider-error-real": {
+    "allConnectCalls": 6,
+    "inetConnectCalls": 6,
+    "nonLoopbackConnectCalls": 0,
+    "nonLoopbackExcerpts": []
+  },
+  "goose-musl-startup-raw": {
+    "allConnectCalls": 4,
+    "inetConnectCalls": 4,
+    "nonLoopbackConnectCalls": 0,
+    "nonLoopbackExcerpts": []
+  },
+  "goose-musl-success-raw": {
+    "allConnectCalls": 8,
+    "inetConnectCalls": 6,
+    "nonLoopbackConnectCalls": 0,
+    "nonLoopbackExcerpts": []
+  },
+  "goose-musl-success-real": {
+    "allConnectCalls": 10,
+    "inetConnectCalls": 8,
+    "nonLoopbackConnectCalls": 0,
+    "nonLoopbackExcerpts": []
+  },
+  "goose-startup-raw": {
+    "allConnectCalls": 10,
+    "inetConnectCalls": 8,
+    "nonLoopbackConnectCalls": 4,
+    "nonLoopbackExcerpts": [
+      "29    17:57:41.304357 connect(11, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr(\"192.168.0.30\")}, 16) = -1 ENETUNREACH (Network is unreachable)",
+      "29    17:57:41.304599 connect(11, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr(\"192.168.0.30\")}, 16) = -1 ENETUNREACH (Network is unreachable)",
+      "29    17:57:41.304814 connect(11, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr(\"192.168.0.30\")}, 16) = -1 ENETUNREACH (Network is unreachable)",
+      "29    17:57:41.304977 connect(11, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr(\"192.168.0.30\")}, 16) = -1 ENETUNREACH (Network is unreachable)"
+    ]
+  },
+  "prime-agent-cancel-raw": {
+    "allConnectCalls": 36,
+    "inetConnectCalls": 2,
+    "nonLoopbackConnectCalls": 0,
+    "nonLoopbackExcerpts": []
+  },
+  "prime-agent-failure-raw": {
+    "allConnectCalls": 34,
+    "inetConnectCalls": 3,
+    "nonLoopbackConnectCalls": 0,
+    "nonLoopbackExcerpts": []
+  },
+  "prime-agent-failure-real": {
+    "allConnectCalls": 32,
+    "inetConnectCalls": 3,
+    "nonLoopbackConnectCalls": 0,
+    "nonLoopbackExcerpts": []
+  },
+  "prime-agent-permission-raw": {
+    "allConnectCalls": 33,
+    "inetConnectCalls": 3,
+    "nonLoopbackConnectCalls": 0,
+    "nonLoopbackExcerpts": []
+  },
+  "prime-agent-provider-error-raw": {
+    "allConnectCalls": 35,
+    "inetConnectCalls": 2,
+    "nonLoopbackConnectCalls": 0,
+    "nonLoopbackExcerpts": []
+  },
+  "prime-agent-provider-error-real": {
+    "allConnectCalls": 28,
+    "inetConnectCalls": 2,
+    "nonLoopbackConnectCalls": 0,
+    "nonLoopbackExcerpts": []
+  },
+  "prime-agent-startup-raw": {
+    "allConnectCalls": 25,
+    "inetConnectCalls": 0,
+    "nonLoopbackConnectCalls": 0,
+    "nonLoopbackExcerpts": []
+  },
+  "prime-agent-success-raw": {
+    "allConnectCalls": 36,
+    "inetConnectCalls": 3,
+    "nonLoopbackConnectCalls": 0,
+    "nonLoopbackExcerpts": []
+  },
+  "prime-agent-success-real": {
+    "allConnectCalls": 33,
+    "inetConnectCalls": 3,
+    "nonLoopbackConnectCalls": 0,
+    "nonLoopbackExcerpts": []
+  }
+}

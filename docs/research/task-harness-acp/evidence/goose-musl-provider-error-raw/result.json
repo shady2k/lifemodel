@@ -1,0 +1,69 @@
+{
+  "candidate": "goose",
+  "scenario": "provider-error",
+  "transcript": "/out/acp.transcript.jsonl",
+  "markerCreated": false,
+  "initialize": {
+    "protocolVersion": 1,
+    "agentInfo": {
+      "name": "goose",
+      "version": "1.56.0"
+    },
+    "authMethods": [
+      "goose-provider"
+    ],
+    "capabilities": {
+      "loadSession": true,
+      "promptCapabilities": {
+        "image": true,
+        "audio": false,
+        "embeddedContext": true
+      },
+      "mcpCapabilities": {
+        "http": true,
+        "sse": false
+      },
+      "sessionCapabilities": {
+        "list": {},
+        "delete": {},
+        "close": {}
+      },
+      "auth": {},
+      "_meta": {
+        "goose": {
+          "recipeParameterScopes": {}
+        }
+      }
+    }
+  },
+  "sessionId": "20261026_1",
+  "sessionNewResultKeys": [
+    "sessionId",
+    "modes",
+    "configOptions",
+    "_meta"
+  ],
+  "durationMs": 7803,
+  "stopReason": "end_turn",
+  "promptResponseKeys": [
+    "stopReason"
+  ],
+  "toolObservedAfterMs": null,
+  "cancelSentAfterMs": null,
+  "startMarker": false,
+  "completionMarker": false,
+  "updateKinds": {
+    "session_info_update": 2,
+    "usage_update": 2,
+    "available_commands_update": 1,
+    "agent_message_chunk": 1
+  },
+  "toolCallStatuses": [],
+  "permissionRequests": [],
+  "exitAfterPrompt": null,
+  "processExit": {
+    "code": null,
+    "signal": "SIGTERM"
+  },
+  "stderrTail": ""
+}

@@ -1,0 +1,106 @@
+lifemodel-heavy: waiting for the machine (docker build -f docker/workbench/Dockerfile -t probe-6539/workbench:stock .)
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 5.11kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+#2 DONE 0.0s
+
+#3 [internal] load build context
+#3 DONE 0.0s
+
+#4 [cli-build 1/8] FROM docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+#4 resolve docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 0.0s done
+#4 DONE 0.0s
+
+#5 [ui-build  1/15] FROM docker.io/library/node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+#5 resolve docker.io/library/node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 0.0s done
+#5 CACHED
+
+#6 [ui-build  2/15] WORKDIR /build
+#6 CACHED
+
+#3 [internal] load build context
+#3 transferring context: 4.53kB 0.1s done
+#3 DONE 0.1s
+
+#7 [cli-build 5/8] COPY loader/tsconfig.json ./
+#7 CACHED
+
+#8 [cli-build 3/8] COPY loader/package.json loader/package-lock.json ./
+#8 CACHED
+
+#9 [cli-build 4/8] RUN npm ci --no-audit --no-fund --ignore-scripts --no-update-notifier --loglevel=http
+#9 CACHED
+
+#10 [stage-1  6/17] COPY docker/workbench/ /opt/lifemodel/docker/workbench/
+#10 CACHED
+
+#11 [cli-build 7/8] COPY loader/src/ ./src/
+#11 CACHED
+
+#12 [stage-1  5/17] COPY scripts/task-agent-provision.mjs scripts/task-agent-paths.mjs /opt/lifemodel/scripts/
+#12 CACHED
+
+#13 [stage-1 12/17] COPY --from=cli-build /build/package.json /opt/lifemodel/loader/package.json
+#13 CACHED
+
+#14 [stage-1  2/17] RUN rm -f /etc/apt/sources.list.d/debian.sources  && rm -rf /var/lib/apt/lists/*  && /usr/lib/apt/apt-helper download-file http://snapshot.debian.org/archive/debian/20261015T000000Z/dists/bookworm/InRelease /tmp/debian.InRelease "SHA256:77737fa4b34f2693e982cc9ee35736816c35a7778fc2d326cc1bbf5b301fe1aa"  && echo "77737fa4b34f2693e982cc9ee35736816c35a7778fc2d326cc1bbf5b301fe1aa  /tmp/debian.InRelease" | sha256sum -c -  && printf 'deb http://snapshot.debian.org/archive/debian/20261015T000000Z bookworm main\n' > /etc/apt/sources.list  && apt-get update -o APT::Update::Error-Mode=any  && cmp /tmp/debian.InRelease /var/lib/apt/lists/*_InRelease  && apt-get install -y --no-install-recommends ca-certificates curl git build-essential python3 ripgrep strace  && rm -rf /var/lib/apt/lists/* /tmp/debian.InRelease
+#14 CACHED
+
+#15 [stage-1  7/17] RUN node /opt/lifemodel/scripts/task-agent-provision.mjs > /tmp/install-agents.sh  && sh -ec "$(cat /tmp/install-agents.sh)"  && rm /tmp/install-agents.sh
+#15 CACHED
+
+#16 [cli-build 6/8] COPY src/ports/task-agent-validation.* /src/ports/
+#16 CACHED
+
+#17 [cli-build 2/8] WORKDIR /build
+#17 CACHED
+
+#18 [stage-1  3/17] COPY src/ports/task-harness-registry.json /opt/lifemodel/src/ports/task-harness-registry.json
+#18 CACHED
+
+#19 [stage-1  9/17] COPY package.json package-lock.json ./
+#19 CACHED
+
+#20 [stage-1 10/17] RUN npm ci --legacy-peer-deps --no-audit --no-fund --ignore-scripts --no-update-notifier --loglevel=http  && test -d /opt/lifemodel/node_modules  && npm cache clean --force
+#20 CACHED
+
+#21 [cli-build 8/8] RUN npm run build
+#21 CACHED
+
+#22 [stage-1 16/17] RUN mkdir -p /work/home /work/tmp  && chown -R 1000:1000 /work
+#22 CACHED
+
+#23 [stage-1 13/17] COPY --from=cli-build /build/dist/storage-cli-main.js /build/dist/storage-cli.js /build/dist/task-*.js /opt/lifemodel/loader/dist/
+#23 CACHED
+
+#24 [stage-1  8/17] WORKDIR /opt/lifemodel
+#24 CACHED
+
+#25 [stage-1 14/17] COPY --chown=root:root --chmod=0555 docker/loader/lifemodel-storage /usr/local/bin/lifemodel-storage
+#25 CACHED
+
+#26 [stage-1 15/17] COPY --chown=root:root --chmod=0555 docker/workbench/lifemodel-task-launcher /usr/local/bin/lifemodel-task-launcher
+#26 CACHED
+
+#27 [stage-1 11/17] RUN --network=none ONNXRUNTIME_NODE_INSTALL_CUDA=skip npm rebuild esbuild onnxruntime-node protobufjs sharp --foreground-scripts
+#27 CACHED
+
+#28 [stage-1  4/17] COPY src/ports/task-agent-validation.mjs /opt/lifemodel/src/ports/task-agent-validation.mjs
+#28 CACHED
+
+#29 [stage-1 17/17] WORKDIR /work
+#29 CACHED
+
+#30 exporting to image
+#30 exporting layers done
+#30 exporting manifest sha256:a9ee47e0d4e0bda06767db6809171e1673ed53843b356fb80a7c7e603a9a1da3 done
+#30 exporting config sha256:5874c50b39c41560fd618fdc438139721e9e887d7197d8f9d85c18c3e41c0db9 done
+#30 exporting attestation manifest sha256:a02ed911ad6ef81aa5475a33271b0ee1ef01a92c7ec9cbc13a779cfe4ec99293 0.0s done
+#30 exporting manifest list sha256:5fe107c1dd8f56870a658cda7a93ebddc9e41768ca089a3168a0113fa5184728 0.0s done
+#30 naming to docker.io/probe-6539/workbench:stock done
+#30 unpacking to docker.io/probe-6539/workbench:stock 0.0s done
+#30 DONE 0.1s

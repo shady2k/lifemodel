@@ -1,0 +1,50 @@
+{
+  "goose": {
+    "repo": "block/goose",
+    "version": "v1.56.0",
+    "sourceCommit": "9949cf926cd42f1d128b9991ed23a496ecace896",
+    "mainCommit": "0a2f30681566ec83e6359c375c7f5b36aa3567b2",
+    "mainComparison": {
+      "status": "diverged",
+      "ahead_by": 23,
+      "behind_by": 3
+    },
+    "asset": "goose-x86_64-unknown-linux-gnu.tar.gz",
+    "url": "https://github.com/aaif-goose/goose/releases/download/v1.56.0/goose-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "225a929b35b5130fb691eafdb50be236f2c0a150019b53973775938f8f19c281",
+    "releasePublishedAt": "2026-10-23T15:49:34Z",
+    "binarySha256": "9f99b4cc21096ef82fdd5533579061c4434665f5eab3d23b1f4d7cec1251e277"
+  },
+  "prime-agent": {
+    "repo": "PrimeIntellect-ai/prime-agent",
+    "version": "v0.10.1",
+    "sourceCommit": "8aac8692456c00c01d4e53e60e6d3347a3506559",
+    "mainCommit": "c4c238ca025e382d96fb5f37e6328ca77fb82ef3",
+    "mainComparison": {
+      "status": "ahead",
+      "ahead_by": 30,
+      "behind_by": 0
+    },
+    "asset": "prime-agent-0.10.1-linux-x64.tar.gz",
+    "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.10.1/prime-agent-0.10.1-linux-x64.tar.gz",
+    "sha256": "21ec219183f4134dd23dce9572102e69456066fe374846525561c776d4d1945c",
+    "releasePublishedAt": "2026-10-21T23:33:59Z",
+    "binarySha256": "1fbb506f54a8e9af1f0d123e521d13a765bce34883707c69656f06d5951b314c"
+  },
+  "goose-musl": {
+    "repo": "block/goose",
+    "version": "v1.56.0",
+    "sourceCommit": "9949cf926cd42f1d128b9991ed23a496ecace896",
+    "mainCommit": "0a2f30681566ec83e6359c375c7f5b36aa3567b2",
+    "mainComparison": {
+      "status": "diverged",
+      "ahead_by": 23,
+      "behind_by": 3
+    },
+    "asset": "goose-x86_64-unknown-linux-musl.tar.gz",
+    "url": "https://github.com/aaif-goose/goose/releases/download/v1.56.0/goose-x86_64-unknown-linux-musl.tar.gz",
+    "sha256": "80e7716fef3dccc3fef6850e24e5b846b7340e10e13098e53b4f47769f5803ef",
+    "releasePublishedAt": "2026-10-23T15:49:34Z",
+    "binarySha256": "d5d26c4cb24858d0cbc10857adbc5709b6a75b612761b67acf2ad12048a47494"
+  }
+}
