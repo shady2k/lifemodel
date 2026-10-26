@@ -1,7 +1,8 @@
-# Task-to-core live channel
+# Task live channel
 
 Task: lifemodel-653.8.8. This is the task-to-core direction of ADR-014 D2.
-It is a source contract, not deployed stage acceptance. Steering remains stage 4.
+The task-to-core direction is a source contract, not deployed stage acceptance.
+The core-to-task direction below is the stage-4 design, not yet implemented.
 
 ## Transport and identity
 
@@ -9,7 +10,8 @@ The launcher posts one JSON frame to `https://core.lifemodel.svc:8447/task/event
 HTTP/1.1 keep-alive gives a reusable outbound TLS channel with one explicit HTTP
 200 ACK per frame. Unlike a bidirectional streaming body, this bounds body intake,
 allows a clear 429 with Retry-After, and does not tie up a worker while a peer holds
-an idle connection. There is no command route or task ingress port.
+an idle connection. Today there is no command route or task ingress port;
+stage 4 adds bounded outbound long-poll, never a Pod ingress port.
 
 The server leaf is issued by the instance CA, stored in the fixed
 `core-task-channel-tls` Secret, and mounted only into core. The listener reloads
@@ -77,7 +79,7 @@ time is checked after waits. Reads emit no mailbox row or Signal. Responses use
 that allowance against connection/process byte reservations until completion.
 Lower configured byte budgets lower the response allowance. Oversized results
 fail closed with a safe 503 code, before any briefing bytes are sent. Request
-bodies, query strings and unknown routes are refused. Refusal logs name a fixed route (unknown paths are `unknown`), and authenticated
+bodies, query strings and unknown routes are refused on these existing reads. Refusal logs name a fixed route (unknown paths are `unknown`), and authenticated
 frames include canonical generated task/trace locators even if the authority
 lookup fails. Arbitrary wire locator text is omitted until storage resolves it.
 These locators are diagnostic input, not a grant of authority. Errors/logs contain only
@@ -127,6 +129,36 @@ A new frame after a stored terminal report is refused. An exact duplicate of an
 already stored frame can replay its ACK while current identity/intent still
 permits access. Terminal/revoked task authority does not become reusable merely
 because a caller presents an old message ID.
+
+## Stage 4 commands and questions
+
+The [ADR amendment](../../adr/014-task-runtime.md#amendment--2026-10-27-live-steering-behind-the-harness-port)
+adds a bounded long-poll from launcher to this listener and outbound ACK/receipt
+posts. Fresh task-audience identity, won claim, canonical intent and deadline
+checks apply on each request and again before delivery after a wait. Reserve
+separate bounded wait capacity: held polls must not occupy event ACK or owner
+intake workers or SQL connections. Close them on revocation/shutdown. Respect
+the frame, per-task and process bounds below in both directions.
+
+Core commits immutable commands before delivery: task/attempt, command ID,
+per-direction sequence, text and optional question ID. Deliver in per-task
+order. Replay outstanding rows by exact IDs, not a contiguous sequence
+watermark; changed content under an ID or sequence conflicts. The launcher
+records dispatch intent before native send and disposition before ACK. Core
+commits the ACK before retiring a delivery. Lost ACK replays the recorded
+disposition, not the native operation; ambiguous Prime dispatch is uncertain
+and fails the task. Later inserted/deferred/failed/uncertain receipts use
+separate immutable, idempotent correlated frames. A lost Pod is not restarted
+to replay commands. Terminal or revoked attempts refuse new commands.
+
+`question` joins `step` and `terminal` in task-to-core frames, with stable
+question ID and nonempty bounded question text (at most 1024 UTF-8 bytes; no
+CR, LF or NUL). Its ACK, duplicate/conflict and Signal rules match `step`.
+The launcher MCP question tool returns promptly once the question frame is
+durably ACKed. Cognition resolves the Signal identifiers to mailbox content;
+it can ask the owner or send an answer through the task control surface. An
+answer is a command correlated to that question, not a blocking MCP response.
+A step uses the same durable frame mechanism. Task claims remain untrusted.
 
 ## Disposable task trace route
 
@@ -237,8 +269,8 @@ and exact last message IDs; these are not contiguous sequence watermarks.
 The replay scan selects every committed unsignalled row, so a late commit or
 sequence gap cannot be skipped. Core emits a normal `task_report` Signal from
 `task.channel` through the existing Valkey bus. Signal data contains task,
-attempt and message IDs plus `eventKind`, not report content. Step reports remain
-available for later status views. Terminal reports identify finalization work.
+attempt and message IDs plus `eventKind`, not report content. Step and question reports remain
+available for cognition and later status views. Terminal reports identify finalization work.
 The [finalizer](task-finalize.md) consumes terminal reports before tick-local
 completion and scans all unfinalized terminal rows at startup; this does not wake the old
 Motor Cortex cognition path or introduce another event model. `signalled_at` proves

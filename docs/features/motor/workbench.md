@@ -3,8 +3,8 @@
 Task: lifemodel-653.8.3. `docker/workbench/Dockerfile` builds the OpenCode workbench of
 [ADR-014 D1/T02](../../adr/014-task-runtime.md). It is **not** the core image.
 `src/ports/task-harness-registry.json` currently configures only OpenCode.
-A second ACP agent for this same image is lifemodel-653.9 work, with the candidate
-probe tracked in lifemodel-653.9.1. No second task image is selected.
+Stage 4 adds prime-agent 0.10.1 to this same image; this is planned, not yet
+implemented. No second task image is selected.
 
 ## Contents and pins
 
@@ -122,6 +122,29 @@ permits only the ten literal endpoint/space/identity-file/CA-file names in the
 [task launch contract](task-launch.md). Arbitrary Job env, valueFrom and envFrom
 remain forbidden. The six channel/model names are consumed by the launcher handshake,
 briefing/channel client and model relay. Tokens/CA are read-only projected directories, never baked.
+
+## Stage 4: prime-agent and local steering plugin
+
+The registry gains `prime-agent` with ACP command `--mode acp --offline
+--no-session --provider task --model task`, exact version/output, adapter module,
+contract fixture and architecture-specific verified archive pins. The probe
+records the x86_64 archive SHA-256
+`21ec219183f4134dd23dce9572102e69456066fe374846525561c776d4d1945c`;
+it did not verify arm64. Fail closed for missing pins. Extend provisioning to
+include the adjacent bundled distribution, local runtime and baked Python
+packages, not just the executable. Bake non-secret models/settings templates
+and offline controls; render the per-task relay URL and private daemon socket
+into private writable configuration. Offline start must make no attempted
+external bootstrap or installation. The setting snapshots the selected
+registry name into the accepted task; no caller or Job environment changes.
+
+Bake the local OpenCode steering plugin; it is the sole exception to the no
+external plugins rule, not an online dependency. ACP supplies launcher MCP
+tools at session creation. The two adapters and scripted fixture share the
+contract suite. Prime's ACP permission gap and completed Python exception are
+known probe limitations accepted by the owner; the barrier's daemon idle/result
+signal remains unverified until implementation tests. See the
+[ADR amendment](../../adr/014-task-runtime.md#amendment--2026-10-27-live-steering-behind-the-harness-port).
 
 ## CI and release
 
