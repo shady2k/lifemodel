@@ -38,7 +38,9 @@ SQL/identity workers. Neither caches positive authority.
 ## Pod-local harness port
 
 `loader/src/task-harness.ts` declares `TaskHarness.start(briefing)`, `abort()`,
-`steer(text)` and `wrap()`. Stage 3 returns `not_supported` for steer/wrap.
+`steer(text)` and `wrap()`. `AcpTaskHarness` in `loader/src/task-acp.ts` returns
+`not_supported` for steer/wrap; live steering remains lifemodel-653.9 work and
+soft-stop control remains lifemodel-653.10 work.
 Normalized events are short `step`, `tool`, safe-code `error` and best-effort
 `trace` events. Trace callbacks cannot gate the harness protocol or outcome. One
 start returns one semantic result: `succeeded`, `failed` or `aborted`, with

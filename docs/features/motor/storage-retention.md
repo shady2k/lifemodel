@@ -302,6 +302,7 @@ exercise projection/defaults/RBAC and bounded authenticated backend enumeration.
 Historically this retention leaf did not implement its sibling scopes. Current
 main includes [consistent storage-set backup/restore](storage-restore.md) (.7.4)
 and [bounded admission/fair workers](storage-objects.md#transfer-bounds) (.7.7).
-Stage-3 task lifecycle and terminal integration remain pending. Repository
-checks do not replace independent stage review, deployed restore checks or the
-RSS/network acceptance walks.
+`src/core/task-launch.ts` integrates allocation and Job lifecycle;
+`src/core/task-finalize.ts` seals storage before committing terminal outcomes.
+Repository checks do not replace independent stage review, deployed restore
+checks or the RSS/network acceptance walks.

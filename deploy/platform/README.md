@@ -27,10 +27,13 @@ tools, this release's offline dev dependencies, storage CLI and task launcher.
 It is not a running platform Deployment. Its release digest is the core's
 `LIFEMODEL_TASK_WORKBENCH_IMAGE` launch input in
 `applications/lifemodel/kustomization.yaml`, pinned before loader seed bundling.
-The Job adapter consumes it in 653.8.5; the launcher stub fails closed until
-653.8.7. See [the workbench contract](../../docs/features/motor/workbench.md)
-for pins, private HOME/work-volume paths and offline checks. Prime Agent joins
-this one image in stage 4, not in the stage-3 image.
+`src/core/kubernetes-task-executor.ts` uses it for the Job container;
+`loader/src/task-launcher-main.ts` runs the launcher handshake and accepted harness.
+See [the workbench contract](../../docs/features/motor/workbench.md)
+for pins, private HOME/work-volume paths and offline checks.
+`src/ports/task-harness-registry.json` currently configures only OpenCode; a second
+ACP agent for this same image remains lifemodel-653.9 work (candidate probe:
+lifemodel-653.9.1).
 
 CI also publishes the workbench on a push to main whose inputs changed, as
 `ghcr.io/shady2k/lifemodel-workbench:main` and `:<commit sha>`
@@ -345,16 +348,19 @@ verification. No plaintext listener serves task or trusted operations.
   Pod verification. Revoke commits the revision and keyed receipt, then cancels
   active streams before ACK. A missing space is `404 space_not_found`; a stale
   expected revision is `409 revision_conflict`. The wired core retention client
-  persists owner warnings before confirming them; task lifecycle/terminal
-  integration remains stage 3.
+  persists owner warnings before confirming them. `src/core/task-launch.ts`
+  integrates allocation and Job lifecycle; `src/core/task-finalize.ts` seals
+  storage before committing terminal outcomes.
 - Trusted read 8445: `GET /identity`, audiences
   `lifemodel-core-storage-read` and `lifemodel-web-storage-read`, matched to
   `lifemodel:core` and `lifemodel:web` respectively with fresh bound Pod checks.
   Web cannot invoke control. Core also has marked, non-tombstoned object
   GET/list routes on this listener, with fresh verification on each chunk.
-  Web has no object-route permission yet: owner download authorization and the
-  same-origin browser content boundary remain S08 integration work, not an
-  existing owner download service.
+  Web has only `GET /artifacts/:artifactId`, resolved by
+  `loader/src/storage-seal.ts`; it has no generic object GET/list permission.
+  `src/web/server.ts` authorizes owner attachment downloads and serves them
+  through the authenticated same-origin browser content boundary, using
+  `src/storage/task-artifact-reader.ts` for storage reads.
 
 `storage-module-access` and the caller-side egress policies admit these exact
 peers, combining namespaceSelector AND podSelector (the Pod label is

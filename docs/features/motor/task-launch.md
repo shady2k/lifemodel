@@ -96,8 +96,10 @@ and discards only the worker registry's checked-out SQL clients. The worker drai
 inside the core's shared shutdown deadline before pool close. Unrelated service
 and core clients remain available for the drained turn's commit.
 
-`requestSoftStop` records durable intent only in stage 3. It does not claim wrap,
-revocation or a shortened native deadline. Stage 5 owns that complete operation.
+`requestSoftStop` in `src/core/task-launch.ts` records durable intent only through
+`recordSoftStop` in `src/storage/postgres-task-registry.ts`. The Kubernetes
+executor acknowledges that intent without wrap, revocation or a shortened native
+deadline. The complete soft-stop operation remains lifemodel-653.10 work.
 
 ## Evidence and next seams
 
@@ -107,23 +109,28 @@ bodies. The Kubernetes and fake executors share the caller contract. Tests also
 evaluate the rendered Job against the actual A0 CEL expressions; this is not a
 claim of a deployed API-server admission test.
 
-- .8.6 verifies live Pod/Job identity and grants the durable once-only start.
-- .8.7 supplies the launcher handshake and harness implementation; today's
-  launcher remains inert.
-- .8.8 supplies the durable live channel.
-- .8.9 owns sealing, terminal outcome, exact-UID final deletion, confirmed Pod
-  termination and reservation release. The [finalizer](task-finalize.md) now owns these steps. No terminal outcome is inferred here.
+- `loader/src/task-identity.ts` verifies live Pod/Job identity and grants the
+  durable once-only start.
+- `loader/src/task-launcher.ts` performs the launcher handshake and starts the
+  accepted harness through `loader/src/task-harness-factory.ts`.
+- `src/core/task-channel.ts` serves the durable live channel.
+- `src/core/task-finalize.ts`, the [finalizer](task-finalize.md), owns sealing,
+  terminal outcome, exact-UID final deletion, confirmed Pod termination and
+  reservation release. No terminal outcome is inferred here.
 
 ## Local registry delivery
 
-The release publishes the workbench at the digest-pinned public origin
-`ghcr.io/shady2k/lifemodel-workbench`. The loader's first-start `workbench-import`
-phase copies its exact OCI bytes to the platform's zot before creating the
-application sources. Jobs name only
+`loader/src/workbench-task.ts` runs the workbench import as an independent
+background loader task, not a first-start prerequisite. `loader/src/app.ts`
+supplies the configured source registry and repository to
+`loader/src/workbench-import.ts`, which copies and verifies the release-pinned
+OCI bytes in the platform's zot. Jobs name only
 `zot.lifemodel-system.svc:5001/lifemodel/workbench@sha256:<digest>`.
 The digest is unchanged; no tag resolution or public-registry fallback happens
 at Job start. Both core validation and both CEL guards reject ghcr.io and all
-other repositories. Missing/mismatched imports block bootstrap and retry.
+other repositories. Missing/mismatched imports refuse new task acceptance through
+`src/core/task-workbench.ts`; the background importer retries without blocking
+application bootstrap.
 
 The node's installer-written k3s mirror routes that authority to
 `http://10.43.0.51:5001`. Pull is anonymous, while the loader reads the sole

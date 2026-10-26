@@ -74,8 +74,9 @@ changing the accepted request.
 
 ## FIFO admission and slots
 
-Stage 3 implements normal FIFO only. `urgent` is reserved and defaults to false;
-no urgent setter, queue limit or stop operation is introduced here.
+`src/storage/postgres-task-registry.ts` admits normal FIFO only. `urgent` is
+reserved and defaults to false; there is no urgent setter or queue limit.
+Full stop and urgent-lane controls remain lifemodel-653.10 work.
 `admitNext` locks the singleton admission row, reads the reservation count, and
 commits one `queued → starting` transition with `slot_reserved=true`. Concurrent
 contenders cannot spend the same capacity. Accept uses the same lock so accepted

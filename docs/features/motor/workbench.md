@@ -1,8 +1,10 @@
 # Task workbench image
 
-Task: lifemodel-653.8.3. This is the stage-3 OpenCode workbench of
+Task: lifemodel-653.8.3. `docker/workbench/Dockerfile` builds the OpenCode workbench of
 [ADR-014 D1/T02](../../adr/014-task-runtime.md). It is **not** the core image.
-A second ACP agent joins this same image in stage 4. No second task image is selected.
+`src/ports/task-harness-registry.json` currently configures only OpenCode.
+A second ACP agent for this same image is lifemodel-653.9 work, with the candidate
+probe tracked in lifemodel-653.9.1. No second task image is selected.
 
 ## Contents and pins
 
