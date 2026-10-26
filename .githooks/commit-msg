@@ -30,8 +30,10 @@ for f in adapter.mjs commits.mjs config.json; do
         exit 1
     fi
 done
-if [ ! -f "$gate/rules/check-commits.mjs" ]; then
-    printf 'commit-msg: %s is missing from this checkout; run npm run connect\n' "$gate/rules/check-commits.mjs" >&2
-    exit 1
-fi
+for f in check-commits.mjs check.mjs time-format.mjs regular-file.mjs argv.mjs; do
+    if [ ! -f "$gate/rules/$f" ]; then
+        printf 'commit-msg: %s is missing from this checkout; run npm run connect\n' "$gate/rules/$f" >&2
+        exit 1
+    fi
+done
 exec node "$gate/commits.mjs" --message-file "$1"

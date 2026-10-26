@@ -28,6 +28,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { landedFor, mainLine } from './landed.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MECHANISM = join(HERE, 'sync', 'tracker-sync.mjs');
@@ -158,17 +159,40 @@ export function storeDir() {
 // A place a store can be read from: this machine's store worktree, or a ref's
 // tree (CI fetches refs/tracker/state; it has no store of its own).
 function placeOf(ref) {
-  if (ref) {
-    return {
-      name: ref,
-      read: (p) => {
-        const r = spawnSync('git', ['show', `${ref}:${p}`], { encoding: 'utf8', maxBuffer: 1 << 30 });
-        return r.status === 0 ? r.stdout : null;
-      },
-    };
-  }
+  const show = (cwd, spec) => {
+    const r = spawnSync('git', ['show', spec], { cwd, encoding: 'utf8', maxBuffer: 1 << 30 });
+    return r.status === 0 ? r.stdout : null;
+  };
+  if (ref) return { name: ref, read: (p) => show(undefined, `${ref}:${p}`), at: (oid, p) => show(undefined, `${oid}:${p}`) };
   const store = storeDir();
-  return { name: store, read: (p) => (existsSync(join(store, p)) ? readFileSync(join(store, p), 'utf8') : null) };
+  return {
+    name: store,
+    read: (p) => (existsSync(join(store, p)) ? readFileSync(join(store, p), 'utf8') : null),
+    at: (oid, p) => show(store, `${oid}:${p}`),
+  };
+}
+
+// A recording is either a whole state (sections, the format before mechanism
+// 0.126.0) or a reference to the store commit that holds it
+// (`tracker-sync-recording/1`, JSON naming `store`). Both read to the items.
+const RECORDING_FORMAT = 'tracker-sync-recording/1';
+function rowsOfRecording(place, text, sha) {
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{')) {
+    let d = null;
+    try {
+      d = JSON.parse(trimmed);
+    } catch {
+      /* not a reference: read as sections below, which says what is wrong */
+    }
+    if (d && d.format === RECORDING_FORMAT && typeof d.store === 'string') {
+      const items = place.at(d.store, EXPORT);
+      if (items === null)
+        throw new Error(`the recording of ${sha} names store commit ${d.store.slice(0, 12)}, which ${place.name} does not hold (fetch the tracker ref's history)`);
+      return parseJsonl(items);
+    }
+  }
+  return parseJsonl(exportSection(text, `the recording of ${sha}`));
 }
 
 function commitOf(rev) {
@@ -185,7 +209,7 @@ export function readAt(rev, { ref, orBefore = false } = {}) {
   const place = placeOf(ref);
   const sha = commitOf(rev);
   const own = recordingOf(place, sha);
-  if (own !== null) return { rows: parseJsonl(exportSection(own, `the recording of ${sha}`)), source: `store ${place.name} @ ${sha}` };
+  if (own !== null) return { rows: rowsOfRecording(place, own, sha), source: `store ${place.name} @ ${sha}`, at: sha };
   if (!orBefore)
     throw new Error(
       `the store (${place.name}) never recorded ${sha.slice(0, 12)}, so its tracker state is unknown and is not guessed from a later one. ` +
@@ -198,8 +222,9 @@ export function readAt(rev, { ref, orBefore = false } = {}) {
     const text = recordingOf(place, a);
     if (text !== null)
       return {
-        rows: parseJsonl(exportSection(text, `the recording of ${a}`)),
+        rows: rowsOfRecording(place, text, a),
         source: `store ${place.name} @ ${a} (newest recording at or before ${sha.slice(0, 12)})`,
+        at: a,
       };
   }
   return null;
@@ -228,24 +253,37 @@ export function readNow({ ref, offline = false } = {}) {
   return { rows: parseJsonl(readFileSync(join(store, EXPORT), 'utf8')), source: `store ${store} (now, not synced)` };
 }
 
+// The raw state argv names, with the revision it was recorded at (`at`; HEAD for
+// the store as it is now) — null for a --jsonl file, which belongs to no revision.
+function readRaw(argv) {
+  const ref = val(argv, '--ref');
+  if (val(argv, '--jsonl')) return { rows: parseJsonl(readFileSync(val(argv, '--jsonl'), 'utf8')), source: `beads jsonl ${val(argv, '--jsonl')}`, at: null };
+  if (val(argv, '--at')) return readAt(val(argv, '--at'), { ref });
+  if (val(argv, '--at-or-before')) {
+    const r = readAt(val(argv, '--at-or-before'), { ref, orBefore: true });
+    if (!r) throw new Error(`no recording at or before ${val(argv, '--at-or-before')}`);
+    return r;
+  }
+  return { ...readNow({ ref, offline: argv.includes('--offline') }), at: commitOf('HEAD') };
+}
+
 export function read(argv) {
-  const val = (flag) => {
-    const i = argv.indexOf(flag);
-    return i >= 0 ? argv[i + 1] : undefined;
-  };
-  const ref = val('--ref');
-  if (val('--jsonl')) return normalize(parseJsonl(readFileSync(val('--jsonl'), 'utf8')), `beads jsonl ${val('--jsonl')}`);
-  if (val('--at')) {
-    const r = readAt(val('--at'), { ref });
-    return normalize(r.rows, r.source);
-  }
-  if (val('--at-or-before')) {
-    const r = readAt(val('--at-or-before'), { ref, orBefore: true });
-    if (!r) throw new Error(`no recording at or before ${val('--at-or-before')}`);
-    return normalize(r.rows, r.source);
-  }
-  const r = readNow({ ref, offline: argv.includes('--offline') });
+  const r = readRaw(argv);
   return normalize(r.rows, r.source);
+}
+
+// read(), with the main line's landed commits beside the issues (model.md, "The
+// landed commits"), judged at the revision the state was recorded at.
+export function readWithLanded(argv) {
+  const r = readRaw(argv);
+  const out = normalize(r.rows, r.source);
+  if (r.at) out.landed = landedFor(r.at, mainLine().sha);
+  return out;
+}
+
+function val(argv, flag) {
+  const i = argv.indexOf(flag);
+  return i >= 0 ? argv[i + 1] : undefined;
 }
 
 function main() {
@@ -269,7 +307,7 @@ function main() {
     }
   }
   try {
-    process.stdout.write(JSON.stringify(read(argv), null, 2) + '\n');
+    process.stdout.write(JSON.stringify(readWithLanded(argv), null, 2) + '\n');
     return 0;
   } catch (e) {
     console.error(`backlog adapter: cannot read the tracker: ${e.message.split('\n')[0]}`);

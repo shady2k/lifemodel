@@ -61,11 +61,13 @@
 
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { notRegularFileSaid, requireRegularFile } from './regular-file.mjs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spansOf } from './time-format.mjs';
+import { ValueNeeded, valueOf } from './argv.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -110,6 +112,12 @@ const isStage = (m, i) => {
 function index(backlog) {
   const by = new Map(backlog.issues.map((i) => [i.id, i]));
   const children = new Map();
+  // Issue id -> the commit ids naming it, each list sorted so the violation's
+  // ref — the earliest of them — does not depend on the adapter's order.
+  const landedBy = new Map();
+  if (backlog.landed) for (const c of backlog.landed)
+    for (const tid of c.taskIds)
+      landedBy.set(tid, [...(landedBy.get(tid) || []), c.id].sort());
   for (const i of backlog.issues) {
     if (!i.parent) continue;
     if (!children.has(i.parent)) children.set(i.parent, []);
@@ -121,6 +129,11 @@ function index(backlog) {
     // The forecast rules are turned on by the export carrying the records at all:
     // a project whose adapter emits none has not adopted them, and its existing
     // dates are not judged by a rule it never agreed to.
+    // The main line's commits, in check-commits.mjs's own shape, that the
+    // adapter supplies when it can read the line at the revision the gate
+    // judges. Absent means the adapter has no such read yet, and the merge
+    // rule below is judged by none of it.
+    landed: backlog.landed || null, landedBy,
     hasForecasts: backlog.forecasts != null, generatedAt: backlog.generatedAt,
   };
 }
@@ -474,6 +487,26 @@ const CHECKS = [
       }),
   },
   {
+    id: 'merged-but-open',
+    severity: 'error',
+    why: 'The work is already on the main line: a commit on it names this leaf. A worker is offered it a second time, and the owner is told work remains that exists.',
+    fix: 'Close the leaf with the revision that delivered it and the checks the merge ran, by the protocol\'s rules "A leaf with no stage closes at its merge" and "Remaining work is counted from what landed", or by close-out\'s evidence rule where the leaf carries a stage. Where the commit did not deliver it, the change or the link is what is wrong, not the status.',
+    // No `ref`: the party to this violation is the issue itself, and a commit
+    // is evidence in the note, not identity. A baseline keyed on a commit would
+    // call the same forgotten close new again the day another commit named it.
+    run: (m) => !m.landed ? [] : m.issues
+      .filter((i) => (i.status === 'open' || i.status === 'active') && i.type !== 'epic' && !carries(m, i))
+      .flatMap((i) => {
+        const namedBy = m.landedBy.get(i.id);
+        if (!namedBy) return [];
+        const others = namedBy.length - 1;
+        return [{
+          id: i.id,
+          note: `still ${i.status}, and the commit ${namedBy[0]} on the main line names it${others ? ` (and ${others} more)` : ''}`,
+        }];
+      }),
+  },
+  {
     id: 'orphaned-outcome',
     severity: 'error',
     why: 'A milestone outcome no stage serves is a promise made on paper. Deferred stages serve nothing, so a milestone whose gains sit beyond every live and closed stage is headed nowhere while looking planned.',
@@ -792,7 +825,7 @@ function bulkClusters(m, threshold) {
 
 // The version of the set these rules shipped with. A project holds a COPY of
 // this file, and this is how anybody tells that the copy has fallen behind.
-const RULES_VERSION = '0.51.0';
+const RULES_VERSION = '0.56.0';
 
 const STRENGTHS = ['block', 'block-new', 'report'];
 
@@ -894,12 +927,32 @@ function checkedBacklog(raw, where) {
       ids.add(o.id);
     }
   }
+  // The main line's commits, in the same shape check-commits.mjs takes its
+  // `commits` list in, so one parser feeds both. No list is the adoption path:
+  // a project whose adapter does not supply the main line yet is judged by none
+  // of the merge rule, and its existing queue is not errored on rules it never
+  // agreed to.
+  if (raw.landed != null) {
+    if (!Array.isArray(raw.landed) || raw.landed.some((c) => !c
+      || typeof c.id !== 'string' || !c.id.trim()
+      || !Array.isArray(c.taskIds) || c.taskIds.some((id) => typeof id !== 'string' || !id.trim())))
+      throw new Misuse(`${where}: landed must be a list of { id, taskIds }: each a main-line commit as check-commits.mjs takes it, with a non-empty string id and the non-empty string ids of the issues its message names`);
+    const ids = new Set();
+    for (const c of raw.landed) {
+      if (ids.has(c.id)) throw new Misuse(`${where}: the landed commit id ${c.id} appears twice`);
+      ids.add(c.id);
+    }
+  }
   return raw;
 }
 
 function readJson(path, what) {
   let text;
   try {
+    // A named file is never opened before it is known to be a regular file; a
+    // named pipe with no writer would wait for ever. '-' is the caller's own
+    // stdin and is read as it comes.
+    if (path && path !== '-') requireRegularFile(path, what);
     text = !path || path === '-' ? readFileSync(0, 'utf8') : readFileSync(path, 'utf8');
   } catch (e) {
     throw new Misuse(`cannot read ${what} (${path || 'stdin'}): ${e.code || e.message}`);
@@ -1048,6 +1101,7 @@ function render(report) {
 function portability(projectConfigPath) {
   let cfg;
   try {
+    requireRegularFile(projectConfigPath, 'the project config');
     cfg = JSON.parse(readFileSync(projectConfigPath, 'utf8'));
   } catch {
     console.log('SKIP  portability: no project config given (--config) to read projectWords from');
@@ -1058,7 +1112,7 @@ function portability(projectConfigPath) {
     console.log('SKIP  portability: the project config declares no projectWords or trackerWords');
     return 0;
   }
-  const files = ['check.mjs', 'check-commits.mjs', 'model.md', 'SKILL.md', 'integration.md', 'protocol.md', 'fixtures/config.json'];
+  const files = ['check.mjs', 'check-commits.mjs', 'model.md', 'SKILL.md', 'integration.md', 'protocol.md', 'fixtures/config.json', 'fixtures/leaf-close.json'];
   for (const kind of ['bad', 'good', 'commits'])
     for (const n of readdirSync(join(HERE, 'fixtures', kind))) files.push(`fixtures/${kind}/${n}`);
   let failures = 0;
@@ -1109,6 +1163,21 @@ function runSelftest(cfg, projectConfigPath) {
     const report = evaluate(load('good', name), cfg, null);
     const fired = report.results.filter((r) => r.violations.length).map((r) => r.id);
     say(fired.length === 0, `good/${name} → [${fired.join(', ') || 'nothing'}]`);
+  }
+  // The close path of every leaf shape, walked end to end: no shape is left
+  // without a legal state. A leaf with no stage closes at its merge, and one
+  // filed with no parent never takes the two middle states at all, so the walk
+  // carries the evidence rules' refusal of them as a step of its own.
+  const walk = load('.', 'leaf-close.json');
+  for (const c of walk.cases) {
+    const bad = [];
+    for (const [n, step] of c.steps.entries()) {
+      const fired = evaluate(step.backlog, cfg, null).results.filter((r) => r.violations.length).map((r) => r.id).sort();
+      const want = (step.fires || []).slice().sort();
+      if (fired.join(',') !== want.join(','))
+        bad.push(`step ${n + 1} (${step.name}) fires [${fired.join(', ') || 'nothing'}], expected [${want.join(', ') || 'nothing'}]`);
+    }
+    say(!bad.length, `leaf-close/${c.shape} (${c.steps.length} step(s)) -- ${bad.join('; ') || 'all clean'}`);
   }
   const covered = new Set(readdirSync(join(dir, 'bad')).map((n) => n.split('.')[0]));
   for (const c of CHECKS) if (!covered.has(c.id)) say(false, `no fixture for check ${c.id}`);
@@ -1165,7 +1234,7 @@ function runSelftest(cfg, projectConfigPath) {
   const fixtureCfg = join(dir, 'config.json');
   const overBudget = join(dir, 'bad', 'finding-budget.json');
   const stale = join(dir, 'bad', 'stale-hold.json');
-  for (const [what, want, argv] of [
+  for (const [what, want, argv, speaks] of [
     ['an unknown --only', 2, ['--config', fixtureCfg, '--strength', 'block', '--only', 'no-such-check', stale]],
     ['an empty backlog file', 2, ['--config', fixtureCfg, '--strength', 'block', put('empty.json', '')]],
     ['a config that is not an object', 2, ['--config', put('cfg.json', '[]'), '--strength', 'block', stale]],
@@ -1181,9 +1250,31 @@ function runSelftest(cfg, projectConfigPath) {
     ['a read at a revision with no revision in the source', 2, ['--config', fixtureCfg, '--strength', 'block', '--at', 'rev-a', stale]],
     ['a read at a revision that read another one', 2, ['--config', fixtureCfg, '--strength', 'block', '--at', 'rev-a', put('at-other.json', { ...load('bad', 'stale-hold.json'), source: 'fixture bad/stale-hold @ rev-b' })]],
     ['a read at the revision it stands for', 1, ['--config', fixtureCfg, '--strength', 'block', '--at', 'rev-a', put('at-same.json', { ...load('bad', 'stale-hold.json'), source: 'fixture bad/stale-hold @ rev-a' })]],
+    ['an empty requested revision', 2, ['--config', fixtureCfg, '--strength', 'report', '--at', '', stale], '--at'],
+    ['a whitespace-only requested revision', 2, ['--config', fixtureCfg, '--strength', 'report', '--at', '   ', stale], '--at'],
+    ['a missing requested revision', 2, ['--config', fixtureCfg, '--strength', 'report', stale, '--at'], '--at'],
+    ['an option instead of the requested revision', 2, ['--config', fixtureCfg, '--strength', 'report', stale, '--at', '--json'], '--at'],
+    // Every other option that takes a value, one case each: what a bare
+    // `argv[++i]` did with it is in the case's name.
+    ['an empty --only, which today names no check at all', 2, ['--config', fixtureCfg, '--strength', 'block', '--only', '', stale], '--only'],
+    ['a missing --only, which today is a trailing option that crashes', 2, ['--config', fixtureCfg, '--strength', 'block', stale, '--only'], '--only'],
+    ['an empty --config, which today is a config that was not given', 2, ['--config', '', '--strength', 'block', stale], '--config'],
+    ['an empty --baseline, which today is no baseline at all', 2, ['--config', fixtureCfg, '--strength', 'block-new', '--baseline', '', stale], '--baseline'],
+    ['an empty --baseline-config, which today judges the baseline by today\'s rules', 2, ['--config', fixtureCfg, '--strength', 'block-new', '--baseline', stale, '--baseline-config', '', stale], '--baseline-config'],
+    ['an empty --strength, which today is a strength that was not given', 2, ['--config', fixtureCfg, '--strength', '', stale], '--strength'],
+    ['an empty --ages-from, which today skips the ages check and answers green or red without it', 2, ['--config', fixtureCfg, '--strength', 'block', '--ages-from', '', stale], '--ages-from'],
+    ['an empty --ages-through, which today skips the ages check and answers green or red without it', 2, ['--config', fixtureCfg, '--strength', 'block', '--ages-through', '', stale], '--ages-through'],
+    ['an empty --purpose, which today falls back to a normal run', 2, ['--config', fixtureCfg, '--strength', 'block', '--purpose', '', stale], '--purpose'],
+    ['an option instead of the task --purpose asks for', 2, ['--purpose', '--json', stale], '--purpose'],
+    ['an option instead of the --config value', 2, ['--config', '--strength', 'block', stale], '--config'],
   ]) {
-    const got = run(...argv).status;
-    say(got === want, `cli: ${what} → exit ${got}${got === want ? '' : `, expected ${want}`}`);
+    const done = run(...argv);
+    const got = done.status;
+    // A row may name the option its refusal has to speak of: misuse exits 2, and
+    // it must name the option, or the exit could have come from anywhere else.
+    const says = `${done.stdout}${done.stderr}`;
+    const names = speaks === undefined || says.includes(`"${speaks}"`);
+    say(got === want && names, `cli: ${what} → exit ${got}${got === want ? '' : `, expected ${want}`}${names ? '' : `, and its refusal does not name ${speaks}`}`);
   }
   // Lowering the budget creates violations. Judged by today's config the
   // baseline has them too and block-new is green; judged by its own it is not.
@@ -1210,20 +1301,35 @@ function runSelftest(cfg, projectConfigPath) {
   return failures ? 1 : 0;
 }
 
+// argv.mjs refuses a value that cannot be one; this gate says so its own way,
+// which is the misuse exit 2 with the usage.
+const value = (argv, i, option, what) => {
+  try {
+    return valueOf(argv, i, option, what);
+  } catch (e) {
+    if (e instanceof ValueNeeded) throw new Misuse(e.message);
+    throw e;
+  }
+};
+
 function main() {
   const argv = process.argv.slice(2);
   const args = { json: false, only: null, input: null, selftest: false, config: null, baseline: null, baselineConfig: null, strength: null, agesFrom: null, agesThrough: null, at: null, purpose: null };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--json') args.json = true;
-    else if (argv[i] === '--only') args.only = argv[++i].split(',');
-    else if (argv[i] === '--config') args.config = argv[++i];
-    else if (argv[i] === '--baseline') args.baseline = argv[++i];
-    else if (argv[i] === '--baseline-config') args.baselineConfig = argv[++i];
-    else if (argv[i] === '--strength') args.strength = argv[++i];
-    else if (argv[i] === '--ages-from') args.agesFrom = argv[++i];
-    else if (argv[i] === '--ages-through') args.agesThrough = argv[++i];
-    else if (argv[i] === '--at') args.at = argv[++i];
-    else if (argv[i] === '--purpose') args.purpose = argv[++i];
+    // Every option that takes a value reads it through argv.mjs: an empty,
+    // blank, missing or option-shaped word is misuse and exits 2, where a bare
+    // `argv[++i]` would have handed the run a value it could only ignore --
+    // `--only ''` a filter no rule matches, `--at ''` no revision at all.
+    else if (argv[i] === '--only') { args.only = value(argv, i, '--only', 'a comma-separated list of check ids').split(','); i++; }
+    else if (argv[i] === '--config') { args.config = value(argv, i, '--config', 'a project config'); i++; }
+    else if (argv[i] === '--baseline') { args.baseline = value(argv, i, '--baseline', 'a baseline backlog'); i++; }
+    else if (argv[i] === '--baseline-config') { args.baselineConfig = value(argv, i, '--baseline-config', 'a baseline config'); i++; }
+    else if (argv[i] === '--strength') { args.strength = value(argv, i, '--strength', 'block, block-new or report'); i++; }
+    else if (argv[i] === '--ages-from') { args.agesFrom = value(argv, i, '--ages-from', 'the snapshot before the bulk edit'); i++; }
+    else if (argv[i] === '--ages-through') { args.agesThrough = value(argv, i, '--ages-through', 'the snapshot after the bulk edit'); i++; }
+    else if (argv[i] === '--at') { args.at = value(argv, i, '--at', 'a code revision'); i++; }
+    else if (argv[i] === '--purpose') { args.purpose = value(argv, i, '--purpose', 'a task id'); i++; }
     else if (argv[i] === '--selftest') args.selftest = true;
     else if (argv[i] === '--help' || argv[i] === '-h') args.help = true;
     else if (argv[i] === '--version') args.version = true;
