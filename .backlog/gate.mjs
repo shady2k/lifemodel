@@ -27,23 +27,32 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalize, readAt, readNow } from './adapter.mjs';
+import { landedFor, mainLine } from './landed.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const git = (...a) => execFileSync('git', a, { encoding: 'utf8', maxBuffer: 1 << 30, stdio: ['ignore', 'pipe', 'ignore'] });
 
 // A rules file the check imports and cannot find crashes node with exit 1, which
 // would read as "this change adds a problem". It is a missing input, said as one.
-const RULES = ['check.mjs', 'time-format.mjs'];
+const RULES = ['check.mjs', 'time-format.mjs', 'regular-file.mjs', 'argv.mjs'];
 
-function baselineOf(base, ref) {
+// Each judged state carries the main line's commits as they stood where it was
+// recorded (landed.mjs): `main` is the base CI judges against, or this clone's
+// main line locally, so a branch's own commits never count as landed.
+function withLanded(state, at, main) {
+  state.landed = landedFor(at, main);
+  return state;
+}
+
+function baselineOf(base, ref, main) {
   const r = readAt(base, { ref, orBefore: true });
-  if (r) return normalize(r.rows, r.source);
+  if (r) return withLanded(normalize(r.rows, r.source), r.at, main);
   return { generatedAt: new Date().toISOString(), source: `empty (no recording at or before ${base})`, issues: [] };
 }
 
 // One judgement of the backlog now against <base>: a check.mjs run whose
 // stdout (with --json) is returned, or whose exit code is returned without it.
-function judged(base, ref, nowFile, json) {
+function judged(base, ref, nowFile, json, main) {
   const dir = mkdtempSync(join(tmpdir(), 'lifemodel-gate-'));
   try {
     const put = (name, value) => {
@@ -51,7 +60,7 @@ function judged(base, ref, nowFile, json) {
       writeFileSync(p, typeof value === 'string' ? value : JSON.stringify(value));
       return p;
     };
-    const baseline = baselineOf(base, ref);
+    const baseline = baselineOf(base, ref, main);
     if (!json) console.log(`baseline: ${baseline.source}`);
     let baselineConfig = null;
     try {
@@ -95,13 +104,14 @@ function main(argv) {
   const dir = mkdtempSync(join(tmpdir(), 'lifemodel-gate-'));
   try {
     let now;
+    const main = head ? git('rev-parse', '--verify', `${base}^{commit}`).trim() : mainLine().sha;
     if (head) {
       const r = readAt(head, { ref, orBefore: argv.includes('--head-or-before') });
       if (!r) throw new Error(`no recording at or before ${head}`);
-      now = normalize(r.rows, r.source);
+      now = withLanded(normalize(r.rows, r.source), r.at, main);
     } else {
       const r = readNow({ offline: argv.includes('--offline') });
-      now = normalize(r.rows, r.source);
+      now = withLanded(normalize(r.rows, r.source), git('rev-parse', 'HEAD').trim(), main);
     }
     if (!json) console.log(`judged:   ${now.source}`);
     const nowFile = join(dir, 'now.json');
@@ -109,8 +119,8 @@ function main(argv) {
     const mergeHead = head ? null : git('rev-parse', '--git-path', 'MERGE_HEAD').trim();
     const other = mergeHead && existsSync(mergeHead) ? readFileSync(mergeHead, 'utf8').split('\n')[0].trim() : null;
     if (other && !spawnSync('git', ['rev-parse', '-q', '--verify', `${other}^{commit}`]).status) {
-      const vsHead = judged(base, ref, nowFile, true);
-      const vsOther = judged(other, ref, nowFile, true);
+      const vsHead = judged(base, ref, nowFile, true, main);
+      const vsOther = judged(other, ref, nowFile, true, main);
       const mg = spawnSync(process.execPath, [join(HERE, 'merge-gate.mjs')], {
         input: JSON.stringify({ head: JSON.parse(vsHead.stdout), other: JSON.parse(vsOther.stdout) }),
         encoding: 'utf8',
@@ -121,7 +131,7 @@ function main(argv) {
         console.error('\nBACKLOG GATE: the tracker has a problem that neither parent of this merge had (lines above, with their fix). Older problems do not block.');
       return mg.status ?? 2;
     }
-    const r = judged(base, ref, nowFile, json); // judged() already printed the report
+    const r = judged(base, ref, nowFile, json, main); // judged() already printed the report
     if (r.status === 1) {
       console.error('\nBACKLOG GATE: the tracker has a problem that its state at the base did not have (FAIL lines above, with their fix).');
       console.error('Older problems are listed but do not block. Fix the new ones in the tracker, then commit again.');

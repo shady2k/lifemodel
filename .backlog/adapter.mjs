@@ -28,6 +28,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { landedFor, mainLine } from './landed.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MECHANISM = join(HERE, 'sync', 'tracker-sync.mjs');
@@ -185,7 +186,7 @@ export function readAt(rev, { ref, orBefore = false } = {}) {
   const place = placeOf(ref);
   const sha = commitOf(rev);
   const own = recordingOf(place, sha);
-  if (own !== null) return { rows: parseJsonl(exportSection(own, `the recording of ${sha}`)), source: `store ${place.name} @ ${sha}` };
+  if (own !== null) return { rows: parseJsonl(exportSection(own, `the recording of ${sha}`)), source: `store ${place.name} @ ${sha}`, at: sha };
   if (!orBefore)
     throw new Error(
       `the store (${place.name}) never recorded ${sha.slice(0, 12)}, so its tracker state is unknown and is not guessed from a later one. ` +
@@ -200,6 +201,7 @@ export function readAt(rev, { ref, orBefore = false } = {}) {
       return {
         rows: parseJsonl(exportSection(text, `the recording of ${a}`)),
         source: `store ${place.name} @ ${a} (newest recording at or before ${sha.slice(0, 12)})`,
+        at: a,
       };
   }
   return null;
@@ -228,24 +230,37 @@ export function readNow({ ref, offline = false } = {}) {
   return { rows: parseJsonl(readFileSync(join(store, EXPORT), 'utf8')), source: `store ${store} (now, not synced)` };
 }
 
+// The raw state argv names, with the revision it was recorded at (`at`; HEAD for
+// the store as it is now) — null for a --jsonl file, which belongs to no revision.
+function readRaw(argv) {
+  const ref = val(argv, '--ref');
+  if (val(argv, '--jsonl')) return { rows: parseJsonl(readFileSync(val(argv, '--jsonl'), 'utf8')), source: `beads jsonl ${val(argv, '--jsonl')}`, at: null };
+  if (val(argv, '--at')) return readAt(val(argv, '--at'), { ref });
+  if (val(argv, '--at-or-before')) {
+    const r = readAt(val(argv, '--at-or-before'), { ref, orBefore: true });
+    if (!r) throw new Error(`no recording at or before ${val(argv, '--at-or-before')}`);
+    return r;
+  }
+  return { ...readNow({ ref, offline: argv.includes('--offline') }), at: commitOf('HEAD') };
+}
+
 export function read(argv) {
-  const val = (flag) => {
-    const i = argv.indexOf(flag);
-    return i >= 0 ? argv[i + 1] : undefined;
-  };
-  const ref = val('--ref');
-  if (val('--jsonl')) return normalize(parseJsonl(readFileSync(val('--jsonl'), 'utf8')), `beads jsonl ${val('--jsonl')}`);
-  if (val('--at')) {
-    const r = readAt(val('--at'), { ref });
-    return normalize(r.rows, r.source);
-  }
-  if (val('--at-or-before')) {
-    const r = readAt(val('--at-or-before'), { ref, orBefore: true });
-    if (!r) throw new Error(`no recording at or before ${val('--at-or-before')}`);
-    return normalize(r.rows, r.source);
-  }
-  const r = readNow({ ref, offline: argv.includes('--offline') });
+  const r = readRaw(argv);
   return normalize(r.rows, r.source);
+}
+
+// read(), with the main line's landed commits beside the issues (model.md, "The
+// landed commits"), judged at the revision the state was recorded at.
+export function readWithLanded(argv) {
+  const r = readRaw(argv);
+  const out = normalize(r.rows, r.source);
+  if (r.at) out.landed = landedFor(r.at, mainLine().sha);
+  return out;
+}
+
+function val(argv, flag) {
+  const i = argv.indexOf(flag);
+  return i >= 0 ? argv[i + 1] : undefined;
 }
 
 function main() {
@@ -269,7 +284,7 @@ function main() {
     }
   }
   try {
-    process.stdout.write(JSON.stringify(read(argv), null, 2) + '\n');
+    process.stdout.write(JSON.stringify(readWithLanded(argv), null, 2) + '\n');
     return 0;
   } catch (e) {
     console.error(`backlog adapter: cannot read the tracker: ${e.message.split('\n')[0]}`);

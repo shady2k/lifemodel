@@ -86,8 +86,9 @@ the repository's installation, and each person's plugin and hooks are their own.
   says whether this machine's store recorded a revision (the pre-push hook).
 - **Rules:** `.backlog/rules/check.mjs` with `time-format.mjs` beside it,
   `check-commits.mjs`, `check-docs.mjs`, `check-product.mjs`, and `check-present.mjs` with
-  `document-format.mjs` beside it — byte-for-byte copies of shady2k-skills
-  0.121.0's `skills/backlog/setup-shady2k-skills/` at setup version 0.51.0,
+  `document-format.mjs` beside it, and `regular-file.mjs` and `argv.mjs`, which
+  every check imports — byte-for-byte copies of shady2k-skills
+  0.126.0's `skills/backlog/setup-shady2k-skills/` at setup version 0.56.0,
   never edited here. Their `--version` is the installation. Proving it: `cmp`
   each against the plugin copy.
 - **Charter outcomes:** none with ids yet. The rules that read them
@@ -153,7 +154,8 @@ the repository's installation, and each person's plugin and hooks are their own.
 - **Tracker synchronization:** `.backlog/sync/tracker-sync.mjs` with the recipe
   `.backlog/sync/trackers/br.mjs` and the systemd template
   `.backlog/sync/supervisors/systemd-user/tracker-sync.service`, byte-for-byte
-  copies of shady2k-skills 0.121.0 (`tracker-sync.version`; `node
+  copies of shady2k-skills 0.126.0, with `argv.mjs` and `regular-file.mjs`
+  beside the mechanism (`tracker-sync.version`; `node
   .backlog/sync/tracker-sync.mjs status --expect-version <the set's version>`
   says whether this copy is behind). **No background sync runs** (owner,
   2026-10-20: "я один работаю" — one person, one machine): the store reaches
@@ -223,6 +225,17 @@ the repository's installation, and each person's plugin and hooks are their own.
   GitHub made and nobody recorded). A merge in progress is judged against both
   parents (`merge-gate.mjs`): an error is new only when it is new against HEAD
   and against the other parent.
+- **Landed commits (`merged-but-open`):** each judged state carries `landed`,
+  the main line's commits with the ids their header names, read by
+  `.backlog/landed.mjs` with the commit-link parser (`commits.mjs` `linkedIds`).
+  The main line is this clone's `refs/remotes/origin/main` (local `main` without
+  one) locally and the `--base` revision in CI; a state recorded at revision R
+  counts only the commits R and the main line share (their merge base), so a
+  branch's own commits never make its active leaf "merged". The rule reports an
+  open or active leaf a landed commit names; the fix is to close it, or set it
+  `implemented` under a stage, with the revision that delivered it. The
+  adapter's command output carries the same list (`readWithLanded`). Tests:
+  `node --test .backlog/landed.test.mjs`.
 - **JSON report:** `npm run backlog:json`.
 - **Commit-link input and check:** `node .backlog/commits.mjs
   --message-file <f>` (the pending message), `--range <base>..<head>` (every
@@ -235,7 +248,8 @@ the repository's installation, and each person's plugin and hooks are their own.
   refs/tracker/state` in CI. An empty range is exit 2, never a pass. Tests:
   `node --test .backlog/commits.test.mjs` (a scratch remote and a store ref),
   `node --test .backlog/adapter.test.mjs`, `node --test .backlog/ready.test.mjs`,
-  `node --test .backlog/merge-gate.test.mjs`, and `node --test
+  `node --test .backlog/merge-gate.test.mjs`, `node --test
+  .backlog/landed.test.mjs`, and `node --test
   .backlog/claim.test.mjs` (a real store on a scratch remote).
 - **Local entry points:** `.githooks/pre-commit` (the product-document check,
   the tracker guard — no staged path under `.beads` — then the backlog gate,

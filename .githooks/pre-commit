@@ -20,7 +20,7 @@ for f in adapter.mjs gate.mjs merge-gate.mjs config.json; do
         exit 1
     fi
 done
-for f in check.mjs time-format.mjs check-product.mjs; do
+for f in check.mjs time-format.mjs check-product.mjs regular-file.mjs argv.mjs; do
     if [ ! -f "$gate/rules/$f" ]; then
         printf 'pre-commit: %s is missing from this checkout; run npm run connect, which names what is missing\n' "$gate/rules/$f" >&2
         exit 1

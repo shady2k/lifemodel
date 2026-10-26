@@ -47,10 +47,10 @@ for f in .githooks/pre-commit .githooks/commit-msg .githooks/pre-push .githooks/
     [ -f "$f" ] || need "$f is missing from this checkout"
 done
 for f in adapter.mjs commits.mjs gate.mjs merge-gate.mjs recorded.mjs claim.mjs ready.mjs config.json br-policy.yaml \
-    sync/tracker-sync.mjs sync/tracker-sync.version sync/trackers/br.mjs sync/supervisors/systemd-user/tracker-sync.service; do
+    sync/tracker-sync.mjs sync/tracker-sync.version sync/argv.mjs sync/regular-file.mjs sync/trackers/br.mjs sync/supervisors/systemd-user/tracker-sync.service; do
     [ -f ".backlog/$f" ] || need ".backlog/$f is missing from this checkout"
 done
-for f in check.mjs time-format.mjs check-commits.mjs check-docs.mjs check-present.mjs check-product.mjs document-format.mjs; do
+for f in check.mjs time-format.mjs check-commits.mjs check-docs.mjs check-present.mjs check-product.mjs document-format.mjs regular-file.mjs argv.mjs; do
     [ -f ".backlog/rules/$f" ] || need ".backlog/rules/$f is missing from this checkout"
 done
 if [ -d .beads ] && [ ! -L .beads ] && [ -f .beads/issues.jsonl ]; then
