@@ -246,7 +246,7 @@ describe('task launcher identity and briefing (real stores and live TLS identity
           },
         ],
       },
-      spec: { serviceAccountName: 'task' },
+      spec: structuredClone(jobs.get(task.jobName).spec.template.spec),
       status: { phase: 'Running' },
     });
     const token = `CHANNEL-TOKEN-PRIVATE-CANARY-${suffix}-${task.id}`;

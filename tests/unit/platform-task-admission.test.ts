@@ -668,6 +668,9 @@ describe('task admission (actual CEL expression evaluation; API-server typecheck
         p.metadata.ownerReferences[0].uid = '22222222-2222-2222-2222-222222222222';
       },
       (p: any) => {
+        p.spec.containers[0].image = `zot.lifemodel-system.svc:5001/lifemodel/workbench@sha256:${'b'.repeat(64)}`;
+      },
+      (p: any) => {
         p.spec.ephemeralContainers = [
           { ...structuredClone(p.spec.containers[0]), name: 'task-debug' },
         ];

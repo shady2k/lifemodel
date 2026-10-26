@@ -10,6 +10,8 @@ import {
 import { createTestStores, type TestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
 
+import { credentialNameCases } from '../helpers/trace-credential-names.js';
+
 const startedAt = '2026-01-01T00:00:00.000Z';
 function span(traceId: string, spanId = 'root', attrs: Record<string, unknown> = {}): TraceRecord {
   return {
@@ -386,6 +388,27 @@ describe('Postgres trace persistence and whole-trace retention', () => {
     expect(
       (await stores.postgres.query('SELECT status,ended_at FROM observability.trace_spans')).rows[0]
     ).toMatchObject({ status: 'failed', ended_at: new Date('2026-01-01T00:00:01Z') });
+  });
+
+  it('independently scrubs credential-name parts in all four fields and structured keys before persistence', async () => {
+    const { canaries, attrs } = credentialNameCases('persistence');
+    const store = writer();
+    expect(store.enqueue(span('credential-name-parts', 'root', attrs))).toBe(true);
+    await store.flush();
+    expect(store.droppedCount).toBe(0);
+    const rows = (
+      await stores.postgres.query('SELECT attrs FROM observability.trace_spans WHERE trace_id=$1', [
+        'credential-name-parts',
+      ])
+    ).rows;
+    expect(rows).toHaveLength(1);
+    for (const field of ['command', 'outputTail', 'finalText', 'model', 'structured']) {
+      const text = JSON.stringify(rows[0].attrs[field]);
+      for (const canary of canaries)
+        expect.soft(text.includes(canary), `persisted ${field} leaked`).toBe(false);
+      expect(text).toContain('[REDACTED]');
+    }
+    expect(rows[0].attrs.ordinary).toBe(attrs.ordinary);
   });
 
   it('scrubs known and shaped credentials before they reach database rows', async () => {
