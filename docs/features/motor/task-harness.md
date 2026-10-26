@@ -2,6 +2,11 @@
 
 Task: lifemodel-653.8.7. Implements the pod-local side of ADR-014 D1/D2.
 This is a source contract, not deployed stage acceptance.
+The whole Pod, including launcher, agent and tool commands, is untrusted
+([ADR-014 amendment](../../adr/014-task-runtime.md#amendment--2026-10-26-the-task-pod-is-one-untrusted-zone)).
+The rules below are launcher policy within that zone. Reported outcomes,
+events and traces are the task's claims, not independently verified facts;
+process environment filtering does not create an inner trust boundary.
 
 ## Authority before execution
 
@@ -71,8 +76,8 @@ for each gateway request. The agent never holds a provider key. The relay verifi
 the projected instance CA. Only `/v1/chat/completions` and `/v1/models` can reach
 the gateway.
 
-Success requires ACP `end_turn`, nonempty final assistant text and no provider
-error or unresolved required tool failure. A settled tool failure is recovered
+The launcher classifies success from ACP `end_turn`, nonempty final assistant
+text and no provider error or unresolved required tool failure. A settled tool failure is recovered
 when later agent work is observed: an `agent_message_chunk` with non-whitespace
 text, or a new tool call / a settled call resuming as `pending` or `in_progress`.
 A completion update for an already running call, usage, thought chunks, empty or
@@ -292,9 +297,9 @@ session/event routes. The owner selected **ACP only** on 2026-10-24.
 
 One generic ACP client implements the port. OpenCode is its first registry
 configuration; goose and other conforming agents must reuse the same client.
-Success requires `end_turn`, nonempty final agent text, no provider error and
-no unresolved failure or unsettled required tool call. Process exit status
-cannot prove it.
+Its local success policy requires `end_turn`, nonempty final agent text, no
+provider error and no unresolved failure or unsettled required tool call.
+Neither this classification nor process exit status proves the work is correct.
 Cancellation must return `aborted`, with bounded process-tree cleanup even if
 an agent fails to respond. No native protocol fallback is permitted.
 

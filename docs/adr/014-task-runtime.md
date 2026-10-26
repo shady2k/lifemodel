@@ -22,6 +22,51 @@ storage service has its own identity, release, state, outage and consumers,
 including web downloads while the core is down. Their
 [shared views](../features/motor/tasks-design.md) define the interaction.
 
+## Amendment — 2026-10-26: the task Pod is one untrusted zone
+
+Owner decision on lifemodel-653, 2026-10-26: the launcher, agent and commands it
+runs are one untrusted zone. The barrier is the Pod boundary, not a boundary
+between processes or containers inside it. This amendment governs D1's success
+rule and D3's terminal outcome without changing their launch/finalization order.
+
+The boundary enforces only what its trusted services can check:
+
+- **Identity and authority:** `src/core/task-channel.ts` and
+  `src/core/task-kubernetes-identity.ts` check audience-bound TokenReview, live
+  non-deleting Pod/controller Job identity and controlled template; the mailbox
+  checks the registered launch, won start claim and current intent/deadlines.
+  `loader/src/task-identity.ts` binds that identity through one durable start
+  claim and authorization projection. These checks identify the task, not which
+  process inside its Pod made a request.
+- **No platform keys:** `src/core/kubernetes-task-executor.ts` projects separate
+  channel/model/storage audience tokens and the public CA, not provider, S3 or
+  platform signing keys. Service tokens are task bearer identity, not proof of
+  an honest launcher. The model gateway retains provider-key custody (ADR-013).
+- **Scoped, sealed storage:** `loader/src/storage-access.ts` limits operations to
+  the bound task space under current intent; `loader/src/storage-seal.ts` freezes
+  writes, checks retained object length/hash and saves an immutable manifest.
+  A seal verifies retained bytes and marks, not their meaning or correctness.
+- **Network and resources:** `deploy/platform/d/network-policy.yaml` allows only
+  the selected runtime listeners and kube-dns; other egress stays default-denied.
+  `src/core/kubernetes-task-executor.ts` renders CPU/memory limits, restricted
+  security context, a private ephemeral volume and the native Job time bound.
+  Kubernetes availability still limits physical deadline/termination guarantees.
+
+D1's ACP success rule is launcher policy **inside** the untrusted zone
+(`loader/src/task-acp.ts`, `loader/src/task-launcher.ts`), not semantic verification
+at the boundary. Outcomes, events and traces are the task's own claims, even
+when authenticated, durably ACKed or sealed. D3's `done` records accepted task
+success plus sealed output and finalization; it does not certify that the work
+is correct or grant authority beyond sealing that task's own result and the reply.
+
+Residuals: code inside the Pod can report false success for its own task, with
+the same standing as untrue final agent text. DNS egress via kube-dns on UDP/TCP
+53 remains allowed (owner decision, 2026-10-21); this policy does not restrict
+query names or prevent DNS-mediated egress. Splitting launcher/agent/tools into
+containers, signing, user namespaces or ptrace hardening is not adopted as a
+fix for report truthfulness. Independent result verification is later work,
+not a stage-3 guarantee.
+
 ## Context and inventory
 
 The owner delegates long work and keeps talking to one lifemodel. The core
@@ -102,7 +147,9 @@ same adapter. Per-agent native HTTP/SSE or stdin RPC adapters are not used.
 ACP is an open standard and avoids rebuilding the launcher when replacing an
 agent. Registry entries own command line, baked config, self-check and image pin;
 launcher/core code know only the port and registered names. Raw agent protocols
-never leave the pod. Success requires ACP `end_turn`, final assistant text, no
+never leave the pod. The success rule below is launcher policy inside the
+untrusted Pod, not a boundary guarantee (see the [2026-10-26 amendment](#amendment--2026-10-26-the-task-pod-is-one-untrusted-zone)).
+Success requires ACP `end_turn`, final assistant text, no
 provider error and no unresolved required tool failure; CLI 0 or a completed
 step alone is not success. `cancelled` maps to aborted. Missing ACP capability
 blocks that agent rather than enabling a native fallback [R].
@@ -236,7 +283,8 @@ normal-controller behaviour into a no-rerun guarantee for ambiguous shell acts.
 
 Keep one small SQL claim in the existing verified-binding operation, served
 by the platform model gateway's task-identity listener, not a standalone gate
-process/deployment. Each Pod starts a trusted inert launcher. TokenReview,
+process/deployment. Each Pod starts an inert launcher, not a separately trusted
+reporter (see the [2026-10-26 amendment](#amendment--2026-10-26-the-task-pod-is-one-untrusted-zone)). TokenReview,
 live non-deleting Pod/controller Job UID/template/launch checks and current
 canonical nonterminal intent precede a CAS on launch ID, Pod UID and fresh
 memory-only process boot nonce. The same verified binding transaction records
@@ -283,7 +331,8 @@ Cleanup has its own durable pending/complete fields; retries never reopen a
 terminal task. Outcome delivery is at-least-once and deduped by outcome key;
 this is not exactly-once shell execution or a cross-store transaction.
 
-Normal success requires semantic harness success and a sealed result. Runtime
+Normal success requires reported semantic harness success and a sealed result;
+this is not verification of the task's claim (see the [2026-10-26 amendment](#amendment--2026-10-26-the-task-pod-is-one-untrusted-zone)). Runtime
 error/OOM/eviction/missing Pod gives failed with reason and retained partial
 output. Owner Stop gives stopped even if wrapping yields a useful result;
 timeout gives failed (`timeout`) after the same wrap path. Hard stop overrides

@@ -58,9 +58,9 @@ owner-state, schedule or task mutations.
 An empty/missing final response is not an acknowledgement, even after a rejected
 `core.say` attempt. A `length`-truncated outcome reply is incomplete even when it
 contains plain text. The model gets the bounded response retries. If those retries
-or model execution fail, a deterministic reply reports the trusted event's terminal
-state, maps the reason code to owner words using only own dictionary entries, and
-quotes the summary as task output. Unknown codes (including `constructor`) get a
+or model execution fail, a deterministic reply reports the core-committed terminal
+state (whose semantic success remains the task's claim), maps the reason code to
+owner words using only own dictionary entries, and quotes the summary as task output. Unknown codes (including `constructor`) get a
 fixed generic explanation, never inherited JavaScript implementation text. This
 fallback is fixed English; ordinary model replies still follow the owner's language.
 That fallback uses the same trusted output-attachment compiler as a normal reply.
