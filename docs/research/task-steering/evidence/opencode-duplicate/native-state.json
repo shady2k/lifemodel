@@ -1,0 +1,118 @@
+{
+  "ok": true,
+  "data": [
+    {
+      "id": "msg_17a3e3e09001035MXJkbkGponZ",
+      "time": {
+        "created": 1793052261968
+      },
+      "text": "PROBE_TASK: run the offered shell tools and finish. Do not launch children.",
+      "files": [],
+      "type": "user"
+    },
+    {
+      "id": "msg_17a3e3e5c001oWwPYgbhwbFMTn",
+      "time": {
+        "created": 1793052262037,
+        "streamed": 1793052262172,
+        "completed": 1793052282306
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "task",
+        "providerID": "lifemodel"
+      },
+      "content": [
+        {
+          "type": "tool",
+          "id": "call_probe_1_0",
+          "name": "shell",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "echo start-0; touch /work/probe/start-0; sleep 20; touch /work/probe/done-0; echo done-0"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "start-0\ndone-0\n"
+              }
+            ],
+            "metadata": {
+              "status": "completed",
+              "truncated": false,
+              "exit": 0
+            }
+          },
+          "time": {
+            "created": 1793052262148,
+            "ran": 1793052262160,
+            "completed": 1793052282298
+          }
+        }
+      ],
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 100,
+        "output": 20,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_steer_unique_6539",
+      "time": {
+        "created": 1793052282321
+      },
+      "text": "STEER_UNIQUE_6539: use the native input queue.",
+      "type": "user"
+    },
+    {
+      "id": "msg_17a3e8ddb001XjtuKUge7q1D1t",
+      "time": {
+        "created": 1793052282345,
+        "streamed": 1793052282462,
+        "completed": 1793052282464
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "task",
+        "providerID": "lifemodel"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "PROBE_FINAL: finished."
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 100,
+        "output": 20,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_17a3e8e65001FFhaq1K4GDMlo2",
+      "time": {
+        "created": 1793052282469
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    }
+  ]
+}

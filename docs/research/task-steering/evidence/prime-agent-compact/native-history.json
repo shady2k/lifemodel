@@ -1,0 +1,56 @@
+{
+  "id": "native-5",
+  "type": "response",
+  "command": "get_messages",
+  "success": true,
+  "data": {
+    "messages": [
+      {
+        "role": "compactionSummary",
+        "summary": "## Objective\n- Complete the probe.\n\n## Requirements\n- No steering in summarizer input.\n\n## Decisions\n- Use native queue.\n\n## Work State\n### Completed\n- Shell completed.\n### Active\n- Finish.\n### Blocked\n- (none)\n\n## Next Move\n1. Finish.\n\n## Relevant Files\n- (none)\n\n## Important Context\n- Stub probe.\n\n---\n\n**Turn Context (split turn):**\n\n## Objective\n- Complete the probe.\n\n## Requirements\n- STEER_UNIQUE_6539: use the native input queue.\n\n## Decisions\n- Use native queue.\n\n## Work State\n### Completed\n- Shell completed.\n### Active\n- Finish.\n### Blocked\n- (none)\n\n## Next Move\n1. Finish.\n\n## Relevant Files\n- (none)\n\n## Important Context\n- Stub probe.",
+        "tokensBefore": 16512,
+        "retainedMessageCount": 1,
+        "harnessDigest": "# Continual Harness State\n\nLocal continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions.\nThe continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.\nDefault to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.\nUse these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.\n\nWhen to call `await refine.run()`: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep `await refine.run()` continual harness edits small and evidence-backed.\n\nCall contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm.spawn('sub-task', name='worker')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries.\n\nprompt: 0\n\nmemory: 0\n\nskill: 0\n\nsubagent: 0\n\nfactory: 0\n\nNo saved harness entries yet.\n\nrecent refinements: 0",
+        "harnessStateFingerprint": "b77e4293d649db19d47120215434b760c8bd519e8f6267d96c280d2d547884bc",
+        "timestamp": 1793051757504
+      },
+      {
+        "customType": "ipython_state",
+        "content": "[python-state]\n\nYour Python kernel persisted through compaction; its remaining variables, imports, and helpers are still available. These names are still defined: agent_message, agent_observe, attach_image, compact, edit, goal, handle, refine, result, rlm_heartbeat, websearch.",
+        "display": false,
+        "details": null,
+        "role": "custom",
+        "timestamp": "2026-10-26T21:55:57.503Z"
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "PROBE_FINAL: finished."
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "probe",
+        "model": "task",
+        "responseId": "probe",
+        "usage": {
+          "input": 100,
+          "output": 20,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 120,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 1793051757504
+      }
+    ]
+  }
+}

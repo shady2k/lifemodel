@@ -1,0 +1,1893 @@
+{
+  "opencode-compact": {
+    "result": {
+      "agent": "opencode",
+      "scenario": "compact",
+      "sessionID": "ses_e85cb71bfffeFT9sCA0LOLNENV",
+      "first": {
+        "stopReason": "end_turn",
+        "usage": {
+          "inputTokens": 60000,
+          "outputTokens": 40,
+          "totalTokens": 60040
+        },
+        "_meta": {}
+      },
+      "admissionCount": 1,
+      "admissions": [
+        {
+          "ok": true,
+          "data": {
+            "id": "msg_steer_unique_6539",
+            "sessionID": "ses_e85cb71bfffeFT9sCA0LOLNENV",
+            "time": {
+              "created": 1793051627993
+            },
+            "type": "user",
+            "payload": {
+              "text": "STEER_UNIQUE_6539: use the native input queue."
+            },
+            "delivery": "steer"
+          }
+        }
+      ],
+      "requestsAtEnd": 3,
+      "requestsAfterObservation": 3,
+      "totalRequests": 4,
+      "done0": true,
+      "done1": false
+    },
+    "requests": [
+      {
+        "at": "2026-10-26T21:53:47.343Z",
+        "kind": "primary",
+        "n": 1,
+        "roles": [
+          "system",
+          "user"
+        ],
+        "steerOccurrences": 0
+      },
+      {
+        "at": "2026-10-26T21:54:07.525Z",
+        "kind": "primary",
+        "n": 2,
+        "roles": [
+          "system",
+          "user",
+          "assistant",
+          "tool",
+          "user"
+        ],
+        "steerOccurrences": 1
+      },
+      {
+        "at": "2026-10-26T21:54:07.638Z",
+        "kind": "compaction",
+        "n": 2,
+        "roles": [
+          "system",
+          "user",
+          "assistant",
+          "tool",
+          "user",
+          "assistant",
+          "user"
+        ],
+        "steerOccurrences": 1
+      },
+      {
+        "at": "2026-10-26T21:54:09.725Z",
+        "kind": "primary",
+        "n": 3,
+        "roles": [
+          "system",
+          "user",
+          "user"
+        ],
+        "steerOccurrences": 2
+      }
+    ],
+    "timeline": [
+      {
+        "at": "2026-10-26T21:53:47.136Z",
+        "event": "acp-prompt-start",
+        "turn": 1
+      },
+      {
+        "at": "2026-10-26T21:53:47.343Z",
+        "event": "model-request",
+        "n": 1,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:53:48.003Z",
+        "event": "steer-ack",
+        "receipt": {
+          "ok": true,
+          "data": {
+            "id": "msg_steer_unique_6539",
+            "sessionID": "ses_e85cb71bfffeFT9sCA0LOLNENV",
+            "time": {
+              "created": 1793051627993
+            },
+            "type": "user",
+            "payload": {
+              "text": "STEER_UNIQUE_6539: use the native input queue."
+            },
+            "delivery": "steer"
+          }
+        }
+      },
+      {
+        "at": "2026-10-26T21:53:48.006Z",
+        "event": "admitted-during-tool",
+        "elapsed": 21,
+        "done0": false,
+        "done1": false
+      },
+      {
+        "at": "2026-10-26T21:54:07.534Z",
+        "event": "model-request",
+        "n": 2,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:54:07.638Z",
+        "event": "model-request",
+        "n": 2,
+        "kind": "compaction"
+      },
+      {
+        "at": "2026-10-26T21:54:07.663Z",
+        "event": "acp-prompt-end",
+        "turn": 1,
+        "result": {
+          "stopReason": "end_turn",
+          "usage": {
+            "inputTokens": 60000,
+            "outputTokens": 40,
+            "totalTokens": 60040
+          },
+          "_meta": {}
+        },
+        "elapsed": 20527
+      },
+      {
+        "at": "2026-10-26T21:54:09.664Z",
+        "event": "observer",
+        "requestsAtEnd": 3,
+        "requestsAfter": 3
+      },
+      {
+        "at": "2026-10-26T21:54:09.680Z",
+        "event": "acp-prompt-start",
+        "turn": 2
+      },
+      {
+        "at": "2026-10-26T21:54:09.725Z",
+        "event": "model-request",
+        "n": 3,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:54:09.770Z",
+        "event": "acp-prompt-end",
+        "turn": 2,
+        "result": {
+          "stopReason": "end_turn",
+          "usage": {
+            "inputTokens": 100,
+            "outputTokens": 20,
+            "totalTokens": 120
+          },
+          "_meta": {}
+        }
+      }
+    ]
+  },
+  "opencode-duplicate": {
+    "result": {
+      "agent": "opencode",
+      "scenario": "duplicate",
+      "sessionID": "ses_e85c1c22cffeAzp1p1VH6wgY1G",
+      "first": {
+        "stopReason": "end_turn",
+        "usage": {
+          "inputTokens": 200,
+          "outputTokens": 40,
+          "totalTokens": 240
+        },
+        "_meta": {}
+      },
+      "admissionCount": 3,
+      "admissions": [
+        {
+          "ok": true,
+          "data": {
+            "id": "msg_steer_unique_6539",
+            "sessionID": "ses_e85c1c22cffeAzp1p1VH6wgY1G",
+            "time": {
+              "created": 1793052262803
+            },
+            "type": "user",
+            "payload": {
+              "text": "STEER_UNIQUE_6539: use the native input queue."
+            },
+            "delivery": "steer"
+          }
+        },
+        {
+          "ok": true,
+          "data": {
+            "id": "msg_steer_unique_6539",
+            "sessionID": "ses_e85c1c22cffeAzp1p1VH6wgY1G",
+            "time": {
+              "created": 1793052262803
+            },
+            "type": "user",
+            "payload": {
+              "text": "STEER_UNIQUE_6539: use the native input queue."
+            },
+            "delivery": "steer"
+          }
+        },
+        {
+          "ok": true,
+          "data": {
+            "id": "msg_steer_unique_6539",
+            "sessionID": "ses_e85c1c22cffeAzp1p1VH6wgY1G",
+            "time": {
+              "created": 1793052282321
+            },
+            "type": "user",
+            "payload": {
+              "text": "STEER_UNIQUE_6539: use the native input queue."
+            },
+            "delivery": "steer"
+          }
+        }
+      ],
+      "requestsAtEnd": 2,
+      "requestsAfterObservation": 2,
+      "totalRequests": 3,
+      "done0": true,
+      "done1": false
+    },
+    "requests": [
+      {
+        "at": "2026-10-26T22:04:22.078Z",
+        "kind": "primary",
+        "n": 1,
+        "roles": [
+          "system",
+          "user"
+        ],
+        "steerOccurrences": 0
+      },
+      {
+        "at": "2026-10-26T22:04:42.404Z",
+        "kind": "primary",
+        "n": 2,
+        "roles": [
+          "system",
+          "user",
+          "assistant",
+          "tool",
+          "user"
+        ],
+        "steerOccurrences": 1
+      },
+      {
+        "at": "2026-10-26T22:04:45.666Z",
+        "kind": "primary",
+        "n": 3,
+        "roles": [
+          "system",
+          "user",
+          "assistant",
+          "tool",
+          "user",
+          "assistant",
+          "user"
+        ],
+        "steerOccurrences": 1
+      }
+    ],
+    "timeline": [
+      {
+        "at": "2026-10-26T22:04:21.887Z",
+        "event": "acp-prompt-start",
+        "turn": 1
+      },
+      {
+        "at": "2026-10-26T22:04:22.079Z",
+        "event": "model-request",
+        "n": 1,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T22:04:22.818Z",
+        "event": "steer-ack",
+        "receipt": {
+          "ok": true,
+          "data": {
+            "id": "msg_steer_unique_6539",
+            "sessionID": "ses_e85c1c22cffeAzp1p1VH6wgY1G",
+            "time": {
+              "created": 1793052262803
+            },
+            "type": "user",
+            "payload": {
+              "text": "STEER_UNIQUE_6539: use the native input queue."
+            },
+            "delivery": "steer"
+          }
+        }
+      },
+      {
+        "at": "2026-10-26T22:04:22.823Z",
+        "event": "steer-ack",
+        "receipt": {
+          "ok": true,
+          "data": {
+            "id": "msg_steer_unique_6539",
+            "sessionID": "ses_e85c1c22cffeAzp1p1VH6wgY1G",
+            "time": {
+              "created": 1793052262803
+            },
+            "type": "user",
+            "payload": {
+              "text": "STEER_UNIQUE_6539: use the native input queue."
+            },
+            "delivery": "steer"
+          }
+        }
+      },
+      {
+        "at": "2026-10-26T22:04:22.825Z",
+        "event": "admitted-during-tool",
+        "elapsed": 33,
+        "done0": false,
+        "done1": false
+      },
+      {
+        "at": "2026-10-26T22:04:42.404Z",
+        "event": "model-request",
+        "n": 2,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T22:04:42.497Z",
+        "event": "acp-prompt-end",
+        "turn": 1,
+        "result": {
+          "stopReason": "end_turn",
+          "usage": {
+            "inputTokens": 200,
+            "outputTokens": 40,
+            "totalTokens": 240
+          },
+          "_meta": {}
+        },
+        "elapsed": 20610
+      },
+      {
+        "at": "2026-10-26T22:04:44.498Z",
+        "event": "observer",
+        "requestsAtEnd": 2,
+        "requestsAfter": 2
+      },
+      {
+        "at": "2026-10-26T22:04:44.521Z",
+        "event": "steer-ack",
+        "receipt": {
+          "ok": true,
+          "data": {
+            "id": "msg_steer_unique_6539",
+            "sessionID": "ses_e85c1c22cffeAzp1p1VH6wgY1G",
+            "time": {
+              "created": 1793052282321
+            },
+            "type": "user",
+            "payload": {
+              "text": "STEER_UNIQUE_6539: use the native input queue."
+            },
+            "delivery": "steer"
+          }
+        }
+      },
+      {
+        "at": "2026-10-26T22:04:45.523Z",
+        "event": "duplicate-after-promotion",
+        "requests": 2
+      },
+      {
+        "at": "2026-10-26T22:04:45.527Z",
+        "event": "acp-prompt-start",
+        "turn": 2
+      },
+      {
+        "at": "2026-10-26T22:04:45.666Z",
+        "event": "model-request",
+        "n": 3,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T22:04:45.739Z",
+        "event": "acp-prompt-end",
+        "turn": 2,
+        "result": {
+          "stopReason": "end_turn",
+          "usage": {
+            "inputTokens": 100,
+            "outputTokens": 20,
+            "totalTokens": 120
+          },
+          "_meta": {}
+        }
+      }
+    ]
+  },
+  "opencode-late": {
+    "result": {
+      "agent": "opencode",
+      "scenario": "late",
+      "sessionID": "ses_e85ca8d38ffeUYuRP9WPI9W048",
+      "first": {
+        "stopReason": "end_turn",
+        "usage": {
+          "inputTokens": 100,
+          "outputTokens": 20,
+          "totalTokens": 120
+        },
+        "_meta": {}
+      },
+      "admissionCount": 1,
+      "admissions": [
+        {
+          "ok": true,
+          "data": {
+            "id": "msg_steer_unique_6539",
+            "sessionID": "ses_e85ca8d38ffeUYuRP9WPI9W048",
+            "time": {
+              "created": 1793051685941
+            },
+            "type": "user",
+            "payload": {
+              "text": "STEER_UNIQUE_6539: use the native input queue."
+            },
+            "delivery": "steer"
+          }
+        }
+      ],
+      "requestsAtEnd": 1,
+      "requestsAfterObservation": 1,
+      "totalRequests": 2,
+      "done0": false,
+      "done1": false
+    },
+    "requests": [
+      {
+        "at": "2026-10-26T21:54:45.847Z",
+        "kind": "primary",
+        "n": 1,
+        "roles": [
+          "system",
+          "user"
+        ],
+        "steerOccurrences": 0
+      },
+      {
+        "at": "2026-10-26T21:54:48.036Z",
+        "kind": "primary",
+        "n": 2,
+        "roles": [
+          "system",
+          "user",
+          "assistant",
+          "user",
+          "user"
+        ],
+        "steerOccurrences": 1
+      }
+    ],
+    "timeline": [
+      {
+        "at": "2026-10-26T21:54:45.640Z",
+        "event": "acp-prompt-start",
+        "turn": 1
+      },
+      {
+        "at": "2026-10-26T21:54:45.847Z",
+        "event": "model-request",
+        "n": 1,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:54:45.935Z",
+        "event": "acp-prompt-end",
+        "turn": 1,
+        "result": {
+          "stopReason": "end_turn",
+          "usage": {
+            "inputTokens": 100,
+            "outputTokens": 20,
+            "totalTokens": 120
+          },
+          "_meta": {}
+        },
+        "elapsed": 295
+      },
+      {
+        "at": "2026-10-26T21:54:45.947Z",
+        "event": "steer-ack",
+        "receipt": {
+          "ok": true,
+          "data": {
+            "id": "msg_steer_unique_6539",
+            "sessionID": "ses_e85ca8d38ffeUYuRP9WPI9W048",
+            "time": {
+              "created": 1793051685941
+            },
+            "type": "user",
+            "payload": {
+              "text": "STEER_UNIQUE_6539: use the native input queue."
+            },
+            "delivery": "steer"
+          }
+        }
+      },
+      {
+        "at": "2026-10-26T21:54:47.949Z",
+        "event": "observer",
+        "requestsAtEnd": 1,
+        "requestsAfter": 1
+      },
+      {
+        "at": "2026-10-26T21:54:47.959Z",
+        "event": "acp-prompt-start",
+        "turn": 2
+      },
+      {
+        "at": "2026-10-26T21:54:48.036Z",
+        "event": "model-request",
+        "n": 2,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:54:48.072Z",
+        "event": "acp-prompt-end",
+        "turn": 2,
+        "result": {
+          "stopReason": "end_turn",
+          "usage": {
+            "inputTokens": 100,
+            "outputTokens": 20,
+            "totalTokens": 120
+          },
+          "_meta": {}
+        }
+      }
+    ]
+  },
+  "opencode-mid": {
+    "result": {
+      "agent": "opencode",
+      "scenario": "mid",
+      "sessionID": "ses_e85cc0b80ffesOHaWyuFY8wGT9",
+      "first": {
+        "stopReason": "end_turn",
+        "usage": {
+          "inputTokens": 200,
+          "outputTokens": 40,
+          "totalTokens": 240
+        },
+        "_meta": {}
+      },
+      "admissionCount": 1,
+      "admissions": [
+        {
+          "ok": true,
+          "data": {
+            "id": "msg_steer_unique_6539",
+            "sessionID": "ses_e85cc0b80ffesOHaWyuFY8wGT9",
+            "time": {
+              "created": 1793051588637
+            },
+            "type": "user",
+            "payload": {
+              "text": "STEER_UNIQUE_6539: use the native input queue."
+            },
+            "delivery": "steer"
+          }
+        }
+      ],
+      "requestsAtEnd": 2,
+      "requestsAfterObservation": 2,
+      "totalRequests": 2,
+      "done0": true,
+      "done1": false
+    },
+    "requests": [
+      {
+        "at": "2026-10-26T21:53:07.984Z",
+        "kind": "primary",
+        "n": 1,
+        "roles": [
+          "system",
+          "user"
+        ],
+        "steerOccurrences": 0
+      },
+      {
+        "at": "2026-10-26T21:53:28.272Z",
+        "kind": "primary",
+        "n": 2,
+        "roles": [
+          "system",
+          "user",
+          "assistant",
+          "tool",
+          "user"
+        ],
+        "steerOccurrences": 1
+      }
+    ],
+    "timeline": [
+      {
+        "at": "2026-10-26T21:53:07.782Z",
+        "event": "acp-prompt-start",
+        "turn": 1
+      },
+      {
+        "at": "2026-10-26T21:53:07.985Z",
+        "event": "model-request",
+        "n": 1,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:53:08.640Z",
+        "event": "steer-ack",
+        "receipt": {
+          "ok": true,
+          "data": {
+            "id": "msg_steer_unique_6539",
+            "sessionID": "ses_e85cc0b80ffesOHaWyuFY8wGT9",
+            "time": {
+              "created": 1793051588637
+            },
+            "type": "user",
+            "payload": {
+              "text": "STEER_UNIQUE_6539: use the native input queue."
+            },
+            "delivery": "steer"
+          }
+        }
+      },
+      {
+        "at": "2026-10-26T21:53:08.643Z",
+        "event": "admitted-during-tool",
+        "elapsed": 24,
+        "done0": false,
+        "done1": false
+      },
+      {
+        "at": "2026-10-26T21:53:28.276Z",
+        "event": "model-request",
+        "n": 2,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:53:28.398Z",
+        "event": "acp-prompt-end",
+        "turn": 1,
+        "result": {
+          "stopReason": "end_turn",
+          "usage": {
+            "inputTokens": 200,
+            "outputTokens": 40,
+            "totalTokens": 240
+          },
+          "_meta": {}
+        },
+        "elapsed": 20616
+      },
+      {
+        "at": "2026-10-26T21:53:30.399Z",
+        "event": "observer",
+        "requestsAtEnd": 2,
+        "requestsAfter": 2
+      }
+    ]
+  },
+  "opencode-parallel": {
+    "result": {
+      "agent": "opencode",
+      "scenario": "parallel",
+      "sessionID": "ses_e85cba5d3ffeWYaX8wxJAt7Uqv",
+      "first": {
+        "stopReason": "end_turn",
+        "usage": {
+          "inputTokens": 200,
+          "outputTokens": 40,
+          "totalTokens": 240
+        },
+        "_meta": {}
+      },
+      "admissionCount": 1,
+      "admissions": [
+        {
+          "ok": true,
+          "data": {
+            "id": "msg_steer_unique_6539",
+            "sessionID": "ses_e85cba5d3ffeWYaX8wxJAt7Uqv",
+            "time": {
+              "created": 1793051614838
+            },
+            "type": "user",
+            "payload": {
+              "text": "STEER_UNIQUE_6539: use the native input queue."
+            },
+            "delivery": "steer"
+          }
+        }
+      ],
+      "requestsAtEnd": 2,
+      "requestsAfterObservation": 2,
+      "totalRequests": 2,
+      "done0": true,
+      "done1": true
+    },
+    "requests": [
+      {
+        "at": "2026-10-26T21:53:34.060Z",
+        "kind": "primary",
+        "n": 1,
+        "roles": [
+          "system",
+          "user"
+        ],
+        "steerOccurrences": 0
+      },
+      {
+        "at": "2026-10-26T21:53:42.408Z",
+        "kind": "primary",
+        "n": 2,
+        "roles": [
+          "system",
+          "user",
+          "assistant",
+          "tool",
+          "tool",
+          "user"
+        ],
+        "steerOccurrences": 1
+      }
+    ],
+    "timeline": [
+      {
+        "at": "2026-10-26T21:53:33.800Z",
+        "event": "acp-prompt-start",
+        "turn": 1
+      },
+      {
+        "at": "2026-10-26T21:53:34.061Z",
+        "event": "model-request",
+        "n": 1,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:53:34.853Z",
+        "event": "steer-ack",
+        "receipt": {
+          "ok": true,
+          "data": {
+            "id": "msg_steer_unique_6539",
+            "sessionID": "ses_e85cba5d3ffeWYaX8wxJAt7Uqv",
+            "time": {
+              "created": 1793051614838
+            },
+            "type": "user",
+            "payload": {
+              "text": "STEER_UNIQUE_6539: use the native input queue."
+            },
+            "delivery": "steer"
+          }
+        }
+      },
+      {
+        "at": "2026-10-26T21:53:34.862Z",
+        "event": "admitted-during-tool",
+        "elapsed": 37,
+        "done0": false,
+        "done1": false
+      },
+      {
+        "at": "2026-10-26T21:53:42.408Z",
+        "event": "model-request",
+        "n": 2,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:53:42.442Z",
+        "event": "acp-prompt-end",
+        "turn": 1,
+        "result": {
+          "stopReason": "end_turn",
+          "usage": {
+            "inputTokens": 200,
+            "outputTokens": 40,
+            "totalTokens": 240
+          },
+          "_meta": {}
+        },
+        "elapsed": 8642
+      },
+      {
+        "at": "2026-10-26T21:53:44.443Z",
+        "event": "observer",
+        "requestsAtEnd": 2,
+        "requestsAfter": 2
+      }
+    ]
+  },
+  "opencode-tail": {
+    "result": {
+      "agent": "opencode",
+      "scenario": "tail",
+      "sessionID": "ses_e85caa49cffeN6bJt10nDoAmnP",
+      "first": {
+        "stopReason": "end_turn",
+        "usage": {
+          "inputTokens": 200,
+          "outputTokens": 40,
+          "totalTokens": 240
+        },
+        "_meta": {}
+      },
+      "admissionCount": 1,
+      "admissions": [
+        {
+          "ok": true,
+          "data": {
+            "id": "msg_steer_unique_6539",
+            "sessionID": "ses_e85caa49cffeN6bJt10nDoAmnP",
+            "time": {
+              "created": 1793051679866
+            },
+            "type": "user",
+            "payload": {
+              "text": "STEER_UNIQUE_6539: use the native input queue."
+            },
+            "delivery": "steer"
+          }
+        }
+      ],
+      "requestsAtEnd": 2,
+      "requestsAfterObservation": 2,
+      "totalRequests": 3,
+      "done0": false,
+      "done1": false
+    },
+    "requests": [
+      {
+        "at": "2026-10-26T21:54:39.857Z",
+        "kind": "primary",
+        "n": 1,
+        "roles": [
+          "system",
+          "user"
+        ],
+        "steerOccurrences": 0
+      },
+      {
+        "at": "2026-10-26T21:54:39.981Z",
+        "kind": "primary",
+        "n": 2,
+        "roles": [
+          "system",
+          "user",
+          "assistant",
+          "user"
+        ],
+        "steerOccurrences": 1
+      },
+      {
+        "at": "2026-10-26T21:54:42.173Z",
+        "kind": "primary",
+        "n": 3,
+        "roles": [
+          "system",
+          "user",
+          "assistant",
+          "user",
+          "assistant",
+          "user"
+        ],
+        "steerOccurrences": 1
+      }
+    ],
+    "timeline": [
+      {
+        "at": "2026-10-26T21:54:39.656Z",
+        "event": "acp-prompt-start",
+        "turn": 1
+      },
+      {
+        "at": "2026-10-26T21:54:39.858Z",
+        "event": "model-request",
+        "n": 1,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:54:39.858Z",
+        "event": "final-content-sent"
+      },
+      {
+        "at": "2026-10-26T21:54:39.873Z",
+        "event": "steer-ack",
+        "receipt": {
+          "ok": true,
+          "data": {
+            "id": "msg_steer_unique_6539",
+            "sessionID": "ses_e85caa49cffeN6bJt10nDoAmnP",
+            "time": {
+              "created": 1793051679866
+            },
+            "type": "user",
+            "payload": {
+              "text": "STEER_UNIQUE_6539: use the native input queue."
+            },
+            "delivery": "steer"
+          }
+        }
+      },
+      {
+        "at": "2026-10-26T21:54:39.981Z",
+        "event": "model-request",
+        "n": 2,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:54:40.092Z",
+        "event": "acp-prompt-end",
+        "turn": 1,
+        "result": {
+          "stopReason": "end_turn",
+          "usage": {
+            "inputTokens": 200,
+            "outputTokens": 40,
+            "totalTokens": 240
+          },
+          "_meta": {}
+        },
+        "elapsed": 436
+      },
+      {
+        "at": "2026-10-26T21:54:42.094Z",
+        "event": "observer",
+        "requestsAtEnd": 2,
+        "requestsAfter": 2
+      },
+      {
+        "at": "2026-10-26T21:54:42.105Z",
+        "event": "acp-prompt-start",
+        "turn": 2
+      },
+      {
+        "at": "2026-10-26T21:54:42.173Z",
+        "event": "model-request",
+        "n": 3,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:54:42.202Z",
+        "event": "acp-prompt-end",
+        "turn": 2,
+        "result": {
+          "stopReason": "end_turn",
+          "usage": {
+            "inputTokens": 100,
+            "outputTokens": 20,
+            "totalTokens": 120
+          },
+          "_meta": {}
+        }
+      }
+    ]
+  },
+  "prime-agent-compact": {
+    "result": {
+      "agent": "prime-agent",
+      "scenario": "compact",
+      "sessionID": "3322b507-8d6a-4d2e-aae3-dd3a50dfda0a",
+      "activeSessionId": "3df901b7f7ef",
+      "first": {
+        "stopReason": "end_turn"
+      },
+      "admissionCount": 1,
+      "admissions": [
+        {
+          "id": "native-2",
+          "type": "response",
+          "command": "steer",
+          "success": true,
+          "data": {
+            "queued": true
+          }
+        }
+      ],
+      "requestsAtEnd": 6,
+      "requestsAfterObservation": 6,
+      "totalRequests": 7,
+      "done0": true,
+      "done1": false
+    },
+    "requests": [
+      {
+        "at": "2026-10-26T21:55:36.339Z",
+        "kind": "primary",
+        "n": 1,
+        "roles": [
+          "system",
+          "user",
+          "user"
+        ],
+        "steerOccurrences": 0
+      },
+      {
+        "at": "2026-10-26T21:55:56.417Z",
+        "kind": "compaction",
+        "n": 1,
+        "roles": [
+          "system",
+          "user"
+        ],
+        "steerOccurrences": 0
+      },
+      {
+        "at": "2026-10-26T21:55:56.432Z",
+        "kind": "primary",
+        "n": 2,
+        "roles": [
+          "system",
+          "user",
+          "assistant",
+          "tool",
+          "user",
+          "user",
+          "user"
+        ],
+        "steerOccurrences": 1
+      },
+      {
+        "at": "2026-10-26T21:55:57.496Z",
+        "kind": "compaction",
+        "n": 2,
+        "roles": [
+          "system",
+          "user"
+        ],
+        "steerOccurrences": 1
+      },
+      {
+        "at": "2026-10-26T21:55:57.500Z",
+        "kind": "compaction",
+        "n": 2,
+        "roles": [
+          "system",
+          "user"
+        ],
+        "steerOccurrences": 0
+      },
+      {
+        "at": "2026-10-26T21:55:57.509Z",
+        "kind": "primary",
+        "n": 3,
+        "roles": [
+          "system",
+          "user",
+          "assistant",
+          "tool",
+          "user"
+        ],
+        "steerOccurrences": 1
+      },
+      {
+        "at": "2026-10-26T21:55:59.562Z",
+        "kind": "primary",
+        "n": 4,
+        "roles": [
+          "system",
+          "user",
+          "assistant",
+          "tool",
+          "user",
+          "assistant",
+          "user"
+        ],
+        "steerOccurrences": 1
+      }
+    ],
+    "timeline": [
+      {
+        "at": "2026-10-26T21:55:36.153Z",
+        "event": "acp-prompt-start",
+        "turn": 1
+      },
+      {
+        "at": "2026-10-26T21:55:36.340Z",
+        "event": "model-request",
+        "n": 1,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:55:36.889Z",
+        "event": "steer-ack",
+        "receipt": {
+          "id": "native-2",
+          "type": "response",
+          "command": "steer",
+          "success": true,
+          "data": {
+            "queued": true
+          }
+        }
+      },
+      {
+        "at": "2026-10-26T21:55:36.894Z",
+        "event": "admitted-during-tool",
+        "elapsed": 12,
+        "done0": false,
+        "done1": false
+      },
+      {
+        "at": "2026-10-26T21:55:56.417Z",
+        "event": "model-request",
+        "n": 1,
+        "kind": "compaction"
+      },
+      {
+        "at": "2026-10-26T21:55:56.433Z",
+        "event": "model-request",
+        "n": 2,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:55:57.496Z",
+        "event": "model-request",
+        "n": 2,
+        "kind": "compaction"
+      },
+      {
+        "at": "2026-10-26T21:55:57.501Z",
+        "event": "model-request",
+        "n": 2,
+        "kind": "compaction"
+      },
+      {
+        "at": "2026-10-26T21:55:57.510Z",
+        "event": "model-request",
+        "n": 3,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:55:57.528Z",
+        "event": "acp-prompt-end",
+        "turn": 1,
+        "result": {
+          "stopReason": "end_turn"
+        },
+        "elapsed": 21375
+      },
+      {
+        "at": "2026-10-26T21:55:59.529Z",
+        "event": "observer",
+        "requestsAtEnd": 6,
+        "requestsAfter": 6
+      },
+      {
+        "at": "2026-10-26T21:55:59.548Z",
+        "event": "acp-prompt-start",
+        "turn": 2
+      },
+      {
+        "at": "2026-10-26T21:55:59.563Z",
+        "event": "model-request",
+        "n": 4,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:55:59.581Z",
+        "event": "acp-prompt-end",
+        "turn": 2,
+        "result": {
+          "stopReason": "end_turn"
+        }
+      }
+    ]
+  },
+  "prime-agent-duplicate": {
+    "result": {
+      "agent": "prime-agent",
+      "scenario": "duplicate",
+      "sessionID": "5e77333b-d25e-4fc1-94b5-ac5b8abca49f",
+      "activeSessionId": "3ec98785b76f",
+      "first": {
+        "stopReason": "end_turn"
+      },
+      "admissionCount": 3,
+      "admissions": [
+        {
+          "id": "lost-ack-stable-id",
+          "type": "response",
+          "command": "steer",
+          "success": true,
+          "data": {
+            "queued": true
+          }
+        },
+        {
+          "id": "lost-ack-stable-id",
+          "type": "response",
+          "command": "steer",
+          "success": true,
+          "data": {
+            "queued": true
+          }
+        },
+        {
+          "id": "lost-ack-stable-id",
+          "type": "response",
+          "command": "steer",
+          "success": true,
+          "data": {
+            "queued": true
+          }
+        }
+      ],
+      "requestsAtEnd": 2,
+      "requestsAfterObservation": 2,
+      "totalRequests": 3,
+      "done0": true,
+      "done1": false
+    },
+    "requests": [
+      {
+        "at": "2026-10-26T21:56:04.652Z",
+        "kind": "primary",
+        "n": 1,
+        "roles": [
+          "system",
+          "user",
+          "user"
+        ],
+        "steerOccurrences": 0
+      },
+      {
+        "at": "2026-10-26T21:56:24.736Z",
+        "kind": "primary",
+        "n": 2,
+        "roles": [
+          "system",
+          "user",
+          "user",
+          "assistant",
+          "tool",
+          "user",
+          "user",
+          "user"
+        ],
+        "steerOccurrences": 2
+      },
+      {
+        "at": "2026-10-26T21:56:26.804Z",
+        "kind": "primary",
+        "n": 3,
+        "roles": [
+          "system",
+          "user",
+          "user",
+          "assistant",
+          "tool",
+          "user",
+          "user",
+          "user",
+          "assistant",
+          "user"
+        ],
+        "steerOccurrences": 3
+      }
+    ],
+    "timeline": [
+      {
+        "at": "2026-10-26T21:56:04.478Z",
+        "event": "acp-prompt-start",
+        "turn": 1
+      },
+      {
+        "at": "2026-10-26T21:56:04.653Z",
+        "event": "model-request",
+        "n": 1,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:56:05.201Z",
+        "event": "steer-ack",
+        "receipt": {
+          "id": "lost-ack-stable-id",
+          "type": "response",
+          "command": "steer",
+          "success": true,
+          "data": {
+            "queued": true
+          }
+        }
+      },
+      {
+        "at": "2026-10-26T21:56:05.205Z",
+        "event": "steer-ack",
+        "receipt": {
+          "id": "lost-ack-stable-id",
+          "type": "response",
+          "command": "steer",
+          "success": true,
+          "data": {
+            "queued": true
+          }
+        }
+      },
+      {
+        "at": "2026-10-26T21:56:05.209Z",
+        "event": "admitted-during-tool",
+        "elapsed": 13,
+        "done0": false,
+        "done1": false
+      },
+      {
+        "at": "2026-10-26T21:56:24.736Z",
+        "event": "model-request",
+        "n": 2,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:56:24.767Z",
+        "event": "acp-prompt-end",
+        "turn": 1,
+        "result": {
+          "stopReason": "end_turn"
+        },
+        "elapsed": 20289
+      },
+      {
+        "at": "2026-10-26T21:56:26.768Z",
+        "event": "observer",
+        "requestsAtEnd": 2,
+        "requestsAfter": 2
+      },
+      {
+        "at": "2026-10-26T21:56:26.797Z",
+        "event": "steer-ack",
+        "receipt": {
+          "id": "lost-ack-stable-id",
+          "type": "response",
+          "command": "steer",
+          "success": true,
+          "data": {
+            "queued": true
+          }
+        }
+      },
+      {
+        "at": "2026-10-26T21:56:26.805Z",
+        "event": "model-request",
+        "n": 3,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:56:27.800Z",
+        "event": "duplicate-after-promotion",
+        "requests": 3
+      }
+    ]
+  },
+  "prime-agent-late": {
+    "result": {
+      "agent": "prime-agent",
+      "scenario": "late",
+      "sessionID": "7db879e3-8b3b-4490-83a2-90b34812b93b",
+      "activeSessionId": "d9e994163e5a",
+      "first": {
+        "stopReason": "end_turn"
+      },
+      "admissionCount": 1,
+      "admissions": [
+        {
+          "id": "native-2",
+          "type": "response",
+          "command": "steer",
+          "success": true,
+          "data": {
+            "queued": true
+          }
+        }
+      ],
+      "requestsAtEnd": 1,
+      "requestsAfterObservation": 2,
+      "totalRequests": 3,
+      "done0": false,
+      "done1": false
+    },
+    "requests": [
+      {
+        "at": "2026-10-26T21:56:39.382Z",
+        "kind": "primary",
+        "n": 1,
+        "roles": [
+          "system",
+          "user",
+          "user"
+        ],
+        "steerOccurrences": 0
+      },
+      {
+        "at": "2026-10-26T21:56:39.423Z",
+        "kind": "primary",
+        "n": 2,
+        "roles": [
+          "system",
+          "user",
+          "user",
+          "assistant",
+          "user",
+          "user"
+        ],
+        "steerOccurrences": 1
+      },
+      {
+        "at": "2026-10-26T21:56:41.443Z",
+        "kind": "primary",
+        "n": 3,
+        "roles": [
+          "system",
+          "user",
+          "user",
+          "assistant",
+          "user",
+          "user",
+          "assistant",
+          "user"
+        ],
+        "steerOccurrences": 1
+      }
+    ],
+    "timeline": [
+      {
+        "at": "2026-10-26T21:56:39.227Z",
+        "event": "acp-prompt-start",
+        "turn": 1
+      },
+      {
+        "at": "2026-10-26T21:56:39.383Z",
+        "event": "model-request",
+        "n": 1,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:56:39.405Z",
+        "event": "acp-prompt-end",
+        "turn": 1,
+        "result": {
+          "stopReason": "end_turn"
+        },
+        "elapsed": 178
+      },
+      {
+        "at": "2026-10-26T21:56:39.413Z",
+        "event": "steer-ack",
+        "receipt": {
+          "id": "native-2",
+          "type": "response",
+          "command": "steer",
+          "success": true,
+          "data": {
+            "queued": true
+          }
+        }
+      },
+      {
+        "at": "2026-10-26T21:56:39.424Z",
+        "event": "model-request",
+        "n": 2,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:56:41.414Z",
+        "event": "observer",
+        "requestsAtEnd": 1,
+        "requestsAfter": 2
+      },
+      {
+        "at": "2026-10-26T21:56:41.431Z",
+        "event": "acp-prompt-start",
+        "turn": 2
+      },
+      {
+        "at": "2026-10-26T21:56:41.443Z",
+        "event": "model-request",
+        "n": 3,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:56:41.459Z",
+        "event": "acp-prompt-end",
+        "turn": 2,
+        "result": {
+          "stopReason": "end_turn"
+        }
+      }
+    ]
+  },
+  "prime-agent-mid": {
+    "result": {
+      "agent": "prime-agent",
+      "scenario": "mid",
+      "sessionID": "ed1968c2-8799-481d-8aa2-f618872c394a",
+      "activeSessionId": "0243fa784cb3",
+      "first": {
+        "stopReason": "end_turn"
+      },
+      "admissionCount": 1,
+      "admissions": [
+        {
+          "id": "native-2",
+          "type": "response",
+          "command": "steer",
+          "success": true,
+          "data": {
+            "queued": true
+          }
+        }
+      ],
+      "requestsAtEnd": 2,
+      "requestsAfterObservation": 2,
+      "totalRequests": 2,
+      "done0": true,
+      "done1": false
+    },
+    "requests": [
+      {
+        "at": "2026-10-26T21:54:52.752Z",
+        "kind": "primary",
+        "n": 1,
+        "roles": [
+          "system",
+          "user",
+          "user"
+        ],
+        "steerOccurrences": 0
+      },
+      {
+        "at": "2026-10-26T21:55:12.806Z",
+        "kind": "primary",
+        "n": 2,
+        "roles": [
+          "system",
+          "user",
+          "user",
+          "assistant",
+          "tool",
+          "user",
+          "user"
+        ],
+        "steerOccurrences": 1
+      }
+    ],
+    "timeline": [
+      {
+        "at": "2026-10-26T21:54:52.598Z",
+        "event": "acp-prompt-start",
+        "turn": 1
+      },
+      {
+        "at": "2026-10-26T21:54:52.753Z",
+        "event": "model-request",
+        "n": 1,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:54:53.308Z",
+        "event": "steer-ack",
+        "receipt": {
+          "id": "native-2",
+          "type": "response",
+          "command": "steer",
+          "success": true,
+          "data": {
+            "queued": true
+          }
+        }
+      },
+      {
+        "at": "2026-10-26T21:54:53.312Z",
+        "event": "admitted-during-tool",
+        "elapsed": 13,
+        "done0": false,
+        "done1": false
+      },
+      {
+        "at": "2026-10-26T21:55:12.807Z",
+        "event": "model-request",
+        "n": 2,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:55:12.823Z",
+        "event": "acp-prompt-end",
+        "turn": 1,
+        "result": {
+          "stopReason": "end_turn"
+        },
+        "elapsed": 20225
+      },
+      {
+        "at": "2026-10-26T21:55:14.824Z",
+        "event": "observer",
+        "requestsAtEnd": 2,
+        "requestsAfter": 2
+      }
+    ]
+  },
+  "prime-agent-parallel": {
+    "result": {
+      "agent": "prime-agent",
+      "scenario": "parallel",
+      "sessionID": "cf8d8689-a5cc-4779-acc7-3ea4cabe2a93",
+      "activeSessionId": "27126295b711",
+      "first": {
+        "stopReason": "end_turn"
+      },
+      "admissionCount": 1,
+      "admissions": [
+        {
+          "id": "native-2",
+          "type": "response",
+          "command": "steer",
+          "success": true,
+          "data": {
+            "queued": true
+          }
+        }
+      ],
+      "requestsAtEnd": 2,
+      "requestsAfterObservation": 2,
+      "totalRequests": 2,
+      "done0": true,
+      "done1": true
+    },
+    "requests": [
+      {
+        "at": "2026-10-26T21:55:18.417Z",
+        "kind": "primary",
+        "n": 1,
+        "roles": [
+          "system",
+          "user",
+          "user"
+        ],
+        "steerOccurrences": 0
+      },
+      {
+        "at": "2026-10-26T21:55:30.500Z",
+        "kind": "primary",
+        "n": 2,
+        "roles": [
+          "system",
+          "user",
+          "user",
+          "assistant",
+          "tool",
+          "tool",
+          "user",
+          "user"
+        ],
+        "steerOccurrences": 1
+      }
+    ],
+    "timeline": [
+      {
+        "at": "2026-10-26T21:55:18.265Z",
+        "event": "acp-prompt-start",
+        "turn": 1
+      },
+      {
+        "at": "2026-10-26T21:55:18.417Z",
+        "event": "model-request",
+        "n": 1,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:55:18.978Z",
+        "event": "steer-ack",
+        "receipt": {
+          "id": "native-2",
+          "type": "response",
+          "command": "steer",
+          "success": true,
+          "data": {
+            "queued": true
+          }
+        }
+      },
+      {
+        "at": "2026-10-26T21:55:18.982Z",
+        "event": "admitted-during-tool",
+        "elapsed": 11,
+        "done0": false,
+        "done1": false
+      },
+      {
+        "at": "2026-10-26T21:55:30.501Z",
+        "event": "model-request",
+        "n": 2,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:55:30.516Z",
+        "event": "acp-prompt-end",
+        "turn": 1,
+        "result": {
+          "stopReason": "end_turn"
+        },
+        "elapsed": 12251
+      },
+      {
+        "at": "2026-10-26T21:55:32.517Z",
+        "event": "observer",
+        "requestsAtEnd": 2,
+        "requestsAfter": 2
+      }
+    ]
+  },
+  "prime-agent-tail": {
+    "result": {
+      "agent": "prime-agent",
+      "scenario": "tail",
+      "sessionID": "f41db4bd-0632-479e-9bb5-cd0593164dc7",
+      "activeSessionId": "23667a280f4d",
+      "first": {
+        "stopReason": "end_turn"
+      },
+      "admissionCount": 1,
+      "admissions": [
+        {
+          "id": "native-2",
+          "type": "response",
+          "command": "steer",
+          "success": true,
+          "data": {
+            "queued": true
+          }
+        }
+      ],
+      "requestsAtEnd": 2,
+      "requestsAfterObservation": 2,
+      "totalRequests": 3,
+      "done0": false,
+      "done1": false
+    },
+    "requests": [
+      {
+        "at": "2026-10-26T21:56:31.910Z",
+        "kind": "primary",
+        "n": 1,
+        "roles": [
+          "system",
+          "user",
+          "user"
+        ],
+        "steerOccurrences": 0
+      },
+      {
+        "at": "2026-10-26T21:56:31.935Z",
+        "kind": "primary",
+        "n": 2,
+        "roles": [
+          "system",
+          "user",
+          "user",
+          "assistant",
+          "user"
+        ],
+        "steerOccurrences": 1
+      },
+      {
+        "at": "2026-10-26T21:56:34.027Z",
+        "kind": "primary",
+        "n": 3,
+        "roles": [
+          "system",
+          "user",
+          "user",
+          "assistant",
+          "user",
+          "assistant",
+          "user",
+          "user"
+        ],
+        "steerOccurrences": 1
+      }
+    ],
+    "timeline": [
+      {
+        "at": "2026-10-26T21:56:31.759Z",
+        "event": "acp-prompt-start",
+        "turn": 1
+      },
+      {
+        "at": "2026-10-26T21:56:31.911Z",
+        "event": "model-request",
+        "n": 1,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:56:31.912Z",
+        "event": "final-content-sent"
+      },
+      {
+        "at": "2026-10-26T21:56:31.916Z",
+        "event": "steer-ack",
+        "receipt": {
+          "id": "native-2",
+          "type": "response",
+          "command": "steer",
+          "success": true,
+          "data": {
+            "queued": true
+          }
+        }
+      },
+      {
+        "at": "2026-10-26T21:56:31.935Z",
+        "event": "model-request",
+        "n": 2,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:56:31.996Z",
+        "event": "acp-prompt-end",
+        "turn": 1,
+        "result": {
+          "stopReason": "end_turn"
+        },
+        "elapsed": 237
+      },
+      {
+        "at": "2026-10-26T21:56:33.998Z",
+        "event": "observer",
+        "requestsAtEnd": 2,
+        "requestsAfter": 2
+      },
+      {
+        "at": "2026-10-26T21:56:34.015Z",
+        "event": "acp-prompt-start",
+        "turn": 2
+      },
+      {
+        "at": "2026-10-26T21:56:34.027Z",
+        "event": "model-request",
+        "n": 3,
+        "kind": "primary"
+      },
+      {
+        "at": "2026-10-26T21:56:34.044Z",
+        "event": "acp-prompt-end",
+        "turn": 2,
+        "result": {
+          "stopReason": "end_turn"
+        }
+      }
+    ]
+  }
+}

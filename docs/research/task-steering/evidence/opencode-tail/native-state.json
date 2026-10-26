@@ -1,0 +1,94 @@
+{
+  "ok": true,
+  "data": [
+    {
+      "id": "msg_17a355bab001WmH9Jv1uFgS0vN",
+      "time": {
+        "created": 1793051679752
+      },
+      "text": "PROBE_TASK: run the offered shell tools and finish. Do not launch children.",
+      "files": [],
+      "type": "user"
+    },
+    {
+      "id": "msg_17a355c19001WWpAcCACqyt05k",
+      "time": {
+        "created": 1793051679785,
+        "streamed": 1793051679888,
+        "completed": 1793051679890
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "task",
+        "providerID": "lifemodel"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "PROBE_FINAL: finished."
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 100,
+        "output": 20,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_steer_unique_6539",
+      "time": {
+        "created": 1793051679951
+      },
+      "text": "STEER_UNIQUE_6539: use the native input queue.",
+      "type": "user"
+    },
+    {
+      "id": "msg_17a355cd6001FOqIeXnik7B9HQ",
+      "time": {
+        "created": 1793051679973,
+        "streamed": 1793051680055,
+        "completed": 1793051680058
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "task",
+        "providerID": "lifemodel"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "PROBE_FINAL: finished."
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 100,
+        "output": 20,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_17a355d42001kCLKpeqxtfMg3B",
+      "time": {
+        "created": 1793051680066
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    }
+  ]
+}

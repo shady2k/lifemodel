@@ -1,0 +1,146 @@
+{
+  "ok": true,
+  "data": [
+    {
+      "id": "msg_17a345a79001Bl1pnSXXTYdTq9",
+      "time": {
+        "created": 1793051613921
+      },
+      "text": "PROBE_TASK: run the offered shell tools and finish. Do not launch children.",
+      "files": [],
+      "type": "user"
+    },
+    {
+      "id": "msg_17a345afb001Ll5HqvuUovVDkB",
+      "time": {
+        "created": 1793051613971,
+        "streamed": 1793051614116,
+        "completed": 1793051622276
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "task",
+        "providerID": "lifemodel"
+      },
+      "content": [
+        {
+          "type": "tool",
+          "id": "call_probe_1_0",
+          "name": "shell",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "echo start-0; touch /work/probe/start-0; sleep 4; touch /work/probe/done-0; echo done-0"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "start-0\ndone-0\n"
+              }
+            ],
+            "metadata": {
+              "status": "completed",
+              "truncated": false,
+              "exit": 0
+            }
+          },
+          "time": {
+            "created": 1793051614084,
+            "ran": 1793051614104,
+            "completed": 1793051618327
+          }
+        },
+        {
+          "type": "tool",
+          "id": "call_probe_1_1",
+          "name": "shell",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "echo start-1; touch /work/probe/start-1; sleep 8; touch /work/probe/done-1; echo done-1"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "start-1\ndone-1\n"
+              }
+            ],
+            "metadata": {
+              "status": "completed",
+              "truncated": false,
+              "exit": 0
+            }
+          },
+          "time": {
+            "created": 1793051614091,
+            "ran": 1793051614113,
+            "completed": 1793051622269
+          }
+        }
+      ],
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 100,
+        "output": 20,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_steer_unique_6539",
+      "time": {
+        "created": 1793051622300
+      },
+      "text": "STEER_UNIQUE_6539: use the native input queue.",
+      "type": "user"
+    },
+    {
+      "id": "msg_17a347baf001fVCMuDELd4qQlv",
+      "time": {
+        "created": 1793051622369,
+        "streamed": 1793051622421,
+        "completed": 1793051622424
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "task",
+        "providerID": "lifemodel"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "PROBE_FINAL: finished."
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 100,
+        "output": 20,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_17a347c1c001lNpbrAVkieQsBm",
+      "time": {
+        "created": 1793051622428
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    }
+  ]
+}

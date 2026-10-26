@@ -1,0 +1,37 @@
+{
+  "agent": "opencode",
+  "scenario": "late",
+  "sessionID": "ses_e85ca8d38ffeUYuRP9WPI9W048",
+  "first": {
+    "stopReason": "end_turn",
+    "usage": {
+      "inputTokens": 100,
+      "outputTokens": 20,
+      "totalTokens": 120
+    },
+    "_meta": {}
+  },
+  "admissionCount": 1,
+  "admissions": [
+    {
+      "ok": true,
+      "data": {
+        "id": "msg_steer_unique_6539",
+        "sessionID": "ses_e85ca8d38ffeUYuRP9WPI9W048",
+        "time": {
+          "created": 1793051685941
+        },
+        "type": "user",
+        "payload": {
+          "text": "STEER_UNIQUE_6539: use the native input queue."
+        },
+        "delivery": "steer"
+      }
+    }
+  ],
+  "requestsAtEnd": 1,
+  "requestsAfterObservation": 1,
+  "totalRequests": 2,
+  "done0": false,
+  "done1": false
+}

@@ -1,0 +1,148 @@
+{
+  "id": "native-5",
+  "type": "response",
+  "command": "get_messages",
+  "success": true,
+  "data": {
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "PROBE_TASK: run the offered shell tools and finish. Do not launch children."
+          }
+        ],
+        "timestamp": 1793051718269
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "toolCall",
+            "id": "call_probe_1_0",
+            "name": "python_repl",
+            "arguments": {
+              "code": "handle = bash(\"echo start-0; touch /work/probe/start-0; sleep 4; touch /work/probe/done-0; echo done-0\", yield_after=60)\nresult = await handle\nprint(result.output)\nif result.exit_code != 0: raise RuntimeError(f'Shell exit {result.exit_code}')"
+            }
+          },
+          {
+            "type": "toolCall",
+            "id": "call_probe_1_1",
+            "name": "python_repl",
+            "arguments": {
+              "code": "handle = bash(\"echo start-1; touch /work/probe/start-1; sleep 8; touch /work/probe/done-1; echo done-1\", yield_after=60)\nresult = await handle\nprint(result.output)\nif result.exit_code != 0: raise RuntimeError(f'Shell exit {result.exit_code}')"
+            }
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "probe",
+        "model": "task",
+        "responseId": "probe",
+        "usage": {
+          "input": 100,
+          "output": 20,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 120,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "toolUse",
+        "timestamp": 1793051718276
+      },
+      {
+        "role": "toolResult",
+        "toolCallId": "call_probe_1_0",
+        "toolName": "python_repl",
+        "content": [
+          {
+            "text": "start-0\ndone-0\n\n",
+            "type": "text"
+          }
+        ],
+        "details": {
+          "status": "ok",
+          "kernelRestarted": false,
+          "durationMs": 4032,
+          "stdout": "start-0\ndone-0\n\n",
+          "bashCommands": {
+            "first": "echo start-0; touch /work/probe/start-0; sleep 4; touch /work/probe/done-0; echo done-0",
+            "count": 1,
+            "lines": 1
+          }
+        },
+        "isError": false,
+        "timestamp": 1793051722455
+      },
+      {
+        "role": "toolResult",
+        "toolCallId": "call_probe_1_1",
+        "toolName": "python_repl",
+        "content": [
+          {
+            "text": "start-1\ndone-1\n\n",
+            "type": "text"
+          }
+        ],
+        "details": {
+          "status": "ok",
+          "kernelRestarted": false,
+          "durationMs": 8028,
+          "stdout": "start-1\ndone-1\n\n",
+          "bashCommands": {
+            "first": "echo start-1; touch /work/probe/start-1; sleep 8; touch /work/probe/done-1; echo done-1",
+            "count": 1,
+            "lines": 1
+          }
+        },
+        "isError": false,
+        "timestamp": 1793051730484
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "STEER_UNIQUE_6539: use the native input queue."
+          }
+        ],
+        "timestamp": 1793051730489
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "PROBE_FINAL: finished."
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "probe",
+        "model": "task",
+        "responseId": "probe",
+        "usage": {
+          "input": 100,
+          "output": 20,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 120,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 1793051730494
+      }
+    ]
+  }
+}

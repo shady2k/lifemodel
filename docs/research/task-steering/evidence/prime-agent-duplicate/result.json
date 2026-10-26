@@ -1,0 +1,44 @@
+{
+  "agent": "prime-agent",
+  "scenario": "duplicate",
+  "sessionID": "5e77333b-d25e-4fc1-94b5-ac5b8abca49f",
+  "activeSessionId": "3ec98785b76f",
+  "first": {
+    "stopReason": "end_turn"
+  },
+  "admissionCount": 3,
+  "admissions": [
+    {
+      "id": "lost-ack-stable-id",
+      "type": "response",
+      "command": "steer",
+      "success": true,
+      "data": {
+        "queued": true
+      }
+    },
+    {
+      "id": "lost-ack-stable-id",
+      "type": "response",
+      "command": "steer",
+      "success": true,
+      "data": {
+        "queued": true
+      }
+    },
+    {
+      "id": "lost-ack-stable-id",
+      "type": "response",
+      "command": "steer",
+      "success": true,
+      "data": {
+        "queued": true
+      }
+    }
+  ],
+  "requestsAtEnd": 2,
+  "requestsAfterObservation": 2,
+  "totalRequests": 3,
+  "done0": true,
+  "done1": false
+}
