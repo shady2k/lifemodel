@@ -258,6 +258,10 @@ spec:
         && object.metadata.ownerReferences == oldObject.metadata.ownerReferences)
       message: 'task update: launch identity and owner references immutable'
     - expression: >-
+        request.operation != 'UPDATE' ||
+        object.spec.containers.map(c, [c.name, c.image]) == oldObject.spec.containers.map(c, [c.name, c.image])
+      message: 'task update: execution container names and images immutable'
+    - expression: >-
         has(variables.p.serviceAccountName) && variables.p.serviceAccountName == 'task' && has(variables.p.automountServiceAccountToken)
         && variables.p.automountServiceAccountToken == false
       message: 'task identity: use task SA and explicitly disable automount'

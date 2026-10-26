@@ -27,6 +27,7 @@ import {
   TASK_LAUNCH_LABEL,
 } from '../../src/core/kubernetes-task-executor.js';
 import { createTaskKubernetesIdentity } from '../../loader/src/task-kubernetes-identity.js';
+import { createTaskKubernetesIdentity as createCoreTaskKubernetesIdentity } from '../../src/core/task-kubernetes-identity.js';
 import { createTaskIdentity } from '../../loader/src/task-identity.js';
 import { createTaskModelGateway } from '../../loader/src/task-model-gateway.js';
 import { createModelGateway } from '../../loader/src/model-gateway-app.js';
@@ -264,7 +265,7 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
           },
         ],
       },
-      spec: { serviceAccountName: 'task' },
+      spec: structuredClone(jobs.get(task.jobName).spec.template.spec),
       status: { phase: 'Running' },
     });
     const token = `MODEL-TOKEN-PRIVATE-CANARY-${suffix}-${task.id}`;
@@ -584,6 +585,61 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
         parentSpanId: f.task.parentSpanId,
       });
     }
+  });
+
+  describe.each([
+    ['loader', createTaskKubernetesIdentity],
+    ['core', createCoreTaskKubernetesIdentity],
+  ] as const)('%s live execution image proof', (_copy, createIdentity) => {
+    function verifier() {
+      const result = createIdentity({
+        apiServer: origin,
+        tokenFile,
+        caFile,
+        timeoutMs: 500,
+        audience: 'lifemodel-task-model',
+      });
+      cleanup.push(() => result.close());
+      return result;
+    }
+    it('accepts the template images with API-defaulted live Pod fields', async () => {
+      const f = await fixture();
+      const pod = pods.get(f.podName);
+      Object.assign(pod.spec, { nodeName: 'scheduled-node', schedulerName: 'default-scheduler' });
+      Object.assign(pod.spec.containers[0], {
+        imagePullPolicy: 'IfNotPresent',
+        terminationMessagePath: '/dev/termination-log',
+        terminationMessagePolicy: 'File',
+      });
+      pod.spec.initContainers = [];
+      pod.spec.ephemeralContainers = [];
+      await expect(verifier().verify(f.token)).resolves.toMatchObject({ podUid: f.podUid });
+    });
+    it.each([
+      'changed-image',
+      'missing-image',
+      'missing-containers',
+      'empty-containers',
+      'renamed-container',
+      'extra-container',
+      'init-container',
+      'ephemeral-container',
+    ] as const)('denies %s in the live Pod despite the intact canonical Job', async (fault) => {
+      const f = await fixture();
+      const pod = pods.get(f.podName);
+      const container = pod.spec.containers[0];
+      if (fault === 'changed-image')
+        container.image = `zot.lifemodel-system.svc:5001/lifemodel/workbench@sha256:${'b'.repeat(64)}`;
+      if (fault === 'missing-image') delete container.image;
+      if (fault === 'missing-containers') delete pod.spec.containers;
+      if (fault === 'empty-containers') pod.spec.containers = [];
+      if (fault === 'renamed-container') container.name = 'other';
+      if (fault === 'extra-container') pod.spec.containers.push({ ...container, name: 'other' });
+      if (fault === 'init-container') pod.spec.initContainers = [{ ...container, name: 'init' }];
+      if (fault === 'ephemeral-container')
+        pod.spec.ephemeralContainers = [{ ...container, name: 'debug' }];
+      await expect(verifier().verify(f.token)).rejects.toMatchObject({ status: 403 });
+    });
   });
 
   it('verifies an executor Job after API defaulting, quantity canonicalization and generated ownership fields', async () => {

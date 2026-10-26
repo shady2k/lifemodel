@@ -149,6 +149,33 @@ function taskJobTemplateHash(job: { spec: JsonObject }): string {
   }
 }
 
+// Pod scheduling/defaulting may add fields, but never changes container names
+// or image references. Do not trust the Job hash alone for the live execution.
+function executionImages(spec: JsonObject): unknown {
+  return ['containers', 'initContainers', 'ephemeralContainers'].map((kind) => {
+    const list = spec[kind];
+    // Kubernetes can omit an empty optional container list.
+    if (list === undefined && kind !== 'containers') return [];
+    if (!Array.isArray(list) || (kind === 'containers' && !list.length)) denied();
+    const names = new Set<string>();
+    return list.map((item) => {
+      const container = object(item);
+      const name = container['name'];
+      const image = container['image'];
+      if (
+        typeof name !== 'string' ||
+        !name ||
+        names.has(name) ||
+        typeof image !== 'string' ||
+        !image
+      )
+        denied();
+      names.add(name);
+      return { name, image };
+    });
+  });
+}
+
 export function createTaskKubernetesIdentity(options: TaskKubernetesIdentityOptions = {}): {
   verify(token: string, signal?: AbortSignal): Promise<TaskKubernetesProof>;
   close(): void;
@@ -381,7 +408,9 @@ export function createTaskKubernetesIdentity(options: TaskKubernetesIdentityOpti
         if (
           templateLabels[LAUNCH_LABEL] !== launchLabel ||
           templateLabels['app.kubernetes.io/name'] !== 'task' ||
-          object(template['spec'])['serviceAccountName'] !== 'task'
+          object(template['spec'])['serviceAccountName'] !== 'task' ||
+          stable(executionImages(object(pod['spec']))) !==
+            stable(executionImages(object(template['spec'])))
         )
           denied();
         // These API-generated fields are omitted by the hash only after validating identity,
