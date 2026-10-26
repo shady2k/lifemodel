@@ -114,15 +114,18 @@ agent failure. Failure to establish or finish that cleanup fails closed.
 ### Stage 4 steering, barrier and MCP contract
 
 [ADR-014’s 2026-10-27 amendment](../../adr/014-task-runtime.md#amendment--2026-10-27-live-steering-behind-the-harness-port)
-defines the binding contract. The registry adapter exports `admit` and `settle`/`reconcileEndTurn` behind
+defines the binding contract. The registry adapter exports `admit` and `reconcileEndTurn` behind
 `TaskHarness`; reconciliation returns `idle | continue | successor | unknown`.
 Add a correlated receipt to `TaskHarnessEvent`. OpenCode uses the stable-ID
 baked plugin; Prime uses same-daemon socket admission. Bind the ACP session to
 exactly one native root before the briefing. At each end-turn close intake and
 settle calls; while a question is unanswered keep intake open for its answer
-and ordinary steers until admission or the soft deadline, then wrap. Continue
+and ordinary steers until admission or the accepted task timeout from the briefing
+(`TaskAccessIntent.softDueAt`). At expiry the barrier ends unanswered and the
+task proceeds as D4 `failed`/`timeout`; the 653.10 wrap command replaces this
+once available. The Job deadline is the hard bound. Continue
 OpenCode with a plain ACP prompt and reopen intake; await Prime's successor.
-Repeat only until the soft deadline. Across turns retain the last final text and
+Repeat only until the accepted task timeout. Across turns retain the last final text and
 accumulate unresolved tool failures. Prime successor success requires daemon
 evidence of final text and settled tools; missing evidence fails closed. The
 Prime idle/queue/result and tool evidence remain unverified.
@@ -133,9 +136,14 @@ that call. After process loss an ambiguous Prime send is uncertain, never resent
 failed socket admission aborts the harness mid-turn with `steer_uncertain`.
 ACK timeout is at least the adapter admission bound. Receipts and ACKs are task
 claims, not proof of execution or obedience. Launcher-hosted MCP tools use a
-stdio subprocess in `session/new`; MCP, including Prime offline support, is
+stdio subprocess in `session/new`. The stdio server is a thin launcher-shipped
+shim relaying over an inherited pipe or launcher-private local socket; it holds
+no channel credentials. Frames, IDs and limits are the launcher’s and core’s.
+MCP, including Prime offline support, is
 unverified. The question returns after durable frame ACK, not an answer. One
-unanswered question per task is permitted; further calls fail explicitly.
+unanswered question per task is permitted; further calls fail explicitly. Core
+refuses a `question` frame while that task has an unanswered question, even from
+a compromised launcher. An answer command’s commit makes the question answered.
 Immediate stop deletes the Job. The Pod remains one untrusted zone.
 
 ## Durable outputs before the report

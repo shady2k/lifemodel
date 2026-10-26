@@ -149,8 +149,8 @@ order. Replay outstanding rows by exact IDs, not a contiguous sequence
 watermark; changed content under an ID or sequence conflicts. The launcher
 records dispatch intent before native send and disposition before ACK. Core
 commits the ACK before retiring a delivery. Lost ACK replays the recorded
-disposition, not the native operation; a duplicate during native admission joins that in-flight call. Only after
-process loss is an ambiguous Prime dispatch uncertain; it fails the task with
+disposition, not the native operation; a duplicate during native admission joins that in-flight call. After
+process loss or socket failure an ambiguous Prime dispatch is uncertain; it fails the task with
 `steer_uncertain`. Command ACK timeout is at least the adapter admission bound. Later inserted/deferred/failed/uncertain receipts use
 separate immutable, idempotent correlated frames. A lost Pod is not restarted
 to replay commands. Terminal or revoked attempts refuse new commands.
@@ -158,16 +158,25 @@ to replay commands. Terminal or revoked attempts refuse new commands.
 `question` joins `step` and `terminal` in task-to-core frames, with a
 launcher-generated question ID derived from the frame message ID and nonempty
 text (at most 1024 UTF-8 bytes; no CR, LF or NUL). At most one question per
-task may be unanswered; another call fails explicitly. Store before ACK and
+task may be unanswered; another call fails explicitly. Core refuses a `question`
+frame while that task has an unanswered question, even from a compromised
+launcher. A question counts as answered once its answer command is committed.
+Store before ACK and
 emit `task_report` as for step, but only question wakes cognition. Its trigger
 prompt reads mailbox content and quotes it as untrusted data. Cognition may ask
 the owner or answer using `core.steerTask`; TaskService owns read/steer/answer.
+In a turn triggered by a task question, `core.steerTask` may target only that task.
 Each command ID derives from deciding turn recipient, correlationId and call
 index, with `recoverAcceptedEffect`; the tool returns queued after the fenced
-commit, without waiting for ACK or receipt. No user-message trigger is required;
+commit, without waiting for ACK or receipt. A rejected or uncertain ACK or failed
+receipt is recorded on the command and shown to cognition through TaskService
+read and status views. No user-message trigger is required;
 D7 grants alone authorize privileged effects. The launcher prefixes the question
 ID to the plain-text answer. An unanswered question keeps barrier intake open
-for answers and ordinary steers until admission or the soft deadline, then wrap.
+for answers and ordinary steers until admission or the accepted task timeout
+from the briefing (`TaskAccessIntent.softDueAt`). At expiry the barrier ends
+unanswered and the task proceeds as D4 `failed`/`timeout`; the 653.10 wrap
+command replaces this once available. The Job deadline is the hard bound.
 MCP over stdio, including Prime offline, remains unverified. ACKs and receipts
 are task claims, not core evidence of execution or obedience.
 

@@ -143,7 +143,10 @@ registry name into the accepted task; no caller or Job environment changes.
 
 Bake the local OpenCode steering plugin; it is the sole exception to the no
 external plugins rule, not an online dependency. ACP supplies launcher MCP
-tools over a stdio subprocess at session creation; MCP and Prime offline MCP
+tools over a stdio subprocess at session creation. The stdio server is a thin
+launcher-shipped shim relaying over an inherited pipe or launcher-private local
+socket; it holds no channel credentials. Frames, IDs and limits are the
+launcher’s and core’s. MCP and Prime offline MCP
 support are unverified until tested. The two adapters and scripted fixture share the
 contract suite. Prime's ACP permission gap and completed Python exception are
 known probe limitations accepted by the owner; the barrier's daemon idle/result

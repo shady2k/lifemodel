@@ -82,7 +82,7 @@ initial terminal response. A shared ACP client delegates native steering and
 completion reconciliation to the selected agent's registry adapter, behind
 `TaskHarness`; launcher and core must not import agent-specific code. A boundary
 test enforces this. Registry adapters export `admit` and
-`settle`/`reconcileEndTurn` (returning `idle | continue | successor | unknown`);
+`reconcileEndTurn` (returning `idle | continue | successor | unknown`);
 `TaskHarnessEvent` gains a correlated receipt event. OpenCode 2.1.4 uses a baked local plugin and a stable native
 message ID derived from the command ID, `delivery: "steer"`, always
 `resume: false`. Prime-agent 0.10.1 uses native `steer` over the private socket
@@ -115,8 +115,10 @@ are not recovery of execution; fail the task rather than rerun commands.
 **End-of-turn barrier.** On ACP `end_turn`, atomically close this turn's intake
 and settle admitted/in-flight calls. If a task question remains unanswered,
 keep intake open for its correlated answer and ordinary steers, and wait until
-admission or the task's soft deadline; the deadline starts the existing wrap
-path. Otherwise commands after closure receive explicit rejection or uncertainty.
+admission or the accepted task timeout from the briefing (`softDueAt` in
+`TaskAccessIntent`). At expiry the barrier ends unanswered and the task proceeds
+as D4's `failed`/`timeout`; the 653.10 wrap command replaces this once available.
+The Job deadline is the hard bound. Otherwise commands after closure receive explicit rejection or uncertainty.
 OpenCode reconciles native IDs and pending items; admitted input causes a plain
 nonempty ACP continuation prompt without resending it. Reopen intake for that
 continuation turn and repeat the barrier. Prime admission wakes a successor run;
@@ -125,7 +127,7 @@ brief, bind the ACP session to exactly one native root; ambiguity fails closed.
 Across turns use the last final text and accumulate unresolved tool failures.
 A Prime successor succeeds only with daemon evidence of final text and settled
 tools; missing tool evidence is `required_tool_failed` or uncertain, never
-success. The soft deadline bounds every repeat loop. The Prime idle/queue/result
+success. The accepted task timeout bounds every repeat loop. The Prime idle/queue/result
 and tool evidence and production barriers are **unverified**: implementation
 tests must prove race and loss paths. Ambiguity fails closed. Only after the
 barrier, semantic checks and process-tree cleanup may the launcher declare its
@@ -151,15 +153,22 @@ connection. The core-to-task ACK timeout is at least the adapter admission bound
 new commands; no command is silently reissued to a replacement Pod.
 
 **Questions and steps.** Supply launcher-hosted MCP tools over a stdio
-subprocess in ACP `session/new` `mcpServers` (currently empty). MCP operation,
+subprocess in ACP `session/new` `mcpServers` (currently empty). The stdio server
+is a thin launcher-shipped shim relaying to the launcher over an inherited pipe
+or launcher-private local socket; it holds no channel credentials. Frames, IDs
+and limits belong to the launcher and core. MCP operation,
 including Prime under `--offline`, is unverified and requires real-harness tests.
 One tool reports a bounded step, another asks a bounded question. The launcher
 generates the question ID from the frame message ID, not agent input. Allow at
-most one unanswered question per task; further calls fail explicitly. The tool
+most one unanswered question per task; further calls fail explicitly. Core refuses
+a `question` frame while that task has an unanswered question, including from a
+compromised launcher. A question counts as answered once its answer command is
+committed. The tool
 returns after durable channel ACK, not an answer. Core stores the frame before
 ACK and emits `task_report`; only `eventKind: question` wakes cognition. Its
 trigger prompt reads the mailbox and presents the question as untrusted quoted
-data. Cognition can answer or ask the owner.
+data. Cognition can answer or ask the owner. In a turn triggered by a task question,
+`core.steerTask` may target only that task.
 
 Add `core.steerTask` beside `core.startTask`, registered independently of Motor
 Cortex, backed by new TaskService read, steer and answer operations. Leave legacy
@@ -168,7 +177,9 @@ need no user-message trigger; privileged effects require D7 grants only. Every
 command ID derives from the deciding turn's recipient, correlationId and call
 index, with `recoverAcceptedEffect` as for `core.startTask`. The tool returns
 queued after the fenced Postgres commit, never waiting for launcher ACK or
-receipts. Answers correlate to the question; the launcher prefixes the question
+receipts. A rejected or uncertain ACK or failed receipt is recorded on the
+command and shown to cognition through TaskService read and status views.
+Answers correlate to the question; the launcher prefixes the question
 ID to their plain-text native continuation. The accepted deadline still applies.
 ACKs and receipts are task claims, not core evidence of execution or obedience.
 
@@ -349,7 +360,7 @@ mechanism locally without claiming a production network/LLM latency SLO.
 Frame/queue/timeout values are typed platform settings with hard validation;
 raising them requires rerunning the fixture, not silently permitting infinity.
 
-The launcher records command intent before native admission and ACKs acceptance only after its adapter accepts and records the disposition in its launcher-private size-reserved journal; rejected and uncertain dispositions are never reported as accepted. A core restart preserves that volume
+The launcher records command intent before native admission and ACKs acceptance only after its adapter accepts and records the disposition in its launcher-private size-reserved journal; rejected and uncertain dispositions are never reported as accepted. A core restart preserves that journal
 and launcher; it does not restart the harness. A lost task Pod is not replayed:
 report failed/uncertain effects rather than auto-reissue shell commands. On
 core outage the task can continue approved local work/model/storage operations;
