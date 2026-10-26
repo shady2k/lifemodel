@@ -114,24 +114,29 @@ agent failure. Failure to establish or finish that cleanup fails closed.
 ### Stage 4 steering, barrier and MCP contract
 
 [ADR-014’s 2026-10-27 amendment](../../adr/014-task-runtime.md#amendment--2026-10-27-live-steering-behind-the-harness-port)
-defines the binding contract. The registry adapter owns OpenCode's stable-ID
-baked plugin and Prime's same-daemon private-socket steer. The shared client
-must allow continuation and late successor results instead of treating the
-first `end_turn` as immediate teardown. Close intake and settle in-flight
-admissions at each barrier; do not interrupt a turn. OpenCode pending input
-is continued by a plain ACP prompt without resend. Prime must reach verified
-idle/empty or await a successor result; that signal remains unverified. A
-missing signal fails closed. Immediate stop deletes the Job.
+defines the binding contract. The registry adapter exports `admit` and `settle`/`reconcileEndTurn` behind
+`TaskHarness`; reconciliation returns `idle | continue | successor | unknown`.
+Add a correlated receipt to `TaskHarnessEvent`. OpenCode uses the stable-ID
+baked plugin; Prime uses same-daemon socket admission. Bind the ACP session to
+exactly one native root before the briefing. At each end-turn close intake and
+settle calls; while a question is unanswered keep intake open for its answer
+and ordinary steers until admission or the soft deadline, then wrap. Continue
+OpenCode with a plain ACP prompt and reopen intake; await Prime's successor.
+Repeat only until the soft deadline. Across turns retain the last final text and
+accumulate unresolved tool failures. Prime successor success requires daemon
+evidence of final text and settled tools; missing evidence fails closed. The
+Prime idle/queue/result and tool evidence remain unverified.
 
-Record command identity and dispatch intent before invoking native admission;
-record the disposition before ACK. `accepted`, `rejected`, `uncertain` are
-prompt admission outcomes; later `inserted`, `deferred-to-next-turn`, `failed`,
-or `uncertain` receipts require evidence. Prime socket send is never retried;
-a broken socket means uncertain and a failed task. Replayed commands never
-repeat that call. No receipt proves obedience. Launcher-provided MCP step and
-question tools are passed in `session/new`; the question returns after its
-durable frame ACK, not after an answer. The Pod and its private socket/volume
-remain one untrusted zone.
+Record intent in a launcher-private size-reserved journal before native send and
+disposition before ACK. A duplicate while native admission is in flight joins
+that call. After process loss an ambiguous Prime send is uncertain, never resent;
+failed socket admission aborts the harness mid-turn with `steer_uncertain`.
+ACK timeout is at least the adapter admission bound. Receipts and ACKs are task
+claims, not proof of execution or obedience. Launcher-hosted MCP tools use a
+stdio subprocess in `session/new`; MCP, including Prime offline support, is
+unverified. The question returns after durable frame ACK, not an answer. One
+unanswered question per task is permitted; further calls fail explicitly.
+Immediate stop deletes the Job. The Pod remains one untrusted zone.
 
 ## Durable outputs before the report
 
@@ -402,10 +407,11 @@ The shared contract iterates the shipped registry plus
 `tests/fixtures/task-agent-registry.json`. The latter adds a distinct scripted
 ACP configuration with its own executable, module, config and version check;
 normal test provisioning installs it using the same registry-driven path. It is
-not an owner setting and is not shipped in the workbench. Every real agent must
-pass success, provider error, abort and required-tool failure before being
-offered. Missing signals must not be represented as success; the owner accepted the
-Prime ACP gaps recorded in the amendment.
+not an owner setting and is not shipped in the workbench. Every real agent must pass success, provider error, abort and observable required-tool
+failure before being offered. Prime’s Python-tool path is exempt from the
+required-tool failure check: its exceptions can appear completed, so failure
+detection there is weaker, an owner-accepted gap. Other missing required tool
+evidence must not be represented as success.
 
 ### ACP patch and framing boundary
 

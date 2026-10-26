@@ -81,12 +81,15 @@ never interrupts a turn.
 initial terminal response. A shared ACP client delegates native steering and
 completion reconciliation to the selected agent's registry adapter, behind
 `TaskHarness`; launcher and core must not import agent-specific code. A boundary
-test enforces this. OpenCode 2.1.4 uses a baked local plugin and a stable native
+test enforces this. Registry adapters export `admit` and
+`settle`/`reconcileEndTurn` (returning `idle | continue | successor | unknown`);
+`TaskHarnessEvent` gains a correlated receipt event. OpenCode 2.1.4 uses a baked local plugin and a stable native
 message ID derived from the command ID, `delivery: "steer"`, always
 `resume: false`. Prime-agent 0.10.1 uses native `steer` over the private socket
 to the daemon backing that same ACP root session, not a second engine. Its
 socket send is at most once: never retry it, including on a lost reply; socket
-failure is `uncertain` and fails the task. Native Prime admission is in-memory,
+failure is `uncertain` and fails the task with `steer_uncertain`; it aborts the
+harness mid-turn, an explicit exception to the non-interruption rule. Native Prime admission is in-memory,
 not a durable exactly-once receipt. Relay injection lacks native history and
 has compaction, tool-shape and Responses API risks; cancel/re-prompt interrupts
 work; a second engine does not steer the ACP session. The probe rejects these
@@ -99,60 +102,75 @@ admission, not obedience or completion. Later correlated receipts are
 evidence supports them. OpenCode can defer; Prime wakes on admission, so do not
 claim its deferral without evidence. Receipts do not prove the model obeyed or
 literal text appeared exactly once after compaction. Record command identity
-and a pre-send state on the private volume before calling the adapter, then
+and a pre-send state in a launcher-private, size-reserved journal before calling
+the adapter, then
 record its disposition before ACK to core. ACK `accepted` only after native
 acceptance and that record; acknowledge rejected or uncertain honestly, never as
-accepted. A replay consults the record; a Prime pre-send or ambiguous state is
-uncertain, never a reason to resend. If recording fails after native acceptance,
-report uncertainty, not a durable acceptance. Private volume loss and Pod loss
+accepted. A concurrent replay of the same command joins the in-flight native call and
+returns its disposition. After the launcher process loses that call, a Prime
+pre-send or ambiguous state is uncertain, never a reason to resend. If recording fails after native acceptance,
+report uncertainty, not a durable acceptance. Journal loss and Pod loss
 are not recovery of execution; fail the task rather than rerun commands.
 
 **End-of-turn barrier.** On ACP `end_turn`, atomically close this turn's intake
-and settle admitted/in-flight calls before deciding completion. Commands arriving
-after closure must receive an explicit rejection or uncertainty, not disappear.
-OpenCode reconciles native IDs and pending items; if admitted input remains,
-issue a plain nonempty ACP continuation prompt without resending that input, and
-repeat the barrier on its result. Prime asks its daemon whether the ACP root is
-idle with an empty queue; if a late steer woke a successor run, wait for that
-run and take its result from the daemon, repeating until idle and empty. The
-Prime idle/queue/result signal and the production barriers are **unverified**:
-implementation tests must prove them, including race and loss paths. A missing
-or ambiguous signal fails closed, not as a success. Only after the barrier,
-semantic result checks and process-tree cleanup may the launcher declare its
-terminal candidate; finalizer sealing still precedes public completion. Prime's
-successor may run outside the original ACP prompt, as the probe observed.
+and settle admitted/in-flight calls. If a task question remains unanswered,
+keep intake open for its correlated answer and ordinary steers, and wait until
+admission or the task's soft deadline; the deadline starts the existing wrap
+path. Otherwise commands after closure receive explicit rejection or uncertainty.
+OpenCode reconciles native IDs and pending items; admitted input causes a plain
+nonempty ACP continuation prompt without resending it. Reopen intake for that
+continuation turn and repeat the barrier. Prime admission wakes a successor run;
+await it and repeat until the daemon reports idle and an empty queue. Before the
+brief, bind the ACP session to exactly one native root; ambiguity fails closed.
+Across turns use the last final text and accumulate unresolved tool failures.
+A Prime successor succeeds only with daemon evidence of final text and settled
+tools; missing tool evidence is `required_tool_failed` or uncertain, never
+success. The soft deadline bounds every repeat loop. The Prime idle/queue/result
+and tool evidence and production barriers are **unverified**: implementation
+tests must prove race and loss paths. Ambiguity fails closed. Only after the
+barrier, semantic checks and process-tree cleanup may the launcher declare its
+terminal candidate; sealing still precedes public completion.
 
 **Duplex control without Pod ingress.** Keep the existing outbound authenticated
 HTTP frame posts. Add bounded launcher long-poll on the same task-only TLS core
-listener, plus outbound command ACK/receipt posts; no listener in the task Pod.
+listener, plus outbound command ACK/receipt posts; no ingress port into the task Pod.
 Core commits immutable steer commands in its fenced Postgres mailbox before
 making them available. Each carries task/attempt, command/message ID, direction,
-sequence and text, optionally a question correlation ID. Delivery is ordered
+sequence, kind (`steer` or `answer`) and text, optionally a question correlation ID.
+Reserve `wrap` for 653.10; reject new steer and answer commands while wrapping. Delivery is ordered
 per task; replay uses outstanding rows and exact IDs, not a contiguous watermark.
 A redelivery with changed content conflicts. Launcher persists intake before
 native send and replays its stored disposition after an ambiguous ACK. Core
 persists that ACK before retiring delivery. Separate subsequent receipt frames
 are idempotent and correlated to the command. Apply D2's identity, bounds,
 timeout, per-task fairness and independent owner-intake reserves to both
- directions; no unbounded held request or worker. Terminal/revoked tasks reject
+ directions; no unbounded held request or worker. A commit-path in-process
+notification wakes a held poll; a bounded recheck handles lost notifications.
+Hold at most one poll per attempt, for at most 25 seconds, without holding a SQL
+connection. The core-to-task ACK timeout is at least the adapter admission bound. Terminal/revoked tasks reject
 new commands; no command is silently reissued to a replacement Pod.
 
-**Questions and steps.** Supply launcher-hosted MCP tools in ACP `session/new`
-`mcpServers` (currently empty). One tool reports a bounded step, another asks a
-bounded question with a stable question ID. The question tool returns promptly
-after durable channel ACK, not after an answer; a failure is explicit. The
-launcher sends a `question` task-to-core frame alongside `step` and `terminal`;
-core stores it before ACK and emits the existing `task_report` Signal with
-identifiers. Cognition reads the question from the mailbox and can answer it or
-ask the owner. Extend the existing `core.task` management surface for task
-status/respond and steer, routed to TaskService, rather than adding parallel
-capabilities. It currently controls legacy Motor Cortex runs, not these tasks;
-resolve the ID/backend explicitly and preserve its existing consent rules.
-`core.startTask` remains the acceptance surface. Answer is a steer command
-correlated to the question, with a stable deciding-turn effect ID. Ordinary
-steer may be agent-initiated; owner consent for privileged effects remains D7,
-not implied by an answer. Questions do not suspend the Pod indefinitely: its
-accepted deadline still applies.
+**Questions and steps.** Supply launcher-hosted MCP tools over a stdio
+subprocess in ACP `session/new` `mcpServers` (currently empty). MCP operation,
+including Prime under `--offline`, is unverified and requires real-harness tests.
+One tool reports a bounded step, another asks a bounded question. The launcher
+generates the question ID from the frame message ID, not agent input. Allow at
+most one unanswered question per task; further calls fail explicitly. The tool
+returns after durable channel ACK, not an answer. Core stores the frame before
+ACK and emits `task_report`; only `eventKind: question` wakes cognition. Its
+trigger prompt reads the mailbox and presents the question as untrusted quoted
+data. Cognition can answer or ask the owner.
+
+Add `core.steerTask` beside `core.startTask`, registered independently of Motor
+Cortex, backed by new TaskService read, steer and answer operations. Leave legacy
+`core.task` untouched for 97bj to remove. Agent-initiated steers and answers
+need no user-message trigger; privileged effects require D7 grants only. Every
+command ID derives from the deciding turn's recipient, correlationId and call
+index, with `recoverAcceptedEffect` as for `core.startTask`. The tool returns
+queued after the fenced Postgres commit, never waiting for launcher ACK or
+receipts. Answers correlate to the question; the launcher prefixes the question
+ID to their plain-text native continuation. The accepted deadline still applies.
+ACKs and receipts are task claims, not core evidence of execution or obedience.
 
 **Second registry entry.** Add `prime-agent` with the existing registry's ACP
 command/args, version check, adapter module, provision and contract fixture;
@@ -161,11 +179,15 @@ the adjacent distribution/runtime and baked Python packages as well as the
 binary; the probe's executable-only sketch is incomplete. Bake non-secret
 models/settings templates and offline controls, then render the dynamic relay URL
 and private daemon socket into task-private config. No startup installs or
-external bootstrap. Unsupported/unverified architecture fails closed. The
+external bootstrap. An unsupported or unverified architecture makes only that harness unavailable;
+acceptance refuses its selection, not the entire workbench or OpenCode build.
+Append Prime to the registry so its first key and default remain OpenCode. The
 loader setting selects a registered harness at acceptance and snapshots it in
 the task record/briefing; caller input and Job environment do not change. The
 probe found Prime's ACP permission method missing and Python exceptions reported
-completed; the owner accepts those gaps, not a claim they were fixed.
+completed; the owner accepts those gaps, not a claim they were fixed. Prime’s
+Python-tool path is exempt from the required-tool failure contract and has
+weaker failure detection; other missing required-tool evidence cannot succeed.
 
 ## Context and inventory
 
@@ -223,7 +245,7 @@ ADR-015. Fixture sizes specify evidence, not a maximum number of owner tasks.
 | T04 | Persist task registry/mailbox in **Postgres**, tick/outbox signals in existing **Valkey** seams; no file state or task store client (frame, standing durable-home rule) | `tests/integration/task-restart.test.ts`: read-only DATA_PATH and kill/restart core at **eight boundaries** named in D3; zero lost ACKs and one terminal event key |
 | T05 | Commit launch/profile/effect intent before dispatch; one launch authorizes **at most one harness execution**, including controller replacement Pods (ADR-010 keyed effects) | `tests/integration/task-launch-fence.test.ts`: **two core epochs + two candidate Pod UIDs**, delayed create/AlreadyExists/adopt/stop/delete, controller restart or lost Pod-create observation, duplicate/lost start reply and authority restart; render Never/0/Failed plus fail-on-disruption/nonzero policy; WALK-TASK-RESTART verifies one claim, zero replacement harness starts, failed partial outcome and cleanup |
 | T06 | Network is deny-first; task can reach only scoped runtime services and granted egress; internal cluster targets/other files/keys remain hard-denied (owner, ADR-013) | `tests/integration/task-consent-contract.test.ts` plus WALK-TASK-ISOLATION: **two profiles**, no-network and one approved domain, forbidden methods/private IP/redirect/domain denied |
-| T07 | Both harnesses expose live commands/events/one semantic terminal result; one stalled task cannot block owner intake (owner) | `tests/integration/task-harness-contract.test.ts`: **shared ACP lifecycle, two real agent adapters + one scripted agent**; with one blocked task, 20 owner intakes and 20 second-task control messages each ACK **within 2 s**; D2 bounds hold. Check mid-tool steering, parallel tools, final-answer races, duplicate core/launcher replay, question round trip, hard stop and errors |
+| T07 | Both harnesses expose live commands/events/one semantic terminal result; one stalled task cannot block owner intake (owner) | `tests/integration/task-harness-contract.test.ts`: **shared ACP lifecycle, two real agent adapters + one scripted agent**; with one blocked task, 20 owner intakes and 20 second-task control messages each ACK **within 2 s**; D2 bounds hold. Check mid-tool steering, parallel tools, final-answer races, in-flight duplicate replay, question wake/end-turn/round trip and flood refusal, missing successor tool evidence, hard stop and errors |
 | T08 | Soft Stop and agent timeout wrap up without new external effects; hard deadline defaults to **300 s**; hard Stop deletes immediately; stop-all soft-stops current tasks, not core (owner answer) | `tests/integration/task-stop.test.ts`: virtual clock, **two running + one queued + one starting**, repeated Stop/timeout/hard/all; WALK-TASK-STOPS checks mutable Job deadline shortening from startTime, no extension/suspend, delayed patch/conflict/restart and core-down timeout/soft Stop; observes native deadline termination, real hard-delete requests, retained marked bytes and no remaining Pod/PVC |
 | T09 | Urgent precedes normal; FIFO in each class, owner or agent can mark urgent, no preemption; concurrency is platform bounded (owner answer) | `tests/integration/task-admission.test.ts`: **100 queued tasks, cap 2, two dispatch contenders**, mixed urgent/normal and cap decrease/restart; no third live reservation, stable class FIFO |
 | T10 | Registry descriptors are typed, loader/platform-owned; secrets set/delete/exists only; ceilings cannot be raised by core (owner/nocx) | `tests/unit/task-settings-registry.test.ts`: duplicate/unknown/type/bounds/secret-read refusal; WALK-TASK-SETTINGS: add **one declaration**, render bounds/errors in deployed Chromium + Firefox, core unavailable |
@@ -309,15 +331,16 @@ executor module or dual registry with authority to launch is introduced.
 
 A task uses outbound TLS posts and a bounded long-poll to a task-only core listener, as specified by the 2026-10-27 amendment. Commands and
 events carry task/attempt ID, immutable message ID and per-direction sequence.
-Postgres inserts idempotently before ACK; replay uses stored cursors, never
-assumes contiguous IDs after deletions. Core emits normal Signals through its
+Postgres inserts idempotently before ACK; replay scans outstanding rows by exact
+IDs, never assuming contiguous IDs after deletions. Core emits normal Signals through its
 existing bus seam; control transport envelopes are not a second cognition
 model. Owner input is never sent raw to a task; the agent turns it into steer.
 `step` is a bounded short line; `question` asks the agent, which may ask owner.
 Use independent per-task queues; output/log bytes go **directly to storage**,
 not this stream. Design defaults: control frame **64 KiB**, at most **16**
 unacknowledged frames/**1 MiB** per task connection, **4 MiB** process-wide
-control buffer, **5 s** ACK timeout before disconnect/replay. Event processing
+control buffer, **5 s** event ACK timeout before disconnect/replay; command ACK timeout is
+at least the bounded adapter admission time. Event processing
 uses round-robin task queues, at most **one frame per task per scheduling pass**;
 control/owner-intake workers and their bounded SQL pool reservations are separate
 from artifact transfer workers. Saturated task queues apply backpressure/429,
@@ -326,7 +349,7 @@ mechanism locally without claiming a production network/LLM latency SLO.
 Frame/queue/timeout values are typed platform settings with hard validation;
 raising them requires rerunning the fixture, not silently permitting infinity.
 
-The launcher records command intent before native admission and ACKs acceptance only after its adapter accepts and records the disposition on its private working volume; rejected and uncertain dispositions are never reported as accepted. A core restart preserves that volume
+The launcher records command intent before native admission and ACKs acceptance only after its adapter accepts and records the disposition in its launcher-private size-reserved journal; rejected and uncertain dispositions are never reported as accepted. A core restart preserves that volume
 and launcher; it does not restart the harness. A lost task Pod is not replayed:
 report failed/uncertain effects rather than auto-reissue shell commands. On
 core outage the task can continue approved local work/model/storage operations;
@@ -441,7 +464,8 @@ from exit status. Temporal/Windmill remain rejected for confined Jobs [J].
 ### D4. Soft Stop, hard Stop, timeout and stop-all
 
 Soft Stop atomically records stop cause/time, revokes new external-effect
-permission and persists `wrapping-up` plus one wrap command. Harness should
+permission and persists `wrapping-up` plus one wrap command on the 653.10 wrap path.
+New steer and answer commands are rejected during wrapping. Harness should
 finish its current local step, save/mark output and write a result. Model,
 channel and storage remain available only for wrapping; revoked egress actions
 cannot start. In-flight external actions may already have happened: record

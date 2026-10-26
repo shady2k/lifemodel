@@ -125,12 +125,15 @@ briefing/channel client and model relay. Tokens/CA are read-only projected direc
 
 ## Stage 4: prime-agent and local steering plugin
 
-The registry gains `prime-agent` with ACP command `--mode acp --offline
+The registry appends `prime-agent` after OpenCode, preserving OpenCode as the
+first-key default, with ACP command `--mode acp --offline
 --no-session --provider task --model task`, exact version/output, adapter module,
 contract fixture and architecture-specific verified archive pins. The probe
 records the x86_64 archive SHA-256
 `21ec219183f4134dd23dce9572102e69456066fe374846525561c776d4d1945c`;
-it did not verify arm64. Fail closed for missing pins. Extend provisioning to
+it did not verify arm64. A missing pin makes Prime unavailable on that
+architecture and task acceptance refuses selecting it; the workbench build and
+OpenCode remain available. Extend provisioning to
 include the adjacent bundled distribution, local runtime and baked Python
 packages, not just the executable. Bake non-secret models/settings templates
 and offline controls; render the per-task relay URL and private daemon socket
@@ -140,7 +143,8 @@ registry name into the accepted task; no caller or Job environment changes.
 
 Bake the local OpenCode steering plugin; it is the sole exception to the no
 external plugins rule, not an online dependency. ACP supplies launcher MCP
-tools at session creation. The two adapters and scripted fixture share the
+tools over a stdio subprocess at session creation; MCP and Prime offline MCP
+support are unverified until tested. The two adapters and scripted fixture share the
 contract suite. Prime's ACP permission gap and completed Python exception are
 known probe limitations accepted by the owner; the barrier's daemon idle/result
 signal remains unverified until implementation tests. See the

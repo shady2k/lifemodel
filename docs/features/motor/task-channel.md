@@ -137,28 +137,39 @@ adds a bounded long-poll from launcher to this listener and outbound ACK/receipt
 posts. Fresh task-audience identity, won claim, canonical intent and deadline
 checks apply on each request and again before delivery after a wait. Reserve
 separate bounded wait capacity: held polls must not occupy event ACK or owner
-intake workers or SQL connections. Close them on revocation/shutdown. Respect
+intake workers or SQL connections. A commit-path in-process notification wakes
+the poll; bounded rechecks cover missed notifications. Allow at most one held
+poll per attempt, timing out after 25 seconds. Close on revocation/shutdown. Respect
 the frame, per-task and process bounds below in both directions.
 
 Core commits immutable commands before delivery: task/attempt, command ID,
-per-direction sequence, text and optional question ID. Deliver in per-task
+per-direction sequence, kind (`steer` or `answer`), text and optional question
+ID. Reserve wrap for 653.10; reject steer and answer while wrapping. Deliver in per-task
 order. Replay outstanding rows by exact IDs, not a contiguous sequence
 watermark; changed content under an ID or sequence conflicts. The launcher
 records dispatch intent before native send and disposition before ACK. Core
 commits the ACK before retiring a delivery. Lost ACK replays the recorded
-disposition, not the native operation; ambiguous Prime dispatch is uncertain
-and fails the task. Later inserted/deferred/failed/uncertain receipts use
+disposition, not the native operation; a duplicate during native admission joins that in-flight call. Only after
+process loss is an ambiguous Prime dispatch uncertain; it fails the task with
+`steer_uncertain`. Command ACK timeout is at least the adapter admission bound. Later inserted/deferred/failed/uncertain receipts use
 separate immutable, idempotent correlated frames. A lost Pod is not restarted
 to replay commands. Terminal or revoked attempts refuse new commands.
 
-`question` joins `step` and `terminal` in task-to-core frames, with stable
-question ID and nonempty bounded question text (at most 1024 UTF-8 bytes; no
-CR, LF or NUL). Its ACK, duplicate/conflict and Signal rules match `step`.
-The launcher MCP question tool returns promptly once the question frame is
-durably ACKed. Cognition resolves the Signal identifiers to mailbox content;
-it can ask the owner or send an answer through the task control surface. An
-answer is a command correlated to that question, not a blocking MCP response.
-A step uses the same durable frame mechanism. Task claims remain untrusted.
+`question` joins `step` and `terminal` in task-to-core frames, with a
+launcher-generated question ID derived from the frame message ID and nonempty
+text (at most 1024 UTF-8 bytes; no CR, LF or NUL). At most one question per
+task may be unanswered; another call fails explicitly. Store before ACK and
+emit `task_report` as for step, but only question wakes cognition. Its trigger
+prompt reads mailbox content and quotes it as untrusted data. Cognition may ask
+the owner or answer using `core.steerTask`; TaskService owns read/steer/answer.
+Each command ID derives from deciding turn recipient, correlationId and call
+index, with `recoverAcceptedEffect`; the tool returns queued after the fenced
+commit, without waiting for ACK or receipt. No user-message trigger is required;
+D7 grants alone authorize privileged effects. The launcher prefixes the question
+ID to the plain-text answer. An unanswered question keeps barrier intake open
+for answers and ordinary steers until admission or the soft deadline, then wrap.
+MCP over stdio, including Prime offline, remains unverified. ACKs and receipts
+are task claims, not core evidence of execution or obedience.
 
 ## Disposable task trace route
 
@@ -270,7 +281,8 @@ The replay scan selects every committed unsignalled row, so a late commit or
 sequence gap cannot be skipped. Core emits a normal `task_report` Signal from
 `task.channel` through the existing Valkey bus. Signal data contains task,
 attempt and message IDs plus `eventKind`, not report content. Step and question reports remain
-available for cognition and later status views. Terminal reports identify finalization work.
+available for cognition and later status views. Only question `task_report`
+wakes cognition; step does not. Terminal reports identify finalization work.
 The [finalizer](task-finalize.md) consumes terminal reports before tick-local
 completion and scans all unfinalized terminal rows at startup; this does not wake the old
 Motor Cortex cognition path or introduce another event model. `signalled_at` proves
