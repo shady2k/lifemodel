@@ -1,0 +1,5 @@
+{
+  "note": "Retained 11 final runs used run.mjs before promoted-retry strengthening; opencode duplicate rerun uses final script. Only duplicate-after-promotion continuation/post-context branch changed. Other scenario behavior unchanged.",
+  "earlierRunScriptSha256": "c8e105d89f4a0ef7918a47752c7eecb5e24ad5983e111a84c4170d66f9648226",
+  "finalRunScriptSha256": "0f55a60b9d40e865532e075aa6f4f126660f79394e1ad8d591557d7927df46bb"
+}

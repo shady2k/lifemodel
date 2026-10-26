@@ -1,0 +1,58 @@
+{
+  "candidate": "prime-agent",
+  "scenario": "failure",
+  "transcript": "/out/acp.transcript.jsonl",
+  "markerCreated": false,
+  "initialize": {
+    "protocolVersion": 1,
+    "agentInfo": {
+      "name": "prime-agent",
+      "title": "Prime Agent",
+      "version": "0.10.1"
+    },
+    "authMethods": [],
+    "capabilities": {
+      "loadSession": false,
+      "promptCapabilities": {
+        "image": true,
+        "embeddedContext": true
+      },
+      "mcpCapabilities": {
+        "http": true
+      },
+      "sessionCapabilities": {
+        "close": {}
+      }
+    }
+  },
+  "sessionId": "dc27fc39-42f3-42fa-a041-01de20d1a774",
+  "sessionNewResultKeys": [
+    "sessionId",
+    "configOptions"
+  ],
+  "durationMs": 210,
+  "stopReason": "end_turn",
+  "promptResponseKeys": [
+    "stopReason"
+  ],
+  "cancelledAfterMs": null,
+  "startMarker": false,
+  "completionMarker": false,
+  "updateKinds": {
+    "tool_call": 1,
+    "tool_call_update": 1,
+    "agent_message_chunk": 1,
+    "session_info_update": 3
+  },
+  "toolCallStatuses": [
+    "tool_call:in_progress",
+    "tool_call_update:completed"
+  ],
+  "permissionRequests": [],
+  "exitAfterPrompt": null,
+  "processExit": {
+    "code": null,
+    "signal": "SIGTERM"
+  },
+  "stderrTail": ""
+}

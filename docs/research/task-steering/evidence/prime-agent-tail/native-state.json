@@ -1,0 +1,54 @@
+{
+  "id": "native-3",
+  "type": "response",
+  "command": "get_state",
+  "success": true,
+  "data": {
+    "id": "23667a280f4d",
+    "lifecycle": "live",
+    "activity": "idle",
+    "isSessionActive": false,
+    "hasRegisteredCronJob": false,
+    "lastActivityAt": "2026-10-26T21:56:31.931Z",
+    "rlmDepth": 0,
+    "activeSessionId": "23667a280f4d",
+    "sessionId": "01a17a37-0632-7310-a91b-8f9de7b2f6c3",
+    "sessionFile": "",
+    "cwd": "/work/probe",
+    "thinkingLevel": "off",
+    "isStreaming": false,
+    "isCompacting": false,
+    "isQuotaParked": false,
+    "isBashRunning": false,
+    "isRunningTools": false,
+    "hasRunningSubagents": false,
+    "attachedClients": 1,
+    "messageCount": 4,
+    "sessionActions": {
+      "queuedCount": 0,
+      "steering": [],
+      "followUps": []
+    },
+    "created": "2026-10-26T21:56:28.850Z",
+    "firstMessage": "PROBE_TASK: run the offered shell tools and finish. Do not launch children.",
+    "usage": {
+      "inputTokens": 200,
+      "outputTokens": 40,
+      "cost": 0
+    },
+    "workerState": "ready",
+    "workerPid": 24,
+    "rosterDeltaSequence": 6,
+    "workerInstanceId": "ae41100d-2c6f-40bc-806f-16040583acc3",
+    "model": {
+      "id": "task",
+      "name": "Probe",
+      "api": "openai-completions",
+      "provider": "probe",
+      "reasoning": false
+    },
+    "runtimeKind": "top-level",
+    "unfinishedActionCount": 0,
+    "anthropicWarningShown": false
+  }
+}

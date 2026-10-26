@@ -1,7 +1,8 @@
-# Task-to-core live channel
+# Task live channel
 
 Task: lifemodel-653.8.8. This is the task-to-core direction of ADR-014 D2.
-It is a source contract, not deployed stage acceptance. Steering remains stage 4.
+The task-to-core direction is a source contract, not deployed stage acceptance.
+The core-to-task direction below is the stage-4 design, not yet implemented.
 
 ## Transport and identity
 
@@ -9,7 +10,8 @@ The launcher posts one JSON frame to `https://core.lifemodel.svc:8447/task/event
 HTTP/1.1 keep-alive gives a reusable outbound TLS channel with one explicit HTTP
 200 ACK per frame. Unlike a bidirectional streaming body, this bounds body intake,
 allows a clear 429 with Retry-After, and does not tie up a worker while a peer holds
-an idle connection. There is no command route or task ingress port.
+an idle connection. Today there is no command route or task ingress port;
+stage 4 adds bounded outbound long-poll, never a Pod ingress port.
 
 The server leaf is issued by the instance CA, stored in the fixed
 `core-task-channel-tls` Secret, and mounted only into core. The listener reloads
@@ -77,7 +79,7 @@ time is checked after waits. Reads emit no mailbox row or Signal. Responses use
 that allowance against connection/process byte reservations until completion.
 Lower configured byte budgets lower the response allowance. Oversized results
 fail closed with a safe 503 code, before any briefing bytes are sent. Request
-bodies, query strings and unknown routes are refused. Refusal logs name a fixed route (unknown paths are `unknown`), and authenticated
+bodies, query strings and unknown routes are refused on these existing reads. Refusal logs name a fixed route (unknown paths are `unknown`), and authenticated
 frames include canonical generated task/trace locators even if the authority
 lookup fails. Arbitrary wire locator text is omitted until storage resolves it.
 These locators are diagnostic input, not a grant of authority. Errors/logs contain only
@@ -127,6 +129,56 @@ A new frame after a stored terminal report is refused. An exact duplicate of an
 already stored frame can replay its ACK while current identity/intent still
 permits access. Terminal/revoked task authority does not become reusable merely
 because a caller presents an old message ID.
+
+## Stage 4 commands and questions
+
+The [ADR amendment](../../adr/014-task-runtime.md#amendment--2026-10-27-live-steering-behind-the-harness-port)
+adds a bounded long-poll from launcher to this listener and outbound ACK/receipt
+posts. Fresh task-audience identity, won claim, canonical intent and deadline
+checks apply on each request and again before delivery after a wait. Reserve
+separate bounded wait capacity: held polls must not occupy event ACK or owner
+intake workers or SQL connections. A commit-path in-process notification wakes
+the poll; bounded rechecks cover missed notifications. Allow at most one held
+poll per attempt, timing out after 25 seconds. Close on revocation/shutdown. Respect
+the frame, per-task and process bounds below in both directions.
+
+Core commits immutable commands before delivery: task/attempt, command ID,
+per-direction sequence, kind (`steer` or `answer`), text and optional question
+ID. Reserve wrap for 653.10; reject steer and answer while wrapping. Deliver in per-task
+order. Replay outstanding rows by exact IDs, not a contiguous sequence
+watermark; changed content under an ID or sequence conflicts. The launcher
+records dispatch intent before native send and disposition before ACK. Core
+commits the ACK before retiring a delivery. Lost ACK replays the recorded
+disposition, not the native operation; a duplicate during native admission joins that in-flight call. After
+process loss or socket failure an ambiguous Prime dispatch is uncertain; it fails the task with
+`steer_uncertain`. Command ACK timeout is at least the adapter admission bound. Later inserted/deferred/failed/uncertain receipts use
+separate immutable, idempotent correlated frames. A lost Pod is not restarted
+to replay commands. Terminal or revoked attempts refuse new commands.
+
+`question` joins `step` and `terminal` in task-to-core frames, with a
+launcher-generated question ID derived from the frame message ID and nonempty
+text (at most 1024 UTF-8 bytes; no CR, LF or NUL). At most one question per
+task may be unanswered; another call fails explicitly. Core refuses a `question`
+frame while that task has an unanswered question, even from a compromised
+launcher. A question counts as answered once its answer command is committed.
+Store before ACK and
+emit `task_report` as for step, but only question wakes cognition. Its trigger
+prompt reads mailbox content and quotes it as untrusted data. Cognition may ask
+the owner or answer using `core.steerTask`; TaskService owns read/steer/answer.
+In a turn triggered by a task question, `core.steerTask` may target only that task.
+Each command ID derives from deciding turn recipient, correlationId and call
+index, with `recoverAcceptedEffect`; the tool returns queued after the fenced
+commit, without waiting for ACK or receipt. A rejected or uncertain ACK or failed
+receipt is recorded on the command and shown to cognition through TaskService
+read and status views. No user-message trigger is required;
+D7 grants alone authorize privileged effects. The launcher prefixes the question
+ID to the plain-text answer. An unanswered question keeps barrier intake open
+for answers and ordinary steers until admission or the accepted task timeout
+from the briefing (`TaskAccessIntent.softDueAt`). At expiry the barrier ends
+unanswered and the task proceeds as D4 `failed`/`timeout`; the 653.10 wrap
+command replaces this once available. The Job deadline is the hard bound.
+MCP over stdio, including Prime offline, remains unverified. ACKs and receipts
+are task claims, not core evidence of execution or obedience.
 
 ## Disposable task trace route
 
@@ -237,8 +289,9 @@ and exact last message IDs; these are not contiguous sequence watermarks.
 The replay scan selects every committed unsignalled row, so a late commit or
 sequence gap cannot be skipped. Core emits a normal `task_report` Signal from
 `task.channel` through the existing Valkey bus. Signal data contains task,
-attempt and message IDs plus `eventKind`, not report content. Step reports remain
-available for later status views. Terminal reports identify finalization work.
+attempt and message IDs plus `eventKind`, not report content. Step and question reports remain
+available for cognition and later status views. Only question `task_report`
+wakes cognition; step does not. Terminal reports identify finalization work.
 The [finalizer](task-finalize.md) consumes terminal reports before tick-local
 completion and scans all unfinalized terminal rows at startup; this does not wake the old
 Motor Cortex cognition path or introduce another event model. `signalled_at` proves

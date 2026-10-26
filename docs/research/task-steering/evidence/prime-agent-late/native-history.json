@@ -1,0 +1,88 @@
+{
+  "id": "native-4",
+  "type": "response",
+  "command": "get_messages",
+  "success": true,
+  "data": {
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "PROBE_TASK: run the offered shell tools and finish. Do not launch children."
+          }
+        ],
+        "timestamp": 1793051799230
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "PROBE_FINAL: finished."
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "probe",
+        "model": "task",
+        "responseId": "probe",
+        "usage": {
+          "input": 100,
+          "output": 20,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 120,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 1793051799237
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "STEER_UNIQUE_6539: use the native input queue."
+          }
+        ],
+        "timestamp": 1793051799411
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "PROBE_FINAL: finished."
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "probe",
+        "model": "task",
+        "responseId": "probe",
+        "usage": {
+          "input": 100,
+          "output": 20,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 120,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 1793051799417
+      }
+    ]
+  }
+}

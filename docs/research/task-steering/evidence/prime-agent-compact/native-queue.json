@@ -1,0 +1,10 @@
+{
+  "id": "native-6",
+  "type": "response",
+  "command": "get_queue",
+  "success": true,
+  "data": {
+    "steering": [],
+    "followUp": []
+  }
+}

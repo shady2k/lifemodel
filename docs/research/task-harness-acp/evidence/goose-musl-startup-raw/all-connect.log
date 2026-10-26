@@ -1,0 +1,38 @@
+16    17:56:25.720511 +++ exited with 0 +++
+24    17:56:25.796151 +++ exited with 0 +++
+27    17:56:26.435094 connect(19, {sa_family=AF_INET, sin_port=htons(35865), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+26    17:56:26.439485 connect(20, {sa_family=AF_INET, sin_port=htons(35865), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+9     17:56:26.450107 connect(23, {sa_family=AF_INET, sin_port=htons(8443), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+9     17:56:26.455061 connect(25, {sa_family=AF_INET, sin_port=htons(8443), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+25    17:56:29.440629 --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=9, si_uid=1000} ---
+29    17:56:29.440836 +++ killed by SIGTERM +++
+33    17:56:29.440846 +++ killed by SIGTERM +++
+31    17:56:29.440852 +++ killed by SIGTERM +++
+30    17:56:29.440857 +++ killed by SIGTERM +++
+27    17:56:29.440862 +++ killed by SIGTERM +++
+32    17:56:29.440880 +++ killed by SIGTERM +++
+26    17:56:29.440893 +++ killed by SIGTERM +++
+28    17:56:29.443265 +++ killed by SIGTERM +++
+25    17:56:29.443298 +++ killed by SIGTERM +++
+9     17:56:29.443307 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_KILLED, si_pid=25, si_uid=1000, si_status=SIGTERM, si_utime=9 /* 0.09 s */, si_stime=13 /* 0.13 s */} ---
+17    17:56:29.742790 --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=9, si_uid=1000} ---
+17    17:56:29.743231 --- SIGTERM {si_signo=SIGTERM, si_code=SI_TKILL, si_pid=17, si_uid=1000} ---
+23    17:56:29.743387 +++ killed by SIGTERM +++
+22    17:56:29.743396 +++ killed by SIGTERM +++
+21    17:56:29.743401 +++ killed by SIGTERM +++
+20    17:56:29.743405 +++ killed by SIGTERM +++
+19    17:56:29.743409 +++ killed by SIGTERM +++
+18    17:56:29.743413 +++ killed by SIGTERM +++
+17    17:56:29.745337 +++ killed by SIGTERM +++
+9     17:56:29.745370 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_KILLED, si_pid=17, si_uid=1000, si_status=SIGTERM, si_utime=5 /* 0.05 s */, si_stime=3 /* 0.03 s */} ---
+13    17:56:29.752453 +++ exited with 0 +++
+11    17:56:29.752551 +++ exited with 0 +++
+14    17:56:29.752569 +++ exited with 0 +++
+12    17:56:29.752655 +++ exited with 0 +++
+10    17:56:29.752857 +++ exited with 0 +++
+37    17:56:29.755138 +++ exited with 0 +++
+35    17:56:29.755219 +++ exited with 0 +++
+36    17:56:29.755253 +++ exited with 0 +++
+34    17:56:29.755319 +++ exited with 0 +++
+15    17:56:29.757342 +++ exited with 0 +++
+9     17:56:29.757365 +++ exited with 0 +++

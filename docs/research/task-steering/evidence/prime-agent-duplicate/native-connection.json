@@ -1,0 +1,54 @@
+{
+  "id": "native-6",
+  "type": "response",
+  "command": "get_connection_state",
+  "success": true,
+  "data": {
+    "activeSessionId": "3ec98785b76f",
+    "cwd": "/work/probe",
+    "model": {
+      "id": "task",
+      "name": "Probe",
+      "api": "openai-completions",
+      "provider": "probe",
+      "reasoning": false
+    },
+    "thinkingLevel": "off",
+    "serviceTier": "default",
+    "availableThinkingLevels": [
+      "off"
+    ],
+    "isStreaming": false,
+    "isCompacting": false,
+    "isBashRunning": false,
+    "retryAttempt": 0,
+    "steeringMode": "all",
+    "followUpMode": "one-at-a-time",
+    "sessionFile": "",
+    "sessionId": "01a17a36-9b4c-74d9-b513-2ccdebe322b6",
+    "leafId": "373d0b7b",
+    "autoCompactionEnabled": true,
+    "messageCount": 6,
+    "sessionActions": {
+      "queuedCount": 0,
+      "steering": [],
+      "followUps": []
+    },
+    "compactionCount": 0,
+    "goal": {
+      "active": false,
+      "status": "idle",
+      "tokensUsed": 0,
+      "timeUsedSeconds": 0,
+      "continuationsUsed": 0
+    },
+    "scopedModels": [],
+    "activeToolNames": [],
+    "contextUsage": {
+      "tokens": 120,
+      "contextWindow": 32768,
+      "percent": 0.3662109375
+    },
+    "heartbeat": null
+  }
+}

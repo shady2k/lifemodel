@@ -1,0 +1,1 @@
+{"code":0,"text":"{\n  \"stopped\": [\n    {\n      \"socketPath\": \"/work/probe/tmp/daemon.sock\",\n      \"action\": \"stopped background service (pid 27)\"\n    }\n  ],\n  \"failed\": []\n}\n"}

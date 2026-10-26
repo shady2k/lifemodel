@@ -1,0 +1,87 @@
+{
+  "candidate": "goose",
+  "scenario": "cancel",
+  "transcript": "/out/acp.transcript.jsonl",
+  "markerCreated": false,
+  "initialize": {
+    "protocolVersion": 1,
+    "agentInfo": {
+      "name": "goose",
+      "version": "1.56.0"
+    },
+    "authMethods": [
+      "goose-provider"
+    ],
+    "capabilities": {
+      "loadSession": true,
+      "promptCapabilities": {
+        "image": true,
+        "audio": false,
+        "embeddedContext": true
+      },
+      "mcpCapabilities": {
+        "http": true,
+        "sse": false
+      },
+      "sessionCapabilities": {
+        "list": {},
+        "delete": {},
+        "close": {}
+      },
+      "auth": {},
+      "_meta": {
+        "goose": {
+          "recipeParameterScopes": {}
+        }
+      }
+    }
+  },
+  "sessionId": "20261026_1",
+  "sessionNewResultKeys": [
+    "sessionId",
+    "modes",
+    "configOptions",
+    "_meta"
+  ],
+  "durationMs": 1309,
+  "stopReason": "cancelled",
+  "promptResponseKeys": [
+    "stopReason"
+  ],
+  "toolObservedAfterMs": 298,
+  "cancelSentAfterMs": 1298,
+  "liveAtCancel": {
+    "startMarker": true,
+    "shellPid": 39,
+    "childPid": 40,
+    "shellAlive": true,
+    "childAlive": true
+  },
+  "shellPid": 39,
+  "shellAliveAtPromptReturn": false,
+  "childPid": 40,
+  "childAliveAtPromptReturn": true,
+  "childStatAtPromptReturn": "40 (sleep) S 1 26 26 0 -1 4194560 95 0 1 0 0 0 0 0 20 0 1 0 121293782 2560000 324 18446744073709551615 98693100007424 98693100025353 140734932631696 0 0 0 0 6 0 1 0 0 17 3 0 0 0 0 0 98693100039440 98693100040704 98693526425600 140734932635158 140734932635167 140734932635167 140734932635625 0\n",
+  "startMarker": true,
+  "childAliveTwoSecondsAfterReturn": true,
+  "childStatTwoSecondsAfterReturn": "40 (sleep) S 1 26 26 0 -1 4194560 95 0 1 0 0 0 0 0 20 0 1 0 121293782 2560000 324 18446744073709551615 98693100007424 98693100025353 140734932631696 0 0 0 0 6 0 1 0 0 17 3 0 0 0 0 0 98693100039440 98693100040704 98693526425600 140734932635158 140734932635167 140734932635167 140734932635625 0\n",
+  "shellAliveAfterObservation": false,
+  "childAliveAfterObservation": false,
+  "completionMarker": false,
+  "updateKinds": {
+    "session_info_update": 2,
+    "usage_update": 3,
+    "available_commands_update": 1,
+    "tool_call": 1
+  },
+  "toolCallStatuses": [
+    "tool_call:-"
+  ],
+  "permissionRequests": [],
+  "exitAfterPrompt": null,
+  "processExit": {
+    "code": null,
+    "signal": "SIGTERM"
+  },
+  "stderrTail": ""
+}

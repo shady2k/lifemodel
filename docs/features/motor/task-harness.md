@@ -43,9 +43,10 @@ SQL/identity workers. Neither caches positive authority.
 ## Pod-local harness port
 
 `loader/src/task-harness.ts` declares `TaskHarness.start(briefing)`, `abort()`,
-`steer(text)` and `wrap()`. `AcpTaskHarness` in `loader/src/task-acp.ts` returns
-`not_supported` for steer/wrap; live steering remains lifemodel-653.9 work and
-soft-stop control remains lifemodel-653.10 work.
+`steer(text)` and `wrap()` today. `AcpTaskHarness` currently returns
+`not_supported` for both. Stage 4 changes steer to `steer({commandId,text})`;
+soft-stop control remains lifemodel-653.10 work. The following stage-4 contract
+is planned, not a claim of current implementation.
 Normalized events are short `step`, `tool`, safe-code `error` and best-effort
 `trace` events. Trace callbacks cannot gate the harness protocol or outcome. One
 start returns one semantic result: `succeeded`, `failed` or `aborted`, with
@@ -54,7 +55,7 @@ result text and a safe failure reason. A required-tool failure also carries
 tool ran last. `ScriptedTaskHarness` implements the
 same port for caller tests; it is not a second production agent.
 
-`AcpTaskHarness` is the only real protocol adapter. It runs a named registry
+The shared `AcpTaskHarness` runs a named registry
 configuration over stdio JSON-RPC, in `/work` with private HOME/TMPDIR. Agent
 command, config, version check and image pin are registry/config inputs, never
 launcher conditionals. The won briefing supplies the accepted `harness` name;
@@ -108,6 +109,42 @@ The accepted hard deadline bounds the adapter; the Job's native deadline remains
 the final compute bound. A Linux Python subreaper supervises the agent and reaps
 its adopted detached tool descendants before adapter completion, including after
 agent failure. Failure to establish or finish that cleanup fails closed.
+
+
+### Stage 4 steering, barrier and MCP contract
+
+[ADR-014’s 2026-10-27 amendment](../../adr/014-task-runtime.md#amendment--2026-10-27-live-steering-behind-the-harness-port)
+defines the binding contract. The registry adapter exports `admit` and `reconcileEndTurn` behind
+`TaskHarness`; reconciliation returns `idle | continue | successor | unknown`.
+Add a correlated receipt to `TaskHarnessEvent`. OpenCode uses the stable-ID
+baked plugin; Prime uses same-daemon socket admission. Bind the ACP session to
+exactly one native root before the briefing. At each end-turn close intake and
+settle calls; while a question is unanswered keep intake open for its answer
+and ordinary steers until admission or the accepted task timeout from the briefing
+(`TaskAccessIntent.softDueAt`). At expiry the barrier ends unanswered and the
+task proceeds as D4 `failed`/`timeout`; the 653.10 wrap command replaces this
+once available. The Job deadline is the hard bound. Continue
+OpenCode with a plain ACP prompt and reopen intake; await Prime's successor.
+Repeat only until the accepted task timeout. Across turns retain the last final text and
+accumulate unresolved tool failures. Prime successor success requires daemon
+evidence of final text and settled tools; missing evidence fails closed. The
+Prime idle/queue/result and tool evidence remain unverified.
+
+Record intent in a launcher-private size-reserved journal before native send and
+disposition before ACK. A duplicate while native admission is in flight joins
+that call. After process loss an ambiguous Prime send is uncertain, never resent;
+failed socket admission aborts the harness mid-turn with `steer_uncertain`.
+ACK timeout is at least the adapter admission bound. Receipts and ACKs are task
+claims, not proof of execution or obedience. Launcher-hosted MCP tools use a
+stdio subprocess in `session/new`. The stdio server is a thin launcher-shipped
+shim relaying over an inherited pipe or launcher-private local socket; it holds
+no channel credentials. Frames, IDs and limits are the launcher’s and core’s.
+MCP, including Prime offline support, is
+unverified. The question returns after durable frame ACK, not an answer. One
+unanswered question per task is permitted; further calls fail explicitly. Core
+refuses a `question` frame while that task has an unanswered question, even from
+a compromised launcher. An answer command’s commit makes the question answered.
+Immediate stop deletes the Job. The Pod remains one untrusted zone.
 
 ## Durable outputs before the report
 
@@ -228,8 +265,8 @@ lifemodel-653.8.9 must read the stored mailbox report, validate marks, stop the
 exact compute instance, revoke task writes, seal storage and commit the keyed
 public outcome. It must also reconcile failed Jobs with no accepted report
 (e.g. a lost start or unavailable core). It must never infer success from exit 0.
-Stage 4 adds a second real ACP agent configuration and steering/wrap with ACK only after the
-adapter accepts it. It must preserve the single-start boundary and the same
+Stage 4 adds prime-agent and steering with ACK only after the
+adapter accepts it and the launcher records the disposition. It must preserve the single-start boundary and the same
 semantic-result contract.
 
 Tests: `tests/integration/task-harness-contract.test.ts`,
@@ -266,8 +303,8 @@ standalone service (`packages/cli/src/services/standalone.ts:17-31,61-63`),
 with `serve --stdio --port 0`, a random lease password and stdin ownership.
 The service defaults to loopback and enforces its generated password:
 `packages/cli/src/server-process.ts:74-100`. This internal HTTP transport is
-an implementation detail, not a launcher API. Do not implement its native
-session/event routes. The owner selected **ACP only** on 2026-10-24.
+an implementation detail, not a launcher API. Native admission is confined to
+the baked plugin and adapter under the 2026-10-27 amendment.
 
 ### ACP coverage and semantic outcome
 
@@ -295,13 +332,13 @@ session/event routes. The owner selected **ACP only** on 2026-10-24.
   offered permission option or cancelled, never leave the agent waiting.
   Do not advertise client filesystem/terminal capabilities unless implemented.
 
-One generic ACP client implements the port. OpenCode is its first registry
-configuration; goose and other conforming agents must reuse the same client.
+One generic ACP client owns lifecycle. OpenCode and prime-agent use it with
+agent-specific steering behind their registry adapter modules.
 Its local success policy requires `end_turn`, nonempty final agent text, no
 provider error and no unresolved failure or unsettled required tool call.
 Neither this classification nor process exit status proves the work is correct.
 Cancellation must return `aborted`, with bounded process-tree cleanup even if
-an agent fails to respond. No native protocol fallback is permitted.
+an agent fails to respond. Only the specified native steering and completion reconciliation are permitted.
 
 ### Config and offline obligations
 
@@ -315,7 +352,7 @@ are applied in `packages/core/src/config/plugin/provider.ts:67-96,125-140`.
 The relay, not the agent, rereads the projected token per request.
 
 Set `update: "disable"`, `share: "disabled"`, `formatter: false`, `lsp: false`,
-no external plugins, MCP servers, URL skills or instructions, and no warming.
+no external plugins, URL skills or instructions, and no warming. Stage 4 adds only the baked steering plugin and launcher-provided MCP tools.
 Plugin disable selectors use `-<id>` (`packages/core/src/config/plugin/source.ts:125-132`);
 do not disable essential config/tool plugins with `-*`.
 `OPENCODE_DISABLE_MODELS_FETCH=true` is wired to the models source
@@ -358,7 +395,8 @@ receipt.
 1. Add one configuration module beside `task-opencode.ts`. Export
    `configureAgent({workDirectory, configFile, relayBaseURL})` and
    `toolOutputFailed(rawOutput, rawInput)` for agent-specific command status;
-   return only the agent's scoped environment. Do not implement a native client.
+   return only the agent's scoped environment. Add its native steering and
+   barrier hook here, behind TaskHarness, not in the launcher or core.
 2. Add one entry in `src/ports/task-harness-registry.json`: name, label,
    ACP command/args, module path, immutable config path, version/versionArgs,
    exact version output, and `provision`. The latter owns architecture-keyed
@@ -377,9 +415,11 @@ The shared contract iterates the shipped registry plus
 `tests/fixtures/task-agent-registry.json`. The latter adds a distinct scripted
 ACP configuration with its own executable, module, config and version check;
 normal test provisioning installs it using the same registry-driven path. It is
-not an owner setting and is not shipped in the workbench. Every real agent must
-pass success, provider error, abort and required-tool failure before being
-offered. Missing ACP signals block integration; there is no native fallback.
+not an owner setting and is not shipped in the workbench. Every real agent must pass success, provider error, abort and observable required-tool
+failure before being offered. Prime’s Python-tool path is exempt from the
+required-tool failure check: its exceptions can appear completed, so failure
+detection there is weaker, an owner-accepted gap. Other missing required tool
+evidence must not be represented as success.
 
 ### ACP patch and framing boundary
 

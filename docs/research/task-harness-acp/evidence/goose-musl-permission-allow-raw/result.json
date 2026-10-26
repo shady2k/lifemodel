@@ -1,0 +1,91 @@
+{
+  "candidate": "goose",
+  "scenario": "permission-allow",
+  "transcript": "/out/acp.transcript.jsonl",
+  "markerCreated": true,
+  "initialize": {
+    "protocolVersion": 1,
+    "agentInfo": {
+      "name": "goose",
+      "version": "1.56.0"
+    },
+    "authMethods": [
+      "goose-provider"
+    ],
+    "capabilities": {
+      "loadSession": true,
+      "promptCapabilities": {
+        "image": true,
+        "audio": false,
+        "embeddedContext": true
+      },
+      "mcpCapabilities": {
+        "http": true,
+        "sse": false
+      },
+      "sessionCapabilities": {
+        "list": {},
+        "delete": {},
+        "close": {}
+      },
+      "auth": {},
+      "_meta": {
+        "goose": {
+          "recipeParameterScopes": {}
+        }
+      }
+    }
+  },
+  "sessionId": "20261026_1",
+  "sessionNewResultKeys": [
+    "sessionId",
+    "modes",
+    "configOptions",
+    "_meta"
+  ],
+  "durationMs": 518,
+  "stopReason": "end_turn",
+  "promptResponseKeys": [
+    "stopReason"
+  ],
+  "toolObservedAfterMs": null,
+  "cancelSentAfterMs": null,
+  "liveAtCancel": null,
+  "startMarker": false,
+  "completionMarker": false,
+  "updateKinds": {
+    "session_info_update": 2,
+    "usage_update": 4,
+    "available_commands_update": 1,
+    "tool_call": 1,
+    "tool_call_update": 2,
+    "agent_message_chunk": 2
+  },
+  "toolCallStatuses": [
+    "tool_call:-",
+    "tool_call_update:in_progress",
+    "tool_call_update:completed"
+  ],
+  "permissionRequests": [
+    {
+      "sessionId": "20261026_1",
+      "toolCall": {
+        "title": "shell · echo probe-tool-ok > /work/probe/probe-tool-marker; ec...…",
+        "kind": "other",
+        "status": "pending"
+      },
+      "optionIds": [
+        "allow_always:allow_always",
+        "allow_once:allow_once",
+        "reject_once:reject_once",
+        "reject_always:reject_always"
+      ]
+    }
+  ],
+  "exitAfterPrompt": null,
+  "processExit": {
+    "code": null,
+    "signal": "SIGTERM"
+  },
+  "stderrTail": ""
+}

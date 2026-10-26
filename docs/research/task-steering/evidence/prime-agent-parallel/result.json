@@ -1,0 +1,26 @@
+{
+  "agent": "prime-agent",
+  "scenario": "parallel",
+  "sessionID": "cf8d8689-a5cc-4779-acc7-3ea4cabe2a93",
+  "activeSessionId": "27126295b711",
+  "first": {
+    "stopReason": "end_turn"
+  },
+  "admissionCount": 1,
+  "admissions": [
+    {
+      "id": "native-2",
+      "type": "response",
+      "command": "steer",
+      "success": true,
+      "data": {
+        "queued": true
+      }
+    }
+  ],
+  "requestsAtEnd": 2,
+  "requestsAfterObservation": 2,
+  "totalRequests": 2,
+  "done0": true,
+  "done1": true
+}

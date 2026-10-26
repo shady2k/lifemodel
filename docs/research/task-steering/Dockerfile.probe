@@ -1,0 +1,5 @@
+FROM probe-6539-2/prime:0.10.1
+USER root
+COPY plugin /opt/probe/steering-plugin
+USER 1000:1000
+ENTRYPOINT ["node", "/probe/run.mjs"]

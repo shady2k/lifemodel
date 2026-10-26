@@ -1,0 +1,33 @@
+Scoped checks for lifemodel-653.9.2
+Each exit code is the named command's own exit status.
+
+node --check docs/research/task-steering/run.mjs
+exit 0
+
+node --check docs/research/task-steering/stub.mjs
+exit 0
+
+node --check docs/research/task-steering/plugin/index.mjs
+exit 0
+
+node --check docs/research/task-steering/verify-evidence.mjs
+exit 0
+
+Python py_compile: fetch.py, run-local.py, run-all.py, collect-evidence.py
+exit 0
+Python compilation passed
+
+node docs/research/task-steering/verify-evidence.mjs
+exit 0
+Verified 12 retained runs, ordering, receipts, compaction, duplicate behavior, ACP boundary, and hashes. Prime late observer failure is required negative evidence, not a pass.
+
+git diff --cached --check
+exit 0
+
+Runtime: 12 retained final Docker commands: exit 0 each (per-case exit-code.txt).
+OpenCode promoted-retry case rerun once after review strengthening, exit 0.
+Build: workbench, reused Prime overlay, final plugin overlay: exit 0 each.
+No production/product suite run: research-only scope.
+Automatic stage document gate: not installed, not run.
+Independent review: same-model read-only evidence review, not stage acceptance.
+Cleanup: no labelled containers remained; removal of three probe images exit 0.

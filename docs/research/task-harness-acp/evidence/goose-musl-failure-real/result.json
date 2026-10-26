@@ -1,0 +1,144 @@
+{
+  "candidate": "goose",
+  "scenario": "failure",
+  "client": "real",
+  "result": {
+    "outcome": "succeeded",
+    "result": "PROBE_FINAL: shell failed."
+  },
+  "events": [
+    {
+      "type": "step",
+      "text": "Running task"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "61a5b78e-1556-4c66-99ba-0a11193f708d",
+        "parentSpanId": null,
+        "component": "task.model",
+        "startedAt": "2026-10-26T18:00:23.325Z",
+        "endedAt": null,
+        "status": null,
+        "attrs": {
+          "model": "task",
+          "durationMs": 0.3474660000001677
+        }
+      }
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "a74a4fef-719a-4838-8020-a86fdba08545",
+        "parentSpanId": "61a5b78e-1556-4c66-99ba-0a11193f708d",
+        "component": "task.tool",
+        "startedAt": "2026-10-26T18:00:24.051Z",
+        "endedAt": null,
+        "status": null,
+        "attrs": {
+          "toolCallId": "call_probe_1",
+          "title": "shell · echo PROBE_SHELL_FAILURE >&2; exit 7",
+          "command": "echo PROBE_SHELL_FAILURE >&2; exit 7",
+          "hostStatus": "pending",
+          "durationMs": 0.015561000000161584
+        }
+      }
+    },
+    {
+      "type": "tool",
+      "name": "task_tool",
+      "status": "running"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "a74a4fef-719a-4838-8020-a86fdba08545",
+        "parentSpanId": "61a5b78e-1556-4c66-99ba-0a11193f708d",
+        "component": "task.tool",
+        "startedAt": "2026-10-26T18:00:24.051Z",
+        "endedAt": null,
+        "status": null,
+        "attrs": {
+          "toolCallId": "call_probe_1",
+          "title": "shell · echo PROBE_SHELL_FAILURE >&2; exit 7",
+          "command": "echo PROBE_SHELL_FAILURE >&2; exit 7",
+          "hostStatus": "in_progress",
+          "durationMs": 305.7191979999998
+        }
+      }
+    },
+    {
+      "type": "tool",
+      "name": "task_tool",
+      "status": "running"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "a74a4fef-719a-4838-8020-a86fdba08545",
+        "parentSpanId": "61a5b78e-1556-4c66-99ba-0a11193f708d",
+        "component": "task.tool",
+        "startedAt": "2026-10-26T18:00:24.051Z",
+        "endedAt": "2026-10-26T18:00:24.375Z",
+        "status": "failed",
+        "attrs": {
+          "toolCallId": "call_probe_1",
+          "title": "shell · echo PROBE_SHELL_FAILURE >&2; exit 7",
+          "command": "echo PROBE_SHELL_FAILURE >&2; exit 7",
+          "hostStatus": "failed",
+          "durationMs": 323.62352899999996,
+          "outputTail": "PROBE_SHELL_FAILURE\n\nCommand exited with code 7"
+        }
+      }
+    },
+    {
+      "type": "tool",
+      "name": "task_tool",
+      "status": "error"
+    },
+    {
+      "type": "step",
+      "text": "Task is working"
+    },
+    {
+      "type": "step",
+      "text": "Task is working"
+    },
+    {
+      "type": "step",
+      "text": "Task is working"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "61a5b78e-1556-4c66-99ba-0a11193f708d",
+        "parentSpanId": null,
+        "component": "task.model",
+        "startedAt": "2026-10-26T18:00:23.325Z",
+        "endedAt": "2026-10-26T18:00:24.657Z",
+        "status": "ok",
+        "attrs": {
+          "model": "task",
+          "stopReason": "end_turn",
+          "durationMs": 1315.1898190000002,
+          "used": 0,
+          "size": 128000
+        }
+      }
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "2b3619e2-0b0c-4105-bacb-f90f18e5bcae",
+        "parentSpanId": "61a5b78e-1556-4c66-99ba-0a11193f708d",
+        "component": "task.completion",
+        "startedAt": "2026-10-26T18:00:24.657Z",
+        "endedAt": "2026-10-26T18:00:24.657Z",
+        "status": "ok",
+        "attrs": {
+          "finalText": "PROBE_FINAL: shell failed."
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+17    18:02:08.269639 +++ exited with 0 +++
+25    18:02:08.328896 +++ exited with 0 +++
+32    18:02:08.800751 connect(22, {sa_family=AF_INET, sin_port=htons(37983), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+33    18:02:08.801381 connect(21, {sa_family=AF_INET, sin_port=htons(37983), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+32    18:02:08.818131 connect(23, {sa_family=AF_INET, sin_port=htons(37983), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+10    18:02:08.820032 connect(25, {sa_family=AF_INET, sin_port=htons(8443), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+10    18:02:08.827404 connect(27, {sa_family=AF_INET, sin_port=htons(8443), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+10    18:02:08.838722 connect(28, {sa_family=AF_INET, sin_port=htons(8443), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+31    18:02:15.412781 --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=10, si_uid=1000} ---
+30    18:02:15.412819 --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=10, si_uid=1000} ---
+39    18:02:15.412978 +++ killed by SIGTERM +++
+40    18:02:15.412986 +++ killed by SIGTERM +++
+38    18:02:15.413002 +++ killed by SIGTERM +++
+37    18:02:15.413006 +++ killed by SIGTERM +++
+36    18:02:15.413010 +++ killed by SIGTERM +++
+35    18:02:15.413014 +++ killed by SIGTERM +++
+34    18:02:15.413018 +++ killed by SIGTERM +++
+33    18:02:15.413022 +++ killed by SIGTERM +++
+32    18:02:15.413027 +++ killed by SIGTERM +++
+31    18:02:15.418266 +++ killed by SIGTERM +++
+30    18:02:15.418319 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_KILLED, si_pid=31, si_uid=1000, si_status=SIGTERM, si_utime=22 /* 0.22 s */, si_stime=18 /* 0.18 s */} ---
+30    18:02:15.422351 +++ exited with 143 +++
+10    18:02:15.422379 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=30, si_uid=1000, si_status=143, si_utime=2 /* 0.02 s */, si_stime=1 /* 0.01 s */} ---
+18    18:02:15.424757 --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=10, si_uid=1000} ---
+18    18:02:15.425206 --- SIGTERM {si_signo=SIGTERM, si_code=SI_TKILL, si_pid=18, si_uid=1000} ---
+24    18:02:15.425328 +++ killed by SIGTERM +++
+21    18:02:15.425340 +++ killed by SIGTERM +++
+22    18:02:15.425350 +++ killed by SIGTERM +++
+20    18:02:15.425356 +++ killed by SIGTERM +++
+23    18:02:15.425362 +++ killed by SIGTERM +++
+19    18:02:15.428346 +++ killed by SIGTERM +++
+18    18:02:15.428375 +++ killed by SIGTERM +++
+10    18:02:15.428411 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_KILLED, si_pid=18, si_uid=1000, si_status=SIGTERM, si_utime=7 /* 0.07 s */, si_stime=1 /* 0.01 s */} ---
+15    18:02:15.435065 +++ exited with 0 +++
+14    18:02:15.435094 +++ exited with 0 +++
+13    18:02:15.435100 +++ exited with 0 +++
+12    18:02:15.435130 +++ exited with 0 +++
+11    18:02:15.435388 +++ exited with 0 +++
+26    18:02:15.437546 +++ exited with 0 +++
+28    18:02:15.437590 +++ exited with 0 +++
+29    18:02:15.437655 +++ exited with 0 +++
+27    18:02:15.437714 +++ exited with 0 +++
+16    18:02:15.440870 +++ exited with 0 +++
+10    18:02:15.440904 +++ exited with 0 +++

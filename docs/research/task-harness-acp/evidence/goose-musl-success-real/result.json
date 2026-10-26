@@ -1,0 +1,140 @@
+{
+  "candidate": "goose",
+  "scenario": "success",
+  "client": "real",
+  "result": {
+    "outcome": "succeeded",
+    "result": "PROBE_FINAL: finished."
+  },
+  "events": [
+    {
+      "type": "step",
+      "text": "Running task"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "cdcc4d50-5306-4785-98a4-574abc48d0c1",
+        "parentSpanId": null,
+        "component": "task.model",
+        "startedAt": "2026-10-26T18:00:31.235Z",
+        "endedAt": null,
+        "status": null,
+        "attrs": {
+          "model": "task",
+          "durationMs": 0.20508300000005875
+        }
+      }
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "f3c747a3-8be2-4634-a78c-9ab8edc6de71",
+        "parentSpanId": "cdcc4d50-5306-4785-98a4-574abc48d0c1",
+        "component": "task.tool",
+        "startedAt": "2026-10-26T18:00:33.585Z",
+        "endedAt": null,
+        "status": null,
+        "attrs": {
+          "toolCallId": "call_probe_1",
+          "title": "shell · echo probe-tool-ok > /work/probe/probe-tool-marker; ec...…",
+          "command": "echo probe-tool-ok > /work/probe/probe-tool-marker; echo probe-tool-ok",
+          "hostStatus": "pending",
+          "durationMs": 4.693768999999975
+        }
+      }
+    },
+    {
+      "type": "tool",
+      "name": "task_tool",
+      "status": "running"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "f3c747a3-8be2-4634-a78c-9ab8edc6de71",
+        "parentSpanId": "cdcc4d50-5306-4785-98a4-574abc48d0c1",
+        "component": "task.tool",
+        "startedAt": "2026-10-26T18:00:33.585Z",
+        "endedAt": null,
+        "status": null,
+        "attrs": {
+          "toolCallId": "call_probe_1",
+          "title": "shell · echo probe-tool-ok > /work/probe/probe-tool-marker; ec...…",
+          "command": "echo probe-tool-ok > /work/probe/probe-tool-marker; echo probe-tool-ok",
+          "hostStatus": "in_progress",
+          "durationMs": 40750.466645
+        }
+      }
+    },
+    {
+      "type": "tool",
+      "name": "task_tool",
+      "status": "running"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "f3c747a3-8be2-4634-a78c-9ab8edc6de71",
+        "parentSpanId": "cdcc4d50-5306-4785-98a4-574abc48d0c1",
+        "component": "task.tool",
+        "startedAt": "2026-10-26T18:00:33.585Z",
+        "endedAt": "2026-10-26T18:01:14.379Z",
+        "status": "ok",
+        "attrs": {
+          "toolCallId": "call_probe_1",
+          "title": "shell · echo probe-tool-ok > /work/probe/probe-tool-marker; ec...…",
+          "command": "echo probe-tool-ok > /work/probe/probe-tool-marker; echo probe-tool-ok",
+          "hostStatus": "completed",
+          "durationMs": 40751.32663,
+          "outputTail": "probe-tool-ok"
+        }
+      }
+    },
+    {
+      "type": "tool",
+      "name": "task_tool",
+      "status": "completed"
+    },
+    {
+      "type": "step",
+      "text": "Task is working"
+    },
+    {
+      "type": "step",
+      "text": "Task is working"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "cdcc4d50-5306-4785-98a4-574abc48d0c1",
+        "parentSpanId": null,
+        "component": "task.model",
+        "startedAt": "2026-10-26T18:00:31.235Z",
+        "endedAt": "2026-10-26T18:01:14.521Z",
+        "status": "ok",
+        "attrs": {
+          "model": "task",
+          "stopReason": "end_turn",
+          "durationMs": 43261.117583,
+          "used": 0,
+          "size": 128000
+        }
+      }
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "b7e812da-78d4-422e-9a6a-acdbdea9663f",
+        "parentSpanId": "cdcc4d50-5306-4785-98a4-574abc48d0c1",
+        "component": "task.completion",
+        "startedAt": "2026-10-26T18:01:14.521Z",
+        "endedAt": "2026-10-26T18:01:14.521Z",
+        "status": "ok",
+        "attrs": {
+          "finalText": "PROBE_FINAL: finished."
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "agent": "opencode",
+  "scenario": "duplicate",
+  "sessionID": "ses_e85c1c22cffeAzp1p1VH6wgY1G",
+  "first": {
+    "stopReason": "end_turn",
+    "usage": {
+      "inputTokens": 200,
+      "outputTokens": 40,
+      "totalTokens": 240
+    },
+    "_meta": {}
+  },
+  "admissionCount": 3,
+  "admissions": [
+    {
+      "ok": true,
+      "data": {
+        "id": "msg_steer_unique_6539",
+        "sessionID": "ses_e85c1c22cffeAzp1p1VH6wgY1G",
+        "time": {
+          "created": 1793052262803
+        },
+        "type": "user",
+        "payload": {
+          "text": "STEER_UNIQUE_6539: use the native input queue."
+        },
+        "delivery": "steer"
+      }
+    },
+    {
+      "ok": true,
+      "data": {
+        "id": "msg_steer_unique_6539",
+        "sessionID": "ses_e85c1c22cffeAzp1p1VH6wgY1G",
+        "time": {
+          "created": 1793052262803
+        },
+        "type": "user",
+        "payload": {
+          "text": "STEER_UNIQUE_6539: use the native input queue."
+        },
+        "delivery": "steer"
+      }
+    },
+    {
+      "ok": true,
+      "data": {
+        "id": "msg_steer_unique_6539",
+        "sessionID": "ses_e85c1c22cffeAzp1p1VH6wgY1G",
+        "time": {
+          "created": 1793052282321
+        },
+        "type": "user",
+        "payload": {
+          "text": "STEER_UNIQUE_6539: use the native input queue."
+        },
+        "delivery": "steer"
+      }
+    }
+  ],
+  "requestsAtEnd": 2,
+  "requestsAfterObservation": 2,
+  "totalRequests": 3,
+  "done0": true,
+  "done1": false
+}

@@ -1,0 +1,286 @@
+{
+  "prime-agent-permission-raw": {
+    "candidate": "prime-agent",
+    "scenario": "permission",
+    "markerCreated": true,
+    "durationMs": 818,
+    "stopReason": "end_turn",
+    "cancelSentAfterMs": null,
+    "startMarker": false,
+    "completionMarker": false,
+    "toolCallStatuses": [
+      "tool_call:in_progress",
+      "tool_call_update:completed"
+    ],
+    "permissionRequests": []
+  },
+  "goose-musl-failure-real": {
+    "candidate": "goose",
+    "scenario": "failure",
+    "client": "real",
+    "result": {
+      "outcome": "succeeded",
+      "result": "PROBE_FINAL: shell failed."
+    }
+  },
+  "goose-musl-permission-real": {
+    "candidate": "goose",
+    "scenario": "permission",
+    "client": "real",
+    "result": {
+      "outcome": "succeeded",
+      "result": "PROBE_FINAL: finished."
+    }
+  },
+  "goose-musl-provider-error-real": {
+    "candidate": "goose",
+    "scenario": "provider-error",
+    "client": "real",
+    "result": {
+      "outcome": "failed",
+      "result": "",
+      "reasonCode": "provider_error",
+      "failureSpanId": "b7f38437-edbe-4c88-94da-4f2fe071fba3"
+    }
+  },
+  "prime-agent-cancel-raw": {
+    "candidate": "prime-agent",
+    "scenario": "cancel",
+    "markerCreated": false,
+    "durationMs": 1198,
+    "stopReason": "cancelled",
+    "cancelSentAfterMs": 1165,
+    "liveAtCancel": {
+      "startMarker": true,
+      "shellPid": 86,
+      "childPid": 90,
+      "shellAlive": true,
+      "childAlive": true
+    },
+    "shellAliveAtPromptReturn": false,
+    "childAliveAtPromptReturn": false,
+    "startMarker": true,
+    "childAliveTwoSecondsAfterReturn": false,
+    "childAliveAfterObservation": false,
+    "completionMarker": false,
+    "toolCallStatuses": [
+      "tool_call:in_progress",
+      "tool_call_update:failed"
+    ],
+    "permissionRequests": []
+  },
+  "goose-musl-permission-allow-raw": {
+    "candidate": "goose",
+    "scenario": "permission-allow",
+    "markerCreated": true,
+    "durationMs": 518,
+    "stopReason": "end_turn",
+    "cancelSentAfterMs": null,
+    "liveAtCancel": null,
+    "startMarker": false,
+    "completionMarker": false,
+    "toolCallStatuses": [
+      "tool_call:-",
+      "tool_call_update:in_progress",
+      "tool_call_update:completed"
+    ],
+    "permissionRequests": [
+      {
+        "sessionId": "20261026_1",
+        "toolCall": {
+          "title": "shell \u00b7 echo probe-tool-ok > /work/probe/probe-tool-marker; ec...\u2026",
+          "kind": "other",
+          "status": "pending"
+        },
+        "optionIds": [
+          "allow_always:allow_always",
+          "allow_once:allow_once",
+          "reject_once:reject_once",
+          "reject_always:reject_always"
+        ]
+      }
+    ]
+  },
+  "goose-musl-cancel-raw": {
+    "candidate": "goose",
+    "scenario": "cancel",
+    "markerCreated": false,
+    "durationMs": 1309,
+    "stopReason": "cancelled",
+    "cancelSentAfterMs": 1298,
+    "liveAtCancel": {
+      "startMarker": true,
+      "shellPid": 39,
+      "childPid": 40,
+      "shellAlive": true,
+      "childAlive": true
+    },
+    "shellAliveAtPromptReturn": false,
+    "childAliveAtPromptReturn": true,
+    "startMarker": true,
+    "childAliveTwoSecondsAfterReturn": true,
+    "childAliveAfterObservation": false,
+    "completionMarker": false,
+    "toolCallStatuses": [
+      "tool_call:-"
+    ],
+    "permissionRequests": []
+  },
+  "goose-musl-success-real": {
+    "candidate": "goose",
+    "scenario": "success",
+    "client": "real",
+    "result": {
+      "outcome": "succeeded",
+      "result": "PROBE_FINAL: finished."
+    }
+  },
+  "prime-agent-failure-real": {
+    "candidate": "prime-agent",
+    "scenario": "failure",
+    "client": "real",
+    "result": {
+      "outcome": "succeeded",
+      "result": "PROBE_FINAL: shell failed."
+    }
+  },
+  "goose-musl-success-raw": {
+    "candidate": "goose",
+    "scenario": "success",
+    "markerCreated": true,
+    "durationMs": 493,
+    "stopReason": "end_turn",
+    "startMarker": false,
+    "completionMarker": false,
+    "toolCallStatuses": [
+      "tool_call:-",
+      "tool_call_update:in_progress",
+      "tool_call_update:completed"
+    ],
+    "permissionRequests": []
+  },
+  "prime-agent-success-real": {
+    "candidate": "prime-agent",
+    "scenario": "success",
+    "client": "real",
+    "result": {
+      "outcome": "succeeded",
+      "result": "PROBE_FINAL: finished."
+    }
+  },
+  "goose-musl-provider-error-raw": {
+    "candidate": "goose",
+    "scenario": "provider-error",
+    "markerCreated": false,
+    "durationMs": 7803,
+    "stopReason": "end_turn",
+    "cancelSentAfterMs": null,
+    "startMarker": false,
+    "completionMarker": false,
+    "toolCallStatuses": [],
+    "permissionRequests": []
+  },
+  "goose-musl-startup-raw": {
+    "candidate": "goose",
+    "scenario": "startup"
+  },
+  "goose-startup-raw": {
+    "candidate": "goose",
+    "scenario": "startup"
+  },
+  "goose-musl-failure-raw": {
+    "candidate": "goose",
+    "scenario": "failure",
+    "markerCreated": false,
+    "durationMs": 1001,
+    "stopReason": "end_turn",
+    "cancelSentAfterMs": null,
+    "startMarker": false,
+    "completionMarker": false,
+    "toolCallStatuses": [
+      "tool_call:-",
+      "tool_call_update:in_progress",
+      "tool_call_update:failed"
+    ],
+    "permissionRequests": []
+  },
+  "goose-musl-permission-raw": {
+    "candidate": "goose",
+    "scenario": "permission",
+    "markerCreated": false,
+    "durationMs": 510,
+    "stopReason": "end_turn",
+    "cancelSentAfterMs": null,
+    "startMarker": false,
+    "completionMarker": false,
+    "toolCallStatuses": [
+      "tool_call:-",
+      "tool_call_update:failed"
+    ],
+    "permissionRequests": [
+      {
+        "sessionId": "20261026_1",
+        "toolCall": {
+          "title": "shell \u00b7 echo probe-tool-ok > /work/probe/probe-tool-marker; ec...\u2026",
+          "kind": "other",
+          "status": "pending"
+        },
+        "optionIds": [
+          "allow_always:allow_always",
+          "allow_once:allow_once",
+          "reject_once:reject_once",
+          "reject_always:reject_always"
+        ]
+      }
+    ]
+  },
+  "prime-agent-failure-raw": {
+    "candidate": "prime-agent",
+    "scenario": "failure",
+    "markerCreated": false,
+    "durationMs": 210,
+    "stopReason": "end_turn",
+    "startMarker": false,
+    "completionMarker": false,
+    "toolCallStatuses": [
+      "tool_call:in_progress",
+      "tool_call_update:completed"
+    ],
+    "permissionRequests": []
+  },
+  "prime-agent-startup-raw": {
+    "candidate": "prime-agent",
+    "scenario": "startup"
+  },
+  "prime-agent-success-raw": {
+    "candidate": "prime-agent",
+    "scenario": "success",
+    "markerCreated": true,
+    "durationMs": 252,
+    "stopReason": "end_turn",
+    "startMarker": false,
+    "completionMarker": false,
+    "toolCallStatuses": [
+      "tool_call:in_progress",
+      "tool_call_update:completed"
+    ],
+    "permissionRequests": []
+  },
+  "prime-agent-provider-error-raw": {
+    "candidate": "prime-agent",
+    "scenario": "provider-error",
+    "markerCreated": false,
+    "error": "rpc_error:{\"code\":-32603,\"message\":\"Internal error\",\"data\":{\"details\":\"prime-agent turn failed: 400 PROBE_PROVIDER_FAILURE\"}}"
+  },
+  "prime-agent-provider-error-real": {
+    "candidate": "prime-agent",
+    "scenario": "provider-error",
+    "client": "real",
+    "result": {
+      "outcome": "failed",
+      "result": "",
+      "reasonCode": "provider_error",
+      "failureSpanId": "5d31f2bf-8395-49c4-9773-d27c4d18449f"
+    }
+  }
+}

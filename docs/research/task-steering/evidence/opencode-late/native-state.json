@@ -1,0 +1,54 @@
+{
+  "ok": true,
+  "data": [
+    {
+      "id": "msg_17a35730b001Lnqs09LqaXG5ok",
+      "time": {
+        "created": 1793051685729
+      },
+      "text": "PROBE_TASK: run the offered shell tools and finish. Do not launch children.",
+      "files": [],
+      "type": "user"
+    },
+    {
+      "id": "msg_17a357371001FNJzjXMgVFf10T",
+      "time": {
+        "created": 1793051685763,
+        "streamed": 1793051685868,
+        "completed": 1793051685872
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "task",
+        "providerID": "lifemodel"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "PROBE_FINAL: finished."
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 100,
+        "output": 20,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_17a3573f5001KTMWhJA7viIPta",
+      "time": {
+        "created": 1793051685877
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    }
+  ]
+}

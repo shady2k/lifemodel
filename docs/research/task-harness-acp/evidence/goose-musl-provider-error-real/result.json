@@ -1,0 +1,68 @@
+{
+  "candidate": "goose",
+  "scenario": "provider-error",
+  "client": "real",
+  "result": {
+    "outcome": "failed",
+    "result": "",
+    "reasonCode": "provider_error",
+    "failureSpanId": "b7f38437-edbe-4c88-94da-4f2fe071fba3"
+  },
+  "events": [
+    {
+      "type": "step",
+      "text": "Running task"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "b7f38437-edbe-4c88-94da-4f2fe071fba3",
+        "parentSpanId": null,
+        "component": "task.model",
+        "startedAt": "2026-10-26T18:02:08.799Z",
+        "endedAt": null,
+        "status": null,
+        "attrs": {
+          "model": "task",
+          "durationMs": 0.10342099999991206
+        }
+      }
+    },
+    {
+      "type": "step",
+      "text": "Task is working"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "b7f38437-edbe-4c88-94da-4f2fe071fba3",
+        "parentSpanId": null,
+        "component": "task.model",
+        "startedAt": "2026-10-26T18:02:08.799Z",
+        "endedAt": "2026-10-26T18:02:15.412Z",
+        "status": "failed",
+        "attrs": {
+          "model": "task",
+          "stopReason": "end_turn",
+          "durationMs": 6611.856301000001,
+          "used": 0,
+          "size": 128000
+        }
+      }
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "f977e874-3dfd-4b28-9931-cc4894e86f0e",
+        "parentSpanId": "b7f38437-edbe-4c88-94da-4f2fe071fba3",
+        "component": "task.completion",
+        "startedAt": "2026-10-26T18:02:15.412Z",
+        "endedAt": "2026-10-26T18:02:15.412Z",
+        "status": "ok",
+        "attrs": {
+          "finalText": "Ran into this error: Request failed: Bad request (400): PROBE_PROVIDER_FAILURE.\n\nPlease retry if you think this is a transient or recoverable error."
+        }
+      }
+    }
+  ]
+}

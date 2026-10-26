@@ -1,0 +1,41 @@
+{
+  "ok": true,
+  "data": [
+    {
+      "type": "compaction",
+      "id": "msg_17a34de30001zNZBgk4Ez5KjYd",
+      "metadata": {
+        "keepID": "msg_steer_unique_6539",
+        "recent": "[User]: STEER_UNIQUE_6539: use the native input queue.\n\n[Assistant]: PROBE_FINAL: finished."
+      },
+      "time": {
+        "created": 1793051647561
+      },
+      "status": "completed",
+      "reason": "manual",
+      "model": {
+        "id": "task",
+        "providerID": "lifemodel"
+      },
+      "summary": "## Objective\n- Complete the probe.\n\n## Requirements\n- STEER_UNIQUE_6539: use the native input queue.\n\n## Decisions\n- Use native queue.\n\n## Work State\n### Completed\n- Shell completed.\n### Active\n- Finish.\n### Blocked\n- (none)\n\n## Next Move\n1. Finish.\n\n## Relevant Files\n- (none)\n\n## Important Context\n- Stub probe.",
+      "cost": 0,
+      "tokens": {
+        "input": 100,
+        "output": 20,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_17a34dea3001UAs5Q2M0AazhUc",
+      "time": {
+        "created": 1793051647651
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    }
+  ]
+}

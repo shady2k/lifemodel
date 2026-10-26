@@ -1,0 +1,55 @@
+16    18:00:29.822195 +++ exited with 0 +++
+24    18:00:29.921916 +++ exited with 0 +++
+31    18:00:31.169195 connect(23, {sa_family=AF_INET, sin_port=htons(39555), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+32    18:00:31.187426 connect(24, {sa_family=AF_INET, sin_port=htons(39555), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+9     18:00:31.417123 connect(25, {sa_family=AF_INET, sin_port=htons(8443), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+31    18:00:31.426444 connect(25, {sa_family=AF_INET, sin_port=htons(39555), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+9     18:00:31.464809 connect(26, {sa_family=AF_INET, sin_port=htons(8443), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+9     18:00:31.565882 connect(28, {sa_family=AF_INET, sin_port=htons(8443), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+33    18:00:44.541883 +++ exited with 0 +++
+35    18:00:45.815221 +++ exited with 0 +++
+42    18:01:01.587028 connect(3, {sa_family=AF_UNIX, sun_path="/var/run/nscd/socket"}, 110) = -1 ENOENT (No such file or directory)
+42    18:01:03.783828 connect(3, {sa_family=AF_UNIX, sun_path="/var/run/nscd/socket"}, 110) = -1 ENOENT (No such file or directory)
+42    18:01:09.912206 +++ exited with 0 +++
+32    18:01:10.461505 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=42, si_uid=1000, si_status=0, si_utime=0, si_stime=5 /* 0.05 s */} ---
+31    18:01:14.443088 connect(24, {sa_family=AF_INET, sin_port=htons(39555), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+9     18:01:14.464360 connect(23, {sa_family=AF_INET, sin_port=htons(8443), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+30    18:01:14.522083 --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=9, si_uid=1000} ---
+29    18:01:14.522153 --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=9, si_uid=1000} ---
+43    18:01:14.522422 +++ killed by SIGTERM +++
+36    18:01:14.522524 +++ killed by SIGTERM +++
+39    18:01:14.522558 +++ killed by SIGTERM +++
+38    18:01:14.522564 +++ killed by SIGTERM +++
+37    18:01:14.522570 +++ killed by SIGTERM +++
+40    18:01:14.522575 +++ killed by SIGTERM +++
+34    18:01:14.522602 +++ killed by SIGTERM +++
+41    18:01:14.522608 +++ killed by SIGTERM +++
+32    18:01:14.522614 +++ killed by SIGTERM +++
+44    18:01:14.522619 +++ killed by SIGTERM +++
+31    18:01:14.522624 +++ killed by SIGTERM +++
+45    18:01:14.536940 +++ killed by SIGTERM +++
+30    18:01:14.536974 +++ killed by SIGTERM +++
+29    18:01:14.537200 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_KILLED, si_pid=30, si_uid=1000, si_status=SIGTERM, si_utime=29 /* 0.29 s */, si_stime=314 /* 3.14 s */} ---
+29    18:01:14.552786 +++ exited with 143 +++
+9     18:01:14.552844 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=29, si_uid=1000, si_status=143, si_utime=2 /* 0.02 s */, si_stime=3 /* 0.03 s */} ---
+17    18:01:14.555549 --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=9, si_uid=1000} ---
+17    18:01:14.555783 --- SIGTERM {si_signo=SIGTERM, si_code=SI_TKILL, si_pid=17, si_uid=1000} ---
+19    18:01:14.555863 +++ killed by SIGTERM +++
+18    18:01:14.555870 +++ killed by SIGTERM +++
+22    18:01:14.555883 +++ killed by SIGTERM +++
+21    18:01:14.555888 +++ killed by SIGTERM +++
+20    18:01:14.555893 +++ killed by SIGTERM +++
+23    18:01:14.562440 +++ killed by SIGTERM +++
+17    18:01:14.562485 +++ killed by SIGTERM +++
+9     18:01:14.562830 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_KILLED, si_pid=17, si_uid=1000, si_status=SIGTERM, si_utime=8 /* 0.08 s */, si_stime=143 /* 1.43 s */} ---
+10    18:01:14.615069 +++ exited with 0 +++
+12    18:01:14.616168 +++ exited with 0 +++
+11    18:01:14.616409 +++ exited with 0 +++
+13    18:01:14.617215 +++ exited with 0 +++
+14    18:01:14.617278 +++ exited with 0 +++
+27    18:01:14.623143 +++ exited with 0 +++
+26    18:01:14.623307 +++ exited with 0 +++
+28    18:01:14.623340 +++ exited with 0 +++
+25    18:01:14.623538 +++ exited with 0 +++
+15    18:01:14.624646 +++ exited with 0 +++
+9     18:01:14.627063 +++ exited with 0 +++

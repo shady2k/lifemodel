@@ -1,0 +1,111 @@
+{
+  "candidate": "prime-agent",
+  "scenario": "success",
+  "client": "real",
+  "result": {
+    "outcome": "succeeded",
+    "result": "PROBE_FINAL: finished."
+  },
+  "events": [
+    {
+      "type": "step",
+      "text": "Running task"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "58cb892e-93ca-462f-a10e-46c748f7d2b1",
+        "parentSpanId": null,
+        "component": "task.model",
+        "startedAt": "2026-10-26T18:01:25.160Z",
+        "endedAt": null,
+        "status": null,
+        "attrs": {
+          "model": "task",
+          "durationMs": 0.14057299999967654
+        }
+      }
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "23587286-0bd5-491a-9a2c-fccc6751723b",
+        "parentSpanId": "58cb892e-93ca-462f-a10e-46c748f7d2b1",
+        "component": "task.tool",
+        "startedAt": "2026-10-26T18:01:25.428Z",
+        "endedAt": null,
+        "status": null,
+        "attrs": {
+          "toolCallId": "call_probe_1",
+          "kind": "execute",
+          "title": "Python cell",
+          "hostStatus": "in_progress",
+          "durationMs": 0.008630000000266591
+        }
+      }
+    },
+    {
+      "type": "tool",
+      "name": "task_tool",
+      "status": "running"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "23587286-0bd5-491a-9a2c-fccc6751723b",
+        "parentSpanId": "58cb892e-93ca-462f-a10e-46c748f7d2b1",
+        "component": "task.tool",
+        "startedAt": "2026-10-26T18:01:25.428Z",
+        "endedAt": "2026-10-26T18:01:25.463Z",
+        "status": "ok",
+        "attrs": {
+          "toolCallId": "call_probe_1",
+          "kind": "execute",
+          "title": "Python cell",
+          "hostStatus": "completed",
+          "durationMs": 34.55276500000036,
+          "outputTail": "probe-tool-ok\n\n"
+        }
+      }
+    },
+    {
+      "type": "tool",
+      "name": "task_tool",
+      "status": "completed"
+    },
+    {
+      "type": "step",
+      "text": "Task is working"
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "58cb892e-93ca-462f-a10e-46c748f7d2b1",
+        "parentSpanId": null,
+        "component": "task.model",
+        "startedAt": "2026-10-26T18:01:25.160Z",
+        "endedAt": "2026-10-26T18:01:25.502Z",
+        "status": "ok",
+        "attrs": {
+          "model": "task",
+          "stopReason": "end_turn",
+          "durationMs": 316.8422379999997
+        }
+      }
+    },
+    {
+      "type": "trace",
+      "span": {
+        "spanId": "59c44fbd-ae61-470f-b31b-800e7c15bae0",
+        "parentSpanId": "58cb892e-93ca-462f-a10e-46c748f7d2b1",
+        "component": "task.completion",
+        "startedAt": "2026-10-26T18:01:25.502Z",
+        "endedAt": "2026-10-26T18:01:25.502Z",
+        "status": "ok",
+        "attrs": {
+          "finalText": "PROBE_FINAL: finished."
+        }
+      }
+    }
+  ]
+}
