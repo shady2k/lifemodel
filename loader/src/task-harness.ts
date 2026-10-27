@@ -107,6 +107,11 @@ export interface TaskQuestionState {
 }
 
 export interface TaskHarness {
+  /** Resolves only after the brief is written and native steering is installed.
+   * If execution ends before opening intake this stays pending; the launcher
+   * cancels its wait when execution ends. It is not a promise of obedience.
+   */
+  readonly intakeReady: Promise<void>;
   start(briefing: TaskBriefing): Promise<TaskHarnessResult>;
   abort(): Promise<void>;
   steer(command: TaskSteerCommand): Promise<TaskSteerDisposition>;
@@ -115,6 +120,9 @@ export interface TaskHarness {
 
 /** Deterministic second implementation used by launcher and core contract tests. */
 export class ScriptedTaskHarness implements TaskHarness {
+  private readonly intake: PromiseWithResolvers<void> = Promise.withResolvers();
+  readonly intakeReady = this.intake.promise;
+  private intakeOpen = false;
   private started = false;
   private aborted = false;
   private release: (() => void) | undefined;
@@ -126,6 +134,7 @@ export class ScriptedTaskHarness implements TaskHarness {
       events?: TaskHarnessEvent[];
       terminal?: TaskHarnessResult;
       waitForAbort?: boolean;
+      beforeIntake?: Promise<void>;
     } = {}
   ) {}
 
@@ -137,7 +146,10 @@ export class ScriptedTaskHarness implements TaskHarness {
       if (event.type === 'trace') emitTaskTrace(this.options.onEvent, event.span);
       else await this.options.onEvent?.(event);
     }
+    await this.options.beforeIntake;
     if (this.options.waitForAbort && !this.aborted) {
+      this.intakeOpen = true;
+      this.intake.resolve();
       await new Promise<void>((resolve) => {
         this.release = resolve;
       });
@@ -155,7 +167,7 @@ export class ScriptedTaskHarness implements TaskHarness {
 
   steer(command: TaskSteerCommand): Promise<TaskSteerDisposition> {
     if (
-      !this.started ||
+      !this.intakeOpen ||
       this.aborted ||
       !this.options.waitForAbort ||
       !command.commandId ||

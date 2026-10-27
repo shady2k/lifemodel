@@ -2,7 +2,10 @@
 
 Task: lifemodel-653.8.8. This is the task-to-core direction of ADR-014 D2.
 The task-to-core direction is a source contract, not deployed stage acceptance.
-The core-to-task direction below is the stage-4 design, not yet implemented.
+The core-to-task mailbox and launcher intake are implemented in source by
+lifemodel-653.9.7. Real-store integration checks cover ordering, replay, ACKs,
+receipts, authority, questions and owner-core processing during a held poll.
+This source contract is not deployed stage acceptance.
 
 ## Transport and identity
 
@@ -10,8 +13,8 @@ The launcher posts one JSON frame to `https://core.lifemodel.svc:8447/task/event
 HTTP/1.1 keep-alive gives a reusable outbound TLS channel with one explicit HTTP
 200 ACK per frame. Unlike a bidirectional streaming body, this bounds body intake,
 allows a clear 429 with Retry-After, and does not tie up a worker while a peer holds
-an idle connection. Today there is no command route or task ingress port;
-stage 4 adds bounded outbound long-poll, never a Pod ingress port.
+an idle connection. The launcher also dials out for bounded command long-polls. No task Pod ingress
+port is created.
 
 The server leaf is issued by the instance CA, stored in the fixed
 `core-task-channel-tls` Secret, and mounted only into core. The listener reloads
@@ -183,6 +186,71 @@ no wrap. A later shortening (soft Stop) is not seen by this snapshot. Live
 deadline updates and wrap belong to 653.10. The Job deadline is the hard bound.
 MCP over stdio, including Prime offline, remains unverified. ACKs and receipts
 are task claims, not core evidence of execution or obedience.
+
+### Command routes and durable storage
+
+`GET /task/commands` returns `{command: null}` after at most 25 seconds or one
+`{command: {taskId, attemptId, commandId, direction: "core_to_task", sequence,
+kind, text, questionId?}}`. It returns the oldest outstanding command, not a
+sequence watermark. A task-scoped commit notification wakes only that task's
+waiter. Empty database authority rechecks back off from one to two, four, then
+five seconds to cover missed notifications. They do not lock task or launch
+rows for update or repeat Kubernetes calls. The listener verifies live Kubernetes
+identity once on every poll request (at most 25 seconds), and again before
+returning a command after any wait. Every SQL transaction commits and releases
+its client before waiting; successful transactions reuse pooled connections.
+Shutdown cancels held polls.
+
+Commands and event frames share the same two credential-verification workers and
+the same round-robin SQL workers, bounded by `tasks.channel.workers` and
+`tasks.channel.sqlConnections`. Credentials queue by token digest; verified work
+queues by Job UID. One Job cannot own concurrent SQL operations across event,
+poll, ACK and receipt routes. Held polls occupy neither worker nor SQL client.
+There are at most 16 command polls and 32 command writes, with one poll and four
+writes per credential and per verified Job. Polls and writes each use at most a
+quarter of `tasks.channel.maxBufferedBytes`, charged to the common event/command
+budget; at least half remains reserved for events. Per-socket limits still apply.
+The task channel/replay pool remains physically separate from owner intake.
+
+The real-store isolation test runs the real owner core in the same process and
+uses one two-connection task pool for command reads/writes, event append and
+replay. Two polls remain held while repeated receipts are committed, an owner
+message and reply commit, and a third task's event receives an ACK under a bounded
+event wait. Idle pool assertions run after completed empty reads, before rechecks
+are released, not at an arbitrary sample time.
+
+`POST /task/commands/ack` takes `{taskId, attemptId, commandId, disposition}`
+(`accepted | rejected | uncertain`). `POST /task/commands/receipt` adds
+`receiptId`, and accepts `inserted | deferred-to-next-turn | failed | uncertain`.
+Both return `{stored: true}` only after commit. They have a ten-second request
+bound, above both adapters' five-second native admission bound. This is the
+deadline of the ACK POST, not a timer from command delivery to ACK. Core has no
+such delivery lease: an unretired command is redelivered on the next poll.
+No changes to ordinary event ACK settings are needed. The launcher uses independent poll,
+ACK, receipt and progress clients so a held poll cannot block writes.
+
+`TaskCommandMailbox.enqueueCommand` is a core-only API, not an agent tool.
+It validates immutable IDs/content and assigns monotonically increasing order
+under the task lock. `core.task_commands` retains content after retirement;
+`core.task_command_acks` stores disposition before retirement in the same fenced
+transaction. A database trigger refuses retirement without that ACK. Exact
+creation/ACK/receipt duplicates are idempotent; changed content conflicts.
+`core.task_command_receipts` retains at most 16 receipts per command. A task
+admits at most 1024 commands, matching the harness journal reservation. Enqueue
+also bounds the complete command response by the configured frame ceiling before
+commit. New commands and polls are refused for terminal, revoked or wrapping
+authority; wrapping delivery policy belongs to 653.10. Exact core-side creation
+replay returns the original command even after these state changes; changed
+content still conflicts. Existing ACKs and receipts remain admissible while the
+same fenced Pod has active or wrapping intent, a live deadline, allocation and
+won claim. Revoked, expired or replaced bindings cannot write old ACKs/receipts.
+No replacement Pod receives commands. The forward migration is `20261015000026_create_task_commands.sql`.
+
+A `question` frame's payload is `{questionId, text}`. `questionId` equals its
+launcher-generated `messageId`; text uses the step-line bound. Core records
+questions in `core.task_questions`, with a unique partial index on the open
+question per task. Committing its correlated `answer` command marks it answered.
+Question wake/cognition tools and the MCP dispatcher remain later tasks.
 
 ## Disposable task trace route
 

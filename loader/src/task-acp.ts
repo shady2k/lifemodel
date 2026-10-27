@@ -215,6 +215,8 @@ export interface AcpTaskHarnessOptions {
 }
 
 export class AcpTaskHarness implements TaskHarness {
+  private readonly intake: PromiseWithResolvers<void> = Promise.withResolvers();
+  readonly intakeReady = this.intake.promise;
   private started = false;
   private cancelled = false;
   private cancelRequest: (() => Promise<void>) | undefined;
@@ -661,6 +663,7 @@ export class AcpTaskHarness implements TaskHarness {
           () => {
             intakeOpen = true;
             this.steering = steering;
+            if (steering) this.intake.resolve();
           }
         );
         promptResponse = response;

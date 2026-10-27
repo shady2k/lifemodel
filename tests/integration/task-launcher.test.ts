@@ -121,6 +121,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
   let startMode: 'ok' | '409' | 'timeout' | 'lost_ack';
   let softDeadline: unknown;
   let briefingStatus: number;
+  let commandStatus: number;
   let briefingHarness: string;
   let loseTerminalAcks: number;
   let markStatus: number;
@@ -158,6 +159,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     startMode = 'ok';
     softDeadline = new Date(Date.now() + 50_000).toISOString();
     briefingStatus = 200;
+    commandStatus = 200;
     briefingHarness = 'opencode';
     loseTerminalAcks = 0;
     markStatus = 200;
@@ -253,6 +255,11 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
         ...(softDeadline === undefined ? {} : { softDueAt: softDeadline }),
         hardStopAt: new Date(Date.now() + 60_000).toISOString(),
       });
+      return;
+    }
+    if (service === 'channel' && call.method === 'GET' && call.path === '/task/commands') {
+      if (commandStatus !== 200) json(res, commandStatus, {});
+      // A real held response, closed when the harness/launcher settles.
       return;
     }
     if (service === 'channel' && call.method === 'GET' && call.path === '/task/identity') {
@@ -401,6 +408,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
             abortCalls++;
             await script.abort();
           },
+          intakeReady: script.intakeReady,
           steer: (text) => script.steer(text),
           wrap: () => script.wrap(),
         };
@@ -464,6 +472,17 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       expect(diagnostics).toContain('start_lost');
     }
   );
+
+  it('fails and reports visibly when deterministic command intake is refused', async () => {
+    commandStatus = 403;
+    expect(await run({ waitForAbort: true })).toBe(1);
+    expect(abortCalls).toBe(1);
+    expect(diagnostics).toContain('command_intake_failed');
+    expect(terminal().payload).toMatchObject({
+      outcome: 'failed',
+      reasonCode: 'command_intake_failed',
+    });
+  });
 
   it('resolves the accepted Prime Agent harness through the launcher factory', async () => {
     briefingHarness = 'prime-agent';

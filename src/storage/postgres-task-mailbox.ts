@@ -8,8 +8,17 @@ import type {
   StoredTaskChannelFrame,
   TaskChannelProof,
   TaskBriefing,
+  TaskCommandMailbox,
+  TaskCommand,
+  TaskCommandInput,
 } from '../ports/task-channel.js';
-import { TaskChannelError, validateTaskChannelFrame } from '../ports/task-channel.js';
+import {
+  TaskChannelError,
+  validateTaskChannelFrame,
+  validateTaskCommandInput,
+  validateTaskCommandAck,
+  validateTaskCommandReceipt,
+} from '../ports/task-channel.js';
 import { createFencedPostgres, StalePostgresEpochError } from './fenced-postgres.js';
 
 interface MailboxRow {
@@ -74,9 +83,12 @@ export function createPostgresTaskMailbox(deps: {
   signal?: AbortSignal;
   operationTimeoutMs?: number;
   onAppendSettled?: () => void;
-}): TaskMailbox & {
-  readTraceAuthority(proof: TaskChannelProof, signal?: AbortSignal): Promise<TaskBriefing>;
-} {
+  /** Same response-frame limit used by the task-only listener. */
+  commandFrameLimit?: number;
+}): TaskMailbox &
+  TaskCommandMailbox & {
+    readTraceAuthority(proof: TaskChannelProof, signal?: AbortSignal): Promise<TaskBriefing>;
+  } {
   const timeoutMs = deps.operationTimeoutMs ?? 5_000;
   if (
     !Number.isSafeInteger(timeoutMs) ||
@@ -87,7 +99,9 @@ export function createPostgresTaskMailbox(deps: {
   )
     throw new TaskChannelError(500, 'invalid_input');
   const closing = new AbortController();
+  const commandListeners = new Map<string, Set<() => void>>();
   const reconcile = new Map<string, symbol>();
+  const clients = new WeakSet<PoolClient>();
   const transaction = async <T>(
     body: (client: PoolClient) => Promise<T>,
     parent?: AbortSignal,
@@ -104,6 +118,7 @@ export function createPostgresTaskMailbox(deps: {
     let raw: PoolClient | undefined;
     let retired = false;
     let commitAttempted = false;
+    let committed = false;
     const destroy = () => {
       if (raw && !retired) {
         retired = true;
@@ -120,7 +135,10 @@ export function createPostgresTaskMailbox(deps: {
     const work = async (): Promise<T> => {
       try {
         raw = await deps.pool.connect();
-        raw.on('error', () => undefined);
+        if (!clients.has(raw)) {
+          raw.on('error', () => undefined);
+          clients.add(raw);
+        }
         if (signal.aborted) {
           destroy();
           throw cancelled();
@@ -152,6 +170,7 @@ export function createPostgresTaskMailbox(deps: {
         commitAttempted = true;
         await client.query('COMMIT');
         if (signal.aborted) throw cancelled();
+        committed = true;
         return result;
       } catch (error) {
         if (error instanceof TaskChannelError || error instanceof StalePostgresEpochError)
@@ -159,7 +178,10 @@ export function createPostgresTaskMailbox(deps: {
         // No raw SQL error, detail, cause, input or bearer can leave this layer.
         throw new TaskChannelError(503, 'storage_error');
       } finally {
-        destroy();
+        if (committed && raw && !retired) {
+          retired = true;
+          raw.release();
+        } else destroy();
         if (commitAttempted) settled?.();
       }
     };
@@ -286,7 +308,169 @@ export function createPostgresTaskMailbox(deps: {
     attemptId: binding.attempt_id,
     launchId: binding.launch_id,
   });
+  async function commandAuthority(client: PoolClient, binding: Binding): Promise<void> {
+    liveAttempt(binding);
+    if (binding.state === 'wrapping-up') throw new TaskChannelError(409, 'wrapping_attempt');
+    await authority(client, binding, true);
+    const terminal = await client.query(
+      "SELECT 1 FROM core.task_mailbox WHERE task_id=$1 AND attempt_id=$2 AND kind='terminal'",
+      [binding.task_id, binding.attempt_id]
+    );
+    if (terminal.rowCount) throw new TaskChannelError(409, 'terminal_attempt');
+  }
+  async function commandBinding(client: PoolClient, proof: TaskChannelProof, delivery = false) {
+    // Empty poll rechecks never take task/launch UPDATE locks. ACK/receipt writes
+    // still serialize with finalization, but may finish in authoritative wrapping.
+    const binding = await resolveBinding(client, proof, !delivery);
+    if (delivery) await commandAuthority(client, binding);
+    else await authority(client, binding);
+    await allocation(client, binding);
+    await wonClaim(client, binding, proof);
+    return binding;
+  }
+  function commandRecord(row: { content: TaskCommandInput; sequence: string }): TaskCommand {
+    return { ...row.content, direction: 'core_to_task', sequence: Number(row.sequence) };
+  }
   return {
+    subscribeCommands: (taskId, wake) => {
+      const listeners = commandListeners.get(taskId) ?? new Set<() => void>();
+      listeners.add(wake);
+      commandListeners.set(taskId, listeners);
+      return () => {
+        listeners.delete(wake);
+        if (!listeners.size) commandListeners.delete(taskId);
+      };
+    },
+    enqueueCommand: async (input, parent) => {
+      const command = validateTaskCommandInput(input);
+      const result = await transaction(async (client) => {
+        // Core callers have no Pod proof. Resolve the authoritative saved binding,
+        // then apply the same fence, row order, canonical intent and allocation.
+        await client.query('SELECT id FROM core.tasks WHERE id=$1 FOR UPDATE', [command.taskId]);
+        const found = await client.query<Binding>(
+          `SELECT l.*,t.state,t.terminal_candidate,t.started_at,t.profile,t.wrap_grace_seconds FROM core.task_launches l JOIN core.tasks t ON t.id=l.task_id WHERE l.task_id=$1 FOR UPDATE OF l`,
+          [command.taskId]
+        );
+        const binding = found.rows[0];
+        if (binding?.attempt_id !== command.attemptId) denied();
+        const existing = await client.query<{
+          content: TaskCommandInput;
+          sequence: string;
+          matches: boolean;
+        }>(
+          'SELECT *,content=$3::jsonb AS matches FROM core.task_commands WHERE task_id=$1 AND command_id=$2',
+          [command.taskId, command.commandId, JSON.stringify(command)]
+        );
+        const old = existing.rows[0];
+        if (old) {
+          if (!old.matches) throw new TaskChannelError(409, 'message_conflict');
+          return commandRecord(old);
+        }
+        await commandAuthority(client, binding);
+        await allocation(client, binding);
+        // Include the envelope, direction, and maximum sequence before commit.
+        const wire = {
+          command: { ...command, direction: 'core_to_task', sequence: Number.MAX_SAFE_INTEGER },
+        };
+        if (Buffer.byteLength(JSON.stringify(wire)) > (deps.commandFrameLimit ?? 65_536))
+          throw new TaskChannelError(413, 'invalid_frame');
+        const count = await client.query<{ count: string }>(
+          'SELECT count(*) FROM core.task_commands WHERE task_id=$1',
+          [command.taskId]
+        );
+        if (Number(count.rows[0]?.count) >= 1024)
+          throw new TaskChannelError(429, 'command_capacity');
+        const inserted = await client.query<{ content: TaskCommandInput; sequence: string }>(
+          `INSERT INTO core.task_commands(task_id,attempt_id,command_id,sequence,content) SELECT $1,$2,$3,COALESCE(max(sequence),0)+1,$4::jsonb FROM core.task_commands WHERE task_id=$1 RETURNING *`,
+          [command.taskId, command.attemptId, command.commandId, JSON.stringify(command)]
+        );
+        if (command.kind === 'answer') {
+          const answered = await client.query(
+            'UPDATE core.task_questions SET answer_command_id=$3 WHERE task_id=$1 AND question_id=$2 AND answer_command_id IS NULL RETURNING question_id',
+            [command.taskId, command.questionId, command.commandId]
+          );
+          if (!answered.rowCount) throw new TaskChannelError(409, 'question_absent');
+        }
+        await commandAuthority(client, binding);
+        const row = inserted.rows[0];
+        if (!row) throw new TaskChannelError(503, 'storage_error');
+        return commandRecord(row);
+      }, parent);
+      // Only committed commands can wake a waiter. A lost COMMIT reply is covered
+      // by the poll's bounded recheck, never by trusting this notification.
+      for (const wake of commandListeners.get(command.taskId) ?? []) wake();
+      return result;
+    },
+    pollCommand: (proof, parent) =>
+      transaction(async (client) => {
+        const binding = await commandBinding(client, proof, true);
+        const result = await client.query<{ content: TaskCommandInput; sequence: string }>(
+          'SELECT * FROM core.task_commands WHERE task_id=$1 AND attempt_id=$2 AND retired_at IS NULL ORDER BY sequence LIMIT 1',
+          [binding.task_id, binding.attempt_id]
+        );
+        return result.rows[0] ? commandRecord(result.rows[0]) : null;
+      }, parent),
+    acknowledgeCommand: async (input, proof, parent) => {
+      const ack = validateTaskCommandAck(input);
+      await transaction(async (client) => {
+        const binding = await commandBinding(client, proof);
+        if (binding.task_id !== ack.taskId || binding.attempt_id !== ack.attemptId) denied();
+        const found = await client.query(
+          'SELECT 1 FROM core.task_commands WHERE task_id=$1 AND attempt_id=$2 AND command_id=$3',
+          [ack.taskId, ack.attemptId, ack.commandId]
+        );
+        if (!found.rowCount) throw new TaskChannelError(404, 'not_found');
+        const previous = await client.query<{ disposition: string }>(
+          'SELECT disposition FROM core.task_command_acks WHERE task_id=$1 AND command_id=$2',
+          [ack.taskId, ack.commandId]
+        );
+        if (previous.rows[0] && previous.rows[0].disposition !== ack.disposition)
+          throw new TaskChannelError(409, 'message_conflict');
+        await client.query(
+          'INSERT INTO core.task_command_acks(task_id,command_id,disposition) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',
+          [ack.taskId, ack.commandId, ack.disposition]
+        );
+        await client.query(
+          'UPDATE core.task_commands SET retired_at=clock_timestamp() WHERE task_id=$1 AND command_id=$2 AND retired_at IS NULL',
+          [ack.taskId, ack.commandId]
+        );
+        await authority(client, binding);
+      }, parent);
+    },
+    recordCommandReceipt: async (input, proof, parent) => {
+      const receipt = validateTaskCommandReceipt(input);
+      await transaction(async (client) => {
+        const binding = await commandBinding(client, proof);
+        if (binding.task_id !== receipt.taskId || binding.attempt_id !== receipt.attemptId)
+          denied();
+        const found = await client.query(
+          'SELECT 1 FROM core.task_commands WHERE task_id=$1 AND attempt_id=$2 AND command_id=$3',
+          [receipt.taskId, receipt.attemptId, receipt.commandId]
+        );
+        if (!found.rowCount) throw new TaskChannelError(404, 'not_found');
+        const old = await client.query<{ command_id: string; disposition: string }>(
+          'SELECT * FROM core.task_command_receipts WHERE task_id=$1 AND receipt_id=$2',
+          [receipt.taskId, receipt.receiptId]
+        );
+        if (
+          old.rows[0] &&
+          (old.rows[0].command_id !== receipt.commandId ||
+            old.rows[0].disposition !== receipt.disposition)
+        )
+          throw new TaskChannelError(409, 'message_conflict');
+        const count = await client.query<{ count: string }>(
+          'SELECT count(*) FROM core.task_command_receipts WHERE task_id=$1 AND command_id=$2',
+          [receipt.taskId, receipt.commandId]
+        );
+        if (!old.rowCount && Number(count.rows[0]?.count) >= 16)
+          throw new TaskChannelError(429, 'command_capacity');
+        await client.query(
+          'INSERT INTO core.task_command_receipts(task_id,command_id,receipt_id,disposition) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',
+          [receipt.taskId, receipt.commandId, receipt.receiptId, receipt.disposition]
+        );
+        await authority(client, binding);
+      }, parent);
+    },
     readIdentity: async (proof, parent) =>
       transaction(async (client) => {
         const binding = await resolveBinding(client, proof);
@@ -352,6 +536,8 @@ export function createPostgresTaskMailbox(deps: {
       }, parent),
     stop: () => {
       closing.abort();
+      for (const listeners of commandListeners.values()) for (const wake of listeners) wake();
+      commandListeners.clear();
     },
     append: async (input, proof, parent) => {
       const frame = validateTaskChannelFrame(input);
@@ -401,6 +587,17 @@ export function createPostgresTaskMailbox(deps: {
             [frame.taskId, frame.direction, frame.attemptId, frame.sequence]
           );
           if (sequence.rowCount) throw new TaskChannelError(409, 'sequence_conflict');
+          if (frame.kind === 'question') {
+            const open = await client.query(
+              'SELECT 1 FROM core.task_questions WHERE task_id=$1 AND answer_command_id IS NULL',
+              [frame.taskId]
+            );
+            if (open.rowCount) throw new TaskChannelError(409, 'question_open');
+            await client.query(
+              'INSERT INTO core.task_questions(task_id,question_id) VALUES($1,$2)',
+              [frame.taskId, frame.payload.questionId]
+            );
+          }
           const inserted = await client.query<MailboxRow>(
             `INSERT INTO core.task_mailbox(task_id,attempt_id,direction,sequence,message_id,kind,payload) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb) RETURNING *`,
             [

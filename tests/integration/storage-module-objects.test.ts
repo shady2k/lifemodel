@@ -583,6 +583,7 @@ describe('task immutable object API', () => {
                 return scripted.start(briefing);
               },
               abort: () => scripted.abort(),
+              intakeReady: scripted.intakeReady,
               steer: (text) => scripted.steer(text),
               wrap: () => scripted.wrap(),
             };

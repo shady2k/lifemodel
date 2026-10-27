@@ -51,6 +51,10 @@ interface FrameIdentity {
 export type TaskChannelFrame = FrameIdentity &
   (
     | { readonly kind: 'step'; readonly payload: { readonly line: string } }
+    | {
+        readonly kind: 'question';
+        readonly payload: { readonly questionId: string; readonly text: string };
+      }
     | { readonly kind: 'terminal'; readonly payload: TaskTerminalReport }
   );
 export interface TaskChannelAck extends FrameIdentity {
@@ -76,6 +80,10 @@ export type TaskChannelErrorCode =
   | 'terminal_attempt'
   | 'message_conflict'
   | 'sequence_conflict'
+  | 'question_open'
+  | 'question_absent'
+  | 'wrapping_attempt'
+  | 'command_capacity'
   | 'storage_error'
   | 'cancelled'
   | 'stopped'
@@ -179,6 +187,13 @@ export function validateTaskChannelFrame(value: unknown): TaskChannelFrame {
   const payload = value['payload'];
   if (value['kind'] === 'step') {
     if (!keys(payload, ['line']) || !line(payload['line'])) return invalid();
+  } else if (value['kind'] === 'question') {
+    if (
+      !keys(payload, ['questionId', 'text']) ||
+      payload['questionId'] !== value['messageId'] ||
+      !line(payload['text'])
+    )
+      return invalid();
   } else if (value['kind'] === 'terminal') {
     const failed = payload['outcome'] === 'failed';
     if (
@@ -274,4 +289,98 @@ export function validateTaskTraceFrame(value: unknown): TaskTraceFrame {
   } catch {
     return invalid();
   }
+}
+
+/** Core-to-task commands are immutable; the core assigns their per-task order. */
+export interface TaskCommandInput {
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly commandId: string;
+  readonly kind: 'steer' | 'answer';
+  readonly text: string;
+  readonly questionId?: string;
+}
+export interface TaskCommand extends TaskCommandInput {
+  readonly direction: 'core_to_task';
+  readonly sequence: number;
+}
+export interface TaskCommandAck {
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly commandId: string;
+  readonly disposition: 'accepted' | 'rejected' | 'uncertain';
+}
+export interface TaskCommandReceipt {
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly commandId: string;
+  readonly receiptId: string;
+  readonly disposition: 'inserted' | 'deferred-to-next-turn' | 'failed' | 'uncertain';
+}
+export interface TaskCommandMailbox {
+  enqueueCommand(command: TaskCommandInput, signal?: AbortSignal): Promise<TaskCommand>;
+  /** Immediate authorized recheck, never a held database transaction. */
+  pollCommand(proof: TaskChannelProof, signal?: AbortSignal): Promise<TaskCommand | null>;
+  acknowledgeCommand(
+    ack: TaskCommandAck,
+    proof: TaskChannelProof,
+    signal?: AbortSignal
+  ): Promise<void>;
+  recordCommandReceipt(
+    receipt: TaskCommandReceipt,
+    proof: TaskChannelProof,
+    signal?: AbortSignal
+  ): Promise<void>;
+  subscribeCommands(taskId: string, wake: () => void): () => void;
+}
+export function validateTaskCommandInput(value: unknown): TaskCommandInput {
+  if (
+    !object(value) ||
+    !keys(value, [
+      'taskId',
+      'attemptId',
+      'commandId',
+      'kind',
+      'text',
+      ...(value['questionId'] === undefined ? [] : ['questionId']),
+    ]) ||
+    !id(value['taskId']) ||
+    !id(value['attemptId']) ||
+    !id(value['commandId']) ||
+    !['steer', 'answer'].includes(value['kind'] as string) ||
+    typeof value['text'] !== 'string' ||
+    !value['text'].trim() ||
+    value['text'].includes('\0') ||
+    Buffer.byteLength(JSON.stringify(value)) > 60000 ||
+    (value['kind'] === 'answer' ? !id(value['questionId']) : value['questionId'] !== undefined)
+  )
+    throw new TaskChannelError(400, 'invalid_frame');
+  return JSON.parse(JSON.stringify(value)) as TaskCommandInput;
+}
+export function validateTaskCommandAck(value: unknown): TaskCommandAck {
+  if (
+    !object(value) ||
+    !keys(value, ['taskId', 'attemptId', 'commandId', 'disposition']) ||
+    !id(value['taskId']) ||
+    !id(value['attemptId']) ||
+    !id(value['commandId']) ||
+    !['accepted', 'rejected', 'uncertain'].includes(value['disposition'] as string)
+  )
+    throw new TaskChannelError(400, 'invalid_frame');
+  return JSON.parse(JSON.stringify(value)) as TaskCommandAck;
+}
+export function validateTaskCommandReceipt(value: unknown): TaskCommandReceipt {
+  if (
+    !object(value) ||
+    !keys(value, ['taskId', 'attemptId', 'commandId', 'receiptId', 'disposition']) ||
+    !id(value['taskId']) ||
+    !id(value['attemptId']) ||
+    !id(value['commandId']) ||
+    !id(value['receiptId']) ||
+    !['inserted', 'deferred-to-next-turn', 'failed', 'uncertain'].includes(
+      value['disposition'] as string
+    )
+  )
+    throw new TaskChannelError(400, 'invalid_frame');
+  return JSON.parse(JSON.stringify(value)) as TaskCommandReceipt;
 }
