@@ -88,6 +88,10 @@ export interface ToolParameter {
  * Context provided to tools during execution.
  */
 export interface ToolContext {
+  /** Trusted ordinal of this tool in the deciding turn; replay preserves the slot. */
+  effectCallIndex?: number;
+  /** Task question that caused this turn, never caller-supplied arguments. */
+  taskQuestion?: { taskId: string; questionId: string };
   /** Opaque recipient identifier */
   recipientId: string;
 

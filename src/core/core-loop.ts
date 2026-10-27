@@ -68,7 +68,8 @@ import { getPrimaryRecipientId, setPrimaryRecipientId } from './globals.js';
 import { StatusUpdateService } from './status-update-service.js';
 import { DomainTrackerService } from './domain-trackers.js';
 import { IntentApplicator, type SendOutcome } from './intent-applicator.js';
-import type { TaskService, TaskRecord } from '../ports/tasks.js';
+import type { TaskAcceptanceService, TaskRecord } from '../ports/tasks.js';
+import type { TaskQuestion } from '../ports/task-channel.js';
 import type { StartTaskIntent } from '../types/intent.js';
 import type { Storage } from '../storage/storage.js';
 import type { PluginLoader } from './plugin-loader.js';
@@ -1655,11 +1656,17 @@ export class CoreLoop {
         'motor_result',
         'task_outcome',
       ];
-      const hasDeferrableSignals = allSignals.some((s) => deferrableTypes.includes(s.type));
+      const needsQuestionTurn = (s: Signal) =>
+        s.type === 'task_report' &&
+        s.data?.kind === 'task_report' &&
+        s.data.eventKind === 'question' &&
+        !!s.data.question;
+      const isDeferrable = (s: Signal) => deferrableTypes.includes(s.type) || needsQuestionTurn(s);
+      const hasDeferrableSignals = allSignals.some(isDeferrable);
       const cognitionAvailable = !this.pendingCognition && activeLayers.cognition;
       if (!cognitionAvailable && hasDeferrableSignals) {
-        const toDefer = allSignals.filter((s) => deferrableTypes.includes(s.type));
-        const otherSignals = allSignals.filter((s) => !deferrableTypes.includes(s.type));
+        const toDefer = allSignals.filter(isDeferrable);
+        const otherSignals = allSignals.filter((s) => !isDeferrable(s));
 
         const deferReason = this.pendingCognition
           ? 'COGNITION busy'
@@ -1718,7 +1725,11 @@ export class CoreLoop {
       }
       const selected = new Set(aggregationResult?.triggerSignals.map((signal) => signal.id) ?? []);
       for (const signal of allSignals) {
-        if (signal.type !== 'task_outcome' || selected.has(signal.id)) continue;
+        if (
+          (signal.type !== 'task_outcome' && !needsQuestionTurn(signal)) ||
+          selected.has(signal.id)
+        )
+          continue;
         const streamId = this.signalStreamIds.get(signal.id);
         this.pendingSignals.push({
           signal,
@@ -2145,7 +2156,7 @@ export class CoreLoop {
    * Normalize a single signal (side effects + enrichment).
    * This should be called inside a per-signal trace context.
    */
-  setTaskService(service: TaskService): void {
+  setTaskService(service: TaskAcceptanceService): void {
     this.intentApplicator.setTaskService(service);
   }
 
@@ -2160,6 +2171,16 @@ export class CoreLoop {
     this.taskReportConsumer = consumer;
   }
 
+  private taskQuestionReader:
+    | ((taskId: string, questionId: string) => Promise<TaskQuestion | null>)
+    | undefined;
+
+  setTaskQuestionReader(
+    reader: (taskId: string, questionId: string) => Promise<TaskQuestion | null>
+  ): void {
+    this.taskQuestionReader = reader;
+  }
+
   private async normalizeSignal(signal: Signal): Promise<Signal> {
     let normalized = signal;
     if (
@@ -2168,6 +2189,29 @@ export class CoreLoop {
       signal.data.eventKind === 'terminal'
     ) {
       await this.taskReportConsumer?.(signal);
+    }
+
+    if (
+      signal.type === 'task_report' &&
+      signal.data?.kind === 'task_report' &&
+      signal.data.eventKind === 'question'
+    ) {
+      const question = await this.taskQuestionReader?.(signal.data.taskId, signal.data.messageId);
+      const streamId = this.signalStreamIds.get(signal.id);
+      const owner = streamId ? this.busSignalStream?.stateFor(streamId) : undefined;
+      const replaying =
+        owner && streamId && owner.status !== 'completed' && owner.turnId !== `pending:${streamId}`;
+      const { question: _oldQuestion, ...data } = signal.data;
+      normalized = {
+        ...signal,
+        data: {
+          ...data,
+          ...(question?.questionId === signal.data.messageId &&
+          (!question.answerCommandId || replaying)
+            ? { question }
+            : {}),
+        },
+      };
     }
 
     // Special handling for user messages
@@ -2524,7 +2568,10 @@ export class CoreLoop {
         const data = first?.data as { recipientId?: unknown } | undefined;
         return typeof data?.recipientId === 'string'
           ? data.recipientId
-          : first?.type === 'task_outcome'
+          : first?.type === 'task_outcome' ||
+              (first?.type === 'task_report' &&
+                first.data?.kind === 'task_report' &&
+                first.data.eventKind === 'question')
             ? getPrimaryRecipientId()
             : undefined;
       })(),

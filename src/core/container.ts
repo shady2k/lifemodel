@@ -104,6 +104,8 @@ import { fileURLToPath } from 'node:url';
 import { createActTool } from '../layers/cognition/tools/core/act.js';
 import { createTaskTool } from '../layers/cognition/tools/core/task.js';
 import { createStartTaskTool } from '../layers/cognition/tools/core/start-task.js';
+import { createSteerTaskTool } from '../layers/cognition/tools/core/steer-task.js';
+import { createTaskService } from './task-service.js';
 import { createCredentialTool } from '../layers/cognition/tools/core/credential.js';
 import { createSkillTool } from '../layers/cognition/tools/core/skill.js';
 import { fetchPage } from '../plugins/web-fetch/fetcher.js';
@@ -1271,7 +1273,7 @@ export async function createContainerAsync(
       settings: createPlatformSettingsReader({ logger }),
       signal: taskLaunchController.signal,
     });
-    taskService = createWorkbenchTaskService({
+    const acceptanceService = createWorkbenchTaskService({
       service: registry,
       imageRevision,
       ready: createTaskWorkbenchReadiness(),
@@ -1279,7 +1281,13 @@ export async function createContainerAsync(
         void taskLaunch?.resync();
       },
     });
+    const taskMailbox = createPostgresTaskMailbox({ pool: rawPostgres, epoch: snapshotEpoch });
+    taskService = createTaskService({ tasks: acceptanceService, mailbox: taskMailbox });
     coreLoop.setTaskService(taskService);
+    coreLoop.setTaskQuestionReader((taskId, questionId) =>
+      taskMailbox.readQuestion(taskId, questionId)
+    );
+    layers.cognition.getToolRegistry().registerTool(createSteerTaskTool(taskService));
     layers.cognition.getToolRegistry().registerTool(
       createStartTaskTool({
         readByLaunchKey: (launchKey) => registry.readByLaunchKey(launchKey),

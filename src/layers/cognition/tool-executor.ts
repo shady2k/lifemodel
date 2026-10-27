@@ -256,11 +256,16 @@ export async function executeToolCalls(
     let args: Record<string, unknown>;
 
     const tool = toolRegistry.getTools().find((t) => t.name === toolName);
+    const toolContext = buildCtx(context);
+    if (toolName === 'core.steerTask') {
+      toolContext.effectCallIndex = state.toolCallCounts.get(toolName) ?? 0;
+      state.toolCallCounts.set(toolName, toolContext.effectCallIndex + 1);
+    }
     // Recover committed effects by trusted recipient/turn/slot, before either
     // regenerated-argument gate. Outcome turns have no read/write capabilities.
     const recovered =
       context.triggerSignal.type !== 'task_outcome'
-        ? await tool?.recoverAcceptedEffect?.(buildCtx(context))
+        ? await tool?.recoverAcceptedEffect?.(toolContext)
         : undefined;
     const recoveredResult =
       recovered === undefined
@@ -334,7 +339,8 @@ export async function executeToolCalls(
     }
 
     // ── Per-tool call limit (maxCallsPerTurn) ──
-    const currentCallCount = (state.toolCallCounts.get(toolName) ?? 0) + 1;
+    const currentCallCount =
+      (state.toolCallCounts.get(toolName) ?? 0) + (toolName === 'core.steerTask' ? 0 : 1);
     state.toolCallCounts.set(toolName, currentCallCount);
     const maxCalls = toolRegistry.getMaxCallsPerTurn(toolName);
     if (maxCalls !== undefined && currentCallCount > maxCalls) {
@@ -492,7 +498,7 @@ export async function executeToolCalls(
         toolCallId: toolCall.id,
         name: toolName,
         args,
-        context: buildCtx(context),
+        context: toolContext,
       });
 
       const resultData = thoughtResult.data as Record<string, unknown> | undefined;
@@ -537,7 +543,7 @@ export async function executeToolCalls(
         toolCallId: toolCall.id,
         name: toolName,
         args,
-        context: buildCtx(context),
+        context: toolContext,
       }));
 
     state.toolResults.push(result);

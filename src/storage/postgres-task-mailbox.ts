@@ -11,6 +11,9 @@ import type {
   TaskCommandMailbox,
   TaskCommand,
   TaskCommandInput,
+  TaskCommandReader,
+  TaskCommandStatus,
+  TaskQuestion,
 } from '../ports/task-channel.js';
 import {
   TaskChannelError,
@@ -86,7 +89,8 @@ export function createPostgresTaskMailbox(deps: {
   /** Same response-frame limit used by the task-only listener. */
   commandFrameLimit?: number;
 }): TaskMailbox &
-  TaskCommandMailbox & {
+  TaskCommandMailbox &
+  TaskCommandReader & {
     readTraceAuthority(proof: TaskChannelProof, signal?: AbortSignal): Promise<TaskBriefing>;
   } {
   const timeoutMs = deps.operationTimeoutMs ?? 5_000;
@@ -331,7 +335,50 @@ export function createPostgresTaskMailbox(deps: {
   function commandRecord(row: { content: TaskCommandInput; sequence: string }): TaskCommand {
     return { ...row.content, direction: 'core_to_task', sequence: Number(row.sequence) };
   }
+  async function readCommands(taskId?: string, commandId?: string): Promise<TaskCommandStatus[]> {
+    if (taskId !== undefined && !inputId(taskId)) throw new TaskChannelError(400, 'invalid_input');
+    if (commandId !== undefined && !inputId(commandId))
+      throw new TaskChannelError(400, 'invalid_input');
+    return transaction(async (client) => {
+      const rows = await client.query<{
+        content: TaskCommandInput;
+        sequence: string;
+        disposition: TaskCommandStatus['disposition'];
+        receipts: TaskCommandStatus['receipts'];
+      }>(
+        `SELECT c.content,c.sequence,COALESCE(a.disposition,'queued') AS disposition,
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('taskId',r.task_id,'attemptId',c.attempt_id,
+          'commandId',r.command_id,'receiptId',r.receipt_id,'disposition',r.disposition) ORDER BY r.receipt_id)
+          FROM core.task_command_receipts r WHERE r.task_id=c.task_id AND r.command_id=c.command_id),'[]'::jsonb) AS receipts
+        FROM core.task_commands c LEFT JOIN core.task_command_acks a USING(task_id,command_id)
+        WHERE ($1::text IS NULL OR c.task_id=$1) AND ($2::text IS NULL OR c.command_id=$2)
+        ORDER BY c.sequence LIMIT 1024`,
+        [taskId ?? null, commandId ?? null]
+      );
+      return rows.rows.map((row) => ({
+        ...commandRecord(row),
+        disposition: row.disposition,
+        receipts: row.receipts,
+        retryable: row.disposition === 'rejected',
+      }));
+    });
+  }
   return {
+    readCommands: (taskId) => readCommands(taskId),
+    readCommand: async (commandId) => (await readCommands(undefined, commandId))[0] ?? null,
+    readQuestion: (taskId, questionId) => {
+      if (!inputId(taskId)) throw new TaskChannelError(400, 'invalid_input');
+      return transaction(async (client) => {
+        const result = await client.query<TaskQuestion>(
+          `SELECT q.task_id AS "taskId",m.attempt_id AS "attemptId",
+          q.question_id AS "questionId",q.answer_command_id AS "answerCommandId",m.payload->>'text' AS text FROM core.task_questions q
+          JOIN core.task_mailbox m ON m.task_id=q.task_id AND m.message_id=q.question_id AND m.kind='question'
+          WHERE q.task_id=$1 AND (($2::text IS NULL AND q.answer_command_id IS NULL) OR q.question_id=$2)`,
+          [taskId, questionId ?? null]
+        );
+        return result.rows[0] ?? null;
+      });
+    },
     subscribeCommands: (taskId, wake) => {
       const listeners = commandListeners.get(taskId) ?? new Set<() => void>();
       listeners.add(wake);

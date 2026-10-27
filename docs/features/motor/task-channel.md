@@ -187,6 +187,45 @@ deadline updates and wrap belong to 653.10. The Job deadline is the hard bound.
 MCP over stdio, including Prime offline, remains unverified. ACKs and receipts
 are task claims, not core evidence of execution or obedience.
 
+### Cognition command tool (lifemodel-653.9.8)
+
+The platform registers `core.steerTask` beside `core.startTask`, outside the
+legacy Motor Cortex registration. Legacy `core.task` is unchanged. The tool
+accepts `action: read | steer | answer` and `taskId`; commands require `text`,
+and answers also require `questionId`. TaskService composes the acceptance
+registry with the fenced mailbox. Its read view includes the open question,
+command ACK disposition (`queued | accepted | rejected | uncertain`), receipts
+and an explicit `retryable` flag. Rejected intake is retryable in a **new**
+deciding turn; replay returns the original committed command, not a new send.
+Uncertainty and failed receipts remain visible and are not automatic retries.
+
+Command IDs hash the trusted recipient, persisted deciding-turn ID and the
+`core.steerTask` call ordinal. `recoverAcceptedEffect` reads the committed
+command before regenerated argument validation, so a crash after command commit
+cannot replace the text or create another command. The queued tool receipt is
+returned after Postgres commit even if no launcher is polling. It promises
+neither native admission nor obedience. An end-turn/successor barrier rejection
+is ACKed and retired, then shown as `rejected, retryable: true` by read.
+
+Question `task_report` signals use the existing durable bus admission receipt.
+Core reads the question from Postgres during normalization; aggregation selects
+one question for one cognition turn. Busy cognition and an owner-input batch
+retain the unselected question on the durable bus. Step and terminal reports do
+not wake cognition. The trigger escapes and quotes question text as untrusted
+content. Trusted tool context restricts question-turn commands to that task;
+ordinary agent turns need no owner-message trigger. Correlated answer commit
+closes the question, not a launcher ACK. On an uncommitted question-turn replay,
+the historical question remains available to recover the already committed
+answer under the same command ID. A completed question does not wake again.
+No polling or plugin-type import is added to the cognition path. D7 is unchanged.
+
+Source checks: `tests/integration/task-mailbox.test.ts` exercises the real
+Postgres/Valkey, aggregation and cognition path, crash/replay and a closed ACP
+barrier; `tests/unit/task-steering-lifecycle.test.ts` holds the brief's write
+callback to prove `intakeReady` cannot resolve early. These are source evidence,
+not a deployed-harness or owner-interface acceptance claim. Task-side MCP
+question/step tools remain in lifemodel-653.9.9.
+
 ### Command routes and durable storage
 
 `GET /task/commands` returns `{command: null}` after at most 25 seconds or one

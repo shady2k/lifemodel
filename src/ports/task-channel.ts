@@ -317,6 +317,24 @@ export interface TaskCommandReceipt {
   readonly receiptId: string;
   readonly disposition: 'inserted' | 'deferred-to-next-turn' | 'failed' | 'uncertain';
 }
+export interface TaskQuestion {
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly questionId: string;
+  readonly text: string;
+  readonly answerCommandId: string | null;
+}
+export interface TaskCommandStatus extends TaskCommand {
+  readonly disposition: TaskCommandAck['disposition'] | 'queued';
+  readonly receipts: readonly TaskCommandReceipt[];
+  /** Rejected intake is safe to retry in a NEW deciding turn, never by replay. */
+  readonly retryable: boolean;
+}
+export interface TaskCommandReader {
+  readCommand(commandId: string): Promise<TaskCommandStatus | null>;
+  readCommands(taskId: string): Promise<readonly TaskCommandStatus[]>;
+  readQuestion(taskId: string, questionId?: string): Promise<TaskQuestion | null>;
+}
 export interface TaskCommandMailbox {
   enqueueCommand(command: TaskCommandInput, signal?: AbortSignal): Promise<TaskCommand>;
   /** Immediate authorized recheck, never a held database transaction. */

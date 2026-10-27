@@ -123,6 +123,12 @@ describe('platform task container wiring', { timeout: 30_000 }, () => {
 
   it('replays the original request and selected image across a deployment change, but rejects changed payloads', async () => {
     active = await createContainerAsync({ logLevel: 'error', logToFile: false });
+    expect(
+      active.layers.cognition
+        .getToolRegistry()
+        .getTools()
+        .map((t) => t.name)
+    ).toContain('core.steerTask');
     const accepted = await active.taskService!.accept(input);
     await active.shutdown();
     active = undefined;

@@ -1,4 +1,4 @@
-import { TaskRegistryError, type TaskService } from '../ports/tasks.js';
+import { TaskRegistryError, type TaskAcceptanceService } from '../ports/tasks.js';
 
 const WORKBENCH_MANIFESTS =
   'http://zot.lifemodel-system.svc:5001/v2/lifemodel/workbench/manifests/';
@@ -49,11 +49,11 @@ export function createTaskWorkbenchReadiness(
  * TaskRegistryError reuses the start tool's existing honest refusal path.
  */
 export function createWorkbenchTaskService(options: {
-  service: TaskService;
+  service: TaskAcceptanceService;
   imageRevision: string;
   ready: (imageRevision: string) => Promise<boolean>;
   onAccepted: () => void;
-}): TaskService {
+}): TaskAcceptanceService {
   return {
     accept: async (request) => {
       // Recover an accepted effect even when a rollout's new image is not ready.

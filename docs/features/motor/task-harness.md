@@ -253,6 +253,13 @@ status only, never command text or credentials. A final bounded receipt attempt
 drains before terminal reporting. Real-store integration checks cover journal recovery after lost ACKs, answer
 prefixes, receipt forwarding and draining an in-flight disposition ACK before
 terminal reporting. This is source verification, not deployed stage acceptance.
+A steer delivered while end-turn intake is closed is explicitly rejected,
+ACKed and retired, never silently discarded. The core read/status view shows
+that rejection as retryable in a new deciding turn. The regression check drives
+a real ACP barrier plus command intake and the Postgres mailbox. A separate
+ordering regression holds the prompt write callback: `intakeReady` remains
+pending until the brief write finishes, even after the agent receives its bytes.
+
 The ten-second ACK POST deadline exceeds the five-second adapter admission
 bound; it is not a delivery-to-ACK timer in core. Core redelivers on the next
 poll until the ACK commits. Receipts and ACKs are
