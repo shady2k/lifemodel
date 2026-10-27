@@ -43,12 +43,14 @@ SQL/identity workers. Neither caches positive authority.
 ## Pod-local harness port
 
 `loader/src/task-harness.ts` declares `TaskHarness.start(briefing)`, `abort()`,
-`steer(text)` and `wrap()` today. `AcpTaskHarness` currently returns
-`not_supported` for both. Stage 4 changes steer to `steer({commandId,text})`;
-soft-stop control remains lifemodel-653.10 work. The following stage-4 contract
-is planned, not a claim of current implementation.
-Normalized events are short `step`, `tool`, safe-code `error` and best-effort
-`trace` events. Trace callbacks cannot gate the harness protocol or outcome. One
+`steer({commandId,text})` and `wrap()`. Steering returns `accepted`, `rejected`
+or `uncertain` after bounded native admission and journal recording, without
+waiting for a model or tool. `wrap()` remains `not_supported`; soft-stop control
+belongs to lifemodel-653.10. Steering before session binding or after shutdown
+is rejected. The command ID is bounded to 256 UTF-8 bytes, text to 60000 bytes;
+blank IDs/text are rejected. Accepted means native live-queue admission only.
+Normalized events are short `step`, `tool`, safe-code `error`, correlated
+`receipt` (`inserted | failed | uncertain`) and best-effort `trace` events. Trace callbacks cannot gate the harness protocol or outcome. One
 start returns one semantic result: `succeeded`, `failed` or `aborted`, with
 result text and a safe failure reason. A required-tool failure also carries
 `failureSpanId`, identifying the failed tool observation rather than whichever
@@ -118,7 +120,39 @@ its adopted detached tool descendants before adapter completion, including after
 agent failure. Failure to establish or finish that cleanup fails closed.
 
 
-### Stage 4 steering, barrier and MCP contract
+### Native admission and private journal
+
+The registry adapter exports `admit`, optional pre-brief `bind`, and
+`observeInsertion`. Generic ACP and factory code do not import native APIs.
+OpenCode's baked dependency-free plugin listens on `/work/tmp/steer.sock`, mode
+0600. It calls `ctx.session.prompt` with the ACP/native session ID, a stable
+SHA-256 message ID derived from `commandId`, `delivery: "steer"` and always
+`resume: false`. An accepted socket reply must carry that same ID. Native
+`session.inbox.delivered` evidence supports an inserted receipt; queue admission
+alone does not. The observer stops with the harness.
+
+Prime binds before the brief using `list` with `includeClientOwned:true` on the
+private daemon socket. Exactly one top-level root at the task working directory
+must exist. Its native `activeSessionId`, not the ACP session ID, routes native
+`steer`. A command-hash marker prefixes the plain text for positive native
+user-row correlation. This marker is not an upstream deduplication key. The
+observer reads bounded transcript pages; an absent row or empty queue is never
+reported as insertion. A broken socket is uncertain and fails the harness with
+`steer_uncertain`. Native sends are never retried.
+
+`task-steering-journal.ts` reserves 1024 fixed slots before opening intake. Each
+slot stores hashes of command identity and text plus a synced pre-send state,
+then a synced final admission disposition before the ACK returns. No prompt
+text is stored in this journal. Same-ID, same-text in-flight duplicates join
+one native call; later replays return the stored disposition. Changed text is
+rejected. Capacity overflow rejects before send. Intent or disposition I/O
+failure yields uncertainty and fails the task. Existing corrupt/missing state
+cannot be silently recreated. Recovering a pre-send state returns uncertainty,
+never a resend, especially on Prime. This is launcher-private ephemeral state,
+not the core's durable mailbox and not recovery after Pod loss.
+
+### Stage 4 barrier and MCP contract (not implemented here)
+
 
 [ADR-014’s 2026-10-27 amendment](../../adr/014-task-runtime.md#amendment--2026-10-27-live-steering-behind-the-harness-port)
 defines the binding contract. The registry adapter exports `admit` and `reconcileEndTurn` behind

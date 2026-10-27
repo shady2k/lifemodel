@@ -4,6 +4,19 @@ Task: lifemodel-653.8.3. `docker/workbench/Dockerfile` builds the OpenCode workb
 [ADR-014 D1/T02](../../adr/014-task-runtime.md). It is **not** the core image.
 `src/ports/task-harness-registry.json` configures OpenCode and prime-agent 0.10.1 in this same image. OpenCode remains the default. No second task image is selected.
 
+## Steering bridge
+
+The registry also provisions `docker/workbench/steering-plugin/` at
+`/etc/lifemodel/steering-plugin`. The dedicated Docker context allowlist admits
+its two source files. It has no package dependency and needs no startup install.
+OpenCode loads it from the rendered private configuration, then the launcher
+admits input over `/work/tmp/steer.sock`. Prime uses the existing ACP daemon's
+private `/work/tmp/daemon.sock`, with exactly one root bound before the brief.
+Neither channel adds Pod ingress or a second agent engine. See
+[task harness admission](task-harness.md#native-admission-and-private-journal)
+for journal, receipts and uncertainty. The end-of-turn barrier is separate
+lifemodel-653.9.6 work; this bridge alone does not settle the final-answer race.
+
 ## Contents and pins
 
 `docker/workbench/Dockerfile` consumes architecture pins and extraction/config

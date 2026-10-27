@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:https';
 import { mkdtemp, writeFile, chmod, mkdir, readFile, rm, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -31,13 +31,22 @@ type Scenario =
   | 'descendant'
   | 'abort'
   | 'permission'
-  | 'background';
+  | 'background'
+  | 'steer-long'
+  | 'steer-parallel'
+  | 'steer-failure';
 const fixtureRegistry = JSON.parse(
   await readFile('tests/fixtures/task-agent-registry.json', 'utf8')
 );
 Object.assign(taskHarnessRegistry, fixtureRegistry);
 type ContractFixture = {
   usesModelEndpoint: boolean;
+  nativeReplay?: (input: {
+    workDirectory: string;
+    sessionId: string;
+    commandId: string;
+    text: string;
+  }) => Promise<string>;
   shellTool?: (command: string) => { name: string; arguments: string };
   failedToolExemption?: string;
   prepare?: (work: string, mode: string) => Promise<void>;
@@ -72,6 +81,11 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
   let events: TaskHarnessEvent[];
   let work: string;
   let activeFixture: ContractFixture | undefined;
+  let insertionSeen: (() => void) | undefined;
+  let finalRequest: (() => void) | undefined;
+  let inserted = false;
+  let nativeSessionId = '';
+  const STEER = 'STEERING-CONTRACT-65395: finish after the tools';
   const sockets = new Set<Socket>();
   const cleanup: (() => Promise<void>)[] = [];
   let oldConfigHome: string | undefined;
@@ -140,7 +154,36 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
             })}\n\n`
           );
         chunk({ role: 'assistant' });
-        if (
+        if (scenario.startsWith('steer-') && !toolSent) {
+          toolSent = true;
+          const count = scenario === 'steer-parallel' ? 2 : 1;
+          chunk({
+            tool_calls: Array.from({ length: count }, (_, i) => ({
+              index: i,
+              id: `call_sleep_${i}`,
+              type: 'function',
+              function: activeFixture?.shellTool?.(
+                `touch start-${i}; sleep ${3 + i}; touch done-${i}; echo done-${i}`
+              ) ?? {
+                name: 'shell',
+                arguments: JSON.stringify({
+                  command: `touch start-${i}; sleep ${3 + i}; touch done-${i}; echo done-${i}`,
+                  description: 'Uninterrupted sleeping tool',
+                }),
+              },
+            })),
+          });
+          chunk({}, 'tool_calls');
+        } else if (scenario.startsWith('steer-')) {
+          finalRequest?.();
+          // Keep ACP alive while the independent native insertion observer catches up.
+          if (!inserted)
+            await new Promise<void>((resolve) => {
+              insertionSeen = resolve;
+            });
+          chunk({ content: RESULT });
+          chunk({}, 'stop');
+        } else if (
           ['tool', 'tool-success', 'storage', 'descendant', 'background'].includes(scenario) &&
           !toolSent
         ) {
@@ -236,10 +279,17 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
     events = [];
     toolSent = false;
     requestSeen = undefined;
+    insertionSeen = undefined;
+    finalRequest = undefined;
+    inserted = false;
     await writeFile(join(directory, 'token'), TOKEN);
     work = await mkdtemp(join(directory, 'work-'));
     const onEvent = async (event: TaskHarnessEvent) => {
       events.push(event);
+      if (event.type === 'receipt' && event.disposition === 'inserted') {
+        inserted = true;
+        insertionSeen?.();
+      }
       if (!activeFixture?.usesModelEndpoint && event.type === 'tool') requestSeen?.();
     };
     await contractFixtures[kind]?.prepare?.(work, mode);
@@ -249,6 +299,14 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
       modelCaFile: join(directory, 'ca'),
       workDirectory: work,
       onEvent,
+      // Only fixtures exposing a native stable-ID replay need the ACP/native ID.
+      ...(activeFixture?.nativeReplay
+        ? {
+            bind: async ({ sessionId }: { sessionId: string }) => {
+              nativeSessionId = sessionId;
+            },
+          }
+        : {}),
       timeoutMs: 45000,
       storageEnv: {
         LIFEMODEL_STORAGE_ENDPOINT: 'https://storage.invalid',
@@ -281,6 +339,105 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
           ).toBe(true);
         }
       }, 60_000);
+
+      it.each(['steer-long', 'steer-parallel'] as const)(
+        'admits once during uninterrupted tools, joins redelivery and receipts insertion: %s',
+        async (mode) => {
+          const task = await harness(kind, mode);
+          let finished = false;
+          const terminal = task.start(briefing).then((result) => {
+            finished = true;
+            return result;
+          });
+          cleanup.push(async () => {
+            await task.abort();
+            await terminal;
+          });
+          const count = mode === 'steer-parallel' ? 2 : 1;
+          await vi.waitFor(
+            async () => {
+              for (let i = 0; i < count; i++) await access(join(work, `start-${i}`));
+            },
+            { timeout: 20000, interval: 20 }
+          );
+          const command = { commandId: 'contract-steer-1', text: STEER };
+          const before = performance.now();
+          // Both calls enter while the first native socket operation is in flight.
+          expect(await Promise.all([task.steer(command), task.steer(command)])).toEqual([
+            'accepted',
+            'accepted',
+          ]);
+          expect(performance.now() - before).toBeLessThan(2000);
+          expect(finished).toBe(false);
+          await expect(access(join(work, `done-${count - 1}`))).rejects.toThrow();
+          expect(await task.steer(command)).toBe('accepted');
+          if (activeFixture?.nativeReplay) {
+            // Bypass the launcher's journal to exercise OpenCode's own same-ID
+            // pending replay. Both the native queue and journal must dedupe.
+            const native = { ...command, workDirectory: work, sessionId: nativeSessionId };
+            expect(await activeFixture.nativeReplay(native)).toBe('accepted');
+            expect(await activeFixture.nativeReplay(native)).toBe('accepted');
+          }
+          expect(await task.steer({ ...command, text: 'changed' })).toBe('rejected');
+          expect(await terminal).toEqual({ outcome: 'succeeded', result: RESULT });
+          for (let i = 0; i < count; i++) await access(join(work, `done-${i}`));
+          expect(events.filter((event) => event.type === 'receipt')).toEqual([
+            { type: 'receipt', commandId: command.commandId, disposition: 'inserted' },
+          ]);
+          expect(
+            events.filter((event) => event.type === 'tool' && event.status === 'completed')
+          ).toHaveLength(count);
+          if (activeFixture!.usesModelEndpoint) {
+            const next = JSON.parse(
+              requests.filter((request) => request.path === '/v1/chat/completions')[1]!.body
+            );
+            const messages = next.messages as {
+              role: string;
+              content: unknown;
+              tool_call_id?: string;
+            }[];
+            const steering = messages.filter(
+              (message) =>
+                message.role === 'user' && JSON.stringify(message.content).includes(STEER)
+            );
+            expect(steering).toHaveLength(1);
+            const index = messages.indexOf(steering[0]!);
+            const tools = messages.slice(0, index).filter((message) => message.role === 'tool');
+            expect(tools).toHaveLength(count);
+            for (let i = 0; i < count; i++) {
+              expect(tools[i]!.tool_call_id).toBe(`call_sleep_${i}`);
+              expect(JSON.stringify(tools[i]!.content)).toContain(`done-${i}`);
+            }
+          }
+        },
+        60000
+      );
+
+      it.runIf(kind === 'prime-agent')(
+        'fails uncertain socket admission without retrying or waiting for the tool',
+        async () => {
+          const task = await harness(kind, 'steer-failure');
+          const terminal = task.start(briefing);
+          cleanup.push(async () => {
+            await task.abort();
+            await terminal;
+          });
+          await vi.waitFor(() => access(join(work, 'start-0')), { timeout: 20000, interval: 20 });
+          await rm(join(work, 'tmp/daemon.sock'));
+          const command = { commandId: 'lost-socket', text: STEER };
+          expect(await task.steer(command)).toBe('uncertain');
+          expect(await terminal).toMatchObject({
+            outcome: 'failed',
+            reasonCode: 'steer_uncertain',
+          });
+          expect(events).toContainEqual({
+            type: 'receipt',
+            commandId: command.commandId,
+            disposition: 'uncertain',
+          });
+        },
+        60000
+      );
 
       it('normalizes a provider error to failed', async () => {
         const task = await harness(kind, 'provider');

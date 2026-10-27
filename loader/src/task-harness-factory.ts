@@ -9,12 +9,22 @@ export async function createRegisteredHarness(
   const registered = taskHarnessRegistry[name];
   if (!registered) throw new Error('harness_not_registered');
   const agent = { ...registered, ...overrides };
-  const { configureAgent, toolOutputFailed, admit, bind, observeInsertion } = (await import(agent.adapterModule)) as {
+  const { configureAgent, toolOutputFailed, admit, bind, observeInsertion } = (await import(
+    agent.adapterModule
+  )) as {
     configureAgent: NonNullable<AcpTaskHarnessOptions['configure']>;
     toolOutputFailed: NonNullable<AcpTaskHarnessOptions['toolOutputFailed']>;
     admit?: AcpTaskHarnessOptions['admit'];
     bind?: AcpTaskHarnessOptions['bind'];
     observeInsertion?: AcpTaskHarnessOptions['observeInsertion'];
   };
-  return new AcpTaskHarness({ ...options, agent, configure: configureAgent, toolOutputFailed, ...(admit ? { admit } : {}), ...(bind ? { bind } : {}), ...(observeInsertion ? { observeInsertion } : {}) });
+  return new AcpTaskHarness({
+    ...options,
+    agent,
+    configure: configureAgent,
+    toolOutputFailed,
+    ...(admit ? { admit } : {}),
+    ...(bind ? { bind } : {}),
+    ...(observeInsertion ? { observeInsertion } : {}),
+  });
 }

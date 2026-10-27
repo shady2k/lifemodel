@@ -2,7 +2,8 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { connect } from 'node:net';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 
 export function configureAgent(input: {
   workDirectory: string;
@@ -48,7 +49,6 @@ export function versionCheckEnv(workDirectory: string): NodeJS.ProcessEnv {
   };
 }
 
-
 // ACP's session ID is not the daemon's activeSessionId. Bind while the
 // freshly-created session is the only root, before the brief can spawn agents.
 const roots = new Map<string, string>();
@@ -62,25 +62,41 @@ const asRecord = (value: unknown): NativeRecord =>
     : {};
 
 /** A single native command, on the same private supervisor socket as ACP. */
-function nativeCall(workDirectory: string, command: NativeRecord): Promise<NativeRecord> {
+function nativeCall(
+  workDirectory: string,
+  command: NativeRecord,
+  signal?: AbortSignal
+): Promise<NativeRecord> {
   const id = randomUUID();
   return new Promise((resolve, reject) => {
     const socket = connect(join(workDirectory, 'tmp/daemon.sock'));
     let buffer = '';
     let hello = false;
     let settled = false;
-    const timer = setTimeout(() => { finish(new Error('prime_daemon_timeout')); }, 5000);
+    const timer = setTimeout(() => {
+      finish(new Error('prime_daemon_timeout'));
+    }, 5000);
     const finish = (error?: Error, response?: NativeRecord): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', cancel);
       socket.destroy();
       if (error) reject(error);
       else resolve(response ?? {});
     };
+    const cancel = () => {
+      finish(new Error('prime_observation_stopped'));
+    };
+    signal?.addEventListener('abort', cancel, { once: true });
+    if (signal?.aborted) cancel();
     socket.setEncoding('utf8');
-    socket.on('error', () => { finish(new Error('prime_daemon_socket_error')); });
-    socket.on('close', () => { finish(new Error('prime_daemon_closed')); });
+    socket.on('error', () => {
+      finish(new Error('prime_daemon_socket_error'));
+    });
+    socket.on('close', () => {
+      finish(new Error('prime_daemon_closed'));
+    });
     socket.on('data', (chunk: string) => {
       buffer += chunk;
       if (Buffer.byteLength(buffer) > 1024 * 1024) {
@@ -130,7 +146,10 @@ function nativeCall(workDirectory: string, command: NativeRecord): Promise<Nativ
 export async function bind(input: { workDirectory: string; sessionId: string }): Promise<void> {
   const key = bindingKey(input.workDirectory, input.sessionId);
   roots.delete(key);
-  const response = await nativeCall(input.workDirectory, { type: 'list', includeClientOwned: true });
+  const response = await nativeCall(input.workDirectory, {
+    type: 'list',
+    includeClientOwned: true,
+  });
   const sessions = asRecord(response['data'])['sessions'];
   if (response['success'] !== true || !Array.isArray(sessions) || sessions.length !== 1)
     throw new Error('prime_root_ambiguous');
@@ -160,7 +179,7 @@ export async function admit(input: {
     const response = await nativeCall(input.workDirectory, {
       type: 'steer',
       activeSessionId,
-      message: input.text,
+      message: steeringText(input.commandId, input.text),
     });
     if (response['command'] !== 'steer') return 'uncertain';
     if (response['success'] === false) return 'rejected';
@@ -171,4 +190,70 @@ export async function admit(input: {
     // A broken connection cannot tell whether the daemon enqueued the text.
     return 'uncertain';
   }
+}
+
+/** Marker is correlation evidence, not a native idempotency key. */
+function steeringMarker(commandId: string): string {
+  return `[lifemodel-steer:${createHash('sha256').update(commandId).digest('hex')}]`;
+}
+function steeringText(commandId: string, text: string): string {
+  return `${steeringMarker(commandId)}\n${text}`;
+}
+
+/** Positive native user-row evidence only. Queue absence never means inserted.
+ * Walk bounded transcript pages so a compaction or busy session cannot turn
+ * a missing recent row into a false receipt. No native steer is retried here.
+ */
+export async function observeInsertion(input: {
+  workDirectory: string;
+  sessionId: string;
+  commandId: string;
+  signal: AbortSignal;
+}): Promise<boolean> {
+  const activeSessionId = roots.get(bindingKey(input.workDirectory, input.sessionId));
+  if (!activeSessionId) return false;
+  const marker = steeringMarker(input.commandId) + '\n';
+  while (!input.signal.aborted) {
+    let before: string | undefined;
+    let historyLeafId: unknown;
+    for (let page = 0; page < 100 && !input.signal.aborted; page++) {
+      const response = await nativeCall(
+        input.workDirectory,
+        {
+          type: 'get_messages',
+          activeSessionId,
+          page: { from: 'end', limit: 100, ...(before ? { before } : {}) },
+          ...(historyLeafId ? { historyLeafId } : {}),
+        },
+        input.signal
+      );
+      if (response['success'] !== true || response['command'] !== 'get_messages') break;
+      const data = asRecord(response['data']);
+      if (!Array.isArray(data['messages'])) break;
+      if (
+        data['messages'].some((value: unknown) => {
+          const message = asRecord(value);
+          return (
+            message['role'] === 'user' &&
+            Array.isArray(message['content']) &&
+            message['content'].some((part: unknown) => {
+              const content = asRecord(part);
+              return (
+                content['type'] === 'text' &&
+                typeof content['text'] === 'string' &&
+                content['text'].startsWith(marker)
+              );
+            })
+          );
+        })
+      )
+        return true;
+      const next = data['firstEntryId'];
+      if (data['more'] !== true || typeof next !== 'string' || next === before) break;
+      before = next;
+      historyLeafId = data['historyLeafId'];
+    }
+    await delay(100, undefined, { signal: input.signal }).catch(() => undefined);
+  }
+  return false;
 }

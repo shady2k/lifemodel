@@ -47,7 +47,14 @@ function assertContext(text: string, ignore: string): void {
     for (const source of parts.slice(0, -1)) {
       const paths =
         source === 'docker/workbench/'
-          ? ['docker/workbench/opencode.json', 'docker/workbench/prime-models.json', 'docker/workbench/prime-settings.json', 'docker/workbench/prime-python-requirements.txt']
+          ? [
+              'docker/workbench/opencode.json',
+              'docker/workbench/prime-models.json',
+              'docker/workbench/prime-settings.json',
+              'docker/workbench/prime-python-requirements.txt',
+              'docker/workbench/steering-plugin/index.mjs',
+              'docker/workbench/steering-plugin/package.json',
+            ]
           : source === 'loader/src/'
             ? [
                 'loader/src/task-launcher-main.ts',
@@ -142,7 +149,9 @@ describe('task workbench image contract', () => {
     expect(text).toContain('/opt/lifemodel/node_modules');
     expect(text).toContain('npm run build');
     expect(text).toContain('python3-venv');
-    expect(read('scripts/task-agent-provision.mjs')).toContain('--only-binary=:all: --require-hashes');
+    expect(read('scripts/task-agent-provision.mjs')).toContain(
+      '--only-binary=:all: --require-hashes'
+    );
     expect(text).toContain('/opt/lifemodel/loader');
     expect(text).toContain('/usr/local/bin/lifemodel-storage');
     expect(text).toContain('USER 1000:1000');

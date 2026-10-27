@@ -1,5 +1,6 @@
 /** Generic ACP JSON-RPC client. Agent-specific launch/config lives in registry modules. */
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -171,9 +172,19 @@ export interface AcpTaskHarnessOptions {
     adapterConfig?: AgentConfiguration['adapterConfig'];
   }) => NodeJS.ProcessEnv;
   toolOutputFailed?: (output: unknown, input?: unknown) => boolean;
-  admit?: (input: { workDirectory: string; sessionId: string; commandId: string; text: string }) => Promise<TaskSteerDisposition>;
+  admit?: (input: {
+    workDirectory: string;
+    sessionId: string;
+    commandId: string;
+    text: string;
+  }) => Promise<TaskSteerDisposition>;
   bind?: (input: { workDirectory: string; sessionId: string }) => Promise<void>;
-  observeInsertion?: (input: { workDirectory: string; commandId: string; signal: AbortSignal }) => Promise<boolean>;
+  observeInsertion?: (input: {
+    workDirectory: string;
+    sessionId: string;
+    commandId: string;
+    signal: AbortSignal;
+  }) => Promise<boolean>;
   timeoutMs?: number;
   storageEnv?: {
     LIFEMODEL_STORAGE_ENDPOINT: string;
@@ -217,6 +228,8 @@ export class AcpTaskHarness implements TaskHarness {
     let journal: TaskSteeringJournal | undefined;
     const receiptObserver = new AbortController();
     const observedCommands = new Set<string>();
+    const commandTexts = new Map<string, string>();
+    const observers = new Set<Promise<void>>();
     const turn = new AcpTurn(this.options.toolOutputFailed, this.options.onEvent);
     let result: TaskHarnessResult = failed('harness_failed');
     const pending = new Map<
@@ -479,20 +492,68 @@ export class AcpTaskHarness implements TaskHarness {
       sessionID = created['sessionId'];
       if (this.options.bind) await this.options.bind({ workDirectory: work, sessionId: sessionID });
       if (this.options.admit) {
-        journal = await TaskSteeringJournal.open(join(work, 'tmp', 'steering.journal'), { capacity: 1024, create: true });
+        journal = await TaskSteeringJournal.open(join(work, 'tmp', 'steering.journal'), {
+          capacity: 1024,
+          create: true,
+        });
         const boundSession = sessionID;
         const steeringJournal = journal;
         const admit = this.options.admit;
         this.steering = async (command) => {
-          const disposition = await steeringJournal.admit(command, () => admit({ workDirectory: work, sessionId: boundSession, ...command }));
-          if (disposition === 'accepted' && this.options.observeInsertion && !observedCommands.has(command.commandId)) {
-            observedCommands.add(command.commandId);
-            void this.options.observeInsertion({ workDirectory: work, commandId: command.commandId, signal: receiptObserver.signal }).then(async (inserted) => {
-              if (inserted) await this.options.onEvent?.({ type: 'receipt', commandId: command.commandId, disposition: 'inserted' });
-            }).catch(() => undefined);
+          if (
+            !command.commandId ||
+            !command.text.trim() ||
+            Buffer.byteLength(command.commandId) > 256 ||
+            Buffer.byteLength(command.text) > 60000
+          )
+            return 'rejected';
+          const textHash = createHash('sha256').update(command.text).digest('hex');
+          const previousText = commandTexts.get(command.commandId);
+          if (previousText !== undefined && previousText !== textHash) return 'rejected';
+          if (previousText === undefined) {
+            if (commandTexts.size >= 1024) return 'rejected';
+            commandTexts.set(command.commandId, textHash);
           }
-          if (disposition !== 'accepted') {
-            void Promise.resolve(this.options.onEvent?.({ type: 'receipt', commandId: command.commandId, disposition: disposition === 'uncertain' ? 'uncertain' : 'failed' })).catch(() => undefined);
+          const disposition = await steeringJournal.admit(command, () =>
+            admit({ workDirectory: work, sessionId: boundSession, ...command })
+          );
+          if (!observedCommands.has(command.commandId)) {
+            observedCommands.add(command.commandId);
+            if (disposition === 'accepted' && this.options.observeInsertion) {
+              const observer = this.options
+                .observeInsertion({
+                  workDirectory: work,
+                  sessionId: boundSession,
+                  commandId: command.commandId,
+                  signal: receiptObserver.signal,
+                })
+                .then(async (inserted) => {
+                  if (inserted && !receiptObserver.signal.aborted)
+                    await emit({
+                      type: 'receipt',
+                      commandId: command.commandId,
+                      disposition: 'inserted',
+                    });
+                })
+                .catch(() => {
+                  if (!receiptObserver.signal.aborted) {
+                    fail('harness_receipt_failed');
+                    this.cancellation.abort();
+                  }
+                });
+              observers.add(observer);
+              void observer.finally(() => observers.delete(observer));
+            } else if (disposition !== 'accepted') {
+              void Promise.resolve()
+                .then(() =>
+                  this.options.onEvent?.({
+                    type: 'receipt',
+                    commandId: command.commandId,
+                    disposition: disposition === 'uncertain' ? 'uncertain' : 'failed',
+                  })
+                )
+                .catch(() => undefined);
+            }
           }
           if (disposition === 'uncertain') {
             fail('steer_uncertain');
@@ -541,7 +602,15 @@ export class AcpTaskHarness implements TaskHarness {
       closing = true;
       this.cancelRequest = undefined;
       this.steering = undefined;
+      // Cleanup owns already-started sends even before the later end-turn
+      // reconciliation barrier is implemented. Never close their journal or
+      // declare success while admission can still become uncertain.
+      await journal?.close().catch(() => {
+        fail('steer_uncertain');
+      });
+      if (fault?.message === 'steer_uncertain') result = failed('steer_uncertain');
       receiptObserver.abort();
+      await Promise.all(observers);
       let cleanupFailed = false;
       try {
         const cleanupChild = child;
@@ -594,7 +663,7 @@ export class AcpTaskHarness implements TaskHarness {
           cleanupFailed = true;
         });
       }
-      await journal?.close().catch(() => { cleanupFailed = true; });
+      // Journal was closed after intake stopped and before process cleanup.
       signal.removeEventListener('abort', stop);
       fail('harness_closed');
       if (cleanupFailed && result.outcome === 'succeeded') {

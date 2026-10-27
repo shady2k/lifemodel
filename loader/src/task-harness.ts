@@ -26,7 +26,10 @@ export function emitTaskTrace(
 }
 
 export type TaskSteerDisposition = 'accepted' | 'rejected' | 'uncertain';
-export interface TaskSteerCommand { commandId: string; text: string }
+export interface TaskSteerCommand {
+  commandId: string;
+  text: string;
+}
 
 export type TaskHarnessEvent =
   | { type: 'step'; text: string }
@@ -57,6 +60,7 @@ export class ScriptedTaskHarness implements TaskHarness {
   private started = false;
   private aborted = false;
   private release: (() => void) | undefined;
+  private readonly commands = new Map<string, string>();
 
   constructor(
     private readonly options: {
@@ -91,8 +95,29 @@ export class ScriptedTaskHarness implements TaskHarness {
     return Promise.resolve();
   }
 
-  steer(_command: TaskSteerCommand): Promise<TaskSteerDisposition> {
-    return Promise.resolve('rejected');
+  steer(command: TaskSteerCommand): Promise<TaskSteerDisposition> {
+    if (
+      !this.started ||
+      this.aborted ||
+      !this.options.waitForAbort ||
+      !command.commandId ||
+      !command.text.trim()
+    )
+      return Promise.resolve('rejected');
+    const previous = this.commands.get(command.commandId);
+    if (previous !== undefined)
+      return Promise.resolve(previous === command.text ? 'accepted' : 'rejected');
+    this.commands.set(command.commandId, command.text);
+    void Promise.resolve()
+      .then(() =>
+        this.options.onEvent?.({
+          type: 'receipt',
+          commandId: command.commandId,
+          disposition: 'inserted',
+        })
+      )
+      .catch(() => undefined);
+    return Promise.resolve('accepted');
   }
   wrap(): Promise<'not_supported'> {
     return Promise.resolve('not_supported');

@@ -80,7 +80,7 @@ export async function admit(input: {
 }): Promise<'accepted' | 'rejected' | 'uncertain'> {
   if (!input.sessionId || !input.commandId || !input.text.trim()) return 'rejected';
   const id = nativeMessageId(input.commandId);
-  return new Promise(resolve => {
+  return new Promise((resolve) => {
     const socket = connect(join(input.workDirectory, 'tmp/steer.sock'));
     let buffer = '';
     let done = false;
@@ -91,15 +91,31 @@ export async function admit(input: {
       socket.destroy();
       resolve(result);
     };
-    const timer = setTimeout(() => { finish('uncertain'); }, 5000);
-    socket.once('error', () => { finish('uncertain'); });
-    socket.once('close', () => { finish('uncertain'); });
-    socket.once('connect', () => socket.write(JSON.stringify({
-      op: 'steer', sessionID: input.sessionId, id, text: input.text,
-    }) + '\n'));
-    socket.on('data', chunk => {
+    const timer = setTimeout(() => {
+      finish('uncertain');
+    }, 5000);
+    socket.once('error', () => {
+      finish('uncertain');
+    });
+    socket.once('close', () => {
+      finish('uncertain');
+    });
+    socket.once('connect', () =>
+      socket.write(
+        JSON.stringify({
+          op: 'steer',
+          sessionID: input.sessionId,
+          id,
+          text: input.text,
+        }) + '\n'
+      )
+    );
+    socket.on('data', (chunk) => {
       buffer += chunk.toString();
-      if (Buffer.byteLength(buffer) > 1048576) { finish('uncertain'); return; }
+      if (Buffer.byteLength(buffer) > 1048576) {
+        finish('uncertain');
+        return;
+      }
       const end = buffer.indexOf('\n');
       if (end < 0) return;
       try {
@@ -132,7 +148,9 @@ export async function observeInsertion(input: {
         socket.destroy();
         resolve(value);
       };
-      const cancel = () => { finish(false); };
+      const cancel = () => {
+        finish(false);
+      };
       const timer = setTimeout(cancel, 1000);
       input.signal.addEventListener('abort', cancel, { once: true });
       socket.once('error', cancel);
@@ -140,13 +158,23 @@ export async function observeInsertion(input: {
       socket.once('connect', () => socket.write(JSON.stringify({ op: 'disposition', id }) + '\n'));
       socket.on('data', (chunk) => {
         buffer += chunk.toString();
-        if (Buffer.byteLength(buffer) > 1048576) { finish(false); return; }
+        if (Buffer.byteLength(buffer) > 1048576) {
+          finish(false);
+          return;
+        }
         const end = buffer.indexOf('\n');
         if (end < 0) return;
         try {
-          const response = JSON.parse(buffer.slice(0, end)) as { ok?: boolean; data?: { id?: string; status?: string } };
-          finish(response.ok === true && response.data?.id === id && response.data.status === 'inserted');
-        } catch { finish(false); }
+          const response = JSON.parse(buffer.slice(0, end)) as {
+            ok?: boolean;
+            data?: { id?: string; status?: string };
+          };
+          finish(
+            response.ok === true && response.data?.id === id && response.data.status === 'inserted'
+          );
+        } catch {
+          finish(false);
+        }
       });
       if (input.signal.aborted) cancel();
     });
@@ -154,7 +182,11 @@ export async function observeInsertion(input: {
     if (input.signal.aborted) break;
     await new Promise<void>((resolve) => {
       const timer = setTimeout(done, 100);
-      function done() { clearTimeout(timer); input.signal.removeEventListener('abort', done); resolve(); }
+      function done() {
+        clearTimeout(timer);
+        input.signal.removeEventListener('abort', done);
+        resolve();
+      }
       input.signal.addEventListener('abort', done, { once: true });
       if (input.signal.aborted) done();
     });

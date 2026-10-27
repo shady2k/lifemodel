@@ -13,7 +13,12 @@ export interface SteeringCommand {
 const HEADER = Buffer.from('LMSTEER1');
 const SLOT_SIZE = 65;
 const STATE: Record<SteeringDisposition, number> = { accepted: 2, rejected: 3, uncertain: 4 };
-const FINAL: Record<number, SteeringDisposition> = { 1: 'uncertain', 2: 'accepted', 3: 'rejected', 4: 'uncertain' };
+const FINAL: Record<number, SteeringDisposition> = {
+  1: 'uncertain',
+  2: 'accepted',
+  3: 'rejected',
+  4: 'uncertain',
+};
 
 interface Entry {
   textHash: string;
@@ -34,12 +39,19 @@ export class TaskSteeringJournal {
   private failed = false;
   private closed = false;
 
-  private constructor(private readonly file: FileHandle, private readonly capacity: number) {}
+  private constructor(
+    private readonly file: FileHandle,
+    private readonly capacity: number
+  ) {}
 
   /** Set create only when this is a new task; false never recreates a lost journal. */
-  static async open(path: string, options: { capacity: number; create: boolean }): Promise<TaskSteeringJournal> {
+  static async open(
+    path: string,
+    options: { capacity: number; create: boolean }
+  ): Promise<TaskSteeringJournal> {
     const { capacity, create } = options;
-    if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 100_000) throw new Error('Invalid steering journal capacity');
+    if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 100_000)
+      throw new Error('Invalid steering journal capacity');
     const size = HEADER.length + capacity * SLOT_SIZE;
     const file = await open(path, create ? 'wx+' : 'r+', 0o600);
     try {
@@ -52,7 +64,11 @@ export class TaskSteeringJournal {
         await writeAll(file, HEADER, 0);
         await file.sync();
         const dir = await open(dirname(path), 'r');
-        try { await dir.sync(); } finally { await dir.close(); }
+        try {
+          await dir.sync();
+        } finally {
+          await dir.close();
+        }
       }
       const stat = await file.stat();
       if (stat.size !== size) throw new Error('Invalid steering journal size');
@@ -63,13 +79,17 @@ export class TaskSteeringJournal {
         if (!result.bytesRead) throw new Error('Short steering journal read');
         read += result.bytesRead;
       }
-      if (!data.subarray(0, HEADER.length).equals(HEADER)) throw new Error('Invalid steering journal header');
+      if (!data.subarray(0, HEADER.length).equals(HEADER))
+        throw new Error('Invalid steering journal header');
       const journal = new TaskSteeringJournal(file, capacity);
       let unused = false;
       for (let i = 0; i < capacity; i++) {
         const offset = HEADER.length + i * SLOT_SIZE;
         const state = data[offset];
-        if (state === 0) { unused = true; continue; }
+        if (state === 0) {
+          unused = true;
+          continue;
+        }
         const disposition = state === undefined ? undefined : FINAL[state];
         if (unused || disposition === undefined) throw new Error('Corrupt steering journal');
         const idHash = data.subarray(offset + 1, offset + 33).toString('hex');
@@ -86,22 +106,32 @@ export class TaskSteeringJournal {
   }
 
   /** Same ID and text joins an in-flight call or returns its recorded outcome. */
-  async admit(command: SteeringCommand, send: () => Promise<SteeringDisposition>): Promise<SteeringDisposition> {
+  async admit(
+    command: SteeringCommand,
+    send: () => Promise<SteeringDisposition>
+  ): Promise<SteeringDisposition> {
     const idHash = hash(command.commandId);
     const textHash = hash(command.text);
     // The lock protects journal state but not the native call: unrelated commands can proceed.
     const result = await this.lock(async () => {
-      if (this.failed || this.closed) return { result: Promise.resolve<SteeringDisposition>('uncertain') };
+      if (this.failed || this.closed)
+        return { result: Promise.resolve<SteeringDisposition>('uncertain') };
       const existing = this.entries.get(idHash);
       if (existing) {
-        if (existing.textHash !== textHash) return { result: Promise.resolve<SteeringDisposition>('rejected') };
+        if (existing.textHash !== textHash)
+          return { result: Promise.resolve<SteeringDisposition>('rejected') };
         return { result: existing.flight ?? Promise.resolve(existing.disposition) };
       }
-      if (this.nextSlot === this.capacity) return { result: Promise.resolve<SteeringDisposition>('rejected') };
+      if (this.nextSlot === this.capacity)
+        return { result: Promise.resolve<SteeringDisposition>('rejected') };
       const offset = HEADER.length + this.nextSlot * SLOT_SIZE;
       try {
         // A zero state cannot have been sent. Sync identities before publishing pre-send.
-        await writeAll(this.file, Buffer.concat([Buffer.from(idHash, 'hex'), Buffer.from(textHash, 'hex')]), offset + 1);
+        await writeAll(
+          this.file,
+          Buffer.concat([Buffer.from(idHash, 'hex'), Buffer.from(textHash, 'hex')]),
+          offset + 1
+        );
         await this.file.sync();
         await writeAll(this.file, Buffer.from([1]), offset);
         await this.file.sync();
@@ -118,7 +148,10 @@ export class TaskSteeringJournal {
     return result.result;
   }
 
-  private async sendAndRecord(entry: Entry, send: () => Promise<SteeringDisposition>): Promise<SteeringDisposition> {
+  private async sendAndRecord(
+    entry: Entry,
+    send: () => Promise<SteeringDisposition>
+  ): Promise<SteeringDisposition> {
     let disposition: SteeringDisposition;
     try {
       const value = await send();
@@ -135,6 +168,14 @@ export class TaskSteeringJournal {
       } catch {
         this.failed = true;
         entry.disposition = 'uncertain';
+        // A failed sync may have left the accepted byte in the page cache.
+        // Best-effort poison it; the caller must fail this task regardless.
+        try {
+          await writeAll(this.file, Buffer.from([STATE.uncertain]), entry.offset);
+          await this.file.sync();
+        } catch {
+          /* disk failure cannot be repaired by resending */
+        }
       }
       delete entry.flight;
       return entry.disposition;
@@ -143,7 +184,10 @@ export class TaskSteeringJournal {
 
   private lock<T>(fn: () => Promise<T>): Promise<T> {
     const result = this.serial.then(fn);
-    this.serial = result.then(() => undefined, () => undefined);
+    this.serial = result.then(
+      () => undefined,
+      () => undefined
+    );
     return result;
   }
 
@@ -151,7 +195,9 @@ export class TaskSteeringJournal {
   async close(): Promise<void> {
     const flights = await this.lock(() => {
       this.closed = true;
-      return Promise.resolve([...this.entries.values()].flatMap((entry) => entry.flight ? [entry.flight] : []));
+      return Promise.resolve(
+        [...this.entries.values()].flatMap((entry) => (entry.flight ? [entry.flight] : []))
+      );
     });
     await Promise.all(flights);
     await this.file.close();

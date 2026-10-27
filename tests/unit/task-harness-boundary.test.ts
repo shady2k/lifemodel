@@ -17,6 +17,8 @@ describe('replaceable task agent boundary', () => {
       'loader/src/task-launcher.ts',
       'loader/src/task-launcher-main.ts',
       'loader/src/task-acp.ts',
+      'loader/src/task-harness.ts',
+      'loader/src/task-harness-factory.ts',
       'loader/src/settings/platform.ts',
     ];
     for (const file of files) {
@@ -37,8 +39,14 @@ describe('replaceable task agent boundary', () => {
     expect(read('loader/src/task-launcher.ts')).toContain('createRegisteredHarness');
     expect(read('loader/src/task-launcher.ts')).toContain("briefing['harness']");
     expect(read('loader/src/task-launcher-main.ts')).toContain('selfCheckHarnesses');
+    const generic = read('loader/src/task-acp.ts') + read('loader/src/task-harness-factory.ts');
+    expect(generic).not.toMatch(
+      /daemon_hello|activeSessionId|delivery:\s*['"]steer|resume:\s*(?:true|false)|node:net/
+    );
+    expect(generic).toContain('admit');
+    expect(generic).toContain('TaskSteeringJournal');
     const factory = read('loader/src/task-harness-factory.ts');
-    expect(factory).toContain('import(agent.adapterModule)');
+    expect(factory).toMatch(/import\(\s*agent\.adapterModule\s*\)/);
     expect(factory).not.toMatch(/opencode|prime-agent/);
     const registry = JSON.parse(read('src/ports/task-harness-registry.json'));
     for (const agent of Object.values(registry) as {

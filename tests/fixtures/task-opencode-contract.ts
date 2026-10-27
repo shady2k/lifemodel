@@ -3,6 +3,7 @@ import { expect } from 'vitest';
 import { access } from 'node:fs/promises';
 import { join } from 'node:path';
 export const usesModelEndpoint = true;
+export { admit as nativeReplay } from '../../loader/src/task-opencode.js';
 export async function checkProvisioned(): Promise<void> {
   await access('/etc/lifemodel/xdg/opencode');
 }

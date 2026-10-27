@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """Deterministic ACP agent. No model/network/config dependency."""
-import json, sys, os
+import json, sys, os, socket, threading, subprocess, time
 if "--version" in sys.argv:
     print("scripted-acp 1")
     raise SystemExit(0)
@@ -9,6 +9,27 @@ if "SCRIPTED_CONFIG" in os.environ:
     assert json.load(open(os.environ["SCRIPTED_CONFIG"]))["fixture"] == "second-distinct-agent"
 session = "scripted-session"
 prompt_id = None
+inbox = {}
+lock = threading.Lock()
+server = socket.socket(socket.AF_UNIX)
+server.bind(os.path.join(os.getcwd(), "tmp/steer.sock"))
+server.listen()
+def listen():
+    while True:
+        connection, _ = server.accept()
+        with connection:
+            raw = b""
+            while b"\n" not in raw:
+                raw += connection.recv(65536)
+            request = json.loads(raw.split(b"\n")[0])
+            with lock:
+                if request["op"] == "steer":
+                    inbox.setdefault(request["id"], {"text": request["text"], "status": "pending"})
+                    data = {"id": request["id"]}
+                else:
+                    data = {"id": request["id"], "status": inbox.get(request["id"], {}).get("status", "unknown")}
+            connection.sendall((json.dumps({"ok": True, "data": data}) + "\n").encode())
+threading.Thread(target=listen, daemon=True).start()
 def send(value):
     print(json.dumps({"jsonrpc": "2.0", **value}), flush=True)
 def update(value):
@@ -22,6 +43,20 @@ for line in sys.stdin:
         send({"id": message["id"], "result": {"sessionId": session}})
     elif method == "session/prompt":
         prompt_id = message["id"]
+        if scenario in ("steer-long", "steer-parallel", "steer-failure"):
+            count = 2 if scenario == "steer-parallel" else 1
+            processes = []
+            for i in range(count):
+                update({"sessionUpdate": "tool_call", "toolCallId": f"sleep-{i}", "status": "in_progress"})
+                processes.append(subprocess.Popen(["sh", "-c", f"touch start-{i}; sleep {2+i}; touch done-{i}; echo done-{i}"], stdout=subprocess.DEVNULL))
+            for i, process in enumerate(processes):
+                assert process.wait() == 0
+                update({"sessionUpdate": "tool_call_update", "toolCallId": f"sleep-{i}", "status": "completed"})
+            with lock:
+                for item in inbox.values():
+                    item["status"] = "inserted"
+            # Keep the deterministic final response open until the receipt observer runs.
+            time.sleep(0.5)
         if scenario == "permission":
             send({"id": "permission-1", "method": "session/request_permission", "params": {"sessionId": session, "toolCall": {"toolCallId": "ask"}, "options": [{"optionId": "once", "kind": "allow_once", "name": "Once"}]}})
             continue
