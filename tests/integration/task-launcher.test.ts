@@ -255,6 +255,10 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       });
       return;
     }
+    if (service === 'channel' && call.method === 'GET' && call.path === '/task/commands') {
+      // A real held response, closed when the harness/launcher settles.
+      return;
+    }
     if (service === 'channel' && call.method === 'GET' && call.path === '/task/identity') {
       json(res, 200, IDS);
       return;

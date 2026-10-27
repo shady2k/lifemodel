@@ -6,6 +6,7 @@ import { TaskJsonClient, LauncherError, type TaskEndpoint } from './task-launche
 import { runStorageCli, storageNameValid } from './storage-cli.js';
 import { createTaskTraceChannel } from './task-trace-channel.js';
 import { createRegisteredHarness } from './task-harness-factory.js';
+import { createTaskCommandIntake } from './task-command-intake.js';
 import type { TaskHarness, TaskHarnessEvent, TaskHarnessResult } from './task-harness.js';
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -181,6 +182,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
   let model: TaskJsonClient | undefined;
   let ids: Identity | undefined;
   let harness: TaskHarness | undefined;
+  let commands: ReturnType<typeof createTaskCommandIntake> | undefined;
   let sequence = 0;
   let started = false;
   let trace: ReturnType<typeof createTaskTraceChannel> | undefined;
@@ -350,6 +352,10 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
     const launchId = ids.launchId;
     let eventCount = 0;
     const onEvent = async (event: TaskHarnessEvent): Promise<void> => {
+      if (event.type === 'receipt') {
+        commands?.receipt(event);
+        return;
+      }
       if (event.type === 'trace') {
         trace?.enqueue({
           ...event.span,
@@ -394,11 +400,20 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       await harness.abort();
       throw new LauncherError('launcher_aborted');
     }
-    const result: TaskHarnessResult = await harness.start({
+    const execution = harness.start({
       text: `${outputInstructions(cwd)}\n\n${briefing['briefing']}`,
       model: 'lifemodel/task',
       softDueAt: claim['softDueAt'],
     });
+    commands = createTaskCommandIntake({
+      endpoint: endpoint(options.env, 'CHANNEL'),
+      identity: ids,
+      harness,
+      hardStopAt: Date.parse(claim['hardStopAt']),
+    });
+    commands.start();
+    const result: TaskHarnessResult = await execution;
+    await commands.stop();
     failureSpanId = result.failureSpanId ? `${ids.launchId}_${result.failureSpanId}` : undefined;
     outputsStartedAt = new Date().toISOString();
     const resultName = `${directory}/result.txt`;
@@ -459,6 +474,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
     }
     return 1;
   } finally {
+    await commands?.stop();
     options.signal?.removeEventListener('abort', onAbort);
     trace?.close();
     channel?.close();

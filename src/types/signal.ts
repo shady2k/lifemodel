@@ -582,7 +582,7 @@ export interface TaskReportData {
   taskId: string;
   attemptId: string;
   messageId: string;
-  eventKind: 'step' | 'terminal';
+  eventKind: 'step' | 'question' | 'terminal';
 }
 
 /**

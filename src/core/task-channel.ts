@@ -1,6 +1,7 @@
 /** Task-only TLS ingress. No artifact bytes, cognition, or owner-intake capacity. */
 import { createServer, type Server } from 'node:https';
 import { createHash } from 'node:crypto';
+import { createTaskCommandChannel } from './task-command-channel.js';
 import type { ServerResponse, IncomingMessage } from 'node:http';
 import type { TLSSocket } from 'node:tls';
 import type { Socket } from 'node:net';
@@ -13,6 +14,7 @@ import {
 } from '../ports/task-channel.js';
 import type {
   TaskChannelFrame,
+  TaskCommandMailbox,
   TaskTraceFrame,
   TaskChannelAck,
   TaskChannelProof,
@@ -28,7 +30,7 @@ interface ChannelOptions {
     read?: () => Promise<{ cert: string | Buffer; key: string | Buffer }>;
   };
   settings: PlatformSettingsValues;
-  mailbox: {
+  mailbox: Partial<TaskCommandMailbox> & {
     readIdentity?(proof: TaskChannelProof, signal?: AbortSignal): Promise<TaskLaunchIdentity>;
     readBriefing?(proof: TaskChannelProof, signal?: AbortSignal): Promise<TaskBriefing>;
     readTraceAuthority?(proof: TaskChannelProof, signal?: AbortSignal): Promise<TaskBriefing>;
@@ -76,6 +78,25 @@ export function createTaskChannel(options: ChannelOptions): {
   let pendingTraces = 0;
   let closed = false;
   const logger = options.logger.child({ component: 'task-channel' });
+
+  const commands = createTaskCommandChannel({
+    mailbox: {
+      ...options.mailbox,
+      readBriefing: (proof, signal) => {
+        if (!options.mailbox.readBriefing) throw new TaskChannelError(503, 'channel_unavailable');
+        return options.mailbox.readBriefing(proof, signal);
+      },
+    },
+    identity: options.identity,
+    frameLimit,
+    maxBufferedBytes: settings['tasks.channel.maxBufferedBytes'],
+    maxUnackedFrames: settings['tasks.channel.maxUnackedFrames'],
+    maxUnackedBytes: settings['tasks.channel.maxUnackedBytes'],
+    workers: workerLimit,
+    onRefused: (status, code, route) => {
+      logger.warn({ status, code, route }, 'Task command request refused');
+    },
+  });
 
   // Independent task-only reservations. Authentication never occupies a mailbox
   // worker. The token key only serializes repeated credentials before verification;
@@ -159,6 +180,8 @@ export function createTaskChannel(options: ChannelOptions): {
     send(res, status, { code });
   }
   function receive(req: IncomingMessage, res: ServerResponse): void {
+    if (commands.receive(req, res)) return;
+    req.socket.setTimeout(timeoutMs);
     // Never log a raw URL: unknown paths and query strings can carry secrets.
     const route =
       (req.method === 'POST' && ['/task/trace', '/task/events'].includes(req.url ?? '')) ||
@@ -501,6 +524,7 @@ export function createTaskChannel(options: ChannelOptions): {
     stop: (deadline) =>
       (stopping ??= (async () => {
         closed = true;
+        commands.stop();
         clearTimeout(reloadTimer);
         authentication.clear();
         mailbox.clear();

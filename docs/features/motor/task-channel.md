@@ -2,7 +2,9 @@
 
 Task: lifemodel-653.8.8. This is the task-to-core direction of ADR-014 D2.
 The task-to-core direction is a source contract, not deployed stage acceptance.
-The core-to-task direction below is the stage-4 design, not yet implemented.
+The core-to-task mailbox and launcher intake are implemented in source by
+lifemodel-653.9.7. Their real-store checks have not yet run successfully in this
+worktree because Docker registry provisioning timed out. They are not accepted.
 
 ## Transport and identity
 
@@ -10,8 +12,8 @@ The launcher posts one JSON frame to `https://core.lifemodel.svc:8447/task/event
 HTTP/1.1 keep-alive gives a reusable outbound TLS channel with one explicit HTTP
 200 ACK per frame. Unlike a bidirectional streaming body, this bounds body intake,
 allows a clear 429 with Retry-After, and does not tie up a worker while a peer holds
-an idle connection. Today there is no command route or task ingress port;
-stage 4 adds bounded outbound long-poll, never a Pod ingress port.
+an idle connection. The launcher also dials out for bounded command long-polls. No task Pod ingress
+port is created.
 
 The server leaf is issued by the instance CA, stored in the fixed
 `core-task-channel-tls` Secret, and mounted only into core. The listener reloads
@@ -183,6 +185,43 @@ no wrap. A later shortening (soft Stop) is not seen by this snapshot. Live
 deadline updates and wrap belong to 653.10. The Job deadline is the hard bound.
 MCP over stdio, including Prime offline, remains unverified. ACKs and receipts
 are task claims, not core evidence of execution or obedience.
+
+### Command routes and durable storage
+
+`GET /task/commands` returns `{command: null}` after at most 25 seconds or one
+`{command: {taskId, attemptId, commandId, direction: "core_to_task", sequence,
+kind, text, questionId?}}`. It returns the oldest outstanding command, not a
+sequence watermark. A commit notification wakes the wait; a one-second recheck
+covers lost notifications and refreshes Kubernetes authority. One attempt can
+hold one poll. Polls reserve a separate 32-request, byte-bounded capacity and
+short operation slots, not event ACK workers. Every SQL transaction finishes
+before the wait. The ordinary task pool is still physically separate from owner
+intake. Shutdown cancels held polls.
+
+`POST /task/commands/ack` takes `{taskId, attemptId, commandId, disposition}`
+(`accepted | rejected | uncertain`). `POST /task/commands/receipt` adds
+`receiptId`, and accepts `inserted | deferred-to-next-turn | failed | uncertain`.
+Both return `{stored: true}` only after commit. They have a ten-second request
+bound, above both adapters' five-second native admission bound. No changes to
+ordinary event ACK settings are needed. The launcher uses independent poll,
+ACK, receipt and progress clients so a held poll cannot block writes.
+
+`TaskCommandMailbox.enqueueCommand` is a core-only API, not an agent tool.
+It validates immutable IDs/content and assigns monotonically increasing order
+under the task lock. `core.task_commands` retains content after retirement;
+`core.task_command_acks` stores disposition before retirement in the same fenced
+transaction. A database trigger refuses retirement without that ACK. Exact
+creation/ACK/receipt duplicates are idempotent; changed content conflicts.
+`core.task_command_receipts` retains at most 16 receipts per command. A task
+admits at most 1024 commands, matching the harness journal reservation. Terminal,
+revoked and wrapping authority denies even replay; no replacement Pod receives
+commands. The forward migration is `20261015000026_create_task_commands.sql`.
+
+A `question` frame's payload is `{questionId, text}`. `questionId` equals its
+launcher-generated `messageId`; text uses the step-line bound. Core records
+questions in `core.task_questions`, with a unique partial index on the open
+question per task. Committing its correlated `answer` command marks it answered.
+Question wake/cognition tools and the MCP dispatcher remain later tasks.
 
 ## Disposable task trace route
 

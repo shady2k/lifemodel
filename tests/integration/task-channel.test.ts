@@ -7,6 +7,8 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { createTaskCommandIntake } from '../../loader/src/task-command-intake.js';
+import { TaskSteeringJournal } from '../../loader/src/task-steering-journal.js';
 import { createTestStores, workerDatabaseUrl, type TestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
 import { finalizeTaskFixture } from '../helpers/finalized-task.js';
@@ -36,6 +38,8 @@ import type { TaskRecord, TaskRegistry } from '../../src/ports/tasks.js';
 import { TaskChannelError } from '../../src/ports/task-channel.js';
 import type {
   TaskChannelFrame,
+  TaskCommandMailbox,
+  TaskCommandInput,
   TaskMailbox,
   TaskTraceFrame,
 } from '../../src/ports/task-channel.js';
@@ -52,7 +56,7 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
   let origin: string;
   let client: Agent;
   let registry: TaskRegistry;
-  let mailbox: TaskMailbox;
+  let mailbox: TaskMailbox & TaskCommandMailbox;
   let identity: ReturnType<typeof createTaskKubernetesIdentity>;
   let access: ReturnType<typeof createTaskIdentity>;
   let apiStatus: number;
@@ -455,6 +459,397 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
       void promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
     });
   }
+  function commandInput(
+    task: TaskRecord,
+    commandId: string,
+    text = 'Please check the result'
+  ): TaskCommandInput {
+    return { taskId: task.id, attemptId: task.attemptId, commandId, kind: 'steer', text };
+  }
+  function commandCall(
+    url: string,
+    token: string,
+    path = '/task/commands',
+    body?: unknown,
+    signal?: AbortSignal
+  ): Promise<Response> {
+    const data = body === undefined ? undefined : JSON.stringify(body);
+    return new Promise((resolve, reject) => {
+      const req = request(
+        new URL(path, url),
+        {
+          method: data === undefined ? 'GET' : 'POST',
+          agent: client,
+          signal: signal ?? AbortSignal.timeout(30_000),
+          headers: {
+            authorization: `Bearer ${token}`,
+            ...(data === undefined
+              ? {}
+              : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) }),
+          },
+        },
+        (res) => {
+          res.on('error', reject);
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk: Buffer) => chunks.push(chunk));
+          res.on('end', () => {
+            const text = Buffer.concat(chunks).toString();
+            resolve({
+              status: res.statusCode!,
+              headers: res.headers,
+              text,
+              body: JSON.parse(text),
+            });
+          });
+        }
+      );
+      req.on('error', reject);
+      req.end(data);
+    });
+  }
+  async function proofFor(f: Awaited<ReturnType<typeof fixture>>) {
+    return identity.verify(f.token);
+  }
+  function commandAck(task: TaskRecord, commandId: string, disposition = 'accepted') {
+    return { taskId: task.id, attemptId: task.attemptId, commandId, disposition };
+  }
+
+  it('delivers commands in committed per-task order and stores ACK before retiring, including reconnect and core restart', async () => {
+    const f = await fixture();
+    const first = await mailbox.enqueueCommand(commandInput(f.task, 'z-first'));
+    const second = await mailbox.enqueueCommand(commandInput(f.task, 'a-second'));
+    expect([first.sequence, second.sequence]).toEqual([1, 2]);
+    let channel = await listener();
+    const poll = () => commandCall(channel.url, f.token);
+    expect((await poll()).body.command).toEqual(first);
+    // Reconnect without ACK must deliver precisely the oldest outstanding row.
+    expect((await poll()).body.command).toEqual(first);
+    await channel.stop(Date.now() + 1000);
+    mailbox.stop();
+    mailbox = createPostgresTaskMailbox({ pool: stores.postgres, epoch: 1 });
+    channel = await listener();
+    expect((await poll()).body.command).toEqual(first);
+    const ack = commandAck(f.task, first.commandId);
+    expect((await commandCall(channel.url, f.token, '/task/commands/ack', ack)).status).toBe(200);
+    const rows = await stores.postgres.query(
+      `SELECT c.retired_at,a.disposition,a.received_at FROM core.task_commands c JOIN core.task_command_acks a USING(task_id,command_id) WHERE c.command_id=$1`,
+      [first.commandId]
+    );
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0].disposition).toBe('accepted');
+    expect(rows.rows[0].retired_at.getTime()).toBeGreaterThanOrEqual(
+      rows.rows[0].received_at.getTime()
+    );
+    expect((await commandCall(channel.url, f.token, '/task/commands/ack', ack)).status).toBe(200);
+    expect((await poll()).body.command).toEqual(second);
+    // A different disposition cannot rewrite the committed one.
+    expect(
+      (
+        await commandCall(channel.url, f.token, '/task/commands/ack', {
+          ...ack,
+          disposition: 'rejected',
+        })
+      ).status
+    ).toBe(409);
+    // The database guard enforces the ACK-before-retire boundary too.
+    await expect(
+      stores.postgres.query(
+        'UPDATE core.task_commands SET retired_at=clock_timestamp() WHERE command_id=$1',
+        [second.commandId]
+      )
+    ).rejects.toMatchObject({ code: '23514' });
+    const receipt = { ...commandAck(f.task, first.commandId, 'inserted'), receiptId: 'receipt-1' };
+    expect(
+      (await commandCall(channel.url, f.token, '/task/commands/receipt', receipt)).status
+    ).toBe(200);
+    expect(
+      (await commandCall(channel.url, f.token, '/task/commands/receipt', receipt)).status
+    ).toBe(200);
+    expect(
+      (
+        await commandCall(channel.url, f.token, '/task/commands/receipt', {
+          ...receipt,
+          disposition: 'failed',
+        })
+      ).status
+    ).toBe(409);
+    expect((await stores.postgres.query('SELECT * FROM core.task_command_receipts')).rowCount).toBe(
+      1
+    );
+  });
+
+  it('rechecks a missed commit notification and closes a held poll on revocation', async () => {
+    const f = await fixture();
+    const checked = Promise.withResolvers<void>();
+    const withoutNotify = {
+      ...mailbox,
+      subscribeCommands: () => () => undefined,
+      pollCommand: async (...args: Parameters<typeof mailbox.pollCommand>) => {
+        const result = await mailbox.pollCommand(...args);
+        if (!result) checked.resolve();
+        return result;
+      },
+    };
+    const channel = await listener({ mailbox: withoutNotify });
+    const pending = commandCall(channel.url, f.token);
+    await bounded(checked.promise);
+    const queued = await mailbox.enqueueCommand(commandInput(f.task, 'missed-notify'));
+    expect((await bounded(pending)).body.command).toEqual(queued);
+    expect(
+      (
+        await commandCall(
+          channel.url,
+          f.token,
+          '/task/commands/ack',
+          commandAck(f.task, queued.commandId)
+        )
+      ).status
+    ).toBe(200);
+    const waiting = Promise.withResolvers<void>();
+    const other = await listener({
+      mailbox: {
+        ...mailbox,
+        pollCommand: async (...args: Parameters<typeof mailbox.pollCommand>) => {
+          const row = await mailbox.pollCommand(...args);
+          if (!row) waiting.resolve();
+          return row;
+        },
+      },
+    });
+    const held = commandCall(other.url, f.token);
+    await bounded(waiting.promise);
+    const intent = (await registry.readAccessIntent(f.task.id))!;
+    await registry.advanceAccessIntent(f.task.id, {
+      mode: 'revoked',
+      softDueAt: intent.softDueAt,
+      hardStopAt: intent.hardStopAt,
+    });
+    expect((await bounded(held)).status).toBe(403);
+  });
+
+  it('launcher reconnect and process recovery replay journal dispositions, prefix answers, and forward immutable receipts', async () => {
+    const f = await fixture();
+    const channel = await listener();
+    const projected = join(directory, `launcher-command-${randomUUID()}.token`);
+    await writeFile(projected, f.token);
+    const journalPath = join(directory, `command-${randomUUID()}.journal`);
+    let journal = await TaskSteeringJournal.open(journalPath, { capacity: 16, create: true });
+    const native: string[] = [];
+    const command1 = await mailbox.enqueueCommand(commandInput(f.task, 'first'));
+    const proof = await proofFor(f);
+    // Simulate launcher death after synced disposition but before core ACK.
+    await journal.admit({ commandId: command1.commandId, text: command1.text }, async () => {
+      native.push(command1.text);
+      return 'accepted';
+    });
+    await journal.close();
+    journal = await TaskSteeringJournal.open(journalPath, { capacity: 16, create: false });
+    const question: TaskChannelFrame = {
+      ...step(f.task, 1),
+      messageId: 'q-one',
+      kind: 'question',
+      payload: { questionId: 'q-one', text: 'Which result?' },
+    };
+    await mailbox.append(question, proof);
+    await mailbox.enqueueCommand({
+      ...commandInput(f.task, 'answer', 'Use the second'),
+      kind: 'answer',
+      questionId: 'q-one',
+    });
+    const allAcked = Promise.withResolvers<void>();
+    const received = Promise.withResolvers<void>();
+    let loseAck = true;
+    const channel2 = await listener({
+      mailbox: {
+        ...mailbox,
+        acknowledgeCommand: async (...args: Parameters<typeof mailbox.acknowledgeCommand>) => {
+          if (loseAck) {
+            loseAck = false;
+            throw new TaskChannelError(503, 'storage_error');
+          }
+          await mailbox.acknowledgeCommand(...args);
+          if (args[0].commandId === 'answer') allAcked.resolve();
+        },
+        recordCommandReceipt: async (...args: Parameters<typeof mailbox.recordCommandReceipt>) => {
+          await mailbox.recordCommandReceipt(...args);
+          received.resolve();
+        },
+      },
+    });
+    let intake: ReturnType<typeof createTaskCommandIntake>;
+    intake = createTaskCommandIntake({
+      endpoint: { endpoint: channel2.url, tokenFile: projected, caFile },
+      identity: { taskId: f.task.id, attemptId: f.task.attemptId, launchId: f.task.launchId },
+      hardStopAt: Date.now() + 30_000,
+      harness: {
+        steer: async (command) => {
+          const result = await journal.admit(command, async () => {
+            native.push(command.text);
+            return 'accepted';
+          });
+          intake.receipt({
+            type: 'receipt',
+            commandId: command.commandId,
+            disposition: 'inserted',
+          });
+          return result;
+        },
+      },
+    });
+    try {
+      intake.start();
+      await bounded(allAcked.promise);
+      await bounded(received.promise);
+      expect(native).toEqual(['Please check the result', '[question:q-one]\nUse the second']);
+      expect((await stores.postgres.query('SELECT * FROM core.task_command_acks')).rowCount).toBe(
+        2
+      );
+      expect(await mailbox.pollCommand(proof)).toBeNull();
+    } finally {
+      await intake.stop();
+      await journal.close();
+    }
+    expect((await stores.postgres.query('SELECT * FROM core.task_command_receipts')).rowCount).toBe(
+      2
+    );
+    await channel.stop(Date.now() + 1000);
+  });
+
+  it('replays identical command creation and conflicts on changed content under the same ID', async () => {
+    const f = await fixture();
+    const input = commandInput(f.task, 'same');
+    const queued = await mailbox.enqueueCommand(input);
+    expect(await mailbox.enqueueCommand(input)).toEqual(queued);
+    for (const changed of [
+      { ...input, text: 'Changed' },
+      { ...input, kind: 'answer' as const, questionId: 'question-id' },
+    ])
+      await expect(mailbox.enqueueCommand(changed)).rejects.toMatchObject({
+        code: 'message_conflict',
+      });
+    expect((await stores.postgres.query('SELECT * FROM core.task_commands')).rowCount).toBe(1);
+  });
+
+  it.each(['revoked', 'terminal', 'wrapping'] as const)(
+    'refuses %s task commands and delivery',
+    async (state) => {
+      const f = await fixture();
+      const input = commandInput(f.task, 'before');
+      await mailbox.enqueueCommand(input);
+      const proof = await proofFor(f);
+      const intent = (await registry.readAccessIntent(f.task.id))!;
+      if (state === 'revoked' || state === 'wrapping')
+        await registry.advanceAccessIntent(f.task.id, {
+          mode: state === 'revoked' ? 'revoked' : 'wrapping',
+          softDueAt: intent.softDueAt,
+          hardStopAt: intent.hardStopAt,
+        });
+      else
+        await registry.beginFinalization(f.task.id, f.task.launchId, {
+          state: 'failed',
+          reasonCode: 'harness_failed',
+          summary: 'Failed',
+        });
+      await expect(mailbox.enqueueCommand(commandInput(f.task, 'after'))).rejects.toBeDefined();
+      await expect(mailbox.enqueueCommand(input)).rejects.toBeDefined();
+      await expect(mailbox.pollCommand(proof)).rejects.toBeDefined();
+      const channel = await listener();
+      expect([403, 409]).toContain((await commandCall(channel.url, f.token)).status);
+    }
+  );
+
+  it('core refuses a second unanswered question, including concurrent hostile frames, and answer commit opens the next question', async () => {
+    const f = await fixture();
+    const channel = await listener();
+    const question = (name: string, seq: number): TaskChannelFrame => ({
+      ...step(f.task, seq),
+      messageId: name,
+      kind: 'question',
+      payload: { questionId: name, text: 'Which result should I use?' },
+    });
+    const q = question('question-1', 1);
+    expect((await call(channel.url, f.token, q)).status).toBe(200);
+    expect((await call(channel.url, f.token, q)).status).toBe(200);
+    const denied = await Promise.all([
+      call(channel.url, f.token, question('question-2', 2)),
+      call(channel.url, f.token, question('question-3', 3)),
+    ]);
+    expect(denied.map((r) => r.status)).toEqual([409, 409]);
+    expect(denied.map((r) => r.body.code)).toEqual(['question_open', 'question_open']);
+    const answer = {
+      ...commandInput(f.task, 'answer'),
+      kind: 'answer' as const,
+      questionId: 'question-1',
+    };
+    await mailbox.enqueueCommand(answer);
+    expect((await call(channel.url, f.token, question('question-2', 2))).status).toBe(200);
+    await expect(
+      mailbox.enqueueCommand({ ...answer, commandId: 'answer-again' })
+    ).rejects.toMatchObject({ code: 'question_absent' });
+    expect((await stores.postgres.query('SELECT * FROM core.task_commands')).rowCount).toBe(1);
+  });
+
+  it('held poll releases every SQL connection, leaves owner intake live, refuses a second poll and wakes on command commit', async () => {
+    const f = await fixture();
+    const { Pool } = await import('pg');
+    const pool = new Pool({
+      connectionString: workerDatabaseUrl(),
+      max: 1,
+      connectionTimeoutMillis: 1000,
+    });
+    pool.on('error', () => undefined);
+    cleanup.push(() => pool.end());
+    const commands = createPostgresTaskMailbox({ pool, epoch: 1 });
+    cleanup.push(() => commands.stop());
+    const checked = Promise.withResolvers<void>();
+    const heldMailbox = {
+      ...commands,
+      pollCommand: async (...args: Parameters<typeof commands.pollCommand>) => {
+        const result = await commands.pollCommand(...args);
+        if (!result) checked.resolve();
+        return result;
+      },
+    };
+    const channel = await listener({ mailbox: heldMailbox });
+    const abort = new AbortController();
+    let settled = false;
+    const pending = commandCall(
+      channel.url,
+      f.token,
+      '/task/commands',
+      undefined,
+      abort.signal
+    ).finally(() => {
+      settled = true;
+    });
+    void pending.catch(() => undefined);
+    try {
+      await bounded(checked.promise);
+      expect(settled).toBe(false);
+      expect(pool.totalCount - pool.idleCount).toBe(0);
+      expect(pool.waitingCount).toBe(0);
+      const owner = new OwnerMessageIntake(stores.redis, 'owner');
+      const id = ownerId();
+      const start = performance.now();
+      const accepted = await owner.acceptOwnerMessage(id, 'Owner is still here');
+      expect(accepted.status).toBe('accepted');
+      // Read/process the durable owner input while the task response is held.
+      const inputs = await stores.redis.xrange('inbound', '-', '+');
+      const own = inputs.find((row) => row[1].includes(id));
+      expect(own).toBeDefined();
+      expect(own![1]).toContain('Owner is still here');
+      await pool.query('SELECT 1');
+      expect(performance.now() - start).toBeLessThan(2000);
+      expect(settled).toBe(false);
+      expect((await commandCall(channel.url, f.token)).status).toBe(429);
+      const queued = await commands.enqueueCommand(commandInput(f.task, 'wake'));
+      expect((await bounded(pending)).body.command).toEqual(queued);
+    } finally {
+      abort.abort();
+      await pending.catch(() => undefined);
+    }
+  });
+
   function ownerId() {
     const time = Date.now().toString(16).padStart(12, '0');
     return `${time.slice(0, 8)}-${time.slice(8)}-7${randomUUID().slice(0, 3)}-8${randomUUID().slice(0, 3)}-${randomUUID().replaceAll('-', '').slice(0, 12)}`;

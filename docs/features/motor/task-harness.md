@@ -228,7 +228,17 @@ The local shared-contract and mutation evidence is recorded in
 
 ### Remaining mailbox and MCP contract
 
-The core's durable command mailbox and long-poll are not implemented here.
+`task-command-intake.ts` now long-polls the core's durable mailbox on an
+independent outbound client. It sends one command at a time through
+`TaskHarness.steer`, then posts the disposition ACK. Lost ACKs reconnect and
+redeliver the same ID/text through the existing harness journal, not directly to
+a native adapter. Answers prefix `[question:<questionId>]` to their plain text.
+The optional `onAnswerAdmitted` callback is the seam for the later question
+MCP dispatcher; it is called only on accepted admission. Receipt events use
+stable SHA-256 receipt IDs and an independent bounded writer. A final bounded
+receipt attempt drains before terminal reporting. The source implementation is
+not yet accepted: real-store verification is blocked by registry provisioning
+in the 653.9.7 worktree.
 ACK timeout must be at least the adapter admission bound. Receipts and ACKs are
 task claims, not proof of execution or obedience. Launcher-hosted MCP tools use a
 stdio subprocess in `session/new`. The stdio server is a thin launcher-shipped
