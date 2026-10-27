@@ -331,7 +331,7 @@ export interface TaskCommandMailbox {
     proof: TaskChannelProof,
     signal?: AbortSignal
   ): Promise<void>;
-  subscribeCommands(wake: () => void): () => void;
+  subscribeCommands(taskId: string, wake: () => void): () => void;
 }
 export function validateTaskCommandInput(value: unknown): TaskCommandInput {
   if (

@@ -400,6 +400,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       await harness.abort();
       throw new LauncherError('launcher_aborted');
     }
+    let intakeFailed = false;
     const execution = harness.start({
       text: `${outputInstructions(cwd)}\n\n${briefing['briefing']}`,
       model: 'lifemodel/task',
@@ -410,10 +411,22 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       identity: ids,
       harness,
       hardStopAt: Date.parse(claim['hardStopAt']),
+      diagnostic: (level, code, status) => {
+        diagnostic(code);
+        process.stderr.write(
+          `${JSON.stringify({ level, component: 'task-command-intake', code, status })}\n`
+        );
+      },
+      onFatal: () => {
+        intakeFailed = true;
+        void harness?.abort().catch(() => undefined);
+      },
     });
     commands.start();
-    const result: TaskHarnessResult = await execution;
+    let result: TaskHarnessResult = await execution;
     await commands.stop();
+    if (intakeFailed)
+      result = { outcome: 'failed', result: '', reasonCode: 'command_intake_failed' };
     failureSpanId = result.failureSpanId ? `${ids.launchId}_${result.failureSpanId}` : undefined;
     outputsStartedAt = new Date().toISOString();
     const resultName = `${directory}/result.txt`;

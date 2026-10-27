@@ -229,17 +229,33 @@ The local shared-contract and mutation evidence is recorded in
 ### Remaining mailbox and MCP contract
 
 `task-command-intake.ts` now long-polls the core's durable mailbox on an
-independent outbound client. It sends one command at a time through
-`TaskHarness.steer`, then posts the disposition ACK. Lost ACKs reconnect and
+independent outbound client. Before any poll, it waits for the generic
+`TaskHarness.intakeReady` promise. The ACP harness resolves it only when the
+brief's `session/prompt` write installs native steering, not on process start or
+session creation. A harness that ends before opening intake never resolves it;
+launcher stop cancels the wait and leaves commands in core for terminal handling.
+The scripted harness has the same port contract. This is not a retry around a
+native rejected disposition. Once ready, intake sends one command at a time
+through `TaskHarness.steer`, then posts the disposition ACK. Lost ACKs reconnect and
 redeliver the same ID/text through the existing harness journal, not directly to
 a native adapter. Answers prefix `[question:<questionId>]` to their plain text.
 The optional `onAnswerAdmitted` callback is the seam for the later question
 MCP dispatcher; it is called only on accepted admission. Receipt events use
-stable SHA-256 receipt IDs and an independent bounded writer. A final bounded
-receipt attempt drains before terminal reporting. Real-store integration checks cover journal recovery after lost ACKs, answer
+stable SHA-256 receipt IDs and an independent bounded writer. Transient
+connection, 408, 429 and server failures back off exponentially from 250 ms to
+five seconds, for both command redelivery and receipts. Deterministic 4xx
+refusals and invalid response/command envelopes never retry indefinitely.
+A deterministic receipt refusal drops that receipt with a safe warning; reaching
+the 128-entry receipt cap also warns. A deterministic poll or disposition-ACK
+failure logs an error, aborts the harness and reports `command_intake_failed`
+instead of silently disabling intake. Diagnostics contain fixed codes and HTTP
+status only, never command text or credentials. A final bounded receipt attempt
+drains before terminal reporting. Real-store integration checks cover journal recovery after lost ACKs, answer
 prefixes, receipt forwarding and draining an in-flight disposition ACK before
 terminal reporting. This is source verification, not deployed stage acceptance.
-ACK timeout must be at least the adapter admission bound. Receipts and ACKs are
+The ten-second ACK POST deadline exceeds the five-second adapter admission
+bound; it is not a delivery-to-ACK timer in core. Core redelivers on the next
+poll until the ACK commits. Receipts and ACKs are
 task claims, not proof of execution or obedience. Launcher-hosted MCP tools use a
 stdio subprocess in `session/new`. The stdio server is a thin launcher-shipped
 shim relaying over an inherited pipe or launcher-private local socket; it holds

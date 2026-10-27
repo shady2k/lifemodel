@@ -584,6 +584,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
             },
             { timeout: 20000, interval: 20 }
           );
+          await task.intakeReady;
           const command = { commandId: 'contract-steer-1', text: STEER };
           const before = performance.now();
           // Both calls enter while the first native socket operation is in flight.

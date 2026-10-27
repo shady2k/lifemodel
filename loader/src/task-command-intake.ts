@@ -21,7 +21,9 @@ interface Command {
 export function createTaskCommandIntake(options: {
   endpoint: TaskEndpoint;
   identity: Identity;
-  harness: Pick<TaskHarness, 'steer'>;
+  harness: Pick<TaskHarness, 'steer' | 'intakeReady'>;
+  diagnostic?: (level: 'warn' | 'error', code: string, status?: number) => void;
+  onFatal?: () => void;
   hardStopAt: number;
   onAnswerAdmitted?: (questionId: string) => void;
 }) {
@@ -39,22 +41,65 @@ export function createTaskCommandIntake(options: {
   const receiptClosing = new AbortController();
   let receiptFlight: Promise<void> | undefined;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let receiptDelay = 250;
+  const diagnostic = (level: 'warn' | 'error', code: string, error?: unknown) => {
+    const status = error instanceof LauncherError ? error.status : undefined;
+    if (options.diagnostic) options.diagnostic(level, code, status);
+    else
+      process.stderr.write(
+        `${JSON.stringify({ level, component: 'task-command-intake', code, status })}\n`
+      );
+  };
+  const deterministic = (error: unknown) =>
+    error instanceof LauncherError &&
+    ((error.status !== undefined &&
+      error.status >= 400 &&
+      error.status < 500 &&
+      ![408, 429].includes(error.status)) ||
+      ['command_invalid', 'command_ack_invalid', 'response_invalid', 'response_too_large'].includes(
+        error.code
+      ));
+  function delay(ms: number, signal: AbortSignal): Promise<void> {
+    return new Promise((resolve) => {
+      const finish = () => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, ms);
+      signal.addEventListener('abort', finish, { once: true });
+      if (signal.aborted) finish();
+    });
+  }
   function flushReceipts(): void {
-    if (receiptFlight || receiptClosing.signal.aborted || !receipts.size) return;
+    if (receiptFlight || retryTimer || receiptClosing.signal.aborted || !receipts.size) return;
     clearTimeout(retryTimer);
     receiptFlight = (async () => {
       for (const [id, receipt] of receipts) {
-        const stored = await receiptClient.call(
-          '/task/commands/receipt',
-          receipt,
-          receiptClosing.signal
-        );
-        if (stored['stored'] !== true) throw new LauncherError('command_ack_invalid');
-        receipts.delete(id);
+        try {
+          const stored = await receiptClient.call(
+            '/task/commands/receipt',
+            receipt,
+            receiptClosing.signal
+          );
+          if (stored['stored'] !== true) throw new LauncherError('command_ack_invalid');
+          receipts.delete(id);
+          receiptDelay = 250;
+        } catch (error) {
+          if (!deterministic(error)) throw error;
+          receipts.delete(id);
+          diagnostic('warn', 'command_receipt_dropped', error);
+        }
       }
     })()
       .catch(() => {
-        if (!stopped) retryTimer = setTimeout(flushReceipts, 250);
+        if (!stopped) {
+          retryTimer = setTimeout(() => {
+            retryTimer = undefined;
+            flushReceipts();
+          }, receiptDelay);
+          receiptDelay = Math.min(receiptDelay * 2, 5000);
+        }
       })
       .finally(() => {
         receiptFlight = undefined;
@@ -88,11 +133,26 @@ export function createTaskCommandIntake(options: {
     return c as unknown as Command;
   }
   async function run() {
+    // No poll, and therefore no irrevocable rejected ACK, before native intake.
+    let cancelReady: (() => void) | undefined;
+    await Promise.race([
+      options.harness.intakeReady,
+      new Promise<void>((resolve) => {
+        cancelReady = resolve;
+        pollClosing.signal.addEventListener('abort', cancelReady, { once: true });
+        if (pollClosing.signal.aborted) resolve();
+      }),
+    ]);
+    if (cancelReady) pollClosing.signal.removeEventListener('abort', cancelReady);
+    let retryDelay = 250;
     while (!stopped && !closing.signal.aborted) {
       try {
         const response = await poll.call('/task/commands', undefined, pollClosing.signal);
         if (stopped) return;
-        if (response['command'] === null) continue;
+        if (response['command'] === null) {
+          retryDelay = 250;
+          continue;
+        }
         const c = command(response['command']);
         const text = c.kind === 'answer' ? `[question:${c.questionId ?? ''}]\n${c.text}` : c.text;
         const disposition = await options.harness.steer({ commandId: c.commandId, text });
@@ -104,35 +164,35 @@ export function createTaskCommandIntake(options: {
           commandId: c.commandId,
           disposition,
         });
+        retryDelay = 250;
       } catch (error) {
-        if (stopped || closing.signal.aborted) return;
-        if (
-          error instanceof LauncherError &&
-          error.status &&
-          [400, 403, 404, 409].includes(error.status)
-        )
+        if (closing.signal.aborted) return;
+        if (deterministic(error)) {
+          diagnostic('error', 'command_intake_failed', error);
+          options.onFatal?.();
           return;
-        // Bounded backoff after connection/store loss. No native retry here:
-        // redelivery goes back through steer and its durable local journal.
-        await new Promise<void>((resolve) => {
-          const finish = () => {
-            clearTimeout(timer);
-            closing.signal.removeEventListener('abort', finish);
-            resolve();
-          };
-          const timer = setTimeout(finish, 250);
-          closing.signal.addEventListener('abort', finish, { once: true });
-          if (closing.signal.aborted) finish();
-        });
+        }
+        if (stopped) return;
+        // Replayed IDs rejoin the journal; never retry native admission directly.
+        await delay(retryDelay, closing.signal);
+        retryDelay = Math.min(retryDelay * 2, 5000);
       }
     }
   }
   return {
     start() {
-      running ??= run();
+      running ??= run().catch((error: unknown) => {
+        if (stopped) return;
+        diagnostic('error', 'command_intake_failed', error);
+        options.onFatal?.();
+      });
     },
     receipt(event: Extract<TaskHarnessEvent, { type: 'receipt' }>) {
-      if (stopped || receipts.size >= 128) return;
+      if (stopped) return;
+      if (receipts.size >= 128) {
+        diagnostic('warn', 'command_receipt_capacity');
+        return;
+      }
       const receiptId = `receipt_${createHash('sha256')
         .update(JSON.stringify([event.commandId, event.disposition]))
         .digest('hex')}`;
@@ -164,6 +224,7 @@ export function createTaskCommandIntake(options: {
           writes.close();
         }
         clearTimeout(retryTimer);
+        retryTimer = undefined;
         flushReceipts();
         // Drain the bounded receipt attempt before the terminal report.
         await receiptFlight;

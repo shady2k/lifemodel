@@ -27,7 +27,8 @@ describe('steering lifecycle', () => {
       },
     });
     const terminal = harness.start({ text: 'brief', model: 'task' });
-    await vi.waitFor(() => expect(events).toHaveLength(1));
+    await harness.intakeReady;
+    expect(events).toHaveLength(1);
     const command = { commandId: 'cmd', text: 'continue' };
     expect(await harness.steer(command)).toBe('accepted');
     expect(await harness.steer(command)).toBe('accepted');

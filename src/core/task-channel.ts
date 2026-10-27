@@ -1,5 +1,6 @@
 /** Task-only TLS ingress. No artifact bytes, cognition, or owner-intake capacity. */
 import { createServer, type Server } from 'node:https';
+import { createTaskChannelScheduler, type Work } from './task-channel-scheduler.js';
 import { createHash } from 'node:crypto';
 import { createTaskCommandChannel } from './task-command-channel.js';
 import type { ServerResponse, IncomingMessage } from 'node:http';
@@ -46,12 +47,6 @@ interface ChannelOptions {
   onTrace?: (frame: TaskTraceFrame, briefing: TaskBriefing) => void;
   readTraceAuthority?: (proof: TaskChannelProof, signal: AbortSignal) => Promise<TaskBriefing>;
 }
-interface Work {
-  taskId: string;
-  run(): Promise<void>;
-  cancelled(): boolean;
-}
-
 export function createTaskChannel(options: ChannelOptions): {
   server: Server;
   stop(deadline: number): Promise<void>;
@@ -79,6 +74,13 @@ export function createTaskChannel(options: ChannelOptions): {
   let closed = false;
   const logger = options.logger.child({ component: 'task-channel' });
 
+  // Independent task-only reservations. Authentication never occupies a mailbox
+  // worker. The token key only serializes repeated credentials before verification;
+  // it is not trusted as an identity and no positive proof is cached.
+  const authentication = createTaskChannelScheduler(2, () => closed);
+  const mailbox = createTaskChannelScheduler(workerLimit, () => closed);
+  const traceAuthentication = createTaskChannelScheduler(1, () => closed);
+  const traceMailbox = createTaskChannelScheduler(1, () => closed);
   const commands = createTaskCommandChannel({
     mailbox: {
       ...options.mailbox,
@@ -92,74 +94,21 @@ export function createTaskChannel(options: ChannelOptions): {
     maxBufferedBytes: settings['tasks.channel.maxBufferedBytes'],
     maxUnackedFrames: settings['tasks.channel.maxUnackedFrames'],
     maxUnackedBytes: settings['tasks.channel.maxUnackedBytes'],
-    workers: workerLimit,
+    authentication,
+    mailboxScheduler: mailbox,
+    reserveBytes: (bytes) => {
+      if (buffered + bytes > settings['tasks.channel.maxBufferedBytes']) return false;
+      buffered += bytes;
+      return true;
+    },
+    releaseBytes: (bytes) => {
+      buffered -= bytes;
+    },
     onRefused: (status, code, route) => {
       logger.warn({ status, code, route }, 'Task command request refused');
     },
   });
 
-  // Independent task-only reservations. Authentication never occupies a mailbox
-  // worker. The token key only serializes repeated credentials before verification;
-  // it is not trusted as an identity and no positive proof is cached.
-  function scheduler(limit: number) {
-    const queues = new Map<string, Work[]>();
-    const activeTasks = new Set<string>();
-    const ready: string[] = [];
-    let active = 0;
-    function schedule(): void {
-      while (!closed && active < limit && ready.length) {
-        const taskId = ready.shift();
-        if (!taskId || activeTasks.has(taskId)) continue;
-        const queue = queues.get(taskId);
-        const work = queue?.shift();
-        if (!work) {
-          queues.delete(taskId);
-          continue;
-        }
-        if (work.cancelled()) {
-          if (queue?.length) ready.push(taskId);
-          else queues.delete(taskId);
-          continue;
-        }
-        active++;
-        activeTasks.add(taskId);
-        void work.run().finally(() => {
-          active--;
-          activeTasks.delete(taskId);
-          if (queues.get(taskId)?.length) ready.push(taskId);
-          else queues.delete(taskId);
-          schedule();
-        });
-      }
-    }
-    return {
-      add(work: Work) {
-        const queue = queues.get(work.taskId) ?? [];
-        queue.push(work);
-        queues.set(work.taskId, queue);
-        if (!activeTasks.has(work.taskId) && !ready.includes(work.taskId)) ready.push(work.taskId);
-        schedule();
-      },
-      remove(work: Work) {
-        const queue = queues.get(work.taskId);
-        const index = queue?.indexOf(work) ?? -1;
-        if (queue && index >= 0) queue.splice(index, 1);
-        if (queue?.length === 0) {
-          queues.delete(work.taskId);
-          const readyIndex = ready.indexOf(work.taskId);
-          if (readyIndex >= 0) ready.splice(readyIndex, 1);
-        }
-      },
-      clear() {
-        queues.clear();
-        ready.length = 0;
-      },
-    };
-  }
-  const authentication = scheduler(2);
-  const mailbox = scheduler(workerLimit);
-  const traceAuthentication = scheduler(1);
-  const traceMailbox = scheduler(1);
   function send(res: ServerResponse, status: number, body: unknown): void {
     if (res.destroyed || res.writableEnded) return;
     res.writeHead(status, {

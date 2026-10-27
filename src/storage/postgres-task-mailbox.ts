@@ -83,6 +83,8 @@ export function createPostgresTaskMailbox(deps: {
   signal?: AbortSignal;
   operationTimeoutMs?: number;
   onAppendSettled?: () => void;
+  /** Same response-frame limit used by the task-only listener. */
+  commandFrameLimit?: number;
 }): TaskMailbox &
   TaskCommandMailbox & {
     readTraceAuthority(proof: TaskChannelProof, signal?: AbortSignal): Promise<TaskBriefing>;
@@ -97,8 +99,9 @@ export function createPostgresTaskMailbox(deps: {
   )
     throw new TaskChannelError(500, 'invalid_input');
   const closing = new AbortController();
-  const commandListeners = new Set<() => void>();
+  const commandListeners = new Map<string, Set<() => void>>();
   const reconcile = new Map<string, symbol>();
+  const clients = new WeakSet<PoolClient>();
   const transaction = async <T>(
     body: (client: PoolClient) => Promise<T>,
     parent?: AbortSignal,
@@ -115,6 +118,7 @@ export function createPostgresTaskMailbox(deps: {
     let raw: PoolClient | undefined;
     let retired = false;
     let commitAttempted = false;
+    let committed = false;
     const destroy = () => {
       if (raw && !retired) {
         retired = true;
@@ -131,7 +135,10 @@ export function createPostgresTaskMailbox(deps: {
     const work = async (): Promise<T> => {
       try {
         raw = await deps.pool.connect();
-        raw.on('error', () => undefined);
+        if (!clients.has(raw)) {
+          raw.on('error', () => undefined);
+          clients.add(raw);
+        }
         if (signal.aborted) {
           destroy();
           throw cancelled();
@@ -163,6 +170,7 @@ export function createPostgresTaskMailbox(deps: {
         commitAttempted = true;
         await client.query('COMMIT');
         if (signal.aborted) throw cancelled();
+        committed = true;
         return result;
       } catch (error) {
         if (error instanceof TaskChannelError || error instanceof StalePostgresEpochError)
@@ -170,7 +178,10 @@ export function createPostgresTaskMailbox(deps: {
         // No raw SQL error, detail, cause, input or bearer can leave this layer.
         throw new TaskChannelError(503, 'storage_error');
       } finally {
-        destroy();
+        if (committed && raw && !retired) {
+          retired = true;
+          raw.release();
+        } else destroy();
         if (commitAttempted) settled?.();
       }
     };
@@ -307,22 +318,27 @@ export function createPostgresTaskMailbox(deps: {
     );
     if (terminal.rowCount) throw new TaskChannelError(409, 'terminal_attempt');
   }
-  async function commandBinding(client: PoolClient, proof: TaskChannelProof) {
-    const binding = await resolveBinding(client, proof);
-    await commandAuthority(client, binding);
+  async function commandBinding(client: PoolClient, proof: TaskChannelProof, delivery = false) {
+    // Empty poll rechecks never take task/launch UPDATE locks. ACK/receipt writes
+    // still serialize with finalization, but may finish in authoritative wrapping.
+    const binding = await resolveBinding(client, proof, !delivery);
+    if (delivery) await commandAuthority(client, binding);
+    else await authority(client, binding);
     await allocation(client, binding);
     await wonClaim(client, binding, proof);
-    await commandAuthority(client, binding);
     return binding;
   }
   function commandRecord(row: { content: TaskCommandInput; sequence: string }): TaskCommand {
     return { ...row.content, direction: 'core_to_task', sequence: Number(row.sequence) };
   }
   return {
-    subscribeCommands: (wake) => {
-      commandListeners.add(wake);
+    subscribeCommands: (taskId, wake) => {
+      const listeners = commandListeners.get(taskId) ?? new Set<() => void>();
+      listeners.add(wake);
+      commandListeners.set(taskId, listeners);
       return () => {
-        commandListeners.delete(wake);
+        listeners.delete(wake);
+        if (!listeners.size) commandListeners.delete(taskId);
       };
     },
     enqueueCommand: async (input, parent) => {
@@ -337,8 +353,6 @@ export function createPostgresTaskMailbox(deps: {
         );
         const binding = found.rows[0];
         if (binding?.attempt_id !== command.attemptId) denied();
-        await commandAuthority(client, binding);
-        await allocation(client, binding);
         const existing = await client.query<{
           content: TaskCommandInput;
           sequence: string;
@@ -352,6 +366,14 @@ export function createPostgresTaskMailbox(deps: {
           if (!old.matches) throw new TaskChannelError(409, 'message_conflict');
           return commandRecord(old);
         }
+        await commandAuthority(client, binding);
+        await allocation(client, binding);
+        // Include the envelope, direction, and maximum sequence before commit.
+        const wire = {
+          command: { ...command, direction: 'core_to_task', sequence: Number.MAX_SAFE_INTEGER },
+        };
+        if (Buffer.byteLength(JSON.stringify(wire)) > (deps.commandFrameLimit ?? 65_536))
+          throw new TaskChannelError(413, 'invalid_frame');
         const count = await client.query<{ count: string }>(
           'SELECT count(*) FROM core.task_commands WHERE task_id=$1',
           [command.taskId]
@@ -376,17 +398,16 @@ export function createPostgresTaskMailbox(deps: {
       }, parent);
       // Only committed commands can wake a waiter. A lost COMMIT reply is covered
       // by the poll's bounded recheck, never by trusting this notification.
-      for (const wake of commandListeners) wake();
+      for (const wake of commandListeners.get(command.taskId) ?? []) wake();
       return result;
     },
     pollCommand: (proof, parent) =>
       transaction(async (client) => {
-        const binding = await commandBinding(client, proof);
+        const binding = await commandBinding(client, proof, true);
         const result = await client.query<{ content: TaskCommandInput; sequence: string }>(
           'SELECT * FROM core.task_commands WHERE task_id=$1 AND attempt_id=$2 AND retired_at IS NULL ORDER BY sequence LIMIT 1',
           [binding.task_id, binding.attempt_id]
         );
-        await commandAuthority(client, binding);
         return result.rows[0] ? commandRecord(result.rows[0]) : null;
       }, parent),
     acknowledgeCommand: async (input, proof, parent) => {
@@ -413,7 +434,7 @@ export function createPostgresTaskMailbox(deps: {
           'UPDATE core.task_commands SET retired_at=clock_timestamp() WHERE task_id=$1 AND command_id=$2 AND retired_at IS NULL',
           [ack.taskId, ack.commandId]
         );
-        await commandAuthority(client, binding);
+        await authority(client, binding);
       }, parent);
     },
     recordCommandReceipt: async (input, proof, parent) => {
@@ -447,7 +468,7 @@ export function createPostgresTaskMailbox(deps: {
           'INSERT INTO core.task_command_receipts(task_id,command_id,receipt_id,disposition) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',
           [receipt.taskId, receipt.commandId, receipt.receiptId, receipt.disposition]
         );
-        await commandAuthority(client, binding);
+        await authority(client, binding);
       }, parent);
     },
     readIdentity: async (proof, parent) =>
@@ -515,7 +536,7 @@ export function createPostgresTaskMailbox(deps: {
       }, parent),
     stop: () => {
       closing.abort();
-      for (const wake of commandListeners) wake();
+      for (const listeners of commandListeners.values()) for (const wake of listeners) wake();
       commandListeners.clear();
     },
     append: async (input, proof, parent) => {

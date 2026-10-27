@@ -5,6 +5,7 @@ SET statement_timeout = '5s';
 -- squawk-ignore ban-drop-constraint
 ALTER TABLE core.task_mailbox DROP CONSTRAINT IF EXISTS task_mailbox_kind_check;
 ALTER TABLE core.task_mailbox ADD CONSTRAINT task_mailbox_kind_check CHECK (kind IN ('step','question','terminal')) NOT VALID;
+ALTER TABLE core.task_mailbox VALIDATE CONSTRAINT task_mailbox_kind_check;
 CREATE TABLE IF NOT EXISTS core.task_commands (
   task_id text NOT NULL REFERENCES core.tasks(id),
   attempt_id text NOT NULL,
