@@ -257,7 +257,7 @@ export async function executeToolCalls(
 
     const tool = toolRegistry.getTools().find((t) => t.name === toolName);
     const toolContext = buildCtx(context);
-    toolContext.taskSteerCounts = state.toolCallCounts;
+    if (toolName === 'core.steerTask') toolContext.taskSteerCounts = state.taskSteerCounts;
     // Parse operation identity before recovery. Payload validation still follows it.
     const argsString = toolCall.function.arguments.trim();
     const parsedArgs = robustJsonParse(argsString);

@@ -559,7 +559,7 @@ export class AgenticLoop {
         onEscalate: (s, ctx, reason) => ({
           ...ctx,
           previousAttempt: {
-            taskSteerCounts: [...s.toolCallCounts].filter(([key]) => key.startsWith('taskSteer:')),
+            taskSteerCounts: [...s.taskSteerCounts],
             toolResults: [...s.toolResults],
             executedTools: [...s.executedTools],
             reason,
