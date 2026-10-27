@@ -326,7 +326,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
         ]);
         await task.abort();
         expect(await terminal).toEqual({ outcome: 'aborted', result: '', reasonCode: 'aborted' });
-        expect(await task.steer('later')).toBe('not_supported');
+        expect(await task.steer({ commandId: 'later', text: 'later' })).toBe('rejected');
         expect(await task.wrap()).toBe('not_supported');
       }, 60_000);
     });

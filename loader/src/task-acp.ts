@@ -6,12 +6,15 @@ import { isDeepStrictEqual } from 'node:util';
 import { createTaskModelRelay } from './task-model-relay.js';
 import { AcpTaskTrace } from './task-trace.js';
 import { TASK_PROCESS_SUPERVISOR } from './task-process.js';
+import { TaskSteeringJournal } from './task-steering-journal.js';
 import type { AgentConfiguration } from './task-harness-registry.js';
 import type {
   TaskBriefing,
   TaskHarness,
   TaskHarnessEventSink,
   TaskHarnessResult,
+  TaskSteerCommand,
+  TaskSteerDisposition,
 } from './task-harness.js';
 
 type Json = Record<string, unknown>;
@@ -168,6 +171,9 @@ export interface AcpTaskHarnessOptions {
     adapterConfig?: AgentConfiguration['adapterConfig'];
   }) => NodeJS.ProcessEnv;
   toolOutputFailed?: (output: unknown, input?: unknown) => boolean;
+  admit?: (input: { workDirectory: string; sessionId: string; commandId: string; text: string }) => Promise<TaskSteerDisposition>;
+  bind?: (input: { workDirectory: string; sessionId: string }) => Promise<void>;
+  observeInsertion?: (input: { workDirectory: string; commandId: string; signal: AbortSignal }) => Promise<boolean>;
   timeoutMs?: number;
   storageEnv?: {
     LIFEMODEL_STORAGE_ENDPOINT: string;
@@ -183,8 +189,9 @@ export class AcpTaskHarness implements TaskHarness {
   private cancelRequest: (() => Promise<void>) | undefined;
   private readonly cancellation = new AbortController();
   constructor(private readonly options: AcpTaskHarnessOptions) {}
-  steer(_text: string): Promise<'not_supported'> {
-    return Promise.resolve('not_supported');
+  private steering: ((command: TaskSteerCommand) => Promise<TaskSteerDisposition>) | undefined;
+  steer(command: TaskSteerCommand): Promise<TaskSteerDisposition> {
+    return this.steering?.(command) ?? Promise.resolve('rejected');
   }
   wrap(): Promise<'not_supported'> {
     return Promise.resolve('not_supported');
@@ -207,6 +214,9 @@ export class AcpTaskHarness implements TaskHarness {
     let processClosed: Promise<void> | undefined;
     let stdoutEnded = false;
     let relay: Awaited<ReturnType<typeof createTaskModelRelay>> | undefined;
+    let journal: TaskSteeringJournal | undefined;
+    const receiptObserver = new AbortController();
+    const observedCommands = new Set<string>();
     const turn = new AcpTurn(this.options.toolOutputFailed, this.options.onEvent);
     let result: TaskHarnessResult = failed('harness_failed');
     const pending = new Map<
@@ -467,6 +477,30 @@ export class AcpTaskHarness implements TaskHarness {
       if (typeof created['sessionId'] !== 'string' || !created['sessionId'])
         throw new Error('harness_session_invalid');
       sessionID = created['sessionId'];
+      if (this.options.bind) await this.options.bind({ workDirectory: work, sessionId: sessionID });
+      if (this.options.admit) {
+        journal = await TaskSteeringJournal.open(join(work, 'tmp', 'steering.journal'), { capacity: 1024, create: true });
+        const boundSession = sessionID;
+        const steeringJournal = journal;
+        const admit = this.options.admit;
+        this.steering = async (command) => {
+          const disposition = await steeringJournal.admit(command, () => admit({ workDirectory: work, sessionId: boundSession, ...command }));
+          if (disposition === 'accepted' && this.options.observeInsertion && !observedCommands.has(command.commandId)) {
+            observedCommands.add(command.commandId);
+            void this.options.observeInsertion({ workDirectory: work, commandId: command.commandId, signal: receiptObserver.signal }).then(async (inserted) => {
+              if (inserted) await this.options.onEvent?.({ type: 'receipt', commandId: command.commandId, disposition: 'inserted' });
+            }).catch(() => undefined);
+          }
+          if (disposition !== 'accepted') {
+            void Promise.resolve(this.options.onEvent?.({ type: 'receipt', commandId: command.commandId, disposition: disposition === 'uncertain' ? 'uncertain' : 'failed' })).catch(() => undefined);
+          }
+          if (disposition === 'uncertain') {
+            fail('steer_uncertain');
+            this.cancellation.abort();
+          }
+          return disposition;
+        };
+      }
       this.cancelRequest = () =>
         write({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: sessionID } });
       await emit({ type: 'step', text: 'Running task' });
@@ -506,6 +540,8 @@ export class AcpTaskHarness implements TaskHarness {
       turn.finish(result, promptResponse);
       closing = true;
       this.cancelRequest = undefined;
+      this.steering = undefined;
+      receiptObserver.abort();
       let cleanupFailed = false;
       try {
         const cleanupChild = child;
@@ -558,6 +594,7 @@ export class AcpTaskHarness implements TaskHarness {
           cleanupFailed = true;
         });
       }
+      await journal?.close().catch(() => { cleanupFailed = true; });
       signal.removeEventListener('abort', stop);
       fail('harness_closed');
       if (cleanupFailed && result.outcome === 'succeeded') {

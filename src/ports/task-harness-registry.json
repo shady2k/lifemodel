@@ -32,6 +32,16 @@
           "source": "docker/workbench/opencode.json",
           "destination": "/etc/lifemodel/opencode.json",
           "mode": "0444"
+        },
+        {
+          "source": "docker/workbench/steering-plugin/package.json",
+          "destination": "/etc/lifemodel/steering-plugin/package.json",
+          "mode": "0444"
+        },
+        {
+          "source": "docker/workbench/steering-plugin/index.mjs",
+          "destination": "/etc/lifemodel/steering-plugin/index.mjs",
+          "mode": "0444"
         }
       ],
       "directories": [
