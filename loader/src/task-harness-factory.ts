@@ -17,6 +17,7 @@ export async function createRegisteredHarness(
     release,
     failOnUncertain,
     observeInsertion,
+    reconcileEndTurn,
   } = (await import(agent.adapterModule)) as {
     configureAgent: NonNullable<AcpTaskHarnessOptions['configure']>;
     toolOutputFailed: NonNullable<AcpTaskHarnessOptions['toolOutputFailed']>;
@@ -25,6 +26,7 @@ export async function createRegisteredHarness(
     release?: AcpTaskHarnessOptions['release'];
     failOnUncertain?: AcpTaskHarnessOptions['failOnUncertain'];
     observeInsertion?: AcpTaskHarnessOptions['observeInsertion'];
+    reconcileEndTurn?: AcpTaskHarnessOptions['reconcileEndTurn'];
   };
   return new AcpTaskHarness({
     ...options,
@@ -36,5 +38,6 @@ export async function createRegisteredHarness(
     ...(release ? { release } : {}),
     ...(failOnUncertain !== undefined ? { failOnUncertain } : {}),
     ...(observeInsertion ? { observeInsertion } : {}),
+    ...(reconcileEndTurn ? { reconcileEndTurn } : {}),
   });
 }

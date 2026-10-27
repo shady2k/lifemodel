@@ -3,7 +3,12 @@ import { createServer, type Server } from 'node:net';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { admit, nativeMessageId, observeInsertion } from '../../loader/src/task-opencode.js';
+import {
+  admit,
+  nativeMessageId,
+  observeInsertion,
+  reconcileEndTurn,
+} from '../../loader/src/task-opencode.js';
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -45,6 +50,41 @@ async function server(
 }
 
 describe('OpenCode steering adapter boundary', () => {
+  it.each([
+    ['inserted', 'idle'],
+    ['pending', 'continue'],
+    ['unknown', 'unknown'],
+    ['compaction', 'unknown'],
+    ['failed', 'unknown'],
+  ])('reconciles native %s as %s', async (status, expected) => {
+    const dir = await work();
+    await server(dir, (request) => ({ ok: true, data: { id: request.id, status } }));
+    const result = await reconcileEndTurn({
+      workDirectory: dir,
+      sessionId: 'session',
+      commandIds: ['cmd'],
+      signal: new AbortController().signal,
+    });
+    expect(result).toEqual(
+      expected === 'continue' ? { state: 'continue', commandIds: ['cmd'] } : { state: expected }
+    );
+  });
+
+  it('fails closed if an ID remains pending after its one continuation', async () => {
+    const dir = await work();
+    await server(dir, (request) => ({ ok: true, data: { id: request.id, status: 'pending' } }));
+    const input = {
+      workDirectory: dir,
+      sessionId: 'session',
+      commandIds: ['cmd'],
+      signal: new AbortController().signal,
+    };
+    expect(await reconcileEndTurn(input)).toEqual({ state: 'continue', commandIds: ['cmd'] });
+    expect(await reconcileEndTurn({ ...input, continuedCommandIds: ['cmd'] })).toEqual({
+      state: 'unknown',
+    });
+  });
+
   it('sends the native session and deterministic identity and accepts only its matching acknowledgement', async () => {
     const dir = await work();
     const seen: Record<string, unknown>[] = [];
@@ -85,22 +125,44 @@ describe('OpenCode steering adapter boundary', () => {
     const dir = await work();
     const statuses = ['pending', 'compaction'];
     const seen: Record<string, unknown>[] = [];
-    await server(dir, request => {seen.push(request); return {ok: true, data: {id: request.id, status: statuses[Math.min(seen.length - 1, 1)]}};});
+    await server(dir, (request) => {
+      seen.push(request);
+      return { ok: true, data: { id: request.id, status: statuses[Math.min(seen.length - 1, 1)] } };
+    });
     const abort = new AbortController();
     let settled = false;
-    const observing = observeInsertion({workDirectory: dir, commandId: 'cmd', signal: abort.signal}).then(value => {settled = true; return value;});
+    const observing = observeInsertion({
+      workDirectory: dir,
+      commandId: 'cmd',
+      signal: abort.signal,
+    }).then((value) => {
+      settled = true;
+      return value;
+    });
     try {
       await vi.waitFor(() => expect(seen.length).toBeGreaterThanOrEqual(2));
       expect(settled).toBe(false);
-    } finally { abort.abort(); }
+    } finally {
+      abort.abort();
+    }
     expect(await observing).toBe(false);
-    expect(seen.every(request => request.op === 'disposition')).toBe(true);
+    expect(seen.every((request) => request.op === 'disposition')).toBe(true);
   });
 
   it('accepts only a matching positive inserted disposition', async () => {
-    const dir = await work(); let count = 0;
-    await server(dir, request => ({ok: true, data: {id: ++count === 1 ? 'wrong' : request.id, status: 'inserted'}}));
-    expect(await observeInsertion({workDirectory: dir, commandId: 'cmd', signal: new AbortController().signal})).toBe(true);
+    const dir = await work();
+    let count = 0;
+    await server(dir, (request) => ({
+      ok: true,
+      data: { id: ++count === 1 ? 'wrong' : request.id, status: 'inserted' },
+    }));
+    expect(
+      await observeInsertion({
+        workDirectory: dir,
+        commandId: 'cmd',
+        signal: new AbortController().signal,
+      })
+    ).toBe(true);
     expect(count).toBe(2);
   });
 
@@ -108,13 +170,14 @@ describe('OpenCode steering adapter boundary', () => {
     const dir = await work();
     const abort = new AbortController();
     let reads = 0;
-    await server(dir, request => {
+    await server(dir, (request) => {
       reads++;
       if (reads === 2) abort.abort();
-      return {ok: true, data: {id: request.id, status: 'pending', output: 'x'.repeat(1048577)}};
+      return { ok: true, data: { id: request.id, status: 'pending', output: 'x'.repeat(1048577) } };
     });
-    expect(await observeInsertion({workDirectory: dir, commandId: 'cmd', signal: abort.signal})).toBe(false);
+    expect(
+      await observeInsertion({ workDirectory: dir, commandId: 'cmd', signal: abort.signal })
+    ).toBe(false);
     expect(reads).toBe(2);
   });
-
 });

@@ -124,7 +124,10 @@ nonempty ACP continuation prompt without resending it. Reopen intake for that
 continuation turn and repeat the barrier. Prime admission wakes a successor run;
 await it and repeat until the daemon reports idle and an empty queue. Before the
 brief, bind the ACP session to exactly one native root; ambiguity fails closed.
-Across turns use the last final text and accumulate unresolved tool failures.
+Across turns use the last final text and retain tool state. Unsettled calls
+always block success. Settled failures carry across a turn reset but later agent
+prose or new/resumed tool work recovers them under the same within-turn policy;
+a reset alone is not recovery.
 A Prime successor succeeds only with daemon evidence of final text and settled
 tools; missing tool evidence is `required_tool_failed` or uncertain, never
 success. The accepted task timeout bounds every repeat loop. The Prime idle/queue/result

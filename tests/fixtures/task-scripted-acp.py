@@ -60,6 +60,15 @@ for line in sys.stdin:
                     item["status"] = "inserted"
             # Final response waits for the actual insertion-disposition read.
             assert inserted_observed.wait(30), "insertion disposition was never observed"
+        if scenario == "barrier-gated":
+            import time
+            update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "First result"}})
+            # Test owns this explicit event gate; no event sink blocks ACP dispatch.
+            open("prompt-tail", "w").close()
+            while not os.path.exists("release-prompt"):
+                time.sleep(0.01)
+            send({"id": prompt_id, "result": {"stopReason": "end_turn"}})
+            continue
         if scenario == "permission":
             send({"id": "permission-1", "method": "session/request_permission", "params": {"sessionId": session, "toolCall": {"toolCallId": "ask"}, "options": [{"optionId": "once", "kind": "allow_once", "name": "Once"}]}})
             continue
@@ -77,7 +86,15 @@ for line in sys.stdin:
             update({"sessionUpdate": "tool_call", "toolCallId": "required", "status": "completed", "rawOutput": {"customFailure": True}})
         if scenario == "tool":
             update({"sessionUpdate": "tool_call", "toolCallId": "required", "status": "failed"})
-        update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "The task result is durable."}})
+        result_text = "The task result is durable."
+        if scenario in ("barrier", "barrier-tool"):
+            with lock:
+                if inbox:
+                    result_text = "Steered terminal result."
+                    for item in inbox.values():
+                        item["status"] = "inserted"
+            # ACP callback must observe final text before terminal closure.
+        update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": result_text}})
         if scenario in ("malformed", "late-tool"):
             final = json.dumps({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "end_turn"}})
             late = "not-json" if scenario == "malformed" else json.dumps({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session, "update": {"sessionUpdate": "tool_call", "toolCallId": "late", "status": "failed"}}})

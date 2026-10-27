@@ -16,8 +16,11 @@ The journal and channels are launcher-owned, outside TMPDIR, not a trust
 boundary; receipts are task claims in the single untrusted Pod zone.
 Neither channel adds Pod ingress or a second agent engine. See
 [task harness admission](task-harness.md#native-admission-and-launcher-owned-journal)
-for journal, receipts and uncertainty. The end-of-turn barrier is separate
-lifemodel-653.9.6 work; this bridge alone does not settle the final-answer race.
+for journal, receipts and uncertainty. The launcher now settles the final-answer
+race through the adapter end-of-turn barrier described below. The bridge alone
+is admission, not completion evidence. Pending IDs receive one plain continuation
+at most; Prime fences successor evidence with closed intake and a second idle
+check, then reads only the relevant history tail.
 
 ## Contents and pins
 
@@ -162,8 +165,14 @@ socket; it holds no channel credentials. Frames, IDs and limits are the
 launcher’s and core’s. MCP and Prime offline MCP
 support are unverified until tested. The two adapters and scripted fixture share the
 contract suite. Prime's ACP permission gap and completed Python exception are
-known probe limitations accepted by the owner; the barrier's daemon idle/result
-signal remains unverified until implementation tests. See the
+known probe limitations accepted by the owner. The launcher now reconciles end-turn
+through each registry adapter: OpenCode continues parked input without resending;
+Prime awaits native idle plus empty queues and requires final-text and settled-tool
+evidence from daemon history. The shared contract exercises tail/late steering,
+question waiting and timeout on the pinned agents and scripted ACP fixture. A
+wire-level loss fixture removes Prime successor tool evidence and must fail closed.
+Question MCP tools remain deferred; the barrier exposes a generic question-state
+seam bounded by the accepted `softDueAt`. See the
 [ADR amendment](../../adr/014-task-runtime.md#amendment--2026-10-27-live-steering-behind-the-harness-port).
 
 ## CI and release

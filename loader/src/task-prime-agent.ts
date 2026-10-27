@@ -1,3 +1,8 @@
+import type {
+  TaskEndTurnInput,
+  TaskEndTurnReconciliation,
+  TaskSuccessorEvidence,
+} from './task-harness.js';
 /** Prime Agent 0.10.1 configuration. The protocol client remains generic ACP. */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -273,4 +278,190 @@ export async function observeInsertion(input: {
       );
   }
   return false;
+}
+
+/** A closed launcher intake makes native idle + empty queue a completion fence. */
+export async function reconcileEndTurn(
+  input: TaskEndTurnInput
+): Promise<TaskEndTurnReconciliation> {
+  const activeSessionId = roots.get(bindingKey(input.workDirectory, input.sessionId));
+  if (!activeSessionId) return { state: 'unknown' };
+  const call = async (type: string, extra: NativeRecord = {}) => {
+    const response = await nativeCall(
+      input.workDirectory,
+      { type, activeSessionId, ...extra },
+      input.signal
+    );
+    if (response['success'] !== true || response['command'] !== type)
+      throw new Error('prime_evidence_missing');
+    return asRecord(response['data']);
+  };
+  const idle = async () => {
+    const state = await call('get_state');
+    const queue = await call('get_queue');
+    if (
+      state['activeSessionId'] !== activeSessionId ||
+      !Array.isArray(queue['steering']) ||
+      !Array.isArray(queue['followUp'])
+    )
+      throw new Error('prime_evidence_missing');
+    return (
+      state['isSessionActive'] === false &&
+      state['isStreaming'] === false &&
+      state['isCompacting'] === false &&
+      state['isRunningTools'] === false &&
+      state['hasRunningSubagents'] === false &&
+      queue['steering'].length === 0 &&
+      queue['followUp'].length === 0
+    );
+  };
+  try {
+    if ((await idle()) && input.commandIds.every((id) => input.insertedCommandIds?.includes(id)))
+      return { state: 'idle' };
+  } catch {
+    return { state: 'unknown' };
+  }
+  return {
+    state: 'successor',
+    wait: async (control) => {
+      try {
+        const commandIds = new Set(input.commandIds);
+        let backoff = 100;
+        for (;;) {
+          while (!(await idle())) {
+            await delay(backoff, undefined, { signal: input.signal });
+            backoff = Math.min(backoff * 2, 2000);
+          }
+          // Native idle is not a fence while launcher intake is open. A steer
+          // may enqueue/start work between the two native reads. Close, settle,
+          // and check again before inspecting any final text.
+          const added = await control.closeIntake();
+          for (const id of added) commandIds.add(id);
+          const settledIdle = await idle();
+          if (settledIdle && added.length === 0) break;
+          // An admitted command can have left its queue before the daemon's
+          // running flags catch up. Give it another idle fence as well.
+          control.reopenIntake();
+        }
+        // Read only the relevant branch-pinned tail. Old task history is not
+        // evidence for this successor and must not cost memory or frame budget.
+        const messages: NativeRecord[] = [];
+        const markers = new Set([...commandIds].map((id) => steeringMarker(id) + '\n'));
+        let before: string | undefined;
+        let historyLeafId: unknown;
+        let bytes = 0;
+        for (let page = 0; ; page++) {
+          const data = await call('get_messages', {
+            page: { from: 'end', limit: 1, ...(before ? { before } : {}) },
+            ...(historyLeafId ? { historyLeafId } : {}),
+          });
+          if (!Array.isArray(data['messages'])) return undefined;
+          let boundary = false;
+          const rows = data['messages'].map(asRecord);
+          for (let index = rows.length - 1; index >= 0; index--) {
+            const row = rows[index];
+            if (!row) return undefined;
+            bytes += Buffer.byteLength(JSON.stringify(row));
+            if (bytes > 8 * 1024 * 1024) return undefined;
+            messages.unshift(row);
+            if (row['role'] === 'user') {
+              const text = messageText(row);
+              for (const marker of markers) if (text.startsWith(marker)) markers.delete(marker);
+              if (markers.size === 0) {
+                boundary = true;
+                break;
+              }
+            }
+          }
+          if (boundary) return successorEvidence(messages, [...commandIds]);
+          if (data['more'] === false) return undefined;
+          if (
+            data['more'] !== true ||
+            typeof data['firstEntryId'] !== 'string' ||
+            data['firstEntryId'] === before ||
+            page === 999
+          )
+            return undefined;
+          before = data['firstEntryId'];
+          historyLeafId = data['historyLeafId'];
+        }
+      } catch {
+        return undefined;
+      }
+    },
+  };
+}
+
+function messageText(row: NativeRecord): string {
+  return Array.isArray(row['content'])
+    ? row['content']
+        .map((part: unknown) => {
+          const value = asRecord(part);
+          return value['type'] === 'text' && typeof value['text'] === 'string' ? value['text'] : '';
+        })
+        .join('')
+    : '';
+}
+
+/** Only structured daemon rows can prove successor final text and tool settlement. */
+function successorEvidence(
+  messages: NativeRecord[],
+  commandIds: string[]
+): TaskSuccessorEvidence | undefined {
+  let start = messages.length;
+  for (const commandId of commandIds) {
+    const index = messages.findIndex(
+      (row) =>
+        row['role'] === 'user' && messageText(row).startsWith(steeringMarker(commandId) + '\n')
+    );
+    if (index < 0) return undefined;
+    start = Math.min(start, index);
+  }
+  if (!commandIds.length) start = messages.findLastIndex((row) => row['role'] === 'user');
+  if (start < 0) return undefined;
+  const updates: TaskSuccessorEvidence['updates'] = [];
+  const pending = new Set<string>();
+  let final = '';
+  for (const row of messages.slice(start)) {
+    if (row['role'] === 'assistant') {
+      if (!Array.isArray(row['content'])) return undefined;
+      for (const part of row['content']) {
+        const content = asRecord(part);
+        if (content['type'] !== 'toolCall') continue;
+        if (typeof content['id'] !== 'string' || !content['id'] || pending.has(content['id']))
+          return undefined;
+        pending.add(content['id']);
+        final = '';
+        updates.push({
+          kind: 'tool',
+          id: content['id'],
+          status: 'in_progress',
+          input: content['arguments'],
+        });
+      }
+      if (row['stopReason'] === 'error' || row['stopReason'] === 'aborted') return undefined;
+      if (row['stopReason'] === 'stop' && messageText(row).trim()) {
+        final = messageText(row);
+        updates.push({ kind: 'reset' }, { kind: 'text', text: final });
+      }
+    } else if (row['role'] === 'toolResult') {
+      if (
+        typeof row['toolCallId'] !== 'string' ||
+        !pending.delete(row['toolCallId']) ||
+        typeof row['isError'] !== 'boolean'
+      )
+        return undefined;
+      updates.push({
+        kind: 'tool',
+        id: row['toolCallId'],
+        status: row['isError'] ? 'failed' : 'completed',
+        output: row['content'],
+      });
+    } else if (row['role'] === 'user') {
+      final = '';
+      updates.push({ kind: 'reset' });
+    }
+  }
+  if (!final.trim() || pending.size) return undefined;
+  return { updates, stopReason: 'end_turn' };
 }

@@ -119,6 +119,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
   let abortCalls: number;
   let startWon: boolean;
   let startMode: 'ok' | '409' | 'timeout' | 'lost_ack';
+  let softDeadline: unknown;
   let briefingStatus: number;
   let briefingHarness: string;
   let loseTerminalAcks: number;
@@ -155,6 +156,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     abortCalls = 0;
     startWon = false;
     startMode = 'ok';
+    softDeadline = new Date(Date.now() + 50_000).toISOString();
     briefingStatus = 200;
     briefingHarness = 'opencode';
     loseTerminalAcks = 0;
@@ -248,6 +250,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
         ...IDS,
         start: true,
         space: SPACE,
+        ...(softDeadline === undefined ? {} : { softDueAt: softDeadline }),
         hardStopAt: new Date(Date.now() + 60_000).toISOString(),
       });
       return;
@@ -451,6 +454,17 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     );
   }
 
+  it.each([undefined, null, 123, 'not-a-date'])(
+    'refuses an invalid start softDueAt: %s',
+    async (value) => {
+      softDeadline = value;
+      expect(await run({})).not.toBe(0);
+      expect(harnessStarts).toEqual([]);
+      expect(harnessCreations).toBe(0);
+      expect(diagnostics).toContain('start_lost');
+    }
+  );
+
   it('resolves the accepted Prime Agent harness through the launcher factory', async () => {
     briefingHarness = 'prime-agent';
     const factory = vi.spyOn(harnessFactory, 'createRegisteredHarness');
@@ -485,6 +499,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       {
         text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\nFiles elsewhere are not delivered. Outputs are delivered only if the task succeeds.\n\n${BRIEFING}`,
         model: 'lifemodel/task',
+        softDueAt: expect.any(String),
       },
     ]);
     expect(stoppedProgress).toBe(true);
@@ -594,6 +609,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       {
         text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\nFiles elsewhere are not delivered. Outputs are delivered only if the task succeeds.\n\n${BRIEFING}`,
         model: 'lifemodel/task',
+        softDueAt: expect.any(String),
       },
     ]);
     expect(startCalls()).toHaveLength(1);

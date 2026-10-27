@@ -296,6 +296,8 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       claim['start'] !== true ||
       !same(ids, identity(claim)) ||
       claim['space'] !== options.env['LIFEMODEL_STORAGE_SPACE'] ||
+      typeof claim['softDueAt'] !== 'string' ||
+      !Number.isFinite(Date.parse(claim['softDueAt'])) ||
       typeof claim['hardStopAt'] !== 'string' ||
       !Number.isFinite(Date.parse(claim['hardStopAt'])) ||
       Date.parse(claim['hardStopAt']) <= Date.now()
@@ -395,6 +397,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
     const result: TaskHarnessResult = await harness.start({
       text: `${outputInstructions(cwd)}\n\n${briefing['briefing']}`,
       model: 'lifemodel/task',
+      softDueAt: claim['softDueAt'],
     });
     failureSpanId = result.failureSpanId ? `${ids.launchId}_${result.failureSpanId}` : undefined;
     outputsStartedAt = new Date().toISOString();
