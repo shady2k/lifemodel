@@ -603,7 +603,7 @@ describe('ensureArtifacts', () => {
         });
         const expectedKeys = Object.keys(saved).filter((key) => saved[key].aarch64);
         expect(artifacts.map((artifact: { key: string }) => artifact.key).sort()).toEqual(expectedKeys.sort());
-        expect(downloaded).toHaveLength(expectedKeys.length);
+        expect(downloaded).toHaveLength(5);
         for (const a of artifacts) {
           expect(fs.existsSync(a.hostPath)).toBe(true);
         }

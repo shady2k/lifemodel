@@ -1,4 +1,3 @@
-import { TASK_HARNESS_NAMES } from '../../src/ports/task-harness-names.js';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AcceptTask, TaskRegistry, TaskRecord } from '../../src/ports/tasks.js';
@@ -286,20 +285,22 @@ describe('fenced durable task registry', () => {
       settings: { read: async () => snapshot },
     });
     const task = await dynamic.accept(request('snapshot'));
+    expect(task.harness).toBe('opencode');
     snapshot = {
       revision: 7,
       values: {
         ...base.values,
         'tasks.concurrency': 1,
-        'tasks.harness': TASK_HARNESS_NAMES[0],
+        'tasks.harness': 'prime-agent',
         'tasks.wrapGraceSeconds': 30,
       },
     };
     expect(await dynamic.accept(request('snapshot'))).toEqual(task);
+    expect((await dynamic.read(task.id))?.harness).toBe('opencode');
     const second = await dynamic.accept(request('snapshot-2'));
     expect(second).toMatchObject({
       settingsRevision: 7,
-      harness: TASK_HARNESS_NAMES[0],
+      harness: 'prime-agent',
       wrapGraceSeconds: 30,
     });
     expect(await dynamic.admitNext()).toMatchObject({ id: task.id });
@@ -307,7 +308,8 @@ describe('fenced durable task registry', () => {
     await dynamic.tombstoneLaunch(task.id, task.launchId);
     await dynamic.confirmComputeTerminated(task.id, task.launchId);
     await dynamic.releaseSlot(task.id);
-    expect(await dynamic.admitNext()).toMatchObject({ id: second.id });
+    expect((await makeRegistry().read(second.id))?.harness).toBe('prime-agent');
+    expect(await dynamic.admitNext()).toMatchObject({ id: second.id, harness: 'prime-agent' });
   });
 
   it('rechecks a lowered cap after a waiting admission reaches the serialized decision', async () => {

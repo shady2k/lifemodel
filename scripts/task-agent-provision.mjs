@@ -35,14 +35,36 @@ export function agentArtifacts(registry = agentRegistry) {
 }
 export function agentInstallScript(name, agent, archive, sourceRoot = '.', destinationRoot = '') {
   validateProvisionRegistry({ [name]: agent });
-  const target = file => quote(destinationRoot + file);
+  // A venv embeds its creation path and cannot be relocated after provisioning.
+  if (destinationRoot !== '') throw new Error('destinationRoot is not supported');
+  const target = file => quote(file);
   const commands = [];
   if (agent.provision.archives) {
     if (!archive) throw new Error(`missing pinned agent archive: ${name}`);
     const temp = `/tmp/lifemodel-agent-${name}`;
     if (agent.provision.archiveLayout === 'distribution') {
       const dir = `/opt/lifemodel/agents/${name}`;
-      commands.push(`mkdir -p ${target(dir)}`, `tar --no-same-owner -xzf ${quote(archive)} -C ${target(dir)}`,
+      // Reject links and special files before extracting any member. Extraction uses
+      // a private fresh directory, not an existing tree that could contain links.
+      const extract = `import os, sys, tarfile
+with tarfile.open(sys.argv[1], 'r:gz') as archive:
+    members = archive.getmembers()
+    seen = set()
+    for member in members:
+        name = member.name.rstrip('/')
+        parts = name.split('/')
+        if not name or name.startswith('/') or any(part in ('', '.', '..') for part in parts) or name in seen or not (member.isfile() or member.isdir()):
+            raise ValueError('unsafe archive member: ' + member.name)
+        seen.add(name)
+        member.uid, member.gid = os.getuid(), os.getgid()
+        member.uname = member.gname = ''
+        member.mode &= 0o755
+    archive.extractall(sys.argv[2], members=members)`;
+      commands.push(`stage=$(mktemp -d)`, `trap 'rm -rf "$stage"' EXIT`,
+        `python3 -c ${quote(extract)} ${quote(archive)} "$stage"`,
+        `test -f "$stage/${agent.provision.archiveMember}"`,
+        `mkdir -p ${quote(path.dirname(dir))}`, `test ! -e ${target(dir)}`, `test ! -L ${target(dir)}`,
+        `mv "$stage" ${target(dir)}`, `trap - EXIT`,
         `chmod -R a+rX,go-w ${target(dir)}`, `ln -s ${quote(dir + '/' + agent.provision.archiveMember)} ${target(agent.command)}`);
     } else {
       commands.push(`mkdir -p ${quote(temp)}`, `tar -xzf ${quote(archive)} -C ${quote(temp)} ${quote(agent.provision.archiveMember)}`,
@@ -55,7 +77,7 @@ export function agentInstallScript(name, agent, archive, sourceRoot = '.', desti
     commands.push(`python3 -m venv ${target(python)}`,
       `${target(python + '/bin/python')} -m pip install --no-cache-dir --only-binary=:all: --require-hashes -r ${quote(path.join(sourceRoot, agent.provision.pythonRequirements))}`,
       `site=$(${target(python + '/bin/python')} -c 'import site; print(site.getsitepackages()[0])')`,
-      `printf '%s\n' ${quote(destinationRoot + runtime)} > "$site/lifemodel-runtime.pth"`,
+      `printf '%s\n' ${quote(runtime)} > "$site/lifemodel-runtime.pth"`,
       `chmod -R a+rX,go-w ${target(python)}`);
   }
   for (const file of agent.provision.files ?? []) {
@@ -66,6 +88,7 @@ export function agentInstallScript(name, agent, archive, sourceRoot = '.', desti
   return commands.join('; ');
 }
 export function agentProvisionScript(arch, registry = agentRegistry, sourceRoot = '.', destinationRoot = '') {
+  if (destinationRoot !== '') throw new Error('destinationRoot is not supported');
   validateProvisionRegistry(registry);
   return Object.entries(registry).map(([name, agent]) => {
     const spec = agent.provision.archives?.[nativeAgentArch(arch)];

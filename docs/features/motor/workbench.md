@@ -16,7 +16,7 @@ paths. Both agents require verified Linux amd64 and arm64 pins; a missing pin fa
 | Node | `24.21.0-bookworm-slim`, manifest digest `sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20` (same version as the isolated test boundary) |
 | Native tools/libraries | Debian bookworm archive `20261015T000000Z`; signed apt indexes freeze git, build-essential, Python 3, ripgrep, curl, CA certificates and their dependencies |
 | OpenCode | `2.1.4`, native npm Linux x64 archive; SHA-256 `ce05abe2dce1041391c8ec8cdb8da066f640fd471e72ac846dcb089c441e11e1` |
-| Prime Agent | `0.10.1` Linux x64 SHA-256 `21ec219183f4134dd23dce9572102e69456066fe374846525561c776d4d1945c`; arm64 SHA-256 `5af68c10a088538fd4990fd18778d8c7fe28c0491083dc069c5177f733770e91`. The complete adjacent distribution and Python runtime are installed at build time. Python wheels are version- and hash-pinned in `docker/workbench/prime-python-requirements.txt`. |
+| Prime Agent | `0.10.1` Linux x64 SHA-256 `21ec219183f4134dd23dce9572102e69456066fe374846525561c776d4d1945c`; arm64 SHA-256 `5af68c10a088538fd4990fd18778d8c7fe28c0491083dc069c5177f733770e91`. The complete adjacent distribution and Python runtime are installed at build time. Python wheels are version- and hash-pinned in `docker/workbench/prime-python-requirements.txt`; its explicit index is PyPI. The universal resolution preserves marker-gated dependencies for Python 3.11 and 3.12 on Linux amd64 and arm64. |
 | Development dependencies | Root `package-lock.json` from this commit, installed by `npm ci --legacy-peer-deps` at `/opt/lifemodel/node_modules`, with native install steps completed during build |
 | Storage CLI | This commit's compiled `loader/src/storage-cli*.ts` at `/opt/lifemodel/loader/dist/`, wrapper `/usr/local/bin/lifemodel-storage` |
 | Launcher | This commit's compiled `loader/src/task-launcher-main.ts`, wrapper `/usr/local/bin/lifemodel-task-launcher` (the image ENTRYPOINT) |
@@ -136,7 +136,7 @@ the adjacent bundled distribution, local runtime and baked Python
 packages, not just the executable. Non-secret models/settings templates and
 offline controls are baked in. The adapter renders the per-task relay URL into
 private configuration and sets a private daemon socket. A network-disabled
-startup trace showed no IP connection attempts through ACP session creation. The setting snapshots the selected
+startup trace of the reviewed amd64 build showed no IP connection attempts through ACP session creation ([trace and method](../../research/task-harness-acp/evidence/prime-workbench-startup/README.md)). The setting snapshots the selected
 registry name into the accepted task; no caller or Job environment changes.
 
 Bake the local OpenCode steering plugin; it is the sole exception to the no

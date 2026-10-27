@@ -26,6 +26,7 @@ type Scenario =
   | 'success'
   | 'provider'
   | 'tool'
+  | 'tool-success'
   | 'storage'
   | 'descendant'
   | 'abort'
@@ -37,6 +38,8 @@ const fixtureRegistry = JSON.parse(
 Object.assign(taskHarnessRegistry, fixtureRegistry);
 type ContractFixture = {
   usesModelEndpoint: boolean;
+  shellTool?: (command: string) => { name: string; arguments: string };
+  failedToolExemption?: string;
   prepare?: (work: string, mode: string) => Promise<void>;
   checkProvisioned: () => Promise<void>;
   checkOffline: (work: string) => Promise<void>;
@@ -137,7 +140,10 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
             })}\n\n`
           );
         chunk({ role: 'assistant' });
-        if (['tool', 'storage', 'descendant', 'background'].includes(scenario) && !toolSent) {
+        if (
+          ['tool', 'tool-success', 'storage', 'descendant', 'background'].includes(scenario) &&
+          !toolSent
+        ) {
           toolSent = true;
           chunk({
             tool_calls: [
@@ -145,7 +151,9 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
                 index: 0,
                 id: 'call_required',
                 type: 'function',
-                function: {
+                function: activeFixture?.shellTool?.(
+                  'printf prime-shell-contract-ok > prime-shell-result'
+                ) ?? {
                   name: 'shell',
                   arguments: JSON.stringify({
                     command:
@@ -284,19 +292,23 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
         });
       }, 60_000);
 
-      it('recovers a failed command when the agent continues with its final answer', async () => {
-        const task = await harness(kind, 'tool');
-        expect(await task.start(briefing)).toEqual({ outcome: 'succeeded', result: RESULT });
-        expect(
-          events.some(
-            (event) =>
-              event.type === 'trace' &&
-              event.span.component === 'task.tool' &&
-              event.span.status === 'failed'
-          )
-        ).toBe(true);
-        if (contractFixtures[kind]!.usesModelEndpoint) expect(toolSent).toBe(true);
-      }, 60_000);
+      it.skipIf(Boolean(contractFixtures[kind]!.failedToolExemption))(
+        'recovers a failed command when the agent continues with its final answer',
+        async () => {
+          const task = await harness(kind, 'tool');
+          expect(await task.start(briefing)).toEqual({ outcome: 'succeeded', result: RESULT });
+          expect(
+            events.some(
+              (event) =>
+                event.type === 'trace' &&
+                event.span.component === 'task.tool' &&
+                event.span.status === 'failed'
+            )
+          ).toBe(true);
+          if (contractFixtures[kind]!.usesModelEndpoint) expect(toolSent).toBe(true);
+        },
+        60_000
+      );
 
       it('aborts an in-flight turn and declares unsupported stage-4 operations', async () => {
         const task = await harness(kind, 'abort');
@@ -449,6 +461,15 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
     },
     60000
   );
+
+  it('runs Prime Python kernel and its real shell tool', async () => {
+    const task = await harness('prime-agent', 'tool-success');
+    expect(await task.start(briefing)).toEqual({ outcome: 'succeeded', result: RESULT });
+    expect(toolSent).toBe(true);
+    expect(await readFile(join(work, 'prime-shell-result'), 'utf8')).toBe(
+      'prime-shell-contract-ok'
+    );
+  }, 60_000);
 
   it('passes only the storage capability to a real shell tool, not model or channel token paths', async () => {
     const task = await harness('opencode', 'storage');

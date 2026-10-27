@@ -32,14 +32,44 @@ describe('registry-owned build and test provisioning', () => {
     }
     expect(() => agentProvisionScript('unsupported')).toThrow('no pinned agent archive');
   });
-  it('keeps the distribution adjacent to its binary and installs hash-pinned Python offline at runtime', () => {
+  it('keeps the distribution adjacent to its binary and installs hash-pinned Python at build time', () => {
     const agent = agentRegistry['prime-agent'];
     const script = agentInstallScript('prime-agent', agent, '/tmp/prime.tgz', '/snapshot');
-    expect(script).toContain('tar --no-same-owner -xzf');
+    expect(script).toContain('archive.extractall');
     expect(script).toContain('/opt/lifemodel/agents/prime-agent');
     expect(script).toContain('prime-agent-runtime/src');
     expect(script).toContain('--only-binary=:all: --require-hashes');
     expect(script).toContain('/snapshot/docker/workbench/prime-python-requirements.txt');
+    const requirements = readFileSync('docker/workbench/prime-python-requirements.txt', 'utf8');
+    expect(requirements).toContain('--index-url https://pypi.org/simple');
+    expect(requirements).toContain("cffi==2.1.1 ; platform_python_implementation != 'PyPy'");
+  });
+  it('rejects non-empty destination roots before emitting a provisioning script', () => {
+    expect(() => agentInstallScript('prime-agent', agentRegistry['prime-agent'], '/tmp/prime.tgz', '.', '/stage')).toThrow('destinationRoot is not supported');
+    expect(() => agentProvisionScript('x86_64', agentRegistry, '.', '/stage')).toThrow('destinationRoot is not supported');
+  });
+  it.each(['symlink', 'hardlink', 'traversal'])('rejects a distribution archive with %s before extraction', kind => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-archive-'));
+    const archive = path.join(root, 'bad.tgz');
+    const canary = path.join(root, 'canary');
+    fs.writeFileSync(canary, 'unchanged');
+    const make = `import io, sys, tarfile
+with tarfile.open(sys.argv[1], 'w:gz') as t:
+    kind, canary = sys.argv[2:]
+    if kind == 'traversal':
+        item = tarfile.TarInfo('../escape'); item.size = 3; t.addfile(item, io.BytesIO(b'bad'))
+    else:
+        item = tarfile.TarInfo('link'); item.type = tarfile.SYMTYPE if kind == 'symlink' else tarfile.LNKTYPE; item.linkname = canary; t.addfile(item)
+        item = tarfile.TarInfo('link/child'); item.size = 3; t.addfile(item, io.BytesIO(b'bad'))`;
+    try {
+      expect(spawnSync('python3', ['-c', make, archive, kind, canary]).status).toBe(0);
+      const script = agentInstallScript('prime-agent', agentRegistry['prime-agent'], archive).split('; test -f ')[0];
+      const result = spawnSync('sh', ['-ec', script], { encoding: 'utf8' });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('unsafe archive member');
+      expect(fs.readFileSync(canary, 'utf8')).toBe('unchanged');
+      expect(fs.existsSync(path.join(root, 'escape'))).toBe(false);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
   it('changes the normal build input when a registry pin changes', () => {
     const registry = structuredClone(agentRegistry);

@@ -91,6 +91,10 @@
       "pythonRequirements": "docker/workbench/prime-python-requirements.txt",
       "pythonRuntime": "prime-agent-runtime/src"
     },
-    "contractModule": "../../tests/fixtures/task-prime-agent-contract.ts"
+    "contractModule": "../../tests/fixtures/task-prime-agent-contract.ts",
+    "adapterConfig": {
+      "settingsFile": "/etc/lifemodel/prime-agent/prime-settings.json",
+      "kernelPython": "/opt/lifemodel/agents/prime-agent-python/bin/python"
+    }
   }
 }

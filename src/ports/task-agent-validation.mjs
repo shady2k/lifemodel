@@ -29,6 +29,10 @@ export function validateAgentRegistry(registry, fixtureNames = []) {
     if (!(typeof agent.adapterModule === 'string' && (/^\.\/task-[a-z0-9-]+\.js$/.test(agent.adapterModule) ||
       (fixture && /^\.\.\/\.\.\/tests\/fixtures\/task-[a-z0-9-]+\.mjs$/.test(agent.adapterModule))))) fail('adapter module');
     if (agent.contractModule !== undefined && (typeof agent.contractModule !== 'string' || !/^\.\.\/\.\.\/tests\/fixtures\/task-[a-z0-9-]+\.ts$/.test(agent.contractModule))) fail('contract module');
+    if (agent.adapterConfig !== undefined) {
+      if (!object(agent.adapterConfig) || !destination(agent.adapterConfig.settingsFile) ||
+          !/^\/opt\/lifemodel\/agents\/[a-z0-9-]+-python\/bin\/python$/.test(agent.adapterConfig.kernelPython)) fail('adapter config');
+    }
     const provision = agent.provision;
     if (!object(provision)) fail('provision');
     if (provision.archiveLayout !== undefined && provision.archiveLayout !== 'distribution') fail('archive layout');
@@ -50,6 +54,8 @@ export function validateAgentRegistry(registry, fixtureNames = []) {
       if (!destination(file.destination)) fail('file destination');
       if (file.mode !== undefined && !['0444', '0555'].includes(file.mode)) fail('file mode');
     }
+    if (agent.adapterConfig && (!provision.files?.some(file => file.destination === agent.adapterConfig.settingsFile) ||
+        agent.adapterConfig.kernelPython !== `/opt/lifemodel/agents/${name}-python/bin/python` || !provision.pythonRequirements)) fail('adapter config provisioning');
     if (provision.directories !== undefined && !Array.isArray(provision.directories)) fail('directories');
     for (const dir of provision.directories ?? []) if (!destination(dir) || !dir.startsWith('/etc/lifemodel/')) fail('directory destination');
   }
