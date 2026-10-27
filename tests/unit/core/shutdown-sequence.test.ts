@@ -98,6 +98,42 @@ describe('container shutdown sequence', () => {
     }
   );
 
+  it('keeps the original shutdown failure first when drains and cleanup also fail', async () => {
+    const d = makeDoubles();
+    const primary = new Error('core shutdown failed');
+    const drain = new Error('task drain failed');
+    const cleanup = new Error('pool close failed');
+    d.coreLoop.stop = async () => {
+      throw primary;
+    };
+    const [outcome] = await Promise.allSettled([
+      shutdownSequence({
+        logger: noopLogger,
+        deadline: Date.now() + 5_000,
+        channels: [d.channel] as never,
+        coreLoop: d.coreLoop as never,
+        stateManager: d.stateManager as never,
+        recipientRegistry: d.recipientRegistry as never,
+      }),
+    ]);
+    const remaining = async () => {
+      d.steps.push('remaining cleanup');
+    };
+    await expect(
+      closeTaskResources(
+        Promise.allSettled([Promise.reject(drain)]),
+        [
+          async () => {
+            throw cleanup;
+          },
+          remaining,
+        ],
+        outcome
+      )
+    ).rejects.toMatchObject({ errors: [primary, drain, cleanup] });
+    expect(d.steps.at(-1)).toBe('remaining cleanup');
+  });
+
   it('still closes the shared stores if command pool close fails', async () => {
     const steps: string[] = [];
     await expect(

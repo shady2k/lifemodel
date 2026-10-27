@@ -370,9 +370,10 @@ export async function shutdownSequence(deps: ShutdownSequenceDeps): Promise<void
 /** Release every store even when a task drain or another cleanup fails. */
 export async function closeTaskResources(
   taskDrains: Promise<PromiseSettledResult<unknown>[]>,
-  cleanup: (() => Promise<unknown>)[]
+  cleanup: (() => Promise<unknown>)[],
+  shutdownOutcome?: PromiseSettledResult<void>
 ): Promise<void> {
-  const outcomes = await taskDrains;
+  const outcomes = [...(shutdownOutcome ? [shutdownOutcome] : []), ...(await taskDrains)];
   for (const close of cleanup) {
     try {
       outcomes.push({ status: 'fulfilled', value: await close() });
@@ -1674,20 +1675,29 @@ export async function createContainerAsync(
       stateManager,
       recipientRegistry,
       progress: stopProgress,
-    }).finally(async () => {
+    }).then(
+      () => finishShutdown({ status: 'fulfilled', value: undefined }),
+      (reason: unknown) => finishShutdown({ status: 'rejected', reason })
+    );
+
+    async function finishShutdown(outcome: PromiseSettledResult<void>): Promise<void> {
       // Worker-owned SQL was cancelled at intake stop; drain it inside the same
       // deadline before closing the shared pool, without touching turn clients.
-      await closeTaskResources(taskDrains, [
-        // Turn command commits drain with cognition before their clients close.
-        async () => closeTaskCommands?.(),
-        async () => {
-          traceStop.abort();
-          await taskTraceDrain;
-        },
-        () => snapshotRedis.quit(),
-        () => postgres.end(),
-      ]);
-    });
+      await closeTaskResources(
+        taskDrains,
+        [
+          // Turn command commits drain with cognition before their clients close.
+          async () => closeTaskCommands?.(),
+          async () => {
+            traceStop.abort();
+            await taskTraceDrain;
+          },
+          () => snapshotRedis.quit(),
+          () => postgres.end(),
+        ],
+        outcome
+      );
+    }
   });
 
   return {
