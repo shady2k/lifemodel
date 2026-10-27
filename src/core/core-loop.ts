@@ -68,8 +68,8 @@ import { getPrimaryRecipientId, setPrimaryRecipientId } from './globals.js';
 import { StatusUpdateService } from './status-update-service.js';
 import { DomainTrackerService } from './domain-trackers.js';
 import { IntentApplicator, type SendOutcome } from './intent-applicator.js';
-import type { TaskAcceptanceService, TaskRecord } from '../ports/tasks.js';
-import type { TaskQuestion } from '../ports/task-channel.js';
+import { TaskRegistryError, type TaskAcceptanceService, type TaskRecord } from '../ports/tasks.js';
+import { TaskChannelError, type TaskQuestion } from '../ports/task-channel.js';
 import type { StartTaskIntent } from '../types/intent.js';
 import type { Storage } from '../storage/storage.js';
 import type { PluginLoader } from './plugin-loader.js';
@@ -1423,8 +1423,13 @@ export class CoreLoop {
   /**
    * Get current system health.
    */
-  getHealth(): SystemHealth {
-    return this.healthMonitor.getHealth();
+  getHealth(): SystemHealth & { taskQuestionLookupDegraded: boolean } {
+    return {
+      ...this.healthMonitor.getHealth(),
+      taskQuestionLookupDegraded: [...this.taskQuestionRetries.values()].some(
+        (retry) => retry.failures >= 3
+      ),
+    };
   }
 
   /**
@@ -2179,6 +2184,11 @@ export class CoreLoop {
     this.taskReportConsumer = consumer;
   }
 
+  private readonly taskQuestionRetries = new Map<
+    string,
+    { failures: number; nextAttemptAt: number }
+  >();
+
   private taskQuestionReader:
     | ((taskId: string, questionId: string) => Promise<TaskQuestion | null>)
     | undefined;
@@ -2207,15 +2217,71 @@ export class CoreLoop {
       // A prepared question may wait for cognition without a SQL read each tick.
       // Revalidate once cognition is free, since another turn may have answered it.
       if (this.pendingCognition && signal.data.question) return signal;
+      const retry = this.taskQuestionRetries.get(signal.id);
+      if (retry && Date.now() < retry.nextAttemptAt) return undefined;
       let question: TaskQuestion | null | undefined;
       try {
         question = await this.taskQuestionReader?.(signal.data.taskId, signal.data.messageId);
-      } catch {
-        this.logger.warn(
-          { code: 'task_question_lookup_pending', signalId: signal.id, taskId: signal.data.taskId },
-          'Task question lookup failed; leaving signal pending for a later tick'
-        );
-        return undefined;
+        this.taskQuestionRetries.delete(signal.id);
+      } catch (error) {
+        // Only known store/transport failures can change on a later attempt.
+        // Unknown exceptions (including TypeError) are deterministic, not retries.
+        const code =
+          error !== null && typeof error === 'object' && 'code' in error ? error.code : undefined;
+        const transient =
+          (error instanceof TaskChannelError &&
+            error.code === 'storage_error' &&
+            error.status >= 500) ||
+          (error instanceof TaskRegistryError && error.code === 'storage_error') ||
+          (typeof code === 'string' &&
+            (/^(08|53|58)/.test(code) ||
+              [
+                '40001',
+                '40P01',
+                '55P03',
+                '57014',
+                '57P01',
+                '57P02',
+                '57P03',
+                'ECONNRESET',
+                'ECONNREFUSED',
+                'ETIMEDOUT',
+                'EPIPE',
+                'EAI_AGAIN',
+              ].includes(code)));
+        if (!transient) {
+          this.taskQuestionRetries.delete(signal.id);
+          this.logger.warn(
+            {
+              code: 'task_question_lookup_refused',
+              signalId: signal.id,
+              taskId: signal.data.taskId,
+            },
+            'Task question lookup refused; completing signal without a question'
+          );
+          question = null;
+        } else {
+          const failures = Math.min((retry?.failures ?? 0) + 1, 32);
+          const retryAfterMs = Math.min(1000 * 2 ** (failures - 1), 30_000);
+          this.taskQuestionRetries.set(signal.id, {
+            failures,
+            nextAttemptAt: Date.now() + retryAfterMs,
+          });
+          this.logger.warn(
+            {
+              code: 'task_question_lookup_pending',
+              signalId: signal.id,
+              taskId: signal.data.taskId,
+              failures,
+              retryAfterMs,
+              degraded: failures >= 3,
+            },
+            failures === 3
+              ? 'Task question lookup health degraded after consecutive failures'
+              : 'Task question lookup failed; leaving signal pending for a later tick'
+          );
+          return undefined;
+        }
       }
       const streamId = this.signalStreamIds.get(signal.id);
       const owner = streamId ? this.busSignalStream?.stateFor(streamId) : undefined;

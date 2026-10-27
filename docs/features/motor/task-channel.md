@@ -205,8 +205,12 @@ bounded transport rechecks still cover a lost commit reply or notification.
 
 Command IDs hash the trusted recipient and persisted deciding-turn ID plus the
 operation identity: task ID and question ID for answers; task ID and per-task
-committed/recovered steer count for steers. Reads reserve no count and do not
-recover write receipts. Refusals do not advance the steer count.
+committed/recovered/uncertain steer count for steers. Reads reserve no count and
+do not recover write receipts. Deterministic refusals do not advance the count.
+The shared text gate rejects blank/NUL text and text outside the JSON/wire byte
+budget before steer recovery or any fresh write. The wire check reserves the
+largest supported identity and answer envelope against the configured channel
+limit, including JSON escaping.
 `recoverAcceptedEffect` selects the operation and target IDs before regenerated
 payload validation, so a crash after command commit can recover the original
 text even if replay adds/removes reads or refusals. The queued tool receipt is
@@ -216,8 +220,12 @@ is ACKed and retired, then shown as `rejected, retryable: true` by read.
 
 Question `task_report` signals use the existing durable bus admission receipt.
 Core reads the question from Postgres during normalization; aggregation selects
-one question for one cognition turn. A failed lookup logs a safe warning and
-leaves the signal pending for a later tick, without stopping the core. A prepared
+one question for one cognition turn. A deterministic/client lookup error logs
+one safe warning and completes the signal without a question. Storage/transport
+failures leave the signal pending with exponential backoff (1 second to a
+30-second cap). Three consecutive failures set `taskQuestionLookupDegraded` in
+the core health snapshot and log degraded health. A successful retry clears
+that signal's health flag. Unknown exceptions are not retried. A prepared
 question waiting on busy cognition is reused until cognition becomes available,
 then revalidated before selection. Busy cognition and an owner-input batch
 retain the unselected question on the durable bus. Step and terminal reports do

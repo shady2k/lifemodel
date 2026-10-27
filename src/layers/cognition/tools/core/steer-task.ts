@@ -2,11 +2,15 @@ import { createHash } from 'node:crypto';
 import type { Tool, ToolContext, ToolParameter } from '../types.js';
 import type { TaskService } from '../../../../ports/tasks.js';
 import { TaskRegistryError } from '../../../../ports/tasks.js';
-import { TaskChannelError, type TaskCommand } from '../../../../ports/task-channel.js';
+import {
+  isTaskCommandText,
+  TaskChannelError,
+  type TaskCommand,
+} from '../../../../ports/task-channel.js';
 import { UncertainMutationError } from '../mutation-error.js';
 import { validateAgainstParameters } from '../validation.js';
 
-export function createSteerTaskTool(service: TaskService): Tool {
+export function createSteerTaskTool(service: TaskService, commandFrameLimit = 65_536): Tool {
   const parameters: ToolParameter[] = [
     {
       name: 'action',
@@ -80,7 +84,7 @@ export function createSteerTaskTool(service: TaskService): Tool {
       if (args['action'] === 'read') return undefined;
       // Invalid steers are refusals, not command slots. They must not recover
       // the following valid steer's receipt when replay adds a refused call.
-      if (args['action'] === 'steer' && (typeof args['text'] !== 'string' || !args['text'].trim()))
+      if (args['action'] === 'steer' && !isTaskCommandText(args['text'], commandFrameLimit))
         return undefined;
       const commandId = commandIdFor(args, context);
       if (!commandId) return undefined;
@@ -92,6 +96,7 @@ export function createSteerTaskTool(service: TaskService): Tool {
         countSteer(args, context);
         return receipt(command);
       } catch {
+        countSteer(args, context);
         throw new UncertainMutationError();
       }
     },
@@ -117,7 +122,7 @@ export function createSteerTaskTool(service: TaskService): Tool {
         return { success: false, code: 'missing_question_id' };
       const commandId = commandIdFor(args, context);
       if (!commandId) return { success: false, code: 'missing_turn' };
-      if (typeof args['text'] !== 'string' || !args['text'].trim())
+      if (!isTaskCommandText(args['text'], commandFrameLimit))
         return { success: false, code: 'invalid_text' };
       try {
         if (args['action'] === 'steer') {
@@ -136,6 +141,7 @@ export function createSteerTaskTool(service: TaskService): Tool {
           (error instanceof TaskRegistryError && error.code !== 'storage_error')
         )
           return { success: false, code: error.code };
+        countSteer(args, context);
         throw new UncertainMutationError();
       }
     },

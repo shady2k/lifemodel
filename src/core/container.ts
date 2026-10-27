@@ -1336,7 +1336,18 @@ export async function createContainerAsync(
     coreLoop.setTaskQuestionReader((taskId, questionId) =>
       taskMailbox.readQuestion(taskId, questionId)
     );
-    layers.cognition.getToolRegistry().registerTool(createSteerTaskTool(taskService));
+    layers.cognition
+      .getToolRegistry()
+      .registerTool(
+        createSteerTaskTool(
+          taskService,
+          Math.min(
+            commandSettings['tasks.channel.maxFrameBytes'],
+            commandSettings['tasks.channel.maxUnackedBytes'],
+            Math.floor(commandSettings['tasks.channel.maxBufferedBytes'] / 4)
+          )
+        )
+      );
     layers.cognition.getToolRegistry().registerTool(
       createStartTaskTool({
         readByLaunchKey: (launchKey) => registry.readByLaunchKey(launchKey),

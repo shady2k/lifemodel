@@ -351,6 +351,29 @@ export interface TaskCommandMailbox {
   ): Promise<void>;
   subscribeCommands(taskId: string, wake: () => void): () => void;
 }
+/** Deterministic text gate, including JSON escaping and the largest wire identity.
+ * Reserve the answer envelope too, so either operation fits the configured channel.
+ */
+export function isTaskCommandText(value: unknown, frameLimit = 65_536): value is string {
+  if (typeof value !== 'string' || !value.trim() || value.includes('\0')) return false;
+  const identity = 'x'.repeat(128);
+  const command = {
+    taskId: identity,
+    attemptId: identity,
+    commandId: identity,
+    kind: 'answer',
+    text: value,
+    questionId: identity,
+  };
+  return (
+    Buffer.byteLength(JSON.stringify(command)) <= 60_000 &&
+    Buffer.byteLength(
+      JSON.stringify({
+        command: { ...command, direction: 'core_to_task', sequence: Number.MAX_SAFE_INTEGER },
+      })
+    ) <= frameLimit
+  );
+}
 export function validateTaskCommandInput(value: unknown): TaskCommandInput {
   if (
     !object(value) ||
@@ -366,9 +389,7 @@ export function validateTaskCommandInput(value: unknown): TaskCommandInput {
     !id(value['attemptId']) ||
     !id(value['commandId']) ||
     !['steer', 'answer'].includes(value['kind'] as string) ||
-    typeof value['text'] !== 'string' ||
-    !value['text'].trim() ||
-    value['text'].includes('\0') ||
+    !isTaskCommandText(value['text']) ||
     Buffer.byteLength(JSON.stringify(value)) > 60000 ||
     (value['kind'] === 'answer' ? !id(value['questionId']) : value['questionId'] !== undefined)
   )

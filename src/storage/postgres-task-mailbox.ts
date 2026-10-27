@@ -182,7 +182,12 @@ export function createPostgresTaskMailbox(deps: {
       } catch (error) {
         if (error instanceof TaskChannelError || error instanceof StalePostgresEpochError)
           throw error;
-        // No raw SQL error, detail, cause, input or bearer can leave this layer.
+        // Schema/permission/input errors cannot recover through retries. Preserve
+        // that classification, but never expose SQL detail, cause, input or bearer.
+        const code =
+          error !== null && typeof error === 'object' && 'code' in error ? error.code : undefined;
+        if (typeof code === 'string' && /^(22|28|3D|3F|42)/.test(code))
+          throw new TaskChannelError(400, 'invalid_input');
         throw new TaskChannelError(503, 'storage_error');
       } finally {
         if (committed && raw && !retired) {

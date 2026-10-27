@@ -125,12 +125,13 @@ agent failure. Failure to establish or finish that cleanup fails closed.
 `core.steerTask` reads task status without reserving a command identity or
 recovering a write receipt. Answers are keyed by the recipient, persisted
 deciding turn, task ID and question ID. Steers are keyed by the recipient,
-deciding turn, task ID and that task's steer count in the turn. Only committed
-or recovered steers advance the count; reads and refused calls do not. Replay
+deciding turn, task ID and that task's steer count in the turn. Committed, recovered
+and uncertain steers advance the count; reads and deterministic refusals do not. Replay
 can therefore add or remove reads/refusals without duplicating commands or
 returning a write receipt as a task view. The operation and target IDs must
-still be supplied on replay; recovery ignores regenerated payload text, not
-operation identity. Changing the order of successful steers to the same task
+still be supplied on replay. Invalid steer text (blank, NUL, or over the
+JSON/wire byte budget) is refused before recovery. Valid regenerated steer text
+and answer text do not determine recovery identity. Changing the order of successful steers to the same task
 is not covered by this identity scheme.
 
 Known limits (review findings F5 and F6, lifemodel-653.9.8):

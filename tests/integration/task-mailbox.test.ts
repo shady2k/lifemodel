@@ -210,6 +210,8 @@ describe('durable fenced task mailbox', () => {
     ['question', 'refused-answer', 'answer'],
     ['owner', 'refused-steer', 'steer'],
     ['owner', 'steer', 'refused-steer'],
+    ['owner', 'refused-long-steer', 'refused-long-steer'],
+    ['owner', 'refused-nul-steer', 'refused-nul-steer'],
   ] as const)(
     'a replayed %s turn changes order from %s to %s without duplicates or misattributed receipts',
     async (trigger, originalOrder, replayOrder) => {
@@ -239,7 +241,11 @@ describe('durable fenced task mailbox', () => {
                   args: {
                     ...args,
                     taskId: trigger === 'question' ? 'other-task' : identity.taskId,
-                    text: '',
+                    text: order.includes('long')
+                      ? 'x'.repeat(60_001)
+                      : order.includes('nul')
+                        ? 'bad\0text'
+                        : '',
                   },
                 },
               ]
@@ -415,6 +421,35 @@ describe('durable fenced task mailbox', () => {
     }
   });
 
+  it.each([true, false])(
+    'a live turn reserves uncertain steer A (committed=%s) and commits different steer B under its own ID',
+    async (committed) => {
+      const domain = service();
+      const steer = domain.steer.bind(domain);
+      let firstId: string | undefined;
+      vi.spyOn(domain, 'steer').mockImplementationOnce(async (...args) => {
+        firstId = args[1];
+        if (committed) await steer(...args);
+        throw new TaskChannelError(503, 'storage_error');
+      });
+      const tool = createSteerTaskTool(domain);
+      const turn = { ...context, taskSteerCounts: new Map<string, number>() };
+      const first = { action: 'steer', taskId: identity.taskId, text: 'Steer A' };
+      const second = { ...first, text: 'Different steer B' };
+      expect(await tool.recoverAcceptedEffect!(turn, first)).toBeUndefined();
+      await expect(tool.execute(first, turn)).rejects.toBeInstanceOf(UncertainMutationError);
+      expect(await tool.recoverAcceptedEffect!(turn, second)).toBeUndefined();
+      const receipt = (await tool.execute(second, turn)) as { commandId: string };
+      expect(receipt).toMatchObject({ success: true, state: 'queued' });
+      expect(receipt.commandId).not.toBe(firstId);
+      const commands = (await domain.read(identity.taskId))!.commands;
+      expect(commands.map((command) => command.text)).toEqual(
+        committed ? ['Steer A', 'Different steer B'] : ['Different steer B']
+      );
+      expect(commands.at(-1)!.commandId).toBe(receipt.commandId);
+    }
+  );
+
   it('read failures are not uncertain writes and missing answer correlation is specific', async () => {
     const domain = service();
     const read = vi.spyOn(domain, 'read');
@@ -434,6 +469,23 @@ describe('durable fenced task mailbox', () => {
       await tool.execute({ action: 'answer', taskId: identity.taskId, text: 'yes' }, context)
     ).toEqual({ success: false, code: 'missing_question_id' });
     expect((await domain.read(identity.taskId))?.commands).toEqual([]);
+  });
+
+  it('classifies a deterministic database permission failure without leaking SQL details', async () => {
+    const connect = vi
+      .spyOn(stores.postgres, 'connect')
+      .mockRejectedValueOnce(
+        Object.assign(new Error('private SQL permission canary'), { code: '42501' })
+      );
+    try {
+      await expect(mailbox().readQuestion(identity.taskId, 'question')).rejects.toMatchObject({
+        status: 400,
+        code: 'invalid_input',
+        message: 'TaskChannelError: invalid_input',
+      });
+    } finally {
+      connect.mockRestore();
+    }
   });
 
   it('indexes command IDs globally for recovery lookups', async () => {
@@ -648,7 +700,14 @@ describe('durable fenced task mailbox', () => {
     }
   });
 
-  it.each(['lookup-failure', 'busy'] as const)(
+  it.each([
+    'lookup-failure',
+    'lookup-refused',
+    'lookup-type-error',
+    'lookup-schema-error',
+    'lookup-degraded',
+    'busy',
+  ] as const)(
     'a pending question survives %s and wakes later without stopping the core',
     async (mode) => {
       const prefix = `question-pending:${randomUUID()}:`;
@@ -688,9 +747,15 @@ describe('durable fenced task mailbox', () => {
         enablePatternDetection: false,
       });
       f.aggregation.process = (signals, state) => aggregation.process(signals, state);
-      let lookupHealthy = mode !== 'lookup-failure';
+      let lookupHealthy = mode !== 'lookup-failure' && mode !== 'lookup-degraded';
+      const attempts: number[] = [];
       const reader = vi.fn(async (taskId: string, id: string) => {
-        if (!lookupHealthy) throw new Error('injected transient question lookup failure');
+        attempts.push(Date.now());
+        if (mode === 'lookup-refused') throw new TaskChannelError(400, 'invalid_input');
+        if (mode === 'lookup-type-error') throw new TypeError('deterministic');
+        if (mode === 'lookup-schema-error')
+          throw Object.assign(new Error('private SQL canary'), { code: '42501' });
+        if (!lookupHealthy) throw new TaskChannelError(503, 'storage_error');
         return mailbox().readQuestion(taskId, id);
       });
       f.coreLoop.setTaskQuestionReader(reader);
@@ -720,7 +785,41 @@ describe('durable fenced task mailbox', () => {
           identity
         );
         await relay.start();
-        if (mode === 'lookup-failure') {
+        if (['lookup-refused', 'lookup-type-error', 'lookup-schema-error'].includes(mode)) {
+          await waitFor(
+            () =>
+              f.recordedLogs.some(
+                (log) =>
+                  log.msg === 'Task question lookup refused; completing signal without a question'
+              ),
+            'deterministic question refusal'
+          );
+          await waitFor(
+            () => Object.keys(bus.exportSnapshot().entries).length === 0,
+            'refused question completed'
+          );
+          expect(reader).toHaveBeenCalledTimes(1);
+          expect(cognition.calls).toHaveLength(0);
+          expect(f.coreLoop.stopReport().loopStopped).toBe(false);
+          expect(f.coreLoop.getHealth().taskQuestionLookupDegraded).toBe(false);
+          return;
+        }
+        if (mode === 'lookup-degraded') {
+          await waitFor(
+            () => f.coreLoop.getHealth().taskQuestionLookupDegraded,
+            'question lookup health degraded',
+            10_000
+          );
+          expect(reader).toHaveBeenCalledTimes(3);
+          expect(attempts[1]! - attempts[0]!).toBeGreaterThanOrEqual(1000);
+          expect(attempts[2]! - attempts[1]!).toBeGreaterThanOrEqual(2000);
+          expect(
+            f.recordedLogs.some(
+              (log) => log.msg === 'Task question lookup health degraded after consecutive failures'
+            )
+          ).toBe(true);
+          lookupHealthy = true;
+        } else if (mode === 'lookup-failure') {
           await waitFor(
             () =>
               f.recordedLogs.some(
@@ -767,7 +866,9 @@ describe('durable fenced task mailbox', () => {
           cognition.settleHangingTurn();
         }
         await expect
-          .poll(async () => (await service().read(identity.taskId))?.commands.length)
+          .poll(async () => (await service().read(identity.taskId))?.commands.length, {
+            timeout: 10_000,
+          })
           .toBe(1);
         const questionCall = cognition.calls.at(-1)!;
         await questionCall.done;
@@ -783,6 +884,7 @@ describe('durable fenced task mailbox', () => {
         expect(f.coreLoop.stopReport().loopStopped).toBe(false);
         expect(await mailbox().pollCommand(identity)).toMatchObject({ kind: 'answer', questionId });
         expect(cognition.calls).toHaveLength(mode === 'busy' ? 2 : 1);
+        expect(f.coreLoop.getHealth().taskQuestionLookupDegraded).toBe(false);
       } finally {
         cognition.hang = false;
         cognition.settleHangingTurn();
@@ -790,7 +892,8 @@ describe('durable fenced task mailbox', () => {
         await f.coreLoop.stop();
         setPrimaryRecipientId(undefined);
       }
-    }
+    },
+    15_000
   );
 
   it('a steer during the closed end-turn barrier is ACKed rejected, retired and visible as retryable', async () => {
