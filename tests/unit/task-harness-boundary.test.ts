@@ -5,9 +5,15 @@ const read = (path: string) => readFileSync(path, 'utf8');
 function sources(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name);
-    return entry.isDirectory() ? sources(path) : path.endsWith('.ts') ? [path] : [];
+    return entry.isDirectory() ? sources(path) : /\.(?:ts|mjs|js)$/.test(path) ? [path] : [];
   });
 }
+const filesForNativeScan = () => [
+  ...sources('src/ports'),
+  'loader/src/task-acp.ts', 'loader/src/task-harness-factory.ts',
+  'loader/src/task-steering-journal.ts', 'loader/src/task-harness.ts',
+  'loader/src/task-launcher.ts', 'loader/src/task-launcher-main.ts',
+];
 describe('replaceable task agent boundary', () => {
   it('keeps agent protocols, flags, config paths and constructors out of launcher and core', () => {
     const files = [
@@ -18,6 +24,7 @@ describe('replaceable task agent boundary', () => {
       'loader/src/task-launcher-main.ts',
       'loader/src/task-acp.ts',
       'loader/src/task-harness.ts',
+      'loader/src/task-steering-journal.ts',
       'loader/src/task-harness-factory.ts',
       'loader/src/settings/platform.ts',
     ];
@@ -39,9 +46,9 @@ describe('replaceable task agent boundary', () => {
     expect(read('loader/src/task-launcher.ts')).toContain('createRegisteredHarness');
     expect(read('loader/src/task-launcher.ts')).toContain("briefing['harness']");
     expect(read('loader/src/task-launcher-main.ts')).toContain('selfCheckHarnesses');
-    const generic = read('loader/src/task-acp.ts') + read('loader/src/task-harness-factory.ts');
+    const generic = filesForNativeScan().map(read).join('\n');
     expect(generic).not.toMatch(
-      /daemon_hello|activeSessionId|delivery:\s*['"]steer|resume:\s*(?:true|false)|node:net/
+      /daemon_hello|activeSessionId|delivery:\s*['"]steer|resume:\s*(?:true|false)|node:net|\.sock|inboxID|get_messages|lifemodel-steer:/
     );
     expect(generic).toContain('admit');
     expect(generic).toContain('TaskSteeringJournal');

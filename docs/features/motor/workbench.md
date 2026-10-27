@@ -10,10 +10,12 @@ The registry also provisions `docker/workbench/steering-plugin/` at
 `/etc/lifemodel/steering-plugin`. The dedicated Docker context allowlist admits
 its two source files. It has no package dependency and needs no startup install.
 OpenCode loads it from the rendered private configuration, then the launcher
-admits input over `/work/tmp/steer.sock`. Prime uses the existing ACP daemon's
-private `/work/tmp/daemon.sock`, with exactly one root bound before the brief.
+admits input over `/work/.launcher/steer.sock`. Prime uses the existing ACP daemon's
+private `/work/.launcher/daemon.sock`, with exactly one root bound before the brief.
+The journal and channels are launcher-owned, outside TMPDIR, not a trust
+boundary; receipts are task claims in the single untrusted Pod zone.
 Neither channel adds Pod ingress or a second agent engine. See
-[task harness admission](task-harness.md#native-admission-and-private-journal)
+[task harness admission](task-harness.md#native-admission-and-launcher-owned-journal)
 for journal, receipts and uncertainty. The end-of-turn barrier is separate
 lifemodel-653.9.6 work; this bridge alone does not settle the final-answer race.
 

@@ -29,6 +29,7 @@ describe('task steering journal', () => {
       });
       if (boundary === 'intent') sync.mockRejectedValueOnce(new Error('disk full before send'));
       expect(await journal.admit(command, send)).toBe('uncertain');
+      expect(journal.hasFailed()).toBe(true);
       expect(send).toHaveBeenCalledTimes(boundary === 'intent' ? 0 : 1);
       expect(await journal.admit(command, send)).toBe('uncertain');
       expect(await journal.admit({ commandId: 'new', text: 'new' }, send)).toBe('uncertain');

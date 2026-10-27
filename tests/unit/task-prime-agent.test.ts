@@ -27,7 +27,7 @@ describe('Prime Agent adapter', () => {
     expect(statSync(join(dir, 'models.json')).mode & 0o777).toBe(0o600);
     expect(statSync(join(dir, 'settings.json')).mode & 0o777).toBe(0o600);
     expect(settings).toMatchObject({ defaultProvider: 'task', defaultModel: 'task', telemetry: { enabled: false }, traces: { enabled: false } });
-    expect(env).toMatchObject({ PI_OFFLINE: '1', DO_NOT_TRACK: '1', PRIME_AGENT_TELEMETRY: '0', PRIME_AGENT_CODING_AGENT_DIR: dir, PRIME_AGENT_DAEMON_SOCKET: join(work, 'tmp/daemon.sock'), PRIME_AGENT_SESSION_DIR: join(dir, 'sessions') });
+    expect(env).toMatchObject({ PI_OFFLINE: '1', DO_NOT_TRACK: '1', PRIME_AGENT_TELEMETRY: '0', PRIME_AGENT_CODING_AGENT_DIR: dir, PRIME_AGENT_DAEMON_SOCKET: join(work, '.launcher/daemon.sock'), PRIME_AGENT_SESSION_DIR: join(dir, 'sessions') });
     expect(env['PRIME_AGENT_KERNEL_PYTHON']).toBe(taskHarnessRegistry['prime-agent']!.adapterConfig!.kernelPython);
     expect(versionCheckEnv(work)).toMatchObject({ PI_OFFLINE: '1', DO_NOT_TRACK: '1', PRIME_AGENT_TELEMETRY: '0', PRIME_AGENT_CODING_AGENT_DIR: join(work, 'agent') });
     expect(toolOutputFailed({})).toBe(false);

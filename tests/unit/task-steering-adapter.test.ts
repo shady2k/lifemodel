@@ -1,9 +1,9 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:net';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { admit, nativeMessageId } from '../../loader/src/task-opencode.js';
+import { admit, nativeMessageId, observeInsertion } from '../../loader/src/task-opencode.js';
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -12,7 +12,7 @@ afterEach(async () => {
 async function work(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'steering-adapter-'));
   cleanup.push(() => rm(dir, { recursive: true, force: true }));
-  await mkdir(join(dir, 'tmp'));
+  await mkdir(join(dir, '.launcher'));
   return dir;
 }
 async function server(
@@ -20,6 +20,7 @@ async function server(
   respond: (request: Record<string, unknown>) => unknown
 ): Promise<void> {
   const listener: Server = createServer((socket) => {
+    socket.on('error', () => undefined);
     let buffer = '';
     socket.on('data', (chunk) => {
       buffer += chunk.toString();
@@ -33,7 +34,7 @@ async function server(
   });
   await new Promise<void>((resolve, reject) => {
     listener.once('error', reject);
-    listener.listen(join(dir, 'tmp/steer.sock'), resolve);
+    listener.listen(join(dir, '.launcher/steer.sock'), resolve);
   });
   cleanup.push(
     () =>
@@ -80,4 +81,40 @@ describe('OpenCode steering adapter boundary', () => {
     expect(await admit({ ...command, text: ' ' })).toBe('rejected');
     expect(count).toBe(2);
   });
+  it('waits through pending/compaction status and returns false when never inserted before abort', async () => {
+    const dir = await work();
+    const statuses = ['pending', 'compaction'];
+    const seen: Record<string, unknown>[] = [];
+    await server(dir, request => {seen.push(request); return {ok: true, data: {id: request.id, status: statuses[Math.min(seen.length - 1, 1)]}};});
+    const abort = new AbortController();
+    let settled = false;
+    const observing = observeInsertion({workDirectory: dir, commandId: 'cmd', signal: abort.signal}).then(value => {settled = true; return value;});
+    try {
+      await vi.waitFor(() => expect(seen.length).toBeGreaterThanOrEqual(2));
+      expect(settled).toBe(false);
+    } finally { abort.abort(); }
+    expect(await observing).toBe(false);
+    expect(seen.every(request => request.op === 'disposition')).toBe(true);
+  });
+
+  it('accepts only a matching positive inserted disposition', async () => {
+    const dir = await work(); let count = 0;
+    await server(dir, request => ({ok: true, data: {id: ++count === 1 ? 'wrong' : request.id, status: 'inserted'}}));
+    expect(await observeInsertion({workDirectory: dir, commandId: 'cmd', signal: new AbortController().signal})).toBe(true);
+    expect(count).toBe(2);
+  });
+
+  it('does not mistake an oversized disposition page for insertion', async () => {
+    const dir = await work();
+    const abort = new AbortController();
+    let reads = 0;
+    await server(dir, request => {
+      reads++;
+      if (reads === 2) abort.abort();
+      return {ok: true, data: {id: request.id, status: 'pending', output: 'x'.repeat(1048577)}};
+    });
+    expect(await observeInsertion({workDirectory: dir, commandId: 'cmd', signal: abort.signal})).toBe(false);
+    expect(reads).toBe(2);
+  });
+
 });

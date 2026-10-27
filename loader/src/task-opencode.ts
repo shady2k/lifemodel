@@ -29,7 +29,7 @@ export function configureAgent(input: {
         },
       },
     }),
-    LIFEMODEL_STEER_SOCKET: join(input.workDirectory, 'tmp/steer.sock'),
+    LIFEMODEL_STEER_SOCKET: join(input.workDirectory, '.launcher/steer.sock'),
     OPENCODE_DISABLE_AUTOUPDATE: 'true',
     OPENCODE_DISABLE_MODELS_FETCH: 'true',
     OPENCODE_DISABLE_PROJECT_CONFIG: 'true',
@@ -66,6 +66,9 @@ export function toolOutputFailed(output: unknown, input?: unknown): boolean {
   );
 }
 
+// Stable IDs make native ambiguity nonfatal. Journal I/O remains fatal.
+export const failOnUncertain = false;
+
 /** Native identity is stable per command, including after an ambiguous ACK. */
 export function nativeMessageId(commandId: string): string {
   return `msg_${createHash('sha256').update(commandId).digest('hex')}`;
@@ -81,7 +84,7 @@ export async function admit(input: {
   if (!input.sessionId || !input.commandId || !input.text.trim()) return 'rejected';
   const id = nativeMessageId(input.commandId);
   return new Promise((resolve) => {
-    const socket = connect(join(input.workDirectory, 'tmp/steer.sock'));
+    const socket = connect(join(input.workDirectory, '.launcher/steer.sock'));
     let buffer = '';
     let done = false;
     const finish = (result: 'accepted' | 'uncertain') => {
@@ -135,9 +138,10 @@ export async function observeInsertion(input: {
   signal: AbortSignal;
 }): Promise<boolean> {
   const id = nativeMessageId(input.commandId);
-  while (!input.signal.aborted) {
+  // Bounded best-effort observation with backoff; no native sends here.
+  for (let pass = 0; pass < 12 && !input.signal.aborted; pass++) {
     const inserted = await new Promise<boolean>((resolve) => {
-      const socket = connect(join(input.workDirectory, 'tmp/steer.sock'));
+      const socket = connect(join(input.workDirectory, '.launcher/steer.sock'));
       let buffer = '';
       let done = false;
       const finish = (value: boolean) => {
@@ -181,7 +185,7 @@ export async function observeInsertion(input: {
     if (inserted) return true;
     if (input.signal.aborted) break;
     await new Promise<void>((resolve) => {
-      const timer = setTimeout(done, 100);
+      const timer = setTimeout(done, Math.min(100 * 2 ** pass, 5000));
       function done() {
         clearTimeout(timer);
         input.signal.removeEventListener('abort', done);

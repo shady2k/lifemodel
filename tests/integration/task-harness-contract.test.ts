@@ -84,6 +84,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
   let insertionSeen: (() => void) | undefined;
   let finalRequest: (() => void) | undefined;
   let inserted = false;
+  let prematureInsertion = false;
   let nativeSessionId = '';
   const STEER = 'STEERING-CONTRACT-65395: finish after the tools';
   const sockets = new Set<Socket>();
@@ -282,11 +283,19 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
     insertionSeen = undefined;
     finalRequest = undefined;
     inserted = false;
+    prematureInsertion = false;
     await writeFile(join(directory, 'token'), TOKEN);
     work = await mkdtemp(join(directory, 'work-'));
     const onEvent = async (event: TaskHarnessEvent) => {
       events.push(event);
       if (event.type === 'receipt' && event.disposition === 'inserted') {
+        if (scenario.startsWith('steer-')) {
+          const count = scenario === 'steer-parallel' ? 2 : 1;
+          for (let i = 0; i < count; i++) {
+            try { await access(join(work, `done-${i}`)); }
+            catch { prematureInsertion = true; }
+          }
+        }
         inserted = true;
         insertionSeen?.();
       }
@@ -370,6 +379,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
           expect(performance.now() - before).toBeLessThan(2000);
           expect(finished).toBe(false);
           await expect(access(join(work, `done-${count - 1}`))).rejects.toThrow();
+          expect(events.filter((event) => event.type === 'receipt')).toEqual([]);
           expect(await task.steer(command)).toBe('accepted');
           if (activeFixture?.nativeReplay) {
             // Bypass the launcher's journal to exercise OpenCode's own same-ID
@@ -377,9 +387,15 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
             const native = { ...command, workDirectory: work, sessionId: nativeSessionId };
             expect(await activeFixture.nativeReplay(native)).toBe('accepted');
             expect(await activeFixture.nativeReplay(native)).toBe('accepted');
+            // The duplicate really was replayed while still pending, not parked
+            // beyond the model request inspected below.
+            for (let i = 0; i < count; i++)
+              await expect(access(join(work, `done-${i}`))).rejects.toThrow();
+            expect(events.filter((event) => event.type === 'receipt')).toEqual([]);
           }
           expect(await task.steer({ ...command, text: 'changed' })).toBe('rejected');
           expect(await terminal).toEqual({ outcome: 'succeeded', result: RESULT });
+          expect(prematureInsertion).toBe(false);
           for (let i = 0; i < count; i++) await access(join(work, `done-${i}`));
           expect(events.filter((event) => event.type === 'receipt')).toEqual([
             { type: 'receipt', commandId: command.commandId, disposition: 'inserted' },
@@ -423,7 +439,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
             await terminal;
           });
           await vi.waitFor(() => access(join(work, 'start-0')), { timeout: 20000, interval: 20 });
-          await rm(join(work, 'tmp/daemon.sock'));
+          await rm(join(work, '.launcher/daemon.sock'));
           const command = { commandId: 'lost-socket', text: STEER };
           expect(await task.steer(command)).toBe('uncertain');
           expect(await terminal).toMatchObject({

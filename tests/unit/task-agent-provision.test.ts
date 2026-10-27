@@ -71,6 +71,11 @@ with tarfile.open(sys.argv[1], 'w:gz') as t:
       expect(fs.existsSync(path.join(root, 'escape'))).toBe(false);
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
+  it('accepts registry-declared nested source modules without any vendor-name branch', () => {
+    const agent = structuredClone(agentRegistry['opencode']);
+    agent.provision.files.push({ source: 'docker/workbench/local-bridge/index.mjs', destination: '/etc/lifemodel/local-bridge/index.mjs', mode: '0444' });
+    expect(() => validateAgentRegistry({ 'different-agent': agent })).not.toThrow();
+  });
   it('changes the normal build input when a registry pin changes', () => {
     const registry = structuredClone(agentRegistry);
     const name = Object.keys(registry)[0]!;

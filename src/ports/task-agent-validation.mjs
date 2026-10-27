@@ -50,8 +50,7 @@ export function validateAgentRegistry(registry, fixtureNames = []) {
     if (provision.files !== undefined && !Array.isArray(provision.files)) fail('files');
     for (const file of provision.files ?? []) {
       if (!object(file) || !safeRelativePath(file.source) || !(fixture ?
-        /^tests\/fixtures\/[^/]+$/.test(file.source) : (/^docker\/workbench\/[^/]+\.json$/.test(file.source) ||
-        (name === 'opencode' && /^docker\/workbench\/steering-plugin\/(?:package\.json|index\.mjs)$/.test(file.source))))) fail('file source');
+        /^tests\/fixtures\/[^/]+$/.test(file.source) : /^docker\/workbench\/(?:[a-z0-9-]+\/)?[a-z0-9.-]+\.(?:json|mjs|js)$/.test(file.source))) fail('file source');
       if (!destination(file.destination)) fail('file destination');
       if (file.mode !== undefined && !['0444', '0555'].includes(file.mode)) fail('file mode');
     }

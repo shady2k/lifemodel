@@ -28,7 +28,7 @@ interface Entry {
 }
 
 /**
- * Launcher-private journal. One launcher process must exclusively own the file.
+ * Launcher-owned journal, not a trust boundary. One launcher process owns the file.
  * The caller must treat missing/corrupt journals for an existing task as task
  * failure; opening a fresh journal is only safe for a newly created task.
  */
@@ -189,6 +189,11 @@ export class TaskSteeringJournal {
       () => undefined
     );
     return result;
+  }
+
+  /** Journal I/O failure is fatal regardless of adapter ambiguity policy. */
+  hasFailed(): boolean {
+    return this.failed;
   }
 
   /** Stop new admissions and wait for all already admitted native calls. */

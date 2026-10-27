@@ -27,7 +27,7 @@ export function configureAgent(input: {
     PRIME_AGENT_TELEMETRY: '0',
     PRIME_AGENT_CODING_AGENT_DIR: dir,
     PRIME_AGENT_SESSION_DIR: join(dir, 'sessions'),
-    PRIME_AGENT_DAEMON_SOCKET: join(input.workDirectory, 'tmp/daemon.sock'),
+    PRIME_AGENT_DAEMON_SOCKET: join(input.workDirectory, '.launcher/daemon.sock'),
     PRIME_AGENT_KERNEL_PYTHON: input.adapterConfig.kernelPython,
   };
 }
@@ -51,7 +51,12 @@ export function versionCheckEnv(workDirectory: string): NodeJS.ProcessEnv {
 
 // ACP's session ID is not the daemon's activeSessionId. Bind while the
 // freshly-created session is the only root, before the brief can spawn agents.
+export const failOnUncertain = true;
 const roots = new Map<string, string>();
+
+export function release(input: { workDirectory: string; sessionId: string }): void {
+  roots.delete(bindingKey(input.workDirectory, input.sessionId));
+}
 const bindingKey = (workDirectory: string, sessionId: string): string =>
   JSON.stringify([workDirectory, sessionId]);
 
@@ -69,7 +74,7 @@ function nativeCall(
 ): Promise<NativeRecord> {
   const id = randomUUID();
   return new Promise((resolve, reject) => {
-    const socket = connect(join(workDirectory, 'tmp/daemon.sock'));
+    const socket = connect(join(workDirectory, '.launcher/daemon.sock'));
     let buffer = '';
     let hello = false;
     let settled = false;
@@ -213,47 +218,59 @@ export async function observeInsertion(input: {
   const activeSessionId = roots.get(bindingKey(input.workDirectory, input.sessionId));
   if (!activeSessionId) return false;
   const marker = steeringMarker(input.commandId) + '\n';
-  while (!input.signal.aborted) {
-    let before: string | undefined;
-    let historyLeafId: unknown;
-    for (let page = 0; page < 100 && !input.signal.aborted; page++) {
-      const response = await nativeCall(
-        input.workDirectory,
-        {
-          type: 'get_messages',
-          activeSessionId,
-          page: { from: 'end', limit: 100, ...(before ? { before } : {}) },
-          ...(historyLeafId ? { historyLeafId } : {}),
-        },
-        input.signal
-      );
-      if (response['success'] !== true || response['command'] !== 'get_messages') break;
-      const data = asRecord(response['data']);
-      if (!Array.isArray(data['messages'])) break;
-      if (
-        data['messages'].some((value: unknown) => {
-          const message = asRecord(value);
-          return (
-            message['role'] === 'user' &&
-            Array.isArray(message['content']) &&
-            message['content'].some((part: unknown) => {
-              const content = asRecord(part);
-              return (
-                content['type'] === 'text' &&
-                typeof content['text'] === 'string' &&
-                content['text'].startsWith(marker)
-              );
-            })
-          );
-        })
-      )
-        return true;
-      const next = data['firstEntryId'];
-      if (data['more'] !== true || typeof next !== 'string' || next === before) break;
-      before = next;
-      historyLeafId = data['historyLeafId'];
+  const signal = AbortSignal.any([input.signal, AbortSignal.timeout(60000)]);
+  // Eight passes, at most 100 single-row pages each. A large tool row can
+  // exceed the byte limit even alone: abandon observation, not the task.
+  for (let pass = 0; pass < 8 && !signal.aborted; pass++) {
+    try {
+      let before: string | undefined;
+      let historyLeafId: unknown;
+      for (let page = 0; page < 100 && !signal.aborted; page++) {
+        const response = await nativeCall(
+          input.workDirectory,
+          {
+            type: 'get_messages',
+            activeSessionId,
+            page: { from: 'end', limit: 1, ...(before ? { before } : {}) },
+            ...(historyLeafId ? { historyLeafId } : {}),
+          },
+          signal
+        );
+        if (response['success'] !== true || response['command'] !== 'get_messages') break;
+        const data = asRecord(response['data']);
+        if (!Array.isArray(data['messages'])) break;
+        if (
+          data['messages'].some((value: unknown) => {
+            const message = asRecord(value);
+            return (
+              message['role'] === 'user' &&
+              Array.isArray(message['content']) &&
+              message['content'].some((part: unknown) => {
+                const content = asRecord(part);
+                return (
+                  content['type'] === 'text' &&
+                  typeof content['text'] === 'string' &&
+                  content['text'].startsWith(marker)
+                );
+              })
+            );
+          })
+        )
+          return true;
+        const next = data['firstEntryId'];
+        if (data['more'] !== true || typeof next !== 'string' || next === before) break;
+        before = next;
+        historyLeafId = data['historyLeafId'];
+      }
+    } catch {
+      // Unreadable/oversized history is no insertion evidence. Never retry
+      // a native steer or fail a running turn because this observer failed.
+      return false;
     }
-    await delay(100, undefined, { signal: input.signal }).catch(() => undefined);
+    if (pass < 7)
+      await delay(Math.min(100 * 2 ** pass, 5000), undefined, { signal: signal }).catch(
+        () => undefined
+      );
   }
   return false;
 }

@@ -2,15 +2,15 @@ import { describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { admit } from '../../loader/src/task-opencode.js';
+import { admit, nativeMessageId } from '../../loader/src/task-opencode.js';
 
 describe('baked OpenCode steering plugin', () => {
   it('uses stable native IDs, delivery steer and resume false, without waiting for a tool', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'plugin-steer-'));
     const { mkdir } = await import('node:fs/promises');
-    await mkdir(join(dir, 'tmp'));
+    await mkdir(join(dir, '.launcher'));
     const old = process.env.LIFEMODEL_STEER_SOCKET;
-    process.env.LIFEMODEL_STEER_SOCKET = join(dir, 'tmp/steer.sock');
+    process.env.LIFEMODEL_STEER_SOCKET = join(dir, '.launcher/steer.sock');
     // Import the shipped source, not a copy of the bridge in the test.
     const plugin = (await import('../../docker/workbench/steering-plugin/index.mjs')).default;
     const prompt = vi.fn(async (value: { id: string }) => ({ id: value.id }));
@@ -41,7 +41,7 @@ describe('baked OpenCode steering plugin', () => {
       );
       const split = frame.indexOf(Buffer.from('🧭')) + 1;
       await new Promise<void>((resolve, reject) => {
-        const socket = connect(join(dir, 'tmp/steer.sock'));
+        const socket = connect(join(dir, '.launcher/steer.sock'));
         socket.on('error', reject);
         socket.on('connect', () => {
           socket.write(frame.subarray(0, split));
@@ -59,4 +59,44 @@ describe('baked OpenCode steering plugin', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+  it('reports pending until a delivered event, not a compaction or unrelated inbox event', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'plugin-evidence-'));
+    const {mkdir} = await import('node:fs/promises');
+    await mkdir(join(dir, '.launcher'));
+    const path = join(dir, '.launcher/steer.sock');
+    const old = process.env.LIFEMODEL_STEER_SOCKET;
+    process.env.LIFEMODEL_STEER_SOCKET = path;
+    let push!: (event: unknown) => void;
+    const plugin = (await import('../../docker/workbench/steering-plugin/index.mjs')).default;
+    const close = await plugin.setup({
+      session: {prompt: async ({id}: {id: string}) => ({id})},
+      event: {async *subscribe() { while (true) yield await new Promise(resolve => {push = resolve;}); }},
+    });
+    const {connect} = await import('node:net');
+    const read = () => new Promise<{data: {status: string}}>((resolve, reject) => {
+      const socket = connect(path); let buffer = '';
+      socket.on('error', reject);
+      socket.on('connect', () => socket.write(JSON.stringify({op: 'disposition', id: nativeMessageId('cmd')}) + '\n'));
+      socket.on('data', chunk => {buffer += chunk.toString(); if (buffer.includes('\n')) {resolve(JSON.parse(buffer)); socket.destroy();}});
+    });
+    try {
+      expect(await admit({workDirectory: dir, sessionId: 's', commandId: 'cmd', text: 'continue'})).toBe('accepted');
+      expect((await read()).data.status).toBe('unknown');
+      push({type: 'session.inbox.enqueued', data: {inboxID: nativeMessageId('cmd')}});
+      await vi.waitFor(async () => expect((await read()).data.status).toBe('pending'));
+      push({type: 'session.compacted', data: {inboxID: nativeMessageId('cmd')}});
+      expect((await read()).data.status).toBe('pending');
+      push({type: 'session.inbox.delivered', data: {inboxID: 'other'}});
+      expect((await read()).data.status).toBe('pending');
+      push({type: 'session.inbox.delivered', data: {inboxID: nativeMessageId('cmd')}});
+      await vi.waitFor(async () => expect((await read()).data.status).toBe('inserted'));
+    } finally {
+      await close();
+      push({type: 'stop'});
+      if (old === undefined) delete process.env.LIFEMODEL_STEER_SOCKET;
+      else process.env.LIFEMODEL_STEER_SOCKET = old;
+      await rm(dir, {recursive: true, force: true});
+    }
+  });
+
 });
