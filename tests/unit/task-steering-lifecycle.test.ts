@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { Socket } from 'node:net';
 import { mkdtemp, writeFile, rm, readdir, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -346,6 +347,48 @@ async function barrierFixture(input: {
 }
 
 describe('end-turn barrier race regressions', () => {
+  it('intakeReady stays pending until the brief prompt write completes', async () => {
+    const writing = deferred();
+    const finishWrite = deferred();
+    const original = Socket.prototype.write;
+    const spy = vi.spyOn(Socket.prototype, 'write').mockImplementation(function (
+      this: Socket,
+      chunk: unknown,
+      ...args: unknown[]
+    ) {
+      if (typeof chunk === 'string' && chunk.includes('"method":"session/prompt"')) {
+        const callback = args.at(-1);
+        if (typeof callback === 'function')
+          args[args.length - 1] = (error?: Error | null) => {
+            writing.resolve();
+            void finishWrite.promise.then(() => callback(error));
+          };
+      }
+      return Reflect.apply(original, this, [chunk, ...args]) as boolean;
+    });
+    let f: Awaited<ReturnType<typeof barrierFixture>> | undefined;
+    try {
+      f = await barrierFixture({});
+      let ready = false;
+      void f.harness.intakeReady.then(() => {
+        ready = true;
+      });
+      await writing.promise;
+      await new Promise<void>((done) => setImmediate(done));
+      expect(ready).toBe(false);
+      expect(await f.harness.steer({ commandId: 'pre-brief', text: 'Too early' })).toBe('rejected');
+      finishWrite.resolve();
+      await f.harness.intakeReady;
+      expect(ready).toBe(true);
+      await f.release();
+      expect(await f.terminal).toMatchObject({ outcome: 'succeeded' });
+    } finally {
+      finishWrite.resolve();
+      spy.mockRestore();
+      await f?.cleanup();
+    }
+  });
+
   it('maps unknown reconciliation to end_turn_uncertain, never successful prose', async () => {
     const f = await barrierFixture({ reconcile: async () => ({ state: 'unknown' }) });
     try {

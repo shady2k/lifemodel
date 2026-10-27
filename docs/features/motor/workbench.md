@@ -175,6 +175,19 @@ Question MCP tools remain deferred; the barrier exposes a generic question-state
 seam bounded by the accepted `softDueAt`. See the
 [ADR amendment](../../adr/014-task-runtime.md#amendment--2026-10-27-live-steering-behind-the-harness-port).
 
+## Core steering surface
+
+`core.steerTask` is now registered with the platform task service independently
+of legacy Motor Cortex. Its read view exposes durable questions and command
+ACK/receipt dispositions. Steer and correlated answer calls return queued after
+commit without waiting for the workbench or native agent. Question reports wake
+one cognition turn through aggregation and quote task content as untrusted.
+A question turn cannot command another task. The core tool does not choose a
+harness or bypass D7 grants. End-turn intake rejection is visible and retryable;
+intake readiness is tested against the brief prompt's completed write. See
+[the channel contract](task-channel.md#cognition-command-tool-lifemodel-65398).
+Task-side MCP tools and deployed two-harness question round trips remain 9.9.
+
 ## CI and release
 
 `ci-workbench-image` builds affected pull requests without a registry login,

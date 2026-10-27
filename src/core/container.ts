@@ -104,6 +104,8 @@ import { fileURLToPath } from 'node:url';
 import { createActTool } from '../layers/cognition/tools/core/act.js';
 import { createTaskTool } from '../layers/cognition/tools/core/task.js';
 import { createStartTaskTool } from '../layers/cognition/tools/core/start-task.js';
+import { createSteerTaskTool } from '../layers/cognition/tools/core/steer-task.js';
+import { createTaskService } from './task-service.js';
 import { createCredentialTool } from '../layers/cognition/tools/core/credential.js';
 import { createSkillTool } from '../layers/cognition/tools/core/skill.js';
 import { fetchPage } from '../plugins/web-fetch/fetcher.js';
@@ -363,6 +365,28 @@ export async function shutdownSequence(deps: ShutdownSequenceDeps): Promise<void
 
   if (progress) progress.step = 'done';
   logger.info('Shutdown complete');
+}
+
+/** Release every store even when a task drain or another cleanup fails. */
+export async function closeTaskResources(
+  taskDrains: Promise<PromiseSettledResult<unknown>[]>,
+  cleanup: (() => Promise<unknown>)[],
+  shutdownOutcome?: PromiseSettledResult<void>
+): Promise<void> {
+  const outcomes = [...(shutdownOutcome ? [shutdownOutcome] : []), ...(await taskDrains)];
+  for (const close of cleanup) {
+    try {
+      outcomes.push({ status: 'fulfilled', value: await close() });
+    } catch (reason) {
+      outcomes.push({ status: 'rejected', reason });
+    }
+  }
+  const failures = outcomes.filter((outcome) => outcome.status === 'rejected');
+  if (failures.length)
+    throw new AggregateError(
+      failures.map((failure): unknown => failure.reason),
+      'Task resource shutdown failed'
+    );
 }
 
 /**
@@ -1256,6 +1280,8 @@ export async function createContainerAsync(
   const taskLaunchController = new AbortController();
   let stopTaskTraces: ((deadline: number, signal: AbortSignal) => Promise<void>) | undefined;
   let stopTaskChannel: ((deadline: number) => Promise<void>) | undefined;
+  let closeTaskCommands: (() => Promise<void>) | undefined;
+  let notifyTaskCommands: ((taskId: string) => void) | undefined;
   if (!mergedConfig.motorCortex.enabled && controlTokenFile && controlCaFile) {
     const image = taskWorkbenchImage(process.env['LIFEMODEL_TASK_WORKBENCH_IMAGE']);
     const imageRevision = image.slice(image.indexOf('@') + 1);
@@ -1271,7 +1297,7 @@ export async function createContainerAsync(
       settings: createPlatformSettingsReader({ logger }),
       signal: taskLaunchController.signal,
     });
-    taskService = createWorkbenchTaskService({
+    const acceptanceService = createWorkbenchTaskService({
       service: registry,
       imageRevision,
       ready: createTaskWorkbenchReadiness(),
@@ -1279,7 +1305,50 @@ export async function createContainerAsync(
         void taskLaunch?.resync();
       },
     });
+    // Cognition commands and question reads never borrow the owner-intake reserve.
+    const commandSettings = (await createPlatformSettingsReader({ logger }).read()).values;
+    const commandPool = new Pool({
+      connectionString: databaseUrl,
+      max: 2,
+      application_name: 'lifemodel-task-commands',
+      connectionTimeoutMillis: 5000,
+      query_timeout: 5000,
+      statement_timeout: 5000,
+      lock_timeout: 5000,
+    });
+    commandPool.on('error', () => undefined);
+    commandPool.on('connect', (client) => client.on('error', () => undefined));
+    const taskMailbox = createPostgresTaskMailbox({
+      pool: commandPool,
+      epoch: snapshotEpoch,
+      onCommandCommitted: (taskId) => notifyTaskCommands?.(taskId),
+      commandFrameLimit: Math.min(
+        commandSettings['tasks.channel.maxFrameBytes'],
+        commandSettings['tasks.channel.maxUnackedBytes'],
+        Math.floor(commandSettings['tasks.channel.maxBufferedBytes'] / 4)
+      ),
+    });
+    closeTaskCommands = async () => {
+      taskMailbox.stop();
+      await commandPool.end();
+    };
+    taskService = createTaskService({ tasks: acceptanceService, mailbox: taskMailbox });
     coreLoop.setTaskService(taskService);
+    coreLoop.setTaskQuestionReader((taskId, questionId) =>
+      taskMailbox.readQuestion(taskId, questionId)
+    );
+    layers.cognition
+      .getToolRegistry()
+      .registerTool(
+        createSteerTaskTool(
+          taskService,
+          Math.min(
+            commandSettings['tasks.channel.maxFrameBytes'],
+            commandSettings['tasks.channel.maxUnackedBytes'],
+            Math.floor(commandSettings['tasks.channel.maxBufferedBytes'] / 4)
+          )
+        )
+      );
     layers.cognition.getToolRegistry().registerTool(
       createStartTaskTool({
         readByLaunchKey: (launchKey) => registry.readByLaunchKey(launchKey),
@@ -1475,6 +1544,9 @@ export async function createContainerAsync(
         void replay.resync();
       },
     });
+    notifyTaskCommands = (taskId) => {
+      mailbox.notifyCommands(taskId);
+    };
     const replay = createTaskChannelReplay({ mailbox, bus: busSignalStream, logger });
     let channel: ReturnType<typeof createTaskChannel> | undefined;
     stopTaskChannel = async (deadline) => {
@@ -1588,6 +1660,8 @@ export async function createContainerAsync(
     const taskDrain = taskLaunch?.stop(deadline);
     const taskFinalizerDrain = stopTaskFinalizer?.(deadline);
     const taskChannelDrain = stopTaskChannel?.(deadline);
+    // Observe all rejections immediately, even while the core is still draining.
+    const taskDrains = Promise.allSettled([taskDrain, taskChannelDrain, taskFinalizerDrain]);
     // Trace drain gets no independent stop budget. It may run only while
     // authoritative work remains, and cannot postpone state-store cleanup.
     const traceStop = new AbortController();
@@ -1601,17 +1675,29 @@ export async function createContainerAsync(
       stateManager,
       recipientRegistry,
       progress: stopProgress,
-    }).finally(async () => {
+    }).then(
+      () => finishShutdown({ status: 'fulfilled', value: undefined }),
+      (reason: unknown) => finishShutdown({ status: 'rejected', reason })
+    );
+
+    async function finishShutdown(outcome: PromiseSettledResult<void>): Promise<void> {
       // Worker-owned SQL was cancelled at intake stop; drain it inside the same
       // deadline before closing the shared pool, without touching turn clients.
-      await taskDrain;
-      await taskChannelDrain;
-      await taskFinalizerDrain;
-      traceStop.abort();
-      await taskTraceDrain;
-      await snapshotRedis.quit();
-      await postgres.end();
-    });
+      await closeTaskResources(
+        taskDrains,
+        [
+          // Turn command commits drain with cognition before their clients close.
+          async () => closeTaskCommands?.(),
+          async () => {
+            traceStop.abort();
+            await taskTraceDrain;
+          },
+          () => snapshotRedis.quit(),
+          () => postgres.end(),
+        ],
+        outcome
+      );
+    }
   });
 
   return {

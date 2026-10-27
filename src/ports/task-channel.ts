@@ -317,6 +317,24 @@ export interface TaskCommandReceipt {
   readonly receiptId: string;
   readonly disposition: 'inserted' | 'deferred-to-next-turn' | 'failed' | 'uncertain';
 }
+export interface TaskQuestion {
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly questionId: string;
+  readonly text: string;
+  readonly answerCommandId: string | null;
+}
+export interface TaskCommandStatus extends TaskCommand {
+  readonly disposition: TaskCommandAck['disposition'] | 'queued';
+  readonly receipts: readonly TaskCommandReceipt[];
+  /** Rejected intake is safe to retry in a NEW deciding turn, never by replay. */
+  readonly retryable: boolean;
+}
+export interface TaskCommandReader {
+  readCommand(commandId: string): Promise<TaskCommandStatus | null>;
+  readCommands(taskId: string): Promise<readonly TaskCommandStatus[]>;
+  readQuestion(taskId: string, questionId?: string): Promise<TaskQuestion | null>;
+}
 export interface TaskCommandMailbox {
   enqueueCommand(command: TaskCommandInput, signal?: AbortSignal): Promise<TaskCommand>;
   /** Immediate authorized recheck, never a held database transaction. */
@@ -333,6 +351,29 @@ export interface TaskCommandMailbox {
   ): Promise<void>;
   subscribeCommands(taskId: string, wake: () => void): () => void;
 }
+/** Deterministic text gate, including JSON escaping and the largest wire identity.
+ * Reserve the answer envelope too, so either operation fits the configured channel.
+ */
+export function isTaskCommandText(value: unknown, frameLimit = 65_536): value is string {
+  if (typeof value !== 'string' || !value.trim() || value.includes('\0')) return false;
+  const identity = 'x'.repeat(128);
+  const command = {
+    taskId: identity,
+    attemptId: identity,
+    commandId: identity,
+    kind: 'answer',
+    text: value,
+    questionId: identity,
+  };
+  return (
+    Buffer.byteLength(JSON.stringify(command)) <= 60_000 &&
+    Buffer.byteLength(
+      JSON.stringify({
+        command: { ...command, direction: 'core_to_task', sequence: Number.MAX_SAFE_INTEGER },
+      })
+    ) <= frameLimit
+  );
+}
 export function validateTaskCommandInput(value: unknown): TaskCommandInput {
   if (
     !object(value) ||
@@ -348,9 +389,7 @@ export function validateTaskCommandInput(value: unknown): TaskCommandInput {
     !id(value['attemptId']) ||
     !id(value['commandId']) ||
     !['steer', 'answer'].includes(value['kind'] as string) ||
-    typeof value['text'] !== 'string' ||
-    !value['text'].trim() ||
-    value['text'].includes('\0') ||
+    !isTaskCommandText(value['text']) ||
     Buffer.byteLength(JSON.stringify(value)) > 60000 ||
     (value['kind'] === 'answer' ? !id(value['questionId']) : value['questionId'] !== undefined)
   )

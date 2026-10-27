@@ -119,6 +119,8 @@ export interface AgentIdentityContext {
  * Previous attempt context for smart retry.
  */
 export interface PreviousAttempt {
+  /** Per-task steer counts survive smart escalation within the same turn. */
+  taskSteerCounts?: [string, number][];
   /** Tool results from first attempt (reuse, don't re-execute) */
   toolResults: ToolResult[];
   /** Executed tools with their call IDs for message reconstruction */

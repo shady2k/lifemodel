@@ -141,5 +141,15 @@ export function buildToolContext(context: LoopContext): ToolContext {
     userId: context.userId,
     correlationId: context.tickId,
     triggerType: context.triggerSignal.type,
+    ...(context.triggerSignal.type === 'task_report' &&
+    context.triggerSignal.data?.kind === 'task_report' &&
+    context.triggerSignal.data.eventKind === 'question'
+      ? {
+          taskQuestion: {
+            taskId: context.triggerSignal.data.taskId,
+            questionId: context.triggerSignal.data.messageId,
+          },
+        }
+      : {}),
   };
 }

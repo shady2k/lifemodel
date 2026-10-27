@@ -583,6 +583,8 @@ export interface TaskReportData {
   attemptId: string;
   messageId: string;
   eventKind: 'step' | 'question' | 'terminal';
+  /** Read from the fenced mailbox during normalization, not trusted frame prose. */
+  question?: { questionId: string; text: string };
 }
 
 /**

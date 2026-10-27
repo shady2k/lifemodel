@@ -603,6 +603,9 @@ export interface LoopState {
   /** Per-tool call counts for maxCallsPerTurn enforcement */
   toolCallCounts: Map<string, number>;
 
+  /** Replay identity counts, isolated from tool call-limit accounting. */
+  taskSteerCounts: Map<string, number>;
+
   /** Cumulative count of per-tool limit violations (safety valve for tool-limit loops) */
   limitViolationCount: number;
 
@@ -655,6 +658,7 @@ export function createLoopState(): LoopState {
     forceRespondAttempts: 0,
     everForcedRespond: false,
     toolCallCounts: new Map<string, number>(),
+    taskSteerCounts: new Map<string, number>(),
     limitViolationCount: 0,
     collectedThoughts: [],
     malformedRetried: false,

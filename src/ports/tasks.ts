@@ -1,4 +1,5 @@
 import type { TaskHarnessName } from './task-harness-names.js';
+import type { TaskCommand, TaskCommandStatus, TaskQuestion } from './task-channel.js';
 /** Core task authority. Deliberately not exposed through PluginPrimitives. */
 export type TaskState =
   | 'queued'
@@ -154,7 +155,7 @@ export class TaskRegistryError extends Error {
   }
 }
 
-export interface TaskService {
+export interface TaskAcceptanceService {
   accept(request: AcceptTask): Promise<TaskRecord>;
   read(taskId: string): Promise<TaskRecord | null>;
   /** Recover an already accepted deciding-turn effect without resubmitting its payload. */
@@ -162,8 +163,19 @@ export interface TaskService {
   list(): Promise<readonly TaskRecord[]>;
 }
 
+export interface TaskView extends TaskRecord {
+  readonly commands: readonly TaskCommandStatus[];
+  readonly question: TaskQuestion | null;
+}
+export interface TaskService extends TaskAcceptanceService {
+  read(taskId: string): Promise<TaskView | null>;
+  readCommand(commandId: string): Promise<TaskCommandStatus | null>;
+  steer(taskId: string, commandId: string, text: string): Promise<TaskCommand>;
+  answer(taskId: string, commandId: string, questionId: string, text: string): Promise<TaskCommand>;
+}
+
 /** Trusted lifecycle writer, not a cognition/plugin tool surface. */
-export interface TaskRegistry extends TaskService {
+export interface TaskRegistry extends TaskAcceptanceService {
   /** Bounded launch/cleanup work page, ordered by immutable accepted order. */
   listLaunchWork(afterOrder?: string, limit?: number): Promise<readonly TaskRecord[]>;
   /** Includes terminal mailbox rows even after signalled_at; cursor is accepted order. */

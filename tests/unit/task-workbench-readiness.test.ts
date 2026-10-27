@@ -7,7 +7,11 @@ import {
 import { createStartTaskTool } from '../../src/layers/cognition/tools/core/start-task.js';
 import { TASK_PROFILES } from '../../src/ports/task-profiles.js';
 import { withTraceContext } from '../../src/core/trace-context.js';
-import { TaskRegistryError, type TaskRecord, type TaskService } from '../../src/ports/tasks.js';
+import {
+  TaskRegistryError,
+  type TaskRecord,
+  type TaskAcceptanceService,
+} from '../../src/ports/tasks.js';
 
 const digest = `sha256:${'a'.repeat(64)}`;
 const context = { correlationId: 'turn-one', recipientId: 'owner', triggerType: 'user_message' };
@@ -195,7 +199,7 @@ describe('task workbench readiness', () => {
     let present = false;
     const accept = vi.fn(async () => record);
     const onAccepted = vi.fn();
-    const underlying: TaskService = {
+    const underlying: TaskAcceptanceService = {
       accept,
       read: async () => null,
       readByLaunchKey: async () => null,

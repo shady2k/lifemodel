@@ -256,11 +256,14 @@ export async function executeToolCalls(
     let args: Record<string, unknown>;
 
     const tool = toolRegistry.getTools().find((t) => t.name === toolName);
-    // Recover committed effects by trusted recipient/turn/slot, before either
-    // regenerated-argument gate. Outcome turns have no read/write capabilities.
+    const toolContext = buildCtx(context);
+    if (toolName === 'core.steerTask') toolContext.taskSteerCounts = state.taskSteerCounts;
+    // Parse operation identity before recovery. Payload validation still follows it.
+    const argsString = toolCall.function.arguments.trim();
+    const parsedArgs = robustJsonParse(argsString);
     const recovered =
       context.triggerSignal.type !== 'task_outcome'
-        ? await tool?.recoverAcceptedEffect?.(buildCtx(context))
+        ? await tool?.recoverAcceptedEffect?.(toolContext, parsedArgs ?? {})
         : undefined;
     const recoveredResult =
       recovered === undefined
@@ -268,9 +271,6 @@ export async function executeToolCalls(
         : createToolResult(toolCall.id, toolName, true, recovered);
 
     // Handle empty arguments string as empty object
-    const argsString = toolCall.function.arguments.trim();
-    const parsedArgs = robustJsonParse(argsString);
-
     if (!recoveredResult && parsedArgs === null && argsString.length > 2) {
       // Genuinely malformed JSON (robustJsonParse exhausted all recovery attempts).
       // Include schema since the model may have failed to parse the tool definition.
@@ -492,7 +492,7 @@ export async function executeToolCalls(
         toolCallId: toolCall.id,
         name: toolName,
         args,
-        context: buildCtx(context),
+        context: toolContext,
       });
 
       const resultData = thoughtResult.data as Record<string, unknown> | undefined;
@@ -537,7 +537,7 @@ export async function executeToolCalls(
         toolCallId: toolCall.id,
         name: toolName,
         args,
-        context: buildCtx(context),
+        context: toolContext,
       }));
 
     state.toolResults.push(result);

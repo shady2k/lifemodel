@@ -223,6 +223,22 @@ export class ThresholdEngine {
         triggerSignals: [taskOutcome],
       };
 
+    // One durable question per turn. Steps and terminal reports never wake cognition.
+    const taskQuestion = signals.find(
+      (signal) =>
+        signal.type === 'task_report' &&
+        signal.data?.kind === 'task_report' &&
+        signal.data.eventKind === 'question' &&
+        signal.data.question
+    );
+    if (taskQuestion)
+      return {
+        shouldWake: true,
+        trigger: 'scheduled',
+        reason: 'Task asks a question',
+        triggerSignals: [taskQuestion],
+      };
+
     // Motor Cortex results — always wake immediately (user is waiting)
     // Filter out already-handled results (prevents re-processing on subsequent ticks)
     const motorResults = signals.filter((s) => {

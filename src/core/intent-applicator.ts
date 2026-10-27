@@ -50,7 +50,7 @@ import type { Storage } from '../storage/storage.js';
 import type { PluginLoader } from './plugin-loader.js';
 import type { DurableEffectRegistry } from './durable-effect-registry.js';
 import type { StartTaskIntent } from '../types/intent.js';
-import type { TaskService, TaskRecord } from '../ports/tasks.js';
+import type { TaskAcceptanceService, TaskRecord } from '../ports/tasks.js';
 
 /**
  * Dependencies injected into IntentApplicator.
@@ -160,9 +160,9 @@ export class IntentApplicator {
     strong_negative: -0.5,
   };
 
-  private taskService: TaskService | undefined;
+  private taskService: TaskAcceptanceService | undefined;
 
-  setTaskService(service: TaskService): void {
+  setTaskService(service: TaskAcceptanceService): void {
     this.taskService = service;
   }
 

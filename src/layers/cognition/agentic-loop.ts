@@ -559,6 +559,7 @@ export class AgenticLoop {
         onEscalate: (s, ctx, reason) => ({
           ...ctx,
           previousAttempt: {
+            taskSteerCounts: [...s.taskSteerCounts],
             toolResults: [...s.toolResults],
             executedTools: [...s.executedTools],
             reason,

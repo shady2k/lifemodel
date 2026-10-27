@@ -26,12 +26,15 @@ export interface Tool {
   parameters: ToolParameter[];
   execute: ToolExecutor;
   /**
-   * Read an already accepted durable effect using trusted turn context only.
+   * Read an already accepted durable effect using trusted turn context and operation identity.
    * Runs before argument validation. Undefined means no accepted effect exists:
    * fresh calls must still pass both validation gates before execute can write.
    * The executor applies its capability boundary before invoking this read seam.
    */
-  recoverAcceptedEffect?: (context: ToolContext) => Promise<unknown>;
+  recoverAcceptedEffect?: (
+    context: ToolContext,
+    args?: Record<string, unknown>
+  ) => Promise<unknown>;
   /**
    * Validate arguments before execution.
    * Returns ValidationResult with data on success, or error message on failure.
@@ -88,6 +91,10 @@ export interface ToolParameter {
  * Context provided to tools during execution.
  */
 export interface ToolContext {
+  /** Successful steers per task in this deciding turn; reads and refusals take no slot. */
+  taskSteerCounts?: Map<string, number>;
+  /** Task question that caused this turn, never caller-supplied arguments. */
+  taskQuestion?: { taskId: string; questionId: string };
   /** Opaque recipient identifier */
   recipientId: string;
 

@@ -187,6 +187,63 @@ deadline updates and wrap belong to 653.10. The Job deadline is the hard bound.
 MCP over stdio, including Prime offline, remains unverified. ACKs and receipts
 are task claims, not core evidence of execution or obedience.
 
+### Cognition command tool (lifemodel-653.9.8)
+
+The platform registers `core.steerTask` beside `core.startTask`, outside the
+legacy Motor Cortex registration. Legacy `core.task` is unchanged. The tool
+accepts `action: read | steer | answer` and `taskId`; commands require `text`,
+and answers also require `questionId`. TaskService composes the acceptance
+registry with the fenced mailbox. Its read view includes the open question,
+command ACK disposition (`queued | accepted | rejected | uncertain`), receipts
+and an explicit `retryable` flag. Rejected intake is retryable in a **new**
+deciding turn; replay returns the original committed command, not a new send.
+Uncertainty and failed receipts remain visible and are not automatic retries.
+Cognition commands and question reads use a dedicated two-connection bounded
+SQL pool, separate from owner intake and the task listener. A post-commit relay
+notifies the listener mailbox instance so its held poll wakes immediately;
+bounded transport rechecks still cover a lost commit reply or notification.
+
+Command IDs hash the trusted recipient and persisted deciding-turn ID plus the
+operation identity: task ID and question ID for answers; task ID and per-task
+committed/recovered/uncertain steer count for steers. Reads reserve no count and
+do not recover write receipts. Deterministic refusals do not advance the count.
+The shared text gate rejects blank/NUL text and text outside the JSON/wire byte
+budget before steer recovery or any fresh write. The wire check reserves the
+largest supported identity and answer envelope against the configured channel
+limit, including JSON escaping.
+`recoverAcceptedEffect` selects the operation and target IDs before regenerated
+payload validation, so a crash after command commit can recover the original
+text even if replay adds/removes reads or refusals. The queued tool receipt is
+returned after Postgres commit even if no launcher is polling. It promises
+neither native admission nor obedience. An end-turn/successor barrier rejection
+is ACKed and retired, then shown as `rejected, retryable: true` by read.
+
+Question `task_report` signals use the existing durable bus admission receipt.
+Core reads the question from Postgres during normalization; aggregation selects
+one question for one cognition turn. A deterministic/client lookup error logs
+one safe warning and completes the signal without a question. Storage/transport
+failures leave the signal pending with exponential backoff (1 second to a
+30-second cap). Three consecutive failures set `taskQuestionLookupDegraded` in
+the core health snapshot and log degraded health. A successful retry clears
+that signal's health flag. Unknown exceptions are not retried. A prepared
+question waiting on busy cognition is reused until cognition becomes available,
+then revalidated before selection. Busy cognition and an owner-input batch
+retain the unselected question on the durable bus. Step and terminal reports do
+not wake cognition. The trigger escapes and quotes question text as untrusted
+content. Trusted tool context restricts question-turn commands to that task;
+ordinary agent turns need no owner-message trigger. Correlated answer commit
+closes the question, not a launcher ACK. On an uncommitted question-turn replay,
+the historical question remains available to recover the already committed
+answer under the same command ID. A completed question does not wake again.
+No polling or plugin-type import is added to the cognition path. D7 is unchanged.
+
+Source checks: `tests/integration/task-mailbox.test.ts` exercises the real
+Postgres/Valkey, aggregation and cognition path, crash/replay and a closed ACP
+barrier; `tests/unit/task-steering-lifecycle.test.ts` holds the brief's write
+callback to prove `intakeReady` cannot resolve early. These are source evidence,
+not a deployed-harness or owner-interface acceptance claim. Task-side MCP
+question/step tools remain in lifemodel-653.9.9.
+
 ### Command routes and durable storage
 
 `GET /task/commands` returns `{command: null}` after at most 25 seconds or one

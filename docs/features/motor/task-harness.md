@@ -120,6 +120,33 @@ its adopted detached tool descendants before adapter completion, including after
 agent failure. Failure to establish or finish that cleanup fails closed.
 
 
+### Cognition steering identity and known limits
+
+`core.steerTask` reads task status without reserving a command identity or
+recovering a write receipt. Answers are keyed by the recipient, persisted
+deciding turn, task ID and question ID. Steers are keyed by the recipient,
+deciding turn, task ID and that task's steer count in the turn. Committed, recovered
+and uncertain steers advance the count; reads and deterministic refusals do not. Replay
+can therefore add or remove reads/refusals without duplicating commands or
+returning a write receipt as a task view. The operation and target IDs must
+still be supplied on replay. Invalid steer text (blank, NUL, or over the
+JSON/wire byte budget) is refused before recovery. Valid regenerated steer text
+and answer text do not determine recovery identity. Changing the order of successful steers to the same task
+is not covered by this identity scheme.
+
+Known limits (review findings F5 and F6, lifemodel-653.9.8):
+
+- **Smart-escalation history rebuild (F5).** Some provider-error escalation
+  paths rebuild initial history without this live turn's earlier tool calls
+  and results. Per-task steer counts survive, but the smart model can miss
+  that guidance was already committed and issue another steer under the next
+  identity. This is not replay deduplication and is not fixed here.
+- **Cross-turn task injection (F6).** The trusted question-turn restriction
+  prevents steering another task in that turn only. Injected task text may
+  influence a thought or other self-signal and reach a later unrestricted turn,
+  which may steer another task. Quoting task text and same-turn target checks
+  are not a cross-turn information-flow boundary or proof of safety.
+
 ### Native admission and launcher-owned journal
 
 The registry adapter exports `admit`, optional pre-brief `bind`, and
@@ -253,6 +280,13 @@ status only, never command text or credentials. A final bounded receipt attempt
 drains before terminal reporting. Real-store integration checks cover journal recovery after lost ACKs, answer
 prefixes, receipt forwarding and draining an in-flight disposition ACK before
 terminal reporting. This is source verification, not deployed stage acceptance.
+A steer delivered while end-turn intake is closed is explicitly rejected,
+ACKed and retired, never silently discarded. The core read/status view shows
+that rejection as retryable in a new deciding turn. The regression check drives
+a real ACP barrier plus command intake and the Postgres mailbox. A separate
+ordering regression holds the prompt write callback: `intakeReady` remains
+pending until the brief write finishes, even after the agent receives its bytes.
+
 The ten-second ACK POST deadline exceeds the five-second adapter admission
 bound; it is not a delivery-to-ACK timer in core. Core redelivers on the next
 poll until the ACK commits. Receipts and ACKs are
