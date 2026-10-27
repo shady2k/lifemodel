@@ -358,6 +358,32 @@ describe('durable fenced task mailbox', () => {
     }
   });
 
+  it('notifies a held channel subscription after a command commits on the separately pooled cognition mailbox', async () => {
+    const listener = mailbox();
+    const received: string[] = [];
+    const unsubscribe = listener.subscribeCommands(identity.taskId, () =>
+      received.push('committed')
+    );
+    const cognitionMailbox = createPostgresTaskMailbox({
+      pool: stores.postgres,
+      epoch: 1,
+      onCommandCommitted: (id) => listener.notifyCommands(id),
+    });
+    const domain = createTaskService({
+      tasks: createPostgresTaskRegistry({ pool: stores.postgres, epoch: 1, settings }),
+      mailbox: cognitionMailbox,
+    });
+    try {
+      await domain.steer(identity.taskId, 'notified-command', 'Inspect output');
+      expect(received).toEqual(['committed']);
+      expect(await listener.pollCommand(identity)).toMatchObject({ commandId: 'notified-command' });
+    } finally {
+      unsubscribe();
+      cognitionMailbox.stop();
+      listener.stop();
+    }
+  });
+
   it('commits a correlated answer and refuses cross-task steering from a question turn', async () => {
     await mailbox().append(
       {
@@ -368,6 +394,7 @@ describe('durable fenced task mailbox', () => {
       identity
     );
     const tool = createSteerTaskTool(service());
+    const second = await seed('second');
     const questionContext = {
       ...context,
       triggerType: 'task_report',
@@ -375,7 +402,7 @@ describe('durable fenced task mailbox', () => {
     };
     expect(
       await tool.execute(
-        { action: 'steer', taskId: 'another-task', text: 'Unrelated' },
+        { action: 'steer', taskId: second.taskId, text: 'Unrelated' },
         questionContext
       )
     ).toEqual({ success: false, code: 'cross_task_question' });
@@ -391,6 +418,7 @@ describe('durable fenced task mailbox', () => {
       text: 'Plain text',
     });
     expect((await service().read(identity.taskId))?.question).toBeNull();
+    expect((await service().read(second.taskId))?.commands).toEqual([]);
   });
 
   it('the real aggregation path wakes one question turn and commits its answer; duplicate relay and restart do not wake again', async () => {

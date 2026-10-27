@@ -86,12 +86,15 @@ export function createPostgresTaskMailbox(deps: {
   signal?: AbortSignal;
   operationTimeoutMs?: number;
   onAppendSettled?: () => void;
+  /** Relay a committed core command to a separately pooled channel instance. */
+  onCommandCommitted?: (taskId: string) => void;
   /** Same response-frame limit used by the task-only listener. */
   commandFrameLimit?: number;
 }): TaskMailbox &
   TaskCommandMailbox &
   TaskCommandReader & {
     readTraceAuthority(proof: TaskChannelProof, signal?: AbortSignal): Promise<TaskBriefing>;
+    notifyCommands(taskId: string): void;
   } {
   const timeoutMs = deps.operationTimeoutMs ?? 5_000;
   if (
@@ -363,7 +366,11 @@ export function createPostgresTaskMailbox(deps: {
       }));
     });
   }
+  const notifyCommands = (taskId: string) => {
+    for (const wake of commandListeners.get(taskId) ?? []) wake();
+  };
   return {
+    notifyCommands,
     readCommands: (taskId) => readCommands(taskId),
     readCommand: async (commandId) => (await readCommands(undefined, commandId))[0] ?? null,
     readQuestion: (taskId, questionId) => {
@@ -445,7 +452,8 @@ export function createPostgresTaskMailbox(deps: {
       }, parent);
       // Only committed commands can wake a waiter. A lost COMMIT reply is covered
       // by the poll's bounded recheck, never by trusting this notification.
-      for (const wake of commandListeners.get(command.taskId) ?? []) wake();
+      notifyCommands(command.taskId);
+      deps.onCommandCommitted?.(command.taskId);
       return result;
     },
     pollCommand: (proof, parent) =>

@@ -198,6 +198,10 @@ command ACK disposition (`queued | accepted | rejected | uncertain`), receipts
 and an explicit `retryable` flag. Rejected intake is retryable in a **new**
 deciding turn; replay returns the original committed command, not a new send.
 Uncertainty and failed receipts remain visible and are not automatic retries.
+Cognition commands and question reads use a dedicated two-connection bounded
+SQL pool, separate from owner intake and the task listener. A post-commit relay
+notifies the listener mailbox instance so its held poll wakes immediately;
+bounded transport rechecks still cover a lost commit reply or notification.
 
 Command IDs hash the trusted recipient, persisted deciding-turn ID and the
 `core.steerTask` call ordinal. `recoverAcceptedEffect` reads the committed

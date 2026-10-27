@@ -1259,6 +1259,7 @@ export async function createContainerAsync(
   let stopTaskTraces: ((deadline: number, signal: AbortSignal) => Promise<void>) | undefined;
   let stopTaskChannel: ((deadline: number) => Promise<void>) | undefined;
   let closeTaskCommands: (() => Promise<void>) | undefined;
+  let notifyTaskCommands: ((taskId: string) => void) | undefined;
   if (!mergedConfig.motorCortex.enabled && controlTokenFile && controlCaFile) {
     const image = taskWorkbenchImage(process.env['LIFEMODEL_TASK_WORKBENCH_IMAGE']);
     const imageRevision = image.slice(image.indexOf('@') + 1);
@@ -1298,6 +1299,7 @@ export async function createContainerAsync(
     const taskMailbox = createPostgresTaskMailbox({
       pool: commandPool,
       epoch: snapshotEpoch,
+      onCommandCommitted: (taskId) => notifyTaskCommands?.(taskId),
       commandFrameLimit: Math.min(
         commandSettings['tasks.channel.maxFrameBytes'],
         commandSettings['tasks.channel.maxUnackedBytes'],
@@ -1509,6 +1511,9 @@ export async function createContainerAsync(
         void replay.resync();
       },
     });
+    notifyTaskCommands = (taskId) => {
+      mailbox.notifyCommands(taskId);
+    };
     const replay = createTaskChannelReplay({ mailbox, bus: busSignalStream, logger });
     let channel: ReturnType<typeof createTaskChannel> | undefined;
     stopTaskChannel = async (deadline) => {
