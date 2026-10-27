@@ -33,6 +33,25 @@ describe('baked OpenCode steering plugin', () => {
         resume: false,
       });
       expect(prompt.mock.calls[1]![0]).toEqual(first);
+      const { connect } = await import('node:net');
+      const unicode = 'Привет 🧭';
+      const frame = Buffer.from(
+        JSON.stringify({ op: 'steer', sessionID: 'native-session', id: 'unicode', text: unicode }) +
+          '\n'
+      );
+      const split = frame.indexOf(Buffer.from('🧭')) + 1;
+      await new Promise<void>((resolve, reject) => {
+        const socket = connect(join(dir, 'tmp/steer.sock'));
+        socket.on('error', reject);
+        socket.on('connect', () => {
+          socket.write(frame.subarray(0, split));
+          // Yield one I/O turn to force an incremental decoder boundary.
+          setTimeout(() => socket.end(frame.subarray(split)), 10);
+        });
+        socket.resume();
+        socket.on('close', () => resolve());
+      });
+      expect(prompt.mock.calls[2]![0]).toMatchObject({ text: unicode, resume: false });
     } finally {
       await close();
       if (old === undefined) delete process.env.LIFEMODEL_STEER_SOCKET;

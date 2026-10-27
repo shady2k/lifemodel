@@ -24,6 +24,8 @@ export default {
     })();
     rmSync(path, { force: true });
     const server = createServer(socket => {
+      // Decode incrementally: a Unicode steering message can span socket chunks.
+      socket.setEncoding('utf8');
       let buffer = '';
       socket.on('error', () => {});
       socket.on('data', chunk => {

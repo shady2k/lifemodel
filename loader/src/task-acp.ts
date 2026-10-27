@@ -501,7 +501,7 @@ export class AcpTaskHarness implements TaskHarness {
         const admit = this.options.admit;
         this.steering = async (command) => {
           if (
-            !command.commandId ||
+            !command.commandId.trim() ||
             !command.text.trim() ||
             Buffer.byteLength(command.commandId) > 256 ||
             Buffer.byteLength(command.text) > 60000
