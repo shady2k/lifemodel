@@ -31,6 +31,8 @@ export function validateAgentRegistry(registry, fixtureNames = []) {
     if (agent.contractModule !== undefined && (typeof agent.contractModule !== 'string' || !/^\.\.\/\.\.\/tests\/fixtures\/task-[a-z0-9-]+\.ts$/.test(agent.contractModule))) fail('contract module');
     const provision = agent.provision;
     if (!object(provision)) fail('provision');
+    if (provision.archiveLayout !== undefined && provision.archiveLayout !== 'distribution') fail('archive layout');
+    if (provision.archiveLayout && !provision.archives) fail('archive options');
     if (provision.archives !== undefined) {
       if (!object(provision.archives) || Object.keys(provision.archives).length === 0) fail('archives');
       for (const [arch, spec] of Object.entries(provision.archives)) {
@@ -39,6 +41,8 @@ export function validateAgentRegistry(registry, fixtureNames = []) {
       }
       if (!safeRelativePath(provision.archiveMember)) fail('archive member');
     }
+    if (provision.pythonRequirements !== undefined && (!provision.archiveLayout || !safeRelativePath(provision.pythonRequirements) || !/^docker\/workbench\/[^/]+\.txt$/.test(provision.pythonRequirements) || !safeRelativePath(provision.pythonRuntime))) fail('python requirements');
+    if (provision.pythonRuntime !== undefined && !provision.pythonRequirements) fail('python runtime');
     if (provision.files !== undefined && !Array.isArray(provision.files)) fail('files');
     for (const file of provision.files ?? []) {
       if (!object(file) || !safeRelativePath(file.source) || !(fixture ?

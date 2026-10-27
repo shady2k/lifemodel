@@ -40,9 +40,9 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
   it('provisions Python inside both disposable boundaries for executed recovery snippets', () => {
     const launcher = readFileSync(join(repoRoot, 'scripts/test-isolated.mjs'), 'utf8');
     const machine = readFileSync(join(repoRoot, 'docker/test/bootstrap-orb.sh'), 'utf8');
-    expect(launcher).toContain('git ca-certificates curl python3 ripgrep');
+    expect(launcher).toContain('git ca-certificates curl python3 python3-venv ripgrep');
     expect(launcher).toContain('recipe-v8-registry-acp');
-    expect(machine).toContain('python3 ripgrep uidmap');
+    expect(machine).toContain('python3 python3-venv ripgrep uidmap');
     expect(launcher).toContain('ONNXRUNTIME_NODE_INSTALL_CUDA=skip');
     expect(readFileSync(join(repoRoot, 'scripts/test-docker-isolated.mjs'), 'utf8')).toContain(
       'ONNXRUNTIME_NODE_INSTALL_CUDA=skip'

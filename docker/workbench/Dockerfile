@@ -1,6 +1,5 @@
 # One release-commit workbench, separate from core. No installs at task startup.
-# Linux/amd64 native v2 binary is checksum pinned. Other architectures
-# fail closed until they have a reviewed binary/checksum and offline receipt.
+# Both agents require verified pins for each supported architecture; missing pins fail the build.
 FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS cli-build
 WORKDIR /build
 COPY loader/package.json loader/package-lock.json ./
@@ -27,7 +26,7 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
  && printf 'deb http://snapshot.debian.org/archive/debian/20261015T000000Z bookworm main\n' > /etc/apt/sources.list \
  && apt-get update -o APT::Update::Error-Mode=any \
  && cmp /tmp/debian.InRelease /var/lib/apt/lists/*_InRelease \
- && apt-get install -y --no-install-recommends ca-certificates curl git build-essential python3 ripgrep strace \
+ && apt-get install -y --no-install-recommends ca-certificates curl git build-essential python3 python3-venv ripgrep strace \
  && rm -rf /var/lib/apt/lists/* /tmp/debian.InRelease
 
 # Registry-owned architecture pins, extraction and immutable agent configuration.

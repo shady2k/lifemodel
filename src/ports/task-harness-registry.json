@@ -39,5 +39,58 @@
       ]
     },
     "contractModule": "../../tests/fixtures/task-opencode-contract.ts"
+  },
+  "prime-agent": {
+    "label": "Prime Agent",
+    "protocol": "acp",
+    "command": "/usr/local/bin/prime-agent",
+    "args": [
+      "--mode",
+      "acp",
+      "--offline",
+      "--no-session",
+      "--provider",
+      "task",
+      "--model",
+      "task"
+    ],
+    "configFile": "/etc/lifemodel/prime-agent/prime-models.json",
+    "version": "0.10.1",
+    "versionArgs": [
+      "--version"
+    ],
+    "versionOutput": "0.10.1",
+    "adapterModule": "./task-prime-agent.js",
+    "provision": {
+      "archives": {
+        "x86_64": {
+          "file": "prime-agent-0.10.1-linux-x64.tar.gz",
+          "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.10.1/prime-agent-0.10.1-linux-x64.tar.gz",
+          "sha256": "21ec219183f4134dd23dce9572102e69456066fe374846525561c776d4d1945c"
+        },
+        "aarch64": {
+          "file": "prime-agent-0.10.1-linux-arm64.tar.gz",
+          "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.10.1/prime-agent-0.10.1-linux-arm64.tar.gz",
+          "sha256": "5af68c10a088538fd4990fd18778d8c7fe28c0491083dc069c5177f733770e91"
+        }
+      },
+      "archiveMember": "prime-agent",
+      "archiveLayout": "distribution",
+      "files": [
+        {
+          "source": "docker/workbench/prime-models.json",
+          "destination": "/etc/lifemodel/prime-agent/prime-models.json",
+          "mode": "0444"
+        },
+        {
+          "source": "docker/workbench/prime-settings.json",
+          "destination": "/etc/lifemodel/prime-agent/prime-settings.json",
+          "mode": "0444"
+        }
+      ],
+      "pythonRequirements": "docker/workbench/prime-python-requirements.txt",
+      "pythonRuntime": "prime-agent-runtime/src"
+    },
+    "contractModule": "../../tests/fixtures/task-prime-agent-contract.ts"
   }
 }

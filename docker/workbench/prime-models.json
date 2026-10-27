@@ -1,0 +1,17 @@
+{
+  "providers": {
+    "task": {
+      "baseUrl": "http://127.0.0.1/v1",
+      "api": "openai-completions",
+      "apiKey": "task-relay",
+      "models": [
+        {
+          "id": "task",
+          "name": "Task",
+          "contextWindow": 32768,
+          "maxTokens": 4096
+        }
+      ]
+    }
+  }
+}

@@ -18,7 +18,10 @@ export function validateProvisionRegistry(registry) {
 export function agentSourceFiles(snapshot, registry = testAgentRegistry) {
   validateProvisionRegistry(registry);
   // Resolve the whole batch before a caller can read even the first source.
-  return Object.values(registry).flatMap(agent => agent.provision.files ?? [])
+  return Object.values(registry).flatMap(agent => [
+    ...(agent.provision.files ?? []),
+    ...(agent.provision.pythonRequirements ? [{ source: agent.provision.pythonRequirements }] : []),
+  ])
     .map(file => ({ ...file, hostPath: realPathWithin(snapshot, file.source) }));
 }
 const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
@@ -37,8 +40,23 @@ export function agentInstallScript(name, agent, archive, sourceRoot = '.', desti
   if (agent.provision.archives) {
     if (!archive) throw new Error(`missing pinned agent archive: ${name}`);
     const temp = `/tmp/lifemodel-agent-${name}`;
-    commands.push(`mkdir -p ${quote(temp)}`, `tar -xzf ${quote(archive)} -C ${quote(temp)} ${quote(agent.provision.archiveMember)}`,
-      `install -D -m 0555 ${quote(temp + '/' + agent.provision.archiveMember)} ${target(agent.command)}`, `rm -rf ${quote(temp)}`);
+    if (agent.provision.archiveLayout === 'distribution') {
+      const dir = `/opt/lifemodel/agents/${name}`;
+      commands.push(`mkdir -p ${target(dir)}`, `tar --no-same-owner -xzf ${quote(archive)} -C ${target(dir)}`,
+        `chmod -R a+rX,go-w ${target(dir)}`, `ln -s ${quote(dir + '/' + agent.provision.archiveMember)} ${target(agent.command)}`);
+    } else {
+      commands.push(`mkdir -p ${quote(temp)}`, `tar -xzf ${quote(archive)} -C ${quote(temp)} ${quote(agent.provision.archiveMember)}`,
+        `install -D -m 0555 ${quote(temp + '/' + agent.provision.archiveMember)} ${target(agent.command)}`, `rm -rf ${quote(temp)}`);
+    }
+  }
+  if (agent.provision.pythonRequirements) {
+    const python = `/opt/lifemodel/agents/${name}-python`;
+    const runtime = `/opt/lifemodel/agents/${name}/${agent.provision.pythonRuntime}`;
+    commands.push(`python3 -m venv ${target(python)}`,
+      `${target(python + '/bin/python')} -m pip install --no-cache-dir --only-binary=:all: --require-hashes -r ${quote(path.join(sourceRoot, agent.provision.pythonRequirements))}`,
+      `site=$(${target(python + '/bin/python')} -c 'import site; print(site.getsitepackages()[0])')`,
+      `printf '%s\n' ${quote(destinationRoot + runtime)} > "$site/lifemodel-runtime.pth"`,
+      `chmod -R a+rX,go-w ${target(python)}`);
   }
   for (const file of agent.provision.files ?? []) {
     commands.push(`install -D -m ${quote(file.mode ?? '0444')} ${quote(path.join(sourceRoot, file.source))} ${target(file.destination)}`);
@@ -51,7 +69,9 @@ export function agentProvisionScript(arch, registry = agentRegistry, sourceRoot 
   validateProvisionRegistry(registry);
   return Object.entries(registry).map(([name, agent]) => {
     const spec = agent.provision.archives?.[nativeAgentArch(arch)];
-    if (agent.provision.archives && !spec) throw new Error(`no pinned agent archive: ${name}/${arch}`);
+    if (agent.provision.archives && !spec) {
+      throw new Error(`no pinned agent archive: ${name}/${arch}`);
+    }
     const archive = `/tmp/lifemodel-${name}.tgz`;
     return [
       ...(spec ? [`curl --proto '=https' --proto-redir '=https' --fail --location --retry 3 ${quote(spec.url)} -o ${quote(archive)}`,
@@ -59,7 +79,7 @@ export function agentProvisionScript(arch, registry = agentRegistry, sourceRoot 
       agentInstallScript(name, agent, spec ? archive : undefined, sourceRoot, destinationRoot),
       ...(spec ? [`rm ${quote(archive)}`] : []),
     ].join('; ');
-  }).join('; ');
+  }).filter(Boolean).join('; ');
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   // Docker build copies only shipped registry and agent-owned build inputs.

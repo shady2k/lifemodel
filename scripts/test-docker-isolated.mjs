@@ -487,15 +487,17 @@ export function buildPlan(input) {
   for (const artifact of artifacts) {
     if (!safeRelativePath(artifact.file) || artifact.file.includes('/')) throw new IsolationError('unsafe artifact file');
   }
-  const agentSteps = Object.entries(testAgentRegistry).map(([name, agent]) => {
+  const agentSteps = Object.entries(testAgentRegistry).flatMap(([name, agent]) => {
     const archive = artifacts.find(artifact => artifact.key === `agent-${name}`);
-    if (agent.provision.archives && !archive) throw new IsolationError(`missing pinned agent artifact: ${name}`);
-    return {
+    if (agent.provision.archives && !archive) {
+      throw new IsolationError(`missing pinned agent artifact: ${name}`);
+    }
+    return [{
       id: `provision-agent-${name}`,
       kind: 'orb',
       argv: runArgv(machineName, 'root', PROVISION_DIR, ['sh', '-ec', agentInstallScript(name, agent, archive ? `${PROVISION_DIR}/${archive.file}` : undefined, SRC_DIR)]),
       timeoutMs: PHASE_TIMEOUTS_MS.provision,
-    };
+    }];
   });
 
   // Host-side tar arguments: the bootstrap script and the pinned artifacts,
@@ -772,7 +774,9 @@ export async function ensureArtifacts({ arch, cacheDir, download, log = () => {}
   const wanted = [];
   for (const key of Object.keys(specs)) {
     const spec = specs[key][arch];
-    if (!spec) throw new IsolationError(`no pinned ${key} artifact for ${arch}`);
+    if (!spec) {
+      throw new IsolationError(`no pinned ${key} artifact for ${arch}`);
+    }
     validateArtifact(spec);
     wanted.push({ key, ...spec });
   }

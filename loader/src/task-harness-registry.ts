@@ -15,6 +15,7 @@ export interface AgentConfiguration {
   version: string;
   versionOutput: string;
   versionArgs: string[];
+  provision: { archives?: Record<string, unknown> };
 }
 export const taskHarnessRegistry = validateAgentRegistry(
   JSON.parse(

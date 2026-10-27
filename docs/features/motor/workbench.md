@@ -2,23 +2,21 @@
 
 Task: lifemodel-653.8.3. `docker/workbench/Dockerfile` builds the OpenCode workbench of
 [ADR-014 D1/T02](../../adr/014-task-runtime.md). It is **not** the core image.
-`src/ports/task-harness-registry.json` currently configures only OpenCode.
-Stage 4 adds prime-agent 0.10.1 to this same image; this is planned, not yet
-implemented. No second task image is selected.
+`src/ports/task-harness-registry.json` configures OpenCode and prime-agent 0.10.1 in this same image. OpenCode remains the default. No second task image is selected.
 
 ## Contents and pins
 
 `docker/workbench/Dockerfile` consumes architecture pins and extraction/config
 inputs from `src/ports/task-harness-registry.json` through
 `scripts/task-agent-provision.mjs`. The same input provisions both isolated test
-paths. Missing architectures fail closed. Linux/amd64 has the local offline
-receipt; the arm64 archive pin is recorded but execution is not accepted here.
+paths. Both agents require verified Linux amd64 and arm64 pins; a missing pin fails the build.
 
 | Input | Pin / location |
 | --- | --- |
 | Node | `24.21.0-bookworm-slim`, manifest digest `sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20` (same version as the isolated test boundary) |
 | Native tools/libraries | Debian bookworm archive `20261015T000000Z`; signed apt indexes freeze git, build-essential, Python 3, ripgrep, curl, CA certificates and their dependencies |
 | OpenCode | `2.1.4`, native npm Linux x64 archive; SHA-256 `ce05abe2dce1041391c8ec8cdb8da066f640fd471e72ac846dcb089c441e11e1` |
+| Prime Agent | `0.10.1` Linux x64 SHA-256 `21ec219183f4134dd23dce9572102e69456066fe374846525561c776d4d1945c`; arm64 SHA-256 `5af68c10a088538fd4990fd18778d8c7fe28c0491083dc069c5177f733770e91`. The complete adjacent distribution and Python runtime are installed at build time. Python wheels are version- and hash-pinned in `docker/workbench/prime-python-requirements.txt`. |
 | Development dependencies | Root `package-lock.json` from this commit, installed by `npm ci --legacy-peer-deps` at `/opt/lifemodel/node_modules`, with native install steps completed during build |
 | Storage CLI | This commit's compiled `loader/src/storage-cli*.ts` at `/opt/lifemodel/loader/dist/`, wrapper `/usr/local/bin/lifemodel-storage` |
 | Launcher | This commit's compiled `loader/src/task-launcher-main.ts`, wrapper `/usr/local/bin/lifemodel-task-launcher` (the image ENTRYPOINT) |
@@ -128,17 +126,17 @@ briefing/channel client and model relay. Tokens/CA are read-only projected direc
 The registry appends `prime-agent` after OpenCode, preserving OpenCode as the
 first-key default, with ACP command `--mode acp --offline
 --no-session --provider task --model task`, exact version/output, adapter module,
-contract fixture and architecture-specific verified archive pins. The probe
-records the x86_64 archive SHA-256
-`21ec219183f4134dd23dce9572102e69456066fe374846525561c776d4d1945c`;
-it did not verify arm64. A missing pin makes Prime unavailable on that
-architecture and task acceptance refuses selecting it; the workbench build and
-OpenCode remain available. Extend provisioning to
-include the adjacent bundled distribution, local runtime and baked Python
-packages, not just the executable. Bake non-secret models/settings templates
-and offline controls; render the per-task relay URL and private daemon socket
-into private writable configuration. Offline start must make no attempted
-external bootstrap or installation. The setting snapshots the selected
+contract fixture and architecture-specific verified archive pins. The upstream
+[v0.10.1 SHA256SUMS](https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.10.1/SHA256SUMS)
+lists both pins above. The arm64 archive was downloaded and its SHA-256 checked
+against that file; its distribution contains `prime-agent` and
+`prime-agent-runtime/src`. The archive check does not establish arm64 execution
+acceptance; that remains to be tested on arm64. A missing pin fails provisioning. Provisioning includes
+the adjacent bundled distribution, local runtime and baked Python
+packages, not just the executable. Non-secret models/settings templates and
+offline controls are baked in. The adapter renders the per-task relay URL into
+private configuration and sets a private daemon socket. A network-disabled
+startup trace showed no IP connection attempts through ACP session creation. The setting snapshots the selected
 registry name into the accepted task; no caller or Job environment changes.
 
 Bake the local OpenCode steering plugin; it is the sole exception to the no

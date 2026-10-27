@@ -1,0 +1,10 @@
+{
+  "defaultProvider": "task",
+  "defaultModel": "task",
+  "telemetry": {
+    "enabled": false
+  },
+  "traces": {
+    "enabled": false
+  }
+}

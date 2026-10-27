@@ -94,9 +94,10 @@ const FIXTURE_FILES = {
   'rootless.tgz': 'b',
   'node.tar.xz': 'c',
   'opencode.tar.gz': 'd',
+  'prime-agent.tar.gz': 'e',
 };
 const ARTIFACTS = Object.keys(FIXTURE_FILES).map((file) => ({
-  key: file === 'opencode.tar.gz' ? 'agent-opencode' : file,
+  key: file === 'opencode.tar.gz' ? 'agent-opencode' : file === 'prime-agent.tar.gz' ? 'agent-prime-agent' : file,
   file,
   hostPath: `/cache/${file}`,
 }));
@@ -433,6 +434,7 @@ describe('buildPlan', () => {
       'transfer-source',
       'provision-root',
       'provision-agent-opencode',
+      'provision-agent-prime-agent',
       'provision-agent-scripted',
       'provision-repo',
       'provision-daemon',
@@ -599,8 +601,9 @@ describe('ensureArtifacts', () => {
             return content;
           },
         });
-        expect(artifacts).toHaveLength(4);
-        expect(downloaded).toHaveLength(4);
+        const expectedKeys = Object.keys(saved).filter((key) => saved[key].aarch64);
+        expect(artifacts.map((artifact: { key: string }) => artifact.key).sort()).toEqual(expectedKeys.sort());
+        expect(downloaded).toHaveLength(expectedKeys.length);
         for (const a of artifacts) {
           expect(fs.existsSync(a.hostPath)).toBe(true);
         }
@@ -612,7 +615,7 @@ describe('ensureArtifacts', () => {
             throw new Error('must not download');
           },
         });
-        expect(again).toHaveLength(4);
+        expect(again).toHaveLength(expectedKeys.length);
 
         // tampered cache file is re-verified and replaced
         fs.writeFileSync(artifacts[0].hostPath, 'tampered');
