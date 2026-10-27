@@ -1258,6 +1258,7 @@ export async function createContainerAsync(
   const taskLaunchController = new AbortController();
   let stopTaskTraces: ((deadline: number, signal: AbortSignal) => Promise<void>) | undefined;
   let stopTaskChannel: ((deadline: number) => Promise<void>) | undefined;
+  let closeTaskCommands: (() => Promise<void>) | undefined;
   if (!mergedConfig.motorCortex.enabled && controlTokenFile && controlCaFile) {
     const image = taskWorkbenchImage(process.env['LIFEMODEL_TASK_WORKBENCH_IMAGE']);
     const imageRevision = image.slice(image.indexOf('@') + 1);
@@ -1281,7 +1282,32 @@ export async function createContainerAsync(
         void taskLaunch?.resync();
       },
     });
-    const taskMailbox = createPostgresTaskMailbox({ pool: rawPostgres, epoch: snapshotEpoch });
+    // Cognition commands and question reads never borrow the owner-intake reserve.
+    const commandSettings = (await createPlatformSettingsReader({ logger }).read()).values;
+    const commandPool = new Pool({
+      connectionString: databaseUrl,
+      max: 2,
+      application_name: 'lifemodel-task-commands',
+      connectionTimeoutMillis: 5000,
+      query_timeout: 5000,
+      statement_timeout: 5000,
+      lock_timeout: 5000,
+    });
+    commandPool.on('error', () => undefined);
+    commandPool.on('connect', (client) => client.on('error', () => undefined));
+    const taskMailbox = createPostgresTaskMailbox({
+      pool: commandPool,
+      epoch: snapshotEpoch,
+      commandFrameLimit: Math.min(
+        commandSettings['tasks.channel.maxFrameBytes'],
+        commandSettings['tasks.channel.maxUnackedBytes'],
+        Math.floor(commandSettings['tasks.channel.maxBufferedBytes'] / 4)
+      ),
+    });
+    closeTaskCommands = async () => {
+      taskMailbox.stop();
+      await commandPool.end();
+    };
     taskService = createTaskService({ tasks: acceptanceService, mailbox: taskMailbox });
     coreLoop.setTaskService(taskService);
     coreLoop.setTaskQuestionReader((taskId, questionId) =>
@@ -1615,6 +1641,8 @@ export async function createContainerAsync(
       await taskDrain;
       await taskChannelDrain;
       await taskFinalizerDrain;
+      // Turn command commits drain with cognition before their clients close.
+      await closeTaskCommands?.();
       traceStop.abort();
       await taskTraceDrain;
       await snapshotRedis.quit();
