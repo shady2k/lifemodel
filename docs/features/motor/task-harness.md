@@ -318,7 +318,7 @@ checks that bound transactionally and with its unique partial index. Core counts
 an answer at command commit; the local barrier remains open until native admission.
 
 The relay permits four socket peers, one active report and 1024 retained report
-identities per launcher. Input is capped at 4096 bytes; each peer expires after
+identities per launcher. Input is capped at 8192 bytes (including JSON escaping); each peer expires after
 15 seconds. Busy/capacity/conflict calls fail explicitly. Within one shim process,
 repeated MCP request IDs with unchanged content join/replay one report. Changed
 content conflicts. Immutable channel frames retry three times after ambiguous
@@ -343,7 +343,8 @@ must finish within 2 seconds. It prints each measured latency. TLS, Postgres,
 Valkey, the shim and both harnesses are real; only the model gateway and Pod
 proof are fixtures. This is not a deployed gateway/cluster walk, image-signature
 acceptance, or a production latency SLO. Core hostile-frame flood refusal and
-exact step/question channel replay are checked in that same fixture.
+exact step/question channel replay are checked in that same fixture. See
+[verification and mutation evidence](../../research/task-mcp-contract.md).
 
 ## Durable outputs before the report
 

@@ -425,7 +425,9 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       endpoint: endpoint(options.env, 'CHANNEL'),
       identity: ids,
       harness,
-      onAnswerAdmitted: tools.answerAdmitted,
+      onAnswerAdmitted: (questionId) => {
+        tools?.answerAdmitted(questionId);
+      },
       hardStopAt: Date.parse(claim['hardStopAt']),
       diagnostic: (level, code, status) => {
         diagnostic(code);

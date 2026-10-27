@@ -43,9 +43,24 @@ for line in sys.stdin:
     if method == "initialize":
         send({"id": message["id"], "result": {"protocolVersion": 1, "agentCapabilities": {}}})
     elif method == "session/new":
+        if scenario == "mcp":
+            config = message["params"]["mcpServers"][0]
+            mcp_process = subprocess.Popen([config["command"], *config["args"]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            def mcp_call(identity, method, params):
+                mcp_process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": identity, "method": method, "params": params}) + "\n")
+                mcp_process.stdin.flush()
+                response = json.loads(mcp_process.stdout.readline())
+                assert not response.get("result", {}).get("isError"), response
+                return response
+            mcp_call(1, "initialize", {"protocolVersion": "2024-11-05"})
+            mcp_call(2, "tools/list", {})
         send({"id": message["id"], "result": {"sessionId": session}})
     elif method == "session/prompt":
         prompt_id = message["id"]
+        if scenario == "mcp" and not os.path.exists("mcp-reported"):
+            mcp_call(3, "tools/call", {"name": "step", "arguments": {"text": "MCP step contract"}})
+            mcp_call(4, "tools/call", {"name": "question", "arguments": {"text": "Which result should I use?"}})
+            open("mcp-reported", "w").close()
         if scenario in ("steer-long", "steer-parallel", "steer-failure"):
             count = 2 if scenario == "steer-parallel" else 1
             processes = []
@@ -87,7 +102,7 @@ for line in sys.stdin:
         if scenario == "tool":
             update({"sessionUpdate": "tool_call", "toolCallId": "required", "status": "failed"})
         result_text = "The task result is durable."
-        if scenario in ("barrier", "barrier-tool"):
+        if scenario in ("barrier", "barrier-tool", "mcp"):
             with lock:
                 if inbox:
                     result_text = "Steered terminal result."

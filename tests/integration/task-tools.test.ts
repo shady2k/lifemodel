@@ -99,19 +99,33 @@ describe('credential-free task MCP stdio shim and launcher relay', () => {
     expect(f.tools.question.isOpen()).toBe(false);
   });
 
-
   it('joins in-flight relay replay, bounds the producer and retains an ambiguous failed question', async () => {
     const gate = Promise.withResolvers<void>();
     let count = 0;
-    const f = await fixture(async () => { count++; await gate.promise; throw new Error('private_channel_failure'); });
-    const relay = (id: string, kind = 'question') => new Promise<any>((resolve, reject) => {
-      const socket = createConnection(join(f.work, '.launcher/tools.sock'));
-      socket.on('error', reject);
-      let buffer = '';
-      socket.on('data', (chunk) => { buffer += chunk; });
-      socket.on('end', () => { resolve(JSON.parse(buffer)); });
-      socket.on('connect', () => socket.end(JSON.stringify({ id, kind, text: 'Which output?' }) + '\n'));
+    const f = await fixture(async () => {
+      count++;
+      await gate.promise;
+      throw new Error('private_channel_failure');
     });
+    const relay = (id: string, kind = 'question') =>
+      new Promise<any>((resolve, reject) => {
+        const socket = createConnection(join(f.work, '.launcher/tools.sock'));
+        socket.on('error', reject);
+        let buffer = '';
+        socket.on('data', (chunk) => {
+          buffer += chunk;
+        });
+        socket.on('end', () => {
+          try {
+            resolve(JSON.parse(buffer));
+          } catch {
+            reject(new Error('relay_response_missing'));
+          }
+        });
+        socket.on('connect', () =>
+          socket.write(JSON.stringify({ id, kind, text: 'Which output?' }) + '\n')
+        );
+      });
     const id = 'a'.repeat(64);
     const first = relay(id);
     await expect.poll(() => count).toBe(1);
@@ -162,11 +176,24 @@ describe('credential-free task MCP stdio shim and launcher relay', () => {
     expect(f.tools.question.isOpen()).toBe(false);
   });
 
+  it('accepts a UTF-8 line at the byte limit without expanding it into a refused relay frame', async () => {
+    const reports: unknown[] = [];
+    const f = await fixture(async (...args) => {
+      reports.push(args);
+    });
+    const text = 'é'.repeat(512);
+    expect((await f.call('tools/call', { name: 'step', arguments: { text } })).isError).toBe(false);
+    expect(reports).toHaveLength(1);
+  });
+
   it('executes the actual shim with an empty environment and private socket, without credential paths or contents', async () => {
     const f = await fixture(async () => undefined);
+    // Observe the Python process after exec, not env's transient empty proc view.
+    await f.call('initialize', { protocolVersion: '2024-11-05' });
     const environment = (await readFile(`/proc/${f.child.pid}/environ`, 'utf8'))
       .split('\0')
-      .filter(Boolean);
+      .filter(Boolean)
+      .map((entry) => entry.split('=', 1)[0]);
     expect(environment).toEqual([]);
     const argv = (await readFile(`/proc/${f.child.pid}/cmdline`, 'utf8')).split('\0');
     expect(argv.join(' ')).not.toMatch(/private\/channel-token|must-not-inherit/);

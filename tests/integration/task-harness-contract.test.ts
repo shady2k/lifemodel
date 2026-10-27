@@ -16,6 +16,9 @@ import { configureAgent, toolOutputFailed } from '../../loader/src/task-opencode
 import { createRegisteredHarness } from '../../loader/src/task-harness-factory.js';
 import { taskHarnessRegistry } from '../../loader/src/task-harness-registry.js';
 import { createTaskModelRelay } from '../../loader/src/task-model-relay.js';
+import { createTaskTools } from '../../loader/src/task-tools.js';
+import { taskToolsContract } from '../helpers/task-tools-contract.js';
+import { createTaskCommandIntake } from '../../loader/src/task-command-intake.js';
 
 const exec = promisify(execFile);
 const TOKEN = 'TASK-MODEL-TOKEN-PRIVATE-CANARY';
@@ -23,6 +26,7 @@ const BRIEFING = 'TASK-BRIEFING-PRIVATE-CANARY';
 const RESULT = 'The task result is durable.';
 const briefing = { text: BRIEFING, model: 'lifemodel/task' };
 type Scenario =
+  | 'mcp'
   | 'success'
   | 'provider'
   | 'tool'
@@ -43,6 +47,11 @@ const fixtureRegistry = JSON.parse(
 Object.assign(taskHarnessRegistry, fixtureRegistry);
 type ContractFixture = {
   usesModelEndpoint: boolean;
+  reportTool?: (
+    kind: string,
+    text: string,
+    tools: { function: { name: string } }[]
+  ) => { name: string; arguments: string };
   loseSuccessorEvidence?: (work: string) => Promise<() => Promise<void>>;
   nativeReplay?: (input: {
     workDirectory: string;
@@ -71,7 +80,7 @@ for (const [name, agent] of Object.entries(taskHarnessRegistry)) {
  * The isolated launcher provisions the checksum-verified binary before denying
  * external egress. A missing binary is a failing test, not a skipped contract.
  */
-describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
+describe('TaskHarness contract: both pinned adapters and scripted harness', () => {
   let certificate: TestStorageCertificate;
   let directory: string;
   let api: Server;
@@ -79,6 +88,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
   let scenario: Scenario;
   let expectedToken: string;
   let toolSent: boolean;
+  let mcpReports = 0;
   let requestSeen: (() => void) | undefined;
   let requests: { path: string; token: string | undefined; body: string }[];
   let events: TaskHarnessEvent[];
@@ -158,7 +168,24 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
             })}\n\n`
           );
         chunk({ role: 'assistant' });
-        if (scenario === 'barrier-tool' && body.includes(STEER) && !toolSent) {
+        // MCP discovery can lag session/new. Retry only a bounded number of
+        // model tool attempts so missing tools fail instead of flooding history.
+        if (scenario === 'mcp' && mcpReports < 2 && requests.length <= 8) {
+          const kind = mcpReports === 0 ? 'step' : 'question';
+          const text = kind === 'step' ? 'MCP step contract' : 'Which result should I use?';
+          const tools = JSON.parse(body).tools;
+          chunk({
+            tool_calls: [
+              {
+                index: 0,
+                id: `mcp-${kind}`,
+                type: 'function',
+                function: activeFixture!.reportTool!(kind, text, tools),
+              },
+            ],
+          });
+          chunk({}, 'tool_calls');
+        } else if (scenario === 'barrier-tool' && body.includes(STEER) && !toolSent) {
           toolSent = true;
           chunk({
             tool_calls: [
@@ -241,7 +268,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
         } else {
           chunk({
             content:
-              scenario.startsWith('barrier') && body.includes(STEER)
+              (scenario.startsWith('barrier') || scenario === 'mcp') && body.includes(STEER)
                 ? 'Steered terminal result.'
                 : RESULT,
           });
@@ -310,6 +337,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
     requests = [];
     events = [];
     toolSent = false;
+    mcpReports = 0;
     requestSeen = undefined;
     insertionSeen = undefined;
     finalRequest = undefined;
@@ -364,6 +392,130 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
 
   for (const kind of Object.keys(taskHarnessRegistry)) {
     describe(kind, () => {
+      it('T02/T07: offline MCP step and question round trip leave 20 owner and 20 second-task control ACKs under 2 s', async () => {
+        const durable = await taskToolsContract(certificate, directory);
+        cleanup.push(() => durable.close());
+        const servers: NonNullable<AcpTaskHarnessOptions['mcpServers']> = [];
+        let tools: Awaited<ReturnType<typeof createTaskTools>>;
+        const waiting = Promise.withResolvers<void>();
+        const task = await harness(kind, 'mcp', {
+          mcpServers: servers,
+          question: {
+            isOpen: () => tools.question.isOpen(),
+            waitForChange: (signal) => tools.question.waitForChange(signal),
+          },
+          onEvent: (event) => {
+            if (event.type === 'step' && event.text === 'Waiting for task answer')
+              waiting.resolve();
+          },
+        });
+        tools = await createTaskTools({
+          workDirectory: work,
+          report: async (...args) => {
+            await durable.report(...args);
+            mcpReports++;
+          },
+        });
+        servers.push(...tools.mcpServers);
+        cleanup.push(() => tools.close());
+        const intake = createTaskCommandIntake({
+          endpoint: durable.endpoint,
+          identity: durable.first,
+          harness: task,
+          hardStopAt: Date.now() + 60000,
+          onAnswerAdmitted: tools.answerAdmitted,
+        });
+        cleanup.push(() => intake.stop());
+        let finished = false;
+        const terminal = task
+          .start({ ...briefing, softDueAt: new Date(Date.now() + 40000).toISOString() })
+          .then((result) => {
+            finished = true;
+            return result;
+          });
+        cleanup.push(async () => {
+          await task.abort();
+          await terminal;
+        });
+        intake.start();
+        await Promise.race([
+          waiting.promise,
+          terminal.then((result) => {
+            throw new Error(`question_missing:${JSON.stringify(result)}`);
+          }),
+        ]);
+        expect(finished).toBe(false);
+        const question = await durable.mailbox.readQuestion(durable.first.taskId);
+        expect(question).toMatchObject({
+          text: 'Which result should I use?',
+          answerCommandId: null,
+        });
+        // Bypass the cooperative shim too: hostile Pod frames must still be
+        // refused by core, with only one durable open question per task.
+        const floods = await Promise.all(
+          Array.from({ length: 20 }, async (_, i) => {
+            try {
+              await durable.mailbox.append(
+                {
+                  taskId: durable.first.taskId,
+                  attemptId: durable.first.attemptId,
+                  direction: 'task_to_core',
+                  messageId: `flood-${i}`,
+                  sequence: 100 + i,
+                  kind: 'question',
+                  payload: { questionId: `flood-${i}`, text: 'Another question?' },
+                },
+                durable.first
+              );
+              return 'accepted';
+            } catch (error) {
+              return (error as { code: string }).code;
+            }
+          })
+        );
+        expect(floods).toEqual(Array(20).fill('question_open'));
+        expect(
+          (
+            await durable.stores.postgres.query(
+              'SELECT 1 FROM core.task_questions WHERE task_id=$1 AND answer_command_id IS NULL',
+              [durable.first.taskId]
+            )
+          ).rowCount
+        ).toBe(1);
+        const latencies = await durable.responsiveness();
+        console.info(`T07 ${kind} ACK milliseconds ${JSON.stringify(latencies)}`);
+        expect(finished).toBe(false);
+        const stored = await durable.stores.postgres.query(
+          'SELECT kind,payload FROM core.task_mailbox WHERE task_id=$1 ORDER BY sequence',
+          [durable.first.taskId]
+        );
+        expect(stored.rows).toEqual([
+          { kind: 'step', payload: { line: 'MCP step contract' } },
+          {
+            kind: 'question',
+            payload: { questionId: question!.questionId, text: 'Which result should I use?' },
+          },
+        ]);
+        expect(durable.attempts).toHaveLength(4);
+        await durable.mailbox.enqueueCommand({
+          taskId: durable.first.taskId,
+          attemptId: durable.first.attemptId,
+          commandId: 'question-answer',
+          kind: 'answer',
+          questionId: question!.questionId,
+          text: STEER,
+        });
+        expect(await terminal).toMatchObject({
+          outcome: 'succeeded',
+          result: 'Steered terminal result.',
+        });
+        await intake.stop();
+        expect(tools.question.isOpen()).toBe(false);
+        expect((await durable.mailbox.readCommand('question-answer'))?.disposition).toBe(
+          'accepted'
+        );
+      }, 60000);
+
       it('settles a delayed admission ACK after ACP reply dispatch on the real adapter', async () => {
         const adapter = await import(
           new URL(

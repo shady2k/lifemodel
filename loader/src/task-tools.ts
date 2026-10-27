@@ -54,7 +54,7 @@ export async function createTaskTools(options: {
     let data = Buffer.alloc(0);
     socket.on('data', (chunk: Buffer) => {
       data = Buffer.concat([data, chunk]);
-      if (data.length > 4096) {
+      if (data.length > 8192) {
         socket.destroy();
         return;
       }
@@ -147,7 +147,11 @@ export async function createTaskTools(options: {
     async close() {
       closed = true;
       for (const socket of sockets) socket.destroy();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await new Promise<void>((resolve) =>
+        server.close(() => {
+          resolve();
+        })
+      );
       await rm(path, { force: true });
       notify();
     },

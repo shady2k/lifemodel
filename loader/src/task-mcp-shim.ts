@@ -12,8 +12,8 @@ def call(identity, params):
     if kind not in ("step", "question") or not isinstance(args, dict) or set(args) != {"text"}:
         return {"isError": True, "content": [{"type": "text", "text": "invalid_report"}]}
     request = {"id": hashlib.sha256((boot + json.dumps(identity)).encode()).hexdigest(), "kind": kind, "text": args["text"]}
-    encoded = json.dumps(request).encode() + b"\n"
-    if len(encoded) > 4096:
+    encoded = json.dumps(request, ensure_ascii=False).encode() + b"\n"
+    if len(encoded) > 8192:
         return {"isError": True, "content": [{"type": "text", "text": "invalid_report"}]}
     try:
         with socket.socket(socket.AF_UNIX) as connection:

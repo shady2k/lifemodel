@@ -12,3 +12,14 @@ export async function checkOffline(work: string): Promise<void> {
   await expect(access('/etc/lifemodel/xdg/opencode/package.json')).rejects.toThrow();
   await expect(access(join(work, '.opencode'))).rejects.toThrow();
 }
+
+export function reportTool(kind: string, text: string, tools: { function: { name: string } }[]) {
+  if (!tools.some((tool) => tool.function.name === 'execute'))
+    throw new Error('task_mcp_execute_missing');
+  return {
+    name: 'execute',
+    arguments: JSON.stringify({
+      code: `return await tools.task.${kind}({text:${JSON.stringify(text)}})`,
+    }),
+  };
+}
