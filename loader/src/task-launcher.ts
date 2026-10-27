@@ -248,8 +248,11 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
           error instanceof LauncherError &&
           error.status &&
           ![429, 500, 502, 503, 504].includes(error.status)
-        )
-          throw error;
+        ) {
+          if (attempt === 0) throw error;
+          // A later refusal cannot disprove a prior attempt's unknown commit.
+          throw new LauncherError('channel_unavailable', undefined, connectionAttempts);
+        }
         if (attempt === 2)
           throw new LauncherError('channel_unavailable', undefined, connectionAttempts);
       }
@@ -375,7 +378,8 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
         return;
       }
       if (++eventCount > 10_000) throw new LauncherError('event_limit');
-      // Progress remains fixed-code diagnostics; private content uses only traces.
+      // Native harness events use fixed progress lines. Explicit MCP step/question
+      // text goes to the durable mailbox; private model/tool content uses traces.
       const line =
         event.type === 'step'
           ? 'Task is working'
@@ -386,6 +390,10 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
     };
     tools = await createTaskTools({
       workDirectory: cwd,
+      diagnostic: (code) => {
+        diagnostic(code);
+        process.stderr.write(`${JSON.stringify({ component: 'task-tools', code })}\n`);
+      },
       report: (kind, text, messageId) =>
         send(kind, kind === 'step' ? { line: text } : { questionId: messageId, text }, messageId),
     });
@@ -441,7 +449,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       },
     });
     commands.start();
-    let result: TaskHarnessResult = await execution;
+    let result: TaskHarnessResult = await execution.finally(() => tools?.close());
     await commands.stop();
     if (intakeFailed)
       result = { outcome: 'failed', result: '', reasonCode: 'command_intake_failed' };
@@ -470,6 +478,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
     await report();
     return result.outcome === 'succeeded' ? 0 : 1;
   } catch (error) {
+    await tools?.close();
     await harness?.abort().catch(() => undefined);
     const code =
       error instanceof LauncherError

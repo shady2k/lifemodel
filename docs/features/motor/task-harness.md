@@ -267,7 +267,10 @@ through `TaskHarness.steer`, then posts the disposition ACK. Lost ACKs reconnect
 redeliver the same ID/text through the existing harness journal, not directly to
 a native adapter. Answers prefix `[question:<questionId>]` to their plain text.
 The `onAnswerAdmitted` callback closes the matching launcher question only on
-accepted native admission. A rejected or uncertain answer leaves it open. Receipt events use
+accepted native admission. Known limit (lifemodel-653.10): an uncertain or
+rejected answer admission leaves the task waiting until its timeout. Core has
+already committed the answer and cannot accept another for that question.
+Receipt events use
 stable SHA-256 receipt IDs and an independent bounded writer. Transient
 connection, 408, 429 and server failures back off exponentially from 250 ms to
 five seconds, for both command redelivery and receipts. Deterministic 4xx
@@ -318,12 +321,27 @@ checks that bound transactionally and with its unique partial index. Core counts
 an answer at command commit; the local barrier remains open until native admission.
 
 The relay permits four socket peers, one active report and 1024 retained report
-identities per launcher. Input is capped at 8192 bytes (including JSON escaping); each peer expires after
-15 seconds. Busy/capacity/conflict calls fail explicitly. Within one shim process,
-repeated MCP request IDs with unchanged content join/replay one report. Changed
-content conflicts. Immutable channel frames retry three times after ambiguous
-ACKs with the same message ID and sequence. Lost launcher/Pod execution is not
-recovered by rerunning a tool. An exhausted report remains failed, not an ACK.
+identities per launcher. Input is capped at 8192 bytes (including JSON escaping); peers have a 15-second
+idle timeout while reading a request, disabled while a report is in flight.
+The shim waits up to 60 seconds, above the launcher's three 5-second attempts
+plus its shared startup-connect retry window (at most 30 seconds). Busy/capacity/
+conflict calls fail explicitly. Within one shim process, repeated MCP request IDs
+with unchanged content join/replay one report. Changed content conflicts. Real
+harnesses normally use new request IDs: lost-ACK protection there comes from
+immutable channel frames retrying three times with the same message ID and
+sequence, not from MCP replay. Lost launcher/Pod execution is not recovered by
+rerunning a tool.
+
+A definite channel refusal returns `report_unavailable` and releases a local
+question reservation, but retains that failed call's identity. An unknown send
+outcome returns `report_uncertain`, never `report_unavailable` or an ACK. Its
+question stays reserved because core may have committed it. A later refusal
+cannot disprove a prior attempt's unknown commit. The shim also reports
+`report_uncertain` on a socket failure after it begins sending the request.
+Operators receive fixed diagnostic codes only, never report text. The tools
+socket closes as execution settles, before output uploads or any terminal frame.
+Malformed or oversized stdin receives a JSON-RPC error without stopping the
+shim. Initialization negotiates only `2024-11-05` or `2025-06-18`.
 
 Prime uses upstream v0.10.1's session-scoped MCP registry, not remote catalog login:
 [ACP stdio admission](https://github.com/PrimeIntellect-ai/prime-agent/blob/v0.10.1/crates/pa-daemon/src/acp/mcp.rs)

@@ -89,3 +89,48 @@ No dependency, tracker or agent pin changes were needed. Prime uses upstream's
 session-scoped offline MCP registry and its already-baked Python `mcp` package.
 The Pod remains one untrusted zone; credential-free shim transport is not proof
 that its progress or answers are true.
+
+
+## Review round 1 regressions (lifemodel-653.9.9)
+
+The relay disables its request-read idle timeout during a report. The shim's
+60-second receive bound exceeds three 5-second sends and the shared 30-second
+startup-connect window. Unknown send outcomes are `report_uncertain`; only a
+definite refusal is `report_unavailable`. A subsequent refusal cannot disprove
+an earlier attempt's unknown commit. Definite 4xx refusals (except retryable 429)
+release the local question and notify its waiters, while preserving call identity.
+Relay diagnostics are fixed codes with no text. The tools socket closes before
+outputs and terminal reporting, on both resolved and rejected execution. Closing
+is idempotent. Existing `.launcher` permissions are explicitly reset to 0700.
+
+Malformed, non-object, null-params and oversized stdin lines get JSON-RPC errors;
+the shim keeps serving. Unknown protocol versions negotiate `2025-06-18` rather
+than echoing unrecognized versions. Both supported versions are tested.
+
+Checks use `lifemodel-heavy npm run check -- -- <files>`: the second separator
+must reach `test-isolated.mjs`. The initially requested single-separator spelling
+returned exit 2 before tests, not a product failure. The initial corrected scoped
+run passed all 50 tests in task-tools and task-launcher (exit 0), including the
+16-second slow ACK. A later scoped run also covers the real launcher's
+first-refusal versus lost-ACK-then-refusal classification.
+
+Required mutations were planted individually and restored:
+
+| Finding | Mutation | Observed RED |
+| --- | --- | --- |
+| M1 | Re-enable 15-second idle timeout during report | exit 1: slow ACK returns before the 16-second commit (`committed` false) |
+| L1 | Keep reservation after definite 409 | exit 1: `question.isOpen()` is true, expected false |
+| L2 | Exit on malformed JSON instead of replying | exit 1: no JSON-RPC reply; test's 5-second bound expires |
+| L4 | Defer tools closure until final cleanup | exit 1: socket still connects during output uploads; thrown-execution case still passes |
+
+The first L1 attempt was terminated before tests (exit 143); it is not RED
+assertion evidence. Its repeat produced the assertion failure above. Targeted
+mutation selections skip unrelated cases; those skips are not passes. Logs use
+the local `.worker-fix1-*.log` prefix. Final restored scoped and full-check
+verdicts are recorded in the worker report. The full check is run exactly once;
+an OOM exit 137 is reported without retry.
+
+M2 is intentionally unchanged. Known limit, tracked on lifemodel-653.10:
+uncertain or rejected answer admission leaves the task waiting until timeout,
+even though core already committed the answer and cannot accept another for
+that question. No stage acceptance or deployed gateway walk is claimed here.
