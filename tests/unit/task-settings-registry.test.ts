@@ -296,6 +296,10 @@ describe('settings declaration registry', () => {
       ok: true,
       value: TASK_HARNESS_NAMES[0],
     });
+    expect(platformSettings.validate('tasks.harness', 'prime-agent')).toEqual({
+      ok: true,
+      value: 'prime-agent',
+    });
     expect(platformSettings.validate('tasks.harness', 'codex')).toMatchObject({
       ok: false,
       reasonCode: 'not_an_option',

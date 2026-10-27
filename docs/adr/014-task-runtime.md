@@ -190,8 +190,8 @@ the adjacent distribution/runtime and baked Python packages as well as the
 binary; the probe's executable-only sketch is incomplete. Bake non-secret
 models/settings templates and offline controls, then render the dynamic relay URL
 and private daemon socket into task-private config. No startup installs or
-external bootstrap. An unsupported or unverified architecture makes only that harness unavailable;
-acceptance refuses its selection, not the entire workbench or OpenCode build.
+external bootstrap. Both supported architectures require verified pins for both agents;
+a missing pin fails the workbench build instead of omitting a harness.
 Append Prime to the registry so its first key and default remain OpenCode. The
 loader setting selects a registered harness at acceptance and snapshots it in
 the task record/briefing; caller input and Job environment do not change. The

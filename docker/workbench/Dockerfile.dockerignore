@@ -3,6 +3,7 @@
 !docker/workbench/Dockerfile
 !docker/workbench/lifemodel-task-launcher
 !docker/workbench/*.json
+!docker/workbench/*.txt
 !scripts/task-agent-provision.mjs
 !docker/loader/lifemodel-storage
 !package.json

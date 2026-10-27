@@ -1,5 +1,7 @@
 /** Data-only agent registry shared with core settings; no core runtime import. */
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { access } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { validateAgentRegistry } from '../../src/ports/task-agent-validation.mjs';
@@ -15,6 +17,8 @@ export interface AgentConfiguration {
   version: string;
   versionOutput: string;
   versionArgs: string[];
+  adapterConfig?: { settingsFile: string; kernelPython: string };
+  provision: { archives?: Record<string, unknown> };
 }
 export const taskHarnessRegistry = validateAgentRegistry(
   JSON.parse(
@@ -30,12 +34,22 @@ export async function selfCheckHarnesses(): Promise<string[]> {
   const checked: string[] = [];
   for (const agent of Object.values(taskHarnessRegistry)) {
     await access(agent.configFile);
-    const version = execFileSync(agent.command, agent.versionArgs, {
-      encoding: 'utf8',
-      timeout: 10_000,
-      maxBuffer: 65536,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim();
+    const adapter = (await import(agent.adapterModule)) as {
+      versionCheckEnv?: (workDirectory: string) => NodeJS.ProcessEnv;
+    };
+    const work = mkdtempSync(join(tmpdir(), 'harness-version-'));
+    let version: string;
+    try {
+      version = execFileSync(agent.command, agent.versionArgs, {
+        encoding: 'utf8',
+        timeout: 10_000,
+        maxBuffer: 65536,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, HOME: work, ...adapter.versionCheckEnv?.(work) },
+      }).trim();
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
     if (version !== agent.versionOutput) throw new Error('harness_version_invalid');
     checked.push(`${agent.label}: ${version}`);
   }

@@ -63,8 +63,15 @@ an unknown/missing name fails closed. No new Job env value is introduced.
 Tool subprocesses receive only the four storage CLI capability values, not
 model/channel token paths. Raw ACP content never enters launcher diagnostics.
 
-The fixed baked provider/model is `lifemodel/task`. This remains a neutral,
-local harness alias, not an upstream model name or a provider choice. The task
+OpenCode uses the fixed baked provider/model `lifemodel/task`; Prime Agent uses
+`task/task`. Both are local aliases. Prime 0.10.1 uses private rendered model
+and settings files, a private daemon socket, offline controls, and an image-baked
+Python runtime. Prime does not implement the ACP permission method, and its
+Python tool can report an exception as completed without structured failure
+evidence. These are accepted exemptions, not reliable failure detection.
+Both agents require verified pins for each supported architecture; a missing pin fails the workbench build.
+
+These are neutral local harness aliases, not upstream model names or provider choices. The task
 model gateway owns model selection: after validating a nonempty model string,
 it replaces any harness-supplied name with the configured model of each attempted
 slot, on primary and on reserve failover. Changing the harness alias is not

@@ -59,19 +59,18 @@ function controlledDocker({ stale = false, complete = false } = {}) {
   };
 }
 
-import { testAgentRegistry } from '../../scripts/task-agent-provision.mjs';
+import { agentSourceFiles } from '../../scripts/task-agent-provision.mjs';
 
 function launcherFixture(root: string) {
   const source = join(root, 'source');
   mkdirSync(source);
   writeFileSync(join(source, 'package.json'), '{}');
   writeFileSync(join(source, 'package-lock.json'), '{}');
-  for (const agent of Object.values(testAgentRegistry) as any[])
-    for (const file of agent.provision.files ?? []) {
-      const target = join(source, file.source);
-      mkdirSync(join(target, '..'), { recursive: true });
-      writeFileSync(target, readFileSync(file.source));
-    }
+  for (const file of agentSourceFiles(process.cwd())) {
+    const target = join(source, file.source);
+    mkdirSync(join(target, '..'), { recursive: true });
+    writeFileSync(target, readFileSync(file.hostPath));
+  }
   return source;
 }
 

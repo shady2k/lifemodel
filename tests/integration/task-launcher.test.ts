@@ -9,6 +9,8 @@ import { createTaskModelRelay } from '../../loader/src/task-model-relay.js';
 import { mkdtemp, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as harnessFactory from '../../loader/src/task-harness-factory.js';
+import { AcpTaskHarness } from '../../loader/src/task-acp.js';
 import { runTaskLauncher, type LauncherOptions } from '../../loader/src/task-launcher.js';
 import {
   ScriptedTaskHarness,
@@ -118,6 +120,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
   let startWon: boolean;
   let startMode: 'ok' | '409' | 'timeout' | 'lost_ack';
   let briefingStatus: number;
+  let briefingHarness: string;
   let loseTerminalAcks: number;
   let markStatus: number;
   let markReceipt: 'committed' | 'unmarked' | 'wrong_id';
@@ -153,6 +156,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     startWon = false;
     startMode = 'ok';
     briefingStatus = 200;
+    briefingHarness = 'opencode';
     loseTerminalAcks = 0;
     markStatus = 200;
     markReceipt = 'committed';
@@ -261,7 +265,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       json(res, briefingStatus, {
         ...IDS,
         briefing: BRIEFING,
-        harness: 'opencode',
+        harness: briefingHarness,
         traceId: IDS.taskId,
         parentSpanId: null,
       });
@@ -446,6 +450,25 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       windowMs
     );
   }
+
+  it('resolves the accepted Prime Agent harness through the launcher factory', async () => {
+    briefingHarness = 'prime-agent';
+    const factory = vi.spyOn(harnessFactory, 'createRegisteredHarness');
+    const start = vi.spyOn(AcpTaskHarness.prototype, 'start').mockResolvedValue({
+      outcome: 'succeeded',
+      result: RESULT,
+    });
+    try {
+      expect(await run({}, { harness: undefined })).toBe(0);
+      expect(factory).toHaveBeenCalledOnce();
+      expect(factory).toHaveBeenCalledWith('prime-agent', expect.any(Object));
+      expect(start).toHaveBeenCalledOnce();
+      expect(terminal().payload.outcome).toBe('succeeded');
+    } finally {
+      factory.mockRestore();
+      start.mockRestore();
+    }
+  });
 
   it('survives refused connections before identity, briefing, progress and terminal', async () => {
     await pause('channel', 250);

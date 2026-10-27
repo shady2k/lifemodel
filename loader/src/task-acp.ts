@@ -165,6 +165,7 @@ export interface AcpTaskHarnessOptions {
     workDirectory: string;
     configFile: string;
     relayBaseURL: string;
+    adapterConfig?: AgentConfiguration['adapterConfig'];
   }) => NodeJS.ProcessEnv;
   toolOutputFailed?: (output: unknown, input?: unknown) => boolean;
   timeoutMs?: number;
@@ -293,6 +294,7 @@ export class AcpTaskHarness implements TaskHarness {
           workDirectory: work,
           configFile: agent.configFile,
           relayBaseURL: relay.baseURL,
+          adapterConfig: agent.adapterConfig,
         }),
       };
       if (signal.aborted) throw new Error('aborted');

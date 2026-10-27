@@ -299,7 +299,7 @@ export async function run(argv, dependencies = {}) {
         owned.add(prep); // Before creation: even a timed-out create must be reaped.
         await docker([...containerArgs(prep, BASE_IMAGE, false), 'sleep', 'infinity']);
         await docker(['start', prep]);
-        await docker(['exec', prep, 'sh', '-ec', 'mkdir -p /opt/deps /snapshot; apt-get update -qq; apt-get install -y -qq --no-install-recommends git ca-certificates curl python3 ripgrep; chown node:node /opt/deps'], { live: true });
+        await docker(['exec', prep, 'sh', '-ec', 'mkdir -p /opt/deps /snapshot; apt-get update -qq; apt-get install -y -qq --no-install-recommends git ca-certificates curl python3 python3-venv ripgrep; chown node:node /opt/deps'], { live: true });
         const nativeArch = base.stdout.trim().split('/').at(-1);
         for (const file of agentSourceFiles(snapshot)) {
           const destination = path.posix.join('/snapshot', file.source);
