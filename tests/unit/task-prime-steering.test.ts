@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { AcpTurn } from '../../loader/src/task-acp.js';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -77,8 +78,287 @@ async function daemon(
   });
   return { work, seen };
 }
+const control = () => ({ closeIntake: vi.fn(async () => [] as string[]), reopenIntake: vi.fn() });
+const idleState = {
+  activeSessionId: 'native-root',
+  isSessionActive: false,
+  isStreaming: false,
+  isCompacting: false,
+  isRunningTools: false,
+  hasRunningSubagents: false,
+};
+const row = (role: string, text: string) => ({
+  role,
+  content: [{ type: 'text', text }],
+  ...(role === 'assistant' ? { stopReason: 'stop' } : {}),
+});
 const root = { rlmDepth: 0, runtimeKind: 'top-level', activeSessionId: 'native-root' };
 describe('Prime same-daemon steering', () => {
+  it('returns idle without scanning a long transcript when every command was observed inserted', async () => {
+    const { work, seen } = await daemon([root], false, (command) => {
+      if (command.type === 'get_state') return { data: idleState };
+      if (command.type === 'get_queue') return { data: { steering: [], followUp: [] } };
+      return {
+        data: {
+          messages: [row('toolResult', 'x'.repeat(1048577))],
+          more: true,
+          firstEntryId: 'old',
+        },
+      };
+    });
+    await bind({ workDirectory: work, sessionId: 'acp' });
+    expect(
+      await reconcileEndTurn({
+        workDirectory: work,
+        sessionId: 'acp',
+        commandIds: ['cmd'],
+        insertedCommandIds: ['cmd'],
+        signal: new AbortController().signal,
+      })
+    ).toEqual({ state: 'idle' });
+    expect(seen.map((c) => c.type)).toEqual(['list', 'get_state', 'get_queue']);
+  });
+
+  it.each(['steering', 'followUp'] as const)(
+    'awaits a nonempty %s queue even with idle flags',
+    async (lane) => {
+      let queued = true;
+      const { work, seen } = await daemon([root], false, (command) => {
+        if (command.type === 'get_state') return { data: idleState };
+        if (command.type === 'get_queue')
+          return { data: { steering: [], followUp: [], [lane]: queued ? ['waiting'] : [] } };
+        return {
+          data: {
+            messages: [row('user', 'brief'), row('assistant', 'Queue drained')],
+            more: false,
+          },
+        };
+      });
+      await bind({ workDirectory: work, sessionId: 'acp' });
+      const result = await reconcileEndTurn({
+        workDirectory: work,
+        sessionId: 'acp',
+        commandIds: [],
+        signal: new AbortController().signal,
+      });
+      expect(result.state).toBe('successor');
+      if (result.state !== 'successor') throw new Error('expected_successor');
+      const fence = control();
+      const pending = result.wait(fence);
+      await vi.waitFor(() =>
+        expect(seen.filter((c) => c.type === 'get_queue').length).toBeGreaterThanOrEqual(2)
+      );
+      expect(fence.closeIntake).not.toHaveBeenCalled();
+      queued = false;
+      expect((await pending)?.updates.at(-1)).toEqual({ kind: 'text', text: 'Queue drained' });
+    }
+  );
+
+  it.each(['old-oversize', 'old-many-pages', 'unsteered'] as const)(
+    'stops at the required user boundary before %s',
+    async (mode) => {
+      let marker = '';
+      let states = 0;
+      const { work, seen } = await daemon([root], false, (command) => {
+        if (command.type === 'steer') {
+          marker = command.message as string;
+          return { data: { queued: true } };
+        }
+        if (command.type === 'get_state')
+          return {
+            data: { ...idleState, isSessionActive: mode === 'unsteered' && states++ === 0 },
+          };
+        if (command.type === 'get_queue') return { data: { steering: [], followUp: [] } };
+        const before = (command.page as { before?: string }).before;
+        const index = before ? Number(before) : 0;
+        const relevant = mode === 'unsteered' ? 'brief' : marker;
+        return {
+          data: {
+            messages: [
+              index === 0
+                ? row('assistant', 'Tail final')
+                : index === 1
+                  ? row('user', relevant)
+                  : row('toolResult', mode === 'old-oversize' ? 'x'.repeat(1048577) : 'old'),
+            ],
+            more: true,
+            firstEntryId: String(index + 1),
+            historyLeafId: 'leaf',
+          },
+        };
+      });
+      const command = { workDirectory: work, sessionId: 'acp', commandId: 'cmd', text: 'continue' };
+      await bind(command);
+      if (mode !== 'unsteered') await admit(command);
+      // Simulate flags lagging ACP: first state check is busy, successor then idle.
+      const ids = mode === 'unsteered' ? [] : ['cmd'];
+      const result = await reconcileEndTurn({
+        ...command,
+        commandIds: ids,
+        signal: new AbortController().signal,
+      });
+      expect(result.state).toBe('successor');
+      if (result.state !== 'successor') throw new Error('expected_successor');
+      expect((await result.wait(control()))?.updates.at(-1)).toEqual({
+        kind: 'text',
+        text: 'Tail final',
+      });
+      const pages = seen.filter((c) => c.type === 'get_messages');
+      expect(pages).toHaveLength(2);
+      expect(pages[1]).toMatchObject({ historyLeafId: 'leaf', page: { before: '1' } });
+    }
+  );
+
+  it('backs off native idle probes while successor work is busy', async () => {
+    const probes: number[] = [];
+    const { work } = await daemon([root], false, (command) => {
+      if (command.type === 'get_state') {
+        probes.push(performance.now());
+        return { data: { ...idleState, isSessionActive: probes.length < 5 } };
+      }
+      if (command.type === 'get_queue') return { data: { steering: [], followUp: [] } };
+      return { data: { messages: [row('user', 'brief'), row('assistant', 'Final')], more: false } };
+    });
+    await bind({ workDirectory: work, sessionId: 'acp' });
+    const result = await reconcileEndTurn({
+      workDirectory: work,
+      sessionId: 'acp',
+      commandIds: [],
+      signal: AbortSignal.timeout(5000),
+    });
+    if (result.state !== 'successor') throw new Error('expected_successor');
+    expect(await result.wait(control())).toBeDefined();
+    expect(probes[3]! - probes[2]!).toBeGreaterThanOrEqual(180);
+    expect(probes[4]! - probes[3]!).toBeGreaterThanOrEqual(380);
+  });
+
+  it('retains evidence from the earliest of multiple required markers, not just the latest', async () => {
+    const markers: string[] = [];
+    const { work } = await daemon([root], false, (command) => {
+      if (command.type === 'steer') {
+        markers.push(command.message as string);
+        return { data: { queued: true } };
+      }
+      if (command.type === 'get_state') return { data: idleState };
+      if (command.type === 'get_queue') return { data: { steering: [], followUp: [] } };
+      const rows = [
+        row('user', markers[0]!),
+        { role: 'assistant', content: [{ type: 'toolCall', id: 'unfinished', arguments: {} }] },
+        row('user', markers[1]!),
+        row('assistant', 'Later final'),
+      ];
+      const index = Number((command.page as { before?: string }).before ?? 0);
+      return {
+        data: {
+          messages: [rows[3 - index]],
+          more: true,
+          firstEntryId: String(index + 1),
+          historyLeafId: 'leaf',
+        },
+      };
+    });
+    const input = {
+      workDirectory: work,
+      sessionId: 'acp',
+      commandIds: ['first', 'second'],
+      signal: new AbortController().signal,
+    };
+    await bind(input);
+    for (const commandId of input.commandIds) await admit({ ...input, commandId, text: commandId });
+    const result = await reconcileEndTurn(input);
+    if (result.state !== 'successor') throw new Error('expected_successor');
+    expect(await result.wait(control())).toBeUndefined(); // the first marker's tool is still pending
+  });
+
+  it.each(['repeated', 'endless'] as const)(
+    'fails closed on %s more:true paging',
+    async (mode) => {
+      const { work, seen } = await daemon([root], false, (command, calls) => {
+        if (command.type === 'get_state') return { data: idleState };
+        if (command.type === 'get_queue') return { data: { steering: [], followUp: [] } };
+        return {
+          data: {
+            messages: [],
+            more: true,
+            firstEntryId: mode === 'repeated' ? 'same' : String(calls.length),
+            historyLeafId: 'leaf',
+          },
+        };
+      });
+      await bind({ workDirectory: work, sessionId: 'acp' });
+      const result = await reconcileEndTurn({
+        workDirectory: work,
+        sessionId: 'acp',
+        commandIds: ['missing'],
+        signal: AbortSignal.timeout(10000),
+      });
+      if (result.state !== 'successor') throw new Error('expected_successor');
+      expect(await result.wait(control())).toBeUndefined();
+      expect(seen.filter((c) => c.type === 'get_messages')).toHaveLength(
+        mode === 'repeated' ? 2 : 1000
+      );
+    },
+    15000
+  );
+
+  it('closes intake and rechecks idle after a steer is admitted during successor waiting', async () => {
+    let marker = '';
+    let lateMarker = '';
+    let busy = false;
+    let lateCompleted = false;
+    let closing = 0;
+    const { work, seen } = await daemon([root], false, (command) => {
+      if (command.type === 'steer') {
+        lateMarker = command.message as string;
+        marker ||= lateMarker;
+        return { data: { queued: true } };
+      }
+      if (command.type === 'get_state') {
+        const active = busy;
+        if (lateMarker !== marker && !busy) lateCompleted = true;
+        busy = false;
+        return { data: { ...idleState, isSessionActive: active } };
+      }
+      if (command.type === 'get_queue') return { data: { steering: [], followUp: [] } };
+      return {
+        data: {
+          messages: [
+            row('user', marker),
+            row('assistant', 'First final'),
+            row('user', lateMarker),
+            ...(lateCompleted ? [row('assistant', 'Late final')] : []),
+          ],
+          more: false,
+        },
+      };
+    });
+    const input = {
+      workDirectory: work,
+      sessionId: 'acp',
+      commandIds: ['first'],
+      signal: new AbortController().signal,
+    };
+    await bind(input);
+    await admit({ ...input, commandId: 'first', text: 'first' });
+    const result = await reconcileEndTurn(input);
+    if (result.state !== 'successor') throw new Error('expected_successor');
+    const reopen = vi.fn();
+    const evidence = await result.wait({
+      closeIntake: async () => {
+        closing++;
+        if (closing !== 1) return [];
+        expect(seen.some((c) => c.type === 'get_messages')).toBe(false);
+        await admit({ ...input, commandId: 'late', text: 'late' });
+        busy = true;
+        return ['late'];
+      },
+      reopenIntake: reopen,
+    });
+    expect(closing).toBe(2);
+    expect(reopen).toHaveBeenCalledOnce();
+    expect(evidence?.updates.at(-1)).toEqual({ kind: 'text', text: 'Late final' });
+  });
+
   it.each(['valid', 'missing', 'pending', 'error'] as const)(
     'classifies daemon successor evidence: %s',
     async (mode) => {
@@ -114,7 +394,7 @@ describe('Prime same-daemon steering', () => {
                 : [
                     { role: 'toolResult', toolCallId: 't', isError: mode === 'error', content: [] },
                   ]),
-              ...(mode === 'error'
+              ...(mode === 'pending'
                 ? []
                 : [
                     {
@@ -142,10 +422,28 @@ describe('Prime same-daemon steering', () => {
       });
       expect(reconciliation.state).toBe('successor');
       if (reconciliation.state !== 'successor') throw new Error('successor_required');
-      const evidence = await reconciliation.wait();
-      if (mode === 'valid')
-        expect(evidence?.updates.at(-1)).toMatchObject({ content: { text: 'Native final' } });
-      else expect(evidence).toBeUndefined();
+      const evidence = await reconciliation.wait(control());
+      if (mode === 'valid' || mode === 'error') {
+        expect(evidence?.updates.at(-1)).toEqual({ kind: 'text', text: 'Native final' });
+        expect(evidence?.updates).toContainEqual(
+          expect.objectContaining({
+            kind: 'tool',
+            status: mode === 'error' ? 'failed' : 'completed',
+          })
+        );
+        const turn = new AcpTurn();
+        for (const update of evidence!.updates) {
+          if (update.kind === 'tool')
+            turn.update({
+              sessionUpdate: 'tool_call_update',
+              toolCallId: update.id,
+              status: update.status,
+            });
+        }
+        expect(turn.result('end_turn').reasonCode).toBe(
+          mode === 'error' ? 'required_tool_failed' : 'no_final_result'
+        );
+      } else expect(evidence).toBeUndefined();
     }
   );
 

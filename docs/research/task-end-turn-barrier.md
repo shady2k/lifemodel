@@ -40,11 +40,88 @@ The final full check runs the restored sources.
 | Skip the end-turn barrier | `final-answer steer` | All nine tail/late/late-tool cases fail across the three agents: stale or concatenated text, or the answer seam is never reached. |
 | Resend steering text instead of the plain continuation | `late final-answer steer` | OpenCode's final model history contains two steering user rows instead of one. Prime and scripted cases still pass; this specifically exercises OpenCode's plain ACP continuation. |
 | Accept Prime final text without required successor tool evidence | `successor tool evidence is missing` | The actual Prime daemon runs its successor tool, the proxy removes its result, and the mutated adapter incorrectly succeeds; the expected failed classification catches it. |
-| Ignore the accepted `softDueAt` | `unanswered question waiting until softDueAt` | All three unanswered-question cases hit their 30-second test bound instead of returning failed/timeout at their 12-second task deadline. |
+| Ignore the accepted `softDueAt` | `unanswered question waiting until softDueAt` | Historical first-round run: all three unanswered-question cases hit their 30-second test bound instead of returning failed/timeout at their 12-second task deadline. |
+
+The rework test allows 30 seconds of task budget and 45 seconds of test budget,
+with a 20-second startup observation bound. This gives startup a larger margin
+under two workers.
 
 The third mutant removes both the adapter's unsettled-tool rejection and its
 pending-tool updates, modeling acceptance of prose alone. Removing only one is
 also prevented by the other layer; prose alone must not bypass both checks.
+
+## Review-round regressions
+
+The rework uses an event-gated delayed admission. Its event sink does not wait
+for the send: the send waits for `Settling task turn`, then calls the actual
+registry adapter. The first reconciliation must contain the admitted ID and the
+result must be the steered result on both real pins and the scripted agent.
+Lifecycle unit tests additionally hold a native ACK across a fully dispatched
+reply and assert no reconciliation occurs before it resolves.
+
+Fake-daemon tests keep `more:true` beyond the required marker, put an oversized
+old row behind that boundary, simulate lagging idle flags without command IDs,
+check both nonempty queue lanes, and reject repeated cursors or 1000 unfinished
+pages. Relevant rows have an 8 MiB aggregate bound as well as the 1 MiB frame
+bound. Earlier history is not fetched. Multiple markers retain evidence from
+the earliest required user row so an earlier unfinished tool cannot disappear.
+
+Prime successor tests admit another steer while closing intake. The first idle
+observation is not trusted: admissions settle, native idle is checked again, and
+new work is awaited before transcript inspection. Progress from normalized
+successor tools goes through the same event path as ACP updates. Distinct ACP
+assistant `messageId` values replace old final prose; chunks of one ID append.
+There is no invented `turn_start` notification in generic protocol handling.
+
+The question lost-wake version check was redundant: `wakeAdmission` is installed
+synchronously before reopening intake and before emitting the waiting event.
+An admission completed inside that event resolves the already-created promise.
+The rework removes that redundant check and tests this exact interleaving. A
+local flag closing without admitted text fails uncertain. A faulty seam that
+immediately resolves with its level unchanged is rate-limited, not a hot loop.
+
+Settled failures retain the existing within-turn recovery rule across turns:
+a reset alone does not recover them, but later agent prose or new/resumed tool
+work does. Unsettled calls always block success. The ADR and feature document
+now say this explicitly rather than claiming immutable failure accumulation.
+Every task currently stops at its start-snapshotted soft deadline, without wrap
+or live shortening; those 653.10 gaps are explicit in both channel and harness
+documents. No MCP implementation is added.
+
+
+All review-round mutants below were planted independently and each isolated
+command returned its own exit **1**. Sources were restored byte-for-byte before
+the full rework check. Filters run through `lifemodel-heavy node
+scripts/test-isolated.mjs test -- <paths> -t <filter>`.
+
+| Mutant | Targeted regression | RED observation |
+| --- | --- | --- |
+| Delete admissions await | Lifecycle delayed ACK + shared delayed admission ACK | 5 failures: both lifecycle states and all three registered agents reconcile without the ID. |
+| OpenCode unknown as inserted | Native disposition table | 3 failures: unknown, compaction and failed become idle. |
+| Reject closed-intake replay | Closed replay lifecycle | Replay settles rejected instead of joining the native flight. |
+| Force full scan on idle inserted command | Prime idle-with-receipt | Returns successor rather than idle with zero history reads. |
+| Scan past required tail boundary | Prime old-oversize, old-many-pages, unsteered | 3 failures; old oversized row or endless old pages invalidate otherwise sufficient evidence. |
+| Remove deferred receipt | Lifecycle continuation | Required receipt absent. |
+| Remove both queue checks | Prime queue lanes | 2 failures: nonempty steering or followUp incorrectly returns idle. |
+| Remove cursor nonprogress guard | Prime repeated more:true cursor | 1000 reads instead of 2. |
+| Remove page cap | Prime endless more:true | Read count exceeds 1000 before test abort. |
+| Remove softDueAt validation | Launcher invalid start claim | 4 failures: missing, null, number and malformed string start the harness. |
+| Trust closed question flag | Question closed without native answer | Incorrect success instead of end_turn_uncertain. |
+| Remove pending-ID continuation cap | OpenCode pending after continuation | Incorrect second continuation instead of unknown. |
+| Skip successor intake fence | Prime steer during successor wait | No close/settle cycle; expected successor ownership is missing. |
+| Ignore isError | Prime error successor evidence | Completed instead of failed tool observation. |
+| Omit admission wake | Question admission inside waiting event | Test bound reached instead of waking reconciliation. |
+
+## Rework full check
+
+`lifemodel-heavy npm run check` returned exit **0** on restored rework sources:
+all project typechecks, lint, formatting and 353 test files passed; 5450 tests
+passed and 3 pre-existing skips remained (5453 total). The suite took 429.49 s;
+the whole command took 487.36 s. This includes the full shared contract,
+launcher negative claims, native adapter cases, lifecycle races and the generic
+boundary scan. `npm run present` returned exit **0** with no new errors and 12
+older dead references. No plugin source changed, so no workbench rebuild was
+needed. These are local checks, not independent stage acceptance.
 
 ## Limits
 

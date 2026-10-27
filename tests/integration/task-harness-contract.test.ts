@@ -364,6 +364,60 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
 
   for (const kind of Object.keys(taskHarnessRegistry)) {
     describe(kind, () => {
+      it('settles a delayed admission ACK after ACP reply dispatch on the real adapter', async () => {
+        const adapter = await import(
+          new URL(
+            taskHarnessRegistry[kind]!.adapterModule,
+            new URL('../../loader/src/task-harness-registry.ts', import.meta.url)
+          ).href
+        );
+        const admit = adapter.admit;
+        const reconcile = adapter.reconcileEndTurn;
+        let release!: () => void;
+        const dispatched = new Promise<void>((done) => {
+          release = done;
+        });
+        let sending: Promise<string> | undefined;
+        let task: TaskHarness;
+        let first = true;
+        const reconciliations: string[][] = [];
+        const admissionSpy = vi
+          .spyOn(adapter, 'admit')
+          .mockImplementation(async (input: unknown) => {
+            // Real native send is held until the reply-dispatch event, not by the
+            // sink. The sink returns immediately and ACP remains free to settle.
+            await dispatched;
+            return admit(input);
+          });
+        const reconcileSpy = vi
+          .spyOn(adapter, 'reconcileEndTurn')
+          .mockImplementation(async (input: { commandIds: string[] }) => {
+            reconciliations.push([...input.commandIds]);
+            return reconcile(input);
+          });
+        try {
+          task = await harness(kind, 'barrier', {
+            onEvent: (event) => {
+              if (event.type === 'step' && event.text === 'Task is working' && first) {
+                first = false;
+                sending = task.steer({ commandId: 'delayed-ack', text: STEER });
+              }
+              if (event.type === 'step' && event.text === 'Settling task turn') release();
+            },
+          });
+          expect(await task.start(briefing)).toEqual({
+            outcome: 'succeeded',
+            result: 'Steered terminal result.',
+          });
+          expect(await sending).toBe('accepted');
+          expect(reconciliations[0]).toEqual(['delayed-ack']);
+        } finally {
+          release();
+          admissionSpy.mockRestore();
+          reconcileSpy.mockRestore();
+        }
+      }, 60000);
+
       it.each(['tail', 'late', 'late-tool'] as const)(
         'settles a %s final-answer steer without losing or resending it',
         async (point) => {
@@ -397,6 +451,16 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
           expect(sent).toBe(true);
           expect(disposition).toBe('accepted');
           expect(terminal).toEqual({ outcome: 'succeeded', result: 'Steered terminal result.' });
+          if (point !== 'tail' && kind !== 'prime-agent')
+            expect(events).toContainEqual({
+              type: 'receipt',
+              commandId: 'final-race',
+              disposition: 'deferred-to-next-turn',
+            });
+          if (point === 'late-tool' && kind === 'prime-agent')
+            expect(
+              events.some((event) => event.type === 'tool' && event.status === 'completed')
+            ).toBe(true);
           expect(await task.steer({ commandId: 'after-close', text: STEER })).toBe('rejected');
           if (activeFixture?.usesModelEndpoint) {
             const bodies = requests.map((request) => JSON.parse(request.body));
@@ -465,7 +529,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
         });
         // Deadline starts before agent startup, as in the accepted task intent.
         const terminal = task
-          .start({ ...briefing, softDueAt: new Date(Date.now() + 12000).toISOString() })
+          .start({ ...briefing, softDueAt: new Date(Date.now() + 30000).toISOString() })
           .then((result) => {
             finished = true;
             return result;
@@ -474,10 +538,10 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
           await task.abort();
           await terminal;
         });
-        await vi.waitFor(() => expect(waiting).toBe(true), { timeout: 10000 });
+        await vi.waitFor(() => expect(waiting).toBe(true), { timeout: 20000 });
         expect(finished).toBe(false);
         expect(await terminal).toMatchObject({ outcome: 'failed', reasonCode: 'timeout' });
-      }, 30000);
+      }, 45000);
 
       it('returns one semantic success with a result and refuses a second start', async () => {
         const task = await harness(kind, 'success');

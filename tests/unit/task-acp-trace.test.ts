@@ -24,6 +24,51 @@ const flush = async () => {
 };
 
 describe('ACP trace mapping behind the harness port', () => {
+  it('appends chunks of one message but replaces prose at a new message identity', () => {
+    const turn = new AcpTurn();
+    const chunk = (messageId: string, text: string) =>
+      turn.update({
+        sessionUpdate: 'agent_message_chunk',
+        messageId,
+        content: { type: 'text', text },
+      });
+    chunk('first', 'Old final');
+    chunk('second', 'New');
+    chunk('second', ' final');
+    expect(turn.result('end_turn')).toEqual({ outcome: 'succeeded', result: 'New final' });
+  });
+
+  it('ignores an invented wire turn_start and resets only through the internal path', () => {
+    const turn = new AcpTurn();
+    final(turn, 'Retained final');
+    turn.update({ sessionUpdate: 'turn_start' });
+    expect(turn.result('end_turn')).toEqual({ outcome: 'succeeded', result: 'Retained final' });
+    turn.continueTurn();
+    expect(turn.result('end_turn')).toMatchObject({
+      outcome: 'failed',
+      reasonCode: 'no_final_result',
+    });
+  });
+
+  it('carries settled failure across reset, but later agent work recovers it; pending tools always block', () => {
+    const turn = new AcpTurn();
+    turn.update({ sessionUpdate: 'tool_call', toolCallId: 'failed', status: 'failed' });
+    turn.continueTurn();
+    expect(turn.result('end_turn')).toMatchObject({
+      outcome: 'failed',
+      reasonCode: 'required_tool_failed',
+    });
+    final(turn);
+    expect(turn.result('end_turn').outcome).toBe('succeeded');
+    turn.update({ sessionUpdate: 'tool_call', toolCallId: 'pending', status: 'in_progress' });
+    turn.continueTurn();
+    final(turn);
+    expect(turn.result('end_turn')).toMatchObject({
+      outcome: 'failed',
+      reasonCode: 'required_tool_failed',
+    });
+  });
+
   it('recovers after a failed call while preserving its failed span', async () => {
     const events: TaskHarnessEvent[] = [];
     const turn = new AcpTurn(toolOutputFailed, (event) => {

@@ -60,19 +60,47 @@ export interface TaskEndTurnInput {
   sessionId: string;
   commandIds: string[];
   signal: AbortSignal;
+  /** Positive insertion receipts observed before this barrier. */
+  insertedCommandIds?: string[];
+  /** IDs already given one plain continuation, never resent. */
+  continuedCommandIds?: string[];
 }
+export interface TaskSuccessorControl {
+  /** Close synchronously, then settle journal admissions and return their IDs. */
+  closeIntake(): Promise<string[]>;
+  reopenIntake(): void;
+}
+export type TaskSuccessorUpdate =
+  | { kind: 'reset' }
+  | { kind: 'text'; text: string }
+  | {
+      kind: 'tool';
+      id: string;
+      status: 'in_progress' | 'completed' | 'failed';
+      input?: unknown;
+      output?: unknown;
+    };
 export interface TaskSuccessorEvidence {
-  /** Structured, settled tool observations followed by the last final text. */
-  updates: Record<string, unknown>[];
+  /** Adapter-neutral, ordered observations; no native protocol shapes. */
+  updates: TaskSuccessorUpdate[];
   stopReason: 'end_turn';
 }
 export type TaskEndTurnReconciliation =
   | { state: 'idle' }
   | { state: 'continue'; commandIds: string[] }
-  | { state: 'successor'; wait: () => Promise<TaskSuccessorEvidence | undefined> }
+  | {
+      state: 'successor';
+      wait: (control: TaskSuccessorControl) => Promise<TaskSuccessorEvidence | undefined>;
+    }
   | { state: 'unknown' };
 
-/** Launcher question tools will supply this seam; no MCP dependency here. */
+/** Launcher question tools supply this seam; no MCP dependency here.
+ * isOpen is a synchronous level check for one outstanding question.
+ * waitForChange subscribes to changes after registration, resolves on a change
+ * or abort, and releases listeners on abort. It must not spin on an unchanged
+ * level. The answer dispatcher closes the local question only after its text
+ * was admitted; a committed core answer alone is not native delivery.
+ */
 export interface TaskQuestionState {
   isOpen(): boolean;
   waitForChange(signal: AbortSignal): Promise<void>;

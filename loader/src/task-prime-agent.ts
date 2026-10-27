@@ -316,29 +316,65 @@ export async function reconcileEndTurn(
     );
   };
   try {
-    if ((await idle()) && input.commandIds.length === 0) return { state: 'idle' };
+    if ((await idle()) && input.commandIds.every((id) => input.insertedCommandIds?.includes(id)))
+      return { state: 'idle' };
   } catch {
     return { state: 'unknown' };
   }
   return {
     state: 'successor',
-    wait: async () => {
+    wait: async (control) => {
       try {
-        while (!(await idle())) {
-          await delay(100, undefined, { signal: input.signal });
+        const commandIds = new Set(input.commandIds);
+        let backoff = 100;
+        for (;;) {
+          while (!(await idle())) {
+            await delay(backoff, undefined, { signal: input.signal });
+            backoff = Math.min(backoff * 2, 2000);
+          }
+          // Native idle is not a fence while launcher intake is open. A steer
+          // may enqueue/start work between the two native reads. Close, settle,
+          // and check again before inspecting any final text.
+          const added = await control.closeIntake();
+          for (const id of added) commandIds.add(id);
+          const settledIdle = await idle();
+          if (settledIdle && added.length === 0) break;
+          // An admitted command can have left its queue before the daemon's
+          // running flags catch up. Give it another idle fence as well.
+          control.reopenIntake();
         }
-        // Read branch-pinned transcript pages, not the compacted context view.
+        // Read only the relevant branch-pinned tail. Old task history is not
+        // evidence for this successor and must not cost memory or frame budget.
         const messages: NativeRecord[] = [];
+        const markers = new Set([...commandIds].map((id) => steeringMarker(id) + '\n'));
         let before: string | undefined;
         let historyLeafId: unknown;
-        for (let page = 0; page < 1000; page++) {
+        let bytes = 0;
+        for (let page = 0; ; page++) {
           const data = await call('get_messages', {
             page: { from: 'end', limit: 1, ...(before ? { before } : {}) },
             ...(historyLeafId ? { historyLeafId } : {}),
           });
           if (!Array.isArray(data['messages'])) return undefined;
-          messages.unshift(...data['messages'].map(asRecord));
-          if (data['more'] === false) break;
+          let boundary = false;
+          const rows = data['messages'].map(asRecord);
+          for (let index = rows.length - 1; index >= 0; index--) {
+            const row = rows[index];
+            if (!row) return undefined;
+            bytes += Buffer.byteLength(JSON.stringify(row));
+            if (bytes > 8 * 1024 * 1024) return undefined;
+            messages.unshift(row);
+            if (row['role'] === 'user') {
+              const text = messageText(row);
+              for (const marker of markers) if (text.startsWith(marker)) markers.delete(marker);
+              if (markers.size === 0) {
+                boundary = true;
+                break;
+              }
+            }
+          }
+          if (boundary) return successorEvidence(messages, [...commandIds]);
+          if (data['more'] === false) return undefined;
           if (
             data['more'] !== true ||
             typeof data['firstEntryId'] !== 'string' ||
@@ -349,7 +385,6 @@ export async function reconcileEndTurn(
           before = data['firstEntryId'];
           historyLeafId = data['historyLeafId'];
         }
-        return successorEvidence(messages, input.commandIds);
       } catch {
         return undefined;
       }
@@ -357,31 +392,34 @@ export async function reconcileEndTurn(
   };
 }
 
+function messageText(row: NativeRecord): string {
+  return Array.isArray(row['content'])
+    ? row['content']
+        .map((part: unknown) => {
+          const value = asRecord(part);
+          return value['type'] === 'text' && typeof value['text'] === 'string' ? value['text'] : '';
+        })
+        .join('')
+    : '';
+}
+
 /** Only structured daemon rows can prove successor final text and tool settlement. */
 function successorEvidence(
   messages: NativeRecord[],
   commandIds: string[]
 ): TaskSuccessorEvidence | undefined {
-  const text = (row: NativeRecord) =>
-    Array.isArray(row['content'])
-      ? row['content']
-          .map((part: unknown) => {
-            const value = asRecord(part);
-            return value['type'] === 'text' && typeof value['text'] === 'string'
-              ? value['text']
-              : '';
-          })
-          .join('')
-      : '';
-  let start = 0;
+  let start = messages.length;
   for (const commandId of commandIds) {
     const index = messages.findIndex(
-      (row) => row['role'] === 'user' && text(row).startsWith(steeringMarker(commandId) + '\n')
+      (row) =>
+        row['role'] === 'user' && messageText(row).startsWith(steeringMarker(commandId) + '\n')
     );
     if (index < 0) return undefined;
-    start = Math.max(start, index);
+    start = Math.min(start, index);
   }
-  const updates: Record<string, unknown>[] = [];
+  if (!commandIds.length) start = messages.findLastIndex((row) => row['role'] === 'user');
+  if (start < 0) return undefined;
+  const updates: TaskSuccessorEvidence['updates'] = [];
   const pending = new Set<string>();
   let final = '';
   for (const row of messages.slice(start)) {
@@ -395,19 +433,16 @@ function successorEvidence(
         pending.add(content['id']);
         final = '';
         updates.push({
-          sessionUpdate: 'tool_call',
-          toolCallId: content['id'],
+          kind: 'tool',
+          id: content['id'],
           status: 'in_progress',
-          rawInput: content['arguments'],
+          input: content['arguments'],
         });
       }
       if (row['stopReason'] === 'error' || row['stopReason'] === 'aborted') return undefined;
-      if (row['stopReason'] === 'stop' && text(row).trim()) {
-        final = text(row);
-        updates.push({
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: final },
-        });
+      if (row['stopReason'] === 'stop' && messageText(row).trim()) {
+        final = messageText(row);
+        updates.push({ kind: 'reset' }, { kind: 'text', text: final });
       }
     } else if (row['role'] === 'toolResult') {
       if (
@@ -417,14 +452,14 @@ function successorEvidence(
       )
         return undefined;
       updates.push({
-        sessionUpdate: 'tool_call_update',
-        toolCallId: row['toolCallId'],
+        kind: 'tool',
+        id: row['toolCallId'],
         status: row['isError'] ? 'failed' : 'completed',
-        rawOutput: row['content'],
+        output: row['content'],
       });
     } else if (row['role'] === 'user') {
       final = '';
-      updates.push({ sessionUpdate: 'turn_start' });
+      updates.push({ kind: 'reset' });
     }
   }
   if (!final.trim() || pending.size) return undefined;

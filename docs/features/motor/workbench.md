@@ -16,8 +16,11 @@ The journal and channels are launcher-owned, outside TMPDIR, not a trust
 boundary; receipts are task claims in the single untrusted Pod zone.
 Neither channel adds Pod ingress or a second agent engine. See
 [task harness admission](task-harness.md#native-admission-and-launcher-owned-journal)
-for journal, receipts and uncertainty. The end-of-turn barrier is separate
-lifemodel-653.9.6 work; this bridge alone does not settle the final-answer race.
+for journal, receipts and uncertainty. The launcher now settles the final-answer
+race through the adapter end-of-turn barrier described below. The bridge alone
+is admission, not completion evidence. Pending IDs receive one plain continuation
+at most; Prime fences successor evidence with closed intake and a second idle
+check, then reads only the relevant history tail.
 
 ## Contents and pins
 

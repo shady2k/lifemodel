@@ -119,6 +119,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
   let abortCalls: number;
   let startWon: boolean;
   let startMode: 'ok' | '409' | 'timeout' | 'lost_ack';
+  let softDeadline: unknown;
   let briefingStatus: number;
   let briefingHarness: string;
   let loseTerminalAcks: number;
@@ -155,6 +156,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     abortCalls = 0;
     startWon = false;
     startMode = 'ok';
+    softDeadline = new Date(Date.now() + 50_000).toISOString();
     briefingStatus = 200;
     briefingHarness = 'opencode';
     loseTerminalAcks = 0;
@@ -248,7 +250,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
         ...IDS,
         start: true,
         space: SPACE,
-        softDueAt: new Date(Date.now() + 50_000).toISOString(),
+        ...(softDeadline === undefined ? {} : { softDueAt: softDeadline }),
         hardStopAt: new Date(Date.now() + 60_000).toISOString(),
       });
       return;
@@ -451,6 +453,17 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       windowMs
     );
   }
+
+  it.each([undefined, null, 123, 'not-a-date'])(
+    'refuses an invalid start softDueAt: %s',
+    async (value) => {
+      softDeadline = value;
+      expect(await run({})).not.toBe(0);
+      expect(harnessStarts).toEqual([]);
+      expect(harnessCreations).toBe(0);
+      expect(diagnostics).toContain('start_lost');
+    }
+  );
 
   it('resolves the accepted Prime Agent harness through the launcher factory', async () => {
     briefingHarness = 'prime-agent';

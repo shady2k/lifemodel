@@ -60,6 +60,15 @@ for line in sys.stdin:
                     item["status"] = "inserted"
             # Final response waits for the actual insertion-disposition read.
             assert inserted_observed.wait(30), "insertion disposition was never observed"
+        if scenario == "barrier-gated":
+            import time
+            update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "First result"}})
+            # Test owns this explicit event gate; no event sink blocks ACP dispatch.
+            open("prompt-tail", "w").close()
+            while not os.path.exists("release-prompt"):
+                time.sleep(0.01)
+            send({"id": prompt_id, "result": {"stopReason": "end_turn"}})
+            continue
         if scenario == "permission":
             send({"id": "permission-1", "method": "session/request_permission", "params": {"sessionId": session, "toolCall": {"toolCallId": "ask"}, "options": [{"optionId": "once", "kind": "allow_once", "name": "Once"}]}})
             continue

@@ -251,8 +251,10 @@ export async function reconcileEndTurn(
       });
       if (input.signal.aborted) cancel();
     });
-    if (status === 'pending') pending.push(commandId);
-    else if (status !== 'inserted') return { state: 'unknown' };
+    if (status === 'pending') {
+      if (input.continuedCommandIds?.includes(commandId)) return { state: 'unknown' };
+      pending.push(commandId);
+    } else if (status !== 'inserted') return { state: 'unknown' };
   }
   return pending.length ? { state: 'continue', commandIds: pending } : { state: 'idle' };
 }

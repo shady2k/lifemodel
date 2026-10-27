@@ -176,7 +176,11 @@ ID to the plain-text answer. An unanswered question keeps barrier intake open
 for answers and ordinary steers until admission or the accepted task timeout
 from the briefing (`TaskAccessIntent.softDueAt`). At expiry the barrier ends
 unanswered and the task proceeds as D4 `failed`/`timeout`; the 653.10 wrap
-command replaces this once available. The Job deadline is the hard bound.
+command replaces this once available. Today the launcher applies the start
+claim's snapshotted `softDueAt` to every task, including active model/tool work
+and tasks without questions: expiry aborts and returns `failed`/`timeout`, with
+no wrap. A later shortening (soft Stop) is not seen by this snapshot. Live
+deadline updates and wrap belong to 653.10. The Job deadline is the hard bound.
 MCP over stdio, including Prime offline, remains unverified. ACKs and receipts
 are task claims, not core evidence of execution or obedience.
 
