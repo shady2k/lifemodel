@@ -7,6 +7,7 @@ import { runStorageCli, storageNameValid } from './storage-cli.js';
 import { createTaskTraceChannel } from './task-trace-channel.js';
 import { createRegisteredHarness } from './task-harness-factory.js';
 import { createTaskCommandIntake } from './task-command-intake.js';
+import { createTaskTools } from './task-tools.js';
 import type { TaskHarness, TaskHarnessEvent, TaskHarnessResult } from './task-harness.js';
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -149,7 +150,9 @@ async function collectOutputs(
 function outputInstructions(cwd: string): string {
   return `Files for the owner go in ${join(cwd, 'outputs')}/, flat, with their final file names.
 Only regular files are allowed; no subfolders or symlinks. Maximum: 64 files.
-Files elsewhere are not delivered. Outputs are delivered only if the task succeeds.`;
+Files elsewhere are not delivered. Outputs are delivered only if the task succeeds.
+Use the task MCP step tool for short progress reports and question to ask the coordinating agent.
+Question returns after storage, not an answer. Wait for the correlated answer via steering.`;
 }
 async function artifacts(env: NodeJS.ProcessEnv, cwd: string): Promise<string[]> {
   const ids: string[] = [];
@@ -183,6 +186,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
   let ids: Identity | undefined;
   let harness: TaskHarness | undefined;
   let commands: ReturnType<typeof createTaskCommandIntake> | undefined;
+  let tools: Awaited<ReturnType<typeof createTaskTools>> | undefined;
   let sequence = 0;
   let started = false;
   let trace: ReturnType<typeof createTaskTraceChannel> | undefined;
@@ -207,13 +211,17 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
     void harness?.abort().catch(() => undefined);
   };
   options.signal?.addEventListener('abort', onAbort, { once: true });
-  async function send(kind: 'step' | 'terminal', payload: unknown): Promise<void> {
+  async function send(
+    kind: 'step' | 'question' | 'terminal',
+    payload: unknown,
+    messageId = `msg_${randomUUID()}`
+  ): Promise<void> {
     if (!channel || !ids) throw new LauncherError('channel_unavailable');
     const frame = {
       taskId: ids.taskId,
       attemptId: ids.attemptId,
       direction: 'task_to_core',
-      messageId: `msg_${randomUUID()}`,
+      messageId,
       sequence: ++sequence,
       kind,
       payload,
@@ -240,8 +248,11 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
           error instanceof LauncherError &&
           error.status &&
           ![429, 500, 502, 503, 504].includes(error.status)
-        )
-          throw error;
+        ) {
+          if (attempt === 0) throw error;
+          // A later refusal cannot disprove a prior attempt's unknown commit.
+          throw new LauncherError('channel_unavailable', undefined, connectionAttempts);
+        }
         if (attempt === 2)
           throw new LauncherError('channel_unavailable', undefined, connectionAttempts);
       }
@@ -367,7 +378,8 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
         return;
       }
       if (++eventCount > 10_000) throw new LauncherError('event_limit');
-      // Progress remains fixed-code diagnostics; private content uses only traces.
+      // Native harness events use fixed progress lines. Explicit MCP step/question
+      // text goes to the durable mailbox; private model/tool content uses traces.
       const line =
         event.type === 'step'
           ? 'Task is working'
@@ -376,6 +388,15 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
             : 'Harness reported an error';
       await send('step', { line });
     };
+    tools = await createTaskTools({
+      workDirectory: cwd,
+      diagnostic: (code) => {
+        diagnostic(code);
+        process.stderr.write(`${JSON.stringify({ component: 'task-tools', code })}\n`);
+      },
+      report: (kind, text, messageId) =>
+        send(kind, kind === 'step' ? { line: text } : { questionId: messageId, text }, messageId),
+    });
     const modelConfig = endpoint(options.env, 'MODEL');
     harness =
       options.harness?.(onEvent) ??
@@ -386,6 +407,8 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
           modelTokenFile: modelConfig.tokenFile,
           modelCaFile: modelConfig.caFile,
           workDirectory: cwd,
+          mcpServers: tools.mcpServers,
+          question: tools.question,
           storageEnv: {
             LIFEMODEL_STORAGE_ENDPOINT: options.env['LIFEMODEL_STORAGE_ENDPOINT'] ?? '',
             LIFEMODEL_STORAGE_SPACE: options.env['LIFEMODEL_STORAGE_SPACE'] ?? '',
@@ -410,6 +433,9 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       endpoint: endpoint(options.env, 'CHANNEL'),
       identity: ids,
       harness,
+      onAnswerAdmitted: (questionId) => {
+        tools?.answerAdmitted(questionId);
+      },
       hardStopAt: Date.parse(claim['hardStopAt']),
       diagnostic: (level, code, status) => {
         diagnostic(code);
@@ -423,7 +449,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       },
     });
     commands.start();
-    let result: TaskHarnessResult = await execution;
+    let result: TaskHarnessResult = await execution.finally(() => tools?.close());
     await commands.stop();
     if (intakeFailed)
       result = { outcome: 'failed', result: '', reasonCode: 'command_intake_failed' };
@@ -452,6 +478,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
     await report();
     return result.outcome === 'succeeded' ? 0 : 1;
   } catch (error) {
+    await tools?.close();
     await harness?.abort().catch(() => undefined);
     const code =
       error instanceof LauncherError
@@ -490,6 +517,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
     await commands?.stop();
     options.signal?.removeEventListener('abort', onAbort);
     trace?.close();
+    await tools?.close();
     channel?.close();
     model?.close();
   }

@@ -162,8 +162,9 @@ external plugins rule, not an online dependency. ACP supplies launcher MCP
 tools over a stdio subprocess at session creation. The stdio server is a thin
 launcher-shipped shim relaying over an inherited pipe or launcher-private local
 socket; it holds no channel credentials. Frames, IDs and limits are the
-launcher’s and core’s. MCP and Prime offline MCP
-support are unverified until tested. The two adapters and scripted fixture share the
+launcher’s and core’s. The isolated shared contract tests MCP on both pinned agents, including Prime
+offline, through `task-tools.ts` and the pure-stdlib `task-mcp-shim.ts`. No extra
+startup dependency or credential reaches the shim. The two adapters and scripted fixture share the
 contract suite. Prime's ACP permission gap and completed Python exception are
 known probe limitations accepted by the owner. The launcher now reconciles end-turn
 through each registry adapter: OpenCode continues parked input without resending;
@@ -171,8 +172,10 @@ Prime awaits native idle plus empty queues and requires final-text and settled-t
 evidence from daemon history. The shared contract exercises tail/late steering,
 question waiting and timeout on the pinned agents and scripted ACP fixture. A
 wire-level loss fixture removes Prime successor tool evidence and must fail closed.
-Question MCP tools remain deferred; the barrier exposes a generic question-state
-seam bounded by the accepted `softDueAt`. See the
+Question MCP tools now supply the generic question-state seam, bounded by the
+accepted `softDueAt`. The answer dispatcher closes it only after correlated
+native admission. The shim starts with an empty environment through `env -i`
+and reaches only the launcher-private tools socket. See the
 [ADR amendment](../../adr/014-task-runtime.md#amendment--2026-10-27-live-steering-behind-the-harness-port).
 
 ## Core steering surface
@@ -186,7 +189,8 @@ A question turn cannot command another task. The core tool does not choose a
 harness or bypass D7 grants. End-turn intake rejection is visible and retryable;
 intake readiness is tested against the brief prompt's completed write. See
 [the channel contract](task-channel.md#cognition-command-tool-lifemodel-65398).
-Task-side MCP tools and deployed two-harness question round trips remain 9.9.
+Task-side MCP tools and isolated two-harness question round trips are implemented
+in 9.9. Deployed gateway/cluster walks and arm64 execution remain separate evidence.
 
 ## CI and release
 

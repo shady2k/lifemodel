@@ -2,8 +2,10 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:https';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { Socket } from 'node:net';
+import { createConnection, type Socket } from 'node:net';
 import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { TaskJsonClient } from '../../loader/src/task-launcher-http.js';
 import { createTaskModelRelay } from '../../loader/src/task-model-relay.js';
 import { mkdtemp, readdir, rename, rm, writeFile } from 'node:fs/promises';
@@ -44,12 +46,14 @@ interface Frame {
   direction: string;
   messageId: string;
   sequence: number;
-  kind: 'step' | 'terminal';
+  kind: 'step' | 'question' | 'terminal';
   payload: {
     outcome?: string;
     reasonCode?: string;
     summary?: string;
     line?: string;
+    questionId?: string;
+    text?: string;
     resultObjectId?: string | null;
     artifactObjectIds?: string[];
   };
@@ -124,6 +128,9 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
   let commandStatus: number;
   let briefingHarness: string;
   let loseTerminalAcks: number;
+  let loseReportAcks: boolean;
+  let reportMode: 'ok' | '409' | 'lost_then_409';
+  let progressReports: Map<string, Frame>;
   let markStatus: number;
   let markReceipt: 'committed' | 'unmarked' | 'wrong_id';
   let pendingMarks: Set<string>;
@@ -162,6 +169,9 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     commandStatus = 200;
     briefingHarness = 'opencode';
     loseTerminalAcks = 0;
+    loseReportAcks = false;
+    reportMode = 'ok';
+    progressReports = new Map();
     markStatus = 200;
     markReceipt = 'committed';
     pendingMarks = new Set();
@@ -293,6 +303,21 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     }
     if (service === 'channel' && call.method === 'POST' && call.path === '/task/events') {
       const frame = JSON.parse(body.toString()) as Frame;
+      if (frame.kind !== 'terminal') {
+        if (reportMode === '409' || (reportMode === 'lost_then_409' && progressReports.size)) {
+          json(res, 409, {});
+          return;
+        }
+        const previous = progressReports.get(frame.messageId);
+        if (previous) expect(frame).toEqual(previous);
+        else {
+          progressReports.set(frame.messageId, frame);
+          if (loseReportAcks || reportMode === 'lost_then_409') {
+            res.destroy();
+            return;
+          }
+        }
+      }
       if (frame.kind === 'terminal') {
         if (pendingMarks.size) wireErrors.push('terminal sent while storage mark was pending');
         terminalFrames.push(frame);
@@ -484,6 +509,134 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     });
   });
 
+  it.each([false, true])(
+    'passes the credential-free shim through the production factory; lost report ACK=%s',
+    async (lost) => {
+      loseReportAcks = lost;
+      const factory = vi.spyOn(harnessFactory, 'createRegisteredHarness');
+      const start = vi.spyOn(AcpTaskHarness.prototype, 'start').mockImplementation(async () => {
+        const options = factory.mock.calls[0]![1];
+        const config = options.mcpServers![0]!;
+        expect(config.env).toEqual([]);
+        expect(config.args.slice(0, 2)).toEqual(['-i', '/usr/bin/python3']);
+        expect(options.question!.isOpen()).toBe(false);
+        const child = spawn(config.command, config.args, { stdio: 'pipe' });
+        const lines = createInterface({ input: child.stdout });
+        const responses = new Map<number, (value: any) => void>();
+        lines.on('line', (line) => {
+          const response = JSON.parse(line);
+          responses.get(response.id)?.(response.result);
+        });
+        let id = 0;
+        const call = (method: string, params: unknown) =>
+          new Promise<any>((resolve) => {
+            responses.set(++id, resolve);
+            child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+          });
+        try {
+          await call('initialize', { protocolVersion: '2024-11-05' });
+          expect(
+            (await call('tools/call', { name: 'step', arguments: { text: 'Actual private step' } }))
+              .isError
+          ).toBe(false);
+          expect(
+            (
+              await call('tools/call', {
+                name: 'question',
+                arguments: { text: 'Which private result?' },
+              })
+            ).isError
+          ).toBe(false);
+          expect(options.question!.isOpen()).toBe(true);
+          const frames = calls
+            .filter((call) => call.path === '/task/events')
+            .map((call) => JSON.parse(call.body.toString()));
+          expect(frames).toHaveLength(lost ? 4 : 2);
+          if (lost) {
+            expect(frames[0]).toEqual(frames[1]);
+            expect(frames[2]).toEqual(frames[3]);
+          }
+          const unique = [...progressReports.values()];
+          expect(unique).toEqual([
+            expect.objectContaining({ kind: 'step', payload: { line: 'Actual private step' } }),
+            expect.objectContaining({
+              kind: 'question',
+              payload: { questionId: expect.any(String), text: 'Which private result?' },
+            }),
+          ]);
+          expect(unique[1]!.payload.questionId).toBe(unique[1]!.messageId);
+        } finally {
+          const closed = new Promise<void>((resolve) => child.once('close', () => resolve()));
+          child.kill();
+          await closed;
+          lines.close();
+        }
+        return { outcome: 'succeeded', result: RESULT };
+      });
+      try {
+        expect(await run({}, { harness: undefined })).toBe(0);
+      } finally {
+        start.mockRestore();
+        factory.mockRestore();
+      }
+      expect(diagnostics).toEqual([]);
+    }
+  );
+
+  it.each(['409', 'lost_then_409'] as const)(
+    'classifies report refusal after production send attempts: %s',
+    async (mode) => {
+      reportMode = mode;
+      const factory = vi.spyOn(harnessFactory, 'createRegisteredHarness');
+      const start = vi.spyOn(AcpTaskHarness.prototype, 'start').mockImplementation(async () => {
+        const options = factory.mock.calls[0]![1];
+        const config = options.mcpServers![0]!;
+        const child = spawn(config.command, config.args, { stdio: 'pipe' });
+        const lines = createInterface({ input: child.stdout });
+        try {
+          const response = new Promise<any>((resolve) =>
+            lines.once('line', (line) => resolve(JSON.parse(line).result))
+          );
+          child.stdin.write(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: 1,
+              method: 'tools/call',
+              params: { name: 'question', arguments: { text: 'PRIVATE REFUSAL QUESTION' } },
+            }) + '\n'
+          );
+          expect(await response).toMatchObject({
+            isError: true,
+            content: [
+              { text: JSON.stringify(mode === '409' ? 'report_unavailable' : 'report_uncertain') },
+            ],
+          });
+          expect(options.question!.isOpen()).toBe(mode === 'lost_then_409');
+        } finally {
+          const closed = new Promise<void>((resolve) => child.once('close', () => resolve()));
+          child.kill();
+          await closed;
+          lines.close();
+        }
+        return { outcome: 'succeeded', result: RESULT };
+      });
+      try {
+        expect(await run({}, { harness: undefined })).toBe(0);
+      } finally {
+        start.mockRestore();
+        factory.mockRestore();
+      }
+      expect(diagnostics).toEqual(
+        mode === '409'
+          ? ['task_tool_report_unavailable']
+          : ['task_tool_question_retained', 'task_tool_report_uncertain']
+      );
+      expect(calls.filter((call) => call.path === '/task/events').length).toBe(
+        mode === '409' ? 2 : 3
+      );
+    }
+  );
+
   it('resolves the accepted Prime Agent harness through the launcher factory', async () => {
     briefingHarness = 'prime-agent';
     const factory = vi.spyOn(harnessFactory, 'createRegisteredHarness');
@@ -516,7 +669,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     expect(await run({ terminal: { outcome: 'succeeded', result: RESULT } })).toBe(0);
     expect(harnessStarts).toEqual([
       {
-        text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\nFiles elsewhere are not delivered. Outputs are delivered only if the task succeeds.\n\n${BRIEFING}`,
+        text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\nFiles elsewhere are not delivered. Outputs are delivered only if the task succeeds.\nUse the task MCP step tool for short progress reports and question to ask the coordinating agent.\nQuestion returns after storage, not an answer. Wait for the correlated answer via steering.\n\n${BRIEFING}`,
         model: 'lifemodel/task',
         softDueAt: expect.any(String),
       },
@@ -526,6 +679,50 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     expect(startCalls()).toHaveLength(1);
     expect(diagnostics).toEqual([]);
   });
+
+  it.each([false, true])(
+    'closes the tools socket before outputs and terminal; execution throws=%s',
+    async (throws) => {
+      const observations: { path: string; open: boolean }[] = [];
+      afterCall = async (call) => {
+        if (
+          call.service !== 'storage' &&
+          !(call.path === '/task/events' && JSON.parse(call.body.toString()).kind === 'terminal')
+        )
+          return;
+        const open = await new Promise<boolean>((resolve) => {
+          const socket = createConnection(join(directory, '.launcher/tools.sock'));
+          socket.once('connect', () => {
+            socket.destroy();
+            resolve(true);
+          });
+          socket.once('error', () => {
+            socket.destroy();
+            resolve(false);
+          });
+        });
+        observations.push({ path: call.path, open });
+      };
+      const harness = throws
+        ? () => ({
+            intakeReady: new Promise<void>(() => undefined),
+            start: async (): Promise<TaskHarnessResult> => {
+              throw new Error('private execution error');
+            },
+            abort: async () => undefined,
+            steer: async () => 'rejected' as const,
+            wrap: async () => 'not_supported' as const,
+          })
+        : undefined;
+      expect(
+        await run({ terminal: { outcome: 'succeeded', result: RESULT } }, throws ? { harness } : {})
+      ).toBe(throws ? 1 : 0);
+      expect(observations.length).toBeGreaterThan(0);
+      expect(observations.every((entry) => !entry.open)).toBe(true);
+      expect(observations.some((entry) => entry.path === '/task/events')).toBe(true);
+      if (!throws) expect(observations.some((entry) => entry.path.includes('/objects'))).toBe(true);
+    }
+  );
 
   it('never retries a JSON request after bytes reached the server and the peer resets', async () => {
     const transport = client('channel');
@@ -626,7 +823,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     expect(harnessCreations).toBe(1);
     expect(harnessStarts).toEqual([
       {
-        text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\nFiles elsewhere are not delivered. Outputs are delivered only if the task succeeds.\n\n${BRIEFING}`,
+        text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\nFiles elsewhere are not delivered. Outputs are delivered only if the task succeeds.\nUse the task MCP step tool for short progress reports and question to ask the coordinating agent.\nQuestion returns after storage, not an answer. Wait for the correlated answer via steering.\n\n${BRIEFING}`,
         model: 'lifemodel/task',
         softDueAt: expect.any(String),
       },

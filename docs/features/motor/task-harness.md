@@ -248,12 +248,12 @@ Startup time counts. Expiry currently aborts work and ends D4 `failed` / `timeou
 without a wrap. A later shortening (soft Stop) is not observed by this snapshot.
 Lifemodel-653.10 must add wrap and live deadline updates; they are not implemented
 here. The Job deadline remains the hard compute bound. Tests drive the question
-seam; MCP tools and core answer correlation belong to lifemodel-653.9.9.
+seam. The launcher MCP dispatcher now supplies that seam and correlates native answer admission (lifemodel-653.9.9).
 
 The local shared-contract and mutation evidence is recorded in
 [End-of-turn barrier verification](../../research/task-end-turn-barrier.md).
 
-### Remaining mailbox and MCP contract
+### Mailbox and MCP contract
 
 `task-command-intake.ts` now long-polls the core's durable mailbox on an
 independent outbound client. Before any poll, it waits for the generic
@@ -266,8 +266,11 @@ native rejected disposition. Once ready, intake sends one command at a time
 through `TaskHarness.steer`, then posts the disposition ACK. Lost ACKs reconnect and
 redeliver the same ID/text through the existing harness journal, not directly to
 a native adapter. Answers prefix `[question:<questionId>]` to their plain text.
-The optional `onAnswerAdmitted` callback is the seam for the later question
-MCP dispatcher; it is called only on accepted admission. Receipt events use
+The `onAnswerAdmitted` callback closes the matching launcher question only on
+accepted native admission. Known limit (lifemodel-653.10): an uncertain or
+rejected answer admission leaves the task waiting until its timeout. Core has
+already committed the answer and cannot accept another for that question.
+Receipt events use
 stable SHA-256 receipt IDs and an independent bounded writer. Transient
 connection, 408, 429 and server failures back off exponentially from 250 ms to
 five seconds, for both command redelivery and receipts. Deterministic 4xx
@@ -294,12 +297,72 @@ task claims, not proof of execution or obedience. Launcher-hosted MCP tools use 
 stdio subprocess in `session/new`. The stdio server is a thin launcher-shipped
 shim relaying over an inherited pipe or launcher-private local socket; it holds
 no channel credentials. Frames, IDs and limits are the launcher’s and core’s.
-MCP, including Prime offline support, is
-unverified. The question returns after durable frame ACK, not an answer. One
+The isolated shared contract exercises MCP on both pinned adapters, including
+Prime offline. The question returns after durable frame ACK, not an answer. One
 unanswered question per task is permitted; further calls fail explicitly. Core
 refuses a `question` frame while that task has an unanswered question, even from
 a compromised launcher. An answer command’s commit makes the question answered.
 Immediate stop deletes the Job. The Pod remains one untrusted zone.
+
+
+`loader/src/task-tools.ts` hosts `/work/.launcher/tools.sock` (0600, parent 0700).
+`task-mcp-shim.ts` supplies a pure Python-stdlib stdio server as an inline script;
+`session/new.mcpServers` starts it through `/usr/bin/env -i /usr/bin/python3`.
+Only the socket locator is passed. Its environment is empty, with no channel,
+model or storage capability, credential path or provider key. The launcher alone
+assigns frame IDs/sequences and uses the authenticated channel client. This
+reduces accidental disclosure, not the whole-Pod trust boundary.
+
+The tools are `step({text})` and `question({text})`. Both require one nonempty
+line of at most 1024 UTF-8 bytes without CR/LF/NUL; extra fields are rejected.
+The question ID equals its launcher-generated frame message ID. A local question
+is reserved before posting; a second question fails `question_open`. Core also
+checks that bound transactionally and with its unique partial index. Core counts
+an answer at command commit; the local barrier remains open until native admission.
+
+The relay permits four socket peers, one active report and 1024 retained report
+identities per launcher. Input is capped at 8192 bytes (including JSON escaping); peers have a 15-second
+idle timeout while reading a request, disabled while a report is in flight.
+The shim waits up to 60 seconds, above the launcher's three 5-second attempts
+plus its shared startup-connect retry window (at most 30 seconds). Busy/capacity/
+conflict calls fail explicitly. Within one shim process, repeated MCP request IDs
+with unchanged content join/replay one report. Changed content conflicts. Real
+harnesses normally use new request IDs: lost-ACK protection there comes from
+immutable channel frames retrying three times with the same message ID and
+sequence, not from MCP replay. Lost launcher/Pod execution is not recovered by
+rerunning a tool.
+
+A definite channel refusal returns `report_unavailable` and releases a local
+question reservation, but retains that failed call's identity. An unknown send
+outcome returns `report_uncertain`, never `report_unavailable` or an ACK. Its
+question stays reserved because core may have committed it. A later refusal
+cannot disprove a prior attempt's unknown commit. The shim also reports
+`report_uncertain` on a socket failure after it begins sending the request.
+Operators receive fixed diagnostic codes only, never report text. The tools
+socket closes as execution settles, before output uploads or any terminal frame.
+Malformed or oversized stdin receives a JSON-RPC error without stopping the
+shim. Initialization negotiates only `2024-11-05` or `2025-06-18`.
+
+Prime uses upstream v0.10.1's session-scoped MCP registry, not remote catalog login:
+[ACP stdio admission](https://github.com/PrimeIntellect-ai/prime-agent/blob/v0.10.1/crates/pa-daemon/src/acp/mcp.rs)
+and [kernel client](https://github.com/PrimeIntellect-ai/prime-agent/blob/v0.10.1/prime-agent-runtime/src/rlm/mcp.py).
+Its baked `mcp` Python dependency permits `await mcp.list_tools("task")` and
+`await mcp.call_tool("task", "question", {"text": "..."})` under `--offline`.
+OpenCode v2 exposes session MCP tools through its `execute` Code Mode namespace,
+for example `return await tools.task.step({text:"Checking results"})`, not as
+independent top-level model functions. Its first model request can precede MCP
+discovery; the fixture retries an unknown-tool discovery error and still requires
+both durable reports. Vendor tool shapes stay in contract fixtures.
+
+The T02/T07 shared fixture drives a real MCP step and question, waits at the real
+end-turn barrier, then commits/delivers/ACKs an answer. While the question waits,
+20 durable Valkey owner intakes and 20 other-task command deliveries/ACKs each
+must finish within 2 seconds. It prints each measured latency. TLS, Postgres,
+Valkey, the shim and both harnesses are real; only the model gateway and Pod
+proof are fixtures. This is not a deployed gateway/cluster walk, image-signature
+acceptance, or a production latency SLO. Core hostile-frame flood refusal and
+exact step/question channel replay are checked in that same fixture. See
+[verification and mutation evidence](../../research/task-mcp-contract.md).
 
 ## Durable outputs before the report
 
@@ -311,6 +374,8 @@ not the OpenCode configuration (the owner-facing goal remains unchanged):
 Files for the owner go in /work/outputs/, flat, with their final file names.
 Only regular files are allowed; no subfolders or symlinks. Maximum: 64 files.
 Files elsewhere are not delivered. Outputs are delivered only if the task succeeds.
+Use the task MCP step tool for short progress reports and question to ask the coordinating agent.
+Question returns after storage, not an answer. Wait for the correlated answer via steering.
 ```
 
 A custom launcher work directory uses its own `outputs/` child in these

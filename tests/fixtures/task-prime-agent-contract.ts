@@ -68,3 +68,15 @@ export async function loseSuccessorEvidence(work: string): Promise<() => Promise
     await new Promise<void>((resolve) => server.close(() => resolve()));
   };
 }
+
+/** Upstream's offline ACP session servers use the kernel-owned MCP registry. */
+export function reportTool(kind: string, text: string) {
+  return {
+    name: 'python_repl',
+    arguments: JSON.stringify({
+      code: `tools = await mcp.list_tools("task")
+print(tools)
+print(await mcp.call_tool("task", ${JSON.stringify(kind)}, {"text": ${JSON.stringify(text)}}))`,
+    }),
+  };
+}

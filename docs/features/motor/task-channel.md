@@ -184,7 +184,10 @@ claim's snapshotted `softDueAt` to every task, including active model/tool work
 and tasks without questions: expiry aborts and returns `failed`/`timeout`, with
 no wrap. A later shortening (soft Stop) is not seen by this snapshot. Live
 deadline updates and wrap belong to 653.10. The Job deadline is the hard bound.
-MCP over stdio, including Prime offline, remains unverified. ACKs and receipts
+The isolated shared harness contract now exercises step/question MCP over stdio
+on both pinned agents, including Prime offline. The launcher shim has an empty
+environment and relays through its private socket, not a core credential. See
+[the MCP contract](task-harness.md#mailbox-and-mcp-contract) for limits and replay. ACKs and receipts
 are task claims, not core evidence of execution or obedience.
 
 ### Cognition command tool (lifemodel-653.9.8)
@@ -242,7 +245,8 @@ Postgres/Valkey, aggregation and cognition path, crash/replay and a closed ACP
 barrier; `tests/unit/task-steering-lifecycle.test.ts` holds the brief's write
 callback to prove `intakeReady` cannot resolve early. These are source evidence,
 not a deployed-harness or owner-interface acceptance claim. Task-side MCP
-question/step tools remain in lifemodel-653.9.9.
+question/step tools and the shared real-adapter round trip are implemented by
+lifemodel-653.9.9 in `tests/integration/task-harness-contract.test.ts`.
 
 ### Command routes and durable storage
 
