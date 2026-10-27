@@ -77,7 +77,15 @@ for line in sys.stdin:
             update({"sessionUpdate": "tool_call", "toolCallId": "required", "status": "completed", "rawOutput": {"customFailure": True}})
         if scenario == "tool":
             update({"sessionUpdate": "tool_call", "toolCallId": "required", "status": "failed"})
-        update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "The task result is durable."}})
+        result_text = "The task result is durable."
+        if scenario in ("barrier", "barrier-tool"):
+            with lock:
+                if inbox:
+                    result_text = "Steered terminal result."
+                    for item in inbox.values():
+                        item["status"] = "inserted"
+            # ACP callback must observe final text before terminal closure.
+        update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": result_text}})
         if scenario in ("malformed", "late-tool"):
             final = json.dumps({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "end_turn"}})
             late = "not-json" if scenario == "malformed" else json.dumps({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session, "update": {"sessionUpdate": "tool_call", "toolCallId": "late", "status": "failed"}}})

@@ -248,6 +248,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
         ...IDS,
         start: true,
         space: SPACE,
+        softDueAt: new Date(Date.now() + 50_000).toISOString(),
         hardStopAt: new Date(Date.now() + 60_000).toISOString(),
       });
       return;
@@ -485,6 +486,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       {
         text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\nFiles elsewhere are not delivered. Outputs are delivered only if the task succeeds.\n\n${BRIEFING}`,
         model: 'lifemodel/task',
+        softDueAt: expect.any(String),
       },
     ]);
     expect(stoppedProgress).toBe(true);
@@ -594,6 +596,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       {
         text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\nFiles elsewhere are not delivered. Outputs are delivered only if the task succeeds.\n\n${BRIEFING}`,
         model: 'lifemodel/task',
+        softDueAt: expect.any(String),
       },
     ]);
     expect(startCalls()).toHaveLength(1);

@@ -50,7 +50,7 @@ belongs to lifemodel-653.10. Steering before the briefing's ACP prompt has been 
 is rejected. The command ID is bounded to 256 UTF-8 bytes, text to 60000 bytes;
 blank IDs/text are rejected. Accepted means native live-queue admission only.
 Normalized events are short `step`, `tool`, safe-code `error`, correlated
-`receipt` (`inserted | failed | uncertain`) and best-effort `trace` events. Trace callbacks cannot gate the harness protocol or outcome. One
+`receipt` (`inserted | deferred-to-next-turn | failed | uncertain`) and best-effort `trace` events. Trace callbacks cannot gate the harness protocol or outcome. One
 start returns one semantic result: `succeeded`, `failed` or `aborted`, with
 result text and a safe failure reason. A required-tool failure also carries
 `failureSpanId`, identifying the failed tool observation rather than whichever
@@ -166,29 +166,47 @@ is one untrusted zone, and receipts are task claims. It is not the core's
 durable mailbox and does not survive Pod loss. An ordinary TMPDIR cleanup
 therefore does not delete the journal or channel files.
 
-Until lifemodel-653.9.6 implements the end-turn barrier, steering is unsafe near
-the terminal boundary. Intake remains open between the ACP prompt response and
-cleanup: an accepted steer there may be lost (OpenCode parked input or Prime
-successor work killed by cleanup). Accepted is not proof of insertion. This
-task deliberately does not implement reconciliation.
+### End-of-turn barrier
 
-### Stage 4 barrier and MCP contract (not implemented here)
+Each registry adapter exports `reconcileEndTurn`, returning `idle | continue |
+successor | unknown`. The generic ACP client closes intake when it dispatches
+the prompt reply, before resolving the prompt waiter. It settles every in-flight
+admission, including journal sync, then calls the adapter. Commands arriving
+after closure are rejected. Intake reopens for a continuation, successor or open
+question, and closes again before each reconciliation.
 
+OpenCode reconciles stable native IDs against the plugin's pending/inserted
+observations. Pending input emits `deferred-to-next-turn` and causes a plain,
+nonempty ACP continuation, without resending steering text. Missing native
+observation fails closed with `end_turn_uncertain`.
 
-[ADR-014’s 2026-10-27 amendment](../../adr/014-task-runtime.md#amendment--2026-10-27-live-steering-behind-the-harness-port)
-defines the remaining barrier, core mailbox/long-poll and MCP contract. The
-future adapter `reconcileEndTurn` returns `idle | continue | successor | unknown`.
-At each end-turn close intake and
-settle calls; while a question is unanswered keep intake open for its answer
-and ordinary steers until admission or the accepted task timeout from the briefing
-(`TaskAccessIntent.softDueAt`). At expiry the barrier ends unanswered and the
-task proceeds as D4 `failed`/`timeout`; the 653.10 wrap command replaces this
-once available. The Job deadline is the hard bound. Continue
-OpenCode with a plain ACP prompt and reopen intake; await Prime's successor.
-Repeat only until the accepted task timeout. Across turns retain the last final text and
-accumulate unresolved tool failures. Prime successor success requires daemon
-evidence of final text and settled tools; missing evidence fails closed. The
-Prime idle/queue/result and tool evidence remain unverified.
+Prime checks the bound root's idle flags and both queue lanes. Busy or admitted
+work is awaited as a successor, including work that starts outside ACP. Its
+result comes from branch-pinned, bounded daemon transcript pages, not ACP idle,
+queue absence or a process exit. The transcript must contain the command marker,
+final assistant text with a normal stop, and matching settled tool results.
+Missing, oversized or ambiguous evidence fails `end_turn_uncertain`. Prime's
+accepted Python-exception exemption remains; it does not excuse missing tool
+results. Native observation errors do not cause a resend.
+
+Across turns the client retains the last final text and accumulated unresolved
+tool failures. The same classifier handles ACP updates and normalized successor
+evidence. One terminal candidate is classified only after reconciliation and
+process-tree cleanup.
+
+The generic `TaskQuestionState` seam supplies `isOpen` and an abortable
+`waitForChange`. An open question keeps intake open after end-turn. An admitted
+answer or ordinary steer wakes reconciliation; changing only a flag is not
+answer delivery. Every repeat and wait shares the absolute `TaskBriefing.softDueAt`
+from the start claim's `TaskAccessIntent`, including startup time. Expiry ends
+D4 `failed` / `timeout`; lifemodel-653.10 will replace this with wrapping. The
+Job deadline remains the hard compute bound. Tests drive this seam; question
+MCP tools and core answer correlation belong to lifemodel-653.9.9.
+
+The local shared-contract and mutation evidence is recorded in
+[End-of-turn barrier verification](../../research/task-end-turn-barrier.md).
+
+### Remaining mailbox and MCP contract
 
 The core's durable command mailbox and long-poll are not implemented here.
 ACK timeout must be at least the adapter admission bound. Receipts and ACKs are

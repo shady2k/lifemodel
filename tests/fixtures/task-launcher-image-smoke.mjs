@@ -129,6 +129,7 @@ async function handler(service, req, res) {
       ...ids,
       start: true,
       space,
+      softDueAt: new Date(Date.now() + 110_000).toISOString(),
       hardStopAt: new Date(Date.now() + 120_000).toISOString(),
     });
     return;

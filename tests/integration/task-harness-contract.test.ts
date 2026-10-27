@@ -11,7 +11,7 @@ import {
   type TestStorageCertificate,
 } from '../helpers/storage-certificate.js';
 import { type TaskHarness, type TaskHarnessEvent } from '../../loader/src/task-harness.js';
-import { AcpTaskHarness, AcpTurn } from '../../loader/src/task-acp.js';
+import { AcpTaskHarness, AcpTurn, type AcpTaskHarnessOptions } from '../../loader/src/task-acp.js';
 import { configureAgent, toolOutputFailed } from '../../loader/src/task-opencode.js';
 import { createRegisteredHarness } from '../../loader/src/task-harness-factory.js';
 import { taskHarnessRegistry } from '../../loader/src/task-harness-registry.js';
@@ -34,13 +34,16 @@ type Scenario =
   | 'background'
   | 'steer-long'
   | 'steer-parallel'
-  | 'steer-failure';
+  | 'steer-failure'
+  | 'barrier'
+  | 'barrier-tool';
 const fixtureRegistry = JSON.parse(
   await readFile('tests/fixtures/task-agent-registry.json', 'utf8')
 );
 Object.assign(taskHarnessRegistry, fixtureRegistry);
 type ContractFixture = {
   usesModelEndpoint: boolean;
+  loseSuccessorEvidence?: (work: string) => Promise<() => Promise<void>>;
   nativeReplay?: (input: {
     workDirectory: string;
     sessionId: string;
@@ -155,7 +158,26 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
             })}\n\n`
           );
         chunk({ role: 'assistant' });
-        if (scenario.startsWith('steer-') && !toolSent) {
+        if (scenario === 'barrier-tool' && body.includes(STEER) && !toolSent) {
+          toolSent = true;
+          chunk({
+            tool_calls: [
+              {
+                index: 0,
+                id: 'successor-required',
+                type: 'function',
+                function: activeFixture?.shellTool?.('printf successor-tool-ok') ?? {
+                  name: 'shell',
+                  arguments: JSON.stringify({
+                    command: 'printf successor-tool-ok',
+                    description: 'Successor tool',
+                  }),
+                },
+              },
+            ],
+          });
+          chunk({}, 'tool_calls');
+        } else if (scenario.startsWith('steer-') && !toolSent) {
           toolSent = true;
           const count = scenario === 'steer-parallel' ? 2 : 1;
           chunk({
@@ -217,7 +239,12 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
           });
           chunk({}, 'tool_calls');
         } else {
-          chunk({ content: RESULT });
+          chunk({
+            content:
+              scenario.startsWith('barrier') && body.includes(STEER)
+                ? 'Steered terminal result.'
+                : RESULT,
+          });
           chunk({}, 'stop');
         }
         res.end('data: [DONE]\n\n');
@@ -272,7 +299,11 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
     certificate?.cleanup();
   });
 
-  async function harness(kind: string, mode: Scenario): Promise<TaskHarness> {
+  async function harness(
+    kind: string,
+    mode: Scenario,
+    options: Partial<AcpTaskHarnessOptions> = {}
+  ): Promise<TaskHarness> {
     activeFixture = contractFixtures[kind];
     scenario = mode;
     expectedToken = TOKEN;
@@ -288,12 +319,16 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
     work = await mkdtemp(join(directory, 'work-'));
     const onEvent = async (event: TaskHarnessEvent) => {
       events.push(event);
+      await options.onEvent?.(event);
       if (event.type === 'receipt' && event.disposition === 'inserted') {
         if (scenario.startsWith('steer-')) {
           const count = scenario === 'steer-parallel' ? 2 : 1;
           for (let i = 0; i < count; i++) {
-            try { await access(join(work, `done-${i}`)); }
-            catch { prematureInsertion = true; }
+            try {
+              await access(join(work, `done-${i}`));
+            } catch {
+              prematureInsertion = true;
+            }
           }
         }
         inserted = true;
@@ -307,6 +342,7 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
       modelTokenFile: join(directory, 'token'),
       modelCaFile: join(directory, 'ca'),
       workDirectory: work,
+      ...options,
       onEvent,
       // Only fixtures exposing a native stable-ID replay need the ACP/native ID.
       ...(activeFixture?.nativeReplay
@@ -328,6 +364,121 @@ describe('TaskHarness contract: pinned OpenCode and scripted harness', () => {
 
   for (const kind of Object.keys(taskHarnessRegistry)) {
     describe(kind, () => {
+      it.each(['tail', 'late', 'late-tool'] as const)(
+        'settles a %s final-answer steer without losing or resending it',
+        async (point) => {
+          let open = point !== 'tail';
+          let sent = false;
+          let disposition: string | undefined;
+          let task: TaskHarness;
+          const question = {
+            isOpen: () => open,
+            waitForChange: (signal: AbortSignal) =>
+              new Promise<void>((resolve) => {
+                signal.addEventListener('abort', () => resolve(), { once: true });
+                if (signal.aborted) resolve();
+              }),
+          };
+          task = await harness(kind, point === 'late-tool' ? 'barrier-tool' : 'barrier', {
+            question,
+            onEvent: async (event) => {
+              const target = point === 'tail' ? 'Task is working' : 'Waiting for task answer';
+              if (!sent && event.type === 'step' && event.text === target) {
+                sent = true;
+                disposition = await task.steer({ commandId: 'final-race', text: STEER });
+                open = false;
+              }
+            },
+          });
+          const terminal = await task.start({
+            ...briefing,
+            softDueAt: new Date(Date.now() + 40000).toISOString(),
+          });
+          expect(sent).toBe(true);
+          expect(disposition).toBe('accepted');
+          expect(terminal).toEqual({ outcome: 'succeeded', result: 'Steered terminal result.' });
+          expect(await task.steer({ commandId: 'after-close', text: STEER })).toBe('rejected');
+          if (activeFixture?.usesModelEndpoint) {
+            const bodies = requests.map((request) => JSON.parse(request.body));
+            expect(bodies.length).toBeGreaterThanOrEqual(2);
+            const last = bodies.at(-1);
+            const rows = last.messages.filter(
+              (message: { role: string; content: unknown }) =>
+                message.role === 'user' && JSON.stringify(message.content).includes(STEER)
+            );
+            expect(rows).toHaveLength(1);
+            expect(JSON.stringify(rows[0])).not.toContain('Continue with any already queued input');
+            if (point === 'late-tool') expect(toolSent).toBe(true);
+          }
+        },
+        60000
+      );
+
+      it('fails closed when successor tool evidence is missing', async () => {
+        const loseEvidence = contractFixtures[kind]?.loseSuccessorEvidence;
+        if (!loseEvidence) return; // Only the native-successor adapter owns this evidence surface.
+        let open = true;
+        let task: TaskHarness;
+        let injected = false;
+        task = await harness(kind, 'barrier-tool', {
+          question: {
+            isOpen: () => open,
+            waitForChange: (signal) =>
+              new Promise<void>((resolve) => {
+                signal.addEventListener('abort', () => resolve(), { once: true });
+              }),
+          },
+          onEvent: async (event) => {
+            if (!injected && event.type === 'step' && event.text === 'Waiting for task answer') {
+              injected = true;
+              cleanup.push(await loseEvidence(work));
+              expect(await task.steer({ commandId: 'missing-evidence', text: STEER })).toBe(
+                'accepted'
+              );
+              open = false;
+            }
+          },
+        });
+        expect(await task.start(briefing)).toMatchObject({
+          outcome: 'failed',
+          reasonCode: 'end_turn_uncertain',
+        });
+        expect(injected).toBe(true);
+        expect(requests.some((request) => request.body.includes('successor-tool-ok'))).toBe(true);
+      }, 60000);
+
+      it('keeps an unanswered question waiting until softDueAt and fails as timeout', async () => {
+        let waiting = false;
+        let finished = false;
+        const task = await harness(kind, 'success', {
+          question: {
+            isOpen: () => true,
+            waitForChange: (signal) =>
+              new Promise<void>((resolve) => {
+                signal.addEventListener('abort', () => resolve(), { once: true });
+                if (signal.aborted) resolve();
+              }),
+          },
+          onEvent: (event) => {
+            if (event.type === 'step' && event.text === 'Waiting for task answer') waiting = true;
+          },
+        });
+        // Deadline starts before agent startup, as in the accepted task intent.
+        const terminal = task
+          .start({ ...briefing, softDueAt: new Date(Date.now() + 12000).toISOString() })
+          .then((result) => {
+            finished = true;
+            return result;
+          });
+        cleanup.push(async () => {
+          await task.abort();
+          await terminal;
+        });
+        await vi.waitFor(() => expect(waiting).toBe(true), { timeout: 10000 });
+        expect(finished).toBe(false);
+        expect(await terminal).toMatchObject({ outcome: 'failed', reasonCode: 'timeout' });
+      }, 30000);
+
       it('returns one semantic success with a result and refuses a second start', async () => {
         const task = await harness(kind, 'success');
         const terminal = await task.start(briefing);

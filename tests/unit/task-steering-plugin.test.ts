@@ -81,7 +81,8 @@ describe('baked OpenCode steering plugin', () => {
     });
     try {
       expect(await admit({workDirectory: dir, sessionId: 's', commandId: 'cmd', text: 'continue'})).toBe('accepted');
-      expect((await read()).data.status).toBe('unknown');
+      // Native admission ACK proves pending even before the event reader catches up.
+      expect((await read()).data.status).toBe('pending');
       push({type: 'session.inbox.enqueued', data: {inboxID: nativeMessageId('cmd')}});
       await vi.waitFor(async () => expect((await read()).data.status).toBe('pending'));
       push({type: 'session.compacted', data: {inboxID: nativeMessageId('cmd')}});

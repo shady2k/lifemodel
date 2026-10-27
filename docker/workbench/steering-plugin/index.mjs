@@ -45,6 +45,7 @@ export default {
                 dispositions.set(q.id, 'unknown');
               }
               data = await ctx.session.prompt({ sessionID: q.sessionID, id: q.id, text: q.text, delivery: 'steer', resume: false });
+              if (data?.id === q.id && dispositions.get(q.id) === 'unknown') dispositions.set(q.id, 'pending');
             } else if (q.op === 'disposition' && typeof q.id === 'string') {
               data = { id: q.id, status: dispositions.get(q.id) ?? 'unknown' };
             } else {

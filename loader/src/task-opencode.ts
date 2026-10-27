@@ -1,3 +1,4 @@
+import type { TaskEndTurnInput, TaskEndTurnReconciliation } from './task-harness.js';
 /** OpenCode v2 configuration only. The protocol client is generic ACP. */
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -196,4 +197,62 @@ export async function observeInsertion(input: {
     });
   }
   return false;
+}
+
+/** Reconcile every admitted stable ID after intake has closed. */
+export async function reconcileEndTurn(
+  input: TaskEndTurnInput
+): Promise<TaskEndTurnReconciliation> {
+  const pending: string[] = [];
+  for (const commandId of input.commandIds) {
+    const id = nativeMessageId(commandId);
+    const status = await new Promise<string>((resolve) => {
+      const socket = connect(join(input.workDirectory, '.launcher/steer.sock'));
+      let buffer = '';
+      let done = false;
+      const finish = (value: string) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        input.signal.removeEventListener('abort', cancel);
+        socket.destroy();
+        resolve(value);
+      };
+      const cancel = () => {
+        finish('unknown');
+      };
+      const timer = setTimeout(cancel, 5000);
+      input.signal.addEventListener('abort', cancel, { once: true });
+      socket.setEncoding('utf8');
+      socket.once('error', cancel);
+      socket.once('close', cancel);
+      socket.once('connect', () => socket.write(JSON.stringify({ op: 'disposition', id }) + '\n'));
+      socket.on('data', (chunk: string) => {
+        buffer += chunk;
+        if (Buffer.byteLength(buffer) > 1048576) {
+          cancel();
+          return;
+        }
+        const end = buffer.indexOf('\n');
+        if (end < 0) return;
+        try {
+          const reply = JSON.parse(buffer.slice(0, end)) as {
+            ok?: boolean;
+            data?: { id?: string; status?: string };
+          };
+          finish(
+            reply.ok === true && reply.data?.id === id
+              ? (reply.data.status ?? 'unknown')
+              : 'unknown'
+          );
+        } catch {
+          cancel();
+        }
+      });
+      if (input.signal.aborted) cancel();
+    });
+    if (status === 'pending') pending.push(commandId);
+    else if (status !== 'inserted') return { state: 'unknown' };
+  }
+  return pending.length ? { state: 'continue', commandIds: pending } : { state: 'idle' };
 }

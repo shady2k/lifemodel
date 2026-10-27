@@ -509,6 +509,7 @@ describe('task immutable object API', () => {
               ...taskIds,
               start: true,
               space: 'a',
+              softDueAt: new Date(Date.now() + 50_000).toISOString(),
               hardStopAt: new Date(Date.now() + 60_000).toISOString(),
             };
           else if (req.url === '/task/briefing')

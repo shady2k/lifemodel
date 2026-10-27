@@ -162,8 +162,14 @@ socket; it holds no channel credentials. Frames, IDs and limits are the
 launcher’s and core’s. MCP and Prime offline MCP
 support are unverified until tested. The two adapters and scripted fixture share the
 contract suite. Prime's ACP permission gap and completed Python exception are
-known probe limitations accepted by the owner; the barrier's daemon idle/result
-signal remains unverified until implementation tests. See the
+known probe limitations accepted by the owner. The launcher now reconciles end-turn
+through each registry adapter: OpenCode continues parked input without resending;
+Prime awaits native idle plus empty queues and requires final-text and settled-tool
+evidence from daemon history. The shared contract exercises tail/late steering,
+question waiting and timeout on the pinned agents and scripted ACP fixture. A
+wire-level loss fixture removes Prime successor tool evidence and must fail closed.
+Question MCP tools remain deferred; the barrier exposes a generic question-state
+seam bounded by the accepted `softDueAt`. See the
 [ADR amendment](../../adr/014-task-runtime.md#amendment--2026-10-27-live-steering-behind-the-harness-port).
 
 ## CI and release

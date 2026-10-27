@@ -16,6 +16,9 @@ import type {
   TaskHarnessResult,
   TaskSteerCommand,
   TaskSteerDisposition,
+  TaskEndTurnInput,
+  TaskEndTurnReconciliation,
+  TaskQuestionState,
 } from './task-harness.js';
 
 type Json = Record<string, unknown>;
@@ -50,6 +53,9 @@ export class AcpTurn {
   begin(model: string): void {
     this.trace.begin(model);
   }
+  continueTurn(): void {
+    this.final = '';
+  }
   cleanupFailed(): void {
     this.trace.failModel('harness_cleanup_failed');
   }
@@ -62,6 +68,7 @@ export class AcpTurn {
 
   update(value: unknown): 'step' | 'tool' | undefined {
     const update = record(value);
+    if (update['sessionUpdate'] === 'turn_start') this.continueTurn();
     if (update['sessionUpdate'] === 'usage_update') this.trace.reportUsage(update);
     if (update['sessionUpdate'] === 'agent_message_chunk') {
       const content = record(update['content']);
@@ -187,6 +194,8 @@ export interface AcpTaskHarnessOptions {
     commandId: string;
     signal: AbortSignal;
   }) => Promise<boolean>;
+  reconcileEndTurn?: (input: TaskEndTurnInput) => Promise<TaskEndTurnReconciliation>;
+  question?: TaskQuestionState;
   timeoutMs?: number;
   storageEnv?: {
     LIFEMODEL_STORAGE_ENDPOINT: string;
@@ -221,7 +230,13 @@ export class AcpTaskHarness implements TaskHarness {
     const agent = this.options.agent;
     if (!agent || !this.options.configure) return failed('harness_not_configured');
     const work = this.options.workDirectory ?? '/work';
-    const timeout = this.options.timeoutMs ?? 3600000;
+    const softDueAt = briefing.softDueAt === undefined ? undefined : Date.parse(briefing.softDueAt);
+    if (softDueAt !== undefined && !Number.isFinite(softDueAt)) return failed('timeout');
+    const timeout = Math.min(
+      this.options.timeoutMs ?? 3600000,
+      softDueAt === undefined ? Infinity : softDueAt - Date.now()
+    );
+    if (timeout <= 0) return failed('timeout');
     const signal = AbortSignal.any([this.cancellation.signal, AbortSignal.timeout(timeout)]);
     let child: ChildProcess | undefined;
     let processClosed: Promise<void> | undefined;
@@ -249,6 +264,12 @@ export class AcpTaskHarness implements TaskHarness {
     let queuedBytes = 0;
     let closing = false;
     let promptSettled = false;
+    let intakeOpen = false;
+    let promptID: number | undefined;
+    const admissions = new Set<Promise<TaskSteerDisposition>>();
+    const accepted = new Set<string>();
+    let wakeAdmission: (() => void) | undefined;
+    let admissionVersion = 0;
     let stopReason: unknown;
     let promptResponse: Json = {};
     const fail = (code: string) => {
@@ -260,7 +281,9 @@ export class AcpTaskHarness implements TaskHarness {
       pending.clear();
     };
     const stop = () => {
-      fail(this.cancelled ? 'aborted' : 'harness_timeout');
+      intakeOpen = false;
+      fail(this.cancelled ? 'aborted' : 'timeout');
+      wakeAdmission?.();
     };
     signal.addEventListener('abort', stop, { once: true });
     const emit = async (
@@ -380,6 +403,7 @@ export class AcpTaskHarness implements TaskHarness {
       ): Promise<Json> => {
         if (fault) return Promise.reject(fault ?? new Error('harness_write_timeout'));
         const id = ++nextID;
+        if (method === 'session/prompt') promptID = id;
         return new Promise((resolve, reject) => {
           const timer = setTimeout(
             () => {
@@ -441,6 +465,8 @@ export class AcpTaskHarness implements TaskHarness {
         }
         const id = message['id'];
         if (typeof id !== 'number' || !pending.has(id)) throw new Error('harness_protocol_error');
+        // This is the intake linearization point, before resolving the ACP waiter.
+        if (id === promptID) intakeOpen = false;
         const waiter = pending.get(id);
         if (!waiter) throw new Error('harness_protocol_error');
         pending.delete(id);
@@ -516,7 +542,7 @@ export class AcpTaskHarness implements TaskHarness {
         const boundSession = sessionID;
         const steeringJournal = journal;
         const admit = this.options.admit;
-        steering = async (command) => {
+        const send = async (command: TaskSteerCommand): Promise<TaskSteerDisposition> => {
           if (
             !command.commandId.trim() ||
             !command.text.trim() ||
@@ -582,25 +608,108 @@ export class AcpTaskHarness implements TaskHarness {
           }
           return disposition;
         };
+        steering = (command) => {
+          if (!intakeOpen || fault || signal.aborted) return Promise.resolve('rejected');
+          const flight = send(command).then((disposition) => {
+            if (disposition !== 'rejected') {
+              accepted.add(command.commandId);
+              admissionVersion++;
+              wakeAdmission?.();
+            }
+            return disposition;
+          });
+          admissions.add(flight);
+          void flight.finally(() => admissions.delete(flight));
+          return flight;
+        };
       }
       this.cancelRequest = () =>
         write({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: sessionID } });
       await emit({ type: 'step', text: 'Running task' });
       turn.begin(briefing.model);
-      const response = await request(
-        'session/prompt',
-        { sessionId: sessionID, prompt: [{ type: 'text', text: briefing.text }] },
-        timeout,
-        () => {
-          this.steering = steering;
+      const prompt = async (text: string) => {
+        const response = await request(
+          'session/prompt',
+          { sessionId: sessionID, prompt: [{ type: 'text', text }] },
+          timeout,
+          () => {
+            intakeOpen = true;
+            this.steering = steering;
+          }
+        );
+        promptResponse = response;
+        stopReason = response['stopReason'];
+        await queue;
+        if (fault) throw fault;
+      };
+      await prompt(briefing.text);
+      while (stopReason === 'end_turn') {
+        intakeOpen = false;
+        await emit({ type: 'step', text: 'Settling task turn' });
+        // Every call registered before closure must settle, including journal sync.
+        await Promise.all([...admissions]);
+        if (fault || signal.aborted) throw fault ?? new Error('timeout');
+        const commandIds = [...accepted];
+        accepted.clear();
+        const reconciliation = this.options.reconcileEndTurn
+          ? await this.options.reconcileEndTurn({
+              workDirectory: work,
+              sessionId: sessionID,
+              commandIds,
+              signal,
+            })
+          : { state: commandIds.length ? ('unknown' as const) : ('idle' as const) };
+        if (fault || signal.aborted) throw fault ?? new Error('timeout');
+        if (reconciliation.state === 'unknown') throw new Error('end_turn_uncertain');
+        if (reconciliation.state === 'continue') {
+          for (const commandId of reconciliation.commandIds) accepted.add(commandId);
+          for (const commandId of reconciliation.commandIds)
+            await emit({ type: 'receipt', commandId, disposition: 'deferred-to-next-turn' }, true);
+          turn.continueTurn();
+          await prompt('Continue with any already queued input; no steering text is resubmitted.');
+          continue;
         }
-      );
-      promptResponse = response;
-      stopReason = response['stopReason'];
-      // Finish the batch containing the reply before planning shutdown. Frames
-      // coalesced behind it cannot hide a malformed message or late tool error.
-      await queue;
-      if (fault) throw fault;
+        if (reconciliation.state === 'successor') {
+          // Native admission may itself wake work. Own that work until native idle.
+          turn.continueTurn();
+          intakeOpen = true;
+          const evidence = await reconciliation.wait();
+          intakeOpen = false;
+          if (fault || signal.aborted) throw fault ?? new Error('timeout');
+          if (!evidence) throw new Error('end_turn_uncertain');
+          await queue;
+          turn.continueTurn();
+          for (const update of evidence.updates) turn.update(update);
+          stopReason = evidence.stopReason;
+          continue;
+        }
+        if (!this.options.question?.isOpen()) break;
+        // Questions retain the same task budget. Wake on either admitted input
+        // or a question-state change; register before reopening to avoid lost wakes.
+        const version = admissionVersion;
+        const waiting = new AbortController();
+        const waitingSignal = AbortSignal.any([signal, waiting.signal]);
+        let wake: (() => void) | undefined;
+        const changed = new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+        wakeAdmission = wake;
+        intakeOpen = true;
+        try {
+          await emit({ type: 'step', text: 'Waiting for task answer' });
+          if (admissionVersion !== version) wake?.();
+          await Promise.race([changed, this.options.question.waitForChange(waitingSignal)]);
+        } finally {
+          intakeOpen = false;
+          wakeAdmission = undefined;
+          waiting.abort();
+        }
+        if (fault || signal.aborted) throw fault ?? new Error('timeout');
+        await Promise.all([...admissions]);
+        // A correlated answer must be admitted as text, not merely a local flag.
+        if (version === admissionVersion && !this.options.question.isOpen())
+          throw new Error('end_turn_uncertain');
+      }
       promptSettled = true;
       result = this.cancelled ? aborted() : turn.result(stopReason);
     } catch (error) {
@@ -611,7 +720,11 @@ export class AcpTaskHarness implements TaskHarness {
           : failed(
               error instanceof Error && error.message === 'provider_error'
                 ? 'provider_error'
-                : (fault?.message ?? 'harness_failed')
+                : (fault?.message ??
+                    (error instanceof Error &&
+                    ['end_turn_uncertain', 'timeout'].includes(error.message)
+                      ? error.message
+                      : 'harness_failed'))
             );
       try {
         await emit({
@@ -626,9 +739,9 @@ export class AcpTaskHarness implements TaskHarness {
       closing = true;
       this.cancelRequest = undefined;
       this.steering = undefined;
-      // Cleanup owns already-started sends even before the later end-turn
-      // reconciliation barrier is implemented. Never close their journal or
-      // declare success while admission can still become uncertain.
+      intakeOpen = false;
+      // Failure and abort paths also own in-flight sends. Never close their
+      // journal or declare success while admission can still become uncertain.
       await journal?.close().catch(() => {
         fail('steer_uncertain');
       });

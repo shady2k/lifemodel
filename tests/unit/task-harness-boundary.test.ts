@@ -10,9 +10,12 @@ function sources(directory: string): string[] {
 }
 const filesForNativeScan = () => [
   ...sources('src/ports'),
-  'loader/src/task-acp.ts', 'loader/src/task-harness-factory.ts',
-  'loader/src/task-steering-journal.ts', 'loader/src/task-harness.ts',
-  'loader/src/task-launcher.ts', 'loader/src/task-launcher-main.ts',
+  'loader/src/task-acp.ts',
+  'loader/src/task-harness-factory.ts',
+  'loader/src/task-steering-journal.ts',
+  'loader/src/task-harness.ts',
+  'loader/src/task-launcher.ts',
+  'loader/src/task-launcher-main.ts',
 ];
 describe('replaceable task agent boundary', () => {
   it('keeps agent protocols, flags, config paths and constructors out of launcher and core', () => {
@@ -51,6 +54,7 @@ describe('replaceable task agent boundary', () => {
       /daemon_hello|activeSessionId|delivery:\s*['"]steer|resume:\s*(?:true|false)|node:net|\.sock|inboxID|get_messages|lifemodel-steer:/
     );
     expect(generic).toContain('admit');
+    expect(generic).toContain('reconcileEndTurn');
     expect(generic).toContain('TaskSteeringJournal');
     const factory = read('loader/src/task-harness-factory.ts');
     expect(factory).toMatch(/import\(\s*agent\.adapterModule\s*\)/);

@@ -43,13 +43,17 @@ describe('steering lifecycle', () => {
     const running = new Promise<void>((resolve) => {
       reached = resolve;
     });
+    let barrierReached!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      barrierReached = resolve;
+    });
     let finishSend!: (value: 'uncertain') => void;
-    const send = vi.fn(
-      (command: {commandId: string}) =>
-        command.commandId === 'too-early' ? Promise.resolve('accepted' as const) :
-        new Promise<'uncertain'>((resolve) => {
-          finishSend = resolve;
-        })
+    const send = vi.fn((command: { commandId: string }) =>
+      command.commandId === 'too-early'
+        ? Promise.resolve('accepted' as const)
+        : new Promise<'uncertain'>((resolve) => {
+            finishSend = resolve;
+          })
     );
     const harness = new AcpTaskHarness({
       workDirectory: work,
@@ -72,6 +76,7 @@ describe('steering lifecycle', () => {
       admit: send,
       failOnUncertain: true,
       onEvent: async (event) => {
+        if (event.type === 'step' && event.text === 'Settling task turn') barrierReached();
         if (event.type === 'step' && event.text === 'Running task') {
           expect(await harness.steer({ commandId: 'too-early', text: 'alone' })).toBe('rejected');
           expect(send).not.toHaveBeenCalled();
@@ -92,14 +97,18 @@ describe('steering lifecycle', () => {
       return result;
     });
     try {
-      await Promise.race([running, terminal.then(result => {throw new Error(`finished_before_prompt:${result.reasonCode}`);})]);
+      await Promise.race([
+        running,
+        terminal.then((result) => {
+          throw new Error(`finished_before_prompt:${result.reasonCode}`);
+        }),
+      ]);
       const steering = harness.steer({ commandId: 'cmd', text: 'continue' });
       await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
       allowPrompt();
-      // Wait for the actual journal close boundary, not an assumed tick count.
-      await vi.waitFor(() =>
-        expect((harness as unknown as { steering?: unknown }).steering).toBeUndefined()
-      );
+      // Wait for closure, then check rejection without creating another flight.
+      await barrier;
+      expect(await harness.steer({ commandId: 'after-close', text: 'late' })).toBe('rejected');
       expect(completed).toBe(false);
       finishSend('uncertain');
       expect(await steering).toBe('uncertain');
@@ -116,91 +125,155 @@ describe('steering lifecycle', () => {
   it.each([
     { name: 'OpenCode', policy: openCodePolicy, expected: 'succeeded' },
     { name: 'Prime', policy: primePolicy, expected: 'failed' },
-  ])('$name owns its native-ambiguity policy', async ({policy, expected}) => {
-    await runFaultCase({policy, disposition: 'uncertain', expected});
-  }, 15000);
+  ])(
+    '$name owns its native-ambiguity policy',
+    async ({ policy, expected }) => {
+      await runFaultCase({ policy, disposition: 'uncertain', expected });
+    },
+    15000
+  );
 
-  it.each([openCodePolicy, primePolicy])('journal I/O fails even under policy %s', async policy => {
-    await runFaultCase({policy, diskFailure: true, disposition: 'accepted', expected: 'failed'});
-  }, 15000);
+  it.each([openCodePolicy, primePolicy])(
+    'journal I/O fails even under policy %s',
+    async (policy) => {
+      await runFaultCase({
+        policy,
+        diskFailure: true,
+        disposition: 'accepted',
+        expected: 'failed',
+      });
+    },
+    15000
+  );
 
   it('a stalled insertion-receipt sink does not fail task cleanup', async () => {
-    await runFaultCase({policy: primePolicy, receiptSinkStalls: true, disposition: 'accepted', expected: 'succeeded'});
+    await runFaultCase({
+      policy: primePolicy,
+      receiptSinkStalls: true,
+      disposition: 'accepted',
+      expected: 'succeeded',
+    });
   }, 15000);
 
   it('an insertion observer error never aborts a running turn', async () => {
-    await runFaultCase({policy: primePolicy, observerError: true, disposition: 'accepted', expected: 'succeeded'});
+    await runFaultCase({
+      policy: primePolicy,
+      observerError: true,
+      disposition: 'accepted',
+      expected: 'succeeded',
+    });
   }, 15000);
-
 });
 
 async function runFaultCase(input: {
-  policy: boolean; disposition: 'accepted' | 'uncertain'; expected: string;
-  diskFailure?: boolean; observerError?: boolean; receiptSinkStalls?: boolean;
+  policy: boolean;
+  disposition: 'accepted' | 'uncertain';
+  expected: string;
+  diskFailure?: boolean;
+  observerError?: boolean;
+  receiptSinkStalls?: boolean;
 }): Promise<void> {
   const certificate = await createStorageCertificate(['localhost']);
   const work = await mkdtemp(join(tmpdir(), 'steering-fault-'));
   await writeFile(join(work, 'ca'), certificate.ca);
   await writeFile(join(work, 'token'), 'test-only');
   let reached!: () => void;
-  const working = new Promise<void>(resolve => { reached = resolve; });
+  const working = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
   let resume!: () => void;
-  const gate = new Promise<void>(resolve => { resume = resolve; });
+  const gate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
   const events: TaskHarnessEvent[] = [];
   const release = vi.fn();
-  const observer = vi.fn(async () => { throw new Error('unreadable history'); });
+  const observer = vi.fn(async () => {
+    throw new Error('unreadable history');
+  });
   const send = vi.fn(async () => input.disposition);
   const open = TaskSteeringJournal.open.bind(TaskSteeringJournal);
   const spy = vi.spyOn(TaskSteeringJournal, 'open').mockImplementation(async (...args) => {
     const journal = await open(...args);
     if (input.diskFailure) {
-      const handle = (journal as unknown as {file: import('node:fs/promises').FileHandle}).file;
+      const handle = (journal as unknown as { file: import('node:fs/promises').FileHandle }).file;
       vi.spyOn(handle, 'sync').mockRejectedValue(new Error('disk full'));
     }
     return journal;
   });
   const harness = new AcpTaskHarness({
-    workDirectory: work, modelEndpoint: 'https://localhost:1',
-    modelCaFile: join(work, 'ca'), modelTokenFile: join(work, 'token'), timeoutMs: 10000,
-    agent: { label: 'Scripted', protocol: 'acp', command: 'python3',
+    workDirectory: work,
+    modelEndpoint: 'https://localhost:1',
+    modelCaFile: join(work, 'ca'),
+    modelTokenFile: join(work, 'token'),
+    timeoutMs: 10000,
+    agent: {
+      label: 'Scripted',
+      protocol: 'acp',
+      command: 'python3',
       args: [resolve('tests/fixtures/task-scripted-acp.py'), 'success'],
-      configFile: '', version: '', versionOutput: '', versionArgs: [], adapterModule: '' },
-    configure: () => ({}), admit: send, release, failOnUncertain: input.policy,
-    ...(input.observerError ? {observeInsertion: observer} : input.receiptSinkStalls ? {observeInsertion: async () => true} : {}),
-    onEvent: async event => {
+      configFile: '',
+      version: '',
+      versionOutput: '',
+      versionArgs: [],
+      adapterModule: '',
+    },
+    configure: () => ({}),
+    admit: send,
+    release,
+    failOnUncertain: input.policy,
+    reconcileEndTurn: async () => ({ state: 'idle' }),
+    ...(input.observerError
+      ? { observeInsertion: observer }
+      : input.receiptSinkStalls
+        ? { observeInsertion: async () => true }
+        : {}),
+    onEvent: async (event) => {
       events.push(event);
       if (input.receiptSinkStalls && event.type === 'receipt') return new Promise<void>(() => {});
       if (event.type === 'step' && event.text === 'Running task') {
-        expect(await harness.steer({commandId: 'early', text: 'wrong turn'})).toBe('rejected');
+        expect(await harness.steer({ commandId: 'early', text: 'wrong turn' })).toBe('rejected');
       }
       if (event.type === 'step' && event.text === 'Task is working') {
-        reached(); await gate;
+        reached();
+        await gate;
       }
     },
   });
-  const terminal = harness.start({text: 'brief', model: 'task'});
+  const terminal = harness.start({ text: 'brief', model: 'task' });
   try {
-    await Promise.race([working, terminal.then(result => {throw new Error(`finished_before_prompt:${result.reasonCode}`);})]);
+    await Promise.race([
+      working,
+      terminal.then((result) => {
+        throw new Error(`finished_before_prompt:${result.reasonCode}`);
+      }),
+    ]);
     // An ordinary tool's TMPDIR cleanup must not remove launcher files.
-    for (const name of await readdir(join(work, 'tmp'))) await rm(join(work, 'tmp', name), {recursive: true, force: true});
-    const disposition = await harness.steer({commandId: 'cmd', text: 'continue'});
+    for (const name of await readdir(join(work, 'tmp')))
+      await rm(join(work, 'tmp', name), { recursive: true, force: true });
+    const disposition = await harness.steer({ commandId: 'cmd', text: 'continue' });
     expect(disposition).toBe(input.diskFailure ? 'uncertain' : input.disposition);
     expect(send).toHaveBeenCalledTimes(input.diskFailure ? 0 : 1);
     if (input.observerError) {
       await vi.waitFor(() => expect(observer).toHaveBeenCalledTimes(1));
-      expect(events.filter(event => event.type === 'receipt')).toEqual([]);
+      expect(events.filter((event) => event.type === 'receipt')).toEqual([]);
     }
     if (input.receiptSinkStalls) {
-      await vi.waitFor(() => expect(events.some(event => event.type === 'receipt')).toBe(true));
+      await vi.waitFor(() => expect(events.some((event) => event.type === 'receipt')).toBe(true));
       // Cleanup must bound this callback without changing task success.
     }
     resume();
-    expect(await terminal).toMatchObject({outcome: input.expected,
-      ...(input.expected === 'failed' ? {reasonCode: 'steer_uncertain'} : {})});
-    expect(release).toHaveBeenCalledWith({workDirectory: work, sessionId: 'scripted-session'});
+    expect(await terminal).toMatchObject({
+      outcome: input.expected,
+      ...(input.expected === 'failed' ? { reasonCode: 'steer_uncertain' } : {}),
+    });
+    expect(release).toHaveBeenCalledWith({ workDirectory: work, sessionId: 'scripted-session' });
   } finally {
-    resume(); await harness.abort(); await terminal;
-    spy.mockRestore(); vi.restoreAllMocks();
-    await rm(work, {recursive: true, force: true}); certificate.cleanup();
+    resume();
+    await harness.abort();
+    await terminal;
+    spy.mockRestore();
+    vi.restoreAllMocks();
+    await rm(work, { recursive: true, force: true });
+    certificate.cleanup();
   }
 }

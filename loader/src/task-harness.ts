@@ -2,6 +2,8 @@
 export interface TaskBriefing {
   text: string;
   model: string;
+  /** Accepted task deadline, from TaskAccessIntent, never a fresh per-turn budget. */
+  softDueAt?: string;
 }
 
 export interface TaskHarnessTraceSpan {
@@ -35,7 +37,11 @@ export type TaskHarnessEvent =
   | { type: 'step'; text: string }
   | { type: 'tool'; name: string; status: 'running' | 'completed' | 'error' }
   | { type: 'error'; code: string }
-  | { type: 'receipt'; commandId: string; disposition: 'inserted' | 'failed' | 'uncertain' }
+  | {
+      type: 'receipt';
+      commandId: string;
+      disposition: 'inserted' | 'deferred-to-next-turn' | 'failed' | 'uncertain';
+    }
   | { type: 'trace'; span: TaskHarnessTraceSpan };
 
 export interface TaskHarnessResult {
@@ -47,6 +53,30 @@ export interface TaskHarnessResult {
 }
 
 export type TaskHarnessEventSink = (event: TaskHarnessEvent) => void | Promise<void>;
+
+/** Native reconciliation stays behind the registry adapter. No raw native data. */
+export interface TaskEndTurnInput {
+  workDirectory: string;
+  sessionId: string;
+  commandIds: string[];
+  signal: AbortSignal;
+}
+export interface TaskSuccessorEvidence {
+  /** Structured, settled tool observations followed by the last final text. */
+  updates: Record<string, unknown>[];
+  stopReason: 'end_turn';
+}
+export type TaskEndTurnReconciliation =
+  | { state: 'idle' }
+  | { state: 'continue'; commandIds: string[] }
+  | { state: 'successor'; wait: () => Promise<TaskSuccessorEvidence | undefined> }
+  | { state: 'unknown' };
+
+/** Launcher question tools will supply this seam; no MCP dependency here. */
+export interface TaskQuestionState {
+  isOpen(): boolean;
+  waitForChange(signal: AbortSignal): Promise<void>;
+}
 
 export interface TaskHarness {
   start(briefing: TaskBriefing): Promise<TaskHarnessResult>;
