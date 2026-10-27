@@ -3,8 +3,9 @@
 Task: lifemodel-653.8.8. This is the task-to-core direction of ADR-014 D2.
 The task-to-core direction is a source contract, not deployed stage acceptance.
 The core-to-task mailbox and launcher intake are implemented in source by
-lifemodel-653.9.7. Their real-store checks have not yet run successfully in this
-worktree because Docker registry provisioning timed out. They are not accepted.
+lifemodel-653.9.7. Real-store integration checks cover ordering, replay, ACKs,
+receipts, authority, questions and owner-core processing during a held poll.
+This source contract is not deployed stage acceptance.
 
 ## Transport and identity
 

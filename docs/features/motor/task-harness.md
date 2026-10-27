@@ -236,9 +236,9 @@ a native adapter. Answers prefix `[question:<questionId>]` to their plain text.
 The optional `onAnswerAdmitted` callback is the seam for the later question
 MCP dispatcher; it is called only on accepted admission. Receipt events use
 stable SHA-256 receipt IDs and an independent bounded writer. A final bounded
-receipt attempt drains before terminal reporting. The source implementation is
-not yet accepted: real-store verification is blocked by registry provisioning
-in the 653.9.7 worktree.
+receipt attempt drains before terminal reporting. Real-store integration checks cover journal recovery after lost ACKs, answer
+prefixes, receipt forwarding and draining an in-flight disposition ACK before
+terminal reporting. This is source verification, not deployed stage acceptance.
 ACK timeout must be at least the adapter admission bound. Receipts and ACKs are
 task claims, not proof of execution or obedience. Launcher-hosted MCP tools use a
 stdio subprocess in `session/new`. The stdio server is a thin launcher-shipped

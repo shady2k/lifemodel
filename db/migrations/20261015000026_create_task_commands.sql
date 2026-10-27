@@ -1,8 +1,9 @@
 -- migrate:up
 SET lock_timeout = '1s';
 SET statement_timeout = '5s';
+-- Expands the accepted kinds; the replacement keeps every previously valid row.
+-- squawk-ignore ban-drop-constraint
 ALTER TABLE core.task_mailbox DROP CONSTRAINT IF EXISTS task_mailbox_kind_check;
--- squawk-ignore constraint-missing-not-valid
 ALTER TABLE core.task_mailbox ADD CONSTRAINT task_mailbox_kind_check CHECK (kind IN ('step','question','terminal')) NOT VALID;
 CREATE TABLE IF NOT EXISTS core.task_commands (
   task_id text NOT NULL REFERENCES core.tasks(id),

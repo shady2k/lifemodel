@@ -31,6 +31,7 @@ export function createTaskCommandIntake(options: {
   const receiptClient = new TaskJsonClient(options.endpoint, 10_000);
   poll.hardStopAt = writes.hardStopAt = receiptClient.hardStopAt = options.hardStopAt;
   const closing = new AbortController();
+  const pollClosing = new AbortController();
   const receipts = new Map<string, Record<string, unknown>>();
   let running: Promise<void> | undefined;
   let stopped = false;
@@ -87,9 +88,10 @@ export function createTaskCommandIntake(options: {
     return c as unknown as Command;
   }
   async function run() {
-    while (!closing.signal.aborted) {
+    while (!stopped && !closing.signal.aborted) {
       try {
-        const response = await poll.call('/task/commands', undefined, closing.signal);
+        const response = await poll.call('/task/commands', undefined, pollClosing.signal);
+        if (stopped) return;
         if (response['command'] === null) continue;
         const c = command(response['command']);
         const text = c.kind === 'answer' ? `[question:${c.questionId ?? ''}]\n${c.text}` : c.text;
@@ -103,7 +105,7 @@ export function createTaskCommandIntake(options: {
           disposition,
         });
       } catch (error) {
-        if (closing.signal.aborted) return;
+        if (stopped || closing.signal.aborted) return;
         if (
           error instanceof LauncherError &&
           error.status &&
@@ -146,10 +148,21 @@ export function createTaskCommandIntake(options: {
     stop() {
       return (stopping ??= (async () => {
         stopped = true;
-        closing.abort();
+        // Close only intake first. A command already handed to steer owns a
+        // disposition ACK even if the harness result settles at the same time.
+        pollClosing.abort();
         poll.close();
-        writes.close();
-        await running;
+        const drainDeadline = setTimeout(() => {
+          closing.abort();
+          writes.close();
+        }, 15_000);
+        try {
+          await running;
+        } finally {
+          clearTimeout(drainDeadline);
+          closing.abort();
+          writes.close();
+        }
         clearTimeout(retryTimer);
         flushReceipts();
         // Drain the bounded receipt attempt before the terminal report.

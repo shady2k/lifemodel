@@ -1,4 +1,8 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { spawn } from 'node:child_process';
+import { createServer as createHttpServer } from 'node:http';
+import Redis from 'iovalkey';
+import { reapProcessGroupOnExit, stopProcessGroup } from '../helpers/child-process-group.js';
 import { Agent, createServer, request, type Server } from 'node:https';
 import type { IncomingHttpHeaders } from 'node:http';
 import type { Socket } from 'node:net';
@@ -9,7 +13,12 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createTaskCommandIntake } from '../../loader/src/task-command-intake.js';
 import { TaskSteeringJournal } from '../../loader/src/task-steering-journal.js';
-import { createTestStores, workerDatabaseUrl, type TestStores } from '../helpers/test-stores.js';
+import {
+  createTestStores,
+  workerDatabaseUrl,
+  testStoreUrls,
+  type TestStores,
+} from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
 import { finalizeTaskFixture } from '../helpers/finalized-task.js';
 import {
@@ -185,6 +194,7 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
       'TRUNCATE task_access.projections, task_access.intents, task_access.start_claims'
     );
     await stores.postgres.query('TRUNCATE core.tasks CASCADE');
+    await stores.redis.del('inbound');
     await stores.postgres.query('TRUNCATE observability.trace_spans, observability.trace_events');
     await stores.postgres.query('TRUNCATE storage.spaces CASCADE');
     await stores.postgres.query(
@@ -715,6 +725,43 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
     await channel.stop(Date.now() + 1000);
   });
 
+  it('settles an admitted command ACK before intake shutdown retires its writers', async () => {
+    const f = await fixture();
+    const channel = await listener();
+    const projected = join(directory, `command-stop-${randomUUID()}.token`);
+    await writeFile(projected, f.token);
+    const queued = await mailbox.enqueueCommand(commandInput(f.task, 'stop-race'));
+    const entered = Promise.withResolvers<void>();
+    const admit = Promise.withResolvers<'accepted'>();
+    const intake = createTaskCommandIntake({
+      endpoint: { endpoint: channel.url, tokenFile: projected, caFile },
+      identity: { taskId: f.task.id, attemptId: f.task.attemptId, launchId: f.task.launchId },
+      hardStopAt: Date.now() + 30_000,
+      harness: {
+        steer: async () => {
+          entered.resolve();
+          return admit.promise;
+        },
+      },
+    });
+    intake.start();
+    try {
+      await bounded(entered.promise);
+      const stopped = intake.stop();
+      admit.resolve('accepted');
+      await bounded(stopped);
+      const rows = await stores.postgres.query(
+        'SELECT disposition FROM core.task_command_acks WHERE task_id=$1 AND command_id=$2',
+        [f.task.id, queued.commandId]
+      );
+      expect(rows.rows).toEqual([{ disposition: 'accepted' }]);
+      expect(await mailbox.pollCommand(await proofFor(f))).toBeNull();
+    } finally {
+      admit.resolve('accepted');
+      await intake.stop();
+    }
+  });
+
   it('replays identical command creation and conflicts on changed content under the same ID', async () => {
     const f = await fixture();
     const input = commandInput(f.task, 'same');
@@ -789,7 +836,72 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
     expect((await stores.postgres.query('SELECT * FROM core.task_commands')).rowCount).toBe(1);
   });
 
-  it('held poll releases every SQL connection, leaves owner intake live, refuses a second poll and wakes on command commit', async () => {
+  it('held poll releases every SQL connection while a real core answers owner intake, refuses a second poll and wakes on command commit', async () => {
+    // Dedicated unprefixed Valkey DB for the real core, not the per-file key prefix.
+    const ownerRedis = new Redis(new URL('/9', testStoreUrls().valkeyUrl).toString());
+    await ownerRedis.flushdb();
+    cleanup.push(() => ownerRedis.quit().then(() => undefined));
+    const ownerDirectory = await mkdtemp(join(tmpdir(), 'task-poll-owner-'));
+    cleanup.push(() => rm(ownerDirectory, { recursive: true, force: true }));
+    const llm = createHttpServer(async (req, res) => {
+      for await (const chunk of req) {
+        void chunk;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          id: 'owner-poll-reply',
+          object: 'chat.completion',
+          created: 1,
+          model: 'stub',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: 'Received while poll held.' },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        })
+      );
+    });
+    await new Promise<void>((resolve) => llm.listen(0, '127.0.0.1', resolve));
+    cleanup.push(() => new Promise<void>((resolve) => llm.close(() => resolve())));
+    const address = llm.address();
+    if (!address || typeof address === 'string') throw new Error('owner model did not bind');
+    const core = spawn(
+      join(process.cwd(), 'node_modules/.bin/tsx'),
+      [join(process.cwd(), 'tests/fixtures/stream-core-child.ts')],
+      {
+        cwd: process.cwd(),
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          LIFEMODEL_VALKEY_URL: new URL('/9', testStoreUrls().valkeyUrl).toString(),
+          LIFEMODEL_DATABASE_URL: workerDatabaseUrl(),
+          MOTOR_CORTEX_ENABLED: 'false',
+          TEST_LLM_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+          DATA_PATH: ownerDirectory,
+        },
+      }
+    );
+    reapProcessGroupOnExit(core);
+    cleanup.push(() => stopProcessGroup(core));
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('owner core not ready')), 30_000);
+      core.stdout.on('data', (chunk: Buffer) => {
+        if (chunk.toString().includes('CORE_READY')) {
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
+      core.stderr.on('data', () => undefined);
+      core.once('exit', (code) => {
+        clearTimeout(timeout);
+        reject(new Error(`owner core exited ${code}`));
+      });
+    });
     const f = await fixture();
     const { Pool } = await import('pg');
     const pool = new Pool({
@@ -828,19 +940,31 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
       expect(settled).toBe(false);
       expect(pool.totalCount - pool.idleCount).toBe(0);
       expect(pool.waitingCount).toBe(0);
-      const owner = new OwnerMessageIntake(stores.redis, 'owner');
+      const recipientId = 'rcpt_5dca93478eabd318';
+      const owner = new OwnerMessageIntake(ownerRedis, recipientId);
       const id = ownerId();
       const start = performance.now();
-      const accepted = await owner.acceptOwnerMessage(id, 'Owner is still here');
-      expect(accepted.status).toBe('accepted');
-      // Read/process the durable owner input while the task response is held.
-      const inputs = await stores.redis.xrange('inbound', '-', '+');
-      const own = inputs.find((row) => row[1].includes(id));
-      expect(own).toBeDefined();
-      expect(own![1]).toContain('Owner is still here');
-      await pool.query('SELECT 1');
-      expect(performance.now() - start).toBeLessThan(2000);
+      expect((await owner.acceptOwnerMessage(id, 'Owner is still here')).status).toBe('accepted');
+      await vi.waitFor(
+        async () => {
+          const rows = await stores.postgres.query(
+            "SELECT message_id,payload->>'role' AS role,payload->>'content' AS content FROM core.conversation_messages WHERE recipient_id=$1 AND kind='message'",
+            [recipientId]
+          );
+          expect(rows.rows.some((row) => row.message_id === `inbound:${id}`)).toBe(true);
+          expect(
+            rows.rows.some(
+              (row) => row.role === 'assistant' && row.content === 'Received while poll held.'
+            )
+          ).toBe(true);
+        },
+        { timeout: 8000, interval: 20 }
+      );
       expect(settled).toBe(false);
+      expect(pool.totalCount - pool.idleCount).toBe(0);
+      expect(pool.waitingCount).toBe(0);
+      await pool.query('SELECT 1');
+      expect(performance.now() - start).toBeLessThan(8000);
       expect((await commandCall(channel.url, f.token)).status).toBe(429);
       const queued = await commands.enqueueCommand(commandInput(f.task, 'wake'));
       expect((await bounded(pending)).body.command).toEqual(queued);
@@ -848,7 +972,7 @@ describe('task-only TLS channel (real stores and Kubernetes identity)', () => {
       abort.abort();
       await pending.catch(() => undefined);
     }
-  });
+  }, 60_000);
 
   function ownerId() {
     const time = Date.now().toString(16).padStart(12, '0');
