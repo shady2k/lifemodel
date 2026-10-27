@@ -1,5 +1,7 @@
 /** OpenCode v2 configuration only. The protocol client is generic ACP. */
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { connect } from 'node:net';
 
 export function configureAgent(input: {
   workDirectory: string;
@@ -10,6 +12,7 @@ export function configureAgent(input: {
     OPENCODE_CONFIG: input.configFile,
     OPENCODE_CONFIG_CONTENT: JSON.stringify({
       model: 'lifemodel/task',
+      plugins: ['-opencode.browser', '/etc/lifemodel/steering-plugin'],
       providers: {
         lifemodel: {
           name: 'Task gateway',
@@ -26,6 +29,7 @@ export function configureAgent(input: {
         },
       },
     }),
+    LIFEMODEL_STEER_SOCKET: join(input.workDirectory, '.launcher/steer.sock'),
     OPENCODE_DISABLE_AUTOUPDATE: 'true',
     OPENCODE_DISABLE_MODELS_FETCH: 'true',
     OPENCODE_DISABLE_PROJECT_CONFIG: 'true',
@@ -60,4 +64,136 @@ export function toolOutputFailed(output: unknown, input?: unknown): boolean {
     Boolean(value['timeout']) ||
     value['status'] === 'running'
   );
+}
+
+// Stable IDs make native ambiguity nonfatal. Journal I/O remains fatal.
+export const failOnUncertain = false;
+
+/** Native identity is stable per command, including after an ambiguous ACK. */
+export function nativeMessageId(commandId: string): string {
+  return `msg_${createHash('sha256').update(commandId).digest('hex')}`;
+}
+
+/** A socket failure can follow native admission, so it is never a rejection. */
+export async function admit(input: {
+  workDirectory: string;
+  sessionId: string;
+  commandId: string;
+  text: string;
+}): Promise<'accepted' | 'rejected' | 'uncertain'> {
+  if (!input.sessionId || !input.commandId || !input.text.trim()) return 'rejected';
+  const id = nativeMessageId(input.commandId);
+  return new Promise((resolve) => {
+    const socket = connect(join(input.workDirectory, '.launcher/steer.sock'));
+    let buffer = '';
+    let done = false;
+    const finish = (result: 'accepted' | 'uncertain') => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      finish('uncertain');
+    }, 5000);
+    socket.once('error', () => {
+      finish('uncertain');
+    });
+    socket.once('close', () => {
+      finish('uncertain');
+    });
+    socket.once('connect', () =>
+      socket.write(
+        JSON.stringify({
+          op: 'steer',
+          sessionID: input.sessionId,
+          id,
+          text: input.text,
+        }) + '\n'
+      )
+    );
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString();
+      if (Buffer.byteLength(buffer) > 1048576) {
+        finish('uncertain');
+        return;
+      }
+      const end = buffer.indexOf('\n');
+      if (end < 0) return;
+      try {
+        const result = JSON.parse(buffer.slice(0, end)) as { ok?: boolean; data?: { id?: string } };
+        finish(result.ok === true && result.data?.id === id ? 'accepted' : 'uncertain');
+      } catch {
+        finish('uncertain');
+      }
+    });
+  });
+}
+
+/** Observe delivery independently of admission; missing evidence is not insertion. */
+export async function observeInsertion(input: {
+  workDirectory: string;
+  commandId: string;
+  signal: AbortSignal;
+}): Promise<boolean> {
+  const id = nativeMessageId(input.commandId);
+  // Bounded best-effort observation with backoff; no native sends here.
+  for (let pass = 0; pass < 12 && !input.signal.aborted; pass++) {
+    const inserted = await new Promise<boolean>((resolve) => {
+      const socket = connect(join(input.workDirectory, '.launcher/steer.sock'));
+      let buffer = '';
+      let done = false;
+      const finish = (value: boolean) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        input.signal.removeEventListener('abort', cancel);
+        socket.destroy();
+        resolve(value);
+      };
+      const cancel = () => {
+        finish(false);
+      };
+      const timer = setTimeout(cancel, 1000);
+      input.signal.addEventListener('abort', cancel, { once: true });
+      socket.once('error', cancel);
+      socket.once('close', cancel);
+      socket.once('connect', () => socket.write(JSON.stringify({ op: 'disposition', id }) + '\n'));
+      socket.on('data', (chunk) => {
+        buffer += chunk.toString();
+        if (Buffer.byteLength(buffer) > 1048576) {
+          finish(false);
+          return;
+        }
+        const end = buffer.indexOf('\n');
+        if (end < 0) return;
+        try {
+          const response = JSON.parse(buffer.slice(0, end)) as {
+            ok?: boolean;
+            data?: { id?: string; status?: string };
+          };
+          finish(
+            response.ok === true && response.data?.id === id && response.data.status === 'inserted'
+          );
+        } catch {
+          finish(false);
+        }
+      });
+      if (input.signal.aborted) cancel();
+    });
+    if (inserted) return true;
+    if (input.signal.aborted) break;
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(done, Math.min(100 * 2 ** pass, 5000));
+      function done() {
+        clearTimeout(timer);
+        input.signal.removeEventListener('abort', done);
+        resolve();
+      }
+      input.signal.addEventListener('abort', done, { once: true });
+      if (input.signal.aborted) done();
+    });
+  }
+  return false;
 }

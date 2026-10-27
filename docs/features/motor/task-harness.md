@@ -43,12 +43,14 @@ SQL/identity workers. Neither caches positive authority.
 ## Pod-local harness port
 
 `loader/src/task-harness.ts` declares `TaskHarness.start(briefing)`, `abort()`,
-`steer(text)` and `wrap()` today. `AcpTaskHarness` currently returns
-`not_supported` for both. Stage 4 changes steer to `steer({commandId,text})`;
-soft-stop control remains lifemodel-653.10 work. The following stage-4 contract
-is planned, not a claim of current implementation.
-Normalized events are short `step`, `tool`, safe-code `error` and best-effort
-`trace` events. Trace callbacks cannot gate the harness protocol or outcome. One
+`steer({commandId,text})` and `wrap()`. Steering returns `accepted`, `rejected`
+or `uncertain` after bounded native admission and journal recording, without
+waiting for a model or tool. `wrap()` remains `not_supported`; soft-stop control
+belongs to lifemodel-653.10. Steering before the briefing's ACP prompt has been written or after shutdown
+is rejected. The command ID is bounded to 256 UTF-8 bytes, text to 60000 bytes;
+blank IDs/text are rejected. Accepted means native live-queue admission only.
+Normalized events are short `step`, `tool`, safe-code `error`, correlated
+`receipt` (`inserted | failed | uncertain`) and best-effort `trace` events. Trace callbacks cannot gate the harness protocol or outcome. One
 start returns one semantic result: `succeeded`, `failed` or `aborted`, with
 result text and a safe failure reason. A required-tool failure also carries
 `failureSpanId`, identifying the failed tool observation rather than whichever
@@ -118,14 +120,65 @@ its adopted detached tool descendants before adapter completion, including after
 agent failure. Failure to establish or finish that cleanup fails closed.
 
 
-### Stage 4 steering, barrier and MCP contract
+### Native admission and launcher-owned journal
+
+The registry adapter exports `admit`, optional pre-brief `bind`, and
+`observeInsertion`, plus optional `release` and `failOnUncertain` policy.
+Generic ACP and factory code do not import native APIs.
+OpenCode's baked dependency-free plugin listens on `/work/.launcher/steer.sock`, mode
+0600. It calls `ctx.session.prompt` with the ACP/native session ID, a stable
+SHA-256 message ID derived from `commandId`, `delivery: "steer"` and always
+`resume: false`. An accepted socket reply must carry that same ID. Native
+`session.inbox.delivered` evidence supports an inserted receipt; queue admission
+alone does not. The observer backs off from 100 ms to 5 s, tries at most 12
+reads, and stops with the harness. Missing evidence yields no inserted receipt.
+An uncertain native OpenCode admission does not abort the turn; the stable ID
+keeps ambiguity safe. The journal still returns its stored outcome, not a resend.
+
+Prime binds before the brief using `list` with `includeClientOwned:true` on the
+private daemon socket. Exactly one top-level root at the task working directory
+must exist. Its native `activeSessionId`, not the ACP session ID, routes native
+`steer`. The model sees the prefix `[lifemodel-steer:<hex>]`, where `<hex>` is the
+command ID's SHA-256, before the plain steering text. This correlation marker is
+not an upstream deduplication key. The observer reads at most 100 single-row
+transcript pages per pass, with eight passes, exponential backoff capped at 5 s
+and an overall 60 s observation deadline. A response over 1 MiB, timeout or
+unreadable history gives up silently with no receipt. A compaction summary,
+absent user row or empty queue never proves insertion. Observation failure
+never aborts a running task. Only a failed/ambiguous native **steer send** is
+uncertain and fails the Prime harness with `steer_uncertain`; native sends are
+never retried. The real-agent socket-failure test removes the socket before
+sending (ENOENT); a separate fake daemon tests lost ACK after receiving steer.
+The root binding is released when the harness ends.
+
+`task-steering-journal.ts` reserves 1024 fixed slots before opening intake. Each
+slot stores hashes of command identity and text plus a synced pre-send state,
+then a synced final admission disposition before the ACK returns. No prompt
+text is stored in this journal. Same-ID, same-text in-flight duplicates join
+one native call; later replays return the stored disposition. Changed text is
+rejected. Capacity overflow rejects before send. Intent or disposition I/O
+failure yields uncertainty and fails the task. Existing corrupt/missing state
+cannot be silently recreated. Recovering a pre-send state returns uncertainty,
+never a resend, especially on Prime. The journal and both adapter sockets live
+in `/work/.launcher/`, outside the agent's TMPDIR (`/work/tmp`) and tool working
+files. This is launcher-owned ephemeral state, **not a trust boundary**: the Pod
+is one untrusted zone, and receipts are task claims. It is not the core's
+durable mailbox and does not survive Pod loss. An ordinary TMPDIR cleanup
+therefore does not delete the journal or channel files.
+
+Until lifemodel-653.9.6 implements the end-turn barrier, steering is unsafe near
+the terminal boundary. Intake remains open between the ACP prompt response and
+cleanup: an accepted steer there may be lost (OpenCode parked input or Prime
+successor work killed by cleanup). Accepted is not proof of insertion. This
+task deliberately does not implement reconciliation.
+
+### Stage 4 barrier and MCP contract (not implemented here)
+
 
 [ADR-014’s 2026-10-27 amendment](../../adr/014-task-runtime.md#amendment--2026-10-27-live-steering-behind-the-harness-port)
-defines the binding contract. The registry adapter exports `admit` and `reconcileEndTurn` behind
-`TaskHarness`; reconciliation returns `idle | continue | successor | unknown`.
-Add a correlated receipt to `TaskHarnessEvent`. OpenCode uses the stable-ID
-baked plugin; Prime uses same-daemon socket admission. Bind the ACP session to
-exactly one native root before the briefing. At each end-turn close intake and
+defines the remaining barrier, core mailbox/long-poll and MCP contract. The
+future adapter `reconcileEndTurn` returns `idle | continue | successor | unknown`.
+At each end-turn close intake and
 settle calls; while a question is unanswered keep intake open for its answer
 and ordinary steers until admission or the accepted task timeout from the briefing
 (`TaskAccessIntent.softDueAt`). At expiry the barrier ends unanswered and the
@@ -137,12 +190,9 @@ accumulate unresolved tool failures. Prime successor success requires daemon
 evidence of final text and settled tools; missing evidence fails closed. The
 Prime idle/queue/result and tool evidence remain unverified.
 
-Record intent in a launcher-private size-reserved journal before native send and
-disposition before ACK. A duplicate while native admission is in flight joins
-that call. After process loss an ambiguous Prime send is uncertain, never resent;
-failed socket admission aborts the harness mid-turn with `steer_uncertain`.
-ACK timeout is at least the adapter admission bound. Receipts and ACKs are task
-claims, not proof of execution or obedience. Launcher-hosted MCP tools use a
+The core's durable command mailbox and long-poll are not implemented here.
+ACK timeout must be at least the adapter admission bound. Receipts and ACKs are
+task claims, not proof of execution or obedience. Launcher-hosted MCP tools use a
 stdio subprocess in `session/new`. The stdio server is a thin launcher-shipped
 shim relaying over an inherited pipe or launcher-private local socket; it holds
 no channel credentials. Frames, IDs and limits are the launcher’s and core’s.

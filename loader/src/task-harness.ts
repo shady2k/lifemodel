@@ -25,10 +25,17 @@ export function emitTaskTrace(
     .catch(() => undefined);
 }
 
+export type TaskSteerDisposition = 'accepted' | 'rejected' | 'uncertain';
+export interface TaskSteerCommand {
+  commandId: string;
+  text: string;
+}
+
 export type TaskHarnessEvent =
   | { type: 'step'; text: string }
   | { type: 'tool'; name: string; status: 'running' | 'completed' | 'error' }
   | { type: 'error'; code: string }
+  | { type: 'receipt'; commandId: string; disposition: 'inserted' | 'failed' | 'uncertain' }
   | { type: 'trace'; span: TaskHarnessTraceSpan };
 
 export interface TaskHarnessResult {
@@ -44,7 +51,7 @@ export type TaskHarnessEventSink = (event: TaskHarnessEvent) => void | Promise<v
 export interface TaskHarness {
   start(briefing: TaskBriefing): Promise<TaskHarnessResult>;
   abort(): Promise<void>;
-  steer(text: string): Promise<'not_supported'>;
+  steer(command: TaskSteerCommand): Promise<TaskSteerDisposition>;
   wrap(): Promise<'not_supported'>;
 }
 
@@ -53,6 +60,7 @@ export class ScriptedTaskHarness implements TaskHarness {
   private started = false;
   private aborted = false;
   private release: (() => void) | undefined;
+  private readonly commands = new Map<string, string>();
 
   constructor(
     private readonly options: {
@@ -87,8 +95,29 @@ export class ScriptedTaskHarness implements TaskHarness {
     return Promise.resolve();
   }
 
-  steer(_text: string): Promise<'not_supported'> {
-    return Promise.resolve('not_supported');
+  steer(command: TaskSteerCommand): Promise<TaskSteerDisposition> {
+    if (
+      !this.started ||
+      this.aborted ||
+      !this.options.waitForAbort ||
+      !command.commandId ||
+      !command.text.trim()
+    )
+      return Promise.resolve('rejected');
+    const previous = this.commands.get(command.commandId);
+    if (previous !== undefined)
+      return Promise.resolve(previous === command.text ? 'accepted' : 'rejected');
+    this.commands.set(command.commandId, command.text);
+    void Promise.resolve()
+      .then(() =>
+        this.options.onEvent?.({
+          type: 'receipt',
+          commandId: command.commandId,
+          disposition: 'inserted',
+        })
+      )
+      .catch(() => undefined);
+    return Promise.resolve('accepted');
   }
   wrap(): Promise<'not_supported'> {
     return Promise.resolve('not_supported');
