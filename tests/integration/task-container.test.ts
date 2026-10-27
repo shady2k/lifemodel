@@ -24,6 +24,27 @@ vi.mock('../../src/core/kubernetes-task-executor.js', () => ({
   }),
 }));
 
+const drainFault = vi.hoisted(() => ({ fail: false }));
+vi.mock('../../src/core/task-launch.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/core/task-launch.js')>();
+  return {
+    ...actual,
+    createTaskLaunchReconciler: (...args: Parameters<typeof actual.createTaskLaunchReconciler>) => {
+      const reconciler = actual.createTaskLaunchReconciler(...args);
+      return {
+        ...reconciler,
+        stop: async (deadline?: number) => {
+          await reconciler.stop(deadline);
+          if (drainFault.fail) {
+            drainFault.fail = false;
+            throw new Error('injected task drain failure');
+          }
+        },
+      };
+    },
+  };
+});
+
 const imageA = `sha256:${'a'.repeat(64)}`;
 const imageB = `sha256:${'b'.repeat(64)}`;
 const input: AcceptTask = {
@@ -171,6 +192,33 @@ describe('platform task container wiring', { timeout: 30_000 }, () => {
     });
     expect(await active.taskService!.list()).toEqual([]);
     expect(workbenchChecks).toEqual([imageA]);
+  });
+
+  it('closes the real command pool and shared Postgres even when task drain rejects', async () => {
+    active = await createContainerAsync({ logLevel: 'error', logToFile: false });
+    const ended: Pool[] = [];
+    const nativeEnd = Pool.prototype.end;
+    const close = vi.spyOn(Pool.prototype, 'end').mockImplementation(function (this: Pool) {
+      ended.push(this);
+      return nativeEnd.call(this);
+    });
+    try {
+      drainFault.fail = true;
+      await expect(active.shutdown()).rejects.toMatchObject({
+        errors: [expect.objectContaining({ message: 'injected task drain failure' })],
+      });
+      expect(
+        ended.some((pool) => pool.options.application_name === 'lifemodel-task-commands')
+      ).toBe(true);
+      expect(ended.some((pool) => pool.options.max === 10)).toBe(true);
+    } finally {
+      close.mockRestore();
+      // A failed mutation must not leak the real pools into database teardown.
+      if (!ended.some((pool) => pool.options.application_name === 'lifemodel-task-commands'))
+        await active.shutdown();
+      active = undefined;
+      drainFault.fail = false;
+    }
   });
 
   it('cancels only reconciler SQL and drains it before pool close within the shared stop budget', async () => {

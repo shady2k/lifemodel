@@ -18,7 +18,11 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { shutdownSequence, type StopProgress } from '../../../src/core/container.js';
+import {
+  closeTaskResources,
+  shutdownSequence,
+  type StopProgress,
+} from '../../../src/core/container.js';
 import type { StopReport } from '../../../src/core/core-loop.js';
 import type { Logger } from '../../../src/types/logger.js';
 
@@ -66,6 +70,48 @@ function makeDoubles() {
 }
 
 describe('container shutdown sequence', () => {
+  it.each([0, 1, 2])(
+    'closes the command pool and stores even when task drain %s fails',
+    async (failed) => {
+      const steps: string[] = [];
+      const fault = new Error('task drain failed');
+      const drains = Promise.allSettled(
+        [0, 1, 2].map((i) => (i === failed ? Promise.reject(fault) : Promise.resolve()))
+      );
+      await expect(
+        closeTaskResources(drains, [
+          async () => {
+            steps.push('commandPool.end');
+          },
+          async () => {
+            steps.push('trace.stop');
+          },
+          async () => {
+            steps.push('redis.quit');
+          },
+          async () => {
+            steps.push('postgres.end');
+          },
+        ])
+      ).rejects.toMatchObject({ errors: [fault] });
+      expect(steps).toEqual(['commandPool.end', 'trace.stop', 'redis.quit', 'postgres.end']);
+    }
+  );
+
+  it('still closes the shared stores if command pool close fails', async () => {
+    const steps: string[] = [];
+    await expect(
+      closeTaskResources(Promise.allSettled([]), [
+        async () => {
+          throw new Error('pool failure');
+        },
+        async () => {
+          steps.push('postgres.end');
+        },
+      ])
+    ).rejects.toThrow('Task resource shutdown failed');
+    expect(steps).toEqual(['postgres.end']);
+  });
   it('stops intake first, drains the turn, releases the channels and flushes storage last', async () => {
     const d = makeDoubles();
     const progress: StopProgress = { step: 'done' };

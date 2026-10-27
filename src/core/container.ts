@@ -367,6 +367,27 @@ export async function shutdownSequence(deps: ShutdownSequenceDeps): Promise<void
   logger.info('Shutdown complete');
 }
 
+/** Release every store even when a task drain or another cleanup fails. */
+export async function closeTaskResources(
+  taskDrains: Promise<PromiseSettledResult<unknown>[]>,
+  cleanup: (() => Promise<unknown>)[]
+): Promise<void> {
+  const outcomes = await taskDrains;
+  for (const close of cleanup) {
+    try {
+      outcomes.push({ status: 'fulfilled', value: await close() });
+    } catch (reason) {
+      outcomes.push({ status: 'rejected', reason });
+    }
+  }
+  const failures = outcomes.filter((outcome) => outcome.status === 'rejected');
+  if (failures.length)
+    throw new AggregateError(
+      failures.map((failure): unknown => failure.reason),
+      'Task resource shutdown failed'
+    );
+}
+
 /**
  * Make a shutdown idempotent: the first call runs it; later calls (sequential
  * or concurrent) return the FIRST call's promise (the stopped instance is
@@ -1627,6 +1648,8 @@ export async function createContainerAsync(
     const taskDrain = taskLaunch?.stop(deadline);
     const taskFinalizerDrain = stopTaskFinalizer?.(deadline);
     const taskChannelDrain = stopTaskChannel?.(deadline);
+    // Observe all rejections immediately, even while the core is still draining.
+    const taskDrains = Promise.allSettled([taskDrain, taskChannelDrain, taskFinalizerDrain]);
     // Trace drain gets no independent stop budget. It may run only while
     // authoritative work remains, and cannot postpone state-store cleanup.
     const traceStop = new AbortController();
@@ -1643,15 +1666,16 @@ export async function createContainerAsync(
     }).finally(async () => {
       // Worker-owned SQL was cancelled at intake stop; drain it inside the same
       // deadline before closing the shared pool, without touching turn clients.
-      await taskDrain;
-      await taskChannelDrain;
-      await taskFinalizerDrain;
-      // Turn command commits drain with cognition before their clients close.
-      await closeTaskCommands?.();
-      traceStop.abort();
-      await taskTraceDrain;
-      await snapshotRedis.quit();
-      await postgres.end();
+      await closeTaskResources(taskDrains, [
+        // Turn command commits drain with cognition before their clients close.
+        async () => closeTaskCommands?.(),
+        async () => {
+          traceStop.abort();
+          await taskTraceDrain;
+        },
+        () => snapshotRedis.quit(),
+        () => postgres.end(),
+      ]);
     });
   });
 
