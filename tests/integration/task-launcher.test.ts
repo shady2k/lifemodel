@@ -4,6 +4,8 @@ import { createServer, type Server } from 'node:https';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
 import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { TaskJsonClient } from '../../loader/src/task-launcher-http.js';
 import { createTaskModelRelay } from '../../loader/src/task-model-relay.js';
 import { mkdtemp, readdir, rename, rm, writeFile } from 'node:fs/promises';
@@ -484,6 +486,70 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     });
   });
 
+  it('passes the credential-free shim and question state through the production factory and waits for report ACK', async () => {
+    const factory = vi.spyOn(harnessFactory, 'createRegisteredHarness');
+    const start = vi.spyOn(AcpTaskHarness.prototype, 'start').mockImplementation(async () => {
+      const options = factory.mock.calls[0]![1];
+      const config = options.mcpServers![0]!;
+      expect(config.env).toEqual([]);
+      expect(config.args.slice(0, 2)).toEqual(['-i', '/usr/bin/python3']);
+      expect(options.question!.isOpen()).toBe(false);
+      const child = spawn(config.command, config.args, { stdio: 'pipe' });
+      const lines = createInterface({ input: child.stdout });
+      const responses = new Map<number, (value: any) => void>();
+      lines.on('line', (line) => {
+        const response = JSON.parse(line);
+        responses.get(response.id)?.(response.result);
+      });
+      let id = 0;
+      const call = (method: string, params: unknown) =>
+        new Promise<any>((resolve) => {
+          responses.set(++id, resolve);
+          child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+        });
+      try {
+        await call('initialize', { protocolVersion: '2024-11-05' });
+        expect(
+          (await call('tools/call', { name: 'step', arguments: { text: 'Actual private step' } }))
+            .isError
+        ).toBe(false);
+        expect(
+          (
+            await call('tools/call', {
+              name: 'question',
+              arguments: { text: 'Which private result?' },
+            })
+          ).isError
+        ).toBe(false);
+        expect(options.question!.isOpen()).toBe(true);
+        const frames = calls
+          .filter((call) => call.path === '/task/events')
+          .map((call) => JSON.parse(call.body.toString()));
+        expect(frames).toEqual([
+          expect.objectContaining({ kind: 'step', payload: { line: 'Actual private step' } }),
+          expect.objectContaining({
+            kind: 'question',
+            payload: { questionId: expect.any(String), text: 'Which private result?' },
+          }),
+        ]);
+        expect(frames[1].payload.questionId).toBe(frames[1].messageId);
+      } finally {
+        const closed = new Promise<void>((resolve) => child.once('close', () => resolve()));
+        child.kill();
+        await closed;
+        lines.close();
+      }
+      return { outcome: 'succeeded', result: RESULT };
+    });
+    try {
+      expect(await run({}, { harness: undefined })).toBe(0);
+    } finally {
+      start.mockRestore();
+      factory.mockRestore();
+    }
+    expect(diagnostics).toEqual([]);
+  });
+
   it('resolves the accepted Prime Agent harness through the launcher factory', async () => {
     briefingHarness = 'prime-agent';
     const factory = vi.spyOn(harnessFactory, 'createRegisteredHarness');
@@ -516,7 +582,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     expect(await run({ terminal: { outcome: 'succeeded', result: RESULT } })).toBe(0);
     expect(harnessStarts).toEqual([
       {
-        text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\nFiles elsewhere are not delivered. Outputs are delivered only if the task succeeds.\n\n${BRIEFING}`,
+        text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\nFiles elsewhere are not delivered. Outputs are delivered only if the task succeeds.\nUse the task MCP step tool for short progress reports and question to ask the coordinating agent.\nQuestion returns after storage, not an answer. Wait for the correlated answer via steering.\n\n${BRIEFING}`,
         model: 'lifemodel/task',
         softDueAt: expect.any(String),
       },
@@ -626,7 +692,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     expect(harnessCreations).toBe(1);
     expect(harnessStarts).toEqual([
       {
-        text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\nFiles elsewhere are not delivered. Outputs are delivered only if the task succeeds.\n\n${BRIEFING}`,
+        text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\nFiles elsewhere are not delivered. Outputs are delivered only if the task succeeds.\nUse the task MCP step tool for short progress reports and question to ask the coordinating agent.\nQuestion returns after storage, not an answer. Wait for the correlated answer via steering.\n\n${BRIEFING}`,
         model: 'lifemodel/task',
         softDueAt: expect.any(String),
       },

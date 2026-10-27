@@ -9,6 +9,7 @@ import { createTaskModelRelay } from './task-model-relay.js';
 import { AcpTaskTrace } from './task-trace.js';
 import { TASK_PROCESS_SUPERVISOR } from './task-process.js';
 import { TaskSteeringJournal } from './task-steering-journal.js';
+import type { TaskMcpServer } from './task-tools.js';
 import type { AgentConfiguration } from './task-harness-registry.js';
 import type {
   TaskBriefing,
@@ -205,6 +206,7 @@ export interface AcpTaskHarnessOptions {
   }) => Promise<boolean>;
   reconcileEndTurn?: (input: TaskEndTurnInput) => Promise<TaskEndTurnReconciliation>;
   question?: TaskQuestionState;
+  mcpServers?: TaskMcpServer[];
   timeoutMs?: number;
   storageEnv?: {
     LIFEMODEL_STORAGE_ENDPOINT: string;
@@ -546,7 +548,10 @@ export class AcpTaskHarness implements TaskHarness {
         clientInfo: { name: 'lifemodel', version: '1' },
       });
       if (initialized['protocolVersion'] !== 1) throw new Error('harness_protocol_error');
-      const created = await request('session/new', { cwd: work, mcpServers: [] });
+      const created = await request('session/new', {
+        cwd: work,
+        mcpServers: this.options.mcpServers ?? [],
+      });
       if (typeof created['sessionId'] !== 'string' || !created['sessionId'])
         throw new Error('harness_session_invalid');
       sessionID = created['sessionId'];
