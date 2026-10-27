@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { TaskQuestionState } from './task-harness.js';
 import { TASK_MCP_SHIM } from './task-mcp-shim.js';
+import { LauncherError } from './task-launcher-http.js';
 
 export interface TaskMcpServer {
   name: string;
@@ -15,15 +16,18 @@ export interface TaskMcpServer {
 export async function createTaskTools(options: {
   workDirectory: string;
   report(kind: 'step' | 'question', text: string, messageId: string): Promise<void>;
+  diagnostic?: (code: string) => void;
 }) {
   const directory = join(options.workDirectory, '.launcher');
   await mkdir(directory, { recursive: true, mode: 0o700 });
+  await chmod(directory, 0o700);
   const path = join(directory, 'tools.sock');
   const sockets = new Set<Socket>();
   const calls = new Map<string, { content: string; flight: Promise<unknown> }>();
   const listeners = new Set<() => void>();
   let questionId: string | undefined;
   let closed = false;
+  let closing: Promise<void> | undefined;
   let reporting = false;
   function notify() {
     for (const wake of listeners) wake();
@@ -61,6 +65,8 @@ export async function createTaskTools(options: {
       const end = data.indexOf(10);
       if (end < 0) return;
       socket.pause(); // One request per connection; no unbounded request queue.
+      socket.setTimeout(0); // The report owns its deadline once the request is read.
+
       void (async () => {
         const input = JSON.parse(data.subarray(0, end).toString()) as Record<string, unknown>;
         const { id, kind, text } = input;
@@ -93,10 +99,25 @@ export async function createTaskTools(options: {
         const flight = options
           .report(kind, text, messageId)
           .then(() => ({ messageId, ...(kind === 'question' ? { questionId: messageId } : {}) }))
+          .catch((error: unknown) => {
+            const refused =
+              error instanceof LauncherError &&
+              error.status !== undefined &&
+              error.status >= 400 &&
+              error.status < 500 &&
+              error.status !== 429;
+            if (kind === 'question') {
+              if (refused) {
+                questionId = undefined;
+                notify();
+              } else options.diagnostic?.('task_tool_question_retained');
+            }
+            throw new Error(refused ? 'report_unavailable' : 'report_uncertain');
+          })
           .finally(() => {
             reporting = false;
           });
-        // Keep an ambiguous failure and its question closed to further production.
+        // Retain every call identity; only an ambiguous failure keeps its question reserved.
         // Retrying this call never creates a different immutable frame.
         calls.set(id, { content, flight });
         return flight;
@@ -111,9 +132,12 @@ export async function createTaskTools(options: {
               'report_capacity',
               'report_busy',
               'question_open',
+              'report_unavailable',
+              'report_uncertain',
             ].includes(error.message)
               ? error.message
-              : 'report_unavailable';
+              : 'invalid_report';
+          options.diagnostic?.(`task_tool_${code}`);
           socket.end(JSON.stringify({ error: code }) + '\n');
         }
       );
@@ -144,16 +168,19 @@ export async function createTaskTools(options: {
         notify();
       }
     },
-    async close() {
-      closed = true;
-      for (const socket of sockets) socket.destroy();
-      await new Promise<void>((resolve) =>
-        server.close(() => {
-          resolve();
-        })
-      );
-      await rm(path, { force: true });
-      notify();
+    close() {
+      closing ??= (async () => {
+        closed = true;
+        for (const socket of sockets) socket.destroy();
+        await new Promise<void>((resolve) =>
+          server.close(() => {
+            resolve();
+          })
+        );
+        await rm(path, { force: true });
+        notify();
+      })();
+      return closing;
     },
   };
 }

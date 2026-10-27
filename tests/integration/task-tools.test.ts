@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdtemp, rm, readFile, stat } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, stat, mkdir, chmod } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createConnection } from 'node:net';
 import { createInterface } from 'node:readline';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTaskTools } from '../../loader/src/task-tools.js';
+import { LauncherError } from '../../loader/src/task-launcher-http.js';
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -14,7 +16,15 @@ afterEach(async () => {
 async function fixture(report: Parameters<typeof createTaskTools>[0]['report']) {
   const work = await mkdtemp(join(tmpdir(), 'task-mcp-'));
   cleanup.push(() => rm(work, { recursive: true, force: true }));
-  const tools = await createTaskTools({ workDirectory: work, report });
+  // Permissions must also be repaired for a directory that already exists.
+  await mkdir(join(work, '.launcher'));
+  await chmod(join(work, '.launcher'), 0o755);
+  const diagnostics: string[] = [];
+  const tools = await createTaskTools({
+    workDirectory: work,
+    report,
+    diagnostic: (code) => diagnostics.push(code),
+  });
   cleanup.push(() => tools.close());
   const config = tools.mcpServers[0]!;
   const child = spawn(config.command, config.args, {
@@ -32,18 +42,20 @@ async function fixture(report: Parameters<typeof createTaskTools>[0]['report']) 
     await closed;
   });
   let id = 0;
-  const pending = new Map<number, (value: any) => void>();
+  const pending = new Map<number | null, (value: any) => void>();
   createInterface({ input: child.stdout }).on('line', (line) => {
     const message = JSON.parse(line);
-    pending.get(message.id)?.(message.result);
+    pending.get(message.id)?.(message);
     pending.delete(message.id);
   });
-  const call = (method: string, params: unknown = {}, identity = ++id) =>
+  const raw = (line: string, identity: number | null) =>
     new Promise<any>((resolve) => {
       pending.set(identity, resolve);
-      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: identity, method, params }) + '\n');
+      child.stdin.write(line + '\n');
     });
-  return { tools, work, child: child as ChildProcessWithoutNullStreams, call };
+  const call = async (method: string, params: unknown = {}, identity = ++id) =>
+    (await raw(JSON.stringify({ jsonrpc: '2.0', id: identity, method, params }), identity)).result;
+  return { tools, work, child: child as ChildProcessWithoutNullStreams, call, raw, diagnostics };
 }
 describe('credential-free task MCP stdio shim and launcher relay', () => {
   it('discovers only step/question, waits for durable ACK, and replays the same MCP call without a second effect', async () => {
@@ -133,11 +145,83 @@ describe('credential-free task MCP stdio shim and launcher relay', () => {
     expect(await relay('b'.repeat(64), 'step')).toEqual({ error: 'report_busy' });
     expect(await relay('c'.repeat(64))).toEqual({ error: 'question_open' });
     gate.resolve();
-    expect(await first).toEqual({ error: 'report_unavailable' });
-    expect(await duplicate).toEqual({ error: 'report_unavailable' });
-    expect(await relay(id)).toEqual({ error: 'report_unavailable' });
+    expect(await first).toEqual({ error: 'report_uncertain' });
+    expect(await duplicate).toEqual({ error: 'report_uncertain' });
+    expect(await relay(id)).toEqual({ error: 'report_uncertain' });
     expect(count).toBe(1);
     expect(f.tools.question.isOpen()).toBe(true);
+  });
+
+  it('keeps a slow committing ACK in flight beyond the request-read deadline', async () => {
+    let committed = false;
+    const f = await fixture(async () => {
+      await delay(16_000);
+      committed = true;
+    });
+    const result = await f.call('tools/call', { name: 'step', arguments: { text: 'Slow ACK' } });
+    expect(committed).toBe(true);
+    expect(result.isError).toBe(false);
+    expect(JSON.parse(result.content[0].text).messageId).toMatch(/^msg_/);
+    expect(f.diagnostics).toEqual([]);
+  }, 25_000);
+
+  it('releases a definitely refused question, notifies waiters, and retains its failed identity', async () => {
+    let count = 0;
+    const f = await fixture(async () => {
+      if (++count === 1) throw new LauncherError('request_refused', 409);
+    });
+    const args = { name: 'question', arguments: { text: 'Private refused question' } };
+    expect(await f.call('tools/call', args, 10)).toMatchObject({
+      isError: true,
+      content: [{ text: '"report_unavailable"' }],
+    });
+    expect(f.tools.question.isOpen()).toBe(false);
+    const abort = new AbortController();
+    const changed = f.tools.question.waitForChange(abort.signal);
+    expect(await f.call('tools/call', args, 10)).toMatchObject({ isError: true });
+    expect(count).toBe(1);
+    expect((await f.call('tools/call', args, 11)).isError).toBe(false);
+    await changed;
+    abort.abort();
+    expect(count).toBe(2);
+    expect(f.tools.question.isOpen()).toBe(true);
+    expect(f.diagnostics).toEqual(['task_tool_report_unavailable', 'task_tool_report_unavailable']);
+  });
+
+  it('emits only fixed diagnostic codes and reports an unknown send as uncertain', async () => {
+    const f = await fixture(async () => {
+      throw new Error('PRIVATE REPORT TEXT');
+    });
+    expect(
+      await f.call('tools/call', { name: 'question', arguments: { text: 'PRIVATE QUESTION' } })
+    ).toMatchObject({ isError: true, content: [{ text: '"report_uncertain"' }] });
+    expect(f.tools.question.isOpen()).toBe(true);
+    expect(f.diagnostics).toEqual(['task_tool_question_retained', 'task_tool_report_uncertain']);
+  });
+
+  it('replies to malformed and oversized stdin and keeps serving with supported protocol versions', async () => {
+    const f = await fixture(async () => undefined);
+    const invalid: [string, number | null, number][] = [
+      ['{', null, -32700],
+      ['[]', null, -32600],
+      ['null', null, -32600],
+      [JSON.stringify({ jsonrpc: '2.0', id: 10, method: 'tools/call', params: null }), 10, -32602],
+      ['x'.repeat(140_000), null, -32600],
+    ];
+    for (const [line, identity, code] of invalid) {
+      expect(await f.raw(line, identity)).toMatchObject({ id: identity, error: { code } });
+      expect(await f.call('ping')).toEqual({});
+    }
+    for (const version of ['2024-11-05', '2025-06-18'])
+      expect(await f.call('initialize', { protocolVersion: version })).toMatchObject({
+        protocolVersion: version,
+      });
+    expect(await f.call('initialize', { protocolVersion: '2099-unknown' })).toMatchObject({
+      protocolVersion: '2025-06-18',
+    });
+    expect(
+      (await f.call('tools/call', { name: 'step', arguments: { text: 'Still serving' } })).isError
+    ).toBe(false);
   });
 
   it('bounds a question flood to one open question and returns explicitly refused calls', async () => {
