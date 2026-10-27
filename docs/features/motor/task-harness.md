@@ -120,6 +120,32 @@ its adopted detached tool descendants before adapter completion, including after
 agent failure. Failure to establish or finish that cleanup fails closed.
 
 
+### Cognition steering identity and known limits
+
+`core.steerTask` reads task status without reserving a command identity or
+recovering a write receipt. Answers are keyed by the recipient, persisted
+deciding turn, task ID and question ID. Steers are keyed by the recipient,
+deciding turn, task ID and that task's steer count in the turn. Only committed
+or recovered steers advance the count; reads and refused calls do not. Replay
+can therefore add or remove reads/refusals without duplicating commands or
+returning a write receipt as a task view. The operation and target IDs must
+still be supplied on replay; recovery ignores regenerated payload text, not
+operation identity. Changing the order of successful steers to the same task
+is not covered by this identity scheme.
+
+Known limits (review findings F5 and F6, lifemodel-653.9.8):
+
+- **Smart-escalation history rebuild (F5).** Some provider-error escalation
+  paths rebuild initial history without this live turn's earlier tool calls
+  and results. Per-task steer counts survive, but the smart model can miss
+  that guidance was already committed and issue another steer under the next
+  identity. This is not replay deduplication and is not fixed here.
+- **Cross-turn task injection (F6).** The trusted question-turn restriction
+  prevents steering another task in that turn only. Injected task text may
+  influence a thought or other self-signal and reach a later unrestricted turn,
+  which may steer another task. Quoting task text and same-turn target checks
+  are not a cross-turn information-flow boundary or proof of safety.
+
 ### Native admission and launcher-owned journal
 
 The registry adapter exports `admit`, optional pre-brief `bind`, and

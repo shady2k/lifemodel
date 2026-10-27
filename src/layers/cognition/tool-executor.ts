@@ -257,15 +257,13 @@ export async function executeToolCalls(
 
     const tool = toolRegistry.getTools().find((t) => t.name === toolName);
     const toolContext = buildCtx(context);
-    if (toolName === 'core.steerTask') {
-      toolContext.effectCallIndex = state.toolCallCounts.get(toolName) ?? 0;
-      state.toolCallCounts.set(toolName, toolContext.effectCallIndex + 1);
-    }
-    // Recover committed effects by trusted recipient/turn/slot, before either
-    // regenerated-argument gate. Outcome turns have no read/write capabilities.
+    toolContext.taskSteerCounts = state.toolCallCounts;
+    // Parse operation identity before recovery. Payload validation still follows it.
+    const argsString = toolCall.function.arguments.trim();
+    const parsedArgs = robustJsonParse(argsString);
     const recovered =
       context.triggerSignal.type !== 'task_outcome'
-        ? await tool?.recoverAcceptedEffect?.(toolContext)
+        ? await tool?.recoverAcceptedEffect?.(toolContext, parsedArgs ?? {})
         : undefined;
     const recoveredResult =
       recovered === undefined
@@ -273,9 +271,6 @@ export async function executeToolCalls(
         : createToolResult(toolCall.id, toolName, true, recovered);
 
     // Handle empty arguments string as empty object
-    const argsString = toolCall.function.arguments.trim();
-    const parsedArgs = robustJsonParse(argsString);
-
     if (!recoveredResult && parsedArgs === null && argsString.length > 2) {
       // Genuinely malformed JSON (robustJsonParse exhausted all recovery attempts).
       // Include schema since the model may have failed to parse the tool definition.
@@ -339,8 +334,7 @@ export async function executeToolCalls(
     }
 
     // ── Per-tool call limit (maxCallsPerTurn) ──
-    const currentCallCount =
-      (state.toolCallCounts.get(toolName) ?? 0) + (toolName === 'core.steerTask' ? 0 : 1);
+    const currentCallCount = (state.toolCallCounts.get(toolName) ?? 0) + 1;
     state.toolCallCounts.set(toolName, currentCallCount);
     const maxCalls = toolRegistry.getMaxCallsPerTurn(toolName);
     if (maxCalls !== undefined && currentCallCount > maxCalls) {

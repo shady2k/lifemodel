@@ -24,7 +24,8 @@ import { AggregationProcessor } from '../../src/layers/aggregation/processor.js'
 import { createUserMessageSignal } from '../../src/types/signal.js';
 import type { ScriptedResponse } from '../helpers/scripted-llm.js';
 import type { TaskChannelFrame, TaskChannelProof } from '../../src/ports/task-channel.js';
-import { validateTaskChannelFrame } from '../../src/ports/task-channel.js';
+import { TaskChannelError, validateTaskChannelFrame } from '../../src/ports/task-channel.js';
+import { UncertainMutationError } from '../../src/layers/cognition/tools/mutation-error.js';
 import { createPostgresTaskMailbox } from '../../src/storage/postgres-task-mailbox.js';
 import { createPostgresTaskRegistry } from '../../src/storage/postgres-task-registry.js';
 import { StalePostgresEpochError } from '../../src/storage/fenced-postgres.js';
@@ -168,7 +169,13 @@ describe('durable fenced task mailbox', () => {
     )) as { commandId: string };
     expect(result).toMatchObject({ success: true, state: 'queued' });
     expect(await mailbox().pollCommand(identity)).toMatchObject({ commandId: result.commandId });
-    expect(await tool.recoverAcceptedEffect!(context)).toEqual(result);
+    expect(
+      await tool.recoverAcceptedEffect!(context, {
+        action: 'steer',
+        taskId: identity.taskId,
+        text: 'Regenerated guidance',
+      })
+    ).toEqual(result);
     expect((await service().read(identity.taskId))?.commands).toMatchObject([
       { commandId: result.commandId, disposition: 'queued' },
     ]);
@@ -197,13 +204,48 @@ describe('durable fenced task mailbox', () => {
     expect(await mailbox().pollCommand(identity)).toBeNull();
   });
 
-  it.each(['owner', 'question'] as const)(
-    'a replayed %s deciding turn reuses the command ID before regenerated arguments are validated',
-    async (trigger) => {
+  it.each([
+    ['owner', 'read-steer', 'steer'],
+    ['owner', 'steer', 'read-steer'],
+    ['question', 'refused-answer', 'answer'],
+    ['owner', 'refused-steer', 'steer'],
+    ['owner', 'steer', 'refused-steer'],
+  ] as const)(
+    'a replayed %s turn changes order from %s to %s without duplicates or misattributed receipts',
+    async (trigger, originalOrder, replayOrder) => {
       const prefix = `steer-replay:${randomUUID()}:`;
       const instances: CoreLoopInstance[] = [];
       let commandId: string | undefined;
-      const boot = async (crash: boolean, args: Record<string, unknown>) => {
+      const boot = async (crash: boolean, order: string) => {
+        const args = {
+          action: trigger === 'question' ? 'answer' : 'steer',
+          ...(trigger === 'question' ? { questionId: 'question-replay' } : {}),
+          taskId: identity.taskId,
+          // Replay still recovers before regenerated payload validation.
+          text: crash
+            ? 'Original committed guidance'
+            : trigger === 'owner'
+              ? 'Regenerated guidance'
+              : null,
+        };
+        const calls = [
+          ...(order.startsWith('read-')
+            ? [{ name: 'core.steerTask', args: { action: 'read', taskId: identity.taskId } }]
+            : []),
+          ...(order.startsWith('refused-')
+            ? [
+                {
+                  name: 'core.steerTask',
+                  args: {
+                    ...args,
+                    taskId: trigger === 'question' ? 'other-task' : identity.taskId,
+                    text: '',
+                  },
+                },
+              ]
+            : []),
+          { name: 'core.steerTask', args },
+        ];
         const snapshot = createSnapshotStore(stores.redis, { keyPrefix: prefix });
         const bus = createBusSignalStream(stores.redis, prefix);
         snapshot.register(bus);
@@ -216,7 +258,7 @@ describe('durable fenced task mailbox', () => {
         const f = await startInstance('', {
           cognitionMode: 'real-scripted',
           script: [
-            { toolCalls: [{ name: 'core.steerTask', args }] },
+            ...calls.map((call) => ({ toolCalls: [call] })),
             { content: 'Guidance queued.' },
           ],
           busSignalStream: bus,
@@ -241,12 +283,7 @@ describe('durable fenced task mailbox', () => {
         return { ...f, domain, cognition, snapshot, bus };
       };
       try {
-        const first = await boot(true, {
-          action: trigger === 'question' ? 'answer' : 'steer',
-          ...(trigger === 'question' ? { questionId: 'question-replay' } : {}),
-          taskId: identity.taskId,
-          text: 'Original committed guidance',
-        });
+        const first = await boot(true, originalOrder);
         if (trigger === 'question') {
           await mailbox().append(
             {
@@ -275,20 +312,40 @@ describe('durable fenced task mailbox', () => {
         await waitFor(() => first.coreLoop.stopReport().loopStopped, 'failed reply CAS');
         const before = (await first.domain.read(identity.taskId))!.commands;
         expect(before).toHaveLength(1);
+        if (originalOrder.startsWith('refused-')) {
+          const refused = first.cognition.provider.requests
+            .at(-1)!
+            .messages.filter((m) => m.role === 'tool' && m.tool_name === 'core.steerTask')[0]!;
+          expect(JSON.parse(refused.content!)).toMatchObject({
+            success: false,
+            code: trigger === 'question' ? 'cross_task_question' : 'invalid_text',
+          });
+          expect(JSON.parse(refused.content!)).not.toHaveProperty('commandId');
+        }
         commandId = before[0]!.commandId;
-        const restarted = await boot(false, { action: null, taskId: false, text: '<UNKNOWN>' });
+        const restarted = await boot(false, replayOrder);
         await waitFor(() => restarted.cognition.calls.length > 0, 'replayed turn');
         await restarted.cognition.calls[0]!.done;
         expect(restarted.cognition.calls[0]!.context.tickId).toBe(
           first.cognition.calls[0]!.context.tickId
         );
-        const receipt = restarted.cognition.provider.requests
-          .flatMap((r) => r.messages)
-          .find((m) => m.role === 'tool' && m.tool_name === 'core.steerTask');
-        expect(JSON.parse(receipt!.content!)).toMatchObject({
-          success: true,
-          state: 'queued',
-          commandId,
+        const receipts = restarted.cognition.provider.requests
+          .at(-1)!
+          .messages.filter((m) => m.role === 'tool' && m.tool_name === 'core.steerTask')
+          .map((m) => JSON.parse(m.content!));
+        expect((await restarted.domain.read(identity.taskId))?.commands).toEqual(before);
+        expect(receipts.at(-1)).toMatchObject({ success: true, state: 'queued', commandId });
+        if (replayOrder.startsWith('read-')) {
+          expect(receipts[0]).toMatchObject({ success: true, task: { id: identity.taskId } });
+          expect(receipts[0]).not.toHaveProperty('commandId');
+        }
+        if (replayOrder.startsWith('refused-')) {
+          expect(receipts[0]).not.toHaveProperty('commandId');
+        }
+        expect(await restarted.domain.readCommand(commandId!)).toMatchObject({
+          taskId: identity.taskId,
+          kind: trigger === 'question' ? 'answer' : 'steer',
+          ...(trigger === 'question' ? { questionId: 'question-replay' } : {}),
         });
         expect((await restarted.domain.read(identity.taskId))?.commands).toEqual(before);
       } finally {
@@ -356,6 +413,46 @@ describe('durable fenced task mailbox', () => {
       await f.coreLoop.stop();
       setPrimaryRecipientId(undefined);
     }
+  });
+
+  it('read failures are not uncertain writes and missing answer correlation is specific', async () => {
+    const domain = service();
+    const read = vi.spyOn(domain, 'read');
+    const recovery = vi.spyOn(domain, 'readCommand');
+    const tool = createSteerTaskTool(domain);
+    const args = { action: 'read', taskId: identity.taskId };
+    expect(await tool.recoverAcceptedEffect!(context, args)).toBeUndefined();
+    expect(recovery).not.toHaveBeenCalled();
+    read.mockRejectedValueOnce(new TaskChannelError(400, 'invalid_input'));
+    expect(await tool.execute(args, context)).toEqual({ success: false, code: 'invalid_input' });
+    read.mockRejectedValueOnce(new Error('temporary lookup failure'));
+    const failure = await tool.execute(args, context).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(UncertainMutationError);
+    expect((failure as Error).message).toBe('Task read failed; retry the read later.');
+    expect(
+      await tool.execute({ action: 'answer', taskId: identity.taskId, text: 'yes' }, context)
+    ).toEqual({ success: false, code: 'missing_question_id' });
+    expect((await domain.read(identity.taskId))?.commands).toEqual([]);
+  });
+
+  it('indexes command IDs globally for recovery lookups', async () => {
+    const indexes = await stores.postgres.query(`SELECT i.indisunique, i.indisvalid,
+      pg_get_indexdef(i.indexrelid) AS definition FROM pg_index i
+      WHERE i.indexrelid = to_regclass('core.task_command_id_idx')`);
+    expect(indexes.rows).toEqual([
+      expect.objectContaining({
+        indisunique: true,
+        indisvalid: true,
+        definition: expect.stringContaining('USING btree (command_id)'),
+      }),
+    ]);
+    const first = await service().steer(identity.taskId, 'globally-unique-command', 'first task');
+    const other = await seed('indexed-other');
+    // Independent tasks cannot reuse a globally addressed recovery key.
+    await expect(service().steer(other.taskId, first.commandId, 'other task')).rejects.toThrow();
+    expect(await service().readCommand(first.commandId)).toMatchObject({ taskId: identity.taskId });
+    expect((await service().read(other.taskId))?.commands).toEqual([]);
   });
 
   it('notifies a held channel subscription after a command commits on the separately pooled cognition mailbox', async () => {
@@ -458,7 +555,19 @@ describe('durable fenced task mailbox', () => {
       cognition.processor.getToolRegistry().registerTool(createSteerTaskTool(service()));
       return { ...f, real: cognition };
     };
-    const replay = createTaskChannelReplay({ mailbox: mailbox(), bus, logger: createTestLogger() });
+    const relayMailbox = mailbox();
+    const nativeMark = relayMailbox.markSignalled.bind(relayMailbox);
+    const mark = vi
+      .spyOn(relayMailbox, 'markSignalled')
+      .mockRejectedValueOnce(new Error('markSignalled commit lost'))
+      .mockImplementation(nativeMark);
+    const append = vi.spyOn(bus, 'appendTaskSignal');
+    const replay = createTaskChannelReplay({
+      mailbox: relayMailbox,
+      bus,
+      logger: createTestLogger(),
+      retryDelayMs: 30_000,
+    });
     try {
       const first = await boot([
         {
@@ -489,6 +598,11 @@ describe('durable fenced task mailbox', () => {
         .poll(async () => (await service().read(identity.taskId))?.commands.length)
         .toBe(1);
       await first.real.calls[0]!.done;
+      expect(mark).toHaveBeenCalledTimes(1);
+      await replay.resync();
+      expect(mark).toHaveBeenCalledTimes(2);
+      expect(append).toHaveBeenCalledTimes(2);
+      expect(await append.mock.results[0]!.value).toBe(await append.mock.results[1]!.value);
       const messages = first.real.provider.requests.flatMap((r) => r.messages);
       const prompt = messages.map((m) => m.content).join('\n');
       expect(prompt).toContain('<untrusted_task_question>');
@@ -505,7 +619,11 @@ describe('durable fenced task mailbox', () => {
       await first.coreLoop.stop();
       const restarted = await boot([{ content: 'Still here.' }]);
       await replay.resync();
-      // Exact duplicate question frame cannot generate another durable signal.
+      // Also append a physical duplicate bus entry, not merely a duplicate frame.
+      const duplicate = first.real.calls[0]!.context.triggerSignals.find(
+        (signal) => signal.type === 'task_report'
+      )!;
+      await bus.append({ ...duplicate, id: randomUUID() });
       await mailbox().append(question, identity);
       await replay.resync();
       restarted.coreLoop.pushSignal(
@@ -529,6 +647,151 @@ describe('durable fenced task mailbox', () => {
       setPrimaryRecipientId(undefined);
     }
   });
+
+  it.each(['lookup-failure', 'busy'] as const)(
+    'a pending question survives %s and wakes later without stopping the core',
+    async (mode) => {
+      const prefix = `question-pending:${randomUUID()}:`;
+      const snapshot = createSnapshotStore(stores.redis, { keyPrefix: prefix });
+      const bus = createBusSignalStream(stores.redis, prefix);
+      snapshot.register(bus);
+      const epoch = await snapshot.takeEpoch();
+      const questionId = 'question-pending';
+      const f = await startInstance('', {
+        cognitionMode: 'real-scripted',
+        hang: mode === 'busy',
+        recordLogs: true,
+        script: [
+          ...(mode === 'busy' ? [{ content: 'Owner turn finished.' }] : []),
+          {
+            toolCalls: [
+              {
+                name: 'core.steerTask',
+                args: {
+                  action: 'answer',
+                  taskId: identity.taskId,
+                  questionId,
+                  text: 'Use plain text.',
+                },
+              },
+            ],
+          },
+          { content: '{"response":""}' },
+        ],
+        busSignalStream: bus,
+        commitSnapshot: (tick, outbox) => snapshot.commitOwners(epoch, tick, outbox),
+      });
+      setPrimaryRecipientId(f.recipientId);
+      const cognition = f.cognition as unknown as RealCognitionFacade;
+      cognition.processor.getToolRegistry().registerTool(createSteerTaskTool(service()));
+      const aggregation = new AggregationProcessor(createTestLogger(), {
+        enablePatternDetection: false,
+      });
+      f.aggregation.process = (signals, state) => aggregation.process(signals, state);
+      let lookupHealthy = mode !== 'lookup-failure';
+      const reader = vi.fn(async (taskId: string, id: string) => {
+        if (!lookupHealthy) throw new Error('injected transient question lookup failure');
+        return mailbox().readQuestion(taskId, id);
+      });
+      f.coreLoop.setTaskQuestionReader(reader);
+      const relay = createTaskChannelReplay({
+        mailbox: mailbox(),
+        bus,
+        logger: createTestLogger(),
+      });
+      try {
+        if (mode === 'busy') {
+          f.coreLoop.pushSignal(
+            createUserMessageSignal({
+              text: 'Hold this turn',
+              channel: 'test',
+              recipientId: f.recipientId,
+              updateId: randomUUID(),
+            })
+          );
+          await waitFor(() => cognition.provider.requests.length === 1, 'busy owner cognition');
+        }
+        await mailbox().append(
+          {
+            ...frame(questionId),
+            kind: 'question',
+            payload: { questionId, text: 'Which format?' },
+          },
+          identity
+        );
+        await relay.start();
+        if (mode === 'lookup-failure') {
+          await waitFor(
+            () =>
+              f.recordedLogs.some(
+                (log) =>
+                  log.msg === 'Task question lookup failed; leaving signal pending for a later tick'
+              ) || f.coreLoop.stopReport().loopStopped,
+            'lookup warning or fatal stop'
+          );
+          expect(cognition.calls).toHaveLength(0);
+          expect(f.coreLoop.stopReport().loopStopped).toBe(false);
+          expect(Object.values(bus.exportSnapshot().entries)).toEqual([
+            expect.objectContaining({ status: 'owned' }),
+          ]);
+          lookupHealthy = true;
+        } else {
+          await waitFor(
+            () =>
+              f.recordedLogs.some(
+                (log) => log.msg === 'Deferring signals to next tick: COGNITION busy'
+              ),
+            'question deferred while busy'
+          );
+          // Wait for a second observed deferral, not a tick-start counter.
+          await waitFor(
+            () =>
+              f.recordedLogs.filter(
+                (log) => log.msg === 'Deferring signals to next tick: COGNITION busy'
+              ).length >= 2,
+            'question still deferred'
+          );
+          expect(reader).toHaveBeenCalledTimes(1);
+          expect(cognition.calls).toHaveLength(1);
+          expect(Object.values(bus.exportSnapshot().entries)).toEqual([
+            expect.objectContaining({
+              status: 'owned',
+              turnId: cognition.calls[0]!.context.tickId,
+            }),
+            expect.objectContaining({
+              status: 'owned',
+              turnId: expect.stringMatching(/^pending:/),
+            }),
+          ]);
+          cognition.hang = false;
+          cognition.settleHangingTurn();
+        }
+        await expect
+          .poll(async () => (await service().read(identity.taskId))?.commands.length)
+          .toBe(1);
+        const questionCall = cognition.calls.at(-1)!;
+        await questionCall.done;
+        expect(questionCall.context.triggerSignals).toEqual([
+          expect.objectContaining({
+            type: 'task_report',
+            data: expect.objectContaining({
+              eventKind: 'question',
+              question: expect.objectContaining({ questionId }),
+            }),
+          }),
+        ]);
+        expect(f.coreLoop.stopReport().loopStopped).toBe(false);
+        expect(await mailbox().pollCommand(identity)).toMatchObject({ kind: 'answer', questionId });
+        expect(cognition.calls).toHaveLength(mode === 'busy' ? 2 : 1);
+      } finally {
+        cognition.hang = false;
+        cognition.settleHangingTurn();
+        await relay.stop(Date.now() + 1000);
+        await f.coreLoop.stop();
+        setPrimaryRecipientId(undefined);
+      }
+    }
+  );
 
   it('a steer during the closed end-turn barrier is ACKed rejected, retired and visible as retryable', async () => {
     const certificate = await createStorageCertificate(['localhost']);

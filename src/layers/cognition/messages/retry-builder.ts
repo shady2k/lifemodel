@@ -63,7 +63,9 @@ export function addPreviousAttemptMessages(
     }
   }
 
-  state.toolCallCounts.set('core.steerTask', previousAttempt.taskCommandCallCount ?? 0);
+  for (const [key, count] of previousAttempt.taskSteerCounts ?? []) {
+    state.toolCallCounts.set(key, count);
+  }
 
   // Mark all previous tools as executed (for side effect tracking)
   for (const tool of previousAttempt.executedTools) {

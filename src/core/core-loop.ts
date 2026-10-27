@@ -1616,7 +1616,15 @@ export class CoreLoop {
         const signalCtx = createTraceContext(signal.id, { correlationId: tickId });
         try {
           const normalized = await withTraceContext(signalCtx, () => this.normalizeSignal(signal));
-          incomingSignals.push(normalized);
+          if (normalized) incomingSignals.push(normalized);
+          else {
+            const streamId = this.signalStreamIds.get(signal.id);
+            this.pendingSignals.push({
+              signal,
+              timestamp: signal.timestamp,
+              ...(streamId !== undefined ? { streamId } : {}),
+            });
+          }
         } catch (error) {
           throw new SignalNormalizationError(
             `normalize ${signal.type}`,
@@ -2181,7 +2189,7 @@ export class CoreLoop {
     this.taskQuestionReader = reader;
   }
 
-  private async normalizeSignal(signal: Signal): Promise<Signal> {
+  private async normalizeSignal(signal: Signal): Promise<Signal | undefined> {
     let normalized = signal;
     if (
       signal.type === 'task_report' &&
@@ -2196,7 +2204,19 @@ export class CoreLoop {
       signal.data?.kind === 'task_report' &&
       signal.data.eventKind === 'question'
     ) {
-      const question = await this.taskQuestionReader?.(signal.data.taskId, signal.data.messageId);
+      // A prepared question may wait for cognition without a SQL read each tick.
+      // Revalidate once cognition is free, since another turn may have answered it.
+      if (this.pendingCognition && signal.data.question) return signal;
+      let question: TaskQuestion | null | undefined;
+      try {
+        question = await this.taskQuestionReader?.(signal.data.taskId, signal.data.messageId);
+      } catch {
+        this.logger.warn(
+          { code: 'task_question_lookup_pending', signalId: signal.id, taskId: signal.data.taskId },
+          'Task question lookup failed; leaving signal pending for a later tick'
+        );
+        return undefined;
+      }
       const streamId = this.signalStreamIds.get(signal.id);
       const owner = streamId ? this.busSignalStream?.stateFor(streamId) : undefined;
       const replaying =

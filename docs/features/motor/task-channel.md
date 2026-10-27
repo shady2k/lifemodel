@@ -203,17 +203,23 @@ SQL pool, separate from owner intake and the task listener. A post-commit relay
 notifies the listener mailbox instance so its held poll wakes immediately;
 bounded transport rechecks still cover a lost commit reply or notification.
 
-Command IDs hash the trusted recipient, persisted deciding-turn ID and the
-`core.steerTask` call ordinal. `recoverAcceptedEffect` reads the committed
-command before regenerated argument validation, so a crash after command commit
-cannot replace the text or create another command. The queued tool receipt is
+Command IDs hash the trusted recipient and persisted deciding-turn ID plus the
+operation identity: task ID and question ID for answers; task ID and per-task
+committed/recovered steer count for steers. Reads reserve no count and do not
+recover write receipts. Refusals do not advance the steer count.
+`recoverAcceptedEffect` selects the operation and target IDs before regenerated
+payload validation, so a crash after command commit can recover the original
+text even if replay adds/removes reads or refusals. The queued tool receipt is
 returned after Postgres commit even if no launcher is polling. It promises
 neither native admission nor obedience. An end-turn/successor barrier rejection
 is ACKed and retired, then shown as `rejected, retryable: true` by read.
 
 Question `task_report` signals use the existing durable bus admission receipt.
 Core reads the question from Postgres during normalization; aggregation selects
-one question for one cognition turn. Busy cognition and an owner-input batch
+one question for one cognition turn. A failed lookup logs a safe warning and
+leaves the signal pending for a later tick, without stopping the core. A prepared
+question waiting on busy cognition is reused until cognition becomes available,
+then revalidated before selection. Busy cognition and an owner-input batch
 retain the unselected question on the durable bus. Step and terminal reports do
 not wake cognition. The trigger escapes and quotes question text as untrusted
 content. Trusted tool context restricts question-turn commands to that task;
