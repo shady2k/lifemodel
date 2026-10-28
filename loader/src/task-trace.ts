@@ -1,6 +1,7 @@
 /** Bounded ACP-to-port trace mapping. It never participates in task decisions. */
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import type { TaskModelRequest } from './task-model-relay.js';
 import {
   emitTaskTrace,
   type TaskHarnessEventSink,
@@ -35,6 +36,11 @@ export class AcpTaskTrace {
   private modelStartedAt: string | undefined;
   private modelStartedMono = 0;
   private model = '';
+  private decidingRequest: TaskHarnessTraceSpan | undefined;
+  private lastRequest: TaskHarnessTraceSpan | undefined;
+  private failedRequests = 0;
+  private emittedRequests = 0;
+  private readonly firstRequests = new Set<string>();
   private modelEndedAt: string | null = null;
   private modelAttrs: Json = {};
   private usage: Json = {};
@@ -49,7 +55,10 @@ export class AcpTaskTrace {
   }
   begin(model: string): void {
     this.safely(() => {
-      if (this.modelStartedAt) return;
+      if (this.modelStartedAt) {
+        if (!this.model) this.model = text(model) ?? '';
+        return;
+      }
       this.model = text(model) ?? '';
       this.modelStartedAt = new Date().toISOString();
       this.modelStartedMono = performance.now();
@@ -144,6 +153,64 @@ export class AcpTaskTrace {
       emitTaskTrace(this.sink, span);
     });
   }
+  request(request: TaskModelRequest, decides = false): void {
+    this.safely(() => {
+      if (decides) this.decidingRequest = undefined;
+      if (!request.failed) return;
+      this.begin('');
+      this.failedRequests++;
+      const { startedAt, endedAt, failed: _failed, ...attrs } = request;
+      const span: TaskHarnessTraceSpan = {
+        spanId: randomUUID(),
+        parentSpanId: this.modelId,
+        component: 'task.model.request',
+        startedAt,
+        endedAt,
+        status: 'failed',
+        attrs: { ...attrs, severity: 'warn' },
+      };
+      this.lastRequest = span;
+      if (decides) this.decidingRequest = span;
+      if (this.firstRequests.size < 16) {
+        this.firstRequests.add(span.spanId);
+        this.emittedRequests++;
+        emitTaskTrace(this.sink, span);
+      }
+    });
+  }
+  providerFailureSpanId(): string | undefined {
+    return this.decidingRequest?.spanId;
+  }
+  promptError(): void {
+    this.safely(() => {
+      if (this.decidingRequest) return;
+      const now = new Date().toISOString();
+      this.request(
+        {
+          startedAt: now,
+          endedAt: now,
+          durationMs: 0,
+          attempt: 0,
+          method: 'ACP',
+          path: 'session/prompt',
+          status: null,
+          failed: true,
+          reasonCode: 'acp_prompt_error',
+          errorExcerpt: '',
+        },
+        true
+      );
+    });
+  }
+  private finishRequests(): void {
+    // Reserve one observation for the deciding failure, or the last recovered
+    // warning. A storm cannot fill the channel with request observations.
+    const last = this.decidingRequest ?? this.lastRequest;
+    if (last && !this.firstRequests.has(last.spanId)) {
+      this.emittedRequests++;
+      emitTaskTrace(this.sink, last);
+    }
+  }
   failModel(reasonCode: string): void {
     this.safely(() => {
       if (!this.modelStartedAt) return;
@@ -167,6 +234,7 @@ export class AcpTaskTrace {
   ): void {
     this.safely(() => {
       if (!this.modelStartedAt) return;
+      this.finishRequests();
       this.reportUsage(response['usage']);
       const endedAt = new Date().toISOString();
       // A finished prompt owns no running tools. Reconcile interrupted calls so
@@ -225,6 +293,8 @@ export class AcpTaskTrace {
       status,
       attrs: {
         model: this.model,
+        failedRequests: this.failedRequests,
+        suppressed: Math.max(0, this.failedRequests - this.emittedRequests),
         ...attrs,
         durationMs: Math.max(0, performance.now() - this.modelStartedMono),
         ...this.usage,

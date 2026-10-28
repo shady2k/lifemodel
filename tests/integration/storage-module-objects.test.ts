@@ -613,16 +613,15 @@ describe('task immutable object API', () => {
         const uploadedOutputs = catalog.filter(
           (row: any) => row.mark === 'artifact' && outputNames.includes(row.name)
         );
-        const expectedOutputs = !reason && outcome === 'succeeded' ? outputNames : [];
+        // Failed/aborted launches retain partial artifacts in the catalog too.
+        // These are diagnostics; owner-reply attachment policy is checked elsewhere.
+        const expectedOutputs = !reason ? outputNames : [];
         expect(uploadedOutputs.map((row: any) => row.name).sort()).toEqual(
           [...expectedOutputs].sort()
         );
         expect(reports[0]).toMatchObject({
           outcome: reason ? 'failed' : outcome,
-          artifactObjectIds:
-            reason || outcome !== 'succeeded'
-              ? []
-              : [...ids, ...uploadedOutputs.map((row: any) => row.id)],
+          artifactObjectIds: reason ? [] : [...ids, ...uploadedOutputs.map((row: any) => row.id)],
           ...(reason ? { reasonCode: reason } : {}),
         });
         if (!reason && outcome !== 'failed') expect(reports[0]).not.toHaveProperty('reasonCode');

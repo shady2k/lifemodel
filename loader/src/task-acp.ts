@@ -5,7 +5,7 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createTaskModelRelay } from './task-model-relay.js';
+import { createTaskModelRelay, type TaskModelRequest } from './task-model-relay.js';
 import { AcpTaskTrace } from './task-trace.js';
 import { TASK_PROCESS_SUPERVISOR } from './task-process.js';
 import { TaskSteeringJournal } from './task-steering-journal.js';
@@ -46,6 +46,8 @@ export class AcpTurn {
   private final = '';
   private messageId: string | undefined;
   private providerFailed = false;
+  private modelRequestFailed = false;
+  private completionAttempt = 0;
   constructor(
     private readonly toolOutputFailed: (output: unknown, input?: unknown) => boolean = () => false,
     onEvent?: TaskHarnessEventSink
@@ -156,12 +158,30 @@ export class AcpTurn {
   toolStatus(id: unknown): string | undefined {
     return typeof id === 'string' ? this.tools.get(id)?.status : undefined;
   }
+  modelRequest(request: TaskModelRequest): void {
+    // Start ordinal orders completion requests, not callback timing. A stale
+    // overlapping result or model-list success cannot recover a newer failure.
+    const decides =
+      request.method === 'POST' &&
+      request.path === '/v1/chat/completions' &&
+      request.reasonCode !== 'client_closed' &&
+      request.attempt >= this.completionAttempt;
+    if (decides) {
+      this.completionAttempt = request.attempt;
+      this.modelRequestFailed = request.failed;
+    }
+    this.trace.request(request, decides);
+  }
   error(): void {
     this.providerFailed = true;
+    this.trace.promptError();
   }
   result(stopReason: unknown): TaskHarnessResult {
     if (stopReason === 'cancelled') return aborted();
-    if (this.providerFailed) return failed('provider_error');
+    if (this.providerFailed || this.modelRequestFailed) {
+      const failureSpanId = this.trace.providerFailureSpanId();
+      return { ...failed('provider_error'), ...(failureSpanId ? { failureSpanId } : {}) };
+    }
     const offendingId =
       [...this.tools].find(
         ([, tool]) => tool.status === 'pending' || tool.status === 'in_progress'
@@ -342,8 +362,8 @@ export class AcpTaskHarness implements TaskHarness {
         modelTokenFile: this.options.modelTokenFile,
         modelCaFile: this.options.modelCaFile,
         timeoutMs: Math.min(timeout, 300000),
-        onError: () => {
-          turn.error();
+        onRequest: (request) => {
+          turn.modelRequest(request);
         },
       });
       const storage = this.options.storageEnv;
@@ -492,8 +512,8 @@ export class AcpTaskHarness implements TaskHarness {
         pending.delete(id);
         clearTimeout(waiter.timer);
         if (Object.hasOwn(message, 'error')) {
-          turn.error();
-          waiter.reject(new Error('provider_error'));
+          if (id === promptID) turn.error();
+          waiter.reject(new Error(id === promptID ? 'provider_error' : 'harness_protocol_error'));
         } else if (!Object.hasOwn(message, 'result'))
           waiter.reject(new Error('harness_protocol_error'));
         else waiter.resolve(record(message['result']));

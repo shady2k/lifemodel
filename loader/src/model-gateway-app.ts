@@ -1,4 +1,4 @@
-/** The platform-owned model gateway. No inbound headers or upstream errors are copied. */
+/** Platform-owned model gateway. Only bounded, scrubbed JSON error fields leave upstream failures. */
 import {
   createServer,
   Agent as HttpAgent,
@@ -25,6 +25,7 @@ import {
 } from './model.js';
 import { modelEndpointUrl } from './model-url.js';
 import { SlotStorageUnavailableError } from './model-bao.js';
+import { readModelErrorExcerpt } from './model-error-excerpt.js';
 import type { LoaderLogger } from './logger.js';
 import {
   badResponse,
@@ -106,8 +107,27 @@ function safeError(error: unknown): GatewayError {
   if (error instanceof SlotStorageUnavailableError) return new GatewayError('storage_unavailable');
   return new GatewayError('unreachable');
 }
+/** Preserve a received rejection's status when its body read hits the deadline.
+ * The cause stays timeout, but replacing this error with signal.reason would
+ * erase the actual upstream 5xx needed for diagnosis and route attribution.
+ */
+function requestFailure(error: unknown, signal: AbortSignal): GatewayError {
+  return safeError(
+    error instanceof GatewayError && error.upstreamStatus !== undefined
+      ? error
+      : signal.aborted
+        ? signal.reason
+        : error
+  );
+}
 function ownedError(res: ServerResponse, error: GatewayError, slot?: ModelSlotName): void {
-  const body = JSON.stringify({ error: { type: 'gateway_error', code: error.code } });
+  const body = JSON.stringify({
+    error: {
+      type: 'gateway_error',
+      code: error.code,
+      ...(error.errorExcerpt ? { message: error.errorExcerpt } : {}),
+    },
+  });
   if (res.destroyed || res.writableEnded) return;
   if (res.headersSent) {
     res.end(`data: ${body}\n\n`);
@@ -484,6 +504,7 @@ export function createModelGateway(options: GatewayOptions) {
     });
     const connectTimer = schedule(timeout, Math.max(1, connectDeadline - Date.now()));
     const byteTimer = schedule(timeout, Math.max(1, startedAt + limits.firstByte - Date.now()));
+    let rejectedStatus: number | undefined;
     try {
       // request() may wait in the bounded shared agent queue. It sends no HTTP
       // bytes until end(): first obtain a connected (TLS-ready) socket, then
@@ -508,13 +529,20 @@ export function createModelGateway(options: GatewayOptions) {
       upstream.on('error', () => undefined);
       const status = upstream.statusCode ?? 502;
       if (status === 401 || status === 403) options.slots.invalidate(name);
-      if (status < 200 || status >= 300)
-        throw status >= 400
-          ? new GatewayError(
-              `upstream_${String(status)}`,
-              status >= 400 && status < 500 ? status : 502
-            )
-          : badResponse('upstream_status', '');
+      if (status < 200 || status >= 300) {
+        rejectedStatus = status;
+        const excerpt = await wait(
+          readModelErrorExcerpt(upstream, inspectedKeys(), body ?? ''),
+          active
+        );
+        throw new GatewayError(
+          status >= 400 ? `upstream_${String(status)}` : 'bad_response',
+          status >= 400 && status < 500 ? status : 502,
+          status >= 400 ? undefined : { check: 'upstream_status', path: '' },
+          status,
+          excerpt
+        );
+      }
       let first = true;
       upstream.on('data', () => {
         if (first) {
@@ -580,8 +608,12 @@ export function createModelGateway(options: GatewayOptions) {
         res.end();
       }
     } catch (error) {
-      if (active.aborted) throw active.reason;
-      throw safeError(error);
+      const failure = safeError(active.aborted ? active.reason : error);
+      // Body-read timeout must retain the status already received, not invent
+      // a transport-only failure. requestFailure preserves it through failover.
+      if (rejectedStatus !== undefined && failure.upstreamStatus === undefined)
+        throw new GatewayError(failure.code, failure.status, failure.reason, rejectedStatus);
+      throw failure;
     } finally {
       cancel(connectTimer);
       cancel(byteTimer);
@@ -643,6 +675,7 @@ export function createModelGateway(options: GatewayOptions) {
       failureSlot = name;
     };
     let last = new GatewayError('not_configured');
+    let loggedFailure: GatewayError | undefined;
     let activeSlot: ModelSlotName = 'primary';
     try {
       let payload: Record<string, unknown> | undefined;
@@ -697,10 +730,23 @@ export function createModelGateway(options: GatewayOptions) {
           health.lastErrorCode = null;
           return;
         } catch (error) {
-          last = safeError(signal.aborted ? signal.reason : error);
+          last = requestFailure(error, signal);
           if (last.code === 'client_disconnected' || last instanceof TaskAuthorizationError)
             throw last;
           recordFailure(name, last.code, identity);
+          options.logger.warn(
+            {
+              code: last.code,
+              status: last.upstreamStatus ?? last.status,
+              modelRoute: name,
+              slot: name,
+              reason: last.reason,
+              errorExcerpt: last.errorExcerpt,
+              ...taskContext,
+            },
+            'Model gateway upstream failed'
+          );
+          loggedFailure = last;
           if (
             signal.aborted ||
             last.code === 'not_configured' ||
@@ -713,7 +759,7 @@ export function createModelGateway(options: GatewayOptions) {
       }
       throw last;
     } catch (error) {
-      const failure = safeError(signal.aborted ? signal.reason : error);
+      const failure = requestFailure(error, signal);
       const callerOutcome =
         failure instanceof TaskAuthorizationError ||
         ['client_disconnected', 'invalid_request', 'request_too_large'].includes(failure.code);
@@ -723,19 +769,23 @@ export function createModelGateway(options: GatewayOptions) {
         health.state = 'down';
         health.outageSince ??= new Date().toISOString();
         health.lastErrorCode = failure.code;
-        options.logger.warn(
-          {
-            code: failure.code,
-            slot: failureSlot ?? activeSlot,
-            reason: failure.reason,
-            ...taskContext,
-          },
-          'Model gateway request failed'
-        );
+        if (failure !== loggedFailure)
+          options.logger.warn(
+            {
+              code: failure.code,
+              status: failure.upstreamStatus ?? failure.status,
+              modelRoute: failureSlot ?? activeSlot,
+              errorExcerpt: failure.errorExcerpt,
+              slot: failureSlot ?? activeSlot,
+              reason: failure.reason,
+              ...taskContext,
+            },
+            'Model gateway request failed'
+          );
       }
       if (callerOutcome && taskContext)
         options.logger.warn(
-          { code: failure.code, ...taskContext },
+          { code: failure.code, status: failure.status, modelRoute: activeSlot, ...taskContext },
           'Task model gateway request refused'
         );
       if (!req.complete) {

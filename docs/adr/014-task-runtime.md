@@ -203,6 +203,54 @@ completed; the owner accepts those gaps, not a claim they were fixed. Prime’s
 Python-tool path is exempt from the required-tool failure contract and has
 weaker failure detection; other missing required-tool evidence cannot succeed.
 
+## Amendment — 2026-10-28: recovered model requests and partial outputs
+
+Owner decision on lifemodel-653.9 (verbatim): «Давай. Но это в принципе
+неправильно помечать задачу ошибочной. Prime-agent прекрасно умеет ретраить».
+
+D1's “no provider error” means no terminal ACP prompt error, not zero failed
+HTTP requests. An intermediate model request the agent recovers from never
+fails the task. The completion barrier, normal turn end, final text, required-tool
+checks and cleanup still apply to every harness. `provider_error` names an ACP
+prompt error or a last finished completion POST that failed without a later
+successful completion, even when the harness prints error text and returns
+`end_turn` (coordinator decision, 2026-10-28). Completion requests are ordered by
+start ordinal, not callback arrival: an older concurrent success or a model-list
+GET cannot recover a newer failed completion. Client-closed requests are not
+provider failures. A normal recovered turn without final text remains
+`no_final_result`.
+
+Each failed relay request is a `task.model.request` child of `task.model`, with
+failed status and warning severity, HTTP status (null without a response), method,
+allowlisted path without query, duration and attempt ordinal. Failed children
+remain visible under a successful model/task. Retain the first 16 failure
+observations plus the deciding failure (or last warning) at completion, at most
+17 request spans. `task.model` records `failedRequests` and `suppressed` counts.
+Request storms cannot exhaust trace capacity reserved for ordinary task work;
+transport/intake remains best effort. An unrecovered provider failure
+links `failureSpanId` to its deciding request; a prompt error with no outstanding
+request failure gets a safe ACP error observation. Excerpts are at most 300 UTF-8
+bytes, selected only from upstream JSON `error.message`, `error.type`, or
+`error.code`. No raw body, headers, prompts or raw ACP error is recorded; known
+credentials and masked key forms are redacted and credential-bearing fields
+omitted. Gateway and relay omit any candidate field sharing a 16-character
+window with request content and fall back to safe type/code. The relay inspects
+at most 1 MiB of request data without replay; larger requests have no excerpt.
+Oversized or non-JSON error bodies have no excerpt. Gateway failure warnings include status,
+slot route and trusted task/trace identity even if reserve recovers. The gateway
+already obtains that trace context from task authorization, not caller headers.
+
+D3's retained-partial-output rule includes regular files in the launcher's
+`outputs/` folder after failed or aborted harness completion. Validate, upload
+and mark them under the same limits as successful output. For an unsuccessful
+harness outcome, collection is best effort: skip bad entries, catch upload/list
+failures, and record bounded reason counts in a warning `task.outputs` span.
+Never replace its original outcome, reason or deciding `failureSpanId` with an
+output error. Successful tasks still fail closed on output errors. These are
+diagnostic partial objects, never attachments to a successful owner reply. Already marked
+objects survive later transfer failures; hard deletion cannot retain bytes that
+were never uploaded. Sealing and public-outcome policy are unchanged.
+
 ## Context and inventory
 
 The owner delegates long work and keeps talking to one lifemodel. The core
@@ -281,7 +329,9 @@ confined to registry adapter modules as specified by the
 [2026-10-27 amendment](#amendment--2026-10-27-live-steering-behind-the-harness-port).
 Launcher/core know only the port. Success requires the completion barrier, ACP
 `end_turn` or the reconciled Prime successor result, final assistant text, no
-provider error and no unresolved required tool failure; CLI 0 or a completed
+terminal provider error (recovered request failures are warnings; see the
+[2026-10-28 amendment](#amendment--2026-10-28-recovered-model-requests-and-partial-outputs))
+and no unresolved required tool failure; CLI 0 or a completed
 step alone is not success. This is policy inside the untrusted Pod, not a
 boundary guarantee. `cancelled` maps to aborted.
 

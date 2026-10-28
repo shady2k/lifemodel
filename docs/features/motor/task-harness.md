@@ -99,7 +99,10 @@ the projected instance CA. Only `/v1/chat/completions` and `/v1/models` can reac
 the gateway.
 
 The launcher classifies success from ACP `end_turn`, nonempty final assistant
-text and no provider error or unresolved required tool failure. A settled tool failure is recovered
+text and no terminal ACP prompt error or unresolved required tool failure.
+A failed model request that the agent recovers from never fails the task (owner,
+2026-10-28; [ADR-014 amendment](../../adr/014-task-runtime.md#amendment--2026-10-28-recovered-model-requests-and-partial-outputs)).
+A settled tool failure is recovered
 when later agent work is observed: an `agent_message_chunk` with non-whitespace
 text, or a new tool call / a settled call resuming as `pending` or `in_progress`.
 A completion update for an already running call, usage, thought chunks, empty or
@@ -115,8 +118,14 @@ settlement is new evidence. Structurally identical raw values and presentation
 patches do not reopen a recovered failure. A resumed call does not reopen a
 failure from retained old output alone; its new evidence or settlement decides. A trailing failure with no later agent work fails with
 `required_tool_failed` and names that tool span. With no unresolved tool failure,
-a missing `end_turn` or empty final text fails with `no_final_result`. Provider
-errors always fail. New/resumed tool work clears earlier final text; settled
+a missing `end_turn` without an outstanding model-request failure, or empty final
+text at `end_turn`, fails with `no_final_result`. ACP prompt errors fail with
+`provider_error`. So does an unrecovered final completion
+POST failure, even with error prose and `end_turn`. Only a later-started,
+successful completion POST recovers it, not a model-list GET or an older
+concurrent request finishing late. Intermediate relay failures that are recovered
+do not set the terminal ACP error flag. New/resumed tool work clears earlier
+final text; settled
 presentation patches do not. Process exit 0, idle, `step_finish` or an ended
 agent alone does not prove success. Abort normalizes to `aborted`. Raw errors
 never enter launcher diagnostics.
@@ -385,13 +394,13 @@ not the OpenCode configuration (the owner-facing goal remains unchanged):
 ```text
 Files for the owner go in /work/outputs/, flat, with their final file names.
 Only regular files are allowed; no subfolders or symlinks. Maximum: 64 files.
-Files elsewhere are not delivered. Outputs are delivered only if the task succeeds.
+Files elsewhere are not retained. Failed-task outputs are retained as partial objects, not delivered as successful work.
 Use the task MCP step tool for short progress reports and question to ask the coordinating agent.
 Question returns after storage, not an answer. Wait for the correlated answer via steering.
 ```
 
 A custom launcher work directory uses its own `outputs/` child in these
-instructions. Nothing is declared up front. After harness success the launcher
+instructions. Nothing is declared up front. After harness completion the launcher
 validates the whole flat folder, then uploads each regular file through the
 shipped `lifemodel-storage put` implementation and durably marks it `artifact`.
 Files elsewhere are not automatically uploaded. The folder and its entries must
@@ -403,9 +412,16 @@ codes expose no file names or contents. Validation finishes before the first
 output upload. Transfer-time no-follow, nonblocking file opens in the shipped
 CLI also reject replacement links and non-regular files.
 
-Failed and aborted harness outcomes do not collect the folder or list artifacts.
-Their files may be incomplete and must not be offered as successful work. Result
-text is still uploaded and marked `result` for finalization diagnostics. The
+Failed and aborted harness outcomes collect the folder and list marked artifacts
+too, as ADR-014 D3 requires, but best effort. Skip invalid entries, inspect at
+most 64 entries, retain valid regular files with no-follow opens, and catch
+upload/list failures. A warning `task.outputs` span records bounded safe reason
+counts, skipped-entry count and upload-failure count, never names or contents.
+Partial-output errors cannot change the harness outcome, reason code or
+`failureSpanId`; successful output collection remains fail closed.
+Their files may be incomplete: retained objects are
+partial diagnostic output, not successful work. Result text is still uploaded
+and marked `result` for finalization diagnostics. The
 launcher does not write or upload a fixed event journal or `log` object. Private
 harness observations use the best-effort trace path instead. The core attaches
 result and artifact objects only for a sealed `done` outcome, never for
@@ -479,6 +495,38 @@ root. A failed semantic result supplies its culprit's namespaced `failureSpanId`
 in final root attributes. Recovered tool failures remain visible as failed child
 spans but do not supply a failure link on a successful root.
 
+Every HTTP >=400, transport failure, interrupted response and relay timeout
+is observed with `severity: warn`, status (null without response), method,
+allowlisted path without query, duration and start ordinal (including GET
+connection retries). To bound storms, emit only the first 16 failed request
+spans plus the deciding failure or last warning at completion (at most 17).
+`task.model` carries `failedRequests` and `suppressed` counts. The deciding
+`failureSpanId` always names an emitted observation, not a suppressed one.
+Existing transport/intake can still drop best-effort traces; this is not a
+complete durable journal.
+
+Only a successful completion POST with a later start ordinal clears the
+outstanding completion failure, not a GET or an older concurrent request that
+finishes late. An unrecovered final completion fails `provider_error` even when
+the harness ends `end_turn` with error text. ACP prompt error links that deciding
+request or gets a fixed safe ACP observation. Client stream cancellation is
+`client_closed`, not a provider failure or recovery. Successful task roots have
+no failure link.
+
+Only upstream JSON `error.message` (or `type`/`code` if absent) supplies the
+error excerpt, capped at 300 UTF-8 bytes. Error bodies over 16 KiB, non-JSON bodies,
+raw ACP errors, request bodies, prompts and headers are never excerpted. Known
+credentials and masked `sk-` key forms are redacted; credential-bearing fields
+are omitted. Gateway and relay drop fields sharing any 16-character window
+with request content, falling back to type/code. Relay capture is bounded at
+1 MiB and does not delay/replay completion bodies; larger bodies have no excerpt.
+The model gateway applies the same filter and includes the safe excerpt in its owned error
+response so relay traces retain the explanation. Each upstream failure warns
+with its actual HTTP status (or the owned transport status), model slot route,
+and trusted task/trace identity, even when reserve later succeeds. The task TLS
+door already reads that identity from authorization; caller trace headers cannot
+replace it. No new trace header or vendor-specific generic code is needed.
+
 Trace observations include model status and usage, tool command and bounded
 output tail, and final completion text. Before sending, the launcher scrubs
 projected token contents. Trace intake permits at most 2048 observations per
@@ -502,7 +550,8 @@ adapter accepts it and the launcher records the disposition. It must preserve th
 semantic-result contract.
 
 Tests: `tests/integration/task-harness-contract.test.ts`,
-`tests/integration/task-launcher.test.ts`, `tests/integration/task-briefing.test.ts`
+`tests/integration/task-launcher.test.ts`, `tests/integration/task-model-request.test.ts`,
+`tests/unit/model-gateway.test.ts`, `tests/integration/task-briefing.test.ts`,
 `tests/unit/task-connection-retry.test.ts` and
 `tests/unit/task-workbench-contract.test.ts`. The isolated test dependency
 setup installs the same checksum-verified pinned binary before network is

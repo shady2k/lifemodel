@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AcpTaskHarness, AcpTurn } from '../../loader/src/task-acp.js';
+import type { TaskModelRequest } from '../../loader/src/task-model-relay.js';
 import {
   ScriptedTaskHarness,
   type TaskHarnessEvent,
@@ -23,7 +24,90 @@ const flush = async () => {
   await Promise.resolve();
 };
 
+const requestObservation = (attempt: number, failed = true, method = 'POST'): TaskModelRequest => ({
+  startedAt: new Date(attempt).toISOString(),
+  endedAt: new Date(attempt + 1).toISOString(),
+  durationMs: 1,
+  attempt,
+  method,
+  path: method === 'GET' ? '/v1/models' : '/v1/chat/completions',
+  status: failed ? 429 : 200,
+  failed,
+  errorExcerpt: failed ? 'Capacity exhausted' : '',
+});
+
 describe('ACP trace mapping behind the harness port', () => {
+  it('bounds 300 failed requests but retains the deciding span and exact counts', async () => {
+    const events: TaskHarnessEvent[] = [];
+    const turn = new AcpTurn(undefined, (event) => {
+      events.push(event);
+    });
+    turn.begin('task/model');
+    for (let attempt = 1; attempt <= 300; attempt++) turn.modelRequest(requestObservation(attempt));
+    turn.update({ sessionUpdate: 'tool_call', toolCallId: 'good', status: 'completed' });
+    final(turn, 'Retries exhausted');
+    const result = turn.result('end_turn');
+    turn.finish(result, { stopReason: 'end_turn' });
+    await flush();
+    const spans = traces(events);
+    expect(result).toMatchObject({ outcome: 'failed', reasonCode: 'provider_error' });
+    const requests = spans.filter((span) => span.component === 'task.model.request');
+    expect(requests).toHaveLength(17);
+    expect(requests.find((span) => span.spanId === result.failureSpanId)).toMatchObject({
+      attrs: { attempt: 300, status: 429 },
+    });
+    expect(spans.filter((span) => span.component === 'task.model').at(-1)).toMatchObject({
+      status: 'failed',
+      attrs: { failedRequests: 300, suppressed: 283 },
+    });
+    expect(spans.some((span) => span.component === 'task.tool')).toBe(true);
+  });
+
+  it.each(['older-success', 'older-failure', 'model-list'] as const)(
+    'orders concurrent completion observations by start ordinal, not %s finish timing',
+    (mode) => {
+      const turn = new AcpTurn();
+      turn.begin('model');
+      if (mode === 'older-failure') {
+        turn.modelRequest(requestObservation(2, false));
+        turn.modelRequest(requestObservation(1, true));
+      } else {
+        turn.modelRequest(requestObservation(2, true));
+        turn.modelRequest(
+          requestObservation(
+            mode === 'model-list' ? 3 : 1,
+            false,
+            mode === 'model-list' ? 'GET' : 'POST'
+          )
+        );
+      }
+      final(turn);
+      expect(turn.result('end_turn').outcome).toBe(
+        mode === 'older-failure' ? 'succeeded' : 'failed'
+      );
+    }
+  );
+
+  it('does not count client closure as a failure or as recovery of a failed completion', async () => {
+    const events: TaskHarnessEvent[] = [];
+    const turn = new AcpTurn(undefined, (event) => {
+      events.push(event);
+    });
+    turn.begin('model');
+    turn.modelRequest(requestObservation(1));
+    turn.modelRequest({ ...requestObservation(2, false), reasonCode: 'client_closed' });
+    final(turn);
+    const result = turn.result('end_turn');
+    turn.finish(result, { stopReason: 'end_turn' });
+    await flush();
+    expect(result.reasonCode).toBe('provider_error');
+    expect(
+      traces(events)
+        .filter((span) => span.component === 'task.model')
+        .at(-1)
+    ).toMatchObject({ attrs: { failedRequests: 1, suppressed: 0 } });
+  });
+
   it('appends chunks of one message but replaces prose at a new message identity', () => {
     const turn = new AcpTurn();
     const chunk = (messageId: string, text: string) =>
