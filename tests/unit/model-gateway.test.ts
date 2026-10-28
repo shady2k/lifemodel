@@ -178,6 +178,118 @@ async function fixture(
   };
 }
 
+describe('model gateway failure diagnostics', () => {
+  it('warns on a failed upstream even when reserve recovers, with trusted task trace and bounded safe excerpt', async () => {
+    const f = await fixture();
+    const traceId = 'task-trace-123';
+    const taskId = 'trusted-task';
+    const door = createServer((req, res) => {
+      void f.app.serveTask(req, res, taskId, async () => undefined, { taskId, traceId });
+    });
+    const url = await listen(door);
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(500, { authorization: 'HEADER-CANARY' });
+      res.end(
+        JSON.stringify({
+          error: { message: '界'.repeat(500), type: 'ignored' },
+          prompt: 'PROMPT-CANARY',
+          token: 'TOKEN-CANARY',
+        })
+      );
+    };
+    const response = await fetch(`${url}/v1/chat/completions`, {
+      method: 'POST',
+      body: JSON.stringify({ model: 'local', messages: [] }),
+      headers: { authorization: 'Bearer INBOUND-CANARY', 'x-trace-id': 'SPOOFED-CANARY' },
+    });
+    expect(response.status).toBe(200);
+    const warnings = f.lines.filter((line) => line.message === 'Model gateway upstream failed');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({
+      level: 'warn',
+      fields: {
+        traceId,
+        taskId,
+        status: 500,
+        modelRoute: 'primary',
+        errorExcerpt: '界'.repeat(100),
+      },
+    });
+    expect(JSON.stringify(f.lines)).not.toContain('CANARY');
+  });
+
+  it('returns only a safe JSON error excerpt and warns for every non-2xx, including redirects', async () => {
+    const f = await fixture();
+    f.slots.reserve = null;
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(429);
+      res.end(JSON.stringify({ error: { message: 'Capacity exhausted' }, body: 'BODY-CANARY' }));
+    };
+    const response = await f.post();
+    expect(await response.json()).toEqual({
+      error: { type: 'gateway_error', code: 'upstream_429', message: 'Capacity exhausted' },
+    });
+    expect(f.lines.find((line) => line.message === 'Model gateway upstream failed')).toMatchObject({
+      level: 'warn',
+      fields: { status: 429, errorExcerpt: 'Capacity exhausted' },
+    });
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(302);
+      res.end();
+    };
+    await f.post();
+    expect(
+      f.lines.filter((line) => line.message === 'Model gateway upstream failed').at(-1)
+    ).toMatchObject({ fields: { status: 302 } });
+    expect(JSON.stringify(f.lines)).not.toContain('CANARY');
+  });
+
+  it('keeps a non-2xx status in the warning when its error body never finishes', async () => {
+    const f = await fixture({ overall: 100, firstByte: 50 });
+    f.slots.reserve = null;
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(500);
+      res.flushHeaders();
+    };
+    const response = await f.post();
+    expect(response.status).toBe(502);
+    expect(f.lines.find((line) => line.message === 'Model gateway upstream failed')).toMatchObject({
+      fields: { code: 'timeout', status: 500, errorExcerpt: '' },
+    });
+  });
+
+  it('scrubs known keys, credential text and raw bodies, and logs transport failures', async () => {
+    const f = await fixture();
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(500);
+      res.end(
+        JSON.stringify({
+          error: {
+            message: 'Bearer primary-SUPER-SECRET',
+            type: 'token=UNKNOWN-CANARY',
+            code: 'primary-SUPER-SECRET',
+          },
+          secret: 'BODY-CANARY',
+        })
+      );
+    };
+    f.handlers.reserve = (req) => {
+      req.socket.destroy();
+    };
+    await f.post();
+    const warnings = f.lines.filter((line) => line.message === 'Model gateway upstream failed');
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]!.fields.errorExcerpt).toBe('[redacted]');
+    expect(warnings[1]!.fields).toMatchObject({
+      code: 'unreachable',
+      status: 502,
+      modelRoute: 'reserve',
+    });
+    for (const canary of ['SECRET', 'CANARY', 'Bearer', 'token='])
+      expect(JSON.stringify(f.lines)).not.toContain(canary);
+  });
+});
+
 describe('model gateway buffered HTTP contract', () => {
   it('injects only the Bao key, maps default, preserves the base prefix and allows only return headers', async () => {
     const f = await fixture();
@@ -1111,7 +1223,12 @@ describe('model gateway review regressions', () => {
       primary: { lastErrorCode: 'upstream_500' },
       reserve: { lastErrorCode: null, lastErrorAt: null },
     });
-    expect(f.lines.filter((line) => line.level === 'warn')).toEqual([]);
+    expect(f.lines.filter((line) => line.level === 'warn')).toEqual([
+      expect.objectContaining({
+        message: 'Model gateway upstream failed',
+        fields: expect.objectContaining({ status: 500, modelRoute: 'primary' }),
+      }),
+    ]);
   });
   it.each(['blocked', 'unset', 'storage'] as const)(
     'platform %s failure reports down before any success',

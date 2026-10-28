@@ -3,11 +3,25 @@ import { createServer, type Server } from 'node:http';
 import { request } from 'node:https';
 import { readFile } from 'node:fs/promises';
 import type { Socket } from 'node:net';
+import { modelErrorExcerpt, MODEL_ERROR_BODY_LIMIT } from './model-error-excerpt.js';
 import {
   StartupConnectionRetry,
   connectionState,
   connectionFailure,
 } from './task-connection-retry.js';
+
+export interface TaskModelRequest {
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  attempt: number;
+  method: string;
+  path: string;
+  status: number | null;
+  failed: boolean;
+  reasonCode?: string;
+  errorExcerpt: string;
+}
 
 export interface TaskModelRelayOptions {
   modelEndpoint: string;
@@ -15,7 +29,7 @@ export interface TaskModelRelayOptions {
   modelCaFile: string;
   timeoutMs?: number;
   startupWindowMs?: number;
-  onError?: () => void;
+  onRequest?: (request: TaskModelRequest) => void;
 }
 
 export async function createTaskModelRelay(options: TaskModelRelayOptions): Promise<{
@@ -36,92 +50,149 @@ export async function createTaskModelRelay(options: TaskModelRelayOptions): Prom
   const retry = new StartupConnectionRetry(options.startupWindowMs);
   const sockets = new Set<Socket>();
   const upstreams = new Set<ReturnType<typeof request>>();
+  let ordinal = 0;
   const server: Server = createServer((incoming, outgoing) => {
     incoming.on('error', () => undefined);
     outgoing.on('error', () => undefined);
     const path = incoming.url ?? '';
+    const method = incoming.method ?? '';
     if (
       !(
-        (incoming.method === 'POST' && path === '/v1/chat/completions') ||
-        (incoming.method === 'GET' && path === '/v1/models')
+        (method === 'POST' && path === '/v1/chat/completions') ||
+        (method === 'GET' && path === '/v1/models')
       )
     ) {
       outgoing.writeHead(404).end();
       return;
     }
     const cancellation = new AbortController();
-    const deadline = AbortSignal.any([
-      AbortSignal.timeout(options.timeoutMs ?? 300_000),
-      cancellation.signal,
-    ]);
+    const timeout = AbortSignal.timeout(options.timeoutMs ?? 300_000);
+    const deadline = AbortSignal.any([timeout, cancellation.signal]);
     const timedOut = () => {
       incoming.destroy();
       outgoing.destroy();
     };
-    deadline.addEventListener('abort', timedOut, { once: true });
+    timeout.addEventListener('abort', timedOut, { once: true });
     outgoing.on('close', () => {
-      deadline.removeEventListener('abort', timedOut);
+      timeout.removeEventListener('abort', timedOut);
       cancellation.abort();
     });
+    let recorded = false;
+    let attempt = 0;
+    let startedAt = new Date().toISOString();
+    let startedMono = performance.now();
+    let status: number | null = null;
+    let token = '';
+    let chunks: Buffer[] = [];
+    let size = 0;
+    const report = (failed: boolean, reasonCode?: string) => {
+      if (recorded) return;
+      recorded = true;
+      try {
+        options.onRequest?.({
+          startedAt,
+          endedAt: new Date().toISOString(),
+          durationMs: Math.max(0, performance.now() - startedMono),
+          attempt,
+          method,
+          path,
+          status,
+          failed,
+          ...(reasonCode ? { reasonCode } : {}),
+          errorExcerpt:
+            size <= MODEL_ERROR_BODY_LIMIT
+              ? modelErrorExcerpt(Buffer.concat(chunks).toString('utf8'), [token])
+              : '',
+        });
+      } catch {
+        // Diagnostic callbacks never change the response or retry decision.
+      }
+    };
     void (async () => {
       try {
         await retry.run(
           async (signal) => {
-            const [rawToken, ca] = await Promise.all([
-              readFile(options.modelTokenFile, { encoding: 'utf8', signal }),
-              readFile(options.modelCaFile, { signal }),
-            ]);
-            const token = rawToken.trim();
-            if (!token || /[\r\n]/.test(token)) throw new Error('token_invalid');
-            signal.throwIfAborted();
-            if (outgoing.destroyed) return;
-            // Ignore caller auth. Every connection attempt reads projected files afresh.
-            await new Promise<void>((resolve, reject) => {
-              const upstream = request(new URL(path, origin), {
-                method: incoming.method,
-                ca,
-                headers: {
-                  'content-type': 'application/json',
-                  'x-lifemodel-task-token': token,
-                },
-                signal,
-              });
-              const connected = connectionState(upstream);
-              const abort = () => upstream.destroy();
-              incoming.once('aborted', abort);
-              upstream.on('error', (error) => {
-                if (outgoing.headersSent) {
-                  options.onError?.();
-                  outgoing.destroy();
-                }
-                reject(connectionFailure(error, connected(), signal.aborted));
-              });
-              upstreams.add(upstream);
-              upstream.once('close', () => {
-                upstreams.delete(upstream);
-                incoming.off('aborted', abort);
-              });
-              upstream.on('response', (response) => {
-                response.on('error', () => outgoing.destroy());
-                if ((response.statusCode ?? 500) >= 400) options.onError?.();
-                outgoing.writeHead(response.statusCode ?? 502, {
-                  'content-type': response.headers['content-type'] ?? 'application/json',
+            attempt = ++ordinal;
+            recorded = false;
+            startedAt = new Date().toISOString();
+            startedMono = performance.now();
+            status = null;
+            chunks = [];
+            size = 0;
+            try {
+              const [rawToken, ca] = await Promise.all([
+                readFile(options.modelTokenFile, { encoding: 'utf8', signal }),
+                readFile(options.modelCaFile, { signal }),
+              ]);
+              token = rawToken.trim();
+              if (!token || /[\r\n]/.test(token)) throw new Error('token_invalid');
+              signal.throwIfAborted();
+              if (outgoing.destroyed) return;
+              // Ignore caller auth. Every connection attempt reads projected files afresh.
+              await new Promise<void>((resolve, reject) => {
+                const upstream = request(new URL(path, origin), {
+                  method,
+                  ca,
+                  headers: {
+                    'content-type': 'application/json',
+                    'x-lifemodel-task-token': token,
+                  },
+                  signal,
                 });
-                response.pipe(outgoing);
-                resolve();
+                const connected = connectionState(upstream);
+                const abort = () => upstream.destroy();
+                incoming.once('aborted', abort);
+                upstream.on('error', (error) => {
+                  reject(connectionFailure(error, connected(), signal.aborted));
+                });
+                upstreams.add(upstream);
+                upstream.once('close', () => {
+                  upstreams.delete(upstream);
+                  incoming.off('aborted', abort);
+                });
+                upstream.on('response', (response) => {
+                  status = response.statusCode ?? 502;
+                  response.on('error', reject);
+                  if (status >= 400)
+                    response.on('data', (chunk: Buffer) => {
+                      size += chunk.length;
+                      if (size <= MODEL_ERROR_BODY_LIMIT) chunks.push(chunk);
+                      else chunks = [];
+                    });
+                  response.once('end', () => {
+                    report((status ?? 502) >= 400);
+                    resolve();
+                  });
+                  outgoing.writeHead(status, {
+                    'content-type': response.headers['content-type'] ?? 'application/json',
+                  });
+                  response.pipe(outgoing);
+                });
+                // Only GET is replayable. Never buffer or resend a streamed completion.
+                if (method === 'GET') upstream.end();
+                else incoming.pipe(upstream);
               });
-              // Only GET is replayable. Never buffer or resend a streamed completion.
-              if (incoming.method === 'GET') upstream.end();
-              else incoming.pipe(upstream);
-            });
+            } catch (error) {
+              report(
+                true,
+                timeout.aborted || (signal.aborted && !cancellation.signal.aborted)
+                  ? 'model_timeout'
+                  : 'model_transport_failed'
+              );
+              throw error;
+            }
           },
           options.timeoutMs ?? 300_000,
-          { retry: incoming.method === 'GET', signal: deadline }
+          { retry: method === 'GET', signal: deadline }
         );
       } catch {
-        options.onError?.();
-        if (!outgoing.headersSent) outgoing.writeHead(502, { 'content-type': 'application/json' });
-        outgoing.end('{"error":{"message":"model_transport_failed"}}');
+        report(true, timeout.aborted ? 'model_timeout' : 'model_transport_failed');
+        if (outgoing.destroyed) return;
+        if (outgoing.headersSent) outgoing.destroy();
+        else
+          outgoing
+            .writeHead(502, { 'content-type': 'application/json' })
+            .end('{"error":{"message":"model_transport_failed"}}');
       }
     })();
   });

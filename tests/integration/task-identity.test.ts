@@ -426,7 +426,12 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
         attempts.push({ body, headers: req.headers, path: req.url ?? '' });
         await holdUpstream?.();
         if (primaryFailure && req.headers.authorization === `Bearer ${MODEL_KEY}`) {
-          res.writeHead(503).end('PRIVATE-UPSTREAM-FAILURE-CANARY');
+          res.writeHead(503).end(
+            JSON.stringify({
+              error: { message: 'Capacity exhausted' },
+              private: 'PRIVATE-UPSTREAM-FAILURE-CANARY',
+            })
+          );
           return;
         }
         res.setHeader('content-type', 'application/json');
@@ -1164,6 +1169,21 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
         expect(attempt.body.user).toBe(f.task.id);
         expect(attempt.headers['x-task-session']).toBe(f.task.id);
       }
+      if (failPrimary) {
+        expect(g.logs).toContainEqual({
+          level: 'warn',
+          message: 'Model gateway upstream failed',
+          fields: {
+            code: 'upstream_503',
+            status: 503,
+            modelRoute: 'primary',
+            errorExcerpt: 'Capacity exhausted',
+            taskId: f.task.id,
+            traceId: f.task.traceId,
+          },
+        });
+        expect(JSON.stringify(g.logs)).not.toContain('CANARY');
+      }
     }
   );
   it.each([undefined, '', 42])(
@@ -1179,7 +1199,13 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
       expect(g.logs).toContainEqual({
         level: 'warn',
         message: 'Task model gateway request refused',
-        fields: { code: 'invalid_request', taskId: f.task.id, traceId: f.task.traceId },
+        fields: {
+          code: 'invalid_request',
+          status: 400,
+          modelRoute: 'primary',
+          taskId: f.task.id,
+          traceId: f.task.traceId,
+        },
       });
     }
   );

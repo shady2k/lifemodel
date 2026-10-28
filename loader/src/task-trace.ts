@@ -1,6 +1,7 @@
 /** Bounded ACP-to-port trace mapping. It never participates in task decisions. */
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import type { TaskModelRequest } from './task-model-relay.js';
 import {
   emitTaskTrace,
   type TaskHarnessEventSink,
@@ -35,6 +36,7 @@ export class AcpTaskTrace {
   private modelStartedAt: string | undefined;
   private modelStartedMono = 0;
   private model = '';
+  private requestFailureId: string | undefined;
   private modelEndedAt: string | null = null;
   private modelAttrs: Json = {};
   private usage: Json = {};
@@ -49,7 +51,10 @@ export class AcpTaskTrace {
   }
   begin(model: string): void {
     this.safely(() => {
-      if (this.modelStartedAt) return;
+      if (this.modelStartedAt) {
+        if (!this.model) this.model = text(model) ?? '';
+        return;
+      }
       this.model = text(model) ?? '';
       this.modelStartedAt = new Date().toISOString();
       this.modelStartedMono = performance.now();
@@ -142,6 +147,46 @@ export class AcpTaskTrace {
       };
       entry.span = span;
       emitTaskTrace(this.sink, span);
+    });
+  }
+  request(request: TaskModelRequest): void {
+    this.safely(() => {
+      this.requestFailureId = undefined;
+      if (!request.failed) return;
+      this.begin('');
+      const spanId = randomUUID();
+      this.requestFailureId = spanId;
+      const { startedAt, endedAt, failed: _failed, ...attrs } = request;
+      emitTaskTrace(this.sink, {
+        spanId,
+        parentSpanId: this.modelId,
+        component: 'task.model.request',
+        startedAt,
+        endedAt,
+        status: 'failed',
+        attrs: { ...attrs, severity: 'warn' },
+      });
+    });
+  }
+  providerFailureSpanId(): string | undefined {
+    return this.requestFailureId;
+  }
+  promptError(): void {
+    this.safely(() => {
+      if (this.requestFailureId) return;
+      const now = new Date().toISOString();
+      this.request({
+        startedAt: now,
+        endedAt: now,
+        durationMs: 0,
+        attempt: 0,
+        method: 'ACP',
+        path: 'session/prompt',
+        status: null,
+        failed: true,
+        reasonCode: 'acp_prompt_error',
+        errorExcerpt: '',
+      });
     });
   }
   failModel(reasonCode: string): void {
