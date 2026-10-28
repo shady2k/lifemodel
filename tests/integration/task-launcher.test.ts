@@ -669,7 +669,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     expect(await run({ terminal: { outcome: 'succeeded', result: RESULT } })).toBe(0);
     expect(harnessStarts).toEqual([
       {
-        text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\nFiles elsewhere are not delivered. Outputs are delivered only if the task succeeds.\nUse the task MCP step tool for short progress reports and question to ask the coordinating agent.\nQuestion returns after storage, not an answer. Wait for the correlated answer via steering.\n\n${BRIEFING}`,
+        text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\nFiles elsewhere are not retained. Failed-task outputs are retained as partial objects, not delivered as successful work.\nUse the task MCP step tool for short progress reports and question to ask the coordinating agent.\nQuestion returns after storage, not an answer. Wait for the correlated answer via steering.\n\n${BRIEFING}`,
         model: 'lifemodel/task',
         softDueAt: expect.any(String),
       },
@@ -823,7 +823,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     expect(harnessCreations).toBe(1);
     expect(harnessStarts).toEqual([
       {
-        text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\nFiles elsewhere are not delivered. Outputs are delivered only if the task succeeds.\nUse the task MCP step tool for short progress reports and question to ask the coordinating agent.\nQuestion returns after storage, not an answer. Wait for the correlated answer via steering.\n\n${BRIEFING}`,
+        text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\nFiles elsewhere are not retained. Failed-task outputs are retained as partial objects, not delivered as successful work.\nUse the task MCP step tool for short progress reports and question to ask the coordinating agent.\nQuestion returns after storage, not an answer. Wait for the correlated answer via steering.\n\n${BRIEFING}`,
         model: 'lifemodel/task',
         softDueAt: expect.any(String),
       },
@@ -1154,6 +1154,29 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       expect(durableAtReport).toEqual([['object_1']]);
     }
   );
+
+  it('retains primes-like outputs as partial objects after a late provider failure', async () => {
+    beforeHarness = async () => {
+      await writeFile(join(directory, 'outputs', 'primes.py'), 'print(2, 3, 5)');
+      await writeFile(join(directory, 'outputs', 'primes.txt'), '2 3 5');
+    };
+    expect(
+      await run({ terminal: { outcome: 'failed', result: '', reasonCode: 'provider_error' } })
+    ).toBe(1);
+    expect(terminal().payload).toMatchObject({
+      outcome: 'failed',
+      reasonCode: 'provider_error',
+      artifactObjectIds: ['object_2', 'object_3'],
+    });
+    expect(
+      [...objects.values()].map((object) => [object.name, object.mark, object.bytes.toString()])
+    ).toEqual([
+      ['result.txt', 'result', ''],
+      ['primes.py', 'artifact', 'print(2, 3, 5)'],
+      ['primes.txt', 'artifact', '2 3 5'],
+    ]);
+    expect(durableAtReport).toEqual([['object_1', 'object_2', 'object_3']]);
+  });
 
   it('aborts an active harness and reports one durable aborted outcome with a nonzero exit', async () => {
     const controller = new AbortController();

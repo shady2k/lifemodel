@@ -203,6 +203,38 @@ completed; the owner accepts those gaps, not a claim they were fixed. Prime’s
 Python-tool path is exempt from the required-tool failure contract and has
 weaker failure detection; other missing required-tool evidence cannot succeed.
 
+## Amendment — 2026-10-28: recovered model requests and partial outputs
+
+Owner decision on lifemodel-653.9 (verbatim): «Давай. Но это в принципе
+неправильно помечать задачу ошибочной. Prime-agent прекрасно умеет ретраить».
+
+D1's “no provider error” means no terminal ACP prompt error, not zero failed
+HTTP requests. An intermediate model request the agent recovers from never
+fails the task. The completion barrier, normal turn end, final text, required-tool
+checks and cleanup still apply to every harness. `provider_error` names an ACP
+prompt error or an abnormal turn with an outstanding model-request failure.
+A normal turn without final text remains `no_final_result`.
+
+Each failed relay request is a `task.model.request` child of `task.model`, with
+failed status and warning severity, HTTP status (null without a response), method,
+allowlisted path without query, duration and attempt ordinal. Failed children
+remain visible under a successful model/task. An unrecovered provider failure
+links `failureSpanId` to its deciding request; a prompt error with no outstanding
+request failure gets a safe ACP error observation. Excerpts are at most 300 UTF-8
+bytes, selected only from upstream JSON `error.message`, `error.type`, or
+`error.code`. No raw body, headers, prompts or raw ACP error is recorded; known
+credentials are redacted and credential-bearing fields omitted. Oversized or
+non-JSON error bodies have no excerpt. Gateway failure warnings include status,
+slot route and trusted task/trace identity even if reserve recovers. The gateway
+already obtains that trace context from task authorization, not caller headers.
+
+D3's retained-partial-output rule includes regular files in the launcher's
+`outputs/` folder after failed or aborted harness completion. Validate, upload
+and mark them under the same limits as successful output. They are diagnostic
+partial objects, never attachments to a successful owner reply. Already marked
+objects survive later transfer failures; hard deletion cannot retain bytes that
+were never uploaded. Sealing and public-outcome policy are unchanged.
+
 ## Context and inventory
 
 The owner delegates long work and keeps talking to one lifemodel. The core
@@ -281,7 +313,9 @@ confined to registry adapter modules as specified by the
 [2026-10-27 amendment](#amendment--2026-10-27-live-steering-behind-the-harness-port).
 Launcher/core know only the port. Success requires the completion barrier, ACP
 `end_turn` or the reconciled Prime successor result, final assistant text, no
-provider error and no unresolved required tool failure; CLI 0 or a completed
+terminal provider error (recovered request failures are warnings; see the
+[2026-10-28 amendment](#amendment--2026-10-28-recovered-model-requests-and-partial-outputs))
+and no unresolved required tool failure; CLI 0 or a completed
 step alone is not success. This is policy inside the untrusted Pod, not a
 boundary guarantee. `cancelled` maps to aborted.
 

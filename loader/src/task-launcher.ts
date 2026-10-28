@@ -150,7 +150,7 @@ async function collectOutputs(
 function outputInstructions(cwd: string): string {
   return `Files for the owner go in ${join(cwd, 'outputs')}/, flat, with their final file names.
 Only regular files are allowed; no subfolders or symlinks. Maximum: 64 files.
-Files elsewhere are not delivered. Outputs are delivered only if the task succeeds.
+Files elsewhere are not retained. Failed-task outputs are retained as partial objects, not delivered as successful work.
 Use the task MCP step tool for short progress reports and question to ask the coordinating agent.
 Question returns after storage, not an answer. Wait for the correlated answer via steering.`;
 }
@@ -458,10 +458,8 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
     const resultName = `${directory}/result.txt`;
     await writeFile(join(cwd, resultName), result.result, { flag: 'wx', mode: 0o600 });
     terminal.resultObjectId = await save(resultName, 'result', options.env, cwd, ids.launchId);
-    if (result.outcome === 'succeeded') {
-      await collectOutputs(options.env, cwd, ids.launchId);
-      terminal.artifactObjectIds = await artifacts(options.env, cwd);
-    }
+    await collectOutputs(options.env, cwd, ids.launchId);
+    terminal.artifactObjectIds = await artifacts(options.env, cwd);
     terminal.outcome = result.outcome;
     terminal.summary =
       result.outcome === 'succeeded'
