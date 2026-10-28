@@ -253,7 +253,6 @@ async function readTaskContext(pool: Pool): Promise<TaskContextSnapshot> {
       TASK_CONTEXT_LIMITS.briefing,
       TASK_CONTEXT_LIMITS.question,
     ],
-    query_timeout: 1500,
   });
   return {
     tasks: rows.rows.slice(0, TASK_CONTEXT_LIMITS.count),
