@@ -3,6 +3,7 @@ import { Client, type Pool, type PoolClient } from 'pg';
 import type { PlatformSettingsReader } from '../config/platform-settings.js';
 import type {
   AcceptTask,
+  TaskContextEntry,
   TaskAccessIntent,
   TaskAccessMode,
   TaskAllocationReceipt,
@@ -13,7 +14,7 @@ import type {
   TaskSealReceipt,
   TaskOutcomeEvent,
 } from '../ports/tasks.js';
-import { TaskRegistryError } from '../ports/tasks.js';
+import { TaskRegistryError, TASK_CONTEXT_LIMITS } from '../ports/tasks.js';
 import type { TaskTerminalReport } from '../ports/task-channel.js';
 import { createFencedPostgres, StalePostgresEpochError } from './fenced-postgres.js';
 
@@ -515,6 +516,23 @@ export function createPostgresTaskRegistry(deps: {
       transaction('registry', async (client) => {
         const rows = await client.query<TaskRow>(`${TASK_SELECT} ORDER BY t.accepted_order,t.id`);
         return rows.rows.map(taskRecord);
+      }),
+    listActiveContext: async () =>
+      transaction('registry', async (client) => {
+        // One snapshot, bounded at the store before materializing large briefings.
+        // Questions come first so waiting tasks are not hidden by an old queue.
+        const rows = await client.query<TaskContextEntry>(
+          `SELECT t.id,t.harness,t.state,left(t.briefing,$2) AS briefing,
+          CASE WHEN q.question_id IS NULL THEN NULL ELSE
+            jsonb_build_object('questionId',q.question_id,'text',left(m.payload->>'text',$3)) END AS question
+          FROM core.tasks t
+          LEFT JOIN core.task_questions q ON q.task_id=t.id AND q.answer_command_id IS NULL
+          LEFT JOIN core.task_mailbox m ON m.task_id=q.task_id AND m.message_id=q.question_id AND m.kind='question'
+          WHERE t.state NOT IN ('done','failed','stopped')
+          ORDER BY (q.question_id IS NOT NULL) DESC,t.accepted_order,t.id LIMIT $1`,
+          [TASK_CONTEXT_LIMITS.count, TASK_CONTEXT_LIMITS.briefing, TASK_CONTEXT_LIMITS.question]
+        );
+        return rows.rows;
       }),
     listLaunchWork: async (afterOrder = '0', limit = 100) => {
       if (

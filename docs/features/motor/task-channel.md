@@ -7,6 +7,37 @@ lifemodel-653.9.7. Real-store integration checks cover ordering, replay, ACKs,
 receipts, authority, questions and owner-core processing during a held poll.
 This source contract is not deployed stage acceptance.
 
+## Cognition across turns
+
+Every cognition turn reads a fresh, fenced task-registry snapshot through
+`TaskService.listActiveContext`, independently of legacy Motor Cortex. The
+trigger context includes at most 10 non-terminal tasks, with exact task ID,
+harness, state, up to 320 characters of briefing, and the unanswered question's
+ID and up to 1024 characters of text. Questions are ordered first, then immutable
+acceptance order. Terminal tasks and answered questions are excluded in SQL.
+The instance has one owner; this is its registry, not a multi-owner lookup.
+
+The `<untrusted_running_tasks>` JSON block is escaped after serialization and
+capped at 24,000 rendered characters (fewer entries may fit). An empty snapshot
+adds no section. Text is untrusted data, not instructions, verified facts or
+consent. The section is not a new listing tool; `core.steerTask(action="read")`
+can read the full status of an identified task. A registry read failure fails
+the turn rather than claiming there are no tasks.
+
+The agent answers task questions only from the owner's conversation or what it
+knows for certain. Otherwise it asks the owner in their language and quotes the
+question. It must not bounce the question, or a request to ask someone, back to
+the task. On the owner's reply, the snapshot supplies the task ID and question
+ID for `core.steerTask(action="answer")`. The mailbox closes the question when
+that answer commits. A task-question-triggered turn still restricts commands to
+that task; an owner-message turn can steer or answer any listed task. Queued is
+commit evidence, not execution or obedience, and grants remain separate.
+
+Scripted-model checks through real cognition and the isolated Postgres registry
+in `tests/integration/task-mailbox.test.ts` cover later-turn steering, owner
+question round trips, closed/terminal omission, escaping and bounds. These are
+source checks, not the two-real-harness VM acceptance walk.
+
 ## Transport and identity
 
 The launcher posts one JSON frame to `https://core.lifemodel.svc:8447/task/events`.

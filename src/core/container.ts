@@ -1334,6 +1334,7 @@ export async function createContainerAsync(
     };
     taskService = createTaskService({ tasks: acceptanceService, mailbox: taskMailbox });
     coreLoop.setTaskService(taskService);
+    layers.cognition.setDependencies({ taskService });
     coreLoop.setTaskQuestionReader((taskId, questionId) =>
       taskMailbox.readQuestion(taskId, questionId)
     );

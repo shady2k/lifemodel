@@ -23,6 +23,7 @@ export function createTaskService(deps: {
     accept: (request) => deps.tasks.accept(request),
     readByLaunchKey: (key) => deps.tasks.readByLaunchKey(key),
     list: () => deps.tasks.list(),
+    listActiveContext: () => deps.tasks.listActiveContext(),
     read: async (id) => {
       const task = await deps.tasks.read(id);
       if (!task) return null;

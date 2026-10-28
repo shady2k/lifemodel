@@ -8,6 +8,18 @@ The rules below are launcher policy within that zone. Reported outcomes,
 events and traces are the task's claims, not independently verified facts;
 process environment filtering does not create an inner trust boundary.
 
+## Owner question relay
+
+The task asks the agent, not the owner directly. Cognition keeps non-terminal
+task IDs and open question IDs in bounded context on every turn, so an owner's
+later chat message can steer the same task or answer its pending question.
+If cognition cannot answer from the owner's conversation or certain knowledge,
+it asks the owner in chat, quoting the question, then commits a correlated
+answer after the owner replies. It never sends a request to ask someone back
+to the harness. The launcher receives the existing answer command; no harness
+API or adapter-specific cognition path is added. See
+[the cross-turn context contract](task-channel.md#cognition-across-turns).
+
 ## Authority before execution
 
 The workbench ENTRYPOINT runs `loader/src/task-launcher-main.ts`. With no

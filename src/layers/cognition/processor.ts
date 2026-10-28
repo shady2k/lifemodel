@@ -59,6 +59,7 @@ import {
 import type { PendingReflection } from '../../types/agent/soul.js';
 import { getPrimaryRecipientId } from '../../core/globals.js';
 import { withCaller } from '../../core/trace-context.js';
+import type { TaskService } from '../../ports/tasks.js';
 import type { InterestGroup } from './soul/interest-compaction.js';
 
 /**
@@ -116,6 +117,7 @@ const DEFAULT_CONFIG: CognitionProcessorConfig = {
  * Dependencies for COGNITION processor.
  */
 export interface CognitionProcessorDeps {
+  taskService?: Pick<TaskService, 'listActiveContext'> | undefined;
   conversationManager?: ConversationManager | undefined;
   userModel?: UserModel | undefined;
   eventBus?: EventBus | undefined;
@@ -146,6 +148,7 @@ export class CognitionProcessor implements CognitionLayer {
   private readonly config: CognitionProcessorConfig;
   private readonly logger: Logger;
 
+  private taskService: CognitionProcessorDeps['taskService'];
   private eventBus: EventBus | undefined;
   private agent: Agent | undefined;
   private conversationManager: ConversationManager | undefined;
@@ -186,6 +189,7 @@ export class CognitionProcessor implements CognitionLayer {
       loopConfig: { ...DEFAULT_CONFIG.loopConfig, ...config.loopConfig },
     };
 
+    this.taskService = deps?.taskService;
     this.eventBus = deps?.eventBus;
     this.agent = deps?.agent;
     this.conversationManager = deps?.conversationManager;
@@ -266,6 +270,7 @@ export class CognitionProcessor implements CognitionLayer {
    * Set dependencies after construction.
    */
   setDependencies(deps: CognitionProcessorDeps): void {
+    if (deps.taskService) this.taskService = deps.taskService;
     if (deps.eventBus) {
       this.eventBus = deps.eventBus;
     }
@@ -456,6 +461,7 @@ export class CognitionProcessor implements CognitionLayer {
       availableSkills,
       associations,
       conversationHistory,
+      runningTasks,
     ] = await Promise.all([
       this.getCompletedActions(recipientId, triggerSignal.type, conversationStatus),
       this.getRecentThoughts(recipientId),
@@ -468,6 +474,7 @@ export class CognitionProcessor implements CognitionLayer {
       discoverSkills(undefined, this.config.builtinSkillsDir),
       associationPromise,
       isAutonomousTrigger ? Promise.resolve([]) : this.getConversationHistory(recipientId),
+      this.taskService?.listActiveContext() ?? Promise.resolve([]),
     ]);
 
     // Build loop context with runtime config
@@ -493,6 +500,7 @@ export class CognitionProcessor implements CognitionLayer {
           }
         : undefined,
       conversationHistory,
+      runningTasks,
       userModel: this.userModel?.getBeliefs() ?? {},
       tickId: context.tickId,
       recipientId, // Still propagate for routing if thought decides to respond
