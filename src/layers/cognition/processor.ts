@@ -342,7 +342,9 @@ export class CognitionProcessor implements CognitionLayer {
       return await Promise.race([
         this.taskService.listActiveContext(),
         new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error('task_context_timeout')), 2000);
+          timer = setTimeout(() => {
+            reject(new Error('task_context_timeout'));
+          }, 2000);
         }),
       ]);
     } catch {
