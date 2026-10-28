@@ -15,7 +15,7 @@ const entry: TaskContextEntry = {
 };
 const context = (runningTasks: readonly TaskContextEntry[] = []) =>
   ({
-    runningTasks,
+    runningTasks: { tasks: runningTasks, omitted: false },
     agentState: {
       energy: 0.5,
       socialDebt: 0,
@@ -44,6 +44,29 @@ describe('running task prompt data budget', () => {
     }
   );
 
+  it('ignores malformed null question text and preserves the question-turn command scope', () => {
+    const ctx = context([{ ...entry, question: { questionId: 'q', text: null } as never }]);
+    ctx.triggerSignal = createSignal(
+      'task_report',
+      'test',
+      { value: 1 },
+      {
+        data: {
+          kind: 'task_report',
+          eventKind: 'question',
+          taskId: entry.id,
+          messageId: 'q',
+        } as never,
+      }
+    );
+    const section = buildRunningTasksSection(ctx)!;
+    expect(section).toContain('"question":null');
+    expect(section).not.toContain('to read status or steer work');
+    expect(section).toContain(
+      'Commands in this turn may target only the task in the task_question trigger'
+    );
+  });
+
   it('bounds count, each field, and expanded JSON/XML while preserving valid data', () => {
     const many = Array.from({ length: 30 }, (_, i) => ({
       ...entry,
@@ -71,7 +94,8 @@ describe('running task prompt data budget', () => {
       /<untrusted_running_tasks>(.*?)<\/untrusted_running_tasks>/s
     )![1]!;
     expect(encoded.length).toBeLessThanOrEqual(TASK_CONTEXT_LIMITS.rendered);
-    expect(JSON.parse(encoded)).toHaveLength(3);
+    expect(JSON.parse(encoded).length).toBeLessThan(TASK_CONTEXT_LIMITS.count);
+    expect(expanded).toContain('Some tasks were omitted');
     expect(expanded).not.toContain('"briefing":"<');
   });
 });

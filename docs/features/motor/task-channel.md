@@ -9,20 +9,28 @@ This source contract is not deployed stage acceptance.
 
 ## Cognition across turns
 
-Every cognition turn reads a fresh, fenced task-registry snapshot through
+Every cognition turn reads a fresh task-registry snapshot through
 `TaskService.listActiveContext`, independently of legacy Motor Cortex. The
 trigger context includes at most 10 non-terminal tasks, with exact task ID,
 harness, state, up to 320 characters of briefing, and the unanswered question's
-ID and up to 1024 characters of text. Questions are ordered first, then immutable
-acceptance order. Terminal tasks and answered questions are excluded in SQL.
+ID and up to 512 characters of text. Questions are ordered first, then newest
+acceptance order first. Terminal tasks, answered questions, questions without
+valid mailbox text, and questions from attempts with a terminal report are
+excluded in SQL.
 The instance has one owner; this is its registry, not a multi-owner lookup.
 
-The `<untrusted_running_tasks>` JSON block is escaped after serialization and
-capped at 24,000 rendered characters (fewer entries may fit). An empty snapshot
-adds no section. Text is untrusted data, not instructions, verified facts or
-consent. The section is not a new listing tool; `core.steerTask(action="read")`
-can read the full status of an identified task. A registry read failure fails
-the turn rather than claiming there are no tasks.
+The `<untrusted_running_tasks>` JSON block uses JSON unicode escapes for `<`,
+`>` and `&` after serialization and is capped at 24,000 rendered characters (fewer entries may fit). An empty snapshot
+adds no section. A note says when tasks were omitted. Text is untrusted data,
+not instructions, verified facts or consent. The section is not a new listing tool; `core.steerTask(action="read")`
+can read the full status of an identified task.
+
+The informational read uses a dedicated one-connection pool with 1.5-second
+connection/SQL limits and healthy connection reuse. It does not take a writer
+epoch lock: ADR-014 fences effects, and the mailbox still fences commands. The
+processor bounds even a hung reader at two seconds. On failure it logs only
+`task_context_unavailable` and adds an unavailable note, without failing the
+owner's turn or claiming there are no tasks.
 
 The agent answers task questions only from the owner's conversation or what it
 knows for certain. Otherwise it asks the owner in their language and quotes the

@@ -165,7 +165,7 @@ describe('task workbench readiness', () => {
         read: async () => null,
         readByLaunchKey,
         list: async () => [record],
-        listActiveContext: async () => [],
+        listActiveContext: async () => ({ tasks: [], omitted: false }),
       },
       imageRevision: `sha256:${'b'.repeat(64)}`,
       ready,
@@ -191,7 +191,7 @@ describe('task workbench readiness', () => {
           throw new TaskRegistryError('', 'storage_error');
         },
         list: async () => [],
-        listActiveContext: async () => [],
+        listActiveContext: async () => ({ tasks: [], omitted: false }),
       },
       imageRevision: digest,
       ready,
@@ -211,7 +211,7 @@ describe('task workbench readiness', () => {
       read: async () => null,
       readByLaunchKey: async () => null,
       list: async () => [],
-      listActiveContext: async () => [],
+      listActiveContext: async () => ({ tasks: [], omitted: false }),
     };
     const service = createWorkbenchTaskService({
       service: underlying,

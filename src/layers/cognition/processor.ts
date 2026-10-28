@@ -59,7 +59,7 @@ import {
 import type { PendingReflection } from '../../types/agent/soul.js';
 import { getPrimaryRecipientId } from '../../core/globals.js';
 import { withCaller } from '../../core/trace-context.js';
-import type { TaskService } from '../../ports/tasks.js';
+import type { TaskService, TaskContextSnapshot } from '../../ports/tasks.js';
 import type { InterestGroup } from './soul/interest-compaction.js';
 
 /**
@@ -335,6 +335,25 @@ export class CognitionProcessor implements CognitionLayer {
     this.logger.debug('COGNITION processor dependencies updated');
   }
 
+  private async getTaskContext(): Promise<TaskContextSnapshot | 'unavailable' | undefined> {
+    if (!this.taskService) return undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.taskService.listActiveContext(),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('task_context_timeout')), 2000);
+        }),
+      ]);
+    } catch {
+      // Never log private query causes or infer an empty registry from a failed read.
+      this.logger.warn({ code: 'task_context_unavailable' }, 'Task context unavailable this turn');
+      return 'unavailable';
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   /**
    * Process aggregated context and decide on action.
    *
@@ -474,7 +493,7 @@ export class CognitionProcessor implements CognitionLayer {
       discoverSkills(undefined, this.config.builtinSkillsDir),
       associationPromise,
       isAutonomousTrigger ? Promise.resolve([]) : this.getConversationHistory(recipientId),
-      this.taskService?.listActiveContext() ?? Promise.resolve([]),
+      this.getTaskContext(),
     ]);
 
     // Build loop context with runtime config
