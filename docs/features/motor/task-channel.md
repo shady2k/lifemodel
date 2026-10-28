@@ -335,7 +335,13 @@ under the task lock. `core.task_commands` retains content after retirement;
 `core.task_command_acks` stores disposition before retirement in the same fenced
 transaction. A database trigger refuses retirement without that ACK. Exact
 creation/ACK/receipt duplicates are idempotent; changed content conflicts.
-`core.task_command_receipts` retains at most 16 receipts per command. A task
+`core.task_command_receipts` retains at most 16 receipts per command. Task status
+(`core.steerTask` with `action="read"`) returns these in server arrival order
+(`received_at`, then `receipt_id` as a stable tie-break), each with `receivedAt`.
+`currentReceipt` is the last receipt or null before any arrive; its disposition
+is the current delivery result. The command's separate `disposition` remains
+the intake ACK, not delivery. A later `inserted` supersedes an earlier
+`deferred-to-next-turn`; neither proves the task obeyed the command. A task
 admits at most 1024 commands, matching the harness journal reservation. Enqueue
 also bounds the complete command response by the configured frame ceiling before
 commit. New commands and polls are refused for terminal, revoked or wrapping

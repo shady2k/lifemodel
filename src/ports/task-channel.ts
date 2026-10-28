@@ -317,6 +317,10 @@ export interface TaskCommandReceipt {
   readonly receiptId: string;
   readonly disposition: 'inserted' | 'deferred-to-next-turn' | 'failed' | 'uncertain';
 }
+/** Receipt readback uses the mailbox's arrival time, not a client-supplied clock. */
+export interface StoredTaskCommandReceipt extends TaskCommandReceipt {
+  readonly receivedAt: string;
+}
 export interface TaskQuestion {
   readonly taskId: string;
   readonly attemptId: string;
@@ -326,7 +330,10 @@ export interface TaskQuestion {
 }
 export interface TaskCommandStatus extends TaskCommand {
   readonly disposition: TaskCommandAck['disposition'] | 'queued';
-  readonly receipts: readonly TaskCommandReceipt[];
+  /** Arrival order: receivedAt, then receiptId as a stable tie-break. */
+  readonly receipts: readonly StoredTaskCommandReceipt[];
+  /** Latest receipt; null until one arrives. disposition above is only the intake ACK. */
+  readonly currentReceipt: StoredTaskCommandReceipt | null;
   /** Rejected intake is safe to retry in a NEW deciding turn, never by replay. */
   readonly retryable: boolean;
 }

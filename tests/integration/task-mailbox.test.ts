@@ -655,6 +655,66 @@ describe('durable fenced task mailbox', () => {
     expect(await mailbox().pollCommand(identity)).toBeNull();
   });
 
+  it('reads receipts in arrival order and exposes the latest delivery separately from the intake ACK', async () => {
+    const tool = createSteerTaskTool(service());
+    const result = (await tool.execute(
+      { action: 'steer', taskId: identity.taskId, text: 'Continue the task' },
+      context
+    )) as { commandId: string };
+    const input = {
+      taskId: identity.taskId,
+      attemptId: identity.attemptId,
+      commandId: result.commandId,
+    };
+    expect((await mailbox().readCommand(result.commandId))?.currentReceipt).toBeNull();
+    await mailbox().acknowledgeCommand({ ...input, disposition: 'accepted' }, identity);
+    // Hash-like IDs deliberately sort opposite to their arrival order.
+    await mailbox().recordCommandReceipt(
+      { ...input, receiptId: 'zz-deferred', disposition: 'deferred-to-next-turn' },
+      identity
+    );
+    await mailbox().recordCommandReceipt(
+      { ...input, receiptId: 'aa-inserted', disposition: 'inserted' },
+      identity
+    );
+    // Fixed server arrival times make the regression independent of wall-clock resolution.
+    await stores.postgres.query(
+      `UPDATE core.task_command_receipts SET received_at=CASE receipt_id
+       WHEN 'zz-deferred' THEN '2026-10-29T21:28:47.970Z'::timestamptz
+       ELSE '2026-10-29T21:28:48.440Z'::timestamptz END WHERE command_id=$1`,
+      [result.commandId]
+    );
+    const status = await mailbox().readCommand(result.commandId);
+    expect(status).toMatchObject({
+      disposition: 'accepted',
+      currentReceipt: { receiptId: 'aa-inserted', disposition: 'inserted' },
+      receipts: [
+        { receiptId: 'zz-deferred', disposition: 'deferred-to-next-turn' },
+        { receiptId: 'aa-inserted', disposition: 'inserted' },
+      ],
+    });
+    expect(status!.receipts.map((receipt) => new Date(receipt.receivedAt).toISOString())).toEqual([
+      '2026-10-29T21:28:47.970Z',
+      '2026-10-29T21:28:48.440Z',
+    ]);
+    expect(status!.currentReceipt).toEqual(status!.receipts[1]);
+    expect(await tool.execute({ action: 'read', taskId: identity.taskId }, context)).toMatchObject({
+      success: true,
+      task: { commands: [status] },
+    });
+    // Equal arrival times use receipt ID as a deterministic tie-break.
+    await stores.postgres.query(
+      `UPDATE core.task_command_receipts SET received_at='2026-10-29T21:28:48.440Z' WHERE command_id=$1`,
+      [result.commandId]
+    );
+    const tied = await mailbox().readCommand(result.commandId);
+    expect(tied!.receipts.map((receipt) => receipt.receiptId)).toEqual([
+      'aa-inserted',
+      'zz-deferred',
+    ]);
+    expect(tied!.currentReceipt).toEqual(tied!.receipts[1]);
+  });
+
   it.each([
     ['owner', 'read-steer', 'steer'],
     ['owner', 'steer', 'read-steer'],

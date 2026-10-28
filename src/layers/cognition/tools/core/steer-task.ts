@@ -78,7 +78,7 @@ export function createSteerTaskTool(service: TaskService, commandFrameLimit = 65
     tags: ['task'],
     hasSideEffects: true,
     description:
-      'Read a background task and its command dispositions, steer it, or answer its question. Returns queued after commit; never waits for the launcher. A rejected command is retryable in a new turn. Uncertain is not safe to resend automatically. In a task-question turn commands may target only that task. Privileged effects still require exact-scope grants.',
+      'Read a background task and its command dispositions, steer it, or answer its question. Receipts are in arrival order with receivedAt; currentReceipt is the latest delivery disposition, while disposition is only the intake ACK. Returns queued after commit; never waits for the launcher. A rejected command is retryable in a new turn. Uncertain is not safe to resend automatically. In a task-question turn commands may target only that task. Privileged effects still require exact-scope grants.',
     validate: (args) => validateAgainstParameters(args as Record<string, unknown>, parameters),
     recoverAcceptedEffect: async (context, args = {}) => {
       if (args['action'] === 'read') return undefined;
