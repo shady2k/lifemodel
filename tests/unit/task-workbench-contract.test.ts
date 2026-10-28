@@ -162,7 +162,8 @@ describe('task workbench image contract', () => {
       'exec node /opt/lifemodel/loader/dist/task-launcher-main.js "$@"'
     );
     // All TaskHarness/relay/launcher modules must ship, not only the old stub.
-    expect(text).toContain('/build/dist/task-*.js');
+    expect(text).toContain('COPY --from=cli-build /build/dist/ /opt/lifemodel/loader/dist/');
+    expect(text).not.toContain('/build/dist/task-*.js');
     expect(read('loader/src/task-launcher-main.ts')).not.toContain('launcher_not_implemented');
     const config = JSON.parse(read('docker/workbench/opencode.json'));
     expect(config.update).toBe('disable');
@@ -375,7 +376,7 @@ describe('task workbench image contract', () => {
 
   it('builds, pushes and pins before the seed bundle and signs the containing platform artifact', () => {
     const release = read('.github/workflows/release.yml');
-    const build = release.indexOf('name: Build and push workbench image');
+    const build = release.indexOf('name: Build the workbench image locally');
     const pin = release.indexOf('scripts/release/set-workbench-digest.sh');
     const seed = release.indexOf('name: Prepare the full-history loader seed bundle');
     expect(build).toBeGreaterThan(0);
@@ -384,7 +385,10 @@ describe('task workbench image contract', () => {
     const section = release.slice(build, seed);
     expect(section).toContain('id: workbench');
     expect(section).toContain('file: docker/workbench/Dockerfile');
-    expect(section).toContain('push: true');
+    expect(section).toContain('push: false');
+    expect(section).toContain('load: true');
+    expect(section).toContain('scripts/smoke-image-modules.sh workbench');
+    expect(section).toContain('scripts/release/push-checked-image.sh');
     expect(section).toContain('lifemodel-workbench:${{ github.ref_name }}');
     expect(section).toContain('WORKBENCH_DIGEST: ${{ steps.workbench.outputs.digest }}');
     expect(section).toContain(pinFile);
@@ -461,6 +465,7 @@ describe('task workbench image contract', () => {
     'package-lock.json',
     '.github/workflows/ci.yml',
     'scripts/ci-workbench-paths.sh',
+    'scripts/smoke-image-modules.sh',
     'scripts/release/set-workbench-digest.sh',
   ])('selects the image job for input %s', (path) => {
     expect(

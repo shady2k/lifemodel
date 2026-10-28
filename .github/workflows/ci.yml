@@ -447,6 +447,10 @@ jobs:
         env:
           SHA: ${{ github.sha }}
         run: docker build --file docker/workbench/Dockerfile --tag "ci-workbench-$SHA" .
+      - name: Check the task launcher module graph offline
+        env:
+          SHA: ${{ github.sha }}
+        run: scripts/smoke-image-modules.sh workbench "ci-workbench-$SHA"
       - name: Verify offline non-root startup with a read-only root
         env:
           SHA: ${{ github.sha }}
@@ -494,6 +498,10 @@ jobs:
           docker build --file docker/workbench/Dockerfile \
             --tag ghcr.io/shady2k/lifemodel-workbench:main \
             --tag "ghcr.io/shady2k/lifemodel-workbench:$SHA" .
+      - name: Check the task launcher module graph offline
+        env:
+          SHA: ${{ github.sha }}
+        run: scripts/smoke-image-modules.sh workbench "ghcr.io/shady2k/lifemodel-workbench:$SHA"
       # The same verification ci-workbench-image runs on a pull request, before
       # anything is pushed: an image that cannot start offline as a non-root
       # user with a read-only root is never published.

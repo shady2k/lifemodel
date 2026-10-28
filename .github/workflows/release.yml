@@ -100,14 +100,25 @@ jobs:
           WEB_DIGEST: ${{ steps.web.outputs.digest }}
         run: scripts/release/set-web-digest.sh "$WEB_DIGEST" deploy/platform/applications/lifemodel/kustomization.yaml
 
-      - name: Build and push workbench image
-        id: workbench
+      - name: Build the workbench image locally
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
         with:
           context: .
           file: docker/workbench/Dockerfile
-          push: true
+          push: false
+          load: true
           tags: ghcr.io/${{ github.repository_owner }}/lifemodel-workbench:${{ github.ref_name }}
+
+      - name: Check the workbench image module graph offline
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/lifemodel-workbench:${{ github.ref_name }}
+        run: scripts/smoke-image-modules.sh workbench "$IMAGE"
+
+      - name: Push the checked workbench image
+        id: workbench
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/lifemodel-workbench:${{ github.ref_name }}
+        run: scripts/release/push-checked-image.sh "$IMAGE"
 
       - name: Pin the workbench image to its pushed digest in the seed source
         env:

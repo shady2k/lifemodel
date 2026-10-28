@@ -40,6 +40,7 @@ export function createTaskLaunchReconciler(options: {
       name: string;
       uid: string;
       launchLabel: string;
+      captureTermination?: (task: TaskRecord, signal: AbortSignal) => Promise<void>;
       remove: (signal: AbortSignal) => Promise<void>;
     }[]
   >;
@@ -201,25 +202,50 @@ export function createTaskLaunchReconciler(options: {
         }
         taskContext = undefined;
       }
+      let scanFailed = false;
       if (options.scanJobs) {
         for (const job of jobs) {
           active();
-          // The lookup itself is fenced and exact; a paged registry snapshot
-          // cannot classify a launch on a different page as an orphan.
-          const fresh = await options.registry.readByJobName(job.name);
-          taskContext = fresh ? { taskId: fresh.id, traceId: fresh.traceId } : undefined;
-          active();
-          if (
-            !fresh ||
-            fresh.tombstonedAt ||
-            terminal(fresh) ||
-            fresh.terminalCandidate ||
-            (fresh.state === 'starting' && fresh.softStopRequestedAt)
-          ) {
-            if (fresh) await options.registry.tombstoneLaunch(fresh.id, fresh.launchId);
+          try {
+            // The lookup itself is fenced and exact; a paged registry snapshot
+            // cannot classify a launch on a different page as an orphan.
+            const fresh = await options.registry.readByJobName(job.name);
+            taskContext = fresh ? { taskId: fresh.id, traceId: fresh.traceId } : undefined;
             active();
-            await job.remove(controller.signal);
-            options.onCleanup?.();
+            if (
+              !fresh ||
+              fresh.tombstonedAt ||
+              terminal(fresh) ||
+              fresh.terminalCandidate ||
+              (fresh.state === 'starting' && fresh.softStopRequestedAt)
+            ) {
+              if (fresh) await options.registry.tombstoneLaunch(fresh.id, fresh.launchId);
+              active();
+              // Evidence is disposable. Neither it nor a full template check
+              // may veto exact-UID scan cleanup of Jobs from an older release.
+              if (fresh && job.captureTermination) {
+                try {
+                  await job.captureTermination(fresh, controller.signal);
+                } catch {
+                  active();
+                  options.logger.warn(
+                    { ...taskContext, code: 'task_pod_evidence_unavailable', count: 1 },
+                    'Task Pod termination evidence unavailable'
+                  );
+                }
+              }
+              active();
+              await job.remove(controller.signal);
+              options.onCleanup?.();
+            }
+          } catch (error) {
+            if (error instanceof StalePostgresEpochError) throw error;
+            active();
+            scanFailed = true;
+            options.logger.warn(
+              { ...taskContext, code: 'task_scan_cleanup_pending', count: 1 },
+              'Task scan cleanup remains pending'
+            );
           }
           taskContext = undefined;
         }
@@ -234,7 +260,7 @@ export function createTaskLaunchReconciler(options: {
           taskContext = undefined;
         }
       }
-      return success;
+      return success && !scanFailed;
     } catch (error) {
       if (error instanceof StalePostgresEpochError) {
         void stop();

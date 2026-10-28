@@ -87,9 +87,10 @@ function fixture() {
           });
           if (state.removeOnDelete) state.pods = state.pods.filter((item) => item !== current);
         } else {
+          if (!state.job) return { status: 404, body: {} };
           expect(identity).toEqual({
-            uid: state.job?.metadata.uid,
-            resourceVersion: state.job?.metadata.resourceVersion,
+            uid: state.job.metadata.uid,
+            resourceVersion: state.job.metadata.resourceVersion,
           });
           if (state.removeOnDelete) state.job = null;
         }
@@ -168,6 +169,179 @@ describe('exact-UID compute and volume cleanup confirmation', () => {
       expect(options).toMatchObject({ gracePeriodSeconds: 1, propagationPolicy: 'Foreground' });
     expect(await api.confirmTerminated(launch)).toBe(true);
     expect(await api.confirmCleanup(launch)).toBe(true);
+  });
+
+  it.each([null, 'pod-uid'])(
+    'records startup termination before deletion without a bound Pod (%s)',
+    async (podUid) => {
+      const { request, state } = fixture();
+      const records: import('../../src/ports/observability.js').TraceRecord[] = [];
+      const enqueue = vi.fn((record: import('../../src/ports/observability.js').TraceRecord) => {
+        expect(request.mock.calls.some(([method]) => method === 'DELETE')).toBe(false);
+        records.push(record);
+        return true;
+      });
+      const api = createKubernetesTaskExecutor({
+        client: { request, close: vi.fn() },
+        traces: { enqueue },
+      });
+      state.job = renderTaskJob(launch);
+      Object.assign(state.job.metadata, {
+        uid: 'job-uid',
+        resourceVersion: '1',
+      });
+      state.job.status = { conditions: [{ type: 'Failed', status: 'True' }] };
+      const failed = pod('Failed');
+      Object.assign(failed.status!, {
+        containerStatuses: [
+          {
+            name: 'task',
+            state: {
+              terminated: {
+                exitCode: 1,
+                reason: 'Error',
+                message:
+                  '{"code":"launcher_start_failed","reasonCode":"ERR_MODULE_NOT_FOUND","module":"model-error-excerpt.js"}',
+              },
+            },
+          },
+        ],
+      });
+      const foreign = pod('Failed', 'foreign', 'different-job');
+      state.pods = [foreign, failed];
+      await api.deleteNow({ ...launch, task: { ...task, podUid } });
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        kind: 'span',
+        span: {
+          traceId: task.traceId,
+          parentSpanId: task.launchId,
+          component: 'task.pod',
+          status: 'failed',
+          attrs: {
+            taskId: task.id,
+            podUid: 'pod-uid',
+            exitCode: 1,
+            reason: 'Error',
+            terminationMessage: expect.stringContaining('model-error-excerpt.js'),
+          },
+        },
+      });
+      expect(request.mock.calls.some(([method]) => method === 'DELETE')).toBe(true);
+    }
+  );
+
+  it.each(['old-template', 'vanished'] as const)(
+    'captures exact controller evidence and removes a %s scanned Job without template GET',
+    async (mode) => {
+      const { request, state } = fixture();
+      const records: import('../../src/ports/observability.js').TraceRecord[] = [];
+      const api = createKubernetesTaskExecutor({
+        client: { request, close: vi.fn() },
+        traces: {
+          enqueue: (record) => {
+            records.push(record);
+            return true;
+          },
+        },
+      });
+      const old = renderTaskJob(launch);
+      Object.assign(old.metadata, { uid: 'job-uid', resourceVersion: '1' });
+      old.spec['activeDeadlineSeconds'] = 86400; // Invalid for today's accepted template.
+      state.job = mode === 'vanished' ? null : old;
+      const failed = pod('Failed');
+      Object.assign(failed.status!, {
+        containerStatuses: [
+          {
+            name: 'task',
+            state: {
+              terminated: { exitCode: 1, reason: 'Error', message: 'launcher_start_failed' },
+            },
+          },
+        ],
+      });
+      state.pods = [failed, pod('Failed', 'foreign', 'different-job')];
+      const observed = {
+        name: task.jobName,
+        uid: 'job-uid',
+        resourceVersion: '1',
+        launchLabel: task.launchId.slice(7, 65),
+        templateHash: 'obsolete',
+        job: old,
+      };
+      await api.capturePodTermination(observed, task);
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        kind: 'span',
+        span: { attrs: { exitCode: 1, reason: 'Error' } },
+      });
+      await api.deleteJob(observed);
+      expect(
+        request.mock.calls.some(([method, path]) => method === 'GET' && path.includes('/jobs/'))
+      ).toBe(false);
+      expect(request.mock.calls.some(([method]) => method === 'DELETE')).toBe(true);
+    }
+  );
+
+  it('bounds and scrubs untrusted termination fields without reading pod logs', async () => {
+    const { request, state } = fixture();
+    const records: import('../../src/ports/observability.js').TraceRecord[] = [];
+    const api = createKubernetesTaskExecutor({
+      client: { request, close: vi.fn() },
+      traces: {
+        enqueue: (record) => {
+          records.push(record);
+          return true;
+        },
+      },
+    });
+    const failed = pod('Failed');
+    Object.assign(failed.status!, {
+      containerStatuses: [
+        {
+          name: 'task',
+          state: {
+            terminated: {
+              exitCode: 137,
+              reason: 'OOMKilled\u001b[31m',
+              message: `token=private-value\n${'x'.repeat(6000)}\u001b[2J`,
+            },
+          },
+        },
+      ],
+    });
+    state.pods = [failed];
+    await api.deleteNow(launch);
+    const record = records[0];
+    expect(record?.kind).toBe('span');
+    if (record?.kind !== 'span') throw new Error('missing Pod span');
+    expect(record.span.attrs['exitCode']).toBe(137);
+    expect(record.span.attrs['reason']).not.toContain('\u001b');
+    expect(Buffer.byteLength(String(record.span.attrs['terminationMessage']))).toBeLessThanOrEqual(
+      2048
+    );
+    expect(JSON.stringify(records)).not.toContain('private-value');
+    expect(request.mock.calls.every(([, path]) => !path.includes('/log'))).toBe(true);
+  });
+
+  it('keeps deletion fail-open when the disposable trace queue rejects evidence', async () => {
+    const { request, state } = fixture();
+    const failed = pod('Failed');
+    Object.assign(failed.status!, {
+      containerStatuses: [
+        {
+          name: 'task',
+          state: { terminated: { exitCode: 1, reason: 'Error' } },
+        },
+      ],
+    });
+    state.pods = [failed];
+    const api = createKubernetesTaskExecutor({
+      client: { request, close: vi.fn() },
+      traces: { enqueue: () => false },
+    });
+    await api.deleteNow(launch);
+    expect(request.mock.calls.some(([method]) => method === 'DELETE')).toBe(true);
   });
 
   it('does not treat an accepted DELETE or deletionTimestamp as termination', async () => {

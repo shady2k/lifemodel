@@ -4,9 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 import { createTestStores, workerDatabaseUrl, type TestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
 import { createPostgresTraceStore } from '../../src/storage/postgres-trace-store.js';
+import { recordTaskPodTermination } from '../../src/core/task-pod-trace.js';
+import type { TaskRecord } from '../../src/ports/tasks.js';
 
 const cli = fileURLToPath(new URL('../../deploy/cli/lifemodel.mjs', import.meta.url));
 const dirs: string[] = [];
@@ -120,6 +123,60 @@ describe('doctor trace stored tree', () => {
         attrs: { taskId: 'task-2' },
       },
     });
+    const launcherDirectory = mkdtempSync(join(tmpdir(), 'doctor-launcher-start-'));
+    let startupDiagnostic: string;
+    try {
+      const main = ts.transpileModule(readFileSync('loader/src/task-launcher-main.ts', 'utf8'), {
+        compilerOptions: { target: ts.ScriptTarget.ES2024, module: ts.ModuleKind.ESNext },
+      }).outputText;
+      writeFileSync(join(launcherDirectory, 'package.json'), '{"type":"module"}');
+      writeFileSync(join(launcherDirectory, 'task-launcher-main.js'), main);
+      const failedStart = spawnSync(
+        process.execPath,
+        [join(launcherDirectory, 'task-launcher-main.js')],
+        {
+          encoding: 'utf8',
+          env: {},
+          timeout: 10_000,
+        }
+      );
+      expect(failedStart.status).toBe(1);
+      startupDiagnostic = failedStart.stderr;
+      expect(JSON.parse(startupDiagnostic)).toMatchObject({
+        code: 'launcher_start_failed',
+        reasonCode: 'ERR_MODULE_NOT_FOUND',
+      });
+    } finally {
+      rmSync(launcherDirectory, { recursive: true, force: true });
+    }
+    recordTaskPodTermination(
+      {
+        id: 'task-start-failure',
+        traceId: 'stored-run',
+        launchId: 'root',
+      } as TaskRecord,
+      {
+        metadata: { uid: 'failed-pod' },
+        status: {
+          phase: 'Failed',
+          containerStatuses: [
+            {
+              name: 'task',
+              state: {
+                terminated: {
+                  exitCode: 1,
+                  reason: 'Error',
+                  startedAt,
+                  finishedAt: endedAt,
+                  message: `${startupDiagnostic}\u001b[2J token=never-print`,
+                },
+              },
+            },
+          ],
+        },
+      },
+      writer
+    );
     await writer.close();
   });
   afterAll(async () => {
@@ -139,6 +196,14 @@ describe('doctor trace stored tree', () => {
     expect(result.stdout).toContain('      · tool-result exitCode=1');
     expect(result.stdout).toContain('    tool [ok] 1000ms span=good-tool');
     expect(result.stdout).toContain('exitCode=0');
+    expect(result.stdout).toContain('    task.pod [failed] 1000ms');
+    expect(result.stdout).toContain('reason="Error"');
+    expect(result.stdout).toContain('terminationMessage=');
+    expect(result.stdout).toContain('launcher_start_failed');
+    expect(result.stdout).toContain('ERR_MODULE_NOT_FOUND');
+    expect(result.stdout).toContain('untrusted=true');
+    expect(result.stdout).not.toContain('never-print');
+    expect(result.stdout).not.toContain('\u001b');
     const args = JSON.parse(result.calls());
     expect(args.slice(0, 8)).toEqual([
       'exec',

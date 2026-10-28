@@ -5,7 +5,8 @@ WORKDIR /build
 COPY loader/package.json loader/package-lock.json ./
 RUN npm ci --no-audit --no-fund --ignore-scripts --no-update-notifier --loglevel=http
 COPY loader/tsconfig.json ./
-COPY src/ports/task-agent-validation.* /src/ports/
+COPY scripts/task-start-manifest.mjs /scripts/
+COPY src/ports/task-agent-validation.* src/ports/task-harness-registry.json /src/ports/
 COPY loader/src/ ./src/
 RUN npm run build
 
@@ -49,7 +50,8 @@ RUN npm ci --legacy-peer-deps --no-audit --no-fund --ignore-scripts --no-update-
  && npm cache clean --force
 RUN --network=none ONNXRUNTIME_NODE_INSTALL_CUDA=skip npm rebuild esbuild onnxruntime-node protobufjs sharp --foreground-scripts
 COPY --from=cli-build /build/package.json /opt/lifemodel/loader/package.json
-COPY --from=cli-build /build/dist/storage-cli-main.js /build/dist/storage-cli.js /build/dist/task-*.js /opt/lifemodel/loader/dist/
+# Ship the complete compiled graph, including shared modules without a task- prefix.
+COPY --from=cli-build /build/dist/ /opt/lifemodel/loader/dist/
 COPY --chown=root:root --chmod=0555 docker/loader/lifemodel-storage /usr/local/bin/lifemodel-storage
 COPY --chown=root:root --chmod=0555 docker/workbench/lifemodel-task-launcher /usr/local/bin/lifemodel-task-launcher
 # The Job mounts its PRIVATE working volume at /work (uid/gid/fsGroup 1000).

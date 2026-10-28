@@ -13,6 +13,7 @@
 !loader/package.json
 !loader/package-lock.json
 !loader/tsconfig.json
+!scripts/task-start-manifest.mjs
 !loader/src/**/*.ts
 # Defense in depth even inside admitted source paths.
 **/.npmrc

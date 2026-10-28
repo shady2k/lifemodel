@@ -6,6 +6,7 @@
 !loader/package.json
 !loader/package-lock.json
 !loader/tsconfig.json
+!scripts/task-start-manifest.mjs
 !loader/src/**/*.ts
 !package.json
 !package-lock.json

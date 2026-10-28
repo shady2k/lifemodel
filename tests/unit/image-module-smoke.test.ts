@@ -84,6 +84,18 @@ case "$1" in run) exit "$RUN_STATUS" ;; esac
     }
   );
 
+  it('smokes the workbench PR and main images after build, before publishing', () => {
+    const pr = commands(ci.jobs['ci-workbench-image']);
+    expect(
+      pr.indexOf('scripts/smoke-image-modules.sh workbench "ci-workbench-$SHA"')
+    ).toBeGreaterThan(pr.indexOf('docker build --file docker/workbench/Dockerfile'));
+    requireSmokeBeforePush(ci.jobs['ci-workbench-image-publish'], 'workbench');
+    const publish = commands(ci.jobs['ci-workbench-image-publish']);
+    expect(publish).toContain(
+      'scripts/smoke-image-modules.sh workbench "ghcr.io/shady2k/lifemodel-workbench:$SHA"'
+    );
+  });
+
   it('smokes the loader PR image after build, without starting its service', () => {
     const run = commands(ci.jobs['ci-loader-image']);
     expect(run.indexOf('scripts/smoke-image-modules.sh loader "ci-loader-$SHA"')).toBeGreaterThan(
@@ -91,7 +103,7 @@ case "$1" in run) exit "$RUN_STATUS" ;; esac
     );
   });
 
-  it.each(['core', 'loader', 'web'])(
+  it.each(['core', 'loader', 'web', 'workbench'])(
     'loads, smokes and pushes the SAME release %s image in order',
     (kind) => {
       const steps = release.steps;
@@ -120,7 +132,12 @@ case "$1" in run) exit "$RUN_STATUS" ;; esac
 
   it('uses the real entrypoints with a bounded, offline, read-only check', () => {
     const smoke = read('scripts/smoke-image-modules.sh');
-    for (const entry of ['dist/index.js', 'loader/dist/main.js', 'dist/web/server.cjs']) {
+    for (const entry of [
+      'dist/index.js',
+      'loader/dist/main.js',
+      'dist/web/server.cjs',
+      'loader/dist/task-launcher-main.js',
+    ]) {
       expect(smoke).toContain(`/opt/lifemodel/${entry}`);
     }
     expect(smoke).toContain('timeout --kill-after=5 60 docker run --rm --name');
