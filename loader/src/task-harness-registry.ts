@@ -30,6 +30,11 @@ const firstHarness = taskHarnessNames[0];
 if (!firstHarness) throw new Error('harness_registry_empty');
 export const defaultTaskHarness = firstHarness;
 
+/** Import every registered adapter graph, without configuring or starting it. */
+export async function checkHarnessModules(): Promise<void> {
+  for (const agent of Object.values(taskHarnessRegistry)) await import(agent.adapterModule);
+}
+
 export async function selfCheckHarnesses(): Promise<string[]> {
   const checked: string[] = [];
   for (const agent of Object.values(taskHarnessRegistry)) {

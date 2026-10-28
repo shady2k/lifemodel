@@ -8,7 +8,7 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node ../scripts/task-start-manifest.mjs .",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {

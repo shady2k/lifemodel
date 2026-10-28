@@ -16,6 +16,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 const read = (path: string) => readFileSync(path, 'utf8');
 const CANARY = 'STARTUP-PRIVATE-CREDENTIAL-CANARY';
+const registry = JSON.parse(read('src/ports/task-harness-registry.json')) as Record<
+  string,
+  { adapterModule: string }
+>;
+const adapterModules = Object.values(registry).map((agent) => agent.adapterModule.slice(2));
 let graph: string;
 
 beforeAll(() => {
@@ -37,12 +42,20 @@ beforeAll(() => {
   for (const file of ['task-agent-validation.mjs', 'task-harness-registry.json']) {
     cpSync(`src/ports/${file}`, join(graph, 'src/ports', file));
   }
+  const generated = spawnSync(
+    process.execPath,
+    ['scripts/task-start-manifest.mjs', 'loader', join(graph, 'loader/dist/task-launcher-main.js')],
+    { encoding: 'utf8', timeout: 10_000 }
+  );
+  expect(generated.status, generated.stderr).toBe(0);
 });
 afterAll(() => rmSync(graph, { recursive: true, force: true }));
 
 function launch(
   options: {
     missing?: string;
+    adapterDependency?: string;
+    extraRuntimeModule?: string;
     throwing?: string;
     selfCheck?: boolean;
     start?: boolean;
@@ -53,6 +66,13 @@ function launch(
   try {
     cpSync(graph, directory, { recursive: true });
     const dist = join(directory, 'loader/dist');
+    if (options.adapterDependency) {
+      const adapter = join(dist, options.adapterDependency);
+      // Current adapters use builtins only after type erasure. Add a runtime
+      // edge to a real emitted module outside the static launcher graph.
+      writeFileSync(adapter, `import './clock.js';\n${read(adapter)}`);
+    }
+    if (options.extraRuntimeModule) writeFileSync(join(dist, options.extraRuntimeModule), '');
     if (options.missing) rmSync(join(dist, options.missing));
     if (options.throwing) writeFileSync(join(dist, 'task-launcher.js'), options.throwing);
     const terminationLog = join(directory, 'termination-log');
@@ -112,16 +132,82 @@ describe('workbench launcher startup diagnostics and graph check', () => {
     expect(result.termination).toBe('');
   });
 
-  it.each(['task-launcher.js', 'task-launcher-http.js', 'model-error-excerpt.js'])(
-    'fails the offline check when the image omits %s, reporting only its basename',
+  it.each([
+    'task-launcher.js',
+    'task-launcher-http.js',
+    'model-error-excerpt.js',
+    ...adapterModules,
+  ])('fails the offline check when the image omits %s, reporting only its basename', (missing) => {
+    expect(diagnostic(launch({ missing }))).toEqual({
+      code: 'launcher_start_failed',
+      reasonCode: 'ERR_MODULE_NOT_FOUND',
+      module: missing,
+    });
+  });
+
+  it.each(['task-identity.js', 'task-model-gateway.js', 'model-error-codes.js'])(
+    'names trusted build module %s even when its runtime file is absent',
     (missing) => {
-      expect(diagnostic(launch({ missing }))).toEqual({
+      const throwing = `throw { code: 'ERR_MODULE_NOT_FOUND', url: 'file:///opt/lifemodel/loader/dist/${missing}' };`;
+      expect(diagnostic(launch({ missing, throwing }))).toEqual({
         code: 'launcher_start_failed',
         reasonCode: 'ERR_MODULE_NOT_FOUND',
         module: missing,
       });
     }
   );
+
+  it.each(adapterModules)(
+    'loads transitive dependencies of registered adapter %s without starting it',
+    (adapterDependency) => {
+      const loaded = launch({ adapterDependency });
+      expect(loaded.status, loaded.stderr).toBe(0);
+      expect(loaded.stdout).toBe('');
+      expect(loaded.stderr).toBe('');
+      expect(diagnostic(launch({ adapterDependency, missing: 'clock.js' }))).toEqual({
+        code: 'launcher_start_failed',
+        reasonCode: 'ERR_MODULE_NOT_FOUND',
+        module: 'clock.js',
+      });
+    }
+  );
+
+  it('does not trust a runtime file as a public diagnostic name', () => {
+    const extraRuntimeModule = `${CANARY}.js`;
+    const throwing = `throw { code: 'ERR_MODULE_NOT_FOUND', url: 'file:///secret/${extraRuntimeModule}' };`;
+    expect(diagnostic(launch({ throwing, extraRuntimeModule }))).toEqual({
+      code: 'launcher_start_failed',
+      reasonCode: 'ERR_MODULE_NOT_FOUND',
+      module: 'unknown',
+    });
+  });
+
+  it('builds the trusted manifest before copying the complete graph into the image', () => {
+    const loader = JSON.parse(read('loader/package.json')) as { scripts: { build: string } };
+    expect(loader.scripts.build).toContain(
+      'tsc -p tsconfig.json && node ../scripts/task-start-manifest.mjs .'
+    );
+    const image = read('docker/workbench/Dockerfile');
+    expect(image).toContain('COPY scripts/task-start-manifest.mjs /scripts/');
+    expect(image.indexOf('RUN npm run build')).toBeLessThan(
+      image.indexOf('COPY --from=cli-build /build/dist/')
+    );
+    for (const path of ['docker/workbench/Dockerfile.dockerignore', '.dockerignore']) {
+      expect(read(path)).toContain('!scripts/task-start-manifest.mjs');
+    }
+    expect(read('docker/loader/Dockerfile')).toContain(
+      'COPY scripts/task-start-manifest.mjs /scripts/'
+    );
+    for (const selector of ['ci-loader-paths.sh', 'ci-workbench-paths.sh']) {
+      const selected = spawnSync('sh', [`scripts/${selector}`], {
+        input: 'changed: scripts/task-start-manifest.mjs\n',
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+      expect(selected.status, selected.stderr).toBe(0);
+      expect(selected.stdout.trim()).toMatch(/_image=true$/);
+    }
+  });
 
   it('records a real startup import failure before a task can execute', () => {
     expect(diagnostic(launch({ start: true, missing: 'model-error-excerpt.js' }))).toEqual({

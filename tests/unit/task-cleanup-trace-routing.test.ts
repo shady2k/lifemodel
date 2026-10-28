@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import type { TaskRecord, TaskRegistry } from '../../src/ports/tasks.js';
 import { createTaskLaunchReconciler } from '../../src/core/task-launch.js';
 import { createFakeTaskExecutor } from '../../src/core/fake-task-executor.js';
-import { TaskExecutorError, type TaskJobObservation } from '../../src/core/task-executor.js';
-import { createTestLogger } from '../helpers/test-logger.js';
+import { TaskExecutorError } from '../../src/core/task-executor.js';
+import { createTestLogger, recordingLogger, type RecordedLog } from '../helpers/test-logger.js';
 
 const launchId = `launch_${'a'.repeat(64)}`;
 const task = {
@@ -13,177 +13,128 @@ const task = {
   launchId,
   jobName: `task-${launchId.slice(7, 65)}`,
   jobUid: 'job-bound',
-  imageRevision: `sha256:${'b'.repeat(64)}`,
-  allocationReceipt: { space: 'space-cleanup' },
-  state: 'running',
+  state: 'failed',
   tombstonedAt: new Date(),
-  terminalCandidate: null,
 } as TaskRecord;
 
-function fixture(fresh: TaskRecord | null, jobUid = 'job-bound', templateHash?: string) {
+function fixture(fresh: TaskRecord | null = task) {
   const remove = vi.fn(async () => undefined);
+  const nextRemove = vi.fn(async () => undefined);
+  const captureTermination = vi.fn(async (_task: TaskRecord, _signal: AbortSignal) => undefined);
   const tombstoneLaunch = vi.fn(async () => fresh!);
-  const bindCleanupJob = vi.fn(async (
-    _taskId: string,
-    _launchId: string,
-    boundUid: string,
-    boundHash: string
-  ) => ({
-    ...fresh!,
-    jobUid: boundUid,
-    templateHash: boundHash,
-  }));
+  const admitNext = vi.fn(async () => null);
   const registry = {
     listLaunchWork: async () => [],
     readByJobName: async () => fresh,
     tombstoneLaunch,
-    bindCleanupJob,
-    admitNext: async () => null,
+    admitNext,
   } as unknown as TaskRegistry;
   const executor = createFakeTaskExecutor();
-  const observation: TaskJobObservation = {
-    taskId: task.id,
-    launchId,
-    jobName: task.jobName,
-    jobUid,
-    resourceVersion: '1',
-    templateHash: templateHash ?? '',
-    startedAt: null,
-    phase: 'failed',
-  };
-  const observe = vi.spyOn(executor, 'observe').mockResolvedValue(observation);
-  const deleteNow = vi.spyOn(executor, 'deleteNow').mockResolvedValue(undefined);
+  const observe = vi.spyOn(executor, 'observe');
+  const deleteNow = vi.spyOn(executor, 'deleteNow');
+  const logs: RecordedLog[] = [];
   const runtime = createTaskLaunchReconciler({
     registry,
     executor,
     storage: { allocate: vi.fn(), close: vi.fn() },
-    logger: createTestLogger(),
+    logger: recordingLogger(createTestLogger(), logs),
     scanJobs: async () => [
       {
         name: task.jobName,
-        uid: jobUid,
+        uid: 'job-bound',
         launchLabel: launchId.slice(7, 65),
-        ...(templateHash ? { templateHash } : {}),
+        captureTermination,
         remove,
+      },
+      {
+        name: 'other-job',
+        uid: 'other-uid',
+        launchLabel: launchId.slice(7, 65),
+        remove: nextRemove,
       },
     ],
   });
-  return { runtime, remove, tombstoneLaunch, bindCleanupJob, observe, observation, deleteNow };
+  return {
+    runtime,
+    remove,
+    nextRemove,
+    captureTermination,
+    tombstoneLaunch,
+    admitNext,
+    observe,
+    deleteNow,
+    logs,
+  };
 }
 
 describe('task cleanup trace routing', () => {
-  it('uses the diagnostic deletion boundary for exact bound Jobs outside the current work page', async () => {
-    const f = fixture(task);
-    try {
-      expect(await f.runtime.runOnce()).toBe(true);
-      expect(f.tombstoneLaunch).toHaveBeenCalledWith(task.id, launchId);
-      expect(f.deleteNow).toHaveBeenCalledWith(
-        expect.objectContaining({ task, spaceId: 'space-cleanup' }),
-        expect.any(AbortSignal)
-      );
-      expect(f.tombstoneLaunch.mock.invocationCallOrder[0]).toBeLessThan(
-        f.deleteNow.mock.invocationCallOrder[0]!
-      );
-      expect(f.remove).not.toHaveBeenCalled();
-    } finally {
-      await f.runtime.stop();
-    }
-  });
-
-  it('binds an unbound late CREATE with its observed hash before diagnostic cleanup', async () => {
-    const unbound = {
-      ...task,
-      jobUid: null,
-      terminalCandidate: 'failed',
-    } as TaskRecord;
-    const hash = 'c'.repeat(64);
-    const f = fixture(unbound, 'job-late', 'd'.repeat(64));
-    f.observe.mockResolvedValueOnce({ ...f.observation, templateHash: hash });
-    // A tombstone re-read returns the newly bound durable row during cleanup.
-    f.tombstoneLaunch.mockResolvedValueOnce(unbound).mockResolvedValueOnce({
-      ...unbound,
-      jobUid: 'job-late',
-      templateHash: hash,
-    });
-    try {
-      expect(await f.runtime.runOnce()).toBe(true);
-      expect(f.observe).toHaveBeenCalledWith(
-        expect.objectContaining({ task: unbound }),
-        expect.any(AbortSignal)
-      );
-      expect(f.observe.mock.invocationCallOrder[0]).toBeLessThan(
-        f.bindCleanupJob.mock.invocationCallOrder[0]!
-      );
-      expect(f.bindCleanupJob).toHaveBeenCalledWith(task.id, launchId, 'job-late', hash);
-      expect(f.deleteNow).toHaveBeenCalledWith(
-        expect.objectContaining({
-          task: expect.objectContaining({ jobUid: 'job-late' }),
-        }),
-        expect.any(AbortSignal)
-      );
-      expect(f.bindCleanupJob.mock.invocationCallOrder[0]).toBeLessThan(
-        f.deleteNow.mock.invocationCallOrder[0]!
-      );
-      expect(f.remove).not.toHaveBeenCalled();
-    } finally {
-      await f.runtime.stop();
-    }
-  });
-
-  it.each(['template-mismatch', 'different-uid', 'missing-job'] as const)(
-    'never binds or deletes an unbound late CREATE after %s validation',
+  it.each(['template-mismatch', 'vanished', 'evidence-unavailable'] as const)(
+    'keeps raw removal and admission independent from %s evidence',
     async (failure) => {
-      const unbound = { ...task, jobUid: null, terminalCandidate: 'failed' } as TaskRecord;
-      const f = fixture(unbound, 'job-late', 'c'.repeat(64));
-      if (failure === 'template-mismatch')
-        f.observe.mockRejectedValueOnce(new TaskExecutorError('template_mismatch'));
-      else if (failure === 'different-uid')
-        f.observe.mockResolvedValueOnce({ ...f.observation, jobUid: 'foreign-job' });
-      else f.observe.mockResolvedValueOnce(null);
-      try {
-        expect(await f.runtime.runOnce()).toBe(false);
-        expect(f.observe).toHaveBeenCalledOnce();
-        expect(f.bindCleanupJob).not.toHaveBeenCalled();
-        expect(f.remove).not.toHaveBeenCalled();
-        expect(f.deleteNow).not.toHaveBeenCalled();
-      } finally {
-        await f.runtime.stop();
-      }
-    }
-  );
-
-  it.each(['unknown', 'different-uid', 'missing-hash'] as const)(
-    'keeps %s observed removal separate from attributed task evidence',
-    async (kind) => {
-      const fresh =
-        kind === 'unknown'
-          ? null
-          : kind === 'missing-hash'
-            ? ({ ...task, jobUid: null } as TaskRecord)
-            : task;
-      const f = fixture(fresh, 'job-not-bound');
+      const f = fixture();
+      if (failure === 'vanished') f.observe.mockResolvedValue(null);
+      else f.observe.mockRejectedValue(new TaskExecutorError('template_mismatch'));
+      if (failure !== 'vanished')
+        f.captureTermination.mockRejectedValueOnce(new TaskExecutorError('template_mismatch'));
       try {
         expect(await f.runtime.runOnce()).toBe(true);
         expect(f.remove).toHaveBeenCalledOnce();
+        expect(f.nextRemove).toHaveBeenCalledOnce();
+        expect(f.admitNext).toHaveBeenCalledOnce();
+        expect(f.observe).not.toHaveBeenCalled();
         expect(f.deleteNow).not.toHaveBeenCalled();
-        expect(f.bindCleanupJob).not.toHaveBeenCalled();
+        expect(f.tombstoneLaunch.mock.invocationCallOrder[0]).toBeLessThan(
+          f.remove.mock.invocationCallOrder[0]!
+        );
+        expect(f.captureTermination.mock.invocationCallOrder[0]).toBeLessThan(
+          f.remove.mock.invocationCallOrder[0]!
+        );
+        if (failure !== 'vanished')
+          expect(f.logs.some((log) => log.obj?.code === 'task_pod_evidence_unavailable')).toBe(
+            true
+          );
       } finally {
         await f.runtime.stop();
       }
     }
   );
 
+  it('continues later Jobs and admission when one exact-UID removal fails', async () => {
+    const f = fixture();
+    f.remove.mockRejectedValueOnce(new TaskExecutorError('api_error'));
+    try {
+      expect(await f.runtime.runOnce()).toBe(false);
+      expect(f.nextRemove).toHaveBeenCalledOnce();
+      expect(f.admitNext).toHaveBeenCalledOnce();
+      expect(f.logs.some((log) => log.obj?.code === 'task_scan_cleanup_pending')).toBe(true);
+    } finally {
+      await f.runtime.stop();
+    }
+  });
+
+  it('keeps unknown orphan removal without attributing it to any task', async () => {
+    const f = fixture(null);
+    try {
+      expect(await f.runtime.runOnce()).toBe(true);
+      expect(f.remove).toHaveBeenCalledOnce();
+      expect(f.captureTermination).not.toHaveBeenCalled();
+      expect(f.admitNext).toHaveBeenCalledOnce();
+    } finally {
+      await f.runtime.stop();
+    }
+  });
+
   it('shares one bounded production trace writer before finalizer startup and outside channel TLS', () => {
     const source = readFileSync('src/core/container.ts', 'utf8');
-    const initialization = source.indexOf(
-      'traces = createPostgresTraceStore({ pool: tracePool });'
-    );
+    const initialization = source.indexOf('traces = createPostgresTraceStore({');
     expect(initialization).toBeGreaterThan(0);
     expect(initialization).toBeLessThan(source.indexOf('await finalizer.start();'));
     expect(initialization).toBeLessThan(
       source.indexOf('if (!mergedConfig.motorCortex.enabled && channelTlsDir) {')
     );
-    expect(source.match(/createPostgresTraceStore\(\{ pool: tracePool \}\)/g)).toHaveLength(1);
+    expect(source.match(/traces = createPostgresTraceStore\(/g)).toHaveLength(1);
+    expect(source).toContain('knownSecrets: [');
+    expect(source).toContain('rawPostgres.options.password');
     expect(
       source.match(
         /createKubernetesTaskExecutor\(\{\s*\.\.\.\(traces \? \{ traces \} : \{\}\),?\s*\}\)/g

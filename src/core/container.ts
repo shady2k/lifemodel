@@ -76,7 +76,7 @@ import { createStorageControlClient } from './storage-control-client.js';
 import { createStorageRetentionReconciler } from './storage-retention.js';
 import { createPlatformSettingsReader } from '../config/platform-settings.js';
 import { createPostgresTaskRegistry } from '../storage/postgres-task-registry.js';
-import type { TaskService } from '../ports/tasks.js';
+import type { TaskRecord, TaskService } from '../ports/tasks.js';
 import { createKubernetesTaskExecutor } from './kubernetes-task-executor.js';
 import { createTaskLaunchReconciler, taskWorkbenchImage } from './task-launch.js';
 import { createTaskWorkbenchReadiness, createWorkbenchTaskService } from './task-workbench.js';
@@ -1301,7 +1301,13 @@ export async function createContainerAsync(
     });
     tracePool.on('error', () => undefined);
     tracePool.on('connect', (client) => client.on('error', () => undefined));
-    traces = createPostgresTraceStore({ pool: tracePool });
+    traces = createPostgresTraceStore({
+      pool: tracePool,
+      knownSecrets: [
+        databaseUrl,
+        ...(typeof rawPostgres.options.password === 'string' ? [rawPostgres.options.password] : []),
+      ],
+    });
     const traceStore = traces;
     stopTaskTraces = async (deadline, signal) => {
       traceAuthority?.stop();
@@ -1498,7 +1504,8 @@ export async function createContainerAsync(
           name: job.name,
           uid: job.uid,
           launchLabel: job.launchLabel,
-          templateHash: job.templateHash,
+          captureTermination: (task: TaskRecord, abortSignal: AbortSignal) =>
+            executor.capturePodTermination(job, task, abortSignal),
           remove: (abortSignal: AbortSignal) => executor.deleteJob(job, abortSignal),
         })),
       closeExecutor: () => {

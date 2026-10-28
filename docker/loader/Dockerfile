@@ -49,7 +49,8 @@ WORKDIR /build
 COPY loader/package.json loader/package-lock.json ./
 RUN npm ci
 COPY loader/ ./
-COPY src/ports/task-agent-validation.* /src/ports/
+COPY scripts/task-start-manifest.mjs /scripts/
+COPY src/ports/task-agent-validation.* src/ports/task-harness-registry.json /src/ports/
 RUN npm run build && npm prune --omit=dev
 
 # ----------------------------------------------------------------- runtime --

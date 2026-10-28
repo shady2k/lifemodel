@@ -1,6 +1,7 @@
 /** Kubernetes Jobs adapter. It has no registry, allocation or launch authority. */
 import { createHash } from 'node:crypto';
 import type { TraceWriter } from '../ports/observability.js';
+import type { TaskRecord } from '../ports/tasks.js';
 import { recordTaskPodTermination } from './task-pod-trace.js';
 import type {
   TaskExecutor,
@@ -760,6 +761,33 @@ export class KubernetesTaskExecutor implements TaskExecutor {
       job.metadata.resourceVersion,
       signal
     );
+  }
+  /** Scan evidence uses captured controller identity, never today's Job template.
+   * Its caller must keep deletion independent from this best-effort observation. */
+  async capturePodTermination(
+    observed: TaskObservedJob,
+    task: TaskRecord,
+    signal?: AbortSignal
+  ): Promise<void> {
+    if (
+      !this.options.traces ||
+      observed.name !== task.jobName ||
+      observed.launchLabel !== launchLabel(task.launchId) ||
+      (task.jobUid !== null && observed.uid !== task.jobUid)
+    )
+      return;
+    for (const pod of await this.listCoreResources('pods', signal)) {
+      if (
+        this.owners(object(pod['metadata'])).some(
+          (owner) =>
+            owner['apiVersion'] === 'batch/v1' &&
+            owner['kind'] === 'Job' &&
+            owner['controller'] === true &&
+            owner['uid'] === observed.uid
+        )
+      )
+        recordTaskPodTermination(task, pod, this.options.traces);
+    }
   }
   async deleteJob(observed: TaskObservedJob, signal?: AbortSignal): Promise<void> {
     // List observations carry captured identity scalars. Never reread mutable raw Job identity.

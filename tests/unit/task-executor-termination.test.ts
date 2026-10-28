@@ -87,9 +87,10 @@ function fixture() {
           });
           if (state.removeOnDelete) state.pods = state.pods.filter((item) => item !== current);
         } else {
+          if (!state.job) return { status: 404, body: {} };
           expect(identity).toEqual({
-            uid: state.job?.metadata.uid,
-            resourceVersion: state.job?.metadata.resourceVersion,
+            uid: state.job.metadata.uid,
+            resourceVersion: state.job.metadata.resourceVersion,
           });
           if (state.removeOnDelete) state.job = null;
         }
@@ -200,7 +201,7 @@ describe('exact-UID compute and volume cleanup confirmation', () => {
                 exitCode: 1,
                 reason: 'Error',
                 message:
-                  '{"code":"task_launcher_start_failed","errorCode":"ERR_MODULE_NOT_FOUND","module":"model-error-excerpt.js"}',
+                  '{"code":"launcher_start_failed","reasonCode":"ERR_MODULE_NOT_FOUND","module":"model-error-excerpt.js"}',
               },
             },
           },
@@ -226,6 +227,58 @@ describe('exact-UID compute and volume cleanup confirmation', () => {
           },
         },
       });
+      expect(request.mock.calls.some(([method]) => method === 'DELETE')).toBe(true);
+    }
+  );
+
+  it.each(['old-template', 'vanished'] as const)(
+    'captures exact controller evidence and removes a %s scanned Job without template GET',
+    async (mode) => {
+      const { request, state } = fixture();
+      const records: import('../../src/ports/observability.js').TraceRecord[] = [];
+      const api = createKubernetesTaskExecutor({
+        client: { request, close: vi.fn() },
+        traces: {
+          enqueue: (record) => {
+            records.push(record);
+            return true;
+          },
+        },
+      });
+      const old = renderTaskJob(launch);
+      Object.assign(old.metadata, { uid: 'job-uid', resourceVersion: '1' });
+      old.spec['activeDeadlineSeconds'] = 86400; // Invalid for today's accepted template.
+      state.job = mode === 'vanished' ? null : old;
+      const failed = pod('Failed');
+      Object.assign(failed.status!, {
+        containerStatuses: [
+          {
+            name: 'task',
+            state: {
+              terminated: { exitCode: 1, reason: 'Error', message: 'launcher_start_failed' },
+            },
+          },
+        ],
+      });
+      state.pods = [failed, pod('Failed', 'foreign', 'different-job')];
+      const observed = {
+        name: task.jobName,
+        uid: 'job-uid',
+        resourceVersion: '1',
+        launchLabel: task.launchId.slice(7, 65),
+        templateHash: 'obsolete',
+        job: old,
+      };
+      await api.capturePodTermination(observed, task);
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        kind: 'span',
+        span: { attrs: { exitCode: 1, reason: 'Error' } },
+      });
+      await api.deleteJob(observed);
+      expect(
+        request.mock.calls.some(([method, path]) => method === 'GET' && path.includes('/jobs/'))
+      ).toBe(false);
       expect(request.mock.calls.some(([method]) => method === 'DELETE')).toBe(true);
     }
   );

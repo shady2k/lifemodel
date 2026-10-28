@@ -5,7 +5,8 @@ WORKDIR /build
 COPY loader/package.json loader/package-lock.json ./
 RUN npm ci --no-audit --no-fund --ignore-scripts --no-update-notifier --loglevel=http
 COPY loader/tsconfig.json ./
-COPY src/ports/task-agent-validation.* /src/ports/
+COPY scripts/task-start-manifest.mjs /scripts/
+COPY src/ports/task-agent-validation.* src/ports/task-harness-registry.json /src/ports/
 COPY loader/src/ ./src/
 RUN npm run build
 

@@ -36,7 +36,11 @@ async function main(): Promise<void> {
   ) {
     // Load the task's actual graph, not just the offline self-check's graph.
     const { runTaskLauncher } = await import('./task-launcher.js');
-    if (process.argv[2] === '--check-modules') return;
+    if (process.argv[2] === '--check-modules') {
+      const { checkHarnessModules } = await import('./task-harness-registry.js');
+      await checkHarnessModules();
+      return;
+    }
     const controller = new AbortController();
     const abort = () => {
       controller.abort();
@@ -105,27 +109,11 @@ const START_ERROR_CODES = new Set([
   'EACCES',
   'ENOENT',
 ]);
-const START_MODULE_NAMES = new Set([
-  'task-launcher.js',
-  'task-launcher-http.js',
-  'task-harness-registry.js',
-  'task-harness-factory.js',
-  'task-harness.js',
-  'task-acp.js',
-  'task-model-relay.js',
-  'model-error-excerpt.js',
-  'task-command-intake.js',
-  'task-connection-retry.js',
-  'task-tools.js',
-  'task-trace.js',
-  'task-trace-channel.js',
-  'task-process.js',
-  'task-mcp-shim.js',
-  'task-steering-journal.js',
-  'storage-cli.js',
-  'task-agent-validation.mjs',
-  'task-harness-registry.json',
-]);
+// The build inlines the immutable source-file inventory here. An unbuilt source
+// run has no trusted inventory and reports unknown, never names from the error.
+const START_MODULE_NAMES: ReadonlySet<string> = new Set(
+  Object.freeze(/* task-start-module-manifest */ [] as string[])
+);
 
 main().catch((error: unknown) => {
   let reasonCode = 'startup_error';

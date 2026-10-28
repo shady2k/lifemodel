@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 import { createTestStores, workerDatabaseUrl, type TestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
 import { createPostgresTraceStore } from '../../src/storage/postgres-trace-store.js';
@@ -122,6 +123,32 @@ describe('doctor trace stored tree', () => {
         attrs: { taskId: 'task-2' },
       },
     });
+    const launcherDirectory = mkdtempSync(join(tmpdir(), 'doctor-launcher-start-'));
+    let startupDiagnostic: string;
+    try {
+      const main = ts.transpileModule(readFileSync('loader/src/task-launcher-main.ts', 'utf8'), {
+        compilerOptions: { target: ts.ScriptTarget.ES2024, module: ts.ModuleKind.ESNext },
+      }).outputText;
+      writeFileSync(join(launcherDirectory, 'package.json'), '{"type":"module"}');
+      writeFileSync(join(launcherDirectory, 'task-launcher-main.js'), main);
+      const failedStart = spawnSync(
+        process.execPath,
+        [join(launcherDirectory, 'task-launcher-main.js')],
+        {
+          encoding: 'utf8',
+          env: {},
+          timeout: 10_000,
+        }
+      );
+      expect(failedStart.status).toBe(1);
+      startupDiagnostic = failedStart.stderr;
+      expect(JSON.parse(startupDiagnostic)).toMatchObject({
+        code: 'launcher_start_failed',
+        reasonCode: 'ERR_MODULE_NOT_FOUND',
+      });
+    } finally {
+      rmSync(launcherDirectory, { recursive: true, force: true });
+    }
     recordTaskPodTermination(
       {
         id: 'task-start-failure',
@@ -141,8 +168,7 @@ describe('doctor trace stored tree', () => {
                   reason: 'Error',
                   startedAt,
                   finishedAt: endedAt,
-                  message:
-                    '{"code":"task_launcher_start_failed","module":"model-error-excerpt.js"}\u001b[2J token=never-print',
+                  message: `${startupDiagnostic}\u001b[2J token=never-print`,
                 },
               },
             },
@@ -173,7 +199,8 @@ describe('doctor trace stored tree', () => {
     expect(result.stdout).toContain('    task.pod [failed] 1000ms');
     expect(result.stdout).toContain('reason="Error"');
     expect(result.stdout).toContain('terminationMessage=');
-    expect(result.stdout).toContain('model-error-excerpt.js');
+    expect(result.stdout).toContain('launcher_start_failed');
+    expect(result.stdout).toContain('ERR_MODULE_NOT_FOUND');
     expect(result.stdout).toContain('untrusted=true');
     expect(result.stdout).not.toContain('never-print');
     expect(result.stdout).not.toContain('\u001b');
