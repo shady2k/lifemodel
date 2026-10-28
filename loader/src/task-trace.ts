@@ -36,7 +36,11 @@ export class AcpTaskTrace {
   private modelStartedAt: string | undefined;
   private modelStartedMono = 0;
   private model = '';
-  private requestFailureId: string | undefined;
+  private decidingRequest: TaskHarnessTraceSpan | undefined;
+  private lastRequest: TaskHarnessTraceSpan | undefined;
+  private failedRequests = 0;
+  private emittedRequests = 0;
+  private readonly firstRequests = new Set<string>();
   private modelEndedAt: string | null = null;
   private modelAttrs: Json = {};
   private usage: Json = {};
@@ -149,45 +153,63 @@ export class AcpTaskTrace {
       emitTaskTrace(this.sink, span);
     });
   }
-  request(request: TaskModelRequest): void {
+  request(request: TaskModelRequest, decides = false): void {
     this.safely(() => {
-      this.requestFailureId = undefined;
+      if (decides) this.decidingRequest = undefined;
       if (!request.failed) return;
       this.begin('');
-      const spanId = randomUUID();
-      this.requestFailureId = spanId;
+      this.failedRequests++;
       const { startedAt, endedAt, failed: _failed, ...attrs } = request;
-      emitTaskTrace(this.sink, {
-        spanId,
+      const span: TaskHarnessTraceSpan = {
+        spanId: randomUUID(),
         parentSpanId: this.modelId,
         component: 'task.model.request',
         startedAt,
         endedAt,
         status: 'failed',
         attrs: { ...attrs, severity: 'warn' },
-      });
+      };
+      this.lastRequest = span;
+      if (decides) this.decidingRequest = span;
+      if (this.firstRequests.size < 16) {
+        this.firstRequests.add(span.spanId);
+        this.emittedRequests++;
+        emitTaskTrace(this.sink, span);
+      }
     });
   }
   providerFailureSpanId(): string | undefined {
-    return this.requestFailureId;
+    return this.decidingRequest?.spanId;
   }
   promptError(): void {
     this.safely(() => {
-      if (this.requestFailureId) return;
+      if (this.decidingRequest) return;
       const now = new Date().toISOString();
-      this.request({
-        startedAt: now,
-        endedAt: now,
-        durationMs: 0,
-        attempt: 0,
-        method: 'ACP',
-        path: 'session/prompt',
-        status: null,
-        failed: true,
-        reasonCode: 'acp_prompt_error',
-        errorExcerpt: '',
-      });
+      this.request(
+        {
+          startedAt: now,
+          endedAt: now,
+          durationMs: 0,
+          attempt: 0,
+          method: 'ACP',
+          path: 'session/prompt',
+          status: null,
+          failed: true,
+          reasonCode: 'acp_prompt_error',
+          errorExcerpt: '',
+        },
+        true
+      );
     });
+  }
+  private finishRequests(): void {
+    // Reserve one observation for the deciding failure, or the last recovered
+    // warning. A storm cannot fill the channel with request observations.
+    const last = this.decidingRequest ?? this.lastRequest;
+    if (last && !this.firstRequests.has(last.spanId)) {
+      this.emittedRequests++;
+      emitTaskTrace(this.sink, last);
+    }
   }
   failModel(reasonCode: string): void {
     this.safely(() => {
@@ -212,6 +234,7 @@ export class AcpTaskTrace {
   ): void {
     this.safely(() => {
       if (!this.modelStartedAt) return;
+      this.finishRequests();
       this.reportUsage(response['usage']);
       const endedAt = new Date().toISOString();
       // A finished prompt owns no running tools. Reconcile interrupted calls so
@@ -270,6 +293,8 @@ export class AcpTaskTrace {
       status,
       attrs: {
         model: this.model,
+        failedRequests: this.failedRequests,
+        suppressed: Math.max(0, this.failedRequests - this.emittedRequests),
         ...attrs,
         durationMs: Math.max(0, performance.now() - this.modelStartedMono),
         ...this.usage,

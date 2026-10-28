@@ -1,10 +1,11 @@
 /** Generic ACP + real loopback relay + stub TLS upstream. No agent/provider implementation. */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createServer } from 'node:https';
+import { request as httpRequest } from 'node:http';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AcpTaskHarness } from '../../loader/src/task-acp.js';
+import { AcpTaskHarness, AcpTurn } from '../../loader/src/task-acp.js';
 import { createTaskModelRelay, type TaskModelRequest } from '../../loader/src/task-model-relay.js';
 import type { TaskHarnessEvent } from '../../loader/src/task-harness.js';
 import {
@@ -27,7 +28,7 @@ for line in sys.stdin:
     elif method == "session/new":
         send({"id": msg["id"], "result": {"sessionId": "test"}})
     elif method == "session/prompt":
-        for attempt in range(2 if scenario == "recover" else 1):
+        for attempt in range(3 if scenario == "exhausted" else 2 if scenario == "recover" else 1):
             req = urllib.request.Request(os.environ["RELAY"] + "/chat/completions", data=b'PRIVATE-PROMPT-CANARY', headers={"Authorization": "Bearer AUTHORIZATION-CANARY"})
             try:
                 urllib.request.urlopen(req).read()
@@ -67,7 +68,9 @@ describe('model request failures are observations, not permanent task failure', 
       req.resume();
       expect(req.headers['x-lifemodel-task-token']).toBe(TOKEN);
       expect(req.headers.authorization).toBeUndefined();
-      res.writeHead(++attempts === 1 ? status : 200, { 'content-type': 'application/json' });
+      res.writeHead(++attempts === 1 || scenario === 'exhausted' ? status : 200, {
+        'content-type': 'application/json',
+      });
       res.end(
         typeof error === 'string'
           ? error
@@ -140,10 +143,11 @@ describe('model request failures are observations, not permanent task failure', 
     }
   );
 
-  it.each(['prompt-error', 'abnormal'])(
+  it.each(['prompt-error', 'abnormal', 'exhausted'])(
     'links provider_error to its deciding request on %s',
     async (scenario) => {
-      const { result, spans } = await run(429, scenario);
+      const { result, spans, attempts } = await run(429, scenario);
+      if (scenario === 'exhausted') expect(attempts).toBe(3);
       expect(result).toMatchObject({ outcome: 'failed', reasonCode: 'provider_error' });
       expect(spans.find((span) => span.spanId === result.failureSpanId)).toMatchObject({
         component: 'task.model.request',
@@ -168,6 +172,95 @@ describe('model request failures are observations, not permanent task failure', 
       },
     });
     expect(JSON.stringify(spans)).not.toContain('RAW-ACP-ERROR-CANARY');
+  });
+
+  it.each(['older-success', 'older-failure', 'model-list'] as const)(
+    'keeps completion start ordering through concurrent relay requests: %s',
+    async (mode) => {
+      let arrivals = 0;
+      const firstArrived = Promise.withResolvers<void>();
+      const releaseFirst = Promise.withResolvers<void>();
+      const upstream = createServer(
+        { cert: certificate.cert, key: certificate.key },
+        (req, res) => {
+          req.resume();
+          const first = ++arrivals === 1;
+          const answer = () => {
+            res.writeHead(
+              (mode === 'older-failure' ? first : !first) && req.method === 'POST' ? 429 : 200
+            );
+            res.end(JSON.stringify({ error: { message: 'Capacity exhausted' } }));
+          };
+          if (first) {
+            firstArrived.resolve();
+            void releaseFirst.promise.then(answer);
+          } else answer();
+        }
+      );
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const address = upstream.address();
+      if (!address || typeof address === 'string') throw new Error('no listener');
+      const events: TaskHarnessEvent[] = [];
+      const turn = new AcpTurn(undefined, (event) => {
+        events.push(event);
+      });
+      turn.begin('task/model');
+      const relay = await createTaskModelRelay({
+        modelEndpoint: `https://localhost:${address.port}`,
+        modelTokenFile: join(directory, 'token'),
+        modelCaFile: join(directory, 'ca'),
+        timeoutMs: 2000,
+        onRequest: (request) => turn.modelRequest(request),
+      });
+      const post = () =>
+        fetch(`${relay.baseURL}/chat/completions`, { method: 'POST', body: PROMPT }).then((res) =>
+          res.text()
+        );
+      try {
+        const first = post();
+        await firstArrived.promise;
+        await post();
+        if (mode === 'model-list') await fetch(`${relay.baseURL}/models`).then((res) => res.text());
+        releaseFirst.resolve();
+        await first;
+        turn.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Final text' },
+        });
+        const result = turn.result('end_turn');
+        turn.finish(result, { stopReason: 'end_turn' });
+        await Promise.resolve();
+        expect(result.outcome).toBe(mode === 'older-failure' ? 'succeeded' : 'failed');
+        if (mode !== 'older-failure')
+          expect(
+            events.find(
+              (event) => event.type === 'trace' && event.span.spanId === result.failureSpanId
+            )
+          ).toMatchObject({ type: 'trace', span: { attrs: { attempt: 2 } } });
+      } finally {
+        releaseFirst.resolve();
+        await relay.close();
+        upstream.closeAllConnections();
+        await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      }
+    }
+  );
+
+  it('drops rejected prompt echoes in the relay excerpt and redacts masked keys', async () => {
+    const echoed = await run(500, 'prompt-error', {
+      message: `input_value='${PROMPT}'`,
+      type: 'validation_error',
+      code: 'invalid',
+    });
+    const masked = await run(500, 'prompt-error', { message: 'rejected sk-or-v1-ab…z and sk-…' });
+    expect(
+      echoed.spans.find((span) => span.component === 'task.model.request')!.attrs.errorExcerpt
+    ).toBe('validation_error; invalid');
+    expect(JSON.stringify(echoed.spans)).not.toContain(PROMPT);
+    expect(JSON.stringify(masked.spans)).not.toContain('sk-');
+    expect(
+      masked.spans.find((span) => span.component === 'task.model.request')!.attrs.errorExcerpt
+    ).toBe('rejected [redacted] and [redacted]');
   });
 
   it('bounds error fields and excludes headers, token text, prompts and raw ACP errors', async () => {
@@ -208,7 +301,7 @@ describe('model request failures are observations, not permanent task failure', 
     expect(JSON.stringify(spans)).not.toContain('CANARY');
   });
 
-  it.each(['transport', 'timeout', 'stream'] as const)(
+  it.each(['transport', 'timeout', 'stream', 'client-close'] as const)(
     'records one bounded %s failure, even after response headers',
     async (mode) => {
       const upstream = createServer(
@@ -216,6 +309,10 @@ describe('model request failures are observations, not permanent task failure', 
         (req, res) => {
           req.resume();
           if (mode === 'transport') req.socket.destroy();
+          if (mode === 'client-close') {
+            res.writeHead(200, { 'content-type': 'text/event-stream' });
+            res.write('data: partial\n\n');
+          }
           if (mode === 'stream') {
             res.writeHead(200, { 'content-type': 'text/event-stream' });
             res.write('data: partial\n\n', () => res.socket?.destroy());
@@ -237,17 +334,38 @@ describe('model request failures are observations, not permanent task failure', 
         },
       });
       try {
-        await fetch(`${relay.baseURL}/chat/completions`, { method: 'POST', body: PROMPT })
-          .then((response) => response.text())
-          .catch(() => undefined);
+        if (mode === 'client-close') {
+          await new Promise<void>((resolve, reject) => {
+            const req = httpRequest(
+              `${relay.baseURL}/chat/completions`,
+              { method: 'POST' },
+              (res) => {
+                res.once('data', () => {
+                  res.destroy();
+                  resolve();
+                });
+              }
+            );
+            req.on('error', reject);
+            req.end(PROMPT);
+          });
+        } else
+          await fetch(`${relay.baseURL}/chat/completions`, { method: 'POST', body: PROMPT })
+            .then((response) => response.text())
+            .catch(() => undefined);
         await expect.poll(() => observations.length).toBe(1);
         expect(observations[0]).toMatchObject({
-          failed: true,
+          failed: mode !== 'client-close',
           attempt: 1,
           errorExcerpt: '',
-          reasonCode: mode === 'timeout' ? 'model_timeout' : 'model_transport_failed',
+          reasonCode:
+            mode === 'client-close'
+              ? 'client_closed'
+              : mode === 'timeout'
+                ? 'model_timeout'
+                : 'model_transport_failed',
         });
-        if (mode === 'stream') expect(observations[0]!.status).toBe(200);
+        if (mode === 'stream' || mode === 'client-close') expect(observations[0]!.status).toBe(200);
         else expect(observations[0]!.status).toBeNull();
       } finally {
         await relay.close();

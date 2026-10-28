@@ -65,6 +65,15 @@ export async function createTaskModelRelay(options: TaskModelRelayOptions): Prom
       outgoing.writeHead(404).end();
       return;
     }
+    // Inspect only a bounded copy; never delay/replay the streamed POST. If it
+    // exceeds the gateway's 1 MiB request limit, omit excerpts entirely.
+    let requestBytes = 0;
+    const requestChunks: Buffer[] = [];
+    const captureRequest = (chunk: Buffer) => {
+      requestBytes += chunk.length;
+      if (requestBytes <= 1_048_576) requestChunks.push(chunk);
+      else requestChunks.length = 0;
+    };
     const cancellation = new AbortController();
     const timeout = AbortSignal.timeout(options.timeoutMs ?? 300_000);
     const deadline = AbortSignal.any([timeout, cancellation.signal]);
@@ -88,6 +97,10 @@ export async function createTaskModelRelay(options: TaskModelRelayOptions): Prom
     const report = (failed: boolean, reasonCode?: string) => {
       if (recorded) return;
       recorded = true;
+      if (cancellation.signal.aborted && !timeout.aborted) {
+        failed = false;
+        reasonCode = 'client_closed';
+      }
       try {
         options.onRequest?.({
           startedAt,
@@ -100,8 +113,12 @@ export async function createTaskModelRelay(options: TaskModelRelayOptions): Prom
           failed,
           ...(reasonCode ? { reasonCode } : {}),
           errorExcerpt:
-            size <= MODEL_ERROR_BODY_LIMIT
-              ? modelErrorExcerpt(Buffer.concat(chunks).toString('utf8'), [token])
+            size <= MODEL_ERROR_BODY_LIMIT && requestBytes <= 1_048_576
+              ? modelErrorExcerpt(
+                  Buffer.concat(chunks).toString('utf8'),
+                  [token],
+                  Buffer.concat(requestChunks).toString('utf8')
+                )
               : '',
         });
       } catch {
@@ -170,7 +187,10 @@ export async function createTaskModelRelay(options: TaskModelRelayOptions): Prom
                 });
                 // Only GET is replayable. Never buffer or resend a streamed completion.
                 if (method === 'GET') upstream.end();
-                else incoming.pipe(upstream);
+                else {
+                  incoming.on('data', captureRequest);
+                  incoming.pipe(upstream);
+                }
               });
             } catch (error) {
               report(

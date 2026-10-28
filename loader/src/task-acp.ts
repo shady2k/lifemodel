@@ -47,6 +47,7 @@ export class AcpTurn {
   private messageId: string | undefined;
   private providerFailed = false;
   private modelRequestFailed = false;
+  private completionAttempt = 0;
   constructor(
     private readonly toolOutputFailed: (output: unknown, input?: unknown) => boolean = () => false,
     onEvent?: TaskHarnessEventSink
@@ -158,8 +159,18 @@ export class AcpTurn {
     return typeof id === 'string' ? this.tools.get(id)?.status : undefined;
   }
   modelRequest(request: TaskModelRequest): void {
-    this.modelRequestFailed = request.failed;
-    this.trace.request(request);
+    // Start ordinal orders completion requests, not callback timing. A stale
+    // overlapping result or model-list success cannot recover a newer failure.
+    const decides =
+      request.method === 'POST' &&
+      request.path === '/v1/chat/completions' &&
+      request.reasonCode !== 'client_closed' &&
+      request.attempt >= this.completionAttempt;
+    if (decides) {
+      this.completionAttempt = request.attempt;
+      this.modelRequestFailed = request.failed;
+    }
+    this.trace.request(request, decides);
   }
   error(): void {
     this.providerFailed = true;
@@ -167,7 +178,7 @@ export class AcpTurn {
   }
   result(stopReason: unknown): TaskHarnessResult {
     if (stopReason === 'cancelled') return aborted();
-    if (this.providerFailed || (stopReason !== 'end_turn' && this.modelRequestFailed)) {
+    if (this.providerFailed || this.modelRequestFailed) {
       const failureSpanId = this.trace.providerFailureSpanId();
       return { ...failed('provider_error'), ...(failureSpanId ? { failureSpanId } : {}) };
     }

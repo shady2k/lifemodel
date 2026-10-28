@@ -2,6 +2,34 @@ import { describe, expect, it } from 'vitest';
 import { modelErrorExcerpt } from '../../loader/src/model-error-excerpt.js';
 
 describe('model error excerpt allowlist', () => {
+  it('rejects any shared 16-character input window, including JSON-escaped text', () => {
+    const prompt = 'secret input across windows and newlines\nwhich must not escape';
+    const request = JSON.stringify({ messages: [{ content: prompt }] });
+    expect(
+      modelErrorExcerpt(
+        JSON.stringify({ error: { message: `input_value='${prompt}'`, type: 'validation' } }),
+        [],
+        request
+      )
+    ).toBe('validation');
+    expect(
+      modelErrorExcerpt(
+        JSON.stringify({
+          error: { message: `prefix ${prompt.slice(7, 23)} suffix`, type: 'validation' },
+        }),
+        [],
+        request
+      )
+    ).toBe('validation');
+    expect(
+      modelErrorExcerpt(
+        JSON.stringify({ error: { message: 'ordinary independent capacity error' } }),
+        [],
+        request
+      )
+    ).toBe('ordinary independent capacity error');
+  });
+
   it('uses message first, falls back to type/code, and strips control characters', () => {
     expect(
       modelErrorExcerpt(

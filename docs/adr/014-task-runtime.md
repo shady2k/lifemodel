@@ -212,26 +212,42 @@ D1's “no provider error” means no terminal ACP prompt error, not zero failed
 HTTP requests. An intermediate model request the agent recovers from never
 fails the task. The completion barrier, normal turn end, final text, required-tool
 checks and cleanup still apply to every harness. `provider_error` names an ACP
-prompt error or an abnormal turn with an outstanding model-request failure.
-A normal turn without final text remains `no_final_result`.
+prompt error or a last finished completion POST that failed without a later
+successful completion, even when the harness prints error text and returns
+`end_turn` (coordinator decision, 2026-10-28). Completion requests are ordered by
+start ordinal, not callback arrival: an older concurrent success or a model-list
+GET cannot recover a newer failed completion. Client-closed requests are not
+provider failures. A normal recovered turn without final text remains
+`no_final_result`.
 
 Each failed relay request is a `task.model.request` child of `task.model`, with
 failed status and warning severity, HTTP status (null without a response), method,
 allowlisted path without query, duration and attempt ordinal. Failed children
-remain visible under a successful model/task. An unrecovered provider failure
+remain visible under a successful model/task. Retain the first 16 failure
+observations plus the deciding failure (or last warning) at completion, at most
+17 request spans. `task.model` records `failedRequests` and `suppressed` counts.
+Request storms cannot exhaust trace capacity reserved for ordinary task work;
+transport/intake remains best effort. An unrecovered provider failure
 links `failureSpanId` to its deciding request; a prompt error with no outstanding
 request failure gets a safe ACP error observation. Excerpts are at most 300 UTF-8
 bytes, selected only from upstream JSON `error.message`, `error.type`, or
 `error.code`. No raw body, headers, prompts or raw ACP error is recorded; known
-credentials are redacted and credential-bearing fields omitted. Oversized or
-non-JSON error bodies have no excerpt. Gateway failure warnings include status,
+credentials and masked key forms are redacted and credential-bearing fields
+omitted. Gateway and relay omit any candidate field sharing a 16-character
+window with request content and fall back to safe type/code. The relay inspects
+at most 1 MiB of request data without replay; larger requests have no excerpt.
+Oversized or non-JSON error bodies have no excerpt. Gateway failure warnings include status,
 slot route and trusted task/trace identity even if reserve recovers. The gateway
 already obtains that trace context from task authorization, not caller headers.
 
 D3's retained-partial-output rule includes regular files in the launcher's
 `outputs/` folder after failed or aborted harness completion. Validate, upload
-and mark them under the same limits as successful output. They are diagnostic
-partial objects, never attachments to a successful owner reply. Already marked
+and mark them under the same limits as successful output. For an unsuccessful
+harness outcome, collection is best effort: skip bad entries, catch upload/list
+failures, and record bounded reason counts in a warning `task.outputs` span.
+Never replace its original outcome, reason or deciding `failureSpanId` with an
+output error. Successful tasks still fail closed on output errors. These are
+diagnostic partial objects, never attachments to a successful owner reply. Already marked
 objects survive later transfer failures; hard deletion cannot retain bytes that
 were never uploaded. Sealing and public-outcome policy are unchanged.
 
