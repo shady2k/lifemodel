@@ -286,12 +286,14 @@ export class ToolRegistry {
   /**
    * Get all tools in OpenAI Chat Completions format (full schemas).
    * Used for native tool calling via the `tools` parameter.
+   * Name order is independent of plugin registration/reload order for prefix caching.
    * core.tools is excluded — with full schemas always sent, the meta-tool is redundant.
    * It remains registered internally (callable if referenced in history).
    */
   getToolsAsOpenAIFormat(): OpenAIChatTool[] {
     return Array.from(this.tools.values())
       .filter((tool) => tool.name !== 'core.tools')
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
       .map((tool) => toolToOpenAIFormat(tool) as OpenAIChatTool);
   }
 
@@ -306,7 +308,10 @@ export class ToolRegistry {
   getToolsWithLazySchema(): (OpenAIChatTool | MinimalOpenAIChatTool)[] {
     const result: (OpenAIChatTool | MinimalOpenAIChatTool)[] = [];
 
-    for (const tool of this.tools.values()) {
+    const sortedTools = Array.from(this.tools.values()).sort((a, b) =>
+      a.name < b.name ? -1 : a.name > b.name ? 1 : 0
+    );
+    for (const tool of sortedTools) {
       if (tool.name === 'core.tools') {
         // Meta-tool gets full schema so LLM knows how to call it
         result.push(toolToOpenAIFormat(tool) as OpenAIChatTool);

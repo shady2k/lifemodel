@@ -2,9 +2,9 @@
  * System Prompt Builder
  *
  * Builds the system prompt for the agentic loop.
- * NOTE: The system prompt is runtime-dynamic (timestamp, timezone, useSmart).
- * Only static fragments (fixed headings) may be module-scoped constants;
- * never cache the full system prompt.
+ * Keep identity and fixed instructions before all per-turn data. Time, timezone,
+ * runtime state and trigger context belong in the trigger prompt, not here.
+ * The prefix stays byte-identical while the configured identity stays unchanged.
  *
  * Uses XML tags to separate semantic zones (identity, instructions, output format)
  * so weaker models don't confuse instructions with expected output.
@@ -12,10 +12,9 @@
  * Pure function — no state mutation.
  */
 
-import { getEffectiveTimezone } from '../../../utils/date.js';
 import type { LoopContext } from '../agentic-loop-types.js';
 
-export function buildSystemPrompt(context: LoopContext, useSmart: boolean): string {
+export function buildSystemPrompt(context: LoopContext, _useSmart: boolean): string {
   const agentName = context.agentIdentity?.name ?? 'Life';
   const agentGender = context.agentIdentity?.gender ?? 'neutral';
 
@@ -26,28 +25,6 @@ export function buildSystemPrompt(context: LoopContext, useSmart: boolean): stri
         ? 'When referring to YOURSELF, use masculine grammatical forms (e.g., Russian: "я рад", "я готов", "я исправил"). This is YOUR gender, not the user\'s.'
         : 'Use neutral grammatical forms when referring to yourself when possible.';
 
-  // Current time for temporal reasoning (age calculations, time-of-day awareness)
-  const now = new Date();
-  const effectiveTimezone = getEffectiveTimezone(
-    context.userModel['defaultTimezone'] as string | undefined,
-    context.userModel['timezoneOffset'] as number | null | undefined
-  );
-
-  // Use 24-hour format for clarity - LLMs often misinterpret AM/PM
-  const dateTimeOptions: Intl.DateTimeFormatOptions = {
-    weekday: 'long',
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-    timeZone: effectiveTimezone,
-    timeZoneName: 'short',
-  };
-
-  const currentDateTime = now.toLocaleString('en-US', dateTimeOptions);
-
   return `<identity>
 You are ${agentName} — a digital companion, not a chatbot.
 ${genderNote}
@@ -57,8 +34,6 @@ You are competent and proactive. You have perfect recall through your tools —
 never make the user repeat themselves. When they reference the past, look it up.
 Think before you ask.
 </identity>
-
-<current_time timezone="${effectiveTimezone}">${currentDateTime}</current_time>
 
 <instructions>
 Respond directly when you can answer from conversation context. Use tools when needed — whether the user asks, or you notice something yourself. Simple messages (acknowledgments, small talk, confirmations, "ok", "thanks", farewells) need no tool calls at all. If multiple tools are needed: core.say first, then tools, then respond.
@@ -71,7 +46,7 @@ IMPORTANT: When user asks to "show", "get", "list" or "what is" current data (fo
 Call core.escalate if genuinely uncertain and need deeper reasoning (fast model only).
 The timestamp in <current_time> is the authoritative present moment. Use it for all time reasoning (greetings, "now", "today", scheduling). Ignore times in conversation history — they are past. Do NOT call core.time for current time. core.time is ONLY for timezone conversions or elapsed time calculations.
 CRITICAL: When working with dates, ALWAYS check <current_time> first. Use the current YEAR from there — do not assume or calculate years on your own. For relative dates, prefer tool keywords ("today", "yesterday", "tomorrow") over manual date arithmetic.
-The user's timezone is ${effectiveTimezone}. Always present times in this timezone.
+The timezone attribute of <current_time> is the user's timezone. Always present times in this timezone.
 Use Runtime Snapshot if provided. Call core.state only for precise or missing state.
 Pass null for optional params, not placeholders.
 Your JSON response is FINAL — nothing happens after it. If you need to look something up or perform an action, call tools BEFORE responding. To tell the user "one moment" while you work, call core.say first, then call tools, then output your final JSON response with the result. Never promise future actions in your JSON response — either do them now via tool calls or don't promise. Exception: after core.startTask confirms acceptance, say the work has started and you will reply when it ends; never wait for task execution in this turn.
@@ -79,12 +54,7 @@ core.say sends a message IMMEDIATELY. The user already sees it. Your final outpu
 core.thought: ONLY for genuine unresolved questions you want to figure out. Not action items, not narration, not plans.
 TOOL CALL RETRY: When a tool fails validation, ALWAYS call it again with corrected parameters. Your final output MUST be JSON ({"response": "text"}), never plain text. Only stop retrying if you see the same error repeatedly.
 Never mention internal constructs (desires, pressure, social debt, active_desires) in messages to the user, in any language.
-NEVER describe performing actions in text instead of calling tools. If you need to act (search, fetch, read, write, run a task), you MUST call the tool. Writing "I will run a task" or "Run ID: ..." without a tool call means NOTHING happens. Do not fabricate IDs, results, or statuses — call the tool and use its real output.${
-    useSmart
-      ? ''
-      : `
-If response needs state, call core.state first (unless snapshot answers it).`
-  }
+NEVER describe performing actions in text instead of calling tools. If you need to act (search, fetch, read, write, run a task), you MUST call the tool. Writing "I will run a task" or "Run ID: ..." without a tool call means NOTHING happens. Do not fabricate IDs, results, or statuses — call the tool and use its real output.
 </instructions>
 
 <memory_rules>

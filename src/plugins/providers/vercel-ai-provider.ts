@@ -421,7 +421,11 @@ export class VercelAIProvider extends BaseLLMProvider {
 
     const aiTools: Record<string, unknown> = {};
 
-    for (const t of tools) {
+    // Keep native tool definitions deterministic even for non-cognition callers.
+    const sortedTools = [...tools].sort((a, b) =>
+      a.function.name < b.function.name ? -1 : a.function.name > b.function.name ? 1 : 0
+    );
+    for (const t of sortedTools) {
       const fn = t.function;
       // Check if this is OpenAIChatTool (has parameters) or MinimalOpenAIChatTool
       if ('parameters' in fn) {
@@ -465,7 +469,11 @@ export class VercelAIProvider extends BaseLLMProvider {
   ): Record<string, unknown>[] | undefined {
     if (!tools || tools.length === 0) return undefined;
 
-    return tools.map((t) => {
+    // Match the SDK tool order, including the fetch interceptor's raw replacement.
+    const sortedTools = [...tools].sort((a, b) =>
+      a.function.name < b.function.name ? -1 : a.function.name > b.function.name ? 1 : 0
+    );
+    return sortedTools.map((t) => {
       const fn = t.function;
       if ('parameters' in fn) {
         // Full tool — include the actual parameter schema

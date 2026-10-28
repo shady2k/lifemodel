@@ -6,6 +6,7 @@
  */
 
 import type { Signal } from '../../../types/signal.js';
+import { getEffectiveTimezone } from '../../../utils/date.js';
 import { buildRunningTasksSection } from './running-tasks.js';
 import { renderReplyQuote } from './reply-quote.js';
 import type { LoopContext } from '../agentic-loop-types.js';
@@ -36,11 +37,17 @@ import { validateTaskOutcome } from '../../../ports/task-outcome.js';
 
 /**
  * Build trigger prompt for current context.
- * Contains: user profile, recent thoughts, runtime snapshot, completed actions, current trigger.
+ * Contains: current time, user profile, recent thoughts, runtime snapshot, completed actions, trigger.
+ * All per-turn data stays after the stable system instructions and native tool definitions.
  * Conversation history is injected as proper OpenAI messages separately.
  */
 export function buildTriggerPrompt(context: LoopContext, useSmart = false): string {
-  const sections: string[] = [];
+  const sections: string[] = [buildCurrentTimeSection(context)];
+  if (!useSmart) {
+    sections.push(
+      '<model_instructions>If response needs state, call core.state first (unless snapshot answers it).</model_instructions>'
+    );
+  }
 
   // User profile (stable facts)
   const userProfile = buildUserProfileSection(context);
@@ -133,6 +140,33 @@ export function buildTriggerPrompt(context: LoopContext, useSmart = false): stri
   sections.push(buildTriggerSection(context.triggerSignal, context));
 
   return sections.join('\n\n');
+}
+
+/** Current time is per-turn context, never part of the stable instruction prefix. */
+function buildCurrentTimeSection(context: LoopContext): string {
+  // Current time for temporal reasoning (age calculations, time-of-day awareness)
+  const now = new Date();
+  const effectiveTimezone = getEffectiveTimezone(
+    context.userModel['defaultTimezone'] as string | undefined,
+    context.userModel['timezoneOffset'] as number | null | undefined
+  );
+
+  // Use 24-hour format for clarity - LLMs often misinterpret AM/PM
+  const dateTimeOptions: Intl.DateTimeFormatOptions = {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    timeZone: effectiveTimezone,
+    timeZoneName: 'short',
+  };
+
+  const currentDateTime = now.toLocaleString('en-US', dateTimeOptions);
+
+  return `<current_time timezone="${effectiveTimezone}">${currentDateTime}</current_time>`;
 }
 
 function buildTriggerSection(signal: Signal, context: LoopContext): string {
