@@ -9,6 +9,8 @@
  * (`createLLMProvider` in `src/core/container.ts`) cannot disagree about it.
  */
 
+import type { ReasoningEffort } from './reasoning-effort.js';
+
 /** The three roles lifemodel asks a model for. */
 export const ENDPOINT_ROLES = ['fast', 'smart', 'motor'] as const;
 
@@ -24,10 +26,14 @@ export interface ModelEndpoint {
   fastModel: string | null;
   smartModel: string | null;
   motorModel: string | null;
+  fastReasoningEffort?: ReasoningEffort | null;
+  smartReasoningEffort?: ReasoningEffort | null;
+  motorReasoningEffort?: ReasoningEffort | null;
 }
 
 /** The endpoint's fields, in the words the interface shows. */
-export const ENDPOINT_FIELDS: readonly { field: keyof ModelEndpoint; label: string }[] = [
+export type RequiredEndpointField = 'baseUrl' | 'fastModel' | 'smartModel' | 'motorModel';
+export const ENDPOINT_FIELDS: readonly { field: RequiredEndpointField; label: string }[] = [
   { field: 'baseUrl', label: 'the endpoint base URL' },
   { field: 'fastModel', label: 'the fast model' },
   { field: 'smartModel', label: 'the smart model' },
@@ -50,7 +56,7 @@ export function isEndpointFieldSet(endpoint: ModelEndpoint): boolean {
  */
 export function endpointGaps(
   endpoint: ModelEndpoint
-): { field: keyof ModelEndpoint; label: string }[] {
+): { field: RequiredEndpointField; label: string }[] {
   if (!isEndpointFieldSet(endpoint)) return [];
   return ENDPOINT_FIELDS.filter(({ field }) => (endpoint[field] ?? '') === '');
 }

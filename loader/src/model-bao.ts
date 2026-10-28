@@ -1,5 +1,6 @@
 /** Shared in-memory Kubernetes-auth client and model-slot reader (ADR-013 D3). */
 import { readFile } from 'node:fs/promises';
+import { isReasoningEffort } from './reasoning-effort.js';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import {
@@ -290,6 +291,7 @@ export function createRoleBaoClient(options: RoleBaoOptions) {
       !['openai', 'ollama'].includes(String(value['kind'])) ||
       typeof value['baseUrl'] !== 'string' ||
       typeof value['model'] !== 'string' ||
+      (value['reasoningEffort'] !== undefined && !isReasoningEffort(value['reasoningEffort'])) ||
       (value['key'] !== undefined && typeof value['key'] !== 'string') ||
       typeof version !== 'number' ||
       !Number.isInteger(version) ||

@@ -97,6 +97,55 @@ const endpoint = {
 };
 
 describe('settings server writes its config boundary', () => {
+  it('rejects non-string JSON efforts without clearing a saved effort or reloading', async () => {
+    await startServer();
+    document = {
+      version: 1,
+      llm: {
+        endpoint: {
+          baseUrl: endpoint.endpointBaseUrl,
+          fastModel: 'fast',
+          smartModel: 'smart',
+          motorModel: 'motor',
+          fastReasoningEffort: 'none',
+          smartReasoningEffort: 'low',
+          motorReasoningEffort: 'high',
+        },
+      },
+    };
+    const original = structuredClone(document);
+    const url = server.address();
+    for (const field of ['fastReasoningEffort', 'smartReasoningEffort', 'motorReasoningEffort']) {
+      for (const value of [true, null, [], ['low'], 3, {}]) {
+        const response = await fetch(`${url}/settings`, {
+          method: 'POST',
+          headers: { origin: url, 'content-type': 'application/json' },
+          body: JSON.stringify({ ...endpoint, [field]: value }),
+        });
+        expect(response.status).toBe(400);
+        expect(await response.text()).toContain('reasoning effort must be a string');
+        expect(document).toEqual(original);
+        expect(saved).toBe(0);
+      }
+    }
+  });
+  it('rejects invalid effort even with a platform-pinned endpoint', async () => {
+    const previous = process.env['LIFEMODEL_MODEL_BASE_URL'];
+    process.env['LIFEMODEL_MODEL_BASE_URL'] = endpoint.endpointBaseUrl;
+    try {
+      await startServer();
+      for (const field of ['fastReasoningEffort', 'smartReasoningEffort', 'motorReasoningEffort']) {
+        const result = await request('/settings', { ...endpoint, [field]: 'maximum' });
+        expect(result.status).toBe(400);
+        expect(result.body).toContain('reasoning effort must be blank');
+        expect(document).toBeNull();
+        expect(saved).toBe(0);
+      }
+    } finally {
+      if (previous === undefined) delete process.env['LIFEMODEL_MODEL_BASE_URL'];
+      else process.env['LIFEMODEL_MODEL_BASE_URL'] = previous;
+    }
+  });
   it('renders the configured loader name, independent of the Host port', async () => {
     await startServer();
     const result = await request('/');

@@ -1099,6 +1099,86 @@ describe('loader password change', () => {
 });
 
 describe('loader static UI and JSON API', () => {
+  it('saves, reads and clears slot effort, and refuses invalid values before checking or writing', async () => {
+    const record = await hashPassword('owner password');
+    const saved: Record<string, ModelSlot | null> = { primary: null, reserve: null };
+    const checked: ModelSlot[] = [];
+    const { base, clock } = await start(
+      record,
+      undefined,
+      {
+        read: async (slot) => saved[slot]!,
+        write: async (slot, value) => {
+          saved[slot] = value;
+        },
+        clearReserve: async () => {
+          saved.reserve = null;
+        },
+      },
+      async (slot) => {
+        checked.push(slot);
+      }
+    );
+    const cookie = `__Host-lm_session=${createSession(record, clock.now())}`;
+    const csrf = JSON.parse(
+      (await request(base, '/api/state', { host: 'boot-lifemodel.local', cookie })).body
+    ).csrfToken as string;
+    const headers = {
+      host: 'boot-lifemodel.local',
+      cookie,
+      origin: 'https://boot-lifemodel.local',
+      'content-type': 'application/json',
+      'x-csrf-token': csrf,
+    };
+    for (const name of ['primary', 'reserve'] as const) {
+      const value = { kind: 'openai', baseUrl: 'https://model.example/v1', model: 'm' };
+      for (const reasoningEffort of ['none', 'minimal', 'low', 'medium', 'high']) {
+        const result = await request(
+          base,
+          `/api/model/${name}`,
+          headers,
+          'PUT',
+          JSON.stringify({ ...value, reasoningEffort })
+        );
+        expect(result.status).toBe(200);
+        expect(saved[name]?.reasoningEffort).toBe(reasoningEffort);
+        expect(checked.at(-1)?.reasoningEffort).toBe(reasoningEffort);
+        expect(JSON.parse(result.body).slot.reasoningEffort).toBe(reasoningEffort);
+      }
+      const reads = await request(base, '/api/model', headers);
+      expect(JSON.parse(reads.body)[name].reasoningEffort).toBe('high');
+      const count = checked.length;
+      for (const reasoningEffort of ['maximum', null, 2, true]) {
+        const result = await request(
+          base,
+          `/api/model/${name}`,
+          headers,
+          'PUT',
+          JSON.stringify({ ...value, reasoningEffort })
+        );
+        expect(result.status).toBe(400);
+        expect(JSON.parse(result.body)).toEqual({ error: 'reasoning_effort_invalid' });
+        expect(saved[name]?.reasoningEffort).toBe('high');
+      }
+      expect(checked).toHaveLength(count);
+      expect(
+        (await request(base, `/api/model/${name}`, headers, 'PUT', JSON.stringify(value))).status
+      ).toBe(200);
+      expect(saved[name]?.reasoningEffort).toBe('high');
+      expect(
+        (
+          await request(
+            base,
+            `/api/model/${name}`,
+            headers,
+            'PUT',
+            JSON.stringify({ ...value, reasoningEffort: '' })
+          )
+        ).status
+      ).toBe(200);
+      expect(saved[name]).not.toHaveProperty('reasoningEffort');
+    }
+  });
   it('serves the built app and anonymous state without core or web dependencies', async () => {
     const fixture = mkdtempSync(join(tmpdir(), 'loader-ui-fixture-'));
     roots.push(fixture);

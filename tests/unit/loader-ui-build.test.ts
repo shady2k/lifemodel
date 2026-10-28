@@ -131,6 +131,7 @@ describe('loader UI build inputs from outside web/loader', () => {
     const imported = outsideLoaderImports(loaderRoot);
     expect(imported).toContain('src/web/model-status.ts');
     expect(imported).toContain('src/web/contract.ts');
+    expect(imported).toContain('loader/src/reasoning-effort.ts');
     const admitted = dockerignore({ ignorecase: false }).add(readFileSync('.dockerignore', 'utf8'));
     const copied = dockerignore({ ignorecase: false }).add(
       uiBuildCopySources(readFileSync('docker/loader/Dockerfile', 'utf8'))

@@ -43,6 +43,75 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 describe('loader UI', () => {
+  it('loads, edits and clears effort beside each model and sends it on save', async () => {
+    await i18n.changeLanguage('en');
+    const writes: { url: string; body: Record<string, unknown> }[] = [];
+    const slots = {
+      primary: {
+        kind: 'openai',
+        baseUrl: 'https://primary.example/v1',
+        model: 'primary',
+        keySet: false,
+        reasoningEffort: 'none',
+      },
+      reserve: {
+        kind: 'openai',
+        baseUrl: 'https://reserve.example/v1',
+        model: 'reserve',
+        keySet: false,
+        reasoningEffort: 'high',
+      },
+    };
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        const body = JSON.parse(String(init.body));
+        writes.push({ url, body });
+        const name = url.endsWith('primary') ? 'primary' : 'reserve';
+        slots[name].reasoningEffort = body.reasoningEffort;
+        return { ok: true, json: async () => ({ ok: true, slot: slots[name] }) };
+      }
+      return {
+        ok: true,
+        json: async () =>
+          url === '/api/state'
+            ? {
+                setupNeeded: false,
+                loggedIn: true,
+                csrfToken: 'csrf',
+                onboarding: { step: 'model', completedAt: null },
+              }
+            : url === '/api/model'
+              ? slots
+              : {},
+      };
+    });
+    render(<App />);
+    const primary = await screen.findByLabelText('Reasoning effort', {
+      selector: '#reasoning-effort',
+    });
+    await waitFor(() => expect(primary).toHaveTextContent('none'));
+    fireEvent.click(primary);
+    for (const effort of ['none', 'minimal', 'low', 'medium', 'high']) {
+      expect(await screen.findByRole('option', { name: effort, exact: true })).toBeInTheDocument();
+    }
+    fireEvent.click(screen.getByRole('option', { name: 'minimal', exact: true }));
+    fireEvent.submit(primary.closest('form')!);
+    await waitFor(() => expect(writes[0]?.body.reasoningEffort).toBe('minimal'));
+    await waitFor(() =>
+      expect(primary.closest('form')!.querySelector('button:not([type=button])')).not.toBeDisabled()
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Reserve model (optional)' }));
+    const reserve = await screen.findByLabelText('Reasoning effort', {
+      selector: '#reserve-reasoning-effort',
+    });
+    expect(reserve).toHaveTextContent('high');
+    fireEvent.click(reserve);
+    fireEvent.click(await screen.findByRole('option', { name: 'Default (blank)' }));
+    fireEvent.submit(reserve.closest('form')!);
+    await waitFor(() =>
+      expect(writes[1]).toMatchObject({ url: '/api/model/reserve', body: { reasoningEffort: '' } })
+    );
+  });
   it.each([
     ['en', false, 'Set your password', true],
     ['en', true, 'Set your password', true],
@@ -161,12 +230,12 @@ describe('loader UI', () => {
     expect(container.querySelector('[data-slot=select-trigger]')).toBeInTheDocument();
     expect(container.querySelector('#kind')).not.toBeInstanceOf(HTMLSelectElement);
     expect(container.querySelector('#kind')).toHaveAttribute('role', 'combobox');
-    fireEvent.click(screen.getByRole('combobox'));
+    fireEvent.click(container.querySelector('#kind')!);
     expect(await screen.findByRole('option', { name: 'Ollama' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('option', { name: 'Ollama' }));
-    expect(screen.getByRole('combobox').textContent).toContain('Ollama');
+    expect(container.querySelector('#kind')?.textContent).toContain('Ollama');
     fireEvent.click(screen.getByRole('button', { name: 'Reserve model (optional)' }));
-    const combos = screen.getAllByRole('combobox');
+    const combos = container.querySelectorAll('#kind, #reserve-kind');
     expect(combos).toHaveLength(2);
     expect(combos[1]).not.toBeInstanceOf(HTMLSelectElement);
     fireEvent.click(combos[1]!);
@@ -834,6 +903,7 @@ describe('loader UI', () => {
       kind: 'openai',
       baseUrl: 'https://primary.example',
       model: 'p',
+      reasoningEffort: '',
     });
     // A row typed by the owner is sent as is, `{session}` included.
     fireEvent.click(screen.getByRole('button', { name: 'Additional headers' }));

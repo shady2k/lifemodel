@@ -41,6 +41,11 @@ function loaderFor(file: AgentConfigFile | null): ConfigLoader {
 }
 
 describe('the platform-pinned model endpoint', () => {
+  it('refuses an invalid saved effort rather than forwarding it', async () => {
+    const file = document('http://model.example/v1');
+    Object.assign(file.llm!.endpoint!, { fastReasoningEffort: 'maximum' });
+    await expect(loaderFor(file).load()).rejects.toThrow('fastReasoningEffort is invalid');
+  });
   it('is unset when the environment names none', () => {
     expect(pinnedModelBaseUrl({})).toBeNull();
     expect(
@@ -104,6 +109,14 @@ describe('the platform-pinned model endpoint', () => {
     // The document keeps no base URL while the platform names the endpoint.
     expect(
       applySettings(document('http://owner.example:1234/v1'), input, GATEWAY).llm?.endpoint
-    ).toEqual({ baseUrl: null, fastModel: 'fast', smartModel: 'smart', motorModel: 'motor' });
+    ).toEqual({
+      baseUrl: null,
+      fastModel: 'fast',
+      smartModel: 'smart',
+      motorModel: 'motor',
+      fastReasoningEffort: null,
+      smartReasoningEffort: null,
+      motorReasoningEffort: null,
+    });
   });
 });

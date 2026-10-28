@@ -196,6 +196,18 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
     const input = settingsInputFromBody(body);
     const pinnedBaseUrl = pinnedModelBaseUrl();
     const errors = validateSettings(input, { pinnedBaseUrl });
+    // Input normalization is for rendering, not permission to erase a bad
+    // JSON type: null, booleans and lists must not clear a saved effort.
+    for (const field of [
+      'fastReasoningEffort',
+      'smartReasoningEffort',
+      'motorReasoningEffort',
+    ] as const) {
+      if (Object.hasOwn(body, field) && typeof body[field] !== 'string') {
+        errors[field] =
+          'reasoning effort must be a string: blank, none, minimal, low, medium or high';
+      }
+    }
 
     if (Object.keys(errors).length > 0) {
       logger.warn({ fields: Object.keys(errors) }, 'Settings refused: a field is not valid');

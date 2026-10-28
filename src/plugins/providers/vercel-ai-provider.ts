@@ -17,6 +17,7 @@ import { toStrictSchema } from '../../llm/tool-schema.js';
 import { resolveModelParams } from './model-params.js';
 import { compileTranscript, resolveTranscriptPolicy } from './transcript-compiler.js';
 import { proxyFetch } from '../../utils/proxy-fetch.js';
+import { isReasoningEffort, type ReasoningEffort } from '../../config/reasoning-effort.js';
 import { MODEL_SESSION_HEADER } from '../../config/model-endpoint.js';
 
 // Vercel AI SDK imports
@@ -67,6 +68,9 @@ export interface VercelAIEndpointConfig {
   smartModel?: string;
   /** The model for the motor role (Motor Cortex) */
   motorModel?: string;
+  fastReasoningEffort?: ReasoningEffort;
+  smartReasoningEffort?: ReasoningEffort;
+  motorReasoningEffort?: ReasoningEffort;
 }
 
 /**
@@ -109,6 +113,14 @@ export class VercelAIProvider extends BaseLLMProvider {
   constructor(config: VercelAIProviderConfig, logger?: Logger) {
     super(logger);
 
+    for (const value of [
+      config.fastReasoningEffort,
+      config.smartReasoningEffort,
+      config.motorReasoningEffort,
+    ]) {
+      if (value !== undefined && !isReasoningEffort(value))
+        throw new Error('Invalid reasoning effort');
+    }
     this.config = config;
     this.name = 'endpoint';
     this.providerLogger = logger?.child({ component: 'vercel-ai-provider' });
@@ -172,18 +184,26 @@ export class VercelAIProvider extends BaseLLMProvider {
    */
   private createEndpointFetch(
     signal: AbortSignal,
-    sessionId: string | undefined
+    sessionId: string | undefined,
+    reasoningEffort: ReasoningEffort | undefined
   ): typeof globalThis.fetch {
     return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       // Fix outgoing request: replace broken tool schemas with raw tools
       let modifiedInit = init;
-      if (this.pendingRawTools && init?.body && typeof init.body === 'string') {
+      if (
+        (this.pendingRawTools || reasoningEffort !== undefined) &&
+        init?.body &&
+        typeof init.body === 'string'
+      ) {
         try {
           const body = JSON.parse(init.body) as Record<string, unknown>;
-          if (body['tools']) {
-            body['tools'] = this.pendingRawTools;
-            modifiedInit = { ...init, body: JSON.stringify(body) };
+          if (this.pendingRawTools && body['tools']) body['tools'] = this.pendingRawTools;
+          // Capture effort per request, not on shared mutable provider state.
+          // The wire field also supports `none`, regardless of SDK version.
+          if (reasoningEffort !== undefined && body['reasoning_effort'] === undefined) {
+            body['reasoning_effort'] = reasoningEffort;
           }
+          modifiedInit = { ...init, body: JSON.stringify(body) };
         } catch {
           // Parse failed — send original body
         }
@@ -237,7 +257,8 @@ export class VercelAIProvider extends BaseLLMProvider {
   private getModel(
     modelId: string,
     signal: AbortSignal,
-    sessionId: string | undefined
+    sessionId: string | undefined,
+    reasoningEffort: ReasoningEffort | undefined
   ): LanguageModel {
     return createOpenAI({
       baseURL: this.config.baseUrl,
@@ -245,7 +266,7 @@ export class VercelAIProvider extends BaseLLMProvider {
       // value only satisfies its own guard, and the fetch wrapper above drops
       // the header it builds, so no credential leaves this process.
       apiKey: '',
-      fetch: this.createEndpointFetch(signal, sessionId),
+      fetch: this.createEndpointFetch(signal, sessionId, reasoningEffort),
     }).chat(modelId);
   }
 
@@ -659,7 +680,18 @@ export class VercelAIProvider extends BaseLLMProvider {
     }
 
     // Get the model
-    const model = this.getModel(modelId, attempt.signal, request.sessionId);
+    // Match the default model selection: smart, then fast, then motor.
+    const role =
+      request.role ??
+      (this.config.smartModel?.trim()
+        ? 'smart'
+        : this.config.fastModel?.trim()
+          ? 'fast'
+          : this.config.motorModel?.trim()
+            ? 'motor'
+            : 'smart');
+    const reasoningEffort = this.config[`${role}ReasoningEffort`];
+    const model = this.getModel(modelId, attempt.signal, request.sessionId, reasoningEffort);
 
     // Debug logging
     this.providerLogger?.debug(

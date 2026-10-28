@@ -48,6 +48,9 @@ describe('Postgres configuration persistence', () => {
         fastModel: 'fast-next',
         smartModel: 'smart-next',
         motorModel: 'motor-next',
+        fastReasoningEffort: 'none',
+        smartReasoningEffort: 'low',
+        motorReasoningEffort: 'high',
         telegramChatId: '',
         telegramBotToken: '__telegram_bot_token__',
       });
@@ -64,6 +67,9 @@ describe('Postgres configuration persistence', () => {
         fastModel: 'fast-next',
         smartModel: 'smart-next',
         motorModel: 'motor-next',
+        fastReasoningEffort: 'none',
+        smartReasoningEffort: 'low',
+        motorReasoningEffort: 'high',
       });
     } finally {
       await server.close();

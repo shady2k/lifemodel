@@ -6,6 +6,7 @@
  * never contains a secret: no key of the endpoint is lifemodel's to show, and
  * the platform's model gateway injects it from OpenBao on the upstream leg.
  */
+import { REASONING_EFFORTS } from '../config/reasoning-effort.js';
 import { isEndpointComplete, isEndpointFieldSet } from '../config/model-endpoint.js';
 import {
   SETTINGS_FIELDS,
@@ -37,7 +38,7 @@ const STYLE = `
     h2 { font-size: 1.1rem; margin-top: 2rem; }
     form { margin-top: 1rem; }
     label { display: block; margin-top: 1rem; font-weight: 600; }
-    input { width: 100%; padding: 0.4rem; font: inherit; box-sizing: border-box; }
+    input, select { width: 100%; padding: 0.4rem; font: inherit; box-sizing: border-box; }
     .hint { font-size: 0.9rem; opacity: 0.75; margin: 0.2rem 0 0; }
     .error { color: #b3261e; font-size: 0.9rem; margin: 0.2rem 0 0; }
     .missing { border: 1px solid currentColor; border-radius: 0.4rem; padding: 0.6rem 0.8rem; }
@@ -95,10 +96,16 @@ function field(options: SettingsPageOptions, formField: (typeof SETTINGS_FIELDS)
     smartModel: 'The model for reasoning and composing messages',
     motorModel: 'The model for Motor Cortex runs',
   };
-  const hint = hints[field];
+  const effort = field.endsWith('ReasoningEffort');
+  const hint = effort
+    ? 'Blank sends no reasoning_effort; the gateway slot or upstream default applies. An explicit value overrides the slot.'
+    : hints[field];
+  const control = effort
+    ? `<select id="${field}" name="${field}">${['', ...REASONING_EFFORTS].map((option) => `<option value="${option}"${option === (value ?? '') ? ' selected' : ''}>${option || 'Default (blank)'}</option>`).join('')}</select>`
+    : `<input id="${field}" name="${field}" value="${escapeHtml(value ?? '')}"${pinned ? ' readonly' : ''} />`;
   return [
     `      <label for="${field}">${escapeHtml(label.charAt(0).toUpperCase() + label.slice(1))}</label>`,
-    `      <input id="${field}" name="${field}" value="${escapeHtml(value)}"${pinned ? ' readonly' : ''} />`,
+    `      ${control}`,
     ...(hint === undefined ? [] : [`      <p class="hint">${escapeHtml(hint)}</p>`]),
     ...(error === undefined
       ? []

@@ -332,6 +332,65 @@ describe('model gateway failure diagnostics', () => {
 });
 
 describe('model gateway buffered HTTP contract', () => {
+  it('leaves a blank slot effort absent and preserves every caller field', async () => {
+    const f = await fixture();
+    const payload = {
+      model: 'owner-model',
+      messages: [],
+      temperature: 0.25,
+      extra: { keep: true },
+    };
+    expect((await f.post(payload)).status).toBe(200);
+    expect(f.attempts[0]?.body).toEqual(payload);
+  });
+  it.each(['none', 'minimal', 'low', 'medium', 'high'] as const)(
+    'adds the configured %s effort on the upstream wire',
+    async (effort) => {
+      const f = await fixture();
+      f.slots.primary!.reasoningEffort = effort;
+      expect((await f.post()).status).toBe(200);
+      expect(f.attempts[0]?.body.reasoning_effort).toBe(effort);
+    }
+  );
+  it('uses each attempted slot effort independently, and never overwrites the client', async () => {
+    const f = await fixture();
+    f.slots.primary!.reasoningEffort = 'none';
+    f.slots.reserve!.reasoningEffort = 'low';
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(503);
+      res.end();
+    };
+    expect((await f.post()).status).toBe(200);
+    expect(f.attempts.map((attempt) => attempt.body.reasoning_effort)).toEqual(['none', 'low']);
+    f.attempts.length = 0;
+    expect(
+      (await f.post({ model: 'default', messages: [], reasoning_effort: 'high' })).status
+    ).toBe(200);
+    expect(f.attempts.map((attempt) => attempt.body.reasoning_effort)).toEqual(['high', 'high']);
+  });
+  it('applies the same slot effort to task requests and preserves their explicit effort', async () => {
+    const f = await fixture();
+    f.slots.primary!.reasoningEffort = 'none';
+    const url = await listen(
+      createServer((req, res) => {
+        void f.app.serveTask(req, res, 'trusted-task', async () => undefined);
+      })
+    );
+    for (const extra of [{}, { reasoning_effort: 'medium' }]) {
+      const response = await fetch(`${url}/v1/chat/completions`, {
+        method: 'POST',
+        body: JSON.stringify({ model: 'task-model', messages: [], ...extra }),
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+    }
+    expect(
+      f.attempts.map((attempt) => [attempt.body.model, attempt.body.reasoning_effort])
+    ).toEqual([
+      ['primary-model', 'none'],
+      ['primary-model', 'medium'],
+    ]);
+  });
   it('injects only the Bao key, maps default, preserves the base prefix and allows only return headers', async () => {
     const f = await fixture();
     f.handlers.primary = (_req, res) => {

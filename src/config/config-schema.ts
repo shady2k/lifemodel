@@ -1,3 +1,4 @@
+import type { ReasoningEffort } from './reasoning-effort.js';
 import type { AgentIdentity } from '../types/agent/identity.js';
 import type { AgentState } from '../types/agent/state.js';
 
@@ -79,6 +80,9 @@ export interface AgentConfigFile {
       smartModel?: string | null;
       /** The motor role's model */
       motorModel?: string | null;
+      fastReasoningEffort?: ReasoningEffort | null;
+      smartReasoningEffort?: ReasoningEffort | null;
+      motorReasoningEffort?: ReasoningEffort | null;
     };
   };
 
@@ -152,6 +156,9 @@ export interface MergedConfig {
       fastModel: string | null;
       smartModel: string | null;
       motorModel: string | null;
+      fastReasoningEffort?: ReasoningEffort | null;
+      smartReasoningEffort?: ReasoningEffort | null;
+      motorReasoningEffort?: ReasoningEffort | null;
     };
   };
 

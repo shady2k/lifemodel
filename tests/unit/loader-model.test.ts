@@ -44,6 +44,27 @@ function localPrivateAddress(): string {
 }
 const validReply = JSON.stringify({ choices: [{ message: { content: 'OK' } }] });
 describe('loader model endpoint checker', () => {
+  it.each([undefined, 'none', 'minimal', 'low', 'medium', 'high'] as const)(
+    'checks the same effort the slot sends upstream (%s)',
+    async (reasoningEffort) => {
+      const bodies: Record<string, unknown>[] = [];
+      const check = createModelChecker({
+        resolveHost: async () => ['192.168.1.20'],
+        request: async (_url, _address, body) => {
+          bodies.push(JSON.parse(body));
+          return { status: 200, body: validReply };
+        },
+      });
+      await check({
+        kind: 'openai',
+        baseUrl: 'https://model.example/v1',
+        model: 'm',
+        ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+      });
+      expect(bodies[0]?.reasoning_effort).toBe(reasoningEffort);
+      expect(Object.hasOwn(bodies[0]!, 'reasoning_effort')).toBe(reasoningEffort !== undefined);
+    }
+  );
   it('keeps a complete API base prefix when building the chat check URL', () => {
     expect(modelEndpointUrl('https://models.example/prefix/v1').pathname).toBe(
       '/prefix/v1/chat/completions'

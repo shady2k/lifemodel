@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { isReasoningEffort } from './reasoning-effort.js';
 import type { AgentConfigFile, MergedConfig } from './config-schema.js';
 import { DEFAULT_CONFIG } from './config-schema.js';
 import { PINNED_MODEL_BASE_URL_ENV, pinnedModelBaseUrl } from './model-endpoint.js';
@@ -108,6 +109,17 @@ export class ConfigLoader {
         if (endpoint.fastModel !== undefined) config.llm.endpoint.fastModel = endpoint.fastModel;
         if (endpoint.smartModel !== undefined) config.llm.endpoint.smartModel = endpoint.smartModel;
         if (endpoint.motorModel !== undefined) config.llm.endpoint.motorModel = endpoint.motorModel;
+        for (const field of [
+          'fastReasoningEffort',
+          'smartReasoningEffort',
+          'motorReasoningEffort',
+        ] as const) {
+          const value = endpoint[field];
+          if (value !== undefined) {
+            if (value !== null && !isReasoningEffort(value)) throw new Error(`${field} is invalid`);
+            config.llm.endpoint[field] = value;
+          }
+        }
       }
     }
 

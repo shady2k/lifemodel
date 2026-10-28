@@ -131,6 +131,11 @@ export const resources = {
         'A header value must be one line of Latin letters, digits, punctuation or a tab, at most 1024 bytes.',
       model_header_duplicate: 'Two headers have the same name.',
       model_header_too_many: 'At most 16 additional headers.',
+      reasoningEffort: 'Reasoning effort',
+      reasoningEffortDefault: 'Default (blank)',
+      reasoningEffortHint:
+        'Blank sends nothing. This slot default applies to core and task requests only when the caller sends no reasoning_effort.',
+      model_reasoning_effort_invalid: 'Choose blank, none, minimal, low, medium or high.',
       deviceTitle: 'Set up this device',
       deviceDescription: 'Install the instance CA certificate to trust its HTTPS connection.',
       address: 'Chat address',
@@ -302,6 +307,12 @@ export const resources = {
         'Значение заголовка — одна строка из латинских букв, цифр, знаков и табуляции, не длиннее 1024 байт.',
       model_header_duplicate: 'Два заголовка имеют одинаковое имя.',
       model_header_too_many: 'Не более 16 дополнительных заголовков.',
+      reasoningEffort: 'Усилие рассуждения',
+      reasoningEffortDefault: 'По умолчанию (пусто)',
+      reasoningEffortHint:
+        'Пустое значение ничего не отправляет. Настройка слота применяется к запросам ядра и задач, только если клиент не передал reasoning_effort.',
+      model_reasoning_effort_invalid:
+        'Выберите пустое значение, none, minimal, low, medium или high.',
       deviceTitle: 'Настройте это устройство',
       deviceDescription:
         'Установите сертификат CA экземпляра, чтобы доверять его HTTPS-соединению.',

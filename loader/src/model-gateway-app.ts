@@ -469,6 +469,12 @@ export function createModelGateway(options: GatewayOptions) {
     const body = payload
       ? JSON.stringify({
           ...payload,
+          // Per-attempt default: reserve uses its own slot, never a primary
+          // default carried over by mutating the caller's payload. Task and
+          // core requests share this rule. An explicit client value wins.
+          ...(payload['reasoning_effort'] === undefined && slot.reasoningEffort !== undefined
+            ? { reasoning_effort: slot.reasoningEffort }
+            : {}),
           model:
             name === 'reserve' || payload['model'] === 'default' ? slot.model : payload['model'],
         })
