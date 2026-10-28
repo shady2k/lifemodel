@@ -364,13 +364,19 @@ export function createPostgresTaskMailbox(deps: {
         ORDER BY c.sequence LIMIT 1024`,
         [taskId ?? null, commandId ?? null]
       );
-      return rows.rows.map((row) => ({
-        ...commandRecord(row),
-        disposition: row.disposition,
-        receipts: row.receipts,
-        currentReceipt: row.receipts.at(-1) ?? null,
-        retryable: row.disposition === 'rejected',
-      }));
+      return rows.rows.map((row) => {
+        const receipts = row.receipts.map((receipt) => ({
+          ...receipt,
+          receivedAt: new Date(receipt.receivedAt).toISOString(),
+        }));
+        return {
+          ...commandRecord(row),
+          disposition: row.disposition,
+          receipts,
+          currentReceipt: receipts.at(-1) ?? null,
+          retryable: row.disposition === 'rejected',
+        };
+      });
     });
   }
   const notifyCommands = (taskId: string) => {

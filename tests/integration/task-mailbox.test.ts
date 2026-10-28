@@ -693,7 +693,7 @@ describe('durable fenced task mailbox', () => {
         { receiptId: 'aa-inserted', disposition: 'inserted' },
       ],
     });
-    expect(status!.receipts.map((receipt) => new Date(receipt.receivedAt).toISOString())).toEqual([
+    expect(status!.receipts.map((receipt) => receipt.receivedAt)).toEqual([
       '2026-10-29T21:28:47.970Z',
       '2026-10-29T21:28:48.440Z',
     ]);
