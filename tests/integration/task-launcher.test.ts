@@ -8,12 +8,13 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { TaskJsonClient } from '../../loader/src/task-launcher-http.js';
 import { createTaskModelRelay } from '../../loader/src/task-model-relay.js';
-import { mkdtemp, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, symlink, mkdtemp, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as harnessFactory from '../../loader/src/task-harness-factory.js';
 import { AcpTaskHarness } from '../../loader/src/task-acp.js';
 import { runTaskLauncher, type LauncherOptions } from '../../loader/src/task-launcher.js';
+import { validateTaskTraceFrame } from '../../src/ports/task-channel.js';
 import {
   ScriptedTaskHarness,
   type TaskBriefing,
@@ -132,6 +133,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
   let reportMode: 'ok' | '409' | 'lost_then_409';
   let progressReports: Map<string, Frame>;
   let markStatus: number;
+  let artifactPutStatus: number;
   let markReceipt: 'committed' | 'unmarked' | 'wrong_id';
   let pendingMarks: Set<string>;
   let beforeMark: ((object: StoredObject) => Promise<void>) | undefined;
@@ -173,6 +175,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     reportMode = 'ok';
     progressReports = new Map();
     markStatus = 200;
+    artifactPutStatus = 201;
     markReceipt = 'committed';
     pendingMarks = new Set();
     beforeMark = undefined;
@@ -348,6 +351,10 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     if (service === 'storage' && call.method === 'PUT' && call.path.startsWith(`${base}/upload_`)) {
       const id = `object_${objects.size + 1}`;
       const name = Buffer.from(String(req.headers['x-storage-name']), 'base64url').toString();
+      if (name === 'good.txt' && artifactPutStatus !== 201) {
+        json(res, artifactPutStatus, {});
+        return;
+      }
       const sha256 = createHash('sha256').update(body).digest('hex');
       if (
         req.headers['x-storage-length'] !== String(body.length) ||
@@ -1155,6 +1162,52 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     }
   );
 
+  it.each(['subdirectory', 'symlink', 'upload'] as const)(
+    'preserves the original unsuccessful outcome with a partial-output %s warning',
+    async (mode) => {
+      beforeHarness = async () => {
+        if (mode === 'subdirectory') await mkdir(join(directory, 'outputs', 'tmp'));
+        if (mode === 'symlink') await symlink('/etc/passwd', join(directory, 'outputs', 'bad'));
+        await writeFile(join(directory, 'outputs', 'good.txt'), 'partial bytes');
+      };
+      if (mode === 'upload') artifactPutStatus = 503;
+      const outcome = mode === 'symlink' ? 'aborted' : 'failed';
+      const reasonCode = outcome === 'aborted' ? 'aborted' : 'provider_error';
+      const culprit = 'model-culprit';
+      expect(
+        await run({ terminal: { outcome, reasonCode, result: '', failureSpanId: culprit } })
+      ).toBe(1);
+      expect(terminal().payload).toMatchObject({ outcome, reasonCode });
+      await expect
+        .poll(() => traceFrames.some((frame) => frame.span.component === 'task.outputs'))
+        .toBe(true);
+      const warningFrame = traceFrames.find((frame) => frame.span.component === 'task.outputs')!;
+      expect(() => validateTaskTraceFrame(warningFrame)).not.toThrow();
+      const warning = warningFrame.span;
+      expect(warning).toMatchObject({
+        status: 'failed',
+        attrs: {
+          severity: 'warn',
+          skippedEntries: mode === 'upload' ? 0 : 1,
+          uploadFailures: mode === 'upload' ? 1 : 0,
+        },
+      });
+      await expect
+        .poll(() =>
+          traceFrames.some((frame) => frame.span.component === 'task' && !!frame.span.endedAt)
+        )
+        .toBe(true);
+      expect(
+        traceFrames.filter((frame) => frame.span.component === 'task').at(-1)!.span.attrs
+      ).toMatchObject({ outcome, reasonCode, failureSpanId: `${IDS.launchId}_${culprit}` });
+      if (mode !== 'upload')
+        expect([...objects.values()].find((object) => object.name === 'good.txt')).toMatchObject({
+          mark: 'artifact',
+          bytes: Buffer.from('partial bytes'),
+        });
+    }
+  );
+
   it('retains primes-like outputs as partial objects after a late provider failure', async () => {
     beforeHarness = async () => {
       await writeFile(join(directory, 'outputs', 'primes.py'), 'print(2, 3, 5)');
@@ -1193,6 +1246,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     expect(terminal().payload).toEqual({
       outcome: 'aborted',
       summary: 'Task was aborted',
+      reasonCode: 'aborted',
       resultObjectId: 'object_1',
       artifactObjectIds: [],
     });

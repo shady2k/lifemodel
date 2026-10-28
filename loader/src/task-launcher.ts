@@ -124,7 +124,8 @@ async function save(
 async function collectOutputs(
   env: NodeJS.ProcessEnv,
   cwd: string,
-  launchId: string
+  launchId: string,
+  warning?: (code: string, upload?: boolean) => void
 ): Promise<void> {
   const outputDirectory = join(cwd, 'outputs');
   const stat = await lstat(outputDirectory);
@@ -132,19 +133,38 @@ async function collectOutputs(
   if (!stat.isDirectory()) throw new LauncherError('output_not_regular');
   const names: string[] = [];
   const directory = await opendir(outputDirectory);
+  let inspected = 0;
   for await (const entry of directory) {
-    if (names.length === 64) throw new LauncherError('output_limit');
-    if (entry.isSymbolicLink()) throw new LauncherError('output_symlink');
-    if (entry.isDirectory()) throw new LauncherError('output_subdirectory');
-    if (!entry.isFile()) throw new LauncherError('output_not_regular');
-    if (!storageNameValid(entry.name)) throw new LauncherError('output_name_invalid');
-    names.push(entry.name);
+    // Partial collection is bounded too. Do not scan an attacker-sized folder.
+    if (++inspected > 64) {
+      if (!warning) throw new LauncherError('output_limit');
+      warning('output_limit');
+      break;
+    }
+    const code = entry.isSymbolicLink()
+      ? 'output_symlink'
+      : entry.isDirectory()
+        ? 'output_subdirectory'
+        : !entry.isFile()
+          ? 'output_not_regular'
+          : !storageNameValid(entry.name)
+            ? 'output_name_invalid'
+            : undefined;
+    if (code) {
+      if (!warning) throw new LauncherError(code);
+      warning(code);
+    } else names.push(entry.name);
   }
-  // Validate the entire flat folder before the first upload. The shipped CLI
-  // also uses no-follow, nonblocking opens and fstat at transfer time, so a
-  // replacement symlink/FIFO cannot bypass this scan or hang the launcher.
-  for (const name of names.sort())
-    await save(join('outputs', name), 'artifact', env, cwd, launchId);
+  // Successful tasks validate the whole folder before upload. Partial collection
+  // skips bad entries. Transfer-time no-follow opens still reject replacements.
+  for (const name of names.sort()) {
+    try {
+      await save(join('outputs', name), 'artifact', env, cwd, launchId);
+    } catch (error) {
+      if (!warning) throw error;
+      warning(error instanceof LauncherError ? error.code : 'output_upload_failed', true);
+    }
+  }
 }
 
 function outputInstructions(cwd: string): string {
@@ -456,10 +476,6 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
     failureSpanId = result.failureSpanId ? `${ids.launchId}_${result.failureSpanId}` : undefined;
     outputsStartedAt = new Date().toISOString();
     const resultName = `${directory}/result.txt`;
-    await writeFile(join(cwd, resultName), result.result, { flag: 'wx', mode: 0o600 });
-    terminal.resultObjectId = await save(resultName, 'result', options.env, cwd, ids.launchId);
-    await collectOutputs(options.env, cwd, ids.launchId);
-    terminal.artifactObjectIds = await artifacts(options.env, cwd);
     terminal.outcome = result.outcome;
     terminal.summary =
       result.outcome === 'succeeded'
@@ -467,12 +483,57 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
         : result.outcome === 'aborted'
           ? 'Task was aborted'
           : 'Task could not complete';
-    if (result.outcome === 'failed')
-      terminal.reasonCode =
-        result.reasonCode && /^[a-z][a-z0-9_]{0,63}$/.test(result.reasonCode)
-          ? result.reasonCode
-          : 'harness_failed';
+    if (result.outcome !== 'succeeded' && result.reasonCode)
+      terminal.reasonCode = /^[a-z][a-z0-9_]{0,63}$/.test(result.reasonCode)
+        ? result.reasonCode
+        : 'harness_failed';
     else delete terminal.reasonCode;
+    const reasons: Record<string, number> = {};
+    let skippedEntries = 0;
+    let uploadFailures = 0;
+    const warning = (code: string, upload = false) => {
+      reasons[code] = (reasons[code] ?? 0) + 1;
+      if (upload) uploadFailures++;
+      else skippedEntries++;
+    };
+    const retain = async (action: () => Promise<void>, upload = false) => {
+      try {
+        await action();
+      } catch (error) {
+        if (result.outcome === 'succeeded') throw error;
+        warning(error instanceof LauncherError ? error.code : 'output_collection_failed', upload);
+      }
+    };
+    await retain(async () => {
+      await writeFile(join(cwd, resultName), result.result, { flag: 'wx', mode: 0o600 });
+      terminal.resultObjectId = await save(resultName, 'result', options.env, cwd, launchId);
+    }, true);
+    await retain(() =>
+      collectOutputs(
+        options.env,
+        cwd,
+        launchId,
+        result.outcome === 'succeeded' ? undefined : warning
+      )
+    );
+    await retain(async () => {
+      terminal.artifactObjectIds = await artifacts(options.env, cwd);
+    }, true);
+    if (skippedEntries || uploadFailures)
+      trace?.enqueue({
+        spanId: `${ids.launchId}_outputs`,
+        parentSpanId: ids.launchId,
+        component: 'task.outputs',
+        startedAt: outputsStartedAt,
+        endedAt: new Date().toISOString(),
+        status: 'failed',
+        attrs: {
+          severity: 'warn',
+          skippedEntries,
+          uploadFailures,
+          reasonCounts: JSON.stringify(reasons),
+        },
+      });
     await report();
     return result.outcome === 'succeeded' ? 0 : 1;
   } catch (error) {
@@ -501,6 +562,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       diagnostic(`connection_attempts=${String(error.connectionAttempts)}`);
     if (!terminalAttempted) {
       terminal.outcome = 'failed';
+      terminal.summary = 'Task could not complete';
       terminal.reasonCode = code;
       try {
         await report();
