@@ -3,6 +3,8 @@ import { Client, type Pool, type PoolClient } from 'pg';
 import type { PlatformSettingsReader } from '../config/platform-settings.js';
 import type {
   AcceptTask,
+  TaskContextEntry,
+  TaskContextSnapshot,
   TaskAccessIntent,
   TaskAccessMode,
   TaskAllocationReceipt,
@@ -13,7 +15,7 @@ import type {
   TaskSealReceipt,
   TaskOutcomeEvent,
 } from '../ports/tasks.js';
-import { TaskRegistryError } from '../ports/tasks.js';
+import { TaskRegistryError, TASK_CONTEXT_LIMITS } from '../ports/tasks.js';
 import type { TaskTerminalReport } from '../ports/task-channel.js';
 import { createFencedPostgres, StalePostgresEpochError } from './fenced-postgres.js';
 
@@ -225,9 +227,44 @@ function validSealReceipt(receipt: TaskSealReceipt): boolean {
   );
 }
 
+/** Informational single-statement snapshot, not a mutation or authority check.
+ * ADR-014 fences writes; command admission still checks the epoch and task authority.
+ * Pool.query returns healthy clients for reuse. Production supplies an isolated,
+ * short-timeout pool, never the owner-intake reserve. */
+async function readTaskContext(pool: Pool): Promise<TaskContextSnapshot> {
+  const rows = await pool.query<TaskContextEntry>({
+    text: `SELECT t.id,t.harness,t.state,left(t.briefing,$2) AS briefing,
+      CASE WHEN q.question_id IS NULL THEN NULL ELSE
+        jsonb_build_object('questionId',q.question_id,'text',left(q.text,$3)) END AS question
+      FROM core.tasks t
+      LEFT JOIN LATERAL (
+        SELECT q.question_id,m.payload->>'text' AS text FROM core.task_questions q
+        INNER JOIN core.task_mailbox m ON m.task_id=q.task_id AND m.message_id=q.question_id
+          AND m.kind='question'
+        WHERE q.task_id=t.id AND q.answer_command_id IS NULL
+          AND jsonb_typeof(m.payload->'text')='string'
+          AND NOT EXISTS (SELECT 1 FROM core.task_mailbox terminal
+            WHERE terminal.task_id=m.task_id AND terminal.attempt_id=m.attempt_id AND terminal.kind='terminal')
+      ) q ON true
+      WHERE t.state NOT IN ('done','failed','stopped')
+      ORDER BY (q.question_id IS NOT NULL) DESC,t.accepted_order DESC,t.id LIMIT $1`,
+    values: [
+      TASK_CONTEXT_LIMITS.count + 1,
+      TASK_CONTEXT_LIMITS.briefing,
+      TASK_CONTEXT_LIMITS.question,
+    ],
+  });
+  return {
+    tasks: rows.rows.slice(0, TASK_CONTEXT_LIMITS.count),
+    omitted: rows.rows.length > TASK_CONTEXT_LIMITS.count,
+  };
+}
+
 /** Core-only writer. It owns no pool lifetime, filesystem state or platform metadata. */
 export function createPostgresTaskRegistry(deps: {
   pool: Pool;
+  /** Optional isolated read pool. No holder lock: this snapshot authorizes no effect. */
+  contextPool?: Pool;
   epoch: number;
   settings: PlatformSettingsReader;
   /** Deployment image is a first-acceptance snapshot, not replay payload. */
@@ -516,6 +553,7 @@ export function createPostgresTaskRegistry(deps: {
         const rows = await client.query<TaskRow>(`${TASK_SELECT} ORDER BY t.accepted_order,t.id`);
         return rows.rows.map(taskRecord);
       }),
+    listActiveContext: () => readTaskContext(deps.contextPool ?? deps.pool),
     listLaunchWork: async (afterOrder = '0', limit = 100) => {
       if (
         typeof afterOrder !== 'string' ||

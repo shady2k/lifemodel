@@ -5,6 +5,7 @@
  * No runtime dependencies — safe to import from any module.
  */
 
+import type { TaskContextSnapshot } from '../../ports/tasks.js';
 import type { Intent } from '../../types/intent.js';
 import type { Signal } from '../../types/signal.js';
 import type { AgentState } from '../../types/agent/state.js';
@@ -146,6 +147,9 @@ export interface LoopContext {
   /** Trigger signal */
   triggerSignal: Signal;
   additionalTriggerSignals?: Signal[];
+
+  /** Bounded snapshot from the core task registry, refreshed for every turn. */
+  runningTasks?: TaskContextSnapshot | 'unavailable' | undefined;
 
   /** Current agent state */
   agentState: AgentState;

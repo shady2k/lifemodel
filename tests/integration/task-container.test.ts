@@ -210,6 +210,9 @@ describe('platform task container wiring', { timeout: 30_000 }, () => {
       expect(
         ended.some((pool) => pool.options.application_name === 'lifemodel-task-commands')
       ).toBe(true);
+      expect(ended.some((pool) => pool.options.application_name === 'lifemodel-task-context')).toBe(
+        true
+      );
       expect(ended.some((pool) => pool.options.max === 10)).toBe(true);
     } finally {
       close.mockRestore();

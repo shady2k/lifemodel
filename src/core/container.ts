@@ -1285,8 +1285,19 @@ export async function createContainerAsync(
   if (!mergedConfig.motorCortex.enabled && controlTokenFile && controlCaFile) {
     const image = taskWorkbenchImage(process.env['LIFEMODEL_TASK_WORKBENCH_IMAGE']);
     const imageRevision = image.slice(image.indexOf('@') + 1);
+    const taskContextPool = new Pool({
+      connectionString: databaseUrl,
+      max: 1,
+      application_name: 'lifemodel-task-context',
+      connectionTimeoutMillis: 1500,
+      query_timeout: 1500,
+      statement_timeout: 1500,
+      lock_timeout: 1500,
+    });
+    taskContextPool.on('error', () => undefined);
     const registry = createPostgresTaskRegistry({
       pool: rawPostgres,
+      contextPool: taskContextPool,
       epoch: snapshotEpoch,
       settings: createPlatformSettingsReader({ logger }),
       imageRevision,
@@ -1330,10 +1341,11 @@ export async function createContainerAsync(
     });
     closeTaskCommands = async () => {
       taskMailbox.stop();
-      await commandPool.end();
+      await Promise.all([commandPool.end(), taskContextPool.end()]);
     };
     taskService = createTaskService({ tasks: acceptanceService, mailbox: taskMailbox });
     coreLoop.setTaskService(taskService);
+    layers.cognition.setDependencies({ taskService });
     coreLoop.setTaskQuestionReader((taskId, questionId) =>
       taskMailbox.readQuestion(taskId, questionId)
     );

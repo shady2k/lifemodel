@@ -69,5 +69,6 @@ export function createWorkbenchTaskService(options: {
     read: (id) => options.service.read(id),
     readByLaunchKey: (key) => options.service.readByLaunchKey(key),
     list: () => options.service.list(),
+    listActiveContext: () => options.service.listActiveContext(),
   };
 }
