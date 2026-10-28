@@ -76,7 +76,9 @@ function ReasoningEffortField(props: {
       <Label htmlFor={props.id}>{t('reasoningEffort')}</Label>
       <Select
         value={props.value || 'default'}
-        onValueChange={(value) => props.onChange(value === 'default' ? '' : value)}
+        onValueChange={(value) => {
+          props.onChange(value === 'default' ? '' : value);
+        }}
       >
         <SelectTrigger id={props.id}>
           <SelectValue />

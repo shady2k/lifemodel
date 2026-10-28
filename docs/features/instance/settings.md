@@ -58,7 +58,13 @@ The configuration fields are `fastReasoningEffort`, `smartReasoningEffort`
 and `motorReasoningEffort` under `llm.endpoint`. Blank stores `null` and sends
 no field. A selected value reaches the outgoing request for that role,
 including a blank role model that asks the pinned gateway for `default`.
-A core role effort therefore overrides a slot default. Without an explicit
+An explicit core role effort goes to both slots, including the reserve during
+failover, rather than using either slot's default. Both upstream models must
+support that value; the slot save check tests only the slot's own effort, not
+a core override. With the platform gateway pinned, the slot setting is the
+recommended control: keep core role efforts blank by default. Saving the core
+form with a blank or absent effort field clears that role's saved effort;
+unlike the loader API, omission does not preserve it. Without an explicit
 role, effort follows the same model selection order: smart, fast, then motor
 (or the smart role for a fully blank pinned endpoint). These settings apply
 to future requests after save, not to individual cognition triggers.

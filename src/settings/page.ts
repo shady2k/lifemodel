@@ -98,7 +98,7 @@ function field(options: SettingsPageOptions, formField: (typeof SETTINGS_FIELDS)
   };
   const effort = field.endsWith('ReasoningEffort');
   const hint = effort
-    ? 'Blank sends no reasoning_effort; the gateway slot or upstream default applies. An explicit value overrides the slot.'
+    ? 'Blank sends no reasoning_effort; the gateway slot or upstream default applies. With the platform gateway pinned, prefer the slot setting and keep core role efforts blank. An explicit core role value goes to both slots, including the reserve during failover; both upstream models must support it. Saving this form with a blank or absent effort field clears that role effort.'
     : hints[field];
   const control = effort
     ? `<select id="${field}" name="${field}">${['', ...REASONING_EFFORTS].map((option) => `<option value="${option}"${option === (value ?? '') ? ' selected' : ''}>${option || 'Default (blank)'}</option>`).join('')}</select>`
