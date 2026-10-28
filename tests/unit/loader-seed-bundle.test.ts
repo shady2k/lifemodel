@@ -272,6 +272,7 @@ describe('loader image release seed bundle', () => {
       'src/web/contract.ts',
       'src/ports/message-attachment.ts',
       'loader/src/settings/registry.ts',
+      'loader/src/reasoning-effort.ts',
       'loader/src/workbench-status.ts',
     ]);
   });

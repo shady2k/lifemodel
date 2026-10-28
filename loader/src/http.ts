@@ -1,5 +1,6 @@
 /** Authenticated HTTP interface for the platform bootstrap loader. */
 import { randomBytes } from 'node:crypto';
+import { isReasoningEffort } from './reasoning-effort.js';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import {
   clearSessionCookie,
@@ -913,7 +914,8 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         const value = payload as Record<string, unknown>;
         if (
           Object.keys(value).some(
-            (key) => !['kind', 'baseUrl', 'model', 'key', 'headers'].includes(key)
+            (key) =>
+              !['kind', 'baseUrl', 'model', 'reasoningEffort', 'key', 'headers'].includes(key)
           ) ||
           (value['kind'] !== 'openai' && value['kind'] !== 'ollama') ||
           typeof value['baseUrl'] !== 'string' ||
@@ -923,6 +925,15 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         ) {
           res.writeHead(400);
           res.end('{"error":"invalid_body"}');
+          return;
+        }
+        if (
+          value['reasoningEffort'] !== undefined &&
+          value['reasoningEffort'] !== '' &&
+          !isReasoningEffort(value['reasoningEffort'])
+        ) {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+          res.end('{"error":"reasoning_effort_invalid"}');
           return;
         }
         // A header list that breaks a rule is refused with the rule's own
@@ -951,6 +962,12 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
             kind: value['kind'],
             baseUrl: value['baseUrl'],
             model: value['model'],
+            // Blank clears the default; an omitted field keeps the saved value.
+            ...(isReasoningEffort(value['reasoningEffort'])
+              ? { reasoningEffort: value['reasoningEffort'] }
+              : value['reasoningEffort'] === undefined && old?.reasoningEffort !== undefined
+                ? { reasoningEffort: old.reasoningEffort }
+                : {}),
             ...(value['key'] === undefined && old?.key !== undefined
               ? { key: old.key }
               : value['key'] === undefined

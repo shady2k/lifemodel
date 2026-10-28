@@ -142,6 +142,15 @@ async function fixture() {
   };
 }
 describe('shared role Bao client over real HTTP', () => {
+  it('reads a stored effort and rejects malformed effort before it can reach upstream', async () => {
+    const f = await fixture();
+    f.reply = { data: { data: { ...slot(), reasoningEffort: 'none' }, metadata: { version: 1 } } };
+    expect(await f.client.readSlot('primary')).toMatchObject({ slot: { reasoningEffort: 'none' } });
+    for (const value of ['maximum', '', null, 1]) {
+      f.reply = { data: { data: { ...slot(), reasoningEffort: value }, metadata: { version: 1 } } };
+      await expect(f.client.readSlot('primary')).rejects.toMatchObject({ code: 'unreachable' });
+    }
+  });
   it('re-logs in after rejection even when proactive renewal is in flight', async () => {
     const f = await fixture();
     await f.client.readSlot('primary');

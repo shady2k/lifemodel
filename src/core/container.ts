@@ -1,4 +1,5 @@
 import type { Logger } from 'pino';
+import type { ReasoningEffort } from '../config/reasoning-effort.js';
 import { pinnedModelBaseUrl } from '../config/model-endpoint.js';
 import type { PersistableState } from '../storage/persistable-state.js';
 import type { PersistedAckRegistryState } from '../layers/aggregation/ack-registry.js';
@@ -165,6 +166,9 @@ export interface AppConfig {
       smartModel?: string;
       /** The motor role's model */
       motorModel?: string;
+      fastReasoningEffort?: ReasoningEffort | null;
+      smartReasoningEffort?: ReasoningEffort | null;
+      motorReasoningEffort?: ReasoningEffort | null;
     };
   };
 }
@@ -442,6 +446,9 @@ export interface LLMProviderConfig {
         fastModel?: string | null | undefined;
         smartModel?: string | null | undefined;
         motorModel?: string | null | undefined;
+        fastReasoningEffort?: ReasoningEffort | null | undefined;
+        smartReasoningEffort?: ReasoningEffort | null | undefined;
+        motorReasoningEffort?: ReasoningEffort | null | undefined;
       }
     | undefined;
 }
@@ -469,6 +476,9 @@ export function createLLMProvider(
     fastModel: config?.endpoint?.fastModel ?? null,
     smartModel: config?.endpoint?.smartModel ?? null,
     motorModel: config?.endpoint?.motorModel ?? null,
+    fastReasoningEffort: config?.endpoint?.fastReasoningEffort ?? null,
+    smartReasoningEffort: config?.endpoint?.smartReasoningEffort ?? null,
+    motorReasoningEffort: config?.endpoint?.motorReasoningEffort ?? null,
   };
 
   // Only a platform pin lets the gateway supply blank role models.
@@ -480,6 +490,13 @@ export function createLLMProvider(
         ...(endpoint.fastModel && { fastModel: endpoint.fastModel }),
         ...(endpoint.smartModel && { smartModel: endpoint.smartModel }),
         ...(endpoint.motorModel && { motorModel: endpoint.motorModel }),
+        ...(endpoint.fastReasoningEffort && { fastReasoningEffort: endpoint.fastReasoningEffort }),
+        ...(endpoint.smartReasoningEffort && {
+          smartReasoningEffort: endpoint.smartReasoningEffort,
+        }),
+        ...(endpoint.motorReasoningEffort && {
+          motorReasoningEffort: endpoint.motorReasoningEffort,
+        }),
       },
       logger
     );

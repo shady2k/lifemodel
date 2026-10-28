@@ -19,6 +19,44 @@ Conversation history stores the message-by-message record of interactions with a
 | `assistant` | Agent responses | `content`, `tool_calls[]` |
 | `tool` | Tool execution results | `content`, `tool_call_id` |
 
+## Request order and prompt caching
+
+Cognition builds one leading system message with the configured name, gender and
+fixed instructions. It has no clock value, timezone value, tick ID, runtime
+snapshot or changing soul/task data. The same identity produces byte-identical
+system instructions across turns, tool rounds and fast/smart escalation. This
+claim covers the system message, not the whole request.
+
+Native tool definitions travel in the request's `tools` field, not as copied
+prompt text. Both the cognition registry and the endpoint adapter sort them by
+name using code-point order. Plugin registration or reload order cannot reorder
+the schemas. The adapter keeps this order in both the SDK tools and the raw
+schemas that its fetch wrapper sends. The tool list is stable for the same
+trigger type and role, not across every request: `filterToolsForContext` can
+remove tools by trigger or role (for example, smart has no `core.escalate`),
+and `forceRespond` sends no tools. Across turns with the same tool set, the
+cacheable prefix is the system message plus those ordered tool definitions.
+History is not part of that guarantee: relative `<msg_time>` values change
+between turns.
+
+After the stable instructions, the transcript contains conversation history and
+then the current trigger context. That context starts with `<current_time>` and
+its timezone, followed by the role-specific state hint, profile, soul, runtime
+snapshot, skills, running tasks and trigger data as applicable. The system rules
+still make `<current_time>` authoritative; history timestamps describe the past.
+Historical timestamps, tool-call IDs and task IDs never enter the fixed prefix.
+System-event turns without history also get a user-role boundary before the
+trigger, so transcript normalization cannot merge live context into the leading
+system message.
+
+The endpoint/model chat template controls how native tools are placed around
+system instructions. The application supplies a stable leading system message
+and stable ordered native tools before any changing message data; it does not
+insert duplicate tool schemas or vendor-specific cache hints. A configured
+identity change, tool/schema change, or context-specific tool filtering can
+invalidate that cache segment. Cache hits still depend on the endpoint's cache
+policy; stable request content does not guarantee them.
+
 ## Invariants
 
 ### Tool Call/Result Pairing

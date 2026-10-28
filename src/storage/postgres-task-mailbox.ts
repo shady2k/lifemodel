@@ -356,19 +356,27 @@ export function createPostgresTaskMailbox(deps: {
       }>(
         `SELECT c.content,c.sequence,COALESCE(a.disposition,'queued') AS disposition,
         COALESCE((SELECT jsonb_agg(jsonb_build_object('taskId',r.task_id,'attemptId',c.attempt_id,
-          'commandId',r.command_id,'receiptId',r.receipt_id,'disposition',r.disposition) ORDER BY r.receipt_id)
+          'commandId',r.command_id,'receiptId',r.receipt_id,'disposition',r.disposition,
+          'receivedAt',r.received_at) ORDER BY r.received_at,r.receipt_id)
           FROM core.task_command_receipts r WHERE r.task_id=c.task_id AND r.command_id=c.command_id),'[]'::jsonb) AS receipts
         FROM core.task_commands c LEFT JOIN core.task_command_acks a USING(task_id,command_id)
         WHERE ($1::text IS NULL OR c.task_id=$1) AND ($2::text IS NULL OR c.command_id=$2)
         ORDER BY c.sequence LIMIT 1024`,
         [taskId ?? null, commandId ?? null]
       );
-      return rows.rows.map((row) => ({
-        ...commandRecord(row),
-        disposition: row.disposition,
-        receipts: row.receipts,
-        retryable: row.disposition === 'rejected',
-      }));
+      return rows.rows.map((row) => {
+        const receipts = row.receipts.map((receipt) => ({
+          ...receipt,
+          receivedAt: new Date(receipt.receivedAt).toISOString(),
+        }));
+        return {
+          ...commandRecord(row),
+          disposition: row.disposition,
+          receipts,
+          currentReceipt: receipts.at(-1) ?? null,
+          retryable: row.disposition === 'rejected',
+        };
+      });
     });
   }
   const notifyCommands = (taskId: string) => {

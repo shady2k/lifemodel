@@ -14,6 +14,11 @@ import { VercelAIProvider } from '../../../src/plugins/providers/vercel-ai-provi
 import { createLLMAdapter } from '../../../src/layers/cognition/llm-adapter.js';
 import { DEFAULT_ROLE_MODEL, LLMError } from '../../../src/llm/provider.js';
 import { createTestLogger } from '../../helpers/test-logger.js';
+import { createLLMProvider } from '../../../src/core/container.js';
+import { ConfigLoader } from '../../../src/config/config-loader.js';
+import type { AgentConfigFile } from '../../../src/config/config-schema.js';
+import type { LLMProvider } from '../../../src/llm/provider.js';
+import { createSettingsServer } from '../../../src/settings/server.js';
 
 interface SeenRequest {
   method: string;
@@ -125,6 +130,116 @@ const REQUEST = {
 };
 
 describe('the core provider in front of the model gateway', () => {
+  it('saves and reloads each role effort through settings, config and container to the actual wire', async () => {
+    const gateway = await gatewayWith(answerOnce('hello'));
+    providerFor(gateway.baseUrl); // Ensure loopback cannot go through an environment proxy.
+    const pin = process.env['LIFEMODEL_MODEL_BASE_URL'];
+    delete process.env['LIFEMODEL_MODEL_BASE_URL'];
+    let document: AgentConfigFile | null = null;
+    const loader = new ConfigLoader({
+      read: async () => document,
+      write: async (value) => {
+        document = value;
+      },
+    });
+    let provider: LLMProvider | null = null;
+    let reloads = 0;
+    const server = createSettingsServer({
+      config: loader,
+      logger: createTestLogger('silent'),
+      port: 0,
+      onSaved: async () => {
+        provider = createLLMProvider((await loader.load()).llm, createTestLogger('silent'));
+        reloads++;
+      },
+    });
+    await server.listen();
+    try {
+      const url = server.address();
+      const values = {
+        endpointBaseUrl: gateway.baseUrl,
+        fastModel: 'fast',
+        smartModel: 'smart',
+        motorModel: 'motor',
+        fastReasoningEffort: 'none',
+        smartReasoningEffort: 'minimal',
+        motorReasoningEffort: 'high',
+      };
+      const save = async (input: Record<string, string>) => {
+        const previousReloads = reloads;
+        const response = await fetch(`${url}/settings`, {
+          method: 'POST',
+          headers: { origin: url, 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams(input),
+        });
+        await response.text();
+        if (response.status === 200)
+          await vi.waitFor(() => expect(reloads).toBe(previousReloads + 1));
+        return response.status;
+      };
+      expect(await save(values)).toBe(200);
+      // Restart through a fresh config loader, then build the real container provider.
+      const restarted = new ConfigLoader({
+        read: async () => document,
+        write: async () => undefined,
+      });
+      provider = createLLMProvider((await restarted.load()).llm, createTestLogger('silent'));
+      for (const role of ['fast', 'smart', 'motor'] as const) {
+        await provider!.complete({ ...REQUEST, role });
+      }
+      expect(
+        gateway.requests.map((request) => {
+          const body = JSON.parse(request.body);
+          return [body.model, body.reasoning_effort];
+        })
+      ).toEqual([
+        ['fast', 'none'],
+        ['smart', 'minimal'],
+        ['motor', 'high'],
+      ]);
+      const page = await (await fetch(url)).text();
+      expect(page).toContain('value="none" selected');
+      expect(page).toContain('value="minimal" selected');
+      expect(page).toContain('value="high" selected');
+      const original = structuredClone(document);
+      expect(await save({ ...values, smartReasoningEffort: 'maximum' })).toBe(400);
+      expect(document).toEqual(original);
+      expect(
+        await save({
+          ...values,
+          fastReasoningEffort: '',
+          smartReasoningEffort: '',
+          motorReasoningEffort: '',
+        })
+      ).toBe(200);
+      await provider!.complete(REQUEST);
+      expect(JSON.parse(gateway.requests.at(-1)!.body)).not.toHaveProperty('reasoning_effort');
+    } finally {
+      await server.close();
+      if (pin === undefined) delete process.env['LIFEMODEL_MODEL_BASE_URL'];
+      else process.env['LIFEMODEL_MODEL_BASE_URL'] = pin;
+    }
+  });
+  it('keeps effort request-local across concurrent role calls and applies it to gateway default models', async () => {
+    const gateway = await gatewayWith(answerOnce('hello'));
+    providerFor(gateway.baseUrl);
+    const provider = new VercelAIProvider({
+      baseUrl: gateway.baseUrl,
+      useGatewayDefault: true,
+      fastReasoningEffort: 'none',
+      smartReasoningEffort: 'low',
+      motorReasoningEffort: 'medium',
+    });
+    await Promise.all(
+      (['fast', 'smart', 'motor'] as const).map((role) => provider.complete({ ...REQUEST, role }))
+    );
+    expect(
+      gateway.requests.map((request) => JSON.parse(request.body).reasoning_effort).sort()
+    ).toEqual(['low', 'medium', 'none']);
+    expect(gateway.requests.every((request) => JSON.parse(request.body).model === 'default')).toBe(
+      true
+    );
+  });
   it('refuses an unpinned blank role before sending HTTP', async () => {
     const gateway = await gatewayWith(answerOnce('hello'));
     const provider = new VercelAIProvider({ baseUrl: gateway.baseUrl }, createTestLogger('silent'));

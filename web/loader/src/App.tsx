@@ -15,6 +15,7 @@ import {
 } from '@kit/components/ui/select';
 
 import i18n, { languageFor } from './i18n';
+import { REASONING_EFFORTS } from '../../../loader/src/reasoning-effort.js';
 import { ModelStatus } from './ModelStatus';
 import { WorkbenchSourceSettings } from './WorkbenchSourceSettings';
 import { parseModelStatus } from '../../../src/web/model-status.js';
@@ -27,6 +28,7 @@ interface Slot {
   kind: 'openai' | 'ollama';
   baseUrl: string;
   model: string;
+  reasoningEffort?: string;
   keySet: boolean;
   /** The stored header names only; a value never comes back from the loader. */
   headerNames?: string[];
@@ -60,7 +62,40 @@ const codes = [
   'header_value_invalid',
   'header_duplicate',
   'header_too_many',
+  'reasoning_effort_invalid',
 ];
+/** Optional slot default; a caller's explicit wire value always wins. */
+function ReasoningEffortField(props: {
+  id: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="space-y-2">
+      <Label htmlFor={props.id}>{t('reasoningEffort')}</Label>
+      <Select
+        value={props.value || 'default'}
+        onValueChange={(value) => {
+          props.onChange(value === 'default' ? '' : value);
+        }}
+      >
+        <SelectTrigger id={props.id}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="default">{t('reasoningEffortDefault')}</SelectItem>
+          {REASONING_EFFORTS.map((effort) => (
+            <SelectItem key={effort} value={effort}>
+              {effort}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <p className="text-xs text-muted-foreground">{t('reasoningEffortHint')}</p>
+    </div>
+  );
+}
 /**
  * The slot's additional headers: a collapsed section with name/value rows,
  * add and remove. After a save the stored header names are listed with their
@@ -426,10 +461,12 @@ export default function App() {
   const [reserveKind, setReserveKind] = useState<'openai' | 'ollama'>('openai');
   const [reserveBaseUrl, setReserveBaseUrl] = useState('');
   const [reserveModel, setReserveModel] = useState('');
+  const [reserveReasoningEffort, setReserveReasoningEffort] = useState('');
   const [reserveKey, setReserveKey] = useState('');
   const [kind, setKind] = useState<'openai' | 'ollama'>('openai');
   const [baseUrl, setBaseUrl] = useState('');
   const [model, setModel] = useState('');
+  const [reasoningEffort, setReasoningEffort] = useState('');
   const [key, setKey] = useState('');
   const [headerRows, setHeaderRows] = useState<HeaderRow[]>([]);
   const [headersOpen, setHeadersOpen] = useState(false);
@@ -465,12 +502,14 @@ export default function App() {
           setKind(data.primary.kind);
           setBaseUrl(data.primary.baseUrl);
           setModel(data.primary.model);
+          setReasoningEffort(data.primary.reasoningEffort ?? '');
         }
         setReserve(data.reserve);
         if (data.reserve) {
           setReserveKind(data.reserve.kind);
           setReserveBaseUrl(data.reserve.baseUrl);
           setReserveModel(data.reserve.model);
+          setReserveReasoningEffort(data.reserve.reasoningEffort ?? '');
         }
       }
       try {
@@ -578,6 +617,7 @@ export default function App() {
           kind,
           baseUrl,
           model,
+          reasoningEffort,
           ...(key ? { key } : {}),
           ...(headersEdited ? { headers: headerRows } : {}),
         }),
@@ -611,6 +651,7 @@ export default function App() {
           kind: reserveKind,
           baseUrl: reserveBaseUrl,
           model: reserveModel,
+          reasoningEffort: reserveReasoningEffort,
           ...(reserveKey ? { key: reserveKey } : {}),
           ...(reserveHeadersEdited ? { headers: reserveHeaderRows } : {}),
         }),
@@ -628,6 +669,7 @@ export default function App() {
       setReserveKind('openai');
       setReserveBaseUrl('');
       setReserveModel('');
+      setReserveReasoningEffort('');
       setSlotSaved(true);
       await load();
     } catch {
@@ -653,6 +695,7 @@ export default function App() {
       setReserveKind('openai');
       setReserveBaseUrl('');
       setReserveModel('');
+      setReserveReasoningEffort('');
       setReserveKey('');
       setReserveHeaderRows([]);
       setReserveHeadersEdited(false);
@@ -912,6 +955,11 @@ export default function App() {
                     }}
                   />
                 </div>
+                <ReasoningEffortField
+                  id="reasoning-effort"
+                  value={reasoningEffort}
+                  onChange={setReasoningEffort}
+                />
                 <div className="space-y-2">
                   <Label htmlFor="key">{t('key')}</Label>
                   <Input
@@ -1009,6 +1057,11 @@ export default function App() {
                           }}
                         />
                       </div>
+                      <ReasoningEffortField
+                        id="reserve-reasoning-effort"
+                        value={reserveReasoningEffort}
+                        onChange={setReserveReasoningEffort}
+                      />
                       <div className="space-y-2">
                         <Label htmlFor="reserve-key">{t('key')}</Label>
                         <Input

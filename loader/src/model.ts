@@ -5,6 +5,7 @@ import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
 import type { ClientRequest } from 'node:http';
 import { modelEndpointUrl } from './model-url.js';
+import type { ReasoningEffort } from './reasoning-effort.js';
 
 export type ModelSlotName = 'primary' | 'reserve';
 /** One additional header the slot sends upstream, in the owner's own order. */
@@ -16,6 +17,8 @@ export interface ModelSlot {
   kind: 'openai' | 'ollama';
   baseUrl: string;
   model: string;
+  /** Used only when the caller omits reasoning_effort. */
+  reasoningEffort?: ReasoningEffort;
   key?: string;
   headers?: ModelSlotHeader[];
 }
@@ -306,6 +309,7 @@ export function createModelChecker(
     const endpoint = modelEndpointUrl(slot.baseUrl);
     const payload = JSON.stringify({
       model: slot.model,
+      ...(slot.reasoningEffort === undefined ? {} : { reasoning_effort: slot.reasoningEffort }),
       messages: [{ role: 'user', content: 'Reply with OK.' }],
       max_tokens: 4,
       stream: false,

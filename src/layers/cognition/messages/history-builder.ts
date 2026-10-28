@@ -21,6 +21,9 @@ export function buildInitialMessages(
   useSmart: boolean,
   promptBuilders: PromptBuilders
 ): Message[] {
+  // Only identity and fixed instructions lead the transcript. Historical timestamps,
+  // call IDs and current trigger/state stay behind this cacheable prefix. Tools travel
+  // separately in the native tools field; never prepend per-turn metadata here.
   const systemPrompt = promptBuilders.buildSystemPrompt(context, useSmart);
   const messages: Message[] = [{ role: 'system', content: systemPrompt }];
 
@@ -93,11 +96,15 @@ export function buildInitialMessages(
   // echoing <msg_time> tags and ignoring the trigger. A user-role boundary breaks
   // this continuation pattern.
   // Reactions are user interactions (feedback on a message), so they skip the boundary.
-  if (!isUserInteraction && context.conversationHistory.length > 0) {
+  // Without history, system-role triggers still need a user boundary: otherwise the
+  // transcript compiler merges their per-turn data into the leading system message.
+  const hasHistory = context.conversationHistory.length > 0;
+  if (!isUserInteraction && (hasHistory || context.triggerSignal.type !== 'task_outcome')) {
     messages.push({
       role: 'user',
-      content:
-        '[End of conversation history. All messages above were already handled and responded to. A new, unrelated system event follows.]',
+      content: hasHistory
+        ? '[End of conversation history. All messages above were already handled and responded to. A new, unrelated system event follows.]'
+        : '[A new system event follows.]',
     });
   }
 

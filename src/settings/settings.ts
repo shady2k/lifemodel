@@ -8,6 +8,7 @@
  * writes the configuration document to Postgres and reloads the model endpoint
  * for future requests from the running core.
  */
+import { isReasoningEffort } from '../config/reasoning-effort.js';
 import { CONFIG_FILE_VERSION, type AgentConfigFile } from '../config/config-schema.js';
 import {
   endpointGaps,
@@ -23,6 +24,9 @@ export interface SettingsInput {
   fastModel: string;
   smartModel: string;
   motorModel: string;
+  fastReasoningEffort?: string;
+  smartReasoningEffort?: string;
+  motorReasoningEffort?: string;
 }
 
 /** A field of the form. */
@@ -35,8 +39,11 @@ export type SettingsErrors = Partial<Record<SettingsField, string>>;
 export const SETTINGS_FIELDS: readonly { field: SettingsField; label: string }[] = [
   { field: 'endpointBaseUrl', label: 'the endpoint base URL' },
   { field: 'fastModel', label: 'the fast model' },
+  { field: 'fastReasoningEffort', label: 'the fast reasoning effort' },
   { field: 'smartModel', label: 'the smart model' },
+  { field: 'smartReasoningEffort', label: 'the smart reasoning effort' },
   { field: 'motorModel', label: 'the motor role model' },
+  { field: 'motorReasoningEffort', label: 'the motor reasoning effort' },
 ];
 
 /** An http(s) URL, the only thing lifemodel can send a request to. */
@@ -107,6 +114,15 @@ export function settingsEndpoint(input: SettingsInput): ModelEndpoint {
     fastModel: blank(input.fastModel),
     smartModel: blank(input.smartModel),
     motorModel: blank(input.motorModel),
+    fastReasoningEffort: isReasoningEffort(input.fastReasoningEffort)
+      ? input.fastReasoningEffort
+      : null,
+    smartReasoningEffort: isReasoningEffort(input.smartReasoningEffort)
+      ? input.smartReasoningEffort
+      : null,
+    motorReasoningEffort: isReasoningEffort(input.motorReasoningEffort)
+      ? input.motorReasoningEffort
+      : null,
   };
 }
 
@@ -123,6 +139,16 @@ export function validateSettings(
   options: { pinnedBaseUrl?: string | null } = {}
 ): SettingsErrors {
   const errors: SettingsErrors = {};
+  for (const field of [
+    'fastReasoningEffort',
+    'smartReasoningEffort',
+    'motorReasoningEffort',
+  ] as const) {
+    const value = input[field] ?? '';
+    if (value !== '' && !isReasoningEffort(value)) {
+      errors[field] = 'reasoning effort must be blank, none, minimal, low, medium or high';
+    }
+  }
   const pinned = options.pinnedBaseUrl ?? null;
   const endpoint = withPinnedBaseUrl(settingsEndpoint(input), pinned);
 
@@ -171,6 +197,9 @@ export function settingsInputFromBody(body: Record<string, unknown>): SettingsIn
     fastModel: read('fastModel'),
     smartModel: read('smartModel'),
     motorModel: read('motorModel'),
+    fastReasoningEffort: read('fastReasoningEffort'),
+    smartReasoningEffort: read('smartReasoningEffort'),
+    motorReasoningEffort: read('motorReasoningEffort'),
   };
 }
 
@@ -189,6 +218,9 @@ export function settingsInputFromFile(
     fastModel: endpoint?.fastModel ?? '',
     smartModel: endpoint?.smartModel ?? '',
     motorModel: endpoint?.motorModel ?? '',
+    fastReasoningEffort: endpoint?.fastReasoningEffort ?? '',
+    smartReasoningEffort: endpoint?.smartReasoningEffort ?? '',
+    motorReasoningEffort: endpoint?.motorReasoningEffort ?? '',
   };
 }
 
@@ -212,7 +244,7 @@ export function applySettings(
       endpoint: {
         // Spread FIRST, replace after: the endpoint's future fields (anything
         // a later version adds) are not this interface's to drop, only the
-        // four here are.
+        // fields owned by this form are.
         ...(file?.llm?.endpoint ?? {}),
         // A platform-pinned base URL is not lifemodel's to write down: the
         // document carries none while the platform names the endpoint.
@@ -220,6 +252,9 @@ export function applySettings(
         fastModel: endpoint.fastModel,
         smartModel: endpoint.smartModel,
         motorModel: endpoint.motorModel,
+        fastReasoningEffort: endpoint.fastReasoningEffort ?? null,
+        smartReasoningEffort: endpoint.smartReasoningEffort ?? null,
+        motorReasoningEffort: endpoint.motorReasoningEffort ?? null,
       },
     },
     primaryUser,
