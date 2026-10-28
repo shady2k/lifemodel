@@ -1,5 +1,7 @@
 /** Kubernetes Jobs adapter. It has no registry, allocation or launch authority. */
 import { createHash } from 'node:crypto';
+import type { TraceWriter } from '../ports/observability.js';
+import { recordTaskPodTermination } from './task-pod-trace.js';
 import type {
   TaskExecutor,
   TaskLaunch,
@@ -59,6 +61,7 @@ export interface KubernetesTaskExecutorOptions extends TaskKubernetesClientOptio
   readonly modelEndpoint?: string;
   readonly workVolumeBytes?: number;
   readonly client?: TaskKubernetesClient;
+  readonly traces?: Pick<TraceWriter, 'enqueue'>;
 }
 
 /** launch_ plus 64 hex is too long for a Kubernetes label. Use the name's 58 hex suffix. */
@@ -563,7 +566,11 @@ export class KubernetesTaskExecutor implements TaskExecutor {
   private async deleteOwnedPods(launch: TaskLaunch, signal?: AbortSignal): Promise<void> {
     // A Job may already be absent. Controller UID still identifies orphan Pods,
     // independently of mutable labels. Orphan propagation would erase this link.
-    for (const pod of await this.ownedPods(launch, signal)) {
+    const pods = await this.ownedPods(launch, signal);
+    // Capture every exact-owned termination before the first destructive call,
+    // including a launcher that died before it could bind its Pod identity.
+    for (const pod of pods) recordTaskPodTermination(launch.task, pod, this.options.traces);
+    for (const pod of pods) {
       const metadata = object(pod['metadata']);
       await this.deleteIdentity(
         metadata['name'] as string,

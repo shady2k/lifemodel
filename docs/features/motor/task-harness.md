@@ -23,7 +23,12 @@ API or adapter-specific cognition path is added. See
 ## Authority before execution
 
 The workbench ENTRYPOINT runs `loader/src/task-launcher-main.ts`. With no
-arguments it runs one task. `--self-check` remains an offline image check.
+arguments it runs one task. `--self-check` remains an offline tool check.
+`--check-modules` imports the actual launcher graph without starting a task;
+workbench CI and releases run it offline before publishing. The image copies
+the complete loader build, including shared modules outside `task-*.js`.
+Startup failures emit only allowlisted public error codes and module basenames
+to stderr and `/dev/termination-log`; self-check failures retain their own code.
 No task API, shell command, prompt or provider credential comes from Job args.
 
 The ten [launch environment values](task-launch.md) contain endpoints and files,
@@ -486,6 +491,15 @@ disabled. HTTP requests, sockets and child streams keep error listeners through
 teardown and have finite deadlines.
 
 ## Best-effort traces, not a journal
+
+Before deleting an exact-owned task Pod, core captures its terminated task
+container's exit code, Kubernetes reason and termination message as a `task.pod`
+child span. This also covers a launcher that dies before its first channel
+request. Text is untrusted: it is bounded, control characters are removed and
+trace credential scrubbing applies. `lifemodel doctor trace` displays these
+fields after the Job is removed. No pod log read or retained log pipeline is
+added. The shared disposable trace queue and its existing loss limits still
+apply; evidence never decides the task outcome or blocks cleanup.
 
 The launcher sends [task trace frames](task-channel.md#disposable-task-trace-route)
 to `/task/trace`, independently of progress and terminal mailbox frames. The

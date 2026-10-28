@@ -1,11 +1,12 @@
 #!/bin/sh
 # Import the actual runtime entrypoint, offline, without starting its service.
 set -eu
-[ "$#" = 2 ] || { echo 'usage: smoke-image-modules.sh core|loader|web IMAGE' >&2; exit 2; }
+[ "$#" = 2 ] || { echo 'usage: smoke-image-modules.sh core|loader|web|workbench IMAGE' >&2; exit 2; }
 case "$1" in
     core) entry=/opt/lifemodel/dist/index.js ;;
     loader) entry=/opt/lifemodel/loader/dist/main.js ;;
     web) entry=/opt/lifemodel/dist/web/server.cjs ;;
+    workbench) entry=/opt/lifemodel/loader/dist/task-launcher-main.js ;;
     *) echo "unknown image kind: $1" >&2; exit 2 ;;
 esac
 name="lifemodel-module-smoke-$$"

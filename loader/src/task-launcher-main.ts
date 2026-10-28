@@ -1,8 +1,7 @@
 /** Workbench ENTRYPOINT. Self-check stays offline; tasks use the once-only start. */
 import { execFileSync } from 'node:child_process';
 import { access, mkdir, readFile } from 'node:fs/promises';
-import { constants } from 'node:fs';
-import { selfCheckHarnesses } from './task-harness-registry.js';
+import { constants, writeFileSync } from 'node:fs';
 
 // Keep listeners through teardown, including late EPIPE after a write callback.
 function write(stream: NodeJS.WriteStream, text: string): void {
@@ -31,8 +30,13 @@ for (const stream of [process.stdout, process.stderr]) {
 }
 
 async function main(): Promise<void> {
-  if (process.argv.length === 2) {
+  if (
+    process.argv.length === 2 ||
+    (process.argv.length === 3 && process.argv[2] === '--check-modules')
+  ) {
+    // Load the task's actual graph, not just the offline self-check's graph.
     const { runTaskLauncher } = await import('./task-launcher.js');
+    if (process.argv[2] === '--check-modules') return;
     const controller = new AbortController();
     const abort = () => {
       controller.abort();
@@ -85,12 +89,80 @@ async function main(): Promise<void> {
     });
     write(process.stdout, `${command}: ${output.trim()}\n`);
   }
+  const { selfCheckHarnesses } = await import('./task-harness-registry.js');
   for (const checked of await selfCheckHarnesses()) write(process.stdout, `${checked}\n`);
   write(process.stdout, 'workbench_self_check_ok\n');
 }
 
-main().catch(() => {
-  // Do not include process env, command stderr or credentials in diagnostics.
-  write(process.stderr, 'workbench_self_check_failed\n');
+// These are trusted public identifiers, not a general-purpose error formatter.
+// Even a syntactically valid error code or basename could contain a secret.
+const START_ERROR_CODES = new Set([
+  'ERR_MODULE_NOT_FOUND',
+  'ERR_PACKAGE_PATH_NOT_EXPORTED',
+  'ERR_UNKNOWN_FILE_EXTENSION',
+  'ERR_REQUIRE_ESM',
+  'MODULE_NOT_FOUND',
+  'EACCES',
+  'ENOENT',
+]);
+const START_MODULE_NAMES = new Set([
+  'task-launcher.js',
+  'task-launcher-http.js',
+  'task-harness-registry.js',
+  'task-harness-factory.js',
+  'task-harness.js',
+  'task-acp.js',
+  'task-model-relay.js',
+  'model-error-excerpt.js',
+  'task-command-intake.js',
+  'task-connection-retry.js',
+  'task-tools.js',
+  'task-trace.js',
+  'task-trace-channel.js',
+  'task-process.js',
+  'task-mcp-shim.js',
+  'task-steering-journal.js',
+  'storage-cli.js',
+  'task-agent-validation.mjs',
+  'task-harness-registry.json',
+]);
+
+main().catch((error: unknown) => {
+  let reasonCode = 'startup_error';
+  let module = 'unknown';
+  try {
+    if (error && typeof error === 'object') {
+      const value = error as Record<string, unknown>;
+      const code = value['code'];
+      if (typeof code === 'string' && START_ERROR_CODES.has(code)) reasonCode = code;
+      // Node's ESM resolver supplies a URL separately from its unsafe message.
+      // Do not parse error.message, stack, path, stderr, or an arbitrary URL host.
+      const url = value['url'];
+      if (typeof url === 'string' && url.length <= 2_048) {
+        const parsed = new URL(url);
+        const name = parsed.pathname.split('/').at(-1) ?? '';
+        if (
+          parsed.protocol === 'file:' &&
+          !parsed.host &&
+          !parsed.search &&
+          !parsed.hash &&
+          START_MODULE_NAMES.has(name)
+        )
+          module = name;
+      }
+    }
+  } catch {
+    // Untrusted properties/getters and malformed URLs must not break reporting.
+  }
+  const code =
+    process.argv[2] === '--self-check' ? 'workbench_self_check_failed' : 'launcher_start_failed';
+  const diagnostic = `${JSON.stringify({ code, reasonCode, module })}\n`;
   process.exitCode = 1;
+  write(process.stderr, diagnostic);
+  try {
+    // Kubernetes captures this file before core removes the failed Job.
+    writeFileSync('/dev/termination-log', diagnostic, { encoding: 'utf8' });
+  } catch {
+    // A missing/read-only termination file must not replace the original code.
+  }
 });

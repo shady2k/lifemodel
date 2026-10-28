@@ -40,6 +40,7 @@ export function createTaskLaunchReconciler(options: {
       name: string;
       uid: string;
       launchLabel: string;
+      templateHash?: string;
       remove: (signal: AbortSignal) => Promise<void>;
     }[]
   >;
@@ -216,10 +217,39 @@ export function createTaskLaunchReconciler(options: {
             fresh.terminalCandidate ||
             (fresh.state === 'starting' && fresh.softStopRequestedAt)
           ) {
-            if (fresh) await options.registry.tombstoneLaunch(fresh.id, fresh.launchId);
-            active();
-            await job.remove(controller.signal);
-            options.onCleanup?.();
+            if (
+              fresh?.allocationReceipt &&
+              (fresh.jobUid === job.uid ||
+                (!fresh.jobUid &&
+                  fresh.terminalCandidate &&
+                  job.launchLabel === fresh.launchId.slice(7, 65) &&
+                  /^[0-9a-f]{64}$/.test(job.templateHash ?? '')))
+            ) {
+              let owned = fresh;
+              if (!owned.jobUid) {
+                // A listed annotation is not template authority. Validate the
+                // late CREATE through the executor before binding durable state.
+                owned = await options.registry.tombstoneLaunch(owned.id, owned.launchId);
+                active();
+                const observed = await options.executor.observe(launch(owned), controller.signal);
+                active();
+                if (observed?.jobUid !== job.uid) throw new TaskExecutorError('identity_mismatch');
+                owned = await options.registry.bindCleanupJob(
+                  owned.id,
+                  owned.launchId,
+                  observed.jobUid,
+                  observed.templateHash
+                );
+                active();
+              }
+              await cleanup(owned);
+            } else {
+              // Unknown or differently bound Jobs cannot supply task evidence.
+              if (fresh) await options.registry.tombstoneLaunch(fresh.id, fresh.launchId);
+              active();
+              await job.remove(controller.signal);
+              options.onCleanup?.();
+            }
           }
           taskContext = undefined;
         }
