@@ -331,7 +331,11 @@ recorded failure and a warning identifying the signal type and source, never
 its values. A resolved non-error internal turn with no final send to its
 answered recipient completes quietly, without replaying its tool effects.
 An undefined internal outcome retries only when a final send to that recipient
-started but was not counted delivered. Inbound messages keep their own policy.
+started but was not counted delivered. A normalized task question that finishes
+without an owner reply or a committed correlated task answer gets a deterministic
+relay containing its text, task id and question id. The relay uses the turn's
+normal outbox effect key, so replay cannot create a second committed relay.
+Inbound messages keep their own policy.
 Restored entries that already exhausted the budget complete without another
 turn. Signal expiry never discards durable bus work on admission, replay or
 retry: an uncommitted scheduled reminder still runs after a long restart.
