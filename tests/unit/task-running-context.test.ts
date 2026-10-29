@@ -44,6 +44,15 @@ describe('running task prompt data budget', () => {
     }
   );
 
+  it('warns that task IDs are unavailable and must not be invented', () => {
+    const ctx = context();
+    ctx.runningTasks = 'unavailable';
+    const prompt = buildTriggerPrompt(ctx);
+    expect(prompt).toContain('Task IDs could not be loaded this turn');
+    expect(prompt).toContain('Never invent a task ID');
+    expect(prompt).toContain('Do not claim there are no tasks');
+  });
+
   it('ignores malformed null question text and preserves the question-turn command scope', () => {
     const ctx = context([{ ...entry, question: { questionId: 'q', text: null } as never }]);
     ctx.triggerSignal = createSignal(

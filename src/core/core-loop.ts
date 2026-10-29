@@ -716,6 +716,15 @@ export class CoreLoop {
     if (state.disposition === 'no_reply' || state.disposition === 'defer') {
       return 'deliberate_no_reply';
     }
+    // Quiet proactive turns (including tools-only work) have already done
+    // their work. Replaying them repeats effects and model cost. Only a
+    // final answer that started but was not counted delivered is undecided.
+    if (
+      ![...state.turn.triggerSignals, ...state.turn.absorbedSignals].some(
+        (signal) => signal.type === 'user_message'
+      )
+    )
+      return 'deliberate_no_reply';
     return undefined;
   }
 
@@ -775,7 +784,8 @@ export class CoreLoop {
    * (error disposition) or a send that did not reach the chat - is never
    * retried for inbound work, which follows its own durable policy. Internal
    * bus entries retry once in this core and then complete with a warning. A
-   * resolved turn with NO outcome leaves its entries for replay at next start.
+   * resolved internal turn retries an undecided final answer, but a quiet
+   * non-error turn completes without replay. Inbound work keeps its own policy.
    */
   private settleTurn(state: PendingTurnCommits): void {
     if (state.settled || this.deadForTest) return;
@@ -818,31 +828,32 @@ export class CoreLoop {
       this.busSignalStream?.markFailed(ownedBusIds);
       const retryBusIds: string[] = [];
       const exhaustedBusIds: string[] = [];
-      if (outcome === 'failed_turn') {
-        for (const id of ownedBusIds) {
-          const failed = this.busSignalStream?.stateFor(id);
-          if (failed?.status !== 'failed') continue;
-          if (failed.retries < 2) {
-            this.busSignalStream?.markOwned([id], failed.turnId);
-            retryBusIds.push(id);
-          } else {
-            exhaustedBusIds.push(id);
-          }
+      for (const id of ownedBusIds) {
+        const failed = this.busSignalStream?.stateFor(id);
+        if (failed?.status !== 'failed') continue;
+        if (failed.retries < 2) {
+          this.busSignalStream?.markOwned([id], failed.turnId);
+          retryBusIds.push(id);
+        } else {
+          exhaustedBusIds.push(id);
         }
-        this.busSignalStream?.markCompleted(exhaustedBusIds);
-        const retrySignals = [...state.turn.triggerSignals, ...state.turn.absorbedSignals];
-        for (const signal of retrySignals.reverse()) {
-          const streamId = this.signalStreamIds.get(signal.id);
-          if (!streamId || !retryBusIds.includes(streamId)) continue;
-          this.knownBusEntries.add(streamId);
-          this.pendingSignals.unshift({ signal, timestamp: signal.timestamp, streamId });
-        }
-        if (exhaustedBusIds.length > 0) {
-          this.logger.warn(
-            { entries: exhaustedBusIds.length },
-            'Internal signals failed twice and were completed with their recorded failure'
-          );
-        }
+      }
+      for (const id of exhaustedBusIds) {
+        const signal = [...state.turn.triggerSignals, ...state.turn.absorbedSignals].find(
+          (signal) => this.signalStreamIds.get(signal.id) === id
+        );
+        this.logger.warn(
+          { streamId: id, signalType: signal?.type, signalSource: signal?.source },
+          'Internal signals failed twice and were completed with their recorded failure'
+        );
+      }
+      this.busSignalStream?.markCompleted(exhaustedBusIds);
+      const retrySignals = [...state.turn.triggerSignals, ...state.turn.absorbedSignals];
+      for (const signal of retrySignals.reverse()) {
+        const streamId = this.signalStreamIds.get(signal.id);
+        if (!streamId || !retryBusIds.includes(streamId)) continue;
+        this.knownBusEntries.add(streamId);
+        this.pendingSignals.unshift({ signal, timestamp: signal.timestamp, streamId });
       }
       const exhaustedIds =
         outcome === 'failed_turn' ? (this.inboundStream?.markFailedTurn(inboundIds) ?? []) : [];
@@ -1115,6 +1126,7 @@ export class CoreLoop {
     await this.drainPendingCognition(deadline);
     if (this.commitSnapshot && (this.finalDrainNeedsCommit || this.tickOutbox.length > 0)) {
       const batch = [...this.tickOutbox];
+      const committingBusOffset = this.busSignalStream?.committedOffset();
       try {
         const result = await awaitWithinDeadline(
           this.commitSnapshot(this.tickCount, batch),
@@ -1128,8 +1140,8 @@ export class CoreLoop {
             const event = this.tickOutbox[index];
             if (event && committed.has(event)) this.tickOutbox.splice(index, 1);
           }
-          if (this.busSignalStream) {
-            await this.busSignalStream.trimBefore(this.busSignalStream.committedOffset());
+          if (this.busSignalStream && committingBusOffset !== undefined) {
+            await this.busSignalStream.trimBefore(committingBusOffset);
           }
         } else {
           if (previousBusSnapshot && this.busSignalStream)
@@ -2010,6 +2022,7 @@ export class CoreLoop {
         // This awaited CAS is the tick's durability boundary. The next tick
         // cannot start until the complete snapshot is committed.
         const committingOutbox = [...this.tickOutbox];
+        const committingBusOffset = this.busSignalStream?.committedOffset();
         this.snapshotCommitStarted = true;
         try {
           await this.commitSnapshot?.(this.tickCount, committingOutbox);
@@ -2034,8 +2047,8 @@ export class CoreLoop {
           throw error;
         }
         this.snapshotCommitStarted = false;
-        if (this.busSignalStream) {
-          const committedOffset = this.busSignalStream.committedOffset();
+        if (this.busSignalStream && committingBusOffset !== undefined) {
+          const committedOffset = committingBusOffset;
           for (const id of this.knownBusEntries) {
             if (compareStreamIds(id, committedOffset) <= 0) this.knownBusEntries.delete(id);
           }
@@ -2113,8 +2126,21 @@ export class CoreLoop {
     if (!this.busSignalStream) return;
     await Promise.all(this.pendingBusWrites);
     this.pendingBusWrites.length = 0;
+    // A previous version could trim uncommitted in-memory progress. Recover
+    // its orphan ledger entries without inventing a payload or a new turn.
+    // Check only replay candidates, never entries owned by a running turn.
+    const replayEntries = Object.entries(this.busSignalStream.exportSnapshot().entries).filter(
+      ([id, state]) => state.status !== 'completed' && !this.knownBusEntries.has(id)
+    );
+    const missing = await this.busSignalStream.missingEntryIds(replayEntries.map(([id]) => id));
+    for (const id of missing) {
+      this.logger.warn(
+        { streamId: id, status: this.busSignalStream.stateFor(id)?.status },
+        'Internal bus ledger entry has no stream row; completed with recorded loss'
+      );
+    }
+    this.busSignalStream.markCompleted(missing);
     const offset = this.busSignalStream.committedOffset();
-    await this.busSignalStream.trimBefore(offset);
     let cursor = offset;
     let admitted = 0;
     while (admitted < this.config.maxSignalsPerTick) {
@@ -2123,8 +2149,27 @@ export class CoreLoop {
       let stoppedForCapacity = false;
       for (const entry of entries) {
         cursor = entry.id;
+        // Completing a replayed gap can retire later completed entries that
+        // were already read in this batch. Never admit those rows again.
+        if (compareStreamIds(entry.id, this.busSignalStream.committedOffset()) <= 0) continue;
         const state = this.busSignalStream.stateFor(entry.id);
-        if (state?.status === 'completed') continue;
+        if (state?.status === 'completed' || this.knownBusEntries.has(entry.id)) continue;
+        // A restored turn that already used its two attempts must not run
+        // again. Complete it in the next epoch-checked snapshot, including
+        // legacy failed/owned entries whose retry count exceeded the budget.
+        if (state && state.retries >= 2) {
+          this.busSignalStream.markCompleted([entry.id]);
+          this.logger.warn(
+            {
+              streamId: entry.id,
+              retries: state.retries,
+              signalType: entry.signal.type,
+              signalSource: entry.signal.source,
+            },
+            'Internal signals failed twice and were completed with their recorded failure'
+          );
+          continue;
+        }
         if (!state) {
           if (this.busSignalStream.admissionCapacity() === 0) {
             stoppedForCapacity = true;
@@ -2134,7 +2179,6 @@ export class CoreLoop {
           admitted += 1;
         }
         this.signalStreamIds.set(entry.signal.id, entry.id);
-        if (this.knownBusEntries.has(entry.id)) continue;
         this.knownBusEntries.add(entry.id);
         this.pendingSignals.push({
           signal: entry.signal,
@@ -2655,18 +2699,15 @@ export class CoreLoop {
       tickId: context.tickId,
       startedAt,
       triggerSignals,
-      // Task outcomes route to the configured owner just as cognition does.
-      // Capture that owner here so its send settles the durable bus entry in
+      // All proactive triggers route to the configured owner, just as
+      // cognition does. Capture that owner so its send settles the bus entry in
       // the same snapshot as the answer, even after outbound dedup is trimmed.
       recipientId: (() => {
         const first = triggerSignals[0];
         const data = first?.data as { recipientId?: unknown } | undefined;
         return typeof data?.recipientId === 'string'
           ? data.recipientId
-          : first?.type === 'task_outcome' ||
-              (first?.type === 'task_report' &&
-                first.data?.kind === 'task_report' &&
-                first.data.eventKind === 'question')
+          : first?.type !== 'user_message'
             ? getPrimaryRecipientId()
             : undefined;
       })(),
