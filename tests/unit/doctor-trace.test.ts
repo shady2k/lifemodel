@@ -180,6 +180,33 @@ describe('doctor trace stored tree', () => {
     writer.enqueue({
       kind: 'span',
       span: {
+        traceId: 'stored-run',
+        spanId: 'chat_3',
+        parentSpanId: 'root',
+        component: 'llm',
+        startedAt: '2026-01-01T00:00:03.000Z',
+        endedAt: '2026-01-01T00:00:03.200Z',
+        status: 'ok',
+        attrs: {
+          'span.name': 'chat smart-model',
+          'gen_ai.request.model': 'smart-model',
+          // A reported cache miss and no reasoning: zeros, not dashes.
+          'gen_ai.usage.input_tokens': 1200,
+          'gen_ai.usage.cache_read.input_tokens': 0,
+          'gen_ai.usage.output_tokens': 180,
+          'gen_ai.usage.reasoning.output_tokens': 0,
+          'lifemodel.call_id': 'call_33333333-3333-3333-3333-333333333333',
+          'lifemodel.role': 'smart',
+          'lifemodel.slot': 'primary',
+          'lifemodel.http.status': 200,
+          'lifemodel.attempt': 1,
+          'lifemodel.duration_ms': 200,
+        },
+      },
+    });
+    writer.enqueue({
+      kind: 'span',
+      span: {
         traceId: 'open-run',
         spanId: 'open',
         parentSpanId: null,
@@ -325,13 +352,17 @@ describe('doctor trace stored tree', () => {
   it('lists recent model calls newest first with a dash where the provider reported nothing', () => {
     const result = run([], {}, 'llm');
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain('recent model calls, newest first (2)');
+    expect(result.stdout).toContain('recent model calls, newest first (3)');
+    const chatThree = result.stdout.indexOf('call=call_33333333-3333-3333-3333-333333333333');
     const chatTwo = result.stdout.indexOf('call=call_22222222-2222-2222-2222-222222222222');
     const chatOne = result.stdout.indexOf('call=call_11111111-1111-1111-1111-111111111111');
-    expect(chatTwo).toBeGreaterThan(0);
+    expect(chatThree).toBeGreaterThan(0);
+    expect(chatThree).toBeLessThan(chatTwo);
     expect(chatTwo).toBeLessThan(chatOne);
     expect(result.stdout).toContain(' 2026-01-01T00:00:00.500Z smart smart-model primary low 1200/1024/180/64 1000ms ok call=call_111');
     expect(result.stdout).toContain(' 2026-01-01T00:00:02.000Z fast fast-model reserve - 40/-/7/- 400ms failed call=call_222');
+    // A reported zero is a cache miss and reads 0; a dash is "not reported".
+    expect(result.stdout).toContain(' 2026-01-01T00:00:03.000Z smart smart-model primary - 1200/0/180/0 200ms ok call=call_333');
     expect(result.stdout).toContain('error=http_500');
   });
 

@@ -255,7 +255,11 @@ below is what that code writes today.
    request summaries, responses and post-processing. Follow the trace id
    seen in the conversation log, or the tick's id as `correlationId` (a
    cognition wake is traced from its trigger signal; the tick id links, it
-   does not root), or fall back to the same timestamp window.
+   does not root), or fall back to the same timestamp window. That signal's
+   trace is the whole turn: its model calls, a task the turn started (the
+   `core.startTask` tool reads the current trace context, so the run's pod
+   spans join it) and the trace reference in the agentic loop's apology text
+   all name it, and `lifemodel doctor trace <id>` reads them together.
 
 Conversation log format (schematic; written by `src/llm/provider.ts`). One
 log entry carries a whole request or response block, so the

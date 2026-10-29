@@ -12,8 +12,9 @@
  * conventions registry at semantic-conventions-genai commit
  * `3fe84604a581b3d50dd5b4bd29383b462d2a5018` (2026-10-28), the revision this
  * leaf was written against; see `docs/features/motor/observability.md`.
- * "Not reported" stays absent, never 0: a zero cached count would claim the
- * provider answered with no cache hit, and it did not answer at all.
+ * "Not reported" stays absent, and a reported 0 stays 0: a cached count of 0
+ * is a cache miss, which is the diagnostic; an absent one only says the
+ * endpoint did not report it.
  *
  * No prompt or answer text reaches a span. The request's stable prefix parts
  * are recorded as a sha-256 prefix and a character length only, so a cache
@@ -24,6 +25,21 @@ import { createHash, randomUUID } from 'node:crypto';
 import { getTraceContext } from '../core/trace-context.js';
 import type { CompletionResponse } from './provider.js';
 import type { TraceRecord, TraceWriter } from '../ports/observability.js';
+
+/**
+ * Run one observation without letting it reach the model call.
+ *
+ * The span is disposable evidence: a recorder that throws - a broken getter, a
+ * transport detail that turned out to be a proxy - must leave the request the
+ * transport sends and the answer it returns exactly as they were.
+ */
+export function observeQuietly(observe: () => void): void {
+  try {
+    observe();
+  } catch {
+    /* disposable evidence never fails a call */
+  }
+}
 
 /** The component name of a model-call span in the observability store. */
 export const MODEL_CALL_COMPONENT = 'llm';
@@ -60,7 +76,10 @@ export interface ModelCallWire {
   responseId?: string;
   /** The endpoint's finish reason(s), when the answer carried one. */
   finishReasons?: string[];
-  /** Provider-reported usage. Absent means "not reported", never 0. */
+  /**
+   * Provider-reported usage. Absent means "not reported"; a field that is
+   * present is what the endpoint reported, `0` included.
+   */
   usage?: {
     inputTokens?: number;
     cacheReadInputTokens?: number;
@@ -123,10 +142,14 @@ export class ModelCallTrace {
     this.callId = `call_${randomUUID()}`;
     const context = getTraceContext();
     // A call with no turn context starts its own trace: the record is worth
-    // more than the parent it lacks.
-    this.traceId = context?.traceId ?? this.callId;
-    this.parentSpanId = context?.spanId ?? null;
-    this.triggerType = context?.triggerType;
+    // more than the parent it lacks. `untraced` is what a caller name alone
+    // produces (`withCaller` outside any turn, trace-context.ts): joining it
+    // would put every such call into one ever-growing trace, so it counts as
+    // no context too.
+    const usable = context !== undefined && context.traceId !== 'untraced' ? context : undefined;
+    this.traceId = usable?.traceId ?? this.callId;
+    this.parentSpanId = usable?.spanId ?? null;
+    this.triggerType = usable?.triggerType;
     this.role = request.role;
     this.requestModel = request.model;
     this.requestMessageCount = request.messages?.length ?? 0;
@@ -174,7 +197,16 @@ export class ModelCallTrace {
     };
   }
 
-  /** The provider-reported usage, with "not reported" kept absent. */
+  /**
+   * The provider-reported usage, with "not reported" kept absent.
+   *
+   * A count the endpoint's usage object carried is recorded as it is, 0
+   * included: a reported `cached_tokens: 0` is a cache miss - the main
+   * diagnostic this span exists for - and it must not read like a count the
+   * provider never sent. Only when the wire usage was not read at all is the
+   * SDK's own 0 indistinguishable from a missing count, so then only a
+   * positive count is recorded.
+   */
   observeUsage(usage: {
     inputTokens?: number | undefined;
     outputTokens?: number | undefined;
@@ -183,28 +215,21 @@ export class ModelCallTrace {
     reasoningTokens?: number | undefined;
   }): void {
     const reported = this.reportedUsage;
-    // A count the wire did not carry has no number to bring: the SDK's 0 is
-    // the transport's default, not the provider's answer. A cached count is
-    // also only meaningful when non-zero, which is what the convention says.
-    const count = (value: number | undefined, carried: boolean, nonZeroOnly: boolean) => {
+    const count = (value: number | undefined, carried: boolean): number | undefined => {
       if (typeof value !== 'number') return undefined;
-      // The wire is the witness of what was reported. Without it a 0 cannot be
-      // told from a missing count, so only a positive count is recorded.
-      if (reported ? !carried : value <= 0) return undefined;
-      if (nonZeroOnly && value <= 0) return undefined;
-      return value;
+      if (reported) return carried ? value : undefined;
+      return value > 0 ? value : undefined;
     };
     const recorded: NonNullable<ModelCallWire['usage']> = {};
-    const input = count(usage.inputTokens, reported?.input ?? false, false);
+    const input = count(usage.inputTokens, reported?.input ?? false);
     if (input !== undefined) recorded.inputTokens = input;
-    const output = count(usage.outputTokens, reported?.output ?? false, false);
+    const output = count(usage.outputTokens, reported?.output ?? false);
     if (output !== undefined) recorded.outputTokens = output;
-    const cached = count(usage.inputTokenDetails?.cacheReadTokens, reported?.cached ?? false, true);
+    const cached = count(usage.inputTokenDetails?.cacheReadTokens, reported?.cached ?? false);
     if (cached !== undefined) recorded.cacheReadInputTokens = cached;
     const reasoning = count(
       usage.outputTokenDetails?.reasoningTokens ?? usage.reasoningTokens,
-      reported?.reasoning ?? false,
-      true
+      reported?.reasoning ?? false
     );
     if (reasoning !== undefined) recorded.reasoningOutputTokens = reasoning;
     this.wire.usage = recorded;

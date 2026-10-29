@@ -8,13 +8,17 @@
  * usage object and the serialized request's prefix parts.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { VercelAIProvider } from '../../../src/plugins/providers/vercel-ai-provider.js';
 import { MODEL_CALL_HEADER } from '../../../src/config/model-endpoint.js';
-import { withTraceContext } from '../../../src/core/trace-context.js';
+import { withCaller, withTraceContext } from '../../../src/core/trace-context.js';
 import type { CompletionRequest } from '../../../src/llm/provider.js';
 import type { TraceRecord } from '../../../src/ports/observability.js';
-import type { ModelCallSpanSink } from '../../../src/llm/model-call-span.js';
+import {
+  ModelCallTrace,
+  modelCallAttributes,
+  type ModelCallSpanSink,
+} from '../../../src/llm/model-call-span.js';
 import { createTestLogger } from '../../helpers/test-logger.js';
 
 interface SeenRequest {
@@ -95,7 +99,9 @@ function answerWith(
       object: 'chat.completion',
       created: 1,
       model: 'served-model-2026',
-      choices: [{ index: 0, message: { role: 'assistant', content: 'answer' }, finish_reason: 'stop' }],
+      choices: [
+        { index: 0, message: { role: 'assistant', content: 'answer' }, finish_reason: 'stop' },
+      ],
       ...(usage === undefined ? {} : { usage }),
     });
     response.writeHead(200, {
@@ -128,11 +134,7 @@ async function gatewayWith(
   return gateway;
 }
 
-function providerFor(
-  baseUrl: string,
-  sink: ModelCallSpanSink,
-  effort?: 'low'
-): VercelAIProvider {
+function providerFor(baseUrl: string, sink: ModelCallSpanSink, effort?: 'low'): VercelAIProvider {
   // An http:// endpoint on loopback: no proxy in the environment may route it.
   for (const name of ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'ALL_PROXY'])
     delete process.env[name];
@@ -157,9 +159,7 @@ const REQUEST: CompletionRequest = {
     { role: 'assistant', content: 'earlier answer' },
     { role: 'user', content: 'hello' },
   ],
-  tools: [
-    { type: 'function', function: { name: 'core.tools', description: 'Describe tools' } },
-  ],
+  tools: [{ type: 'function', function: { name: 'core.tools', description: 'Describe tools' } }],
   maxTokens: 256,
   temperature: 0.3,
 };
@@ -229,6 +229,116 @@ describe('model call spans', () => {
     expect(attrs['gen_ai.usage.output_tokens']).toBe(7);
     expect(attrs).not.toHaveProperty('gen_ai.usage.cache_read.input_tokens');
     expect(attrs).not.toHaveProperty('gen_ai.usage.reasoning.output_tokens');
+  });
+
+  it('records a reported zero cache read and reasoning count as zero, not absent', async () => {
+    const gateway = await gatewayWith(
+      answerWith({
+        prompt_tokens: 1200,
+        completion_tokens: 180,
+        total_tokens: 1380,
+        prompt_tokens_details: { cached_tokens: 0 },
+        completion_tokens_details: { reasoning_tokens: 0 },
+      })
+    );
+    const { records, sink } = recorder();
+
+    await providerFor(gateway.baseUrl, sink).complete(REQUEST);
+
+    // A reported miss is the main cache diagnostic: it must read 0, not "-".
+    const attrs = spanOf(records).attrs;
+    expect(attrs['gen_ai.usage.cache_read.input_tokens']).toBe(0);
+    expect(attrs['gen_ai.usage.reasoning.output_tokens']).toBe(0);
+    expect(attrs['gen_ai.usage.input_tokens']).toBe(1200);
+    expect(attrs['gen_ai.usage.output_tokens']).toBe(180);
+  });
+
+  it('falls back to positive SDK counts only when the wire usage was not seen', () => {
+    // The transport could not read a usage object at all: the SDK's own zero
+    // is then indistinguishable from a missing count, so only positives count.
+    const unseen = new ModelCallTrace({});
+    unseen.observeUsage({
+      inputTokens: 40,
+      outputTokens: 7,
+      inputTokenDetails: { cacheReadTokens: 0 },
+      outputTokenDetails: { reasoningTokens: 0 },
+    });
+    const unseenAttrs = modelCallAttributes(unseen);
+    expect(unseenAttrs['gen_ai.usage.input_tokens']).toBe(40);
+    expect(unseenAttrs['gen_ai.usage.output_tokens']).toBe(7);
+    expect(unseenAttrs).not.toHaveProperty('gen_ai.usage.cache_read.input_tokens');
+    expect(unseenAttrs).not.toHaveProperty('gen_ai.usage.reasoning.output_tokens');
+
+    // With the wire as witness, the same zeros are a reported miss.
+    const seen = new ModelCallTrace({});
+    seen.observeWireUsage({
+      prompt_tokens: 40,
+      completion_tokens: 7,
+      prompt_tokens_details: { cached_tokens: 0 },
+      completion_tokens_details: { reasoning_tokens: 0 },
+    });
+    seen.observeUsage({
+      inputTokens: 40,
+      outputTokens: 7,
+      inputTokenDetails: { cacheReadTokens: 0 },
+      outputTokenDetails: { reasoningTokens: 0 },
+    });
+    expect(modelCallAttributes(seen)).toMatchObject({
+      'gen_ai.usage.cache_read.input_tokens': 0,
+      'gen_ai.usage.reasoning.output_tokens': 0,
+    });
+  });
+
+  it('starts its own trace instead of joining the untraced caller context', async () => {
+    const gateway = await gatewayWith(answerWith(FULL_USAGE));
+    const first = recorder();
+    const second = recorder();
+
+    // A caller with no trace context at all only carries a caller name, and
+    // withCaller names its trace 'untraced': one ever-growing trace otherwise.
+    const run = (sink: ModelCallSpanSink) =>
+      withCaller('messageComposer', () => providerFor(gateway.baseUrl, sink).complete(REQUEST));
+    await run(first.sink);
+    await run(second.sink);
+
+    const one = spanOf(first.records);
+    const two = spanOf(second.records);
+    expect(one.traceId).toBe(one.attrs['lifemodel.call_id']);
+    expect(two.traceId).toBe(two.attrs['lifemodel.call_id']);
+    expect(one.traceId).not.toBe('untraced');
+    expect(one.traceId).not.toBe(two.traceId);
+    expect(one.parentSpanId).toBeNull();
+  });
+
+  it('keeps the sent body and the call result when a recorder throws', async () => {
+    const gateway = await gatewayWith(answerWith(FULL_USAGE));
+    const spyRequest = vi
+      .spyOn(ModelCallTrace.prototype, 'observeRequest')
+      .mockImplementation(() => {
+        throw new Error('recorder exploded');
+      });
+    const spyUsage = vi.spyOn(ModelCallTrace.prototype, 'observeUsage').mockImplementation(() => {
+      throw new Error('recorder exploded');
+    });
+    const spyResponse = vi
+      .spyOn(ModelCallTrace.prototype, 'observeResponse')
+      .mockImplementation(() => {
+        throw new Error('recorder exploded');
+      });
+    try {
+      const answer = await providerFor(gateway.baseUrl, recorder().sink, 'low').complete(REQUEST);
+
+      expect(answer.content).toBe('answer');
+      // The repaired tool set and the configured effort still went out.
+      const sent = JSON.parse(gateway.requests[0]?.body ?? '{}');
+      expect(sent.reasoning_effort).toBe('low');
+      expect(sent.tools).toHaveLength(1);
+      expect(sent.messages).toHaveLength(4);
+    } finally {
+      spyRequest.mockRestore();
+      spyUsage.mockRestore();
+      spyResponse.mockRestore();
+    }
   });
 
   it('records the reasoning effort exactly as it went out, and nothing when none was sent', async () => {
@@ -316,7 +426,9 @@ describe('model call spans', () => {
     const after = spanOf(second.records).attrs;
     expect(after['lifemodel.prefix.system.hash']).toBe(before['lifemodel.prefix.system.hash']);
     expect(after['lifemodel.prefix.tools.hash']).toBe(before['lifemodel.prefix.tools.hash']);
-    expect(after['lifemodel.prefix.history.hash']).not.toBe(before['lifemodel.prefix.history.hash']);
+    expect(after['lifemodel.prefix.history.hash']).not.toBe(
+      before['lifemodel.prefix.history.hash']
+    );
     expect(after['lifemodel.prefix.context.hash']).not.toBe(
       before['lifemodel.prefix.context.hash']
     );

@@ -79,11 +79,33 @@ delays or fails a model call.
 - component `llm`; span name `chat <model>` in the `span.name` attribute (the
   store has no name column); open and closed in one record, because the call's
   outcome is what matters and its duration is known only at the end.
-- parent: the turn's trace context (`src/core/trace-context.ts`) when there is
-  one - a cognition turn runs under its trigger signal's trace - otherwise the
-  span starts its own trace and its `traceId` equals its call id.
+- parent: the current trace context (`src/core/trace-context.ts`) when there is
+  one, otherwise the span starts its own trace and its `traceId` equals its call
+  id. A context whose trace id is `untraced` (a caller name alone, produced by
+  `withCaller` outside any turn) counts as none, so unrelated calls never join
+  one ever-growing trace.
 - no prompt or answer text. The four stable prefix parts are a sha-256 prefix
   and a character length only.
+
+### What a turn's trace is
+
+A cognition turn runs under the trace of the signal that woke it: its trace id
+is that signal's id, and the tick id is the turn's `correlationId` - the tick
+links the work, it does not root the trace. Everything the turn starts shares
+that trace:
+
+- its model calls, whose spans record the trigger as `lifemodel.trigger_type`;
+- a task the turn starts (`core.startTask` reads the current trace context), so
+  a run's pod spans, its termination evidence and the model calls of the turn
+  that launched it are one trace;
+- the turn's log lines, and the trace reference the agentic loop puts in its
+  apology text (`(trace: <traceId8>:<spanId>)`) when it cannot produce a
+  well-formed answer.
+
+That is deliberate: an operator reads one trace from the owner's message to the
+task's pod. Work done outside any turn (a plugin, a schedule tick) keeps its
+tick-level trace, and a model call made with no trace context at all starts its
+own.
 
 ### Names and the pinned revision
 
@@ -106,11 +128,18 @@ to that pin and to the table below, in one commit.
 | `gen_ai.usage.cache_read.input_tokens` | cached input, **inside** `input_tokens`, not added to it |
 | `gen_ai.usage.reasoning.output_tokens` | reasoning output, **inside** `output_tokens`, not added to it |
 
-A count the provider did not report is **absent**, never `0`. The AI SDK
-defaults a missing cache and reasoning count to `0`, so the transport reads the
-endpoint's own usage object off the wire and records only what it carried; a
-cached or reasoning count is also recorded only when non-zero, which is what the
-conventions ask for.
+A count the provider did not report is **absent**; a count it did report is
+recorded as it is, `0` included. The two are not the same fact: a
+`gen_ai.usage.cache_read.input_tokens` of `0` is a cache miss, which is the
+diagnostic this span exists for, and an absent one only says the endpoint
+reported no cache figure at all.
+
+The AI SDK defaults a *missing* cache and reasoning count to `0`, so the
+transport reads the endpoint's own usage object off the wire
+(`prompt_tokens_details.cached_tokens`, `completion_tokens_details.reasoning_tokens`)
+and records a count only when that object carried it. When the wire usage was
+not read at all, a `0` cannot be told from a missing count, so only a positive
+count is recorded.
 
 `gen_ai.request.reasoning_effort` is not a convention name: the effort the
 request carried is `lifemodel.request.reasoning_effort`, exactly as it went out,
@@ -157,10 +186,24 @@ cache, not the prompt, was the difference.
 
 Retention runs after the first batch, then every 50 batches. It is lazy on
 writes: an idle store does not start a separate retention timer. Defaults are
-14 days since the latest span
-closure, 5,000 traces and 256 MiB of logical row data. The size budget counts
-`pg_column_size` across span and event rows; it is not a promise to shrink
-Postgres relation files, indexes or WAL to that size.
+14 days since the latest span closure, 5,000 evidence traces, 2,000 model-call
+traces and 256 MiB of logical row data. The size budget counts `pg_column_size`
+across span and event rows; it is not a promise to shrink Postgres relation
+files, indexes or WAL to that size.
+
+Traces are counted in two classes, so the core's own chatter cannot evict a
+run's evidence:
+
+- a **model-call trace** is a trace whose every row is an `llm` span. Every
+  model call writes one, and turns are frequent, so it has its own bound
+  (`maxModelCallTraces`, 2,000).
+- every other trace is **evidence** - a task's spans, a task channel frame, a
+  trace with events, or a turn trace that also carries a task's spans - and
+  keeps the whole `maxTraces` budget (5,000).
+
+Each class is pruned against its own cap, oldest closure first. Age and the
+byte budget are shared, because the store is one relation; whichever trace is
+oldest goes first either way.
 
 Pruning removes whole traces, oldest closure first. Every span must have a
 closed status and end time. One open child protects the entire trace. Events-only
@@ -223,17 +266,22 @@ row its HTTP status, attempt, error code, trigger, served model and the four
 prefix fingerprints (first 8 hex characters, then the size).
 
 ```text
-recent model calls, newest first (2)
+recent model calls, newest first (3)
   time role model slot effort in/cached/out/reasoning duration status call
+  2026-01-01T00:00:03.000Z smart smart-model primary - 1200/0/180/0 200ms ok call=call_3333...
+      http=200 attempt=1 error=- trigger=- served=- prefix system=-/- tools=-/- history=-/- context=-/-
   2026-01-01T00:00:02.000Z fast fast-model reserve - 40/-/7/- 400ms failed call=call_2222...
-      http=500 attempt=1 error=http_500 trigger=user_message served=- prefix system=ab12cd34/4800 tools=-/- history=-/- context=-/-
+      http=500 attempt=1 error=http_500 trigger=- served=- prefix system=ab12cd34/4800 tools=-/- history=-/- context=-/-
   2026-01-01T00:00:00.500Z smart smart-model primary low 1200/1024/180/64 1000ms ok call=call_1111...
       http=200 attempt=1 error=- trigger=user_message served=served-model-2026 prefix system=ab12cd34/4800 tools=9b1c2d3e/12034 history=aa11bb22/900 context=7788ee99/120
 ```
 
+The newest row is a reported cache miss (`cached=0`), the second reports no
+cache figure at all (`-`), and the third was served from the cache.
+
 A dash is "the provider did not report it", which is not the same as `0`: a
-cached count of `-` means the endpoint reported no cache read at all, and
-`0` would claim it reported none. Both readers run the same read-only
+cached count of `0` is a reported cache miss, and `-` means the endpoint's usage
+object carried no cache figure at all. Both readers run the same read-only
 transaction and the same fixed unavailable message as the trace reader.
 
 Open spans display `[incomplete] open`. A missing parent becomes a displayed
@@ -253,6 +301,11 @@ exit codes, durations, incomplete spans, latest selection and safe errors, a
 model call's rendering and the `doctor llm` listing.
 `tests/unit/llm/model-call-spans.test.ts` runs the real provider against a local
 fake gateway and checks one span per call, the usage names, an unreported cache
-count staying absent, the effort as sent, the slot header, the call id it sent,
-the prefix fingerprints, the parent trace, a failing endpoint's status and code,
-and a full or throwing trace queue never delaying the call.
+count staying absent, a reported `cached_tokens: 0` staying `0`, the SDK-only
+fallback when no wire usage was read, the effort as sent, the slot header, the
+call id it sent, the prefix fingerprints, the parent trace, an `untraced` caller
+context starting its own trace, a failing endpoint's status and code, a full or
+throwing trace queue never delaying the call, and a throwing recorder leaving
+the sent body and the answer unchanged.
+`tests/unit/trace-store.test.ts` also checks that model-call traces are bounded
+apart from task evidence.

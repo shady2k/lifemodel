@@ -19,7 +19,11 @@ import { compileTranscript, resolveTranscriptPolicy } from './transcript-compile
 import { proxyFetch } from '../../utils/proxy-fetch.js';
 import { isReasoningEffort, type ReasoningEffort } from '../../config/reasoning-effort.js';
 import { MODEL_CALL_HEADER, MODEL_SESSION_HEADER } from '../../config/model-endpoint.js';
-import type { ModelCallTrace, ModelCallSpanSink } from '../../llm/model-call-span.js';
+import {
+  observeQuietly,
+  type ModelCallTrace,
+  type ModelCallSpanSink,
+} from '../../llm/model-call-span.js';
 
 // Vercel AI SDK imports
 import { createOpenAI } from '@ai-sdk/openai';
@@ -192,6 +196,7 @@ export class VercelAIProvider extends BaseLLMProvider {
     return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       // Fix outgoing request: replace broken tool schemas with raw tools
       let modifiedInit = init;
+      let sent: Record<string, unknown> | undefined;
       if (init?.body && typeof init.body === 'string') {
         try {
           const body = JSON.parse(init.body) as Record<string, unknown>;
@@ -206,15 +211,22 @@ export class VercelAIProvider extends BaseLLMProvider {
             body['reasoning_effort'] = reasoningEffort;
             changed = true;
           }
-          // What is recorded is the body that leaves, not what was asked for:
-          // the model, the sampling parameters, the effort the gateway may
-          // still default, the tool set and the request's stable prefix parts.
-          call.observeRequest(body);
           if (changed) modifiedInit = { ...init, body: JSON.stringify(body) };
+          sent = body;
         } catch {
           // Parse failed — send original body
         }
       }
+      // What is recorded is the body that LEAVES, not what was asked for: the
+      // model, the sampling parameters, the effort the gateway may still
+      // default, the tool set and the request's stable prefix parts. Observing
+      // happens after the body is final and never fails the call, so a
+      // recorder cannot change what is sent.
+      const observed = sent;
+      if (observed)
+        observeQuietly(() => {
+          call.observeRequest(observed);
+        });
       // This attempt's own signal (the timeout aborts the HTTP request itself)
       // and no Authorization header: lifemodel holds no key, and the platform's
       // model gateway injects the real one on its way upstream (ADR-013 D2/D4).
@@ -242,7 +254,9 @@ export class VercelAIProvider extends BaseLLMProvider {
       // The endpoint's answer frame: its status and, in front of the platform's
       // gateway, the slot that answered (`x-lifemodel-slot`). Recorded for a
       // failed answer too, which is when the slot matters most.
-      call.observeResponse(response.status, response.headers);
+      observeQuietly(() => {
+        call.observeResponse(response.status, response.headers);
+      });
       if (!response.ok) return response;
 
       // Extract reasoning_content and the response model from the endpoint's
@@ -255,11 +269,13 @@ export class VercelAIProvider extends BaseLLMProvider {
         const reasoning = message?.['reasoning_content'];
         this.lastReasoningContent =
           typeof reasoning === 'string' && reasoning.length > 0 ? reasoning : null;
-        const served = json['model'];
-        if (typeof served === 'string' && served.length > 0) call.wire.responseModel = served;
-        const usage = json['usage'];
-        if (typeof usage === 'object' && usage !== null)
-          call.observeWireUsage(usage as Record<string, unknown>);
+        observeQuietly(() => {
+          const served = json['model'];
+          if (typeof served === 'string' && served.length > 0) call.wire.responseModel = served;
+          const usage = json['usage'];
+          if (typeof usage === 'object' && usage !== null)
+            call.observeWireUsage(usage as Record<string, unknown>);
+        });
       } catch {
         this.lastReasoningContent = null;
       }
@@ -879,10 +895,12 @@ export class VercelAIProvider extends BaseLLMProvider {
       // The answer's own facts, recorded before the response is mapped: the
       // provider-reported usage (absence preserved, never zeroed) and the model
       // the endpoint says it served.
-      call.observeUsage(result.usage);
-      const servedModel = result.response.modelId;
-      if (typeof servedModel === 'string' && servedModel.length > 0)
-        call.wire.responseModel = servedModel;
+      observeQuietly(() => {
+        call.observeUsage(result.usage);
+        const servedModel = result.response.modelId;
+        if (typeof servedModel === 'string' && servedModel.length > 0)
+          call.wire.responseModel = servedModel;
+      });
 
       // Map AI SDK result back to CompletionResponse, with intercepted reasoning as fallback
       const response = this.mapAIResponseToCompletion(result, modelId, interceptedReasoning);

@@ -3,7 +3,13 @@ import type { TraceRecord, TraceWriter } from '../ports/observability.js';
 
 export interface TraceRetentionPolicy {
   maxAgeDays?: number | null;
+  /** Closed traces kept: task-pod and task-channel evidence. */
   maxTraces?: number | null;
+  /**
+   * Closed traces of model-call spans only (`component = 'llm'`), counted
+   * apart from task evidence so a chatty core cannot evict a run's spans.
+   */
+  maxModelCallTraces?: number | null;
   /** Logical row bytes, not physical relation/WAL size. */
   maxBytes?: number | null;
 }
@@ -162,6 +168,7 @@ export class PostgresTraceStore implements TraceWriter {
     this.retention = {
       maxAgeDays: 14,
       maxTraces: 5000,
+      maxModelCallTraces: 2000,
       maxBytes: 256 * 1024 * 1024,
       ...options.retention,
     };
@@ -339,29 +346,41 @@ export class PostgresTraceStore implements TraceWriter {
       closed: boolean;
       ended_at: Date | null;
       bytes: string;
+      model_calls_only: boolean;
     }>(`SELECT trace_id, bool_and(closed) AS closed, max(ended_at) AS ended_at,
-        sum(bytes)::text AS bytes FROM (
+        sum(bytes)::text AS bytes, bool_and(model_call) AS model_calls_only FROM (
       SELECT s.trace_id, s.ended_at IS NOT NULL AND s.status IS NOT NULL AS closed,
-        s.ended_at, pg_column_size(s)::bigint AS bytes FROM observability.trace_spans s
+        s.ended_at, pg_column_size(s)::bigint AS bytes, s.component = 'llm' AS model_call
+        FROM observability.trace_spans s
       UNION ALL
-      SELECT e.trace_id, true, NULL::timestamptz, pg_column_size(e)::bigint
+      SELECT e.trace_id, true, NULL::timestamptz, pg_column_size(e)::bigint, false
         FROM observability.trace_events e
       ) records GROUP BY trace_id ORDER BY max(ended_at) ASC NULLS LAST, trace_id`);
-    let count = result.rows.length;
-    let bytes = result.rows.reduce((n, row) => n + Number(row.bytes), 0);
-    const { maxAgeDays, maxTraces, maxBytes } = this.retention;
+    const { maxAgeDays, maxTraces, maxBytes, maxModelCallTraces } = this.retention;
     const cutoff = maxAgeDays == null ? -Infinity : Date.now() - maxAgeDays * 86400000;
+    // A trace of model-call spans only is the core's own chatter (one per
+    // model call, and turns are frequent). Task evidence keeps its whole
+    // budget: the two classes are counted apart, so a busy chat cannot evict a
+    // run's spans. Age and bytes stay shared, oldest closure first.
+    const counts = { evidence: 0, modelCalls: 0 };
+    let bytes = 0;
+    for (const row of result.rows) {
+      counts[row.model_calls_only ? 'modelCalls' : 'evidence']++;
+      bytes += Number(row.bytes);
+    }
     const ids: string[] = [];
     for (const row of result.rows) {
       // Events-only traces and ANY open span are protected, even if over budget.
       if (!row.closed || !row.ended_at) continue;
+      const kind = row.model_calls_only ? 'modelCalls' : 'evidence';
+      const cap = row.model_calls_only ? maxModelCallTraces : maxTraces;
       if (
         row.ended_at.getTime() < cutoff ||
-        (maxTraces != null && count > maxTraces) ||
+        (cap != null && counts[kind] > cap) ||
         (maxBytes != null && bytes > maxBytes)
       ) {
         ids.push(row.trace_id);
-        count--;
+        counts[kind]--;
         bytes -= Number(row.bytes);
       }
     }
