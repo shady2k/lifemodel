@@ -1,11 +1,18 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  ClientRequest,
+  createServer,
+  type Server,
+  type IncomingMessage,
+  type ServerResponse,
+} from 'node:http';
 import { networkInterfaces } from 'node:os';
 import { createModelGateway, GATEWAY_LIMITS } from '../../loader/src/model-gateway-app.js';
 import { connect } from 'node:net';
 import { createRoleBaoClient, createCachedSlotReader } from '../../loader/src/model-bao.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 import type { ModelSlot, ModelSlotName } from '../../loader/src/model.js';
+import { createExchangeCapture, type CaptureRow } from '../../loader/src/model-exchange-capture.js';
 
 const servers: Server[] = [];
 afterEach(async () => {
@@ -43,7 +50,9 @@ type Handler = (req: IncomingMessage, res: ServerResponse, body: Record<string, 
 async function fixture(
   options?: Parameters<typeof createModelGateway>[0]['timeouts'],
   timers?: Parameters<typeof createModelGateway>[0]['timers'],
-  recheck?: Parameters<typeof createModelGateway>[0]['recheck']
+  recheck?: Parameters<typeof createModelGateway>[0]['recheck'],
+  capture?: Parameters<typeof createModelGateway>[0]['capture'],
+  captureEnabled?: Parameters<typeof createModelGateway>[0]['captureEnabled']
 ) {
   const attempts: Array<{
     slot: ModelSlotName;
@@ -134,6 +143,8 @@ async function fixture(
     ...(options ? { timeouts: options } : {}),
     ...(timers ? { timers } : {}),
     ...(recheck ? { recheck } : {}),
+    ...(capture ? { capture } : {}),
+    ...(captureEnabled ? { captureEnabled } : {}),
   });
   const url = await listen(app.api);
   const statusUrl = await listen(app.status);
@@ -2624,5 +2635,282 @@ describe('model gateway review round 2: safe reasons, stream positions, slot att
     f.handlers.primary = (_req, res) =>
       res.end(JSON.stringify(textAnswer({ role: 'assistant', content: f.slots.primary!.key })));
     await expectExactShapes(f, 'unsafe_response');
+  });
+});
+
+describe('model gateway opt-in exchange capture', () => {
+  it('does no capture work or header mutation when the production capture gate is off', async () => {
+    let begins = 0;
+    const capture = {
+      close: () => undefined,
+      begin: () => {
+        begins++;
+        throw Error('must not capture');
+      },
+    };
+    const outgoingHeaders: ReturnType<ClientRequest['getHeaders']>[] = [];
+    const end = ClientRequest.prototype.end;
+    const spy = vi.spyOn(ClientRequest.prototype, 'end').mockImplementation(function (
+      this: ClientRequest,
+      ...args: Parameters<ClientRequest['end']>
+    ) {
+      if (this.path === '/prefix/v1/chat/completions') outgoingHeaders.push(this.getHeaders());
+      return end.apply(this, args);
+    });
+    try {
+      const f = await fixture(undefined, undefined, undefined, capture, () => false);
+      expect(await (await f.post()).json()).toEqual(answer());
+      expect(begins).toBe(0);
+      expect(outgoingHeaders).toHaveLength(1);
+      // Inspect the gateway's object before Node emits its implicit wire header.
+      expect(outgoingHeaders[0]).not.toHaveProperty('connection');
+      f.app.close();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+  async function captured(write?: (row: CaptureRow) => Promise<void>) {
+    const rows: CaptureRow[] = [];
+    let setting: { until: string | null; session?: string } = {
+      until: new Date(Date.now() + 600_000).toISOString(),
+    };
+    const capture = createExchangeCapture({
+      context: () => ({
+        setting,
+        secrets: ['primary-SUPER-SECRET', 'reserve-SUPER-SECRET', 'DATABASE-PASSWORD'],
+        secretHeaders: ['x-private'],
+      }),
+      write:
+        write ??
+        (async (row) => {
+          rows.push(row);
+        }),
+    });
+    const f = await fixture(undefined, undefined, undefined, capture);
+    return {
+      ...f,
+      rows,
+      capture,
+      setSetting(value: typeof setting) {
+        setting = value;
+      },
+    };
+  }
+  it('captures the actual upstream attempt, raw caller body and full response headers with whole-row redaction', async () => {
+    const f = await captured();
+    f.slots.primary!.reasoningEffort = 'none';
+    f.slots.primary!.headers = [{ name: 'x-private', value: 'CUSTOM-TOKEN-LONG-SECRET' }];
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        'x-upstream-cache': 'MISS',
+        'set-cookie': 'RESPONSE-COOKIE',
+        'x-echo': 'reserve-SUPER-SECRET',
+      });
+      res.end(JSON.stringify(answer()));
+    };
+    const response = await f.post(
+      {
+        model: 'default',
+        messages: [
+          {
+            role: 'user',
+            content:
+              'Hi DATABASE-PASSWORD primary-SUPER-SECRET reserve-SUPER-SECRET CUSTOM-TOKEN-LONG-SECRET',
+          },
+        ],
+      },
+      { 'x-lifemodel-call': 'call-capture-1', 'x-lifemodel-session': 'chat-capture' }
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    await expect.poll(() => f.rows.length).toBe(1);
+    expect(f.rows[0]).toMatchObject({
+      callId: 'call-capture-1',
+      attempt: 1,
+      slot: 'primary',
+      sessionId: 'chat-capture',
+      exchange: {
+        upstream: { headers: { 'x-private': '[redacted len=24]' } },
+        response: { status: 200, headers: { 'x-upstream-cache': 'MISS' } },
+      },
+    });
+    const exchange = f.rows[0]!.exchange as {
+      upstream: { body: string };
+      inbound: { body: string };
+    };
+    expect(JSON.parse(exchange.upstream.body)).toMatchObject({
+      reasoning_effort: 'none',
+      model: 'primary-model',
+    });
+    expect(JSON.parse(exchange.inbound.body).model).toBe('default');
+    expect(f.attempts[0]?.headers['x-lifemodel-call']).toBeUndefined();
+    const upstreamCapture = f.rows[0]!.exchange.upstream as { headers: Record<string, string> };
+    expect(
+      Object.keys(upstreamCapture.headers)
+        .map((name) => name.toLowerCase())
+        .sort()
+    ).toEqual(Object.keys(f.attempts[0]!.headers).sort());
+    for (const [name, value] of Object.entries(upstreamCapture.headers))
+      if (!['authorization', 'x-private'].includes(name.toLowerCase()))
+        expect(value).toEqual(f.attempts[0]!.headers[name.toLowerCase()]);
+    for (const secret of [
+      'INBOUND-PRIVATE',
+      'PRIVATE-COOKIE',
+      'primary-SUPER-SECRET',
+      'reserve-SUPER-SECRET',
+      'DATABASE-PASSWORD',
+      'CUSTOM-TOKEN-LONG-SECRET',
+      'RESPONSE-COOKIE',
+    ])
+      expect(JSON.stringify(f.rows)).not.toContain(secret);
+    f.capture.close();
+  });
+  it('keeps sessions and short custom header values out of the global scrub list', async () => {
+    const f = await captured();
+    f.slots.primary!.headers = [
+      { name: 'x-affinity', value: '{session}' },
+      { name: 'x-short-one', value: '1' },
+      { name: 'x-short-language', value: 'en' },
+      { name: 'x-short-marker', value: 'len' },
+    ];
+    await (
+      await f.post(
+        { model: 'default', messages: [{ role: 'user', content: 'en len 1 chat-session' }] },
+        { 'x-lifemodel-session': 'chat-session' }
+      )
+    ).text();
+    await expect.poll(() => f.rows.length).toBe(1);
+    expect(f.rows[0]?.sessionId).toBe('chat-session');
+    expect(f.rows[0]?.exchange.upstream).toMatchObject({
+      headers: {
+        'x-affinity': '[redacted len=12]',
+        'x-short-one': '[redacted len=1]',
+        'x-short-language': '[redacted len=2]',
+        'x-short-marker': '[redacted len=3]',
+      },
+    });
+    expect(JSON.stringify(f.rows[0]?.exchange)).toContain('en len 1 chat-session');
+    f.capture.close();
+  });
+  it('captures a rejected body beyond the diagnostic excerpt limit without changing its result', async () => {
+    const f = await captured();
+    f.slots.reserve = null;
+    const raw = JSON.stringify({ error: { message: 'rejected' }, details: 'x'.repeat(40000) });
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(400, { 'x-rejection': 'yes' });
+      res.end(raw);
+    };
+    const response = await f.post();
+    expect(response.status).toBe(400);
+    await response.text();
+    await expect.poll(() => f.rows.length).toBe(1);
+    expect(f.rows[0]?.exchange.response).toMatchObject({
+      status: 400,
+      body: raw,
+      headers: { 'x-rejection': 'yes' },
+    });
+    f.capture.close();
+  });
+  it('returns a large rejection before a slow capture-only tail completes', async () => {
+    const f = await captured();
+    f.slots.reserve = null;
+    let finish: (() => void) | undefined;
+    let upstreamSocket: import('node:net').Socket | undefined;
+    f.handlers.primary = (req, res) => {
+      upstreamSocket = req.socket;
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.write('x'.repeat(20000));
+      finish = () => res.end('tail');
+    };
+    const response = await f.post();
+    expect(response.status).toBe(400);
+    await response.text();
+    expect(f.rows).toHaveLength(0);
+    finish!();
+    await expect.poll(() => f.rows.length).toBe(1);
+    expect(f.rows[0]?.exchange.response).toMatchObject({ body: 'x'.repeat(20000) + 'tail' });
+    await expect.poll(() => upstreamSocket?.destroyed).toBe(true);
+    f.capture.close();
+  });
+  it('stores an independent row for failed primary and successful reserve', async () => {
+    const f = await captured();
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(503, { 'x-upstream': 'retry' });
+      res.end('unavailable');
+    };
+    expect((await f.post({}, { 'x-lifemodel-call': 'retry-call' })).status).toBe(400);
+    const response = await f.post(undefined, { 'x-lifemodel-call': 'retry-call' });
+    await response.text();
+    await expect.poll(() => f.rows.length).toBe(2);
+    expect(f.rows.map((row) => [row.callId, row.attempt, row.slot])).toEqual([
+      ['retry-call', 1, 'primary'],
+      ['retry-call', 2, 'reserve'],
+    ]);
+    expect(f.rows[0]?.exchange.response).toMatchObject({ status: 503, body: 'unavailable' });
+    f.capture.close();
+  });
+  it('does not capture off, expired or another session and captures only the selected session', async () => {
+    const f = await captured();
+    f.setSetting({ until: null });
+    await (await f.post()).text();
+    f.setSetting({ until: new Date(Date.now() - 1).toISOString() });
+    await (await f.post()).text();
+    f.setSetting({ until: new Date(Date.now() + 600_000).toISOString(), session: 'wanted' });
+    await (await f.post(undefined, { 'x-lifemodel-session': 'other' })).text();
+    await (await f.post(undefined, { 'x-lifemodel-session': 'wanted' })).text();
+    await expect.poll(() => f.rows.length).toBe(1);
+    expect(f.rows[0]?.sessionId).toBe('wanted');
+    f.capture.close();
+  });
+  it('tees SSE without changing the client answer and captures upstream framing', async () => {
+    const f = await captured();
+    const sse = `data: ${JSON.stringify({ id: 'stream-1', object: 'chat.completion.chunk', model: 'real', choices: [{ index: 0, delta: { content: 'hello' }, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`;
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'x-stream': 'yes' });
+      res.end(sse);
+    };
+    const response = await f.post({ model: 'default', messages: [], stream: true });
+    expect(await response.text()).toBe(sse);
+    await expect.poll(() => f.rows.length).toBe(1);
+    expect(f.rows[0]?.exchange.response).toMatchObject({
+      body: sse,
+      headers: { 'x-stream': 'yes' },
+    });
+    f.capture.close();
+  });
+  it('delivers an SSE frame before upstream ends even when capture storage never settles', async () => {
+    const f = await captured(async () => new Promise<void>(() => undefined));
+    const frame = event('first-frame');
+    let finish: (() => void) | undefined;
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(frame);
+      finish = () => res.end(endStream());
+    };
+    const response = await f.post(streamPayload);
+    const reader = response.body!.getReader();
+    const first = await reader.read();
+    expect(new TextDecoder().decode(first.value)).toContain('first-frame');
+    expect(f.rows).toHaveLength(0);
+    finish!();
+    while (!(await reader.read()).done) {
+      /* consume */
+    }
+    f.capture.close();
+  });
+  it('never waits for a hung/full or failing writer and keeps results byte-identical', async () => {
+    const f = await captured(async () => new Promise<void>(() => undefined));
+    for (let i = 0; i < 12; i++) {
+      const response = await f.post();
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(answer());
+    }
+    f.capture.close();
+    const failed = await captured(async () => {
+      throw new Error('capture_failed');
+    });
+    expect(await (await failed.post()).json()).toEqual(answer());
+    failed.capture.close();
   });
 });

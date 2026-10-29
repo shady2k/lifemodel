@@ -143,6 +143,9 @@ describe('the storage module readiness with a real catalog', () => {
     // A fresh catalog state: no storage schema and no record of its migration.
     await stores.postgres.query('DROP SCHEMA IF EXISTS storage CASCADE');
     await stores.postgres.query('DROP SCHEMA IF EXISTS task_access CASCADE');
+    // The reset replays every migration from storage onward, including capture
+    // views and functions. Drop the full later schema, not only its tables.
+    await stores.postgres.query('DROP SCHEMA IF EXISTS observability CASCADE');
     const migrated = await stores.postgres.query(
       "SELECT to_regclass('public.schema_migrations') AS table"
     );

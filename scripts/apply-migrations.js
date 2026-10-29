@@ -174,6 +174,25 @@ export async function applyMigrations(pool, migrationsDir = DEFAULT_MIGRATIONS_D
       client.release();
     }
   }
+  // CNPG can reconcile the optional writer after the schema migration ran.
+  // Reapply on every core migrate start, including an unchanged schema and a
+  // dropped/recreated role. The loader never needs an owner database route.
+  await pool.query(`DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lifemodel_capture_writer')
+     AND to_regprocedure('observability.append_model_exchange(text,integer,text,text,text,jsonb,timestamptz)') IS NOT NULL
+     AND to_regprocedure('observability.prune_model_exchanges()') IS NOT NULL THEN
+    GRANT USAGE ON SCHEMA observability TO lifemodel_capture_writer;
+    GRANT EXECUTE ON FUNCTION observability.append_model_exchange(text,integer,text,text,text,jsonb,timestamptz) TO lifemodel_capture_writer;
+    GRANT EXECUTE ON FUNCTION observability.prune_model_exchanges() TO lifemodel_capture_writer;
+  END IF;
+END;
+$$`);
+  const writer = await pool.query(
+    "SELECT 1 FROM pg_roles WHERE rolname = 'lifemodel_capture_writer'"
+  );
+  if (!writer.rowCount)
+    console.info('apply-migrations: capture_writer_absent; optional capture grants skipped');
 }
 
 async function main() {

@@ -599,3 +599,46 @@ provide that proof and keep delayed stale creates inert. Local tests evaluate
 actual CEL expressions with the existing evaluator. They do not replace API
 server CEL typechecking/defaulting or runtime network enforcement: the
 coordinator must run the VM probes before stage acceptance.
+
+### Model gateway debug captures
+
+The loader model page can enable machine-local exchange capture until a chosen
+expiry (10 minutes, 1 hour, at most 24 hours), optionally for one session.
+It is off by default and explicitly warns that conversation text is stored.
+The gateway refreshes settings and all-slot redaction material without blocking
+model traffic. It records inbound/upstream requests and upstream response
+headers/body per attempt; SSE delivery does not wait for capture storage.
+`lifemodel doctor exchange <call_id>` links this evidence to `doctor llm`.
+
+Migration `20261015000028_create_model_exchanges.sql` owns
+`observability.model_exchanges` and the bounded append/prune functions. CNPG
+manages only the capture writer login, separately from task authorization
+credentials; only the gateway receives its Secret at
+`/opt/lifemodel/capture-database`. The writer has function execution, not table
+read access. Doctor uses the owner login and filters rows to the last 24 hours
+in its query. On every startup, core's `migrate` step applies guarded,
+idempotent writer grants after all migrations, even when no migration changed.
+If CNPG has not created the writer role yet, core logs the skip once at info
+and continues. Capture becomes usable at the next core start after CNPG creates
+the role. If the role is dropped and recreated, the next core startup repairs
+its grants. The loader copies credentials through the Kubernetes API only; it
+has no Postgres network route and does not apply database grants.
+
+The loader may create Secrets in `lifemodel-state` to establish the durable
+capture password. Kubernetes RBAC cannot restrict `create` by `resourceNames`,
+because the authorization check targets the collection, not a named object.
+This namespace-wide Secret-create permission is accepted. Reads remain limited
+to the named application and capture Secrets; the loader code creates only
+`lifemodel-capture-credentials`.
+
+Bodies are redacted before entering an 8-row queue, capped at 1 MiB each and
+explicitly marked when truncated. Database retention is 100 MiB/24 hours,
+oldest first. Task model traffic is captured too and shares the 100 MiB cap;
+the session filter narrows capture to one chat. Pruning runs at gateway startup,
+even when capture is off, then every minute while enabled and hourly while any
+rows remain. The prune function reports only row existence, not conversation
+text, so retention survives a restart without giving the writer table access.
+Database failure drops capture evidence, not model calls. Gateway logs expose
+reason-coded, cumulative `capture_dropped_<reason>` counts without captured text
+or credential values. Captures contain personal messages; back up and restrict
+access to the stores accordingly.

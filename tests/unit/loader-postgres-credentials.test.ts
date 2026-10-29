@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createKubernetesPostgresSecretPhase } from '../../loader/src/postgres.js';
+import {
+  createKubernetesPostgresSecretPhase,
+  createKubernetesCaptureSecretPhase,
+} from '../../loader/src/postgres.js';
 
 const encode = (value: string) => Buffer.from(value).toString('base64');
 
@@ -178,6 +181,74 @@ describe('CNPG application credential copy phase', () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it.each([false, true])(
+    'creates one durable capture login and reuses it after a restart (conflict=%s)',
+    async (conflict) => {
+      const directory = await mkdtemp(join(tmpdir(), 'cnpg-capture-'));
+      try {
+        const tokenFile = join(directory, 'token');
+        await writeFile(tokenFile, 'test-token');
+        const secrets = new Map<
+          string,
+          { metadata: { resourceVersion: string }; data: Record<string, string> }
+        >();
+        const sourcePath =
+          '/api/v1/namespaces/lifemodel-state/secrets/lifemodel-capture-credentials';
+        let generated = 0;
+        let sourceCreates = 0;
+        const options = {
+          apiServer: 'https://kubernetes.test',
+          tokenFile,
+          randomPassword: () => {
+            generated++;
+            return 'new-capture-password';
+          },
+          request: async (url: URL, method: string, _token: string, body: string | undefined) => {
+            expect(url.pathname).not.toMatch(
+              /lifemodel-app|lifemodel-db-credentials|storage-module-db-credentials|model-gateway-db-credentials/
+            );
+            if (method === 'POST') {
+              const parsed = JSON.parse(body!);
+              const path = `${url.pathname}/${parsed.metadata.name}`;
+              if (path === sourcePath) {
+                sourceCreates++;
+                expect(parsed.type).toBe('kubernetes.io/basic-auth');
+                expect(parsed.data.username).toBe(encode('lifemodel_capture_writer'));
+                if (conflict) parsed.data.password = encode('winning-password');
+              }
+              const secret = { ...parsed, metadata: { ...parsed.metadata, resourceVersion: '1' } };
+              secrets.set(path, secret);
+              return {
+                status: path === sourcePath && conflict ? 409 : 201,
+                body: JSON.stringify(secret),
+              };
+            }
+            if (method === 'PUT') {
+              const parsed = JSON.parse(body!);
+              secrets.set(url.pathname, parsed);
+              return { status: 200, body: JSON.stringify(parsed) };
+            }
+            const secret = secrets.get(url.pathname);
+            return { status: secret ? 200 : 404, body: JSON.stringify(secret ?? {}) };
+          },
+        };
+        await createKubernetesCaptureSecretPhase(options).run();
+        await createKubernetesCaptureSecretPhase(options).run();
+        expect(generated).toBe(1);
+        expect(sourceCreates).toBe(1);
+        expect(
+          secrets.get('/api/v1/namespaces/lifemodel-system/secrets/model-capture-db-credentials')
+            ?.data
+        ).toEqual({
+          username: encode('lifemodel_capture_writer'),
+          password: encode(conflict ? 'winning-password' : 'new-capture-password'),
+        });
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  );
 
   it('fails when a Kubernetes API response stalls past the total deadline', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'cnpg-credentials-'));

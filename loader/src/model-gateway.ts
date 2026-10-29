@@ -1,5 +1,12 @@
 /** Separate process entry point, built into the platform loader image. */
-import { createRoleBaoClient, createCachedSlotReader } from './model-bao.js';
+import {
+  createRoleBaoClient,
+  createCachedSlotReader,
+  createCachedCaptureReader,
+} from './model-bao.js';
+import { createExchangeCapture } from './model-exchange-capture.js';
+import { createExchangeStore } from './model-exchange-store.js';
+import { createCaptureInventory } from './model-capture-inventory.js';
 import { createModelGateway } from './model-gateway-app.js';
 import { createStdoutLogger } from './logger.js';
 import { readFile } from 'node:fs/promises';
@@ -16,7 +23,71 @@ if (!address) {
   process.exit(1);
 }
 const bao = createRoleBaoClient({ address, role: 'model-gateway', logger });
-const app = createModelGateway({ slots: createCachedSlotReader(bao.readSlot), logger });
+const slots = createCachedSlotReader(bao.readSlot);
+const captureSetting = createCachedCaptureReader(bao.readCapture);
+const captureCredentials = async () => {
+  const [username, password] = await Promise.all([
+    readFile(
+      process.env['LIFEMODEL_CAPTURE_DB_USERNAME_FILE'] ??
+        '/opt/lifemodel/capture-database/username',
+      'utf8'
+    ),
+    readFile(
+      process.env['LIFEMODEL_CAPTURE_DB_PASSWORD_FILE'] ??
+        '/opt/lifemodel/capture-database/password',
+      'utf8'
+    ),
+  ]);
+  if (!username || !password) throw new Error('capture_credentials_unavailable');
+  return { username, password };
+};
+const captureStore = createExchangeStore(async () => {
+  const { username, password } = await captureCredentials();
+  return catalogConnectionString(username, password);
+});
+const inventory = createCaptureInventory({
+  setting: captureSetting,
+  readSlot: bao.readSlot,
+  passwords: async () => {
+    const [{ password }, identityPassword] = await Promise.all([
+      captureCredentials(),
+      readFile(
+        process.env['LIFEMODEL_DB_PASSWORD_FILE'] ?? '/opt/lifemodel/database/password',
+        'utf8'
+      ),
+    ]);
+    return [password, identityPassword];
+  },
+  prune: () => captureStore.prune(),
+});
+const capture = createExchangeCapture({
+  context: (input) => inventory.context(input.sessionId),
+  write: async (row) => {
+    await captureStore.write(row);
+    inventory.noteWrite();
+  },
+  onDrop: (reason, count) => {
+    logger.warn({ code: `capture_dropped_${reason}`, count }, 'Model capture evidence dropped');
+  },
+});
+void inventory.refresh();
+const captureRefresh = setInterval(() => {
+  void inventory.refresh();
+}, 30_000);
+captureRefresh.unref();
+const app = createModelGateway({
+  slots: {
+    ...slots,
+    read: async (name) => {
+      const value = await slots.read(name);
+      inventory.observeSlot(name, value);
+      return value;
+    },
+  },
+  logger,
+  capture,
+  captureEnabled: (sessionId) => inventory.enabled(sessionId),
+});
 const tlsDirectory = process.env['LIFEMODEL_TASK_MODEL_TLS_DIR'] ?? '';
 if (!tlsDirectory) {
   logger.error({ code: 'missing_task_tls' }, 'Model gateway cannot start');
@@ -66,6 +137,10 @@ app.api.listen(8080, '0.0.0.0');
 task.server.listen(8446, '0.0.0.0');
 app.status.listen(8081, '0.0.0.0');
 function stop(): void {
+  clearInterval(captureRefresh);
+  inventory.close();
+  capture.close();
+  void captureStore.close().catch(() => undefined);
   task.close();
   app.close();
   identity.close();

@@ -1,5 +1,12 @@
 /** Authenticated HTTP interface for the platform bootstrap loader. */
 import { randomBytes } from 'node:crypto';
+import {
+  activeCaptureSetting,
+  captureSettingFromRequest,
+  CaptureSettingError,
+  validateCaptureSetting,
+  type ModelCaptureSetting,
+} from './model-capture-setting.js';
 import { isReasoningEffort } from './reasoning-effort.js';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import {
@@ -80,6 +87,10 @@ export interface LoaderHttpDeps {
   config: LoaderConfig;
   uiRoot?: string;
   modelSlots?: ModelSlots;
+  modelCapture?: {
+    read(): Promise<ModelCaptureSetting>;
+    write(value: ModelCaptureSetting): Promise<void>;
+  };
   modelStatus?: ModelStatusReader;
   modelChecker?: (slot: ModelSlot, slotName?: ModelSlotName) => Promise<void>;
   settings?: SettingsHttp;
@@ -98,6 +109,7 @@ const API_METHODS: Record<string, string> = {
   '/api/logout': 'POST',
   '/api/onboarding/device': 'POST',
   '/api/model': 'GET',
+  '/api/model-capture': 'GET',
   '/api/model-status': 'GET',
   '/api/workbench-source': 'GET',
   '/api/workbench-status': 'GET',
@@ -252,7 +264,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         return;
       }
       const validMethod =
-        path === '/api/workbench-source'
+        path === '/api/workbench-source' || path === '/api/model-capture'
           ? method === 'GET' || method === 'PUT'
           : path === '/api/model/reserve'
             ? method === 'PUT' || method === 'DELETE'
@@ -272,6 +284,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           path === '/api/state' ||
           path === '/api/model' ||
           path === '/api/model-status' ||
+          path === '/api/model-capture' ||
           path === '/api/workbench-source' ||
           path === '/api/workbench-status' ||
           path.startsWith('/assets/'))) ||
@@ -284,6 +297,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       (method === 'PUT' &&
         (path === '/api/model/primary' ||
           path === '/api/model/reserve' ||
+          path === '/api/model-capture' ||
           path === '/api/workbench-source')) ||
       (method === 'DELETE' && path === '/api/model/reserve') ||
       (method === 'GET' && path === '/api/settings') ||
@@ -662,6 +676,92 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           if (error instanceof WorkbenchSourceError)
             json(400, { error: 'invalid_source', fields: error.fields });
           else json(503, { error: 'storage_unavailable' });
+        }
+        return;
+      }
+      if (path === '/api/model-capture') {
+        const json = (status: number, value: unknown) => {
+          res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify(value));
+        };
+        const record = await state.readAuth();
+        const token = record === null ? null : sessionToken(req, record);
+        if (record === null || token === null) {
+          json(method === 'GET' ? 403 : 401, { error: 'session' });
+          return;
+        }
+        const origin = header(req, 'origin');
+        const fetchSite = header(req, 'sec-fetch-site');
+        if (method === 'GET') {
+          if (
+            (origin !== undefined && refuseOrigin(req) !== null) ||
+            (fetchSite !== undefined && fetchSite !== 'same-origin')
+          ) {
+            json(403, { error: 'origin' });
+            return;
+          }
+          try {
+            if (!deps.modelCapture) throw new Error('unavailable');
+            json(
+              200,
+              activeCaptureSetting(
+                validateCaptureSetting(await deps.modelCapture.read(), clock.now()),
+                clock.now()
+              )
+            );
+          } catch {
+            json(503, { error: 'storage_unavailable' });
+          }
+          return;
+        }
+        if (
+          refuseOrigin(req) !== null ||
+          !verifyCsrf(header(req, 'x-csrf-token') ?? '', record, token)
+        ) {
+          json(403, { error: 'origin_or_csrf' });
+          return;
+        }
+        if (
+          header(req, 'content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json'
+        ) {
+          json(415, { error: 'content_type' });
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let size = 0;
+        // Keep the socket alive when refusing a body, so the caller gets 413.
+        for await (const chunk of req.iterator({
+          destroyOnReturn: false,
+        }) as AsyncIterable<Uint8Array>) {
+          const part = Buffer.from(chunk);
+          size += part.length;
+          if (size > MAX_FORM_BYTES) break;
+          chunks.push(part);
+        }
+        if (size > MAX_FORM_BYTES) {
+          req.resume();
+          json(413, { error: 'body_too_large' });
+          return;
+        }
+        let payload: unknown;
+        try {
+          payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        } catch {
+          json(400, { error: 'invalid_body' });
+          return;
+        }
+        try {
+          const value = captureSettingFromRequest(payload, clock.now());
+          if (!deps.modelCapture) throw new Error('unavailable');
+          await deps.modelCapture.write(value);
+          json(200, value);
+        } catch (error) {
+          json(error instanceof CaptureSettingError ? 400 : 503, {
+            error:
+              error instanceof CaptureSettingError
+                ? 'capture_setting_invalid'
+                : 'storage_unavailable',
+          });
         }
         return;
       }

@@ -15,6 +15,7 @@ let fetchMock: ReturnType<typeof vi.fn>;
 function settingsFetch(modelStatus: () => unknown): ReturnType<typeof vi.fn> {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
+    if (url === '/api/model-capture') return { ok: true, json: async () => ({ until: null }) };
     if (url === '/api/state')
       return {
         ok: true,

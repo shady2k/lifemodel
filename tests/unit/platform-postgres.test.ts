@@ -161,7 +161,51 @@ describe('CloudNativePG platform state', () => {
     ).toContain("const SOURCE_NAME = 'lifemodel-app'");
   });
 
-  it('limits database ingress to the core namespace and CNPG operator ports', () => {
+  it('manages only a dedicated capture writer, never the owner or a reader role', () => {
+    const cluster = YAML.parse(readFileSync(join(stateRoot, 'cluster/cluster.yaml'), 'utf8'));
+    expect(cluster.spec.managed.roles).toEqual([
+      {
+        name: 'lifemodel_capture_writer',
+        ensure: 'present',
+        login: true,
+        passwordSecret: { name: 'lifemodel-capture-credentials' },
+      },
+    ]);
+    const gateway = allYaml(join(root, 'a')).find(
+      (item) => item.kind === 'Deployment' && item.metadata.name === 'model-gateway'
+    );
+    const container = gateway.spec.template.spec.containers[0];
+    expect(container.env).toEqual(
+      expect.arrayContaining([
+        {
+          name: 'LIFEMODEL_CAPTURE_DB_USERNAME_FILE',
+          value: '/opt/lifemodel/capture-database/username',
+        },
+        {
+          name: 'LIFEMODEL_CAPTURE_DB_PASSWORD_FILE',
+          value: '/opt/lifemodel/capture-database/password',
+        },
+      ])
+    );
+    expect(gateway.spec.template.spec.volumes).toContainEqual({
+      name: 'capture-database',
+      secret: { secretName: 'model-capture-db-credentials', optional: true, defaultMode: 288 },
+    });
+    const grant = allYaml(stateRoot).find(
+      (item) => item.kind === 'Role' && item.metadata.name === 'loader-capture-credentials'
+    );
+    expect(grant.rules).toEqual([
+      {
+        apiGroups: [''],
+        resources: ['secrets'],
+        resourceNames: ['lifemodel-capture-credentials'],
+        verbs: ['get'],
+      },
+      { apiGroups: [''], resources: ['secrets'], verbs: ['create'] },
+    ]);
+  });
+
+  it('limits database ingress to trusted applications and CNPG operator ports, never the loader', () => {
     const policies = allYaml(stateRoot).filter((item) => item.kind === 'NetworkPolicy');
     const deny = policies.find((item) => item.metadata.name === 'lifemodel-state-default-deny');
     expect(deny?.spec).toEqual({
@@ -191,6 +235,14 @@ describe('CloudNativePG platform state', () => {
         }),
       ])
     );
+    expect(database?.spec.ingress).toHaveLength(4);
+    for (const rule of database?.spec.ingress ?? []) {
+      expect(rule.from).not.toContainEqual(
+        expect.objectContaining({
+          podSelector: { matchLabels: { 'app.kubernetes.io/name': 'loader' } },
+        })
+      );
+    }
     expect(database?.spec.policyTypes).toEqual(['Ingress', 'Egress']);
     expect(database?.spec.egress).toEqual([
       expect.objectContaining({

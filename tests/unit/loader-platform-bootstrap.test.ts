@@ -252,7 +252,7 @@ describe('platform bootstrap phases', () => {
     expect(record).toEqual({ phase: 'bao', status: 'complete' });
   });
 
-  it('allows zot, DNS, k3s API, OpenBao, gateway status, model checks and Gitea only', async () => {
+  it('allows custody, status, model checks and Gitea routes without a database route', async () => {
     const policy = await readFile('deploy/platform/a0/network-policy.yaml', 'utf8');
     const egress = policy.split('  egress:\n')[1] ?? '';
     expect(egress).toContain('k8s-app: kube-dns');
@@ -312,6 +312,8 @@ describe('platform bootstrap phases', () => {
       parsed.spec.egress[7].to[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name']
     ).toBe('ollama');
     expect(parsed.spec.egress[2].ports).toEqual([{ protocol: 'TCP', port: 6443 }]);
+    expect(egress).not.toContain('lifemodel-state');
+    expect(egress).not.toContain('port: 5432');
   });
 
   it('declares only phase and custody Secret grants for the loader ServiceAccount and mounts its token', async () => {

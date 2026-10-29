@@ -14,6 +14,13 @@ spec:
       owner: lifemodel
       postInitApplicationSQL:
         - CREATE EXTENSION IF NOT EXISTS vector;
+  managed:
+    roles:
+      - name: lifemodel_capture_writer
+        ensure: present
+        login: true
+        passwordSecret:
+          name: lifemodel-capture-credentials
   storage:
     size: 4Gi
     storageClass: local-path

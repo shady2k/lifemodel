@@ -68,10 +68,13 @@ function help() {
   console.log(`Usage: lifemodel doctor [--repin previous|clear]
        lifemodel doctor trace <trace_id | last [N]>
        lifemodel doctor llm [N]
+       lifemodel doctor exchange <call_id | last [N]> [--headers-only]
        lifemodel address
        lifemodel --help
 
 Diagnose Flux sources, Kustomizations, the lifemodel loader and core.
+  exchange  Read already-redacted model headers and bodies (conversation text).
+            Use the call id printed by doctor llm; capture is off by default.
   --repin previous  Persist an override to the previous successfully applied ref and rerun bootstrap.
   --repin clear     Remove the override and rerun bootstrap.`);
 }
@@ -332,9 +335,18 @@ function report() {
     } else {
       phaseLabel = clean(phaseRecord.phase);
       console.log(`Loader first start phase=${phaseLabel} status=${clean(phaseRecord.status)}`);
+      const credentialPhases = [
+        'cnpg-copy-core-credentials',
+        'valkey-password',
+        'model-capture-credentials',
+      ];
+      const applicationSourcesComplete =
+        credentialPhases.includes(phaseRecord.phase) ||
+        (phaseRecord.phase === 'gitea-application-kustomizations' &&
+          phaseRecord.status === 'complete');
       const finalPhaseComplete =
-        phaseRecord.phase === 'gitea-application-kustomizations' &&
-        phaseRecord.status === 'complete';
+        phaseRecord.phase === 'model-capture-credentials' && phaseRecord.status === 'complete';
+      applicationResourcesRequired = applicationSourcesComplete;
       if (phaseRecord.status === 'failed') {
         failures.push(`Loader bootstrap phase ${phaseLabel} (failed)`);
         applicationResourcesRequired = true;
@@ -536,7 +548,77 @@ const llmQuery = storeScript(`
       [request.limit])).rows;
 `);
 
-function readStore(script, request) {
+// Doctor uses the core's existing owner connection in a read-only transaction.
+// Filter age here: expired rows stay hidden even before the next writer prune.
+const exchangeQuery = storeScript(`
+    const rows = (await client.query(
+      "SELECT * FROM observability.model_exchanges WHERE created_at >= clock_timestamp() - interval '24 hours' AND ($1::text IS NULL OR call_id=$1) ORDER BY created_at DESC,call_id DESC,attempt DESC,slot DESC LIMIT $2",
+      [request.id ?? null, request.limit + 1])).rows;
+    return {
+      truncated: rows.length > request.limit,
+      rows: rows.slice(0, request.limit).map(({ exchange, ...row }) => {
+        const { inbound, upstream, response, ...metadata } = exchange;
+        const sections = Object.entries({ inbound, upstream, response }).map(([name, value]) => {
+          const { body, ...details } = value ?? {};
+          // Cap each serialized body separately, before transport to the host.
+          const text = request.headersOnly ? undefined : JSON.stringify(body ?? null, null, 2);
+          return { name, details, text: text?.slice(0, 262144), truncated: (text?.length ?? 0) > 262144 };
+        });
+        return { ...row, metadata, sections };
+      }),
+    };
+`);
+
+function doctorExchange(args) {
+  const print = (text) => writeFileSync(1, `${text}\n`);
+  const headersOnly = args.includes('--headers-only');
+  if (args.filter((arg) => arg === '--headers-only').length > 1)
+    throw new Error('exchange accepts --headers-only once');
+  args = args.filter((arg) => arg !== '--headers-only');
+  let request;
+  if (args[0] === 'last' && args.length <= 2) {
+    const limit = args[1] === undefined ? 1 : Number(args[1]);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 20)
+      throw new Error('exchange last count must be an integer from 1 to 20');
+    request = { limit };
+  } else if (args.length === 1 && /^[A-Za-z0-9_-]{1,128}$/.test(args[0])) {
+    request = { id: args[0], limit: 20 };
+  } else throw new Error('Usage: lifemodel doctor exchange <call_id | last [N]> [--headers-only]');
+  request.headersOnly = headersOnly;
+  let result;
+  try {
+    result = readStore(exchangeQuery, request, 64 * 1024 * 1024);
+  } catch {
+    console.error('Exchange store unavailable. The core pod and capture schema must be available.');
+    return 1;
+  }
+  if (!result.rows.length) {
+    print('No model exchanges recorded (capture is off by default; retention is 24 hours).');
+    return 0;
+  }
+  for (const row of result.rows) {
+    print(
+      `exchange call=${safe(row.call_id)} attempt=${safe(row.attempt)} slot=${safe(row.slot)} task=${dash(row.task_id)} session=${dash(row.session_id)} time=${safe(row.created_at)} bytes=${safe(row.size_bytes)}`
+    );
+    // All metadata, statuses and headers precede every body, so a large prompt
+    // cannot hide upstream settings or response headers. JSON escapes controls.
+    print(`  metadata: ${JSON.stringify(row.metadata, null, 2)}`);
+    for (const section of row.sections)
+      print(`  ${section.name}: ${JSON.stringify(section.details, null, 2)}`);
+    if (!headersOnly) {
+      for (const section of row.sections) {
+        print(`  ${section.name}.body:`);
+        print(String(section.text).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ' '));
+        if (section.truncated)
+          print(`(${section.name} body display truncated at 262144 characters)`);
+      }
+    }
+  }
+  if (result.truncated) print('(exchange count truncated)');
+  return 0;
+}
+
+function readStore(script, request, maxBuffer = 16 * 1024 * 1024) {
   return JSON.parse(
     execFileSync(
       kubectl[0],
@@ -558,7 +640,7 @@ function readStore(script, request) {
       {
         encoding: 'utf8',
         timeout: 15000,
-        maxBuffer: 16 * 1024 * 1024,
+        maxBuffer,
         stdio: ['ignore', 'pipe', 'pipe'],
       }
     )
@@ -606,7 +688,9 @@ const LLM_FACTS = [
 const LLM_PREFIXES = ['system', 'tools', 'history', 'context'];
 
 function dash(value) {
-  return value === undefined || value === null ? '-' : safe(JSON.stringify(value)).replace(/^"|"$/g, '');
+  return value === undefined || value === null
+    ? '-'
+    : safe(JSON.stringify(value)).replace(/^"|"$/g, '');
 }
 
 // "system=ab12cd34/4800": which part of the prompt, and how big it was. A
@@ -935,6 +1019,9 @@ try {
   }
   if (args[0] === 'doctor' && args[1] === 'trace') {
     process.exit(doctorTrace(args.slice(2)));
+  }
+  if (args[0] === 'doctor' && args[1] === 'exchange') {
+    process.exit(doctorExchange(args.slice(2)));
   }
   if (args[0] === 'doctor' && args[1] === 'llm') {
     process.exit(doctorLlm(args.slice(2)));

@@ -161,6 +161,14 @@ describe('the platform model gateway', () => {
       { name: 'LIFEMODEL_TASK_MODEL_TLS_DIR', value: '/opt/lifemodel/task-model-tls' },
       { name: 'LIFEMODEL_DB_USERNAME_FILE', value: '/opt/lifemodel/database/username' },
       { name: 'LIFEMODEL_DB_PASSWORD_FILE', value: '/opt/lifemodel/database/password' },
+      {
+        name: 'LIFEMODEL_CAPTURE_DB_USERNAME_FILE',
+        value: '/opt/lifemodel/capture-database/username',
+      },
+      {
+        name: 'LIFEMODEL_CAPTURE_DB_PASSWORD_FILE',
+        value: '/opt/lifemodel/capture-database/password',
+      },
     ]);
   });
 
@@ -175,11 +183,16 @@ describe('the platform model gateway', () => {
         name: 'database',
         secret: { secretName: 'model-gateway-db-credentials', optional: true, defaultMode: 288 },
       },
+      {
+        name: 'capture-database',
+        secret: { secretName: 'model-capture-db-credentials', optional: true, defaultMode: 288 },
+      },
     ]);
     expect(container?.volumeMounts).toEqual([
       { name: 'tmp', mountPath: '/tmp' },
       { name: 'task-model-tls', mountPath: '/opt/lifemodel/task-model-tls', readOnly: true },
       { name: 'database', mountPath: '/opt/lifemodel/database', readOnly: true },
+      { name: 'capture-database', mountPath: '/opt/lifemodel/capture-database', readOnly: true },
     ]);
     expect(container?.securityContext).toMatchObject({
       readOnlyRootFilesystem: true,

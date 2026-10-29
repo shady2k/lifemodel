@@ -351,6 +351,7 @@ describe('storage identity bootstrap order', () => {
       'gitea',
       'cnpg-copy-core-credentials',
       'valkey-password',
+      'model-capture-credentials',
     ]);
   });
 });

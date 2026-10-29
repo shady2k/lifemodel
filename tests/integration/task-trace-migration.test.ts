@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { applyMigrations } from '../../scripts/apply-migrations.js';
+import { applyTestMigrations as applyMigrations } from '../helpers/apply-test-migrations.js';
 import { createTestStores } from '../helpers/test-stores.js';
 
 const migrations = fileURLToPath(new URL('../../db/migrations/', import.meta.url));

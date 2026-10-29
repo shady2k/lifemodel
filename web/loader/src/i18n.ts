@@ -7,6 +7,23 @@ const language = languageFor(navigator.language);
 export const resources = {
   en: {
     translation: {
+      captureTitle: 'Capture model exchanges',
+      captureWarning:
+        'Captures store personal conversation text on this machine. Capture is off by default and stops automatically at expiry. Changes reach the gateway within 30 seconds.',
+      captureUntil: 'Capture is on until {{time}}.',
+      captureOff: 'Capture is off.',
+      captureScope: 'Only session: {{session}}',
+      captureDuration: 'Capture duration (24 hours maximum)',
+      capture10Minutes: '10 minutes',
+      capture1Hour: '1 hour',
+      capture24Hours: '24 hours',
+      captureSession: 'Chat/session ID (optional)',
+      captureSessionHint: 'Leave blank to capture all sessions.',
+      captureStart: 'Start capture',
+      captureStop: 'Stop capture',
+      captureLoadFailed: 'Capture settings are unavailable. Reload the page to try again.',
+      captureSaveFailed:
+        'Capture settings could not be saved. Use a valid session ID and try again.',
       workbenchSource: 'Workbench image source',
       workbenchRegistry: 'Registry HTTPS origin',
       workbenchRepository: 'Repository path',
@@ -182,6 +199,23 @@ export const resources = {
   },
   ru: {
     translation: {
+      captureTitle: 'Запись обмена с моделью',
+      captureWarning:
+        'Записи содержат личный текст переписки и хранятся на этой машине. По умолчанию запись выключена и останавливается по истечении срока. Шлюз применяет изменения в течение 30 секунд.',
+      captureUntil: 'Запись включена до {{time}}.',
+      captureOff: 'Запись выключена.',
+      captureScope: 'Только сессия: {{session}}',
+      captureDuration: 'Длительность записи (не более 24 часов)',
+      capture10Minutes: '10 минут',
+      capture1Hour: '1 час',
+      capture24Hours: '24 часа',
+      captureSession: 'ID чата/сессии (необязательно)',
+      captureSessionHint: 'Оставьте пустым для записи всех сессий.',
+      captureStart: 'Начать запись',
+      captureStop: 'Остановить запись',
+      captureLoadFailed: 'Настройки записи недоступны. Попробуйте обновить страницу.',
+      captureSaveFailed:
+        'Не удалось сохранить настройки записи. Проверьте ID сессии и повторите попытку.',
       workbenchSource: 'Источник образа рабочего окружения',
       workbenchRegistry: 'HTTPS-адрес реестра',
       workbenchRepository: 'Путь репозитория',
