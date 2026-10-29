@@ -67,6 +67,7 @@ export interface GatewayOptions {
   };
   logger: LoaderLogger;
   capture?: ExchangeCapture;
+  captureEnabled?: (sessionId: string | null) => boolean;
   timeouts?: Timeouts;
   /** The stale-outage re-check's bounds; tests narrow them. */
   recheck?: { bound?: number; cache?: number };
@@ -504,27 +505,25 @@ export function createModelGateway(options: GatewayOptions) {
       stream: payload?.['stream'] === true,
       contentLength: body === undefined ? undefined : Buffer.byteLength(body),
     });
-    // Make the agent's implicit transport header explicit so capture matches the wire.
-    if (!Object.keys(headers).some((key) => key.toLowerCase() === 'connection'))
-      headers['connection'] = 'keep-alive';
-    const capture = options.capture?.begin(
-      {
-        ...captureInput,
-        slot: name,
-        upstream: { method: payload ? 'POST' : 'GET', url: url.href, headers, body: body ?? '' },
-      },
-      {
-        secrets: [
-          slot.key ?? '',
-          ...Object.entries(headers)
-            .filter(([key]) =>
-              (slot.headers ?? []).some((header) => header.name.toLowerCase() === key.toLowerCase())
-            )
-            .map(([, value]) => value),
-        ],
-        secretHeaders: (slot.headers ?? []).map((header) => header.name),
-      }
-    );
+    const capture =
+      options.capture && (options.captureEnabled?.(captureInput.sessionId) ?? true)
+        ? options.capture.begin(
+            {
+              ...captureInput,
+              slot: name,
+              upstream: {
+                method: payload ? 'POST' : 'GET',
+                url: url.href,
+                headers: { connection: 'keep-alive', ...headers },
+                body: body ?? '',
+              },
+            },
+            {
+              secrets: [slot.key ?? '', ...renderAttemptHeaders(slot, session.id).secrets],
+              secretHeaders: (slot.headers ?? []).map((header) => header.name),
+            }
+          )
+        : undefined;
     const requestFn = url.protocol === 'https:' ? httpsRequest : httpRequest;
     const req = requestFn(url, {
       method: payload ? 'POST' : 'GET',
@@ -590,7 +589,8 @@ export function createModelGateway(options: GatewayOptions) {
           // existing 16 KiB excerpt boundary remains the caller's boundary.
           captureDetached = true;
           // Detached debugging must not occupy an agent admission slot.
-          upstream.socket?.emit('agentRemove');
+          const detachedSocket = upstream.socket;
+          detachedSocket?.emit('agentRemove');
           upstream.removeAllListeners('data');
           let bytes = 0;
           let finished = false;
@@ -602,6 +602,7 @@ export function createModelGateway(options: GatewayOptions) {
               upstream.readableEnded ? `upstream_${String(status)}` : 'body_incomplete'
             );
             req.destroy();
+            detachedSocket?.destroy();
           };
           const deadline = setTimeout(finish, 1000);
           deadline.unref();
@@ -770,8 +771,10 @@ export function createModelGateway(options: GatewayOptions) {
       let payload: Record<string, unknown> | undefined;
       if (req.method === 'POST') {
         try {
-          inboundBody = await readBody(req, signal);
-          payload = record(JSON.parse(inboundBody));
+          const raw = await readBody(req, signal);
+          payload = record(JSON.parse(raw));
+          if (options.capture && (options.captureEnabled?.(named ?? null) ?? true))
+            inboundBody = raw;
         } catch (error) {
           if (signal.aborted || error instanceof GatewayError) throw error;
           throw new GatewayError('invalid_request', 400);

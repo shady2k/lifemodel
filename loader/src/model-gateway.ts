@@ -6,7 +6,7 @@ import {
 } from './model-bao.js';
 import { createExchangeCapture } from './model-exchange-capture.js';
 import { createExchangeStore } from './model-exchange-store.js';
-import { renderAttemptHeaders, type ModelSlot } from './model.js';
+import { createCaptureInventory } from './model-capture-inventory.js';
 import { createModelGateway } from './model-gateway-app.js';
 import { createStdoutLogger } from './logger.js';
 import { readFile } from 'node:fs/promises';
@@ -25,9 +25,6 @@ if (!address) {
 const bao = createRoleBaoClient({ address, role: 'model-gateway', logger });
 const slots = createCachedSlotReader(bao.readSlot);
 const captureSetting = createCachedCaptureReader(bao.readCapture);
-let captureSecrets:
-  | { values: string[]; headers: string[]; slots: ModelSlot[]; refreshed: number }
-  | undefined;
 const captureCredentials = async () => {
   const [username, password] = await Promise.all([
     readFile(
@@ -48,19 +45,10 @@ const captureStore = createExchangeStore(async () => {
   const { username, password } = await captureCredentials();
   return catalogConnectionString(username, password);
 });
-let refreshingCapture = false;
-async function refreshCapture(): Promise<void> {
-  if (refreshingCapture) return;
-  refreshingCapture = true;
-  captureSecrets = undefined;
-  try {
-    await captureSetting.refresh();
-    const configured = await Promise.all(
-      ['primary', 'reserve'].map(async (name) => {
-        const slot = await bao.readSlot(name as 'primary' | 'reserve');
-        return slot.state === 'present' ? slot.slot : undefined;
-      })
-    );
+const inventory = createCaptureInventory({
+  setting: captureSetting,
+  readSlot: bao.readSlot,
+  passwords: async () => {
     const [{ password }, identityPassword] = await Promise.all([
       captureCredentials(),
       readFile(
@@ -68,80 +56,31 @@ async function refreshCapture(): Promise<void> {
         'utf8'
       ),
     ]);
-    const present = configured.filter((slot): slot is ModelSlot => slot !== undefined);
-    captureSecrets = {
-      values: [
-        password,
-        identityPassword,
-        ...present.flatMap((slot) => [
-          slot.key ?? '',
-          ...(slot.headers ?? []).map((header) => header.value.split('{session}').join('')),
-        ]),
-      ],
-      headers: present.flatMap((slot) => (slot.headers ?? []).map((header) => header.name)),
-      slots: present,
-      refreshed: Date.now(),
-    };
-  } catch {
-    captureSecrets = undefined;
-  } finally {
-    refreshingCapture = false;
-  }
-}
+    return [password, identityPassword];
+  },
+  prune: () => captureStore.prune(),
+});
 const capture = createExchangeCapture({
-  context: (input) =>
-    captureSecrets && Date.now() - captureSecrets.refreshed < 60_000
-      ? {
-          setting: captureSetting.current(),
-          secrets: [
-            ...captureSecrets.values,
-            ...captureSecrets.slots.flatMap((slot) =>
-              Object.values(renderAttemptHeaders(slot, input.sessionId ?? '').headers)
-            ),
-          ],
-          secretHeaders: captureSecrets.headers,
-        }
-      : undefined,
+  context: (input) => inventory.context(input.sessionId),
   write: (row) => captureStore.write(row),
 });
-void refreshCapture();
+void inventory.refresh();
 const captureRefresh = setInterval(() => {
-  void refreshCapture();
+  void inventory.refresh();
 }, 30_000);
 captureRefresh.unref();
-// Retention also runs while capture is off; unavailable storage is never a gateway failure.
-let pruning = false;
-const pruneCapture = () => {
-  if (pruning) return;
-  pruning = true;
-  void captureStore
-    .prune()
-    .catch(() => undefined)
-    .finally(() => {
-      pruning = false;
-    });
-};
-pruneCapture();
-const capturePrune = setInterval(pruneCapture, 60_000);
-capturePrune.unref();
 const app = createModelGateway({
   slots: {
     ...slots,
     read: async (name) => {
       const value = await slots.read(name);
-      if (
-        captureSecrets &&
-        value.state === 'present' &&
-        !captureSecrets.slots.some((slot) => JSON.stringify(slot) === JSON.stringify(value.slot))
-      ) {
-        captureSecrets = undefined;
-        void refreshCapture();
-      }
+      inventory.observeSlot(name, value);
       return value;
     },
   },
   logger,
   capture,
+  captureEnabled: (sessionId) => inventory.enabled(sessionId),
 });
 const tlsDirectory = process.env['LIFEMODEL_TASK_MODEL_TLS_DIR'] ?? '';
 if (!tlsDirectory) {
@@ -193,7 +132,7 @@ task.server.listen(8446, '0.0.0.0');
 app.status.listen(8081, '0.0.0.0');
 function stop(): void {
   clearInterval(captureRefresh);
-  clearInterval(capturePrune);
+  inventory.close();
   capture.close();
   void captureStore.close().catch(() => undefined);
   task.close();

@@ -41,7 +41,7 @@ export function createExchangeStore(credentials: () => Promise<string>) {
           row.slot,
           row.taskId,
           row.sessionId,
-          JSON.stringify(row.exchange),
+          row.serialized ?? JSON.stringify(row.exchange),
           row.expiresAt,
         ]
       );

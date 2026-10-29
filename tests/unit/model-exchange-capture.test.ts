@@ -1,6 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { performance } from 'node:perf_hooks';
+import { describe, expect, it, vi } from 'vitest';
+import { renderAttemptHeaders } from '../../loader/src/model.js';
 import {
   createExchangeCapture,
+  prepareCaptureSecrets,
   type CaptureInput,
   type CaptureRow,
 } from '../../loader/src/model-exchange-capture.js';
@@ -24,6 +27,144 @@ const input: CaptureInput = {
   },
 };
 describe('bounded exchange capture', () => {
+  it('redacts custom headers by name without scrubbing short values or the session globally', async () => {
+    const rows: CaptureRow[] = [];
+    const rendered = renderAttemptHeaders(
+      {
+        kind: 'openai',
+        baseUrl: 'https://example.test',
+        model: 'example',
+        headers: [
+          { name: 'x-affinity', value: '{session}' },
+          { name: 'x-count', value: '1' },
+          { name: 'x-locale', value: 'en' },
+          { name: 'x-label', value: 'len' },
+          { name: 'x-secret', value: 'private-header-credential-{session}' },
+        ],
+      },
+      'chat'
+    );
+    expect(rendered.secrets).toEqual(['private-header-credential-chat']);
+    const customInput: CaptureInput = {
+      ...input,
+      inbound: {
+        ...input.inbound,
+        headers: { ...input.inbound.headers, ...rendered.headers },
+        body: `chat 1 en len ${rendered.secrets[0]}`,
+      },
+      upstream: { ...input.upstream, headers: rendered.headers },
+    };
+    const capture = createExchangeCapture({
+      context: () => ({
+        setting: { until: new Date(Date.now() + 600_000).toISOString() },
+        secrets: ['url-secret'],
+        secretHeaders: Object.keys(rendered.headers),
+      }),
+      write: async (row) => {
+        rows.push(row);
+      },
+    });
+    const attempt = capture.begin(customInput, {
+      secrets: rendered.secrets,
+      secretHeaders: Object.keys(rendered.headers),
+    })!;
+    attempt.response(200, rendered.headers);
+    attempt.chunk(Buffer.from(customInput.inbound.body));
+    attempt.finish();
+    await expect.poll(() => rows.length).toBe(1);
+    expect(rows[0]!.sessionId).toBe('chat');
+    const exchange = rows[0]!.exchange;
+    for (const part of ['inbound', 'upstream', 'response']) {
+      const headers = (exchange[part] as { headers: Record<string, string> }).headers;
+      for (const name of Object.keys(rendered.headers))
+        expect(headers[name]).toMatch(/^\[redacted len=\d+\]$/);
+    }
+    expect((exchange.inbound as { body: string }).body).toBe('chat 1 en len [redacted len=30]');
+    expect((exchange.response as { body: string }).body).toBe('chat 1 en len [redacted len=30]');
+    expect(JSON.stringify(rows)).not.toContain('private-header-credential-chat');
+    capture.close();
+  });
+
+  it('always scrubs short keys and passwords, using prepared raw, JSON and URL variants', async () => {
+    const rows: CaptureRow[] = [];
+    const credentials = ['QZ', 'PW', 'long-secret-"\\?+.*[]()$'];
+    const preparedSecrets = prepareCaptureSecrets(credentials);
+    const payload = preparedSecrets.join(' / ');
+    const capture = createExchangeCapture({
+      context: () => ({
+        setting: { until: new Date(Date.now() + 600_000).toISOString() },
+        secrets: [],
+        preparedSecrets,
+        secretHeaders: [],
+      }),
+      write: async (row) => {
+        rows.push(row);
+      },
+    });
+    const attempt = capture.begin({
+      ...input,
+      inbound: { ...input.inbound, body: payload },
+      upstream: { ...input.upstream, body: payload },
+    })!;
+    attempt.chunk(Buffer.from(payload));
+    attempt.finish();
+    await expect.poll(() => rows.length).toBe(1);
+    const serialized = JSON.stringify(rows[0]);
+    for (const secret of preparedSecrets) expect(serialized).not.toContain(secret);
+    expect(serialized).toContain('[redacted len=2]');
+    expect(rows[0]!.serialized).toBe(JSON.stringify(rows[0]!.exchange));
+    capture.close();
+  });
+
+  it('serializes once per row and yields between large-inventory finalizations', async () => {
+    const rows: CaptureRow[] = [];
+    // Far larger than two slots' bounded custom-header inventory. Preparation is off the call path.
+    const preparedSecrets = prepareCaptureSecrets(
+      Array.from(
+        { length: 4096 },
+        (_, index) => `credential-${index.toString(16).padStart(6, '0')}-static-private-value`
+      )
+    );
+    const body = 'data: ordinary SSE content\n\n'.repeat(38_000);
+    const capture = createExchangeCapture({
+      context: () => ({
+        setting: { until: new Date(Date.now() + 600_000).toISOString() },
+        secrets: [],
+        preparedSecrets,
+        secretHeaders: [],
+      }),
+      write: async (row) => {
+        rows.push(row);
+      },
+    });
+    const calls = Array.from(
+      { length: 4 },
+      () =>
+        capture.begin({
+          ...input,
+          inbound: { ...input.inbound, body },
+          upstream: { ...input.upstream, body },
+        })!
+    );
+    for (const call of calls) call.chunk(Buffer.from(body + preparedSecrets[0]));
+    // A second SSE stream can continue on each turn, rather than waiting for all four rows.
+    const stringify = vi.spyOn(JSON, 'stringify');
+    try {
+      for (const call of calls) call.finish();
+      for (let turn = 0; turn < calls.length; turn++) {
+        const started = performance.now();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(performance.now() - started).toBeLessThan(250);
+        expect(stringify).toHaveBeenCalledTimes(turn + 1);
+      }
+    } finally {
+      stringify.mockRestore();
+    }
+    await expect.poll(() => rows.length).toBe(calls.length);
+    for (const row of rows) expect(row.serialized).not.toContain(preparedSecrets[0]);
+    capture.close();
+  });
+
   it('defers body scrubbing and row assembly, retaining its active slot until finalization', async () => {
     const rows: CaptureRow[] = [];
     let bodyReads = 0;

@@ -106,7 +106,8 @@ next settings refresh (at most 30 seconds). Expiry is checked on every attempt
 and write, so expiry needs no restart or cleanup action. The setting lives in
 OpenBao at `lifemodel/data/model/capture`; the gateway refreshes it in the
 background and never waits for it on a model call. An unavailable setting or
-secret inventory disables capture.
+secret inventory disables capture. The browser sends a duration; the server
+computes the expiry with its own clock, not the browser clock.
 
 **Captures store personal conversation text on this machine.** They do not go
 to an external observability service. The gateway stores one redacted exchange
@@ -118,17 +119,23 @@ trusted task id where present. The call id is the `lifemodel.call_id` in
 `lifemodel doctor exchange last [N]`.
 
 Authorization, Proxy-Authorization, Cookie, Set-Cookie, X-Api-Key and Api-Key
-headers are replaced with `[redacted len=N]`. All custom slot headers are treated
-as secret because the slot format has no secret flag. Every slot's key and
-custom-header secret material, the incoming credential values and the database
-passwords are scrubbed from stored text, including JSON-escaped and URL-encoded
-forms. A final guard drops a row if any configured secret still occurs.
+headers are replaced with `[redacted len=N]`. All custom slot headers are
+redacted by name in header maps. Only custom values whose static part is at
+least 16 bytes enter the global scrubber, following the existing gateway echo
+guard; short ordinary values and a bare `{session}` are not global secrets.
+Every slot's key, long custom-header secret material, incoming credential values
+and both database passwords are scrubbed from stored text, including JSON-escaped
+and URL-encoded forms. A final guard drops a row if credential material remains.
+Task traffic is captured too and shares the 100 MiB cap. The optional exact
+session filter narrows capture to one chat/session instead.
 
 Each body retains at most 1 MiB plus an explicit truncation marker naming its
 original byte length. The complete exchange has a 4 MiB database limit. The
 store retains at most 100 MiB of recorded payload, newest first, and 24 hours.
-A background prune runs every minute even while capture is off; reader access
-also hides rows older than 24 hours. At most 16 exchanges collect bodies at
+A background prune runs every minute while enabled, then hourly for up to
+24 hours after capture turns off. Doctor queries filter out rows older than
+24 hours. While capture is off, the gateway reads no inventory or password
+files and retains no inbound capture body. At most 16 exchanges collect bodies at
 once and 8 redacted rows wait in memory. A full queue, missing database or
 capture error drops evidence, never the model result. Database work runs off
 the model-call path with one connection and a 1-second query/connect bound.
