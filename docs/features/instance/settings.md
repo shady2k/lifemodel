@@ -96,3 +96,39 @@ are covered by `tests/unit/loader-http-auth.test.ts`,
 `tests/unit/model-gateway.test.ts`; `tests/web-loader/loader.test.tsx` covers
 the slot controls. Store integration uses
 the Postgres-backed configuration store.
+
+## Time-limited model exchange capture
+
+The loader's model page has **Capture model exchanges**. It is off by default.
+Choose 10 minutes, 1 hour, or 24 hours (the maximum), optionally name one exact
+chat/session id, then enable it. Disable stops new captures after the gateway's
+next settings refresh (at most 30 seconds). Expiry is checked on every attempt
+and write, so expiry needs no restart or cleanup action. The setting lives in
+OpenBao at `lifemodel/data/model/capture`; the gateway refreshes it in the
+background and never waits for it on a model call. An unavailable setting or
+secret inventory disables capture.
+
+**Captures store personal conversation text on this machine.** They do not go
+to an external observability service. The gateway stores one redacted exchange
+per upstream attempt in Postgres, including the original caller request, the
+actual upstream request after model/effort selection, upstream response headers
+and body (SSE text for streams), timing, call id, slot, attempt, session and
+trusted task id where present. The call id is the `lifemodel.call_id` in
+`lifemodel doctor llm`; read it with `lifemodel doctor exchange <call_id>` or
+`lifemodel doctor exchange last [N]`.
+
+Authorization, Proxy-Authorization, Cookie, Set-Cookie, X-Api-Key and Api-Key
+headers are replaced with `[redacted len=N]`. All custom slot headers are treated
+as secret because the slot format has no secret flag. Every slot's key and
+custom-header secret material, the incoming credential values and the database
+passwords are scrubbed from stored text, including JSON-escaped and URL-encoded
+forms. A final guard drops a row if any configured secret still occurs.
+
+Each body retains at most 1 MiB plus an explicit truncation marker naming its
+original byte length. The complete exchange has a 4 MiB database limit. The
+store retains at most 100 MiB of recorded payload, newest first, and 24 hours.
+A background prune runs every minute even while capture is off; reader access
+also hides rows older than 24 hours. At most 16 exchanges collect bodies at
+once and 8 redacted rows wait in memory. A full queue, missing database or
+capture error drops evidence, never the model result. Database work runs off
+the model-call path with one connection and a 1-second query/connect bound.

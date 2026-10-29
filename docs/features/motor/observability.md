@@ -309,3 +309,25 @@ throwing trace queue never delaying the call, and a throwing recorder leaving
 the sent body and the answer unchanged.
 `tests/unit/trace-store.test.ts` also checks that model-call traces are bounded
 apart from task evidence.
+
+## Gateway exchange capture
+
+Serves: lifemodel-z1bh.
+
+A model-call span's `lifemodel.call_id` links to an optional gateway capture.
+Enable a time-limited capture on the loader's model page, send a message, then
+run `lifemodel doctor exchange <call_id>` (or `exchange last [N]`). Each attempt
+shows the inbound method/path/headers/body, actual upstream URL/headers/body,
+upstream status/headers/body and timing. The gateway never forwards the call-id
+header upstream. Streams are observed alongside delivery, not buffered behind
+the capture writer. Rejections and reserve attempts have separate rows.
+
+Capture is off by default and stores personal conversation text on this
+machine. It redacts credentials before queueing, caps each body at 1 MiB,
+marks truncation with original bytes, and retains at most 100 MiB/24 hours.
+The capture-only database login can execute only append/prune functions;
+the doctor's reader role can select only the age-filtered view. The doctor
+strips control characters and bounds output. See
+[settings](../instance/settings.md#time-limited-model-exchange-capture) for
+redaction, queue limits, expiry and the optional exact-session filter. Dropped
+capture evidence never changes the model-call outcome.

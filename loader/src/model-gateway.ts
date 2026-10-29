@@ -1,5 +1,12 @@
 /** Separate process entry point, built into the platform loader image. */
-import { createRoleBaoClient, createCachedSlotReader } from './model-bao.js';
+import {
+  createRoleBaoClient,
+  createCachedSlotReader,
+  createCachedCaptureReader,
+} from './model-bao.js';
+import { createExchangeCapture } from './model-exchange-capture.js';
+import { createExchangeStore } from './model-exchange-store.js';
+import type { ModelSlot } from './model.js';
 import { createModelGateway } from './model-gateway-app.js';
 import { createStdoutLogger } from './logger.js';
 import { readFile } from 'node:fs/promises';
@@ -16,7 +23,99 @@ if (!address) {
   process.exit(1);
 }
 const bao = createRoleBaoClient({ address, role: 'model-gateway', logger });
-const app = createModelGateway({ slots: createCachedSlotReader(bao.readSlot), logger });
+const slots = createCachedSlotReader(bao.readSlot);
+const captureSetting = createCachedCaptureReader(bao.readCapture);
+let captureSecrets: { values: string[]; headers: string[]; refreshed: number } | undefined;
+const captureCredentials = async () => {
+  const [username, password] = await Promise.all([
+    readFile(
+      process.env['LIFEMODEL_CAPTURE_DB_USERNAME_FILE'] ??
+        '/opt/lifemodel/capture-database/username',
+      'utf8'
+    ),
+    readFile(
+      process.env['LIFEMODEL_CAPTURE_DB_PASSWORD_FILE'] ??
+        '/opt/lifemodel/capture-database/password',
+      'utf8'
+    ),
+  ]);
+  if (!username || !password) throw new Error('capture_credentials_unavailable');
+  return { username, password };
+};
+const captureStore = createExchangeStore(async () => {
+  const { username, password } = await captureCredentials();
+  return catalogConnectionString(username, password);
+});
+let refreshingCapture = false;
+async function refreshCapture(): Promise<void> {
+  if (refreshingCapture) return;
+  refreshingCapture = true;
+  try {
+    await captureSetting.refresh();
+    const configured = await Promise.all(
+      ['primary', 'reserve'].map(async (name) => {
+        const slot = await bao.readSlot(name as 'primary' | 'reserve');
+        return slot.state === 'present' ? slot.slot : undefined;
+      })
+    );
+    const [{ password }, identityPassword] = await Promise.all([
+      captureCredentials(),
+      readFile(
+        process.env['LIFEMODEL_DB_PASSWORD_FILE'] ?? '/opt/lifemodel/database/password',
+        'utf8'
+      ),
+    ]);
+    const present = configured.filter((slot): slot is ModelSlot => slot !== undefined);
+    captureSecrets = {
+      values: [
+        password,
+        identityPassword,
+        ...present.flatMap((slot) => [
+          slot.key ?? '',
+          ...(slot.headers ?? []).map((header) => header.value.split('{session}').join('')),
+        ]),
+      ],
+      headers: present.flatMap((slot) => (slot.headers ?? []).map((header) => header.name)),
+      refreshed: Date.now(),
+    };
+  } catch {
+    captureSecrets = undefined;
+  } finally {
+    refreshingCapture = false;
+  }
+}
+const capture = createExchangeCapture({
+  context: () =>
+    captureSecrets && Date.now() - captureSecrets.refreshed < 60_000
+      ? {
+          setting: captureSetting.current(),
+          secrets: captureSecrets.values,
+          secretHeaders: captureSecrets.headers,
+        }
+      : undefined,
+  write: captureStore.write,
+});
+void refreshCapture();
+const captureRefresh = setInterval(() => {
+  void refreshCapture();
+}, 30_000);
+captureRefresh.unref();
+// Retention also runs while capture is off; unavailable storage is never a gateway failure.
+let pruning = false;
+const pruneCapture = () => {
+  if (pruning) return;
+  pruning = true;
+  void captureStore
+    .prune()
+    .catch(() => undefined)
+    .finally(() => {
+      pruning = false;
+    });
+};
+pruneCapture();
+const capturePrune = setInterval(pruneCapture, 60_000);
+capturePrune.unref();
+const app = createModelGateway({ slots, logger, capture });
 const tlsDirectory = process.env['LIFEMODEL_TASK_MODEL_TLS_DIR'] ?? '';
 if (!tlsDirectory) {
   logger.error({ code: 'missing_task_tls' }, 'Model gateway cannot start');
@@ -66,6 +165,10 @@ app.api.listen(8080, '0.0.0.0');
 task.server.listen(8446, '0.0.0.0');
 app.status.listen(8081, '0.0.0.0');
 function stop(): void {
+  clearInterval(captureRefresh);
+  clearInterval(capturePrune);
+  capture.close();
+  void captureStore.close().catch(() => undefined);
   task.close();
   app.close();
   identity.close();

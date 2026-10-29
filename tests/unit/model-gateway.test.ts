@@ -6,6 +6,7 @@ import { connect } from 'node:net';
 import { createRoleBaoClient, createCachedSlotReader } from '../../loader/src/model-bao.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 import type { ModelSlot, ModelSlotName } from '../../loader/src/model.js';
+import { createExchangeCapture, type CaptureRow } from '../../loader/src/model-exchange-capture.js';
 
 const servers: Server[] = [];
 afterEach(async () => {
@@ -43,7 +44,8 @@ type Handler = (req: IncomingMessage, res: ServerResponse, body: Record<string, 
 async function fixture(
   options?: Parameters<typeof createModelGateway>[0]['timeouts'],
   timers?: Parameters<typeof createModelGateway>[0]['timers'],
-  recheck?: Parameters<typeof createModelGateway>[0]['recheck']
+  recheck?: Parameters<typeof createModelGateway>[0]['recheck'],
+  capture?: Parameters<typeof createModelGateway>[0]['capture']
 ) {
   const attempts: Array<{
     slot: ModelSlotName;
@@ -134,6 +136,7 @@ async function fixture(
     ...(options ? { timeouts: options } : {}),
     ...(timers ? { timers } : {}),
     ...(recheck ? { recheck } : {}),
+    ...(capture ? { capture } : {}),
   });
   const url = await listen(app.api);
   const statusUrl = await listen(app.status);
@@ -2624,5 +2627,155 @@ describe('model gateway review round 2: safe reasons, stream positions, slot att
     f.handlers.primary = (_req, res) =>
       res.end(JSON.stringify(textAnswer({ role: 'assistant', content: f.slots.primary!.key })));
     await expectExactShapes(f, 'unsafe_response');
+  });
+});
+
+describe('model gateway opt-in exchange capture', () => {
+  async function captured(write?: (row: CaptureRow) => Promise<void>) {
+    const rows: CaptureRow[] = [];
+    let setting: { until: string | null; session?: string } = {
+      until: new Date(Date.now() + 600_000).toISOString(),
+    };
+    const capture = createExchangeCapture({
+      context: () => ({
+        setting,
+        secrets: ['primary-SUPER-SECRET', 'reserve-SUPER-SECRET', 'DATABASE-PASSWORD'],
+        secretHeaders: ['x-private'],
+      }),
+      write:
+        write ??
+        (async (row) => {
+          rows.push(row);
+        }),
+    });
+    const f = await fixture(undefined, undefined, undefined, capture);
+    return {
+      ...f,
+      rows,
+      capture,
+      setSetting(value: typeof setting) {
+        setting = value;
+      },
+    };
+  }
+  it('captures the actual upstream attempt, raw caller body and full response headers with whole-row redaction', async () => {
+    const f = await captured();
+    f.slots.primary!.reasoningEffort = 'none';
+    f.slots.primary!.headers = [{ name: 'x-private', value: 'CUSTOM-TOKEN' }];
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        'x-upstream-cache': 'MISS',
+        'set-cookie': 'RESPONSE-COOKIE',
+        'x-echo': 'reserve-SUPER-SECRET',
+      });
+      res.end(JSON.stringify(answer()));
+    };
+    const response = await f.post(
+      {
+        model: 'default',
+        messages: [
+          {
+            role: 'user',
+            content: 'Hi DATABASE-PASSWORD primary-SUPER-SECRET reserve-SUPER-SECRET CUSTOM-TOKEN',
+          },
+        ],
+      },
+      { 'x-lifemodel-call': 'call-capture-1', 'x-lifemodel-session': 'chat-capture' }
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    await expect.poll(() => f.rows.length).toBe(1);
+    expect(f.rows[0]).toMatchObject({
+      callId: 'call-capture-1',
+      attempt: 1,
+      slot: 'primary',
+      sessionId: 'chat-capture',
+      exchange: {
+        upstream: { headers: { 'x-private': '[redacted len=12]' } },
+        response: { status: 200, headers: { 'x-upstream-cache': 'MISS' } },
+      },
+    });
+    const exchange = f.rows[0]!.exchange as {
+      upstream: { body: string };
+      inbound: { body: string };
+    };
+    expect(JSON.parse(exchange.upstream.body)).toMatchObject({
+      reasoning_effort: 'none',
+      model: 'primary-model',
+    });
+    expect(JSON.parse(exchange.inbound.body).model).toBe('default');
+    expect(f.attempts[0]?.headers['x-lifemodel-call']).toBeUndefined();
+    for (const secret of [
+      'INBOUND-PRIVATE',
+      'PRIVATE-COOKIE',
+      'primary-SUPER-SECRET',
+      'reserve-SUPER-SECRET',
+      'DATABASE-PASSWORD',
+      'CUSTOM-TOKEN',
+      'RESPONSE-COOKIE',
+    ])
+      expect(JSON.stringify(f.rows)).not.toContain(secret);
+    f.capture.close();
+  });
+  it('stores an independent row for failed primary and successful reserve', async () => {
+    const f = await captured();
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(503, { 'x-upstream': 'retry' });
+      res.end('unavailable');
+    };
+    expect((await f.post({}, { 'x-lifemodel-call': 'retry-call' })).status).toBe(400);
+    const response = await f.post(undefined, { 'x-lifemodel-call': 'retry-call' });
+    await response.text();
+    await expect.poll(() => f.rows.length).toBe(2);
+    expect(f.rows.map((row) => [row.callId, row.attempt, row.slot])).toEqual([
+      ['retry-call', 1, 'primary'],
+      ['retry-call', 2, 'reserve'],
+    ]);
+    expect(f.rows[0]?.exchange.response).toMatchObject({ status: 503, body: 'unavailable' });
+    f.capture.close();
+  });
+  it('does not capture off, expired or another session and captures only the selected session', async () => {
+    const f = await captured();
+    f.setSetting({ until: null });
+    await (await f.post()).text();
+    f.setSetting({ until: new Date(Date.now() - 1).toISOString() });
+    await (await f.post()).text();
+    f.setSetting({ until: new Date(Date.now() + 600_000).toISOString(), session: 'wanted' });
+    await (await f.post(undefined, { 'x-lifemodel-session': 'other' })).text();
+    await (await f.post(undefined, { 'x-lifemodel-session': 'wanted' })).text();
+    await expect.poll(() => f.rows.length).toBe(1);
+    expect(f.rows[0]?.sessionId).toBe('wanted');
+    f.capture.close();
+  });
+  it('tees SSE without changing the client answer and captures upstream framing', async () => {
+    const f = await captured();
+    const sse = `data: ${JSON.stringify({ id: 'stream-1', object: 'chat.completion.chunk', model: 'real', choices: [{ index: 0, delta: { content: 'hello' }, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`;
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'x-stream': 'yes' });
+      res.end(sse);
+    };
+    const response = await f.post({ model: 'default', messages: [], stream: true });
+    expect(await response.text()).toBe(sse);
+    await expect.poll(() => f.rows.length).toBe(1);
+    expect(f.rows[0]?.exchange.response).toMatchObject({
+      body: sse,
+      headers: { 'x-stream': 'yes' },
+    });
+    f.capture.close();
+  });
+  it('never waits for a hung/full or failing writer and keeps results byte-identical', async () => {
+    const f = await captured(async () => new Promise<void>(() => undefined));
+    for (let i = 0; i < 12; i++) {
+      const response = await f.post();
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(answer());
+    }
+    f.capture.close();
+    const failed = await captured(async () => {
+      throw new Error('capture_failed');
+    });
+    expect(await (await failed.post()).json()).toEqual(answer());
+    failed.capture.close();
   });
 });

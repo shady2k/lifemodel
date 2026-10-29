@@ -237,6 +237,7 @@ Created at runtime relative to the working directory; the root is `data/`
   tokens, slot, effort, prefix fingerprints) into `observability.trace_spans`;
   read it with `lifemodel doctor trace <id>` and `lifemodel doctor llm [N]`
   (`docs/features/motor/observability.md`).
+- Optional gateway exchange captures hold personal messages in Postgres; they are off by default, time-limited, redacted, and readable with `lifemodel doctor exchange` (see `docs/features/instance/settings.md`).
 - Persistent state lives in its declared store: the tick snapshot, bus offsets and inbound/outbound streams live in Valkey; conversations, memory, soul, registries, plugin settings, schedules and configuration live in Postgres. `DATA_PATH` is not a persistent-state store and the core must start when it is read-only. In the cluster, logs go to stdout (`kubectl logs`), and the ONNX model is baked into the core image at `/opt/model-cache` and read in place. Motor Cortex and its skill/workspace/run directories are disabled in the cluster (`MOTOR_CORTEX_ENABLED=false`) and move with lifemodel-653; when disabled, they must not create `data/skills`, `data/motor-runs` or `data/models`. Back up the stores before destructive recovery; logs and stores hold personal messages and tool content.
 
 ## Debugging unexpected agent output

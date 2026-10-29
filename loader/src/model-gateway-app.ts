@@ -24,6 +24,7 @@ import {
   type SlotRead,
 } from './model.js';
 import { modelEndpointUrl } from './model-url.js';
+import type { CaptureInput, ExchangeCapture } from './model-exchange-capture.js';
 import { SlotStorageUnavailableError } from './model-bao.js';
 import { readModelErrorExcerpt } from './model-error-excerpt.js';
 import type { LoaderLogger } from './logger.js';
@@ -65,6 +66,7 @@ export interface GatewayOptions {
     keys(): readonly string[];
   };
   logger: LoaderLogger;
+  capture?: ExchangeCapture;
   timeouts?: Timeouts;
   /** The stale-outage re-check's bounds; tests narrow them. */
   recheck?: { bound?: number; cache?: number };
@@ -429,13 +431,24 @@ export function createModelGateway(options: GatewayOptions) {
     res: ServerResponse,
     signal: AbortSignal,
     session: { id: string; callerNamed: boolean },
+    captureInput: Omit<CaptureInput, 'upstream' | 'slot'>,
     authorizeTask?: (signal: AbortSignal) => Promise<void>
   ): Promise<void> {
     const rendered = renderAttemptHeaders(slot, session.id);
     if (slot.key) retain(activeKeys, slot.key);
     for (const secret of rendered.secrets) retain(activeHeaderSecrets, secret);
     try {
-      await sendAttempt(slot, name, payload, res, signal, session, rendered.headers, authorizeTask);
+      await sendAttempt(
+        slot,
+        name,
+        payload,
+        res,
+        signal,
+        session,
+        rendered.headers,
+        captureInput,
+        authorizeTask
+      );
     } finally {
       if (slot.key) release(activeKeys, slot.key);
       for (const secret of rendered.secrets) release(activeHeaderSecrets, secret);
@@ -450,6 +463,7 @@ export function createModelGateway(options: GatewayOptions) {
     signal: AbortSignal,
     session: { id: string; callerNamed: boolean },
     custom: Record<string, string>,
+    captureInput: Omit<CaptureInput, 'upstream' | 'slot'>,
     authorizeTask?: (signal: AbortSignal) => Promise<void>
   ): Promise<void> {
     const startedAt = Date.now();
@@ -485,6 +499,29 @@ export function createModelGateway(options: GatewayOptions) {
     const timeout = () => {
       controller.abort(new GatewayError('timeout'));
     };
+    const headers = upstreamHeaders(slot, custom, session, name, {
+      host: url.host,
+      stream: payload?.['stream'] === true,
+      contentLength: body === undefined ? undefined : Buffer.byteLength(body),
+    });
+    const capture = options.capture?.begin(
+      {
+        ...captureInput,
+        slot: name,
+        upstream: { method: payload ? 'POST' : 'GET', url: url.href, headers, body: body ?? '' },
+      },
+      {
+        secrets: [
+          slot.key ?? '',
+          ...Object.entries(headers)
+            .filter(([key]) =>
+              (slot.headers ?? []).some((header) => header.name.toLowerCase() === key.toLowerCase())
+            )
+            .map(([, value]) => value),
+        ],
+        secretHeaders: (slot.headers ?? []).map((header) => header.name),
+      }
+    );
     const requestFn = url.protocol === 'https:' ? httpsRequest : httpRequest;
     const req = requestFn(url, {
       method: payload ? 'POST' : 'GET',
@@ -497,11 +534,7 @@ export function createModelGateway(options: GatewayOptions) {
             ...(options.tlsCa === undefined ? {} : { ca: options.tlsCa }),
           }
         : {}),
-      headers: upstreamHeaders(slot, custom, session, name, {
-        host: url.host,
-        stream: payload?.['stream'] === true,
-        contentLength: body === undefined ? undefined : Buffer.byteLength(body),
-      }),
+      headers,
     });
     // A permanent safe listener also handles destruction after the response event.
     req.on('error', () => {
@@ -511,6 +544,7 @@ export function createModelGateway(options: GatewayOptions) {
     const connectTimer = schedule(timeout, Math.max(1, connectDeadline - Date.now()));
     const byteTimer = schedule(timeout, Math.max(1, startedAt + limits.firstByte - Date.now()));
     let rejectedStatus: number | undefined;
+    let captureError: string | undefined;
     try {
       // request() may wait in the bounded shared agent queue. It sends no HTTP
       // bytes until end(): first obtain a connected (TLS-ready) socket, then
@@ -534,6 +568,8 @@ export function createModelGateway(options: GatewayOptions) {
       const [upstream] = await responsePromise;
       upstream.on('error', () => undefined);
       const status = upstream.statusCode ?? 502;
+      capture?.response(status, upstream.headers);
+      upstream.on('data', (chunk: Buffer) => capture?.chunk(chunk));
       if (status === 401 || status === 403) options.slots.invalidate(name);
       if (status < 200 || status >= 300) {
         rejectedStatus = status;
@@ -615,6 +651,7 @@ export function createModelGateway(options: GatewayOptions) {
       }
     } catch (error) {
       const failure = safeError(active.aborted ? active.reason : error);
+      captureError = failure.code;
       // Body-read timeout must retain the status already received, not invent
       // a transport-only failure. requestFailure preserves it through failover.
       if (rejectedStatus !== undefined && failure.upstreamStatus === undefined)
@@ -624,6 +661,7 @@ export function createModelGateway(options: GatewayOptions) {
       cancel(connectTimer);
       cancel(byteTimer);
       cancel(idleTimer);
+      capture?.finish(captureError);
       // Includes slot switch, malformed responses and success; never leaves a live upstream.
       req.destroy();
     }
@@ -683,11 +721,15 @@ export function createModelGateway(options: GatewayOptions) {
     let last = new GatewayError('not_configured');
     let loggedFailure: GatewayError | undefined;
     let activeSlot: ModelSlotName = 'primary';
+    let inboundBody = '';
+    let attemptNumber = 0;
+    const callId = validSessionId(req.headers['x-lifemodel-call']) ?? randomUUID();
     try {
       let payload: Record<string, unknown> | undefined;
       if (req.method === 'POST') {
         try {
-          payload = record(JSON.parse(await readBody(req, signal)));
+          inboundBody = await readBody(req, signal);
+          payload = record(JSON.parse(inboundBody));
         } catch (error) {
           if (signal.aborted || error instanceof GatewayError) throw error;
           throw new GatewayError('invalid_request', 400);
@@ -726,7 +768,27 @@ export function createModelGateway(options: GatewayOptions) {
           // The failure names the slot that was really attempted, never one
           // whose read only came back absent.
           activeSlot = name;
-          await attempt(read.slot, name, payload, res, signal, session, authorizeTask);
+          await attempt(
+            read.slot,
+            name,
+            payload,
+            res,
+            signal,
+            session,
+            {
+              callId,
+              attempt: ++attemptNumber,
+              taskId: trustedTaskId ?? null,
+              sessionId: named ?? null,
+              inbound: {
+                method: req.method ?? '',
+                path: req.url ?? '',
+                headers: req.headers,
+                body: inboundBody,
+              },
+            },
+            authorizeTask
+          );
           failureRevisions[name]++;
           outcomeRevision++;
           health.lastAttemptAt = requestStartedAt;
