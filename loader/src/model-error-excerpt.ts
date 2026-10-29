@@ -55,11 +55,12 @@ export function modelErrorExcerpt(
 export async function readModelErrorExcerpt(
   response: IncomingMessage,
   secrets: readonly string[],
-  requestJson = ''
+  requestJson = '',
+  preserveForCapture = false
 ): Promise<string> {
   const chunks: Buffer[] = [];
   let size = 0;
-  for await (const value of response) {
+  for await (const value of response.iterator({ destroyOnReturn: !preserveForCapture })) {
     const chunk = Buffer.isBuffer(value) ? value : Buffer.from(String(value));
     size += chunk.length;
     if (size > MODEL_ERROR_BODY_LIMIT) return '';

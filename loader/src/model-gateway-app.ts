@@ -504,6 +504,9 @@ export function createModelGateway(options: GatewayOptions) {
       stream: payload?.['stream'] === true,
       contentLength: body === undefined ? undefined : Buffer.byteLength(body),
     });
+    // Make the agent's implicit transport header explicit so capture matches the wire.
+    if (!Object.keys(headers).some((key) => key.toLowerCase() === 'connection'))
+      headers['connection'] = 'keep-alive';
     const capture = options.capture?.begin(
       {
         ...captureInput,
@@ -545,6 +548,8 @@ export function createModelGateway(options: GatewayOptions) {
     const byteTimer = schedule(timeout, Math.max(1, startedAt + limits.firstByte - Date.now()));
     let rejectedStatus: number | undefined;
     let captureError: string | undefined;
+    let captureComplete = false;
+    let captureDetached = false;
     try {
       // request() may wait in the bounded shared agent queue. It sends no HTTP
       // bytes until end(): first obtain a connected (TLS-ready) socket, then
@@ -569,14 +574,47 @@ export function createModelGateway(options: GatewayOptions) {
       upstream.on('error', () => undefined);
       const status = upstream.statusCode ?? 502;
       capture?.response(status, upstream.headers);
+      upstream.once('end', () => {
+        captureComplete = true;
+      });
       upstream.on('data', (chunk: Buffer) => capture?.chunk(chunk));
       if (status === 401 || status === 403) options.slots.invalidate(name);
       if (status < 200 || status >= 300) {
         rejectedStatus = status;
         const excerpt = await wait(
-          readModelErrorExcerpt(upstream, inspectedKeys(), body ?? ''),
+          readModelErrorExcerpt(upstream, inspectedKeys(), body ?? '', capture !== undefined),
           active
         );
+        if (capture && !upstream.readableEnded && !active.aborted) {
+          // Do not hold rejection/failover behind optional capture intake. The
+          // existing 16 KiB excerpt boundary remains the caller's boundary.
+          captureDetached = true;
+          // Detached debugging must not occupy an agent admission slot.
+          upstream.socket?.emit('agentRemove');
+          upstream.removeAllListeners('data');
+          let bytes = 0;
+          let finished = false;
+          const finish = () => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(deadline);
+            capture.finish(
+              upstream.readableEnded ? `upstream_${String(status)}` : 'body_incomplete'
+            );
+            req.destroy();
+          };
+          const deadline = setTimeout(finish, 1000);
+          deadline.unref();
+          upstream.on('data', (chunk: Buffer) => {
+            capture.chunk(chunk);
+            bytes += chunk.length;
+            if (bytes > MAX_BODY + 64 * 1024) finish();
+          });
+          upstream.once('end', finish);
+          upstream.once('close', finish);
+          upstream.once('error', finish);
+          upstream.resume();
+        }
         throw new GatewayError(
           status >= 400 ? `upstream_${String(status)}` : 'bad_response',
           status >= 400 && status < 500 ? status : 502,
@@ -661,9 +699,13 @@ export function createModelGateway(options: GatewayOptions) {
       cancel(connectTimer);
       cancel(byteTimer);
       cancel(idleTimer);
-      capture?.finish(captureError);
-      // Includes slot switch, malformed responses and success; never leaves a live upstream.
-      req.destroy();
+      if (!captureDetached) {
+        capture?.finish(
+          captureComplete ? captureError : `${captureError ?? 'incomplete'}:body_incomplete`
+        );
+        // Detached error captures own a separate bounded cleanup deadline.
+        req.destroy();
+      }
     }
   }
 

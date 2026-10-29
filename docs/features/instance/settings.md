@@ -132,3 +132,11 @@ also hides rows older than 24 hours. At most 16 exchanges collect bodies at
 once and 8 redacted rows wait in memory. A full queue, missing database or
 capture error drops evidence, never the model result. Database work runs off
 the model-call path with one connection and a 1-second query/connect bound.
+
+A rejected response larger than the diagnostic excerpt continues capture intake
+in the background for at most one second, without delaying rejection or reserve
+failover. If transport validation, disconnect, the cap or that deadline stops
+intake before EOF, the exchange records `body_incomplete`; its observed byte
+length is not claimed to be the upstream's complete length. Truncated bodies
+name the observed original byte count. Capture redaction and row finalization
+run in bounded deferred collectors before the redacted write queue.

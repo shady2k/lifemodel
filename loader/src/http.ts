@@ -729,8 +729,10 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         const chunks: Buffer[] = [];
         let size = 0;
         // Keep the socket alive when refusing a body, so the caller gets 413.
-        for await (const chunk of req.iterator({ destroyOnReturn: false })) {
-          const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        for await (const chunk of req.iterator({
+          destroyOnReturn: false,
+        }) as AsyncIterable<Uint8Array>) {
+          const part = Buffer.from(chunk);
           size += part.length;
           if (size > MAX_FORM_BYTES) break;
           chunks.push(part);

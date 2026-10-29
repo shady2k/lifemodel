@@ -6,7 +6,7 @@ import {
 } from './model-bao.js';
 import { createExchangeCapture } from './model-exchange-capture.js';
 import { createExchangeStore } from './model-exchange-store.js';
-import type { ModelSlot } from './model.js';
+import { renderAttemptHeaders, type ModelSlot } from './model.js';
 import { createModelGateway } from './model-gateway-app.js';
 import { createStdoutLogger } from './logger.js';
 import { readFile } from 'node:fs/promises';
@@ -25,7 +25,9 @@ if (!address) {
 const bao = createRoleBaoClient({ address, role: 'model-gateway', logger });
 const slots = createCachedSlotReader(bao.readSlot);
 const captureSetting = createCachedCaptureReader(bao.readCapture);
-let captureSecrets: { values: string[]; headers: string[]; refreshed: number } | undefined;
+let captureSecrets:
+  | { values: string[]; headers: string[]; slots: ModelSlot[]; refreshed: number }
+  | undefined;
 const captureCredentials = async () => {
   const [username, password] = await Promise.all([
     readFile(
@@ -50,6 +52,7 @@ let refreshingCapture = false;
 async function refreshCapture(): Promise<void> {
   if (refreshingCapture) return;
   refreshingCapture = true;
+  captureSecrets = undefined;
   try {
     await captureSetting.refresh();
     const configured = await Promise.all(
@@ -76,6 +79,7 @@ async function refreshCapture(): Promise<void> {
         ]),
       ],
       headers: present.flatMap((slot) => (slot.headers ?? []).map((header) => header.name)),
+      slots: present,
       refreshed: Date.now(),
     };
   } catch {
@@ -85,15 +89,20 @@ async function refreshCapture(): Promise<void> {
   }
 }
 const capture = createExchangeCapture({
-  context: () =>
+  context: (input) =>
     captureSecrets && Date.now() - captureSecrets.refreshed < 60_000
       ? {
           setting: captureSetting.current(),
-          secrets: captureSecrets.values,
+          secrets: [
+            ...captureSecrets.values,
+            ...captureSecrets.slots.flatMap((slot) =>
+              Object.values(renderAttemptHeaders(slot, input.sessionId ?? '').headers)
+            ),
+          ],
           secretHeaders: captureSecrets.headers,
         }
       : undefined,
-  write: captureStore.write,
+  write: (row) => captureStore.write(row),
 });
 void refreshCapture();
 const captureRefresh = setInterval(() => {
@@ -115,7 +124,25 @@ const pruneCapture = () => {
 pruneCapture();
 const capturePrune = setInterval(pruneCapture, 60_000);
 capturePrune.unref();
-const app = createModelGateway({ slots, logger, capture });
+const app = createModelGateway({
+  slots: {
+    ...slots,
+    read: async (name) => {
+      const value = await slots.read(name);
+      if (
+        captureSecrets &&
+        value.state === 'present' &&
+        !captureSecrets.slots.some((slot) => JSON.stringify(slot) === JSON.stringify(value.slot))
+      ) {
+        captureSecrets = undefined;
+        void refreshCapture();
+      }
+      return value;
+    },
+  },
+  logger,
+  capture,
+});
 const tlsDirectory = process.env['LIFEMODEL_TASK_MODEL_TLS_DIR'] ?? '';
 if (!tlsDirectory) {
   logger.error({ code: 'missing_task_tls' }, 'Model gateway cannot start');

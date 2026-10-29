@@ -2706,6 +2706,15 @@ describe('model gateway opt-in exchange capture', () => {
     });
     expect(JSON.parse(exchange.inbound.body).model).toBe('default');
     expect(f.attempts[0]?.headers['x-lifemodel-call']).toBeUndefined();
+    const upstreamCapture = f.rows[0]!.exchange.upstream as { headers: Record<string, string> };
+    expect(
+      Object.keys(upstreamCapture.headers)
+        .map((name) => name.toLowerCase())
+        .sort()
+    ).toEqual(Object.keys(f.attempts[0]!.headers).sort());
+    for (const [name, value] of Object.entries(upstreamCapture.headers))
+      if (!['authorization', 'x-private'].includes(name.toLowerCase()))
+        expect(value).toEqual(f.attempts[0]!.headers[name.toLowerCase()]);
     for (const secret of [
       'INBOUND-PRIVATE',
       'PRIVATE-COOKIE',
@@ -2716,6 +2725,43 @@ describe('model gateway opt-in exchange capture', () => {
       'RESPONSE-COOKIE',
     ])
       expect(JSON.stringify(f.rows)).not.toContain(secret);
+    f.capture.close();
+  });
+  it('captures a rejected body beyond the diagnostic excerpt limit without changing its result', async () => {
+    const f = await captured();
+    f.slots.reserve = null;
+    const raw = JSON.stringify({ error: { message: 'rejected' }, details: 'x'.repeat(40000) });
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(400, { 'x-rejection': 'yes' });
+      res.end(raw);
+    };
+    const response = await f.post();
+    expect(response.status).toBe(400);
+    await response.text();
+    await expect.poll(() => f.rows.length).toBe(1);
+    expect(f.rows[0]?.exchange.response).toMatchObject({
+      status: 400,
+      body: raw,
+      headers: { 'x-rejection': 'yes' },
+    });
+    f.capture.close();
+  });
+  it('returns a large rejection before a slow capture-only tail completes', async () => {
+    const f = await captured();
+    f.slots.reserve = null;
+    let finish: (() => void) | undefined;
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.write('x'.repeat(20000));
+      finish = () => res.end('tail');
+    };
+    const response = await f.post();
+    expect(response.status).toBe(400);
+    await response.text();
+    expect(f.rows).toHaveLength(0);
+    finish!();
+    await expect.poll(() => f.rows.length).toBe(1);
+    expect(f.rows[0]?.exchange.response).toMatchObject({ body: 'x'.repeat(20000) + 'tail' });
     f.capture.close();
   });
   it('stores an independent row for failed primary and successful reserve', async () => {
@@ -2762,6 +2808,26 @@ describe('model gateway opt-in exchange capture', () => {
       body: sse,
       headers: { 'x-stream': 'yes' },
     });
+    f.capture.close();
+  });
+  it('delivers an SSE frame before upstream ends even when capture storage never settles', async () => {
+    const f = await captured(async () => new Promise<void>(() => undefined));
+    const frame = event('first-frame');
+    let finish: (() => void) | undefined;
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(frame);
+      finish = () => res.end(endStream());
+    };
+    const response = await f.post(streamPayload);
+    const reader = response.body!.getReader();
+    const first = await reader.read();
+    expect(new TextDecoder().decode(first.value)).toContain('first-frame');
+    expect(f.rows).toHaveLength(0);
+    finish!();
+    while (!(await reader.read()).done) {
+      /* consume */
+    }
     f.capture.close();
   });
   it('never waits for a hung/full or failing writer and keeps results byte-identical', async () => {

@@ -63,9 +63,28 @@ function bounded(value: string, bytes: number, originalBytes = Buffer.byteLength
       .replace(/\uFFFD+$/, '') + `\n[truncated original_bytes=${String(originalBytes)}]`
   );
 }
+/** Longest retained suffix that could be the start of a cut credential, in linear time. */
+function partialSecretSuffix(value: string, secret: string): number {
+  if (secret.length < 2) return 0;
+  const fallback = new Uint32Array(secret.length);
+  let matched = 0;
+  for (let index = 1; index < secret.length; index++) {
+    while (matched > 0 && secret[index] !== secret[matched]) matched = fallback[matched - 1] ?? 0;
+    if (secret[index] === secret[matched]) matched++;
+    fallback[index] = matched;
+  }
+  matched = 0;
+  // A full credential is handled by scrub; only a proper prefix is uncertain.
+  const start = Math.max(0, value.length - secret.length + 1);
+  for (let index = start; index < value.length; index++) {
+    while (matched > 0 && value[index] !== secret[matched]) matched = fallback[matched - 1] ?? 0;
+    if (value[index] === secret[matched]) matched++;
+  }
+  return matched;
+}
 /** Deliberately treats ALL custom slot headers as secret: the slot format has no secret flag. */
 export function createExchangeCapture(options: {
-  context(): CaptureContext | undefined;
+  context(input: CaptureInput): CaptureContext | undefined;
   write(row: CaptureRow): Promise<void>;
   now?: () => number;
   bodyBytes?: number;
@@ -107,17 +126,17 @@ export function createExchangeCapture(options: {
     ) {
       // This entire optional facility is contained: even a broken context or writer cannot escape.
       try {
-        const context = options.context();
+        const context = options.context(input);
         if (
           closed ||
-          !context ||
-          !context.setting.until ||
+          !context?.setting.until ||
           !(Date.parse(context.setting.until) > now()) ||
           (context.setting.session !== undefined && context.setting.session !== input.sessionId) ||
           active >= (options.active ?? CAPTURE_LIMITS.active) ||
           queue.length >= (options.queue ?? CAPTURE_LIMITS.queue)
         )
           return undefined;
+        const expiresAt = context.setting.until;
         const started = now();
         const secretNames = new Set([
           ...privateHeaders,
@@ -143,8 +162,7 @@ export function createExchangeCapture(options: {
             // Never keep a partial credential at the retained prefix boundary.
             let remove = 0;
             for (const secret of secrets)
-              for (let length = 1; length < secret.length && length <= raw.length; length++)
-                if (raw.endsWith(secret.slice(0, length))) remove = Math.max(remove, length);
+              remove = Math.max(remove, partialSecretSuffix(raw, secret));
             if (remove) raw = raw.slice(0, -remove);
           }
           return bounded(text(raw), bodyBytes, originalBytes);
@@ -168,8 +186,6 @@ export function createExchangeCapture(options: {
           headers: headers(value.headers),
           body: bounded(text(value.body), bodyBytes, Buffer.byteLength(value.body)),
         });
-        const inbound = request(input.inbound);
-        const upstream = request(input.upstream);
         const responseChunks: Buffer[] = [];
         // Retain lookahead so a secret crossing the cap cannot leave a raw prefix.
         const retainBytes =
@@ -177,21 +193,29 @@ export function createExchangeCapture(options: {
         let storedBytes = 0;
         let originalBytes = 0;
         let status: number | null = null;
-        let responseHeaders: Record<string, string> = {};
+        let responseHeaders: IncomingHttpHeaders = {};
         let firstByteMs: number | null = null;
         let finished = false;
         active++;
         return {
           response(code: number, values: IncomingHttpHeaders) {
+            if (finished) return;
             try {
               status = code;
-              responseHeaders = headers(values);
+              // Keep raw headers only in this bounded active collector, never the queue.
+              responseHeaders = Object.fromEntries(
+                Object.entries(values).map(([name, value]) => [
+                  name,
+                  Array.isArray(value) ? [...value] : value,
+                ])
+              );
               firstByteMs = now() - started;
             } catch {
               /* capture only */
             }
           },
           chunk(value: Buffer) {
+            if (finished) return;
             try {
               originalBytes += value.length;
               if (storedBytes < retainBytes) {
@@ -206,46 +230,51 @@ export function createExchangeCapture(options: {
           finish(error?: string) {
             if (finished) return;
             finished = true;
-            active--;
-            try {
-              if (
-                closed ||
-                Date.parse(context.setting.until ?? '') <= now() ||
-                queue.length >= (options.queue ?? CAPTURE_LIMITS.queue)
-              )
-                return;
-              // Metadata is also untrusted stored text, and must pass the same scrubber.
-              const row: CaptureRow = {
-                callId: text(input.callId),
-                attempt: input.attempt,
-                slot: input.slot,
-                expiresAt: context.setting.until!,
-                taskId: input.taskId === null ? null : text(input.taskId),
-                sessionId: input.sessionId === null ? null : text(input.sessionId),
-                exchange: {
-                  inbound,
-                  upstream,
-                  response: { status, headers: responseHeaders, body: responseText() },
-                  timing: {
-                    startedAt: new Date(started).toISOString(),
-                    firstByteMs,
-                    durationMs: now() - started,
+            const durationMs = now() - started;
+            // Finalization owns its active slot until every raw reference is released.
+            // Neither response scrubbing nor serialization runs on the model-call stack.
+            setImmediate(() => {
+              try {
+                if (
+                  closed ||
+                  Date.parse(context.setting.until ?? '') <= now() ||
+                  queue.length >= (options.queue ?? CAPTURE_LIMITS.queue)
+                )
+                  return;
+                const row: CaptureRow = {
+                  callId: text(input.callId),
+                  attempt: input.attempt,
+                  slot: input.slot,
+                  expiresAt,
+                  taskId: input.taskId === null ? null : text(input.taskId),
+                  sessionId: input.sessionId === null ? null : text(input.sessionId),
+                  exchange: {
+                    inbound: request(input.inbound),
+                    upstream: request(input.upstream),
+                    response: { status, headers: headers(responseHeaders), body: responseText() },
+                    timing: {
+                      startedAt: new Date(started).toISOString(),
+                      firstByteMs,
+                      durationMs,
+                    },
+                    ...(error ? { error: text(error) } : {}),
                   },
-                  ...(error ? { error: text(error) } : {}),
-                },
-              };
-              // A conservative last guard covers escaped forms and redaction-marker collisions.
-              // Drop rather than persist any row in which a configured value still occurs.
-              const serialized = JSON.stringify(row);
-              if (secrets.some((secret) => serialized.includes(secret))) return;
-              queue.push(row);
-              // Never start a writer on the caller's stack; thrown/rejected writes stay contained.
-              setImmediate(() => {
-                void drain().catch(() => undefined);
-              });
-            } catch {
-              /* capture only */
-            }
+                };
+                // The writer queue receives redacted rows only. Drop marker collisions too.
+                const serialized = JSON.stringify(row);
+                if (secrets.some((secret) => serialized.includes(secret))) return;
+                queue.push(row);
+                setImmediate(() => {
+                  void drain().catch(() => undefined);
+                });
+              } catch {
+                /* capture only */
+              } finally {
+                responseChunks.length = 0;
+                responseHeaders = {};
+                active--;
+              }
+            });
           },
         };
       } catch {
