@@ -24,13 +24,14 @@ export interface KubernetesPostgresSecretOptions {
   ) => Promise<{ status: number; body: string }>;
 }
 
-const SOURCE_NAMESPACE = 'lifemodel-state';
+export const SOURCE_NAMESPACE = 'lifemodel-state';
 const SOURCE_NAME = 'lifemodel-app';
-const TARGETS = [
-  { namespace: 'lifemodel', name: 'lifemodel-db-credentials' },
-  { namespace: 'lifemodel-system', name: 'storage-module-db-credentials' },
-  { namespace: 'lifemodel-system', name: 'model-gateway-db-credentials' },
-  { namespace: 'lifemodel-system', name: 'model-capture-db-credentials' },
+export const CAPTURE_SECRET_NAME = 'lifemodel-capture-credentials';
+export const TARGETS = [
+  { namespace: 'lifemodel', name: 'lifemodel-db-credentials', create: true },
+  { namespace: 'lifemodel-system', name: 'storage-module-db-credentials', create: false },
+  { namespace: 'lifemodel-system', name: 'model-gateway-db-credentials', create: false },
+  { namespace: 'lifemodel-system', name: 'model-capture-db-credentials', create: false },
 ] as const;
 const SERVICE_ACCOUNT = '/var/run/secrets/kubernetes.io/serviceaccount';
 // One bounded keep-alive pool for this helper, shared across fixed-name reads.
@@ -187,7 +188,7 @@ function createCredentialPhase(
   return {
     name: mode === 'capture' ? 'model-capture-credentials' : 'cnpg-copy-core-credentials',
     run: async () => {
-      /** One target: create it when it is absent, else replace its two keys. */
+      /** Only the core copy may be created; system targets have update-only RBAC. */
       async function copy(
         target: (typeof TARGETS)[number],
         username: string,
@@ -226,6 +227,8 @@ function createCredentialPhase(
         };
         let current = await send(targetUrl, 'GET');
         if (current.status === 404) {
+          if (!target.create)
+            throw new Error(`${target.name} must be platform-created before the loader copies it`);
           current = await send(collection, 'POST', body);
           if (current.status === 201) return verify();
           if (current.status !== 409)
@@ -269,7 +272,8 @@ function createCredentialPhase(
       }
       // CNPG owns the narrow capture LOGIN. Its durable random password lives
       // in state; retries and loader restarts reuse it rather than rotate it.
-      const captureName = 'lifemodel-capture-credentials';
+      // Reload labels apply on create only: state Secret RBAC has no update/patch.
+      const captureName = CAPTURE_SECRET_NAME;
       const captureUrl = new URL(
         `/api/v1/namespaces/${SOURCE_NAMESPACE}/secrets/${captureName}`,
         host
@@ -288,6 +292,7 @@ function createCredentialPhase(
             metadata: {
               name: captureName,
               namespace: SOURCE_NAMESPACE,
+              labels: { 'cnpg.io/reload': 'true' },
               annotations: { 'kustomize.toolkit.fluxcd.io/prune': 'disabled' },
             },
             type: 'kubernetes.io/basic-auth',

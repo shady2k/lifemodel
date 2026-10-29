@@ -31,6 +31,10 @@ export interface KubernetesSettingsProjectionOptions {
 
 const SERVICE_ACCOUNT = '/var/run/secrets/kubernetes.io/serviceaccount';
 const DOCUMENT_VERSION = 1;
+export const SETTINGS_PROJECTION_TARGETS = [
+  { namespace: 'lifemodel', name: 'lifemodel-platform-settings' },
+  { namespace: 'lifemodel-system', name: 'lifemodel-storage-settings' },
+] as const;
 
 /** The wire form of the projection document (ConfigMap data is strings). */
 export function settingsProjectionData(content: SettingsProjectionContent): string {
@@ -202,18 +206,9 @@ export function createKubernetesSettingsProjection(
 export function createPlatformSettingsProjection(
   options: Omit<KubernetesSettingsProjectionOptions, 'namespace' | 'name'> = {}
 ): SettingsProjection {
-  const targets = [
-    createKubernetesSettingsProjection({
-      ...options,
-      namespace: 'lifemodel',
-      name: 'lifemodel-platform-settings',
-    }),
-    createKubernetesSettingsProjection({
-      ...options,
-      namespace: 'lifemodel-system',
-      name: 'lifemodel-storage-settings',
-    }),
-  ];
+  const targets = SETTINGS_PROJECTION_TARGETS.map((target) =>
+    createKubernetesSettingsProjection({ ...options, ...target })
+  );
   return {
     project: async (content) => {
       const outcomes = await Promise.allSettled(targets.map((target) => target.project(content)));

@@ -17,6 +17,12 @@ interface ApiOptions {
   ) => Promise<{ status: number; body: string }>;
   timeoutMs?: number;
 }
+export const LOADER_TLS_SECRET = 'lifemodel-tls';
+export const STORAGE_TLS_SECRET = 'storage-module-tls';
+export const MODEL_GATEWAY_TLS_SECRET = 'model-gateway-task-tls';
+export const CORE_TLS_SECRET = 'core-task-channel-tls';
+export const CA_CONFIGMAP = 'lifemodel-ca';
+export const STATUS_CONFIGMAP = 'lifemodel-pki-status';
 const SA = '/var/run/secrets/kubernetes.io/serviceaccount';
 // One bounded keep-alive pool for this helper, shared across fixed-name reads.
 // Idle sockets expire; error guards remain attached through reuse and teardown.
@@ -155,25 +161,25 @@ export function createKubernetesTlsStores(options: ApiOptions = {}): {
   configMap: CaConfigMapStore;
   status: PkiStatusStore;
 } {
-  const sec = createApi(options, 'secrets', 'lifemodel-tls');
-  const serviceSec = createApi(options, 'secrets', 'storage-module-tls');
-  const taskModelSec = createApi(options, 'secrets', 'model-gateway-task-tls');
+  const sec = createApi(options, 'secrets', LOADER_TLS_SECRET);
+  const serviceSec = createApi(options, 'secrets', STORAGE_TLS_SECRET);
+  const taskModelSec = createApi(options, 'secrets', MODEL_GATEWAY_TLS_SECRET);
   const taskChannelSec = createApi(
     { ...options, namespace: 'lifemodel' },
     'secrets',
-    'core-task-channel-tls'
+    CORE_TLS_SECRET
   );
-  const cm = createApi(options, 'configmaps', 'lifemodel-ca');
+  const cm = createApi(options, 'configmaps', CA_CONFIGMAP);
   // A0 precreates these public-only replicas and their fixed-name write RBAC.
   // Both application namespaces exist in instance, before A0; PKI readiness
   // must never depend on step A or D, which themselves wait for the loader.
-  const coreCm = createApi({ ...options, namespace: 'lifemodel' }, 'configmaps', 'lifemodel-ca');
+  const coreCm = createApi({ ...options, namespace: 'lifemodel' }, 'configmaps', CA_CONFIGMAP);
   const motorCm = createApi(
     { ...options, namespace: 'lifemodel-motor' },
     'configmaps',
-    'lifemodel-ca'
+    CA_CONFIGMAP
   );
-  const statusCm = createApi(options, 'configmaps', 'lifemodel-pki-status');
+  const statusCm = createApi(options, 'configmaps', STATUS_CONFIGMAP);
   async function read(resource: ReturnType<typeof createApi>) {
     const r = await resource.send('GET');
     if (r.status === 404) return null;
@@ -231,10 +237,10 @@ export function createKubernetesTlsStores(options: ApiOptions = {}): {
     };
   }
   return {
-    secret: secretStore(sec, 'lifemodel-tls'),
-    serviceSecret: secretStore(serviceSec, 'storage-module-tls'),
-    taskModelSecret: secretStore(taskModelSec, 'model-gateway-task-tls'),
-    taskChannelSecret: secretStore(taskChannelSec, 'core-task-channel-tls'),
+    secret: secretStore(sec, LOADER_TLS_SECRET),
+    serviceSecret: secretStore(serviceSec, STORAGE_TLS_SECRET),
+    taskModelSecret: secretStore(taskModelSec, MODEL_GATEWAY_TLS_SECRET),
+    taskChannelSecret: secretStore(taskChannelSec, CORE_TLS_SECRET),
     configMap: {
       read: async () => {
         const obj = await read(cm);
@@ -249,7 +255,7 @@ export function createKubernetesTlsStores(options: ApiOptions = {}): {
             apiVersion: 'v1',
             kind: 'ConfigMap',
             metadata: {
-              name: 'lifemodel-ca',
+              name: CA_CONFIGMAP,
               namespace: resource.namespace,
               resourceVersion: old.metadata.resourceVersion,
               ...(old.metadata.annotations ? { annotations: old.metadata.annotations } : {}),
@@ -273,7 +279,7 @@ export function createKubernetesTlsStores(options: ApiOptions = {}): {
           apiVersion: 'v1',
           kind: 'ConfigMap',
           metadata: {
-            name: 'lifemodel-pki-status',
+            name: STATUS_CONFIGMAP,
             namespace: statusCm.namespace,
             resourceVersion: old.metadata.resourceVersion,
             ...(old.metadata.annotations ? { annotations: old.metadata.annotations } : {}),

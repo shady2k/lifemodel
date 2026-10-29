@@ -132,14 +132,17 @@ describe('CNPG application credential copy phase', () => {
     }
   });
 
-  it('creates a target Secret that is absent, so a fresh install needs no precreated copy', async () => {
+  it('creates an absent core copy and only updates platform-created system copies', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'cnpg-credentials-'));
     try {
       const tokenFile = join(directory, 'token');
       await writeFile(tokenFile, 'test-token');
       const calls: { method: string; path: string }[] = [];
       // One store per target path: a created core copy is not the module's.
-      const created = new Map<string, Record<string, string>>();
+      const created = new Map<string, Record<string, string>>([
+        ['/api/v1/namespaces/lifemodel-system/secrets/storage-module-db-credentials', {}],
+        ['/api/v1/namespaces/lifemodel-system/secrets/model-gateway-db-credentials', {}],
+      ]);
       const phase = createKubernetesPostgresSecretPhase({
         apiServer: 'https://kubernetes.test',
         tokenFile,
@@ -152,7 +155,12 @@ describe('CNPG application credential copy phase', () => {
                 data: { username: encode('lifemodel'), password: encode('generated-password') },
               }),
             };
+          if (method === 'PUT') {
+            created.set(url.pathname, JSON.parse(body!).data);
+            return { status: 200, body: '{}' };
+          }
           if (method === 'POST') {
+            expect(url.pathname).toBe('/api/v1/namespaces/lifemodel/secrets');
             const payload = JSON.parse(body!) as {
               metadata: { name: string };
               data: Record<string, string>;
@@ -162,7 +170,10 @@ describe('CNPG application credential copy phase', () => {
           }
           const data = created.get(url.pathname);
           if (data === undefined) return { status: 404, body: 'not found' };
-          return { status: 200, body: JSON.stringify({ data }) };
+          return {
+            status: 200,
+            body: JSON.stringify({ metadata: { resourceVersion: '1' }, data }),
+          };
         },
       });
       await phase.run();
@@ -176,7 +187,7 @@ describe('CNPG application credential copy phase', () => {
           username: encode('lifemodel'),
           password: encode('generated-password'),
         });
-      expect(calls.filter((call) => call.method === 'POST')).toHaveLength(3);
+      expect(calls.filter((call) => call.method === 'POST')).toHaveLength(1);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -192,7 +203,12 @@ describe('CNPG application credential copy phase', () => {
         const secrets = new Map<
           string,
           { metadata: { resourceVersion: string }; data: Record<string, string> }
-        >();
+        >([
+          [
+            '/api/v1/namespaces/lifemodel-system/secrets/model-capture-db-credentials',
+            { metadata: { resourceVersion: '1' }, data: {} },
+          ],
+        ]);
         const sourcePath =
           '/api/v1/namespaces/lifemodel-state/secrets/lifemodel-capture-credentials';
         let generated = 0;
@@ -214,8 +230,13 @@ describe('CNPG application credential copy phase', () => {
               if (path === sourcePath) {
                 sourceCreates++;
                 expect(parsed.type).toBe('kubernetes.io/basic-auth');
+                expect(parsed.metadata.labels).toEqual({ 'cnpg.io/reload': 'true' });
                 expect(parsed.data.username).toBe(encode('lifemodel_capture_writer'));
-                if (conflict) parsed.data.password = encode('winning-password');
+                if (conflict) {
+                  parsed.data.password = encode('winning-password');
+                  // An older, unlabeled Secret won the create race.
+                  delete parsed.metadata.labels;
+                }
               }
               const secret = { ...parsed, metadata: { ...parsed.metadata, resourceVersion: '1' } };
               secrets.set(path, secret);
@@ -224,7 +245,9 @@ describe('CNPG application credential copy phase', () => {
                 body: JSON.stringify(secret),
               };
             }
-            if (method === 'PUT') {
+            if (method === 'PUT' || method === 'PATCH') {
+              expect(url.pathname).not.toBe(sourcePath);
+              expect(method).toBe('PUT');
               const parsed = JSON.parse(body!);
               secrets.set(url.pathname, parsed);
               return { status: 200, body: JSON.stringify(parsed) };
@@ -237,6 +260,12 @@ describe('CNPG application credential copy phase', () => {
         await createKubernetesCaptureSecretPhase(options).run();
         expect(generated).toBe(1);
         expect(sourceCreates).toBe(1);
+        expect(secrets.get(sourcePath)?.metadata).toEqual(
+          expect.objectContaining(
+            conflict ? { resourceVersion: '1' } : { labels: { 'cnpg.io/reload': 'true' } }
+          )
+        );
+        if (conflict) expect(secrets.get(sourcePath)?.metadata).not.toHaveProperty('labels');
         expect(
           secrets.get('/api/v1/namespaces/lifemodel-system/secrets/model-capture-db-credentials')
             ?.data
@@ -244,6 +273,51 @@ describe('CNPG application credential copy phase', () => {
           username: encode('lifemodel_capture_writer'),
           password: encode(conflict ? 'winning-password' : 'new-capture-password'),
         });
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it.each(['application', 'capture'] as const)(
+    'does not attempt an unauthorized system Secret create (%s)',
+    async (mode) => {
+      const directory = await mkdtemp(join(tmpdir(), 'cnpg-system-placeholder-'));
+      try {
+        const tokenFile = join(directory, 'token');
+        await writeFile(tokenFile, 'test-token');
+        const request = async (url: URL, method: string) => {
+          expect(method).toBe('GET');
+          const source =
+            url.pathname.includes('/lifemodel-state/') ||
+            url.pathname.includes('/lifemodel/secrets/');
+          return source
+            ? {
+                status: 200,
+                body: JSON.stringify({
+                  metadata: { resourceVersion: '1' },
+                  data: {
+                    username: encode(mode === 'capture' ? 'lifemodel_capture_writer' : 'lifemodel'),
+                    password: encode('password'),
+                  },
+                }),
+              }
+            : { status: 404, body: '{}' };
+        };
+        // The application phase updates core before reaching its first system copy.
+        const options = {
+          tokenFile,
+          request: async (url: URL, method: string) => {
+            if (method === 'PUT' && url.pathname.includes('/lifemodel/secrets/'))
+              return { status: 200, body: '{}' };
+            return request(url, method);
+          },
+        };
+        const phase =
+          mode === 'capture'
+            ? createKubernetesCaptureSecretPhase(options)
+            : createKubernetesPostgresSecretPhase(options);
+        await expect(phase.run()).rejects.toThrow('must be platform-created');
       } finally {
         await rm(directory, { recursive: true, force: true });
       }
