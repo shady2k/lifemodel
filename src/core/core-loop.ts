@@ -1680,6 +1680,7 @@ export class CoreLoop {
         'user_message',
         'motor_result',
         'task_outcome',
+        'plugin_event',
       ];
       const needsQuestionTurn = (s: Signal) =>
         s.type === 'task_report' &&

@@ -114,22 +114,31 @@ export class ValkeyBusSignalStream implements BusSignalStream {
   /** Bounded replay repair: prove absence atomically, without decoding payloads. */
   async missingEntryIds(ids: string[]): Promise<string[]> {
     if (ids.length === 0) return [];
-    if (ids.length > MAX_BUS_LEDGER_ENTRIES || ids.some((id) => !/^\d+-\d+$/.test(id)))
+    if (ids.some((id) => !/^\d+-\d+$/.test(id)))
       throw new Error('Invalid bus ledger probe');
-    return (await this.redis.eval(
-      `
-      local missing = {}
-      for _, id in ipairs(ARGV) do
-        if #redis.call('XRANGE', KEYS[1], id, id, 'COUNT', 1) == 0 then
-          table.insert(missing, id)
-        end
-      end
-      return missing
-    `,
-      1,
-      this.key,
-      ...ids
-    )) as string[];
+    const missing: string[] = [];
+    // Older snapshots can exceed today's admission cap. Preserve their work,
+    // but keep each atomic Redis probe bounded by the current ledger limit.
+    for (let offset = 0; offset < ids.length; offset += MAX_BUS_LEDGER_ENTRIES) {
+      const batch = ids.slice(offset, offset + MAX_BUS_LEDGER_ENTRIES);
+      missing.push(
+        ...((await this.redis.eval(
+          `
+          local missing = {}
+          for _, id in ipairs(ARGV) do
+            if #redis.call('XRANGE', KEYS[1], id, id, 'COUNT', 1) == 0 then
+              table.insert(missing, id)
+            end
+          end
+          return missing
+        `,
+          1,
+          this.key,
+          ...batch
+        )) as string[])
+      );
+    }
+    return missing;
   }
 
   async trimBefore(offset: string): Promise<void> {

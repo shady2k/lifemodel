@@ -14,6 +14,7 @@ import {
   makeScratchDir,
   rmDir,
   startInstance,
+  stopInstance,
   thoughtSignal,
   waitFor as waitCondition,
 } from '../helpers/core-loop-drain-harness.js';
@@ -103,6 +104,133 @@ describe('bus ledger review round 1', () => {
       h.cognition.settleAll(quiet);
       await waitFor(() => t.saved().watermark === id, 'reminder outcome committed');
       expect(h.cognition.triggerIds()).toEqual([emitted[0]!.id]);
+    } finally {
+      h.coreLoop.haltForTest();
+      await rmDir(t.path);
+    }
+  });
+
+  it.each(['same-core', 'restart'] as const)(
+    'defers a scheduler-fired reminder during a running turn exactly once (%s)',
+    async (mode) => {
+      const t = await setup(`busy-reminder-${mode}`);
+      const h = await t.start();
+      let resumed: Awaited<ReturnType<typeof t.start>> | undefined;
+      let verified: Awaited<ReturnType<typeof t.start>> | undefined;
+      try {
+        const head = thoughtSignal('busy turn');
+        const headId = await t.bus.append(head);
+        await waitFor(() => h.cognition.calls.length === 1, 'head turn is running');
+        const logger = createTestLogger();
+        const values = new Map<string, unknown>();
+        const storage = {
+          load: async (k: string) => values.get(k) ?? null,
+          save: async (k: string, v: unknown) => {
+            values.set(k, structuredClone(v));
+          },
+          delete: async (k: string) => {
+            values.delete(k);
+          },
+        } as unknown as Storage;
+        const primitive = new SchedulerPrimitiveImpl(
+          'reminder',
+          new StoragePrimitiveImpl(storage, 'reminder', logger),
+          logger
+        );
+        await primitive.schedule({
+          fireAt: new Date(0),
+          data: { kind: 'reminder:due', text: 'busy reminder' },
+        });
+        const scheduler = createSchedulerService(logger);
+        scheduler.registerScheduler('reminder', primitive);
+        const emitted: Signal[] = [];
+        scheduler.setSignalCallback((signal) => {
+          emitted.push(signal);
+          h.coreLoop.pushSignal(signal);
+        });
+        await scheduler.tick();
+        expect(primitive.getSchedules()).toHaveLength(0);
+        expect(emitted).toHaveLength(1);
+        const reminder = emitted[0]!;
+        await waitFor(
+          () => h.autonomic.seen.some((batch) => batch.some((s) => s.id === reminder.id)),
+          'busy tick sees scheduled reminder'
+        );
+        await waitFor(
+          () => Object.keys(t.saved().entries).length === 2,
+          'busy tick commits both ledger entries'
+        );
+        const reminderId = Object.keys(t.saved().entries).find((id) => id !== headId)!;
+        expect(t.saved().entries[reminderId]?.status).toBe('owned');
+        expect(h.cognition.triggerIds()).toEqual([head.id]);
+
+        if (mode === 'restart') {
+          // Drain the head, but stop intake/ticks before the deferred reminder
+          // can start. Only the committed Valkey snapshot survives the restart.
+          const stopping = stopInstance(h);
+          h.cognition.settleAll(quiet);
+          await stopping;
+          await t.store.hydrate(await t.store.read());
+          resumed = await t.start();
+        } else {
+          h.cognition.settleAll(quiet);
+        }
+        const active = resumed ?? h;
+        const expectedCalls = mode === 'restart' ? 1 : 2;
+        await waitFor(
+          () => active.cognition.calls.length === expectedCalls,
+          'deferred reminder starts its own turn'
+        );
+        expect(active.cognition.calls.at(-1)!.context.triggerSignals.map((s) => s.id)).toEqual([
+          reminder.id,
+        ]);
+        active.cognition.settleAll(quiet);
+        await waitFor(() => t.saved().watermark === reminderId, 'reminder outcome commits');
+        expect([...h.cognition.triggerIds(), ...(resumed?.cognition.triggerIds() ?? [])]).toEqual([
+          head.id,
+          reminder.id,
+        ]);
+        await stopInstance(active);
+        await t.store.hydrate(await t.store.read());
+        const before = t.saved();
+        verified = await t.start();
+        await waitFor(() => t.saved() !== before, 'post-completion restart commits a tick');
+        expect(verified.cognition.calls).toHaveLength(0);
+      } finally {
+        h.coreLoop.haltForTest();
+        resumed?.coreLoop.haltForTest();
+        verified?.coreLoop.haltForTest();
+        await rmDir(t.path);
+      }
+    }
+  );
+
+  it('loads and drains a hydrated legacy snapshot with 150 owned entries', async () => {
+    const t = await setup('legacy-150');
+    const signals = Array.from({ length: 150 }, (_, i) => thoughtSignal(`legacy ${i}`));
+    const ids: string[] = [];
+    for (const signal of signals) ids.push(await t.bus.append(signal));
+    t.bus.hydrateSnapshot({
+      version: 1,
+      watermark: '0-0',
+      entries: Object.fromEntries(
+        ids.map((id) => [id, { status: 'owned', turnId: 'legacy-turn', retries: 0 }])
+      ),
+    });
+    await t.store.commitOwners(t.epoch, 0);
+    await t.store.hydrate(await t.store.read());
+    const h = await t.start();
+    try {
+      let handled = 0;
+      await waitFor(() => {
+        if (h.cognition.calls.length > handled) {
+          handled = h.cognition.calls.length;
+          h.cognition.settleAll(quiet);
+        }
+        return t.saved().watermark === ids.at(-1);
+      }, 'legacy ledger drains without an oversized probe');
+      expect(h.cognition.triggerIds()).toEqual(signals.map((s) => s.id));
+      expect(t.saved().entries).toEqual({});
     } finally {
       h.coreLoop.haltForTest();
       await rmDir(t.path);
