@@ -7,6 +7,7 @@
 
 import type { OpenAIChatTool, MinimalOpenAIChatTool } from './tool-schema.js';
 import { logConversation } from '../core/logger.js';
+import { ModelCallTrace, recordModelCall, type ModelCallSpanSink } from './model-call-span.js';
 
 /**
  * Tool call from the model (OpenAI Chat Completions format).
@@ -257,12 +258,15 @@ export interface LLMLogger {
 export abstract class BaseLLMProvider implements LLMProvider {
   abstract readonly name: string;
   protected readonly logger?: LLMLogger | undefined;
+  /** Where each call's trace span goes. Absent means no observability store. */
+  protected readonly traces?: ModelCallSpanSink | undefined;
   private requestCounter = 0;
   /** Tracks how many messages have been logged to avoid repetition (delta logging) */
   private lastLoggedMessageCount = 0;
 
-  constructor(logger?: LLMLogger) {
+  constructor(logger?: LLMLogger, traces?: ModelCallSpanSink) {
     this.logger = logger?.child({ component: 'llm' });
+    this.traces = traces;
   }
 
   abstract isAvailable(): boolean;
@@ -417,8 +421,19 @@ export abstract class BaseLLMProvider implements LLMProvider {
     // Update the count for next request
     this.lastLoggedMessageCount = totalMessages;
 
+    // One record per model call, at the shared boundary so no caller (a
+    // cognition turn, a tool continuation, a summary, a reflection) is missed
+    // (lifemodel-d4t8). The transport fills the wire facts; the call id is
+    // this call's own, and the turn's trace is its parent when there is one.
+    const call = new ModelCallTrace({
+      role: request.role,
+      model: request.model,
+      messages: request.messages,
+      tools: request.tools,
+    });
+
     try {
-      const response = await this.doComplete(request);
+      const response = await this.doComplete(request, call);
       const duration = Date.now() - startTime;
 
       // Log response with full content at debug level
@@ -496,6 +511,7 @@ export abstract class BaseLLMProvider implements LLMProvider {
         `${'─'.repeat(60)}\n← RESPONSE [${durationStr}ms, ${tokensStr} tokens${reasoningStr}, ${finishStr}]${response.generationId ? ` gen:${response.generationId}` : ''}\n${responseContent}${toolCallsDetail}${reasoningDetail}\n${'═'.repeat(60)}`
       );
 
+      recordModelCall(this.traces, call, { response });
       return response;
     } catch (error) {
       const duration = Date.now() - startTime;
@@ -525,6 +541,7 @@ export abstract class BaseLLMProvider implements LLMProvider {
         `${'─'.repeat(60)}\n✗ ERROR [${errorDurationStr}ms]: ${errorMsg}\n${'═'.repeat(60)}`
       );
 
+      recordModelCall(this.traces, call, { error });
       throw error;
     }
   }
@@ -532,6 +549,14 @@ export abstract class BaseLLMProvider implements LLMProvider {
   /**
    * Perform the actual completion request.
    * Subclasses implement this method.
+   *
+   * `call` is the trace record of this call: a transport that can see its own
+   * wire (the HTTP status, the gateway's answer headers, the serialized body)
+   * fills those facts as it sends, and the base class records the span once the
+   * call answers or fails.
    */
-  protected abstract doComplete(request: CompletionRequest): Promise<CompletionResponse>;
+  protected abstract doComplete(
+    request: CompletionRequest,
+    call: ModelCallTrace
+  ): Promise<CompletionResponse>;
 }

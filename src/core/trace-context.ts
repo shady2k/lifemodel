@@ -29,6 +29,12 @@ export interface TraceContext {
   spanId?: string;
   /** Calling function/method name for downstream log attribution */
   caller?: string;
+  /**
+   * What woke the turn this work belongs to (a signal type such as
+   * `user_message`, `thought` or `task_outcome`). Model-call spans record it as
+   * `lifemodel.trigger_type` (lifemodel-d4t8); a tick-level context has none.
+   */
+  triggerType?: string;
 }
 
 const asyncLocalStorage = new AsyncLocalStorage<TraceContext>();
@@ -98,7 +104,12 @@ export function generateChildSpan(parent?: string): string {
  */
 export function createTraceContext(
   id: string,
-  options: { correlationId?: string; parentId?: string; spanId?: string } = {}
+  options: {
+    correlationId?: string;
+    parentId?: string;
+    spanId?: string;
+    triggerType?: string;
+  } = {}
 ): TraceContext {
   const result: TraceContext = {
     traceId: id,
@@ -109,6 +120,9 @@ export function createTraceContext(
   }
   if (options.parentId !== undefined) {
     result.parentId = options.parentId;
+  }
+  if (options.triggerType !== undefined) {
+    result.triggerType = options.triggerType;
   }
   return result;
 }

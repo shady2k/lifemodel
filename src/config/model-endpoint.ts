@@ -86,6 +86,17 @@ export const PINNED_MODEL_BASE_URL_ENV = 'LIFEMODEL_MODEL_BASE_URL';
  */
 export const MODEL_SESSION_HEADER = 'x-lifemodel-session';
 
+/**
+ * The request header that names one model call (lifemodel-d4t8).
+ *
+ * The core makes the id per logical call and sends it to the platform's model
+ * gateway, which reads no caller header but the session one and so forwards
+ * none of them upstream. The same id is recorded as `lifemodel.call_id` on the
+ * call's trace span, so the gateway's raw capture (its own leaf) can be joined
+ * to the call the core made, and a failed slot answered for exactly one call.
+ */
+export const MODEL_CALL_HEADER = 'x-lifemodel-call';
+
 /** The pinned base URL, or null when the platform pins none. */
 export function pinnedModelBaseUrl(env: NodeJS.ProcessEnv = process.env): string | null {
   const value = (env[PINNED_MODEL_BASE_URL_ENV] ?? '').trim();
