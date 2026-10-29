@@ -53,7 +53,14 @@ export type TaskChannelFrame = FrameIdentity &
     | { readonly kind: 'step'; readonly payload: { readonly line: string } }
     | {
         readonly kind: 'question';
-        readonly payload: { readonly questionId: string; readonly text: string };
+        readonly payload: {
+          readonly questionId: string;
+          readonly text: string;
+        };
+      }
+    | {
+        readonly kind: 'lifecycle';
+        readonly payload: { readonly phase: 'running' | 'wrapping-up' };
       }
     | { readonly kind: 'terminal'; readonly payload: TaskTerminalReport }
   );
@@ -192,6 +199,12 @@ export function validateTaskChannelFrame(value: unknown): TaskChannelFrame {
       !keys(payload, ['questionId', 'text']) ||
       payload['questionId'] !== value['messageId'] ||
       !line(payload['text'])
+    )
+      return invalid();
+  } else if (value['kind'] === 'lifecycle') {
+    if (
+      !keys(payload, ['phase']) ||
+      !['running', 'wrapping-up'].includes(payload['phase'] as string)
     )
       return invalid();
   } else if (value['kind'] === 'terminal') {
@@ -376,7 +389,11 @@ export function isTaskCommandText(value: unknown, frameLimit = 65_536): value is
     Buffer.byteLength(JSON.stringify(command)) <= 60_000 &&
     Buffer.byteLength(
       JSON.stringify({
-        command: { ...command, direction: 'core_to_task', sequence: Number.MAX_SAFE_INTEGER },
+        command: {
+          ...command,
+          direction: 'core_to_task',
+          sequence: Number.MAX_SAFE_INTEGER,
+        },
       })
     ) <= frameLimit
   );

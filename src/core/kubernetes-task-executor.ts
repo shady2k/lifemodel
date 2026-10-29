@@ -144,19 +144,28 @@ export function renderTaskJob(
       ),
     },
     { name: 'LIFEMODEL_STORAGE_SPACE', value: launch.spaceId },
-    { name: 'LIFEMODEL_STORAGE_TOKEN_FILE', value: `${identityDirectory}/storage` },
+    {
+      name: 'LIFEMODEL_STORAGE_TOKEN_FILE',
+      value: `${identityDirectory}/storage`,
+    },
     { name: 'LIFEMODEL_STORAGE_CA_FILE', value: caFile },
     {
       name: 'LIFEMODEL_TASK_CHANNEL_ENDPOINT',
       value: endpoint(options.channelEndpoint ?? 'https://core.lifemodel.svc:8447'),
     },
-    { name: 'LIFEMODEL_TASK_CHANNEL_TOKEN_FILE', value: `${identityDirectory}/channel` },
+    {
+      name: 'LIFEMODEL_TASK_CHANNEL_TOKEN_FILE',
+      value: `${identityDirectory}/channel`,
+    },
     { name: 'LIFEMODEL_TASK_CHANNEL_CA_FILE', value: caFile },
     {
       name: 'LIFEMODEL_TASK_MODEL_ENDPOINT',
       value: endpoint(options.modelEndpoint ?? 'https://model-gateway.lifemodel-system.svc:8446'),
     },
-    { name: 'LIFEMODEL_TASK_MODEL_TOKEN_FILE', value: `${identityDirectory}/model` },
+    {
+      name: 'LIFEMODEL_TASK_MODEL_TOKEN_FILE',
+      value: `${identityDirectory}/model`,
+    },
     { name: 'LIFEMODEL_TASK_MODEL_CA_FILE', value: caFile },
   ];
   const resources = {
@@ -178,8 +187,14 @@ export function renderTaskJob(
       ),
       podFailurePolicy: {
         rules: [
-          { action: 'FailJob', onPodConditions: [{ type: 'DisruptionTarget', status: 'True' }] },
-          { action: 'FailJob', onExitCodes: { operator: 'NotIn', values: [0] } },
+          {
+            action: 'FailJob',
+            onPodConditions: [{ type: 'DisruptionTarget', status: 'True' }],
+          },
+          {
+            action: 'FailJob',
+            onExitCodes: { operator: 'NotIn', values: [0] },
+          },
         ],
       },
       template: {
@@ -209,11 +224,22 @@ export function renderTaskJob(
                 readOnlyRootFilesystem: true,
                 capabilities: { drop: ['ALL'] },
               },
-              resources: { requests: { ...resources }, limits: { ...resources } },
+              resources: {
+                requests: { ...resources },
+                limits: { ...resources },
+              },
               volumeMounts: [
                 { name: 'work', mountPath: '/work' },
-                { name: 'identity', mountPath: identityDirectory, readOnly: true },
-                { name: 'ca', mountPath: '/var/run/lifemodel/ca', readOnly: true },
+                {
+                  name: 'identity',
+                  mountPath: identityDirectory,
+                  readOnly: true,
+                },
+                {
+                  name: 'ca',
+                  mountPath: '/var/run/lifemodel/ca',
+                  readOnly: true,
+                },
               ],
             },
           ],
@@ -499,8 +525,65 @@ export class KubernetesTaskExecutor implements TaskExecutor {
     // Before runtime binding, a pending Job need not have created its Pod yet.
     // After binding, loss of that exact Pod is failure evidence even if Job
     // status has not caught up. A different Pod must never stand in for it.
-    if (!launch.task.podUid) return observed;
-    const pods = await this.ownedPods(launch, signal);
+    if (!launch.task.podUid && launch.task.state !== 'starting') return observed;
+    const pods = await this.ownedPods(
+      { ...launch, task: { ...launch.task, jobUid: observed.jobUid } },
+      signal
+    );
+    if (!launch.task.podUid) {
+      const pod = pods[0];
+      let phase: NonNullable<TaskJobObservation['startup']>['phase'] = 'waiting-for-scheduling';
+      let since = observed.startedAt ?? launch.task.acceptedAt;
+      if (pod) {
+        const status =
+          pod['status'] && typeof pod['status'] === 'object' ? (pod['status'] as JsonObject) : {};
+        const containers = Array.isArray(status['containerStatuses'])
+          ? status['containerStatuses']
+          : [];
+        const running = containers.some((c) => {
+          const state = object(c)['state'];
+          return state && typeof state === 'object' && !!(state as JsonObject)['running'];
+        });
+        if (running) phase = 'container-started';
+        else {
+          // Event reasons are fixed Kubernetes codes. Never project raw messages,
+          // image names, node names, or container values into cognition.
+          const params = new URLSearchParams({
+            fieldSelector: `involvedObject.uid=${String(object(pod['metadata'])['uid'])}`,
+            limit: '100',
+          });
+          const events = await this.send(
+            'GET',
+            `${this.coreCollection}/events?${params}`,
+            undefined,
+            signal
+          );
+          if (events.status !== 200) throw new TaskExecutorError('api_error');
+          const items = object(events.body)['items'];
+          if (!Array.isArray(items)) throw new TaskExecutorError('api_error');
+          const startup = items
+            .map((value) => object(value))
+            .filter(
+              (event) =>
+                object(event['involvedObject'])['uid'] === object(pod['metadata'])['uid'] &&
+                ['Pulling', 'Pulled', 'Started'].includes(event['reason'] as string)
+            );
+          const last = startup
+            .sort((a, b) =>
+              (typeof a['lastTimestamp'] === 'string' ? a['lastTimestamp'] : '').localeCompare(
+                typeof b['lastTimestamp'] === 'string' ? b['lastTimestamp'] : ''
+              )
+            )
+            .at(-1);
+          if (last) {
+            phase = last['reason'] === 'Pulling' ? 'pulling-image' : 'container-started';
+            const time = new Date(String(last['firstTimestamp'] ?? last['lastTimestamp']));
+            if (Number.isFinite(time.getTime())) since = time;
+          }
+        }
+      }
+      return { ...observed, startup: { phase, since } };
+    }
     const bound = pods.find((pod) => object(pod['metadata'])['uid'] === launch.task.podUid);
     if (!bound) return { ...observed, phase: 'failed', failureReason: 'compute_missing' };
     const status = bound['status'];
@@ -529,8 +612,18 @@ export class KubernetesTaskExecutor implements TaskExecutor {
       if (adopted) return adopted;
       throw error;
     }
-    if (result.status === 200 || result.status === 201)
-      return validateTaskJob(result.body as TaskKubernetesJob, launch, this.options);
+    if (result.status === 200 || result.status === 201) {
+      const observed = validateTaskJob(result.body as TaskKubernetesJob, launch, this.options);
+      return launch.task.state === 'starting'
+        ? {
+            ...observed,
+            startup: {
+              phase: 'waiting-for-scheduling',
+              since: observed.startedAt ?? launch.task.acceptedAt,
+            },
+          }
+        : observed;
+    }
     if (
       result.status === 409 ||
       result.status === 408 ||
@@ -546,7 +639,11 @@ export class KubernetesTaskExecutor implements TaskExecutor {
     return Promise.resolve().then((): TaskSoftStopIntent => {
       checkLaunch(launch);
       if (signal?.aborted) throw new TaskExecutorError('aborted');
-      return { taskId: launch.task.id, launchId: launch.task.launchId, intent: 'soft-stop' };
+      return {
+        taskId: launch.task.id,
+        launchId: launch.task.launchId,
+        intent: 'soft-stop',
+      };
     });
   }
   async deleteNow(launch: TaskLaunch, signal?: AbortSignal): Promise<void> {
@@ -841,7 +938,10 @@ export class KubernetesTaskExecutor implements TaskExecutor {
     do {
       if (signal.aborted || performance.now() >= deadline) throw new TaskExecutorError('aborted');
       if (pages++ >= MAX_LIST_PAGES) throw new TaskExecutorError('api_error');
-      const params = new URLSearchParams({ labelSelector: TASK_LAUNCH_LABEL, limit: '100' });
+      const params = new URLSearchParams({
+        labelSelector: TASK_LAUNCH_LABEL,
+        limit: '100',
+      });
       if (continuation) params.set('continue', continuation);
       const response = await this.send('GET', `${this.collection}?${params}`, undefined, signal);
       if (signal.aborted || performance.now() >= deadline) throw new TaskExecutorError('aborted');

@@ -33,6 +33,8 @@ interface TaskRow {
   accepted_order: string;
   urgent: boolean;
   state: TaskRecord['state'];
+  startup_phase: NonNullable<TaskRecord['startup']>['phase'] | null;
+  startup_since: Date | null;
   terminal_candidate: TaskRecord['terminalCandidate'];
   terminal_reason_code: string | null;
   finalization_pending: boolean;
@@ -87,6 +89,16 @@ function taskRecord(row: TaskRow): TaskRecord {
     acceptedOrder: row.accepted_order,
     urgent: row.urgent,
     state: row.state,
+    startup:
+      row.state === 'starting'
+        ? {
+            phase: row.startup_phase ?? 'waiting-for-scheduling',
+            elapsedSeconds: Math.max(
+              0,
+              Math.floor((Date.now() - (row.startup_since ?? row.updated_at).getTime()) / 1000)
+            ),
+          }
+        : null,
     terminalCandidate: row.terminal_candidate,
     terminalReasonCode: row.terminal_reason_code,
     finalizationPending: row.finalization_pending,
@@ -234,6 +246,10 @@ function validSealReceipt(receipt: TaskSealReceipt): boolean {
 async function readTaskContext(pool: Pool): Promise<TaskContextSnapshot> {
   const rows = await pool.query<TaskContextEntry>({
     text: `SELECT t.id,t.harness,t.state,left(t.briefing,$2) AS briefing,
+      CASE WHEN t.state='starting' THEN jsonb_build_object(
+        'phase',COALESCE(t.startup_phase,'waiting-for-scheduling'),
+        'elapsedSeconds',GREATEST(0,floor(extract(epoch FROM clock_timestamp()-COALESCE(t.startup_since,t.updated_at)))))
+        ELSE NULL END AS startup,
       CASE WHEN q.question_id IS NULL THEN NULL ELSE
         jsonb_build_object('questionId',q.question_id,'text',left(q.text,$3)) END AS question
       FROM core.tasks t
@@ -554,6 +570,29 @@ export function createPostgresTaskRegistry(deps: {
         return rows.rows.map(taskRecord);
       }),
     listActiveContext: () => readTaskContext(deps.contextPool ?? deps.pool),
+    recordStartupObservation: async (taskId, launchId, observation) => {
+      if (
+        ![
+          'waiting-for-scheduling',
+          'pulling-image',
+          'container-started',
+          'harness-starting',
+        ].includes(observation.phase) ||
+        !Number.isFinite(observation.since.getTime())
+      )
+        throw new TaskRegistryError(taskId, 'invalid_input');
+      await transaction(taskId, async (client) => {
+        const task = await lockLaunch(client, taskId, launchId);
+        if (task.launchId !== launchId) throw new TaskRegistryError(taskId, 'invalid_transition');
+        await client.query(
+          `UPDATE core.tasks SET startup_phase=$2,
+          startup_since=CASE WHEN startup_phase IS DISTINCT FROM $2 THEN $3 ELSE startup_since END
+          WHERE id=$1 AND state='starting' AND terminal_candidate IS NULL
+            AND startup_phase IS DISTINCT FROM 'harness-starting'`,
+          [taskId, observation.phase, observation.since]
+        );
+      });
+    },
     listLaunchWork: async (afterOrder = '0', limit = 100) => {
       if (
         typeof afterOrder !== 'string' ||
@@ -717,10 +756,12 @@ export function createPostgresTaskRegistry(deps: {
         if (reasonCode === 'revision_conflict') {
           // A definite rejection may precede any freeze. Only then can a new
           // keyed request replace the old one. Unknown responses never enter here.
-          const space = await client.query<{ mode: string; access_revision: string }>(
-            'SELECT mode,access_revision::text FROM storage.spaces WHERE id=$1 FOR SHARE',
-            [task.sealRequest.space]
-          );
+          const space = await client.query<{
+            mode: string;
+            access_revision: string;
+          }>('SELECT mode,access_revision::text FROM storage.spaces WHERE id=$1 FOR SHARE', [
+            task.sealRequest.space,
+          ]);
           const current = space.rows[0];
           const operation = await client.query(
             'SELECT 1 FROM storage.seal_operations WHERE space_id=$1',
@@ -933,7 +974,11 @@ export function createPostgresTaskRegistry(deps: {
           'UPDATE core.task_launches SET allocation_receipt=$2::jsonb WHERE task_id=$1',
           [
             taskId,
-            JSON.stringify({ id: receipt.id, space: receipt.space, effectKey: receipt.effectKey }),
+            JSON.stringify({
+              id: receipt.id,
+              space: receipt.space,
+              effectKey: receipt.effectKey,
+            }),
           ]
         );
         return rereadTask(client, taskId);

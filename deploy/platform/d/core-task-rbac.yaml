@@ -15,6 +15,10 @@ rules:
   - apiGroups: ['']
     resources: ['pods']
     verbs: ['get', 'list', 'watch', 'delete']
+  # Read only: fixed startup reasons; raw event messages never enter task status.
+  - apiGroups: ['']
+    resources: ['events']
+    verbs: ['list']
   # Read only: confirm generic ephemeral volume GC before completing cleanup.
   - apiGroups: ['']
     resources: ['persistentvolumeclaims']

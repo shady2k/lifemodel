@@ -1,5 +1,5 @@
 /** Infrastructure port only. Registry, allocation and tombstone checks belong to its caller. */
-import type { TaskRecord } from '../ports/tasks.js';
+import type { TaskRecord, TaskStartupPhase } from '../ports/tasks.js';
 
 export interface TaskLaunch {
   readonly task: TaskRecord;
@@ -15,6 +15,7 @@ export interface TaskJobObservation {
   readonly resourceVersion: string;
   readonly templateHash: string;
   readonly startedAt: Date | null;
+  readonly startup?: { readonly phase: TaskStartupPhase; readonly since: Date };
   readonly phase: 'pending' | 'running' | 'succeeded' | 'failed' | 'deleting';
   /** Runtime failure evidence only; never a semantic task outcome. */
   readonly failureReason?: 'compute_missing' | 'pod_failed';

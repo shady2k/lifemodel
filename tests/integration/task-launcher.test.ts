@@ -47,12 +47,13 @@ interface Frame {
   direction: string;
   messageId: string;
   sequence: number;
-  kind: 'step' | 'question' | 'terminal';
+  kind: 'step' | 'question' | 'terminal' | 'lifecycle';
   payload: {
     outcome?: string;
     reasonCode?: string;
     summary?: string;
     line?: string;
+    phase?: string;
     questionId?: string;
     text?: string;
     resultObjectId?: string | null;
@@ -306,8 +307,8 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     }
     if (service === 'channel' && call.method === 'POST' && call.path === '/task/events') {
       const frame = JSON.parse(body.toString()) as Frame;
-      if (frame.kind !== 'terminal') {
-        if (reportMode === '409' || (reportMode === 'lost_then_409' && progressReports.size)) {
+      if (frame.kind === 'step' || frame.kind === 'question') {
+        if (reportMode === '409' || (reportMode === 'lost_then_409' && [...progressReports.values()].some((f) => f.kind !== 'lifecycle'))) {
           json(res, 409, {});
           return;
         }
@@ -321,6 +322,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
           }
         }
       }
+      if (frame.kind === 'lifecycle') progressReports.set(frame.messageId, frame);
       if (frame.kind === 'terminal') {
         if (pendingMarks.size) wireErrors.push('terminal sent while storage mark was pending');
         terminalFrames.push(frame);
@@ -639,7 +641,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
           : ['task_tool_question_retained', 'task_tool_report_uncertain']
       );
       expect(calls.filter((call) => call.path === '/task/events').length).toBe(
-        mode === '409' ? 2 : 3
+        mode === '409' ? 3 : 4
       );
     }
   );
@@ -849,7 +851,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       attemptId: IDS.attemptId,
       direction: 'task_to_core',
       messageId: expect.stringMatching(/^msg_[0-9a-f-]{36}$/),
-      sequence: 2,
+      sequence: 4,
       kind: 'terminal',
       payload: {
         outcome: 'succeeded',
@@ -858,6 +860,11 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
         artifactObjectIds: ['artifact_a', 'artifact_b'],
       },
     });
+    expect(
+      [...progressReports.values()]
+        .filter((f) => f.kind === 'lifecycle')
+        .map((f) => f.payload.phase)
+    ).toEqual(['running', 'wrapping-up']);
     expect(objects.get('object_1')).toMatchObject({ bytes: Buffer.from(RESULT), mark: 'result' });
     expect(objects.size).toBe(1);
     expect(report.payload).not.toHaveProperty('logObjectId');
@@ -974,8 +981,8 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
           ? { outcome: 'succeeded' }
           : { outcome: 'failed', reasonCode: 'required_tool_failed' }
       );
-      expect(terminal().sequence).toBe(1); // Trace frames never occupy mailbox sequence numbers.
-      expect(calls.filter((call) => call.path === '/task/events')).toHaveLength(1);
+      expect(terminal().sequence).toBe(2); // Trace frames never occupy mailbox sequence numbers; wrapping does.
+      expect(calls.filter((call) => call.path === '/task/events' && JSON.parse(call.body.toString()).kind !== 'lifecycle')).toHaveLength(1);
       expect(objects.size).toBe(1);
       expect(diagnostics).toEqual([]);
     }
@@ -1061,7 +1068,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       expect(traceFrames.map((frame) => frame.span.endedAt === null)).toEqual(
         mode === 'timeout' ? [true] : [true, false]
       );
-      expect(calls.filter((call) => call.path === '/task/events')).toHaveLength(1);
+      expect(calls.filter((call) => call.path === '/task/events' && JSON.parse(call.body.toString()).kind !== 'lifecycle')).toHaveLength(1);
     }
   );
 

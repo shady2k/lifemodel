@@ -131,6 +131,43 @@ describe('exact-UID compute and volume cleanup confirmation', () => {
     }
   );
 
+  it('projects pulling-image with the event clock before the start claim, without raw values', async () => {
+    const { api, request, state } = fixture();
+    const starting = {
+      ...launch,
+      task: { ...task, state: 'starting' as const, podUid: null },
+    };
+    state.job = renderTaskJob(starting);
+    state.job.metadata.uid = 'job-uid';
+    state.job.metadata.resourceVersion = '1';
+    state.pods = [pod('Pending')];
+    const original = request.getMockImplementation()!;
+    request.mockImplementation(async (method, path, body) => {
+      if (path.includes('/events?'))
+        return {
+          status: 200,
+          body: {
+            items: [
+              {
+                involvedObject: { uid: 'pod-uid' },
+                reason: 'Pulling',
+                firstTimestamp: '2026-10-30T22:00:00Z',
+                lastTimestamp: '2026-10-30T22:00:00Z',
+                message: 'PRIVATE image and node values',
+              },
+            ],
+          },
+        };
+      return original(method, path, body);
+    });
+    const observation = await api.observe(starting);
+    expect(observation?.startup).toEqual({
+      phase: 'pulling-image',
+      since: new Date('2026-10-30T22:00:00Z'),
+    });
+    expect(JSON.stringify(observation)).not.toContain('PRIVATE');
+  });
+
   it.each(['Pending', 'Running', 'Unknown', undefined])(
     'Job 404 does not confirm an owned %s Pod has terminated',
     async (phase) => {

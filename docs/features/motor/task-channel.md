@@ -59,6 +59,26 @@ in `tests/integration/task-mailbox.test.ts` cover later-turn steering, owner
 question round trips, closed/terminal omission, escaping and bounds. These are
 source checks, not the two-real-harness VM acceptance walk.
 
+## Live task state (lifemodel-653.9.17)
+
+The read view and running-tasks snapshot expose `startup: {phase, elapsedSeconds}`
+while starting, and null otherwise. Executor observations use only scheduling,
+image-pull and container-start phases. The briefing read records harness-starting.
+No Pod messages, image names or node values enter this projection. Elapsed time
+is measured from the phase observation, not reset by repeated reconciliation.
+A slow image pull is startup progress, not evidence of a hung task.
+
+The launcher's first agent-session progress event commits a `lifecycle` frame
+with `phase: running`. After the harness turn settles, it commits
+`phase: wrapping-up` before publishing outputs and the terminal report. These
+frames use the existing fenced, immutable mailbox and ACK/replay contract.
+Lifecycle frames update only nonterminal state under the task lock, do not wake
+cognition, and cannot regress a wrapping or terminal task. They are task claims,
+not evidence that a command was obeyed. Sealed terminal publication is unchanged.
+The additive migration is `20261015000029_task_startup_visibility.sql`;
+rollback stops new launchers first and leaves the extra columns/frame constraint
+in place so retained lifecycle frames remain readable.
+
 ## Transport and identity
 
 The launcher posts one JSON frame to `https://core.lifemodel.svc:8447/task/events`.

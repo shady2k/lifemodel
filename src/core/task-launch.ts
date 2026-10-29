@@ -152,6 +152,8 @@ export function createTaskLaunchReconciler(options: {
       observed.templateHash
     );
     active();
+    if (observed.startup)
+      await options.registry.recordStartupObservation(task.id, task.launchId, observed.startup);
     if (observed.startedAt)
       await options.registry.initializeAccessIntent(task.id, observed.startedAt);
     if (observed.phase === 'failed' || observed.phase === 'succeeded')
@@ -229,7 +231,11 @@ export function createTaskLaunchReconciler(options: {
                 } catch {
                   active();
                   options.logger.warn(
-                    { ...taskContext, code: 'task_pod_evidence_unavailable', count: 1 },
+                    {
+                      ...taskContext,
+                      code: 'task_pod_evidence_unavailable',
+                      count: 1,
+                    },
                     'Task Pod termination evidence unavailable'
                   );
                 }

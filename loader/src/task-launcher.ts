@@ -232,7 +232,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
   };
   options.signal?.addEventListener('abort', onAbort, { once: true });
   async function send(
-    kind: 'step' | 'question' | 'terminal',
+    kind: 'step' | 'question' | 'terminal' | 'lifecycle',
     payload: unknown,
     messageId = `msg_${randomUUID()}`
   ): Promise<void> {
@@ -382,6 +382,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
     trace.enqueue(root);
     const launchId = ids.launchId;
     let eventCount = 0;
+    let sessionStarted = false;
     const onEvent = async (event: TaskHarnessEvent): Promise<void> => {
       if (event.type === 'receipt') {
         commands?.receipt(event);
@@ -398,6 +399,10 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
         return;
       }
       if (++eventCount > 10_000) throw new LauncherError('event_limit');
+      if (!sessionStarted && (event.type === 'step' || event.type === 'tool')) {
+        await send('lifecycle', { phase: 'running' });
+        sessionStarted = true;
+      }
       // Native harness events use fixed progress lines. Explicit MCP step/question
       // text goes to the durable mailbox; private model/tool content uses traces.
       const line =
@@ -471,8 +476,13 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
     commands.start();
     let result: TaskHarnessResult = await execution.finally(() => tools?.close());
     await commands.stop();
+    await send('lifecycle', { phase: 'wrapping-up' });
     if (intakeFailed)
-      result = { outcome: 'failed', result: '', reasonCode: 'command_intake_failed' };
+      result = {
+        outcome: 'failed',
+        result: '',
+        reasonCode: 'command_intake_failed',
+      };
     failureSpanId = result.failureSpanId ? `${ids.launchId}_${result.failureSpanId}` : undefined;
     outputsStartedAt = new Date().toISOString();
     const resultName = `${directory}/result.txt`;
@@ -505,7 +515,10 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       }
     };
     await retain(async () => {
-      await writeFile(join(cwd, resultName), result.result, { flag: 'wx', mode: 0o600 });
+      await writeFile(join(cwd, resultName), result.result, {
+        flag: 'wx',
+        mode: 0o600,
+      });
       terminal.resultObjectId = await save(resultName, 'result', options.env, cwd, launchId);
     }, true);
     await retain(() =>

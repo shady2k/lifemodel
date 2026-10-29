@@ -238,6 +238,43 @@ describe('durable fenced task mailbox', () => {
     }[];
   }
 
+  it('publishes starting phase and elapsed time, then running and wrapping from launcher lifecycle frames', async () => {
+    const domain = service();
+    const registry = createPostgresTaskRegistry({
+      pool: stores.postgres,
+      epoch: 1,
+      settings,
+    });
+    expect((await domain.read(identity.taskId))?.state).toBe('starting');
+    await registry.recordStartupObservation(identity.taskId, identity.launchId, {
+      phase: 'pulling-image',
+      since: new Date(Date.now() - 129_000),
+    });
+    const view = await domain.read(identity.taskId);
+    expect(view?.startup).toMatchObject({ phase: 'pulling-image' });
+    expect(view?.startup?.elapsedSeconds).toBeGreaterThanOrEqual(129);
+    expect((await domain.listActiveContext()).tasks[0]?.startup).toEqual(view?.startup);
+    for (const [index, state] of ['running', 'wrapping-up'].entries()) {
+      await mailbox().append(
+        {
+          ...frame(`lifecycle-${index}`, index + 1),
+          kind: 'lifecycle',
+          payload: { phase: state },
+        } as TaskChannelFrame,
+        identity
+      );
+      expect((await domain.read(identity.taskId))?.state).toBe(state);
+      expect((await domain.read(identity.taskId))?.startup).toBeNull();
+      expect((await domain.listActiveContext()).tasks[0]?.state).toBe(state);
+    }
+    // A late startup observation or replay must not regress a running session.
+    await registry.recordStartupObservation(identity.taskId, identity.launchId, {
+      phase: 'container-started',
+      since: new Date(),
+    });
+    expect((await domain.read(identity.taskId))?.state).toBe('wrapping-up');
+  });
+
   it('later owner turn sees the startTask ID without its tool result and commits steering through cognition', async () => {
     const steerArgs = { action: 'steer', taskId: '', text: 'Also save the result in primes.txt' };
     const f = await contextBoot([
@@ -268,6 +305,7 @@ describe('durable fenced task mailbox', () => {
         id: task.id,
         harness: task.harness,
         state: 'starting',
+        startup: expect.objectContaining({ phase: 'waiting-for-scheduling' }),
         briefing: 'mailbox fixture',
         question: null,
       });

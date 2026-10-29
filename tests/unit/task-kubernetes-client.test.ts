@@ -111,6 +111,7 @@ describe('task Kubernetes LIST bounds', () => {
 
 describe('task Kubernetes transport resource allowlist', () => {
   it.each([
+    '/api/v1/namespaces/lifemodel-motor/events?fieldSelector=involvedObject.uid%3Dpod-uid&limit=100',
     '/api/v1/namespaces/lifemodel-motor/pods?limit=100',
     '/api/v1/namespaces/lifemodel-motor/pods/task-pod',
     '/api/v1/namespaces/lifemodel-motor/persistentvolumeclaims?limit=100',
