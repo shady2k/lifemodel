@@ -1680,14 +1680,16 @@ export class CoreLoop {
         'user_message',
         'motor_result',
         'task_outcome',
-        'plugin_event',
       ];
       const needsQuestionTurn = (s: Signal) =>
         s.type === 'task_report' &&
         s.data?.kind === 'task_report' &&
         s.data.eventKind === 'question' &&
         !!s.data.question;
-      const isDeferrable = (s: Signal) => deferrableTypes.includes(s.type) || needsQuestionTurn(s);
+      const isBusPluginEvent = (s: Signal) =>
+        s.type === 'plugin_event' && this.signalStreamIds.has(s.id);
+      const isDeferrable = (s: Signal) =>
+        deferrableTypes.includes(s.type) || needsQuestionTurn(s) || isBusPluginEvent(s);
       const hasDeferrableSignals = allSignals.some(isDeferrable);
       const cognitionAvailable = !this.pendingCognition && activeLayers.cognition;
       if (!cognitionAvailable && hasDeferrableSignals) {
@@ -1705,6 +1707,7 @@ export class CoreLoop {
               thoughts: toDefer.filter((s) => s.type === 'thought').length,
               reactions: toDefer.filter((s) => s.type === 'message_reaction').length,
               userMessages: toDefer.filter((s) => s.type === 'user_message').length,
+              pluginEvents: toDefer.filter(isBusPluginEvent).length,
             },
             `Deferring signals to next tick: ${deferReason}`
           );
@@ -1744,15 +1747,18 @@ export class CoreLoop {
         });
       }
 
-      // Cognition consumes one task outcome per turn. Any unselected outcome
-      // remains owned by the durable bus, including a batch with owner input.
+      // Cognition consumes one task outcome per turn. Unselected durable work
+      // stays pending, including plugin events sharing a batch with owner input.
+      // In-memory derived plugin events still follow aggregation's normal path.
       if (aggregationResult?.triggerSignals[0]?.type === 'task_outcome') {
         aggregationResult.triggerSignals = [aggregationResult.triggerSignals[0]];
       }
       const selected = new Set(aggregationResult?.triggerSignals.map((signal) => signal.id) ?? []);
       for (const signal of allSignals) {
         if (
-          (signal.type !== 'task_outcome' && !needsQuestionTurn(signal)) ||
+          (signal.type !== 'task_outcome' &&
+            !needsQuestionTurn(signal) &&
+            !isBusPluginEvent(signal)) ||
           selected.has(signal.id)
         )
           continue;

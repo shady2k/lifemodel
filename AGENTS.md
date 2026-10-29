@@ -339,8 +339,12 @@ Inbound messages keep their own policy.
 Restored entries that already exhausted the budget complete without another
 turn. Signal expiry never discards durable bus work on admission, replay or
 retry: an uncommitted scheduled reminder still runs after a long restart.
-Plugin events, including schedule-fired reminders, wait while cognition is
-busy or stress-disabled; a tick cannot complete them without their turn.
+Bus-owned plugin events (those with a stream id), including schedule-fired
+reminders, wait while cognition is busy or stress-disabled. If aggregation
+selects owner input instead, unselected bus-owned plugin events stay pending
+in order for a later turn. A tick cannot complete them without their turn.
+In-memory derived plugin events without a stream id keep their normal
+aggregation path; they are not deferred or re-queued by this rule.
 A turn id is fixed when the turn starts, saved in
 the epoch-checked snapshot before any effect, and reused when its owned entries
 replay; absorbing more triggers later does not change its effect keys. A tick

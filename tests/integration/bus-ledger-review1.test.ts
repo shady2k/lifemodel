@@ -3,6 +3,7 @@ import { createTestStores, type TestStores } from '../helpers/test-stores.js';
 import { createSnapshotStore } from '../../src/storage/snapshot-store.js';
 import { createBusSignalStream } from '../../src/core/bus-stream.js';
 import { RecipientRegistry } from '../../src/core/recipient-registry.js';
+import { AggregationProcessor } from '../../src/layers/aggregation/processor.js';
 import { InboundMessageStream } from '../../src/core/message-streams.js';
 import { SchedulerPrimitiveImpl } from '../../src/core/scheduler-primitive.js';
 import { StoragePrimitiveImpl } from '../../src/core/storage-primitive.js';
@@ -163,6 +164,13 @@ describe('bus ledger review round 1', () => {
         const reminderId = Object.keys(t.saved().entries).find((id) => id !== headId)!;
         expect(t.saved().entries[reminderId]?.status).toBe('owned');
         expect(h.cognition.triggerIds()).toEqual([head.id]);
+        expect(
+          h.recordedLogs.some(
+            (log) =>
+              log.msg === 'Deferring signals to next tick: COGNITION busy' &&
+              log.obj?.pluginEvents === 1
+          )
+        ).toBe(true);
 
         if (mode === 'restart') {
           // Drain the head, but stop intake/ticks before the deferred reminder
@@ -204,6 +212,102 @@ describe('bus ledger review round 1', () => {
       }
     }
   );
+
+  it.each(['same-core', 'restart'] as const)(
+    'keeps a reminder sharing an owner-message tick for its own later turn (%s)',
+    async (mode) => {
+      const t = await setup(`shared-owner-${mode}`);
+      const registry = new RecipientRegistry();
+      const owner = registry.getOrCreate('web', 'owner');
+      const reminder = createSignal(
+        'plugin_event',
+        'reminder.scheduler',
+        { value: 1 },
+        {
+          data: {
+            kind: 'plugin_event',
+            pluginId: 'reminder',
+            eventKind: 'reminder_due',
+            fireId: 'shared-fire',
+            payload: { text: 'shared tick reminder' },
+          },
+        }
+      );
+      const message = createUserMessageSignal({
+        recipientId: owner,
+        channel: 'web',
+        updateId: 'shared-owner-message',
+        text: 'Owner wins this tick',
+      });
+      const reminderId = await t.bus.append(reminder);
+      const ownerId = await t.bus.append(message);
+      if (mode === 'restart') {
+        for (const id of [reminderId, ownerId]) t.bus.ensureOwned(id, `pending:${id}`);
+        await t.store.commitOwners(t.epoch, 0);
+        await t.store.hydrate(await t.store.read());
+      }
+      let saved = t.bus.exportSnapshot();
+      const h = await startInstance(t.path, {
+        cognitionMode: 'hang',
+        busSignalStream: t.bus,
+        recipientRegistry: registry,
+        commitSnapshot: async (tick, events) => {
+          await t.store.commitOwners(t.epoch, tick, events);
+          saved = t.bus.exportSnapshot();
+        },
+      });
+      const aggregation = new AggregationProcessor(createTestLogger(), {
+        enablePatternDetection: false,
+      });
+      h.aggregation.process = (signals, state) => aggregation.process(signals, state);
+      try {
+        await waitFor(() => h.cognition.calls.length === 1, 'owner wins shared tick');
+        expect(h.cognition.triggerIds()).toEqual([message.id]);
+        h.cognition.settleAll(quiet);
+        await waitFor(() => h.cognition.calls.length === 2, 'reminder runs after owner');
+        expect(h.cognition.triggerIds()).toEqual([message.id, reminder.id]);
+        h.cognition.settleAll(quiet);
+        await waitFor(() => saved.watermark === ownerId, 'both shared inputs commit');
+        await stopInstance(h);
+        expect(h.cognition.calls).toHaveLength(2);
+        await t.store.hydrate(await t.store.read());
+        const before = t.saved();
+        const verified = await t.start();
+        try {
+          await waitFor(() => t.saved() !== before, 'restart after both outcomes');
+          expect(verified.cognition.calls).toHaveLength(0);
+        } finally {
+          verified.coreLoop.haltForTest();
+        }
+      } finally {
+        h.coreLoop.haltForTest();
+        await rmDir(t.path);
+      }
+    }
+  );
+
+  it('does not defer an in-memory autonomic plugin event while cognition is busy', async () => {
+    const t = await setup('derived-plugin');
+    const h = await t.start();
+    const derived = createSignal('plugin_event', 'calories.anomaly', { value: 1 });
+    try {
+      await t.bus.append(thoughtSignal('hold cognition'));
+      await waitFor(() => h.cognition.calls.length === 1, 'cognition busy');
+      const process = h.autonomic.process.bind(h.autonomic);
+      h.autonomic.process = (state, signals, correlationId) => {
+        const result = process(state, signals, correlationId);
+        return { ...result, signals: [...result.signals, derived] };
+      };
+      await waitFor(
+        () => h.aggregation.sawAllOf(derived),
+        'derived plugin reaches aggregation while busy'
+      );
+      expect(h.cognition.calls).toHaveLength(1);
+    } finally {
+      h.coreLoop.haltForTest();
+      await rmDir(t.path);
+    }
+  });
 
   it('loads and drains a hydrated legacy snapshot with 150 owned entries', async () => {
     const t = await setup('legacy-150');
