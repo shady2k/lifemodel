@@ -1747,18 +1747,21 @@ export class CoreLoop {
         });
       }
 
-      // Cognition consumes one task outcome per turn. Unselected durable work
-      // stays pending, including plugin events sharing a batch with owner input.
+      // Cognition consumes one task outcome per turn. Bus plugin events wait
+      // only when another trigger won this tick or aggregation could not run.
+      // A quiet aggregation evaluation completes them without a cognition turn.
       // In-memory derived plugin events still follow aggregation's normal path.
       if (aggregationResult?.triggerSignals[0]?.type === 'task_outcome') {
         aggregationResult.triggerSignals = [aggregationResult.triggerSignals[0]];
       }
       const selected = new Set(aggregationResult?.triggerSignals.map((signal) => signal.id) ?? []);
       for (const signal of allSignals) {
+        const pluginNeedsLaterEvaluation =
+          isBusPluginEvent(signal) && (aggregationResult === null || selected.size > 0);
         if (
           (signal.type !== 'task_outcome' &&
             !needsQuestionTurn(signal) &&
-            !isBusPluginEvent(signal)) ||
+            !pluginNeedsLaterEvaluation) ||
           selected.has(signal.id)
         )
           continue;

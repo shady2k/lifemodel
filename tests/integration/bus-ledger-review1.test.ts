@@ -309,6 +309,104 @@ describe('bus ledger review round 1', () => {
     }
   });
 
+  it.each(['idle', 'owner-message', '120-events'] as const)(
+    'completes non-waking bus plugin events after one quiet evaluation (%s)',
+    async (mode) => {
+      const t = await setup(`quiet-plugin-${mode}`);
+      const count = mode === '120-events' ? 120 : 1;
+      const facts = Array.from({ length: count }, (_, i) =>
+        createSignal(
+          'plugin_event',
+          'news.facts',
+          { value: 0.1 },
+          {
+            data: {
+              kind: 'fact_batch',
+              pluginId: 'news',
+              eventKind: 'news:interesting',
+              urgent: false,
+              facts: [
+                {
+                  content: `quiet fact ${i}`,
+                  confidence: 0.5,
+                  tags: ['quiet'],
+                  provenance: { source: 'test', originalId: `quiet-${i}` },
+                },
+              ],
+            },
+          }
+        )
+      );
+      const ids: string[] = [];
+      for (const fact of facts) ids.push(await t.bus.append(fact));
+      let lastId = ids.at(-1)!;
+      let ownerId: string | undefined;
+      if (mode === 'owner-message') {
+        const registry = new RecipientRegistry();
+        const owner = registry.getOrCreate('web', 'owner');
+        const message = createUserMessageSignal({
+          recipientId: owner,
+          channel: 'web',
+          updateId: 'quiet-owner',
+          text: 'Owner first',
+        });
+        lastId = await t.bus.append(message);
+        ownerId = message.id;
+      }
+      const h = await t.start();
+      const save = vi.fn(async () => undefined);
+      const aggregation = new AggregationProcessor(createTestLogger(), {
+        enablePatternDetection: false,
+      });
+      aggregation.updateDeps({ memoryProvider: { save } as never });
+      const evaluations: { signals: Signal[]; selected: string[] }[] = [];
+      h.aggregation.process = async (signals, state) => {
+        const result = await aggregation.process(signals, state);
+        evaluations.push({
+          signals: [...signals],
+          selected: result.triggerSignals.map((s) => s.id),
+        });
+        return result;
+      };
+      try {
+        if (ownerId) {
+          await waitFor(() => h.cognition.calls.length === 1, 'owner wins quiet-fact batch');
+          expect(h.cognition.triggerIds()).toEqual([ownerId]);
+          expect(save).not.toHaveBeenCalled();
+          h.cognition.settleAll(quiet);
+        }
+        await waitFor(
+          () => t.saved().watermark === lastId,
+          'quiet facts complete and release admission'
+        );
+        expect(save).toHaveBeenCalledTimes(count);
+        expect(h.cognition.calls).toHaveLength(ownerId ? 1 : 0);
+        for (const fact of facts) {
+          const quietEvaluations = evaluations.filter(
+            (entry) => entry.selected.length === 0 && entry.signals.some((s) => s.id === fact.id)
+          );
+          expect(quietEvaluations).toHaveLength(1);
+        }
+        if (ownerId) {
+          const ownerEvaluation = evaluations.findIndex((entry) =>
+            entry.selected.includes(ownerId!)
+          );
+          const factEvaluation = evaluations.findIndex(
+            (entry) =>
+              entry.selected.length === 0 && entry.signals.some((s) => s.id === facts[0]!.id)
+          );
+          expect(factEvaluation).toBeGreaterThan(ownerEvaluation);
+        }
+        expect(t.saved().entries).toEqual({});
+        await stopInstance(h);
+        expect(save).toHaveBeenCalledTimes(count);
+      } finally {
+        h.coreLoop.haltForTest();
+        await rmDir(t.path);
+      }
+    }
+  );
+
   it('loads and drains a hydrated legacy snapshot with 150 owned entries', async () => {
     const t = await setup('legacy-150');
     const signals = Array.from({ length: 150 }, (_, i) => thoughtSignal(`legacy ${i}`));
