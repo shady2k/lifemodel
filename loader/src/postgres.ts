@@ -4,6 +4,7 @@
  * login until lifemodel-2t5 leases modules their own identities).
  */
 import { readFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import { Agent, request as httpsRequest } from 'node:https';
 import type { Socket } from 'node:net';
 import type { PlatformPhase } from './platform-bootstrap.js';
@@ -13,6 +14,7 @@ export interface KubernetesPostgresSecretOptions {
   tokenFile?: string;
   caFile?: string;
   timeoutMs?: number;
+  randomPassword?: () => string;
   request?: (
     url: URL,
     method: string,
@@ -28,6 +30,7 @@ const TARGETS = [
   { namespace: 'lifemodel', name: 'lifemodel-db-credentials' },
   { namespace: 'lifemodel-system', name: 'storage-module-db-credentials' },
   { namespace: 'lifemodel-system', name: 'model-gateway-db-credentials' },
+  { namespace: 'lifemodel-system', name: 'model-capture-db-credentials' },
 ] as const;
 const SERVICE_ACCOUNT = '/var/run/secrets/kubernetes.io/serviceaccount';
 // One bounded keep-alive pool for this helper, shared across fixed-name reads.
@@ -56,6 +59,20 @@ const MAX_API_RESPONSE_BYTES = 1024 * 1024;
  */
 export function createKubernetesPostgresSecretPhase(
   options: KubernetesPostgresSecretOptions = {}
+): PlatformPhase {
+  return createCredentialPhase(options, false);
+}
+
+/** Runs after the legacy credential phases, including on already-onboarded instances. */
+export function createKubernetesCaptureSecretPhase(
+  options: KubernetesPostgresSecretOptions = {}
+): PlatformPhase {
+  return createCredentialPhase(options, true);
+}
+
+function createCredentialPhase(
+  options: KubernetesPostgresSecretOptions,
+  captureOnly: boolean
 ): PlatformPhase {
   const host =
     options.apiServer ??
@@ -165,25 +182,17 @@ export function createKubernetesPostgresSecretPhase(
       );
     });
   }
+  let pendingCapturePassword: string | undefined;
   const sourceUrl = new URL(`/api/v1/namespaces/${SOURCE_NAMESPACE}/secrets/${SOURCE_NAME}`, host);
   return {
-    name: 'cnpg-copy-core-credentials',
+    name: captureOnly ? 'model-capture-credentials' : 'cnpg-copy-core-credentials',
     run: async () => {
-      const source = await send(sourceUrl, 'GET');
-      if (source.status !== 200)
-        throw new Error(`CNPG application Secret read failed (${String(source.status)})`);
-      const credentials = (JSON.parse(source.body) as { data?: Record<string, string> }).data;
-      const username = credentials?.['username'];
-      const password = credentials?.['password'];
-      if (
-        !username ||
-        !password ||
-        !Buffer.from(username, 'base64').toString() ||
-        !Buffer.from(password, 'base64').toString()
-      )
-        throw new Error('CNPG application Secret lifemodel-app has no username/password');
       /** One target: create it when it is absent, else replace its two keys. */
-      async function copy(target: (typeof TARGETS)[number]): Promise<void> {
+      async function copy(
+        target: (typeof TARGETS)[number],
+        username: string,
+        password: string
+      ): Promise<void> {
         const targetUrl = new URL(
           `/api/v1/namespaces/${target.namespace}/secrets/${target.name}`,
           host
@@ -208,9 +217,8 @@ export function createKubernetesPostgresSecretPhase(
               : undefined;
           if (
             response.status !== 200 ||
-            copied === undefined ||
-            copied['username'] !== username ||
-            copied['password'] !== password
+            copied?.['username'] !== username ||
+            copied?.['password'] !== password
           )
             throw new Error(
               `${target.name} read-back did not match CNPG credentials (${String(response.status)})`
@@ -242,7 +250,68 @@ export function createKubernetesPostgresSecretPhase(
           throw new Error(`${target.name} update failed (${String(result.status)})`);
         await verify();
       }
-      for (const target of TARGETS) await copy(target);
+      if (!captureOnly) {
+        const source = await send(sourceUrl, 'GET');
+        if (source.status !== 200)
+          throw new Error(`CNPG application Secret read failed (${String(source.status)})`);
+        const credentials = (JSON.parse(source.body) as { data?: Record<string, string> }).data;
+        const username = credentials?.['username'];
+        const password = credentials?.['password'];
+        if (
+          !username ||
+          !password ||
+          !Buffer.from(username, 'base64').toString() ||
+          !Buffer.from(password, 'base64').toString()
+        )
+          throw new Error('CNPG application Secret lifemodel-app has no username/password');
+        for (const target of TARGETS.slice(0, 3)) await copy(target, username, password);
+        return;
+      }
+      // CNPG owns the narrow capture LOGIN. Its durable random password lives
+      // in state; retries and loader restarts reuse it rather than rotate it.
+      const captureName = 'lifemodel-capture-credentials';
+      const captureUrl = new URL(
+        `/api/v1/namespaces/${SOURCE_NAMESPACE}/secrets/${captureName}`,
+        host
+      );
+      let capture = await send(captureUrl, 'GET');
+      if (capture.status === 404) {
+        pendingCapturePassword ??=
+          options.randomPassword?.() ?? randomBytes(32).toString('base64url');
+        if (!pendingCapturePassword) throw new Error('capture password unavailable');
+        capture = await send(
+          new URL(`/api/v1/namespaces/${SOURCE_NAMESPACE}/secrets`, host),
+          'POST',
+          {
+            apiVersion: 'v1',
+            kind: 'Secret',
+            metadata: {
+              name: captureName,
+              namespace: SOURCE_NAMESPACE,
+              annotations: { 'kustomize.toolkit.fluxcd.io/prune': 'disabled' },
+            },
+            type: 'kubernetes.io/basic-auth',
+            data: {
+              username: Buffer.from('lifemodel_capture_writer').toString('base64'),
+              password: Buffer.from(pendingCapturePassword).toString('base64'),
+            },
+          }
+        );
+        if (capture.status === 409) capture = await send(captureUrl, 'GET');
+      }
+      if (capture.status !== 200 && capture.status !== 201)
+        throw new Error(`capture credential read/create failed (${String(capture.status)})`);
+      const captureData = (JSON.parse(capture.body) as { data?: Record<string, string> }).data;
+      const captureUsername = captureData?.['username'];
+      const capturePassword = captureData?.['password'];
+      if (
+        !captureUsername ||
+        !capturePassword ||
+        Buffer.from(captureUsername, 'base64').toString() !== 'lifemodel_capture_writer' ||
+        !Buffer.from(capturePassword, 'base64').toString()
+      )
+        throw new Error('capture credentials unavailable');
+      await copy(TARGETS[3], captureUsername, capturePassword);
     },
   };
 }

@@ -70,6 +70,10 @@ spec:
               value: /opt/lifemodel/database/username
             - name: LIFEMODEL_DB_PASSWORD_FILE
               value: /opt/lifemodel/database/password
+            - name: LIFEMODEL_CAPTURE_DB_USERNAME_FILE
+              value: /opt/lifemodel/capture-database/username
+            - name: LIFEMODEL_CAPTURE_DB_PASSWORD_FILE
+              value: /opt/lifemodel/capture-database/password
           ports:
             - name: api
               containerPort: 8080
@@ -118,6 +122,9 @@ spec:
             - name: database
               mountPath: /opt/lifemodel/database
               readOnly: true
+            - name: capture-database
+              mountPath: /opt/lifemodel/capture-database
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir:
@@ -131,5 +138,10 @@ spec:
           secret:
             secretName: model-gateway-db-credentials
             # Missing/empty before C is normal; requests deny until it fills.
+            optional: true
+            defaultMode: 288
+        - name: capture-database
+          secret:
+            secretName: model-capture-db-credentials
             optional: true
             defaultMode: 288

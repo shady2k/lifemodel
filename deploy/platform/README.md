@@ -599,3 +599,25 @@ provide that proof and keep delayed stale creates inert. Local tests evaluate
 actual CEL expressions with the existing evaluator. They do not replace API
 server CEL typechecking/defaulting or runtime network enforcement: the
 coordinator must run the VM probes before stage acceptance.
+
+### Model gateway debug captures
+
+The loader model page can enable machine-local exchange capture until a chosen
+expiry (10 minutes, 1 hour, at most 24 hours), optionally for one session.
+It is off by default and explicitly warns that conversation text is stored.
+The gateway refreshes settings and all-slot redaction material without blocking
+model traffic. It records inbound/upstream requests and upstream response
+headers/body per attempt; SSE delivery does not wait for capture storage.
+`lifemodel doctor exchange <call_id>` links this evidence to `doctor llm`.
+
+Migration `20261015000028_create_model_exchanges.sql` owns
+`observability.model_exchanges`, its age-filtered reader view, and the bounded
+append/prune functions. CNPG manages the capture writer login separately from
+task authorization credentials; only the gateway receives its Secret at
+`/opt/lifemodel/capture-database`. The writer has function execution, not table
+read access; `lifemodel_capture_reader` has view select only. Bodies are
+redacted before entering an 8-row queue, capped at 1 MiB each and explicitly
+marked when truncated. Database retention is 100 MiB/24 hours, oldest first;
+pruning runs every minute even when capture is off. Database failure drops
+capture evidence, not model calls. Captures contain personal messages; back up
+and restrict access to the stores accordingly.

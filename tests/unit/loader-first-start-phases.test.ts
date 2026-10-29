@@ -29,10 +29,41 @@ describe('the loader first-start phase order', () => {
     }).map((phase) => phase.name);
     expect(names.slice(0, 3)).toEqual(['storage-seaweed-custody', 'zot-custody', 'gitea-ready']);
     expect(names).not.toContain('workbench-import');
+    expect(names.at(-1)).toBe('model-capture-credentials');
+    expect(names.indexOf('model-capture-credentials')).toBeGreaterThan(
+      names.indexOf('valkey-password')
+    );
     // The two phases whose source Secret only exists once a later platform
     // step has run (lifemodel-state is platform C).
     for (const waiting of ['cnpg-copy-core-credentials', 'valkey-password'])
       expect(names.indexOf(waiting)).toBeGreaterThan(0);
+  });
+
+  it('runs the new capture-only phase on an already-onboarded instance without replaying owner credentials', async () => {
+    let record: PlatformPhaseRecord | null = { phase: 'valkey-password', status: 'complete' };
+    const ran: string[] = [];
+    const phase = (name: string) => ({
+      name,
+      run: async () => {
+        ran.push(name);
+      },
+    });
+    const plan = platformFirstStartPhases({
+      gitea: [phase('gitea-ready')],
+      storageCustody: phase('storage-seaweed-custody'),
+      zotCustody: phase('zot-custody'),
+      postgres: phase('cnpg-copy-core-credentials'),
+      valkey: phase('valkey-password'),
+      capture: phase('model-capture-credentials'),
+    });
+    await createPlatformPhaseRunner({
+      read: async () => record,
+      write: async (next) => {
+        record = next;
+      },
+    })(plan);
+    expect(ran).toEqual(['model-capture-credentials']);
+    expect(record).toEqual({ phase: 'model-capture-credentials', status: 'complete' });
   });
 
   it('finishes Seaweed custody on a fresh installation where the CNPG Secret never appears', async () => {

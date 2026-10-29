@@ -45,7 +45,10 @@ import {
   type SettingsProjection,
   type SettingsStore,
 } from './settings/store.js';
-import { createKubernetesPostgresSecretPhase } from './postgres.js';
+import {
+  createKubernetesPostgresSecretPhase,
+  createKubernetesCaptureSecretPhase,
+} from './postgres.js';
 import { createKubernetesValkeySecretPhase } from './valkey.js';
 import { createKubernetesS3IdentitySecret, createStorageCustodyPhase } from './storage-custody.js';
 import {
@@ -81,6 +84,7 @@ export interface FirstStartPhaseDeps {
   zotCustody: PlatformPhase;
   postgres?: PlatformPhase;
   valkey?: PlatformPhase;
+  capture?: PlatformPhase;
 }
 
 /**
@@ -107,6 +111,7 @@ export function platformFirstStartPhases(deps: FirstStartPhaseDeps): PlatformPha
     ...deps.gitea,
     deps.postgres ?? createKubernetesPostgresSecretPhase(),
     deps.valkey ?? createKubernetesValkeySecretPhase(),
+    deps.capture ?? createKubernetesCaptureSecretPhase(),
   ];
 }
 

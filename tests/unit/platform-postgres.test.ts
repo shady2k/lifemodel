@@ -161,6 +161,52 @@ describe('CloudNativePG platform state', () => {
     ).toContain("const SOURCE_NAME = 'lifemodel-app'");
   });
 
+  it('provisions a dedicated capture writer and SELECT-only reader without owner membership for the writer', () => {
+    const cluster = YAML.parse(readFileSync(join(stateRoot, 'cluster/cluster.yaml'), 'utf8'));
+    expect(cluster.spec.managed.roles).toEqual([
+      {
+        name: 'lifemodel_capture_writer',
+        ensure: 'present',
+        login: true,
+        passwordSecret: { name: 'lifemodel-capture-credentials' },
+      },
+      { name: 'lifemodel_capture_reader', ensure: 'present', login: false },
+      { name: 'lifemodel', ensure: 'present', login: true, inRoles: ['lifemodel_capture_reader'] },
+    ]);
+    const gateway = allYaml(join(root, 'a')).find(
+      (item) => item.kind === 'Deployment' && item.metadata.name === 'model-gateway'
+    );
+    const container = gateway.spec.template.spec.containers[0];
+    expect(container.env).toEqual(
+      expect.arrayContaining([
+        {
+          name: 'LIFEMODEL_CAPTURE_DB_USERNAME_FILE',
+          value: '/opt/lifemodel/capture-database/username',
+        },
+        {
+          name: 'LIFEMODEL_CAPTURE_DB_PASSWORD_FILE',
+          value: '/opt/lifemodel/capture-database/password',
+        },
+      ])
+    );
+    expect(gateway.spec.template.spec.volumes).toContainEqual({
+      name: 'capture-database',
+      secret: { secretName: 'model-capture-db-credentials', optional: true, defaultMode: 288 },
+    });
+    const grant = allYaml(stateRoot).find(
+      (item) => item.kind === 'Role' && item.metadata.name === 'loader-capture-credentials'
+    );
+    expect(grant.rules).toEqual([
+      {
+        apiGroups: [''],
+        resources: ['secrets'],
+        resourceNames: ['lifemodel-capture-credentials'],
+        verbs: ['get'],
+      },
+      { apiGroups: [''], resources: ['secrets'], verbs: ['create'] },
+    ]);
+  });
+
   it('limits database ingress to the core namespace and CNPG operator ports', () => {
     const policies = allYaml(stateRoot).filter((item) => item.kind === 'NetworkPolicy');
     const deny = policies.find((item) => item.metadata.name === 'lifemodel-state-default-deny');

@@ -68,10 +68,13 @@ function help() {
   console.log(`Usage: lifemodel doctor [--repin previous|clear]
        lifemodel doctor trace <trace_id | last [N]>
        lifemodel doctor llm [N]
+       lifemodel doctor exchange <call_id | last [N]>
        lifemodel address
        lifemodel --help
 
 Diagnose Flux sources, Kustomizations, the lifemodel loader and core.
+  exchange  Read already-redacted model headers and bodies (conversation text).
+            Use the call id printed by doctor llm; capture is off by default.
   --repin previous  Persist an override to the previous successfully applied ref and rerun bootstrap.
   --repin clear     Remove the override and rerun bootstrap.`);
 }
@@ -536,6 +539,60 @@ const llmQuery = storeScript(`
       [request.limit])).rows;
 `);
 
+// The role can select only the age-filtered capture view, never append/prune.
+const exchangeQuery = storeScript(`
+    await client.query('SET LOCAL ROLE lifemodel_capture_reader');
+    const rows = (await client.query(
+      'SELECT * FROM observability.recent_model_exchanges WHERE ($1::text IS NULL OR call_id=$1) ORDER BY created_at DESC,call_id DESC,attempt DESC,slot DESC LIMIT $2',
+      [request.id ?? null, request.limit + 1])).rows;
+    return {
+      truncated: rows.length > request.limit,
+      rows: rows.slice(0, request.limit).map(({ exchange, ...row }) => {
+        const text = JSON.stringify(exchange, null, 2);
+        return { ...row, text: text.slice(0, 262144), truncated: text.length > 262144 };
+      }),
+    };
+`);
+
+function doctorExchange(args) {
+  const print = (text) => writeFileSync(1, `${text}\n`);
+  let request;
+  if (args[0] === 'last' && args.length <= 2) {
+    const limit = args[1] === undefined ? 1 : Number(args[1]);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 20)
+      throw new Error('exchange last count must be an integer from 1 to 20');
+    request = { limit };
+  } else if (args.length === 1 && /^[A-Za-z0-9_-]{1,128}$/.test(args[0])) {
+    request = { id: args[0], limit: 20 };
+  } else throw new Error('Usage: lifemodel doctor exchange <call_id | last [N]>');
+  let result;
+  try {
+    result = readStore(exchangeQuery, request);
+  } catch {
+    console.error('Exchange store unavailable. The core pod and capture schema must be available.');
+    return 1;
+  }
+  if (!result.rows.length) {
+    print('No model exchanges recorded (capture is off by default; retention is 24 hours).');
+    return 0;
+  }
+  for (const row of result.rows) {
+    print(
+      `exchange call=${safe(row.call_id)} attempt=${safe(row.attempt)} slot=${safe(row.slot)} task=${dash(row.task_id)} session=${dash(row.session_id)} time=${safe(row.created_at)} bytes=${safe(row.size_bytes)}`
+    );
+    // Pretty JSON preserves body/header boundaries and escapes terminal control
+    // sequences. Strip actual controls too; bound output to 256 KiB per row.
+    print(
+      String(row.text)
+        .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ' ')
+        .slice(0, 262144)
+    );
+    if (row.truncated) print('(exchange display truncated at 262144 characters)');
+  }
+  if (result.truncated) print('(exchange count truncated)');
+  return 0;
+}
+
 function readStore(script, request) {
   return JSON.parse(
     execFileSync(
@@ -606,7 +663,9 @@ const LLM_FACTS = [
 const LLM_PREFIXES = ['system', 'tools', 'history', 'context'];
 
 function dash(value) {
-  return value === undefined || value === null ? '-' : safe(JSON.stringify(value)).replace(/^"|"$/g, '');
+  return value === undefined || value === null
+    ? '-'
+    : safe(JSON.stringify(value)).replace(/^"|"$/g, '');
 }
 
 // "system=ab12cd34/4800": which part of the prompt, and how big it was. A
@@ -935,6 +994,9 @@ try {
   }
   if (args[0] === 'doctor' && args[1] === 'trace') {
     process.exit(doctorTrace(args.slice(2)));
+  }
+  if (args[0] === 'doctor' && args[1] === 'exchange') {
+    process.exit(doctorExchange(args.slice(2)));
   }
   if (args[0] === 'doctor' && args[1] === 'llm') {
     process.exit(doctorLlm(args.slice(2)));
