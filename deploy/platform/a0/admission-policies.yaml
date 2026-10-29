@@ -24,7 +24,7 @@ spec:
         request.operation != 'DELETE' &&
         ((request.namespace == 'lifemodel-git' && object.metadata.name == 'gitea-admin') ||
          (request.namespace == 'lifemodel' && request.operation == 'UPDATE' && object.metadata.name == 'core-task-channel-tls') ||
-         ((request.namespace == 'lifemodel' && (object.metadata.name == 'deploy-source-credential' || object.metadata.name == 'lifemodel-db-credentials' || object.metadata.name == 'lifemodel-valkey-credentials')) || (request.namespace == 'lifemodel-motor' && object.metadata.name == 'deploy-source-credential') || (request.namespace == 'lifemodel-state' && object.metadata.name == 'lifemodel-valkey-credentials')))
+         ((request.namespace == 'lifemodel' && (object.metadata.name == 'deploy-source-credential' || object.metadata.name == 'lifemodel-db-credentials' || object.metadata.name == 'lifemodel-valkey-credentials')) || (request.namespace == 'lifemodel-motor' && object.metadata.name == 'deploy-source-credential') || (request.namespace == 'lifemodel-state' && (object.metadata.name == 'lifemodel-valkey-credentials' || object.metadata.name == 'lifemodel-capture-credentials'))))
       message: loader may only create or update named bootstrap and store credential Secrets, or update the existing core task TLS Secret; deletion is forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1

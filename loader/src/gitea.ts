@@ -100,7 +100,8 @@ interface KubernetesOptions {
     ca?: Buffer
   ) => Promise<{ status: number; body: string }>;
 }
-const ADMIN_SECRET = 'gitea-admin';
+export const ADMIN_SECRET = 'gitea-admin';
+export const SOURCE_CREDENTIAL_SECRET = 'deploy-source-credential';
 /** Fixed-name Secret access only. RBAC create cannot use resourceNames; the client posts only this name and has no list/delete operation. */
 export function createKubernetesGiteaAdminSecret(
   options: KubernetesOptions = {}
@@ -207,7 +208,7 @@ export interface GiteaHttpOptions {
   timeoutMs?: number;
   kubernetes?: KubernetesOptions;
 }
-const APPLICATIONS = [
+export const APPLICATIONS = [
   {
     namespace: 'lifemodel',
     source: 'lifemodel',
@@ -306,7 +307,7 @@ export function createKubernetesApplicationBootstrap(options: KubernetesOptions 
     };
   }
   async function ensureCredentials(): Promise<GiteaCredentials> {
-    const name = 'deploy-source-credential';
+    const name = SOURCE_CREDENTIAL_SECRET;
     const existing = await Promise.all(
       APPLICATIONS.map(({ namespace }) => readSecret(namespace, name))
     );

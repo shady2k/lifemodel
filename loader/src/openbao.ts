@@ -189,7 +189,7 @@ interface KubernetesSecretStoreOptions {
   ) => Promise<{ status: number; body: string }>;
   timeoutMs?: number;
 }
-const SECRET = 'openbao-unseal-custody';
+export const SECRET = 'openbao-unseal-custody';
 const SA_DIR = '/var/run/secrets/kubernetes.io/serviceaccount';
 
 /** Restricted client for the platform-created custody Secret; it cannot create or list Secrets. */

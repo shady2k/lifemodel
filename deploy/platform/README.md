@@ -145,9 +145,14 @@ policy in step A.
 
 A0 also creates two Flux-prune-protected Secrets for durable loader phase
 records and OpenBao key custody. Its ValidatingAdmissionPolicies fail closed:
-the loader can create or update only `gitea-admin` in `lifemodel-git` and
-`deploy-source-credential` in the two application namespaces, and cannot
-delete them. Application Kustomizations must use their namespace's named
+the loader can create or update only `gitea-admin` in `lifemodel-git`,
+`deploy-source-credential` in the two application namespaces,
+`lifemodel-db-credentials` and `lifemodel-valkey-credentials` in `lifemodel`,
+and `lifemodel-valkey-credentials` and `lifemodel-capture-credentials` in
+`lifemodel-state`. It may only update the existing `core-task-channel-tls`
+Secret in `lifemodel`; deletion is forbidden. System-namespace Secrets,
+including the database copy targets, are platform-created and have fixed-name
+update-only RBAC; the loader never creates them. Application Kustomizations must use their namespace's named
 GitRepository and applier, cannot use kubeconfig, and cannot target or depend
 on another namespace.
 
@@ -627,9 +632,12 @@ has no Postgres network route and does not apply database grants.
 The loader may create Secrets in `lifemodel-state` to establish the durable
 capture password. Kubernetes RBAC cannot restrict `create` by `resourceNames`,
 because the authorization check targets the collection, not a named object.
-This namespace-wide Secret-create permission is accepted. Reads remain limited
-to the named application and capture Secrets; the loader code creates only
-`lifemodel-capture-credentials`.
+Admission restricts this namespace-wide Secret-create permission to
+`lifemodel-capture-credentials` and `lifemodel-valkey-credentials`; deletion is
+forbidden. Reads remain limited to the named application, capture and Valkey
+Secrets. The capture phase creates only `lifemodel-capture-credentials` and
+updates its platform-created `model-capture-db-credentials` copy in
+`lifemodel-system`.
 
 Bodies are redacted before entering an 8-row queue, capped at 1 MiB each and
 explicitly marked when truncated. Database retention is 100 MiB/24 hours,

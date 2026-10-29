@@ -19,9 +19,9 @@ export interface KubernetesValkeySecretOptions {
   ) => Promise<{ status: number; body: string }>;
 }
 
-const SOURCE_NAMESPACE = 'lifemodel-state';
-const SECRET_NAME = 'lifemodel-valkey-credentials';
-const TARGET_NAMESPACE = 'lifemodel';
+export const SOURCE_NAMESPACE = 'lifemodel-state';
+export const SECRET_NAME = 'lifemodel-valkey-credentials';
+export const TARGET_NAMESPACE = 'lifemodel';
 const SERVICE_ACCOUNT = '/var/run/secrets/kubernetes.io/serviceaccount';
 
 /** Idempotently creates the password in state and mirrors it to the core namespace. */

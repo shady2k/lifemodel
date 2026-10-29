@@ -94,7 +94,7 @@ export interface KubernetesSecretStoreOptions {
   timeoutMs?: number;
 }
 
-const SECRET_NAME = 'loader-bootstrap-state';
+export const SECRET_NAME = 'loader-bootstrap-state';
 const SERVICE_ACCOUNT = '/var/run/secrets/kubernetes.io/serviceaccount';
 
 /** Kubernetes API client restricted in code to this one named Secret. */
