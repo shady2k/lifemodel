@@ -1,6 +1,12 @@
 /** Shared in-memory Kubernetes-auth client and model-slot reader (ADR-013 D3). */
 import { readFile } from 'node:fs/promises';
 import { isReasoningEffort } from './reasoning-effort.js';
+import {
+  CAPTURE_SETTING_PATH,
+  activeCaptureSetting,
+  validateCaptureSetting,
+  type ModelCaptureSetting,
+} from './model-capture-setting.js';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import {
@@ -318,6 +324,31 @@ export function createRoleBaoClient(options: RoleBaoOptions) {
     call,
     login: () => authenticate(true),
     readSlot,
+    readCapture: async (): Promise<ModelCaptureSetting> => {
+      let result: Record<string, unknown>;
+      try {
+        result = await call(CAPTURE_SETTING_PATH);
+      } catch (error) {
+        if (error instanceof BaoStorageError && error.code === 'not_found') return { until: null };
+        throw error;
+      }
+      const data = result['data'] as Record<string, unknown> | undefined;
+      const metadata = data?.['metadata'] as Record<string, unknown> | undefined;
+      if (
+        metadata?.['destroyed'] === true ||
+        (typeof metadata?.['deletion_time'] === 'string' && metadata['deletion_time'] !== '')
+      )
+        return { until: null };
+      try {
+        return activeCaptureSetting(validateCaptureSetting(data?.['data'], now()), now());
+      } catch {
+        throw failure('unreachable');
+      }
+    },
+    writeCapture: async (value: ModelCaptureSetting): Promise<void> => {
+      const setting = validateCaptureSetting(value, now(), true);
+      await call(CAPTURE_SETTING_PATH, 'POST', { data: setting });
+    },
     writeSlot: async (slot: ModelSlotName, value: ModelSlot) => {
       await call(`lifemodel/data/model/${slot}`, 'POST', { data: value });
     },
@@ -392,6 +423,43 @@ export function createCachedSlotReader(
       } finally {
         if (pending.get(slot) === refresh) pending.delete(slot);
       }
+    },
+  };
+}
+
+/** Never puts capture settings I/O on a model request's critical path. */
+export function createCachedCaptureReader(
+  read: () => Promise<ModelCaptureSetting>,
+  now = Date.now
+) {
+  let value: ModelCaptureSetting = { until: null };
+  let refreshed = -Infinity;
+  let pending: Promise<void> | undefined;
+  function refresh(): Promise<void> {
+    if (pending) return pending;
+    pending = Promise.resolve().then(async () => {
+      try {
+        value = validateCaptureSetting(await read(), now());
+      } catch {
+        // Privacy first: a failed setting refresh must never keep capture on.
+        value = { until: null };
+      } finally {
+        refreshed = now();
+        pending = undefined;
+      }
+    });
+    return pending;
+  }
+  function current(): ModelCaptureSetting {
+    if (now() - refreshed >= 30_000) void refresh();
+    return activeCaptureSetting(value, now());
+  }
+  return {
+    current,
+    refresh,
+    async read(): Promise<ModelCaptureSetting> {
+      await refresh();
+      return activeCaptureSetting(value, now());
     },
   };
 }

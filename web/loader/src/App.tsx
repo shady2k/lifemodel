@@ -18,6 +18,7 @@ import i18n, { languageFor } from './i18n';
 import { REASONING_EFFORTS } from '../../../loader/src/reasoning-effort.js';
 import { ModelStatus } from './ModelStatus';
 import { WorkbenchSourceSettings } from './WorkbenchSourceSettings';
+import { ModelCaptureSettings } from './ModelCaptureSettings';
 import { parseModelStatus } from '../../../src/web/model-status.js';
 import type { ModelStatusEvent } from '../../../src/web/contract.js';
 import type {
@@ -1117,6 +1118,7 @@ export default function App() {
                   {t('modelAccess')}
                 </h2>
                 {modelStatus !== undefined && <ModelStatus value={modelStatus} saved={slotSaved} />}
+                <ModelCaptureSettings csrfToken={state.csrfToken ?? ''} />
                 <WorkbenchSourceSettings csrfToken={state.csrfToken ?? ''} />
               </section>
               <section className="mt-8 space-y-4" aria-labelledby="platform-settings-title">

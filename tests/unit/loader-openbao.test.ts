@@ -87,6 +87,8 @@ function fixture(
     },
     readWorkbenchSource: async () => null,
     writeWorkbenchSource: async () => {},
+    readCapture: async () => ({ until: null }),
+    writeCapture: async () => {},
   };
   const store: PlatformPhaseStore = {
     read: async () => record,
@@ -1293,6 +1295,8 @@ describe('OpenBao bootstrap', () => {
       },
       readWorkbenchSource: async () => null,
       writeWorkbenchSource: async () => {},
+      readCapture: async () => ({ until: null }),
+      writeCapture: async () => {},
     };
     const custody: BaoCustody = {
       read: async () => ({ keys: ['share'], rootToken: null }),

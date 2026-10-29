@@ -41,6 +41,7 @@ COPY src/ports/message-attachment.ts ./src/ports/message-attachment.ts
 COPY loader/src/settings/registry.ts ./loader/src/settings/registry.ts
 # Pure slot effort choices shared by the loader API and its model form.
 COPY loader/src/reasoning-effort.ts ./loader/src/reasoning-effort.ts
+COPY loader/src/model-capture-setting.ts ./loader/src/model-capture-setting.ts
 # Pure workbench status contract; never copy the server task and its I/O into the UI stage.
 COPY loader/src/workbench-status.ts ./loader/src/workbench-status.ts
 RUN npm run build:loader-ui -- --emptyOutDir

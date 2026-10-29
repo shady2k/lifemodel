@@ -522,6 +522,7 @@ describe('loader UI', () => {
       keySet: true,
     };
     fetchMock.mockImplementation(async (url: string, options?: RequestInit) => {
+      if (url === '/api/model-capture') return { ok: true, json: async () => ({ until: null }) };
       if (url === '/api/state')
         return {
           ok: true,
@@ -562,6 +563,7 @@ describe('loader UI', () => {
       'The model rejected the credentials.'
     );
     fetchMock.mockImplementation(async (url: string, options?: RequestInit) => {
+      if (url === '/api/model-capture') return { ok: true, json: async () => ({ until: null }) };
       if (url === '/api/state')
         return {
           ok: true,

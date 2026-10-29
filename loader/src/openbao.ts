@@ -3,6 +3,7 @@ import { request as httpsRequest } from 'node:https';
 import { ZOT_CUSTODY_PATH, type ZotCredential } from './zot-custody.js';
 import { readFile } from 'node:fs/promises';
 import type { ModelSlot } from './model.js';
+import type { ModelCaptureSetting } from './model-capture-setting.js';
 import {
   WORKBENCH_SOURCE_PATH,
   validateWorkbenchSource,
@@ -44,6 +45,8 @@ export interface BaoApi {
   readModelSlot(slot: 'primary' | 'reserve'): Promise<ModelSlot | null>;
   writeModelSlot(slot: 'primary' | 'reserve', value: ModelSlot): Promise<void>;
   deleteModelReserve(): Promise<void>;
+  readCapture(): Promise<ModelCaptureSetting>;
+  writeCapture(value: ModelCaptureSetting): Promise<void>;
   readWorkbenchSource(): Promise<WorkbenchSource | null>;
   writeWorkbenchSource(value: WorkbenchSource): Promise<void>;
 }
@@ -683,6 +686,8 @@ export function createOpenBaoApi(
     },
     writeModelSlot: client.writeSlot,
     deleteModelReserve: client.deleteReserve,
+    readCapture: client.readCapture,
+    writeCapture: client.writeCapture,
     revokeRootToken: async (rootToken) => {
       await asToken(rootToken, 'auth/token/revoke-self', 'POST', {});
     },

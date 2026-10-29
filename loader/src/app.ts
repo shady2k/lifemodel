@@ -325,6 +325,10 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
           pki,
           config,
           modelSlots,
+          modelCapture: {
+            read: () => bao.api.readCapture(),
+            write: (value) => bao.api.writeCapture(value),
+          },
           settings,
           workbench: {
             read: readWorkbenchSource,
