@@ -114,8 +114,7 @@ export class ValkeyBusSignalStream implements BusSignalStream {
   /** Bounded replay repair: prove absence atomically, without decoding payloads. */
   async missingEntryIds(ids: string[]): Promise<string[]> {
     if (ids.length === 0) return [];
-    if (ids.some((id) => !/^\d+-\d+$/.test(id)))
-      throw new Error('Invalid bus ledger probe');
+    if (ids.some((id) => !/^\d+-\d+$/.test(id))) throw new Error('Invalid bus ledger probe');
     const missing: string[] = [];
     // Older snapshots can exceed today's admission cap. Preserve their work,
     // but keep each atomic Redis probe bounded by the current ledger limit.
