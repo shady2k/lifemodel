@@ -1661,6 +1661,17 @@ describe('platform manifests', () => {
         ],
         ports: [{ protocol: 'TCP', port: 3000 }],
       },
+      {
+        to: [
+          {
+            namespaceSelector: {
+              matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-state' },
+            },
+            podSelector: { matchLabels: { 'cnpg.io/cluster': 'lifemodel' } },
+          },
+        ],
+        ports: [{ protocol: 'TCP', port: 5432 }],
+      },
     ]);
     const yaml = readFileSync(join(platformRoot, 'a0/network-policy.yaml'), 'utf8');
     expect(yaml).toContain('k3s DNATs the in-cluster API Service to the node address');
@@ -1692,6 +1703,7 @@ describe('platform manifests', () => {
       'TCP/3000',
       'TCP/5001',
       'TCP/53',
+      'TCP/5432',
       'TCP/6443',
       // The model gateway's health listener and the storage module's.
       'TCP/8081',
