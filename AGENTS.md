@@ -335,6 +335,8 @@ started but was not counted delivered. Inbound messages keep their own policy.
 Restored entries that already exhausted the budget complete without another
 turn. Signal expiry never discards durable bus work on admission, replay or
 retry: an uncommitted scheduled reminder still runs after a long restart.
+Plugin events, including schedule-fired reminders, wait while cognition is
+busy or stress-disabled; a tick cannot complete them without their turn.
 A turn id is fixed when the turn starts, saved in
 the epoch-checked snapshot before any effect, and reused when its owned entries
 replay; absorbing more triggers later does not change its effect keys. A tick
