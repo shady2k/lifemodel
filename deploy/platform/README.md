@@ -637,7 +637,12 @@ Admission restricts this namespace-wide Secret-create permission to
 forbidden. Reads remain limited to the named application, capture and Valkey
 Secrets. The capture phase creates only `lifemodel-capture-credentials` and
 updates its platform-created `model-capture-db-credentials` copy in
-`lifemodel-system`.
+`lifemodel-system`. Newly created capture source Secrets carry
+`cnpg.io/reload: 'true'` so CNPG observes their creation and later password
+changes. The loader has only `get` and `create` on that source, not `update`
+or `patch`, so it cannot add the label to an existing unlabeled Secret on an
+upgraded cluster. Those Secrets remain unchanged; an operator with Secret
+update permission must add the label if CNPG reload notifications are needed.
 
 Bodies are redacted before entering an 8-row queue, capped at 1 MiB each and
 explicitly marked when truncated. Database retention is 100 MiB/24 hours,

@@ -230,8 +230,13 @@ describe('CNPG application credential copy phase', () => {
               if (path === sourcePath) {
                 sourceCreates++;
                 expect(parsed.type).toBe('kubernetes.io/basic-auth');
+                expect(parsed.metadata.labels).toEqual({ 'cnpg.io/reload': 'true' });
                 expect(parsed.data.username).toBe(encode('lifemodel_capture_writer'));
-                if (conflict) parsed.data.password = encode('winning-password');
+                if (conflict) {
+                  parsed.data.password = encode('winning-password');
+                  // An older, unlabeled Secret won the create race.
+                  delete parsed.metadata.labels;
+                }
               }
               const secret = { ...parsed, metadata: { ...parsed.metadata, resourceVersion: '1' } };
               secrets.set(path, secret);
@@ -240,7 +245,9 @@ describe('CNPG application credential copy phase', () => {
                 body: JSON.stringify(secret),
               };
             }
-            if (method === 'PUT') {
+            if (method === 'PUT' || method === 'PATCH') {
+              expect(url.pathname).not.toBe(sourcePath);
+              expect(method).toBe('PUT');
               const parsed = JSON.parse(body!);
               secrets.set(url.pathname, parsed);
               return { status: 200, body: JSON.stringify(parsed) };
@@ -253,6 +260,12 @@ describe('CNPG application credential copy phase', () => {
         await createKubernetesCaptureSecretPhase(options).run();
         expect(generated).toBe(1);
         expect(sourceCreates).toBe(1);
+        expect(secrets.get(sourcePath)?.metadata).toEqual(
+          expect.objectContaining(
+            conflict ? { resourceVersion: '1' } : { labels: { 'cnpg.io/reload': 'true' } }
+          )
+        );
+        if (conflict) expect(secrets.get(sourcePath)?.metadata).not.toHaveProperty('labels');
         expect(
           secrets.get('/api/v1/namespaces/lifemodel-system/secrets/model-capture-db-credentials')
             ?.data

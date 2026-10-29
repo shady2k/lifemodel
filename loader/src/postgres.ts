@@ -272,6 +272,7 @@ function createCredentialPhase(
       }
       // CNPG owns the narrow capture LOGIN. Its durable random password lives
       // in state; retries and loader restarts reuse it rather than rotate it.
+      // Reload labels apply on create only: state Secret RBAC has no update/patch.
       const captureName = CAPTURE_SECRET_NAME;
       const captureUrl = new URL(
         `/api/v1/namespaces/${SOURCE_NAMESPACE}/secrets/${captureName}`,
@@ -291,6 +292,7 @@ function createCredentialPhase(
             metadata: {
               name: captureName,
               namespace: SOURCE_NAMESPACE,
+              labels: { 'cnpg.io/reload': 'true' },
               annotations: { 'kustomize.toolkit.fluxcd.io/prune': 'disabled' },
             },
             type: 'kubernetes.io/basic-auth',
