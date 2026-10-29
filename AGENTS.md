@@ -326,7 +326,12 @@ The bus snapshot stores a contiguous watermark and a per-entry ledger for
 entries beyond it. Each ledger entry is owned by a persisted turn id, completed,
 or failed with a retry count. A failed internal turn retries once in the same
 running core; after its second failure its entries are completed with the
-recorded failure and a warning. A turn id is fixed when the turn starts, saved in
+recorded failure and a warning. This budget also applies when an internal
+turn resolves without a counted answer or explicit silence. Restored entries
+that already exhausted the budget complete without another turn. An expired
+internal signal completes without a turn, on admission or replay (including
+signals that expire while queued); inbound messages keep their own policy.
+A turn id is fixed when the turn starts, saved in
 the epoch-checked snapshot before any effect, and reused when its owned entries
 replay; absorbing more triggers later does not change its effect keys. A tick
 commit atomically stores this ledger with the inbound read and per-recipient

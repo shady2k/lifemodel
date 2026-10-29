@@ -1,7 +1,8 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createTestStores, type TestStores } from '../helpers/test-stores.js';
 import { createSnapshotStore } from '../../src/storage/snapshot-store.js';
 import { createBusSignalStream, type BusSnapshot } from '../../src/core/bus-stream.js';
+import { IntentApplicator, type IntentApplicatorDeps } from '../../src/core/intent-applicator.js';
 import { createSignal } from '../../src/types/signal.js';
 import {
   makeScratchDir,
@@ -33,15 +34,16 @@ describe('internal bus terminal outcomes', () => {
     const epoch = await store.takeEpoch();
     const path = await makeScratchDir('bus-terminal-');
     let saved: BusSnapshot | undefined;
-    const start = () => startInstance(path, {
-      cognitionMode: 'hang',
-      recordLogs: true,
-      busSignalStream: bus,
-      commitSnapshot: async (tick, events) => {
-        await store.commitOwners(epoch, tick, events);
-        saved = bus.exportSnapshot();
-      },
-    });
+    const start = () =>
+      startInstance(path, {
+        cognitionMode: 'hang',
+        recordLogs: true,
+        busSignalStream: bus,
+        commitSnapshot: async (tick, events) => {
+          await store.commitOwners(epoch, tick, events);
+          saved = bus.exportSnapshot();
+        },
+      });
     return { prefix, store, bus, epoch, path, start, saved: () => saved };
   }
 
@@ -62,8 +64,10 @@ describe('internal bus terminal outcomes', () => {
       expect(h.cognition.calls).toHaveLength(1);
       const rows = await stores.redis.xrange(`${t.prefix}outbound`, '-', '+');
       expect(rows).toHaveLength(1);
-      expect(JSON.parse(rows[0]![1][1]!)).toMatchObject({
-        type: 'send.command', payload: { recipientId: owner, channel: 'web', text: 'Digest' },
+      const fields = rows[0]![1];
+      expect(JSON.parse(fields[fields.indexOf('event') + 1]!)).toMatchObject({
+        type: 'send.command',
+        payload: { recipientId: owner, channel: 'web', text: 'Digest' },
       });
       expect(h.channel.sent).toHaveLength(0);
     } finally {
@@ -72,10 +76,32 @@ describe('internal bus terminal outcomes', () => {
     }
   });
 
-  it.each(['empty-result', 'unaccounted-final-send'] as const)(
-    'bounds an undefined %s outcome to two attempts and admits 105 later signals', async (mode) => {
+  it.each(['empty-result', 'unaccounted-final-send', 'undelivered-final-send'] as const)(
+    'bounds an undefined %s outcome to two attempts and admits 105 later signals',
+    async (mode) => {
       const t = await setup(mode);
       const h = await t.start();
+      // Reproduce the historical sender reporting false at the applicator
+      // boundary. CoreLoop itself (ownership, retry and CAS) stays real.
+      const apply = IntentApplicator.prototype.apply;
+      const sendFault =
+        mode === 'undelivered-final-send'
+          ? vi.spyOn(IntentApplicator.prototype, 'apply').mockImplementation(function (
+              this: IntentApplicator,
+              intents,
+              context
+            ) {
+              const deps = (this as unknown as { deps: IntentApplicatorDeps }).deps;
+              const settled = deps.onSendSettled;
+              deps.onSendSettled = (turn, recipient, final) =>
+                settled?.(turn, recipient, final, { delivered: false });
+              try {
+                apply.call(this, intents, context);
+              } finally {
+                deps.onSendSettled = settled;
+              }
+            })
+          : undefined;
       try {
         const head = thoughtSignal('undecided head', h.recipientId);
         const id = await t.bus.append(head);
@@ -85,10 +111,21 @@ describe('internal bus terminal outcomes', () => {
         const result = {
           confidence: 1,
           disposition: 'respond' as const,
-          intents: mode === 'empty-result' ? [] : [{
-            type: 'SEND_MESSAGE' as const,
-            payload: { recipientId: h.registry.getOrCreate('web', 'other'), text: 'Other' },
-          }],
+          intents:
+            mode === 'empty-result'
+              ? []
+              : [
+                  {
+                    type: 'SEND_MESSAGE' as const,
+                    payload: {
+                      recipientId:
+                        mode === 'undelivered-final-send'
+                          ? h.recipientId
+                          : h.registry.getOrCreate('web', 'other'),
+                      text: 'Other',
+                    },
+                  },
+                ],
         };
         h.cognition.settleAll(result);
         await waitFor(() => h.cognition.calls.length === 2, 'undefined outcome retried once');
@@ -96,10 +133,17 @@ describe('internal bus terminal outcomes', () => {
         h.cognition.settleAll(result);
         await waitFor(() => t.saved()?.watermark === id, 'retry budget releases watermark');
         expect(h.cognition.calls).toHaveLength(2);
-        expect(h.recordedLogs.some((log) => log.msg ===
-          'Internal signals failed twice and were completed with their recorded failure')).toBe(true);
+        expect(
+          h.recordedLogs.some(
+            (log) =>
+              log.msg ===
+              'Internal signals failed twice and were completed with their recorded failure'
+          )
+        ).toBe(true);
         h.cognition.result = silent;
-        const later = Array.from({ length: 105 }, (_, i) => thoughtSignal(`later ${i}`, h.recipientId));
+        const later = Array.from({ length: 105 }, (_, i) =>
+          thoughtSignal(`later ${i}`, h.recipientId)
+        );
         const laterIds = [];
         for (const signal of later) laterIds.push(await t.bus.append(signal));
         let handled = 2;
@@ -113,66 +157,87 @@ describe('internal bus terminal outcomes', () => {
         expect(h.cognition.triggerIds()).toEqual([head.id, head.id, ...later.map((s) => s.id)]);
         expect(t.saved()?.entries).toEqual({});
       } finally {
+        sendFault?.mockRestore();
         h.coreLoop.haltForTest();
         await rmDir(t.path);
       }
     }
   );
 
-  it.each([false, true])('recovers a full hydrated ledger with retries=3 (expired=%s) without another turn', async (expired) => {
-    const t = await setup(`stuck-${expired}`);
-    const head = thoughtSignal('stuck');
-    if (expired) head.expiresAt = new Date(0);
-    const seeds = [head, ...Array.from({ length: 99 }, (_, i) => thoughtSignal(`completed ${i}`))];
-    const ids = [];
-    for (const signal of seeds) ids.push(await t.bus.append(signal));
-    const snapshot: BusSnapshot = {
-      version: 1, watermark: '0-0', entries: Object.fromEntries(ids.map((id, i) => [id,
-        i === 0 ? { status: 'failed', turnId: 'vm-stuck-turn', retries: 3 } : { status: 'completed' },
-      ])),
-    };
-    t.bus.hydrateSnapshot(snapshot);
-    await t.store.commitOwners(t.epoch, 0);
-    const restored = createBusSignalStream(stores.redis, t.prefix);
-    restored.hydrateSnapshot(t.bus.exportSnapshot());
-    t.bus.hydrateSnapshot(restored.exportSnapshot());
-    const later = Array.from({ length: 105 }, (_, i) => thoughtSignal(`waiting ${i}`));
-    const laterIds = [];
-    for (const signal of later) laterIds.push(await t.bus.append(signal));
-    const h = await t.start();
-    try {
-      let handled = 0;
-      await waitFor(() => {
-        if (h.cognition.calls.length > handled) {
-          handled = h.cognition.calls.length;
-          h.cognition.settleAll(silent);
-        }
-        return t.saved()?.watermark === laterIds.at(-1);
-      }, 'stuck snapshot self-recovers and waiting signals commit');
-      expect(h.cognition.triggerIds()).toEqual(later.map((s) => s.id));
-      expect(t.saved()?.entries).toEqual({});
-    } finally {
-      h.coreLoop.haltForTest();
-      await rmDir(t.path);
+  it.each(['failed', 'owned', 'expired'] as const)(
+    'recovers a full hydrated ledger with retries=3 (%s) without another turn',
+    async (mode) => {
+      const t = await setup(`stuck-${mode}`);
+      const head = thoughtSignal('stuck');
+      if (mode === 'expired') head.expiresAt = new Date(0);
+      const seeds = [
+        head,
+        ...Array.from({ length: 99 }, (_, i) => thoughtSignal(`completed ${i}`)),
+      ];
+      const ids = [];
+      for (const signal of seeds) ids.push(await t.bus.append(signal));
+      const snapshot: BusSnapshot = {
+        version: 1,
+        watermark: '0-0',
+        entries: Object.fromEntries(
+          ids.map((id, i) => [
+            id,
+            i === 0
+              ? {
+                  status: mode === 'owned' ? 'owned' : 'failed',
+                  turnId: 'vm-stuck-turn',
+                  retries: 3,
+                }
+              : { status: 'completed' },
+          ])
+        ),
+      };
+      t.bus.hydrateSnapshot(snapshot);
+      await t.store.commitOwners(t.epoch, 0);
+      const restored = createBusSignalStream(stores.redis, t.prefix);
+      restored.hydrateSnapshot(t.bus.exportSnapshot());
+      t.bus.hydrateSnapshot(restored.exportSnapshot());
+      const later = Array.from({ length: 105 }, (_, i) => thoughtSignal(`waiting ${i}`));
+      const laterIds = [];
+      for (const signal of later) laterIds.push(await t.bus.append(signal));
+      const h = await t.start();
+      try {
+        let handled = 0;
+        await waitFor(() => {
+          if (h.cognition.calls.length > handled) {
+            handled = h.cognition.calls.length;
+            h.cognition.settleAll(silent);
+          }
+          return t.saved()?.watermark === laterIds.at(-1);
+        }, 'stuck snapshot self-recovers and waiting signals commit');
+        expect(h.cognition.triggerIds()).toEqual(later.map((s) => s.id));
+        expect(t.saved()?.entries).toEqual({});
+      } finally {
+        h.coreLoop.haltForTest();
+        await rmDir(t.path);
+      }
     }
-  });
+  );
 
-  it.each(['new', 'owned', 'failed'] as const)('completes an expired %s signal without cognition', async (status) => {
-    const t = await setup(`expired-${status}`);
-    const signal = thoughtSignal('expired');
-    signal.expiresAt = new Date(0);
-    const id = await t.bus.append(signal);
-    if (status !== 'new') {
-      t.bus.ensureOwned(id, 'persisted-turn');
-      if (status === 'failed') t.bus.markFailed([id]);
+  it.each(['new', 'owned', 'failed'] as const)(
+    'completes an expired %s signal without cognition',
+    async (status) => {
+      const t = await setup(`expired-${status}`);
+      const signal = thoughtSignal('expired');
+      signal.expiresAt = new Date(0);
+      const id = await t.bus.append(signal);
+      if (status !== 'new') {
+        t.bus.ensureOwned(id, 'persisted-turn');
+        if (status === 'failed') t.bus.markFailed([id]);
+      }
+      const h = await t.start();
+      try {
+        await waitFor(() => t.saved()?.watermark === id, 'expired entry completed');
+        expect(h.cognition.calls).toHaveLength(0);
+      } finally {
+        h.coreLoop.haltForTest();
+        await rmDir(t.path);
+      }
     }
-    const h = await t.start();
-    try {
-      await waitFor(() => t.saved()?.watermark === id, 'expired entry completed');
-      expect(h.cognition.calls).toHaveLength(0);
-    } finally {
-      h.coreLoop.haltForTest();
-      await rmDir(t.path);
-    }
-  });
+  );
 });

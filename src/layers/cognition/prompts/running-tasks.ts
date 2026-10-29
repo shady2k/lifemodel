@@ -4,7 +4,7 @@ import type { LoopContext } from '../agentic-loop-types.js';
 /** Escape after JSON serialization so task text cannot close the data boundary. */
 export function buildRunningTasksSection(context: LoopContext): string | null {
   if (context.runningTasks === 'unavailable')
-    return '<running_tasks status="unavailable">Task IDs could not be loaded this turn. Do not claim there are no tasks.</running_tasks>';
+    return '<running_tasks status="unavailable">Task IDs could not be loaded this turn. Do not claim there are no tasks. Never invent a task ID. Use core.steerTask only with an exact task ID already present in the trigger or conversation; otherwise tell the owner that task status is temporarily unavailable.</running_tasks>';
   const snapshot = context.runningTasks;
   const tasks = snapshot?.tasks ?? [];
   const entries: string[] = [];

@@ -28,7 +28,7 @@ import type {
   MessageReactionData,
   Event,
 } from '../types/index.js';
-import { createSignal, THOUGHT_LIMITS } from '../types/signal.js';
+import { createSignal, isSignalExpired, THOUGHT_LIMITS } from '../types/signal.js';
 import { awaitWithinDeadline } from './deadline.js';
 import { DurableEffectRegistry } from './durable-effect-registry.js';
 import { createTraceContext, withTraceContext, type TraceContext } from './trace-context.js';
@@ -775,7 +775,8 @@ export class CoreLoop {
    * (error disposition) or a send that did not reach the chat - is never
    * retried for inbound work, which follows its own durable policy. Internal
    * bus entries retry once in this core and then complete with a warning. A
-   * resolved turn with NO outcome leaves its entries for replay at next start.
+   * resolved internal turn with NO outcome follows that same retry budget;
+   * inbound work keeps its separate restart policy.
    */
   private settleTurn(state: PendingTurnCommits): void {
     if (state.settled || this.deadForTest) return;
@@ -818,31 +819,29 @@ export class CoreLoop {
       this.busSignalStream?.markFailed(ownedBusIds);
       const retryBusIds: string[] = [];
       const exhaustedBusIds: string[] = [];
-      if (outcome === 'failed_turn') {
-        for (const id of ownedBusIds) {
-          const failed = this.busSignalStream?.stateFor(id);
-          if (failed?.status !== 'failed') continue;
-          if (failed.retries < 2) {
-            this.busSignalStream?.markOwned([id], failed.turnId);
-            retryBusIds.push(id);
-          } else {
-            exhaustedBusIds.push(id);
-          }
+      for (const id of ownedBusIds) {
+        const failed = this.busSignalStream?.stateFor(id);
+        if (failed?.status !== 'failed') continue;
+        if (failed.retries < 2) {
+          this.busSignalStream?.markOwned([id], failed.turnId);
+          retryBusIds.push(id);
+        } else {
+          exhaustedBusIds.push(id);
         }
-        this.busSignalStream?.markCompleted(exhaustedBusIds);
-        const retrySignals = [...state.turn.triggerSignals, ...state.turn.absorbedSignals];
-        for (const signal of retrySignals.reverse()) {
-          const streamId = this.signalStreamIds.get(signal.id);
-          if (!streamId || !retryBusIds.includes(streamId)) continue;
-          this.knownBusEntries.add(streamId);
-          this.pendingSignals.unshift({ signal, timestamp: signal.timestamp, streamId });
-        }
-        if (exhaustedBusIds.length > 0) {
-          this.logger.warn(
-            { entries: exhaustedBusIds.length },
-            'Internal signals failed twice and were completed with their recorded failure'
-          );
-        }
+      }
+      this.busSignalStream?.markCompleted(exhaustedBusIds);
+      const retrySignals = [...state.turn.triggerSignals, ...state.turn.absorbedSignals];
+      for (const signal of retrySignals.reverse()) {
+        const streamId = this.signalStreamIds.get(signal.id);
+        if (!streamId || !retryBusIds.includes(streamId)) continue;
+        this.knownBusEntries.add(streamId);
+        this.pendingSignals.unshift({ signal, timestamp: signal.timestamp, streamId });
+      }
+      if (exhaustedBusIds.length > 0) {
+        this.logger.warn(
+          { entries: exhaustedBusIds.length },
+          'Internal signals failed twice and were completed with their recorded failure'
+        );
       }
       const exhaustedIds =
         outcome === 'failed_turn' ? (this.inboundStream?.markFailedTurn(inboundIds) ?? []) : [];
@@ -2123,8 +2122,22 @@ export class CoreLoop {
       let stoppedForCapacity = false;
       for (const entry of entries) {
         cursor = entry.id;
+        // Completing a replayed gap can retire later completed entries that
+        // were already read in this batch. Never admit those rows again.
+        if (compareStreamIds(entry.id, this.busSignalStream.committedOffset()) <= 0) continue;
         const state = this.busSignalStream.stateFor(entry.id);
-        if (state?.status === 'completed') continue;
+        if (state?.status === 'completed' || this.knownBusEntries.has(entry.id)) continue;
+        // A restored turn that already used its two attempts must not run
+        // again. Complete it in the next epoch-checked snapshot, including
+        // legacy failed/owned entries whose retry count exceeded the budget.
+        if (state && state.retries >= 2) {
+          this.busSignalStream.markCompleted([entry.id]);
+          this.logger.warn(
+            { entries: 1, streamId: entry.id, retries: state.retries },
+            'Internal signals failed twice and were completed with their recorded failure'
+          );
+          continue;
+        }
         if (!state) {
           if (this.busSignalStream.admissionCapacity() === 0) {
             stoppedForCapacity = true;
@@ -2133,8 +2146,13 @@ export class CoreLoop {
           this.busSignalStream.ensureOwned(entry.id, `pending:${entry.id}`);
           admitted += 1;
         }
+        // Expiry applies to new admission and replay alike. Do not wake a
+        // turn for stale internal work, even if its old turn owned the entry.
+        if (isSignalExpired(entry.signal)) {
+          this.busSignalStream.markCompleted([entry.id]);
+          continue;
+        }
         this.signalStreamIds.set(entry.signal.id, entry.id);
-        if (this.knownBusEntries.has(entry.id)) continue;
         this.knownBusEntries.add(entry.id);
         this.pendingSignals.push({
           signal: entry.signal,
@@ -2162,6 +2180,10 @@ export class CoreLoop {
     while (this.pendingSignals.length > 0 && signals.length < maxSignals) {
       const pending = this.pendingSignals.shift();
       if (pending) {
+        if (pending.streamId && isSignalExpired(pending.signal)) {
+          this.busSignalStream?.markCompleted([pending.streamId]);
+          continue;
+        }
         signals.push(pending.signal);
         if (pending.streamId) this.tickConsumedBusEntries.push(pending.streamId);
       }
@@ -2655,18 +2677,15 @@ export class CoreLoop {
       tickId: context.tickId,
       startedAt,
       triggerSignals,
-      // Task outcomes route to the configured owner just as cognition does.
-      // Capture that owner here so its send settles the durable bus entry in
+      // All proactive triggers route to the configured owner, just as
+      // cognition does. Capture that owner so its send settles the bus entry in
       // the same snapshot as the answer, even after outbound dedup is trimmed.
       recipientId: (() => {
         const first = triggerSignals[0];
         const data = first?.data as { recipientId?: unknown } | undefined;
         return typeof data?.recipientId === 'string'
           ? data.recipientId
-          : first?.type === 'task_outcome' ||
-              (first?.type === 'task_report' &&
-                first.data?.kind === 'task_report' &&
-                first.data.eventKind === 'question')
+          : first?.type !== 'user_message'
             ? getPrimaryRecipientId()
             : undefined;
       })(),
