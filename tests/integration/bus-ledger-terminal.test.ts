@@ -76,7 +76,7 @@ describe('internal bus terminal outcomes', () => {
     }
   });
 
-  it.each(['empty-result', 'unaccounted-final-send', 'undelivered-final-send'] as const)(
+  it.each(['undelivered-final-send'] as const)(
     'bounds an undefined %s outcome to two attempts and admits 105 later signals',
     async (mode) => {
       const t = await setup(mode);
@@ -84,48 +84,34 @@ describe('internal bus terminal outcomes', () => {
       // Reproduce the historical sender reporting false at the applicator
       // boundary. CoreLoop itself (ownership, retry and CAS) stays real.
       const apply = IntentApplicator.prototype.apply;
-      const sendFault =
-        mode === 'undelivered-final-send'
-          ? vi.spyOn(IntentApplicator.prototype, 'apply').mockImplementation(function (
-              this: IntentApplicator,
-              intents,
-              context
-            ) {
-              const deps = (this as unknown as { deps: IntentApplicatorDeps }).deps;
-              const settled = deps.onSendSettled;
-              deps.onSendSettled = (turn, recipient, final) =>
-                settled?.(turn, recipient, final, { delivered: false });
-              try {
-                apply.call(this, intents, context);
-              } finally {
-                deps.onSendSettled = settled;
-              }
-            })
-          : undefined;
+      const sendFault = vi.spyOn(IntentApplicator.prototype, 'apply').mockImplementation(function (
+        this: IntentApplicator,
+        intents,
+        context
+      ) {
+        const deps = (this as unknown as { deps: IntentApplicatorDeps }).deps;
+        const settled = deps.onSendSettled;
+        deps.onSendSettled = (turn, recipient, final) =>
+          settled?.(turn, recipient, final, { delivered: false });
+        try {
+          apply.call(this, intents, context);
+        } finally {
+          deps.onSendSettled = settled;
+        }
+      });
       try {
         const head = thoughtSignal('undecided head', h.recipientId);
         const id = await t.bus.append(head);
         await waitFor(() => h.cognition.calls.length === 1, 'first attempt');
-        // A send to somebody else does not answer this turn. This exercises a
-        // real final send that is not counted delivered for the owned trigger.
         const result = {
           confidence: 1,
           disposition: 'respond' as const,
-          intents:
-            mode === 'empty-result'
-              ? []
-              : [
-                  {
-                    type: 'SEND_MESSAGE' as const,
-                    payload: {
-                      recipientId:
-                        mode === 'undelivered-final-send'
-                          ? h.recipientId
-                          : h.registry.getOrCreate('web', 'other'),
-                      text: 'Other',
-                    },
-                  },
-                ],
+          intents: [
+            {
+              type: 'SEND_MESSAGE' as const,
+              payload: { recipientId: h.recipientId, text: 'Answer' },
+            },
+          ],
         };
         h.cognition.settleAll(result);
         await waitFor(() => h.cognition.calls.length === 2, 'undefined outcome retried once');
@@ -212,28 +198,6 @@ describe('internal bus terminal outcomes', () => {
         }, 'stuck snapshot self-recovers and waiting signals commit');
         expect(h.cognition.triggerIds()).toEqual(later.map((s) => s.id));
         expect(t.saved()?.entries).toEqual({});
-      } finally {
-        h.coreLoop.haltForTest();
-        await rmDir(t.path);
-      }
-    }
-  );
-
-  it.each(['new', 'owned', 'failed'] as const)(
-    'completes an expired %s signal without cognition',
-    async (status) => {
-      const t = await setup(`expired-${status}`);
-      const signal = thoughtSignal('expired');
-      signal.expiresAt = new Date(0);
-      const id = await t.bus.append(signal);
-      if (status !== 'new') {
-        t.bus.ensureOwned(id, 'persisted-turn');
-        if (status === 'failed') t.bus.markFailed([id]);
-      }
-      const h = await t.start();
-      try {
-        await waitFor(() => t.saved()?.watermark === id, 'expired entry completed');
-        expect(h.cognition.calls).toHaveLength(0);
       } finally {
         h.coreLoop.haltForTest();
         await rmDir(t.path);

@@ -326,11 +326,14 @@ The bus snapshot stores a contiguous watermark and a per-entry ledger for
 entries beyond it. Each ledger entry is owned by a persisted turn id, completed,
 or failed with a retry count. A failed internal turn retries once in the same
 running core; after its second failure its entries are completed with the
-recorded failure and a warning. This budget also applies when an internal
-turn resolves without a counted answer or explicit silence. Restored entries
-that already exhausted the budget complete without another turn. An expired
-internal signal completes without a turn, on admission or replay (including
-signals that expire while queued); inbound messages keep their own policy.
+recorded failure and a warning identifying the signal type and source, never
+its values. A resolved non-error internal turn with no final send to its
+answered recipient completes quietly, without replaying its tool effects.
+An undefined internal outcome retries only when a final send to that recipient
+started but was not counted delivered. Inbound messages keep their own policy.
+Restored entries that already exhausted the budget complete without another
+turn. Signal expiry never discards durable bus work on admission, replay or
+retry: an uncommitted scheduled reminder still runs after a long restart.
 A turn id is fixed when the turn starts, saved in
 the epoch-checked snapshot before any effect, and reused when its owned entries
 replay; absorbing more triggers later does not change its effect keys. A tick
@@ -346,7 +349,11 @@ in the Valkey stream and are not admitted into the snapshot ledger until capacit
 opens. Completed entries beyond a gap stay in the ledger and are skipped on
 restart; owned and failed entries replay under their recorded turn id. Entries
 leave the ledger only when the watermark passes them, and the stream is trimmed
-only through that watermark after the snapshot CAS succeeds. The Valkey commit
+only through the watermark captured for a successful snapshot CAS, never an
+in-memory watermark advanced after that CAS began or before it succeeded.
+On replay, a ledger entry whose stream row is already missing is completed
+with a warning recording the loss, so an old premature trim cannot wedge the
+ledger permanently. The Valkey commit
 rejects a stale generation by epoch. Postgres writes are fenced by the active
 holder.
 

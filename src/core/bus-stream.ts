@@ -26,6 +26,7 @@ export interface BusSignalStream extends SnapshotSectionOwner<BusSnapshot> {
   appendTaskSignal(signal: Signal, key: string): Promise<string>;
   readAfter(offset: string, limit: number): Promise<BusSignalEntry[]>;
   trimBefore(offset: string): Promise<void>;
+  missingEntryIds(ids: string[]): Promise<string[]>;
   committedOffset(): string;
   stateFor(id: string): BusEntryState | undefined;
   ensureOwned(id: string, turnId: string): void;
@@ -108,6 +109,27 @@ export class ValkeyBusSignalStream implements BusSignalStream {
         throw new Error(`Bus entry ${id} has an invalid signal payload`, { cause: error });
       }
     });
+  }
+
+  /** Bounded replay repair: prove absence atomically, without decoding payloads. */
+  async missingEntryIds(ids: string[]): Promise<string[]> {
+    if (ids.length === 0) return [];
+    if (ids.length > MAX_BUS_LEDGER_ENTRIES || ids.some((id) => !/^\d+-\d+$/.test(id)))
+      throw new Error('Invalid bus ledger probe');
+    return (await this.redis.eval(
+      `
+      local missing = {}
+      for _, id in ipairs(ARGV) do
+        if #redis.call('XRANGE', KEYS[1], id, id, 'COUNT', 1) == 0 then
+          table.insert(missing, id)
+        end
+      end
+      return missing
+    `,
+      1,
+      this.key,
+      ...ids
+    )) as string[];
   }
 
   async trimBefore(offset: string): Promise<void> {
