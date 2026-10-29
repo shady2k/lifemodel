@@ -2,9 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { createCachedCaptureReader, createRoleBaoClient } from '../../loader/src/model-bao.js';
 import {
   activeCaptureSetting,
+  captureSettingFromRequest,
   isCaptureEnabled,
   MAX_CAPTURE_DURATION_MS,
   validateCaptureSetting,
+  validateCaptureSettingResponse,
   type ModelCaptureSetting,
 } from '../../loader/src/model-capture-setting.js';
 
@@ -45,6 +47,53 @@ describe('time-limited capture setting', () => {
       expect(() => validateCaptureSetting(input, now, true)).toThrow('capture_setting_invalid');
     }
     expect(validateCaptureSetting(on(-1), now)).toEqual(on(-1));
+  });
+  it('derives expiry only from server time and accepts an explicit off request', () => {
+    expect(captureSettingFromRequest({ durationMs: MAX_CAPTURE_DURATION_MS }, now)).toEqual(
+      on(MAX_CAPTURE_DURATION_MS)
+    );
+    expect(captureSettingFromRequest({ durationMs: 600_000, session: 'chat-1' }, now)).toEqual({
+      ...on(),
+      session: 'chat-1',
+    });
+    expect(captureSettingFromRequest({ durationMs: null }, now)).toEqual({ until: null });
+  });
+  it('refuses unbounded durations, client timestamps and malformed request fields', () => {
+    for (const input of [
+      null,
+      [],
+      {},
+      { durationMs: undefined },
+      { durationMs: true },
+      { durationMs: '600000' },
+      { durationMs: 0 },
+      { durationMs: -1 },
+      { durationMs: 0.5 },
+      { durationMs: NaN },
+      { durationMs: Infinity },
+      { durationMs: MAX_CAPTURE_DURATION_MS + 1 },
+      { durationMs: null, session: 'chat-1' },
+      { durationMs: 600_000, session: '' },
+      { durationMs: 600_000, session: 'bad session' },
+      { durationMs: 600_000, session: 'x'.repeat(129) },
+      { durationMs: 600_000, extra: true },
+      { durationMs: 600_000, until: on().until },
+      on(),
+      { until: null },
+    ]) {
+      expect(() => captureSettingFromRequest(input, now)).toThrow('capture_setting_invalid');
+    }
+  });
+  it('validates server responses without applying the browser clock to the 24h ceiling', () => {
+    const response = { ...on(MAX_CAPTURE_DURATION_MS), session: 'chat-1' };
+    expect(() => validateCaptureSetting(response, now - 60_000)).toThrow('capture_setting_invalid');
+    expect(validateCaptureSettingResponse(response)).toEqual(response);
+    for (const invalid of [
+      { until: 'bad' },
+      { until: null, session: 'chat-1' },
+      { ...response, extra: true },
+    ])
+      expect(() => validateCaptureSettingResponse(invalid)).toThrow('capture_setting_invalid');
   });
   it('keeps current synchronous and off until a read completes, coalesces and refreshes changes', async () => {
     let time = now;

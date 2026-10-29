@@ -15,6 +15,7 @@ beforeEach(async () => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 describe('model capture settings control', () => {
   it('warns about local conversation text, starts a timed session-filtered capture and stops it', async () => {
@@ -25,7 +26,14 @@ describe('model capture settings control', () => {
         if (init?.method === 'PUT') {
           const body = JSON.parse(String(init.body));
           writes.push({ body, csrf: (init.headers as Record<string, string>)['x-csrf-token'] });
-          return { ok: true, json: async () => body };
+          const setting =
+            body.durationMs === null
+              ? { until: null }
+              : {
+                  until: new Date(Date.now() + Number(body.durationMs)).toISOString(),
+                  ...(body.session ? { session: body.session } : {}),
+                };
+          return { ok: true, json: async () => setting };
         }
         return { ok: true, json: async () => ({ until: null }) };
       })
@@ -38,27 +46,50 @@ describe('model capture settings control', () => {
     fireEvent.change(screen.getByLabelText('Chat/session ID (optional)'), {
       target: { value: 'chat-1' },
     });
-    const before = Date.now();
     fireEvent.click(screen.getByRole('button', { name: 'Start capture' }));
     await waitFor(() => expect(writes).toHaveLength(1));
-    expect(writes[0]).toMatchObject({ body: { session: 'chat-1' }, csrf: 'csrf-canary' });
-    const expiry = Date.parse(String(writes[0]?.body.until));
-    expect(expiry).toBeGreaterThanOrEqual(before + 600_000);
-    expect(expiry).toBeLessThanOrEqual(Date.now() + 600_000);
+    expect(writes[0]).toEqual({
+      body: { durationMs: 600_000, session: 'chat-1' },
+      csrf: 'csrf-canary',
+    });
     expect(await screen.findByText('Only session: chat-1')).toBeInTheDocument();
     const stop = screen.getByRole('button', { name: 'Stop capture' });
     await waitFor(() => expect(stop).not.toBeDisabled());
     fireEvent.click(stop);
-    await waitFor(() => expect(writes[1]?.body).toEqual({ until: null }));
+    await waitFor(() => expect(writes[1]?.body).toEqual({ durationMs: null }));
     expect(await screen.findByText('Capture is off.')).toBeInTheDocument();
   });
+  it('sends the 24-hour duration unchanged with a slow browser clock and accepts server expiry', async () => {
+    const serverNow = Date.now();
+    const expiry = new Date(serverNow + 86_400_000).toISOString();
+    vi.spyOn(Date, 'now').mockReturnValue(serverNow - 120_000);
+    const writes: unknown[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        if (init?.method === 'PUT') {
+          writes.push(JSON.parse(String(init.body)));
+          return { ok: true, json: async () => ({ until: expiry }) };
+        }
+        return { ok: true, json: async () => ({ until: null }) };
+      })
+    );
+    render(<ModelCaptureSettings csrfToken="csrf" />);
+    await screen.findByText('Capture is off.');
+    fireEvent.click(screen.getByLabelText(/Capture duration/));
+    fireEvent.click(await screen.findByRole('option', { name: '24 hours', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start capture' }));
+    await waitFor(() => expect(writes).toEqual([{ durationMs: 86_400_000 }]));
+    expect(
+      await screen.findByText(`Capture is on until ${new Date(expiry).toLocaleString()}.`)
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
   it('shows expired capture as off and does not allow saving when loading fails', async () => {
-    const fetch = vi
-      .fn()
-      .mockResolvedValue({
-        ok: true,
-        json: async () => ({ until: new Date(Date.now() - 1).toISOString() }),
-      });
+    const fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ until: new Date(Date.now() - 1).toISOString() }),
+    });
     vi.stubGlobal('fetch', fetch);
     const first = render(<ModelCaptureSettings csrfToken="csrf" />);
     expect(await screen.findByText('Capture is off.')).toBeInTheDocument();

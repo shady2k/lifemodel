@@ -12,7 +12,8 @@ import {
 } from '@kit/components/ui/select';
 import {
   isCaptureEnabled,
-  validateCaptureSetting,
+  validateCaptureSettingResponse,
+  type ModelCaptureRequest,
   type ModelCaptureSetting,
 } from '../../../loader/src/model-capture-setting.js';
 
@@ -31,7 +32,7 @@ export function ModelCaptureSettings({ csrfToken }: { csrfToken: string }) {
     void fetch('/api/model-capture', { cache: 'no-store' })
       .then(async (response) => {
         if (!response.ok) throw new Error('unavailable');
-        const value = validateCaptureSetting(await response.json());
+        const value = validateCaptureSettingResponse(await response.json());
         if (active) {
           setSetting(value);
           setSession(value.session ?? '');
@@ -59,10 +60,10 @@ export function ModelCaptureSettings({ csrfToken }: { csrfToken: string }) {
   async function save(off = false) {
     setBusy(true);
     setError('');
-    const value: ModelCaptureSetting = off
-      ? { until: null }
+    const value: ModelCaptureRequest = off
+      ? { durationMs: null }
       : {
-          until: new Date(Date.now() + Number(duration)).toISOString(),
+          durationMs: Number(duration),
           ...(session.trim() ? { session: session.trim() } : {}),
         };
     try {
@@ -72,7 +73,7 @@ export function ModelCaptureSettings({ csrfToken }: { csrfToken: string }) {
         body: JSON.stringify(value),
       });
       if (!response.ok) throw new Error('unavailable');
-      setSetting(validateCaptureSetting(await response.json()));
+      setSetting(validateCaptureSettingResponse(await response.json()));
       setNow(Date.now());
     } catch {
       setError('captureSaveFailed');

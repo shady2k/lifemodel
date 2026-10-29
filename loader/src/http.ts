@@ -2,6 +2,7 @@
 import { randomBytes } from 'node:crypto';
 import {
   activeCaptureSetting,
+  captureSettingFromRequest,
   CaptureSettingError,
   validateCaptureSetting,
   type ModelCaptureSetting,
@@ -750,7 +751,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
           return;
         }
         try {
-          const value = validateCaptureSetting(payload, clock.now(), true);
+          const value = captureSettingFromRequest(payload, clock.now());
           if (!deps.modelCapture) throw new Error('unavailable');
           await deps.modelCapture.write(value);
           json(200, value);

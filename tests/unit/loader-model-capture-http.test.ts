@@ -123,23 +123,40 @@ describe('capture setting HTTP boundary', () => {
     expect(initial.headers['cache-control']).toBe('no-store');
     expect(JSON.parse(initial.body)).toEqual({ until: null });
     const setting = { until: new Date(f.clock.now() + 600_000).toISOString(), session: 'chat-1' };
-    expect((await f.request('/api/model-capture', 'PUT', setting)).status).toBe(200);
+    expect(
+      (await f.request('/api/model-capture', 'PUT', { durationMs: 600_000, session: 'chat-1' }))
+        .status
+    ).toBe(200);
     expect(f.setting).toEqual(setting);
     expect(JSON.parse((await f.request('/api/model-capture')).body)).toEqual(setting);
     f.clock.advance(600_000);
     expect(JSON.parse((await f.request('/api/model-capture')).body)).toEqual({ until: null });
-    expect((await f.request('/api/model-capture', 'PUT', { until: null })).status).toBe(200);
+    expect((await f.request('/api/model-capture', 'PUT', { durationMs: null })).status).toBe(200);
     expect(f.writes.at(-1)).toEqual({ until: null });
   });
-  it('rejects indefinite, expired, over-24h and malformed session settings before storage', async () => {
+  it('sets a full 24-hour expiry from server time, returns it and stores no duration', async () => {
+    const f = await fixture();
+    const expected = { until: new Date(f.clock.now() + 86_400_000).toISOString() };
+    const response = await f.request('/api/model-capture', 'PUT', { durationMs: 86_400_000 });
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body)).toEqual(expected);
+    expect(f.writes).toEqual([expected]);
+    expect(JSON.parse((await f.request('/api/model-capture')).body)).toEqual(expected);
+  });
+  it('rejects indefinite, nonpositive, over-24h and malformed session requests before storage', async () => {
     const f = await fixture();
     for (const value of [
       {},
-      { until: 'bad' },
-      { until: new Date(f.clock.now()).toISOString() },
-      { until: new Date(f.clock.now() + 86_400_001).toISOString() },
-      { until: new Date(f.clock.now() + 600_000).toISOString(), session: 'bad session' },
-      { until: null, extra: true },
+      { durationMs: '600000' },
+      { durationMs: 0 },
+      { durationMs: -1 },
+      { durationMs: 86_400_001 },
+      { durationMs: 600_000, session: 'bad session' },
+      { durationMs: null, session: 'chat-1' },
+      { durationMs: null, extra: true },
+      { until: null },
+      { until: new Date(f.clock.now() + 600_000).toISOString() },
+      { durationMs: 600_000, until: new Date(f.clock.now() + 600_000).toISOString() },
     ]) {
       const response = await f.request('/api/model-capture', 'PUT', value);
       expect(response.status).toBe(400);
@@ -151,9 +168,9 @@ describe('capture setting HTTP boundary', () => {
     ['read authentication', 'GET', undefined, { cookie: '' }, 403],
     ['read origin', 'GET', undefined, { origin: 'https://attacker.example' }, 403],
     ['read fetch site', 'GET', undefined, { 'sec-fetch-site': 'cross-site' }, 403],
-    ['write authentication', 'PUT', { until: null }, { cookie: '' }, 401],
-    ['write CSRF', 'PUT', { until: null }, { 'x-csrf-token': '' }, 403],
-    ['write origin', 'PUT', { until: null }, { origin: 'https://attacker.example' }, 403],
+    ['write authentication', 'PUT', { durationMs: null }, { cookie: '' }, 401],
+    ['write CSRF', 'PUT', { durationMs: null }, { 'x-csrf-token': '' }, 403],
+    ['write origin', 'PUT', { durationMs: null }, { origin: 'https://attacker.example' }, 403],
     ['JSON content type', 'PUT', {}, { 'content-type': 'text/plain' }, 415],
     ['POST method', 'POST', {}, {}, 405],
     ['DELETE method', 'DELETE', {}, {}, 405],
@@ -166,7 +183,7 @@ describe('capture setting HTTP boundary', () => {
   it('returns bounded storage errors, never private exception text', async () => {
     const f = await fixture(true);
     const read = await f.request('/api/model-capture');
-    const write = await f.request('/api/model-capture', 'PUT', { until: null });
+    const write = await f.request('/api/model-capture', 'PUT', { durationMs: null });
     expect(read.status).toBe(503);
     expect(write.status).toBe(503);
     expect(read.body + write.body + JSON.stringify(f.logs)).not.toContain('PRIVATE_STORAGE_ERROR');

@@ -317,17 +317,23 @@ Serves: lifemodel-z1bh.
 A model-call span's `lifemodel.call_id` links to an optional gateway capture.
 Enable a time-limited capture on the loader's model page, send a message, then
 run `lifemodel doctor exchange <call_id>` (or `exchange last [N]`). Each attempt
-shows the inbound method/path/headers/body, actual upstream URL/headers/body,
-upstream status/headers/body and timing. The gateway never forwards the call-id
+shows its metadata and timing, then all three sections' status and headers before
+any body: inbound method/path/headers, actual upstream URL/method/headers, and
+response status/headers. The inbound, upstream and response bodies follow, each
+capped separately at 262,144 serialized characters with its own truncation marker.
+Use `lifemodel doctor exchange <call_id> --headers-only` (or
+`exchange last [N] --headers-only`) to omit all three bodies. The gateway never forwards the call-id
 header upstream. Streams are observed alongside delivery, not buffered behind
 the capture writer. Rejections and reserve attempts have separate rows.
 
 Capture is off by default and stores personal conversation text on this
 machine. It redacts credentials before queueing, caps each body at 1 MiB,
 marks truncation with original bytes, and retains at most 100 MiB/24 hours.
-The capture-only database login can execute only append/prune functions;
-the doctor's reader role can select only the age-filtered view. The doctor
-strips control characters and bounds output. See
+The capture-only database login can execute only append/prune functions.
+Doctor uses the core's existing owner connection in a read-only transaction and
+queries `observability.model_exchanges` with a 24-hour age filter; it uses no
+separate reader role or view. The doctor strips control characters and bounds
+output. See
 [settings](../instance/settings.md#time-limited-model-exchange-capture) for
 redaction, queue limits, expiry and the optional exact-session filter. Dropped
 capture evidence never changes the model-call outcome.

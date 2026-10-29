@@ -68,7 +68,7 @@ function help() {
   console.log(`Usage: lifemodel doctor [--repin previous|clear]
        lifemodel doctor trace <trace_id | last [N]>
        lifemodel doctor llm [N]
-       lifemodel doctor exchange <call_id | last [N]>
+       lifemodel doctor exchange <call_id | last [N]> [--headers-only]
        lifemodel address
        lifemodel --help
 
@@ -539,23 +539,33 @@ const llmQuery = storeScript(`
       [request.limit])).rows;
 `);
 
-// The role can select only the age-filtered capture view, never append/prune.
+// Doctor uses the core's existing owner connection in a read-only transaction.
+// Filter age here: expired rows stay hidden even before the next writer prune.
 const exchangeQuery = storeScript(`
-    await client.query('SET LOCAL ROLE lifemodel_capture_reader');
     const rows = (await client.query(
-      'SELECT * FROM observability.recent_model_exchanges WHERE ($1::text IS NULL OR call_id=$1) ORDER BY created_at DESC,call_id DESC,attempt DESC,slot DESC LIMIT $2',
+      "SELECT * FROM observability.model_exchanges WHERE created_at >= clock_timestamp() - interval '24 hours' AND ($1::text IS NULL OR call_id=$1) ORDER BY created_at DESC,call_id DESC,attempt DESC,slot DESC LIMIT $2",
       [request.id ?? null, request.limit + 1])).rows;
     return {
       truncated: rows.length > request.limit,
       rows: rows.slice(0, request.limit).map(({ exchange, ...row }) => {
-        const text = JSON.stringify(exchange, null, 2);
-        return { ...row, text: text.slice(0, 262144), truncated: text.length > 262144 };
+        const { inbound, upstream, response, ...metadata } = exchange;
+        const sections = Object.entries({ inbound, upstream, response }).map(([name, value]) => {
+          const { body, ...details } = value ?? {};
+          // Cap each serialized body separately, before transport to the host.
+          const text = request.headersOnly ? undefined : JSON.stringify(body ?? null, null, 2);
+          return { name, details, text: text?.slice(0, 262144), truncated: (text?.length ?? 0) > 262144 };
+        });
+        return { ...row, metadata, sections };
       }),
     };
 `);
 
 function doctorExchange(args) {
   const print = (text) => writeFileSync(1, `${text}\n`);
+  const headersOnly = args.includes('--headers-only');
+  if (args.filter((arg) => arg === '--headers-only').length > 1)
+    throw new Error('exchange accepts --headers-only once');
+  args = args.filter((arg) => arg !== '--headers-only');
   let request;
   if (args[0] === 'last' && args.length <= 2) {
     const limit = args[1] === undefined ? 1 : Number(args[1]);
@@ -564,10 +574,11 @@ function doctorExchange(args) {
     request = { limit };
   } else if (args.length === 1 && /^[A-Za-z0-9_-]{1,128}$/.test(args[0])) {
     request = { id: args[0], limit: 20 };
-  } else throw new Error('Usage: lifemodel doctor exchange <call_id | last [N]>');
+  } else throw new Error('Usage: lifemodel doctor exchange <call_id | last [N]> [--headers-only]');
+  request.headersOnly = headersOnly;
   let result;
   try {
-    result = readStore(exchangeQuery, request);
+    result = readStore(exchangeQuery, request, 64 * 1024 * 1024);
   } catch {
     console.error('Exchange store unavailable. The core pod and capture schema must be available.');
     return 1;
@@ -580,20 +591,25 @@ function doctorExchange(args) {
     print(
       `exchange call=${safe(row.call_id)} attempt=${safe(row.attempt)} slot=${safe(row.slot)} task=${dash(row.task_id)} session=${dash(row.session_id)} time=${safe(row.created_at)} bytes=${safe(row.size_bytes)}`
     );
-    // Pretty JSON preserves body/header boundaries and escapes terminal control
-    // sequences. Strip actual controls too; bound output to 256 KiB per row.
-    print(
-      String(row.text)
-        .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ' ')
-        .slice(0, 262144)
-    );
-    if (row.truncated) print('(exchange display truncated at 262144 characters)');
+    // All metadata, statuses and headers precede every body, so a large prompt
+    // cannot hide upstream settings or response headers. JSON escapes controls.
+    print(`  metadata: ${JSON.stringify(row.metadata, null, 2)}`);
+    for (const section of row.sections)
+      print(`  ${section.name}: ${JSON.stringify(section.details, null, 2)}`);
+    if (!headersOnly) {
+      for (const section of row.sections) {
+        print(`  ${section.name}.body:`);
+        print(String(section.text).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ' '));
+        if (section.truncated)
+          print(`(${section.name} body display truncated at 262144 characters)`);
+      }
+    }
   }
   if (result.truncated) print('(exchange count truncated)');
   return 0;
 }
 
-function readStore(script, request) {
+function readStore(script, request, maxBuffer = 16 * 1024 * 1024) {
   return JSON.parse(
     execFileSync(
       kubectl[0],
@@ -615,7 +631,7 @@ function readStore(script, request) {
       {
         encoding: 'utf8',
         timeout: 15000,
-        maxBuffer: 16 * 1024 * 1024,
+        maxBuffer,
         stdio: ['ignore', 'pipe', 'pipe'],
       }
     )

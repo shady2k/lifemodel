@@ -81,7 +81,7 @@ describe('doctor exchange readback', () => {
   afterAll(async () => {
     await Promise.all([stores.postgres.end(), stores.redis.quit()]);
   });
-  it('prints each attempt, headers, bodies, timings and the model call id through a SELECT-only role', () => {
+  it('prints each attempt, headers, bodies, timings and call id through a read-only owner query', () => {
     const result = run(['call_fixture']);
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(
@@ -101,7 +101,10 @@ describe('doctor exchange readback', () => {
     ])
       expect(result.stdout).toContain(text);
     expect(result.stdout).not.toContain('\u001b');
-    expect(result.calls()).toContain('SET LOCAL ROLE lifemodel_capture_reader');
+    expect(result.calls()).toContain('FROM observability.model_exchanges');
+    expect(result.calls()).toContain("created_at >= clock_timestamp() - interval '24 hours'");
+    expect(result.calls()).not.toContain('SET LOCAL ROLE');
+    expect(result.calls()).not.toContain('recent_model_exchanges');
     expect(result.calls()).toContain('BEGIN READ ONLY');
     expect(result.calls()).not.toContain('get secrets');
   });
@@ -113,15 +116,90 @@ describe('doctor exchange readback', () => {
     expect(result.stdout).toContain('(exchange count truncated)');
     expect(run(['expired']).stdout).toContain('No model exchanges recorded');
   });
-  it('bounds body output and marks truncation', async () => {
+  it('prints all headers and statuses before separately capped bodies', async () => {
     await stores.postgres.query(
       `SELECT observability.append_model_exchange('large',1,'primary',NULL,NULL,$1,now()+interval '1 hour')`,
-      [{ response: { body: 'x'.repeat(300000) } }]
+      [
+        {
+          inbound: {
+            method: 'POST',
+            path: '/v1/chat/completions',
+            headers: { 'x-inbound': 'inbound-header' },
+            body: 'INBOUND-START' + 'i'.repeat(300000) + 'INBOUND-END',
+          },
+          upstream: {
+            url: 'https://upstream.test/v1/chat/completions',
+            method: 'POST',
+            headers: { 'x-upstream': 'upstream-header' },
+            body: '{"reasoning_effort":"none","content":"' + 'u'.repeat(300000) + 'UPSTREAM-END"}',
+          },
+          response: {
+            status: 200,
+            headers: { 'x-cache': 'HIT' },
+            body: 'RESPONSE-START' + 'r'.repeat(300000) + 'RESPONSE-END',
+          },
+          timing: { firstByteMs: 4, durationMs: 10 },
+        },
+      ]
     );
     const result = run(['large']);
     expect(result.status).toBe(0);
-    expect(result.stdout.length).toBeLessThan(264000);
-    expect(result.stdout).toContain('(exchange display truncated at 262144 characters)');
+    expect(result.stdout.length).toBeLessThan(3 * 262144 + 3000);
+    const firstBody = result.stdout.indexOf('  inbound.body:');
+    expect(firstBody).toBeGreaterThan(0);
+    for (const text of [
+      'inbound-header',
+      'upstream-header',
+      '"status": 200',
+      'x-cache',
+      'HIT',
+      'timing',
+    ]) {
+      expect(result.stdout.slice(0, firstBody)).toContain(text);
+    }
+    expect(result.stdout).toContain('reasoning_effort');
+    expect(result.stdout).toContain('none');
+    for (const section of ['inbound', 'upstream', 'response']) {
+      expect(result.stdout).toContain(`(${section} body display truncated at 262144 characters)`);
+      const body = result.stdout.split(`  ${section}.body:\n`)[1]?.split(`\n(${section} body`)[0];
+      expect(body).toHaveLength(262144);
+      expect(result.stdout).not.toContain(`${section.toUpperCase()}-END`);
+    }
+    const headersOnly = run(['large', '--headers-only']);
+    expect(headersOnly.status).toBe(0);
+    expect(headersOnly.stdout.length).toBeLessThan(3000);
+    for (const text of [
+      'inbound-header',
+      'upstream-header',
+      '"status": 200',
+      'x-cache',
+      'HIT',
+      'timing',
+    ])
+      expect(headersOnly.stdout).toContain(text);
+    for (const text of [
+      '.body:',
+      'INBOUND-START',
+      'reasoning_effort',
+      'RESPONSE-START',
+      'truncated',
+    ])
+      expect(headersOnly.stdout).not.toContain(text);
+  });
+  it('supports headers-only with last and call-id selectors', () => {
+    for (const args of [
+      ['call_fixture', '--headers-only'],
+      ['--headers-only', 'call_fixture'],
+      ['last', '1', '--headers-only'],
+    ]) {
+      const result = run(args);
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('call=');
+      expect(result.stdout).toContain('x-cache');
+      expect(result.stdout).not.toContain('.body:');
+      expect(result.stdout).not.toContain('caller body');
+    }
+    expect(run(['expired', '--headers-only']).stdout).toContain('No model exchanges recorded');
   });
   it('rejects invalid input and never prints database or kubectl errors', () => {
     for (const args of [
@@ -131,6 +209,9 @@ describe('doctor exchange readback', () => {
       ['last', '1.5'],
       ['bad;SQL'],
       ['call_fixture', 'extra'],
+      ['call_fixture', '--unknown'],
+      ['call_fixture', '--headers-only', '--headers-only'],
+      ['--headers-only'],
     ])
       expect(run(args).status).toBe(1);
     const result = run(['last'], true);
@@ -142,5 +223,6 @@ describe('doctor exchange readback', () => {
     const result = spawnSync(process.execPath, [cli, '--help'], { encoding: 'utf8' });
     expect(result.stdout).toContain('lifemodel doctor exchange <call_id | last [N]>');
     expect(result.stdout).toContain('call id printed by doctor llm');
+    expect(result.stdout).toContain('[--headers-only]');
   });
 });
