@@ -124,7 +124,7 @@ describe('task cleanup trace routing', () => {
     }
   });
 
-  it('shares one bounded production trace writer before finalizer startup and outside channel TLS', () => {
+  it('shares one bounded trace writer before finalizer startup, model wiring and channel TLS', () => {
     const source = readFileSync('src/core/container.ts', 'utf8');
     const initialization = source.indexOf('traces = createPostgresTraceStore({');
     expect(initialization).toBeGreaterThan(0);
@@ -132,21 +132,23 @@ describe('task cleanup trace routing', () => {
     expect(initialization).toBeLessThan(
       source.indexOf('if (!mergedConfig.motorCortex.enabled && channelTlsDir) {')
     );
+    // One writer, created whether or not the task channel exists, before the
+    // provider that records model calls into it (lifemodel-d4t8).
     expect(source.match(/traces = createPostgresTraceStore\(/g)).toHaveLength(1);
+    expect(initialization).toBeLessThan(
+      source.indexOf('createLLMProvider(llmConfig, logger, traces)')
+    );
+    expect(initialization).toBeLessThan(
+      source.indexOf('if (!mergedConfig.motorCortex.enabled && controlTokenFile')
+    );
     expect(source).toContain('knownSecrets: [');
     expect(source).toContain('rawPostgres.options.password');
-    expect(
-      source.match(
-        /createKubernetesTaskExecutor\(\{\s*\.\.\.\(traces \? \{ traces \} : \{\}\),?\s*\}\)/g
-      )
-    ).toHaveLength(2);
-    expect(source).toContain('traces?.enqueue({');
+    expect(source.match(/createKubernetesTaskExecutor\(\{ traces \}\)/g)).toHaveLength(2);
+    expect(source).toContain('traces.enqueue({');
     expect(source).toMatch(
       /const tracePool = new Pool\(\{[^}]*max: 1,[^}]*application_name: 'lifemodel-observability'/
     );
-    expect(source).toContain('await traceStore.close(deadline, signal);');
-    expect(source).toContain(
-      'const taskTraceDrain = stopTaskTraces?.(deadline, traceStop.signal);'
-    );
+    expect(source).toContain('await traces.close(deadline, signal);');
+    expect(source).toContain('const taskTraceDrain = stopTaskTraces(deadline, traceStop.signal);');
   });
 });

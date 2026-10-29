@@ -233,6 +233,10 @@ Created at runtime relative to the working directory; the root is `data/`
   and results pretty-printed, responses unwrapped from their JSON envelope;
   the file comes from `src/core/logger.ts`, the entries from
   `src/llm/provider.ts`
+- Every model call writes one span (component `llm`, GenAI attribute names,
+  tokens, slot, effort, prefix fingerprints) into `observability.trace_spans`;
+  read it with `lifemodel doctor trace <id>` and `lifemodel doctor llm [N]`
+  (`docs/features/motor/observability.md`).
 - Persistent state lives in its declared store: the tick snapshot, bus offsets and inbound/outbound streams live in Valkey; conversations, memory, soul, registries, plugin settings, schedules and configuration live in Postgres. `DATA_PATH` is not a persistent-state store and the core must start when it is read-only. In the cluster, logs go to stdout (`kubectl logs`), and the ONNX model is baked into the core image at `/opt/model-cache` and read in place. Motor Cortex and its skill/workspace/run directories are disabled in the cluster (`MOTOR_CORTEX_ENABLED=false`) and move with lifemodel-653; when disabled, they must not create `data/skills`, `data/motor-runs` or `data/models`. Back up the stores before destructive recovery; logs and stores hold personal messages and tool content.
 
 ## Debugging unexpected agent output
@@ -244,14 +248,18 @@ below is what that code writes today.
 1. Find the newest logs: `ls -t data/logs/agent-*.log | head -3`
 2. Find the exchange: search the conversation log for the bad output text,
    or by timestamp. Conversation lines carry a `[traceId:spanId]` prefix
-   only when trace context reaches the logger — a cognition turn runs
-   outside it, so a prefix is often missing there; the trace id is
-   shortened to its first 8 characters when present.
+   only when trace context reaches the logger — a cognition turn runs under
+   the trace of the signal that woke it, so its prefix names that signal;
+   the trace id is shortened to its first 8 characters when present.
 3. Trace the chain: with `LOG_LEVEL=debug`, the agent log holds the LLM
    request summaries, responses and post-processing. Follow the trace id
    seen in the conversation log, or the tick's id as `correlationId` (a
    cognition wake is traced from its trigger signal; the tick id links, it
-   does not root), or fall back to the same timestamp window.
+   does not root), or fall back to the same timestamp window. That signal's
+   trace is the whole turn: its model calls, a task the turn started (the
+   `core.startTask` tool reads the current trace context, so the run's pod
+   spans join it) and the trace reference in the agentic loop's apology text
+   all name it, and `lifemodel doctor trace <id>` reads them together.
 
 Conversation log format (schematic; written by `src/llm/provider.ts`). One
 log entry carries a whole request or response block, so the

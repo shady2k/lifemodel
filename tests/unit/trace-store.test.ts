@@ -36,7 +36,17 @@ function openSpan(traceId: string): TraceRecord {
   }
   return record;
 }
-const noRetention = { maxAgeDays: null, maxTraces: null, maxBytes: null };
+function modelCallSpan(traceId: string, spanId = 'chat_1'): TraceRecord {
+  const record = span(traceId, spanId);
+  if (record.kind === 'span') record.span.component = 'llm';
+  return record;
+}
+const noRetention = {
+  maxAgeDays: null,
+  maxTraces: null,
+  maxBytes: null,
+  maxModelCallTraces: null,
+};
 
 describe('bounded disposable trace queue', () => {
   it('counts full and closed drops synchronously without consulting Postgres', async () => {
@@ -548,6 +558,22 @@ describe('Postgres trace persistence and whole-trace retention', () => {
       (await stores.postgres.query('SELECT count(*)::int AS n FROM observability.trace_events'))
         .rows[0]['n']
     ).toBe(0);
+  });
+
+  it('bounds model-call traces apart from task evidence so turns cannot evict a run', async () => {
+    // Two task traces keep the whole task budget; the model-call traces have
+    // their own bound, so a chatty core evicts its own calls, not a run.
+    const store = writer(
+      { maxAgeDays: null, maxTraces: 2, maxBytes: null, maxModelCallTraces: 2 },
+      { pruneEveryBatches: 1 }
+    );
+    store.enqueue(span('task-a'));
+    store.enqueue(span('task-b'));
+    store.enqueue(modelCallSpan('call-1'));
+    store.enqueue(modelCallSpan('call-2'));
+    store.enqueue(modelCallSpan('call-3'));
+    await store.flush();
+    expect(await ids()).toEqual(['call-2', 'call-3', 'task-a', 'task-b']);
   });
 
   it('prunes on the first batch even when the periodic cadence is not reached', async () => {

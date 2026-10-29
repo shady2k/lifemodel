@@ -67,6 +67,7 @@ function address() {
 function help() {
   console.log(`Usage: lifemodel doctor [--repin previous|clear]
        lifemodel doctor trace <trace_id | last [N]>
+       lifemodel doctor llm [N]
        lifemodel address
        lifemodel --help
 
@@ -489,7 +490,10 @@ function report() {
 }
 // Runs in the existing core container. Credentials stay in its environment and
 // are never fetched as Kubernetes Secrets or printed by the operator command.
-const traceQuery = `
+// Both readers share this prologue: a read-only transaction, a bound parameter
+// and a fixed unavailable message; the body returns what it read.
+function storeScript(body) {
+  return `
 import pg from 'pg';
 const request = JSON.parse(Buffer.from(process.argv[1], 'base64').toString('utf8'));
 const e = encodeURIComponent;
@@ -502,6 +506,16 @@ try {
   try {
     await client.query('BEGIN READ ONLY');
     await client.query("SET LOCAL statement_timeout = '5s'");
+    const result = await (async (client, request) => {${body}})(client, request);
+    await client.query('COMMIT');
+    process.stdout.write(JSON.stringify(result));
+  } finally { client.release(); }
+} catch { process.stderr.write('store unavailable\\n'); process.exitCode=1; }
+finally { await pool.end(); }
+`;
+}
+
+const traceQuery = storeScript(`
     const ids = request.id ? [request.id] : (await client.query(
       'SELECT trace_id FROM (SELECT trace_id,started_at AS ts FROM observability.trace_spans UNION ALL SELECT trace_id,ts FROM observability.trace_events) records GROUP BY trace_id ORDER BY min(ts) DESC,trace_id DESC LIMIT $1',
       [request.last])).rows.map(r => r.trace_id);
@@ -511,12 +525,154 @@ try {
       const events = (await client.query('SELECT * FROM observability.trace_events WHERE trace_id=$1 ORDER BY ts,record_id LIMIT 10001',[id])).rows;
       traces.push({id,spans:spans.slice(0,10000),events:events.slice(0,10000),truncated:spans.length>10000||events.length>10000});
     }
-    await client.query('COMMIT');
-    process.stdout.write(JSON.stringify(traces));
-  } finally { client.release(); }
-} catch { process.stderr.write('trace store unavailable\\n'); process.exitCode=1; }
-finally { await pool.end(); }
-`;
+    return traces;
+`);
+
+// Recent model calls (lifemodel-d4t8), newest first. The span component and the
+// call id are what make a row a model call; nothing else is guessed.
+const llmQuery = storeScript(`
+    return (await client.query(
+      "SELECT trace_id,span_id,started_at,ended_at,status,attrs FROM observability.trace_spans WHERE component='llm' AND attrs ? 'lifemodel.call_id' ORDER BY started_at DESC,span_id DESC LIMIT $1",
+      [request.limit])).rows;
+`);
+
+function readStore(script, request) {
+  return JSON.parse(
+    execFileSync(
+      kubectl[0],
+      [
+        ...kubectl.slice(1),
+        'exec',
+        '-n',
+        'lifemodel',
+        'core-0',
+        '-c',
+        'core',
+        '--',
+        'node',
+        '--input-type=module',
+        '-e',
+        script,
+        Buffer.from(JSON.stringify(request)).toString('base64'),
+      ],
+      {
+        encoding: 'utf8',
+        timeout: 15000,
+        maxBuffer: 16 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    )
+  );
+}
+
+function storeUnavailable() {
+  console.error(
+    'Trace store unavailable. The core pod and observability schema must be available.'
+  );
+}
+
+function safe(value) {
+  return String(value)
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')
+    .slice(0, 1000);
+}
+
+function fields(bag) {
+  return Object.entries(bag || {})
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${safe(key)}=${safe(JSON.stringify(value))}`)
+    .join(' ');
+}
+
+// A model call's attribute names follow the GenAI semantic conventions plus
+// lifemodel's own facts; the reader names them in the operator's words.
+const LLM_FACTS = [
+  ['name', 'span.name', true],
+  ['role', 'lifemodel.role'],
+  ['trigger', 'lifemodel.trigger_type'],
+  ['model', 'gen_ai.request.model'],
+  ['served', 'gen_ai.response.model'],
+  ['slot', 'lifemodel.slot'],
+  ['effort', 'lifemodel.request.reasoning_effort'],
+  ['in', 'gen_ai.usage.input_tokens'],
+  ['cached', 'gen_ai.usage.cache_read.input_tokens'],
+  ['out', 'gen_ai.usage.output_tokens'],
+  ['reasoning', 'gen_ai.usage.reasoning.output_tokens'],
+  ['http', 'lifemodel.http.status'],
+  ['attempt', 'lifemodel.attempt'],
+  ['error', 'lifemodel.error_code'],
+  ['call', 'lifemodel.call_id'],
+];
+const LLM_PREFIXES = ['system', 'tools', 'history', 'context'];
+
+function dash(value) {
+  return value === undefined || value === null ? '-' : safe(JSON.stringify(value)).replace(/^"|"$/g, '');
+}
+
+// "system=ab12cd34/4800": which part of the prompt, and how big it was. A
+// dash means the part was not present, so a cache miss is read as "history
+// changed" rather than guessed.
+function llmPrefixes(attrs) {
+  return LLM_PREFIXES.map((part) => {
+    const hash = attrs[`lifemodel.prefix.${part}.hash`];
+    const size = attrs[`lifemodel.prefix.${part}.size`];
+    return `${part}=${hash === undefined ? '-' : safe(String(hash)).slice(0, 8)}/${dash(size)}`;
+  }).join(' ');
+}
+
+function llmFacts(attrs) {
+  return LLM_FACTS.map(([label, key, quoted]) => {
+    const value = attrs[key];
+    if (value === undefined || value === null) return `${label}=-`;
+    return `${label}=${quoted ? safe(JSON.stringify(value)) : dash(value)}`;
+  }).join(' ');
+}
+
+function llmTokens(attrs) {
+  return [
+    dash(attrs['gen_ai.usage.input_tokens']),
+    dash(attrs['gen_ai.usage.cache_read.input_tokens']),
+    dash(attrs['gen_ai.usage.output_tokens']),
+    dash(attrs['gen_ai.usage.reasoning.output_tokens']),
+  ].join('/');
+}
+
+function renderSpan(span, depth, trace, emitted) {
+  const indent = '  '.repeat(Math.min(depth, 32));
+  const status = span.ended_at && span.status ? span.status : 'incomplete';
+  const duration = span.ended_at
+    ? `${Math.max(0, Date.parse(span.ended_at) - Date.parse(span.started_at))}ms`
+    : 'open';
+  if (span.component === 'llm') {
+    // A model call has more attributes than a line can hold: the facts an
+    // operator asks for first, then which prefix part changed, then the rest.
+    const attrs = span.attrs || {};
+    console.log(
+      `${indent}llm [${safe(status)}] ${duration} span=${safe(span.span_id)} ${llmFacts(attrs)}`.trimEnd()
+    );
+    console.log(`${indent}    prefix ${llmPrefixes(attrs)}`.trimEnd());
+    const known = new Set([
+      ...LLM_FACTS.map(([, key]) => key),
+      'lifemodel.duration_ms',
+      'lifemodel.message_count',
+      'lifemodel.tool_count',
+    ]);
+    const rest = Object.fromEntries(
+      Object.entries(attrs).filter(
+        ([key]) => !known.has(key) && !key.startsWith('lifemodel.prefix.')
+      )
+    );
+    if (Object.keys(rest).length) console.log(`${indent}    ${fields(rest)}`.trimEnd());
+  } else {
+    console.log(
+      `${indent}${safe(span.component)} [${safe(status)}] ${duration} span=${safe(span.span_id)} ${fields(span.attrs)}`.trimEnd()
+    );
+  }
+  for (const event of trace.events.filter((event) => event.span_id === span.span_id)) {
+    emitted.add(event.record_id);
+    console.log(`${indent}  · ${safe(event.event)} ${fields(event.fields)}`.trimEnd());
+  }
+}
 
 function doctorTrace(args) {
   let request;
@@ -530,51 +686,15 @@ function doctorTrace(args) {
   } else throw new Error('Usage: lifemodel doctor trace <trace_id | last [N]>');
   let traces;
   try {
-    traces = JSON.parse(
-      execFileSync(
-        kubectl[0],
-        [
-          ...kubectl.slice(1),
-          'exec',
-          '-n',
-          'lifemodel',
-          'core-0',
-          '-c',
-          'core',
-          '--',
-          'node',
-          '--input-type=module',
-          '-e',
-          traceQuery,
-          Buffer.from(JSON.stringify(request)).toString('base64'),
-        ],
-        {
-          encoding: 'utf8',
-          timeout: 15000,
-          maxBuffer: 16 * 1024 * 1024,
-          stdio: ['ignore', 'pipe', 'pipe'],
-        }
-      )
-    );
+    traces = readStore(traceQuery, request);
   } catch {
-    console.error(
-      'Trace store unavailable. The core pod and observability schema must be available.'
-    );
+    storeUnavailable();
     return 1;
   }
   if (!traces.length) {
     console.log('No traces recorded.');
     return 0;
   }
-  const safe = (value) =>
-    String(value)
-      .replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')
-      .slice(0, 1000);
-  const fields = (bag) =>
-    Object.entries(bag || {})
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, value]) => `${safe(key)}=${safe(JSON.stringify(value))}`)
-      .join(' ');
   for (const trace of traces) {
     console.log(`trace ${safe(trace.id)}`);
     if (!trace.spans.length && !trace.events.length) console.log('  (no spans or events recorded)');
@@ -589,18 +709,7 @@ function doctorTrace(args) {
         const { span, depth } = stack.pop();
         if (visited.has(span.span_id)) continue;
         visited.add(span.span_id);
-        const indent = '  '.repeat(Math.min(depth, 32));
-        const status = span.ended_at && span.status ? span.status : 'incomplete';
-        const duration = span.ended_at
-          ? `${Math.max(0, Date.parse(span.ended_at) - Date.parse(span.started_at))}ms`
-          : 'open';
-        console.log(
-          `${indent}${safe(span.component)} [${safe(status)}] ${duration} span=${safe(span.span_id)} ${fields(span.attrs)}`.trimEnd()
-        );
-        for (const event of trace.events.filter((event) => event.span_id === span.span_id)) {
-          emitted.add(event.record_id);
-          console.log(`${indent}  · ${safe(event.event)} ${fields(event.fields)}`.trimEnd());
-        }
+        renderSpan(span, depth, trace, emitted);
         const children = trace.spans.filter((child) => child.parent_span_id === span.span_id);
         for (const child of children.reverse()) stack.push({ span: child, depth: depth + 1 });
       }
@@ -617,6 +726,55 @@ function doctorTrace(args) {
           `  · ${safe(event.event)} (missing span ${safe(event.span_id)}) ${fields(event.fields)}`.trimEnd()
         );
     if (trace.truncated) console.log('  (display truncated at 10000 records per table)');
+  }
+  return 0;
+}
+
+// Recent model calls, newest first: what each cost, whether its input was
+// cached, the effort that went out, the slot that answered and which part of
+// the prompt changed (lifemodel-d4t8).
+function doctorLlm(args) {
+  let limit = 10;
+  if (args.length === 1) {
+    limit = Number(args[0]);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 50)
+      throw new Error('llm count must be an integer from 1 to 50');
+  } else if (args.length > 1) throw new Error('Usage: lifemodel doctor llm [N]');
+  let rows;
+  try {
+    rows = readStore(llmQuery, { limit });
+  } catch {
+    storeUnavailable();
+    return 1;
+  }
+  if (!rows.length) {
+    console.log('No model calls recorded.');
+    return 0;
+  }
+  console.log(`recent model calls, newest first (${String(rows.length)})`);
+  console.log('  time role model slot effort in/cached/out/reasoning duration status call');
+  for (const row of rows) {
+    const attrs = row.attrs || {};
+    const status = row.ended_at && row.status ? row.status : 'incomplete';
+    const duration = row.ended_at
+      ? `${Math.max(0, Date.parse(row.ended_at) - Date.parse(row.started_at))}ms`
+      : 'open';
+    console.log(
+      [
+        `  ${safe(new Date(row.started_at).toISOString())}`,
+        dash(attrs['lifemodel.role']),
+        dash(attrs['gen_ai.request.model']),
+        dash(attrs['lifemodel.slot']),
+        dash(attrs['lifemodel.request.reasoning_effort']),
+        llmTokens(attrs),
+        duration,
+        safe(status),
+        `call=${dash(attrs['lifemodel.call_id'])}`,
+      ].join(' ')
+    );
+    console.log(
+      `      http=${dash(attrs['lifemodel.http.status'])} attempt=${dash(attrs['lifemodel.attempt'])} error=${dash(attrs['lifemodel.error_code'])} trigger=${dash(attrs['lifemodel.trigger_type'])} served=${dash(attrs['gen_ai.response.model'])} prefix ${llmPrefixes(attrs)}`
+    );
   }
   return 0;
 }
@@ -777,6 +935,9 @@ try {
   }
   if (args[0] === 'doctor' && args[1] === 'trace') {
     process.exit(doctorTrace(args.slice(2)));
+  }
+  if (args[0] === 'doctor' && args[1] === 'llm') {
+    process.exit(doctorLlm(args.slice(2)));
   }
   if (args.length === 1 && args[0] === 'doctor') {
     locked(args);

@@ -32,6 +32,7 @@ import {
 import { type UserModel, createUserModel, createNewUserWithModel } from '../models/user-model.js';
 import { type MessageComposer, createMessageComposer } from '../llm/composer.js';
 import type { LLMProvider } from '../llm/provider.js';
+import type { ModelCallSpanSink } from '../llm/model-call-span.js';
 import { createVercelAIProvider } from '../plugins/providers/vercel-ai-provider.js';
 import {
   type Storage,
@@ -468,7 +469,8 @@ export interface LLMProviderConfig {
  */
 export function createLLMProvider(
   config: LLMProviderConfig | undefined,
-  logger: Logger
+  logger: Logger,
+  traces?: ModelCallSpanSink
 ): LLMProvider | null {
   const pinned = pinnedModelBaseUrl();
   const endpoint: ModelEndpoint = {
@@ -498,7 +500,8 @@ export function createLLMProvider(
           motorReasoningEffort: endpoint.motorReasoningEffort,
         }),
       },
-      logger
+      logger,
+      traces
     );
     logger.info({ baseUrl: endpoint.baseUrl }, 'Model endpoint configured');
     return provider;
@@ -748,15 +751,77 @@ export async function createContainerAsync(
     logger.info({ userId: primaryRecipientId, userName }, 'UserModel created for primary user');
   }
 
+  // Disposable execution evidence: task-pod facts, the task channel's frames
+  // and every model call's span (lifemodel-d4t8). It is created whenever the
+  // core has its database - a motor-mode core records model calls too - and it
+  // never spends state/owner-intake SQL capacity. Before finalizer.start,
+  // because startup cleanup can delete failed Pods even when the task channel
+  // has no TLS projection yet.
+  const tracePool = new Pool({
+    connectionString: databaseUrl,
+    max: 1,
+    application_name: 'lifemodel-observability',
+    connectionTimeoutMillis: 1000,
+    query_timeout: 2000,
+    statement_timeout: 2000,
+    lock_timeout: 1000,
+  });
+  tracePool.on('error', () => undefined);
+  tracePool.on('connect', (client) => client.on('error', () => undefined));
+  const traces = createPostgresTraceStore({
+    pool: tracePool,
+    knownSecrets: [
+      databaseUrl,
+      ...(typeof rawPostgres.options.password === 'string' ? [rawPostgres.options.password] : []),
+    ],
+  });
+  let traceAuthority: ReturnType<typeof createPostgresTaskMailbox> | undefined;
+  let traceAuthorityPool: Pool | undefined;
+  const stopTaskTraces = async (deadline: number, signal: AbortSignal): Promise<void> => {
+    traceAuthority?.stop();
+    await traces.close(deadline, signal);
+    if (traces.droppedCount)
+      logger.warn(
+        { code: 'trace_records_dropped', count: traces.droppedCount },
+        'Trace records dropped'
+      );
+    // Start disposal even if the cancellation already fired. Checked-out
+    // trace sockets are destroyed by close; late connects destroy themselves.
+    // Never wait for disposable pool shutdown once authoritative work is done.
+    const poolsClosed = Promise.all([traceAuthorityPool?.end(), tracePool.end()]).catch(
+      () => undefined
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    try {
+      await Promise.race([
+        poolsClosed,
+        new Promise<void>((resolveStop) => {
+          onAbort = resolveStop;
+          if (signal.aborted) resolveStop();
+          else signal.addEventListener('abort', onAbort, { once: true });
+          timer = setTimeout(resolveStop, Math.max(0, deadline - Date.now()));
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (onAbort) signal.removeEventListener('abort', onAbort);
+    }
+  };
+
   // Create LLM providers
   const llmConfig = {
     endpoint: configOverrides.llm?.endpoint ?? mergedConfig.llm.endpoint,
   };
-  const reloadableProvider = createReloadableLLMProvider(createLLMProvider(llmConfig, logger));
+  const reloadableProvider = createReloadableLLMProvider(
+    createLLMProvider(llmConfig, logger, traces)
+  );
   const llmProvider = reloadableProvider.provider;
   const reloadConfig = async (): Promise<void> => {
     const refreshed = await configLoader.load();
-    reloadableProvider.replace(createLLMProvider({ endpoint: refreshed.llm.endpoint }, logger));
+    reloadableProvider.replace(
+      createLLMProvider({ endpoint: refreshed.llm.endpoint }, logger, traces)
+    );
     logger.info(
       { baseUrl: refreshed.llm.endpoint.baseUrl },
       'Model endpoint configuration reloaded'
@@ -1295,69 +1360,10 @@ export async function createContainerAsync(
   let taskLaunch: ReturnType<typeof createTaskLaunchReconciler> | undefined;
   let stopTaskFinalizer: ((deadline: number) => Promise<void>) | undefined;
   const taskLaunchController = new AbortController();
-  let stopTaskTraces: ((deadline: number, signal: AbortSignal) => Promise<void>) | undefined;
   let stopTaskChannel: ((deadline: number) => Promise<void>) | undefined;
   let closeTaskCommands: (() => Promise<void>) | undefined;
   let notifyTaskCommands: ((taskId: string) => void) | undefined;
   const channelTlsDir = process.env['LIFEMODEL_TASK_CHANNEL_TLS_DIR'];
-  let traces: ReturnType<typeof createPostgresTraceStore> | undefined;
-  let traceAuthority: ReturnType<typeof createPostgresTaskMailbox> | undefined;
-  let traceAuthorityPool: Pool | undefined;
-  // Initialize before finalizer.start: startup cleanup can delete failed Pods
-  // even when the task channel has no TLS projection yet.
-  if (!mergedConfig.motorCortex.enabled && ((controlTokenFile && controlCaFile) || channelTlsDir)) {
-    // Disposable observations never spend state/owner-intake SQL capacity.
-    const tracePool = new Pool({
-      connectionString: databaseUrl,
-      max: 1,
-      application_name: 'lifemodel-observability',
-      connectionTimeoutMillis: 1000,
-      query_timeout: 2000,
-      statement_timeout: 2000,
-      lock_timeout: 1000,
-    });
-    tracePool.on('error', () => undefined);
-    tracePool.on('connect', (client) => client.on('error', () => undefined));
-    traces = createPostgresTraceStore({
-      pool: tracePool,
-      knownSecrets: [
-        databaseUrl,
-        ...(typeof rawPostgres.options.password === 'string' ? [rawPostgres.options.password] : []),
-      ],
-    });
-    const traceStore = traces;
-    stopTaskTraces = async (deadline, signal) => {
-      traceAuthority?.stop();
-      await traceStore.close(deadline, signal);
-      if (traceStore.droppedCount)
-        logger.warn(
-          { code: 'trace_records_dropped', count: traceStore.droppedCount },
-          'Task trace records dropped'
-        );
-      // Start disposal even if the cancellation already fired. Checked-out
-      // trace sockets are destroyed by close; late connects destroy themselves.
-      // Never wait for disposable pool shutdown once authoritative work is done.
-      const poolsClosed = Promise.all([traceAuthorityPool?.end(), tracePool.end()]).catch(
-        () => undefined
-      );
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      let onAbort: (() => void) | undefined;
-      try {
-        await Promise.race([
-          poolsClosed,
-          new Promise<void>((resolveStop) => {
-            onAbort = resolveStop;
-            if (signal.aborted) resolveStop();
-            else signal.addEventListener('abort', onAbort, { once: true });
-            timer = setTimeout(resolveStop, Math.max(0, deadline - Date.now()));
-          }),
-        ]);
-      } finally {
-        if (timer) clearTimeout(timer);
-        if (onAbort) signal.removeEventListener('abort', onAbort);
-      }
-    };
-  }
   if (!mergedConfig.motorCortex.enabled && controlTokenFile && controlCaFile) {
     const image = taskWorkbenchImage(process.env['LIFEMODEL_TASK_WORKBENCH_IMAGE']);
     const imageRevision = image.slice(image.indexOf('@') + 1);
@@ -1467,9 +1473,7 @@ export async function createContainerAsync(
       pool: finalizerPool,
       epoch: snapshotEpoch,
     });
-    const finalizerExecutor = createKubernetesTaskExecutor({
-      ...(traces ? { traces } : {}),
-    });
+    const finalizerExecutor = createKubernetesTaskExecutor({ traces });
     const finalizer = createTaskFinalizer({
       registry: finalizerRegistry,
       mailbox: finalizerMailbox,
@@ -1495,9 +1499,7 @@ export async function createContainerAsync(
     };
     coreLoop.setTaskReportConsumer((signal) => finalizer.consumeSignal(signal));
     await finalizer.start();
-    const executor = createKubernetesTaskExecutor({
-      ...(traces ? { traces } : {}),
-    });
+    const executor = createKubernetesTaskExecutor({ traces });
     taskLaunch = createTaskLaunchReconciler({
       onCleanup: () => {
         void finalizer.resync();
@@ -1618,7 +1620,7 @@ export async function createContainerAsync(
         readTraceAuthority: (proof, signal) =>
           channelTraceAuthority.readTraceAuthority(proof, signal),
         onTrace: (frame, briefing) => {
-          traces?.enqueue({
+          traces.enqueue({
             kind: 'span',
             span: {
               ...frame.span,
@@ -1716,7 +1718,7 @@ export async function createContainerAsync(
     // Trace drain gets no independent stop budget. It may run only while
     // authoritative work remains, and cannot postpone state-store cleanup.
     const traceStop = new AbortController();
-    const taskTraceDrain = stopTaskTraces?.(deadline, traceStop.signal);
+    const taskTraceDrain = stopTaskTraces(deadline, traceStop.signal);
     outboundDelivery.stop();
     return shutdownSequence({
       logger,

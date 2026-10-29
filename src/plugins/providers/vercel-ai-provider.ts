@@ -18,7 +18,12 @@ import { resolveModelParams } from './model-params.js';
 import { compileTranscript, resolveTranscriptPolicy } from './transcript-compiler.js';
 import { proxyFetch } from '../../utils/proxy-fetch.js';
 import { isReasoningEffort, type ReasoningEffort } from '../../config/reasoning-effort.js';
-import { MODEL_SESSION_HEADER } from '../../config/model-endpoint.js';
+import { MODEL_CALL_HEADER, MODEL_SESSION_HEADER } from '../../config/model-endpoint.js';
+import {
+  observeQuietly,
+  type ModelCallTrace,
+  type ModelCallSpanSink,
+} from '../../llm/model-call-span.js';
 
 // Vercel AI SDK imports
 import { createOpenAI } from '@ai-sdk/openai';
@@ -110,8 +115,8 @@ export class VercelAIProvider extends BaseLLMProvider {
   /** Raw tools to inject via fetch interceptor (workaround for AI SDK schema stripping) */
   private pendingRawTools: Record<string, unknown>[] | null = null;
 
-  constructor(config: VercelAIProviderConfig, logger?: Logger) {
-    super(logger);
+  constructor(config: VercelAIProviderConfig, logger?: Logger, traces?: ModelCallSpanSink) {
+    super(logger, traces);
 
     for (const value of [
       config.fastReasoningEffort,
@@ -185,29 +190,43 @@ export class VercelAIProvider extends BaseLLMProvider {
   private createEndpointFetch(
     signal: AbortSignal,
     sessionId: string | undefined,
-    reasoningEffort: ReasoningEffort | undefined
+    reasoningEffort: ReasoningEffort | undefined,
+    call: ModelCallTrace
   ): typeof globalThis.fetch {
     return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       // Fix outgoing request: replace broken tool schemas with raw tools
       let modifiedInit = init;
-      if (
-        (this.pendingRawTools || reasoningEffort !== undefined) &&
-        init?.body &&
-        typeof init.body === 'string'
-      ) {
+      let sent: Record<string, unknown> | undefined;
+      if (init?.body && typeof init.body === 'string') {
         try {
           const body = JSON.parse(init.body) as Record<string, unknown>;
-          if (this.pendingRawTools && body['tools']) body['tools'] = this.pendingRawTools;
+          let changed = false;
+          if (this.pendingRawTools && body['tools']) {
+            body['tools'] = this.pendingRawTools;
+            changed = true;
+          }
           // Capture effort per request, not on shared mutable provider state.
           // The wire field also supports `none`, regardless of SDK version.
           if (reasoningEffort !== undefined && body['reasoning_effort'] === undefined) {
             body['reasoning_effort'] = reasoningEffort;
+            changed = true;
           }
-          modifiedInit = { ...init, body: JSON.stringify(body) };
+          if (changed) modifiedInit = { ...init, body: JSON.stringify(body) };
+          sent = body;
         } catch {
           // Parse failed — send original body
         }
       }
+      // What is recorded is the body that LEAVES, not what was asked for: the
+      // model, the sampling parameters, the effort the gateway may still
+      // default, the tool set and the request's stable prefix parts. Observing
+      // happens after the body is final and never fails the call, so a
+      // recorder cannot change what is sent.
+      const observed = sent;
+      if (observed)
+        observeQuietly(() => {
+          call.observeRequest(observed);
+        });
       // This attempt's own signal (the timeout aborts the HTTP request itself)
       // and no Authorization header: lifemodel holds no key, and the platform's
       // model gateway injects the real one on its way upstream (ADR-013 D2/D4).
@@ -215,6 +234,10 @@ export class VercelAIProvider extends BaseLLMProvider {
       // The conversation this request belongs to, for the platform gateway to
       // fill a slot's `{session}` header from (ADR-013, custom headers).
       if (sessionId !== undefined) headers.set(MODEL_SESSION_HEADER, sessionId);
+      // This call's own id: the gateway does not forward it upstream, and the
+      // trace span carries it so the gateway's raw capture can be joined to
+      // the call the core made (lifemodel-d4t8).
+      headers.set(MODEL_CALL_HEADER, call.callId);
       modifiedInit = {
         ...(modifiedInit ?? {}),
         signal,
@@ -228,9 +251,16 @@ export class VercelAIProvider extends BaseLLMProvider {
       // ONE shared place (src/utils/proxy-fetch.ts, finding 3); this wrapper
       // keeps only its own jobs - tool-schema repair and reasoning_content.
       const response = await proxyFetch(input, modifiedInit);
+      // The endpoint's answer frame: its status and, in front of the platform's
+      // gateway, the slot that answered (`x-lifemodel-slot`). Recorded for a
+      // failed answer too, which is when the slot matters most.
+      observeQuietly(() => {
+        call.observeResponse(response.status, response.headers);
+      });
       if (!response.ok) return response;
 
-      // Extract reasoning_content from response
+      // Extract reasoning_content and the response model from the endpoint's
+      // own answer, which is the only place the served model is named.
       const cloned = response.clone();
       try {
         const json = (await cloned.json()) as Record<string, unknown>;
@@ -239,6 +269,13 @@ export class VercelAIProvider extends BaseLLMProvider {
         const reasoning = message?.['reasoning_content'];
         this.lastReasoningContent =
           typeof reasoning === 'string' && reasoning.length > 0 ? reasoning : null;
+        observeQuietly(() => {
+          const served = json['model'];
+          if (typeof served === 'string' && served.length > 0) call.wire.responseModel = served;
+          const usage = json['usage'];
+          if (typeof usage === 'object' && usage !== null)
+            call.observeWireUsage(usage as Record<string, unknown>);
+        });
       } catch {
         this.lastReasoningContent = null;
       }
@@ -258,7 +295,8 @@ export class VercelAIProvider extends BaseLLMProvider {
     modelId: string,
     signal: AbortSignal,
     sessionId: string | undefined,
-    reasoningEffort: ReasoningEffort | undefined
+    reasoningEffort: ReasoningEffort | undefined,
+    call: ModelCallTrace
   ): LanguageModel {
     return createOpenAI({
       baseURL: this.config.baseUrl,
@@ -266,7 +304,7 @@ export class VercelAIProvider extends BaseLLMProvider {
       // value only satisfies its own guard, and the fetch wrapper above drops
       // the header it builds, so no credential leaves this process.
       apiKey: '',
-      fetch: this.createEndpointFetch(signal, sessionId, reasoningEffort),
+      fetch: this.createEndpointFetch(signal, sessionId, reasoningEffort, call),
     }).chat(modelId);
   }
 
@@ -276,14 +314,17 @@ export class VercelAIProvider extends BaseLLMProvider {
    * Exactly ONE HTTP attempt: no retry loop, no circuit-breaker race, no
    * second request after the first one reported a timeout (ADR-013 D4).
    */
-  protected async doComplete(request: CompletionRequest): Promise<CompletionResponse> {
+  protected async doComplete(
+    request: CompletionRequest,
+    call: ModelCallTrace
+  ): Promise<CompletionResponse> {
     if (!this.isAvailable()) {
       throw new LLMError('VercelAIProvider not configured', this.name);
     }
 
     const modelId = this.getModelId(request);
 
-    return this.executeRequest(request, modelId);
+    return this.executeRequest(request, modelId, call);
   }
 
   /**
@@ -629,7 +670,8 @@ export class VercelAIProvider extends BaseLLMProvider {
    */
   private async executeRequest(
     request: CompletionRequest,
-    modelId: string
+    modelId: string,
+    call: ModelCallTrace
   ): Promise<CompletionResponse> {
     // ONE attempt, bounded by its own signal: the timer aborts the HTTP request
     // itself, so a gateway waiting upstream sees the disconnect, and nothing
@@ -691,7 +733,7 @@ export class VercelAIProvider extends BaseLLMProvider {
             ? 'motor'
             : 'smart');
     const reasoningEffort = this.config[`${role}ReasoningEffort`];
-    const model = this.getModel(modelId, attempt.signal, request.sessionId, reasoningEffort);
+    const model = this.getModel(modelId, attempt.signal, request.sessionId, reasoningEffort, call);
 
     // Debug logging
     this.providerLogger?.debug(
@@ -850,6 +892,16 @@ export class VercelAIProvider extends BaseLLMProvider {
         'AI SDK generateText response'
       );
 
+      // The answer's own facts, recorded before the response is mapped: the
+      // provider-reported usage (absence preserved, never zeroed) and the model
+      // the endpoint says it served.
+      observeQuietly(() => {
+        call.observeUsage(result.usage);
+        const servedModel = result.response.modelId;
+        if (typeof servedModel === 'string' && servedModel.length > 0)
+          call.wire.responseModel = servedModel;
+      });
+
       // Map AI SDK result back to CompletionResponse, with intercepted reasoning as fallback
       const response = this.mapAIResponseToCompletion(result, modelId, interceptedReasoning);
 
@@ -867,6 +919,7 @@ export class VercelAIProvider extends BaseLLMProvider {
       // A timeout this provider caused is reported as itself, never as an
       // upstream protocol error: the request it aborted is the only one that ran.
       if (timedOut) {
+        call.fail('timeout');
         this.providerLogger?.error(
           { durationMs: duration, model: modelId, timeoutMs },
           "The model endpoint did not answer before this provider's timeout"
@@ -948,7 +1001,13 @@ export class VercelAIProvider extends BaseLLMProvider {
 
       // Map AI SDK errors to LLMError
       this.pendingRawTools = null;
-      throw this.mapAIErrorToLLMError(error);
+      const mapped = this.mapAIErrorToLLMError(error);
+      // The code, not the message: a span never carries provider text, which
+      // can echo request values back.
+      call.fail(
+        mapped.statusCode === undefined ? 'transport' : `http_${String(mapped.statusCode)}`
+      );
+      throw mapped;
     } finally {
       clearTimeout(timeoutTimer);
     }
@@ -1234,9 +1293,10 @@ export class VercelAIProvider extends BaseLLMProvider {
  */
 export function createVercelAIEndpointProvider(
   config: VercelAIEndpointConfig,
-  logger?: Logger
+  logger?: Logger,
+  traces?: ModelCallSpanSink
 ): VercelAIProvider {
-  return new VercelAIProvider(config, logger);
+  return new VercelAIProvider(config, logger, traces);
 }
 
 /**
@@ -1244,7 +1304,8 @@ export function createVercelAIEndpointProvider(
  */
 export function createVercelAIProvider(
   config: VercelAIProviderConfig,
-  logger?: Logger
+  logger?: Logger,
+  traces?: ModelCallSpanSink
 ): VercelAIProvider {
-  return new VercelAIProvider(config, logger);
+  return new VercelAIProvider(config, logger, traces);
 }

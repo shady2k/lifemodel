@@ -1789,8 +1789,13 @@ export class CoreLoop {
         );
 
         const triggerSignal = aggregationResult.triggerSignals[0];
+        // The turn's own trace, and the trigger that woke it: the turn's model
+        // calls hang under it and record the trigger type (lifemodel-d4t8).
         const traceContext = triggerSignal
-          ? createTraceContext(triggerSignal.id, { correlationId: tickId })
+          ? createTraceContext(triggerSignal.id, {
+              correlationId: tickId,
+              triggerType: triggerSignal.type,
+            })
           : tickCtx;
 
         this.startCognitionAsync(
@@ -2638,7 +2643,11 @@ export class CoreLoop {
     const startGate = new Promise<void>((resolve) => {
       releaseStart = resolve;
     });
-    const promise = startGate.then(() => this.layers.cognition.process(context));
+    // The turn runs under its own trace context, not the tick's: its model
+    // calls (and its log lines) belong to the signal that woke it.
+    const promise = startGate.then(() =>
+      withTraceContext(traceContext, () => this.layers.cognition.process(context))
+    );
     this.pendingCognitionStart = releaseStart;
 
     this.pendingCognition = {

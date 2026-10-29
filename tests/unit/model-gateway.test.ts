@@ -1972,12 +1972,19 @@ describe('model gateway custom slot headers', () => {
         { name: 'x-static', value: 'static-value' },
       ],
     };
-    const response = await f.post(undefined, { 'x-lifemodel-session': 'conv-1' });
+    const response = await f.post(undefined, {
+      'x-lifemodel-session': 'conv-1',
+      // The core's own call id names one model call for its trace span; the
+      // gateway answers it and forwards no caller header upstream
+      // (lifemodel-d4t8).
+      'x-lifemodel-call': 'call-1',
+    });
     expect(response.status).toBe(200);
     expect(f.attempts).toHaveLength(1);
     expect(f.attempts[0]?.headers['x-opencode-session']).toBe('conv-1');
     expect(f.attempts[0]?.headers['x-static']).toBe('static-value');
     expect(f.attempts[0]?.headers['x-lifemodel-session']).toBeUndefined();
+    expect(f.attempts[0]?.headers['x-lifemodel-call']).toBeUndefined();
     expect(f.attempts[0]?.headers['x-forwarded-for']).toBeUndefined();
     expect(f.attempts[0]?.headers['cookie']).toBeUndefined();
   });

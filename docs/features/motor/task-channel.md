@@ -106,7 +106,12 @@ projected-token reread and fresh live Kubernetes identity described above:
   [startup connection-only retries](task-harness.md) when no connection opened). It
   returns `{taskId,attemptId,launchId,briefing,profile,harness,traceId,parentSpanId}`,
   where `traceId` is the stable task trace and `parentSpanId` links the launch root
-  to its recorded parent (or is null). The accepted resource profile has
+  to its recorded parent (or is null). A task started by a cognition turn gets
+  that turn's trace id - the id of the signal that woke it - and the turn's span
+  as its parent (the `core.startTask` tool reads the current trace context), so
+  the owner's message, the turn's model calls and the run's pod spans are one
+  trace; the tick id is only that turn's `correlationId`
+  ([observability](observability.md#what-a-turns-trace-is)). The accepted resource profile has
   `id`, `revision`, `timeoutSeconds`, `cpuMillis` and `memoryBytes`. This requires
   the exact won Pod/Job start claim and projection, plus current active/wrapping
   intent and matching allocation. A replacement/loser Pod cannot read it. The
