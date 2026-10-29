@@ -41,6 +41,19 @@ that answer commits. A task-question-triggered turn still restricts commands to
 that task; an owner-message turn can steer or answer any listed task. Queued is
 commit evidence, not execution or obedience, and grants remain separate.
 
+A normalized question turn without a nonempty final reply or a queued
+correlated task answer falls back to an owner-visible deterministic relay of
+the question text, task ID and question ID through the normal durable outbox.
+On successful turns, an exact question text-and-ID relay through `core.say`
+also suppresses the fallback. A paraphrased `core.say` followed by an empty
+reply still gets the deterministic relay: a duplicate is preferred to a missed
+question. A nonempty final reply suppresses the relay even if it does not
+mention the question; this semantic gap remains by design for now.
+On a model exception or error outcome, `core.say` is only a provisional send,
+not durable delivery evidence, so it cannot suppress the fallback. A queued
+correlated task answer can suppress it because the task service committed that
+answer before returning its receipt.
+
 Scripted-model checks through real cognition and the isolated Postgres registry
 in `tests/integration/task-mailbox.test.ts` cover later-turn steering, owner
 question round trips, closed/terminal omission, escaping and bounds. These are

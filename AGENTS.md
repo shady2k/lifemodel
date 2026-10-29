@@ -335,6 +335,13 @@ started but was not counted delivered. A normalized task question that finishes
 without an owner reply or a committed correlated task answer gets a deterministic
 relay containing its text, task id and question id. The relay uses the turn's
 normal outbox effect key, so replay cannot create a second committed relay.
+On a model exception or error outcome, a provisional `core.say` relay does
+not suppress the fallback; only a queued correlated task answer does. On a
+successful turn, `core.say` suppresses the fallback only when it contains the
+exact question text and id. A paraphrase followed by an empty reply also gets
+the deterministic relay: a duplicate is preferred to a missed question.
+A nonempty final reply suppresses the relay even when it does not mention
+the question. This remaining semantic gap is accepted by design for now.
 Inbound messages keep their own policy.
 Restored entries that already exhausted the budget complete without another
 turn. Signal expiry never discards durable bus work on admission, replay or

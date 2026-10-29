@@ -39,6 +39,9 @@ describe('task question owner delivery', () => {
     'empty',
     'relayed',
     'said',
+    'said-then-error',
+    'paraphrased',
+    'unrelated-final',
     'ack-only',
     'provider-error',
     'answered',
@@ -58,17 +61,33 @@ describe('task question owner delivery', () => {
       const script =
         mode === 'provider-error'
           ? []
-          : mode === 'relayed'
-            ? [{ content: JSON.stringify({ response: relay }) }]
+          : mode === 'relayed' || mode === 'unrelated-final'
+            ? [
+                {
+                  content: JSON.stringify({
+                    response: mode === 'relayed' ? relay : 'I checked the task.',
+                  }),
+                },
+              ]
             : mode === 'empty'
               ? [empty, empty, empty, empty]
               : [
                   {
                     toolCalls: [
-                      mode === 'said' || mode === 'ack-only'
+                      mode === 'said' ||
+                      mode === 'said-then-error' ||
+                      mode === 'paraphrased' ||
+                      mode === 'ack-only'
                         ? {
                             name: 'core.say',
-                            args: { text: mode === 'said' ? relay : 'Checking the task.' },
+                            args: {
+                              text:
+                                mode === 'said' || mode === 'said-then-error'
+                                  ? relay
+                                  : mode === 'paraphrased'
+                                    ? 'The task needs you to choose a destination.'
+                                    : 'Checking the task.',
+                            },
                           }
                         : mode === 'answered' || mode === 'refused-answer'
                           ? {
@@ -88,6 +107,7 @@ describe('task question owner delivery', () => {
                   empty,
                   empty,
                 ];
+      if (mode === 'said-then-error') script.splice(1);
       const h = await startInstance(path, {
         cognitionMode: 'real-scripted',
         hang: true,
@@ -148,8 +168,24 @@ describe('task question owner delivery', () => {
       }
       await waitFor(() => saved.watermark === id, 'question outcome committed');
       const rows = await stores.redis.xrange(`${prefix}outbound`, '-', '+');
-      expect(rows).toHaveLength(mode === 'answered' ? 0 : mode === 'ack-only' ? 2 : 1);
-      if (mode !== 'answered') {
+      if (mode === 'said-then-error') {
+        expect(h.cognition.calls).toHaveLength(1);
+        const texts = rows.map(
+          ([, fields]) => JSON.parse(fields[fields.indexOf('event') + 1]!).payload.text
+        );
+        expect(texts).toEqual([
+          relay,
+          `Task ${question.taskId} asks (question ${question.questionId}):\n${question.text}`,
+        ]);
+      }
+      expect(rows).toHaveLength(
+        mode === 'answered'
+          ? 0
+          : ['ack-only', 'paraphrased', 'said-then-error'].includes(mode)
+            ? 2
+            : 1
+      );
+      if (mode !== 'answered' && mode !== 'unrelated-final') {
         const fields = rows.at(-1)![1];
         const event = JSON.parse(fields[fields.indexOf('event') + 1]!);
         expect(event.payload.text).toContain(question.text);

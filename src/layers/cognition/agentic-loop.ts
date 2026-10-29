@@ -214,16 +214,22 @@ export class AgenticLoop {
         );
       });
     });
-    const relayed = state.toolResults.some((entry) => {
-      const text = (entry.data as { delivered_text?: unknown } | undefined)?.delivered_text;
-      return (
-        entry.toolName === 'core.say' &&
-        entry.success &&
-        typeof text === 'string' &&
-        text.includes(question.questionId) &&
-        text.includes(question.text)
-      );
-    });
+    // A core.say send is only provisional until this turn succeeds. On the
+    // exception/error path its send would be withdrawn, unlike a queued task
+    // answer that already committed in the task service.
+    const relayed =
+      result !== undefined &&
+      state.disposition !== 'error' &&
+      state.toolResults.some((entry) => {
+        const text = (entry.data as { delivered_text?: unknown } | undefined)?.delivered_text;
+        return (
+          entry.toolName === 'core.say' &&
+          entry.success &&
+          typeof text === 'string' &&
+          text.includes(question.questionId) &&
+          text.includes(question.text)
+        );
+      });
     return !answered && !relayed;
   }
 
