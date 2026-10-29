@@ -92,6 +92,7 @@ function sectionPayload(overrides: Partial<SettingsSectionPayload> = {}): Settin
 }
 function mockDonePage(settings: SettingsSectionPayload, puts?: Array<Record<string, unknown>>) {
   fetchMock.mockImplementation(async (url: string, options?: RequestInit) => {
+    if (url === '/api/model-capture') return { ok: true, json: async () => ({ until: null }) };
     if (url === '/api/state')
       return {
         ok: true,
@@ -258,6 +259,7 @@ describe('loader settings section', () => {
     await i18n.changeLanguage('en');
     let attempts = 0;
     fetchMock.mockImplementation(async (url: string, options?: RequestInit) => {
+      if (url === '/api/model-capture') return { ok: true, json: async () => ({ until: null }) };
       if (url === '/api/state')
         return {
           ok: true,
