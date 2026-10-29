@@ -3,6 +3,7 @@ import { createTestStores, type TestStores } from '../helpers/test-stores.js';
 import { createSnapshotStore } from '../../src/storage/snapshot-store.js';
 import { createBusSignalStream } from '../../src/core/bus-stream.js';
 import { RecipientRegistry } from '../../src/core/recipient-registry.js';
+import { AggregationProcessor } from '../../src/layers/aggregation/processor.js';
 import { InboundMessageStream } from '../../src/core/message-streams.js';
 import { SchedulerPrimitiveImpl } from '../../src/core/scheduler-primitive.js';
 import { StoragePrimitiveImpl } from '../../src/core/storage-primitive.js';
@@ -14,6 +15,7 @@ import {
   makeScratchDir,
   rmDir,
   startInstance,
+  stopInstance,
   thoughtSignal,
   waitFor as waitCondition,
 } from '../helpers/core-loop-drain-harness.js';
@@ -103,6 +105,334 @@ describe('bus ledger review round 1', () => {
       h.cognition.settleAll(quiet);
       await waitFor(() => t.saved().watermark === id, 'reminder outcome committed');
       expect(h.cognition.triggerIds()).toEqual([emitted[0]!.id]);
+    } finally {
+      h.coreLoop.haltForTest();
+      await rmDir(t.path);
+    }
+  });
+
+  it.each(['same-core', 'restart'] as const)(
+    'defers a scheduler-fired reminder during a running turn exactly once (%s)',
+    async (mode) => {
+      const t = await setup(`busy-reminder-${mode}`);
+      const h = await t.start();
+      let resumed: Awaited<ReturnType<typeof t.start>> | undefined;
+      let verified: Awaited<ReturnType<typeof t.start>> | undefined;
+      try {
+        const head = thoughtSignal('busy turn');
+        const headId = await t.bus.append(head);
+        await waitFor(() => h.cognition.calls.length === 1, 'head turn is running');
+        const logger = createTestLogger();
+        const values = new Map<string, unknown>();
+        const storage = {
+          load: async (k: string) => values.get(k) ?? null,
+          save: async (k: string, v: unknown) => {
+            values.set(k, structuredClone(v));
+          },
+          delete: async (k: string) => {
+            values.delete(k);
+          },
+        } as unknown as Storage;
+        const primitive = new SchedulerPrimitiveImpl(
+          'reminder',
+          new StoragePrimitiveImpl(storage, 'reminder', logger),
+          logger
+        );
+        await primitive.schedule({
+          fireAt: new Date(0),
+          data: { kind: 'reminder:due', text: 'busy reminder' },
+        });
+        const scheduler = createSchedulerService(logger);
+        scheduler.registerScheduler('reminder', primitive);
+        const emitted: Signal[] = [];
+        scheduler.setSignalCallback((signal) => {
+          emitted.push(signal);
+          h.coreLoop.pushSignal(signal);
+        });
+        await scheduler.tick();
+        expect(primitive.getSchedules()).toHaveLength(0);
+        expect(emitted).toHaveLength(1);
+        const reminder = emitted[0]!;
+        await waitFor(
+          () => h.autonomic.seen.some((batch) => batch.some((s) => s.id === reminder.id)),
+          'busy tick sees scheduled reminder'
+        );
+        await waitFor(
+          () => Object.keys(t.saved().entries).length === 2,
+          'busy tick commits both ledger entries'
+        );
+        const reminderId = Object.keys(t.saved().entries).find((id) => id !== headId)!;
+        expect(t.saved().entries[reminderId]?.status).toBe('owned');
+        expect(h.cognition.triggerIds()).toEqual([head.id]);
+        expect(
+          h.recordedLogs.some(
+            (log) =>
+              log.msg === 'Deferring signals to next tick: COGNITION busy' &&
+              log.obj?.pluginEvents === 1
+          )
+        ).toBe(true);
+
+        if (mode === 'restart') {
+          // Drain the head, but stop intake/ticks before the deferred reminder
+          // can start. Only the committed Valkey snapshot survives the restart.
+          const stopping = stopInstance(h);
+          h.cognition.settleAll(quiet);
+          await stopping;
+          await t.store.hydrate(await t.store.read());
+          resumed = await t.start();
+        } else {
+          h.cognition.settleAll(quiet);
+        }
+        const active = resumed ?? h;
+        const expectedCalls = mode === 'restart' ? 1 : 2;
+        await waitFor(
+          () => active.cognition.calls.length === expectedCalls,
+          'deferred reminder starts its own turn'
+        );
+        expect(active.cognition.calls.at(-1)!.context.triggerSignals.map((s) => s.id)).toEqual([
+          reminder.id,
+        ]);
+        active.cognition.settleAll(quiet);
+        await waitFor(() => t.saved().watermark === reminderId, 'reminder outcome commits');
+        expect([...h.cognition.triggerIds(), ...(resumed?.cognition.triggerIds() ?? [])]).toEqual([
+          head.id,
+          reminder.id,
+        ]);
+        await stopInstance(active);
+        await t.store.hydrate(await t.store.read());
+        const before = t.saved();
+        verified = await t.start();
+        await waitFor(() => t.saved() !== before, 'post-completion restart commits a tick');
+        expect(verified.cognition.calls).toHaveLength(0);
+      } finally {
+        h.coreLoop.haltForTest();
+        resumed?.coreLoop.haltForTest();
+        verified?.coreLoop.haltForTest();
+        await rmDir(t.path);
+      }
+    }
+  );
+
+  it.each(['same-core', 'restart'] as const)(
+    'keeps a reminder sharing an owner-message tick for its own later turn (%s)',
+    async (mode) => {
+      const t = await setup(`shared-owner-${mode}`);
+      const registry = new RecipientRegistry();
+      const owner = registry.getOrCreate('web', 'owner');
+      const reminder = createSignal(
+        'plugin_event',
+        'reminder.scheduler',
+        { value: 1 },
+        {
+          data: {
+            kind: 'plugin_event',
+            pluginId: 'reminder',
+            eventKind: 'reminder_due',
+            fireId: 'shared-fire',
+            payload: { text: 'shared tick reminder' },
+          },
+        }
+      );
+      const message = createUserMessageSignal({
+        recipientId: owner,
+        channel: 'web',
+        updateId: 'shared-owner-message',
+        text: 'Owner wins this tick',
+      });
+      const reminderId = await t.bus.append(reminder);
+      const ownerId = await t.bus.append(message);
+      if (mode === 'restart') {
+        for (const id of [reminderId, ownerId]) t.bus.ensureOwned(id, `pending:${id}`);
+        await t.store.commitOwners(t.epoch, 0);
+        await t.store.hydrate(await t.store.read());
+      }
+      let saved = t.bus.exportSnapshot();
+      const h = await startInstance(t.path, {
+        cognitionMode: 'hang',
+        busSignalStream: t.bus,
+        recipientRegistry: registry,
+        commitSnapshot: async (tick, events) => {
+          await t.store.commitOwners(t.epoch, tick, events);
+          saved = t.bus.exportSnapshot();
+        },
+      });
+      const aggregation = new AggregationProcessor(createTestLogger(), {
+        enablePatternDetection: false,
+      });
+      h.aggregation.process = (signals, state) => aggregation.process(signals, state);
+      try {
+        await waitFor(() => h.cognition.calls.length === 1, 'owner wins shared tick');
+        expect(h.cognition.triggerIds()).toEqual([message.id]);
+        h.cognition.settleAll(quiet);
+        await waitFor(() => h.cognition.calls.length === 2, 'reminder runs after owner');
+        expect(h.cognition.triggerIds()).toEqual([message.id, reminder.id]);
+        h.cognition.settleAll(quiet);
+        await waitFor(() => saved.watermark === ownerId, 'both shared inputs commit');
+        await stopInstance(h);
+        expect(h.cognition.calls).toHaveLength(2);
+        await t.store.hydrate(await t.store.read());
+        const before = t.saved();
+        const verified = await t.start();
+        try {
+          await waitFor(() => t.saved() !== before, 'restart after both outcomes');
+          expect(verified.cognition.calls).toHaveLength(0);
+        } finally {
+          verified.coreLoop.haltForTest();
+        }
+      } finally {
+        h.coreLoop.haltForTest();
+        await rmDir(t.path);
+      }
+    }
+  );
+
+  it('does not defer an in-memory autonomic plugin event while cognition is busy', async () => {
+    const t = await setup('derived-plugin');
+    const h = await t.start();
+    const derived = createSignal('plugin_event', 'calories.anomaly', { value: 1 });
+    try {
+      await t.bus.append(thoughtSignal('hold cognition'));
+      await waitFor(() => h.cognition.calls.length === 1, 'cognition busy');
+      const process = h.autonomic.process.bind(h.autonomic);
+      h.autonomic.process = (state, signals, correlationId) => {
+        const result = process(state, signals, correlationId);
+        return { ...result, signals: [...result.signals, derived] };
+      };
+      await waitFor(
+        () => h.aggregation.sawAllOf(derived),
+        'derived plugin reaches aggregation while busy'
+      );
+      expect(h.cognition.calls).toHaveLength(1);
+    } finally {
+      h.coreLoop.haltForTest();
+      await rmDir(t.path);
+    }
+  });
+
+  it.each(['idle', 'owner-message', '120-events'] as const)(
+    'completes non-waking bus plugin events after one quiet evaluation (%s)',
+    async (mode) => {
+      const t = await setup(`quiet-plugin-${mode}`);
+      const count = mode === '120-events' ? 120 : 1;
+      const facts = Array.from({ length: count }, (_, i) =>
+        createSignal(
+          'plugin_event',
+          'news.facts',
+          { value: 0.1 },
+          {
+            data: {
+              kind: 'fact_batch',
+              pluginId: 'news',
+              eventKind: 'news:interesting',
+              urgent: false,
+              facts: [
+                {
+                  content: `quiet fact ${i}`,
+                  confidence: 0.5,
+                  tags: ['quiet'],
+                  provenance: { source: 'test', originalId: `quiet-${i}` },
+                },
+              ],
+            },
+          }
+        )
+      );
+      const ids: string[] = [];
+      for (const fact of facts) ids.push(await t.bus.append(fact));
+      let lastId = ids.at(-1)!;
+      let ownerId: string | undefined;
+      if (mode === 'owner-message') {
+        const registry = new RecipientRegistry();
+        const owner = registry.getOrCreate('web', 'owner');
+        const message = createUserMessageSignal({
+          recipientId: owner,
+          channel: 'web',
+          updateId: 'quiet-owner',
+          text: 'Owner first',
+        });
+        lastId = await t.bus.append(message);
+        ownerId = message.id;
+      }
+      const h = await t.start();
+      const save = vi.fn(async () => undefined);
+      const aggregation = new AggregationProcessor(createTestLogger(), {
+        enablePatternDetection: false,
+      });
+      aggregation.updateDeps({ memoryProvider: { save } as never });
+      const evaluations: { signals: Signal[]; selected: string[] }[] = [];
+      h.aggregation.process = async (signals, state) => {
+        const result = await aggregation.process(signals, state);
+        evaluations.push({
+          signals: [...signals],
+          selected: result.triggerSignals.map((s) => s.id),
+        });
+        return result;
+      };
+      try {
+        if (ownerId) {
+          await waitFor(() => h.cognition.calls.length === 1, 'owner wins quiet-fact batch');
+          expect(h.cognition.triggerIds()).toEqual([ownerId]);
+          expect(save).not.toHaveBeenCalled();
+          h.cognition.settleAll(quiet);
+        }
+        await waitFor(
+          () => t.saved().watermark === lastId,
+          'quiet facts complete and release admission'
+        );
+        expect(save).toHaveBeenCalledTimes(count);
+        expect(h.cognition.calls).toHaveLength(ownerId ? 1 : 0);
+        for (const fact of facts) {
+          const quietEvaluations = evaluations.filter(
+            (entry) => entry.selected.length === 0 && entry.signals.some((s) => s.id === fact.id)
+          );
+          expect(quietEvaluations).toHaveLength(1);
+        }
+        if (ownerId) {
+          const ownerEvaluation = evaluations.findIndex((entry) =>
+            entry.selected.includes(ownerId!)
+          );
+          const factEvaluation = evaluations.findIndex(
+            (entry) =>
+              entry.selected.length === 0 && entry.signals.some((s) => s.id === facts[0]!.id)
+          );
+          expect(factEvaluation).toBeGreaterThan(ownerEvaluation);
+        }
+        expect(t.saved().entries).toEqual({});
+        await stopInstance(h);
+        expect(save).toHaveBeenCalledTimes(count);
+      } finally {
+        h.coreLoop.haltForTest();
+        await rmDir(t.path);
+      }
+    }
+  );
+
+  it('loads and drains a hydrated legacy snapshot with 150 owned entries', async () => {
+    const t = await setup('legacy-150');
+    const signals = Array.from({ length: 150 }, (_, i) => thoughtSignal(`legacy ${i}`));
+    const ids: string[] = [];
+    for (const signal of signals) ids.push(await t.bus.append(signal));
+    t.bus.hydrateSnapshot({
+      version: 1,
+      watermark: '0-0',
+      entries: Object.fromEntries(
+        ids.map((id) => [id, { status: 'owned', turnId: 'legacy-turn', retries: 0 }])
+      ),
+    });
+    await t.store.commitOwners(t.epoch, 0);
+    await t.store.hydrate(await t.store.read());
+    const h = await t.start();
+    try {
+      let handled = 0;
+      await waitFor(() => {
+        if (h.cognition.calls.length > handled) {
+          handled = h.cognition.calls.length;
+          h.cognition.settleAll(quiet);
+        }
+        return t.saved().watermark === ids.at(-1);
+      }, 'legacy ledger drains without an oversized probe');
+      expect(h.cognition.triggerIds()).toEqual(signals.map((s) => s.id));
+      expect(t.saved().entries).toEqual({});
     } finally {
       h.coreLoop.haltForTest();
       await rmDir(t.path);

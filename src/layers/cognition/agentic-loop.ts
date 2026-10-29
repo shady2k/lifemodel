@@ -138,9 +138,12 @@ export class AgenticLoop {
    */
   async run(context: LoopContext): Promise<LoopResult> {
     const useSmart = context.previousAttempt !== undefined;
+    const state = createLoopState();
 
     try {
-      const result = await this.runInternal(context, useSmart);
+      const result = await this.runInternal(context, useSmart, state);
+      if (this.needsQuestionRelay(context, result.state, result))
+        return this.questionFallback(context, result.state);
       if (
         context.triggerSignal.type === 'task_outcome' &&
         (result.terminal.type !== 'respond' ||
@@ -154,6 +157,7 @@ export class AgenticLoop {
       // Sending this deterministic reply is a successful answer, not silence.
       if (context.triggerSignal.type === 'task_outcome')
         return this.outcomeFallback(context, createLoopState());
+      if (this.needsQuestionRelay(context, state)) return this.questionFallback(context, state);
       this.logger.error(
         { error: error instanceof Error ? error.message : String(error) },
         'Agentic loop failed'
@@ -173,12 +177,83 @@ export class AgenticLoop {
     );
   }
 
+  /** A question may finish quietly only after a correlated answer or owner relay. */
+  private needsQuestionRelay(context: LoopContext, state: LoopState, result?: LoopResult): boolean {
+    const report = context.triggerSignal.data;
+    if (
+      context.triggerSignal.type !== 'task_report' ||
+      report?.kind !== 'task_report' ||
+      report.eventKind !== 'question' ||
+      !report.question
+    )
+      return false;
+    const question = report.question;
+    if (
+      result?.terminal.type === 'respond' &&
+      result.terminal.text.trim() &&
+      state.disposition !== 'error'
+    )
+      return false;
+    const answered = state.executedTools.some((tool) => {
+      if (
+        tool.name !== 'core.steerTask' ||
+        tool.args['action'] !== 'answer' ||
+        tool.args['taskId'] !== report.taskId ||
+        tool.args['questionId'] !== question.questionId
+      )
+        return false;
+      return state.toolResults.some((entry) => {
+        const receipt = entry.data as Record<string, unknown> | undefined;
+        return (
+          entry.toolCallId === tool.toolCallId &&
+          entry.success &&
+          receipt?.['success'] === true &&
+          receipt['state'] === 'queued' &&
+          receipt['taskId'] === report.taskId &&
+          typeof receipt['commandId'] === 'string'
+        );
+      });
+    });
+    // A core.say send is only provisional until this turn succeeds. On the
+    // exception/error path its send would be withdrawn, unlike a queued task
+    // answer that already committed in the task service.
+    const relayed =
+      result !== undefined &&
+      state.disposition !== 'error' &&
+      state.toolResults.some((entry) => {
+        const text = (entry.data as { delivered_text?: unknown } | undefined)?.delivered_text;
+        return (
+          entry.toolName === 'core.say' &&
+          entry.success &&
+          typeof text === 'string' &&
+          text.includes(question.questionId) &&
+          text.includes(question.text)
+        );
+      });
+    return !answered && !relayed;
+  }
+
+  private questionFallback(context: LoopContext, state: LoopState): LoopResult {
+    const report = context.triggerSignal.data;
+    if (report?.kind !== 'task_report' || !report.question)
+      throw new Error('Task question fallback requires a normalized question');
+    state.disposition = 'answer';
+    return buildFinalResultFromNaturalCompletion(
+      `Task ${report.taskId} asks (question ${report.question.questionId}):\n${report.question.text}`,
+      state,
+      context,
+      this.logger
+    );
+  }
+
   /**
    * Internal run implementation using native tool calling.
    */
-  private async runInternal(context: LoopContext, useSmart: boolean): Promise<LoopResult> {
-    const state = createLoopState();
-
+  private async runInternal(
+    context: LoopContext,
+    useSmart: boolean,
+    state = createLoopState()
+  ): Promise<LoopResult> {
     this.logger.debug(
       {
         correlationId: context.tickId,

@@ -331,10 +331,31 @@ recorded failure and a warning identifying the signal type and source, never
 its values. A resolved non-error internal turn with no final send to its
 answered recipient completes quietly, without replaying its tool effects.
 An undefined internal outcome retries only when a final send to that recipient
-started but was not counted delivered. Inbound messages keep their own policy.
+started but was not counted delivered. A normalized task question that finishes
+without an owner reply or a committed correlated task answer gets a deterministic
+relay containing its text, task id and question id. The relay uses the turn's
+normal outbox effect key, so replay cannot create a second committed relay.
+On a model exception or error outcome, a provisional `core.say` relay does
+not suppress the fallback; only a queued correlated task answer does. On a
+successful turn, `core.say` suppresses the fallback only when it contains the
+exact question text and id. A paraphrase followed by an empty reply also gets
+the deterministic relay: a duplicate is preferred to a missed question.
+A nonempty final reply suppresses the relay even when it does not mention
+the question. This remaining semantic gap is accepted by design for now.
+Inbound messages keep their own policy.
 Restored entries that already exhausted the budget complete without another
 turn. Signal expiry never discards durable bus work on admission, replay or
 retry: an uncommitted scheduled reminder still runs after a long restart.
+Bus-owned plugin events (those with a stream id), including schedule-fired
+reminders, wait while cognition is busy or stress-disabled. After aggregation,
+an unselected bus plugin event is re-queued in order only if aggregation
+selected at least one other trigger (for example, owner input won the tick),
+or if aggregation was stress-disabled and did not run. When aggregation ran
+and selected nothing, the event was evaluated without waking cognition and
+completes in that tick; it is not re-queued. Stress-disabled events remain
+pending through the stress window. In-memory derived plugin events without a
+stream id keep their normal aggregation path; they are not deferred or
+re-queued by this rule.
 A turn id is fixed when the turn starts, saved in
 the epoch-checked snapshot before any effect, and reused when its owned entries
 replay; absorbing more triggers later does not change its effect keys. A tick
