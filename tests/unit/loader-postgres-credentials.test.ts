@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import {
   createKubernetesPostgresSecretPhase,
   createKubernetesCaptureSecretPhase,
+  createKubernetesCaptureGrantPhase,
 } from '../../loader/src/postgres.js';
 
 const encode = (value: string) => Buffer.from(value).toString('base64');
@@ -249,6 +250,74 @@ describe('CNPG application credential copy phase', () => {
       }
     }
   );
+
+  it('runs bounded owner grants after role reconciliation and scrubs failures', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cnpg-grants-'));
+    try {
+      const tokenFile = join(directory, 'token');
+      await writeFile(tokenFile, 'test-token');
+      const events: string[] = [];
+      let roleExists = false;
+      const phase = createKubernetesCaptureGrantPhase({
+        tokenFile,
+        request: async (url, method) => {
+          expect(method).toBe('GET');
+          expect(url.pathname).toBe('/api/v1/namespaces/lifemodel-state/secrets/lifemodel-app');
+          return {
+            status: 200,
+            body: JSON.stringify({
+              data: {
+                username: encode('owner'),
+                password: encode('private-owner-password'),
+              },
+            }),
+          };
+        },
+        grantClient: (connectionString) => {
+          expect(connectionString).toBe(
+            'postgresql://owner:private-owner-password@lifemodel-rw.lifemodel-state.svc.cluster.local:5432/lifemodel'
+          );
+          return {
+            connect: async () => {
+              events.push('connect');
+            },
+            query: async (sql) => {
+              events.push('grant');
+              expect(sql).toContain(
+                "IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lifemodel_capture_writer')"
+              );
+              expect(sql).toContain(
+                'GRANT USAGE ON SCHEMA observability TO lifemodel_capture_writer'
+              );
+              expect(sql).not.toContain('capture_reader');
+              if (!roleExists) throw new Error(`private-owner-password ${connectionString}`);
+            },
+            end: async () => {
+              events.push('end');
+            },
+          };
+        },
+      });
+      expect(phase.name).toBe('model-capture-grants');
+      await expect(phase.run()).rejects.toThrow(/^capture writer grants unavailable$/);
+      roleExists = true;
+      await phase.run();
+      await phase.run();
+      expect(events).toEqual([
+        'connect',
+        'grant',
+        'end',
+        'connect',
+        'grant',
+        'end',
+        'connect',
+        'grant',
+        'end',
+      ]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 
   it('fails when a Kubernetes API response stalls past the total deadline', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'cnpg-credentials-'));

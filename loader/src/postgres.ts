@@ -8,6 +8,31 @@ import { randomBytes } from 'node:crypto';
 import { Agent, request as httpsRequest } from 'node:https';
 import type { Socket } from 'node:net';
 import type { PlatformPhase } from './platform-bootstrap.js';
+import { Client } from 'pg';
+import { catalogConnectionString } from './storage-catalog.js';
+
+export interface CaptureGrantClient {
+  connect(): Promise<void>;
+  query(sql: string): Promise<unknown>;
+  end(): Promise<void>;
+  on?(event: 'error', listener: () => void): unknown;
+}
+
+/** The same bounded, idempotent grants used after CNPG creates the writer. */
+export async function applyCaptureWriterGrants(
+  database: Pick<CaptureGrantClient, 'query'>
+): Promise<void> {
+  await database.query(`DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lifemodel_capture_writer') THEN
+    RAISE EXCEPTION USING ERRCODE='42704', MESSAGE='capture_writer_unavailable';
+  END IF;
+  GRANT USAGE ON SCHEMA observability TO lifemodel_capture_writer;
+  GRANT EXECUTE ON FUNCTION observability.append_model_exchange(text,integer,text,text,text,jsonb,timestamptz) TO lifemodel_capture_writer;
+  GRANT EXECUTE ON FUNCTION observability.prune_model_exchanges() TO lifemodel_capture_writer;
+END;
+$$`);
+}
 
 export interface KubernetesPostgresSecretOptions {
   apiServer?: string;
@@ -15,6 +40,8 @@ export interface KubernetesPostgresSecretOptions {
   caFile?: string;
   timeoutMs?: number;
   randomPassword?: () => string;
+  /** Override the bounded owner connection in grant-phase tests. */
+  grantClient?: (connectionString: string) => CaptureGrantClient;
   request?: (
     url: URL,
     method: string,
@@ -60,19 +87,26 @@ const MAX_API_RESPONSE_BYTES = 1024 * 1024;
 export function createKubernetesPostgresSecretPhase(
   options: KubernetesPostgresSecretOptions = {}
 ): PlatformPhase {
-  return createCredentialPhase(options, false);
+  return createCredentialPhase(options, 'application');
 }
 
 /** Runs after the legacy credential phases, including on already-onboarded instances. */
 export function createKubernetesCaptureSecretPhase(
   options: KubernetesPostgresSecretOptions = {}
 ): PlatformPhase {
-  return createCredentialPhase(options, true);
+  return createCredentialPhase(options, 'capture');
+}
+
+/** Later than credentials: retry until both core migration and CNPG role exist. */
+export function createKubernetesCaptureGrantPhase(
+  options: KubernetesPostgresSecretOptions = {}
+): PlatformPhase {
+  return createCredentialPhase(options, 'grants');
 }
 
 function createCredentialPhase(
   options: KubernetesPostgresSecretOptions,
-  captureOnly: boolean
+  mode: 'application' | 'capture' | 'grants'
 ): PlatformPhase {
   const host =
     options.apiServer ??
@@ -185,7 +219,12 @@ function createCredentialPhase(
   let pendingCapturePassword: string | undefined;
   const sourceUrl = new URL(`/api/v1/namespaces/${SOURCE_NAMESPACE}/secrets/${SOURCE_NAME}`, host);
   return {
-    name: captureOnly ? 'model-capture-credentials' : 'cnpg-copy-core-credentials',
+    name:
+      mode === 'grants'
+        ? 'model-capture-grants'
+        : mode === 'capture'
+          ? 'model-capture-credentials'
+          : 'cnpg-copy-core-credentials',
     run: async () => {
       /** One target: create it when it is absent, else replace its two keys. */
       async function copy(
@@ -250,7 +289,7 @@ function createCredentialPhase(
           throw new Error(`${target.name} update failed (${String(result.status)})`);
         await verify();
       }
-      if (!captureOnly) {
+      if (mode !== 'capture') {
         const source = await send(sourceUrl, 'GET');
         if (source.status !== 200)
           throw new Error(`CNPG application Secret read failed (${String(source.status)})`);
@@ -264,7 +303,35 @@ function createCredentialPhase(
           !Buffer.from(password, 'base64').toString()
         )
           throw new Error('CNPG application Secret lifemodel-app has no username/password');
-        for (const target of TARGETS.slice(0, 3)) await copy(target, username, password);
+        if (mode === 'application') {
+          for (const target of TARGETS.slice(0, 3)) await copy(target, username, password);
+          return;
+        }
+        // The owner grants only access to its own schema/functions. Role creation
+        // remains CNPG's job. Missing role/schema fails this optional phase, not core.
+        const connectionString = catalogConnectionString(
+          Buffer.from(username, 'base64').toString(),
+          Buffer.from(password, 'base64').toString()
+        );
+        const database =
+          options.grantClient?.(connectionString) ??
+          new Client({
+            connectionString,
+            connectionTimeoutMillis: timeoutMs,
+            query_timeout: timeoutMs,
+            statement_timeout: timeoutMs,
+            application_name: 'lifemodel-capture-grants',
+          });
+        database.on?.('error', () => undefined);
+        try {
+          await database.connect();
+          await applyCaptureWriterGrants(database);
+        } catch {
+          // Never propagate connection URLs, credentials or server error details.
+          throw new Error('capture writer grants unavailable');
+        } finally {
+          await database.end().catch(() => undefined);
+        }
         return;
       }
       // CNPG owns the narrow capture LOGIN. Its durable random password lives

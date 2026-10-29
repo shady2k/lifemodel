@@ -21,13 +21,6 @@ spec:
         login: true
         passwordSecret:
           name: lifemodel-capture-credentials
-      - name: lifemodel_capture_reader
-        ensure: present
-        login: false
-      - name: lifemodel
-        ensure: present
-        login: true
-        inRoles: [lifemodel_capture_reader]
   storage:
     size: 4Gi
     storageClass: local-path

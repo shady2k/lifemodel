@@ -161,7 +161,7 @@ describe('CloudNativePG platform state', () => {
     ).toContain("const SOURCE_NAME = 'lifemodel-app'");
   });
 
-  it('provisions a dedicated capture writer and SELECT-only reader without owner membership for the writer', () => {
+  it('manages only a dedicated capture writer, never the owner or a reader role', () => {
     const cluster = YAML.parse(readFileSync(join(stateRoot, 'cluster/cluster.yaml'), 'utf8'));
     expect(cluster.spec.managed.roles).toEqual([
       {
@@ -170,8 +170,6 @@ describe('CloudNativePG platform state', () => {
         login: true,
         passwordSecret: { name: 'lifemodel-capture-credentials' },
       },
-      { name: 'lifemodel_capture_reader', ensure: 'present', login: false },
-      { name: 'lifemodel', ensure: 'present', login: true, inRoles: ['lifemodel_capture_reader'] },
     ]);
     const gateway = allYaml(join(root, 'a')).find(
       (item) => item.kind === 'Deployment' && item.metadata.name === 'model-gateway'
@@ -207,7 +205,7 @@ describe('CloudNativePG platform state', () => {
     ]);
   });
 
-  it('limits database ingress to the core namespace and CNPG operator ports', () => {
+  it('limits database ingress to trusted applications, capture grants and CNPG operator ports', () => {
     const policies = allYaml(stateRoot).filter((item) => item.kind === 'NetworkPolicy');
     const deny = policies.find((item) => item.metadata.name === 'lifemodel-state-default-deny');
     expect(deny?.spec).toEqual({
@@ -237,6 +235,15 @@ describe('CloudNativePG platform state', () => {
         }),
       ])
     );
+    expect(database?.spec.ingress).toContainEqual({
+      from: [
+        {
+          namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' } },
+          podSelector: { matchLabels: { 'app.kubernetes.io/name': 'loader' } },
+        },
+      ],
+      ports: [{ protocol: 'TCP', port: 5432 }],
+    });
     expect(database?.spec.policyTypes).toEqual(['Ingress', 'Egress']);
     expect(database?.spec.egress).toEqual([
       expect.objectContaining({

@@ -352,6 +352,7 @@ describe('storage identity bootstrap order', () => {
       'cnpg-copy-core-credentials',
       'valkey-password',
       'model-capture-credentials',
+      'model-capture-grants',
     ]);
   });
 });

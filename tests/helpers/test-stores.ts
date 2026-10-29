@@ -92,15 +92,6 @@ export async function createTestStores(
     } catch (error) {
       if (postgresErrorCode(error) !== '42P04') throw error;
     }
-    // CNPG creates these cluster-wide access roles before application startup.
-    // Tests use the store administrator, but readers/writers below SET ROLE.
-    for (const role of ['lifemodel_capture_writer', 'lifemodel_capture_reader']) {
-      try {
-        await admin.query(`CREATE ROLE "${role}" NOLOGIN`);
-      } catch (error) {
-        if (!['42710', '23505'].includes(postgresErrorCode(error) ?? '')) throw error;
-      }
-    }
     // Recorded before anything can fail: a teardown that never runs must still
     // leave a record the main process can reclaim from.
     recordTestDatabase(file, databaseName);

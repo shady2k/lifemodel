@@ -1,13 +1,26 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createTestStores, type TestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
+import { applyCaptureWriterGrants } from '../../loader/src/postgres.js';
 
 describe('gateway capture migration and least privilege', () => {
   let stores: TestStores;
+  let roleAbsentDuringMigration = false;
   beforeAll(async () => {
     stores = await createTestStores();
+    const roles = await stores.postgres.query(
+      "SELECT rolname FROM pg_roles WHERE rolname IN ('lifemodel_capture_writer','lifemodel_capture_reader')"
+    );
+    expect(roles.rows).toEqual([]);
     await applyTestMigrations(stores.postgres);
     await applyTestMigrations(stores.postgres);
+    roleAbsentDuringMigration = true;
+    await expect(applyCaptureWriterGrants(stores.postgres)).rejects.toMatchObject({
+      code: '42704',
+    });
+    await stores.postgres.query('CREATE ROLE lifemodel_capture_writer NOLOGIN');
+    await applyCaptureWriterGrants(stores.postgres);
+    await applyCaptureWriterGrants(stores.postgres);
   });
   beforeEach(async () => {
     await stores.postgres.query('TRUNCATE observability.model_exchanges');
@@ -29,7 +42,22 @@ describe('gateway capture migration and least privilege', () => {
       client.release();
     }
   }
-  it('allows append/prune only to writer and view SELECT only to reader', async () => {
+  it('migrates without capture roles, then grants only writer append/prune idempotently', async () => {
+    expect(roleAbsentDuringMigration).toBe(true);
+    expect(
+      (
+        await stores.postgres.query(
+          "SELECT to_regclass('observability.recent_model_exchanges') AS view"
+        )
+      ).rows[0].view
+    ).toBeNull();
+    expect(
+      (
+        await stores.postgres.query(
+          "SELECT rolname FROM pg_roles WHERE rolname='lifemodel_capture_reader'"
+        )
+      ).rows
+    ).toEqual([]);
     const expiry = new Date(Date.now() + 60000);
     await asRole('lifemodel_capture_writer', append, [
       'call-one',
@@ -41,10 +69,7 @@ describe('gateway capture migration and least privilege', () => {
       { response: { body: 'duplicate' } },
       expiry,
     ]);
-    const rows = await asRole(
-      'lifemodel_capture_reader',
-      'SELECT * FROM observability.recent_model_exchanges'
-    );
+    const rows = await stores.postgres.query('SELECT * FROM observability.model_exchanges');
     expect(rows.rows).toEqual([
       expect.objectContaining({
         call_id: 'call-one',
@@ -52,7 +77,7 @@ describe('gateway capture migration and least privilege', () => {
       }),
     ]);
     expect(Number(rows.rows[0].size_bytes)).toBeGreaterThan(0);
-    for (const role of ['lifemodel_capture_writer', 'lifemodel_capture_reader']) {
+    for (const role of ['lifemodel_capture_writer']) {
       await expect(
         asRole(role, 'SELECT * FROM observability.model_exchanges')
       ).rejects.toMatchObject({ code: '42501' });
@@ -66,15 +91,6 @@ describe('gateway capture migration and least privilege', () => {
         )
       ).rejects.toMatchObject({ code: '42501' });
     }
-    await expect(
-      asRole('lifemodel_capture_writer', 'SELECT * FROM observability.recent_model_exchanges')
-    ).rejects.toMatchObject({ code: '42501' });
-    await expect(
-      asRole('lifemodel_capture_reader', append, ['bad', {}, expiry])
-    ).rejects.toMatchObject({ code: '42501' });
-    await expect(
-      asRole('lifemodel_capture_reader', 'SELECT observability.prune_model_exchanges()')
-    ).rejects.toMatchObject({ code: '42501' });
     await asRole('lifemodel_capture_writer', 'SELECT observability.prune_model_exchanges()');
     expect(
       (
@@ -114,9 +130,8 @@ describe('gateway capture migration and least privilege', () => {
       VALUES('expired',1,'primary',now()-interval '25 hours','{}',1)`);
     expect(
       (
-        await asRole(
-          'lifemodel_capture_reader',
-          `SELECT call_id FROM observability.recent_model_exchanges WHERE call_id='expired'`
+        await stores.postgres.query(
+          `SELECT call_id FROM observability.model_exchanges WHERE created_at >= clock_timestamp() - interval '24 hours' AND call_id='expired'`
         )
       ).rows
     ).toEqual([]);

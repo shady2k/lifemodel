@@ -48,6 +48,7 @@ import {
 import {
   createKubernetesPostgresSecretPhase,
   createKubernetesCaptureSecretPhase,
+  createKubernetesCaptureGrantPhase,
 } from './postgres.js';
 import { createKubernetesValkeySecretPhase } from './valkey.js';
 import { createKubernetesS3IdentitySecret, createStorageCustodyPhase } from './storage-custody.js';
@@ -85,6 +86,7 @@ export interface FirstStartPhaseDeps {
   postgres?: PlatformPhase;
   valkey?: PlatformPhase;
   capture?: PlatformPhase;
+  captureGrants?: PlatformPhase;
 }
 
 /**
@@ -112,6 +114,7 @@ export function platformFirstStartPhases(deps: FirstStartPhaseDeps): PlatformPha
     deps.postgres ?? createKubernetesPostgresSecretPhase(),
     deps.valkey ?? createKubernetesValkeySecretPhase(),
     deps.capture ?? createKubernetesCaptureSecretPhase(),
+    deps.captureGrants ?? createKubernetesCaptureGrantPhase(),
   ];
 }
 

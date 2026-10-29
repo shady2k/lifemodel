@@ -2,7 +2,7 @@
 SET lock_timeout = '1s';
 SET statement_timeout = '5s';
 -- Disposable, already-redacted gateway evidence. No task FKs or holder fence.
--- CNPG provisions the capture access roles before application migrations.
+-- The optional capture role may arrive after core migrations; grants are guarded.
 CREATE TABLE IF NOT EXISTS observability.model_exchanges (
   call_id text NOT NULL CHECK (length(call_id) BETWEEN 1 AND 128),
   -- Retry count, not a growing identity; a model call cannot reach 2^31 attempts.
@@ -19,15 +19,10 @@ CREATE TABLE IF NOT EXISTS observability.model_exchanges (
 -- squawk-ignore require-concurrent-index-creation
 CREATE INDEX IF NOT EXISTS model_exchanges_created ON observability.model_exchanges(created_at, call_id, attempt, slot);
 
--- Readers cannot retrieve expired conversation text, even while capture is off.
-CREATE VIEW observability.recent_model_exchanges AS
-  SELECT * FROM observability.model_exchanges
-  WHERE created_at >= clock_timestamp() - interval '24 hours';
-
 CREATE FUNCTION observability.prune_model_exchanges() RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 BEGIN
-  PERFORM pg_advisory_xact_lock(914732662);
+  PERFORM pg_advisory_xact_lock(hashtext('lifemodel-model-exchanges'));
   DELETE FROM observability.model_exchanges
     WHERE created_at < clock_timestamp() - interval '24 hours';
   -- Keep the newest suffix whose recorded payload fits in 100 MiB.
@@ -47,7 +42,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE
   payload_bytes bigint;
 BEGIN
-  PERFORM pg_advisory_xact_lock(914732662);
+  PERFORM pg_advisory_xact_lock(hashtext('lifemodel-model-exchanges'));
   -- A row queued while enabled must not be stored after the switch expires.
   IF p_expires_at IS NULL OR NOT isfinite(p_expires_at) OR p_expires_at <= clock_timestamp() THEN
     RETURN;
@@ -64,11 +59,18 @@ BEGIN
   PERFORM observability.prune_model_exchanges();
 END;
 $$;
-REVOKE ALL ON observability.model_exchanges, observability.recent_model_exchanges FROM PUBLIC;
+REVOKE ALL ON observability.model_exchanges FROM PUBLIC;
 REVOKE ALL ON FUNCTION observability.append_model_exchange(text,integer,text,text,text,jsonb,timestamptz) FROM PUBLIC;
 REVOKE ALL ON FUNCTION observability.prune_model_exchanges() FROM PUBLIC;
-GRANT USAGE ON SCHEMA observability TO lifemodel_capture_writer, lifemodel_capture_reader;
-GRANT EXECUTE ON FUNCTION observability.append_model_exchange(text,integer,text,text,text,jsonb,timestamptz) TO lifemodel_capture_writer;
-GRANT EXECUTE ON FUNCTION observability.prune_model_exchanges() TO lifemodel_capture_writer;
-GRANT SELECT ON observability.recent_model_exchanges TO lifemodel_capture_reader;
+-- Capture is optional. Core must migrate before CNPG has reconciled the role.
+-- The loader's later model-capture-grants phase reapplies these grants once it exists.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lifemodel_capture_writer') THEN
+    GRANT USAGE ON SCHEMA observability TO lifemodel_capture_writer;
+    GRANT EXECUTE ON FUNCTION observability.append_model_exchange(text,integer,text,text,text,jsonb,timestamptz) TO lifemodel_capture_writer;
+    GRANT EXECUTE ON FUNCTION observability.prune_model_exchanges() TO lifemodel_capture_writer;
+  END IF;
+END;
+$$;
 -- migrate:down
