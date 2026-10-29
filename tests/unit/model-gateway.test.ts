@@ -1,5 +1,11 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  ClientRequest,
+  createServer,
+  type Server,
+  type IncomingMessage,
+  type ServerResponse,
+} from 'node:http';
 import { networkInterfaces } from 'node:os';
 import { createModelGateway, GATEWAY_LIMITS } from '../../loader/src/model-gateway-app.js';
 import { connect } from 'node:net';
@@ -2642,11 +2648,26 @@ describe('model gateway opt-in exchange capture', () => {
         throw Error('must not capture');
       },
     };
-    const f = await fixture(undefined, undefined, undefined, capture, () => false);
-    expect(await (await f.post()).json()).toEqual(answer());
-    expect(begins).toBe(0);
-    expect(f.attempts[0]?.headers.connection).toBe('keep-alive');
-    f.app.close();
+    const outgoingHeaders: ReturnType<ClientRequest['getHeaders']>[] = [];
+    const end = ClientRequest.prototype.end;
+    const spy = vi.spyOn(ClientRequest.prototype, 'end').mockImplementation(function (
+      this: ClientRequest,
+      ...args: Parameters<ClientRequest['end']>
+    ) {
+      if (this.path === '/prefix/v1/chat/completions') outgoingHeaders.push(this.getHeaders());
+      return end.apply(this, args);
+    });
+    try {
+      const f = await fixture(undefined, undefined, undefined, capture, () => false);
+      expect(await (await f.post()).json()).toEqual(answer());
+      expect(begins).toBe(0);
+      expect(outgoingHeaders).toHaveLength(1);
+      // Inspect the gateway's object before Node emits its implicit wire header.
+      expect(outgoingHeaders[0]).not.toHaveProperty('connection');
+      f.app.close();
+    } finally {
+      spy.mockRestore();
+    }
   });
   async function captured(write?: (row: CaptureRow) => Promise<void>) {
     const rows: CaptureRow[] = [];

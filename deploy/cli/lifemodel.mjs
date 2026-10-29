@@ -335,9 +335,18 @@ function report() {
     } else {
       phaseLabel = clean(phaseRecord.phase);
       console.log(`Loader first start phase=${phaseLabel} status=${clean(phaseRecord.status)}`);
+      const credentialPhases = [
+        'cnpg-copy-core-credentials',
+        'valkey-password',
+        'model-capture-credentials',
+      ];
+      const applicationSourcesComplete =
+        credentialPhases.includes(phaseRecord.phase) ||
+        (phaseRecord.phase === 'gitea-application-kustomizations' &&
+          phaseRecord.status === 'complete');
       const finalPhaseComplete =
-        phaseRecord.phase === 'gitea-application-kustomizations' &&
-        phaseRecord.status === 'complete';
+        phaseRecord.phase === 'model-capture-credentials' && phaseRecord.status === 'complete';
+      applicationResourcesRequired = applicationSourcesComplete;
       if (phaseRecord.status === 'failed') {
         failures.push(`Loader bootstrap phase ${phaseLabel} (failed)`);
         applicationResourcesRequired = true;

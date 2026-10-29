@@ -121,15 +121,3 @@ spec:
       ports:
         - protocol: TCP
           port: 3000
-    # Optional capture grants use the owner login after core migrations and
-    # CNPG role reconciliation; no model traffic waits for this connection.
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: lifemodel-state
-          podSelector:
-            matchLabels:
-              cnpg.io/cluster: lifemodel
-      ports:
-        - protocol: TCP
-          port: 5432

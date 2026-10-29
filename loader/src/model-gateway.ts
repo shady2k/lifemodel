@@ -62,7 +62,13 @@ const inventory = createCaptureInventory({
 });
 const capture = createExchangeCapture({
   context: (input) => inventory.context(input.sessionId),
-  write: (row) => captureStore.write(row),
+  write: async (row) => {
+    await captureStore.write(row);
+    inventory.noteWrite();
+  },
+  onDrop: (reason, count) => {
+    logger.warn({ code: `capture_dropped_${reason}`, count }, 'Model capture evidence dropped');
+  },
 });
 void inventory.refresh();
 const captureRefresh = setInterval(() => {

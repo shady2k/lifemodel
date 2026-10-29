@@ -509,6 +509,37 @@ describe('lifemodel doctor', () => {
     expect(run.stdout).toContain('missing (expected; first start');
   });
 
+  it.each([
+    ['cnpg-copy-core-credentials', 'running'],
+    ['cnpg-copy-core-credentials', 'complete'],
+    ['valkey-password', 'running'],
+    ['valkey-password', 'complete'],
+    ['model-capture-credentials', 'running'],
+    ['model-capture-credentials', 'complete'],
+  ])('requires application resources during later credential phase %s (%s)', (phase, status) => {
+    const data = structuredClone(healthy) as Record<string, any>;
+    data.secret.data.phase = Buffer.from(JSON.stringify({ phase, status })).toString('base64');
+    data['gitrepositories-lifemodel'].items = [];
+    const env = setup(data);
+    const run = spawnSync(process.execPath, [cli, 'doctor'], { env: env.env, encoding: 'utf8' });
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain('GitRepository/lifemodel/lifemodel (missing)');
+  });
+
+  it('recognizes completed capture credentials as the final loader phase', () => {
+    const data = structuredClone(healthy) as Record<string, any>;
+    data.secret.data.phase = Buffer.from(
+      JSON.stringify({ phase: 'model-capture-credentials', status: 'complete' })
+    ).toString('base64');
+    const env = setup(data);
+    const run = spawnSync(process.execPath, [cli, 'doctor'], { env: env.env, encoding: 'utf8' });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain(
+      'Loader first start phase=model-capture-credentials status=complete'
+    );
+    expect(run.stdout).not.toContain('Loader first start in progress');
+  });
+
   it('reports missing application resources as failures after first start completes', () => {
     const data = structuredClone(healthy) as Record<string, any>;
     data['gitrepositories-lifemodel'].items = [];

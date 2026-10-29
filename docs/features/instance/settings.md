@@ -125,20 +125,30 @@ least 16 bytes enter the global scrubber, following the existing gateway echo
 guard; short ordinary values and a bare `{session}` are not global secrets.
 Every slot's key, long custom-header secret material, incoming credential values
 and both database passwords are scrubbed from stored text, including JSON-escaped
-and URL-encoded forms. A final guard drops a row if credential material remains.
+and URL-encoded forms. A final guard drops a row if credential material remains
+in captured text outside redaction markers. Generated schema keys, numeric
+metadata and marker lengths are not credential evidence, so even a one-character
+slot key does not disable capture.
 Task traffic is captured too and shares the 100 MiB cap. The optional exact
 session filter narrows capture to one chat/session instead.
 
 Each body retains at most 1 MiB plus an explicit truncation marker naming its
 original byte length. The complete exchange has a 4 MiB database limit. The
 store retains at most 100 MiB of recorded payload, newest first, and 24 hours.
-A background prune runs every minute while enabled, then hourly for up to
-24 hours after capture turns off. Doctor queries filter out rows older than
-24 hours. While capture is off, the gateway reads no inventory or password
-files and retains no inbound capture body. At most 16 exchanges collect bodies at
-once and 8 redacted rows wait in memory. A full queue, missing database or
-capture error drops evidence, never the model result. Database work runs off
-the model-call path with one connection and a 1-second query/connect bound.
+The gateway prunes once at startup even when capture is off. A background prune
+runs every minute while enabled, then hourly while retained rows remain. The
+prune reports only whether rows remain; the writer cannot read conversation
+text. Cleanup therefore survives gateway restarts and retries database failures.
+Doctor queries filter out rows older than 24 hours. While capture is off, the
+gateway reads no slot or redaction-secret inventory and retains no inbound
+capture body. Retention maintenance still reads its own database credentials.
+At most 16 exchanges collect bodies at once and 8 redacted rows wait in memory. A full queue, missing database or
+capture error drops evidence, never the model result. The gateway logs cumulative,
+process-local dropped-row counts with `capture_dropped_<reason>` codes, including
+`secret_guard`, `queue_full`, `active_limit`, `write_error`, `context_error`,
+`capture_error`, `expired` and `closed`. These diagnostics contain no evidence or
+credential values. Database work runs off the model-call path with one connection
+and a 1-second query/connect bound.
 
 A rejected response larger than the diagnostic excerpt continues capture intake
 in the background for at most one second, without delaying rejection or reserve

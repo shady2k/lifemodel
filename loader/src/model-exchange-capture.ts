@@ -42,6 +42,22 @@ const privateHeaders = [
   'api-key',
 ];
 const marker = (value: string) => `[redacted len=${String(Buffer.byteLength(value))}]`;
+/** Check separate text segments so removing a generated marker cannot join a new secret. */
+export function hasUnredactedCaptureSecret(value: string, pattern: RegExp): boolean {
+  return value.split(/\[redacted len=\d+\]/g).some((part) => {
+    pattern.lastIndex = 0;
+    return pattern.test(part);
+  });
+}
+export type CaptureDropReason =
+  | 'active_limit'
+  | 'queue_full'
+  | 'closed'
+  | 'expired'
+  | 'secret_guard'
+  | 'context_error'
+  | 'capture_error'
+  | 'write_error';
 /** Prepare global credential variants once per inventory refresh, not once per model call. */
 export function prepareCaptureSecrets(secrets: readonly string[]): readonly string[] {
   return [
@@ -100,6 +116,8 @@ export function createExchangeCapture(options: {
   bodyBytes?: number;
   queue?: number;
   active?: number;
+  /** Deferred, reason-coded counts only. Never receives evidence or credential values. */
+  onDrop?(reason: CaptureDropReason, count: number): void;
 }) {
   const now = options.now ?? Date.now;
   const bodyBytes = options.bodyBytes ?? CAPTURE_LIMITS.bodyBytes;
@@ -107,6 +125,28 @@ export function createExchangeCapture(options: {
   let running = false;
   let active = 0;
   let closed = false;
+  const dropped: Partial<Record<CaptureDropReason, number>> = {};
+  const reports = new Set<CaptureDropReason>();
+  let reporting = false;
+  function drop(reason: CaptureDropReason, count = 1): void {
+    dropped[reason] = Math.min(Number.MAX_SAFE_INTEGER, (dropped[reason] ?? 0) + count);
+    if (!options.onDrop) return;
+    reports.add(reason);
+    if (reporting) return;
+    reporting = true;
+    setImmediate(() => {
+      reporting = false;
+      const pending = [...reports];
+      reports.clear();
+      for (const code of pending) {
+        try {
+          options.onDrop?.(code, dropped[code] ?? 0);
+        } catch {
+          /* Diagnostics cannot change model traffic or the writer. */
+        }
+      }
+    });
+  }
   const finalizers: (() => void)[] = [];
   let finalizing = false;
   // One bounded row per event-loop turn, even if all active attempts finish together.
@@ -131,7 +171,7 @@ export function createExchangeCapture(options: {
           try {
             await options.write(row);
           } catch {
-            /* drop, never retry raw evidence */
+            drop('write_error'); // Never retry raw evidence.
           }
         }
       }
@@ -140,8 +180,12 @@ export function createExchangeCapture(options: {
     }
   }
   return {
+    dropped() {
+      return { ...dropped };
+    },
     close() {
       closed = true;
+      if (queue.length) drop('closed', queue.length);
       queue.length = 0;
     },
     begin(
@@ -155,11 +199,17 @@ export function createExchangeCapture(options: {
           closed ||
           !context?.setting.until ||
           !(Date.parse(context.setting.until) > now()) ||
-          (context.setting.session !== undefined && context.setting.session !== input.sessionId) ||
-          active >= (options.active ?? CAPTURE_LIMITS.active) ||
-          queue.length >= (options.queue ?? CAPTURE_LIMITS.queue)
+          (context.setting.session !== undefined && context.setting.session !== input.sessionId)
         )
           return undefined;
+        if (active >= (options.active ?? CAPTURE_LIMITS.active)) {
+          drop('active_limit');
+          return undefined;
+        }
+        if (queue.length >= (options.queue ?? CAPTURE_LIMITS.queue)) {
+          drop('queue_full');
+          return undefined;
+        }
         const expiresAt = context.setting.until;
         const started = now();
         const secretNames = new Set([
@@ -180,10 +230,16 @@ export function createExchangeCapture(options: {
             ...prepareCaptureSecrets([...(attempted?.secrets ?? []), ...inboundSecrets]),
           ]),
         ].sort((a, b) => b.length - a.length);
-        // Compile once, deferred to finalization. Reuse for every field and the whole-row guard.
+        // Compile once, deferred to finalization. Reuse for scrubbing and guarding captured fields.
         let pattern: RegExp | undefined;
-        const text = (value: string) =>
-          pattern ? value.replace(pattern, (secret) => marker(secret)) : value;
+        let unredactedSecret = false;
+        const text = (value: string) => {
+          const redacted = pattern ? value.replace(pattern, (secret) => marker(secret)) : value;
+          // Check captured text before generated JSON keys, times, lengths and truncation
+          // markers are added. Those are not credential evidence (notably for 1-byte keys).
+          if (pattern && hasUnredactedCaptureSecret(redacted, pattern)) unredactedSecret = true;
+          return redacted;
+        };
         const responseText = () => {
           let raw = Buffer.concat(responseChunks).toString('utf8');
           if (originalBytes > storedBytes) {
@@ -264,12 +320,18 @@ export function createExchangeCapture(options: {
             // Neither response scrubbing nor serialization runs on the model-call stack.
             finalize(() => {
               try {
-                if (
-                  closed ||
-                  Date.parse(context.setting.until ?? '') <= now() ||
-                  queue.length >= (options.queue ?? CAPTURE_LIMITS.queue)
-                )
+                if (closed) {
+                  drop('closed');
                   return;
+                }
+                if (Date.parse(context.setting.until ?? '') <= now()) {
+                  drop('expired');
+                  return;
+                }
+                if (queue.length >= (options.queue ?? CAPTURE_LIMITS.queue)) {
+                  drop('queue_full');
+                  return;
+                }
                 pattern = secretPattern(secrets);
                 const row: CaptureRow = {
                   callId: text(input.callId),
@@ -290,32 +352,20 @@ export function createExchangeCapture(options: {
                     ...(error ? { error: text(error) } : {}),
                   },
                 };
-                // The writer queue receives redacted rows only. Drop marker collisions too.
-                const serialized = JSON.stringify(row.exchange);
-                if (pattern) {
-                  pattern.lastIndex = 0;
-                  if (
-                    pattern.test(
-                      [
-                        row.callId,
-                        row.attempt,
-                        row.slot,
-                        row.taskId,
-                        row.sessionId,
-                        row.expiresAt,
-                        serialized,
-                      ].join('\0')
-                    )
-                  )
-                    return;
+                // All input-derived strings passed through text(); schema keys, enum
+                // labels and numeric metadata must not collide with short credentials.
+                if (unredactedSecret) {
+                  drop('secret_guard');
+                  return;
                 }
+                const serialized = JSON.stringify(row.exchange);
                 Object.defineProperty(row, 'serialized', { value: serialized });
                 queue.push(row);
                 setImmediate(() => {
                   void drain().catch(() => undefined);
                 });
               } catch {
-                /* capture only */
+                drop('capture_error');
               } finally {
                 responseChunks.length = 0;
                 responseHeaders = {};
@@ -325,6 +375,7 @@ export function createExchangeCapture(options: {
           },
         };
       } catch {
+        drop('context_error');
         return undefined;
       }
     },

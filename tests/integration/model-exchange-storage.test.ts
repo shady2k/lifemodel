@@ -1,32 +1,82 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createTestStores, type TestStores } from '../helpers/test-stores.js';
-import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
-import { applyCaptureWriterGrants } from '../../loader/src/postgres.js';
+import { lockTestMigrationRoles } from '../helpers/apply-test-migrations.js';
+import { applyMigrations as applyTestMigrations } from '../../scripts/apply-migrations.js';
 
 describe('gateway capture migration and least privilege', () => {
   let stores: TestStores;
   let roleAbsentDuringMigration = false;
+  let unlock: (() => Promise<void>) | undefined;
   beforeAll(async () => {
     stores = await createTestStores();
+    // Prevent concurrent worker DBs granting this cluster-global fixture role.
+    unlock = await lockTestMigrationRoles(true);
     const roles = await stores.postgres.query(
       "SELECT rolname FROM pg_roles WHERE rolname IN ('lifemodel_capture_writer','lifemodel_capture_reader')"
     );
     expect(roles.rows).toEqual([]);
-    await applyTestMigrations(stores.postgres);
+    const info = vi.spyOn(console, 'info');
+    try {
+      await applyTestMigrations(stores.postgres);
+      expect(info).toHaveBeenCalledExactlyOnceWith(
+        'apply-migrations: capture_writer_absent; optional capture grants skipped'
+      );
+    } finally {
+      info.mockRestore();
+    }
     await applyTestMigrations(stores.postgres);
     roleAbsentDuringMigration = true;
-    await expect(applyCaptureWriterGrants(stores.postgres)).rejects.toMatchObject({
-      code: '42704',
-    });
+    const versions = await stores.postgres.query(
+      'SELECT version, applied_at FROM public.schema_migrations ORDER BY version'
+    );
+    const assertGranted = async () => {
+      expect(
+        (
+          await stores.postgres.query(`SELECT
+        has_schema_privilege('lifemodel_capture_writer', 'observability', 'USAGE') AS usage,
+        has_function_privilege('lifemodel_capture_writer', 'observability.append_model_exchange(text,integer,text,text,text,jsonb,timestamptz)', 'EXECUTE') AS append,
+        has_function_privilege('lifemodel_capture_writer', 'observability.prune_model_exchanges()', 'EXECUTE') AS prune
+      `)
+        ).rows
+      ).toEqual([{ usage: true, append: true, prune: true }]);
+    };
+    // Real startup path: schema first, CNPG role later, then an unchanged
+    // migration run repairs the grants. Do not call a grant helper directly.
     await stores.postgres.query('CREATE ROLE lifemodel_capture_writer NOLOGIN');
-    await applyCaptureWriterGrants(stores.postgres);
-    await applyCaptureWriterGrants(stores.postgres);
+    await applyTestMigrations(stores.postgres);
+    await assertGranted();
+    await stores.postgres.query('DROP OWNED BY lifemodel_capture_writer');
+    await stores.postgres.query('DROP ROLE lifemodel_capture_writer');
+    await stores.postgres.query('CREATE ROLE lifemodel_capture_writer NOLOGIN');
+    expect(
+      (
+        await stores.postgres.query(
+          "SELECT has_schema_privilege('lifemodel_capture_writer', 'observability', 'USAGE') AS usage"
+        )
+      ).rows
+    ).toEqual([{ usage: false }]);
+    await applyTestMigrations(stores.postgres);
+    await assertGranted();
+    await applyTestMigrations(stores.postgres);
+    expect(
+      (
+        await stores.postgres.query(
+          'SELECT version, applied_at FROM public.schema_migrations ORDER BY version'
+        )
+      ).rows
+    ).toEqual(versions.rows);
   });
   beforeEach(async () => {
     await stores.postgres.query('TRUNCATE observability.model_exchanges');
   });
   afterAll(async () => {
-    await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    try {
+      await stores.postgres.query('DROP OWNED BY lifemodel_capture_writer');
+      await stores.postgres.query('DROP ROLE lifemodel_capture_writer');
+    } finally {
+      await unlock?.();
+      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    }
   });
   const append = `SELECT observability.append_model_exchange($1,1,'primary',NULL,NULL,$2,$3)`;
   async function asRole(role: string, sql: string, values: unknown[] = []) {
@@ -42,7 +92,7 @@ describe('gateway capture migration and least privilege', () => {
       client.release();
     }
   }
-  it('migrates without capture roles, then grants only writer append/prune idempotently', async () => {
+  it('runs migrations before optional grants, repairing a late or recreated writer on the next start', async () => {
     expect(roleAbsentDuringMigration).toBe(true);
     expect(
       (
@@ -91,7 +141,14 @@ describe('gateway capture migration and least privilege', () => {
         )
       ).rejects.toMatchObject({ code: '42501' });
     }
-    await asRole('lifemodel_capture_writer', 'SELECT observability.prune_model_exchanges()');
+    expect(
+      (
+        await asRole(
+          'lifemodel_capture_writer',
+          'SELECT observability.prune_model_exchanges() AS remaining'
+        )
+      ).rows
+    ).toEqual([{ remaining: true }]);
     expect(
       (
         await stores.postgres.query(
@@ -99,6 +156,22 @@ describe('gateway capture migration and least privilege', () => {
         )
       ).rows[0].proconfig
     ).toEqual(['search_path=pg_catalog']);
+  });
+  it('returns an empty retention result at startup and after expired-only pruning', async () => {
+    const prune = () =>
+      asRole(
+        'lifemodel_capture_writer',
+        'SELECT observability.prune_model_exchanges() AS remaining'
+      );
+    expect((await prune()).rows).toEqual([{ remaining: false }]);
+    await stores.postgres.query(`INSERT INTO observability.model_exchanges(
+      call_id,attempt,slot,created_at,exchange,size_bytes
+    ) VALUES('expired-only',1,'primary',now()-interval '25 hours','{}',1)`);
+    expect((await prune()).rows).toEqual([{ remaining: false }]);
+    expect(
+      (await stores.postgres.query('SELECT count(*)::int n FROM observability.model_exchanges'))
+        .rows
+    ).toEqual([{ n: 0 }]);
   });
   it('rejects invalid and oversized rows and ignores expired queue entries', async () => {
     await asRole('lifemodel_capture_writer', append, ['expired', {}, new Date(Date.now() - 1)]);

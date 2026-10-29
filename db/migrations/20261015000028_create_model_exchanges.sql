@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS observability.model_exchanges (
 -- squawk-ignore require-concurrent-index-creation
 CREATE INDEX IF NOT EXISTS model_exchanges_created ON observability.model_exchanges(created_at, call_id, attempt, slot);
 
-CREATE FUNCTION observability.prune_model_exchanges() RETURNS void
+CREATE FUNCTION observability.prune_model_exchanges() RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtext('lifemodel-model-exchanges'));
@@ -32,6 +32,8 @@ BEGIN
     FROM observability.model_exchanges
   ) old WHERE target.call_id=old.call_id AND target.attempt=old.attempt
       AND target.slot=old.slot AND old.bytes > 104857600;
+  -- Report only existence, never conversation text, to the capture writer.
+  RETURN EXISTS (SELECT 1 FROM observability.model_exchanges);
 END;
 $$;
 CREATE FUNCTION observability.append_model_exchange(
@@ -62,15 +64,5 @@ $$;
 REVOKE ALL ON observability.model_exchanges FROM PUBLIC;
 REVOKE ALL ON FUNCTION observability.append_model_exchange(text,integer,text,text,text,jsonb,timestamptz) FROM PUBLIC;
 REVOKE ALL ON FUNCTION observability.prune_model_exchanges() FROM PUBLIC;
--- Capture is optional. Core must migrate before CNPG has reconciled the role.
--- The loader's later model-capture-grants phase reapplies these grants once it exists.
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lifemodel_capture_writer') THEN
-    GRANT USAGE ON SCHEMA observability TO lifemodel_capture_writer;
-    GRANT EXECUTE ON FUNCTION observability.append_model_exchange(text,integer,text,text,text,jsonb,timestamptz) TO lifemodel_capture_writer;
-    GRANT EXECUTE ON FUNCTION observability.prune_model_exchanges() TO lifemodel_capture_writer;
-  END IF;
-END;
-$$;
+-- Optional writer grants are reconciled after all migrations on every core migrate start.
 -- migrate:down

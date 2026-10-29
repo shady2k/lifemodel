@@ -46,8 +46,11 @@ export function createExchangeStore(credentials: () => Promise<string>) {
         ]
       );
     },
-    async prune(): Promise<void> {
-      await (await source()).query('SELECT observability.prune_model_exchanges()');
+    async prune(): Promise<boolean> {
+      const result = await (
+        await source()
+      ).query<{ remaining: boolean }>('SELECT observability.prune_model_exchanges() AS remaining');
+      return result.rows[0]?.remaining ?? true;
     },
     async close(): Promise<void> {
       closed = true;

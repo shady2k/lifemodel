@@ -1,4 +1,4 @@
-/** Capture's production wiring: no inventory/credential I/O while disabled. */
+/** Capture wiring: disabled capture reads no secret inventory; retention still runs. */
 import { renderAttemptHeaders, type ModelSlotName, type SlotRead } from './model.js';
 import { prepareCaptureSecrets, type CaptureContext } from './model-exchange-capture.js';
 import type { ModelCaptureSetting } from './model-capture-setting.js';
@@ -7,7 +7,8 @@ export function createCaptureInventory(options: {
   setting: { current(): ModelCaptureSetting; refresh(): Promise<void> };
   readSlot(name: ModelSlotName): Promise<SlotRead>;
   passwords(): Promise<readonly string[]>;
-  prune(): Promise<void>;
+  /** Prune retained evidence and report whether any rows remain. */
+  prune(): Promise<boolean>;
   now?: () => number;
 }) {
   const now = options.now ?? Date.now;
@@ -22,7 +23,9 @@ export function createCaptureInventory(options: {
     | undefined;
   let refreshing: Promise<void> | undefined;
   let closed = false;
-  let retentionUntil = 0;
+  // Unknown after restart: always prune once, even with capture disabled.
+  let retainedRows = true;
+  let writes = 0;
   let nextPrune = 0;
   let pruning = false;
   function setting(sessionId?: string | null): ModelCaptureSetting | undefined {
@@ -42,13 +45,23 @@ export function createCaptureInventory(options: {
     );
   }
   function prune(on: boolean): void {
-    if (on) retentionUntil = now() + 24 * 60 * 60 * 1000;
-    if (pruning || now() >= retentionUntil || now() < nextPrune) return;
+    // Turning capture back on must not inherit the slower off-state schedule.
+    if (on && nextPrune > now() + 60_000) nextPrune = now();
+    if (closed || pruning || (!on && !retainedRows) || now() < nextPrune) return;
     nextPrune = now() + (on ? 60_000 : 60 * 60 * 1000);
     pruning = true;
+    const observedWrites = writes;
     void options
       .prune()
-      .catch(() => undefined)
+      .then((remaining) => {
+        // Enabled capture can append after this query, so only an off prune
+        // can establish that maintenance may stop.
+        retainedRows = on || remaining || writes !== observedWrites;
+      })
+      .catch(() => {
+        // Unknown is not empty. Retry maintenance after a transient failure.
+        retainedRows = true;
+      })
       .finally(() => {
         pruning = false;
       });
@@ -90,6 +103,8 @@ export function createCaptureInventory(options: {
         };
       } catch {
         inventory = undefined;
+        // Retention does not depend on a successful settings/secret refresh.
+        prune(false);
       } finally {
         refreshing = undefined;
       }
@@ -99,6 +114,12 @@ export function createCaptureInventory(options: {
   return {
     enabled,
     refresh,
+    /** An already-admitted collector can finish after capture turns off. */
+    noteWrite() {
+      if (closed) return;
+      retainedRows = true;
+      writes++;
+    },
     close() {
       closed = true;
       inventory = undefined;

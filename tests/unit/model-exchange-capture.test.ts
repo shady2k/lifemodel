@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { renderAttemptHeaders } from '../../loader/src/model.js';
 import {
   createExchangeCapture,
+  hasUnredactedCaptureSecret,
   prepareCaptureSecrets,
   type CaptureInput,
   type CaptureRow,
@@ -27,6 +28,140 @@ const input: CaptureInput = {
   },
 };
 describe('bounded exchange capture', () => {
+  it('checks raw text outside complete redaction markers without joining segments', () => {
+    expect(hasUnredactedCaptureSecret('[redacted len=1]', /1|d|e/g)).toBe(false);
+    expect(hasUnredactedCaptureSecret('raw-key [redacted len=7]', /raw-key/g)).toBe(true);
+    expect(hasUnredactedCaptureSecret('ra[redacted len=7]w-key', /raw-key/g)).toBe(false);
+    expect(hasUnredactedCaptureSecret('x [redacted len=7] raw-key', /raw-key/g)).toBe(true);
+  });
+
+  it.each(['1', 'd', 'e'])(
+    'stores redacted evidence for a one-character slot key %s',
+    async (key) => {
+      const rows: CaptureRow[] = [];
+      const capture = createExchangeCapture({
+        context: () => ({
+          setting: { until: new Date(Date.now() + 600_000).toISOString() },
+          secrets: [key, 'url-secret'],
+          secretHeaders: [],
+        }),
+        write: async (row) => {
+          rows.push(row);
+        },
+      });
+      const attempt = capture.begin({
+        ...input,
+        callId: `call-${key}`,
+        taskId: `task-${key}`,
+        sessionId: `chat-${key}`,
+        inbound: { ...input.inbound, body: `secret=${key}` },
+        upstream: {
+          ...input.upstream,
+          headers: { authorization: `Bearer ${key}`, [`x-${key}`]: key },
+          body: key,
+        },
+      })!;
+      attempt.response(200, { [`x-${key}`]: key });
+      attempt.chunk(Buffer.from(key));
+      attempt.finish();
+      await expect.poll(() => rows.length).toBe(1);
+      const row = rows[0]!;
+      for (const value of [row.callId, row.taskId!, row.sessionId!])
+        expect(hasUnredactedCaptureSecret(value, new RegExp(key, 'g'))).toBe(false);
+      expect(row.exchange.upstream).toMatchObject({
+        body: '[redacted len=1]',
+        headers: {
+          authorization: new RegExp('^\\[redacted len=\\d+\\]$'),
+          'x-[redacted len=1]': '[redacted len=1]',
+        },
+      });
+      expect(row.exchange.response).toMatchObject({ body: '[redacted len=1]' });
+      expect(capture.dropped()).toEqual({});
+      capture.close();
+    }
+  );
+
+  it('reports bounded reason-coded drop counts without evidence and contains diagnostic throws', async () => {
+    const reports: { reason: string; count: number }[] = [];
+    const broken = createExchangeCapture({
+      context: () => {
+        throw Error('private-context-value');
+      },
+      write: async () => undefined,
+      onDrop: (reason, count) => {
+        reports.push({ reason, count });
+        throw Error('private-diagnostic-value');
+      },
+    });
+    expect(broken.begin(input)).toBeUndefined();
+    expect(broken.dropped()).toEqual({ context_error: 1 });
+    const capture = createExchangeCapture({
+      active: 1,
+      queue: 1,
+      context: () => ({
+        setting: { until: new Date(Date.now() + 600_000).toISOString() },
+        secrets: ['url-secret'],
+        secretHeaders: [],
+      }),
+      write: async () => {
+        throw Error('private-writer-value');
+      },
+      onDrop: (reason, count) => {
+        reports.push({ reason, count });
+      },
+    });
+    const first = capture.begin(input)!;
+    expect(capture.begin(input)).toBeUndefined();
+    first.finish();
+    await expect.poll(() => capture.dropped().write_error).toBe(1);
+    await expect
+      .poll(() => reports)
+      .toEqual(
+        expect.arrayContaining([
+          { reason: 'context_error', count: 1 },
+          { reason: 'active_limit', count: 1 },
+          { reason: 'write_error', count: 1 },
+        ])
+      );
+    expect(JSON.stringify(reports)).not.toContain('private-');
+    const snapshot = capture.dropped();
+    snapshot.write_error = 100;
+    expect(capture.dropped().write_error).toBe(1);
+    capture.close();
+    broken.close();
+  });
+
+  it('counts queue overflow while the writer is busy without awaiting it on the call path', async () => {
+    let writes = 0;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const capture = createExchangeCapture({
+      queue: 1,
+      context: () => ({
+        setting: { until: new Date(Date.now() + 600_000).toISOString() },
+        secrets: ['url-secret'],
+        secretHeaders: [],
+      }),
+      write: async () => {
+        writes++;
+        await blocked;
+      },
+    });
+    capture.begin(input)!.finish();
+    await expect.poll(() => writes).toBe(1);
+    capture.begin(input)!.finish();
+    // The second finalizer is enqueued before this barrier. Its redacted row
+    // must fill the queue while the first write is still blocked.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(capture.begin(input)).toBeUndefined();
+    expect(capture.dropped()).toEqual({ queue_full: 1 });
+    release();
+    await expect.poll(() => writes).toBe(2);
+    capture.close();
+  });
+
   it('redacts custom headers by name without scrubbing short values or the session globally', async () => {
     const rows: CaptureRow[] = [];
     const rendered = renderAttemptHeaders(

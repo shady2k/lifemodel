@@ -205,7 +205,7 @@ describe('CloudNativePG platform state', () => {
     ]);
   });
 
-  it('limits database ingress to trusted applications, capture grants and CNPG operator ports', () => {
+  it('limits database ingress to trusted applications and CNPG operator ports, never the loader', () => {
     const policies = allYaml(stateRoot).filter((item) => item.kind === 'NetworkPolicy');
     const deny = policies.find((item) => item.metadata.name === 'lifemodel-state-default-deny');
     expect(deny?.spec).toEqual({
@@ -235,15 +235,14 @@ describe('CloudNativePG platform state', () => {
         }),
       ])
     );
-    expect(database?.spec.ingress).toContainEqual({
-      from: [
-        {
-          namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' } },
+    expect(database?.spec.ingress).toHaveLength(4);
+    for (const rule of database?.spec.ingress ?? []) {
+      expect(rule.from).not.toContainEqual(
+        expect.objectContaining({
           podSelector: { matchLabels: { 'app.kubernetes.io/name': 'loader' } },
-        },
-      ],
-      ports: [{ protocol: 'TCP', port: 5432 }],
-    });
+        })
+      );
+    }
     expect(database?.spec.policyTypes).toEqual(['Ingress', 'Egress']);
     expect(database?.spec.egress).toEqual([
       expect.objectContaining({

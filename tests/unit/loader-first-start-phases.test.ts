@@ -29,10 +29,7 @@ describe('the loader first-start phase order', () => {
     }).map((phase) => phase.name);
     expect(names.slice(0, 3)).toEqual(['storage-seaweed-custody', 'zot-custody', 'gitea-ready']);
     expect(names).not.toContain('workbench-import');
-    expect(names.at(-1)).toBe('model-capture-grants');
-    expect(names.indexOf('model-capture-grants')).toBeGreaterThan(
-      names.indexOf('model-capture-credentials')
-    );
+    expect(names.at(-1)).toBe('model-capture-credentials');
     expect(names.indexOf('model-capture-credentials')).toBeGreaterThan(
       names.indexOf('valkey-password')
     );
@@ -58,7 +55,6 @@ describe('the loader first-start phase order', () => {
       postgres: phase('cnpg-copy-core-credentials'),
       valkey: phase('valkey-password'),
       capture: phase('model-capture-credentials'),
-      captureGrants: phase('model-capture-grants'),
     });
     await createPlatformPhaseRunner({
       read: async () => record,
@@ -66,20 +62,19 @@ describe('the loader first-start phase order', () => {
         record = next;
       },
     })(plan);
-    expect(ran).toEqual(['model-capture-credentials', 'model-capture-grants']);
-    expect(record).toEqual({ phase: 'model-capture-grants', status: 'complete' });
+    expect(ran).toEqual(['model-capture-credentials']);
+    expect(record).toEqual({ phase: 'model-capture-credentials', status: 'complete' });
   });
 
-  it('retries grants after completed capture credentials without replaying earlier phases', async () => {
+  it('finishes bootstrap after capture credentials without waiting for the writer role or schema', async () => {
     let record: PlatformPhaseRecord | null = {
       phase: 'model-capture-credentials',
       status: 'complete',
     };
-    let attempts = 0;
     const phase = (name: string) => ({
       name,
       run: async () => {
-        throw new Error('earlier phase replayed');
+        throw new Error('completed phase replayed');
       },
     });
     const plan = platformFirstStartPhases({
@@ -89,12 +84,6 @@ describe('the loader first-start phase order', () => {
       postgres: phase('cnpg-copy-core-credentials'),
       valkey: phase('valkey-password'),
       capture: phase('model-capture-credentials'),
-      captureGrants: {
-        name: 'model-capture-grants',
-        run: async () => {
-          if (++attempts === 1) throw new Error('capture_writer_unavailable');
-        },
-      },
     });
     const run = createPlatformPhaseRunner({
       read: async () => record,
@@ -102,11 +91,8 @@ describe('the loader first-start phase order', () => {
         record = next;
       },
     });
-    await expect(run(plan)).rejects.toThrow('capture_writer_unavailable');
-    expect(record).toEqual({ phase: 'model-capture-grants', status: 'failed' });
     await run(plan);
-    expect(attempts).toBe(2);
-    expect(record).toEqual({ phase: 'model-capture-grants', status: 'complete' });
+    expect(record).toEqual({ phase: 'model-capture-credentials', status: 'complete' });
   });
 
   it('finishes Seaweed custody on a fresh installation where the CNPG Secret never appears', async () => {
