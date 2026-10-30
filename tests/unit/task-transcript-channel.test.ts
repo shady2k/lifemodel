@@ -274,3 +274,67 @@ it('r2 raw JSON budget drops cut text runs instead of orphaning credential prefi
   expect(value.text).toMatch(/…$/);
   expect(Buffer.byteLength(JSON.stringify(value))).toBeLessThanOrEqual(8192 - 256);
 });
+
+it('call references survive launcher scrub and both bounds', async () => {
+  const calls = vi.spyOn(TaskJsonClient.prototype, 'call').mockResolvedValue({});
+  const c = channel();
+  const callRef = 'call_' + 'a'.repeat(64);
+  c.enqueue({
+    ...entry(''),
+    role: 'tool',
+    tool: {
+      name: 'shell',
+      callRef,
+      input: 'token=private',
+      status: 'running',
+      outputTail: '',
+    },
+  });
+  await c.close();
+  expect(calls).toHaveBeenCalledOnce();
+  expect(calls.mock.calls[0]?.[1]).toMatchObject({
+    payload: { tool: { callRef, input: 'token=[REDACTED]' } },
+  });
+  expect(c.droppedCount).toBe(0);
+});
+
+it('call references are optional safe bounded IDs at the core boundary', async () => {
+  const { validateTaskChannelFrame } = await import('../../src/ports/task-channel.js');
+  const frame = (reference: Record<string, unknown>) => ({
+    taskId: 'task',
+    attemptId: 'attempt',
+    direction: 'task_to_core',
+    sequence: 1,
+    messageId: 'entry_test',
+    kind: 'transcript',
+    payload: {
+      ...entry(''),
+      role: 'tool',
+      tool: { name: 'shell', status: 'running', outputTail: '', ...reference },
+    },
+  });
+  expect(() => validateTaskChannelFrame(frame({}))).not.toThrow();
+  expect(() =>
+    validateTaskChannelFrame(frame({ callRef: 'call_' + 'a'.repeat(64) }))
+  ).not.toThrow();
+  for (const callRef of [
+    '',
+    'a'.repeat(128),
+    'a'.repeat(129),
+    'toolu_native123',
+    'call_' + 'A'.repeat(64),
+    'call_' + 'a'.repeat(63),
+    'call_' + 'a'.repeat(65),
+    5,
+    null,
+    {},
+    'native/call:123',
+    'bad\0id',
+  ])
+    expect(() => validateTaskChannelFrame(frame({ callRef }))).toThrow('invalid_frame');
+  const bounded = boundTaskTranscript({
+    ...entry(''),
+    tool: { name: 'shell', callRef: 'a'.repeat(200), outputTail: '' },
+  });
+  expect(bounded.tool.callRef).toBe('a'.repeat(128));
+});

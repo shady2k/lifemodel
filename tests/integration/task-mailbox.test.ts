@@ -474,6 +474,7 @@ describe('durable fenced task mailbox', () => {
         text: '',
         tool: {
           name: 'shell',
+          callRef: 'call_' + 'a'.repeat(64),
           input: 'token=input-canary sleep 240',
           status: 'completed' as const,
           outputTail: 'tail token=tool-canary',
@@ -498,6 +499,7 @@ describe('durable fenced task mailbox', () => {
           id: 'entry-tool',
           tool: {
             name: 'shell',
+            callRef: 'call_' + 'a'.repeat(64),
             input: 'token=[REDACTED] sleep 240',
             status: 'completed',
             outputTail: 'tail token=[REDACTED]',

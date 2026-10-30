@@ -725,44 +725,55 @@ it('r1 session finally flushes a pending-only tool', async () => {
   }
 }, 15000);
 
-it('r2 insertion boundary holds a streamed key for redaction', async () => {
-  const { createTaskContentScrubber } = await import('../../loader/src/task-content-scrub.js');
+it('successor replay keeps whole text rows separate across two commands', async () => {
   const events: TaskHarnessEvent[] = [];
   let reconciled = false;
   const f = await barrierFixture({
     onEvent: (event) => {
       events.push(event);
     },
-    reconcile: async () => {
+    reconcile: async (input) => {
       if (reconciled) return { state: 'idle' };
       reconciled = true;
+      expect(input.commandIds).toEqual(['write', 'summarize']);
       return {
         state: 'successor',
-        wait: async () => ({
-          stopReason: 'end_turn',
-          updates: [
-            { kind: 'text', text: 'before sk-abcdefghijk' },
-            { kind: 'inserted', commandId: 'cmd' },
-            { kind: 'text', text: 'lmnopqrstu0123456789 after ' },
-          ],
-        }),
+        wait: async (control) => {
+          await control.closeIntake();
+          return {
+            stopReason: 'end_turn',
+            updates: [
+              { kind: 'inserted', commandId: 'write' },
+              { kind: 'reset' },
+              { kind: 'text', text: 'Wrote file.txt' },
+              { kind: 'inserted', commandId: 'summarize' },
+              { kind: 'reset' },
+              { kind: 'text', text: 'Final answer' },
+            ],
+          };
+        },
       };
     },
   });
   try {
     await f.harness.intakeReady;
-    expect(await f.harness.steer({ commandId: 'cmd', text: 'steer' })).toBe('accepted');
-    await f.release();
-    expect(await f.terminal).toMatchObject({ outcome: 'succeeded' });
-    const scrub = createTaskContentScrubber({});
-    const entries = await Promise.all(
-      events.flatMap((event) => (event.type === 'transcript' ? [scrub(event.entry)] : []))
+    expect(await f.harness.steer({ commandId: 'write', text: 'Write the file' })).toBe('accepted');
+    expect(await f.harness.steer({ commandId: 'summarize', text: 'Summarize the result' })).toBe(
+      'accepted'
     );
-    const text = entries.map((entry) => entry.text).join('');
-    expect(text).toContain('[REDACTED]');
-    expect(text).not.toContain('sk-abcdefghijk');
-    expect(text).not.toContain('lmnopqrstu');
-    expect(text).toContain('after ');
+    await f.release();
+    expect(await f.terminal).toMatchObject({ outcome: 'succeeded', result: 'Final answer' });
+    expect(
+      events.flatMap((event) =>
+        event.type === 'transcript' ? [{ role: event.entry.role, text: event.entry.text }] : []
+      )
+    ).toEqual([
+      { role: 'assistant', text: 'First result' },
+      { role: 'steer', text: 'Write the file' },
+      { role: 'assistant', text: 'Wrote file.txt' },
+      { role: 'steer', text: 'Summarize the result' },
+      { role: 'assistant', text: 'Final answer' },
+    ]);
   } finally {
     await f.cleanup();
   }

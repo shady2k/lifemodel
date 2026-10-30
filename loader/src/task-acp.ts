@@ -800,12 +800,13 @@ export class AcpTaskHarness implements TaskHarness {
             } else if (update.kind === 'reset') {
               transcript?.flush();
               turn.continueTurn();
-            } else if (update.kind === 'text')
+            } else if (update.kind === 'text') {
               await applyUpdate({
                 sessionUpdate: 'agent_message_chunk',
                 content: { type: 'text', text: update.text },
               });
-            else
+              transcript?.completeText();
+            } else
               await applyUpdate({
                 sessionUpdate: 'tool_call_update',
                 toolCallId: update.id,

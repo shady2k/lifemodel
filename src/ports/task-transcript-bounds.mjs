@@ -47,7 +47,7 @@ export function transcriptRawTail(text, max) {
 }
 /**
  * Re-bound scrubbed transcript fields and both JSON wire/JSONB text budgets.
- * @param {{text: string, tool: {name: string, input?: string, outputTail: string} | null}} entry
+ * @param {{text: string, tool: {name: string, callRef?: string, input?: string, outputTail: string} | null}} entry
  * @param {boolean} [raw] Keep larger input/output until the channel has scrubbed it.
  */
 export function boundTaskTranscript(entry, raw = false) {
@@ -64,6 +64,7 @@ export function boundTaskTranscript(entry, raw = false) {
       ? {
           ...entry.tool,
           name: clip(entry.tool.name, 128),
+          ...(entry.tool.callRef === undefined ? {} : { callRef: clip(entry.tool.callRef, 128) }),
           ...(entry.tool.input === undefined
             ? {}
             : { input: runClip(entry.tool.input, raw ? 4000 : 300) }),

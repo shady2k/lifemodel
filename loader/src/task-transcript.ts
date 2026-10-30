@@ -16,6 +16,12 @@ const record = (v: unknown): Json =>
 export function transcriptText(value: string, bytes = 4000, tail = false): string {
   return transcriptSlice(value, bytes, tail).text;
 }
+/** Native IDs stay private; all status rows derive the same bounded reference. */
+function callReference(id: string, generation: number): string {
+  return `call_${createHash('sha256')
+    .update(`${id}\0${String(generation)}`)
+    .digest('hex')}`;
+}
 export function createAcpTranscriptMapper(
   sink: TaskHarnessEventSink | undefined,
   mapping: {
@@ -29,11 +35,13 @@ export function createAcpTranscriptMapper(
   let droppingRun = false;
   let pendingAt: string | undefined;
   let chunk = 0;
-  let messageId: unknown;
+  let messageId: string | undefined;
+  let lastTextHasMessageId = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const tools = new Map<
     string,
     {
+      generation: number;
       name: string;
       input: string;
       status: 'running' | 'completed' | 'error';
@@ -62,7 +70,7 @@ export function createAcpTranscriptMapper(
     timer = undefined;
     if (ended) droppingRun = false;
     if (!pending) return;
-    // A streamed credential can span any non-final boundary. Keep its whole run.
+    // Partial-text flushes may split a credential; keep its whole trailing run.
     const trailing = ended ? '' : (/\S+$/u.exec(pending)?.[0] ?? '');
     let text = pending.slice(0, pending.length - trailing.length);
     pending = trailing;
@@ -86,10 +94,11 @@ export function createAcpTranscriptMapper(
         if (tool.emitted && tool.status !== 'running') continue;
         tool.status = 'error';
         tool.emitted = true;
-        emit(`tool:${id}:error`, {
+        emit(`tool:${id}\0${String(tool.generation)}:error`, {
           role: 'tool',
           text: '',
           tool: {
+            callRef: callReference(id, tool.generation),
             name: tool.name,
             input: tool.input,
             status: 'error',
@@ -102,10 +111,16 @@ export function createAcpTranscriptMapper(
       try {
         const update = record(value);
         if (update['sessionUpdate'] === 'agent_message_chunk') {
-          if (update['messageId'] !== undefined && update['messageId'] !== messageId) flush();
-          messageId = update['messageId'];
           const content = record(update['content']);
           if (content['type'] !== 'text' || typeof content['text'] !== 'string') return;
+          const id = update['messageId'];
+          const identified = typeof id === 'string' && id.length > 0;
+          if (identified) {
+            // An ID-less tail may continue in the next identified chunk.
+            if (messageId !== undefined && id !== messageId) flush(lastTextHasMessageId);
+            messageId = id;
+          }
+          if (content['text']) lastTextHasMessageId = identified;
           let rest = content['text'];
           while (rest) {
             if (droppingRun) {
@@ -138,11 +153,20 @@ export function createAcpTranscriptMapper(
             timer.unref();
           }
         } else if (['tool_call', 'tool_call_update'].includes(update['sessionUpdate'] as string)) {
-          flush();
           const id = update['toolCallId'];
-          if (typeof id !== 'string') return;
-          const previous = tools.get(id);
-          if (!previous && tools.size >= 1024) tools.delete(tools.keys().next().value ?? '');
+          const known = typeof id === 'string' ? tools.get(id) : undefined;
+          const restarted =
+            known !== undefined &&
+            known.status !== 'running' &&
+            (['pending', 'in_progress', 'running'].includes(update['status'] as string) ||
+              update['sessionUpdate'] === 'tool_call');
+          // Only new work completes assistant text. Executor patches can arrive mid-word.
+          const fresh = typeof id === 'string' && id.length > 0 && (!known || restarted);
+          flush(fresh);
+          if (typeof id !== 'string' || !id) return;
+          const generation = restarted ? known.generation + 1 : (known?.generation ?? 0);
+          const previous = restarted ? undefined : known;
+          if (!known && tools.size >= 1024) tools.delete(tools.keys().next().value ?? '');
           const name =
             previous?.name && previous.name !== 'tool'
               ? previous.name
@@ -165,6 +189,7 @@ export function createAcpTranscriptMapper(
             update['status'] !== 'pending' &&
             (previous?.status !== status || (status === 'running' && !previous?.runningEmitted));
           tools.set(id, {
+            generation,
             name,
             input,
             status,
@@ -177,13 +202,14 @@ export function createAcpTranscriptMapper(
             role: 'tool' as const,
             text: '',
             tool: {
+              callRef: callReference(id, generation),
               name,
               input,
               status,
               outputTail,
             },
           } satisfies Omit<TaskTranscriptEntry, 'id' | 'time'>;
-          if (shouldEmit) emit(`tool:${id}:${status}`, entry);
+          if (shouldEmit) emit(`tool:${id}\0${String(generation)}:${status}`, entry);
         }
       } catch {
         /* Capture cannot fail a task. */
