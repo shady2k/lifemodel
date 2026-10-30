@@ -290,6 +290,23 @@ describe('durable fenced task mailbox', () => {
     expect((await m.readTranscript(identity.taskId)).entries).toHaveLength(0);
   });
 
+  it('round2: a tool output containing NUL is stored without NUL', async () => {
+    const f = {
+      ...transcriptFrame('nul-output', 1, ''),
+      payload: {
+        id: 'nul-output',
+        role: 'tool' as const,
+        time: new Date().toISOString(),
+        text: '',
+        tool: { name: 'shell', status: 'completed' as const, outputTail: 'before\0after' },
+      },
+    } as TaskChannelFrame;
+    await mailbox().append(f, identity);
+    expect((await mailbox().readTranscript(identity.taskId)).entries[0]?.tool?.outputTail).toBe(
+      'beforeafter'
+    );
+  });
+
   it('review6: transcript append never requests replay resync', async () => {
     const settled = vi.fn();
     const m = createPostgresTaskMailbox({

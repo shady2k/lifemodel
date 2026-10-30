@@ -30,7 +30,7 @@ export function transcriptSlice(text, max, tail = false) {
 export function boundTaskTranscript(entry) {
   /** @param {string} text @param {number} max @param {boolean} [tail] */
   const clip = (text, max, tail = false) =>
-    transcriptSlice(text, max, tail).text;
+    transcriptSlice(text.replaceAll('\0', ''), max, tail).text;
   const value = {
     ...entry,
     text: clip(entry.text, 4000),
