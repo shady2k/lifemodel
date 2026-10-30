@@ -20,7 +20,8 @@ and the encoded entry 8 KiB. Ordinary frame identity/authority/transport bounds
 still apply. No artifacts, raw tool arguments or raw provider messages are copied.
 
 The launcher captures best effort on a separate bounded socket/queue (64 waiting,
-1,024 recent deduplication IDs). A lost ACK gets one identical replay. Capture
+1,024 recent deduplication IDs). A lost ACK or 5xx gets one identical replay;
+4xx responses (including 400/409/429) are dropped without retry. Capture
 never gates harness success; final drain is at most two seconds before the terminal
 frame. Transport failure, queue pressure, excerpt clipping or the capture cap can
 leave gaps. Repeated tool patches with the same content have one effect. Tool
@@ -43,7 +44,9 @@ expired. This uses the trace writer cadence (first and every 50 batches), not
 a separate timer; no writes means no retention pass. Null age disables expiry.
 Content-free eviction horizons remain with the task to prevent reinsertion. Known credentials, assignments, token forms, JWTs and credential URLs are
 scrubbed before transport with the same code as `task.tool` spans, and scrubbed
-again before storage with the trace-store scrubber. Scrubbing is defense in depth,
+again before storage with the trace-store scrubber. Both sides re-bound the scrubbed
+entry, including JSON escaping; redaction expansion cannot overflow storage. SQL
+check violations on transcript rows return 400, not a retried 503. Scrubbing is defense in depth,
 not a guarantee of discovering arbitrary unknown secrets in prose.
 
 An accepted step, question or live session transcript entry (never `user-briefing`) advances `starting` to

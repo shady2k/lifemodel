@@ -95,7 +95,8 @@ export interface TaskChannelAck extends FrameIdentity {
   readonly receivedAt: string;
 }
 export interface StoredTaskChannelFrame {
-  readonly frame: TaskChannelFrame;
+  /** Transcript rows live in their own table and are never replay candidates. */
+  readonly frame: Exclude<TaskChannelFrame, { readonly kind: 'transcript' }>;
   readonly ack: TaskChannelAck;
 }
 export interface TaskChannelCursor {

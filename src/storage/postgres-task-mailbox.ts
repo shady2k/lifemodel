@@ -74,7 +74,7 @@ function record(row: MailboxRow): StoredTaskChannelFrame {
       ...identity,
       kind: row.kind,
       payload: row.payload,
-    } as TaskChannelFrame,
+    } as StoredTaskChannelFrame['frame'],
     ack: { ...identity, receivedAt: row.received_at.toISOString() },
   };
 }
