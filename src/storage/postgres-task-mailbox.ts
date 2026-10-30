@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from 'pg';
+import { taskCommandDeliverySql, taskAttemptEndedSql } from './task-command-delivery.js';
 import type { TaskProfile } from '../ports/tasks.js';
 import type {
   TaskChannelCursor,
@@ -360,14 +361,17 @@ export function createPostgresTaskMailbox(deps: {
         content: TaskCommandInput;
         sequence: string;
         disposition: TaskCommandStatus['disposition'];
+        delivery: NonNullable<TaskCommandStatus['delivery']>;
         receipts: TaskCommandStatus['receipts'];
       }>(
         `SELECT c.content,c.sequence,COALESCE(a.disposition,'queued') AS disposition,
+        ${taskCommandDeliverySql(taskAttemptEndedSql)} AS delivery,
         COALESCE((SELECT jsonb_agg(jsonb_build_object('taskId',r.task_id,'attemptId',c.attempt_id,
           'commandId',r.command_id,'receiptId',r.receipt_id,'disposition',r.disposition,
           'receivedAt',r.received_at) ORDER BY r.received_at,r.receipt_id)
           FROM core.task_command_receipts r WHERE r.task_id=c.task_id AND r.command_id=c.command_id),'[]'::jsonb) AS receipts
-        FROM core.task_commands c LEFT JOIN core.task_command_acks a USING(task_id,command_id)
+        FROM core.task_commands c JOIN core.tasks t ON t.id=c.task_id
+        LEFT JOIN core.task_command_acks a USING(task_id,command_id)
         WHERE ($1::text IS NULL OR c.task_id=$1) AND ($2::text IS NULL OR c.command_id=$2)
         ORDER BY c.sequence LIMIT 1024`,
         [taskId ?? null, commandId ?? null]
@@ -380,6 +384,7 @@ export function createPostgresTaskMailbox(deps: {
         return {
           ...commandRecord(row),
           disposition: row.disposition,
+          delivery: row.delivery,
           receipts,
           currentReceipt: receipts.at(-1) ?? null,
           retryable: row.disposition === 'rejected',

@@ -341,7 +341,19 @@ export interface TaskQuestion {
   readonly text: string;
   readonly answerCommandId: string | null;
 }
+export type TaskCommandDelivery =
+  | 'queued'
+  | 'delivered'
+  | 'inserted'
+  | 'not_delivered'
+  | 'uncertain';
+export interface TaskCommandDeliveryStatus {
+  readonly commandId: string;
+  readonly kind: 'steer' | 'answer';
+  readonly delivery: TaskCommandDelivery;
+}
 export interface TaskCommandStatus extends TaskCommand {
+  readonly delivery?: TaskCommandDelivery;
   readonly disposition: TaskCommandAck['disposition'] | 'queued';
   /** Arrival order: receivedAt, then receiptId as a stable tie-break. */
   readonly receipts: readonly StoredTaskCommandReceipt[];

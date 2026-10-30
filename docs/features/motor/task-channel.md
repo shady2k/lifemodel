@@ -325,6 +325,32 @@ not a deployed-harness or owner-interface acceptance claim. Task-side MCP
 question/step tools and the shared real-adapter round trip are implemented by
 lifemodel-653.9.9 in `tests/integration/task-harness-contract.test.ts`.
 
+### Delivery visibility (lifemodel-653.9.18)
+
+Every command read and running-task context lists command ID, kind and delivery:
+`queued`, `delivered` (native queue admission), `inserted` (a turn saw it),
+`not_delivered`, or `uncertain`. The immutable ACK and ordered receipt history
+remain separate. None proves obedience. Pending commands must not be re-sent
+just because the owner asks for status. Read the full task if the bounded
+context cannot fit all commands.
+
+The projection is shared SQL over durable command/ACK/receipt rows and the
+terminal report or finalization boundary. At that boundary a command with no
+ACK or receipt becomes `not_delivered`; a rejected or failed delivery is also
+not delivered. Accepted without insertion remains delivered, not applied.
+Ambiguous admission stays uncertain. A later inserted receipt supersedes earlier
+uncertainty or deferral. Sealed outcome events freeze this metadata (no command
+text) with the result. The outcome prompt names missed commands and asks for an
+honest explanation and an offer to rerun. The deterministic fallback says those
+changes did not reach the task and were not applied.
+
+Prestart commands wait for `intakeReady`, then use the ordinary journaled send,
+ACK and correlated insertion receipts. Receipt intake remains open while an
+in-flight dispatch drains at shutdown; a receipt arriving as a previous flush
+releases ownership starts a new flush, so it cannot remain stranded in memory; the receipt client closes before terminal
+publication. Both registered harnesses use this same intake contract. These are
+source/store checks, not the deployed VM acceptance walk.
+
 ### Command routes and durable storage
 
 `GET /task/commands` returns `{command: null}` after at most 25 seconds or one

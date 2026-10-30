@@ -1,5 +1,10 @@
 import type { TaskHarnessName } from './task-harness-names.js';
-import type { TaskCommand, TaskCommandStatus, TaskQuestion } from './task-channel.js';
+import type {
+  TaskCommand,
+  TaskCommandStatus,
+  TaskQuestion,
+  TaskCommandDeliveryStatus,
+} from './task-channel.js';
 /** Core task authority. Deliberately not exposed through PluginPrimitives. */
 export type TaskState =
   | 'queued'
@@ -100,6 +105,7 @@ export interface TaskFinalizationCandidate {
 }
 /** Durable logical event; delivery is at-least-once, deduplicated by outcomeKey. */
 export interface TaskOutcomeEvent {
+  readonly commands?: readonly TaskCommandDeliveryStatus[];
   readonly taskId: string;
   readonly outcomeKey: string;
   readonly state: TaskTerminalState;
@@ -175,6 +181,7 @@ export const TASK_CONTEXT_LIMITS = {
   rendered: 24_000,
 } as const;
 export interface TaskContextEntry {
+  readonly commands?: readonly TaskCommandDeliveryStatus[];
   readonly id: string;
   readonly harness: string;
   readonly state: TaskState;

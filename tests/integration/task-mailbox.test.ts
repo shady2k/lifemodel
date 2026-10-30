@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, writeFile, rm, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { ScriptedTaskHarness } from '../../loader/src/task-harness.js';
 import { AcpTaskHarness } from '../../loader/src/task-acp.js';
 import { createTaskCommandIntake } from '../../loader/src/task-command-intake.js';
 import { TaskJsonClient } from '../../loader/src/task-launcher-http.js';
@@ -23,7 +24,7 @@ import {
 import { RealCognitionFacade } from '../helpers/core-loop-real-cognition.js';
 import { setPrimaryRecipientId } from '../../src/core/globals.js';
 import { AggregationProcessor } from '../../src/layers/aggregation/processor.js';
-import { createUserMessageSignal } from '../../src/types/signal.js';
+import { createSignal, createUserMessageSignal } from '../../src/types/signal.js';
 import type { ScriptedResponse } from '../helpers/scripted-llm.js';
 import type { TaskChannelFrame, TaskChannelProof } from '../../src/ports/task-channel.js';
 import { TaskChannelError, validateTaskChannelFrame } from '../../src/ports/task-channel.js';
@@ -275,6 +276,87 @@ describe('durable fenced task mailbox', () => {
     expect((await domain.read(identity.taskId))?.state).toBe('wrapping-up');
   });
 
+  it('delivers commands queued before native intake and stores insertion receipts after startup', async () => {
+    const domain = service();
+    await domain.steer(identity.taskId, 'prestart-one', 'Save the result');
+    await domain.steer(identity.taskId, 'prestart-two', 'Also save an artifact');
+    const ready = Promise.withResolvers<void>();
+    let intake: ReturnType<typeof createTaskCommandIntake>;
+    const harness = new ScriptedTaskHarness({ waitForAbort: true, beforeIntake: ready.promise,
+      onEvent: (event) => { if (event.type === 'receipt') intake.receipt(event); },
+    });
+    const calls = vi.spyOn(TaskJsonClient.prototype, 'call').mockImplementation(async (path, body, signal) => {
+      if (path === '/task/commands') {
+        const command = await mailbox().pollCommand(identity);
+        if (command) return { command };
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(new Error('closed')), { once: true });
+        });
+      }
+      if (path === '/task/commands/ack') await mailbox().acknowledgeCommand(body as never, identity);
+      else if (path === '/task/commands/receipt') await mailbox().recordCommandReceipt(body as never, identity);
+      else throw new Error('unexpected route');
+      return { stored: true };
+    });
+    intake = createTaskCommandIntake({
+      endpoint: { endpoint: 'https://localhost:1', tokenFile: '/unused', caFile: '/unused' },
+      identity, harness, hardStopAt: Date.now() + 60_000,
+    });
+    const execution = harness.start({ text: 'Find primes', model: 'test' });
+    intake.start();
+    try {
+      expect(calls).not.toHaveBeenCalled();
+      ready.resolve();
+      await expect.poll(async () => (await domain.read(identity.taskId))?.commands.map((c) => c.delivery))
+        .toEqual(['inserted', 'inserted']);
+      expect((await domain.listActiveContext()).tasks[0]?.commands).toEqual([
+        { commandId: 'prestart-one', kind: 'steer', delivery: 'inserted' },
+        { commandId: 'prestart-two', kind: 'steer', delivery: 'inserted' },
+      ]);
+    } finally {
+      await harness.abort(); await execution; await intake.stop(); calls.mockRestore();
+    }
+  });
+
+  it('keeps prestart commands visible and makes an undelivered late steer explicit in the core outcome reply', async () => {
+    const domain = service();
+    await domain.steer(identity.taskId, 'early-steer', 'Save primes.txt');
+    expect((await domain.read(identity.taskId))?.commands[0]).toMatchObject({ delivery: 'queued' });
+    await mailbox().acknowledgeCommand({ taskId: identity.taskId, attemptId: identity.attemptId, commandId: 'early-steer', disposition: 'accepted' }, identity);
+    expect((await domain.read(identity.taskId))?.commands[0]).toMatchObject({ delivery: 'delivered' });
+    await mailbox().recordCommandReceipt({ taskId: identity.taskId, attemptId: identity.attemptId, commandId: 'early-steer', receiptId: 'inserted-early', disposition: 'inserted' }, identity);
+    expect((await domain.read(identity.taskId))?.commands[0]).toMatchObject({ delivery: 'inserted' });
+    const f = await contextBoot([{ content: '' }]);
+    try {
+      await domain.steer(identity.taskId, 'late-steer', 'Use N=9 instead of N=7');
+      // The VM's three-second race is event-driven here, without timer waits.
+      // No launcher poll or receipt occurs between the committed steer and terminal frame.
+      await mailbox().append(terminal(), identity);
+      expect((await domain.read(identity.taskId))?.commands[1]).toMatchObject({ delivery: 'not_delivered' });
+      await finalizeTaskFixture(stores.postgres, f.registry, { id: identity.taskId, launchId: identity.launchId }, {
+        state: 'done', reasonCode: 'completed', summary: 'Primes for N=7 are ready.',
+      });
+      const event = (await f.registry.listOutcomeWork())[0]!;
+      expect(event.commands).toEqual(expect.arrayContaining([
+        expect.objectContaining({ commandId: 'late-steer', delivery: 'not_delivered' }),
+      ]));
+      expect(JSON.stringify(event.commands)).not.toContain('Use N=9');
+      await f.bus.append(createSignal('task_outcome', 'task.finalizer', { value: 1 }, { data: { kind: 'task_outcome', ...event } }));
+      await waitFor(() => f.real.calls.length > 0, 'outcome reply');
+      await f.real.calls[0]!.done;
+      await expect.poll(async () => (await f.events()).length).toBe(1);
+      expect((await f.events())[0]!.payload.text).toContain('did not reach the task');
+      expect((await f.events())[0]!.payload.text).toContain('not applied');
+      expect((await f.events())[0]!.payload.text).toContain('rerun');
+      const prompt = f.real.provider.requests.flatMap((r) => r.messages).map((m) => m.content).join('\n');
+      expect(prompt).toContain('late-steer');
+      expect(prompt).toContain('not_delivered');
+    } finally {
+      await f.coreLoop.stop();
+      setPrimaryRecipientId(undefined);
+    }
+  });
+
   it('later owner turn sees the startTask ID without its tool result and commits steering through cognition', async () => {
     const steerArgs = { action: 'steer', taskId: '', text: 'Also save the result in primes.txt' };
     const f = await contextBoot([
@@ -306,6 +388,8 @@ describe('durable fenced task mailbox', () => {
         harness: task.harness,
         state: 'starting',
         startup: expect.objectContaining({ phase: 'waiting-for-scheduling' }),
+        commands: expect.any(Array),
+        commandsOmitted: 0,
         briefing: 'mailbox fixture',
         question: null,
       });

@@ -17,6 +17,7 @@ import type {
 } from '../ports/tasks.js';
 import { TaskRegistryError, TASK_CONTEXT_LIMITS } from '../ports/tasks.js';
 import type { TaskTerminalReport } from '../ports/task-channel.js';
+import { taskCommandDeliverySql, taskAttemptEndedSql } from './task-command-delivery.js';
 import { createFencedPostgres, StalePostgresEpochError } from './fenced-postgres.js';
 
 interface TaskRow {
@@ -250,6 +251,10 @@ async function readTaskContext(pool: Pool): Promise<TaskContextSnapshot> {
         'phase',COALESCE(t.startup_phase,'waiting-for-scheduling'),
         'elapsedSeconds',GREATEST(0,floor(extract(epoch FROM clock_timestamp()-COALESCE(t.startup_since,t.updated_at)))))
         ELSE NULL END AS startup,
+      COALESCE((SELECT jsonb_agg(jsonb_build_object('commandId',c.command_id,
+        'kind',c.content->>'kind','delivery',${taskCommandDeliverySql(taskAttemptEndedSql)}) ORDER BY c.sequence)
+        FROM core.task_commands c LEFT JOIN core.task_command_acks a USING(task_id,command_id)
+        WHERE c.task_id=t.id),'[]'::jsonb) AS commands,
       CASE WHEN q.question_id IS NULL THEN NULL ELSE
         jsonb_build_object('questionId',q.question_id,'text',left(q.text,$3)) END AS question
       FROM core.tasks t
@@ -853,7 +858,15 @@ export function createPostgresTaskRegistry(deps: {
               !receipt.manifest.objects.some((object) => object.mark === 'result')))
         )
           throw new TaskRegistryError(taskId, 'invalid_transition');
+        const commands = await client.query<NonNullable<TaskOutcomeEvent['commands']>[number]>(
+          `SELECT c.command_id AS "commandId",c.content->>'kind' AS kind,
+            ${taskCommandDeliverySql('true')} AS delivery FROM core.task_commands c
+            LEFT JOIN core.task_command_acks a USING(task_id,command_id)
+            WHERE c.task_id=$1 ORDER BY c.sequence LIMIT 1024`,
+          [taskId]
+        );
         const event: TaskOutcomeEvent = {
+          ...(commands.rows.length ? { commands: commands.rows } : {}),
           taskId,
           outcomeKey: `outcome_${launchId}`,
           state: task.terminalCandidate,
