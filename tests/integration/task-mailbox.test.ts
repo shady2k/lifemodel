@@ -323,10 +323,11 @@ describe('durable fenced task mailbox', () => {
       m.append(transcriptFrame('cap-a', 2000), identity),
       m.append(transcriptFrame('cap-b', 2001), identity),
     ]);
-    expect(settled.filter((s) => s.status === 'fulfilled')).toHaveLength(1);
-    expect(settled.filter((s) => s.status === 'rejected')).toMatchObject([
-      { reason: { code: 'transcript_capacity' } },
-    ]);
+    expect(settled.filter((s) => s.status === 'fulfilled')).toHaveLength(2);
+    expect((await m.readTranscript(identity.taskId)).entries[0]?.id).toMatch(/^cap-/);
+    await expect(m.append(transcriptFrame('seed-1', 1, 'seed'), identity)).rejects.toMatchObject({
+      code: 'transcript_evicted',
+    });
     const page = await m.readTranscript(identity.taskId, { limit: 50 });
     expect(page.entries).toHaveLength(50);
     expect(page.captureLimitReached).toBe(true);

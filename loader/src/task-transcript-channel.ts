@@ -54,14 +54,11 @@ export function createTaskTranscriptChannel(options: {
     enqueue(entry: TaskTranscriptEntry) {
       try {
         if (closed || ids.has(entry.id)) return;
-        if (
-          ids.size >= 1024 ||
-          queue.length >= 64 ||
-          Buffer.byteLength(JSON.stringify(entry)) > 8192
-        ) {
+        if (queue.length >= 64 || Buffer.byteLength(JSON.stringify(entry)) > 8192) {
           dropped++;
           return;
         }
+        if (ids.size >= 1024) ids.delete(ids.values().next().value ?? '');
         ids.add(entry.id);
         queue.push({
           entry: JSON.parse(JSON.stringify(entry)) as TaskTranscriptEntry,

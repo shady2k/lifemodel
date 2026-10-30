@@ -724,8 +724,25 @@ export function createPostgresTaskMailbox(deps: {
               'SELECT count(*) FROM core.task_transcript WHERE task_id=$1',
               [frame.taskId]
             );
-            if (Number(count.rows[0]?.count) >= TASK_TRANSCRIPT_LIMITS.entries)
-              throw new TaskChannelError(429, 'transcript_capacity');
+            const horizon = await client.query(
+              `SELECT 1 FROM core.task_transcript_horizons WHERE task_id=$1 AND attempt_id=$2 AND evicted_through >= $3::bigint`,
+              [frame.taskId, frame.attemptId, frame.sequence]
+            );
+            if (horizon.rowCount) throw new TaskChannelError(409, 'transcript_evicted');
+            if (Number(count.rows[0]?.count) >= TASK_TRANSCRIPT_LIMITS.entries) {
+              await client.query(
+                `WITH evicted AS (
+                  DELETE FROM core.task_transcript WHERE task_id=$1 AND ordinal IN (
+                    SELECT ordinal FROM core.task_transcript WHERE task_id=$1 ORDER BY ordinal
+                    LIMIT $2
+                  ) RETURNING attempt_id,sequence
+                ) INSERT INTO core.task_transcript_horizons(task_id,attempt_id,evicted_through)
+                  SELECT $1,attempt_id,max(sequence) FROM evicted GROUP BY attempt_id
+                  ON CONFLICT(task_id,attempt_id) DO UPDATE SET evicted_through=greatest(
+                    core.task_transcript_horizons.evicted_through,EXCLUDED.evicted_through)`,
+                [frame.taskId, Number(count.rows[0]?.count) - TASK_TRANSCRIPT_LIMITS.entries + 1]
+              );
+            }
             const inserted = await client.query<{ received_at: Date }>(
               `INSERT INTO core.task_transcript(task_id,attempt_id,message_id,sequence,payload) VALUES($1,$2,$3,$4,$5::jsonb) RETURNING received_at`,
               [
@@ -923,14 +940,14 @@ export function createPostgresTaskMailbox(deps: {
           `SELECT ordinal,payload FROM core.task_transcript WHERE task_id=$1 AND ordinal < $2::numeric ORDER BY ordinal DESC LIMIT $3`,
           [taskId, query.before ?? '9223372036854775808', limit + 1]
         );
-        const count = await client.query<{ count: string }>(
-          'SELECT count(*) FROM core.task_transcript WHERE task_id=$1',
+        const dropped = await client.query(
+          'SELECT 1 FROM core.task_transcript_horizons WHERE task_id=$1 LIMIT 1',
           [taskId]
         );
         return {
           entries: rows.rows.slice(0, limit).map((row) => row.payload),
           nextCursor: rows.rows.length > limit ? (rows.rows[limit - 1]?.ordinal ?? null) : null,
-          captureLimitReached: Number(count.rows[0]?.count) >= TASK_TRANSCRIPT_LIMITS.entries,
+          captureLimitReached: Boolean(dropped.rowCount),
         };
       });
     },

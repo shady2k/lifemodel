@@ -37,7 +37,7 @@ describe('neutral task session capture', () => {
         content: { type: 'text', text: 'Final '.repeat(2000) },
       });
       mapper.flush();
-      await vi.waitFor(() => expect(events).toHaveLength(4));
+      await vi.waitFor(() => expect(events).toHaveLength(6));
       const entries = events.flatMap((event) => (event.type === 'transcript' ? [event.entry] : []));
       expect(entries[0]).toMatchObject({ role: 'assistant', text: 'Inspecting the files.' });
       expect(entries[1]).toMatchObject({ role: 'tool', tool: { status: 'running' } });
@@ -84,9 +84,48 @@ describe('neutral task session capture', () => {
         });
       await Promise.resolve();
       await Promise.resolve();
-      expect(events).toHaveLength(1024);
+      expect(events).toHaveLength(1101);
     }
   );
+
+  it('review2: streams tool tails without spending entries and coalesces prose', async () => {
+    const events: TaskHarnessEvent[] = [];
+    const mapper = first((event) => {
+      events.push(event);
+    });
+    mapper.update({
+      sessionUpdate: 'tool_call',
+      toolCallId: 'long',
+      title: 'shell',
+      status: 'in_progress',
+    });
+    for (let i = 0; i < 2000; i++)
+      mapper.update({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'long',
+        rawOutput: 'tail-' + i,
+      });
+    mapper.update({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'long',
+      status: 'completed',
+      rawOutput: 'FINAL',
+    });
+    for (let i = 0; i < 7; i++)
+      mapper.update({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'a'.repeat(500) },
+      });
+    mapper.flush();
+    await Promise.resolve();
+    await Promise.resolve();
+    const entries = events.flatMap((e) => (e.type === 'transcript' ? [e.entry] : []));
+    expect(entries.filter((e) => e.role === 'tool').length).toBeLessThanOrEqual(3);
+    expect(entries.find((e) => e.tool?.status === 'completed')?.tool?.outputTail).toBe('FINAL');
+    expect(entries.filter((e) => e.role === 'assistant').map((e) => e.text)).toEqual([
+      'a'.repeat(3500),
+    ]);
+  });
 
   it('generic transcript/launcher/client/port code does not name vendors', async () => {
     const paths = [

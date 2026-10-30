@@ -17,7 +17,8 @@ turn end, tool boundaries and cleanup. The factory wires the mapper without
 vendor branches. Shared ACP mapping coalesces assistant text chunks and merges
 tool patches, retaining tool name, status and a short output tail. It hashes
 observation identities; duplicate tool patches do not create duplicate entries.
-The mapper caps entries/tools and never throws into execution.
+The mapper bounds recent IDs/tool state, coalesces assistant text up to 4,000 bytes,
+and emits tool starts/status changes rather than output patches. It never throws into execution.
 
 OpenCode maps ACP tool `name`/`kind`/`title` and raw output/metadata or text content.
 Prime-agent maps ACP tool `name`/`title`/`kind` and the same text forms, including

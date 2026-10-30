@@ -118,7 +118,7 @@ export type TaskChannelErrorCode =
   | 'question_absent'
   | 'wrapping_attempt'
   | 'command_capacity'
-  | 'transcript_capacity'
+  | 'transcript_evicted'
   | 'storage_error'
   | 'cancelled'
   | 'stopped'

@@ -28,7 +28,7 @@ export function createAcpTranscriptMapper(
   >();
   const seen = new Set<string>();
   const emit = (key: string, entry: Omit<TaskTranscriptEntry, 'id' | 'time'>) => {
-    if (seen.size >= 1024) return;
+    if (seen.size >= 1024) seen.delete(seen.values().next().value ?? '');
     const id = `entry_${createHash('sha256').update(key).digest('hex')}`;
     if (seen.has(id)) return;
     const value = { ...entry, id, time: new Date().toISOString() };
@@ -58,18 +58,27 @@ export function createAcpTranscriptMapper(
           messageId = update['messageId'];
           const content = record(update['content']);
           if (content['type'] !== 'text' || typeof content['text'] !== 'string') return;
-          // Bounded even for one huge update; excerpts deliberately omit excess.
-          pending += transcriptText(content['text']);
-          if (Buffer.byteLength(pending) >= 512) flush();
-          else if (!timer) {
+          let rest = content['text'];
+          while (rest) {
+            const part = transcriptText(rest, 4000 - Buffer.byteLength(pending));
+            if (!part) {
+              flush();
+              continue;
+            }
+            pending += part;
+            rest = rest.slice(part.length);
+            if (Buffer.byteLength(pending) >= 3997) flush();
+          }
+          if (pending && !timer) {
             timer = setTimeout(flush, 250);
             timer.unref();
           }
         } else if (['tool_call', 'tool_call_update'].includes(update['sessionUpdate'] as string)) {
           flush();
           const id = update['toolCallId'];
-          if (typeof id !== 'string' || (!tools.has(id) && tools.size >= 1024)) return;
+          if (typeof id !== 'string') return;
           const previous = tools.get(id);
+          if (!previous && tools.size >= 1024) tools.delete(tools.keys().next().value ?? '');
           const hasName = ['name', 'title', 'kind'].some((key) => typeof update[key] === 'string');
           const name = transcriptText(
             hasName ? mapping.name(update) : (previous?.name ?? mapping.name(update)),
@@ -98,7 +107,7 @@ export function createAcpTranscriptMapper(
               outputTail,
             },
           } satisfies Omit<TaskTranscriptEntry, 'id' | 'time'>;
-          emit(`tool:${id}:${JSON.stringify(entry)}`, entry);
+          if (!previous || previous.status !== status) emit(`tool:${id}:${status}`, entry);
         }
       } catch {
         /* Capture cannot fail a task. */
