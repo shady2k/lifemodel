@@ -2,7 +2,8 @@
 SET lock_timeout = '1s';
 SET statement_timeout = '5s';
 -- Separate from the control mailbox: captured content never wakes cognition.
--- Capture stops at 1024 immutable entries (max 8 MiB logical JSON per task).
+-- Retain the newest 1024 immutable entries in a per-task ring (max 8 MiB logical JSON).
+-- Oldest rows are evicted under the task lock; sequence horizons prevent resurrection.
 CREATE TABLE IF NOT EXISTS core.task_transcript (
   task_id text NOT NULL REFERENCES core.tasks(id) ON DELETE CASCADE,
   ordinal bigint GENERATED ALWAYS AS IDENTITY,

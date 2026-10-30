@@ -187,6 +187,11 @@ describe('neutral task session capture', () => {
     ]);
   });
 
+  it('round2: migration describes newest-entry ring rather than frozen capture', async () => {
+    const sql = await readFile('db/migrations/20261015000031_create_task_transcript.sql', 'utf8');
+    expect(sql).not.toContain('Capture stops');
+    expect(sql).toContain('newest');
+  });
 
   it('generic transcript/launcher/client/port code does not name vendors', async () => {
     const paths = [
