@@ -82,7 +82,6 @@ describe('task workbench readiness', () => {
       'briefing',
       'profile',
       'expectedOutputs',
-      'redoOf',
     ]);
   });
 

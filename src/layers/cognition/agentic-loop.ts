@@ -149,7 +149,21 @@ export class AgenticLoop {
         if (!event.redoOf && tool?.recoverAcceptedEffect) {
           const toolContext = buildToolContext(context);
           toolContext.taskOutcome = { taskId: event.taskId, redoAllowed: true };
-          const receipt = await tool.recoverAcceptedEffect(toolContext);
+          let receipt: unknown;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              receipt = await tool.recoverAcceptedEffect(toolContext);
+              break;
+            } catch (error) {
+              if (!(error instanceof UncertainMutationError)) throw error;
+              if (attempt === 2) {
+                // This is a failed read, not a new mutation. Complete the
+                // outcome honestly rather than exhausting the bus retry budget.
+                state.taskRedoRecoveryUncertain = true;
+                return this.outcomeFallback(context, state);
+              }
+            }
+          }
           if ((receipt as { success?: boolean } | undefined)?.success === true) {
             // A reply-commit crash must not let a regenerated model deny or
             // duplicate the accepted redo, even when it calls no tools at all.
@@ -232,9 +246,11 @@ export class AgenticLoop {
     );
     state.disposition = 'answer';
     return buildFinalResultFromNaturalCompletion(
-      acceptedRedo
-        ? 'I could not verify the requested result. I have started one corrected attempt and will check it before confirming the result.'
-        : taskOutcomeFallback(event, commandTexts),
+      state.taskRedoRecoveryUncertain
+        ? 'I may have started a corrected attempt; I will report on it. I could not confirm its current state, so I cannot confirm the requested result yet.'
+        : acceptedRedo
+          ? 'I could not verify the requested result. I have started one corrected attempt and will check it before confirming the result.'
+          : taskOutcomeFallback(event, commandTexts),
       state,
       context,
       this.logger
@@ -616,6 +632,7 @@ export class AgenticLoop {
                           const data = result.data as
                             | {
                                 success?: boolean;
+                                code?: string;
                                 taskId?: string;
                                 file?: { name?: string; text?: unknown };
                               }
@@ -623,10 +640,17 @@ export class AgenticLoop {
                           return (
                             result.toolCallId === tool.toolCallId &&
                             result.success &&
-                            data?.success === true &&
-                            data.taskId === event.taskId &&
-                            data.file?.name === name &&
-                            typeof data.file.text === 'string'
+                            ((data?.success === true &&
+                              data.taskId === event.taskId &&
+                              data.file?.name === name &&
+                              typeof data.file.text === 'string') ||
+                              (data?.success === false &&
+                                data.code === 'file_not_text' &&
+                                event.objects.filter(
+                                  (object) =>
+                                    object.name === name &&
+                                    (object.mark === 'result' || object.mark === 'artifact')
+                                ).length === 1))
                           );
                         })
                     )

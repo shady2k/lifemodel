@@ -573,6 +573,9 @@ export interface LoopState {
   /** Executed tools with side-effect tracking (for safe retry detection) */
   executedTools: ExecutedTool[];
 
+  /** A bounded accepted-redo recovery read failed; do not imply no redo exists. */
+  taskRedoRecoveryUncertain?: boolean;
+
   /** Whether loop was aborted */
   aborted: boolean;
 

@@ -59,8 +59,11 @@ This is a verification-and-reply turn. Cognition may read only this outcome's
 status, transcript and delivered files through `core.steerTask(action="read")`.
 Before claiming a result, it checks expected names, opens their contents and
 compares them with the owner's request; it reads the transcript when in doubt.
-For `done` outcomes with declared expected files, core requires successful reads
-of all expected names before accepting a normal final reply. Missing read evidence
+For `done` outcomes with declared expected files, core requires checked read
+evidence for all expected names before accepting a normal final reply. A core
+`file_not_text` refusal for an exact sealed output also counts as checked: the
+reply may state manifest facts (name and size), but must say it cannot inspect
+the content. Missing or unavailable reads do not count. Missing read evidence
 gets bounded retries, then an honest fallback instead of an unverified claim.
 Outcome turns allow up to 24 iterations so all 16 expected files can be read
 within the existing tool and time bounds. Reading bytes does not prove semantic
@@ -79,14 +82,20 @@ If verification fails, the agent may start exactly one corrected redo and briefl
 tell the owner it is redoing. It calls `core.startTask` with `redoOf` equal to
 this outcome's task ID. Core refuses a redo of a redo and a second redo of the
 same original, including concurrent requests. An omitted redo output list
-inherits the original; a different explicit list is refused. The linkage is
+inherits the original; explicitly repeated names are compared as a set, so a
+reorder is allowed but a changed set is refused. Refused starts leave the accepted
+start slot available for a corrected call in the same turn. `redoOf` is not
+advertised to general turns and is accepted only from its exact original outcome. The linkage is
 durable and an accepted launch still replays under its deciding-turn key. A second failed
 verification ends with an honest account of what failed and why, and a question
 about how to proceed. Other tools, including `core.defer`, `core.remember`,
 `core.schedule` and `core.say`, remain forbidden in an outcome turn. An accepted
 redo suppresses the original output attachments on the redo notice. If the model
 fails after acceptance, the fallback acknowledges that redo instead of asking as
-if no work were running.
+if no work were running. Pre-model recovery reads retry at most three times. If
+all fail, the owner still receives an honest uncertainty notice: a corrected
+attempt may have started, but its state could not be confirmed. That notice
+neither starts more work nor attaches the old files as a result.
 
 An empty/missing final response is not an acknowledgement, even after a rejected
 `core.say` attempt. A `length`-truncated outcome reply is incomplete even when it

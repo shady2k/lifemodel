@@ -46,9 +46,13 @@ BEGIN
     IF NOT FOUND OR original.redo_of IS NOT NULL OR original.state NOT IN ('done','failed','stopped') THEN
       RAISE EXCEPTION 'task redo requires terminal original' USING ERRCODE='23514';
     END IF;
-    IF NEW.expected_outputs IS DISTINCT FROM original.expected_outputs THEN
+    IF NOT core.valid_task_expected_outputs(NEW.expected_outputs)
+      OR NOT (NEW.expected_outputs @> original.expected_outputs
+        AND NEW.expected_outputs <@ original.expected_outputs) THEN
       RAISE EXCEPTION 'task redo must preserve expected outputs' USING ERRCODE='23514';
     END IF;
+    -- The contract is a set; retain the owner's original order after comparison.
+    NEW.expected_outputs := original.expected_outputs;
   END IF;
   IF NEW.state='done' AND EXISTS (
     SELECT 1 FROM unnest(NEW.expected_outputs) name WHERE NOT EXISTS (

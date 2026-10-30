@@ -44,6 +44,7 @@ import { createTestEmbedder } from '../helpers/test-embedder.js';
 import { UserModel } from '../../src/models/user-model.js';
 import { createUser, type User } from '../../src/types/user/user.js';
 import type { ScriptedResponse } from '../helpers/scripted-llm.js';
+import { UncertainMutationError } from '../../src/layers/cognition/tools/mutation-error.js';
 
 const imageRevision = `sha256:${'a'.repeat(64)}`;
 const startScript = [
@@ -101,7 +102,8 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
   async function boot(
     prefix: string,
     script: ScriptedResponse[] = startScript,
-    crashBeforeAnswerCommit = false
+    crashBeforeAnswerCommit = false,
+    recoveryReadFailures = 0
   ) {
     const snapshot = createSnapshotStore(stores.redis, { keyPrefix: prefix });
     const bus = createBusSignalStream(stores.redis, prefix);
@@ -134,7 +136,10 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
     const cognition = instance.cognition as unknown as RealCognitionFacade;
     cognition.processor.getToolRegistry().registerTool(
       createStartTaskTool({
-        readByLaunchKey: (launchKey) => registry.readByLaunchKey(launchKey),
+        readByLaunchKey: (launchKey) => {
+          if (recoveryReadFailures-- > 0) throw new UncertainMutationError();
+          return registry.readByLaunchKey(launchKey);
+        },
         applyStartTask: (intent) => instance.coreLoop.applyStartTask(intent),
         imageRevision,
       })
@@ -248,6 +253,131 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
       )
     );
   }
+  it('checks a binary expected file from manifest facts without claiming content inspection or falling back', async () => {
+    const args = { action: 'read', taskId: '', view: 'file', name: 'chart.png' };
+    const reply = 'I delivered chart.png (8 bytes). I cannot inspect its binary content.';
+    const instance = await boot(`task-binary-output:${randomUUID()}:`, [
+      { toolCalls: [{ name: 'core.steerTask', args }] },
+      { content: reply },
+    ]);
+    const task = await instance.registry.accept({
+      launchKey: 'binary-output',
+      briefing: 'Save chart.png.',
+      imageRevision,
+      profile: {
+        id: 'small',
+        revision: '1',
+        timeoutSeconds: 600,
+        cpuMillis: 500,
+        memoryBytes: 536870912,
+      },
+      expectedOutputs: ['chart.png'],
+    });
+    args.taskId = task.id;
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const delivered = {
+      ...object,
+      name: 'chart.png',
+      size: bytes.length,
+      contentType: 'image/png',
+    };
+    instance.fileContents.set(delivered.id, bytes);
+    await relay(
+      instance,
+      await seal(instance.registry, task, [delivered], 'The chart is perfect.')
+    );
+    await expect.poll(async () => (await instance.events()).length).toBe(1);
+    expect((await instance.events())[0]!.payload).toMatchObject({
+      text: reply,
+      attachments: [{ name: 'chart.png', size: 8 }],
+    });
+    expect(instance.fileReads).toEqual([delivered.id]);
+    expect(instance.cognition.provider.requests).toHaveLength(2);
+    expect(instance.cognition.provider.requests[1]!.messages).toContainEqual(
+      expect.objectContaining({
+        role: 'tool',
+        content: JSON.stringify({ success: false, code: 'file_not_text' }),
+      })
+    );
+  });
+
+  it.each(['file_unavailable', 'file_not_delivered'] as const)(
+    'does not count %s as binary inspection evidence',
+    async (code) => {
+      const args = { action: 'read', taskId: '', view: 'file', name: 'chart.png' };
+      const instance = await boot(`task-binary-read-failure:${code}:${randomUUID()}:`, [
+        { toolCalls: [{ name: 'core.steerTask', args }] },
+        ...Array.from({ length: 3 }, () => ({ content: 'I verified every chart pixel.' })),
+      ]);
+      const tool = instance.cognition.processor
+        .getToolRegistry()
+        .getTools()
+        .find((entry) => entry.name === 'core.steerTask')!;
+      tool.execute = async () => ({ success: false, code });
+      const event = outcome('task-binary-failure', `outcome_binary_${code}`);
+      args.taskId = 'task-binary-failure';
+      instance.coreLoop.pushSignal({
+        ...event,
+        data: {
+          ...event.data,
+          expectedOutputs: ['chart.png'],
+          objects: [{ ...object, name: 'chart.png' }],
+        },
+      } as never);
+      await expect.poll(async () => (await instance.events()).length).toBe(1);
+      expect((await instance.events())[0]!.payload.text).toContain(
+        'could not verify their contents'
+      );
+      expect((await instance.events())[0]!.payload.text).not.toContain('every chart pixel');
+    }
+  );
+
+  it.each(['transient', 'persistent'] as const)(
+    'keeps an owner outcome reply after %s pre-model redo recovery read failures',
+    async (kind) => {
+      const reply = 'I could not finish the work. How would you like me to proceed?';
+      const instance = await boot(`task-recovery-read:${kind}:${randomUUID()}:`, [
+        { content: reply },
+      ]);
+      const tool = instance.cognition.processor
+        .getToolRegistry()
+        .getTools()
+        .find((entry) => entry.name === 'core.startTask')!;
+      const recover = tool.recoverAcceptedEffect!;
+      let attempts = 0;
+      tool.recoverAcceptedEffect = async (context, args) => {
+        attempts++;
+        if (kind === 'persistent' || attempts === 1) throw new UncertainMutationError();
+        return recover(context, args);
+      };
+      instance.coreLoop.pushSignal(
+        outcome(
+          'task-recovery-read',
+          'outcome_recovery_read',
+          kind === 'persistent' ? 'done' : 'failed'
+        )
+      );
+      await expect.poll(async () => (await instance.events()).length).toBe(1);
+      await instance.coreLoop.fenceForTest();
+      const actual = (await instance.events())[0]!.payload;
+      expect(instance.cognition.calls).toHaveLength(1);
+      if (kind === 'transient') {
+        expect(attempts).toBe(2);
+        expect(actual.text).toBe(reply);
+        expect(instance.cognition.provider.requests).toHaveLength(1);
+      } else {
+        expect(attempts).toBe(3);
+        expect(actual.text).toBe(
+          'I may have started a corrected attempt; I will report on it. I could not confirm its current state, so I cannot confirm the requested result yet.'
+        );
+        expect(actual.attachments).toBeUndefined();
+        expect(instance.cognition.provider.requests).toHaveLength(0);
+      }
+      expect(await instance.registry.list()).toHaveLength(0);
+      expect(Object.values(instance.bus.exportSnapshot().entries)).toEqual([]);
+    }
+  );
+
   it('verifies delivered bytes instead of repeating a contradictory completion claim', async () => {
     const readArgs = { action: 'read', taskId: '', view: 'file', name: 'primes500.txt' };
     const statusArgs = { action: 'read', taskId: '' };
@@ -411,8 +541,59 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
         correlationId: 'new-turn',
         triggerType: 'user_message',
       })
-    ).toMatchObject({ success: false, code: 'invalid_transition' });
+    ).toMatchObject({ success: false, code: 'redo_not_allowed' });
     expect(await instance.registry.list()).toHaveLength(2);
+  });
+
+  it('retries a changed redo output set in the same turn and accepts the original names reordered', async () => {
+    const bad = {
+      briefing: 'Save both files correctly.',
+      profile: 'small',
+      redoOf: '',
+      expectedOutputs: ['a.txt', 'wrong.txt'],
+    };
+    const reordered = { ...bad, expectedOutputs: ['b.txt', 'a.txt'] };
+    const instance = await boot(`task-redo-corrected-set:${randomUUID()}:`, [
+      { toolCalls: [{ name: 'core.startTask', args: bad }] },
+      { toolCalls: [{ name: 'core.startTask', args: reordered }] },
+      { content: 'I am redoing the work and will deliver a.txt and b.txt.' },
+    ]);
+    const original = await instance.registry.accept({
+      launchKey: 'redo-corrected-set',
+      briefing: 'Save a.txt and b.txt.',
+      imageRevision,
+      profile: {
+        id: 'small',
+        revision: '1',
+        timeoutSeconds: 600,
+        cpuMillis: 500,
+        memoryBytes: 536870912,
+      },
+      expectedOutputs: ['a.txt', 'b.txt'],
+    });
+    bad.redoOf = original.id;
+    reordered.redoOf = original.id;
+    await relay(instance, await seal(instance.registry, original, [object], 'Done.'));
+    await expect.poll(async () => (await instance.events()).length).toBe(1);
+    const tasks = await instance.registry.list();
+    expect(tasks).toHaveLength(2);
+    expect(tasks.find((task) => task.redoOf === original.id)?.expectedOutputs).toEqual([
+      'a.txt',
+      'b.txt',
+    ]);
+    expect(instance.cognition.provider.requests[1]!.messages).toContainEqual(
+      expect.objectContaining({
+        role: 'tool',
+        content: JSON.stringify({ success: false, code: 'invalid_input' }),
+      })
+    );
+    expect(instance.cognition.provider.requests[2]!.messages).toContainEqual(
+      expect.objectContaining({
+        role: 'tool',
+        content: expect.stringContaining('"success":true'),
+      })
+    );
+    expect((await instance.events())[0]!.payload.text).toContain('I am redoing');
   });
 
   it('refuses a premature success claim until expected delivered bytes have been read', async () => {
@@ -517,7 +698,7 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
     );
   });
 
-  it.each(['no_tools', 'malformed_call', 'throws'] as const)(
+  it.each(['no_tools', 'malformed_call', 'throws', 'transient_read'] as const)(
     'reports an accepted redo honestly after model failure and recovers the same redo after a reply-commit crash (%s)',
     async (replayKind) => {
       const prefix = `task-redo-replay:${randomUUID()}:`;
@@ -567,7 +748,9 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
                     },
                   ],
                 },
-              ]
+              ],
+        false,
+        replayKind === 'transient_read' ? 1 : 0
       );
       await expect.poll(async () => (await replay.events()).length).toBe(1);
       expect(replay.cognition.calls[0]!.context.tickId).toBe(decidingTurn);
@@ -577,6 +760,7 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
       );
       expect((await replay.events())[0]!.payload.attachments).toBeUndefined();
       expect(replay.cognition.provider.requests).toHaveLength(0);
+      expect(replay.cognition.calls).toHaveLength(1);
     }
   );
 

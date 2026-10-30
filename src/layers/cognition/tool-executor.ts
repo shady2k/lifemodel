@@ -268,6 +268,21 @@ export async function executeToolCalls(
         taskId: outcomeTaskId,
         redoAllowed: isTaskOutcomeRedo(context, 'core.startTask', { redoOf: outcomeTaskId }),
       };
+    // A model cannot borrow another turn's redo capability, including on replay.
+    if (
+      toolName === 'core.startTask' &&
+      parsedArgs?.['redoOf'] !== undefined &&
+      context.triggerSignal.type !== 'task_outcome'
+    ) {
+      state.toolCallCount++;
+      messages.push({
+        role: 'tool',
+        tool_call_id: toolCall.id,
+        tool_name: toolCall.function.name,
+        content: JSON.stringify({ success: false, code: 'redo_not_allowed' }),
+      });
+      continue;
+    }
     const recovered =
       context.triggerSignal.type !== 'task_outcome' ||
       (toolName === 'core.startTask' && toolContext.taskOutcome?.redoAllowed)
@@ -310,9 +325,38 @@ export async function executeToolCalls(
         ? { ...parsedArgs, redoOf: outcomeTaskId }
         : (parsedArgs ?? {});
 
+    if (
+      !recoveredResult &&
+      toolName === 'core.startTask' &&
+      (args['redoOf'] !== undefined || context.triggerSignal.type === 'task_outcome') &&
+      !isTaskOutcomeRedo(context, toolName, args)
+    ) {
+      state.toolCallCount++;
+      messages.push({
+        role: 'tool',
+        tool_call_id: toolCall.id,
+        tool_name: toolCall.function.name,
+        content: JSON.stringify({ success: false, code: 'task_outcome_requires_final_reply' }),
+      });
+      continue;
+    }
+
     // Fresh calls retain both shared argument-validation gates.
     if (tool && !recoveredResult) {
-      const prevalidation = prevalidateToolArgs(args, tool.parameters, tool.rawParameterSchema);
+      const parameters =
+        outcomeTaskId && isTaskOutcomeRedo(context, toolName, args)
+          ? [
+              ...tool.parameters,
+              {
+                name: 'redoOf',
+                type: 'string' as const,
+                required: true,
+                enum: [outcomeTaskId],
+                description: 'Exact original task ID for this outcome.',
+              },
+            ]
+          : tool.parameters;
+      const prevalidation = prevalidateToolArgs(args, parameters, tool.rawParameterSchema);
       if (!prevalidation.success) {
         const outcome = processToolValidationFailure(
           toolCall,
@@ -558,6 +602,12 @@ export async function executeToolCalls(
         args,
         context: toolContext,
       }));
+
+    // startTask reserves its slot before execution so uncertain writes keep it.
+    // A deterministic refusal made no effect and must allow corrected arguments.
+    const startResult = result.data as { success?: boolean; code?: string } | undefined;
+    if (toolName === 'core.startTask' && startResult?.success === false)
+      state.toolCallCounts.set(toolName, currentCallCount - 1);
 
     state.toolResults.push(result);
 

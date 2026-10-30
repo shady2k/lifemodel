@@ -443,11 +443,16 @@ describe('fenced durable task registry', () => {
       redoOf: original.id,
     });
     expect(await makeRegistry().accept(input)).toEqual(accepted);
+    expect(
+      await makeRegistry().accept({
+        ...input,
+        expectedOutputs: [...input.expectedOutputs].reverse(),
+      })
+    ).toEqual(accepted);
     const { expectedOutputs: _expected, ...implicit } = input;
     expect(await makeRegistry().accept(implicit)).toEqual(accepted);
     for (const changed of [
       { ...input, expectedOutputs: ['result.txt'] },
-      { ...input, expectedOutputs: [...input.expectedOutputs].reverse() },
       { ...input, redoOf: undefined },
       { ...input, redoOf: 'missing-original' },
     ])
@@ -472,10 +477,15 @@ describe('fenced durable task registry', () => {
   it('inherits the owner-agreed output contract on redo and cannot weaken or replace it', async () => {
     const original = await registry.accept({
       ...request('contract-original'),
-      expectedOutputs: ['needed.txt'],
+      expectedOutputs: ['needed.txt', 'also-needed.txt'],
     });
     await finish(original);
-    for (const expectedOutputs of [[], ['other.txt'], ['needed.txt', 'extra.txt']])
+    for (const expectedOutputs of [
+      [],
+      ['other.txt'],
+      ['needed.txt'],
+      ['needed.txt', 'also-needed.txt', 'extra.txt'],
+    ])
       await expect(
         registry.accept({ ...request('contract-changed'), redoOf: original.id, expectedOutputs })
       ).rejects.toMatchObject({ code: 'invalid_input' });
@@ -488,17 +498,45 @@ describe('fenced durable task registry', () => {
         [original.id]
       )
     ).rejects.toMatchObject({ code: '23514' });
-    const redo = await registry.accept({ ...request('contract-redo'), redoOf: original.id });
-    expect(redo.expectedOutputs).toEqual(['needed.txt']);
+    const redo = await registry.accept({
+      ...request('contract-redo'),
+      redoOf: original.id,
+      expectedOutputs: ['also-needed.txt', 'needed.txt'],
+    });
+    expect(redo.expectedOutputs).toEqual(['needed.txt', 'also-needed.txt']);
     expect(
       await makeRegistry().accept({ ...request('contract-redo'), redoOf: original.id })
     ).toEqual(redo);
     expect((await finish(redo)).event).toMatchObject({
       state: 'failed',
       redoOf: original.id,
-      expectedOutputs: ['needed.txt'],
-      missingExpectedOutputs: ['needed.txt'],
+      expectedOutputs: ['needed.txt', 'also-needed.txt'],
+      missingExpectedOutputs: ['needed.txt', 'also-needed.txt'],
     });
+  });
+
+  it('accepts an independently inserted redo with reordered names and preserves the original order', async () => {
+    const original = await registry.accept({
+      ...request('sql-reorder-original'),
+      expectedOutputs: ['first.txt', 'second.txt'],
+    });
+    await finish(original);
+    const insertRedo = (names: string[]) =>
+      stores.postgres.query(
+        `INSERT INTO core.tasks
+      (id,launch_key,briefing,profile,settings_revision,harness,image_revision,wrap_grace_seconds,request_image_revision,trace_id,expected_outputs,redo_of)
+      SELECT 'sql-reordered-redo','sql-reordered-redo',briefing,profile,settings_revision,harness,image_revision,wrap_grace_seconds,request_image_revision,'sql-reordered-redo',$2::text[],id
+      FROM core.tasks WHERE id=$1 RETURNING expected_outputs,redo_of`,
+        [original.id, names]
+      );
+    // Canonicalization must not silently repair invalid duplicate input.
+    await expect(insertRedo(['second.txt', 'first.txt', 'first.txt'])).rejects.toMatchObject({
+      code: '23514',
+    });
+    const inserted = await insertRedo(['second.txt', 'first.txt']);
+    expect(inserted.rows).toEqual([
+      { expected_outputs: ['first.txt', 'second.txt'], redo_of: original.id },
+    ]);
   });
 
   it('keeps delivery-input DDL replayable and validates output shape independently in SQL', async () => {

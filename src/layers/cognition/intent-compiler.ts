@@ -100,7 +100,7 @@ export function compileIntentsFromToolResults(
     let groups: MessageAttachment[][] = [];
     let attachmentFailure = false;
     // A redo notice must not present the rejected original outputs as a result.
-    if (event && !acceptedRedo) {
+    if (event && !acceptedRedo && !state.taskRedoRecoveryUncertain) {
       try {
         groups = taskOutcomeAttachments(event);
       } catch {

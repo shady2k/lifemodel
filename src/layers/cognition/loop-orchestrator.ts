@@ -133,7 +133,7 @@ export function filterToolsForContext(
             function: {
               ...tool.function,
               description:
-                'After failed verification, accept one corrected redo of my original work. Link it with redoOf. Say I am redoing only after acceptance.',
+                'After failed verification, accept one corrected redo of my original work. Link it with redoOf. It inherits the original expected files: omit expectedOutputs or repeat the original names in any order; never change them. Say I am redoing only after acceptance.',
               parameters: {
                 ...('parameters' in tool.function ? tool.function.parameters : {}),
                 type: 'object' as const,
@@ -144,6 +144,12 @@ export function filterToolsForContext(
                         .properties
                     : {}),
                   redoOf: { type: 'string', enum: [event.taskId] },
+                  expectedOutputs: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description:
+                      'Inherit the original expected files: omit this field or repeat the original names in any order. Do not change or weaken them.',
+                  },
                 },
                 required: ['briefing', 'profile', 'redoOf'],
               },

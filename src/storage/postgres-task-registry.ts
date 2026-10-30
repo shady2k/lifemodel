@@ -566,7 +566,8 @@ export function createPostgresTaskRegistry(deps: {
           // are NOT request payload: a replay keeps the original snapshot.
           const match = await client.query<{ matches: boolean }>(
             `SELECT briefing=$2 AND profile=$3::jsonb AND request_image_revision=$4
-              AND expected_outputs=$5::text[] AND redo_of IS NOT DISTINCT FROM $6::text AS matches
+              AND expected_outputs @> $5::text[] AND expected_outputs <@ $5::text[]
+              AND redo_of IS NOT DISTINCT FROM $6::text AS matches
               FROM core.tasks WHERE id=$1`,
             [
               row.id,
@@ -592,7 +593,8 @@ export function createPostgresTaskRegistry(deps: {
           const originalOutputs = original.expectedOutputs ?? [];
           if (
             request.expectedOutputs !== undefined &&
-            JSON.stringify(request.expectedOutputs) !== JSON.stringify(originalOutputs)
+            (request.expectedOutputs.length !== originalOutputs.length ||
+              request.expectedOutputs.some((name) => !originalOutputs.includes(name)))
           )
             throw new TaskRegistryError(identity.id, 'invalid_input');
           expectedOutputs = originalOutputs;

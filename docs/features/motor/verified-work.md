@@ -25,13 +25,21 @@ add an execution system or a second artifact store.
   content or accepts a workspace path or caller-selected object UUID.
 - Verification precedes a result reply. The agent compares read contents with
   the owner's request and reads the transcript when uncertain. Opening bytes
-  can be enforced; semantic correctness remains a model judgment. An excerpt
+  can be enforced; a core `file_not_text` refusal for an exact sealed name counts
+  as checked presence, with name/size facts only and an explicit inability to
+  inspect contents. Missing/unavailable reads do not count. Semantic correctness
+  remains a model judgment. An excerpt
   cannot prove the unseen remainder. The fallback never repeats the summary.
 - A failed verification permits one corrected start with `redoOf` equal to the
   original ID. A unique durable link prevents concurrent duplicate redos, and
   a redo cannot be redone. Redos retain the original expected output names;
   corrected instructions can change the method, not silently weaken delivery.
-  Existing deciding-turn effect keys recover accepted starts on replay.
+  Output contracts compare as sets; a reordering does not change delivery.
+  Only the exact original outcome can supply `redoOf`; ordinary turns do not
+  advertise it. Deterministic refused starts do not consume the accepted-start
+  slot. Existing deciding-turn effect keys recover accepted starts on replay.
+  Three failed recovery reads yield an uncertainty notice rather than losing
+  the outcome reply or claiming that no redo exists.
 - First-person status uses actual observations. A plan stays a plan. A launch
   is stated only after an accepted receipt in that turn. Ambiguous requests
   need an agreed plan and expected files; clear requests run at once.

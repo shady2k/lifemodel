@@ -38,12 +38,16 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
       description:
         'Expected delivered output filenames: at most 16 unique safe flat names. Omit for answer-only work. Missing files make completion unsuccessful.',
     },
+  ];
+  // Only the outcome-specific advertised schema exposes this trusted capability.
+  const outcomeParameters: ToolParameter[] = [
+    ...parameters,
     {
       name: 'redoOf',
       type: 'string',
       required: false,
       description:
-        'Original finished task ID for one corrected automatic redo after failed verification. A redo cannot itself be redone.',
+        'Original finished task ID for one corrected redo. Inherit its expected files: omit expectedOutputs or repeat the original names in any order.',
     },
   ];
   // The slot belongs to the persisted deciding turn, never regenerated arguments.
@@ -65,16 +69,21 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
     hasSideEffects: true,
     maxCallsPerTurn: 1,
     description:
-      'Start my long work in the background with a complete briefing, explicit profile and expected output filenames when files are requested. Agree the plan and expected files with the owner first only when the request has doubts or multiple readings; clear requests run at once. Returns queued without waiting for execution. Say I started only after this tool returns accepted in this turn, never before or after a refusal. A plan is not a result. On an outcome that fails verification, one corrected redo may name the original task in redoOf; a redo of a redo is refused.',
-    validate: (args) => validateAgainstParameters(args as Record<string, unknown>, parameters),
+      'Start my long work in the background with a complete briefing, explicit profile and expected output filenames when files are requested. Agree the plan and expected files with the owner first only when the request has doubts or multiple readings; clear requests run at once. Returns queued without waiting for execution. Say I started only after this tool returns accepted in this turn, never before or after a refusal. A plan is not a result. On an outcome that fails verification, one corrected redo may name that exact original task in redoOf; it inherits the original expected files, so omit expectedOutputs or repeat the original names in any order. Changing or weakening that contract and a redo of a redo are refused.',
+    validate: (args) =>
+      validateAgainstParameters(args as Record<string, unknown>, outcomeParameters),
     recoverAcceptedEffect: async (context) => {
       const launchKey = launchKeyFor(context);
       if (!launchKey) return undefined;
       try {
         const task = await deps.readByLaunchKey(launchKey);
         if (
-          context.taskOutcome &&
-          (!context.taskOutcome.redoAllowed || task?.redoOf !== context.taskOutcome.taskId)
+          (task?.redoOf &&
+            (context.triggerType !== 'task_outcome' ||
+              !context.taskOutcome?.redoAllowed ||
+              task.redoOf !== context.taskOutcome.taskId)) ||
+          (context.triggerType === 'task_outcome' &&
+            (!context.taskOutcome?.redoAllowed || task?.redoOf !== context.taskOutcome.taskId))
         )
           return undefined;
         return task ? acceptedReceipt(task) : undefined;
@@ -86,6 +95,13 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
     execute: async (args, context) => {
       const launchKey = launchKeyFor(context);
       if (!launchKey || !context) return { success: false, code: 'missing_turn' };
+      if (
+        args['redoOf'] !== undefined &&
+        (context.triggerType !== 'task_outcome' ||
+          !context.taskOutcome?.redoAllowed ||
+          args['redoOf'] !== context.taskOutcome.taskId)
+      )
+        return { success: false, code: 'redo_not_allowed' };
       try {
         const profile =
           typeof args['profile'] === 'string' && Object.hasOwn(TASK_PROFILES, args['profile'])
