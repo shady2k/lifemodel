@@ -253,30 +253,37 @@ describe('durable fenced task mailbox', () => {
   it('recent finished context is bounded by terminal time, not update time', async () => {
     const ids: string[] = [];
     const registry = createPostgresTaskRegistry({ pool: stores.postgres, epoch: 1, settings });
-    const base = (await registry.read(identity.taskId))!;
-    for (let i = 0; i < 5; i++)
-      ids.push(
-        (
-          await registry.accept({
-            launchKey: `recent-${i}`,
-            briefing: 'B'.repeat(5000),
-            profile: base.profile,
-            imageRevision: base.imageRevision,
-          })
-        ).id
+    for (let i = 0; i < 4; i++) {
+      const proof = await seed(`recent-${i}`, 'B'.repeat(5000));
+      const state = (['done', 'failed', 'stopped'] as const)[i % 3]!;
+      await finalizeTaskFixture(
+        stores.postgres,
+        registry,
+        { id: proof.taskId, launchId: proof.launchId },
+        {
+          state,
+          reasonCode: state === 'done' ? 'completed' : 'timeout',
+          summary: 'Finished',
+        }
       );
-    for (let i = 0; i < ids.length; i++)
-      await stores.postgres.query(
-        `UPDATE core.tasks SET state=$2,terminal_at=clock_timestamp()-($3 * interval '1 hour') WHERE id=$1`,
-        [ids[i], ['done', 'failed', 'stopped'][i % 3], i === 4 ? 25 : i]
-      );
+      await registry.releaseSlot(proof.taskId);
+      ids.unshift(proof.taskId);
+    }
     const snapshot = await service().listActiveContext();
     expect(snapshot.recentTasks?.map((task) => task.id)).toEqual(ids.slice(0, 3));
     expect(snapshot.recentTasks?.[0]?.briefing).toHaveLength(TASK_CONTEXT_LIMITS.briefing);
     expect(snapshot.recentTasks?.[0]?.terminalAt).toEqual(expect.any(String));
+    // Seed only a historical terminal row by INSERT, never mutate terminal times.
+    const historical = await stores.postgres.query(
+      'SELECT profile,image_revision FROM core.tasks WHERE id=$1',
+      [ids[0]]
+    );
+    await stores.postgres.query('TRUNCATE core.tasks CASCADE');
     await stores.postgres.query(
-      "UPDATE core.tasks SET terminal_at=clock_timestamp()-interval '25 hours' WHERE id=ANY($1::text[])",
-      [ids]
+      `INSERT INTO core.tasks(id,launch_key,briefing,profile,settings_revision,harness,image_revision,request_image_revision,trace_id,wrap_grace_seconds,
+        state,terminal_candidate,terminal_reason_code,terminal_at)
+      VALUES('old-terminal','old-terminal','old',$1,0,'opencode',$2,$2,'old-terminal',300,'failed','failed','timeout',clock_timestamp()-interval '25 hours')`,
+      [historical.rows[0].profile, historical.rows[0].image_revision]
     );
     expect((await service().listActiveContext()).recentTasks).toEqual([]);
   });
