@@ -19,6 +19,7 @@ export type TaskAccessMode = 'active' | 'wrapping' | 'revoked';
 export type TaskStartupPhase =
   | 'waiting-for-scheduling'
   | 'pulling-image'
+  | 'image-pulled'
   | 'container-started'
   | 'harness-starting';
 export interface TaskStartupStatus {

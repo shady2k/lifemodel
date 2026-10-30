@@ -6,7 +6,7 @@ ALTER TABLE core.tasks ADD COLUMN IF NOT EXISTS startup_since timestamptz;
 -- squawk-ignore ban-drop-constraint
 ALTER TABLE core.tasks DROP CONSTRAINT IF EXISTS task_startup_phase_check;
 ALTER TABLE core.tasks ADD CONSTRAINT task_startup_phase_check CHECK
-  (startup_phase IN ('waiting-for-scheduling','pulling-image','container-started','harness-starting')) NOT VALID;
+  (startup_phase IN ('waiting-for-scheduling','pulling-image','image-pulled','container-started','harness-starting')) NOT VALID;
 ALTER TABLE core.tasks VALIDATE CONSTRAINT task_startup_phase_check;
 -- squawk-ignore ban-drop-constraint
 ALTER TABLE core.task_mailbox DROP CONSTRAINT IF EXISTS task_mailbox_kind_check;

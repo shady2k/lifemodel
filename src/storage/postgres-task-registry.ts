@@ -580,6 +580,7 @@ export function createPostgresTaskRegistry(deps: {
         ![
           'waiting-for-scheduling',
           'pulling-image',
+          'image-pulled',
           'container-started',
           'harness-starting',
         ].includes(observation.phase) ||
@@ -593,7 +594,10 @@ export function createPostgresTaskRegistry(deps: {
           `UPDATE core.tasks SET startup_phase=$2,
           startup_since=CASE WHEN startup_phase IS DISTINCT FROM $2 THEN $3 ELSE startup_since END
           WHERE id=$1 AND state='starting' AND terminal_candidate IS NULL
-            AND startup_phase IS DISTINCT FROM 'harness-starting'`,
+            AND COALESCE(array_position(ARRAY['waiting-for-scheduling','pulling-image',
+              'image-pulled','container-started','harness-starting'],startup_phase),0)
+              <= array_position(ARRAY['waiting-for-scheduling','pulling-image',
+                'image-pulled','container-started','harness-starting'],$2)`,
           [taskId, observation.phase, observation.since]
         );
       });

@@ -239,6 +239,40 @@ describe('durable fenced task mailbox', () => {
     }[];
   }
 
+  it('never regresses startup phase or resets its clock on stale observations', async () => {
+    const registry = createPostgresTaskRegistry({ pool: stores.postgres, epoch: 1, settings });
+    const since = new Date(Date.now() - 120_000);
+    await registry.recordStartupObservation(identity.taskId, identity.launchId, {
+      phase: 'container-started',
+      since,
+    });
+    await registry.recordStartupObservation(identity.taskId, identity.launchId, {
+      phase: 'pulling-image',
+      since: new Date(),
+    });
+    let row = await stores.postgres.query(
+      'SELECT startup_phase,startup_since FROM core.tasks WHERE id=$1',
+      [identity.taskId]
+    );
+    expect(row.rows[0]).toEqual({ startup_phase: 'container-started', startup_since: since });
+    await registry.recordStartupObservation(identity.taskId, identity.launchId, {
+      phase: 'container-started',
+      since: new Date(),
+    });
+    row = await stores.postgres.query(
+      'SELECT startup_phase,startup_since FROM core.tasks WHERE id=$1',
+      [identity.taskId]
+    );
+    expect(row.rows[0]).toEqual({ startup_phase: 'container-started', startup_since: since });
+    // A cold pull has a distinct completed-image phase before the container starts.
+    const second = await seed('image-pulled');
+    await registry.recordStartupObservation(second.taskId, second.launchId, {
+      phase: 'image-pulled',
+      since,
+    });
+    expect((await service().read(second.taskId))?.startup?.phase).toBe('image-pulled');
+  });
+
   it('publishes starting phase and elapsed time, then running and wrapping from launcher lifecycle frames', async () => {
     const domain = service();
     const registry = createPostgresTaskRegistry({

@@ -63,15 +63,20 @@ source checks, not the two-real-harness VM acceptance walk.
 
 The read view and running-tasks snapshot expose `startup: {phase, elapsedSeconds}`
 while starting, and null otherwise. Executor observations use only scheduling,
-image-pull and container-start phases. The briefing read records harness-starting.
+image-pull, image-pulled and container-start phases. Image-pulled means the image
+is ready, not that the container has started. Only Started means container-started. The briefing read records harness-starting.
 No Pod messages, image names or node values enter this projection. Elapsed time
-is measured from the phase observation, not reset by repeated reconciliation.
+is measured from the phase observation, not reset by repeated reconciliation or
+backward observations. Startup projection failures fall back to waiting-for-scheduling
+and never block launch/adoption or change the observed Job outcome.
 A slow image pull is startup progress, not evidence of a hung task.
 
 The launcher's first agent-session progress event commits a `lifecycle` frame
 with `phase: running`. After the harness turn settles, it commits
 `phase: wrapping-up` before publishing outputs and the terminal report. These
-frames use the existing fenced, immutable mailbox and ACK/replay contract.
+frames use the existing fenced, immutable mailbox and ACK/replay contract. They
+are best-effort: a failed lifecycle send records a fixed bounded diagnostic but
+never drops the computed result or prevents output collection and terminal reporting.
 Lifecycle frames update only nonterminal state under the task lock, do not wake
 cognition, and cannot regress a wrapping or terminal task. They are task claims,
 not evidence that a command was obeyed. Sealed terminal publication is unchanged.
