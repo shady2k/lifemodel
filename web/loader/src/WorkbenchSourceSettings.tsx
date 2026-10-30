@@ -125,8 +125,12 @@ export function WorkbenchSourceSettings({ csrfToken }: { csrfToken: string }) {
             {status.detail && (
               <p data-testid="workbench-failure-detail">
                 {t('workbenchFailureStep', {
-                  step: t(`workbench_step_${status.detail.step}`),
-                  side: t(`workbench_side_${status.detail.side}`),
+                  step: t(`workbench_step_${status.detail.step}`, {
+                    defaultValue: t('workbench_step_preparation'),
+                  }),
+                  side: t(`workbench_side_${status.detail.side}`, {
+                    defaultValue: t('workbench_side_loader'),
+                  }),
                 })}
                 {status.detail.status !== undefined && ` · HTTP ${String(status.detail.status)}`}
                 {status.detail.sourceOrigin &&

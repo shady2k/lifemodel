@@ -274,13 +274,19 @@ and HTTP status when a response arrived. Source detail includes only the
 validated registry origin and repository, never a credentialed URL.
 
 A source manifest or listed blob returning 404 shows `source-missing`: the
-source lacks this pinned version (or an object it references). Destination
+source lacks this pinned version (or an object it references). A listed blob's
+404 may come from the registry's redirected blob host. Some registries also
+answer 404 instead of 401 for private repositories without credentials; check
+the saved pull credential before concluding that the version is absent. Destination
 upload 4xx responses other than 401/403 show `rejected`, retaining HTTP status
 and the safe request media type. Access failures remain `unauthorized`;
 network/server failures remain `unavailable`, with a safe standard error class
 and a known system/TLS error code such as `ECONNREFUSED`, not the error message.
 Steps distinguish preparation, source manifest/blob reads, source authentication,
 destination checks, blob uploads, manifest writes and read-back verification.
+Local temporary-directory operations (including blob file writes) use
+`local-storage`, side `loader`, without a source origin or HTTP status. Unclassified
+task exceptions use `preparation`, side `loader`, rather than blaming the source.
 Other reasons remain `configuration`, `credential`, `redirect`, `deadline`,
 `aborted`, `digest-mismatch`, `size-limit`, `manifest`, `protocol` and
 `state-store` (saving status failed). Response bodies, Authorization, passwords,

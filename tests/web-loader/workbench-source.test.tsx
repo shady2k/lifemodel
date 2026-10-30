@@ -11,6 +11,39 @@ afterEach(() => {
 });
 describe('workbench source settings UI', () => {
   it.each([
+    ['en', 'Loader: preparing the import'],
+    ['ru', 'Загрузчик: подготовка импорта'],
+  ])(
+    'uses safe localized defaults for unknown step and side in %s',
+    async (language, explanation) => {
+      await i18n.changeLanguage(language);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string) => ({
+          ok: true,
+          json: async () =>
+            url.endsWith('status')
+              ? {
+                  state: 'failed',
+                  lastAttemptAt: null,
+                  detail: { step: 'private-step-canary', side: 'private-side-canary' },
+                }
+              : {
+                  registry: 'https://registry.example',
+                  repository: 'team/workbench',
+                  hasPassword: false,
+                },
+        }))
+      );
+      render(<WorkbenchSourceSettings csrfToken="csrf" />);
+      const detail = await screen.findByTestId('workbench-failure-detail');
+      expect(detail).toHaveTextContent(explanation);
+      expect(detail).not.toHaveTextContent(
+        /private-step-canary|private-side-canary|workbench_step_|workbench_side_/
+      );
+    }
+  );
+  it.each([
     [
       'en',
       'The image source does not have this version.',
@@ -49,7 +82,13 @@ describe('workbench source settings UI', () => {
         }))
       );
       render(<WorkbenchSourceSettings csrfToken="csrf" />);
-      expect(await screen.findByText(new RegExp(reason))).toBeInTheDocument();
+      const reasonLine = await screen.findByText(new RegExp(reason));
+      expect(reasonLine).toBeInTheDocument();
+      expect(reasonLine).toHaveTextContent(
+        language === 'en'
+          ? 'Some registries also return 404 for a private repository without credentials.'
+          : 'Некоторые реестры также возвращают 404 для закрытого репозитория без данных доступа.'
+      );
       const detail = screen.getByTestId('workbench-failure-detail');
       expect(detail).toHaveTextContent(step);
       expect(detail).toHaveTextContent('HTTP 404');
