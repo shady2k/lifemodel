@@ -62,7 +62,7 @@ export function createAcpTranscriptMapper(
     timer = undefined;
     if (!pending) return;
     // A streamed credential can span any non-final boundary. Keep its whole run.
-    const trailing = ended ? '' : (pending.match(/\S+$/u)?.[0] ?? '');
+    const trailing = ended ? '' : (/\S+$/u.exec(pending)?.[0] ?? '');
     let text = pending.slice(0, pending.length - trailing.length);
     pending = trailing;
     if (Buffer.byteLength(pending) >= 3997 || (full && !text)) {
@@ -128,7 +128,9 @@ export function createAcpTranscriptMapper(
           }
           clearTimeout(timer);
           if (pending) {
-            timer = setTimeout(() => flush(), 2000);
+            timer = setTimeout(() => {
+              flush();
+            }, 2000);
             timer.unref();
           }
         } else if (['tool_call', 'tool_call_update'].includes(update['sessionUpdate'] as string)) {
