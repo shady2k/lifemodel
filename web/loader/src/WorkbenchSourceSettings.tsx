@@ -122,6 +122,21 @@ export function WorkbenchSourceSettings({ csrfToken }: { csrfToken: string }) {
                 })}
               </p>
             )}
+            {status.detail && (
+              <p data-testid="workbench-failure-detail">
+                {t('workbenchFailureStep', {
+                  step: t(`workbench_step_${status.detail.step}`),
+                  side: t(`workbench_side_${status.detail.side}`),
+                })}
+                {status.detail.status !== undefined && ` · HTTP ${String(status.detail.status)}`}
+                {status.detail.sourceOrigin &&
+                  status.detail.sourceRepository &&
+                  ` · ${status.detail.sourceOrigin}/${status.detail.sourceRepository}`}
+                {status.detail.errorName && ` · ${status.detail.errorName}`}
+                {status.detail.errorCode && ` · ${status.detail.errorCode}`}
+                {status.detail.digest && ` · ${status.detail.digest}`}
+              </p>
+            )}
             <p>
               {status.lastAttemptAt === null
                 ? t('workbenchNoAttempt')
