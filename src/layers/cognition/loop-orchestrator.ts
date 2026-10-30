@@ -10,6 +10,16 @@ import type { ResponseFormat } from '../../llm/provider.js';
 import type { Message } from '../../llm/provider.js';
 import type { LoopContext, ToolCompletionRequest } from './agentic-loop-types.js';
 import { isProactiveTrigger } from './prompts/runtime-snapshot.js';
+import { validateTaskOutcome } from '../../ports/task-outcome.js';
+
+/** A sealed outcome can read its own command texts, never mutate task work. */
+export function taskOutcomeCommandRead(context: LoopContext): string | undefined {
+  if (context.triggerSignal.type !== 'task_outcome') return undefined;
+  const event = validateTaskOutcome(context.triggerSignal.data);
+  return event.commands?.some((command) => command.delivery !== 'inserted')
+    ? event.taskId
+    : undefined;
+}
 
 /**
  * Build a ToolCompletionRequest for the LLM.
@@ -80,8 +90,29 @@ export function filterToolsForContext(
   context: LoopContext,
   useSmart: boolean
 ): (OpenAIChatTool | MinimalOpenAIChatTool)[] {
-  // Outcome turns have an empty capability allowlist, not a tool denylist.
-  if (context.triggerSignal.type === 'task_outcome') return [];
+  // Keep an explicit read-only capability allowlist for the outcome's own task.
+  if (context.triggerSignal.type === 'task_outcome') {
+    if (!taskOutcomeCommandRead(context)) return [];
+    return tools
+      .filter((tool) => tool.function.name === 'core.steerTask')
+      .map((tool) => ({
+        ...tool,
+        function: {
+          ...tool.function,
+          description:
+            'Read this outcome task command texts only. Steering and answers are forbidden.',
+          parameters: {
+            type: 'object' as const,
+            properties: {
+              action: { type: 'string', enum: ['read'] },
+              taskId: { type: 'string', enum: [taskOutcomeCommandRead(context)!] },
+            },
+            required: ['action', 'taskId'],
+            additionalProperties: false,
+          },
+        },
+      }));
+  }
   const isThoughtTrigger = context.triggerSignal.type === 'thought';
   const isProactive =
     context.triggerSignal.type === 'contact_urge' || isProactiveTrigger(context.triggerSignal);

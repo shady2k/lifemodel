@@ -182,6 +182,7 @@ export const TASK_CONTEXT_LIMITS = {
   rendered: 24_000,
 } as const;
 export interface TaskContextEntry {
+  readonly commandsOmitted?: number;
   readonly commands?: readonly TaskCommandDeliveryStatus[];
   readonly id: string;
   readonly harness: string;

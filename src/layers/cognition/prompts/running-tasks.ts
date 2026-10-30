@@ -15,8 +15,8 @@ export function buildRunningTasksSection(context: LoopContext): string | null {
       harness: task.harness.slice(0, 64),
       state: task.state,
       startup: task.startup ?? null,
-      commands: (task.commands ?? []).slice(0, 32),
-      commandsOmitted: Math.max(0, (task.commands?.length ?? 0) - 32),
+      commands: (task.commands ?? []).slice(-32),
+      commandsOmitted: (task.commandsOmitted ?? 0) + Math.max(0, (task.commands?.length ?? 0) - 32),
       briefing: task.briefing.slice(0, TASK_CONTEXT_LIMITS.briefing),
       question:
         task.question && typeof task.question.text === 'string'

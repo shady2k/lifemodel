@@ -77,13 +77,24 @@ describe('running task prompt data budget', () => {
   });
 
   it('shows bounded delivery metadata without dropping the task, and forbids resending pending commands', () => {
-    const ctx = context([{ ...entry, commands: Array.from({ length: 100 }, (_, i) => ({
-      commandId: `c-${i}`, kind: 'steer' as const, delivery: 'queued' as const,
-    })) }]);
+    const ctx = context([
+      {
+        ...entry,
+        commands: Array.from({ length: 100 }, (_, i) => ({
+          commandId: `c-${i}`,
+          kind: 'steer' as const,
+          delivery: 'queued' as const,
+        })),
+      },
+    ]);
     const section = buildRunningTasksSection(ctx)!;
-    const data = JSON.parse(section.match(/<untrusted_running_tasks>(.*?)<\/untrusted_running_tasks>/s)![1]!);
+    const data = JSON.parse(
+      section.match(/<untrusted_running_tasks>(.*?)<\/untrusted_running_tasks>/s)![1]!
+    );
     expect(data).toHaveLength(1);
     expect(data[0].commands).toHaveLength(32);
+    expect(data[0].commands[0].commandId).toBe('c-68');
+    expect(data[0].commands.at(-1).commandId).toBe('c-99');
     expect(data[0].commandsOmitted).toBe(68);
     expect(section).toContain('Never re-send a queued or delivered command');
     expect(section).toContain('Never say a pending, uncertain or not_delivered change was applied');

@@ -110,7 +110,10 @@ export function taskOutcomeAttachments(event: TaskOutcomeEvent): MessageAttachme
 }
 
 /** Fixed owner-facing explanation; task text is quoted, never used as instructions. */
-export function taskOutcomeFallback(event: TaskOutcomeEvent): string {
+export function taskOutcomeFallback(
+  event: TaskOutcomeEvent,
+  commandTexts: ReadonlyMap<string, string> = new Map()
+): string {
   const reasons: Record<string, string> = {
     completed: 'The work completed.',
     timeout: 'The task ran out of time.',
@@ -137,11 +140,17 @@ export function taskOutcomeFallback(event: TaskOutcomeEvent): string {
   const missed = event.commands?.filter((c) => c.delivery === 'not_delivered') ?? [];
   const uncertain =
     event.commands?.filter((c) => ['queued', 'delivered', 'uncertain'].includes(c.delivery)) ?? [];
+  const excerpts = missed
+    .flatMap((command) => {
+      const text = commandTexts.get(command.commandId);
+      return typeof text === 'string' ? [JSON.stringify(text.slice(0, 160))] : [];
+    })
+    .slice(0, 8);
   const delivery = missed.length
-    ? `\nChanges did not reach the task and were not applied (${missed.map((c) => c.commandId).join(', ')}). I can rerun the task with those changes.`
+    ? `\n${missed.length} ${missed.length === 1 ? 'change did' : 'changes did'} not reach the task and ${missed.length === 1 ? 'was' : 'were'} not applied.${excerpts.length ? ` Changes (quoted): ${excerpts.join('; ')}.` : ''} I can rerun the task with those changes.`
     : '';
   const pending = uncertain.length
-    ? '\nSome command changes have no confirmed turn insertion. Do not assume they were applied.'
+    ? `\n${uncertain.length} ${uncertain.length === 1 ? 'change has' : 'changes have'} no confirmed turn insertion and may not have been applied.`
     : '';
   return `${state} ${reason}${delivery}${pending}\nTask output (quoted): ${JSON.stringify(event.summary)}${event.state === 'done' ? '' : '\nNo completed result is available.'}`;
 }

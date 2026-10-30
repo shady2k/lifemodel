@@ -252,9 +252,13 @@ async function readTaskContext(pool: Pool): Promise<TaskContextSnapshot> {
         'elapsedSeconds',GREATEST(0,floor(extract(epoch FROM clock_timestamp()-COALESCE(t.startup_since,t.updated_at)))))
         ELSE NULL END AS startup,
       COALESCE((SELECT jsonb_agg(jsonb_build_object('commandId',c.command_id,
-        'kind',c.content->>'kind','delivery',${taskCommandDeliverySql(taskAttemptEndedSql)}) ORDER BY c.sequence)
-        FROM core.task_commands c LEFT JOIN core.task_command_acks a USING(task_id,command_id)
-        WHERE c.task_id=t.id),'[]'::jsonb) AS commands,
+        'kind',c.content->>'kind','delivery',${taskCommandDeliverySql(taskAttemptEndedSql, 'r.disposition')}) ORDER BY c.sequence)
+        FROM (SELECT * FROM core.task_commands WHERE task_id=t.id ORDER BY sequence DESC LIMIT 32) c
+        LEFT JOIN core.task_command_acks a USING(task_id,command_id)
+        LEFT JOIN LATERAL (SELECT disposition FROM core.task_command_receipts
+          WHERE task_id=c.task_id AND command_id=c.command_id
+          ORDER BY received_at DESC,receipt_id DESC LIMIT 1) r ON true),'[]'::jsonb) AS commands,
+      GREATEST(0,(SELECT count(*) FROM core.task_commands WHERE task_id=t.id)-32)::integer AS "commandsOmitted",
       CASE WHEN q.question_id IS NULL THEN NULL ELSE
         jsonb_build_object('questionId',q.question_id,'text',left(q.text,$3)) END AS question
       FROM core.tasks t
