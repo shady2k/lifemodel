@@ -497,7 +497,7 @@ describe('durable fenced task mailbox', () => {
       );
       expect(prompt).toContain('never guess');
       expect(f.real.provider.requests[0]?.tools?.map((tool) => tool.function.name)).toEqual([
-        'core.steerTask',
+        'core_steerTask',
       ]);
       const results = f.real.provider.requests
         .flatMap((request) => request.messages)

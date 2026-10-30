@@ -95,7 +95,7 @@ export function filterToolsForContext(
     const taskId = taskOutcomeCommandRead(context);
     if (!taskId) return [];
     return tools
-      .filter((tool) => tool.function.name === 'core.steerTask')
+      .filter((tool) => ['core.steerTask', 'core_steerTask'].includes(tool.function.name))
       .map((tool) => ({
         ...tool,
         function: {
