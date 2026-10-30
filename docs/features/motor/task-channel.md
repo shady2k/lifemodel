@@ -36,9 +36,12 @@ is extra). Oldest entries are evicted under the task lock to keep the newest vie
 live. Each attempt has a content-free evicted sequence horizon. Entries at or
 below that horizon are refused with 409 rather than reinserted, including late
 out-of-order entries. Retained exact IDs replay their receipt; changed content conflicts. Transcript rows have no cognition
-signal or mailbox cursor effect. The task record owns retention; deleting it
-cascades to this transcript. The migration does not change existing retention
-policy. Known credentials, assignments, token forms, JWTs and credential URLs are
+signal or mailbox cursor effect. Task deletion cascades to the transcript. The
+trace retention pass also deletes terminal task transcripts older than its age
+policy (14 days by default, measured from terminal_at). Running tasks are never
+expired. This uses the trace writer cadence (first and every 50 batches), not
+a separate timer; no writes means no retention pass. Null age disables expiry.
+Content-free eviction horizons remain with the task to prevent reinsertion. Known credentials, assignments, token forms, JWTs and credential URLs are
 scrubbed before transport with the same code as `task.tool` spans, and scrubbed
 again before storage with the trace-store scrubber. Scrubbing is defense in depth,
 not a guarantee of discovering arbitrary unknown secrets in prose.

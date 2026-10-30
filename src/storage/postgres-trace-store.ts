@@ -358,6 +358,16 @@ export class PostgresTraceStore implements TraceWriter {
       ) records GROUP BY trace_id ORDER BY max(ended_at) ASC NULLS LAST, trace_id`);
     const { maxAgeDays, maxTraces, maxBytes, maxModelCallTraces } = this.retention;
     const cutoff = maxAgeDays == null ? -Infinity : Date.now() - maxAgeDays * 86400000;
+    if (maxAgeDays != null) {
+      // Same cadence, transaction, lock and configured age as trace retention.
+      // A terminal timestamp is immutable; active task evidence is never expired.
+      await client.query(
+        `DELETE FROM core.task_transcript tr USING core.tasks t
+         WHERE tr.task_id=t.id AND t.state IN ('done','failed','stopped')
+         AND t.terminal_at < $1::timestamptz`,
+        [new Date(cutoff).toISOString()]
+      );
+    }
     // A trace of model-call spans only is the core's own chatter (one per
     // model call, and turns are frequent). Task evidence keeps its whole
     // budget: the two classes are counted apart, so a busy chat cannot evict a

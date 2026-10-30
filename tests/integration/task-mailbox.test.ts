@@ -1,3 +1,4 @@
+import { createPostgresTraceStore } from '../../src/storage/postgres-trace-store.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Pool, type PoolClient } from 'pg';
 import { randomUUID } from 'node:crypto';
@@ -247,6 +248,49 @@ describe('durable fenced task mailbox', () => {
     ...frame(id, sequence),
     kind: 'transcript',
     payload: { id, role: 'assistant', time: '2026-10-30T00:00:00.000Z', text, tool: null },
+  });
+
+  it('review3: trace retention removes only old terminal transcripts', async () => {
+    const m = mailbox();
+    await m.append(transcriptFrame('retained-chat', 1), identity);
+    const prune = async (id: string) => {
+      const writer = createPostgresTraceStore({ pool: stores.postgres, pruneEveryBatches: 1 });
+      writer.enqueue({
+        kind: 'event',
+        event: {
+          recordId: id,
+          traceId: id,
+          spanId: 'root',
+          event: 'test',
+          ts: new Date().toISOString(),
+          fields: {},
+        },
+      });
+      await writer.close();
+    };
+    await prune('active-pass');
+    expect((await m.readTranscript(identity.taskId)).entries).toHaveLength(1);
+    const registry = createPostgresTaskRegistry({ pool: stores.postgres, epoch: 1, settings });
+    await finalizeTaskFixture(
+      stores.postgres,
+      registry,
+      { id: identity.taskId, launchId: identity.launchId },
+      { state: 'failed', reasonCode: 'compute_missing', summary: 'fixture' }
+    );
+    await prune('recent-pass');
+    expect((await m.readTranscript(identity.taskId)).entries).toHaveLength(1);
+    // Backdate only the fixture's immutable terminal clock.
+    await stores.postgres.query('ALTER TABLE core.tasks DISABLE TRIGGER USER');
+    try {
+      await stores.postgres.query(
+        "UPDATE core.tasks SET terminal_at=clock_timestamp()-interval '15 days' WHERE id=$1",
+        [identity.taskId]
+      );
+    } finally {
+      await stores.postgres.query('ALTER TABLE core.tasks ENABLE TRIGGER USER');
+    }
+    await prune('old-pass');
+    expect((await m.readTranscript(identity.taskId)).entries).toHaveLength(0);
   });
 
   it('transcript: stores scrubbed tool and assistant excerpts, replays once and pages older entries', async () => {
