@@ -44,6 +44,7 @@ export function boundTaskTranscript(entry, raw = false) {
   /** @param {string} text @param {number} max @param {boolean} [tail] */
   const clip = (text, max, tail = false) =>
     transcriptSlice(text.replaceAll('\0', ''), max, tail).text;
+  /** @param {string} text @param {number} max @param {boolean} [tail] */
   const runClip = (text, max, tail = false) =>
     transcriptRunSlice(text.replaceAll('\0', ''), max, tail);
   const value = {
