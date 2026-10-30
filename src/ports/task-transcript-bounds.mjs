@@ -1,5 +1,10 @@
-/** Re-bound scrubbed transcript fields and both JSON wire/JSONB text budgets. */
+import { Buffer } from 'node:buffer';
+/**
+ * Re-bound scrubbed transcript fields and both JSON wire/JSONB text budgets.
+ * @param {{text: string, tool: {name: string, outputTail: string} | null}} entry
+ */
 export function boundTaskTranscript(entry) {
+  /** @param {string} text @param {number} max @param {boolean} [tail] */
   const clip = (text, max, tail = false) => {
     if (max <= 0) return '';
     const b = Buffer.from(text);

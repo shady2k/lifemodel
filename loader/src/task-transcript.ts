@@ -107,7 +107,7 @@ export function createAcpTranscriptMapper(
               outputTail,
             },
           } satisfies Omit<TaskTranscriptEntry, 'id' | 'time'>;
-          if (!previous || previous.status !== status) emit(`tool:${id}:${status}`, entry);
+          if (previous?.status !== status) emit(`tool:${id}:${status}`, entry);
         }
       } catch {
         /* Capture cannot fail a task. */
