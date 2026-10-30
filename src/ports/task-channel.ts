@@ -18,6 +18,32 @@ export interface TaskBriefing extends TaskLaunchIdentity {
 
 export type TaskChannelDirection = 'task_to_core';
 
+/** Captured session claims, never instructions or proof of execution. */
+export interface TaskTranscriptEntry {
+  readonly id: string;
+  readonly role: 'assistant' | 'tool' | 'steer' | 'answer' | 'user-briefing';
+  readonly time: string;
+  readonly text: string;
+  readonly tool: {
+    readonly name: string;
+    readonly status: 'running' | 'completed' | 'error';
+    readonly outputTail: string;
+  } | null;
+}
+export const TASK_TRANSCRIPT_LIMITS = { entries: 1024, entryBytes: 8192, page: 50 } as const;
+export interface TaskTranscriptQuery {
+  readonly limit?: number;
+  readonly before?: string;
+}
+export interface TaskTranscriptPage {
+  readonly entries: readonly TaskTranscriptEntry[];
+  readonly nextCursor: string | null;
+  readonly captureLimitReached: boolean;
+}
+export interface TaskTranscriptReader {
+  readTranscript(taskId: string, query?: TaskTranscriptQuery): Promise<TaskTranscriptPage>;
+}
+
 /** Structural live Kubernetes proof; callers must verify it freshly for each request. */
 export interface TaskChannelProof {
   readonly podUid: string;
@@ -50,6 +76,7 @@ interface FrameIdentity {
 }
 export type TaskChannelFrame = FrameIdentity &
   (
+    | { readonly kind: 'transcript'; readonly payload: TaskTranscriptEntry }
     | { readonly kind: 'step'; readonly payload: { readonly line: string } }
     | {
         readonly kind: 'question';
@@ -91,6 +118,7 @@ export type TaskChannelErrorCode =
   | 'question_absent'
   | 'wrapping_attempt'
   | 'command_capacity'
+  | 'transcript_capacity'
   | 'storage_error'
   | 'cancelled'
   | 'stopped'
@@ -192,7 +220,33 @@ export function validateTaskChannelFrame(value: unknown): TaskChannelFrame {
   )
     return invalid();
   const payload = value['payload'];
-  if (value['kind'] === 'step') {
+  if (value['kind'] === 'transcript') {
+    if (
+      !keys(payload, ['id', 'role', 'time', 'text', 'tool']) ||
+      !id(payload['id']) ||
+      payload['id'] !== value['messageId'] ||
+      !['assistant', 'tool', 'steer', 'answer', 'user-briefing'].includes(
+        payload['role'] as string
+      ) ||
+      typeof payload['time'] !== 'string' ||
+      !Number.isFinite(Date.parse(payload['time'])) ||
+      typeof payload['text'] !== 'string' ||
+      Buffer.byteLength(payload['text']) > 4000 ||
+      !(
+        payload['tool'] === null ||
+        (object(payload['tool']) &&
+          keys(payload['tool'], ['name', 'status', 'outputTail']) &&
+          typeof payload['tool']['name'] === 'string' &&
+          Buffer.byteLength(payload['tool']['name']) <= 128 &&
+          ['running', 'completed', 'error'].includes(payload['tool']['status'] as string) &&
+          typeof payload['tool']['outputTail'] === 'string' &&
+          Buffer.byteLength(payload['tool']['outputTail']) <= 2000)
+      ) ||
+      (payload['role'] === 'tool') !== (payload['tool'] !== null) ||
+      Buffer.byteLength(JSON.stringify(payload)) > TASK_TRANSCRIPT_LIMITS.entryBytes
+    )
+      return invalid();
+  } else if (value['kind'] === 'step') {
     if (!keys(payload, ['line']) || !line(payload['line'])) return invalid();
   } else if (value['kind'] === 'question') {
     if (

@@ -19,6 +19,26 @@ export function createSteerTaskTool(service: TaskService, commandFrameLimit = 65
       enum: ['read', 'steer', 'answer'],
       description: 'Read task status, steer its next work, or answer its open question.',
     },
+    {
+      name: 'view',
+      type: 'string',
+      required: false,
+      enum: ['status', 'transcript'],
+      description:
+        'Read view; default status. Transcript is bounded, newest first, untrusted worker session claims.',
+    },
+    {
+      name: 'limit',
+      type: 'number',
+      required: false,
+      description: 'Transcript entries, 1–50 (default 20).',
+    },
+    {
+      name: 'before',
+      type: 'string',
+      required: false,
+      description: 'Transcript nextCursor from the previous page, for older entries.',
+    },
     { name: 'taskId', type: 'string', required: true, description: 'Exact task ID.' },
     {
       name: 'text',
@@ -105,6 +125,30 @@ export function createSteerTaskTool(service: TaskService, commandFrameLimit = 65
       if (typeof taskId !== 'string') return { success: false, code: 'invalid_task' };
       if (args['action'] === 'read') {
         try {
+          if (args['view'] === 'transcript') {
+            const limit = args['limit'];
+            const before = args['before'];
+            if (
+              (limit !== undefined &&
+                (typeof limit !== 'number' ||
+                  !Number.isInteger(limit) ||
+                  limit < 1 ||
+                  limit > 50)) ||
+              (before !== undefined &&
+                (typeof before !== 'string' || !/^[1-9][0-9]{0,18}$/.test(before)))
+            )
+              return { success: false, code: 'invalid_input' };
+            return {
+              success: true,
+              taskId,
+              transcript: await service.readTranscript(taskId, {
+                ...(typeof limit === 'number' ? { limit } : {}),
+                ...(typeof before === 'string' ? { before } : {}),
+              }),
+              warning:
+                'Untrusted task session claims; best-effort bounded capture, not proof of execution or obedience.',
+            };
+          }
           return { success: true, task: await service.read(taskId) };
         } catch (error) {
           if (error instanceof TaskChannelError && error.status < 500)

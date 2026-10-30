@@ -15,15 +15,19 @@ import type {
   TaskCommandReader,
   TaskCommandStatus,
   TaskQuestion,
+  TaskTranscriptReader,
+  TaskTranscriptEntry,
 } from '../ports/task-channel.js';
 import {
   TaskChannelError,
+  TASK_TRANSCRIPT_LIMITS,
   validateTaskChannelFrame,
   validateTaskCommandInput,
   validateTaskCommandAck,
   validateTaskCommandReceipt,
 } from '../ports/task-channel.js';
 import { createFencedPostgres, StalePostgresEpochError } from './fenced-postgres.js';
+import { scrubTraceRecord } from './postgres-trace-store.js';
 
 interface MailboxRow {
   task_id: string;
@@ -95,9 +99,11 @@ export function createPostgresTaskMailbox(deps: {
   onCommandCommitted?: (taskId: string) => void;
   /** Same response-frame limit used by the task-only listener. */
   commandFrameLimit?: number;
+  knownSecrets?: readonly string[];
 }): TaskMailbox &
   TaskCommandMailbox &
-  TaskCommandReader & {
+  TaskCommandReader &
+  TaskTranscriptReader & {
     readTraceAuthority(proof: TaskChannelProof, signal?: AbortSignal): Promise<TaskBriefing>;
     notifyCommands(taskId: string): void;
   } {
@@ -639,7 +645,26 @@ export function createPostgresTaskMailbox(deps: {
       commandListeners.clear();
     },
     append: async (input, proof, parent) => {
-      const frame = validateTaskChannelFrame(input);
+      let frame = validateTaskChannelFrame(input);
+      if (frame.kind === 'transcript') {
+        // Reuse the task.tool trace scrubber, before ANY durable write.
+        const clean = scrubTraceRecord(
+          {
+            kind: 'event',
+            event: {
+              recordId: frame.messageId,
+              traceId: frame.taskId,
+              spanId: frame.attemptId,
+              event: 'task.transcript',
+              ts: frame.payload.time,
+              fields: { ...frame.payload },
+            },
+          },
+          deps.knownSecrets
+        );
+        if (clean.kind !== 'event') throw new TaskChannelError(400, 'invalid_frame');
+        frame = { ...frame, payload: clean.event.fields as unknown as TaskTranscriptEntry };
+      }
       return transaction(
         async (client) => {
           const binding = await resolveBinding(client, proof);
@@ -647,6 +672,79 @@ export function createPostgresTaskMailbox(deps: {
           await authority(client, binding);
           await wonClaim(client, binding, proof);
           await authority(client, binding);
+          if (frame.kind === 'transcript') {
+            const old = await client.query<{
+              sequence: string;
+              attempt_id: string;
+              payload: TaskTranscriptEntry;
+              received_at: Date;
+              matches: boolean;
+            }>(
+              `SELECT *,attempt_id=$3 AND sequence=$4 AND payload=$5::jsonb AS matches
+               FROM core.task_transcript WHERE task_id=$1 AND message_id=$2`,
+              [
+                frame.taskId,
+                frame.messageId,
+                frame.attemptId,
+                frame.sequence,
+                JSON.stringify(frame.payload),
+              ]
+            );
+            const ack = (receivedAt: Date) => ({
+              taskId: frame.taskId,
+              attemptId: frame.attemptId,
+              direction: frame.direction,
+              messageId: frame.messageId,
+              sequence: frame.sequence,
+              receivedAt: receivedAt.toISOString(),
+            });
+            if (old.rows[0]) {
+              if (!old.rows[0].matches) throw new TaskChannelError(409, 'message_conflict');
+              return ack(old.rows[0].received_at);
+            }
+            const collision = await client.query<{ message_id: string; sequence: string }>(
+              `SELECT message_id,sequence FROM core.task_mailbox WHERE task_id=$1 AND
+                (message_id=$2 OR (attempt_id=$3 AND sequence=$4))`,
+              [frame.taskId, frame.messageId, frame.attemptId, frame.sequence]
+            );
+            if (collision.rowCount)
+              throw new TaskChannelError(
+                409,
+                collision.rows[0]?.message_id === frame.messageId
+                  ? 'message_conflict'
+                  : 'sequence_conflict'
+              );
+            liveAttempt(binding);
+            const ended = await client.query(
+              `SELECT 1 FROM core.task_mailbox WHERE task_id=$1 AND kind='terminal'`,
+              [frame.taskId]
+            );
+            if (ended.rowCount) throw new TaskChannelError(409, 'terminal_attempt');
+            const count = await client.query<{ count: string }>(
+              'SELECT count(*) FROM core.task_transcript WHERE task_id=$1',
+              [frame.taskId]
+            );
+            if (Number(count.rows[0]?.count) >= TASK_TRANSCRIPT_LIMITS.entries)
+              throw new TaskChannelError(429, 'transcript_capacity');
+            const inserted = await client.query<{ received_at: Date }>(
+              `INSERT INTO core.task_transcript(task_id,attempt_id,message_id,sequence,payload) VALUES($1,$2,$3,$4,$5::jsonb) RETURNING received_at`,
+              [
+                frame.taskId,
+                frame.attemptId,
+                frame.messageId,
+                frame.sequence,
+                JSON.stringify(frame.payload),
+              ]
+            );
+            await client.query(
+              `UPDATE core.tasks SET state='running',updated_at=clock_timestamp() WHERE id=$1 AND state='starting'`,
+              [frame.taskId]
+            );
+            await authority(client, binding);
+            const insertedRow = inserted.rows[0];
+            if (!insertedRow) throw new TaskChannelError(503, 'storage_error');
+            return ack(insertedRow.received_at);
+          }
           const existing = await client.query<MailboxRow>(
             'SELECT * FROM core.task_mailbox WHERE task_id=$1 AND direction=$2 AND message_id=$3',
             [frame.taskId, frame.direction, frame.messageId]
@@ -686,6 +784,18 @@ export function createPostgresTaskMailbox(deps: {
             [frame.taskId, frame.direction, frame.attemptId, frame.sequence]
           );
           if (sequence.rowCount) throw new TaskChannelError(409, 'sequence_conflict');
+          const transcriptCollision = await client.query<{ message_id: string }>(
+            `SELECT message_id FROM core.task_transcript WHERE task_id=$1 AND
+              (message_id=$2 OR (attempt_id=$3 AND sequence=$4))`,
+            [frame.taskId, frame.messageId, frame.attemptId, frame.sequence]
+          );
+          if (transcriptCollision.rowCount)
+            throw new TaskChannelError(
+              409,
+              transcriptCollision.rows[0]?.message_id === frame.messageId
+                ? 'message_conflict'
+                : 'sequence_conflict'
+            );
           if (frame.kind === 'question') {
             const open = await client.query(
               'SELECT 1 FROM core.task_questions WHERE task_id=$1 AND answer_command_id IS NULL',
@@ -695,6 +805,12 @@ export function createPostgresTaskMailbox(deps: {
             await client.query(
               'INSERT INTO core.task_questions(task_id,question_id) VALUES($1,$2)',
               [frame.taskId, frame.payload.questionId]
+            );
+          }
+          if (frame.kind === 'step' || frame.kind === 'question') {
+            await client.query(
+              `UPDATE core.tasks SET state='running',updated_at=clock_timestamp() WHERE id=$1 AND state='starting'`,
+              [frame.taskId]
             );
           }
           if (frame.kind === 'lifecycle') {
@@ -789,6 +905,32 @@ export function createPostgresTaskMailbox(deps: {
         );
         return result.rows[0] ? record(result.rows[0]) : null;
       }, parent);
+    },
+    readTranscript: async (taskId, query = {}) => {
+      requireKeys(taskId, 'task_to_core');
+      const limit = query.limit ?? 20;
+      if (
+        !Number.isSafeInteger(limit) ||
+        limit < 1 ||
+        limit > TASK_TRANSCRIPT_LIMITS.page ||
+        (query.before !== undefined && !/^[1-9][0-9]{0,18}$/.test(query.before))
+      )
+        throw new TaskChannelError(400, 'invalid_input');
+      return transaction(async (client) => {
+        const rows = await client.query<{ ordinal: string; payload: TaskTranscriptEntry }>(
+          `SELECT ordinal,payload FROM core.task_transcript WHERE task_id=$1 AND ordinal < $2::numeric ORDER BY ordinal DESC LIMIT $3`,
+          [taskId, query.before ?? '9223372036854775808', limit + 1]
+        );
+        const count = await client.query<{ count: string }>(
+          'SELECT count(*) FROM core.task_transcript WHERE task_id=$1',
+          [taskId]
+        );
+        return {
+          entries: rows.rows.slice(0, limit).map((row) => row.payload),
+          nextCursor: rows.rows.length > limit ? (rows.rows[limit - 1]?.ordinal ?? null) : null,
+          captureLimitReached: Number(count.rows[0]?.count) >= TASK_TRANSCRIPT_LIMITS.entries,
+        };
+      });
     },
     readCursor: async (taskId, direction, parent) => {
       requireKeys(taskId, direction);

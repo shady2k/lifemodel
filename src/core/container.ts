@@ -1585,6 +1585,10 @@ export async function createContainerAsync(
     const identity = createTaskKubernetesIdentity({ timeoutMs });
     const mailbox = createPostgresTaskMailbox({
       pool: channelPool,
+      knownSecrets: [
+        databaseUrl,
+        ...(typeof rawPostgres.options.password === 'string' ? [rawPostgres.options.password] : []),
+      ],
       commandFrameLimit: Math.min(
         settings['tasks.channel.maxFrameBytes'],
         settings['tasks.channel.maxUnackedBytes'],
