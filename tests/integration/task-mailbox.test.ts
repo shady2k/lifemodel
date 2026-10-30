@@ -250,6 +250,30 @@ describe('durable fenced task mailbox', () => {
     payload: { id, role: 'assistant', time: '2026-10-30T00:00:00.000Z', text, tool: null },
   });
 
+  it('review4: expanded redactions fit stored entry bounds', async () => {
+    const m = mailbox();
+    await m.append(transcriptFrame('expanding', 1, 'token=x '.repeat(500)), identity);
+    const page = await m.readTranscript(identity.taskId);
+    expect(Buffer.byteLength(page.entries[0]?.text ?? '')).toBeLessThanOrEqual(4000);
+    expect(page.entries[0]?.text).not.toContain('token=x');
+    expect(page.entries[0]?.text).toContain('[REDACTED]');
+  });
+
+  it('review4: transcript SQL check violations are client errors', async () => {
+    await stores.postgres
+      .query(`CREATE FUNCTION core.review_check() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture' USING ERRCODE='23514', TABLE='task_transcript'; END; $$;
+      CREATE TRIGGER review_check BEFORE INSERT ON core.task_transcript FOR EACH ROW EXECUTE FUNCTION core.review_check()`);
+    try {
+      await expect(
+        mailbox().append(transcriptFrame('check-failure', 1), identity)
+      ).rejects.toMatchObject({ status: 400, code: 'invalid_input' });
+    } finally {
+      await stores.postgres.query(
+        'DROP TRIGGER review_check ON core.task_transcript; DROP FUNCTION core.review_check()'
+      );
+    }
+  });
+
   it('review3: trace retention removes only old terminal transcripts', async () => {
     const m = mailbox();
     await m.append(transcriptFrame('retained-chat', 1), identity);

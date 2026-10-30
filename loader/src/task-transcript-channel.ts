@@ -1,5 +1,6 @@
 /** Best-effort bounded session capture, separate socket from control and terminal. */
-import { TaskJsonClient, type TaskEndpoint } from './task-launcher-http.js';
+import { TaskJsonClient, LauncherError, type TaskEndpoint } from './task-launcher-http.js';
+import { boundTaskTranscript } from '../../src/ports/task-transcript-bounds.mjs';
 import { createTaskContentScrubber } from './task-content-scrub.js';
 import type { TaskTranscriptEntry } from './task-harness.js';
 export function createTaskTranscriptChannel(options: {
@@ -22,7 +23,7 @@ export function createTaskTranscriptChannel(options: {
         const next = queue.shift();
         if (!next) break;
         try {
-          const entry = await scrub(next.entry);
+          const entry = boundTaskTranscript(await scrub(next.entry));
           const frame = {
             taskId: options.identity.taskId,
             attemptId: options.identity.attemptId,

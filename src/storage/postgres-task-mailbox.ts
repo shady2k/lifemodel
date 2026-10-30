@@ -28,6 +28,7 @@ import {
 } from '../ports/task-channel.js';
 import { createFencedPostgres, StalePostgresEpochError } from './fenced-postgres.js';
 import { scrubTraceRecord } from './postgres-trace-store.js';
+import { boundTaskTranscript } from '../ports/task-transcript-bounds.mjs';
 
 interface MailboxRow {
   task_id: string;
@@ -197,7 +198,14 @@ export function createPostgresTaskMailbox(deps: {
         // that classification, but never expose SQL detail, cause, input or bearer.
         const code =
           error !== null && typeof error === 'object' && 'code' in error ? error.code : undefined;
-        if (typeof code === 'string' && /^(22|28|3D|3F|42)/.test(code))
+        if (
+          (typeof code === 'string' && /^(22|28|3D|3F|42)/.test(code)) ||
+          (code === '23514' &&
+            error !== null &&
+            typeof error === 'object' &&
+            'table' in error &&
+            error.table === 'task_transcript')
+        )
           throw new TaskChannelError(400, 'invalid_input');
         throw new TaskChannelError(503, 'storage_error');
       } finally {
@@ -663,7 +671,10 @@ export function createPostgresTaskMailbox(deps: {
           deps.knownSecrets
         );
         if (clean.kind !== 'event') throw new TaskChannelError(400, 'invalid_frame');
-        frame = { ...frame, payload: clean.event.fields as unknown as TaskTranscriptEntry };
+        frame = validateTaskChannelFrame({
+          ...frame,
+          payload: boundTaskTranscript(clean.event.fields as unknown as TaskTranscriptEntry),
+        });
       }
       return transaction(
         async (client) => {

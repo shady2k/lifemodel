@@ -29,3 +29,5 @@
 
 !src/ports/task-agent-validation.*
 !scripts/task-agent-paths.mjs
+
+!src/ports/task-transcript-bounds.*
