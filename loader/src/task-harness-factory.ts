@@ -12,7 +12,6 @@ export async function createRegisteredHarness(
   const {
     configureAgent,
     createTranscriptMapper,
-    insertedText,
     toolOutputFailed,
     admit,
     bind,
@@ -23,7 +22,6 @@ export async function createRegisteredHarness(
   } = (await import(agent.adapterModule)) as {
     configureAgent: NonNullable<AcpTaskHarnessOptions['configure']>;
     createTranscriptMapper?: AcpTaskHarnessOptions['createTranscriptMapper'];
-    insertedText?: AcpTaskHarnessOptions['insertedText'];
     toolOutputFailed: NonNullable<AcpTaskHarnessOptions['toolOutputFailed']>;
     admit?: AcpTaskHarnessOptions['admit'];
     bind?: AcpTaskHarnessOptions['bind'];
@@ -37,7 +35,6 @@ export async function createRegisteredHarness(
     agent,
     configure: configureAgent,
     ...(createTranscriptMapper ? { createTranscriptMapper } : {}),
-    ...(insertedText ? { insertedText } : {}),
     toolOutputFailed,
     ...(admit ? { admit } : {}),
     ...(bind ? { bind } : {}),

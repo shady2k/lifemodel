@@ -210,7 +210,6 @@ export interface AcpTaskHarnessOptions {
     relayBaseURL: string;
     adapterConfig?: AgentConfiguration['adapterConfig'];
   }) => NodeJS.ProcessEnv;
-  insertedText?: (commandId: string, text: string) => string;
   createTranscriptMapper?: (sink?: TaskHarnessEventSink) => TaskTranscriptMapper;
   toolOutputFailed?: (output: unknown, input?: unknown) => boolean;
   admit?: (input: {
@@ -628,9 +627,7 @@ export class AcpTaskHarness implements TaskHarness {
             commandTexts.set(command.commandId, textHash);
             transcriptCommands.set(command.commandId, {
               role: command.kind ?? 'steer',
-              text: transcriptText(
-                this.options.insertedText?.(command.commandId, command.text) ?? command.text
-              ),
+              text: transcriptText(command.text),
             });
           }
           const disposition = await steeringJournal.admit(command, () =>
