@@ -16,6 +16,19 @@ function selectProducerOutput(...paths: string[]): string {
 }
 
 describe('loader image CI path classification', () => {
+  it.each(['loader', 'workbench'] as const)('round2: shared helper selects %s image', (image) => {
+    const selector = fileURLToPath(new URL(`../../scripts/ci-${image}-paths.sh`, import.meta.url));
+    for (const path of [
+      'src/ports/task-transcript-bounds.mjs',
+      'src/ports/task-transcript-bounds.d.mts',
+    ])
+      expect(
+        execFileSync('sh', [selector], {
+          input: `changed: ${path}\nproduct=true\n`,
+          encoding: 'utf8',
+        }).trim()
+      ).toBe(`${image}_image=true`);
+  });
   it.each([
     ['the loader program', ['loader/src/main.ts']],
     ['the loader UI', ['web/loader/src/app.tsx']],
