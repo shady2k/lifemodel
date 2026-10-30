@@ -284,9 +284,12 @@ network/server failures remain `unavailable`, with a safe standard error class
 and a known system/TLS error code such as `ECONNREFUSED`, not the error message.
 Steps distinguish preparation, source manifest/blob reads, source authentication,
 destination checks, blob uploads, manifest writes and read-back verification.
-Local temporary-directory operations (including blob file writes) use
-`local-storage`, side `loader`, without a source origin or HTTP status. Unclassified
-task exceptions use `preparation`, side `loader`, rather than blaming the source.
+Local temporary-directory setup and blob file write failures use
+`local-storage`, side `loader`, without a source origin or HTTP status.
+Cleanup after a transfer or import is best-effort: a failed close or temporary
+file removal never replaces the import result. The next attempt removes the
+whole temporary directory before starting; failure of that setup remains visible.
+Unclassified task exceptions use `preparation`, side `loader`, rather than blaming the source.
 Other reasons remain `configuration`, `credential`, `redirect`, `deadline`,
 `aborted`, `digest-mismatch`, `size-limit`, `manifest`, `protocol` and
 `state-store` (saving status failed). Response bodies, Authorization, passwords,

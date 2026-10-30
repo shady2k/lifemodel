@@ -16,7 +16,7 @@ import { createRecordingLogger } from '../../loader/src/logger.js';
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, open: vi.fn(actual.open) };
+  return { ...actual, open: vi.fn(actual.open), rm: vi.fn(actual.rm) };
 });
 
 const digest = (bytes: Buffer) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
@@ -41,6 +41,8 @@ afterEach(async () => {
   vi.mocked(open).mockReset();
   const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
   vi.mocked(open).mockImplementation(actual.open);
+  vi.mocked(rm).mockReset();
+  vi.mocked(rm).mockImplementation(actual.rm);
 });
 
 function fixture(docker = false) {
@@ -178,9 +180,10 @@ async function setup(docker = false) {
   return { data, source, target, options, temporary };
 }
 
-async function failedTask(
+async function taskResult(
   options: Awaited<ReturnType<typeof setup>>['options'],
-  temporary: string
+  temporary: string,
+  expectedState: 'failed' | 'ready' = 'failed'
 ) {
   const fs = createNodeFileSystem();
   const entries: Parameters<typeof createRecordingLogger>[0] = [];
@@ -199,12 +202,59 @@ async function failedTask(
   });
   cleanups.push(() => task.stop());
   await task.start();
-  await vi.waitFor(() => expect(task.status().state).toBe('failed'));
+  await vi.waitFor(() => expect(task.status().state).toBe(expectedState));
   const saved = JSON.parse(await fs.readFile(join(temporary, 'workbench-import.json')));
   return { status: task.status(), entries, saved };
 }
 
 describe('workbench byte-identical OCI import', () => {
+  it.each(['failed', 'ready'] as const)(
+    'preserves the %s import result when workspace cleanup fails',
+    async (expectedState) => {
+      const { options, source, target, data, temporary } = await setup();
+      if (expectedState === 'failed') source.manifests.delete(data.root);
+      const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+      let cleanupFailed = false;
+      vi.mocked(rm).mockImplementation(async (path, settings) => {
+        if (settings?.recursive && String(path).startsWith(join(temporary, 'downloads', 'run-'))) {
+          cleanupFailed = true;
+          throw Object.assign(new Error('cleanup-private-path-canary'), { code: 'EACCES' });
+        }
+        return actual.rm(path, settings);
+      });
+      const result = await taskResult(options, temporary, expectedState);
+      expect(cleanupFailed).toBe(true);
+      expect(result.status.state).toBe(expectedState);
+      expect(result.saved).toEqual(result.status);
+      if (expectedState === 'failed') {
+        const detail = {
+          step: 'source-manifest',
+          side: 'source',
+          status: 404,
+          digest: data.root,
+          sourceOrigin: source.origin,
+          sourceRepository: 'custom/team-workbench',
+        };
+        expect(result.status.reason).toBe('source-missing');
+        expect(result.status.detail).toEqual(detail);
+        expect(result.entries).toContainEqual({
+          level: 'warn',
+          fields: { code: 'source-missing', detail },
+          message: 'workbench import failed; retrying',
+        });
+      } else {
+        expect(result.status).not.toHaveProperty('reason');
+        expect(result.status).not.toHaveProperty('detail');
+        expect(result.entries).toEqual([
+          { level: 'info', fields: { code: 'ready' }, message: 'workbench import is ready' },
+        ]);
+        expect(target.blobs).toEqual(data.blobs);
+        expect(target.manifests).toEqual(data.manifests);
+      }
+      expect(JSON.stringify(result)).not.toContain('cleanup-private-path-canary');
+    }
+  );
+
   it.each([
     'SELF_SIGNED_CERT_IN_CHAIN',
     'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
@@ -241,7 +291,7 @@ describe('workbench byte-identical OCI import', () => {
         }
         return true;
       });
-      const result = await failedTask(options, temporary);
+      const result = await taskResult(options, temporary);
       expect(cdn.calls).toHaveLength(1);
       expect(result.status.reason).toBe(
         outcome === 403 ? 'unauthorized' : outcome === 404 ? 'source-missing' : 'unavailable'
@@ -289,7 +339,7 @@ describe('workbench byte-identical OCI import', () => {
       res.end();
       return true;
     });
-    const result = await failedTask(options, temporary);
+    const result = await taskResult(options, temporary);
     expect(result.status.reason).toBe('unavailable');
     expect(result.status.detail).toEqual({
       step: 'source-authentication',
@@ -308,44 +358,65 @@ describe('workbench byte-identical OCI import', () => {
     expect(JSON.stringify(result)).not.toContain('TOKEN_BODY_CANARY');
   });
 
-  it('attributes an injected ENOSPC on the blob file write to loader local-storage', async () => {
-    const { options, source, target, temporary } = await setup();
-    const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
-    let injected = false;
-    let blobDigest = '';
-    source.intercept((req) => {
-      if ((req.url ?? '').includes('/blobs/')) blobDigest = (req.url ?? '').split('/').at(-1)!;
-      return false;
-    });
-    vi.mocked(open).mockImplementation(async (...args) => {
-      const file = await actual.open(...args);
-      if (String(args[0]).endsWith('/blob')) {
-        vi.spyOn(file, 'writeFile').mockImplementation(async () => {
-          injected = true;
-          throw Object.assign(new Error('ENOSPC private-path-canary'), { code: 'ENOSPC' });
+  it.each(['none', 'close', 'unlink'] as const)(
+    'attributes write ENOSPC to loader local-storage despite %s cleanup failure',
+    async (cleanup) => {
+      const { options, source, target, temporary } = await setup();
+      const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+      let injected = false;
+      let cleanupFailed = false;
+      if (cleanup === 'unlink')
+        vi.mocked(rm).mockImplementation(async (path, settings) => {
+          if (String(path).endsWith('/blob')) {
+            cleanupFailed = true;
+            throw Object.assign(new Error('cleanup-private-path-canary'), { code: 'EROFS' });
+          }
+          return actual.rm(path, settings);
         });
-      }
-      return file;
-    });
-    const result = await failedTask(options, temporary);
-    expect(injected).toBe(true);
-    expect(result.status.reason).toBe('unavailable');
-    expect(result.status.detail).toEqual({
-      step: 'local-storage',
-      side: 'loader',
-      digest: blobDigest,
-      errorName: 'Error',
-      errorCode: 'ENOSPC',
-    });
-    expect(result.saved).toEqual(result.status);
-    expect(result.entries).toContainEqual({
-      level: 'warn',
-      message: 'workbench import failed; retrying',
-      fields: { code: 'unavailable', detail: result.status.detail },
-    });
-    expect(JSON.stringify(result)).not.toContain('private-path-canary');
-    expect(target.blobs.size).toBe(0);
-  });
+      let blobDigest = '';
+      source.intercept((req) => {
+        if ((req.url ?? '').includes('/blobs/')) blobDigest = (req.url ?? '').split('/').at(-1)!;
+        return false;
+      });
+      vi.mocked(open).mockImplementation(async (...args) => {
+        const file = await actual.open(...args);
+        if (String(args[0]).endsWith('/blob')) {
+          if (cleanup === 'close') {
+            const close = file.close.bind(file);
+            vi.spyOn(file, 'close').mockImplementation(async () => {
+              await close();
+              cleanupFailed = true;
+              throw Object.assign(new Error('cleanup-private-path-canary'), { code: 'EACCES' });
+            });
+          }
+          vi.spyOn(file, 'writeFile').mockImplementation(async () => {
+            injected = true;
+            throw Object.assign(new Error('ENOSPC private-path-canary'), { code: 'ENOSPC' });
+          });
+        }
+        return file;
+      });
+      const result = await taskResult(options, temporary);
+      expect(injected).toBe(true);
+      expect(cleanupFailed).toBe(cleanup !== 'none');
+      expect(result.status.reason).toBe('unavailable');
+      expect(result.status.detail).toEqual({
+        step: 'local-storage',
+        side: 'loader',
+        digest: blobDigest,
+        errorName: 'Error',
+        errorCode: 'ENOSPC',
+      });
+      expect(result.saved).toEqual(result.status);
+      expect(result.entries).toContainEqual({
+        level: 'warn',
+        message: 'workbench import failed; retrying',
+        fields: { code: 'unavailable', detail: result.status.detail },
+      });
+      expect(JSON.stringify(result)).not.toContain('private-path-canary');
+      expect(target.blobs.size).toBe(0);
+    }
+  );
 
   it.each(['manifest', 'blob'])(
     'records a missing source %s safely in the log and durable status',
@@ -353,7 +424,7 @@ describe('workbench byte-identical OCI import', () => {
       const { options, source, data, temporary } = await setup();
       const missing = kind === 'manifest' ? data.root : (data.blobs.keys().next().value as string);
       (kind === 'manifest' ? source.manifests : source.blobs).delete(missing);
-      const result = await failedTask(
+      const result = await taskResult(
         {
           ...options,
           readSource: async () => ({
@@ -394,7 +465,7 @@ describe('workbench byte-identical OCI import', () => {
       res.end(password);
       return true;
     });
-    const result = await failedTask(options, temporary);
+    const result = await taskResult(options, temporary);
     const configDigest = JSON.parse(data.manifests.values().next().value!.toString()).config.digest;
     const detail = {
       step: 'destination-upload',
@@ -421,7 +492,7 @@ describe('workbench byte-identical OCI import', () => {
     const address = closed.address();
     if (!address || typeof address === 'string') throw new Error('missing test address');
     await new Promise<void>((resolve) => closed.close(() => resolve()));
-    const result = await failedTask(
+    const result = await taskResult(
       {
         ...options,
         readSource: async () => ({
@@ -455,7 +526,7 @@ describe('workbench byte-identical OCI import', () => {
   it('never publishes configured URL userinfo, passwords, tokens or arbitrary error metadata', async () => {
     const { options, temporary } = await setup();
     const credentialedUrl = 'https://user-canary:password-canary@registry.example';
-    const result = await failedTask(
+    const result = await taskResult(
       {
         ...options,
         readSource: async () => ({
@@ -489,7 +560,7 @@ describe('workbench byte-identical OCI import', () => {
       res.end(invalid);
       return true;
     });
-    const result = await failedTask({ ...options, pinnedDigest: pin }, temporary);
+    const result = await taskResult({ ...options, pinnedDigest: pin }, temporary);
     expect(result.status.reason).toBe('unavailable');
     expect(result.status.detail).toEqual({
       step: 'source-manifest',
@@ -803,7 +874,7 @@ describe('workbench byte-identical OCI import', () => {
       res.end(password);
       return true;
     });
-    const result = await failedTask(options, temporary);
+    const result = await taskResult(options, temporary);
     expect(result.status.reason).toBe('unavailable');
     expect(result.status.detail).toEqual({
       step,

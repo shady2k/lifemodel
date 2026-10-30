@@ -456,7 +456,8 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
                       else if (!spec.discard) chunks.push(bytes);
                     }
                   } finally {
-                    if (file !== undefined) await localStorage(file.close());
+                    // Cleanup must not replace a transfer failure or turn success into failure.
+                    await file?.close().catch(() => undefined);
                   }
                   return {
                     status,
@@ -742,7 +743,7 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
               status(pushed, [201]);
               wrote = true;
             } finally {
-              await localStorage(rm(file, { force: true }));
+              await rm(file, { force: true }).catch(() => undefined);
             }
           }
           const stored = await destinationRequest(
@@ -858,7 +859,8 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
         clearTimeout(phaseTimer);
         options.signal?.removeEventListener('abort', abort);
         if (workspace !== undefined)
-          await localStorage(rm(workspace, { recursive: true, force: true }));
+          // The next attempt removes abandoned temporary files before importing.
+          await rm(workspace, { recursive: true, force: true }).catch(() => undefined);
       }
     },
   };
