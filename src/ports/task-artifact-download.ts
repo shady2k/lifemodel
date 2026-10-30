@@ -5,7 +5,9 @@ export interface TaskArtifactReader {
   openTaskArtifact(
     artifactId: string,
     range: string | undefined,
-    signal: AbortSignal
+    signal: AbortSignal,
+    /** Trusted sealed receipt space selects the existing core read route. Omitted by web. */
+    space?: string
   ): Promise<{ body: Readable; size: number; start: number; end: number; partial: boolean }>;
 }
 

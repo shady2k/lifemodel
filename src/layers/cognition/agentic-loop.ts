@@ -68,6 +68,8 @@ import { buildSystemPrompt } from './prompts/system-prompt.js';
 import { buildTriggerPrompt } from './prompts/trigger-prompt.js';
 import { getTraceContext } from '../../core/trace-context.js';
 import { taskOutcomeFallback, validateTaskOutcome } from '../../ports/task-outcome.js';
+import { UncertainMutationError } from './tools/mutation-error.js';
+import { createToolResult } from './tools/types.js';
 
 /**
  * Resolve per-request LLM timeout based on trigger type.
@@ -141,6 +143,28 @@ export class AgenticLoop {
     const state = createLoopState();
 
     try {
+      if (context.triggerSignal.type === 'task_outcome') {
+        const event = validateTaskOutcome(context.triggerSignal.data);
+        const tool = this.toolRegistry.getTools().find((entry) => entry.name === 'core.startTask');
+        if (!event.redoOf && tool?.recoverAcceptedEffect) {
+          const toolContext = buildToolContext(context);
+          toolContext.taskOutcome = { taskId: event.taskId, redoAllowed: true };
+          const receipt = await tool.recoverAcceptedEffect(toolContext);
+          if ((receipt as { success?: boolean } | undefined)?.success === true) {
+            // A reply-commit crash must not let a regenerated model deny or
+            // duplicate the accepted redo, even when it calls no tools at all.
+            const toolCallId = 'recovered-outcome-redo';
+            state.executedTools.push({
+              toolCallId,
+              name: 'core.startTask',
+              args: { redoOf: event.taskId },
+              hasSideEffects: true,
+            });
+            state.toolResults.push(createToolResult(toolCallId, 'core.startTask', true, receipt));
+            return this.outcomeFallback(context, state);
+          }
+        }
+      }
       const result = await this.runInternal(context, useSmart, state);
       if (this.needsQuestionRelay(context, result.state, result))
         return this.questionFallback(context, result.state);
@@ -153,6 +177,8 @@ export class AgenticLoop {
         return this.outcomeFallback(context, result.state);
       return result;
     } catch (error) {
+      // An accepted redo may exist. Never commit an unverified refusal over it.
+      if (error instanceof UncertainMutationError) throw error;
       // Model retries/limits exhausted: the trusted outcome still owes a reply.
       // Sending this deterministic reply is a successful answer, not silence.
       if (context.triggerSignal.type === 'task_outcome')
@@ -193,9 +219,22 @@ export class AgenticLoop {
           commandTexts.set(command.commandId, command.text);
       }
     }
+    const acceptedRedo = state.executedTools.some(
+      (tool) =>
+        tool.name === 'core.startTask' &&
+        tool.args['redoOf'] === event.taskId &&
+        state.toolResults.some(
+          (result) =>
+            result.toolCallId === tool.toolCallId &&
+            result.success &&
+            (result.data as { success?: boolean } | undefined)?.success === true
+        )
+    );
     state.disposition = 'answer';
     return buildFinalResultFromNaturalCompletion(
-      taskOutcomeFallback(event, commandTexts),
+      acceptedRedo
+        ? 'I could not verify the requested result. I have started one corrected attempt and will check it before confirming the result.'
+        : taskOutcomeFallback(event, commandTexts),
       state,
       context,
       this.logger
@@ -304,12 +343,19 @@ export class AgenticLoop {
     // Send full tool schemas — models need them to call tools correctly on first attempt.
     // Lazy schemas (ADR-004 Option 1) were reverted: see docs/adr/004-prompt-token-optimization.md.
     const allTools = this.toolRegistry.getToolsAsOpenAIFormat();
+    // One status read + up to 16 output reads, optional transcript/redo, then reply.
+    // Keep the existing timeout/tool-call bounds; other triggers keep their budget.
+    const maxIterations =
+      context.triggerSignal.type === 'task_outcome'
+        ? Math.max(this.config.maxIterations, 24)
+        : this.config.maxIterations;
 
+    let verificationRetries = 0;
     while (!state.aborted) {
       // Check limits
-      if (state.iteration >= this.config.maxIterations) {
+      if (state.iteration >= maxIterations) {
         state.aborted = true;
-        state.abortReason = `Max iterations reached (${String(this.config.maxIterations)})`;
+        state.abortReason = `Max iterations reached (${String(maxIterations)})`;
         break;
       }
 
@@ -542,6 +588,60 @@ export class AgenticLoop {
 
       // No tool calls = natural completion (Codex-style termination)
       if (response.toolCalls.length === 0) {
+        if (context.triggerSignal.type === 'task_outcome') {
+          const event = validateTaskOutcome(context.triggerSignal.data);
+          const acceptedRedo = state.executedTools.some(
+            (tool) =>
+              tool.name === 'core.startTask' &&
+              tool.args['redoOf'] === event.taskId &&
+              state.toolResults.some(
+                (result) =>
+                  result.toolCallId === tool.toolCallId &&
+                  result.success &&
+                  (result.data as { success?: boolean } | undefined)?.success === true
+              )
+          );
+          const unread =
+            event.state === 'done' && !acceptedRedo
+              ? (event.expectedOutputs ?? []).filter(
+                  (name) =>
+                    !state.executedTools.some(
+                      (tool) =>
+                        tool.name === 'core.steerTask' &&
+                        tool.args['action'] === 'read' &&
+                        tool.args['taskId'] === event.taskId &&
+                        tool.args['view'] === 'file' &&
+                        tool.args['name'] === name &&
+                        state.toolResults.some((result) => {
+                          const data = result.data as
+                            | {
+                                success?: boolean;
+                                taskId?: string;
+                                file?: { name?: string; text?: unknown };
+                              }
+                            | undefined;
+                          return (
+                            result.toolCallId === tool.toolCallId &&
+                            result.success &&
+                            data?.success === true &&
+                            data.taskId === event.taskId &&
+                            data.file?.name === name &&
+                            typeof data.file.text === 'string'
+                          );
+                        })
+                    )
+                )
+              : [];
+          if (unread.length) {
+            if (verificationRetries++ >= 2) return this.outcomeFallback(context, state);
+            messages.push({ role: 'assistant', content: response.content });
+            messages.push({
+              role: 'system',
+              content: `Verification required before a final reply: open these expected files with core.steerTask(action="read", view="file") and compare their contents with the owner's request: ${JSON.stringify(unread)}. If verification fails, accept one corrected linked redo or explain honestly that the result is unverified. Do not claim success without reading.`,
+            });
+            continue;
+          }
+        }
         const result = this.handleNaturalCompletion(response.content, state, context);
         if (result === null) {
           // Check if handleNaturalCompletion is requesting smart model escalation

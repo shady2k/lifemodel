@@ -2,6 +2,12 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { request } from 'node:https';
 import { randomUUID } from 'node:crypto';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { StorageTaskArtifactReader } from '../../src/storage/task-artifact-reader.js';
+import { createTaskService } from '../../src/core/task-service.js';
+import type { TaskRecord } from '../../src/ports/tasks.js';
 import { createRetentionHarness, gate } from '../helpers/storage-retention-harness.js';
 
 let h: Awaited<ReturnType<typeof createRetentionHarness>>;
@@ -21,6 +27,61 @@ afterAll(async () => {
 const artifactPath = (id: string) => `/artifacts/${id}`;
 
 describe('narrow storage read listener artifact operation', () => {
+  it('reads a delivered file with the real core audience on the sealed-space route, never the web route', async () => {
+    const space = await h.prepare();
+    const bytes = Buffer.from('verified delivered content: ' + 'x'.repeat(9000));
+    const artifact = await h.upload(space, 'a', 'output', bytes);
+    // A flat delivered name is valid input to cognition; task storage also
+    // accepts names with paths, which this deliberately narrower surface refuses.
+    await h.stores.postgres.query('UPDATE storage.objects SET name=$2 WHERE id=$1', [
+      artifact.id,
+      'output.txt',
+    ]);
+    const sealReceipt = await h.seal(space);
+    const directory = await mkdtemp(join(tmpdir(), 'core-task-file-'));
+    const tokenFile = join(directory, 'token');
+    const caFile = join(directory, 'ca');
+    await writeFile(tokenFile, 'coreRead');
+    await writeFile(caFile, h.identity.certificate.ca);
+    const reader = new StorageTaskArtifactReader({
+      endpoint: `https://localhost:${h.child().ports.read}`,
+      tokenFile,
+      caFile,
+      requestTimeoutMs: 5000,
+    });
+    const task = { id: 'a', state: 'done', sealReceipt } as TaskRecord;
+    const service = createTaskService({
+      tasks: { read: async () => task } as never,
+      mailbox: {} as never,
+      artifactReader: reader,
+    });
+    try {
+      expect(await service.readFile('a', 'output.txt')).toEqual({
+        name: 'output.txt',
+        size: bytes.length,
+        bytesRead: 8192,
+        truncated: true,
+        text: bytes.subarray(0, 8192).toString('utf8'),
+      });
+      await expect(
+        reader.openTaskArtifact(artifact.id, 'bytes=0-7', AbortSignal.timeout(5000))
+      ).rejects.toMatchObject({ status: 503 });
+      // A web identity cannot silently substitute for the core space capability.
+      await writeFile(tokenFile, 'web');
+      await expect(service.readFile('a', 'output.txt')).rejects.toMatchObject({
+        code: 'file_unavailable',
+      });
+      await writeFile(tokenFile, 'coreRead');
+      h.identity.deadPods.add('core');
+      await expect(service.readFile('a', 'output.txt')).rejects.toMatchObject({
+        code: 'file_unavailable',
+      });
+    } finally {
+      reader.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it('resolves a marked UUID server-side, with bounded ranges and no web space/list/write access', async () => {
     const a = await h.artifact('a');
     const b = await h.artifact('b');

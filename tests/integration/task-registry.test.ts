@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AcceptTask, TaskRegistry, TaskRecord } from '../../src/ports/tasks.js';
@@ -355,6 +356,289 @@ describe('fenced durable task registry', () => {
     expect(await dynamic.read(first.id)).toMatchObject({ state: 'starting', slotReserved: true });
   });
 
+  async function finish(
+    task: TaskRecord,
+    names: readonly string[] = ['result.txt'],
+    state: 'done' | 'failed' | 'stopped' = 'done',
+    logName?: string
+  ) {
+    if (state === 'done') expect(await registry.admitNext()).toMatchObject({ id: task.id });
+    await registry.beginFinalization(task.id, task.launchId, {
+      state,
+      reasonCode: state === 'done' ? 'completed' : 'compute_failed',
+      summary: 'Everything requested is ready (an untrusted claim).',
+    });
+    await registry.confirmComputeTerminated(task.id, task.launchId);
+    const space = `space-${task.id.slice(-24)}`;
+    await registry.recordAllocation(task.id, task.launchId, {
+      id: `receipt-${task.id}`,
+      space,
+      effectKey: `${task.launchId}:allocate`,
+    });
+    await stores.postgres.query(
+      'INSERT INTO storage.spaces(id) VALUES($1) ON CONFLICT DO NOTHING',
+      [space]
+    );
+    const prepared = await registry.prepareSeal(task.id, task.launchId);
+    const seal = prepared.sealRequest!;
+    await registry.recordSealReceipt(task.id, task.launchId, seal.candidateRevision, {
+      id: `seal-${task.id}`,
+      space,
+      effectKey: seal.effectKey,
+      revision: String(BigInt(seal.expectedRevision) + 1n),
+      outcome: seal.outcome,
+      state: 'sealed',
+      reason: null,
+      manifest: {
+        id: `manifest-${task.id}`,
+        version: 1,
+        sha256: 'a'.repeat(64),
+        objects: [
+          ...names.map((name, i) => ({
+            id: `object-${i}`,
+            name,
+            size: 10,
+            sha256: 'a'.repeat(64),
+            mark: i === 0 ? 'result' : 'artifact',
+          })),
+          ...(logName
+            ? [{ id: 'log', name: logName, size: 10, sha256: 'a'.repeat(64), mark: 'log' }]
+            : []),
+        ],
+        excluded: [
+          {
+            id: 'excluded',
+            name: 'excluded.txt',
+            size: 10,
+            sha256: 'a'.repeat(64),
+            mark: 'artifact',
+            reason: 'checksum_mismatch',
+          },
+        ],
+      },
+    });
+    const event = await registry.commitFinalization(
+      task.id,
+      task.launchId,
+      prepared.candidateRevision
+    );
+    await registry.releaseSlot(task.id);
+    return { event, revision: prepared.candidateRevision };
+  }
+
+  it('durably preserves expected names and redo payload, including launch replay conflicts', async () => {
+    const original = await registry.accept({
+      ...request('outputs-original'),
+      expectedOutputs: ['result.txt', 'primes500.txt'],
+    });
+    await finish(original, ['result.txt', 'primes500.txt']);
+    const input = {
+      ...request('outputs-redo'),
+      expectedOutputs: ['result.txt', 'primes500.txt'],
+      redoOf: original.id,
+    };
+    const accepted = await registry.accept(input);
+    expect(await makeRegistry().read(accepted.id)).toMatchObject({
+      expectedOutputs: input.expectedOutputs,
+      redoOf: original.id,
+    });
+    expect(await makeRegistry().accept(input)).toEqual(accepted);
+    const { expectedOutputs: _expected, ...implicit } = input;
+    expect(await makeRegistry().accept(implicit)).toEqual(accepted);
+    for (const changed of [
+      { ...input, expectedOutputs: ['result.txt'] },
+      { ...input, expectedOutputs: [...input.expectedOutputs].reverse() },
+      { ...input, redoOf: undefined },
+      { ...input, redoOf: 'missing-original' },
+    ])
+      await expect(registry.accept(changed)).rejects.toMatchObject({ code: 'launch_key_conflict' });
+    for (const [column, value] of [
+      ['expected_outputs', ['changed.txt']],
+      ['redo_of', null],
+    ])
+      await expect(
+        stores.postgres.query(`UPDATE core.tasks SET ${column}=$2 WHERE id=$1`, [
+          accepted.id,
+          value,
+        ])
+      ).rejects.toMatchObject({ code: '23514' });
+    const omitted = await registry.accept(request('outputs-omitted'));
+    expect(await registry.accept({ ...request('outputs-omitted'), expectedOutputs: [] })).toEqual(
+      omitted
+    );
+    expect(omitted.expectedOutputs).toBeUndefined();
+  });
+
+  it('inherits the owner-agreed output contract on redo and cannot weaken or replace it', async () => {
+    const original = await registry.accept({
+      ...request('contract-original'),
+      expectedOutputs: ['needed.txt'],
+    });
+    await finish(original);
+    for (const expectedOutputs of [[], ['other.txt'], ['needed.txt', 'extra.txt']])
+      await expect(
+        registry.accept({ ...request('contract-changed'), redoOf: original.id, expectedOutputs })
+      ).rejects.toMatchObject({ code: 'invalid_input' });
+    await expect(
+      stores.postgres.query(
+        `INSERT INTO core.tasks
+      (id,launch_key,briefing,profile,settings_revision,harness,image_revision,wrap_grace_seconds,request_image_revision,trace_id,redo_of)
+      SELECT 'sql-weakened-redo','sql-weakened-redo',briefing,profile,settings_revision,harness,image_revision,wrap_grace_seconds,request_image_revision,'sql-weakened-redo',id
+      FROM core.tasks WHERE id=$1`,
+        [original.id]
+      )
+    ).rejects.toMatchObject({ code: '23514' });
+    const redo = await registry.accept({ ...request('contract-redo'), redoOf: original.id });
+    expect(redo.expectedOutputs).toEqual(['needed.txt']);
+    expect(
+      await makeRegistry().accept({ ...request('contract-redo'), redoOf: original.id })
+    ).toEqual(redo);
+    expect((await finish(redo)).event).toMatchObject({
+      state: 'failed',
+      redoOf: original.id,
+      expectedOutputs: ['needed.txt'],
+      missingExpectedOutputs: ['needed.txt'],
+    });
+  });
+
+  it('keeps delivery-input DDL replayable and validates output shape independently in SQL', async () => {
+    await expect(applyTestMigrations(stores.postgres)).resolves.toBeUndefined();
+    const original = await registry.accept(request('sql-output-shape'));
+    const ddl = await readFile(
+      new URL('../../db/migrations/20261015000035_task_expected_outputs.sql', import.meta.url),
+      'utf8'
+    );
+    const client = await stores.postgres.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(ddl.split('-- migrate:down')[0]!);
+      await client.query('COMMIT');
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+    const clone = (names: unknown) =>
+      stores.postgres.query(
+        `INSERT INTO core.tasks
+      (id,launch_key,briefing,profile,settings_revision,harness,image_revision,wrap_grace_seconds,request_image_revision,trace_id,expected_outputs)
+      SELECT 'sql-bad-output','sql-bad-output',briefing,profile,settings_revision,harness,image_revision,wrap_grace_seconds,request_image_revision,'sql-bad-output',$2::text[]
+      FROM core.tasks WHERE id=$1`,
+        [original.id, names]
+      );
+    for (const names of [
+      ['../escape'],
+      ['a', 'a'],
+      [null],
+      ['x'.repeat(129)],
+      Array.from({ length: 17 }, (_, i) => `file-${i}`),
+    ])
+      await expect(clone(names)).rejects.toMatchObject({ code: '23514' });
+    expect(
+      (
+        await stores.postgres.query('SELECT expected_outputs,redo_of FROM core.tasks WHERE id=$1', [
+          original.id,
+        ])
+      ).rows
+    ).toEqual([{ expected_outputs: [], redo_of: null }]);
+  });
+
+  it('refuses a redo of a redo, concurrent duplicate redos, and nonterminal or missing originals', async () => {
+    const original = await registry.accept(request('redo-original'));
+    await expect(
+      registry.accept({ ...request('redo-active'), redoOf: original.id })
+    ).rejects.toMatchObject({ code: 'invalid_transition' });
+    await expect(
+      registry.accept({ ...request('redo-missing'), redoOf: 'missing-task' })
+    ).rejects.toMatchObject({ code: 'not_found' });
+    await finish(original);
+    const attempts = await Promise.allSettled([
+      registry.accept({ ...request('redo-a'), redoOf: original.id }),
+      makeRegistry().accept({ ...request('redo-b'), redoOf: original.id }),
+    ]);
+    expect(attempts.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(attempts.filter((result) => result.status === 'rejected')).toMatchObject([
+      { reason: { code: 'invalid_transition' } },
+    ]);
+    const redo = attempts.find((result) => result.status === 'fulfilled')!;
+    if (redo.status !== 'fulfilled') throw new Error('missing redo');
+    expect((await finish(redo.value)).event.redoOf).toBe(original.id);
+    await expect(
+      registry.accept({ ...request('redo-chain'), redoOf: redo.value.id })
+    ).rejects.toMatchObject({ code: 'invalid_transition' });
+    // Independent SQL writers cannot bypass either the unique index or the depth guard.
+    const clone = (id: string, redoOf: string) =>
+      stores.postgres.query(
+        `INSERT INTO core.tasks
+      (id,launch_key,briefing,profile,settings_revision,harness,image_revision,wrap_grace_seconds,request_image_revision,trace_id,redo_of)
+      SELECT $2,$2,briefing,profile,settings_revision,harness,image_revision,wrap_grace_seconds,request_image_revision,$2,$3
+      FROM core.tasks WHERE id=$1`,
+        [original.id, id, redoOf]
+      );
+    await expect(clone('sql-duplicate-redo', original.id)).rejects.toMatchObject({ code: '23505' });
+    await expect(clone('sql-chain-redo', redo.value.id)).rejects.toMatchObject({ code: '23514' });
+  });
+
+  it('decides missing outputs from the sealed manifest and commits the same failed state and immutable event', async () => {
+    const task = await registry.accept({
+      ...request('missing-outputs'),
+      expectedOutputs: ['primes500.txt', 'excluded.txt'],
+    });
+    const { event, revision } = await finish(task);
+    expect(event).toMatchObject({
+      state: 'failed',
+      reasonCode: 'expected_outputs_missing',
+      expectedOutputs: ['primes500.txt', 'excluded.txt'],
+      missingExpectedOutputs: ['primes500.txt', 'excluded.txt'],
+      summary: 'Expected output files were not delivered: primes500.txt, excluded.txt.',
+    });
+    expect(event.summary).not.toContain('Everything requested');
+    expect(await makeRegistry().read(task.id)).toMatchObject({
+      state: event.state,
+      terminalCandidate: event.state,
+      terminalReasonCode: event.reasonCode,
+      terminalSummary: event.summary,
+      sealReceipt: { outcome: 'completed' },
+    });
+    expect(await makeRegistry().commitFinalization(task.id, task.launchId, revision)).toEqual(
+      event
+    );
+    expect(await makeRegistry().listOutcomeWork()).toEqual([event]);
+    const logs = await registry.accept({
+      ...request('log-not-output'),
+      expectedOutputs: ['needed.txt'],
+    });
+    expect((await finish(logs, ['result.txt'], 'done', 'needed.txt')).event).toMatchObject({
+      state: 'failed',
+      reasonCode: 'expected_outputs_missing',
+      missingExpectedOutputs: ['needed.txt'],
+    });
+  });
+
+  it('keeps delivered/answer-only results successful and preserves explicit stop with missing output facts', async () => {
+    const task = await registry.accept({
+      ...request('outputs-delivered'),
+      expectedOutputs: ['primes500.txt'],
+    });
+    expect((await finish(task, ['result.txt', 'primes500.txt'])).event).toMatchObject({
+      state: 'done',
+      expectedOutputs: ['primes500.txt'],
+    });
+    const answer = await registry.accept(request('answer-only'));
+    const answerEvent = (await finish(answer)).event;
+    expect(answerEvent).toMatchObject({ state: 'done', reasonCode: 'completed' });
+    expect(answerEvent.expectedOutputs).toBeUndefined();
+    expect(answerEvent.missingExpectedOutputs).toBeUndefined();
+    const stopped = await registry.accept({
+      ...request('stopped-outputs'),
+      expectedOutputs: ['needed.txt'],
+    });
+    expect((await finish(stopped, [], 'stopped')).event).toMatchObject({
+      state: 'stopped',
+      reasonCode: 'compute_failed',
+      missingExpectedOutputs: ['needed.txt'],
+    });
+  });
+
   const starting = async (): Promise<TaskRecord> => {
     await registry.accept(request('intent'));
     const task = (await registry.admitNext())!;
@@ -566,6 +850,29 @@ describe('fenced durable task registry', () => {
         profile: { ...request('bad').profile, timeoutSeconds: Number.MAX_SAFE_INTEGER },
       },
       { ...request('bad'), imageRevision: '' },
+      ...[
+        null,
+        'result.txt',
+        ['../private-canary'],
+        ['a/b'],
+        ['a\\b'],
+        ['.'],
+        ['..'],
+        ['-option'],
+        ['a b'],
+        ['é.txt'],
+        ['output.txt\n'],
+        ['output.txt\r\n'],
+        Array(1),
+        ['a'.repeat(129)],
+        ['same', 'same'],
+        Array.from({ length: 17 }, (_, i) => `output-${i}`),
+        [null],
+        [1],
+      ].map((expectedOutputs) => ({ ...request('bad'), expectedOutputs }) as unknown as AcceptTask),
+      ...['', '../private-canary', 'x'.repeat(129), null, 1].map(
+        (redoOf) => ({ ...request('bad'), redoOf }) as unknown as AcceptTask
+      ),
     ])
       await expect(registry.accept(invalid)).rejects.toMatchObject({
         code: 'invalid_input',

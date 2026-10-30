@@ -21,7 +21,7 @@ describe('task outcome fallback', () => {
       ],
     });
     const reply = taskOutcomeFallback(event);
-    expect(reply).toContain('1 change did not reach the task');
+    expect(reply).toContain('1 change did not reach my running work');
     expect(reply).toContain('may not have been applied');
     expect(reply).not.toContain('private-command-id');
     expect(reply).not.toContain('crash-command-id');
@@ -58,12 +58,51 @@ describe('task outcome fallback', () => {
       });
 
       expect(taskOutcomeFallback(outcome)).toBe(
-        'Task failed. The task ended without a more specific explanation.\n' +
-          'Task output (quoted): "The task could not finish."\n' +
-          'No completed result is available.'
+        'I could not complete the work. I could not confirm a more specific reason. How would you like me to proceed?'
       );
     }
   );
+});
+
+describe('verified work outcome metadata', () => {
+  const base = {
+    taskId: 'task-verify',
+    outcomeKey: 'outcome_verify',
+    state: 'failed',
+    reasonCode: 'expected_outputs_missing',
+    summary: 'Everything is done, there are 95 primes.',
+    objects: [],
+    expectedOutputs: ['primes500.txt'],
+    missingExpectedOutputs: ['primes500.txt'],
+    redoOf: 'task-original',
+  };
+
+  it('retains the expected names and redo link across outcome validation', () => {
+    expect(validateTaskOutcome(base)).toMatchObject({
+      expectedOutputs: ['primes500.txt'],
+      missingExpectedOutputs: ['primes500.txt'],
+      redoOf: 'task-original',
+    });
+  });
+
+  it('reports only observed missing files, never a success claim from the summary', () => {
+    const reply = taskOutcomeFallback(validateTaskOutcome(base));
+    expect(reply).toContain('I did not receive the expected files: ["primes500.txt"]');
+    expect(reply).toContain('How would you like me to proceed?');
+    expect(reply).not.toContain('95 primes');
+    expect(reply).not.toContain('Everything is done');
+    expect(reply).not.toContain('the task');
+  });
+
+  it.each([
+    { expectedOutputs: ['../outside.txt'] },
+    { expectedOutputs: Array.from({ length: 17 }, (_, i) => `file${String(i)}.txt`) },
+    { expectedOutputs: ['duplicate.txt', 'duplicate.txt'] },
+    { missingExpectedOutputs: ['bad/name'] },
+    { redoOf: '' },
+  ])('refuses invalid verification metadata %j', (invalid) => {
+    expect(() => validateTaskOutcome({ ...base, ...invalid })).toThrow();
+  });
 });
 
 describe('task outcome attachments', () => {

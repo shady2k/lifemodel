@@ -84,9 +84,23 @@ export function compileIntentsFromToolResults(
       context.triggerSignal.type === 'task_outcome'
         ? validateTaskOutcome(context.triggerSignal.data)
         : undefined;
+    const acceptedRedo =
+      event &&
+      state.executedTools.some(
+        (tool) =>
+          tool.name === 'core.startTask' &&
+          tool.args['redoOf'] === event.taskId &&
+          state.toolResults.some(
+            (result) =>
+              result.toolCallId === tool.toolCallId &&
+              result.success &&
+              (result.data as { success?: boolean } | undefined)?.success === true
+          )
+      );
     let groups: MessageAttachment[][] = [];
     let attachmentFailure = false;
-    if (event) {
+    // A redo notice must not present the rejected original outputs as a result.
+    if (event && !acceptedRedo) {
       try {
         groups = taskOutcomeAttachments(event);
       } catch {

@@ -2,7 +2,11 @@ import type { Tool, ToolContext, ToolParameter } from '../types.js';
 import { UncertainMutationError } from '../mutation-error.js';
 import { validateAgainstParameters } from '../validation.js';
 import { TASK_PROFILES } from '../../../../ports/task-profiles.js';
-import { TaskRegistryError, type TaskRecord } from '../../../../ports/tasks.js';
+import {
+  isTaskExpectedOutputs,
+  TaskRegistryError,
+  type TaskRecord,
+} from '../../../../ports/tasks.js';
 import type { StartTaskIntent } from '../../../../types/intent.js';
 import { getTraceContext } from '../../../../core/trace-context.js';
 
@@ -27,6 +31,20 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
       required: true,
       description: `Allowed resource profile: ${Object.keys(TASK_PROFILES).join(', ')}. Unknown names are refused.`,
     },
+    {
+      name: 'expectedOutputs',
+      type: 'array',
+      required: false,
+      description:
+        'Expected delivered output filenames: at most 16 unique safe flat names. Omit for answer-only work. Missing files make completion unsuccessful.',
+    },
+    {
+      name: 'redoOf',
+      type: 'string',
+      required: false,
+      description:
+        'Original finished task ID for one corrected automatic redo after failed verification. A redo cannot itself be redone.',
+    },
   ];
   // The slot belongs to the persisted deciding turn, never regenerated arguments.
   const launchKeyFor = (context?: ToolContext) =>
@@ -38,7 +56,7 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
     taskId: task.id,
     state: task.state,
     message:
-      'Accepted in background. Reply now; the outcome will arrive later with the result and artifact attachments if the task succeeds.',
+      'Accepted in background in this turn. You may now say I started. The outcome will arrive later; verify delivered files before claiming a result.',
   });
   return {
     name: 'core.startTask',
@@ -47,13 +65,18 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
     hasSideEffects: true,
     maxCallsPerTurn: 1,
     description:
-      'Start long work in the background with a briefing and an explicit profile. Returns queued immediately, without waiting for execution. After acceptance, tell the owner now that work has started and you will reply when it ends. Successful replies include the result and artifact files. A refusal is not a started task.',
+      'Start my long work in the background with a complete briefing, explicit profile and expected output filenames when files are requested. Agree the plan and expected files with the owner first only when the request has doubts or multiple readings; clear requests run at once. Returns queued without waiting for execution. Say I started only after this tool returns accepted in this turn, never before or after a refusal. A plan is not a result. On an outcome that fails verification, one corrected redo may name the original task in redoOf; a redo of a redo is refused.',
     validate: (args) => validateAgainstParameters(args as Record<string, unknown>, parameters),
     recoverAcceptedEffect: async (context) => {
       const launchKey = launchKeyFor(context);
       if (!launchKey) return undefined;
       try {
         const task = await deps.readByLaunchKey(launchKey);
+        if (
+          context.taskOutcome &&
+          (!context.taskOutcome.redoAllowed || task?.redoOf !== context.taskOutcome.taskId)
+        )
+          return undefined;
         return task ? acceptedReceipt(task) : undefined;
       } catch {
         // A failed fenced read must not become a refusal or an unfenced write.
@@ -71,6 +94,8 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
         if (!profile) return { success: false, code: 'unknown_profile' };
         if (typeof args['briefing'] !== 'string' || !args['briefing'].trim())
           return { success: false, code: 'invalid_briefing' };
+        if (args['expectedOutputs'] != null && !isTaskExpectedOutputs(args['expectedOutputs']))
+          return { success: false, code: 'invalid_expected_outputs' };
         const trace = getTraceContext();
         const task = await deps.applyStartTask({
           type: 'START_TASK',
@@ -78,6 +103,10 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
             launchKey,
             briefing: args['briefing'],
             profile,
+            ...(Array.isArray(args['expectedOutputs'])
+              ? { expectedOutputs: args['expectedOutputs'] as string[] }
+              : {}),
+            ...(typeof args['redoOf'] === 'string' ? { redoOf: args['redoOf'] } : {}),
             imageRevision: deps.imageRevision,
             traceId: trace?.traceId ?? context.correlationId,
             parentSpanId: trace?.spanId ?? context.correlationId,

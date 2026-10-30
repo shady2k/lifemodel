@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { Readable } from 'node:stream';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createTestStores, type TestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
@@ -14,9 +15,17 @@ import { createBusSignalStream, type BusSnapshot } from '../../src/core/bus-stre
 import { createPostgresTaskRegistry } from '../../src/storage/postgres-task-registry.js';
 import { createPlatformSettingsReader } from '../../src/config/platform-settings.js';
 import { createStartTaskTool } from '../../src/layers/cognition/tools/core/start-task.js';
+import { createSteerTaskTool } from '../../src/layers/cognition/tools/core/steer-task.js';
+import { createTaskService } from '../../src/core/task-service.js';
+import { createPostgresTaskMailbox } from '../../src/storage/postgres-task-mailbox.js';
 import { createSignal, createUserMessageSignal } from '../../src/types/signal.js';
 import { setPrimaryRecipientId } from '../../src/core/globals.js';
-import type { TaskOutcomeEvent } from '../../src/ports/tasks.js';
+import type {
+  TaskManifestObject,
+  TaskOutcomeEvent,
+  TaskRecord,
+  TaskRegistry,
+} from '../../src/ports/tasks.js';
 import { createFakeTaskExecutor } from '../../src/core/fake-task-executor.js';
 import { createTaskFinalizer } from '../../src/core/task-finalize.js';
 import { createTaskLaunchReconciler } from '../../src/core/task-launch.js';
@@ -130,6 +139,28 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
         imageRevision,
       })
     );
+    const fileContents = new Map<string, Buffer>();
+    const fileReads: string[] = [];
+    const service = createTaskService({
+      tasks: registry,
+      mailbox: createPostgresTaskMailbox({ pool: stores.postgres, epoch }),
+      artifactReader: {
+        openTaskArtifact: async (id, range) => {
+          fileReads.push(id);
+          const bytes = fileContents.get(id);
+          if (!bytes) throw new Error('Missing test artifact bytes');
+          const end = range ? Number(range.split('-')[1]) : bytes.length - 1;
+          return {
+            body: Readable.from([bytes.subarray(0, end + 1)]),
+            size: bytes.length,
+            start: 0,
+            end,
+            partial: range !== undefined,
+          };
+        },
+      },
+    });
+    cognition.processor.getToolRegistry().registerTool(createSteerTaskTool(service));
     const events = async () =>
       (await stores.redis.xrange(`${prefix}outbound`, '-', '+')).map(
         ([, fields]) =>
@@ -138,7 +169,7 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
             payload: { text: string; attachments?: unknown[] };
           }
       );
-    return { ...instance, snapshot, bus, registry, cognition, events };
+    return { ...instance, snapshot, bus, registry, cognition, events, fileContents, fileReads };
   }
   function outcome(
     taskId: string,
@@ -163,6 +194,428 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
       }
     );
   }
+  async function seal(
+    registry: TaskRegistry,
+    task: TaskRecord,
+    objects: readonly TaskManifestObject[],
+    summary: string
+  ) {
+    if (task.state === 'queued') expect((await registry.admitNext())?.id).toBe(task.id);
+    await registry.beginFinalization(task.id, task.launchId, {
+      state: 'done',
+      reasonCode: 'completed',
+      summary,
+    });
+    await registry.confirmComputeTerminated(task.id, task.launchId);
+    const allocation = await registry.recordAllocation(task.id, task.launchId, {
+      id: `allocation-${task.id}`,
+      space: `space-${task.id.slice(-48)}`,
+      effectKey: `${task.launchId}:allocate`,
+    });
+    await stores.postgres.query(
+      'INSERT INTO storage.spaces(id) VALUES($1) ON CONFLICT DO NOTHING',
+      [allocation.allocationReceipt!.space]
+    );
+    const prepared = await registry.prepareSeal(task.id, task.launchId);
+    const request = prepared.sealRequest!;
+    await registry.recordSealReceipt(task.id, task.launchId, request.candidateRevision, {
+      id: `seal-${task.id}`,
+      space: request.space,
+      effectKey: request.effectKey,
+      revision: String(BigInt(request.expectedRevision) + 1n),
+      outcome: request.outcome,
+      state: 'sealed',
+      reason: null,
+      manifest: { id: `manifest-${task.id}`, version: 1, sha256: 'a'.repeat(64), objects },
+    });
+    const event = await registry.commitFinalization(
+      task.id,
+      task.launchId,
+      request.candidateRevision
+    );
+    await registry.releaseSlot(task.id);
+    return event;
+  }
+  async function relay(instance: Awaited<ReturnType<typeof boot>>, event: TaskOutcomeEvent) {
+    await instance.bus.append(
+      createSignal(
+        'task_outcome',
+        'task.finalizer',
+        { value: 1 },
+        {
+          data: { kind: 'task_outcome', ...event },
+        }
+      )
+    );
+  }
+  it('verifies delivered bytes instead of repeating a contradictory completion claim', async () => {
+    const readArgs = { action: 'read', taskId: '', view: 'file', name: 'primes500.txt' };
+    const statusArgs = { action: 'read', taskId: '' };
+    const redoArgs = {
+      briefing: 'Save the complete list of primes below 500, not only 2 and 3.',
+      profile: 'small',
+      expectedOutputs: ['primes500.txt'],
+      redoOf: '',
+    };
+    const instance = await boot(`task-verify-file:${randomUUID()}:`, [
+      { toolCalls: [{ name: 'core.steerTask', args: statusArgs }] },
+      { toolCalls: [{ name: 'core.steerTask', args: readArgs }] },
+      { toolCalls: [{ name: 'core.startTask', args: redoArgs }] },
+      {
+        content:
+          'I checked primes500.txt: it contains only 2 and 3, not the requested 95 primes. I am redoing the complete list.',
+      },
+    ]);
+    const task = await instance.registry.accept({
+      launchKey: 'verify-file',
+      briefing: 'Save all primes below 500 in primes500.txt.',
+      profile: {
+        id: 'small',
+        revision: '1',
+        timeoutSeconds: 600,
+        cpuMillis: 500,
+        memoryBytes: 536870912,
+      },
+      imageRevision,
+      expectedOutputs: ['primes500.txt'],
+    });
+    readArgs.taskId = task.id;
+    statusArgs.taskId = task.id;
+    redoArgs.redoOf = task.id;
+    const bytes = Buffer.from('2\n3\n');
+    const delivered = { ...object, name: 'primes500.txt', size: bytes.length };
+    instance.fileContents.set(delivered.id, bytes);
+    const event = await seal(
+      instance.registry,
+      task,
+      [delivered],
+      'All 95 primes from 2 to 499 were saved.'
+    );
+    await relay(instance, event);
+    await expect.poll(async () => (await instance.events()).length).toBe(1);
+    expect(instance.fileReads).toEqual([delivered.id]);
+    expect((await instance.events())[0]!.payload.attachments).toBeUndefined();
+    expect(await instance.registry.list()).toHaveLength(2);
+    const toolData = instance.cognition.provider.requests[2]!.messages.filter(
+      (message) => message.role === 'tool'
+    ).map((message) => JSON.parse(message.content!));
+    expect(toolData).toContainEqual(
+      expect.objectContaining({
+        success: true,
+        file: expect.objectContaining({
+          name: 'primes500.txt',
+          text: '<task_file_data>2\n3\n</task_file_data>',
+        }),
+      })
+    );
+    const prompt = instance.cognition.provider.requests[0]!.messages.map(
+      (message) => message.content
+    ).join('\n');
+    expect(prompt).toContain('Verify before replying');
+    expect(prompt).toContain('Claims only: summary, result.txt and transcript text');
+    expect(prompt).toContain('compare the contents with the owner');
+    expect((await instance.events())[0]!.payload.text).toContain(
+      'I checked primes500.txt: it contains only 2 and 3'
+    );
+    expect((await instance.events())[0]!.payload.text).not.toContain(
+      'All 95 primes from 2 to 499 were saved.'
+    );
+  });
+
+  it('makes a missing expected file unsuccessful, starts one corrected redo, and refuses a redo of that redo', async () => {
+    const redoArgs = {
+      briefing:
+        'Save all 95 primes below 500 in primes500.txt; verify the complete file before finishing.',
+      profile: 'small',
+      expectedOutputs: ['primes500.txt'],
+      redoOf: '',
+    };
+    const secondRedoArgs = { ...redoArgs };
+    const instance = await boot(`task-verify-redo:${randomUUID()}:`, [
+      { toolCalls: [{ name: 'core.startTask', args: redoArgs }] },
+      {
+        content: 'I did not receive primes500.txt. I am redoing it with the missing file required.',
+      },
+      { toolCalls: [{ name: 'core.startTask', args: secondRedoArgs }] },
+      {
+        content:
+          'I still could not produce primes500.txt on my second attempt. How would you like me to proceed?',
+      },
+    ]);
+    const original = await instance.registry.accept({
+      launchKey: 'verify-missing',
+      briefing: 'Save primes500.txt.',
+      profile: {
+        id: 'small',
+        revision: '1',
+        timeoutSeconds: 600,
+        cpuMillis: 500,
+        memoryBytes: 536870912,
+      },
+      imageRevision,
+      expectedOutputs: ['primes500.txt'],
+    });
+    redoArgs.redoOf = original.id;
+    const event = await seal(
+      instance.registry,
+      original,
+      [object],
+      'Done: 95 primes are ready in primes500.txt.'
+    );
+    expect(event).toMatchObject({
+      state: 'failed',
+      reasonCode: 'expected_outputs_missing',
+      missingExpectedOutputs: ['primes500.txt'],
+    });
+    expect(await instance.registry.read(original.id)).toMatchObject({
+      state: 'failed',
+      terminalReasonCode: 'expected_outputs_missing',
+    });
+    await relay(instance, event);
+    await expect.poll(async () => (await instance.events()).length).toBe(1);
+    const tasks = await instance.registry.list();
+    expect(tasks).toHaveLength(2);
+    const redo = tasks.find((task) => task.redoOf === original.id)!;
+    expect(redo).toMatchObject({
+      briefing: redoArgs.briefing,
+      expectedOutputs: ['primes500.txt'],
+      state: 'queued',
+    });
+    expect((await instance.events())[0]!.payload).toMatchObject({
+      text: expect.stringContaining('I am redoing'),
+    });
+    expect((await instance.events())[0]!.payload.attachments).toBeUndefined();
+    secondRedoArgs.redoOf = redo.id;
+    const retryEvent = await seal(instance.registry, redo, [object], 'All done again.');
+    expect(retryEvent).toMatchObject({ state: 'failed', redoOf: original.id });
+    await relay(instance, retryEvent);
+    await expect.poll(async () => (await instance.events()).length).toBe(2);
+    expect(await instance.registry.list()).toHaveLength(2);
+    const refusal = instance.cognition.provider.requests[3]!.messages.filter(
+      (message) => message.role === 'tool'
+    ).map((message) => JSON.parse(message.content!));
+    expect(refusal).toContainEqual({ success: false, code: 'task_outcome_requires_final_reply' });
+    expect(
+      instance.cognition.provider.requests[2]!.tools?.map((tool) => tool.function.name)
+    ).toEqual(['core_steerTask']);
+    expect((await instance.events())[1]!.payload.text).toContain(
+      'How would you like me to proceed?'
+    );
+    const tool = instance.cognition.processor
+      .getToolRegistry()
+      .getTools()
+      .find((tool) => tool.name === 'core.startTask')!;
+    expect(
+      await tool.execute(secondRedoArgs, {
+        recipientId: instance.recipientId,
+        correlationId: 'new-turn',
+        triggerType: 'user_message',
+      })
+    ).toMatchObject({ success: false, code: 'invalid_transition' });
+    expect(await instance.registry.list()).toHaveLength(2);
+  });
+
+  it('refuses a premature success claim until expected delivered bytes have been read', async () => {
+    const readArgs = { action: 'read', taskId: '', view: 'file', name: 'answer.txt' };
+    const instance = await boot(`task-verify-premature:${randomUUID()}:`, [
+      { content: 'I finished: the answer is 999.' },
+      { toolCalls: [{ name: 'core.steerTask', args: readArgs }] },
+      { content: 'I checked answer.txt: the answer is 42.' },
+    ]);
+    const task = await instance.registry.accept({
+      launchKey: 'premature-success',
+      briefing: 'Save the answer in answer.txt.',
+      profile: {
+        id: 'small',
+        revision: '1',
+        timeoutSeconds: 600,
+        cpuMillis: 500,
+        memoryBytes: 536870912,
+      },
+      imageRevision,
+      expectedOutputs: ['answer.txt'],
+    });
+    readArgs.taskId = task.id;
+    instance.fileContents.set(object.id, Buffer.from('42'));
+    await relay(
+      instance,
+      await seal(instance.registry, task, [{ ...object, size: 2 }], 'The answer is 999.')
+    );
+    await expect.poll(async () => (await instance.events()).length).toBe(1);
+    expect(instance.fileReads).toEqual([object.id]);
+    expect(instance.cognition.provider.requests).toHaveLength(3);
+    expect(instance.cognition.provider.requests[1]!.messages).toContainEqual(
+      expect.objectContaining({
+        role: 'system',
+        content: expect.stringContaining('Verification required before a final reply'),
+      })
+    );
+    expect((await instance.events())[0]!.payload.text).toBe(
+      'I checked answer.txt: the answer is 42.'
+    );
+  });
+
+  it('falls back honestly when a model keeps claiming success without reading expected files', async () => {
+    const instance = await boot(
+      `task-verify-no-read:${randomUUID()}:`,
+      Array.from({ length: 3 }, () => ({ content: 'I finished: the answer is 999.' }))
+    );
+    const task = await instance.registry.accept({
+      launchKey: 'never-read-success',
+      briefing: 'Save the answer in answer.txt.',
+      profile: {
+        id: 'small',
+        revision: '1',
+        timeoutSeconds: 600,
+        cpuMillis: 500,
+        memoryBytes: 536870912,
+      },
+      imageRevision,
+      expectedOutputs: ['answer.txt'],
+    });
+    await relay(instance, await seal(instance.registry, task, [object], 'The answer is 999.'));
+    await expect.poll(async () => (await instance.events()).length).toBe(1);
+    expect((await instance.events())[0]!.payload.text).toContain('could not verify their contents');
+    expect((await instance.events())[0]!.payload.text).not.toContain('999');
+    expect(instance.cognition.provider.requests).toHaveLength(3);
+  });
+
+  it('keeps enough bounded iterations to read all 16 expected files before replying', async () => {
+    const names = Array.from({ length: 16 }, (_, index) => `output${String(index)}.txt`);
+    const statusArgs = { action: 'read', taskId: '' };
+    const reads = names.map((name) => ({ action: 'read', taskId: '', view: 'file', name }));
+    const instance = await boot(`task-verify-sixteen:${randomUUID()}:`, [
+      { toolCalls: [{ name: 'core.steerTask', args: statusArgs }] },
+      ...reads.map((args) => ({ toolCalls: [{ name: 'core.steerTask', args }] })),
+      { content: 'I checked all 16 files. Each contains the requested answer, 42.' },
+    ]);
+    const task = await instance.registry.accept({
+      launchKey: 'verify-sixteen',
+      briefing: 'Save 42 in each of the 16 output files.',
+      profile: {
+        id: 'small',
+        revision: '1',
+        timeoutSeconds: 600,
+        cpuMillis: 500,
+        memoryBytes: 536870912,
+      },
+      imageRevision,
+      expectedOutputs: names,
+    });
+    statusArgs.taskId = task.id;
+    reads.forEach((args) => {
+      args.taskId = task.id;
+    });
+    const objects = names.map((name) => ({ ...object, id: randomUUID(), name, size: 2 }));
+    objects.forEach((file) => instance.fileContents.set(file.id, Buffer.from('42')));
+    await relay(instance, await seal(instance.registry, task, objects, '42 saved in every file.'));
+    await expect.poll(async () => (await instance.events()).length).toBe(1);
+    expect(instance.fileReads).toEqual(objects.map((file) => file.id));
+    expect(instance.cognition.provider.requests).toHaveLength(18);
+    expect((await instance.events())[0]!.payload.text).toBe(
+      'I checked all 16 files. Each contains the requested answer, 42.'
+    );
+  });
+
+  it.each(['no_tools', 'malformed_call', 'throws'] as const)(
+    'reports an accepted redo honestly after model failure and recovers the same redo after a reply-commit crash (%s)',
+    async (replayKind) => {
+      const prefix = `task-redo-replay:${randomUUID()}:`;
+      const redoArgs = {
+        briefing: 'Save the missing primes500.txt.',
+        profile: 'small',
+        expectedOutputs: ['primes500.txt'],
+        redoOf: '',
+      };
+      const first = await boot(
+        prefix,
+        [{ toolCalls: [{ name: 'core.startTask', args: redoArgs }] }],
+        true
+      );
+      const original = await first.registry.accept({
+        launchKey: 'redo-replay-original',
+        briefing: 'Save primes500.txt.',
+        profile: {
+          id: 'small',
+          revision: '1',
+          timeoutSeconds: 600,
+          cpuMillis: 500,
+          memoryBytes: 536870912,
+        },
+        imageRevision,
+        expectedOutputs: ['primes500.txt'],
+      });
+      redoArgs.redoOf = original.id;
+      await relay(first, await seal(first.registry, original, [object], 'All done.'));
+      await waitFor(() => first.coreLoop.stopReport().loopStopped, 'redo reply CAS failed');
+      expect(await first.events()).toHaveLength(0);
+      const before = await first.registry.list();
+      expect(before).toHaveLength(2);
+      const decidingTurn = first.cognition.calls[0]!.context.tickId;
+      const replay = await boot(
+        prefix,
+        replayKind === 'throws'
+          ? []
+          : replayKind === 'no_tools'
+            ? [{ content: 'I am done; the answer is 999.' }]
+            : [
+                {
+                  toolCalls: [
+                    {
+                      name: 'core.startTask',
+                      args: { redoOf: 'wrong-regenerated-id', profile: null, briefing: null },
+                    },
+                  ],
+                },
+              ]
+      );
+      await expect.poll(async () => (await replay.events()).length).toBe(1);
+      expect(replay.cognition.calls[0]!.context.tickId).toBe(decidingTurn);
+      expect(await replay.registry.list()).toEqual(before);
+      expect((await replay.events())[0]!.payload.text).toBe(
+        'I could not verify the requested result. I have started one corrected attempt and will check it before confirming the result.'
+      );
+      expect((await replay.events())[0]!.payload.attachments).toBeUndefined();
+      expect(replay.cognition.provider.requests).toHaveLength(0);
+    }
+  );
+
+  it('persists expected output names from a clear owner request without changing answer-only starts', async () => {
+    const instance = await boot(`task-expected-start:${randomUUID()}:`, [
+      {
+        toolCalls: [
+          {
+            name: 'core.startTask',
+            args: {
+              briefing: 'Save primes500.txt.',
+              profile: 'small',
+              expectedOutputs: ['primes500.txt'],
+            },
+          },
+        ],
+      },
+      { content: 'I started. I will check primes500.txt before confirming the result.' },
+    ]);
+    instance.coreLoop.pushSignal(
+      createUserMessageSignal({
+        text: 'Save all primes below 500 in primes500.txt.',
+        recipientId: instance.recipientId,
+        channel: 'test',
+        updateId: randomUUID(),
+      })
+    );
+    await expect.poll(async () => (await instance.events()).length).toBe(1);
+    expect(await instance.registry.list()).toEqual([
+      expect.objectContaining({ expectedOutputs: ['primes500.txt'] }),
+    ]);
+    const prompt = instance.cognition.provider.requests[0]!.messages[0]!.content!;
+    expect(prompt).toContain(
+      'Say "started" only after core.startTask returned accepted in this turn'
+    );
+    expect(prompt).toContain('A clear request runs at once');
+    expect(prompt).toContain('agree the plan, including expected files');
+  });
+
   it('answers at once, then binds sealed result and artifact files with plain names to one reply across duplicate relay and restart', async () => {
     const prefix = `task-reply:${randomUUID()}:`;
     const first = await boot(prefix, [...startScript, { content: 'The answer is 42.' }]);
@@ -696,7 +1149,11 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
     expect(Object.values(bus.exportSnapshot().entries)).toEqual([]);
     const requests = cognition.provider.requests;
     expect(requests).toHaveLength(2);
-    expect(requests.every((request) => (request.tools?.length ?? 0) === 0)).toBe(true);
+    expect(
+      requests.every((request) =>
+        request.tools?.map((tool) => tool.function.name).every((name) => name === 'core_startTask')
+      )
+    ).toBe(true);
     const initialMessages = requests[0]!.messages;
     expect(
       initialMessages
@@ -791,9 +1248,9 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
         content: JSON.stringify({ success: false, code: 'task_outcome_requires_final_reply' }),
       })
     );
-    expect(instance.cognition.provider.requests.every((request) => !request.tools?.length)).toBe(
-      true
-    );
+    expect(
+      instance.cognition.provider.requests[0]!.tools?.map((tool) => tool.function.name)
+    ).toEqual(['core_startTask', 'core_steerTask']);
   });
   it('retries rejected say then empty finals and commits one deterministic attached fallback', async () => {
     const instance = await boot(`task-empty-reply:${randomUUID()}:`, [
@@ -808,7 +1265,7 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
     expect(instance.cognition.provider.requests).toHaveLength(6);
     expect(await instance.events()).toHaveLength(1);
     expect((await instance.events())[0]!.payload).toMatchObject({
-      text: 'Task completed. The work completed.\nTask output (quoted): "The answer is 42."',
+      text: 'I received the delivered files, but could not verify their contents. I cannot confirm the requested result yet. How would you like me to proceed?',
       attachments: [{ artifactId: object.id }, { artifactId: artifact.id, name: artifact.name }],
     });
     expect(Object.values(instance.bus.exportSnapshot().entries)).toEqual([]);
@@ -831,8 +1288,8 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
       expect(replies).toHaveLength(1);
       expect(replies[0]!.payload.text).toBe(
         state === 'done'
-          ? 'Task completed. The work completed.\nTask output (quoted): "The answer is 42."'
-          : `Task ${state === 'failed' ? 'failed' : 'stopped'}. The task ran out of time.\nTask output (quoted): "The task ran out of time."\nNo completed result is available.`
+          ? 'I received the delivered files, but could not verify their contents. I cannot confirm the requested result yet. How would you like me to proceed?'
+          : 'I could not complete the work. I ran out of time. How would you like me to proceed?'
       );
       if (state === 'done')
         expect(replies[0]!.payload.attachments).toEqual([
@@ -869,10 +1326,8 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
       instance.coreLoop.pushSignal(outcome('task_no_model', 'outcome_no_model', state));
       await expect.poll(async () => (await instance.events()).length).toBe(1);
       await instance.coreLoop.fenceForTest();
-      expect((await instance.events())[0]!.payload.text).toContain('The task ran out of time.');
-      expect((await instance.events())[0]!.payload.text).toContain(
-        'Task output (quoted): "The task ran out of time."'
-      );
+      expect((await instance.events())[0]!.payload.text).toContain('I ran out of time.');
+      expect((await instance.events())[0]!.payload.text).not.toContain('Task output (quoted)');
       expect((await instance.events())[0]!.payload.attachments).toBeUndefined();
       expect(Object.values(instance.bus.exportSnapshot().entries)).toEqual([]);
     }
@@ -886,7 +1341,7 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
       await expect.poll(async () => (await instance.events()).length).toBe(1);
       await instance.coreLoop.fenceForTest();
       expect((await instance.events())[0]!.payload.text).toBe(
-        'Task failed. The task ended without a more specific explanation.\nTask output (quoted): "The task ran out of time."\nNo completed result is available.'
+        'I could not complete the work. I could not confirm a more specific reason. How would you like me to proceed?'
       );
       expect((await instance.events())[0]!.payload.attachments).toBeUndefined();
       expect(Object.values(instance.bus.exportSnapshot().entries)).toEqual([]);

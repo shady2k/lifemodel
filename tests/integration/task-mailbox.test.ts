@@ -987,9 +987,9 @@ describe('durable fenced task mailbox', () => {
       await waitFor(() => f.real.calls.length > 0, 'outcome reply');
       await f.real.calls[0]!.done;
       await expect.poll(async () => (await f.events()).length).toBe(1);
-      expect((await f.events())[0]!.payload.text).toContain('did not reach the task');
+      expect((await f.events())[0]!.payload.text).toContain('did not reach my running work');
       expect((await f.events())[0]!.payload.text).toContain('not applied');
-      expect((await f.events())[0]!.payload.text).toContain('rerun');
+      expect((await f.events())[0]!.payload.text).toContain('How would you like me to proceed?');
       expect((await f.events())[0]!.payload.text).not.toContain('late-steer');
       expect((await f.events())[0]!.payload.text).toContain('Use N=9 instead of N=7');
       const prompt = f.real.provider.requests
@@ -1003,6 +1003,7 @@ describe('durable fenced task mailbox', () => {
       );
       expect(prompt).toContain('never guess');
       expect(f.real.provider.requests[0]?.tools?.map((tool) => tool.function.name)).toEqual([
+        'core_startTask',
         'core_steerTask',
       ]);
       const results = f.real.provider.requests

@@ -1,4 +1,6 @@
 import type { TaskAcceptanceService, TaskService } from '../ports/tasks.js';
+import type { TaskArtifactReader } from '../ports/task-artifact-download.js';
+import { readDeliveredTaskFile } from './task-file-read.js';
 import { TaskRegistryError } from '../ports/tasks.js';
 import type {
   TaskCommandMailbox,
@@ -9,6 +11,7 @@ import type {
 /** Domain facade. Commands return after the fenced commit, not launcher admission. */
 export function createTaskService(deps: {
   tasks: TaskAcceptanceService;
+  artifactReader?: TaskArtifactReader;
   mailbox: TaskCommandReader & TaskTranscriptReader & Pick<TaskCommandMailbox, 'enqueueCommand'>;
 }): TaskService {
   const send = async (taskId: string, commandId: string, text: string, questionId?: string) => {
@@ -39,6 +42,10 @@ export function createTaskService(deps: {
     },
     readTranscript: async (id, query) =>
       (await deps.tasks.read(id)) ? deps.mailbox.readTranscript(id, query) : null,
+    readFile: async (id, name) => {
+      const task = await deps.tasks.read(id);
+      return task ? readDeliveredTaskFile(task, name, deps.artifactReader) : null;
+    },
     readCommand: (id) => deps.mailbox.readCommand(id),
     steer: (taskId, commandId, text) => send(taskId, commandId, text),
     answer: (taskId, commandId, questionId, text) => send(taskId, commandId, text, questionId),

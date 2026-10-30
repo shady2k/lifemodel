@@ -37,10 +37,30 @@ export interface TaskProfile {
   readonly memoryBytes: number;
 }
 
+/** Flat, bounded names shared by task acceptance, outcomes and file reads. */
+export function isTaskOutputName(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value) &&
+    value.trim() === value
+  );
+}
+export function isTaskExpectedOutputs(value: unknown): value is readonly string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= 16 &&
+    Array.from(value).every(isTaskOutputName) &&
+    new Set(value).size === value.length
+  );
+}
+
 export interface AcceptTask {
   /** Deciding turn's committed effect key, reused verbatim on replay. */
   readonly launchKey: string;
   readonly briefing: string;
+  readonly expectedOutputs?: readonly string[];
+  /** One terminal original may be redone once; a redo cannot itself be redone. */
+  readonly redoOf?: string;
   readonly profile: TaskProfile;
   readonly imageRevision: string;
   /** Causal context is captured only on first acceptance, never replaced on replay. */
@@ -108,6 +128,9 @@ export interface TaskFinalizationCandidate {
 }
 /** Durable logical event; delivery is at-least-once, deduplicated by outcomeKey. */
 export interface TaskOutcomeEvent {
+  readonly expectedOutputs?: readonly string[];
+  readonly redoOf?: string;
+  readonly missingExpectedOutputs?: readonly string[];
   readonly commands?: readonly TaskCommandDeliveryStatus[];
   readonly taskId: string;
   readonly outcomeKey: string;
@@ -123,6 +146,8 @@ export interface TaskRecord {
   readonly parentSpanId: string | null;
   readonly launchKey: string;
   readonly briefing: string;
+  readonly expectedOutputs?: readonly string[];
+  readonly redoOf?: string;
   readonly profile: TaskProfile;
   readonly settingsRevision: number;
   readonly harness: TaskHarnessName;
@@ -228,7 +253,15 @@ export interface TaskView extends TaskRecord {
   readonly commands: readonly TaskCommandStatus[];
   readonly question: TaskQuestion | null;
 }
+export interface TaskFileView {
+  readonly name: string;
+  readonly size: number;
+  readonly bytesRead: number;
+  readonly truncated: boolean;
+  readonly text: string;
+}
 export interface TaskService extends TaskAcceptanceService {
+  readFile(taskId: string, name: string): Promise<TaskFileView | null>;
   read(taskId: string): Promise<TaskView | null>;
   readTranscript(taskId: string, query?: TaskTranscriptQuery): Promise<TaskTranscriptPage | null>;
   readCommand(commandId: string): Promise<TaskCommandStatus | null>;
