@@ -5,6 +5,7 @@ import type {
   AcceptTask,
   TaskContextEntry,
   TaskContextSnapshot,
+  RecentTaskContextEntry,
   TaskAccessIntent,
   TaskAccessMode,
   TaskAllocationReceipt,
@@ -240,7 +241,7 @@ function validSealReceipt(receipt: TaskSealReceipt): boolean {
   );
 }
 
-/** Informational single-statement snapshot, not a mutation or authority check.
+/** Informational bounded active/recent reads, not a mutation or authority check.
  * ADR-014 fences writes; command admission still checks the epoch and task authority.
  * Pool.query returns healthy clients for reuse. Production supplies an isolated,
  * short-timeout pool, never the owner-intake reserve. */
@@ -279,7 +280,18 @@ async function readTaskContext(pool: Pool): Promise<TaskContextSnapshot> {
       TASK_CONTEXT_LIMITS.question,
     ],
   });
+  const recent = await pool.query<RecentTaskContextEntry>({
+    text: `SELECT id,harness,state,terminal_at AS "terminalAt",left(briefing,$2) AS briefing
+      FROM core.tasks WHERE state IN ('done','failed','stopped')
+        AND terminal_at >= statement_timestamp() - interval '24 hours'
+      ORDER BY terminal_at DESC,id DESC LIMIT $1`,
+    values: [TASK_CONTEXT_LIMITS.recentCount, TASK_CONTEXT_LIMITS.briefing],
+  });
   return {
+    recentTasks: recent.rows.map((task) => ({
+      ...task,
+      terminalAt: new Date(task.terminalAt).toISOString(),
+    })),
     tasks: rows.rows.slice(0, TASK_CONTEXT_LIMITS.count),
     omitted: rows.rows.length > TASK_CONTEXT_LIMITS.count,
   };

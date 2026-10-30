@@ -179,6 +179,8 @@ export class TaskRegistryError extends Error {
 /** Fixed cognition budget; this instance has one owner and one task registry. */
 export const TASK_CONTEXT_LIMITS = {
   count: 10,
+  recentCount: 3,
+  recentHours: 24,
   briefing: 320,
   question: 512,
   rendered: 24_000,
@@ -197,7 +199,16 @@ export interface TaskContextEntry {
   } | null;
 }
 
+export interface RecentTaskContextEntry {
+  readonly id: string;
+  readonly harness: string;
+  readonly state: TaskTerminalState;
+  readonly terminalAt: string;
+  readonly briefing: string;
+}
+
 export interface TaskContextSnapshot {
+  readonly recentTasks?: readonly RecentTaskContextEntry[];
   readonly tasks: readonly TaskContextEntry[];
   /** More tasks exist than fit in the store projection. */
   readonly omitted: boolean;
@@ -209,7 +220,7 @@ export interface TaskAcceptanceService {
   /** Recover an already accepted deciding-turn effect without resubmitting its payload. */
   readByLaunchKey(launchKey: string): Promise<TaskRecord | null>;
   list(): Promise<readonly TaskRecord[]>;
-  /** Bounded non-terminal owner task snapshot, including only unanswered questions. */
+  /** Bounded owner active tasks/unanswered questions plus recent terminal references. */
   listActiveContext(): Promise<TaskContextSnapshot>;
 }
 
