@@ -770,6 +770,7 @@ export async function createContainerAsync(
   tracePool.on('connect', (client) => client.on('error', () => undefined));
   const traces = createPostgresTraceStore({
     pool: tracePool,
+    logger,
     knownSecrets: [
       databaseUrl,
       ...(typeof rawPostgres.options.password === 'string' ? [rawPostgres.options.password] : []),

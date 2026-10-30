@@ -1,3 +1,4 @@
+import { createTestLogger, recordingLogger } from '../helpers/test-logger.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { EventEmitter } from 'node:events';
@@ -49,6 +50,22 @@ const noRetention = {
 };
 
 describe('bounded disposable trace queue', () => {
+  it('round2: transcript retention is task-key driven', async () => {
+    const client = Object.assign(new EventEmitter(), {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      release: vi.fn(),
+    });
+    const store = createPostgresTraceStore({
+      pool: { connect: vi.fn().mockResolvedValue(client) } as unknown as Pool,
+    });
+    store.enqueue(span('shape'));
+    await store.close();
+    expect(client.query).toHaveBeenCalledWith(
+      expect.stringMatching(/DELETE FROM core.task_transcript WHERE task_id IN/),
+      expect.any(Array)
+    );
+  });
+
   it('counts full and closed drops synchronously without consulting Postgres', async () => {
     const connect = vi.fn().mockRejectedValue(new Error('unavailable'));
     const writer = createPostgresTraceStore({ pool: { connect } as unknown as Pool, maxQueue: 1 });
@@ -321,6 +338,41 @@ describe('Postgres trace persistence and whole-trace retention', () => {
       )
     ).rows.map((row) => row['trace_id']);
   }
+
+  it('round2: transcript retention failure warns without undoing trace persistence or pruning', async () => {
+    const lines: import('../helpers/test-logger.js').RecordedLog[] = [];
+    const logger = recordingLogger(createTestLogger(), lines);
+    const store = writer(
+      { maxAgeDays: 14, maxTraces: null, maxBytes: null, maxModelCallTraces: null },
+      { logger }
+    );
+    // Force the real PostgreSQL DELETE statement to fail, even on an empty table.
+    await stores.postgres
+      .query(`CREATE FUNCTION core.fail_transcript_prune() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'PRIVATE_PRUNE_CANARY'; END $$;
+      CREATE TRIGGER fail_transcript_prune BEFORE DELETE ON core.task_transcript FOR EACH STATEMENT EXECUTE FUNCTION core.fail_transcript_prune()`);
+    try {
+      store.enqueue(span('expired-trace'));
+      await store.flush();
+      expect(store.droppedCount).toBe(0);
+      expect(await ids()).not.toContain('expired-trace');
+      expect(lines).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            level: 'warn',
+            obj: { code: 'task_transcript_retention_failed' },
+          }),
+        ])
+      );
+      expect(JSON.stringify(lines)).not.toContain('PRIVATE_PRUNE_CANARY');
+      store.enqueue(openSpan('persisted-open'));
+      await store.flush();
+      expect(await ids()).toContain('persisted-open');
+    } finally {
+      await stores.postgres.query(
+        'DROP TRIGGER fail_transcript_prune ON core.task_transcript; DROP FUNCTION core.fail_transcript_prune()'
+      );
+    }
+  });
 
   it('persists a failed then successful tool tree, events, codes and failure cause', async () => {
     const store = writer();

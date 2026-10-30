@@ -57,6 +57,17 @@ completion records, replay offsets or outcome authority. An overlapping old
 writer must not gain the right to write authoritative state from this API.
 A transaction advisory lock only serializes observation writes with retention.
 
+**Accepted fence exception:** this unfenced pool also applies transcript age
+retention by task key. It is an idempotent age policy on immutable terminal task
+rows: a stale holder can only delete what a live holder would delete too. It
+cannot change task state, completion, replay or authorization. The writer has no
+holder epoch; adding a fence here would couple the independent disposable writer
+to core authority. Running transcripts are never deleted. A savepoint isolates
+transcript DELETE failure from trace pruning, and trace batches are committed
+before pruning starts. Failure logs only `task_transcript_retention_failed`, never
+SQL text, parameters or personal content; the next scheduled pass can try again.
+
+
 `enqueue(record)` is synchronous and does not wait for I/O. The default queue
 holds at most 10,000 records, including the batch in flight. It writes batches
 of at most 128 records in one transaction. A partial batch wakes after 200 ms.
