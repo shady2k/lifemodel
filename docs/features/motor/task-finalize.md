@@ -43,8 +43,12 @@ The launcher shares the untrusted Pod with the agent and its commands
    an uncommitted success candidate to failure and allows a new recovery key.
 4. Validate and persist the sealed receipt, including manifest ID/hash. One
    fenced transaction compares the candidate version, commits terminal state,
-   and inserts one `core.task_outcomes` row. There is one unique task and launch
-   per outbox row. Replayed terminal reports cannot change it.
+   and inserts one `core.task_outcomes` row. Before this commit, a `done` candidate
+   is compared with the durable expected output names. Missing `result`- or
+   `artifact`-marked names downgrade it to `failed/expected_outputs_missing`, with
+   `missingExpectedOutputs` naming the absent files. The stored state and outcome
+   agree regardless of the worker's final text. There is one unique task and
+   launch per outbox row. Replayed terminal reports cannot change it.
 5. Confirm Pod and generic ephemeral PVC garbage collection before clearing
    cleanup pending. Cleanup is durable independently of the terminal outcome.
 
@@ -58,9 +62,11 @@ Storage down or refusal leaves a nonterminal task with `finalization_pending`,
 a saved candidate and a safe failure code. Compute is still stopped first.
 Retries back off to 30 seconds. A `done` outcome requires a task report claiming
 semantic success **and** a sealed manifest containing a marked result, not
-independent verification of that result. Failures preserve sealed partial
-output and their reason. No Job status, exit code or private process map owns an
-outcome. No automatic new attempt is created.
+independent verification of that result. All declared expected names must also
+be present. Failures preserve sealed partial output and their reason. No Job
+status, exit code or private process map owns an outcome. The finalizer creates
+no automatic attempt. The [cognition verification turn](task-reply.md#end) may
+accept one explicitly linked corrected redo.
 
 ## Outcome contract for the task tool
 
@@ -72,7 +78,10 @@ The transaction writes this immutable event (not a `send.command`):
   outcomeKey: string; // "outcome_" + immutable launchId
   state: 'done' | 'failed' | 'stopped';
   reasonCode: string; // completed, report reason, missing_result, compute_missing, ...
-  summary: string; // the single-line semantic report, or an infrastructure summary
+  summary: string; // untrusted semantic report, or an infrastructure summary
+  expectedOutputs?: readonly string[];
+  missingExpectedOutputs?: readonly string[];
+  redoOf?: string; // original task ID; never a chain of redos
   objects: readonly {
     id: string;
     name: string;

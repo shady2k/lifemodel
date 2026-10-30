@@ -9,7 +9,7 @@ import {
   validArtifactRange,
 } from '../ports/task-artifact-download.js';
 
-/** The web's service identity can read one marked artifact, never S3 or object lists. */
+/** Reads marked objects with the caller's projected service identity, never S3. */
 export class StorageTaskArtifactReader implements TaskArtifactReader {
   private readonly socketErrors = new WeakSet<Socket>();
   private readonly agent = new Agent({ keepAlive: true, maxSockets: 8, maxFreeSockets: 2 });
@@ -38,8 +38,15 @@ export class StorageTaskArtifactReader implements TaskArtifactReader {
     this.agent.destroy();
   }
 
-  async openTaskArtifact(artifactId: string, range: string | undefined, signal: AbortSignal) {
+  async openTaskArtifact(
+    artifactId: string,
+    range: string | undefined,
+    signal: AbortSignal,
+    space?: string
+  ) {
     if (!ARTIFACT_ID.test(artifactId)) throw new ArtifactUnavailableError(404);
+    if (space !== undefined && !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(space))
+      throw new ArtifactUnavailableError(404);
     if (range !== undefined && !validArtifactRange(range)) throw new ArtifactUnavailableError(416);
     try {
       // Directory-mounted projected identities rotate. Read again for every call.
@@ -55,7 +62,11 @@ export class StorageTaskArtifactReader implements TaskArtifactReader {
           const fail = () => {
             reject(new ArtifactUnavailableError(503));
           };
-          const req = request(new URL(`/artifacts/${artifactId}`, this.endpoint), {
+          const path =
+            space === undefined
+              ? `/artifacts/${artifactId}`
+              : `/spaces/${space}/objects/${artifactId}`;
+          const req = request(new URL(path, this.endpoint), {
             agent: this.agent,
             ca,
             signal,

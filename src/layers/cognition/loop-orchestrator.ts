@@ -12,13 +12,21 @@ import type { LoopContext, ToolCompletionRequest } from './agentic-loop-types.js
 import { isProactiveTrigger } from './prompts/runtime-snapshot.js';
 import { validateTaskOutcome } from '../../ports/task-outcome.js';
 
-/** A sealed outcome can read its own command texts, never mutate task work. */
-export function taskOutcomeCommandRead(context: LoopContext): string | undefined {
+/** Verification can read only the task that caused this outcome. */
+export function taskOutcomeReadId(context: LoopContext): string | undefined {
   if (context.triggerSignal.type !== 'task_outcome') return undefined;
+  return validateTaskOutcome(context.triggerSignal.data).taskId;
+}
+
+/** The registry also enforces one durable redo per original, including across turns. */
+export function isTaskOutcomeRedo(
+  context: LoopContext,
+  toolName: string,
+  args: Record<string, unknown>
+): boolean {
+  if (context.triggerSignal.type !== 'task_outcome' || toolName !== 'core.startTask') return false;
   const event = validateTaskOutcome(context.triggerSignal.data);
-  return event.commands?.some((command) => command.delivery !== 'inserted')
-    ? event.taskId
-    : undefined;
+  return !event.redoOf && args['redoOf'] === event.taskId;
 }
 
 /**
@@ -90,29 +98,66 @@ export function filterToolsForContext(
   context: LoopContext,
   useSmart: boolean
 ): (OpenAIChatTool | MinimalOpenAIChatTool)[] {
-  // Keep an explicit read-only capability allowlist for the outcome's own task.
+  // Narrow both advertised schemas and execution to this outcome's exact task.
   if (context.triggerSignal.type === 'task_outcome') {
-    const taskId = taskOutcomeCommandRead(context);
-    if (!taskId) return [];
-    return tools
-      .filter((tool) => ['core.steerTask', 'core_steerTask'].includes(tool.function.name))
-      .map((tool) => ({
-        ...tool,
-        function: {
-          ...tool.function,
-          description:
-            'Read this outcome task command texts only. Steering and answers are forbidden.',
-          parameters: {
-            type: 'object' as const,
-            properties: {
-              action: { type: 'string', enum: ['read'] },
-              taskId: { type: 'string', enum: [taskId] },
+    const event = validateTaskOutcome(context.triggerSignal.data);
+    return tools.flatMap((tool): (OpenAIChatTool | MinimalOpenAIChatTool)[] => {
+      if (['core.steerTask', 'core_steerTask'].includes(tool.function.name))
+        return [
+          {
+            ...tool,
+            function: {
+              ...tool.function,
+              description:
+                'Verify my finished work: read its status, delivered file contents or transcript. Steering and answers are forbidden.',
+              parameters: {
+                type: 'object' as const,
+                properties: {
+                  action: { type: 'string', enum: ['read'] },
+                  taskId: { type: 'string', enum: [event.taskId] },
+                  view: { type: 'string', enum: ['status', 'transcript', 'file'] },
+                  name: { type: 'string' },
+                  limit: { type: 'number' },
+                  before: { type: 'string' },
+                },
+                required: ['action', 'taskId'],
+                additionalProperties: false,
+              },
             },
-            required: ['action', 'taskId'],
-            additionalProperties: false,
           },
-        },
-      }));
+        ];
+      if (!event.redoOf && ['core.startTask', 'core_startTask'].includes(tool.function.name))
+        return [
+          {
+            ...tool,
+            function: {
+              ...tool.function,
+              description:
+                'After failed verification, accept one corrected redo of my original work. Link it with redoOf. It inherits the original expected files: omit expectedOutputs or repeat the original names in any order; never change them. Say I am redoing only after acceptance.',
+              parameters: {
+                ...('parameters' in tool.function ? tool.function.parameters : {}),
+                type: 'object' as const,
+                additionalProperties: false,
+                properties: {
+                  ...('parameters' in tool.function
+                    ? (tool.function.parameters as { properties?: Record<string, unknown> })
+                        .properties
+                    : {}),
+                  redoOf: { type: 'string', enum: [event.taskId] },
+                  expectedOutputs: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description:
+                      'Inherit the original expected files: omit this field or repeat the original names in any order. Do not change or weaken them.',
+                  },
+                },
+                required: ['briefing', 'profile', 'redoOf'],
+              },
+            },
+          },
+        ];
+      return [];
+    });
   }
   const isThoughtTrigger = context.triggerSignal.type === 'thought';
   const isProactive =

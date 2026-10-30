@@ -17,7 +17,7 @@ import type {
   TaskSealReceipt,
   TaskOutcomeEvent,
 } from '../ports/tasks.js';
-import { TaskRegistryError, TASK_CONTEXT_LIMITS } from '../ports/tasks.js';
+import { TaskRegistryError, TASK_CONTEXT_LIMITS, isTaskExpectedOutputs } from '../ports/tasks.js';
 import type { TaskTerminalReport } from '../ports/task-channel.js';
 import { taskCommandDeliverySql, taskAttemptEndedSql } from './task-command-delivery.js';
 import { createFencedPostgres, StalePostgresEpochError } from './fenced-postgres.js';
@@ -28,6 +28,8 @@ interface TaskRow {
   parent_span_id: string | null;
   launch_key: string;
   briefing: string;
+  expected_outputs: string[];
+  redo_of: string | null;
   profile: TaskProfile;
   settings_revision: string;
   harness: TaskRecord['harness'];
@@ -84,6 +86,8 @@ function taskRecord(row: TaskRow): TaskRecord {
     parentSpanId: row.parent_span_id,
     launchKey: row.launch_key,
     briefing: row.briefing,
+    ...(row.expected_outputs.length ? { expectedOutputs: row.expected_outputs } : {}),
+    ...(row.redo_of ? { redoOf: row.redo_of } : {}),
     profile: row.profile,
     settingsRevision: Number(row.settings_revision),
     harness: row.harness,
@@ -166,6 +170,11 @@ function validateInput(request: AcceptTask, taskId: string): void {
     request.launchKey.length > 512 ||
     typeof request.briefing !== 'string' ||
     request.briefing.trim().length === 0 ||
+    (request.expectedOutputs !== undefined && !isTaskExpectedOutputs(request.expectedOutputs)) ||
+    (request.redoOf !== undefined &&
+      (typeof request.redoOf !== 'string' ||
+        request.redoOf.trim() !== request.redoOf ||
+        !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(request.redoOf))) ||
     !profile ||
     typeof profile.id !== 'string' ||
     !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(profile.id) ||
@@ -556,15 +565,43 @@ export function createPostgresTaskRegistry(deps: {
           // Compare JSON structurally in SQL, not JS key/insertion order. Settings
           // are NOT request payload: a replay keeps the original snapshot.
           const match = await client.query<{ matches: boolean }>(
-            `SELECT briefing=$2 AND profile=$3::jsonb AND request_image_revision=$4 AS matches FROM core.tasks WHERE id=$1`,
-            [row.id, request.briefing, JSON.stringify(request.profile), request.imageRevision]
+            `SELECT briefing=$2 AND profile=$3::jsonb AND request_image_revision=$4
+              AND expected_outputs @> $5::text[] AND expected_outputs <@ $5::text[]
+              AND redo_of IS NOT DISTINCT FROM $6::text AS matches
+              FROM core.tasks WHERE id=$1`,
+            [
+              row.id,
+              request.briefing,
+              JSON.stringify(request.profile),
+              request.imageRevision,
+              request.expectedOutputs ??
+                (row.redo_of === request.redoOf ? row.expected_outputs : []),
+              request.redoOf ?? null,
+            ]
           );
           if (!match.rows[0]?.matches) throw new TaskRegistryError(row.id, 'launch_key_conflict');
           return taskRecord(row);
         }
+        let expectedOutputs = request.expectedOutputs ?? [];
+        if (request.redoOf !== undefined) {
+          const original = await lockTask(client, request.redoOf);
+          const prior = await client.query('SELECT id FROM core.tasks WHERE redo_of=$1', [
+            original.id,
+          ]);
+          if (original.redoOf || !TERMINAL.has(original.state) || prior.rows.length)
+            throw new TaskRegistryError(identity.id, 'invalid_transition');
+          const originalOutputs = original.expectedOutputs ?? [];
+          if (
+            request.expectedOutputs !== undefined &&
+            (request.expectedOutputs.length !== originalOutputs.length ||
+              request.expectedOutputs.some((name) => !originalOutputs.includes(name)))
+          )
+            throw new TaskRegistryError(identity.id, 'invalid_input');
+          expectedOutputs = originalOutputs;
+        }
         await client.query(
-          `INSERT INTO core.tasks(id,launch_key,briefing,profile,settings_revision,harness,image_revision,wrap_grace_seconds,request_image_revision,trace_id,parent_span_id)
-          VALUES($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11)`,
+          `INSERT INTO core.tasks(id,launch_key,briefing,profile,settings_revision,harness,image_revision,wrap_grace_seconds,request_image_revision,trace_id,parent_span_id,expected_outputs,redo_of)
+          VALUES($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11,$12::text[],$13)`,
           [
             identity.id,
             request.launchKey,
@@ -577,6 +614,8 @@ export function createPostgresTaskRegistry(deps: {
             request.imageRevision,
             request.traceId ?? identity.id,
             request.parentSpanId ?? null,
+            expectedOutputs,
+            request.redoOf ?? null,
           ]
         );
         await client.query(
@@ -896,19 +935,35 @@ export function createPostgresTaskRegistry(deps: {
             WHERE c.task_id=$1 ORDER BY c.sequence LIMIT 1024`,
           [taskId]
         );
+        // The sealed manifest is delivery authority, not the worker's report.
+        const delivered = new Set(
+          receipt.manifest.objects
+            .filter((object) => object.mark === 'result' || object.mark === 'artifact')
+            .map((object) => object.name)
+        );
+        const missingExpectedOutputs = (task.expectedOutputs ?? []).filter(
+          (name) => !delivered.has(name)
+        );
+        const missingDone = task.terminalCandidate === 'done' && missingExpectedOutputs.length > 0;
         const event: TaskOutcomeEvent = {
+          ...(task.expectedOutputs ? { expectedOutputs: task.expectedOutputs } : {}),
+          ...(task.redoOf ? { redoOf: task.redoOf } : {}),
+          ...(missingExpectedOutputs.length ? { missingExpectedOutputs } : {}),
           ...(commands.rows.length ? { commands: commands.rows } : {}),
           taskId,
           outcomeKey: `outcome_${launchId}`,
-          state: task.terminalCandidate,
-          reasonCode: task.terminalReasonCode,
-          summary: task.terminalSummary,
+          state: missingDone ? 'failed' : task.terminalCandidate,
+          reasonCode: missingDone ? 'expected_outputs_missing' : task.terminalReasonCode,
+          summary: missingDone
+            ? `Expected output files were not delivered: ${missingExpectedOutputs.join(', ')}.`
+            : task.terminalSummary,
           objects: receipt.manifest.objects,
         };
         await client.query(
-          `UPDATE core.tasks SET state=terminal_candidate,terminal_at=clock_timestamp(),
-          finalization_pending=false,finalization_failure_code=NULL,updated_at=clock_timestamp() WHERE id=$1`,
-          [taskId]
+          `UPDATE core.tasks SET state=$2,terminal_candidate=$2,terminal_reason_code=$3,terminal_summary=$4,
+          terminal_at=clock_timestamp(),finalization_pending=false,finalization_failure_code=NULL,
+          updated_at=clock_timestamp() WHERE id=$1`,
+          [taskId, event.state, event.reasonCode, event.summary]
         );
         await client.query(
           `INSERT INTO core.task_outcomes(outcome_key,task_id,launch_id,event) VALUES($1,$2,$3,$4::jsonb)`,

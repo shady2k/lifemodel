@@ -405,15 +405,18 @@ before that frame. A crash or finalization without that frame leaves the command
 or failed delivery is not delivered. Accepted without insertion remains delivered,
 not applied. A later inserted receipt supersedes earlier uncertainty or deferral.
 Sealed outcome events freeze this metadata (no command text) with the result.
-Outcome turns allow only `core.steerTask(action="read")` for their own task when
-commands need explanation; the executor rejects steering, answers and reads of
-other tasks even if the provider ignores the schema. Other outcome turns retain
-an empty tool allowlist. Before replying about missed or uncertain changes, the
-outcome prompt tells the agent to read their texts with `core.steerTask(action="read")`, never guess from
-IDs or compacted history. The deterministic fallback reports counts, not raw
-command IDs, and quotes bounded excerpts if a successful read is available. It
-says missed changes were not applied and offers a rerun; uncertain changes may
-not have been applied.
+Outcome turns allow `core.steerTask(action="read")` only for their own task:
+status and command texts, delivered file contents, or the bounded transcript.
+The executor rejects steering, answers and reads of other tasks even if the
+provider ignores the schema. After failed verification, an original outcome may
+also accept one corrected `core.startTask` with its exact `redoOf` linkage; core
+refuses redo chains and duplicate redos. See [task replies](task-reply.md#end).
+Before replying about missed or uncertain changes, the outcome prompt tells the
+agent to read their texts, never guess from IDs or compacted history. The
+deterministic fallback reports counts, not raw command IDs, and quotes bounded
+command excerpts if a successful read is available. It does not quote the
+worker's summary as a result. Missed changes were not applied; uncertain changes
+may not have been applied.
 
 Prestart commands wait for `intakeReady`, then use the ordinary journaled send,
 ACK and correlated insertion receipts. Receipt intake remains open while an

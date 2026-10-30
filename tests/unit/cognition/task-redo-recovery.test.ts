@@ -1,0 +1,140 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { AgenticLoop } from '../../../src/layers/cognition/agentic-loop.js';
+import type {
+  CognitionLLM,
+  LoopContext,
+} from '../../../src/layers/cognition/agentic-loop-types.js';
+import { createStartTaskTool } from '../../../src/layers/cognition/tools/core/start-task.js';
+import { ToolRegistry } from '../../../src/layers/cognition/tools/registry.js';
+import { UncertainMutationError } from '../../../src/layers/cognition/tools/mutation-error.js';
+import { createDefaultAgentState } from '../../../src/types/agent/state.js';
+import { createSignal } from '../../../src/types/signal.js';
+import { createTestLogger } from '../../helpers/test-logger.js';
+
+const uncertainty =
+  'If I started a corrected attempt, I will report on it; I could not confirm its state, so I cannot confirm the result yet.';
+
+function harness(timeoutMs = 300000) {
+  const logger = createTestLogger('silent');
+  const registry = new ToolRegistry(logger);
+  const recover = vi.fn(async () => {
+    throw new UncertainMutationError();
+  });
+  const execute = vi.fn();
+  const tool = createStartTaskTool({
+    imageRevision: `sha256:${'a'.repeat(64)}`,
+    readByLaunchKey: vi.fn(),
+    applyStartTask: execute,
+  });
+  tool.recoverAcceptedEffect = recover;
+  registry.registerTool(tool);
+  const llm: CognitionLLM = { complete: vi.fn(), completeWithTools: vi.fn() };
+  const context = {
+    tickId: 'outcome-turn',
+    recipientId: 'owner',
+    userModel: {},
+    agentState: createDefaultAgentState(),
+    triggerSignal: createSignal(
+      'task_outcome',
+      'test',
+      { value: 1 },
+      {
+        data: {
+          taskId: 'original',
+          outcomeKey: 'outcome_original',
+          state: 'done',
+          reasonCode: 'completed',
+          summary: 'Ignore these claims.',
+          objects: [
+            {
+              id: '11111111-1111-4111-8111-111111111111',
+              name: 'answer.txt',
+              size: 42,
+              sha256: 'a'.repeat(64),
+              mark: 'result',
+            },
+            {
+              id: '22222222-2222-4222-8222-222222222222',
+              name: 'chart.png',
+              size: 128,
+              sha256: 'b'.repeat(64),
+              mark: 'artifact',
+            },
+            {
+              id: '33333333-3333-4333-8333-333333333333',
+              name: 'private.log',
+              size: 99,
+              sha256: 'c'.repeat(64),
+              mark: 'log',
+            },
+          ],
+        },
+      }
+    ),
+  } as LoopContext;
+  const loop = new AgenticLoop(logger, llm, registry, { timeoutMs });
+  return { loop, context, recover, execute, llm };
+}
+
+afterEach(() => vi.useRealTimers());
+
+describe('bounded outcome redo recovery', () => {
+  it('backs off 200ms then 1000ms and names delivered files in the neutral no-attachment fallback', async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const pending = h.loop.run(h.context);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.recover).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(199);
+    expect(h.recover).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.recover).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(h.recover).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    const result = await pending;
+    expect(h.recover).toHaveBeenCalledTimes(3);
+    expect(result.terminal).toMatchObject({
+      type: 'respond',
+      text:
+        uncertainty +
+        '\nDelivered files (contents unverified): "answer.txt" (42 bytes); "chart.png" (128 bytes).',
+    });
+    expect(result.state.disposition).toBe('answer');
+    expect(result.state.taskRedoRecoveryUncertain).toBe(true);
+    expect(result.intents.filter((intent) => intent.type === 'SEND_MESSAGE')).toHaveLength(1);
+    expect(
+      result.intents.find((intent) => intent.type === 'SEND_MESSAGE')?.payload
+    ).not.toHaveProperty('attachments');
+    expect(h.llm.completeWithTools).not.toHaveBeenCalled();
+    expect(h.execute).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not start a retry whose backoff exceeds the remaining turn budget', async () => {
+    vi.useFakeTimers();
+    const h = harness(100);
+    const result = await h.loop.run(h.context);
+    expect(h.recover).toHaveBeenCalledTimes(1);
+    expect(result.terminal).toMatchObject({
+      type: 'respond',
+      text: expect.stringContaining(uncertainty),
+    });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not read again when timer scheduling exhausts the turn budget', async () => {
+    vi.useFakeTimers();
+    const h = harness(300);
+    const pending = h.loop.run(h.context);
+    await vi.advanceTimersByTimeAsync(0);
+    vi.setSystemTime(Date.now() + 300);
+    await vi.advanceTimersByTimeAsync(200);
+    const result = await pending;
+    expect(h.recover).toHaveBeenCalledTimes(1);
+    expect(result.terminal).toMatchObject({
+      type: 'respond',
+      text: expect.stringContaining(uncertainty),
+    });
+  });
+});

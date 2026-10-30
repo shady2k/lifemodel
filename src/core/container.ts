@@ -75,6 +75,7 @@ import {
 } from './message-streams.js';
 import { createBusSignalStream, type BusSnapshot } from './bus-stream.js';
 import { createStorageControlClient } from './storage-control-client.js';
+import { StorageTaskArtifactReader } from '../storage/task-artifact-reader.js';
 import { createStorageRetentionReconciler } from './storage-retention.js';
 import { createPlatformSettingsReader } from '../config/platform-settings.js';
 import { createPostgresTaskRegistry } from '../storage/postgres-task-registry.js';
@@ -1423,11 +1424,24 @@ export async function createContainerAsync(
         Math.floor(commandSettings['tasks.channel.maxBufferedBytes'] / 4)
       ),
     });
+    const taskArtifactReader = new StorageTaskArtifactReader({
+      endpoint: 'https://storage-module.lifemodel-system.svc.cluster.local:8445',
+      tokenFile:
+        process.env['LIFEMODEL_STORAGE_READ_TOKEN_FILE'] ??
+        '/var/run/secrets/lifemodel-storage/read-token',
+      caFile: process.env['LIFEMODEL_STORAGE_READ_CA_FILE'] ?? controlCaFile,
+      requestTimeoutMs: 10_000,
+    });
     closeTaskCommands = async () => {
       taskMailbox.stop();
+      taskArtifactReader.close();
       await Promise.all([commandPool.end(), taskContextPool.end()]);
     };
-    taskService = createTaskService({ tasks: acceptanceService, mailbox: taskMailbox });
+    taskService = createTaskService({
+      tasks: acceptanceService,
+      mailbox: taskMailbox,
+      artifactReader: taskArtifactReader,
+    });
     coreLoop.setTaskService(taskService);
     layers.cognition.setDependencies({ taskService });
     coreLoop.setTaskQuestionReader((taskId, questionId) =>

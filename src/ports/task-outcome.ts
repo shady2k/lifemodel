@@ -1,5 +1,5 @@
 import type { TaskCommandDeliveryStatus } from './task-channel.js';
-import type { TaskManifestObject, TaskOutcomeEvent } from './tasks.js';
+import { isTaskExpectedOutputs, type TaskManifestObject, type TaskOutcomeEvent } from './tasks.js';
 import { validateMessageAttachments, type MessageAttachment } from './message-attachment.js';
 
 /** Terminal events are private data, not instructions or model-selected file IDs. */
@@ -72,6 +72,15 @@ export function validateTaskOutcome(value: unknown): TaskOutcomeEvent {
       } as TaskCommandDeliveryStatus;
     });
   }
+  for (const key of ['expectedOutputs', 'missingExpectedOutputs']) {
+    if (event[key] !== undefined && !isTaskExpectedOutputs(event[key]))
+      throw new Error('Invalid task expected outputs');
+  }
+  if (
+    event['redoOf'] !== undefined &&
+    (typeof event['redoOf'] !== 'string' || !event['redoOf'] || event['redoOf'].length > 128)
+  )
+    throw new Error('Invalid task redo');
   if (event['state'] === 'done' && !objects.some((object) => object.mark === 'result'))
     throw new Error('Task outcome missing result');
   return {
@@ -82,6 +91,13 @@ export function validateTaskOutcome(value: unknown): TaskOutcomeEvent {
     summary: event['summary'],
     objects,
     ...(commands === undefined ? {} : { commands }),
+    ...(event['expectedOutputs'] === undefined
+      ? {}
+      : { expectedOutputs: [...(event['expectedOutputs'] as string[])] }),
+    ...(event['missingExpectedOutputs'] === undefined
+      ? {}
+      : { missingExpectedOutputs: [...(event['missingExpectedOutputs'] as string[])] }),
+    ...(event['redoOf'] === undefined ? {} : { redoOf: event['redoOf'] }),
   };
 }
 
@@ -109,34 +125,30 @@ export function taskOutcomeAttachments(event: TaskOutcomeEvent): MessageAttachme
   return groups;
 }
 
-/** Fixed owner-facing explanation; task text is quoted, never used as instructions. */
+/** Fixed owner-facing facts only; the unverified semantic summary is never repeated. */
 export function taskOutcomeFallback(
   event: TaskOutcomeEvent,
   commandTexts: ReadonlyMap<string, string> = new Map()
 ): string {
   const reasons: Record<string, string> = {
-    completed: 'The work completed.',
-    timeout: 'The task ran out of time.',
-    stopped: 'The task was stopped.',
-    aborted: 'The task stopped before finishing.',
-    compute_missing: 'The running task could no longer be found.',
-    job_failed: 'The task failed while running.',
-    semantic_report_missing: 'The task ended without confirming its result.',
-    missing_result: 'The task did not produce a result file.',
-    checksum_mismatch: 'The result file could not be verified.',
-    executor_failed: 'The task could not finish running.',
-    launch_failed: 'The task could not start.',
+    completed:
+      'I received the delivered files, but could not verify their contents. I cannot confirm the requested result yet.',
+    timeout: 'I ran out of time.',
+    stopped: 'I stopped before finishing.',
+    aborted: 'I stopped before finishing.',
+    compute_missing: 'I could no longer find the running work.',
+    job_failed: 'I encountered an execution failure.',
+    semantic_report_missing: 'I did not receive a final result confirmation.',
+    missing_result: 'I did not receive a result file.',
+    expected_outputs_missing: `I did not receive the expected files: ${JSON.stringify(event.missingExpectedOutputs ?? [])}.`,
+    checksum_mismatch: 'I could not verify the result file checksum.',
+    executor_failed: 'I could not finish execution.',
+    launch_failed: 'I could not start execution.',
   };
-  const state =
-    event.state === 'done'
-      ? 'Task completed.'
-      : event.state === 'stopped'
-        ? 'Task stopped.'
-        : 'Task failed.';
   const knownReason = Object.hasOwn(reasons, event.reasonCode)
     ? reasons[event.reasonCode]
     : undefined;
-  const reason = knownReason ?? 'The task ended without a more specific explanation.';
+  const reason = knownReason ?? 'I could not confirm a more specific reason.';
   const missed = event.commands?.filter((c) => c.delivery === 'not_delivered') ?? [];
   const uncertain =
     event.commands?.filter((c) => ['queued', 'delivered', 'uncertain'].includes(c.delivery)) ?? [];
@@ -147,10 +159,13 @@ export function taskOutcomeFallback(
     })
     .slice(0, 8);
   const delivery = missed.length
-    ? `\n${String(missed.length)} ${missed.length === 1 ? 'change did' : 'changes did'} not reach the task and ${missed.length === 1 ? 'was' : 'were'} not applied.${excerpts.length ? ` Changes (quoted): ${excerpts.join('; ')}.` : ''} I can rerun the task with those changes.`
+    ? `\n${String(missed.length)} ${missed.length === 1 ? 'change did' : 'changes did'} not reach my running work and ${missed.length === 1 ? 'was' : 'were'} not applied.${excerpts.length ? ` Changes (quoted): ${excerpts.join('; ')}.` : ''}`
     : '';
   const pending = uncertain.length
     ? `\n${String(uncertain.length)} ${uncertain.length === 1 ? 'change has' : 'changes have'} no confirmed turn insertion and may not have been applied.`
     : '';
-  return `${state} ${reason}${delivery}${pending}\nTask output (quoted): ${JSON.stringify(event.summary)}${event.state === 'done' ? '' : '\nNo completed result is available.'}`;
+  // The semantic report is an untrusted claim. A fallback did not inspect
+  // file contents, so it must never turn that claim into the owner's result.
+  const state = event.state === 'done' ? '' : 'I could not complete the work. ';
+  return `${state}${reason}${delivery}${pending} How would you like me to proceed?`;
 }

@@ -78,7 +78,32 @@ describe('task workbench readiness', () => {
         }),
       })
     );
-    expect(tool.parameters.map((parameter) => parameter.name)).toEqual(['briefing', 'profile']);
+    expect(tool.parameters.map((parameter) => parameter.name)).toEqual([
+      'briefing',
+      'profile',
+      'expectedOutputs',
+    ]);
+  });
+
+  it.each([
+    { names: ['../private'] },
+    { names: ['a.txt', 'a.txt'] },
+    { names: Array.from({ length: 17 }, (_, i) => `${String(i)}.txt`) },
+    { names: [42] },
+  ])('refuses invalid expected output names before accepting work: $names', async ({ names }) => {
+    const applyStartTask = vi.fn(async () => record);
+    const tool = createStartTaskTool({
+      imageRevision: digest,
+      readByLaunchKey: async () => null,
+      applyStartTask,
+    });
+    expect(
+      await tool.execute(
+        { briefing: request.briefing, profile: 'small', expectedOutputs: names },
+        context
+      )
+    ).toEqual({ success: false, code: 'invalid_expected_outputs' });
+    expect(applyStartTask).not.toHaveBeenCalled();
   });
 
   it('checks only the pinned local manifest using an anonymous HEAD', async () => {

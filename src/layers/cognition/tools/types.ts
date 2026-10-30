@@ -95,6 +95,8 @@ export interface ToolContext {
   taskSteerCounts?: Map<string, number>;
   /** Task question that caused this turn, never caller-supplied arguments. */
   taskQuestion?: { taskId: string; questionId: string };
+  /** Trusted outcome capability for accepted-redo recovery, never model arguments. */
+  taskOutcome?: { taskId: string; redoAllowed: boolean };
   /** Opaque recipient identifier */
   recipientId: string;
 
