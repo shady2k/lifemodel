@@ -3,6 +3,8 @@ import type {
   TaskEndTurnReconciliation,
   TaskSuccessorEvidence,
 } from './task-harness.js';
+import { createAcpTranscriptMapper, acpToolOutput } from './task-transcript.js';
+import type { TaskHarnessEventSink } from './task-harness.js';
 /** Prime Agent 0.10.1 configuration. The protocol client remains generic ACP. */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -189,7 +191,7 @@ export async function admit(input: {
     const response = await nativeCall(input.workDirectory, {
       type: 'steer',
       activeSessionId,
-      message: steeringText(input.commandId, input.text),
+      message: insertedText(input.commandId, input.text),
     });
     if (response['command'] !== 'steer') return 'uncertain';
     if (response['success'] === false) return 'rejected';
@@ -206,7 +208,7 @@ export async function admit(input: {
 function steeringMarker(commandId: string): string {
   return `[lifemodel-steer:${createHash('sha256').update(commandId).digest('hex')}]`;
 }
-function steeringText(commandId: string, text: string): string {
+export function insertedText(commandId: string, text: string): string {
   return `${steeringMarker(commandId)}\n${text}`;
 }
 
@@ -436,6 +438,7 @@ function successorEvidence(
           kind: 'tool',
           id: content['id'],
           status: 'in_progress',
+          ...(typeof content['name'] === 'string' ? { name: content['name'] } : {}),
           input: content['arguments'],
         });
       }
@@ -458,10 +461,24 @@ function successorEvidence(
         output: row['content'],
       });
     } else if (row['role'] === 'user') {
+      for (const commandId of commandIds)
+        if (messageText(row).startsWith(steeringMarker(commandId) + '\n'))
+          updates.push({ kind: 'inserted', commandId, text: messageText(row) });
       final = '';
       updates.push({ kind: 'reset' });
     }
   }
   if (!final.trim() || pending.size) return undefined;
   return { updates, stopReason: 'end_turn' };
+}
+
+/** Map this adapter's ACP session, including native successor observations. */
+export function createTranscriptMapper(sink?: TaskHarnessEventSink) {
+  return createAcpTranscriptMapper(sink, {
+    name: (tool) =>
+      ['name', 'title', 'kind']
+        .map((key) => tool[key])
+        .find((value): value is string => typeof value === 'string') ?? 'tool',
+    output: acpToolOutput,
+  });
 }

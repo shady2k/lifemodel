@@ -10,6 +10,7 @@ import { createPlatformSettingsReader } from '../../src/config/platform-settings
 import { createTestLogger } from './test-logger.js';
 import { createPostgresTaskRegistry } from '../../src/storage/postgres-task-registry.js';
 import { createPostgresTaskMailbox } from '../../src/storage/postgres-task-mailbox.js';
+import { createTaskService } from '../../src/core/task-service.js';
 import { createTaskChannel } from '../../src/core/task-channel.js';
 import { TaskJsonClient } from '../../loader/src/task-launcher-http.js';
 import { OwnerMessageIntake } from '../../src/storage/owner-message-intake.js';
@@ -140,6 +141,10 @@ export async function taskToolsContract(certificate: TestStorageCertificate, dir
   return {
     stores,
     mailbox,
+    service: createTaskService({
+      tasks: createPostgresTaskRegistry({ pool: stores.postgres, epoch: 1, settings }),
+      mailbox,
+    }),
     first,
     second,
     endpoint,

@@ -65,11 +65,11 @@ for line in sys.stdin:
             count = 2 if scenario == "steer-parallel" else 1
             processes = []
             for i in range(count):
-                update({"sessionUpdate": "tool_call", "toolCallId": f"sleep-{i}", "status": "in_progress"})
+                update({"sessionUpdate": "tool_call", "toolCallId": f"sleep-{i}", "title": "shell", "status": "in_progress"})
                 processes.append(subprocess.Popen(["sh", "-c", f"touch start-{i}; sleep {2+i}; touch done-{i}; echo done-{i}"], stdout=subprocess.DEVNULL))
             for i, process in enumerate(processes):
                 assert process.wait() == 0
-                update({"sessionUpdate": "tool_call_update", "toolCallId": f"sleep-{i}", "status": "completed"})
+                update({"sessionUpdate": "tool_call_update", "toolCallId": f"sleep-{i}", "status": "completed", "rawOutput": f"done-{i}"})
             with lock:
                 for item in inbox.values():
                     item["status"] = "inserted"

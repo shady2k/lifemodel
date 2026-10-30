@@ -66,7 +66,9 @@ describe('OpenCode steering adapter boundary', () => {
       signal: new AbortController().signal,
     });
     expect(result).toEqual(
-      expected === 'continue' ? { state: 'continue', commandIds: ['cmd'] } : { state: expected }
+      expected === 'continue'
+        ? { state: 'continue', commandIds: ['cmd'] }
+        : { state: expected, ...(status === 'inserted' ? { insertedCommandIds: ['cmd'] } : {}) }
     );
   });
 

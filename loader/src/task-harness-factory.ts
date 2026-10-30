@@ -11,6 +11,8 @@ export async function createRegisteredHarness(
   const agent = { ...registered, ...overrides };
   const {
     configureAgent,
+    createTranscriptMapper,
+    insertedText,
     toolOutputFailed,
     admit,
     bind,
@@ -20,6 +22,8 @@ export async function createRegisteredHarness(
     reconcileEndTurn,
   } = (await import(agent.adapterModule)) as {
     configureAgent: NonNullable<AcpTaskHarnessOptions['configure']>;
+    createTranscriptMapper?: AcpTaskHarnessOptions['createTranscriptMapper'];
+    insertedText?: AcpTaskHarnessOptions['insertedText'];
     toolOutputFailed: NonNullable<AcpTaskHarnessOptions['toolOutputFailed']>;
     admit?: AcpTaskHarnessOptions['admit'];
     bind?: AcpTaskHarnessOptions['bind'];
@@ -32,6 +36,8 @@ export async function createRegisteredHarness(
     ...options,
     agent,
     configure: configureAgent,
+    ...(createTranscriptMapper ? { createTranscriptMapper } : {}),
+    ...(insertedText ? { insertedText } : {}),
     toolOutputFailed,
     ...(admit ? { admit } : {}),
     ...(bind ? { bind } : {}),

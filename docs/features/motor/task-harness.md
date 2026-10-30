@@ -8,6 +8,36 @@ The rules below are launcher policy within that zone. Reported outcomes,
 events and traces are the task's claims, not independently verified facts;
 process environment filtering does not create an inner trust boundary.
 
+## Session transcript adapter mapping
+
+Task: lifemodel-653.9.19. `TaskHarnessEvent` includes a neutral `transcript`
+entry. Each registry adapter exports `createTranscriptMapper`; the generic ACP
+client passes session updates to it and flushes pending assistant excerpts at
+turn end, tool boundaries and cleanup. The factory wires the mapper without
+vendor branches. Shared ACP mapping coalesces assistant text chunks and merges
+tool patches, retaining tool name, status and a short output tail. It hashes
+observation identities; duplicate tool patches do not create duplicate entries.
+The mapper caps entries/tools and never throws into execution.
+
+OpenCode maps ACP tool `name`/`kind`/`title` and raw output/metadata or text content.
+Prime-agent maps ACP tool `name`/`title`/`kind` and the same text forms, including
+native successor `toolCall.name` and `toolResult` content translated behind its
+adapter. Native successor text/tool evidence uses the same mapper. No vendor
+names or native protocol shapes leak into launcher/core transcript code.
+
+The launcher adds the actual initial user briefing excerpt, including its output
+instructions. Positive native insertion observation adds a correlated immutable
+`steer` or `answer` entry, never mere queue admission. Kind is explicit on the
+neutral steer command; answers retain the `[question:...]` envelope. The
+Prime-agent entry also retains its native correlation marker via adapter-owned
+`insertedText`. Missing insertion evidence produces no claim of inserted text.
+All text is excerpted; the transcript does not certify obedience or complete
+history after compaction. The same shared contract file checks assistant text,
+tool output and steering/answer capture for both provisioned real adapters and
+the scripted ACP agent. This source test is not the deployed two-harness walk.
+See [task channel](task-channel.md#bounded-worker-session-transcript) for bounds,
+replay, storage and read semantics.
+
 ## Owner question relay
 
 The task asks the agent, not the owner directly. Cognition keeps non-terminal
