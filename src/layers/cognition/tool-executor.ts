@@ -26,6 +26,7 @@ import type { ToolRegistry } from './tools/registry.js';
 import { createToolResult, type ToolContext, type ToolParameter } from './tools/types.js';
 import type { LoopContext, LoopCallbacks, ToolExecutionOutcome } from './agentic-loop-types.js';
 import { prevalidateToolArgs } from './tools/validation.js';
+import { UncertainMutationError } from './tools/mutation-error.js';
 import { isTaskOutcomeRedo, taskOutcomeReadId } from './loop-orchestrator.js';
 
 /**
@@ -283,11 +284,27 @@ export async function executeToolCalls(
       });
       continue;
     }
-    const recovered =
-      context.triggerSignal.type !== 'task_outcome' ||
-      (toolName === 'core.startTask' && toolContext.taskOutcome?.redoAllowed)
-        ? await tool?.recoverAcceptedEffect?.(toolContext, parsedArgs ?? {})
-        : undefined;
+    let recovered: unknown;
+    try {
+      recovered =
+        context.triggerSignal.type !== 'task_outcome' ||
+        (toolName === 'core.startTask' && toolContext.taskOutcome?.redoAllowed)
+          ? await tool?.recoverAcceptedEffect?.(toolContext, parsedArgs ?? {})
+          : undefined;
+    } catch (error) {
+      if (
+        error instanceof UncertainMutationError &&
+        context.triggerSignal.type === 'task_outcome' &&
+        toolName === 'core.startTask' &&
+        toolContext.taskOutcome?.redoAllowed
+      ) {
+        // Only this failed read can finish with the honest outcome fallback.
+        // Uncertain execution below still fails the turn for owned-effect replay.
+        state.taskRedoRecoveryUncertain = true;
+        return { type: 'continue', messages };
+      }
+      throw error;
+    }
     const recoveredResult =
       recovered === undefined
         ? undefined

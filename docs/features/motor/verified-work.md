@@ -38,8 +38,11 @@ add an execution system or a second artifact store.
   Only the exact original outcome can supply `redoOf`; ordinary turns do not
   advertise it. Deterministic refused starts do not consume the accepted-start
   slot. Existing deciding-turn effect keys recover accepted starts on replay.
-  Three failed recovery reads yield an uncertainty notice rather than losing
-  the outcome reply or claiming that no redo exists.
+  Pre-model recovery retries have 200 ms and 1 s backoffs within the turn budget.
+  Failed recovery reads (including in-loop reads) yield a conditional uncertainty
+  notice rather than losing the outcome reply or claiming that a redo exists or
+  does not exist. The notice names delivered files and sizes without attachments;
+  actual uncertain mutations still fail closed.
 - First-person status uses actual observations. A plan stays a plan. A launch
   is stated only after an accepted receipt in that turn. Ambiguous requests
   need an agreed plan and expected files; clear requests run at once.

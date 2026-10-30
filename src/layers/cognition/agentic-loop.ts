@@ -156,9 +156,18 @@ export class AgenticLoop {
               break;
             } catch (error) {
               if (!(error instanceof UncertainMutationError)) throw error;
-              if (attempt === 2) {
+              const backoffMs = [200, 1000][attempt];
+              if (
+                backoffMs === undefined ||
+                Date.now() - state.startTime + backoffMs >= this.config.timeoutMs
+              ) {
                 // This is a failed read, not a new mutation. Complete the
                 // outcome honestly rather than exhausting the bus retry budget.
+                state.taskRedoRecoveryUncertain = true;
+                return this.outcomeFallback(context, state);
+              }
+              await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
+              if (Date.now() - state.startTime >= this.config.timeoutMs) {
                 state.taskRedoRecoveryUncertain = true;
                 return this.outcomeFallback(context, state);
               }
@@ -244,10 +253,16 @@ export class AgenticLoop {
             (result.data as { success?: boolean } | undefined)?.success === true
         )
     );
+    const delivered = event.objects
+      .filter((object) => object.mark === 'result' || object.mark === 'artifact')
+      .map((object) => `${JSON.stringify(object.name)} (${String(object.size)} bytes)`);
     state.disposition = 'answer';
     return buildFinalResultFromNaturalCompletion(
       state.taskRedoRecoveryUncertain
-        ? 'I may have started a corrected attempt; I will report on it. I could not confirm its current state, so I cannot confirm the requested result yet.'
+        ? 'If I started a corrected attempt, I will report on it; I could not confirm its state, so I cannot confirm the result yet.' +
+            (delivered.length
+              ? `\nDelivered files (contents unverified): ${delivered.join('; ')}.`
+              : '')
         : acceptedRedo
           ? 'I could not verify the requested result. I have started one corrected attempt and will check it before confirming the result.'
           : taskOutcomeFallback(event, commandTexts),
@@ -792,6 +807,8 @@ export class AgenticLoop {
         compileIntents: (terminal, ctx, s) =>
           compileIntentsFromToolResults(terminal, ctx, s, this.logger),
       });
+
+      if (state.taskRedoRecoveryUncertain) return this.outcomeFallback(context, state);
 
       switch (outcome.type) {
         case 'escalate':

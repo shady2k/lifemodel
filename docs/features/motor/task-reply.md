@@ -92,10 +92,14 @@ about how to proceed. Other tools, including `core.defer`, `core.remember`,
 `core.schedule` and `core.say`, remain forbidden in an outcome turn. An accepted
 redo suppresses the original output attachments on the redo notice. If the model
 fails after acceptance, the fallback acknowledges that redo instead of asking as
-if no work were running. Pre-model recovery reads retry at most three times. If
-all fail, the owner still receives an honest uncertainty notice: a corrected
-attempt may have started, but its state could not be confirmed. That notice
-neither starts more work nor attaches the old files as a result.
+if no work were running. Pre-model recovery reads retry at most three times,
+with 200 ms and 1 s backoffs within the turn budget. A failed recovery read during
+the tool loop also returns the uncertainty fallback instead of losing the reply.
+Actual uncertain start writes still fail closed. The notice is conditional:
+"If I started a corrected attempt, I will report on it; I could not confirm its
+state, so I cannot confirm the result yet." It names the original's delivered
+result/artifact files and sizes as unverified manifest facts, without attaching
+them. It neither starts more work nor promises a report from a nonexistent redo.
 
 An empty/missing final response is not an acknowledgement, even after a rejected
 `core.say` attempt. A `length`-truncated outcome reply is incomplete even when it

@@ -357,7 +357,7 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
           kind === 'persistent' ? 'done' : 'failed'
         )
       );
-      await expect.poll(async () => (await instance.events()).length).toBe(1);
+      await expect.poll(async () => (await instance.events()).length, { timeout: 5000 }).toBe(1);
       await instance.coreLoop.fenceForTest();
       const actual = (await instance.events())[0]!.payload;
       expect(instance.cognition.calls).toHaveLength(1);
@@ -368,7 +368,7 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
       } else {
         expect(attempts).toBe(3);
         expect(actual.text).toBe(
-          'I may have started a corrected attempt; I will report on it. I could not confirm its current state, so I cannot confirm the requested result yet.'
+          'If I started a corrected attempt, I will report on it; I could not confirm its state, so I cannot confirm the result yet.\nDelivered files (contents unverified): "answer.txt" (42 bytes).'
         );
         expect(actual.attachments).toBeUndefined();
         expect(instance.cognition.provider.requests).toHaveLength(0);
@@ -377,6 +377,39 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
       expect(Object.values(instance.bus.exportSnapshot().entries)).toEqual([]);
     }
   );
+
+  it('commits an uncertainty reply after an in-loop redo recovery read fails without executing another start', async () => {
+    const args = {
+      briefing: 'Save the corrected file.',
+      profile: 'small',
+      redoOf: 'task-in-loop-recovery',
+    };
+    const instance = await boot(`task-in-loop-recovery:${randomUUID()}:`, [
+      { toolCalls: [{ name: 'core.startTask', args }] },
+    ]);
+    const tool = instance.cognition.processor
+      .getToolRegistry()
+      .getTools()
+      .find((entry) => entry.name === 'core.startTask')!;
+    const recover = tool.recoverAcceptedEffect!;
+    let attempts = 0;
+    tool.recoverAcceptedEffect = async (context, input) => {
+      if (++attempts > 1) throw new UncertainMutationError();
+      return recover(context, input);
+    };
+    instance.coreLoop.pushSignal(outcome(args.redoOf, 'outcome_in_loop_recovery', 'done'));
+    await expect.poll(async () => (await instance.events()).length).toBe(1);
+    await instance.coreLoop.fenceForTest();
+    expect((await instance.events())[0]!.payload).toMatchObject({
+      text: 'If I started a corrected attempt, I will report on it; I could not confirm its state, so I cannot confirm the result yet.\nDelivered files (contents unverified): "answer.txt" (42 bytes).',
+    });
+    expect((await instance.events())[0]!.payload.attachments).toBeUndefined();
+    expect(attempts).toBe(2);
+    expect(instance.cognition.calls).toHaveLength(1);
+    expect(instance.cognition.provider.requests).toHaveLength(1);
+    expect(await instance.registry.list()).toHaveLength(0);
+    expect(Object.values(instance.bus.exportSnapshot().entries)).toEqual([]);
+  });
 
   it('verifies delivered bytes instead of repeating a contradictory completion claim', async () => {
     const readArgs = { action: 'read', taskId: '', view: 'file', name: 'primes500.txt' };

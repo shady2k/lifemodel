@@ -69,7 +69,7 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
     hasSideEffects: true,
     maxCallsPerTurn: 1,
     description:
-      'Start my long work in the background with a complete briefing, explicit profile and expected output filenames when files are requested. Agree the plan and expected files with the owner first only when the request has doubts or multiple readings; clear requests run at once. Returns queued without waiting for execution. Say I started only after this tool returns accepted in this turn, never before or after a refusal. A plan is not a result. On an outcome that fails verification, one corrected redo may name that exact original task in redoOf; it inherits the original expected files, so omit expectedOutputs or repeat the original names in any order. Changing or weakening that contract and a redo of a redo are refused.',
+      'Start my long work in the background with a complete briefing, explicit profile and expected output filenames when files are requested. Agree the plan and expected files with the owner first only when the request has doubts or multiple readings; clear requests run at once. Returns queued without waiting for execution. Say I started only after this tool returns accepted in this turn, never before or after a refusal. A plan is not a result.',
     validate: (args) =>
       validateAgainstParameters(args as Record<string, unknown>, outcomeParameters),
     recoverAcceptedEffect: async (context) => {

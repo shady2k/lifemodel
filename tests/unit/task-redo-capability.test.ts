@@ -102,7 +102,14 @@ describe('startTask redo capability and effect budget', () => {
       expect(prompt).toContain('file_not_text');
       expect(prompt).toContain('cannot inspect its binary contents');
     }
-    expect(h.tool.description).toContain(
+    expect(h.tool.description).not.toContain('redoOf');
+    const outcomeTool = filterToolsForContext(
+      h.registry.getToolsAsOpenAIFormat(),
+      h.context,
+      false
+    )[0]!;
+    expect(outcomeTool.function.description).toContain('It inherits the original expected files');
+    expect(outcomeTool.function.description).toContain(
       'omit expectedOutputs or repeat the original names in any order'
     );
   });
@@ -112,6 +119,7 @@ describe('startTask redo capability and effect budget', () => {
       .getToolsAsOpenAIFormat()
       .find((t) => t.function.name === 'core_startTask')!;
     expect(general.function.parameters.properties).not.toHaveProperty('redoOf');
+    expect(general.function.description).not.toContain('redoOf');
     const outcome = filterToolsForContext([general], h.context, false)[0]!;
     expect(outcome.function).toMatchObject({
       parameters: {
@@ -186,10 +194,59 @@ describe('startTask redo capability and effect budget', () => {
     expect(h.messages.at(-1)?.content).toContain('limit reached');
   });
 
+  it('stops an outcome redo on uncertain in-loop recovery without executing the start', async () => {
+    const h = harness();
+    const execute = vi.spyOn(h.registry, 'execute');
+    h.readByLaunchKey.mockRejectedValue(new Error('transient read failure'));
+
+    const outcome = await h.call(args);
+
+    expect(outcome).toEqual({ type: 'continue', messages: h.messages });
+    expect(h.state.taskRedoRecoveryUncertain).toBe(true);
+    expect(h.readByLaunchKey).toHaveBeenCalledTimes(1);
+    expect(execute).not.toHaveBeenCalled();
+    expect(h.applyStartTask).not.toHaveBeenCalled();
+    expect(h.state.executedTools).toEqual([]);
+    expect(h.state.toolResults).toEqual([]);
+    expect(h.state.toolCallCounts.get('core.startTask')).toBeUndefined();
+  });
+
+  it.each(['user_message', 'thought'] as const)(
+    'rethrows uncertain recovery unchanged outside an outcome on %s',
+    async (type) => {
+      const h = harness(type);
+      const error = new UncertainMutationError();
+      h.tool.recoverAcceptedEffect = vi.fn(async () => {
+        throw error;
+      });
+
+      await expect(h.call({ briefing: args.briefing, profile: args.profile })).rejects.toBe(error);
+
+      expect(h.state.taskRedoRecoveryUncertain).not.toBe(true);
+      expect(h.applyStartTask).not.toHaveBeenCalled();
+    }
+  );
+
+  it('rethrows other outcome recovery errors unchanged', async () => {
+    const h = harness();
+    const error = new Error('unexpected recovery failure');
+    h.tool.recoverAcceptedEffect = vi.fn(async () => {
+      throw error;
+    });
+
+    await expect(h.call(args)).rejects.toBe(error);
+
+    expect(h.state.taskRedoRecoveryUncertain).not.toBe(true);
+    expect(h.applyStartTask).not.toHaveBeenCalled();
+  });
+
   it('keeps the reserved slot when execution may have written before a storage failure', async () => {
     const h = harness();
     h.applyStartTask.mockRejectedValue(new TaskRegistryError('redo', 'storage_error'));
     await expect(h.call(args)).rejects.toBeInstanceOf(UncertainMutationError);
+    expect(h.state.taskRedoRecoveryUncertain).not.toBe(true);
+    expect(h.readByLaunchKey).toHaveBeenCalledTimes(1);
+    expect(h.applyStartTask).toHaveBeenCalledTimes(1);
     expect(h.state.toolCallCounts.get('core.startTask')).toBe(1);
     await h.call(args);
     expect(h.applyStartTask).toHaveBeenCalledTimes(1);
