@@ -603,13 +603,11 @@ export class KubernetesTaskExecutor implements TaskExecutor {
               object(event['involvedObject'])['uid'] === object(pod['metadata'])['uid'] &&
               ['Pulling', 'Pulled', 'Started'].includes(event['reason'] as string)
           );
-        const last = startup
-          .sort((a, b) =>
-            String(a['eventTime'] ?? a['lastTimestamp'] ?? '').localeCompare(
-              String(b['eventTime'] ?? b['lastTimestamp'] ?? '')
-            )
-          )
-          .at(-1);
+        const timestamp = (event: JsonObject): string => {
+          const value = event['eventTime'] ?? event['lastTimestamp'];
+          return typeof value === 'string' ? value : '';
+        };
+        const last = startup.sort((a, b) => timestamp(a).localeCompare(timestamp(b))).at(-1);
         if (last) {
           phase =
             last['reason'] === 'Pulling'
