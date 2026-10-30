@@ -66,12 +66,13 @@ for `generations-1`, where the deploy branch they concern is built on.
 
 ## Finding budget
 
-10 findings: 8 agreed by the owner on 2026-10-19, raised to 9 on 2026-10-23
+11 findings: 8 agreed by the owner on 2026-10-19, raised to 9 on 2026-10-23
 to admit lifemodel-pf3v (a random model-gateway test timeout that turned main
 red), then raised to 10 on 2026-10-29 to admit lifemodel-36y4 (a reminder fired
-while the agent is busy is lost), with no planned work displaced. The value
-lives in `.backlog/config.json` (`findingBudget`). An eleventh comes to the
-owner for a decision.
+while the agent is busy is lost), then raised to 11 on 2026-10-30 to admit
+lifemodel-653.9.20 (a failed workbench image import named no cause), with no
+planned work displaced. The value lives in `.backlog/config.json`
+(`findingBudget`). A twelfth comes to the owner for a decision.
 
 No target date: none was set from outside the work.
 
