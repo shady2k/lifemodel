@@ -5,6 +5,8 @@ export function boundTaskTranscript<
   },
 >(entry: T, raw?: boolean): T;
 
+export function transcriptRawTail(text: string, max: number): string;
+
 export function transcriptRunSlice(text: string, max: number, tail?: boolean): string;
 
 export function transcriptSlice(

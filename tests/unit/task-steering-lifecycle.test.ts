@@ -678,7 +678,7 @@ it.each(['inserted', 'reset'] as const)(
           wait: async () => ({
             stopReason: 'end_turn',
             updates: [
-              { kind: 'text', text: 'A' },
+              { kind: 'text', text: 'A ' },
               ...(boundary === 'inserted'
                 ? [{ kind: 'inserted' as const, commandId: 'cmd' }]
                 : [{ kind: 'reset' as const }]),
@@ -695,9 +695,10 @@ it.each(['inserted', 'reset'] as const)(
       expect(await f.terminal).toMatchObject({ outcome: 'succeeded' });
       const entries = events.flatMap((event) => (event.type === 'transcript' ? [event.entry] : []));
       const texts = entries
-        .filter((entry) => ['A', 'B', 'AB', 'steer'].includes(entry.text))
+        .map((entry) => ({ ...entry, text: entry.text.endsWith('A ') ? 'A ' : entry.text }))
+        .filter((entry) => ['A ', 'B', 'A B', 'steer'].includes(entry.text))
         .map((entry) => entry.text);
-      expect(texts).toEqual(boundary === 'inserted' ? ['A', 'steer', 'B'] : ['A', 'B']);
+      expect(texts).toEqual(boundary === 'inserted' ? ['A ', 'steer', 'B'] : ['A ', 'B']);
     } finally {
       await f.cleanup();
     }
@@ -719,6 +720,49 @@ it('r1 session finally flushes a pending-only tool', async () => {
     expect(
       events.filter((event) => event.type === 'transcript' && event.entry.role === 'tool')
     ).toMatchObject([{ entry: { tool: { name: 'shell', status: 'error' } } }]);
+  } finally {
+    await f.cleanup();
+  }
+}, 15000);
+
+it('r2 insertion boundary holds a streamed key for redaction', async () => {
+  const { createTaskContentScrubber } = await import('../../loader/src/task-content-scrub.js');
+  const events: TaskHarnessEvent[] = [];
+  let reconciled = false;
+  const f = await barrierFixture({
+    onEvent: (event) => {
+      events.push(event);
+    },
+    reconcile: async () => {
+      if (reconciled) return { state: 'idle' };
+      reconciled = true;
+      return {
+        state: 'successor',
+        wait: async () => ({
+          stopReason: 'end_turn',
+          updates: [
+            { kind: 'text', text: 'before sk-abcdefghijk' },
+            { kind: 'inserted', commandId: 'cmd' },
+            { kind: 'text', text: 'lmnopqrstu0123456789 after ' },
+          ],
+        }),
+      };
+    },
+  });
+  try {
+    await f.harness.intakeReady;
+    expect(await f.harness.steer({ commandId: 'cmd', text: 'steer' })).toBe('accepted');
+    await f.release();
+    expect(await f.terminal).toMatchObject({ outcome: 'succeeded' });
+    const scrub = createTaskContentScrubber({});
+    const entries = await Promise.all(
+      events.flatMap((event) => (event.type === 'transcript' ? [scrub(event.entry)] : []))
+    );
+    const text = entries.map((entry) => entry.text).join('');
+    expect(text).toContain('[REDACTED]');
+    expect(text).not.toContain('sk-abcdefghijk');
+    expect(text).not.toContain('lmnopqrstu');
+    expect(text).toContain('after ');
   } finally {
     await f.cleanup();
   }

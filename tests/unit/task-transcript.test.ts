@@ -8,10 +8,11 @@ import { createTranscriptMapper as first } from '../../loader/src/task-opencode.
 import { createTranscriptMapper as scripted } from '../fixtures/task-scripted-config.mjs';
 import { createTranscriptMapper as second } from '../../loader/src/task-prime-agent.js';
 import { type TaskHarnessEvent } from '../../loader/src/task-harness.js';
+import { boundTaskTranscript } from '../../src/ports/task-transcript-bounds.mjs';
 import { validateTaskChannelFrame } from '../../src/ports/task-channel.js';
 
 describe('neutral task session capture', () => {
-  it.each([['�'], ['abc\uD800'], ['\uD800'], ['a�b�'], ['x'.repeat(3995), '🙂🙂', 'last�']])(
+  it.each([['�'], ['abc\uD800'], ['\uD800'], ['a�b�'], ['x '.repeat(1997), '🙂🙂 ', 'last�']])(
     'round2: malformed or replacement text completes without loss (%#)',
     async (...parts) => {
       const source = await readFile('loader/src/task-transcript.ts', 'utf8');
@@ -29,7 +30,7 @@ describe('neutral task session capture', () => {
         (async()=>{const m=await import(workerData.url);const entries=[];
           const mapper=m.createAcpTranscriptMapper(e=>entries.push(e.entry),{name:()=>'',output:()=>''});
           for(const text of workerData.parts) mapper.update({sessionUpdate:'agent_message_chunk',content:{type:'text',text}});
-          mapper.flush();await Promise.resolve();await Promise.resolve();parentPort.postMessage(entries);})();`,
+          mapper.flush(true);await Promise.resolve();await Promise.resolve();parentPort.postMessage(entries);})();`,
         { eval: true, workerData: { url, parts } }
       );
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -60,7 +61,7 @@ describe('neutral task session capture', () => {
       });
       mapper.update({
         sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'Inspecting the files.' },
+        content: { type: 'text', text: 'Inspecting the files. ' },
       });
       mapper.update({
         sessionUpdate: 'tool_call',
@@ -73,7 +74,7 @@ describe('neutral task session capture', () => {
         sessionUpdate: 'tool_call_update',
         toolCallId: 'shell-1',
         status: 'completed',
-        rawOutput: { output: 'head ' + '🙂'.repeat(1000) + ' OUTPUT-END' },
+        rawOutput: { output: 'head ' + '🙂'.repeat(1000) + '\nOUTPUT-END' },
       };
       mapper.update(end);
       mapper.update(end);
@@ -81,17 +82,18 @@ describe('neutral task session capture', () => {
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Final '.repeat(2000) },
       });
-      mapper.flush();
-      await vi.waitFor(() => expect(events).toHaveLength(6));
+      mapper.flush(true);
+      await vi.waitFor(() => expect(events).toHaveLength(7));
       const entries = events.flatMap((event) => (event.type === 'transcript' ? [event.entry] : []));
-      expect(entries[0]).toMatchObject({ role: 'assistant', text: 'Inspecting the files.' });
+      expect(entries[0]).toMatchObject({ role: 'assistant', text: 'Inspecting the files. ' });
       expect(entries[1]).toMatchObject({ role: 'tool', tool: { status: 'running' } });
       expect(entries[2]).toMatchObject({
         role: 'tool',
         tool: { status: 'completed', outputTail: expect.stringContaining('OUTPUT-END') },
       });
       expect(entries[3]?.role).toBe('assistant');
-      for (const entry of entries) {
+      for (const raw of entries) {
+        const entry = boundTaskTranscript(raw);
         expect(Buffer.byteLength(entry.text)).toBeLessThanOrEqual(4000);
         expect(Buffer.byteLength(entry.tool?.outputTail ?? '')).toBeLessThanOrEqual(2000);
         expect(entry.text).not.toContain('�');
@@ -118,7 +120,7 @@ describe('neutral task session capture', () => {
       });
       mapper.update({
         sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'Still working' },
+        content: { type: 'text', text: 'Still working ' },
       });
       await vi.waitFor(() => expect(events).toHaveLength(1), { timeout: 3000 });
       for (let i = 0; i < 1100; i++)
@@ -138,10 +140,10 @@ describe('neutral task session capture', () => {
     const mapper = first((e) => {
       events.push(e);
     });
-    const parts = ['x'.repeat(500), '🙂'.repeat(1000), 'last'];
+    const parts = ['x '.repeat(250), '🙂 '.repeat(1000), 'last'];
     for (const text of parts)
       mapper.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
-    mapper.flush();
+    mapper.flush(true);
     await Promise.resolve();
     await Promise.resolve();
     expect(events.flatMap((e) => (e.type === 'transcript' ? [e.entry.text] : [])).join('')).toBe(
@@ -175,16 +177,16 @@ describe('neutral task session capture', () => {
     for (let i = 0; i < 7; i++)
       mapper.update({
         sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'a'.repeat(500) },
+        content: { type: 'text', text: 'a '.repeat(250) },
       });
-    mapper.flush();
+    mapper.flush(true);
     await Promise.resolve();
     await Promise.resolve();
     const entries = events.flatMap((e) => (e.type === 'transcript' ? [e.entry] : []));
     expect(entries.filter((e) => e.role === 'tool').length).toBeLessThanOrEqual(3);
     expect(entries.find((e) => e.tool?.status === 'completed')?.tool?.outputTail).toBe('FINAL');
     expect(entries.filter((e) => e.role === 'assistant').map((e) => e.text)).toEqual([
-      'a'.repeat(3500),
+      'a '.repeat(1750),
     ]);
   });
 
@@ -282,18 +284,18 @@ it.each([first, second])(
           messageId,
           content: { type: 'text', text },
         });
-      for (const text of ['a', 'b', 'c', 'd', 'e']) {
+      for (const text of ['a ', 'b ', 'c ', 'd ', 'e ']) {
         add(text);
         await vi.advanceTimersByTimeAsync(300);
       }
       expect(entries).toEqual([]);
       await vi.advanceTimersByTimeAsync(2500);
-      expect(entries).toEqual(['abcde']);
-      add('f');
+      expect(entries).toEqual(['a b c d e ']);
+      add('f ');
       add('g', 'two');
-      mapper.flush();
+      mapper.flush(true);
       await vi.advanceTimersByTimeAsync(0);
-      expect(entries).toEqual(['abcde', 'f', 'g']);
+      expect(entries).toEqual(['a b c d e ', 'f ', 'g']);
     } finally {
       vi.useRealTimers();
     }
@@ -318,7 +320,7 @@ it('assistant observation time is its first chunk, not delayed flush', async () 
     });
     mapper.update({
       sessionUpdate: 'agent_message_chunk',
-      content: { type: 'text', text: 'before insertion' },
+      content: { type: 'text', text: 'before insertion ' },
     });
     await vi.advanceTimersByTimeAsync(2500);
     expect(entries).toEqual(['2026-10-01T12:00:00.000Z']);
@@ -377,3 +379,94 @@ it.each([first, second])(
     ]);
   }
 );
+
+it.each(['idle', 'insertion', 'message', 'tool', 'post-prompt', 'size'])(
+  'r2 assistant key streamed across %s boundary is scrubbed',
+  async (boundary) => {
+    const { createTaskContentScrubber } = await import('../../loader/src/task-content-scrub.js');
+    vi.useFakeTimers();
+    try {
+      const entries: TaskHarnessEvent[] = [];
+      const mapper = first((event) => {
+        entries.push(event);
+      });
+      const add = (text: string, messageId = 'one') =>
+        mapper.update({
+          sessionUpdate: 'agent_message_chunk',
+          messageId,
+          content: { type: 'text', text },
+        });
+      add((boundary === 'size' ? 'safe '.repeat(795) : 'before ') + 'sk-abcdefghijk');
+      if (boundary === 'idle') await vi.advanceTimersByTimeAsync(2500);
+      else if (boundary === 'tool')
+        mapper.update({
+          sessionUpdate: 'tool_call',
+          toolCallId: 't',
+          title: 'read',
+          status: 'completed',
+        });
+      else if (boundary !== 'size' && boundary !== 'message') mapper.flush();
+      add('lmnopqrstu0123456789 after ', boundary === 'message' ? 'two' : 'one');
+      mapper.flush(true);
+      await vi.advanceTimersByTimeAsync(0);
+      const scrub = createTaskContentScrubber({});
+      const captured = await Promise.all(
+        entries.filter((event) => event.type === 'transcript').map((event) => scrub(event.entry))
+      );
+      const text = captured.map((entry) => entry.text).join('');
+      expect(text).toContain('[REDACTED]');
+      expect(text).not.toContain('sk-abcdefghijk');
+      expect(text).not.toContain('lmnopqrstu');
+      expect(text).toContain('after ');
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+);
+
+it('r2 oversized assistant run is dropped through its streamed suffix', async () => {
+  const entries: TaskHarnessEvent[] = [];
+  const mapper = first((event) => {
+    entries.push(event);
+  });
+  for (const text of ['sk-' + 'x'.repeat(5000), 'still-secret', ' safe end'])
+    mapper.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
+  mapper.flush(true);
+  await Promise.resolve();
+  expect(
+    entries.flatMap((event) => (event.type === 'transcript' ? [event.entry.text] : [])).join('')
+  ).toBe('… safe end');
+});
+
+it.each([first, second])('r2 running tool gets one error at session end (%#)', async (factory) => {
+  const entries: TaskHarnessEvent[] = [];
+  const mapper = factory((event) => {
+    entries.push(event);
+  });
+  mapper.update({
+    sessionUpdate: 'tool_call',
+    toolCallId: 'running',
+    title: 'shell',
+    status: 'in_progress',
+  });
+  mapper.flush(true);
+  mapper.flush(true);
+  await Promise.resolve();
+  expect(entries).toMatchObject([
+    { entry: { tool: { status: 'running' } } },
+    { entry: { tool: { status: 'error' } } },
+  ]);
+});
+
+it('r2 recent index follows the small-table bounded-lock squawk precedent', async () => {
+  const sql = await readFile(
+    'db/migrations/20261015000034_index_recent_terminal_tasks.sql',
+    'utf8'
+  );
+  const precedent = await readFile('db/migrations/20261015000022_create_task_mailbox.sql', 'utf8');
+  const ignoredIndex = /-- squawk-ignore require-concurrent-index-creation\nCREATE INDEX/;
+  expect(precedent).toMatch(ignoredIndex);
+  expect(sql).toMatch(ignoredIndex);
+  expect(sql).toContain("SET lock_timeout = '1s'");
+  expect(sql).toContain('Small core task table');
+});

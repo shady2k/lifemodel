@@ -198,3 +198,79 @@ it('r1 output front cut drops the entire partial run and keeps UTF-8 valid', () 
   });
   expect(bounded.tool.outputTail).toBe('…' + ' safe '.repeat(330));
 });
+
+it.each([
+  ['json', '"api_key": "s3cr3tvalue"', 's3cr3tvalue'],
+  ['password', 'password: hunter2', 'hunter2'],
+  ['bearer', 'Bearer abcdefghijklmnop', 'abcdefghijklmnop'],
+])(
+  'r2 raw output front cut never loses secret context (%s)',
+  async (_label, assignment, secret) => {
+    const { createTranscriptMapper } = await import('../../loader/src/task-opencode.js');
+    const calls = vi.spyOn(TaskJsonClient.prototype, 'call').mockResolvedValue({});
+    const c = channel();
+    const mapper = createTranscriptMapper((event) => {
+      if (event.type === 'transcript') c.enqueue(event.entry);
+    });
+    // Native 2,000-byte front edge lands inside the key/scheme, not the value.
+    const output = 'prefix ' + assignment + ' '.repeat(1999 - assignment.length + 3);
+    mapper.update({
+      sessionUpdate: 'tool_call',
+      toolCallId: 'edge',
+      title: 'shell',
+      status: 'completed',
+      rawOutput: { output },
+    });
+    await Promise.resolve();
+    await c.close();
+    expect(calls).toHaveBeenCalledOnce();
+    const payload = (calls.mock.calls[0]?.[1] as { payload: { tool: { outputTail: string } } })
+      .payload;
+    expect(payload.tool.outputTail).not.toBe('');
+    expect(payload.tool.outputTail).not.toContain(secret);
+    expect(Buffer.byteLength(payload.tool.outputTail)).toBeLessThanOrEqual(2000);
+  }
+);
+
+it.each(['"api_key": "s3cr3tvalue"', 'password: hunter2', 'Bearer abcdefghijklmnop'])(
+  'r2 oversized raw front cut drops the orphaned first line (%s)',
+  async (assignment) => {
+    const { transcriptRawTail } = await import('../../src/ports/task-transcript-bounds.mjs');
+    const raw = 'prefix ' + assignment + ' '.repeat(3999 - assignment.length + 3);
+    expect(transcriptRawTail(raw, 4000)).toBe('…');
+    expect(transcriptRawTail(raw + '\nkeep this line', 4000)).toBe('…keep this line');
+    const value = boundTaskTranscript(
+      { ...entry(''), tool: { name: 'shell', outputTail: raw } },
+      true
+    );
+    expect(value.tool.outputTail).toBe('…');
+  }
+);
+
+it('r2 raw budget spends input headroom before output and does not split text runs', () => {
+  const outputTail = 'important output\n'.repeat(230);
+  const raw = boundTaskTranscript(
+    { ...entry(''), tool: { name: 'shell', input: 'input '.repeat(660), outputTail } },
+    true
+  );
+  expect(raw.tool.outputTail).toBe(outputTail);
+  expect(Buffer.byteLength(raw.tool.input)).toBeLessThanOrEqual(1024);
+  const text = 'a '.repeat(1990) + 'sk-abcdefghijk' + 'longrun'.repeat(20);
+  const bounded = boundTaskTranscript(entry(text), true);
+  expect(bounded.text).toBe('a '.repeat(1990) + '…');
+  expect(bounded.text).not.toContain('sk-');
+});
+
+it('r2 raw JSON budget drops cut text runs instead of orphaning credential prefixes', () => {
+  const text = '" '.repeat(1550) + 'sk-abcdefghijk' + 'x'.repeat(500);
+  const value = boundTaskTranscript(
+    {
+      ...entry(text),
+      tool: { name: 'shell', input: 'i '.repeat(650), outputTail: 'important\n'.repeat(350) },
+    },
+    true
+  );
+  expect(value.text).not.toContain('sk-');
+  expect(value.text).toMatch(/…$/);
+  expect(Buffer.byteLength(JSON.stringify(value))).toBeLessThanOrEqual(8192 - 256);
+});

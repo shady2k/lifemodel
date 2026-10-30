@@ -729,10 +729,11 @@ export class AcpTaskHarness implements TaskHarness {
             if (steering) this.intake.resolve();
           }
         );
+        // Notification chunks already admitted to the queue belong to this response.
+        await queue;
         transcript?.flush();
         promptResponse = response;
         stopReason = response['stopReason'];
-        await queue;
         if (fault) throw fault;
       };
       await prompt(briefing.text);
