@@ -50,7 +50,21 @@ it('review4: escaped fields stay below SQL jsonb text bound', () => {
   expect(result.tool.outputTail).not.toBe('');
 });
 
-
+it('round2: escaped tool tails are bounded before queue admission', async () => {
+  const calls = vi.spyOn(TaskJsonClient.prototype, 'call').mockResolvedValue({});
+  const c = channel();
+  c.enqueue({
+    ...entry(''),
+    role: 'tool',
+    tool: { name: 'shell', status: 'completed', outputTail: '\u0001'.repeat(2000) },
+  });
+  await c.close();
+  expect(calls).toHaveBeenCalledOnce();
+  const frame = calls.mock.calls[0]?.[1] as { payload: { tool: { outputTail: string } } };
+  expect(frame.payload.tool.outputTail.length).toBeGreaterThan(0);
+  expect(Buffer.byteLength(JSON.stringify(frame.payload))).toBeLessThanOrEqual(8192);
+  expect(c.droppedCount).toBe(0);
+});
 it.each(['�', 'abc\uD800', '\uD800', 'a�b�'])(
   'round2: shared bounds preserve replacement characters in %s',
   (text) => {
