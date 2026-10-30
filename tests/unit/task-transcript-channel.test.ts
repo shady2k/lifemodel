@@ -1,4 +1,4 @@
-import { boundTaskTranscript } from '../../src/ports/task-transcript-bounds.mjs';
+import { boundTaskTranscript, transcriptSlice } from '../../src/ports/task-transcript-bounds.mjs';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createTaskTranscriptChannel } from '../../loader/src/task-transcript-channel.js';
 import { TaskJsonClient, LauncherError } from '../../loader/src/task-launcher-http.js';
@@ -48,4 +48,20 @@ it('review4: escaped fields stay below SQL jsonb text bound', () => {
   });
   expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(8192 - 256);
   expect(result.tool.outputTail).not.toBe('');
+});
+
+
+it.each(['�', 'abc\uD800', '\uD800', 'a�b�'])(
+  'round2: shared bounds preserve replacement characters in %s',
+  (text) => {
+    expect(boundTaskTranscript(entry(text)).text).toBe(Buffer.from(text).toString('utf8'));
+  }
+);
+
+it('round2: UTF-8 head/tail cuts keep real replacement glyphs', () => {
+  expect(transcriptSlice('�a�', 7).text).toBe('�a�');
+  expect(transcriptSlice('x🙂�', 7, true).text).toBe('🙂�');
+  expect(transcriptSlice('🙂', 3).text).toBe('');
+  expect(transcriptSlice('🙂', 3, true).text).toBe('');
+  expect(transcriptSlice('abc\uD800', 6)).toEqual({ text: 'abc�', consumed: 4 });
 });

@@ -1,3 +1,7 @@
+import { Worker } from 'node:worker_threads';
+import ts from 'typescript';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, it, expect, vi } from 'vitest';
 import { readFile } from 'node:fs/promises';
 import { createTranscriptMapper as first } from '../../loader/src/task-opencode.js';
@@ -6,6 +10,46 @@ import { type TaskHarnessEvent } from '../../loader/src/task-harness.js';
 import { validateTaskChannelFrame } from '../../src/ports/task-channel.js';
 
 describe('neutral task session capture', () => {
+  it.each([['�'], ['abc\uD800'], ['\uD800'], ['a�b�'], ['x'.repeat(3995), '🙂🙂', 'last�']])(
+    'round2: malformed or replacement text completes without loss (%#)',
+    async (...parts) => {
+      const source = await readFile('loader/src/task-transcript.ts', 'utf8');
+      const compiled = ts
+        .transpileModule(source, {
+          compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2024 },
+        })
+        .outputText.replace(
+          '../../src/ports/task-transcript-bounds.mjs',
+          pathToFileURL(resolve('src/ports/task-transcript-bounds.mjs')).href
+        );
+      const url = 'data:text/javascript;base64,' + Buffer.from(compiled).toString('base64');
+      const worker = new Worker(
+        `const {parentPort,workerData}=require('node:worker_threads');
+        (async()=>{const m=await import(workerData.url);const entries=[];
+          const mapper=m.createAcpTranscriptMapper(e=>entries.push(e.entry),{name:()=>'',output:()=>''});
+          for(const text of workerData.parts) mapper.update({sessionUpdate:'agent_message_chunk',content:{type:'text',text}});
+          mapper.flush();await Promise.resolve();await Promise.resolve();parentPort.postMessage(entries);})();`,
+        { eval: true, workerData: { url, parts } }
+      );
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const entries = await new Promise<{ text: string }[]>((resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('mapper deadline exceeded')), 2000);
+          worker.once('message', resolve);
+          worker.once('error', reject);
+        });
+        expect(entries.map((e) => e.text).join('')).toBe(
+          Buffer.from(parts.join('')).toString('utf8')
+        );
+        for (const entry of entries)
+          expect(Buffer.byteLength(entry.text)).toBeLessThanOrEqual(4000);
+      } finally {
+        clearTimeout(timer);
+        await worker.terminate();
+      }
+    }
+  );
+
   it.each([first, second])(
     'maps tool patches and assistant excerpts with stable replay IDs (%#)',
     async (factory) => {
@@ -142,6 +186,7 @@ describe('neutral task session capture', () => {
       'a'.repeat(3500),
     ]);
   });
+
 
   it('generic transcript/launcher/client/port code does not name vendors', async () => {
     const paths = [

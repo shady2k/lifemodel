@@ -1,5 +1,6 @@
 /** ACP session excerpt capture. Native naming/output differences belong to adapters. */
 import { createHash } from 'node:crypto';
+import { transcriptSlice } from '../../src/ports/task-transcript-bounds.mjs';
 import type {
   TaskHarnessEventSink,
   TaskTranscriptEntry,
@@ -9,10 +10,7 @@ type Json = Record<string, unknown>;
 const record = (v: unknown): Json =>
   v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Json) : {};
 export function transcriptText(value: string, bytes = 4000, tail = false): string {
-  const buffer = Buffer.from(value);
-  return (tail ? buffer.subarray(-bytes) : buffer.subarray(0, bytes))
-    .toString('utf8')
-    .replace(tail ? /^\uFFFD+/ : /\uFFFD+$/, '');
+  return transcriptSlice(value, bytes, tail).text;
 }
 export function createAcpTranscriptMapper(
   sink: TaskHarnessEventSink | undefined,
@@ -60,13 +58,19 @@ export function createAcpTranscriptMapper(
           if (content['type'] !== 'text' || typeof content['text'] !== 'string') return;
           let rest = content['text'];
           while (rest) {
-            const part = transcriptText(rest, 4000 - Buffer.byteLength(pending));
-            if (!part) {
-              flush();
-              continue;
+            let part = transcriptSlice(rest, 4000 - Buffer.byteLength(pending));
+            if (!part.consumed) {
+              if (pending) {
+                flush();
+                continue;
+              }
+              // Even malformed UTF-16 must consume original code units.
+              const point = rest.codePointAt(0);
+              const units = point !== undefined && point > 0xffff ? 2 : 1;
+              part = { text: Buffer.from(rest.slice(0, units)).toString('utf8'), consumed: units };
             }
-            pending += part;
-            rest = rest.slice(part.length);
+            pending += part.text;
+            rest = rest.slice(part.consumed);
             if (Buffer.byteLength(pending) >= 3997) flush();
           }
           if (pending && !timer) {

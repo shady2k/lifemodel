@@ -1,17 +1,36 @@
 import { Buffer } from 'node:buffer';
 /**
+ * Cut encoded UTF-8 only at code point boundaries. Real U+FFFD is content.
+ * @param {string} text @param {number} max @param {boolean} [tail]
+ */
+export function transcriptSlice(text, max, tail = false) {
+  const b = Buffer.from(text);
+  let start = tail ? Math.max(0, b.length - Math.max(0, max)) : 0;
+  let end = tail ? b.length : Math.min(b.length, Math.max(0, max));
+  if (tail) {
+    while (start < b.length && (b[start] & 0xc0) === 0x80) start++;
+  } else {
+    while (end > 0 && end < b.length && (b[end] & 0xc0) === 0x80) end--;
+  }
+  let consumed = 0;
+  if (!tail) {
+    let bytes = 0;
+    for (const point of text) {
+      bytes += Buffer.byteLength(point);
+      if (bytes > end) break;
+      consumed += point.length;
+    }
+  }
+  return { text: b.subarray(start, end).toString('utf8'), consumed };
+}
+/**
  * Re-bound scrubbed transcript fields and both JSON wire/JSONB text budgets.
  * @param {{text: string, tool: {name: string, outputTail: string} | null}} entry
  */
 export function boundTaskTranscript(entry) {
   /** @param {string} text @param {number} max @param {boolean} [tail] */
-  const clip = (text, max, tail = false) => {
-    if (max <= 0) return '';
-    const b = Buffer.from(text);
-    return (tail ? b.subarray(-max) : b.subarray(0, max))
-      .toString('utf8')
-      .replace(tail ? /^\uFFFD+/ : /\uFFFD+$/, '');
-  };
+  const clip = (text, max, tail = false) =>
+    transcriptSlice(text, max, tail).text;
   const value = {
     ...entry,
     text: clip(entry.text, 4000),

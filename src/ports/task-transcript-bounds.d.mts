@@ -4,3 +4,9 @@ export function boundTaskTranscript<
     tool: { name: string; outputTail: string } | null;
   },
 >(entry: T): T;
+
+export function transcriptSlice(
+  text: string,
+  max: number,
+  tail?: boolean
+): { text: string; consumed: number };
