@@ -114,3 +114,87 @@ it('core rejects an oversized or non-string input summary', async () => {
   expect(() => validateTaskChannelFrame(frame('🙂'.repeat(76)))).toThrow('invalid_frame');
   expect(() => validateTaskChannelFrame(frame({ command: 'oops' }))).toThrow('invalid_frame');
 });
+
+// Keep credentials intact until redaction, including native adapter bounds.
+it.each([
+  ['url', 'https://oauth2:glpat-' + 'X'.repeat(90) + '@host/repo', 'glpat-'],
+  ['key', 'sk-' + 'Y'.repeat(90), 'sk-'],
+])('r1 secret straddles input and output bounds (%s)', async (_name, credential, marker) => {
+  const { createTranscriptMapper } = await import('../../loader/src/task-opencode.js');
+  const calls = vi.spyOn(TaskJsonClient.prototype, 'call').mockResolvedValue({});
+  const c = channel();
+  const mapper = createTranscriptMapper((event) => {
+    if (event.type === 'transcript') c.enqueue(event.entry);
+  });
+  mapper.update({
+    sessionUpdate: 'tool_call',
+    toolCallId: 'edge',
+    title: 'shell',
+    status: 'completed',
+    rawInput: { command: 'echo ok; '.repeat(27) + credential + ' trailing' },
+    rawOutput: { output: 'before ' + credential + ' ' + 'end '.repeat(490) },
+  });
+  await Promise.resolve();
+  await c.close();
+  expect(calls).toHaveBeenCalledOnce();
+  const payload = (
+    calls.mock.calls[0]?.[1] as { payload: { tool: { input: string; outputTail: string } } }
+  ).payload;
+  const serialized = JSON.stringify(payload);
+  expect(payload.tool.input).toContain('[REDACTED]');
+  expect(payload.tool.input).toContain(' trailing');
+  expect(serialized).not.toContain(marker);
+  expect(serialized).not.toContain('X'.repeat(8));
+  expect(serialized).not.toContain('Y'.repeat(8));
+  expect(Buffer.byteLength(payload.tool.input)).toBeLessThanOrEqual(300);
+  expect(Buffer.byteLength(payload.tool.outputTail)).toBeLessThanOrEqual(2000);
+});
+
+it('r1 final bounds drop partial non-whitespace runs at both edges', () => {
+  const bounded = boundTaskTranscript({
+    ...entry(''),
+    tool: {
+      name: 'shell',
+      input: 'ok '.repeat(95) + 'unrecognized-sensitive-run-' + 'Z'.repeat(80),
+      outputTail: 'Z'.repeat(80) + 'secret-fragment ' + 'ok '.repeat(655),
+    },
+  });
+  expect(bounded.tool.input).toBe('ok '.repeat(95) + '…');
+  expect(bounded.tool.outputTail).toBe('… ' + 'ok '.repeat(655));
+  expect(JSON.stringify(bounded.tool)).not.toContain('Z');
+});
+
+it('r1 short key prefix cut at byte 300 is never stored', async () => {
+  const calls = vi.spyOn(TaskJsonClient.prototype, 'call').mockResolvedValue({});
+  const c = channel();
+  const { createTranscriptMapper } = await import('../../loader/src/task-opencode.js');
+  const mapper = createTranscriptMapper((event) => {
+    if (event.type === 'transcript') c.enqueue(event.entry);
+  });
+  mapper.update({
+    sessionUpdate: 'tool_call',
+    toolCallId: 'short-edge',
+    title: 'shell',
+    status: 'completed',
+    rawInput: { command: 'x '.repeat(146) + 'sk-abcdef0123456789ABCDEFGHIJ' },
+    rawOutput: '',
+  });
+  await Promise.resolve();
+  await c.close();
+  expect(calls).toHaveBeenCalledOnce();
+  const tool = (calls.mock.calls[0]?.[1] as { payload: { tool: { input: string } } }).payload.tool;
+  expect(tool.input).toBe('x '.repeat(146) + '…');
+  expect(tool.input).not.toContain('sk-');
+  expect(tool.input).not.toContain('abcdef');
+});
+
+it('r1 output front cut drops the entire partial run and keeps UTF-8 valid', () => {
+  const bounded = boundTaskTranscript({
+    ...entry(''),
+    tool: {
+      name: 'shell',
+      outputTail: 'cut-sensitive-run-' + '🙂'.repeat(50) + ' safe '.repeat(330),
+    },
+  });
+  expect(bounded.tool.outputTail).toBe('…' + ' safe '.repeat(330));
+});

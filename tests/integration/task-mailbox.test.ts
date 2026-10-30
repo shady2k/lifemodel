@@ -530,6 +530,39 @@ describe('durable fenced task mailbox', () => {
     ).rejects.toMatchObject({ code: 'message_conflict' });
   });
 
+  it('r1 core scrub expansion re-bounds whole runs before persistence', async () => {
+    const m = mailbox();
+    const input = 'token=x '.repeat(20) + 'unrecognized-input-run-' + 'Q'.repeat(30);
+    const outputTail = 'output-sensitive-run-' + 'R'.repeat(30) + ' ' + 'token=x '.repeat(200);
+    await expect(
+      m.append(
+        {
+          ...transcriptFrame('r1-core-edge', 1),
+          payload: {
+            id: 'r1-core-edge',
+            role: 'tool',
+            time: '2026-10-30T00:00:00.000Z',
+            text: '',
+            tool: { name: 'shell', input, outputTail, status: 'completed' },
+          },
+        } as TaskChannelFrame,
+        identity
+      )
+    ).resolves.toBeDefined();
+    const stored = await stores.postgres.query(
+      'SELECT payload FROM core.task_transcript WHERE task_id=$1',
+      [identity.taskId]
+    );
+    const payload = stored.rows[0].payload;
+    expect(Buffer.byteLength(payload.tool.input)).toBeLessThanOrEqual(300);
+    expect(Buffer.byteLength(payload.tool.outputTail)).toBeLessThanOrEqual(2000);
+    expect(payload.tool.input).toBe('token=[REDACTED] '.repeat(17) + '…');
+    expect(payload.tool.outputTail).toMatch(/^…\s/);
+    expect(JSON.stringify(payload.tool)).not.toContain('token=x');
+    expect(JSON.stringify(payload.tool)).not.toContain('Q');
+    expect(JSON.stringify(payload.tool)).not.toContain('R'.repeat(8));
+  });
+
   it('transcript: enforces UTF-8 entry bounds and the 1024-entry per-task cap with concurrent intake', async () => {
     const m = mailbox();
     expect(() =>

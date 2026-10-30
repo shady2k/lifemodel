@@ -48,7 +48,8 @@ export interface TaskTranscriptEntry {
 }
 export interface TaskTranscriptMapper {
   update(value: unknown): void;
-  flush(): void;
+  /** End-of-session also records calls that never left pending. */
+  flush(ended?: boolean): void;
 }
 export type TaskHarnessEvent =
   | { type: 'transcript'; entry: TaskTranscriptEntry }

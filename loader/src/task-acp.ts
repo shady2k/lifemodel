@@ -288,6 +288,7 @@ export class AcpTaskHarness implements TaskHarness {
     const transcriptCommands = new Map<string, { role: 'steer' | 'answer'; text: string }>();
     const transcriptInserted = new Set<string>();
     const captureInserted = (commandId: string, insertedAt?: string) => {
+      transcript?.flush();
       const command = transcriptCommands.get(commandId);
       if (!command || transcriptInserted.has(commandId)) return;
       transcriptInserted.add(commandId);
@@ -795,8 +796,10 @@ export class AcpTaskHarness implements TaskHarness {
           for (const update of evidence.updates) {
             if (update.kind === 'inserted') {
               captureInserted(update.commandId, update.insertedAt);
-            } else if (update.kind === 'reset') turn.continueTurn();
-            else if (update.kind === 'text')
+            } else if (update.kind === 'reset') {
+              transcript?.flush();
+              turn.continueTurn();
+            } else if (update.kind === 'text')
               await applyUpdate({
                 sessionUpdate: 'agent_message_chunk',
                 content: { type: 'text', text: update.text },
@@ -872,7 +875,7 @@ export class AcpTaskHarness implements TaskHarness {
         /* preserve cleanup */
       }
     } finally {
-      transcript?.flush();
+      transcript?.flush(true);
       turn.finish(result, promptResponse);
       closing = true;
       this.cancelRequest = undefined;

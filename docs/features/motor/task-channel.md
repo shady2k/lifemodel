@@ -17,7 +17,7 @@ and `user-briefing`. `tool` is null except for the tool role, where it contains
 `{ name, input?, status, outputTail }`; status is `running`, `completed`, or `error`.
 Text is at most 4,000 UTF-8 bytes, name 128 bytes, input summary 300 bytes, output tail 2,000 bytes,
 and the encoded entry 8 KiB. Ordinary frame identity/authority/transport bounds
-still apply. Adapters select command, code, path or URL as a short input summary; no full argument bags, artifacts or raw provider messages are copied. Input is scrubbed and re-bounded like other text. The existing 8 KiB SQL row bound still suffices; older entries without input remain readable.
+still apply. Adapters select command, code, path or URL as a short input summary; no full argument bags, artifacts or raw provider messages are copied. The mapper keeps up to 4,000 raw input bytes within the bounded enqueue budget, so the launcher can scrub complete credentials before the final 300-byte cut. Both launcher and core re-bound after redaction. Input head cuts and output-tail front cuts discard a partial non-whitespace run and mark the omission with `…`. Calls that remain pending are captured once as `error` at session end; normal intermediate flushes do not end a call. The existing 8 KiB SQL row bound still suffices; older entries without input remain readable.
 
 The launcher captures best effort on a separate bounded socket/queue (64 waiting,
 1,024 recent deduplication IDs). A lost ACK or 5xx gets one identical replay;

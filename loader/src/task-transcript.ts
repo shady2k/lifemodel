@@ -1,6 +1,6 @@
 /** ACP session excerpt capture. Native naming/output differences belong to adapters. */
 import { createHash } from 'node:crypto';
-import { transcriptSlice } from '../../src/ports/task-transcript-bounds.mjs';
+import { transcriptSlice, transcriptRunSlice } from '../../src/ports/task-transcript-bounds.mjs';
 import type {
   TaskHarnessEventSink,
   TaskTranscriptEntry,
@@ -34,6 +34,7 @@ export function createAcpTranscriptMapper(
       status: 'running' | 'completed' | 'error';
       outputTail: string;
       runningEmitted: boolean;
+      emitted: boolean;
     }
   >();
   const seen = new Set<string>();
@@ -68,7 +69,24 @@ export function createAcpTranscriptMapper(
     pendingAt = undefined;
   };
   return {
-    flush,
+    flush(ended = false) {
+      flush();
+      if (!ended) return;
+      for (const [id, tool] of tools) {
+        if (tool.emitted) continue;
+        tool.emitted = true;
+        emit(`tool:${id}:error`, {
+          role: 'tool',
+          text: '',
+          tool: {
+            name: tool.name,
+            input: tool.input,
+            status: 'error',
+            outputTail: tool.outputTail,
+          },
+        });
+      }
+    },
     update(value) {
       try {
         const update = record(value);
@@ -110,7 +128,8 @@ export function createAcpTranscriptMapper(
             previous?.name && previous.name !== 'tool'
               ? previous.name
               : transcriptText(mapping.name(update), 128);
-          const input = transcriptText(mapping.input?.(update) || previous?.input || '', 300);
+          // Preserve whole credentials for the channel scrubber, within its raw queue budget.
+          const input = transcriptRunSlice(mapping.input?.(update) || previous?.input || '', 4000);
           const status =
             update['status'] == null
               ? (previous?.status ?? 'running')
@@ -119,7 +138,7 @@ export function createAcpTranscriptMapper(
                 : update['status'] === 'completed'
                   ? 'completed'
                   : 'running';
-          const outputTail = transcriptText(
+          const outputTail = transcriptRunSlice(
             mapping.output(update) || previous?.outputTail || '',
             2000,
             true
@@ -132,6 +151,7 @@ export function createAcpTranscriptMapper(
             input,
             status,
             outputTail,
+            emitted: previous?.emitted === true || shouldEmit,
             runningEmitted:
               previous?.runningEmitted === true || (shouldEmit && status === 'running'),
           });

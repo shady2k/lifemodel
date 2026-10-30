@@ -63,7 +63,7 @@ export function createTaskTranscriptChannel(options: {
     enqueue(entry: TaskTranscriptEntry) {
       try {
         if (closed || ids.has(entry.id)) return;
-        entry = boundTaskTranscript(entry);
+        entry = boundTaskTranscript(entry, true);
         if (queue.length >= 64 || Buffer.byteLength(JSON.stringify(entry)) > 8192) {
           dropped++;
           return;

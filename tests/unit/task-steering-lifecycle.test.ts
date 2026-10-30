@@ -3,6 +3,7 @@ import { Socket } from 'node:net';
 import { mkdtemp, writeFile, rm, readdir, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { createTranscriptMapper } from '../../loader/src/task-prime-agent.js';
 import { AcpTaskHarness } from '../../loader/src/task-acp.js';
 import {
   ScriptedTaskHarness,
@@ -312,6 +313,7 @@ async function barrierFixture(input: {
   }) => Promise<'accepted' | 'rejected' | 'uncertain'>;
   reconcile?: (input: TaskEndTurnInput) => Promise<TaskEndTurnReconciliation>;
   question?: TaskQuestionState;
+  pendingTool?: boolean;
   onEvent?: (event: TaskHarnessEvent) => void | Promise<void>;
 }) {
   const certificate = await createStorageCertificate(['localhost']);
@@ -340,6 +342,17 @@ async function barrierFixture(input: {
     reconcileEndTurn: input.reconcile ?? (async () => ({ state: 'idle' })),
     question: input.question,
     onEvent: input.onEvent,
+    createTranscriptMapper: (sink) => {
+      const mapper = createTranscriptMapper(sink);
+      if (input.pendingTool)
+        mapper.update({
+          sessionUpdate: 'tool_call',
+          toolCallId: 'waiting',
+          title: 'shell',
+          status: 'pending',
+        });
+      return mapper;
+    },
   });
   const terminal = harness.start({ text: 'brief', model: 'task' });
   await vi.waitFor(() => access(join(work, 'prompt-tail')));
@@ -646,4 +659,67 @@ it('late reconciliation captures native insertion time, not reconciliation time'
     expected: 'succeeded',
     insertedAt: '2026-10-01T12:00:00.000Z',
   });
+}, 15000);
+
+it.each(['inserted', 'reset'] as const)(
+  'r1 successor %s splits A steer B without message IDs',
+  async (boundary) => {
+    const events: TaskHarnessEvent[] = [];
+    let reconciled = false;
+    const f = await barrierFixture({
+      onEvent: (event) => {
+        events.push(event);
+      },
+      reconcile: async () => {
+        if (reconciled) return { state: 'idle' };
+        reconciled = true;
+        return {
+          state: 'successor',
+          wait: async () => ({
+            stopReason: 'end_turn',
+            updates: [
+              { kind: 'text', text: 'A' },
+              ...(boundary === 'inserted'
+                ? [{ kind: 'inserted' as const, commandId: 'cmd' }]
+                : [{ kind: 'reset' as const }]),
+              { kind: 'text', text: 'B' },
+            ],
+          }),
+        };
+      },
+    });
+    try {
+      await f.harness.intakeReady;
+      expect(await f.harness.steer({ commandId: 'cmd', text: 'steer' })).toBe('accepted');
+      await f.release();
+      expect(await f.terminal).toMatchObject({ outcome: 'succeeded' });
+      const entries = events.flatMap((event) => (event.type === 'transcript' ? [event.entry] : []));
+      const texts = entries
+        .filter((entry) => ['A', 'B', 'AB', 'steer'].includes(entry.text))
+        .map((entry) => entry.text);
+      expect(texts).toEqual(boundary === 'inserted' ? ['A', 'steer', 'B'] : ['A', 'B']);
+    } finally {
+      await f.cleanup();
+    }
+  },
+  15000
+);
+
+it('r1 session finally flushes a pending-only tool', async () => {
+  const events: TaskHarnessEvent[] = [];
+  const f = await barrierFixture({
+    pendingTool: true,
+    onEvent: (event) => {
+      events.push(event);
+    },
+  });
+  try {
+    await f.release();
+    expect(await f.terminal).toMatchObject({ outcome: 'succeeded' });
+    expect(
+      events.filter((event) => event.type === 'transcript' && event.entry.role === 'tool')
+    ).toMatchObject([{ entry: { tool: { name: 'shell', status: 'error' } } }]);
+  } finally {
+    await f.cleanup();
+  }
 }, 15000);

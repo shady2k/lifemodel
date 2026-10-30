@@ -73,7 +73,7 @@ describe('neutral task session capture', () => {
         sessionUpdate: 'tool_call_update',
         toolCallId: 'shell-1',
         status: 'completed',
-        rawOutput: { output: 'head' + '🙂'.repeat(1000) + 'OUTPUT-END' },
+        rawOutput: { output: 'head ' + '🙂'.repeat(1000) + ' OUTPUT-END' },
       };
       mapper.update(end);
       mapper.update(end);
@@ -341,3 +341,39 @@ it.each([
   await Promise.resolve();
   expect(entries).toMatchObject([{ entry: { tool: { input } } }]);
 });
+
+it.each([first, second])(
+  'r1 pending-only tools are captured once on session end (%#)',
+  async (factory) => {
+    const events: TaskHarnessEvent[] = [];
+    const mapper = factory((event) => {
+      events.push(event);
+    });
+    mapper.update({
+      sessionUpdate: 'tool_call',
+      toolCallId: 'waiting',
+      title: 'shell',
+      status: 'pending',
+      rawInput: { command: 'sleep 240', code: 'sleep 240' },
+    });
+    mapper.flush();
+    await Promise.resolve();
+    expect(events).toEqual([]);
+    mapper.flush(true);
+    mapper.flush(true);
+    await Promise.resolve();
+    expect(events).toMatchObject([
+      {
+        type: 'transcript',
+        entry: {
+          role: 'tool',
+          tool: {
+            name: 'shell',
+            input: 'sleep 240',
+            status: 'error',
+          },
+        },
+      },
+    ]);
+  }
+);
