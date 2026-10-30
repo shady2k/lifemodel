@@ -246,7 +246,7 @@ export async function observeInsertion(input: {
         if (response['success'] !== true || response['command'] !== 'get_messages') break;
         const data = asRecord(response['data']);
         if (!Array.isArray(data['messages'])) break;
-        const inserted = data['messages'].find((value: unknown) => {
+        const inserted: unknown = data['messages'].find((value: unknown) => {
           const message = asRecord(value);
           return message['role'] === 'user' && messageText(message).startsWith(marker);
         });
@@ -448,13 +448,14 @@ function successorEvidence(
         output: row['content'],
       });
     } else if (row['role'] === 'user') {
+      const insertedAt = nativeInsertionTime(row);
       for (const commandId of commandIds)
         if (messageText(row).startsWith(steeringMarker(commandId) + '\n'))
           updates.push({
             kind: 'inserted',
             commandId,
             text: messageText(row),
-            ...(nativeInsertionTime(row) ? { insertedAt: nativeInsertionTime(row)! } : {}),
+            ...(insertedAt ? { insertedAt } : {}),
           });
       final = '';
       updates.push({ kind: 'reset' });
