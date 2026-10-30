@@ -317,8 +317,20 @@ it('call references are optional safe bounded IDs at the core boundary', async (
   expect(() =>
     validateTaskChannelFrame(frame({ callRef: 'call_' + 'a'.repeat(64) }))
   ).not.toThrow();
-  expect(() => validateTaskChannelFrame(frame({ callRef: 'a'.repeat(128) }))).not.toThrow();
-  for (const callRef of ['', 'a'.repeat(129), 5, null, {}, 'native/call:123', 'bad\0id'])
+  for (const callRef of [
+    '',
+    'a'.repeat(128),
+    'a'.repeat(129),
+    'toolu_native123',
+    'call_' + 'A'.repeat(64),
+    'call_' + 'a'.repeat(63),
+    'call_' + 'a'.repeat(65),
+    5,
+    null,
+    {},
+    'native/call:123',
+    'bad\0id',
+  ])
     expect(() => validateTaskChannelFrame(frame({ callRef }))).toThrow('invalid_frame');
   const bounded = boundTaskTranscript({
     ...entry(''),

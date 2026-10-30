@@ -26,7 +26,7 @@ export interface TaskTranscriptEntry {
   readonly text: string;
   readonly tool: {
     readonly name: string;
-    /** Opaque correlation for observations of one call, not proof of execution. */
+    /** call_ + 64 lowercase hex digits; correlates one call, not proof of execution. */
     readonly callRef?: string;
     readonly input?: string;
     readonly status: 'running' | 'completed' | 'error';
@@ -246,7 +246,9 @@ export function validateTaskChannelFrame(value: unknown): TaskChannelFrame {
             ...(payload['tool']['input'] === undefined ? [] : ['input']),
             ...(payload['tool']['callRef'] === undefined ? [] : ['callRef']),
           ]) &&
-          (payload['tool']['callRef'] === undefined || id(payload['tool']['callRef'])) &&
+          (payload['tool']['callRef'] === undefined ||
+            (typeof payload['tool']['callRef'] === 'string' &&
+              /^call_[a-f0-9]{64}$/.test(payload['tool']['callRef']))) &&
           (payload['tool']['input'] === undefined ||
             (typeof payload['tool']['input'] === 'string' &&
               Buffer.byteLength(payload['tool']['input']) <= 300)) &&

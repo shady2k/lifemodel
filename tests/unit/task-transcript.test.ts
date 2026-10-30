@@ -462,7 +462,9 @@ it.each(
       status === 'failed' ? 'error' : 'completed',
       status === 'failed' ? 'error' : 'completed',
     ]);
-    const refs = nativeIds.map((id) => `call_${createHash('sha256').update(id).digest('hex')}`);
+    const refs = nativeIds.map(
+      (id) => `call_${createHash('sha256').update(`${id}\0${0}`).digest('hex')}`
+    );
     expect(entries.map((entry) => entry.tool?.callRef)).toEqual([
       refs[0],
       refs[1],
@@ -529,6 +531,210 @@ it.each(
   }
 );
 
+it.each(
+  [first, second, scripted].flatMap((factory) =>
+    [
+      { sessionUpdate: 'tool_call', toolCallId: 'known', status: 'in_progress' },
+      { sessionUpdate: 'tool_call_update', toolCallId: 'known', rawOutput: 'progress' },
+      { sessionUpdate: 'tool_call_update', toolCallId: 'known', status: 'completed' },
+      { sessionUpdate: 'tool_call_update' },
+      { sessionUpdate: 'tool_call_update', toolCallId: null },
+      { sessionUpdate: 'tool_call_update', toolCallId: '' },
+      { sessionUpdate: 'tool_call_update', toolCallId: 42 },
+      { sessionUpdate: 'tool_call', toolCallId: null },
+    ].map((patch) => [factory, patch] as const)
+  )
+)(
+  'known or malformed tool patches hold a streamed credential for scrubbing (%#)',
+  async (factory, patch) => {
+    const { createTaskContentScrubber } = await import('../../loader/src/task-content-scrub.js');
+    const entries: TaskTranscriptEntry[] = [];
+    const mapper = factory((event) => {
+      if (event.type === 'transcript') entries.push(event.entry);
+    });
+    mapper.update({
+      sessionUpdate: 'tool_call',
+      toolCallId: 'known',
+      title: 'shell',
+      status: 'in_progress',
+    });
+    const add = (text: string) =>
+      mapper.update({
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'one',
+        content: { type: 'text', text },
+      });
+    add('before sk-abcdefghijk');
+    mapper.update(patch);
+    await Promise.resolve();
+    expect(
+      entries.filter((entry) => entry.role === 'assistant').map((entry) => entry.text)
+    ).toEqual(['before ']);
+    add('lmnopqrstu0123456789 after');
+    mapper.flush(true);
+    await Promise.resolve();
+    const scrub = createTaskContentScrubber({});
+    const captured = await Promise.all(
+      entries.filter((entry) => entry.role === 'assistant').map((entry) => scrub(entry))
+    );
+    const text = captured.map((entry) => entry.text).join('');
+    expect(text).toBe('before [REDACTED] after');
+    expect(text).not.toContain('sk-abcdefghijk');
+    expect(text).not.toContain('lmnopqrstu');
+  }
+);
+
+it.each(
+  [first, second, scripted].flatMap((factory) =>
+    [undefined, null, '', 42, {}].map((messageId) => [factory, messageId] as const)
+  )
+)(
+  'a true message ID change holds the trailing run after an unidentified chunk (%#)',
+  async (factory, unknownId) => {
+    const { createTaskContentScrubber } = await import('../../loader/src/task-content-scrub.js');
+    const entries: TaskTranscriptEntry[] = [];
+    const mapper = factory((event) => {
+      if (event.type === 'transcript') entries.push(event.entry);
+    });
+    const add = (text: string, messageId?: unknown) =>
+      mapper.update({
+        sessionUpdate: 'agent_message_chunk',
+        messageId,
+        content: { type: 'text', text },
+      });
+    add('A complete.', 'A');
+    add(' before sk-abcdefghijk', unknownId);
+    add('lmnopqrstu0123456789 after', 'B');
+    await Promise.resolve();
+    expect(entries.map((entry) => entry.text)).toEqual(['A complete. before ']);
+    mapper.flush(true);
+    await Promise.resolve();
+    const scrub = createTaskContentScrubber({});
+    const captured = await Promise.all(entries.map((entry) => scrub(entry)));
+    const text = captured.map((entry) => entry.text).join('');
+    expect(text).toBe('A complete. before [REDACTED] after');
+    expect(text).not.toContain('sk-abcdefghijk');
+    expect(text).not.toContain('lmnopqrstu');
+  }
+);
+
+it.each(
+  [first, second, scripted].flatMap((factory) =>
+    ['completed', 'failed'].flatMap((terminal) =>
+      [
+        { sessionUpdate: 'tool_call_update', status: 'pending' },
+        { sessionUpdate: 'tool_call_update', status: 'in_progress' },
+        { sessionUpdate: 'tool_call_update', status: 'running' },
+        { sessionUpdate: 'tool_call' },
+      ].map((restart) => [factory, terminal, restart] as const)
+    )
+  )
+)(
+  'reused terminal native IDs create distinct replay-stable call generations (%#)',
+  async (factory, terminal, restart) => {
+    const nativeId = 'reused-native-id';
+    const capture = async () => {
+      const entries: TaskTranscriptEntry[] = [];
+      const mapper = factory((event) => {
+        if (event.type === 'transcript') entries.push(event.entry);
+      });
+      mapper.update({
+        sessionUpdate: 'tool_call',
+        toolCallId: nativeId,
+        name: 'first-tool',
+        rawInput: 'first input',
+        status: 'in_progress',
+      });
+      const firstEnd = {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: nativeId,
+        status: terminal,
+        rawOutput: 'first output',
+      };
+      mapper.update(firstEnd);
+      mapper.update(firstEnd);
+      // A late output-only patch is not new work and must not reopen a terminal call.
+      mapper.update({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: nativeId,
+        rawOutput: 'late first output',
+      });
+      mapper.update({
+        ...restart,
+        toolCallId: nativeId,
+        name: 'second-tool',
+        rawInput: 'second input',
+      });
+      if ('status' in restart && restart.status === 'pending')
+        mapper.update({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: nativeId,
+          status: 'in_progress',
+        });
+      const secondEnd = {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: nativeId,
+        status: terminal,
+        rawOutput: 'second output',
+      };
+      mapper.update(secondEnd);
+      mapper.update(secondEnd);
+      mapper.update({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: nativeId,
+        rawOutput: 'late second output',
+      });
+      mapper.flush(true);
+      mapper.flush(true);
+      await Promise.resolve();
+      return entries;
+    };
+    const entries = await capture();
+    const refs = [0, 1].map(
+      (generation) =>
+        `call_${createHash('sha256').update(`${nativeId}\0${generation}`).digest('hex')}`
+    );
+    const terminalStatus = terminal === 'failed' ? 'error' : 'completed';
+    expect(entries.map((entry) => entry.tool)).toEqual([
+      {
+        callRef: refs[0],
+        name: 'first-tool',
+        input: 'first input',
+        status: 'running',
+        outputTail: '',
+      },
+      {
+        callRef: refs[0],
+        name: 'first-tool',
+        input: 'first input',
+        status: terminalStatus,
+        outputTail: 'first output',
+      },
+      {
+        callRef: refs[1],
+        name: 'second-tool',
+        input: 'second input',
+        status: 'running',
+        outputTail: '',
+      },
+      {
+        callRef: refs[1],
+        name: 'second-tool',
+        input: 'second input',
+        status: terminalStatus,
+        outputTail: 'second output',
+      },
+    ]);
+    expect(new Set(entries.map((entry) => entry.id)).size).toBe(4);
+    expect(new Set(entries.map((entry) => entry.tool?.callRef)).size).toBe(2);
+    expect(JSON.stringify(entries)).not.toContain(nativeId);
+    const replay = await capture();
+    expect(replay.map((entry) => ({ id: entry.id, tool: entry.tool }))).toEqual(
+      entries.map((entry) => ({ id: entry.id, tool: entry.tool }))
+    );
+  }
+);
+
 it('r2 oversized assistant run is dropped through its streamed suffix', async () => {
   const entries: TaskHarnessEvent[] = [];
   const mapper = first((event) => {
@@ -564,7 +770,9 @@ it.each([first, second, scripted])(
     mapper.flush(true);
     mapper.flush(true);
     await Promise.resolve();
-    const callRef = `call_${createHash('sha256').update('running').digest('hex')}`;
+    const callRef = `call_${createHash('sha256')
+      .update('running\0' + '0')
+      .digest('hex')}`;
     expect(entries).toMatchObject([
       { tool: { status: 'running', callRef } },
       {
@@ -658,3 +866,33 @@ it.each([first, second, scripted])(
     expect((await scrub(entries))[0]?.text).toBe('before [REDACTED] after');
   }
 );
+
+it.each(
+  [first, second, scripted].flatMap((factory) =>
+    ['completed', 'failed'].map((status) => [factory, status] as const)
+  )
+)('terminal-only new calls also advance reused ID generations (%#)', async (factory, status) => {
+  const entries: TaskTranscriptEntry[] = [];
+  const mapper = factory((event) => {
+    if (event.type === 'transcript') entries.push(event.entry);
+  });
+  for (const name of ['first', 'second']) {
+    mapper.update({
+      sessionUpdate: 'tool_call',
+      toolCallId: 'reused',
+      status,
+      name,
+      rawInput: `${name} input`,
+      rawOutput: `${name} output`,
+    });
+    // Terminal patches repeat observations; a new tool_call starts another call.
+    mapper.update({ sessionUpdate: 'tool_call_update', toolCallId: 'reused', status });
+  }
+  mapper.flush(true);
+  await Promise.resolve();
+  expect(entries.map((entry) => entry.tool?.name)).toEqual(['first', 'second']);
+  expect(entries.map((entry) => entry.tool?.input)).toEqual(['first input', 'second input']);
+  expect(entries.map((entry) => entry.tool?.outputTail)).toEqual(['first output', 'second output']);
+  expect(new Set(entries.map((entry) => entry.tool?.callRef)).size).toBe(2);
+  expect(new Set(entries.map((entry) => entry.id)).size).toBe(2);
+});
