@@ -31,6 +31,35 @@ async function fixture() {
 }
 
 describe('durable independent workbench import task', () => {
+  it('does not trust exception messages, custom names or arbitrary code strings', async () => {
+    const f = await fixture();
+    const entries: Parameters<typeof createRecordingLogger>[0] = [];
+    const task = createWorkbenchImportTask({
+      ...f,
+      pinnedDigest,
+      logger: createRecordingLogger(entries),
+      run: async () => {
+        throw Object.assign(new Error('https://user-canary:password-canary@registry.example'), {
+          name: 'user-canary',
+          code: 'password-canary',
+        });
+      },
+    });
+    try {
+      await task.start();
+      await vi.waitFor(() => expect(task.status().state).toBe('failed'));
+      const saved = await f.fs.readFile(join(f.root, 'workbench-import.json'));
+      expect(task.status()).toMatchObject({
+        reason: 'unavailable',
+        detail: { errorName: 'Error' },
+      });
+      expect(saved + JSON.stringify(entries) + JSON.stringify(task.status())).not.toMatch(
+        /user-canary|password-canary/
+      );
+    } finally {
+      await task.stop();
+    }
+  });
   it('admits only one owner when start is called concurrently', async () => {
     const f = await fixture();
     const run = vi.fn(async () => {});

@@ -4,7 +4,12 @@ import type { Clock } from './clock.js';
 import type { FileSystem } from './fs.js';
 import type { LoaderLogger } from './logger.js';
 
-import { WorkbenchDestinationRejection } from './workbench-import.js';
+import {
+  WorkbenchDestinationRejection,
+  WorkbenchImportFailure,
+  workbenchErrorDetail,
+  safeWorkbenchImportDetail,
+} from './workbench-import.js';
 import type { WorkbenchImportStatus } from './workbench-status.js';
 export type { WorkbenchImportStatus } from './workbench-status.js';
 export interface WorkbenchImportTask {
@@ -26,6 +31,7 @@ const REASONS = new Set([
   'credential',
   'unauthorized',
   'unavailable',
+  'source-missing',
   'rejected',
   'deadline',
   'aborted',
@@ -101,19 +107,34 @@ export function createWorkbenchImportTask(deps: WorkbenchImportTaskDeps): Workbe
         const match =
           error instanceof Error ? /^workbench-import:([a-z-]+)$/.exec(error.message) : null;
         const reason = match?.[1] !== undefined && REASONS.has(match[1]) ? match[1] : 'unavailable';
+        const detail = (error instanceof WorkbenchImportFailure
+          ? safeWorkbenchImportDetail(error.detail)
+          : undefined) ?? {
+          step: 'preparation' as const,
+          side: 'source' as const,
+          ...workbenchErrorDetail(error),
+        };
         try {
-          await record({ state: 'failed', pinnedDigest: deps.pinnedDigest, lastAttemptAt, reason });
+          await record({
+            state: 'failed',
+            pinnedDigest: deps.pinnedDigest,
+            lastAttemptAt,
+            reason,
+            detail,
+          });
         } catch {
           current = {
             state: 'failed',
             pinnedDigest: deps.pinnedDigest,
             lastAttemptAt,
             reason: 'state-store',
+            detail,
           };
         }
         deps.logger.warn(
           {
             code: current.reason ?? reason,
+            detail,
             ...(error instanceof WorkbenchDestinationRejection
               ? { status: error.status, mediaType: error.mediaType }
               : {}),
@@ -128,7 +149,10 @@ export function createWorkbenchImportTask(deps: WorkbenchImportTaskDeps): Workbe
     }
   }
   return {
-    status: () => ({ ...current }),
+    status: () => ({
+      ...current,
+      ...(current.detail === undefined ? {} : { detail: { ...current.detail } }),
+    }),
     start: () => {
       starting ??= (async () => {
         // Recover display history only. Every restart checks the destination.

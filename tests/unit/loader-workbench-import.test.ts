@@ -167,7 +167,185 @@ async function setup(docker = false) {
   return { data, source, target, options, temporary };
 }
 
+async function failedTask(
+  options: Awaited<ReturnType<typeof setup>>['options'],
+  temporary: string
+) {
+  const fs = createNodeFileSystem();
+  const entries: Parameters<typeof createRecordingLogger>[0] = [];
+  const task = createWorkbenchImportTask({
+    fs,
+    config: { loaderDir: temporary },
+    clock: { now: Date.now, sleep: () => new Promise(() => undefined) },
+    logger: createRecordingLogger(entries),
+    pinnedDigest: options.pinnedDigest,
+    run: (signal) =>
+      createWorkbenchImportPhase({
+        ...options,
+        signal,
+        tempDirectory: join(temporary, 'downloads'),
+      }).run(),
+  });
+  cleanups.push(() => task.stop());
+  await task.start();
+  await vi.waitFor(() => expect(task.status().state).toBe('failed'));
+  const saved = JSON.parse(await fs.readFile(join(temporary, 'workbench-import.json')));
+  return { status: task.status(), entries, saved };
+}
+
 describe('workbench byte-identical OCI import', () => {
+  it.each(['manifest', 'blob'])(
+    'records a missing source %s safely in the log and durable status',
+    async (kind) => {
+      const { options, source, data, temporary } = await setup();
+      const missing = kind === 'manifest' ? data.root : (data.blobs.keys().next().value as string);
+      (kind === 'manifest' ? source.manifests : source.blobs).delete(missing);
+      const result = await failedTask(
+        {
+          ...options,
+          readSource: async () => ({
+            ...(await options.readSource()),
+            username: 'pull-user-canary',
+            password,
+          }),
+        },
+        temporary
+      );
+      const detail = {
+        step: kind === 'manifest' ? 'source-manifest' : 'source-blob',
+        side: 'source',
+        status: 404,
+        digest: missing,
+        sourceOrigin: source.origin,
+        sourceRepository: 'custom/team-workbench',
+      };
+      expect(result.status).toMatchObject({ reason: 'source-missing', detail });
+      expect(result.saved).toEqual(result.status);
+      expect(result.entries).toContainEqual({
+        level: 'warn',
+        message: 'workbench import failed; retrying',
+        fields: { code: 'source-missing', detail },
+      });
+      expect(JSON.stringify(result)).not.toMatch(
+        /pull-user-canary|private-password-never-print|Basic |Bearer |Authorization/i
+      );
+    }
+  );
+
+  it('records destination upload 500 with its side, step, status and blob digest', async () => {
+    const { options, target, data, temporary } = await setup();
+    target.intercept((req, res) => {
+      if (req.method !== 'PUT') return false;
+      res.writeHead(500);
+      res.end(password);
+      return true;
+    });
+    const result = await failedTask(options, temporary);
+    const configDigest = JSON.parse(data.manifests.values().next().value!.toString()).config.digest;
+    const detail = {
+      step: 'destination-upload',
+      side: 'destination',
+      status: 500,
+      digest: configDigest,
+    };
+    expect(result.status).toMatchObject({ reason: 'unavailable', detail });
+    expect(result.saved).toEqual(result.status);
+    expect(result.entries).toContainEqual({
+      level: 'warn',
+      message: 'workbench import failed; retrying',
+      fields: { code: 'unavailable', detail },
+    });
+    expect(JSON.stringify(result)).not.toContain(password);
+  });
+
+  it('records a network error code without changing the unavailable reason or leaking messages', async () => {
+    const { options, source, temporary, data } = await setup();
+    // Bind then close a real loopback listener, leaving a deterministic refused port.
+    const closed = createServer(tls);
+    await new Promise<void>((resolve) => closed.listen(0, '127.0.0.1', resolve));
+    const address = closed.address();
+    if (!address || typeof address === 'string') throw new Error('missing test address');
+    await new Promise<void>((resolve) => closed.close(() => resolve()));
+    const result = await failedTask(
+      {
+        ...options,
+        readSource: async () => ({
+          registry: `https://127.0.0.1:${address.port}`,
+          repository: 'custom/team-workbench',
+        }),
+      },
+      temporary
+    );
+    const detail = {
+      step: 'source-manifest',
+      side: 'source',
+      digest: data.root,
+      sourceOrigin: `https://127.0.0.1:${address.port}`,
+      sourceRepository: 'custom/team-workbench',
+      errorName: 'Error',
+      errorCode: 'ECONNREFUSED',
+    };
+    expect(result.status).toMatchObject({ reason: 'unavailable', detail });
+    expect(result.status.detail).not.toHaveProperty('status');
+    expect(result.saved).toEqual(result.status);
+    expect(result.entries).toContainEqual({
+      level: 'warn',
+      message: 'workbench import failed; retrying',
+      fields: { code: 'unavailable', detail },
+    });
+    expect(source.calls).toEqual([]);
+  });
+
+  it('never publishes configured URL userinfo, passwords, tokens or arbitrary error metadata', async () => {
+    const { options, temporary } = await setup();
+    const credentialedUrl = 'https://user-canary:password-canary@registry.example';
+    const result = await failedTask(
+      {
+        ...options,
+        readSource: async () => ({
+          registry: credentialedUrl,
+          repository: 'custom/team-workbench',
+          username: 'user-canary',
+          password: 'password-canary',
+        }),
+      },
+      temporary
+    );
+    expect(result.status).toMatchObject({
+      reason: 'configuration',
+      detail: { step: 'preparation' },
+    });
+    expect(JSON.stringify(result)).not.toMatch(
+      /user-canary|password-canary|@registry|Authorization|Basic |Bearer /i
+    );
+  });
+
+  it('keeps an unexpected exception class without its potentially secret message', async () => {
+    const { options, source, data, temporary } = await setup();
+    const invalid = Buffer.from(
+      '{not valid JSON; https://user-canary:password-canary@registry.example'
+    );
+    const pin = digest(invalid);
+    source.intercept((_req, res) => {
+      res.writeHead(200, { 'content-type': manifestType });
+      res.end(invalid);
+      return true;
+    });
+    const result = await failedTask({ ...options, pinnedDigest: pin }, temporary);
+    expect(result.status).toMatchObject({
+      reason: 'unavailable',
+      detail: {
+        step: 'source-manifest',
+        side: 'source',
+        status: 200,
+        errorName: 'SyntaxError',
+        digest: pin,
+      },
+    });
+    expect(result.saved).toEqual(result.status);
+    expect(JSON.stringify(result)).not.toMatch(/user-canary|password-canary/);
+    expect(data.root).not.toBe(pin);
+  });
   it('retries the real HTTPS importer after an unreachable source is changed without restarting the task', async () => {
     const { options, source, target, data, temporary } = await setup();
     const replacement = await registry({ data });
@@ -411,7 +589,16 @@ describe('workbench byte-identical OCI import', () => {
       expect(JSON.parse(saved)).toMatchObject({ state: 'failed', reason: 'rejected' });
       expect(entries).toContainEqual({
         level: 'warn',
-        fields: { code: 'rejected', status, mediaType },
+        fields: {
+          code: 'rejected',
+          status,
+          mediaType,
+          detail: expect.objectContaining({
+            side: 'destination',
+            status,
+            step: path === '/manifests/' ? 'destination-manifest-write' : 'destination-upload',
+          }),
+        },
         message: 'workbench import failed; retrying',
       });
       expect(saved + JSON.stringify(entries)).not.toMatch(
@@ -437,6 +624,34 @@ describe('workbench byte-identical OCI import', () => {
     await expect(createWorkbenchImportPhase(options).run()).rejects.toThrow(
       `workbench-import:${reason}`
     );
+  });
+
+  it.each([
+    ['destination-check', 'GET', 503],
+    ['destination-manifest-write', 'PUT', 500],
+    ['read-back-verify', 'GET', 404],
+  ] as const)('keeps %s destination failures at the correct step', async (step, method, status) => {
+    const { options, target, data, temporary } = await setup();
+    let wroteManifest = false;
+    target.intercept((req, res) => {
+      if (!(req.url ?? '').includes('/manifests/')) return false;
+      if (req.method === 'PUT') wroteManifest = true;
+      if (req.method !== method || (step === 'read-back-verify' && !wroteManifest)) return false;
+      res.writeHead(status);
+      res.end(password);
+      return true;
+    });
+    const result = await failedTask(options, temporary);
+    expect(result.status).toMatchObject({
+      reason: 'unavailable',
+      detail: {
+        step,
+        side: 'destination',
+        status,
+        digest: step === 'destination-check' ? data.root : expect.stringMatching(/^sha256:/),
+      },
+    });
+    expect(result.saved).toEqual(result.status);
   });
 
   it('does not classify source read failures as destination rejections', async () => {
