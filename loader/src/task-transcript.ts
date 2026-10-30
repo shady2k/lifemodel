@@ -16,6 +16,10 @@ const record = (v: unknown): Json =>
 export function transcriptText(value: string, bytes = 4000, tail = false): string {
   return transcriptSlice(value, bytes, tail).text;
 }
+/** Native IDs stay private; all status rows derive the same bounded reference. */
+function callReference(id: string): string {
+  return `call_${createHash('sha256').update(id).digest('hex')}`;
+}
 export function createAcpTranscriptMapper(
   sink: TaskHarnessEventSink | undefined,
   mapping: {
@@ -29,7 +33,7 @@ export function createAcpTranscriptMapper(
   let droppingRun = false;
   let pendingAt: string | undefined;
   let chunk = 0;
-  let messageId: unknown;
+  let messageId: string | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const tools = new Map<
     string,
@@ -62,7 +66,7 @@ export function createAcpTranscriptMapper(
     timer = undefined;
     if (ended) droppingRun = false;
     if (!pending) return;
-    // A streamed credential can span any non-final boundary. Keep its whole run.
+    // Size/idle flushes may split a credential; complete message/tool boundaries do not.
     const trailing = ended ? '' : (/\S+$/u.exec(pending)?.[0] ?? '');
     let text = pending.slice(0, pending.length - trailing.length);
     pending = trailing;
@@ -90,6 +94,7 @@ export function createAcpTranscriptMapper(
           role: 'tool',
           text: '',
           tool: {
+            callRef: callReference(id),
             name: tool.name,
             input: tool.input,
             status: 'error',
@@ -102,8 +107,11 @@ export function createAcpTranscriptMapper(
       try {
         const update = record(value);
         if (update['sessionUpdate'] === 'agent_message_chunk') {
-          if (update['messageId'] !== undefined && update['messageId'] !== messageId) flush();
-          messageId = update['messageId'];
+          const id = update['messageId'];
+          if (typeof id === 'string' && id) {
+            if (messageId !== undefined && id !== messageId) flush(true);
+            messageId = id;
+          }
           const content = record(update['content']);
           if (content['type'] !== 'text' || typeof content['text'] !== 'string') return;
           let rest = content['text'];
@@ -138,7 +146,7 @@ export function createAcpTranscriptMapper(
             timer.unref();
           }
         } else if (['tool_call', 'tool_call_update'].includes(update['sessionUpdate'] as string)) {
-          flush();
+          flush(true);
           const id = update['toolCallId'];
           if (typeof id !== 'string') return;
           const previous = tools.get(id);
@@ -177,6 +185,7 @@ export function createAcpTranscriptMapper(
             role: 'tool' as const,
             text: '',
             tool: {
+              callRef: callReference(id),
               name,
               input,
               status,

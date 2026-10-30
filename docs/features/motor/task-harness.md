@@ -16,7 +16,10 @@ client passes session updates to it and flushes pending assistant excerpts at
 turn end, tool boundaries and cleanup. The factory wires the mapper without
 vendor branches. Shared ACP mapping coalesces assistant text chunks and merges
 tool patches, retaining tool name, input summary, status and a short output tail. The first specific name for a call ID stays stable through completion; only the generic `tool` fallback can be refined. It hashes
-observation identities; duplicate tool patches do not create duplicate entries.
+observation identities and emits a separate opaque `tool.callRef`, shared by the
+running and completed/error observations of one native call. Duplicate tool patches
+do not create duplicate entries. Tool boundaries and message ID changes complete
+preceding assistant text; only size and idle splits hold back its trailing run.
 The mapper bounds recent IDs/tool state, coalesces assistant text up to 4,000 bytes,
 and emits tool starts/status changes rather than output patches. A native pending call records its name but waits for the in-progress patch before emitting running, so the input summary is available. It never throws into execution.
 

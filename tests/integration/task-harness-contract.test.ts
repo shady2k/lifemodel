@@ -575,7 +575,13 @@ describe('TaskHarness contract: both pinned adapters and scripted harness', () =
             transcript: {
               entries: {
                 role: string;
-                tool: { name: string; status: string; input?: string; outputTail: string } | null;
+                tool: {
+                  name: string;
+                  callRef?: string;
+                  status: string;
+                  input?: string;
+                  outputTail: string;
+                } | null;
               }[];
             };
           }
@@ -591,6 +597,8 @@ describe('TaskHarness contract: both pinned adapters and scripted harness', () =
         );
         expect(running?.tool?.name).toBeTruthy();
         expect(completed?.tool?.name).toBe(running?.tool?.name);
+        expect(running?.tool?.callRef).toMatch(/^call_[a-f0-9]{64}$/);
+        expect(completed?.tool?.callRef).toBe(running?.tool?.callRef);
         expect(view).toMatchObject({
           success: true,
           transcript: {
@@ -884,6 +892,25 @@ describe('TaskHarness contract: both pinned adapters and scripted harness', () =
                 }),
               }),
             });
+          const completedCalls = chatTools.flatMap((event) =>
+            event.type === 'transcript' && event.entry.tool?.status === 'completed'
+              ? [event.entry.tool]
+              : []
+          );
+          expect(completedCalls).toHaveLength(count);
+          expect(new Set(completedCalls.map((tool) => tool.callRef)).size).toBe(count);
+          for (const completed of completedCalls) {
+            expect(completed.callRef).toMatch(/^call_[a-f0-9]{64}$/);
+            expect(chatTools).toContainEqual({
+              type: 'transcript',
+              entry: expect.objectContaining({
+                tool: expect.objectContaining({
+                  status: 'running',
+                  callRef: completed.callRef,
+                }),
+              }),
+            });
+          }
           for (let i = 0; i < count; i++) await access(join(work, `done-${i}`));
           expect(events.filter((event) => event.type === 'receipt')).toEqual([
             { type: 'receipt', commandId: command.commandId, disposition: 'inserted' },

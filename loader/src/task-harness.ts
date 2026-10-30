@@ -41,6 +41,8 @@ export interface TaskTranscriptEntry {
   text: string;
   tool: {
     name: string;
+    /** Opaque correlation for observations of one call. */
+    callRef?: string;
     input?: string;
     status: 'running' | 'completed' | 'error';
     outputTail: string;

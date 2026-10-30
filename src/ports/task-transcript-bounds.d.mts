@@ -1,7 +1,12 @@
 export function boundTaskTranscript<
   T extends {
     text: string;
-    tool: { name: string; input?: string; outputTail: string } | null;
+    tool: {
+      name: string;
+      callRef?: string;
+      input?: string;
+      outputTail: string;
+    } | null;
   },
 >(entry: T, raw?: boolean): T;
 
