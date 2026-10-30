@@ -943,13 +943,14 @@ export function createPostgresTaskMailbox(deps: {
         !Number.isSafeInteger(limit) ||
         limit < 1 ||
         limit > TASK_TRANSCRIPT_LIMITS.page ||
-        (query.before !== undefined && !/^[1-9][0-9]{0,18}$/.test(query.before))
+        (query.before !== undefined &&
+          (!/^[1-9][0-9]{0,18}$/.test(query.before) || BigInt(query.before) > 9223372036854775807n))
       )
         throw new TaskChannelError(400, 'invalid_input');
       return transaction(async (client) => {
         const rows = await client.query<{ ordinal: string; payload: TaskTranscriptEntry }>(
-          `SELECT ordinal,payload FROM core.task_transcript WHERE task_id=$1 AND ordinal < $2::numeric ORDER BY ordinal DESC LIMIT $3`,
-          [taskId, query.before ?? '9223372036854775808', limit + 1]
+          `SELECT ordinal,payload FROM core.task_transcript WHERE task_id=$1 AND ($2::bigint IS NULL OR ordinal < $2::bigint) ORDER BY ordinal DESC LIMIT $3`,
+          [taskId, query.before ?? null, limit + 1]
         );
         const dropped = await client.query(
           'SELECT 1 FROM core.task_transcript_horizons WHERE task_id=$1 LIMIT 1',

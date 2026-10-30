@@ -250,6 +250,46 @@ describe('durable fenced task mailbox', () => {
     payload: { id, role: 'assistant', time: '2026-10-30T00:00:00.000Z', text, tool: null },
   });
 
+  it('review8: cursor is a signed bigint', async () => {
+    await expect(
+      mailbox().readTranscript(identity.taskId, { before: '9223372036854775808' })
+    ).rejects.toMatchObject({ code: 'invalid_input' });
+  });
+
+  it('review8: SQL rejects malformed transcript IDs', async () => {
+    await mailbox().append(transcriptFrame('source', 1), identity);
+    await expect(
+      stores.postgres.query(
+        "INSERT INTO core.task_transcript(task_id,attempt_id,message_id,sequence,payload) SELECT task_id,attempt_id,'invalid id',2,payload FROM core.task_transcript WHERE task_id=$1",
+        [identity.taskId]
+      )
+    ).rejects.toMatchObject({ code: '23514' });
+  });
+
+  it('review8: transcript rows reject mutation and invalid IDs but allow deletion', async () => {
+    const m = mailbox();
+    await m.append(transcriptFrame('immutable-chat', 1), identity);
+    await expect(
+      stores.postgres.query(
+        "UPDATE core.task_transcript SET payload=jsonb_set(payload,'{text}','\"changed\"') WHERE task_id=$1",
+        [identity.taskId]
+      )
+    ).rejects.toMatchObject({ code: '23514' });
+    await expect(
+      stores.postgres.query(
+        "INSERT INTO core.task_transcript(task_id,attempt_id,message_id,sequence,payload) SELECT task_id,attempt_id,'invalid id',2,payload FROM core.task_transcript WHERE task_id=$1",
+        [identity.taskId]
+      )
+    ).rejects.toMatchObject({ code: '23514' });
+    await expect(
+      m.readTranscript(identity.taskId, { before: '9223372036854775808' })
+    ).rejects.toMatchObject({ code: 'invalid_input' });
+    await stores.postgres.query('DELETE FROM core.task_transcript WHERE task_id=$1', [
+      identity.taskId,
+    ]);
+    expect((await m.readTranscript(identity.taskId)).entries).toHaveLength(0);
+  });
+
   it('review6: transcript append never requests replay resync', async () => {
     const settled = vi.fn();
     const m = createPostgresTaskMailbox({
@@ -407,6 +447,8 @@ describe('durable fenced task mailbox', () => {
     ]);
     expect(settled.filter((s) => s.status === 'fulfilled')).toHaveLength(2);
     expect((await m.readTranscript(identity.taskId)).entries[0]?.id).toMatch(/^cap-/);
+    await m.append(transcriptFrame('latest-after-cap', 2002), identity);
+    expect((await m.readTranscript(identity.taskId)).entries[0]?.id).toBe('latest-after-cap');
     await expect(m.append(transcriptFrame('seed-1', 1, 'seed'), identity)).rejects.toMatchObject({
       code: 'transcript_evicted',
     });

@@ -88,6 +88,22 @@ describe('neutral task session capture', () => {
     }
   );
 
+  it('review8: assistant chunks crossing a UTF-8 bound carry every byte', async () => {
+    const events: TaskHarnessEvent[] = [];
+    const mapper = first((e) => {
+      events.push(e);
+    });
+    const parts = ['x'.repeat(500), '🙂'.repeat(1000), 'last'];
+    for (const text of parts)
+      mapper.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
+    mapper.flush();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(events.flatMap((e) => (e.type === 'transcript' ? [e.entry.text] : [])).join('')).toBe(
+      parts.join('')
+    );
+  });
+
   it('review2: streams tool tails without spending entries and coalesces prose', async () => {
     const events: TaskHarnessEvent[] = [];
     const mapper = first((event) => {
