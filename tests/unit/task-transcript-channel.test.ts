@@ -79,3 +79,38 @@ it('round2: UTF-8 head/tail cuts keep real replacement glyphs', () => {
   expect(transcriptSlice('🙂', 3, true).text).toBe('');
   expect(transcriptSlice('abc\uD800', 6)).toEqual({ text: 'abc�', consumed: 4 });
 });
+
+it('tool input is scrubbed and re-bounded after redaction expansion', async () => {
+  const calls = vi.spyOn(TaskJsonClient.prototype, 'call').mockResolvedValue({});
+  const c = channel();
+  c.enqueue({
+    ...entry(''),
+    role: 'tool',
+    tool: { name: 'shell', input: 'token=x '.repeat(100), status: 'running', outputTail: '' },
+  });
+  await c.close();
+  const frame = calls.mock.calls[0]?.[1] as { payload: { tool: { input: string } } };
+  expect(Buffer.byteLength(frame.payload.tool.input)).toBeLessThanOrEqual(300);
+  expect(frame.payload.tool.input).toContain('[REDACTED]');
+  expect(frame.payload.tool.input).not.toContain('token=x');
+});
+
+it('core rejects an oversized or non-string input summary', async () => {
+  const { validateTaskChannelFrame } = await import('../../src/ports/task-channel.js');
+  const frame = (input: unknown) => ({
+    taskId: 'task',
+    attemptId: 'attempt',
+    direction: 'task_to_core',
+    sequence: 1,
+    messageId: 'entry_test',
+    kind: 'transcript',
+    payload: {
+      ...entry(''),
+      role: 'tool',
+      tool: { name: 'shell', input, status: 'running', outputTail: '' },
+    },
+  });
+  expect(() => validateTaskChannelFrame(frame('🙂'.repeat(75)))).not.toThrow();
+  expect(() => validateTaskChannelFrame(frame('🙂'.repeat(76)))).toThrow('invalid_frame');
+  expect(() => validateTaskChannelFrame(frame({ command: 'oops' }))).toThrow('invalid_frame');
+});

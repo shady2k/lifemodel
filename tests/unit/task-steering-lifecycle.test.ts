@@ -180,6 +180,7 @@ async function runFaultCase(input: {
   diskFailure?: boolean;
   observerError?: boolean;
   receiptSinkStalls?: boolean;
+  insertedAt?: string;
 }): Promise<void> {
   const certificate = await createStorageCertificate(['localhost']);
   const work = await mkdtemp(join(tmpdir(), 'steering-fault-'));
@@ -229,7 +230,12 @@ async function runFaultCase(input: {
     admit: send,
     release,
     failOnUncertain: input.policy,
-    reconcileEndTurn: async () => ({ state: 'idle' }),
+    reconcileEndTurn: async () => ({
+      state: 'idle',
+      ...(input.insertedAt
+        ? { insertedCommandIds: ['cmd'], insertedAt: { cmd: input.insertedAt } }
+        : {}),
+    }),
     ...(input.observerError
       ? { observeInsertion: observer }
       : input.receiptSinkStalls
@@ -274,6 +280,11 @@ async function runFaultCase(input: {
       outcome: input.expected,
       ...(input.expected === 'failed' ? { reasonCode: 'steer_uncertain' } : {}),
     });
+    if (input.insertedAt)
+      expect(events).toContainEqual({
+        type: 'transcript',
+        entry: expect.objectContaining({ role: 'steer', time: input.insertedAt, text: 'continue' }),
+      });
     expect(release).toHaveBeenCalledWith({ workDirectory: work, sessionId: 'scripted-session' });
   } finally {
     resume();
@@ -627,3 +638,12 @@ describe('end-turn barrier race regressions', () => {
     }
   });
 });
+
+it('late reconciliation captures native insertion time, not reconciliation time', async () => {
+  await runFaultCase({
+    policy: openCodePolicy,
+    disposition: 'accepted',
+    expected: 'succeeded',
+    insertedAt: '2026-10-01T12:00:00.000Z',
+  });
+}, 15000);

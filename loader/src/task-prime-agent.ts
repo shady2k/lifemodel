@@ -221,7 +221,7 @@ export async function observeInsertion(input: {
   sessionId: string;
   commandId: string;
   signal: AbortSignal;
-}): Promise<boolean> {
+}): Promise<boolean | string> {
   const activeSessionId = roots.get(bindingKey(input.workDirectory, input.sessionId));
   if (!activeSessionId) return false;
   const marker = steeringMarker(input.commandId) + '\n';
@@ -246,24 +246,11 @@ export async function observeInsertion(input: {
         if (response['success'] !== true || response['command'] !== 'get_messages') break;
         const data = asRecord(response['data']);
         if (!Array.isArray(data['messages'])) break;
-        if (
-          data['messages'].some((value: unknown) => {
-            const message = asRecord(value);
-            return (
-              message['role'] === 'user' &&
-              Array.isArray(message['content']) &&
-              message['content'].some((part: unknown) => {
-                const content = asRecord(part);
-                return (
-                  content['type'] === 'text' &&
-                  typeof content['text'] === 'string' &&
-                  content['text'].startsWith(marker)
-                );
-              })
-            );
-          })
-        )
-          return true;
+        const inserted = data['messages'].find((value: unknown) => {
+          const message = asRecord(value);
+          return message['role'] === 'user' && messageText(message).startsWith(marker);
+        });
+        if (inserted) return nativeInsertionTime(asRecord(inserted)) ?? true;
         const next = data['firstEntryId'];
         if (data['more'] !== true || typeof next !== 'string' || next === before) break;
         before = next;
@@ -463,7 +450,12 @@ function successorEvidence(
     } else if (row['role'] === 'user') {
       for (const commandId of commandIds)
         if (messageText(row).startsWith(steeringMarker(commandId) + '\n'))
-          updates.push({ kind: 'inserted', commandId, text: messageText(row) });
+          updates.push({
+            kind: 'inserted',
+            commandId,
+            text: messageText(row),
+            ...(nativeInsertionTime(row) ? { insertedAt: nativeInsertionTime(row)! } : {}),
+          });
       final = '';
       updates.push({ kind: 'reset' });
     }
@@ -479,6 +471,25 @@ export function createTranscriptMapper(sink?: TaskHarnessEventSink) {
       ['name', 'title', 'kind']
         .map((key) => tool[key])
         .find((value): value is string => typeof value === 'string') ?? 'tool',
+    input: (tool) => {
+      const raw = tool['rawInput'];
+      if (typeof raw === 'string') return raw;
+      if (!raw || typeof raw !== 'object') return '';
+      const input = raw as Record<string, unknown>;
+      return (
+        ['code', 'command', 'path', 'url']
+          .map((key) => input[key])
+          .find((value): value is string => typeof value === 'string') ?? ''
+      );
+    },
     output: acpToolOutput,
   });
+}
+
+/** Daemon rows carry a millisecond timestamp; absent timestamps remain observation time. */
+function nativeInsertionTime(row: NativeRecord): string | undefined {
+  const value = row['timestamp'];
+  if (typeof value !== 'number' && typeof value !== 'string') return undefined;
+  const time = new Date(value);
+  return Number.isFinite(time.getTime()) ? time.toISOString() : undefined;
 }

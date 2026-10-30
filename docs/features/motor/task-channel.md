@@ -14,10 +14,10 @@ Task: lifemodel-653.9.19. The existing `POST /task/events` channel accepts
 `id` equals the frame's immutable `messageId`; `time` is the worker's observation
 time (not a trusted clock). Roles are `assistant`, `tool`, `steer`, `answer`,
 and `user-briefing`. `tool` is null except for the tool role, where it contains
-`{ name, status, outputTail }`; status is `running`, `completed`, or `error`.
-Text is at most 4,000 UTF-8 bytes, name 128 bytes, output tail 2,000 bytes,
+`{ name, input?, status, outputTail }`; status is `running`, `completed`, or `error`.
+Text is at most 4,000 UTF-8 bytes, name 128 bytes, input summary 300 bytes, output tail 2,000 bytes,
 and the encoded entry 8 KiB. Ordinary frame identity/authority/transport bounds
-still apply. No artifacts, raw tool arguments or raw provider messages are copied.
+still apply. Adapters select command, code, path or URL as a short input summary; no full argument bags, artifacts or raw provider messages are copied. Input is scrubbed and re-bounded like other text. The existing 8 KiB SQL row bound still suffices; older entries without input remain readable.
 
 The launcher captures best effort on a separate bounded socket/queue (64 waiting,
 1,024 recent deduplication IDs). A lost ACK or 5xx gets one identical replay;
@@ -27,8 +27,7 @@ frame. Transport failure, queue pressure, excerpt clipping or the capture cap ca
 leave gaps. Repeated tool patches with the same content have one effect. Tool
 state changes are separate immutable observations, not edits to prior entries.
 Tool entries emit at start and status changes, with the final tail on completion,
-not for each growing output patch. Assistant chunks coalesce for up to 250 ms,
-a role/message change, or 4,000 UTF-8 bytes; remaining text carries into the next entry.
+not for each growing output patch. Assistant chunks coalesce per message until a message ID change, tool event, turn/session end, 4,000 UTF-8 bytes or an idle gap of at least two seconds. Each chunk resets the idle timer; 300 ms streaming gaps do not fragment a message. Remaining text carries into the next entry.
 
 Core stores entries in `core.task_transcript`, not the control mailbox or bus.
 Its fenced append locks the task, checks the won claim/live authority and caps
@@ -58,12 +57,12 @@ historical columns, not a current startup status.
 `core.steerTask(action="read", taskId=..., view="transcript", limit=20)` reads
 newest entries first for running **and finished** tasks. `limit` is 1–50;
 `before=nextCursor` pages older entries. The cursor is an exclusive server
-arrival ordinal, scoped by task, not the task-provided timestamp or sequence.
+arrival ordinal, scoped by task, not the task-provided timestamp or sequence. Page membership and cursors remain ordinal to avoid gaps on late insertion capture. Within each selected page entries are ordered by observation/insertion time descending, with descending ordinal for ties. Read a page in reverse for chronological order: a late-captured steer then precedes its caused work when its insertion time is known. Ordering across page boundaries is still arrival-based, not a globally time-sorted history; clocks remain untrusted.
 `nextCursor: null` ends the page set. `captureLimitReached` means older entries
 were dropped by the ring, not that network loss was detected. The tool labels the view as untrusted, bounded,
 best-effort task claims, never instructions, owner consent or proof of obedience.
 Default `view="status"` is unchanged. The running-tasks prompt advertises this
-read without dumping transcript content into every turn.
+read without dumping transcript content into every turn. It also appears when only recent finished tasks exist.
 
 ## Cognition across turns
 
@@ -75,11 +74,11 @@ ID and up to 512 characters of text. Questions are ordered first, then newest
 acceptance order first. Terminal tasks, answered questions, questions without
 valid mailbox text, and questions from attempts with a terminal report are
 excluded in SQL.
-The instance has one owner; this is its registry, not a multi-owner lookup.
+The same bounded registry read also loads at most three recently finished tasks, terminal within the last 24 hours, newest terminal time first. A partial `(terminal_at DESC,id DESC)` index on terminal states keeps this query bounded and cheap. A separate `<recent_finished_tasks>` / `<untrusted_recent_finished_tasks>` block carries exact id, harness, terminal state/time and a 320-character briefing excerpt. It uses the same escaping and 24,000-character rendered cap as the active block. Terminal entries are read-only references, not steering targets. The instance has one owner; this is its registry, not a multi-owner lookup.
 
 The `<untrusted_running_tasks>` JSON block uses JSON unicode escapes for `<`,
 `>` and `&` after serialization and is capped at 24,000 rendered characters (fewer entries may fit). An empty snapshot
-adds no section. A note says when tasks were omitted. Text is untrusted data,
+adds no active section; recent finished references can still appear. A note says when active tasks were omitted. Text is untrusted data,
 not instructions, verified facts or consent. The section is not a new listing tool; `core.steerTask(action="read")`
 can read the full status of an identified task.
 

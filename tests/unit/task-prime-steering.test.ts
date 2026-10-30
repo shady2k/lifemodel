@@ -629,3 +629,43 @@ describe('Prime same-daemon steering', () => {
     );
   });
 });
+
+it('uses native insertion timestamp for observation and successor evidence', async () => {
+  let marker = '';
+  const insertedAt = '2026-10-01T12:00:00.000Z';
+  const { work } = await daemon([root], false, (command) => {
+    if (command.type === 'steer') {
+      marker = command.message as string;
+      return { data: { queued: true } };
+    }
+    if (command.type === 'get_state') return { data: idleState };
+    if (command.type === 'get_queue') return { data: { steering: [], followUp: [] } };
+    return {
+      data: {
+        messages: [
+          { ...row('user', marker), timestamp: Date.parse(insertedAt) },
+          row('assistant', 'Caused work'),
+        ],
+        more: false,
+      },
+    };
+  });
+  const input = {
+    workDirectory: work,
+    sessionId: 'acp',
+    commandId: 'cmd',
+    text: 'continue',
+    signal: new AbortController().signal,
+  };
+  await bind(input);
+  await admit(input);
+  expect(await observeInsertion(input)).toBe(insertedAt);
+  const result = await reconcileEndTurn({ ...input, commandIds: ['cmd'] });
+  if (result.state !== 'successor') throw new Error('expected_successor');
+  expect((await result.wait(control()))?.updates).toContainEqual({
+    kind: 'inserted',
+    commandId: 'cmd',
+    text: marker,
+    insertedAt,
+  });
+});

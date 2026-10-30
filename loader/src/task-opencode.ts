@@ -139,15 +139,15 @@ export async function observeInsertion(input: {
   workDirectory: string;
   commandId: string;
   signal: AbortSignal;
-}): Promise<boolean> {
+}): Promise<boolean | string> {
   const id = nativeMessageId(input.commandId);
   // Bounded best-effort observation with backoff; no native sends here.
   for (let pass = 0; pass < 12 && !input.signal.aborted; pass++) {
-    const inserted = await new Promise<boolean>((resolve) => {
+    const inserted = await new Promise<boolean | string>((resolve) => {
       const socket = connect(join(input.workDirectory, '.launcher/steer.sock'));
       let buffer = '';
       let done = false;
-      const finish = (value: boolean) => {
+      const finish = (value: boolean | string) => {
         if (done) return;
         done = true;
         clearTimeout(timer);
@@ -174,10 +174,12 @@ export async function observeInsertion(input: {
         try {
           const response = JSON.parse(buffer.slice(0, end)) as {
             ok?: boolean;
-            data?: { id?: string; status?: string };
+            data?: { id?: string; status?: string; insertedAt?: string };
           };
           finish(
             response.ok === true && response.data?.id === id && response.data.status === 'inserted'
+              ? (response.data.insertedAt ?? true)
+              : false
           );
         } catch {
           finish(false);
@@ -185,7 +187,7 @@ export async function observeInsertion(input: {
       });
       if (input.signal.aborted) cancel();
     });
-    if (inserted) return true;
+    if (inserted) return inserted;
     if (input.signal.aborted) break;
     await new Promise<void>((resolve) => {
       const timer = setTimeout(done, Math.min(100 * 2 ** pass, 5000));
@@ -207,6 +209,7 @@ export async function reconcileEndTurn(
 ): Promise<TaskEndTurnReconciliation> {
   const pending: string[] = [];
   const insertedCommandIds: string[] = [];
+  const insertedAt: Record<string, string> = {};
   for (const commandId of input.commandIds) {
     const id = nativeMessageId(commandId);
     const status = await new Promise<string>((resolve) => {
@@ -241,8 +244,14 @@ export async function reconcileEndTurn(
         try {
           const reply = JSON.parse(buffer.slice(0, end)) as {
             ok?: boolean;
-            data?: { id?: string; status?: string };
+            data?: { id?: string; status?: string; insertedAt?: string };
           };
+          if (
+            reply.ok === true &&
+            reply.data?.id === id &&
+            typeof reply.data.insertedAt === 'string'
+          )
+            insertedAt[commandId] = reply.data.insertedAt;
           finish(
             reply.ok === true && reply.data?.id === id
               ? (reply.data.status ?? 'unknown')
@@ -264,18 +273,36 @@ export async function reconcileEndTurn(
     ? {
         state: 'continue',
         commandIds: pending,
-        ...(insertedCommandIds.length ? { insertedCommandIds } : {}),
+        ...(insertedCommandIds.length
+          ? { insertedCommandIds, ...(Object.keys(insertedAt).length ? { insertedAt } : {}) }
+          : {}),
       }
-    : { state: 'idle', ...(insertedCommandIds.length ? { insertedCommandIds } : {}) };
+    : {
+        state: 'idle',
+        ...(insertedCommandIds.length
+          ? { insertedCommandIds, ...(Object.keys(insertedAt).length ? { insertedAt } : {}) }
+          : {}),
+      };
 }
 
 /** Map this adapter's ACP session, including native successor observations. */
 export function createTranscriptMapper(sink?: TaskHarnessEventSink) {
   return createAcpTranscriptMapper(sink, {
     name: (tool) =>
-      ['name', 'kind', 'title']
+      ['name', 'title', 'kind']
         .map((key) => tool[key])
         .find((value): value is string => typeof value === 'string') ?? 'tool',
+    input: (tool) => {
+      const raw = tool['rawInput'];
+      if (typeof raw === 'string') return raw;
+      if (!raw || typeof raw !== 'object') return '';
+      const input = raw as Record<string, unknown>;
+      return (
+        ['command', 'filePath', 'path', 'url']
+          .map((key) => input[key])
+          .find((value): value is string => typeof value === 'string') ?? ''
+      );
+    },
     output: acpToolOutput,
     failed: (tool) => toolOutputFailed(tool['rawOutput'], tool['rawInput']),
   });

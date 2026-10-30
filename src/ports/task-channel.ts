@@ -26,6 +26,7 @@ export interface TaskTranscriptEntry {
   readonly text: string;
   readonly tool: {
     readonly name: string;
+    readonly input?: string;
     readonly status: 'running' | 'completed' | 'error';
     readonly outputTail: string;
   } | null;
@@ -236,7 +237,15 @@ export function validateTaskChannelFrame(value: unknown): TaskChannelFrame {
       !(
         payload['tool'] === null ||
         (object(payload['tool']) &&
-          keys(payload['tool'], ['name', 'status', 'outputTail']) &&
+          keys(payload['tool'], [
+            'name',
+            'status',
+            'outputTail',
+            ...(payload['tool']['input'] === undefined ? [] : ['input']),
+          ]) &&
+          (payload['tool']['input'] === undefined ||
+            (typeof payload['tool']['input'] === 'string' &&
+              Buffer.byteLength(payload['tool']['input']) <= 300)) &&
           typeof payload['tool']['name'] === 'string' &&
           Buffer.byteLength(payload['tool']['name']) <= 128 &&
           ['running', 'completed', 'error'].includes(payload['tool']['status'] as string) &&

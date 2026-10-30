@@ -15,13 +15,13 @@ entry. Each registry adapter exports `createTranscriptMapper`; the generic ACP
 client passes session updates to it and flushes pending assistant excerpts at
 turn end, tool boundaries and cleanup. The factory wires the mapper without
 vendor branches. Shared ACP mapping coalesces assistant text chunks and merges
-tool patches, retaining tool name, status and a short output tail. It hashes
+tool patches, retaining tool name, input summary, status and a short output tail. The first specific name for a call ID stays stable through completion; only the generic `tool` fallback can be refined. It hashes
 observation identities; duplicate tool patches do not create duplicate entries.
 The mapper bounds recent IDs/tool state, coalesces assistant text up to 4,000 bytes,
-and emits tool starts/status changes rather than output patches. It never throws into execution.
+and emits tool starts/status changes rather than output patches. A native pending call records its name but waits for the in-progress patch before emitting running, so the input summary is available. It never throws into execution.
 
-OpenCode maps ACP tool `name`/`kind`/`title` and raw output/metadata or text content.
-Prime-agent maps ACP tool `name`/`title`/`kind` and the same text forms, including
+OpenCode maps ACP tool `name`/`title`/`kind` (specific title before generic kind) and raw output/metadata or text content. Input summaries select `rawInput.command`, `filePath`, `path` or `url`.
+Prime-agent maps ACP tool `name`/`title`/`kind` and the same text forms, selecting `rawInput.code`, `command`, `path` or `url` for input, including
 native successor `toolCall.name` and `toolResult` content translated behind its
 adapter. Native successor text/tool evidence uses the same mapper. No vendor
 names or native protocol shapes leak into launcher/core transcript code.
@@ -32,7 +32,7 @@ instructions. Positive native insertion observation adds a correlated immutable
 neutral steer command; answers retain the `[question:...]` envelope. The
 Prime-agent entry also retains its native correlation marker via adapter-owned
 `insertedText`. Missing insertion evidence produces no claim of inserted text.
-All text is excerpted; the transcript does not certify obedience or complete
+Insertion timestamps use native row timestamps when available (Prime-agent daemon `timestamp`), or OpenCode's `session.inbox.delivered.created` epoch milliseconds, retained by the bridge through reconciliation (bridge observation time only if absent). Live observation without a native timestamp falls back to its observation time. If reconciliation is the first observation and the native evidence has no timestamp, the entry necessarily retains reconciliation time; admission time is not guessed as insertion time. All text is excerpted; the transcript does not certify obedience or complete
 history after compaction. The same shared contract file checks assistant text,
 tool output and steering/answer capture for both provisioned real adapters and
 the scripted ACP agent. This source test is not the deployed two-harness walk.

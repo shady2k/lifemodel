@@ -25,7 +25,7 @@ export function transcriptSlice(text, max, tail = false) {
 }
 /**
  * Re-bound scrubbed transcript fields and both JSON wire/JSONB text budgets.
- * @param {{text: string, tool: {name: string, outputTail: string} | null}} entry
+ * @param {{text: string, tool: {name: string, input?: string, outputTail: string} | null}} entry
  */
 export function boundTaskTranscript(entry) {
   /** @param {string} text @param {number} max @param {boolean} [tail] */
@@ -38,6 +38,7 @@ export function boundTaskTranscript(entry) {
       ? {
           ...entry.tool,
           name: clip(entry.tool.name, 128),
+          ...(entry.tool.input === undefined ? {} : { input: clip(entry.tool.input, 300) }),
           outputTail: clip(entry.tool.outputTail, 2000, true),
         }
       : null,

@@ -183,3 +183,63 @@ describe('OpenCode steering adapter boundary', () => {
     expect(reads).toBe(2);
   });
 });
+
+it('retains bridge insertion time through live read and late reconciliation', async () => {
+  const dir = await work();
+  const insertedAt = '2026-10-01T12:00:00.000Z';
+  await server(dir, (request) => ({
+    ok: true,
+    data: { id: request.id, status: 'inserted', insertedAt },
+  }));
+  const input = {
+    workDirectory: dir,
+    sessionId: 'session',
+    commandIds: ['cmd'],
+    signal: new AbortController().signal,
+  };
+  expect(await observeInsertion({ ...input, commandId: 'cmd' })).toBe(insertedAt);
+  expect(await reconcileEndTurn(input)).toEqual({
+    state: 'idle',
+    insertedCommandIds: ['cmd'],
+    insertedAt: { cmd: insertedAt },
+  });
+});
+
+it('bridge retains native delivered event time rather than reconciliation clock', async () => {
+  const { default: plugin } = await import('../../docker/workbench/steering-plugin/index.mjs');
+  const dir = await work();
+  const old = process.env.LIFEMODEL_STEER_SOCKET;
+  process.env.LIFEMODEL_STEER_SOCKET = join(dir, '.launcher/steer.sock');
+  let deliver!: (event: unknown) => void;
+  const event = new Promise<unknown>((resolve) => {
+    deliver = resolve;
+  });
+  const stop = await plugin.setup({
+    event: {
+      subscribe: async function* () {
+        yield await event;
+      },
+    },
+    session: {
+      prompt: async ({ id }: { id: string }) => {
+        deliver({
+          type: 'session.inbox.delivered',
+          created: Date.parse('2026-10-01T12:00:00.000Z'),
+          data: { inboxID: id },
+        });
+        return { id };
+      },
+    },
+  });
+  try {
+    const input = { workDirectory: dir, sessionId: 'session', commandId: 'cmd', text: 'continue' };
+    expect(await admit(input)).toBe('accepted');
+    expect(await observeInsertion({ ...input, signal: new AbortController().signal })).toBe(
+      '2026-10-01T12:00:00.000Z'
+    );
+  } finally {
+    await stop();
+    if (old === undefined) delete process.env.LIFEMODEL_STEER_SOCKET;
+    else process.env.LIFEMODEL_STEER_SOCKET = old;
+  }
+});

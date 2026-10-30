@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { describe, it, expect, vi } from 'vitest';
 import { readFile } from 'node:fs/promises';
 import { createTranscriptMapper as first } from '../../loader/src/task-opencode.js';
+import { createTranscriptMapper as scripted } from '../fixtures/task-scripted-config.mjs';
 import { createTranscriptMapper as second } from '../../loader/src/task-prime-agent.js';
 import { type TaskHarnessEvent } from '../../loader/src/task-harness.js';
 import { validateTaskChannelFrame } from '../../src/ports/task-channel.js';
@@ -119,7 +120,7 @@ describe('neutral task session capture', () => {
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Still working' },
       });
-      await vi.waitFor(() => expect(events).toHaveLength(1));
+      await vi.waitFor(() => expect(events).toHaveLength(1), { timeout: 3000 });
       for (let i = 0; i < 1100; i++)
         mapper.update({
           sessionUpdate: 'tool_call',
@@ -206,9 +207,137 @@ describe('neutral task session capture', () => {
       'src/layers/cognition/tools/core/steer-task.ts',
       'src/ports/task-channel.ts',
       'src/core/task-service.ts',
+      'src/layers/cognition/prompts/running-tasks.ts',
+      'src/storage/postgres-task-registry.ts',
+      'src/ports/task-transcript-bounds.mjs',
       'src/storage/postgres-task-mailbox.ts',
     ];
     for (const path of paths)
       expect(await readFile(path, 'utf8'), path).not.toMatch(/opencode|prime/i);
   });
+});
+
+it.each([first, second, scripted])(
+  'shell call retains specific name and scrubbed input (%#)',
+  async (factory) => {
+    const { createTaskContentScrubber } = await import('../../loader/src/task-content-scrub.js');
+    const { boundTaskTranscript } = await import('../../src/ports/task-transcript-bounds.mjs');
+    const scrub = createTaskContentScrubber({});
+    const entries: unknown[] = [];
+    const flights: Promise<void>[] = [];
+    const mapper = factory((event) => {
+      if (event.type === 'transcript')
+        flights.push(
+          scrub(event.entry).then((entry) => {
+            entries.push(boundTaskTranscript(entry));
+          })
+        );
+    });
+    mapper.update({
+      sessionUpdate: 'tool_call',
+      toolCallId: 'shell',
+      name: 'shell',
+      kind: 'execute',
+      status: 'pending',
+      rawInput: {},
+    });
+    mapper.update({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'shell',
+      title: 'shell',
+      kind: 'execute',
+      rawInput: { command: 'TOKEN=planted-secret sleep 240' },
+      status: 'in_progress',
+    });
+    mapper.update({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'shell',
+      title: 'execute',
+      kind: 'execute',
+      status: 'completed',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.all(flights);
+    expect(entries).toMatchObject([
+      { tool: { name: 'shell', status: 'running', input: 'TOKEN=[REDACTED] sleep 240' } },
+      { tool: { name: 'shell', status: 'completed', input: 'TOKEN=[REDACTED] sleep 240' } },
+    ]);
+    expect(JSON.stringify(entries)).not.toContain('planted-secret');
+  }
+);
+
+it.each([first, second])(
+  '300 ms chunks coalesce; 2.5 s idle splits a message (%#)',
+  async (factory) => {
+    vi.useFakeTimers();
+    try {
+      const entries: string[] = [];
+      const mapper = factory((event) => {
+        if (event.type === 'transcript') entries.push(event.entry.text);
+      });
+      const add = (text: string, messageId = 'one') =>
+        mapper.update({
+          sessionUpdate: 'agent_message_chunk',
+          messageId,
+          content: { type: 'text', text },
+        });
+      for (const text of ['a', 'b', 'c', 'd', 'e']) {
+        add(text);
+        await vi.advanceTimersByTimeAsync(300);
+      }
+      expect(entries).toEqual([]);
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(entries).toEqual(['abcde']);
+      add('f');
+      add('g', 'two');
+      mapper.flush();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(entries).toEqual(['abcde', 'f', 'g']);
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+);
+
+it('tool description advertises finished task chats', async () => {
+  const { createSteerTaskTool } =
+    await import('../../src/layers/cognition/tools/core/steer-task.js');
+  const tool = createSteerTaskTool({} as never);
+  expect(tool.description).toContain('running and finished tasks');
+  expect(tool.description).toContain('view="transcript"');
+});
+
+it('assistant observation time is its first chunk, not delayed flush', async () => {
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(new Date('2026-10-01T12:00:00.000Z'));
+    const entries: string[] = [];
+    const mapper = first((event) => {
+      if (event.type === 'transcript') entries.push(event.entry.time);
+    });
+    mapper.update({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'before insertion' },
+    });
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(entries).toEqual(['2026-10-01T12:00:00.000Z']);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it.each([
+  [first, { filePath: '/workspace/count.txt' }, '/workspace/count.txt'],
+  [first, { url: 'https://example.test/page' }, 'https://example.test/page'],
+  [second, { code: 'h = bash("sleep 240")' }, 'h = bash("sleep 240")'],
+] as const)('adapter selects its native input field (%#)', async (factory, rawInput, input) => {
+  const entries: TaskHarnessEvent[] = [];
+  const mapper = factory((event) => {
+    entries.push(event);
+  });
+  mapper.update({ sessionUpdate: 'tool_call', toolCallId: 'input', title: 'read', rawInput });
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(entries).toMatchObject([{ entry: { tool: { input } } }]);
 });
