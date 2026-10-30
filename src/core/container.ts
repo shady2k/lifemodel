@@ -1381,6 +1381,7 @@ export async function createContainerAsync(
     const registry = createPostgresTaskRegistry({
       pool: rawPostgres,
       contextPool: taskContextPool,
+      logger,
       epoch: snapshotEpoch,
       settings: createPlatformSettingsReader({ logger }),
       imageRevision,

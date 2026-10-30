@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { Logger } from '../types/logger.js';
 import { Client, type Pool, type PoolClient } from 'pg';
 import type { PlatformSettingsReader } from '../config/platform-settings.js';
 import type {
@@ -245,7 +246,10 @@ function validSealReceipt(receipt: TaskSealReceipt): boolean {
  * ADR-014 fences writes; command admission still checks the epoch and task authority.
  * Pool.query returns healthy clients for reuse. Production supplies an isolated,
  * short-timeout pool, never the owner-intake reserve. */
-async function readTaskContext(pool: Pool): Promise<TaskContextSnapshot> {
+async function readTaskContext(
+  pool: Pool,
+  logger?: Pick<Logger, 'warn'>
+): Promise<TaskContextSnapshot> {
   const rows = await pool.query<TaskContextEntry>({
     text: `SELECT t.id,t.harness,t.state,left(t.briefing,$2) AS briefing,
       CASE WHEN t.state='starting' THEN jsonb_build_object(
@@ -280,18 +284,24 @@ async function readTaskContext(pool: Pool): Promise<TaskContextSnapshot> {
       TASK_CONTEXT_LIMITS.question,
     ],
   });
-  const recent = await pool.query<RecentTaskContextEntry>({
-    text: `SELECT id,harness,state,terminal_at AS "terminalAt",left(briefing,$2) AS briefing
+  let recentTasks: RecentTaskContextEntry[] = [];
+  try {
+    const recent = await pool.query<RecentTaskContextEntry>({
+      text: `SELECT id,harness,state,terminal_at AS "terminalAt",left(briefing,$2) AS briefing
       FROM core.tasks WHERE state IN ('done','failed','stopped')
         AND terminal_at >= statement_timestamp() - interval '24 hours'
       ORDER BY terminal_at DESC,id DESC LIMIT $1`,
-    values: [TASK_CONTEXT_LIMITS.recentCount, TASK_CONTEXT_LIMITS.briefing],
-  });
-  return {
-    recentTasks: recent.rows.map((task) => ({
+      values: [TASK_CONTEXT_LIMITS.recentCount, TASK_CONTEXT_LIMITS.briefing],
+    });
+    recentTasks = recent.rows.map((task) => ({
       ...task,
       terminalAt: new Date(task.terminalAt).toISOString(),
-    })),
+    }));
+  } catch {
+    logger?.warn({ component: 'task-context' }, 'Recent task context unavailable');
+  }
+  return {
+    recentTasks,
     tasks: rows.rows.slice(0, TASK_CONTEXT_LIMITS.count),
     omitted: rows.rows.length > TASK_CONTEXT_LIMITS.count,
   };
@@ -300,6 +310,7 @@ async function readTaskContext(pool: Pool): Promise<TaskContextSnapshot> {
 /** Core-only writer. It owns no pool lifetime, filesystem state or platform metadata. */
 export function createPostgresTaskRegistry(deps: {
   pool: Pool;
+  logger?: Pick<Logger, 'warn'>;
   /** Optional isolated read pool. No holder lock: this snapshot authorizes no effect. */
   contextPool?: Pool;
   epoch: number;
@@ -590,7 +601,7 @@ export function createPostgresTaskRegistry(deps: {
         const rows = await client.query<TaskRow>(`${TASK_SELECT} ORDER BY t.accepted_order,t.id`);
         return rows.rows.map(taskRecord);
       }),
-    listActiveContext: () => readTaskContext(deps.contextPool ?? deps.pool),
+    listActiveContext: () => readTaskContext(deps.contextPool ?? deps.pool, deps.logger),
     recordStartupObservation: async (taskId, launchId, observation) => {
       if (
         ![
