@@ -28,6 +28,19 @@ it('review4: launcher re-bounds after expanding redactions', async () => {
   expect(Buffer.byteLength(JSON.stringify(frame.payload))).toBeLessThanOrEqual(8192);
   expect(frame.payload.text).not.toContain('token=x');
 });
+it.each([400, 409, 429, 500, 503, undefined])(
+  'review5: retry classification %s',
+  async (status) => {
+    const calls = vi
+      .spyOn(TaskJsonClient.prototype, 'call')
+      .mockRejectedValue(new LauncherError('request_refused', status));
+    const c = channel();
+    c.enqueue(entry());
+    await c.close();
+    expect(calls).toHaveBeenCalledTimes(status !== undefined && status < 500 ? 1 : 2);
+  }
+);
+
 it('review4: escaped fields stay below SQL jsonb text bound', () => {
   const result = boundTaskTranscript({
     ...entry('\\'.repeat(4000)),

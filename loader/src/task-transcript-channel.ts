@@ -38,7 +38,15 @@ export function createTaskTranscriptChannel(options: {
             try {
               await client.call('/task/events', frame);
               break;
-            } catch {
+            } catch (error) {
+              if (
+                error instanceof LauncherError &&
+                error.status !== undefined &&
+                error.status < 500
+              ) {
+                dropped++;
+                break;
+              }
               if (pass === 1) dropped++;
             }
           }
