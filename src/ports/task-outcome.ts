@@ -147,10 +147,10 @@ export function taskOutcomeFallback(
     })
     .slice(0, 8);
   const delivery = missed.length
-    ? `\n${missed.length} ${missed.length === 1 ? 'change did' : 'changes did'} not reach the task and ${missed.length === 1 ? 'was' : 'were'} not applied.${excerpts.length ? ` Changes (quoted): ${excerpts.join('; ')}.` : ''} I can rerun the task with those changes.`
+    ? `\n${String(missed.length)} ${missed.length === 1 ? 'change did' : 'changes did'} not reach the task and ${missed.length === 1 ? 'was' : 'were'} not applied.${excerpts.length ? ` Changes (quoted): ${excerpts.join('; ')}.` : ''} I can rerun the task with those changes.`
     : '';
   const pending = uncertain.length
-    ? `\n${uncertain.length} ${uncertain.length === 1 ? 'change has' : 'changes have'} no confirmed turn insertion and may not have been applied.`
+    ? `\n${String(uncertain.length)} ${uncertain.length === 1 ? 'change has' : 'changes have'} no confirmed turn insertion and may not have been applied.`
     : '';
   return `${state} ${reason}${delivery}${pending}\nTask output (quoted): ${JSON.stringify(event.summary)}${event.state === 'done' ? '' : '\nNo completed result is available.'}`;
 }

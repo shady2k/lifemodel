@@ -92,7 +92,8 @@ export function filterToolsForContext(
 ): (OpenAIChatTool | MinimalOpenAIChatTool)[] {
   // Keep an explicit read-only capability allowlist for the outcome's own task.
   if (context.triggerSignal.type === 'task_outcome') {
-    if (!taskOutcomeCommandRead(context)) return [];
+    const taskId = taskOutcomeCommandRead(context);
+    if (!taskId) return [];
     return tools
       .filter((tool) => tool.function.name === 'core.steerTask')
       .map((tool) => ({
@@ -105,7 +106,7 @@ export function filterToolsForContext(
             type: 'object' as const,
             properties: {
               action: { type: 'string', enum: ['read'] },
-              taskId: { type: 'string', enum: [taskOutcomeCommandRead(context)!] },
+              taskId: { type: 'string', enum: [taskId] },
             },
             required: ['action', 'taskId'],
             additionalProperties: false,
