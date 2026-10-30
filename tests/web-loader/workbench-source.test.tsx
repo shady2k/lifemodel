@@ -11,6 +11,93 @@ afterEach(() => {
 });
 describe('workbench source settings UI', () => {
   it.each([
+    ['en', 'Loader: preparing the import'],
+    ['ru', 'Загрузчик: подготовка импорта'],
+  ])(
+    'uses safe localized defaults for unknown step and side in %s',
+    async (language, explanation) => {
+      await i18n.changeLanguage(language);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string) => ({
+          ok: true,
+          json: async () =>
+            url.endsWith('status')
+              ? {
+                  state: 'failed',
+                  lastAttemptAt: null,
+                  detail: { step: 'private-step-canary', side: 'private-side-canary' },
+                }
+              : {
+                  registry: 'https://registry.example',
+                  repository: 'team/workbench',
+                  hasPassword: false,
+                },
+        }))
+      );
+      render(<WorkbenchSourceSettings csrfToken="csrf" />);
+      const detail = await screen.findByTestId('workbench-failure-detail');
+      expect(detail).toHaveTextContent(explanation);
+      expect(detail).not.toHaveTextContent(
+        /private-step-canary|private-side-canary|workbench_step_|workbench_side_/
+      );
+    }
+  );
+  it.each([
+    [
+      'en',
+      'The image source does not have this version.',
+      'Image source: reading the image manifest',
+    ],
+    ['ru', 'В источнике образа нет этой версии.', 'Источник образа: чтение манифеста образа'],
+  ])(
+    'explains a missing source version and its safe HTTP detail in %s',
+    async (language, reason, step) => {
+      await i18n.changeLanguage(language);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string) => ({
+          ok: true,
+          json: async () =>
+            url.endsWith('status')
+              ? {
+                  state: 'failed',
+                  reason: 'source-missing',
+                  lastAttemptAt: 1000,
+                  pinnedDigest: 'sha256:abc',
+                  detail: {
+                    step: 'source-manifest',
+                    side: 'source',
+                    status: 404,
+                    sourceOrigin: 'https://registry.example',
+                    sourceRepository: 'team/workbench',
+                    digest: 'sha256:abc',
+                  },
+                }
+              : {
+                  registry: 'https://registry.example',
+                  repository: 'team/workbench',
+                  hasPassword: true,
+                },
+        }))
+      );
+      render(<WorkbenchSourceSettings csrfToken="csrf" />);
+      const reasonLine = await screen.findByText(new RegExp(reason));
+      expect(reasonLine).toBeInTheDocument();
+      expect(reasonLine).toHaveTextContent(
+        language === 'en'
+          ? 'Some registries also return 404 for a private repository without credentials.'
+          : 'Некоторые реестры также возвращают 404 для закрытого репозитория без данных доступа.'
+      );
+      const detail = screen.getByTestId('workbench-failure-detail');
+      expect(detail).toHaveTextContent(step);
+      expect(detail).toHaveTextContent('HTTP 404');
+      expect(detail).toHaveTextContent('https://registry.example/team/workbench');
+      expect(detail).toHaveTextContent('sha256:abc');
+      expect(detail).not.toHaveTextContent(/password|Authorization|Basic |Bearer /i);
+    }
+  );
+  it.each([
     [
       'en',
       'Workbench image source',

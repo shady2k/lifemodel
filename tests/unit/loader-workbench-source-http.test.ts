@@ -5,6 +5,7 @@ import { createSession, csrfToken, hashPassword } from '../../loader/src/auth.js
 import { loadConfig } from '../../loader/src/config.js';
 import { createTestClock } from '../../loader/src/clock.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
+import type { WorkbenchImportDetail } from '../../loader/src/workbench-status.js';
 import type { WorkbenchSource } from '../../loader/src/workbench-source.js';
 import { createSettingsStore } from '../../loader/src/settings/store.js';
 import { platformSettings } from '../../loader/src/settings/platform.js';
@@ -16,6 +17,7 @@ afterEach(async () => {
 async function fixture(
   hooks: {
     reason?: string;
+    detail?: WorkbenchImportDetail;
     onAuthRead?: () => void;
     beforeWrite?: (value: WorkbenchSource) => Promise<void>;
   } = {}
@@ -74,6 +76,7 @@ async function fixture(
         state: 'failed',
         lastAttemptAt: 123,
         reason: hooks.reason ?? 'unavailable',
+        detail: hooks.detail,
         pinnedDigest: 'sha256:' + 'a'.repeat(64),
         password: 'SECRET_CANARY',
       }),
@@ -138,6 +141,63 @@ async function fixture(
   };
 }
 describe('workbench source HTTP boundary', () => {
+  it('returns source-missing and its safe detail through the loader API', async () => {
+    const detail: WorkbenchImportDetail = {
+      step: 'source-manifest',
+      side: 'source',
+      status: 404,
+      sourceOrigin: 'https://registry.example',
+      sourceRepository: 'team/workbench',
+      digest: 'sha256:' + 'a'.repeat(64),
+    };
+    const f = await fixture({ reason: 'source-missing', detail });
+    const response = await f.request('/api/workbench-status');
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body).reason).toBe('source-missing');
+    expect(JSON.parse(response.body).detail).toEqual(detail);
+  });
+  it('returns exact destination detail without source location fields', async () => {
+    const detail: WorkbenchImportDetail = {
+      step: 'destination-upload',
+      side: 'destination',
+      status: 500,
+      digest: 'sha256:' + 'a'.repeat(64),
+    };
+    const f = await fixture({
+      detail: {
+        ...detail,
+        sourceOrigin: 'https://registry.example',
+        sourceRepository: 'team/workbench',
+      },
+    });
+    const response = await f.request('/api/workbench-status');
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body).detail).toEqual(detail);
+  });
+  it('re-projects injected detail without credentialed URLs or arbitrary fields', async () => {
+    const f = await fixture({
+      detail: {
+        step: 'source-manifest',
+        side: 'source',
+        sourceOrigin: 'https://user:SECRET_CANARY@registry.example',
+        sourceRepository: 'team/workbench?SECRET_CANARY',
+        errorName: 'SECRET_CANARY',
+        errorCode: 'SECRET_CANARY',
+        digest: 'SECRET_CANARY',
+        password: 'SECRET_CANARY',
+        status: 404,
+      } as WorkbenchImportDetail,
+    });
+    const response = await f.request('/api/workbench-status');
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body).detail).toEqual({
+      step: 'source-manifest',
+      side: 'source',
+      status: 404,
+      errorName: 'Error',
+    });
+    expect(response.body + JSON.stringify(f.logs)).not.toContain('SECRET_CANARY');
+  });
   it('returns only safe source and safe status fields', async () => {
     const f = await fixture();
     const response = await f.request('/api/workbench-source');

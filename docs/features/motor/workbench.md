@@ -266,10 +266,36 @@ Core anonymously HEADs the pinned zot manifest with a short deadline before task
 acceptance. A missing/unreachable image refuses with `workbench_unavailable`,
 creating neither a Job nor a task registry row. The same request proceeds after
 import succeeds. Loader settings show `pending`, `importing`, `ready` or `failed`,
-a safe reason and last attempt time. Destination upload 4xx responses other than
-401/403 show `rejected`; the loader logs the HTTP status and request media type
-without credentials or token-bearing URLs. Access failures remain `unauthorized`
-and unreachable registries/server failures remain `unavailable`.
+a safe reason and last attempt time. The same reason and detail appear in the
+loader's `workbench import failed; retrying` warning, `workbench-import.json`
+and `/api/workbench-status`. The workbench section explains them in English
+and Russian. Detail names the step, source or destination side, object digest,
+and HTTP status when a response arrived. Source detail includes only the
+validated registry origin and repository, never a credentialed URL.
+
+A source manifest or listed blob returning 404 shows `source-missing`: the
+source lacks this pinned version (or an object it references). A listed blob's
+404 may come from the registry's redirected blob host. Some registries also
+answer 404 instead of 401 for private repositories without credentials; check
+the saved pull credential before concluding that the version is absent. Destination
+upload 4xx responses other than 401/403 show `rejected`, retaining HTTP status
+and the safe request media type. Access failures remain `unauthorized`;
+network/server failures remain `unavailable`, with a safe standard error class
+and a known system/TLS error code such as `ECONNREFUSED`, not the error message.
+Steps distinguish preparation, source manifest/blob reads, source authentication,
+destination checks, blob uploads, manifest writes and read-back verification.
+Local temporary-directory setup and blob file write failures use
+`local-storage`, side `loader`, without a source origin or HTTP status.
+Cleanup after a transfer or import is best-effort: a failed close or temporary
+file removal never replaces the import result. The next attempt removes the
+whole temporary directory before starting; failure of that setup remains visible.
+Unclassified task exceptions use `preparation`, side `loader`, rather than blaming the source.
+Other reasons remain `configuration`, `credential`, `redirect`, `deadline`,
+`aborted`, `digest-mismatch`, `size-limit`, `manifest`, `protocol` and
+`state-store` (saving status failed). Response bodies, Authorization, passwords,
+tokens and arbitrary exception metadata never enter status or warnings.
+The core's separate `workbench_unavailable` refusal does not carry this loader
+status.
 Saves trigger retry without restart; kills
 resume from verified objects rather than a process-memory completion flag.
 

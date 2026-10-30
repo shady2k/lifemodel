@@ -4,10 +4,12 @@ import { createReadStream } from 'node:fs';
 import { mkdir, mkdtemp, open, rm } from 'node:fs/promises';
 import { request as httpRequest, type IncomingHttpHeaders } from 'node:http';
 import { request as httpsRequest } from 'node:https';
-import { tmpdir } from 'node:os';
+import { constants, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { PlatformPhaseError, type PlatformPhase } from './platform-bootstrap.js';
+
+import type { WorkbenchImportDetail, WorkbenchImportStep } from './workbench-status.js';
 
 const REPOSITORY =
   /^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:\/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*$/;
@@ -52,6 +54,7 @@ type Reason =
   | 'credential'
   | 'unauthorized'
   | 'unavailable'
+  | 'source-missing'
   | 'rejected'
   | 'deadline'
   | 'aborted'
@@ -60,17 +63,106 @@ type Reason =
   | 'size-limit'
   | 'manifest'
   | 'protocol';
+export class WorkbenchImportFailure extends PlatformPhaseError {
+  constructor(
+    reason: Reason,
+    readonly detail: WorkbenchImportDetail
+  ) {
+    super('workbench-import', `workbench-import:${reason}`);
+  }
+}
 function failure(reason: Reason): PlatformPhaseError {
   return new PlatformPhaseError('workbench-import', `workbench-import:${reason}`);
 }
+/** Error messages, custom names and arbitrary code strings can contain credentials. */
+export function workbenchErrorDetail(
+  error: unknown
+): Pick<WorkbenchImportDetail, 'errorName' | 'errorCode'> {
+  const names = new Set([
+    'Error',
+    'TypeError',
+    'SyntaxError',
+    'RangeError',
+    'ReferenceError',
+    'URIError',
+    'EvalError',
+    'AggregateError',
+  ]);
+  const codes = new Set([
+    ...Object.keys(constants.errno),
+    'ENOTFOUND',
+    'EAI_AGAIN',
+    'ERR_TLS_CERT_ALTNAME_INVALID',
+    'CERT_HAS_EXPIRED',
+    'DEPTH_ZERO_SELF_SIGNED_CERT',
+    'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    'SELF_SIGNED_CERT_IN_CHAIN',
+    'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  ]);
+  const code = error instanceof Error && 'code' in error ? error.code : undefined;
+  return {
+    ...(error instanceof Error ? { errorName: names.has(error.name) ? error.name : 'Error' } : {}),
+    ...(typeof code === 'string' && codes.has(code) ? { errorCode: code } : {}),
+  };
+}
+/** Re-project injected status too: accept only protocol metadata, not arbitrary strings. */
+export function safeWorkbenchImportDetail(value: unknown): WorkbenchImportDetail | undefined {
+  if (!record(value)) return undefined;
+  const steps = [
+    'preparation',
+    'local-storage',
+    'source-manifest',
+    'source-blob',
+    'source-authentication',
+    'destination-check',
+    'destination-upload',
+    'destination-manifest-write',
+    'read-back-verify',
+  ];
+  if (
+    typeof value['step'] !== 'string' ||
+    !steps.includes(value['step']) ||
+    (value['side'] !== 'source' && value['side'] !== 'destination' && value['side'] !== 'loader')
+  )
+    return undefined;
+  const detail: WorkbenchImportDetail = {
+    step: value['step'] as WorkbenchImportStep,
+    side: value['side'],
+  };
+  if (typeof value['digest'] === 'string' && DIGEST.test(value['digest']))
+    detail.digest = value['digest'];
+  if (
+    typeof value['status'] === 'number' &&
+    Number.isInteger(value['status']) &&
+    value['status'] >= 100 &&
+    value['status'] <= 599
+  )
+    detail.status = value['status'];
+  if (value['side'] === 'source') {
+    if (typeof value['sourceOrigin'] === 'string') {
+      try {
+        detail.sourceOrigin = parseOrigin(value['sourceOrigin']).origin;
+      } catch {
+        /* Invalid location is private. */
+      }
+    }
+    if (typeof value['sourceRepository'] === 'string' && REPOSITORY.test(value['sourceRepository']))
+      detail.sourceRepository = value['sourceRepository'];
+  }
+  const error = Object.assign(new Error(), { name: value['errorName'], code: value['errorCode'] });
+  Object.assign(detail, workbenchErrorDetail(error));
+  if (value['errorName'] === undefined) delete detail.errorName;
+  return detail;
+}
 /** Only bounded protocol metadata crosses the import boundary, never URLs or response bodies. */
-export class WorkbenchDestinationRejection extends PlatformPhaseError {
+export class WorkbenchDestinationRejection extends WorkbenchImportFailure {
   readonly mediaType: string;
   constructor(
     readonly status: number,
-    mediaType: string | undefined
+    mediaType: string | undefined,
+    detail: WorkbenchImportDetail
   ) {
-    super('workbench-import', 'workbench-import:rejected');
+    super('rejected', detail);
     this.mediaType =
       mediaType !== undefined && [...MANIFEST_TYPES, 'application/octet-stream'].includes(mediaType)
         ? mediaType
@@ -89,6 +181,7 @@ interface Result {
   size: number;
 }
 interface RequestOptions {
+  step?: WorkbenchImportStep;
   method?: string;
   headers?: Record<string, string>;
   body?: Buffer | { path: string; size: number };
@@ -118,6 +211,46 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
       );
       const temporary = options.tempDirectory ?? join(tmpdir(), 'lifemodel-workbench-import');
       let workspace: string | undefined;
+      let detail: WorkbenchImportDetail = {
+        step: 'preparation',
+        side: 'loader',
+        ...(DIGEST.test(options.pinnedDigest) ? { digest: options.pinnedDigest } : {}),
+      };
+      let sourceOrigin: string | undefined;
+      let detailSourceRepository: string | undefined;
+      function context(
+        step: WorkbenchImportStep,
+        side: 'source' | 'destination' | 'loader',
+        digest: string
+      ): void {
+        detail = {
+          step,
+          side,
+          digest,
+          ...(side === 'source' && sourceOrigin !== undefined ? { sourceOrigin } : {}),
+          ...(side === 'source' && detailSourceRepository !== undefined
+            ? { sourceRepository: detailSourceRepository }
+            : {}),
+        };
+      }
+      function failure(reason: Reason): WorkbenchImportFailure {
+        return new WorkbenchImportFailure(reason, { ...detail });
+      }
+      function localFailure(error: unknown): WorkbenchImportFailure {
+        return new WorkbenchImportFailure('unavailable', {
+          step: 'local-storage',
+          side: 'loader',
+          ...(detail.digest === undefined ? {} : { digest: detail.digest }),
+          ...workbenchErrorDetail(error),
+        });
+      }
+      async function localStorage<T>(work: Promise<T>): Promise<T> {
+        try {
+          return await work;
+        } catch (error) {
+          throw localFailure(error);
+        }
+      }
       try {
         if (!DIGEST.test(options.pinnedDigest)) throw failure('configuration');
         const pinnedDigest = options.pinnedDigest;
@@ -129,7 +262,9 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
             : parseOrigin(options.originRegistry);
         if (options.originRegistry !== undefined && !loopback(source))
           throw failure('configuration');
+        sourceOrigin = configuredOrigin.origin;
         const sourceRepository = configuredSource.repository;
+        detailSourceRepository = sourceRepository;
         const destination = parseOrigin(
           options.destinationOrigin ?? 'http://zot.lifemodel-system.svc:5001'
         );
@@ -154,9 +289,9 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
         }
         checkAbort();
         // A platform phase has one owner. Never accumulate killed-run layer files on its PVC.
-        await rm(temporary, { force: true, recursive: true });
-        await mkdir(temporary, { recursive: true, mode: 0o700 });
-        workspace = await mkdtemp(join(temporary, 'run-'));
+        await localStorage(rm(temporary, { force: true, recursive: true }));
+        await localStorage(mkdir(temporary, { recursive: true, mode: 0o700 }));
+        workspace = await localStorage(mkdtemp(join(temporary, 'run-')));
         let transferred = 0;
         let activeManifestBytes = 0;
         let objectCount = 0;
@@ -259,6 +394,9 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
           });
         }
         async function request(url: URL, spec: RequestOptions = {}): Promise<Result> {
+          delete detail.status;
+          delete detail.errorName;
+          delete detail.errorCode;
           checkAbort();
           return new Promise<Result>((resolve, reject) => {
             const method = spec.method ?? 'GET';
@@ -281,6 +419,7 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
               (res) => {
                 void (async () => {
                   const status = res.statusCode ?? 0;
+                  detail = { ...detail, status };
                   if (status !== 200 || method === 'HEAD') {
                     res.destroy();
                     return {
@@ -301,7 +440,9 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
                   const hash = createHash('sha256');
                   const chunks: Buffer[] = [];
                   const file =
-                    spec.file === undefined ? undefined : await open(spec.file, 'w', 0o600);
+                    spec.file === undefined
+                      ? undefined
+                      : await localStorage(open(spec.file, 'w', 0o600));
                   let size = 0;
                   try {
                     for await (const chunk of res) {
@@ -311,11 +452,12 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
                       if (size > limit) throw failure('size-limit');
                       charge(bytes.length);
                       hash.update(bytes);
-                      if (file !== undefined) await file.writeFile(bytes);
+                      if (file !== undefined) await localStorage(file.writeFile(bytes));
                       else if (!spec.discard) chunks.push(bytes);
                     }
                   } finally {
-                    await file?.close();
+                    // Cleanup must not replace a transfer failure or turn success into failure.
+                    await file?.close().catch(() => undefined);
                   }
                   return {
                     status,
@@ -342,8 +484,13 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
               controller.signal.removeEventListener('abort', onAbort);
             }
             controller.signal.addEventListener('abort', onAbort, { once: true });
-            req.on('error', () => {
+            req.on('error', (error) => {
+              detail = { ...detail, ...workbenchErrorDetail(error) };
               cleanup();
+              if (error instanceof WorkbenchImportFailure) {
+                reject(error);
+                return;
+              }
               reject(
                 failure(
                   controller.signal.aborted
@@ -357,8 +504,14 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
               );
             });
             if (spec.body !== undefined && !Buffer.isBuffer(spec.body)) {
-              void pipeline(createReadStream(spec.body.path), req).catch(() => {
-                req.destroy(failure('unavailable'));
+              const input = createReadStream(spec.body.path);
+              input.on('error', (error: NodeJS.ErrnoException) => {
+                if (error.syscall === 'open' || error.syscall === 'read')
+                  req.destroy(localFailure(error));
+              });
+              void pipeline(input, req).catch((error: unknown) => {
+                detail = { ...detail, ...workbenchErrorDetail(error) };
+                req.destroy(error instanceof Error ? error : failure('unavailable'));
               });
             } else req.end(spec.body);
           });
@@ -366,12 +519,35 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
         function status(response: Result, expected: number[]): void {
           if (response.status === 401 || response.status === 403) throw failure('unauthorized');
           if (response.status >= 300 && response.status < 400) throw failure('redirect');
-          if (!expected.includes(response.status)) throw failure('unavailable');
+          if (!expected.includes(response.status)) {
+            if (
+              response.status === 404 &&
+              detail.side === 'source' &&
+              (detail.step === 'source-manifest' || detail.step === 'source-blob')
+            )
+              throw failure('source-missing');
+            throw failure('unavailable');
+          }
         }
         async function destinationRequest(
           path: string | URL,
-          spec: RequestOptions = {}
+          spec: RequestOptions = {},
+          digest = options.pinnedDigest
         ): Promise<Result> {
+          const method = spec.method ?? 'GET';
+          const pathText = typeof path === 'string' ? path : path.pathname;
+          context(
+            spec.step ??
+              (audit
+                ? 'read-back-verify'
+                : method === 'GET' || method === 'HEAD'
+                  ? 'destination-check'
+                  : pathText.includes('manifests/')
+                    ? 'destination-manifest-write'
+                    : 'destination-upload'),
+            'destination',
+            digest
+          );
           const url =
             typeof path === 'string'
               ? new URL(`/v2/${repository}/${path}`, destination)
@@ -389,11 +565,15 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
           )
             throw new WorkbenchDestinationRejection(
               response.status,
-              spec.headers?.['content-type']
+              spec.headers?.['content-type'],
+              { ...detail }
             );
           return response;
         }
         async function sourceRequest(path: string, spec: RequestOptions): Promise<Result> {
+          const sourceStep = path.startsWith('blobs/') ? 'source-blob' : 'source-manifest';
+          const digest = path.split('/').at(-1) as string;
+          context(sourceStep, 'source', digest);
           const url = new URL(`/v2/${sourceRepository}/${path}`, source);
           // Only the registry itself ever receives the cached source authorization.
           const send = async () => {
@@ -449,6 +629,7 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
                 throw failure('redirect');
               if (service !== undefined) tokenUrl.searchParams.set('service', service);
               tokenUrl.searchParams.set('scope', `repository:${sourceRepository}:pull`);
+              context('source-authentication', 'source', digest);
               const grant = await request(tokenUrl, {
                 limit: 64 * 1024,
                 ...(credential === undefined ? {} : { headers: { authorization: credential } }),
@@ -465,6 +646,7 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
                 throw failure('unauthorized');
               sourceAuthorization = `Bearer ${value}`;
             } else throw failure('unauthorized');
+            context(sourceStep, 'source', digest);
             response = await send();
           }
           if (response.status >= 300 && response.status < 400) {
@@ -522,11 +704,12 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
           return true;
         }
         async function blob(item: Descriptor): Promise<void> {
+          context(audit ? 'read-back-verify' : 'destination-check', 'destination', item.digest);
           const key = `blob:${item.digest}`;
           if (!begin(key, item.size)) return;
           if (item.size > blobLimit) throw failure('size-limit');
           const path = `blobs/${item.digest}`;
-          const head = await destinationRequest(path, { method: 'HEAD' });
+          const head = await destinationRequest(path, { method: 'HEAD' }, item.digest);
           status(head, [200, 404]);
           if (head.status === 404) {
             if (audit) throw failure('unavailable');
@@ -534,7 +717,11 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
             try {
               const original = await sourceRequest(path, { limit: blobLimit, file });
               verify(original, item.digest, item.size);
-              const start = await destinationRequest('blobs/uploads/', { method: 'POST' });
+              const start = await destinationRequest(
+                'blobs/uploads/',
+                { method: 'POST' },
+                item.digest
+              );
               status(start, [202]);
               if (start.headers.location === undefined) throw failure('protocol');
               const upload = checkedUrl(
@@ -544,31 +731,44 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
               if (!upload.pathname.startsWith(`/v2/${repository}/blobs/uploads/`))
                 throw failure('redirect');
               upload.searchParams.set('digest', item.digest);
-              const pushed = await destinationRequest(upload, {
-                method: 'PUT',
-                headers: { 'content-type': 'application/octet-stream' },
-                body: { path: file, size: item.size },
-              });
+              const pushed = await destinationRequest(
+                upload,
+                {
+                  method: 'PUT',
+                  headers: { 'content-type': 'application/octet-stream' },
+                  body: { path: file, size: item.size },
+                },
+                item.digest
+              );
               status(pushed, [201]);
               wrote = true;
             } finally {
-              await rm(file, { force: true });
+              await rm(file, { force: true }).catch(() => undefined);
             }
           }
-          const stored = await destinationRequest(path, { limit: blobLimit, discard: true });
+          const stored = await destinationRequest(
+            path,
+            { limit: blobLimit, discard: true, step: 'read-back-verify' },
+            item.digest
+          );
           status(stored, [200]);
           verify(stored, item.digest, item.size);
           visiting.delete(key);
           completed.set(key, item.size);
         }
         async function manifest(digest: string, expectedSize?: number, depth = 0): Promise<void> {
+          context(audit ? 'read-back-verify' : 'destination-check', 'destination', digest);
           if (depth > 16) throw failure('size-limit');
           const key = `manifest:${digest}`;
           if (!begin(key, expectedSize)) return;
           const path = `manifests/${digest}`;
-          let bytes = await destinationRequest(path, {
-            headers: { accept: MANIFEST_TYPES.join(', ') },
-          });
+          let bytes = await destinationRequest(
+            path,
+            {
+              headers: { accept: MANIFEST_TYPES.join(', ') },
+            },
+            digest
+          );
           status(bytes, [200, 404]);
           const missing = bytes.status === 404;
           if (missing) {
@@ -586,6 +786,7 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
             !MANIFEST_TYPES.includes(document['mediaType'])
           )
             throw failure('manifest');
+          const manifestDetail = { ...detail };
           const mediaType = document['mediaType'];
           if (document['subject'] !== undefined) {
             const subject = descriptor(document['subject']);
@@ -594,25 +795,39 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
           if (INDEX_TYPES.has(mediaType)) {
             if (!Array.isArray(document['manifests'])) throw failure('manifest');
             for (const value of document['manifests']) {
+              detail = { ...manifestDetail };
               const child = descriptor(value);
               await manifest(child.digest, child.size, depth + 1);
             }
           } else {
             await blob(descriptor(document['config']));
+            detail = { ...manifestDetail };
             if (!Array.isArray(document['layers'])) throw failure('manifest');
-            for (const value of document['layers']) await blob(descriptor(value));
+            for (const value of document['layers']) {
+              detail = { ...manifestDetail };
+              await blob(descriptor(value));
+            }
           }
           if (missing) {
-            const pushed = await destinationRequest(path, {
-              method: 'PUT',
-              headers: { 'content-type': mediaType },
-              body: bytes.bytes,
-            });
+            const pushed = await destinationRequest(
+              path,
+              {
+                method: 'PUT',
+                headers: { 'content-type': mediaType },
+                body: bytes.bytes,
+              },
+              digest
+            );
             status(pushed, [201]);
             wrote = true;
-            const stored = await destinationRequest(path, {
-              headers: { accept: MANIFEST_TYPES.join(', ') },
-            });
+            const stored = await destinationRequest(
+              path,
+              {
+                headers: { accept: MANIFEST_TYPES.join(', ') },
+                step: 'read-back-verify',
+              },
+              digest
+            );
             status(stored, [200]);
             verify(stored, digest, bytes.size);
           }
@@ -632,12 +847,19 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
         checkAbort();
       } catch (error) {
         if (controller.signal.aborted) throw failure(phaseExpired ? 'deadline' : 'aborted');
-        if (error instanceof PlatformPhaseError && error.phase === 'workbench-import') throw error;
+        if (error instanceof WorkbenchImportFailure) throw error;
+        if (error instanceof PlatformPhaseError && error.phase === 'workbench-import')
+          throw new WorkbenchImportFailure(
+            error.message.slice('workbench-import:'.length) as Reason,
+            { ...detail }
+          );
+        detail = { ...detail, ...workbenchErrorDetail(error) };
         throw failure('unavailable');
       } finally {
         clearTimeout(phaseTimer);
         options.signal?.removeEventListener('abort', abort);
         if (workspace !== undefined)
+          // The next attempt removes abandoned temporary files before importing.
           await rm(workspace, { recursive: true, force: true }).catch(() => undefined);
       }
     },

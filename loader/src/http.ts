@@ -65,6 +65,7 @@ import {
   type WorkbenchSource,
 } from './workbench-source.js';
 import type { WorkbenchImportStatus } from './workbench-task.js';
+import { safeWorkbenchImportDetail } from './workbench-import.js';
 
 export interface WorkbenchHttp {
   read(): Promise<WorkbenchSource>;
@@ -601,6 +602,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
                 'credential',
                 'unauthorized',
                 'unavailable',
+                'source-missing',
                 'rejected',
                 'deadline',
                 'aborted',
@@ -620,6 +622,9 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
                 ...(status.reason === undefined
                   ? {}
                   : { reason: reasons.includes(status.reason) ? status.reason : 'unavailable' }),
+                ...(status.detail === undefined
+                  ? {}
+                  : { detail: safeWorkbenchImportDetail(status.detail) }),
                 ...(/^sha256:[a-f0-9]{64}$/.test(status.pinnedDigest)
                   ? { pinnedDigest: status.pinnedDigest }
                   : {}),
