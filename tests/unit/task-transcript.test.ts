@@ -380,7 +380,7 @@ it.each([first, second])(
   }
 );
 
-it.each(['idle', 'insertion', 'message', 'tool', 'post-prompt', 'size'])(
+it.each(['idle', 'insertion', 'message', 'tool', 'size'])(
   'r2 assistant key streamed across %s boundary is scrubbed',
   async (boundary) => {
     const { createTaskContentScrubber } = await import('../../loader/src/task-content-scrub.js');
@@ -470,3 +470,37 @@ it('r2 recent index follows the small-table bounded-lock squawk precedent', asyn
   expect(sql).toContain("SET lock_timeout = '1s'");
   expect(sql).toContain('Small core task table');
 });
+
+it.each([first, second])(
+  'fix3 complete text keeps a final word in one row without closing tools (%#)',
+  async (factory) => {
+    const events: TaskHarnessEvent[] = [];
+    const mapper = factory((event) => {
+      events.push(event);
+    });
+    mapper.update({
+      sessionUpdate: 'tool_call',
+      toolCallId: 'live',
+      title: 'shell',
+      status: 'in_progress',
+    });
+    for (const text of ['The task result is ', 'durable.'])
+      mapper.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
+    mapper.completeText();
+    await Promise.resolve();
+    expect(
+      events.filter((event) => event.type === 'transcript' && event.entry.role === 'assistant')
+    ).toMatchObject([{ entry: { text: 'The task result is durable.' } }]);
+    expect(
+      events.filter((event) => event.type === 'transcript' && event.entry.tool?.status === 'error')
+    ).toEqual([]);
+    mapper.flush(true);
+    await Promise.resolve();
+    expect(
+      events.filter((event) => event.type === 'transcript' && event.entry.role === 'assistant')
+    ).toHaveLength(1);
+    expect(
+      events.filter((event) => event.type === 'transcript' && event.entry.tool?.status === 'error')
+    ).toHaveLength(1);
+  }
+);

@@ -767,3 +767,35 @@ it('r2 insertion boundary holds a streamed key for redaction', async () => {
     await f.cleanup();
   }
 }, 15000);
+
+it('fix3 post-prompt flush completes one final row before reconciliation without ending tools', async () => {
+  const events: TaskHarnessEvent[] = [];
+  const f = await barrierFixture({
+    pendingTool: true,
+    onEvent: (event) => {
+      events.push(event);
+    },
+    reconcile: async () => {
+      await Promise.resolve();
+      const transcript = events.flatMap((event) =>
+        event.type === 'transcript' ? [event.entry] : []
+      );
+      expect(
+        transcript.filter((entry) => entry.role === 'assistant').map((entry) => entry.text)
+      ).toEqual(['First result']);
+      expect(transcript.filter((entry) => entry.role === 'tool')).toEqual([]);
+      return { state: 'idle' };
+    },
+  });
+  try {
+    await f.release();
+    expect(await f.terminal).toMatchObject({ outcome: 'succeeded' });
+    expect(
+      events.flatMap((event) =>
+        event.type === 'transcript' && event.entry.role === 'assistant' ? [event.entry.text] : []
+      )
+    ).toEqual(['First result']);
+  } finally {
+    await f.cleanup();
+  }
+}, 15000);

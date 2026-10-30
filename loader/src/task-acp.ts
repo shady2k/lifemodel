@@ -731,7 +731,7 @@ export class AcpTaskHarness implements TaskHarness {
         );
         // Notification chunks already admitted to the queue belong to this response.
         await queue;
-        transcript?.flush();
+        transcript?.completeText();
         promptResponse = response;
         stopReason = response['stopReason'];
         if (fault) throw fault;

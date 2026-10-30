@@ -48,6 +48,8 @@ export interface TaskTranscriptEntry {
 }
 export interface TaskTranscriptMapper {
   update(value: unknown): void;
+  /** The drained prompt response completes text, but not the session or its tools. */
+  completeText(): void;
   /** End-of-session also records calls that never left pending. */
   flush(ended?: boolean): void;
 }

@@ -60,6 +60,7 @@ export function createAcpTranscriptMapper(
   const flush = (ended = false, full = false) => {
     clearTimeout(timer);
     timer = undefined;
+    if (ended) droppingRun = false;
     if (!pending) return;
     // A streamed credential can span any non-final boundary. Keep its whole run.
     const trailing = ended ? '' : (/\S+$/u.exec(pending)?.[0] ?? '');
@@ -75,6 +76,9 @@ export function createAcpTranscriptMapper(
     if (!pending) pendingAt = undefined;
   };
   return {
+    completeText() {
+      flush(true);
+    },
     flush(ended = false) {
       flush(ended);
       if (!ended) return;

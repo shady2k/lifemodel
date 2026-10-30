@@ -17,7 +17,7 @@ and `user-briefing`. `tool` is null except for the tool role, where it contains
 `{ name, input?, status, outputTail }`; status is `running`, `completed`, or `error`.
 Text is at most 4,000 UTF-8 bytes, name 128 bytes, input summary 300 bytes, output tail 2,000 bytes,
 and the encoded entry 8 KiB. Ordinary frame identity/authority/transport bounds
-still apply. Adapters select command, code, path or URL as a short input summary; no full argument bags, artifacts or raw provider messages are copied. The mapper keeps up to 4,000 raw input and output-tail bytes within the bounded enqueue budget, so the launcher can scrub complete credentials before the final 300-byte cut. Both launcher and core re-bound after redaction. After scrub, input head cuts and output-tail front cuts discard a partial non-whitespace run and mark the omission with `…`. Before scrub, a raw output front cut discards through the first newline (or keeps only `…` when none exists), so a value cannot outlive its missing key. Raw budget pressure spends input headroom first (1,024 bytes before the final 300-byte wire bound) and cuts text on run boundaries. Non-final assistant flushes hold the last non-whitespace run for the next chunk; an oversized run is dropped through its streamed suffix. Only final flushes emit the complete held run. Calls that remain pending or running are captured once as `error` at session end; normal intermediate flushes do not end a call. The existing 8 KiB SQL row bound still suffices; older entries without input remain readable.
+still apply. Adapters select command, code, path or URL as a short input summary; no full argument bags, artifacts or raw provider messages are copied. The mapper keeps up to 4,000 raw input and output-tail bytes within the bounded enqueue budget, so the launcher can scrub complete credentials before the final 300-byte cut. Both launcher and core re-bound after redaction. After scrub, input head cuts and output-tail front cuts discard a partial non-whitespace run and mark the omission with `…`. Before scrub, a raw output front cut discards through the first newline (or keeps only `…` when none exists), so a value cannot outlive its missing key. Raw budget pressure spends input headroom first (1,024 bytes before the final 300-byte wire bound) and cuts text on run boundaries. Non-final assistant flushes hold the last non-whitespace run for the next chunk; an oversized run is dropped through its streamed suffix. The drained prompt-response boundary completes its text and emits the complete held run without closing tools. Session-end flush also emits the complete held run and closes unfinished tools. Calls that remain pending or running are captured once as `error` at session end; normal intermediate flushes do not end a call. The existing 8 KiB SQL row bound still suffices; older entries without input remain readable.
 
 The launcher captures best effort on a separate bounded socket/queue (64 waiting,
 1,024 recent deduplication IDs). A lost ACK or 5xx gets one identical replay;
@@ -564,15 +564,15 @@ integers with minimum 1 and hard maximum equal to the defaults below. Values
 are snapshotted when the listener starts; changes apply on its next start.
 Raising a hard maximum requires code review and rerunning the two-second fixture.
 
-| Setting | Default / hard maximum |
-| --- | ---: |
-| `tasks.channel.maxFrameBytes` | 65536 |
-| `tasks.channel.maxUnackedFrames` | 16 |
-| `tasks.channel.maxUnackedBytes` | 1048576 |
-| `tasks.channel.maxBufferedBytes` | 4194304 |
-| `tasks.channel.ackTimeoutMs` | 5000 |
-| `tasks.channel.workers` | 2 |
-| `tasks.channel.sqlConnections` | 2 |
+| Setting                          | Default / hard maximum |
+| -------------------------------- | ---------------------: |
+| `tasks.channel.maxFrameBytes`    |                  65536 |
+| `tasks.channel.maxUnackedFrames` |                     16 |
+| `tasks.channel.maxUnackedBytes`  |                1048576 |
+| `tasks.channel.maxBufferedBytes` |                4194304 |
+| `tasks.channel.ackTimeoutMs`     |                   5000 |
+| `tasks.channel.workers`          |                      2 |
+| `tasks.channel.sqlConnections`   |                      2 |
 
 Before body intake, a fixed-length request reserves its Content-Length (at least
 one byte); a chunked request reserves the smaller of the frame ceiling and the
