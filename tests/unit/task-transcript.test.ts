@@ -5,12 +5,14 @@ import { pathToFileURL } from 'node:url';
 import { describe, it, expect, vi } from 'vitest';
 import { readFile } from 'node:fs/promises';
 import { createTranscriptMapper as first } from '../../loader/src/task-opencode.js';
+import { createTranscriptMapper as scripted } from '../fixtures/task-scripted-config.mjs';
 import { createTranscriptMapper as second } from '../../loader/src/task-prime-agent.js';
 import { type TaskHarnessEvent } from '../../loader/src/task-harness.js';
+import { boundTaskTranscript } from '../../src/ports/task-transcript-bounds.mjs';
 import { validateTaskChannelFrame } from '../../src/ports/task-channel.js';
 
 describe('neutral task session capture', () => {
-  it.each([['�'], ['abc\uD800'], ['\uD800'], ['a�b�'], ['x'.repeat(3995), '🙂🙂', 'last�']])(
+  it.each([['�'], ['abc\uD800'], ['\uD800'], ['a�b�'], ['x '.repeat(1997), '🙂🙂 ', 'last�']])(
     'round2: malformed or replacement text completes without loss (%#)',
     async (...parts) => {
       const source = await readFile('loader/src/task-transcript.ts', 'utf8');
@@ -28,7 +30,7 @@ describe('neutral task session capture', () => {
         (async()=>{const m=await import(workerData.url);const entries=[];
           const mapper=m.createAcpTranscriptMapper(e=>entries.push(e.entry),{name:()=>'',output:()=>''});
           for(const text of workerData.parts) mapper.update({sessionUpdate:'agent_message_chunk',content:{type:'text',text}});
-          mapper.flush();await Promise.resolve();await Promise.resolve();parentPort.postMessage(entries);})();`,
+          mapper.flush(true);await Promise.resolve();await Promise.resolve();parentPort.postMessage(entries);})();`,
         { eval: true, workerData: { url, parts } }
       );
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -59,7 +61,7 @@ describe('neutral task session capture', () => {
       });
       mapper.update({
         sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'Inspecting the files.' },
+        content: { type: 'text', text: 'Inspecting the files. ' },
       });
       mapper.update({
         sessionUpdate: 'tool_call',
@@ -72,7 +74,7 @@ describe('neutral task session capture', () => {
         sessionUpdate: 'tool_call_update',
         toolCallId: 'shell-1',
         status: 'completed',
-        rawOutput: { output: 'head' + '🙂'.repeat(1000) + 'OUTPUT-END' },
+        rawOutput: { output: 'head ' + '🙂'.repeat(1000) + '\nOUTPUT-END' },
       };
       mapper.update(end);
       mapper.update(end);
@@ -80,17 +82,18 @@ describe('neutral task session capture', () => {
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Final '.repeat(2000) },
       });
-      mapper.flush();
-      await vi.waitFor(() => expect(events).toHaveLength(6));
+      mapper.flush(true);
+      await vi.waitFor(() => expect(events).toHaveLength(7));
       const entries = events.flatMap((event) => (event.type === 'transcript' ? [event.entry] : []));
-      expect(entries[0]).toMatchObject({ role: 'assistant', text: 'Inspecting the files.' });
+      expect(entries[0]).toMatchObject({ role: 'assistant', text: 'Inspecting the files. ' });
       expect(entries[1]).toMatchObject({ role: 'tool', tool: { status: 'running' } });
       expect(entries[2]).toMatchObject({
         role: 'tool',
         tool: { status: 'completed', outputTail: expect.stringContaining('OUTPUT-END') },
       });
       expect(entries[3]?.role).toBe('assistant');
-      for (const entry of entries) {
+      for (const raw of entries) {
+        const entry = boundTaskTranscript(raw);
         expect(Buffer.byteLength(entry.text)).toBeLessThanOrEqual(4000);
         expect(Buffer.byteLength(entry.tool?.outputTail ?? '')).toBeLessThanOrEqual(2000);
         expect(entry.text).not.toContain('�');
@@ -117,9 +120,9 @@ describe('neutral task session capture', () => {
       });
       mapper.update({
         sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'Still working' },
+        content: { type: 'text', text: 'Still working ' },
       });
-      await vi.waitFor(() => expect(events).toHaveLength(1));
+      await vi.waitFor(() => expect(events).toHaveLength(1), { timeout: 3000 });
       for (let i = 0; i < 1100; i++)
         mapper.update({
           sessionUpdate: 'tool_call',
@@ -137,10 +140,10 @@ describe('neutral task session capture', () => {
     const mapper = first((e) => {
       events.push(e);
     });
-    const parts = ['x'.repeat(500), '🙂'.repeat(1000), 'last'];
+    const parts = ['x '.repeat(250), '🙂 '.repeat(1000), 'last'];
     for (const text of parts)
       mapper.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
-    mapper.flush();
+    mapper.flush(true);
     await Promise.resolve();
     await Promise.resolve();
     expect(events.flatMap((e) => (e.type === 'transcript' ? [e.entry.text] : [])).join('')).toBe(
@@ -174,16 +177,16 @@ describe('neutral task session capture', () => {
     for (let i = 0; i < 7; i++)
       mapper.update({
         sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'a'.repeat(500) },
+        content: { type: 'text', text: 'a '.repeat(250) },
       });
-    mapper.flush();
+    mapper.flush(true);
     await Promise.resolve();
     await Promise.resolve();
     const entries = events.flatMap((e) => (e.type === 'transcript' ? [e.entry] : []));
     expect(entries.filter((e) => e.role === 'tool').length).toBeLessThanOrEqual(3);
     expect(entries.find((e) => e.tool?.status === 'completed')?.tool?.outputTail).toBe('FINAL');
     expect(entries.filter((e) => e.role === 'assistant').map((e) => e.text)).toEqual([
-      'a'.repeat(3500),
+      'a '.repeat(1750),
     ]);
   });
 
@@ -206,9 +209,298 @@ describe('neutral task session capture', () => {
       'src/layers/cognition/tools/core/steer-task.ts',
       'src/ports/task-channel.ts',
       'src/core/task-service.ts',
+      'src/layers/cognition/prompts/running-tasks.ts',
+      'src/storage/postgres-task-registry.ts',
+      'src/ports/task-transcript-bounds.mjs',
       'src/storage/postgres-task-mailbox.ts',
     ];
     for (const path of paths)
       expect(await readFile(path, 'utf8'), path).not.toMatch(/opencode|prime/i);
   });
 });
+
+it.each([first, second, scripted])(
+  'shell call retains specific name and scrubbed input (%#)',
+  async (factory) => {
+    const { createTaskContentScrubber } = await import('../../loader/src/task-content-scrub.js');
+    const { boundTaskTranscript } = await import('../../src/ports/task-transcript-bounds.mjs');
+    const scrub = createTaskContentScrubber({});
+    const entries: unknown[] = [];
+    const flights: Promise<void>[] = [];
+    const mapper = factory((event) => {
+      if (event.type === 'transcript')
+        flights.push(
+          scrub(event.entry).then((entry) => {
+            entries.push(boundTaskTranscript(entry));
+          })
+        );
+    });
+    mapper.update({
+      sessionUpdate: 'tool_call',
+      toolCallId: 'shell',
+      name: 'shell',
+      kind: 'execute',
+      status: 'pending',
+      rawInput: {},
+    });
+    mapper.update({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'shell',
+      title: 'shell',
+      kind: 'execute',
+      rawInput: { command: 'TOKEN=planted-secret sleep 240' },
+      status: 'in_progress',
+    });
+    mapper.update({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'shell',
+      title: 'execute',
+      kind: 'execute',
+      status: 'completed',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.all(flights);
+    expect(entries).toMatchObject([
+      { tool: { name: 'shell', status: 'running', input: 'TOKEN=[REDACTED] sleep 240' } },
+      { tool: { name: 'shell', status: 'completed', input: 'TOKEN=[REDACTED] sleep 240' } },
+    ]);
+    expect(JSON.stringify(entries)).not.toContain('planted-secret');
+  }
+);
+
+it.each([first, second])(
+  '300 ms chunks coalesce; 2.5 s idle splits a message (%#)',
+  async (factory) => {
+    vi.useFakeTimers();
+    try {
+      const entries: string[] = [];
+      const mapper = factory((event) => {
+        if (event.type === 'transcript') entries.push(event.entry.text);
+      });
+      const add = (text: string, messageId = 'one') =>
+        mapper.update({
+          sessionUpdate: 'agent_message_chunk',
+          messageId,
+          content: { type: 'text', text },
+        });
+      for (const text of ['a ', 'b ', 'c ', 'd ', 'e ']) {
+        add(text);
+        await vi.advanceTimersByTimeAsync(300);
+      }
+      expect(entries).toEqual([]);
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(entries).toEqual(['a b c d e ']);
+      add('f ');
+      add('g', 'two');
+      mapper.flush(true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(entries).toEqual(['a b c d e ', 'f ', 'g']);
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+);
+
+it('tool description advertises finished task chats', async () => {
+  const { createSteerTaskTool } =
+    await import('../../src/layers/cognition/tools/core/steer-task.js');
+  const tool = createSteerTaskTool({} as never);
+  expect(tool.description).toContain('running and finished tasks');
+  expect(tool.description).toContain('view="transcript"');
+});
+
+it('assistant observation time is its first chunk, not delayed flush', async () => {
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(new Date('2026-10-01T12:00:00.000Z'));
+    const entries: string[] = [];
+    const mapper = first((event) => {
+      if (event.type === 'transcript') entries.push(event.entry.time);
+    });
+    mapper.update({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'before insertion ' },
+    });
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(entries).toEqual(['2026-10-01T12:00:00.000Z']);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it.each([
+  [first, { filePath: '/workspace/count.txt' }, '/workspace/count.txt'],
+  [first, { url: 'https://example.test/page' }, 'https://example.test/page'],
+  [second, { code: 'h = bash("sleep 240")' }, 'h = bash("sleep 240")'],
+] as const)('adapter selects its native input field (%#)', async (factory, rawInput, input) => {
+  const entries: TaskHarnessEvent[] = [];
+  const mapper = factory((event) => {
+    entries.push(event);
+  });
+  mapper.update({ sessionUpdate: 'tool_call', toolCallId: 'input', title: 'read', rawInput });
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(entries).toMatchObject([{ entry: { tool: { input } } }]);
+});
+
+it.each([first, second])(
+  'r1 pending-only tools are captured once on session end (%#)',
+  async (factory) => {
+    const events: TaskHarnessEvent[] = [];
+    const mapper = factory((event) => {
+      events.push(event);
+    });
+    mapper.update({
+      sessionUpdate: 'tool_call',
+      toolCallId: 'waiting',
+      title: 'shell',
+      status: 'pending',
+      rawInput: { command: 'sleep 240', code: 'sleep 240' },
+    });
+    mapper.flush();
+    await Promise.resolve();
+    expect(events).toEqual([]);
+    mapper.flush(true);
+    mapper.flush(true);
+    await Promise.resolve();
+    expect(events).toMatchObject([
+      {
+        type: 'transcript',
+        entry: {
+          role: 'tool',
+          tool: {
+            name: 'shell',
+            input: 'sleep 240',
+            status: 'error',
+          },
+        },
+      },
+    ]);
+  }
+);
+
+it.each(['idle', 'insertion', 'message', 'tool', 'size'])(
+  'r2 assistant key streamed across %s boundary is scrubbed',
+  async (boundary) => {
+    const { createTaskContentScrubber } = await import('../../loader/src/task-content-scrub.js');
+    vi.useFakeTimers();
+    try {
+      const entries: TaskHarnessEvent[] = [];
+      const mapper = first((event) => {
+        entries.push(event);
+      });
+      const add = (text: string, messageId = 'one') =>
+        mapper.update({
+          sessionUpdate: 'agent_message_chunk',
+          messageId,
+          content: { type: 'text', text },
+        });
+      add((boundary === 'size' ? 'safe '.repeat(795) : 'before ') + 'sk-abcdefghijk');
+      if (boundary === 'idle') await vi.advanceTimersByTimeAsync(2500);
+      else if (boundary === 'tool')
+        mapper.update({
+          sessionUpdate: 'tool_call',
+          toolCallId: 't',
+          title: 'read',
+          status: 'completed',
+        });
+      else if (boundary !== 'size' && boundary !== 'message') mapper.flush();
+      add('lmnopqrstu0123456789 after ', boundary === 'message' ? 'two' : 'one');
+      mapper.flush(true);
+      await vi.advanceTimersByTimeAsync(0);
+      const scrub = createTaskContentScrubber({});
+      const captured = await Promise.all(
+        entries.filter((event) => event.type === 'transcript').map((event) => scrub(event.entry))
+      );
+      const text = captured.map((entry) => entry.text).join('');
+      expect(text).toContain('[REDACTED]');
+      expect(text).not.toContain('sk-abcdefghijk');
+      expect(text).not.toContain('lmnopqrstu');
+      expect(text).toContain('after ');
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+);
+
+it('r2 oversized assistant run is dropped through its streamed suffix', async () => {
+  const entries: TaskHarnessEvent[] = [];
+  const mapper = first((event) => {
+    entries.push(event);
+  });
+  for (const text of ['sk-' + 'x'.repeat(5000), 'still-secret', ' safe end'])
+    mapper.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
+  mapper.flush(true);
+  await Promise.resolve();
+  expect(
+    entries.flatMap((event) => (event.type === 'transcript' ? [event.entry.text] : [])).join('')
+  ).toBe('… safe end');
+});
+
+it.each([first, second])('r2 running tool gets one error at session end (%#)', async (factory) => {
+  const entries: TaskHarnessEvent[] = [];
+  const mapper = factory((event) => {
+    entries.push(event);
+  });
+  mapper.update({
+    sessionUpdate: 'tool_call',
+    toolCallId: 'running',
+    title: 'shell',
+    status: 'in_progress',
+  });
+  mapper.flush(true);
+  mapper.flush(true);
+  await Promise.resolve();
+  expect(entries).toMatchObject([
+    { entry: { tool: { status: 'running' } } },
+    { entry: { tool: { status: 'error' } } },
+  ]);
+});
+
+it('r2 recent index follows the small-table bounded-lock squawk precedent', async () => {
+  const sql = await readFile(
+    'db/migrations/20261015000034_index_recent_terminal_tasks.sql',
+    'utf8'
+  );
+  const precedent = await readFile('db/migrations/20261015000022_create_task_mailbox.sql', 'utf8');
+  const ignoredIndex = /-- squawk-ignore require-concurrent-index-creation\nCREATE INDEX/;
+  expect(precedent).toMatch(ignoredIndex);
+  expect(sql).toMatch(ignoredIndex);
+  expect(sql).toContain("SET lock_timeout = '1s'");
+  expect(sql).toContain('Small core task table');
+});
+
+it.each([first, second])(
+  'fix3 complete text keeps a final word in one row without closing tools (%#)',
+  async (factory) => {
+    const events: TaskHarnessEvent[] = [];
+    const mapper = factory((event) => {
+      events.push(event);
+    });
+    mapper.update({
+      sessionUpdate: 'tool_call',
+      toolCallId: 'live',
+      title: 'shell',
+      status: 'in_progress',
+    });
+    for (const text of ['The task result is ', 'durable.'])
+      mapper.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
+    mapper.completeText();
+    await Promise.resolve();
+    expect(
+      events.filter((event) => event.type === 'transcript' && event.entry.role === 'assistant')
+    ).toMatchObject([{ entry: { text: 'The task result is durable.' } }]);
+    expect(
+      events.filter((event) => event.type === 'transcript' && event.entry.tool?.status === 'error')
+    ).toEqual([]);
+    mapper.flush(true);
+    await Promise.resolve();
+    expect(
+      events.filter((event) => event.type === 'transcript' && event.entry.role === 'assistant')
+    ).toHaveLength(1);
+    expect(
+      events.filter((event) => event.type === 'transcript' && event.entry.tool?.status === 'error')
+    ).toHaveLength(1);
+  }
+);

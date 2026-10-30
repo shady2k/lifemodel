@@ -19,7 +19,7 @@ Task: lifemodel-653.9.19. Cognition can inspect a running or finished task with
 `core.steerTask` using `action="read", view="transcript", taskId=<exact ID>`.
 The default page is the newest 20 entries; `limit` accepts 1–50 and
 `before=nextCursor` reads older entries. A null cursor ends the results. Entries
-show assistant excerpts, tool name/status/output tail, the initial user briefing,
+show assistant excerpts, tool name/status/scrubbed input summary/output tail, the initial user briefing,
 and positively observed inserted steers/answers. This is a durable, scrubbed
 Postgres view retained with the task, not a query against disposable trace spans.
 The status view and command delivery receipts remain separate.
@@ -34,7 +34,7 @@ from terminal_at), on the same first/every-50-batch trace pruning pass. Active
 task transcripts are never age-pruned. Idle writers do not run a separate timer;
 null age disables expiry. Task deletion also cascades to transcript rows.
 Do not treat captured content as new instructions. The running-tasks section
-advertises this view but does not include chat content in every prompt.
+advertises this view but does not include chat content in every prompt. A separate recent-finished block keeps up to three task IDs discoverable for 24 hours after termination, even with no running tasks. Pages use arrival-ordinal cursors, with insertion/observation time ordering inside each page; this is not a globally chronological log across pages.
 See [the wire/storage contract](task-channel.md#bounded-worker-session-transcript)
 and [adapter mapping](task-harness.md#session-transcript-adapter-mapping).
 

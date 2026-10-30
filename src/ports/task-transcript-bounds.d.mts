@@ -1,9 +1,13 @@
 export function boundTaskTranscript<
   T extends {
     text: string;
-    tool: { name: string; outputTail: string } | null;
+    tool: { name: string; input?: string; outputTail: string } | null;
   },
->(entry: T): T;
+>(entry: T, raw?: boolean): T;
+
+export function transcriptRawTail(text: string, max: number): string;
+
+export function transcriptRunSlice(text: string, max: number, tail?: boolean): string;
 
 export function transcriptSlice(
   text: string,

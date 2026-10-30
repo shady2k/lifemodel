@@ -250,6 +250,75 @@ describe('durable fenced task mailbox', () => {
     payload: { id, role: 'assistant', time: '2026-10-30T00:00:00.000Z', text, tool: null },
   });
 
+  it('recent finished context is bounded by terminal time, not update time', async () => {
+    const ids: string[] = [];
+    const registry = createPostgresTaskRegistry({ pool: stores.postgres, epoch: 1, settings });
+    for (let i = 0; i < 4; i++) {
+      const proof = await seed(`recent-${i}`, 'B'.repeat(5000));
+      const state = (['done', 'failed', 'stopped'] as const)[i % 3]!;
+      await finalizeTaskFixture(
+        stores.postgres,
+        registry,
+        { id: proof.taskId, launchId: proof.launchId },
+        {
+          state,
+          reasonCode: state === 'done' ? 'completed' : 'timeout',
+          summary: 'Finished',
+        }
+      );
+      await registry.releaseSlot(proof.taskId);
+      ids.unshift(proof.taskId);
+    }
+    const snapshot = await service().listActiveContext();
+    expect(snapshot.recentTasks?.map((task) => task.id)).toEqual(ids.slice(0, 3));
+    expect(snapshot.recentTasks?.[0]?.briefing).toHaveLength(TASK_CONTEXT_LIMITS.briefing);
+    expect(snapshot.recentTasks?.[0]?.terminalAt).toEqual(expect.any(String));
+    // Seed only a historical terminal row by INSERT, never mutate terminal times.
+    const historical = await stores.postgres.query(
+      'SELECT profile,image_revision FROM core.tasks WHERE id=$1',
+      [ids[0]]
+    );
+    await stores.postgres.query('TRUNCATE core.tasks CASCADE');
+    await stores.postgres.query(
+      `INSERT INTO core.tasks(id,launch_key,briefing,profile,settings_revision,harness,image_revision,request_image_revision,trace_id,wrap_grace_seconds,
+        state,terminal_candidate,terminal_reason_code,terminal_at)
+      VALUES('old-terminal','old-terminal','old',$1,0,'opencode',$2,$2,'old-terminal',300,'failed','failed','timeout',clock_timestamp()-interval '25 hours')`,
+      [historical.rows[0].profile, historical.rows[0].image_revision]
+    );
+    expect((await service().listActiveContext()).recentTasks).toEqual([]);
+  });
+
+  it('late captured steer uses insertion time within an ordinal-cursor page', async () => {
+    const m = mailbox();
+    const entries = [
+      {
+        id: 'work',
+        role: 'assistant',
+        time: '2026-10-01T10:00:02.000Z',
+        text: 'work caused by steer',
+        tool: null,
+      },
+      { id: 'steer', role: 'steer', time: '2026-10-01T10:00:01.000Z', text: 'do work', tool: null },
+    ];
+    for (const [i, entry] of entries.entries())
+      await m.append(
+        {
+          ...frame(entry.id, i + 1),
+          kind: 'transcript',
+          payload: entry as never,
+        },
+        identity
+      );
+    const page = await m.readTranscript(identity.taskId, { limit: 2 });
+    expect(page.entries.map((entry) => entry.id)).toEqual(['work', 'steer']);
+    expect(page.entries[1]?.time).toBe('2026-10-01T10:00:01.000Z');
+    // Membership and cursors stay ordinal: late rows cannot be lost between pages.
+    const newest = await m.readTranscript(identity.taskId, { limit: 1 });
+    expect(newest.entries[0]?.id).toBe('steer');
+    const older = await m.readTranscript(identity.taskId, { before: newest.nextCursor!, limit: 1 });
+    expect(older.entries[0]?.id).toBe('work');
+  });
+
   it('review8: cursor is a signed bigint', async () => {
     await expect(
       mailbox().readTranscript(identity.taskId, { before: '9223372036854775808' })
@@ -403,19 +472,36 @@ describe('durable fenced task mailbox', () => {
         role: 'tool' as const,
         time: '2026-10-30T00:00:01.000Z',
         text: '',
-        tool: { name: 'shell', status: 'completed' as const, outputTail: 'tail token=tool-canary' },
+        tool: {
+          name: 'shell',
+          input: 'token=input-canary sleep 240',
+          status: 'completed' as const,
+          outputTail: 'tail token=tool-canary',
+        },
       },
     } as TaskChannelFrame;
     const ack = await m.append(first, identity);
     expect(await m.append(first, identity)).toEqual(ack);
     await m.append(tool, identity);
-    await m.append(transcriptFrame('entry-last', 103, 'latest work'), identity);
+    const last = transcriptFrame('entry-last', 103, 'latest work');
+    await m.append(
+      {
+        ...last,
+        payload: { ...last.payload, time: '2026-10-30T00:00:02.000Z' },
+      } as TaskChannelFrame,
+      identity
+    );
     expect(await m.readTranscript(identity.taskId, { limit: 2 })).toMatchObject({
       entries: [
         { id: 'entry-last', text: 'latest work' },
         {
           id: 'entry-tool',
-          tool: { name: 'shell', status: 'completed', outputTail: 'tail token=[REDACTED]' },
+          tool: {
+            name: 'shell',
+            input: 'token=[REDACTED] sleep 240',
+            status: 'completed',
+            outputTail: 'tail token=[REDACTED]',
+          },
         },
       ],
       captureLimitReached: false,
@@ -431,7 +517,7 @@ describe('durable fenced task mailbox', () => {
       [identity.taskId]
     );
     expect(stored.rowCount).toBe(3);
-    for (const value of ['assistant-canary', 'tool-canary', token]) {
+    for (const value of ['assistant-canary', 'tool-canary', 'input-canary', token]) {
       expect(JSON.stringify(stored.rows)).not.toContain(value);
       expect(JSON.stringify([page, older])).not.toContain(value);
     }
@@ -442,6 +528,39 @@ describe('durable fenced task mailbox', () => {
         identity
       )
     ).rejects.toMatchObject({ code: 'message_conflict' });
+  });
+
+  it('r1 core scrub expansion re-bounds whole runs before persistence', async () => {
+    const m = mailbox();
+    const input = 'token=x '.repeat(20) + 'unrecognized-input-run-' + 'Q'.repeat(30);
+    const outputTail = 'output-sensitive-run-' + 'R'.repeat(30) + ' ' + 'token=x '.repeat(200);
+    await expect(
+      m.append(
+        {
+          ...transcriptFrame('r1-core-edge', 1),
+          payload: {
+            id: 'r1-core-edge',
+            role: 'tool',
+            time: '2026-10-30T00:00:00.000Z',
+            text: '',
+            tool: { name: 'shell', input, outputTail, status: 'completed' },
+          },
+        } as TaskChannelFrame,
+        identity
+      )
+    ).resolves.toBeDefined();
+    const stored = await stores.postgres.query(
+      'SELECT payload FROM core.task_transcript WHERE task_id=$1',
+      [identity.taskId]
+    );
+    const payload = stored.rows[0].payload;
+    expect(Buffer.byteLength(payload.tool.input)).toBeLessThanOrEqual(300);
+    expect(Buffer.byteLength(payload.tool.outputTail)).toBeLessThanOrEqual(2000);
+    expect(payload.tool.input).toBe('token=[REDACTED] '.repeat(17) + '…');
+    expect(payload.tool.outputTail).toMatch(/^…\s/);
+    expect(JSON.stringify(payload.tool)).not.toContain('token=x');
+    expect(JSON.stringify(payload.tool)).not.toContain('Q');
+    expect(JSON.stringify(payload.tool)).not.toContain('R'.repeat(8));
   });
 
   it('transcript: enforces UTF-8 entry bounds and the 1024-entry per-task cap with concurrent intake', async () => {
@@ -1125,7 +1244,10 @@ describe('durable fenced task mailbox', () => {
       expect(prompt).toContain('Some tasks were omitted');
       expect(data[0]!.briefing.length).toBeLessThanOrEqual(TASK_CONTEXT_LIMITS.briefing);
       expect(data[0]!.question!.text.length).toBeLessThanOrEqual(TASK_CONTEXT_LIMITS.question);
-      for (const id of terminalIds) expect(prompt).not.toContain(id);
+      for (const id of terminalIds) {
+        expect(data.some((task) => task.id === id)).toBe(false);
+        expect(prompt).toContain(id);
+      }
       expect(
         prompt.match(/<untrusted_running_tasks>(.*?)<\/untrusted_running_tasks>/s)![1]!.length
       ).toBeLessThanOrEqual(TASK_CONTEXT_LIMITS.rendered);
@@ -1246,7 +1368,7 @@ describe('durable fenced task mailbox', () => {
     }
   });
 
-  it('reuses an isolated context pool for one-statement reads without a writer fence', async () => {
+  it('reuses an isolated context pool for bounded reads without a writer fence', async () => {
     const pool = new Pool({
       ...stores.postgres.options,
       max: 1,
@@ -1266,7 +1388,7 @@ describe('durable fenced task mailbox', () => {
       for (let i = 0; i < 3; i++)
         expect((await registry.listActiveContext()).tasks[0]!.id).toBe(identity.taskId);
       expect(connect).toHaveBeenCalledTimes(1);
-      expect(query).toHaveBeenCalledTimes(3);
+      expect(query).toHaveBeenCalledTimes(6);
       expect(pool.totalCount).toBe(1);
       expect(pool.idleCount).toBe(1);
       expect(JSON.stringify(query.mock.calls)).not.toContain('core.active_holder');

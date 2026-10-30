@@ -957,7 +957,14 @@ export function createPostgresTaskMailbox(deps: {
           [taskId]
         );
         return {
-          entries: rows.rows.slice(0, limit).map((row) => row.payload),
+          entries: rows.rows
+            .slice(0, limit)
+            .sort(
+              (a, b) =>
+                Date.parse(b.payload.time) - Date.parse(a.payload.time) ||
+                (BigInt(a.ordinal) < BigInt(b.ordinal) ? 1 : -1)
+            )
+            .map((row) => row.payload),
           nextCursor: rows.rows.length > limit ? (rows.rows[limit - 1]?.ordinal ?? null) : null,
           captureLimitReached: Boolean(dropped.rowCount),
         };

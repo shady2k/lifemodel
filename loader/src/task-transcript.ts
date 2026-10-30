@@ -1,6 +1,10 @@
 /** ACP session excerpt capture. Native naming/output differences belong to adapters. */
 import { createHash } from 'node:crypto';
-import { transcriptSlice } from '../../src/ports/task-transcript-bounds.mjs';
+import {
+  transcriptSlice,
+  transcriptRunSlice,
+  transcriptRawTail,
+} from '../../src/ports/task-transcript-bounds.mjs';
 import type {
   TaskHarnessEventSink,
   TaskTranscriptEntry,
@@ -14,40 +18,86 @@ export function transcriptText(value: string, bytes = 4000, tail = false): strin
 }
 export function createAcpTranscriptMapper(
   sink: TaskHarnessEventSink | undefined,
-  mapping: { name(tool: Json): string; output(tool: Json): string; failed?(tool: Json): boolean }
+  mapping: {
+    name(tool: Json): string;
+    input?(tool: Json): string;
+    output(tool: Json): string;
+    failed?(tool: Json): boolean;
+  }
 ): TaskTranscriptMapper {
   let pending = '';
+  let droppingRun = false;
+  let pendingAt: string | undefined;
   let chunk = 0;
   let messageId: unknown;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const tools = new Map<
     string,
-    { name: string; status: 'running' | 'completed' | 'error'; outputTail: string }
+    {
+      name: string;
+      input: string;
+      status: 'running' | 'completed' | 'error';
+      outputTail: string;
+      runningEmitted: boolean;
+      emitted: boolean;
+    }
   >();
   const seen = new Set<string>();
-  const emit = (key: string, entry: Omit<TaskTranscriptEntry, 'id' | 'time'>) => {
+  const emit = (
+    key: string,
+    entry: Omit<TaskTranscriptEntry, 'id' | 'time'>,
+    time = new Date().toISOString()
+  ) => {
     if (seen.size >= 1024) seen.delete(seen.values().next().value ?? '');
     const id = `entry_${createHash('sha256').update(key).digest('hex')}`;
     if (seen.has(id)) return;
-    const value = { ...entry, id, time: new Date().toISOString() };
+    const value = { ...entry, id, time };
     seen.add(id);
     void Promise.resolve()
       .then(() => sink?.({ type: 'transcript', entry: value }))
       .catch(() => undefined);
   };
-  const flush = () => {
+  const flush = (ended = false, full = false) => {
     clearTimeout(timer);
     timer = undefined;
+    if (ended) droppingRun = false;
     if (!pending) return;
-    emit(`assistant:${String(chunk++)}`, {
-      role: 'assistant',
-      text: transcriptText(pending),
-      tool: null,
-    });
-    pending = '';
+    // A streamed credential can span any non-final boundary. Keep its whole run.
+    const trailing = ended ? '' : (/\S+$/u.exec(pending)?.[0] ?? '');
+    let text = pending.slice(0, pending.length - trailing.length);
+    pending = trailing;
+    if (Buffer.byteLength(pending) >= 3997 || (full && !text)) {
+      text += '…';
+      pending = '';
+      droppingRun = true;
+    }
+    if (text)
+      emit(`assistant:${String(chunk++)}`, { role: 'assistant', text, tool: null }, pendingAt);
+    if (!pending) pendingAt = undefined;
   };
   return {
-    flush,
+    completeText() {
+      flush(true);
+    },
+    flush(ended = false) {
+      flush(ended);
+      if (!ended) return;
+      for (const [id, tool] of tools) {
+        if (tool.emitted && tool.status !== 'running') continue;
+        tool.status = 'error';
+        tool.emitted = true;
+        emit(`tool:${id}:error`, {
+          role: 'tool',
+          text: '',
+          tool: {
+            name: tool.name,
+            input: tool.input,
+            status: 'error',
+            outputTail: tool.outputTail,
+          },
+        });
+      }
+    },
     update(value) {
       try {
         const update = record(value);
@@ -58,10 +108,16 @@ export function createAcpTranscriptMapper(
           if (content['type'] !== 'text' || typeof content['text'] !== 'string') return;
           let rest = content['text'];
           while (rest) {
+            if (droppingRun) {
+              const whitespace = rest.search(/\s/u);
+              if (whitespace < 0) break;
+              rest = rest.slice(whitespace);
+              droppingRun = false;
+            }
             let part = transcriptSlice(rest, 4000 - Buffer.byteLength(pending));
             if (!part.consumed) {
               if (pending) {
-                flush();
+                flush(false, true);
                 continue;
               }
               // Even malformed UTF-16 must consume original code units.
@@ -69,12 +125,16 @@ export function createAcpTranscriptMapper(
               const units = point !== undefined && point > 0xffff ? 2 : 1;
               part = { text: Buffer.from(rest.slice(0, units)).toString('utf8'), consumed: units };
             }
+            pendingAt ??= new Date().toISOString();
             pending += part.text;
             rest = rest.slice(part.consumed);
             if (Buffer.byteLength(pending) >= 3997) flush();
           }
-          if (pending && !timer) {
-            timer = setTimeout(flush, 250);
+          clearTimeout(timer);
+          if (pending) {
+            timer = setTimeout(() => {
+              flush();
+            }, 2000);
             timer.unref();
           }
         } else if (['tool_call', 'tool_call_update'].includes(update['sessionUpdate'] as string)) {
@@ -83,11 +143,12 @@ export function createAcpTranscriptMapper(
           if (typeof id !== 'string') return;
           const previous = tools.get(id);
           if (!previous && tools.size >= 1024) tools.delete(tools.keys().next().value ?? '');
-          const hasName = ['name', 'title', 'kind'].some((key) => typeof update[key] === 'string');
-          const name = transcriptText(
-            hasName ? mapping.name(update) : (previous?.name ?? mapping.name(update)),
-            128
-          );
+          const name =
+            previous?.name && previous.name !== 'tool'
+              ? previous.name
+              : transcriptText(mapping.name(update), 128);
+          // Preserve whole credentials for the channel scrubber, within its raw queue budget.
+          const input = transcriptRunSlice(mapping.input?.(update) || previous?.input || '', 4000);
           const status =
             update['status'] == null
               ? (previous?.status ?? 'running')
@@ -96,22 +157,33 @@ export function createAcpTranscriptMapper(
                 : update['status'] === 'completed'
                   ? 'completed'
                   : 'running';
-          const outputTail = transcriptText(
+          const outputTail = transcriptRawTail(
             mapping.output(update) || previous?.outputTail || '',
-            2000,
-            true
+            4000
           );
-          tools.set(id, { name, status, outputTail });
+          const shouldEmit =
+            update['status'] !== 'pending' &&
+            (previous?.status !== status || (status === 'running' && !previous?.runningEmitted));
+          tools.set(id, {
+            name,
+            input,
+            status,
+            outputTail,
+            emitted: previous?.emitted === true || shouldEmit,
+            runningEmitted:
+              previous?.runningEmitted === true || (shouldEmit && status === 'running'),
+          });
           const entry = {
             role: 'tool' as const,
             text: '',
             tool: {
               name,
+              input,
               status,
               outputTail,
             },
           } satisfies Omit<TaskTranscriptEntry, 'id' | 'time'>;
-          if (previous?.status !== status) emit(`tool:${id}:${status}`, entry);
+          if (shouldEmit) emit(`tool:${id}:${status}`, entry);
         }
       } catch {
         /* Capture cannot fail a task. */

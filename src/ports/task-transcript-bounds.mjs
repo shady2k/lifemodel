@@ -23,35 +23,82 @@ export function transcriptSlice(text, max, tail = false) {
   }
   return { text: b.subarray(start, end).toString('utf8'), consumed };
 }
+/** Drop a cut non-whitespace run: it may be an unrecognizable credential fragment.
+ * @param {string} text @param {number} max @param {boolean} [tail]
+ */
+export function transcriptRunSlice(text, max, tail = false) {
+  if (Buffer.byteLength(text) <= max) return transcriptSlice(text, max, tail).text;
+  if (max < 3) return '';
+  let part = transcriptSlice(text, max - 3, tail).text;
+  const edge = tail ? text.length - part.length : part.length;
+  if (/\S/.test(text[edge - 1] ?? '') && /\S/.test(text[edge] ?? ''))
+    part = tail ? part.replace(/^\S+/, '') : part.replace(/\S+$/, '');
+  return tail ? '…' + part : part + '…';
+}
+/** A raw front cut discards its first line, which may have lost a secret's key.
+ * @param {string} text @param {number} max
+ */
+export function transcriptRawTail(text, max) {
+  if (Buffer.byteLength(text) <= max) return transcriptSlice(text, max, true).text;
+  if (max < 3) return '';
+  const part = transcriptSlice(text, max - 3, true).text;
+  const newline = part.indexOf('\n');
+  return '…' + (newline < 0 ? '' : part.slice(newline + 1));
+}
 /**
  * Re-bound scrubbed transcript fields and both JSON wire/JSONB text budgets.
- * @param {{text: string, tool: {name: string, outputTail: string} | null}} entry
+ * @param {{text: string, tool: {name: string, input?: string, outputTail: string} | null}} entry
+ * @param {boolean} [raw] Keep larger input/output until the channel has scrubbed it.
  */
-export function boundTaskTranscript(entry) {
+export function boundTaskTranscript(entry, raw = false) {
   /** @param {string} text @param {number} max @param {boolean} [tail] */
   const clip = (text, max, tail = false) =>
     transcriptSlice(text.replaceAll('\0', ''), max, tail).text;
+  /** @param {string} text @param {number} max @param {boolean} [tail] */
+  const runClip = (text, max, tail = false) =>
+    transcriptRunSlice(text.replaceAll('\0', ''), max, tail);
   const value = {
     ...entry,
-    text: clip(entry.text, 4000),
+    text: raw ? runClip(entry.text, 4000) : clip(entry.text, 4000),
     tool: entry.tool
       ? {
           ...entry.tool,
           name: clip(entry.tool.name, 128),
-          outputTail: clip(entry.tool.outputTail, 2000, true),
+          ...(entry.tool.input === undefined
+            ? {}
+            : { input: runClip(entry.tool.input, raw ? 4000 : 300) }),
+          outputTail: raw
+            ? transcriptRawTail(entry.tool.outputTail.replaceAll('\0', ''), 4000)
+            : runClip(entry.tool.outputTail, 2000, true),
         }
       : null,
   };
   // PostgreSQL jsonb::text inserts spaces after separators. Reserving 256 bytes
   // covers this fixed shape, including worst-case escaping and metadata.
   while (Buffer.byteLength(JSON.stringify(value)) > 8192 - 256) {
-    if (value.text.length)
-      value.text = clip(value.text, Math.max(0, Buffer.byteLength(value.text) - 256));
+    // Spend raw input headroom first: its final wire budget is only 300 bytes.
+    if (raw && value.tool?.input && Buffer.byteLength(value.tool.input) > 1024)
+      value.tool.input = runClip(value.tool.input, 1024);
+    else if (value.text.length)
+      value.text = (raw ? runClip : clip)(
+        value.text,
+        Math.max(0, Buffer.byteLength(value.text) - 256)
+      );
     else if (value.tool?.outputTail.length)
-      value.tool.outputTail = clip(
-        value.tool.outputTail,
-        Math.max(0, Buffer.byteLength(value.tool.outputTail) - 256),
-        true
+      value.tool.outputTail = raw
+        ? transcriptRawTail(
+            value.tool.outputTail,
+            Math.max(0, Buffer.byteLength(value.tool.outputTail) - 256)
+          )
+        : runClip(
+            value.tool.outputTail,
+            Math.max(0, Buffer.byteLength(value.tool.outputTail) - 256),
+            true
+          );
+    else if (value.tool?.input?.length)
+      value.tool.input = runClip(
+        value.tool.input,
+        Math.max(0, Buffer.byteLength(value.tool.input) - 256)
       );
     else throw new Error('invalid_transcript_size');
   }

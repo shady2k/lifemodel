@@ -3,6 +3,7 @@ import { Socket } from 'node:net';
 import { mkdtemp, writeFile, rm, readdir, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { createTranscriptMapper } from '../../loader/src/task-prime-agent.js';
 import { AcpTaskHarness } from '../../loader/src/task-acp.js';
 import {
   ScriptedTaskHarness,
@@ -180,6 +181,7 @@ async function runFaultCase(input: {
   diskFailure?: boolean;
   observerError?: boolean;
   receiptSinkStalls?: boolean;
+  insertedAt?: string;
 }): Promise<void> {
   const certificate = await createStorageCertificate(['localhost']);
   const work = await mkdtemp(join(tmpdir(), 'steering-fault-'));
@@ -229,7 +231,12 @@ async function runFaultCase(input: {
     admit: send,
     release,
     failOnUncertain: input.policy,
-    reconcileEndTurn: async () => ({ state: 'idle' }),
+    reconcileEndTurn: async () => ({
+      state: 'idle',
+      ...(input.insertedAt
+        ? { insertedCommandIds: ['cmd'], insertedAt: { cmd: input.insertedAt } }
+        : {}),
+    }),
     ...(input.observerError
       ? { observeInsertion: observer }
       : input.receiptSinkStalls
@@ -274,6 +281,11 @@ async function runFaultCase(input: {
       outcome: input.expected,
       ...(input.expected === 'failed' ? { reasonCode: 'steer_uncertain' } : {}),
     });
+    if (input.insertedAt)
+      expect(events).toContainEqual({
+        type: 'transcript',
+        entry: expect.objectContaining({ role: 'steer', time: input.insertedAt, text: 'continue' }),
+      });
     expect(release).toHaveBeenCalledWith({ workDirectory: work, sessionId: 'scripted-session' });
   } finally {
     resume();
@@ -301,6 +313,7 @@ async function barrierFixture(input: {
   }) => Promise<'accepted' | 'rejected' | 'uncertain'>;
   reconcile?: (input: TaskEndTurnInput) => Promise<TaskEndTurnReconciliation>;
   question?: TaskQuestionState;
+  pendingTool?: boolean;
   onEvent?: (event: TaskHarnessEvent) => void | Promise<void>;
 }) {
   const certificate = await createStorageCertificate(['localhost']);
@@ -329,6 +342,17 @@ async function barrierFixture(input: {
     reconcileEndTurn: input.reconcile ?? (async () => ({ state: 'idle' })),
     question: input.question,
     onEvent: input.onEvent,
+    createTranscriptMapper: (sink) => {
+      const mapper = createTranscriptMapper(sink);
+      if (input.pendingTool)
+        mapper.update({
+          sessionUpdate: 'tool_call',
+          toolCallId: 'waiting',
+          title: 'shell',
+          status: 'pending',
+        });
+      return mapper;
+    },
   });
   const terminal = harness.start({ text: 'brief', model: 'task' });
   await vi.waitFor(() => access(join(work, 'prompt-tail')));
@@ -627,3 +651,151 @@ describe('end-turn barrier race regressions', () => {
     }
   });
 });
+
+it('late reconciliation captures native insertion time, not reconciliation time', async () => {
+  await runFaultCase({
+    policy: openCodePolicy,
+    disposition: 'accepted',
+    expected: 'succeeded',
+    insertedAt: '2026-10-01T12:00:00.000Z',
+  });
+}, 15000);
+
+it.each(['inserted', 'reset'] as const)(
+  'r1 successor %s splits A steer B without message IDs',
+  async (boundary) => {
+    const events: TaskHarnessEvent[] = [];
+    let reconciled = false;
+    const f = await barrierFixture({
+      onEvent: (event) => {
+        events.push(event);
+      },
+      reconcile: async () => {
+        if (reconciled) return { state: 'idle' };
+        reconciled = true;
+        return {
+          state: 'successor',
+          wait: async () => ({
+            stopReason: 'end_turn',
+            updates: [
+              { kind: 'text', text: 'A ' },
+              ...(boundary === 'inserted'
+                ? [{ kind: 'inserted' as const, commandId: 'cmd' }]
+                : [{ kind: 'reset' as const }]),
+              { kind: 'text', text: 'B' },
+            ],
+          }),
+        };
+      },
+    });
+    try {
+      await f.harness.intakeReady;
+      expect(await f.harness.steer({ commandId: 'cmd', text: 'steer' })).toBe('accepted');
+      await f.release();
+      expect(await f.terminal).toMatchObject({ outcome: 'succeeded' });
+      const entries = events.flatMap((event) => (event.type === 'transcript' ? [event.entry] : []));
+      const texts = entries
+        .map((entry) => ({ ...entry, text: entry.text.endsWith('A ') ? 'A ' : entry.text }))
+        .filter((entry) => ['A ', 'B', 'A B', 'steer'].includes(entry.text))
+        .map((entry) => entry.text);
+      expect(texts).toEqual(boundary === 'inserted' ? ['A ', 'steer', 'B'] : ['A ', 'B']);
+    } finally {
+      await f.cleanup();
+    }
+  },
+  15000
+);
+
+it('r1 session finally flushes a pending-only tool', async () => {
+  const events: TaskHarnessEvent[] = [];
+  const f = await barrierFixture({
+    pendingTool: true,
+    onEvent: (event) => {
+      events.push(event);
+    },
+  });
+  try {
+    await f.release();
+    expect(await f.terminal).toMatchObject({ outcome: 'succeeded' });
+    expect(
+      events.filter((event) => event.type === 'transcript' && event.entry.role === 'tool')
+    ).toMatchObject([{ entry: { tool: { name: 'shell', status: 'error' } } }]);
+  } finally {
+    await f.cleanup();
+  }
+}, 15000);
+
+it('r2 insertion boundary holds a streamed key for redaction', async () => {
+  const { createTaskContentScrubber } = await import('../../loader/src/task-content-scrub.js');
+  const events: TaskHarnessEvent[] = [];
+  let reconciled = false;
+  const f = await barrierFixture({
+    onEvent: (event) => {
+      events.push(event);
+    },
+    reconcile: async () => {
+      if (reconciled) return { state: 'idle' };
+      reconciled = true;
+      return {
+        state: 'successor',
+        wait: async () => ({
+          stopReason: 'end_turn',
+          updates: [
+            { kind: 'text', text: 'before sk-abcdefghijk' },
+            { kind: 'inserted', commandId: 'cmd' },
+            { kind: 'text', text: 'lmnopqrstu0123456789 after ' },
+          ],
+        }),
+      };
+    },
+  });
+  try {
+    await f.harness.intakeReady;
+    expect(await f.harness.steer({ commandId: 'cmd', text: 'steer' })).toBe('accepted');
+    await f.release();
+    expect(await f.terminal).toMatchObject({ outcome: 'succeeded' });
+    const scrub = createTaskContentScrubber({});
+    const entries = await Promise.all(
+      events.flatMap((event) => (event.type === 'transcript' ? [scrub(event.entry)] : []))
+    );
+    const text = entries.map((entry) => entry.text).join('');
+    expect(text).toContain('[REDACTED]');
+    expect(text).not.toContain('sk-abcdefghijk');
+    expect(text).not.toContain('lmnopqrstu');
+    expect(text).toContain('after ');
+  } finally {
+    await f.cleanup();
+  }
+}, 15000);
+
+it('fix3 post-prompt flush completes one final row before reconciliation without ending tools', async () => {
+  const events: TaskHarnessEvent[] = [];
+  const f = await barrierFixture({
+    pendingTool: true,
+    onEvent: (event) => {
+      events.push(event);
+    },
+    reconcile: async () => {
+      await Promise.resolve();
+      const transcript = events.flatMap((event) =>
+        event.type === 'transcript' ? [event.entry] : []
+      );
+      expect(
+        transcript.filter((entry) => entry.role === 'assistant').map((entry) => entry.text)
+      ).toEqual(['First result']);
+      expect(transcript.filter((entry) => entry.role === 'tool')).toEqual([]);
+      return { state: 'idle' };
+    },
+  });
+  try {
+    await f.release();
+    expect(await f.terminal).toMatchObject({ outcome: 'succeeded' });
+    expect(
+      events.flatMap((event) =>
+        event.type === 'transcript' && event.entry.role === 'assistant' ? [event.entry.text] : []
+      )
+    ).toEqual(['First result']);
+  } finally {
+    await f.cleanup();
+  }
+}, 15000);

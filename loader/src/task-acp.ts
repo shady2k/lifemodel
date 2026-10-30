@@ -226,7 +226,7 @@ export interface AcpTaskHarnessOptions {
     sessionId: string;
     commandId: string;
     signal: AbortSignal;
-  }) => Promise<boolean>;
+  }) => Promise<boolean | string>;
   reconcileEndTurn?: (input: TaskEndTurnInput) => Promise<TaskEndTurnReconciliation>;
   question?: TaskQuestionState;
   mcpServers?: TaskMcpServer[];
@@ -287,7 +287,8 @@ export class AcpTaskHarness implements TaskHarness {
     const commandTexts = new Map<string, string>();
     const transcriptCommands = new Map<string, { role: 'steer' | 'answer'; text: string }>();
     const transcriptInserted = new Set<string>();
-    const captureInserted = (commandId: string) => {
+    const captureInserted = (commandId: string, insertedAt?: string) => {
+      transcript?.flush();
       const command = transcriptCommands.get(commandId);
       if (!command || transcriptInserted.has(commandId)) return;
       transcriptInserted.add(commandId);
@@ -297,7 +298,10 @@ export class AcpTaskHarness implements TaskHarness {
             type: 'transcript',
             entry: {
               id: `entry_${createHash('sha256').update(`inserted:${commandId}`).digest('hex')}`,
-              time: new Date().toISOString(),
+              time:
+                insertedAt && Number.isFinite(Date.parse(insertedAt))
+                  ? new Date(insertedAt).toISOString()
+                  : new Date().toISOString(),
               role: command.role,
               text: command.text,
               tool: null,
@@ -650,7 +654,10 @@ export class AcpTaskHarness implements TaskHarness {
                     // needs native evidence even if its receipt already arrived.
                     if (promptID !== undefined && pending.has(promptID))
                       insertedCommands.set(command.commandId, assistantVersion);
-                    captureInserted(command.commandId);
+                    captureInserted(
+                      command.commandId,
+                      typeof inserted === 'string' ? inserted : undefined
+                    );
                     await emit(
                       {
                         type: 'receipt',
@@ -722,10 +729,11 @@ export class AcpTaskHarness implements TaskHarness {
             if (steering) this.intake.resolve();
           }
         );
-        transcript?.flush();
+        // Notification chunks already admitted to the queue belong to this response.
+        await queue;
+        transcript?.completeText();
         promptResponse = response;
         stopReason = response['stopReason'];
-        await queue;
         if (fault) throw fault;
       };
       await prompt(briefing.text);
@@ -751,7 +759,8 @@ export class AcpTaskHarness implements TaskHarness {
           : { state: commandIds.length ? ('unknown' as const) : ('idle' as const) };
         if (fault || signal.aborted) throw fault ?? new Error('timeout');
         if (reconciliation.state === 'idle' || reconciliation.state === 'continue')
-          for (const id of reconciliation.insertedCommandIds ?? []) captureInserted(id);
+          for (const id of reconciliation.insertedCommandIds ?? [])
+            captureInserted(id, reconciliation.insertedAt?.[id]);
         if (reconciliation.state === 'unknown') throw new Error('end_turn_uncertain');
         if (reconciliation.state === 'continue') {
           for (const commandId of reconciliation.commandIds) {
@@ -787,9 +796,11 @@ export class AcpTaskHarness implements TaskHarness {
           turn.continueTurn();
           for (const update of evidence.updates) {
             if (update.kind === 'inserted') {
-              captureInserted(update.commandId);
-            } else if (update.kind === 'reset') turn.continueTurn();
-            else if (update.kind === 'text')
+              captureInserted(update.commandId, update.insertedAt);
+            } else if (update.kind === 'reset') {
+              transcript?.flush();
+              turn.continueTurn();
+            } else if (update.kind === 'text')
               await applyUpdate({
                 sessionUpdate: 'agent_message_chunk',
                 content: { type: 'text', text: update.text },
@@ -865,7 +876,7 @@ export class AcpTaskHarness implements TaskHarness {
         /* preserve cleanup */
       }
     } finally {
-      transcript?.flush();
+      transcript?.flush(true);
       turn.finish(result, promptResponse);
       closing = true;
       this.cancelRequest = undefined;

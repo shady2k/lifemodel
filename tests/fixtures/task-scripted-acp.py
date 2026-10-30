@@ -65,7 +65,7 @@ for line in sys.stdin:
             count = 2 if scenario == "steer-parallel" else 1
             processes = []
             for i in range(count):
-                update({"sessionUpdate": "tool_call", "toolCallId": f"sleep-{i}", "title": "shell", "status": "in_progress"})
+                update({"sessionUpdate": "tool_call", "toolCallId": f"sleep-{i}", "title": "shell", "kind": "execute", "rawInput": {"command": f"touch start-{i}; sleep {3+i}; touch done-{i}; echo done-{i}"}, "status": "in_progress"})
                 processes.append(subprocess.Popen(["sh", "-c", f"touch start-{i}; sleep {2+i}; touch done-{i}; echo done-{i}"], stdout=subprocess.DEVNULL))
             for i, process in enumerate(processes):
                 assert process.wait() == 0

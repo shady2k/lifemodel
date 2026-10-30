@@ -39,11 +39,19 @@ export interface TaskTranscriptEntry {
   role: 'assistant' | 'tool' | 'steer' | 'answer' | 'user-briefing';
   time: string;
   text: string;
-  tool: { name: string; status: 'running' | 'completed' | 'error'; outputTail: string } | null;
+  tool: {
+    name: string;
+    input?: string;
+    status: 'running' | 'completed' | 'error';
+    outputTail: string;
+  } | null;
 }
 export interface TaskTranscriptMapper {
   update(value: unknown): void;
-  flush(): void;
+  /** The drained prompt response completes text, but not the session or its tools. */
+  completeText(): void;
+  /** End-of-session also records calls that never left pending. */
+  flush(ended?: boolean): void;
 }
 export type TaskHarnessEvent =
   | { type: 'transcript'; entry: TaskTranscriptEntry }
@@ -84,7 +92,7 @@ export interface TaskSuccessorControl {
   reopenIntake(): void;
 }
 export type TaskSuccessorUpdate =
-  | { kind: 'inserted'; commandId: string; text: string }
+  | { kind: 'inserted'; commandId: string; text: string; insertedAt?: string }
   | { kind: 'reset' }
   | { kind: 'text'; text: string }
   | {
@@ -101,8 +109,13 @@ export interface TaskSuccessorEvidence {
   stopReason: 'end_turn';
 }
 export type TaskEndTurnReconciliation =
-  | { state: 'idle'; insertedCommandIds?: string[] }
-  | { state: 'continue'; commandIds: string[]; insertedCommandIds?: string[] }
+  | { state: 'idle'; insertedCommandIds?: string[]; insertedAt?: Record<string, string> }
+  | {
+      state: 'continue';
+      commandIds: string[];
+      insertedCommandIds?: string[];
+      insertedAt?: Record<string, string>;
+    }
   | {
       state: 'successor';
       wait: (control: TaskSuccessorControl) => Promise<TaskSuccessorEvidence | undefined>;

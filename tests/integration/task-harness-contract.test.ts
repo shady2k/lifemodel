@@ -570,6 +570,27 @@ describe('TaskHarness contract: both pinned adapters and scripted harness', () =
           taskId: durable.first.taskId,
           limit: 50,
         });
+        const transcript = (
+          view as {
+            transcript: {
+              entries: {
+                role: string;
+                tool: { name: string; status: string; input?: string; outputTail: string } | null;
+              }[];
+            };
+          }
+        ).transcript;
+        const completed = transcript.entries.find(
+          (entry) => entry.tool?.status === 'completed' && entry.tool.outputTail.includes('done-0')
+        );
+        expect(completed?.tool?.input).toContain(
+          'touch start-0; sleep 3; touch done-0; echo done-0'
+        );
+        const running = transcript.entries.find(
+          (entry) => entry.tool?.status === 'running' && entry.tool.input === completed?.tool?.input
+        );
+        expect(running?.tool?.name).toBeTruthy();
+        expect(completed?.tool?.name).toBe(running?.tool?.name);
         expect(view).toMatchObject({
           success: true,
           transcript: {
