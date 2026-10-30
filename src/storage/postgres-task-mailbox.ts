@@ -736,10 +736,12 @@ export function createPostgresTaskMailbox(deps: {
                 JSON.stringify(frame.payload),
               ]
             );
-            await client.query(
-              `UPDATE core.tasks SET state='running',updated_at=clock_timestamp() WHERE id=$1 AND state='starting'`,
-              [frame.taskId]
-            );
+            // The briefing precedes harness startup and does not prove liveness.
+            if (frame.payload.role !== 'user-briefing')
+              await client.query(
+                `UPDATE core.tasks SET state='running',updated_at=clock_timestamp() WHERE id=$1 AND state='starting'`,
+                [frame.taskId]
+              );
             await authority(client, binding);
             const insertedRow = inserted.rows[0];
             if (!insertedRow) throw new TaskChannelError(503, 'storage_error');

@@ -355,6 +355,31 @@ describe('durable fenced task mailbox', () => {
     ).resolves.toBeDefined();
   });
 
+  it.each(['user-briefing', 'assistant', 'tool', 'steer', 'answer'] as const)(
+    'review1: transcript role %s only advances a live session',
+    async (role) => {
+      const m = mailbox();
+      await m.readBriefing(identity);
+      const f = {
+        ...transcriptFrame('role-check', 1),
+        payload: {
+          id: 'role-check',
+          role,
+          time: '2026-10-30T00:00:00.000Z',
+          text: role === 'tool' ? '' : 'observed text',
+          tool:
+            role === 'tool' ? { name: 'shell', status: 'running' as const, outputTail: '' } : null,
+        },
+      } as TaskChannelFrame;
+      await m.append(f, identity);
+      expect(await service().read(identity.taskId)).toMatchObject(
+        role === 'user-briefing'
+          ? { state: 'starting', startup: { phase: 'harness-starting' } }
+          : { state: 'running', startup: null }
+      );
+    }
+  );
+
   it.each(['step', 'question', 'transcript'] as const)(
     'transcript: lost running lifecycle recovers on %s without regressing wrapping and hides startup',
     async (kind) => {
