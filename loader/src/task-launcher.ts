@@ -278,6 +278,15 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       }
     }
   }
+  async function lifecycle(phase: 'running' | 'wrapping-up'): Promise<void> {
+    try {
+      await send('lifecycle', { phase });
+    } catch {
+      // Informational only: retain outputs and the terminal outcome even when
+      // the phase cannot be observed. At most one fixed diagnostic per phase.
+      diagnostic('lifecycle_unavailable');
+    }
+  }
   async function report(): Promise<void> {
     terminalAttempted = true;
     if (root)
@@ -400,8 +409,8 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       }
       if (++eventCount > 10_000) throw new LauncherError('event_limit');
       if (!sessionStarted && (event.type === 'step' || event.type === 'tool')) {
-        await send('lifecycle', { phase: 'running' });
         sessionStarted = true;
+        await lifecycle('running');
       }
       // Native harness events use fixed progress lines. Explicit MCP step/question
       // text goes to the durable mailbox; private model/tool content uses traces.
@@ -476,7 +485,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
     commands.start();
     let result: TaskHarnessResult = await execution.finally(() => tools?.close());
     await commands.stop();
-    await send('lifecycle', { phase: 'wrapping-up' });
+    await lifecycle('wrapping-up');
     if (intakeFailed)
       result = {
         outcome: 'failed',

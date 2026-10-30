@@ -132,6 +132,9 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
   let loseTerminalAcks: number;
   let loseReportAcks: boolean;
   let reportMode: 'ok' | '409' | 'lost_then_409';
+  let lifecycleFailure:
+    | { phase: 'running' | 'wrapping-up' | 'both'; mode: 409 | 503 | 'transport' }
+    | undefined;
   let progressReports: Map<string, Frame>;
   let markStatus: number;
   let artifactPutStatus: number;
@@ -174,6 +177,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     loseTerminalAcks = 0;
     loseReportAcks = false;
     reportMode = 'ok';
+    lifecycleFailure = undefined;
     progressReports = new Map();
     markStatus = 200;
     artifactPutStatus = 201;
@@ -308,7 +312,11 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     if (service === 'channel' && call.method === 'POST' && call.path === '/task/events') {
       const frame = JSON.parse(body.toString()) as Frame;
       if (frame.kind === 'step' || frame.kind === 'question') {
-        if (reportMode === '409' || (reportMode === 'lost_then_409' && [...progressReports.values()].some((f) => f.kind !== 'lifecycle'))) {
+        if (
+          reportMode === '409' ||
+          (reportMode === 'lost_then_409' &&
+            [...progressReports.values()].some((f) => f.kind !== 'lifecycle'))
+        ) {
           json(res, 409, {});
           return;
         }
@@ -322,7 +330,17 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
           }
         }
       }
-      if (frame.kind === 'lifecycle') progressReports.set(frame.messageId, frame);
+      if (frame.kind === 'lifecycle') {
+        if (
+          lifecycleFailure &&
+          (lifecycleFailure.phase === 'both' || lifecycleFailure.phase === frame.payload.phase)
+        ) {
+          if (lifecycleFailure.mode === 'transport') res.destroy();
+          else json(res, lifecycleFailure.mode, { error: EVENT });
+          return;
+        }
+        progressReports.set(frame.messageId, frame);
+      }
       if (frame.kind === 'terminal') {
         if (pendingMarks.size) wireErrors.push('terminal sent while storage mark was pending');
         terminalFrames.push(frame);
@@ -640,9 +658,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
           ? ['task_tool_report_unavailable']
           : ['task_tool_question_retained', 'task_tool_report_uncertain']
       );
-      expect(calls.filter((call) => call.path === '/task/events').length).toBe(
-        mode === '409' ? 3 : 4
-      );
+      expect(calls.filter((call) => call.path === '/task/events').length).toBe(mode === '409' ? 3 : 4);
     }
   );
 
@@ -819,6 +835,60 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
         );
       } finally {
         await relay.close();
+      }
+    }
+  );
+
+  it.each([
+    { phase: 'running', mode: 409 },
+    { phase: 'wrapping-up', mode: 409 },
+    { phase: 'running', mode: 503 },
+    { phase: 'wrapping-up', mode: 503 },
+    { phase: 'running', mode: 'transport' },
+    { phase: 'wrapping-up', mode: 'transport' },
+    { phase: 'both', mode: 409 },
+  ] as const)(
+    'retains succeeded outputs when lifecycle frames fail: $phase / $mode',
+    async (failure) => {
+      lifecycleFailure = failure;
+      beforeHarness = () => writeFile(join(directory, 'outputs', 'good.txt'), 'Owner artifact');
+      expect(
+        await run({
+          events: [
+            { type: 'step', text: EVENT },
+            { type: 'tool', name: EVENT, status: 'completed' },
+          ],
+          terminal: { outcome: 'succeeded', result: RESULT },
+        })
+      ).toBe(0);
+      expect(terminal().payload).toEqual({
+        outcome: 'succeeded',
+        summary: 'Task result is ready',
+        resultObjectId: 'object_1',
+        artifactObjectIds: ['object_2'],
+      });
+      expect(objects.get('object_1')).toMatchObject({ bytes: Buffer.from(RESULT), mark: 'result' });
+      expect(objects.get('object_2')).toMatchObject({
+        bytes: Buffer.from('Owner artifact'),
+        mark: 'artifact',
+      });
+      expect(durableAtReport).toEqual([['object_1', 'object_2']]);
+      expect(abortCalls).toBe(0);
+      expect(diagnostics).toEqual(
+        failure.phase === 'both'
+          ? ['lifecycle_unavailable', 'lifecycle_unavailable']
+          : ['lifecycle_unavailable']
+      );
+      const lifecycleFrames = calls
+        .filter((call) => call.path === '/task/events')
+        .map((call) => JSON.parse(call.body.toString()) as Frame)
+        .filter((frame) => frame.kind === 'lifecycle');
+      for (const phase of ['running', 'wrapping-up']) {
+        const frames = lifecycleFrames.filter((frame) => frame.payload.phase === phase);
+        const failed = failure.phase === 'both' || failure.phase === phase;
+        expect(frames).toHaveLength(failed && failure.mode !== 409 ? 3 : 1);
+        // Ambiguous transport or server failures replay the same immutable frame.
+        for (const frame of frames) expect(frame).toEqual(frames[0]);
       }
     }
   );
