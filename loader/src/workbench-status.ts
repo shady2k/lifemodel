@@ -1,6 +1,7 @@
 /** Safe loader-to-browser status for the durable workbench import task. */
 export type WorkbenchImportStep =
   | 'preparation'
+  | 'local-storage'
   | 'source-manifest'
   | 'source-blob'
   | 'source-authentication'
@@ -10,7 +11,7 @@ export type WorkbenchImportStep =
   | 'read-back-verify';
 export interface WorkbenchImportDetail {
   step: WorkbenchImportStep;
-  side: 'source' | 'destination';
+  side: 'source' | 'destination' | 'loader';
   digest?: string;
   status?: number;
   sourceOrigin?: string;

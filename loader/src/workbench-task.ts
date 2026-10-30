@@ -111,7 +111,7 @@ export function createWorkbenchImportTask(deps: WorkbenchImportTaskDeps): Workbe
           ? safeWorkbenchImportDetail(error.detail)
           : undefined) ?? {
           step: 'preparation' as const,
-          side: 'source' as const,
+          side: 'loader' as const,
           ...workbenchErrorDetail(error),
         };
         try {

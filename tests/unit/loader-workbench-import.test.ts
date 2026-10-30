@@ -2,14 +2,22 @@ import { createHash } from 'node:crypto';
 import { type IncomingMessage, type ServerResponse } from 'node:http';
 import { createServer, globalAgent } from 'node:https';
 import { readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createWorkbenchImportPhase } from '../../loader/src/workbench-import.js';
+import {
+  createWorkbenchImportPhase,
+  workbenchErrorDetail,
+} from '../../loader/src/workbench-import.js';
 import { createWorkbenchImportTask } from '../../loader/src/workbench-task.js';
 import { createNodeFileSystem } from '../../loader/src/fs.js';
 import { createRecordingLogger } from '../../loader/src/logger.js';
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, open: vi.fn(actual.open) };
+});
 
 const digest = (bytes: Buffer) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 const json = (value: unknown) => Buffer.from(JSON.stringify(value, null, 2));
@@ -30,6 +38,9 @@ beforeEach(() => {
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
   globalAgent.options.ca = originalCa;
+  vi.mocked(open).mockReset();
+  const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  vi.mocked(open).mockImplementation(actual.open);
 });
 
 function fixture(docker = false) {
@@ -194,6 +205,148 @@ async function failedTask(
 }
 
 describe('workbench byte-identical OCI import', () => {
+  it.each([
+    'SELF_SIGNED_CERT_IN_CHAIN',
+    'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+    'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    'CERT_HAS_EXPIRED',
+    'DEPTH_ZERO_SELF_SIGNED_CERT',
+    'ERR_TLS_CERT_ALTNAME_INVALID',
+  ])('retains the safe TLS error code %s', (code) => {
+    expect(workbenchErrorDetail(Object.assign(new Error('private TLS message'), { code }))).toEqual(
+      { errorName: 'Error', errorCode: code }
+    );
+  });
+  it.each([403, 404, 500, 'reset'] as const)(
+    'keeps a redirected signed blob failure %s private and attributed to source-blob',
+    async (outcome) => {
+      const { options, source, data, temporary } = await setup();
+      const cdn = await registry({ host: '127.0.0.2' });
+      let requestedDigest = '';
+      source.intercept((req, res) => {
+        if (!(req.url ?? '').includes('/blobs/')) return false;
+        requestedDigest = (req.url ?? '').split('/').at(-1)!;
+        res.writeHead(307, {
+          location: `${cdn.origin}${req.url}?X-Amz-Signature=SIGNED_QUERY_CANARY`,
+        });
+        res.end();
+        return true;
+      });
+      cdn.intercept((req, res) => {
+        expect(req.url).toContain('X-Amz-Signature=SIGNED_QUERY_CANARY');
+        if (outcome === 'reset') res.destroy();
+        else {
+          res.writeHead(outcome);
+          res.end('CDN_BODY_CANARY');
+        }
+        return true;
+      });
+      const result = await failedTask(options, temporary);
+      expect(cdn.calls).toHaveLength(1);
+      expect(result.status.reason).toBe(
+        outcome === 403 ? 'unauthorized' : outcome === 404 ? 'source-missing' : 'unavailable'
+      );
+      expect(result.status.detail).toEqual({
+        step: 'source-blob',
+        side: 'source',
+        digest: requestedDigest,
+        sourceOrigin: source.origin,
+        sourceRepository: 'custom/team-workbench',
+        ...(outcome === 'reset'
+          ? { errorName: 'Error', errorCode: 'ECONNRESET' }
+          : { status: outcome }),
+      });
+      expect(result.saved).toEqual(result.status);
+      expect(result.entries).toContainEqual({
+        level: 'warn',
+        message: 'workbench import failed; retrying',
+        fields: { code: result.status.reason, detail: result.status.detail },
+      });
+      const exposed = JSON.stringify(result);
+      for (const secret of [
+        cdn.origin,
+        '127.0.0.2',
+        'SIGNED_QUERY_CANARY',
+        'X-Amz-Signature',
+        'CDN_BODY_CANARY',
+      ])
+        expect(exposed).not.toContain(secret);
+      expect(result.status.pinnedDigest).toBe(data.root);
+    }
+  );
+
+  it('attributes a failed token grant to source-authentication without its response body', async () => {
+    const { options, source, data, temporary } = await setup();
+    source.intercept((req, res) => {
+      if ((req.url ?? '').startsWith('/token?')) {
+        res.writeHead(500);
+        res.end('TOKEN_BODY_CANARY');
+        return true;
+      }
+      res.writeHead(401, {
+        'www-authenticate': `Bearer realm="${source.origin}/token",service="registry"`,
+      });
+      res.end();
+      return true;
+    });
+    const result = await failedTask(options, temporary);
+    expect(result.status.reason).toBe('unavailable');
+    expect(result.status.detail).toEqual({
+      step: 'source-authentication',
+      side: 'source',
+      status: 500,
+      digest: data.root,
+      sourceOrigin: source.origin,
+      sourceRepository: 'custom/team-workbench',
+    });
+    expect(result.saved).toEqual(result.status);
+    expect(result.entries).toContainEqual({
+      level: 'warn',
+      message: 'workbench import failed; retrying',
+      fields: { code: 'unavailable', detail: result.status.detail },
+    });
+    expect(JSON.stringify(result)).not.toContain('TOKEN_BODY_CANARY');
+  });
+
+  it('attributes an injected ENOSPC on the blob file write to loader local-storage', async () => {
+    const { options, source, target, temporary } = await setup();
+    const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    let injected = false;
+    let blobDigest = '';
+    source.intercept((req) => {
+      if ((req.url ?? '').includes('/blobs/')) blobDigest = (req.url ?? '').split('/').at(-1)!;
+      return false;
+    });
+    vi.mocked(open).mockImplementation(async (...args) => {
+      const file = await actual.open(...args);
+      if (String(args[0]).endsWith('/blob')) {
+        vi.spyOn(file, 'writeFile').mockImplementation(async () => {
+          injected = true;
+          throw Object.assign(new Error('ENOSPC private-path-canary'), { code: 'ENOSPC' });
+        });
+      }
+      return file;
+    });
+    const result = await failedTask(options, temporary);
+    expect(injected).toBe(true);
+    expect(result.status.reason).toBe('unavailable');
+    expect(result.status.detail).toEqual({
+      step: 'local-storage',
+      side: 'loader',
+      digest: blobDigest,
+      errorName: 'Error',
+      errorCode: 'ENOSPC',
+    });
+    expect(result.saved).toEqual(result.status);
+    expect(result.entries).toContainEqual({
+      level: 'warn',
+      message: 'workbench import failed; retrying',
+      fields: { code: 'unavailable', detail: result.status.detail },
+    });
+    expect(JSON.stringify(result)).not.toContain('private-path-canary');
+    expect(target.blobs.size).toBe(0);
+  });
+
   it.each(['manifest', 'blob'])(
     'records a missing source %s safely in the log and durable status',
     async (kind) => {
@@ -219,7 +372,8 @@ describe('workbench byte-identical OCI import', () => {
         sourceOrigin: source.origin,
         sourceRepository: 'custom/team-workbench',
       };
-      expect(result.status).toMatchObject({ reason: 'source-missing', detail });
+      expect(result.status.reason).toBe('source-missing');
+      expect(result.status.detail).toEqual(detail);
       expect(result.saved).toEqual(result.status);
       expect(result.entries).toContainEqual({
         level: 'warn',
@@ -248,7 +402,8 @@ describe('workbench byte-identical OCI import', () => {
       status: 500,
       digest: configDigest,
     };
-    expect(result.status).toMatchObject({ reason: 'unavailable', detail });
+    expect(result.status.reason).toBe('unavailable');
+    expect(result.status.detail).toEqual(detail);
     expect(result.saved).toEqual(result.status);
     expect(result.entries).toContainEqual({
       level: 'warn',
@@ -285,7 +440,8 @@ describe('workbench byte-identical OCI import', () => {
       errorName: 'Error',
       errorCode: 'ECONNREFUSED',
     };
-    expect(result.status).toMatchObject({ reason: 'unavailable', detail });
+    expect(result.status.reason).toBe('unavailable');
+    expect(result.status.detail).toEqual(detail);
     expect(result.status.detail).not.toHaveProperty('status');
     expect(result.saved).toEqual(result.status);
     expect(result.entries).toContainEqual({
@@ -311,9 +467,11 @@ describe('workbench byte-identical OCI import', () => {
       },
       temporary
     );
-    expect(result.status).toMatchObject({
-      reason: 'configuration',
-      detail: { step: 'preparation' },
+    expect(result.status.reason).toBe('configuration');
+    expect(result.status.detail).toEqual({
+      step: 'preparation',
+      side: 'loader',
+      digest: options.pinnedDigest,
     });
     expect(JSON.stringify(result)).not.toMatch(
       /user-canary|password-canary|@registry|Authorization|Basic |Bearer /i
@@ -332,15 +490,15 @@ describe('workbench byte-identical OCI import', () => {
       return true;
     });
     const result = await failedTask({ ...options, pinnedDigest: pin }, temporary);
-    expect(result.status).toMatchObject({
-      reason: 'unavailable',
-      detail: {
-        step: 'source-manifest',
-        side: 'source',
-        status: 200,
-        errorName: 'SyntaxError',
-        digest: pin,
-      },
+    expect(result.status.reason).toBe('unavailable');
+    expect(result.status.detail).toEqual({
+      step: 'source-manifest',
+      side: 'source',
+      status: 200,
+      errorName: 'SyntaxError',
+      digest: pin,
+      sourceOrigin: source.origin,
+      sourceRepository: 'custom/team-workbench',
     });
     expect(result.saved).toEqual(result.status);
     expect(JSON.stringify(result)).not.toMatch(/user-canary|password-canary/);
@@ -593,11 +751,15 @@ describe('workbench byte-identical OCI import', () => {
           code: 'rejected',
           status,
           mediaType,
-          detail: expect.objectContaining({
+          detail: {
             side: 'destination',
             status,
             step: path === '/manifests/' ? 'destination-manifest-write' : 'destination-upload',
-          }),
+            digest:
+              path === '/manifests/'
+                ? [...data.manifests.keys()][0]
+                : JSON.parse(data.manifests.values().next().value!.toString()).config.digest,
+          },
         },
         message: 'workbench import failed; retrying',
       });
@@ -642,14 +804,12 @@ describe('workbench byte-identical OCI import', () => {
       return true;
     });
     const result = await failedTask(options, temporary);
-    expect(result.status).toMatchObject({
-      reason: 'unavailable',
-      detail: {
-        step,
-        side: 'destination',
-        status,
-        digest: step === 'destination-check' ? data.root : expect.stringMatching(/^sha256:/),
-      },
+    expect(result.status.reason).toBe('unavailable');
+    expect(result.status.detail).toEqual({
+      step,
+      side: 'destination',
+      status,
+      digest: step === 'destination-check' ? data.root : [...data.manifests.keys()][0],
     });
     expect(result.saved).toEqual(result.status);
   });

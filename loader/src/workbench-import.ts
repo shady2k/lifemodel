@@ -96,6 +96,8 @@ export function workbenchErrorDetail(
     'CERT_HAS_EXPIRED',
     'DEPTH_ZERO_SELF_SIGNED_CERT',
     'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    'SELF_SIGNED_CERT_IN_CHAIN',
+    'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
   ]);
   const code = error instanceof Error && 'code' in error ? error.code : undefined;
   return {
@@ -108,6 +110,7 @@ export function safeWorkbenchImportDetail(value: unknown): WorkbenchImportDetail
   if (!record(value)) return undefined;
   const steps = [
     'preparation',
+    'local-storage',
     'source-manifest',
     'source-blob',
     'source-authentication',
@@ -119,7 +122,7 @@ export function safeWorkbenchImportDetail(value: unknown): WorkbenchImportDetail
   if (
     typeof value['step'] !== 'string' ||
     !steps.includes(value['step']) ||
-    (value['side'] !== 'source' && value['side'] !== 'destination')
+    (value['side'] !== 'source' && value['side'] !== 'destination' && value['side'] !== 'loader')
   )
     return undefined;
   const detail: WorkbenchImportDetail = {
@@ -210,14 +213,14 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
       let workspace: string | undefined;
       let detail: WorkbenchImportDetail = {
         step: 'preparation',
-        side: 'source',
+        side: 'loader',
         ...(DIGEST.test(options.pinnedDigest) ? { digest: options.pinnedDigest } : {}),
       };
       let sourceOrigin: string | undefined;
       let detailSourceRepository: string | undefined;
       function context(
         step: WorkbenchImportStep,
-        side: 'source' | 'destination',
+        side: 'source' | 'destination' | 'loader',
         digest: string
       ): void {
         detail = {
@@ -232,6 +235,21 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
       }
       function failure(reason: Reason): WorkbenchImportFailure {
         return new WorkbenchImportFailure(reason, { ...detail });
+      }
+      function localFailure(error: unknown): WorkbenchImportFailure {
+        return new WorkbenchImportFailure('unavailable', {
+          step: 'local-storage',
+          side: 'loader',
+          ...(detail.digest === undefined ? {} : { digest: detail.digest }),
+          ...workbenchErrorDetail(error),
+        });
+      }
+      async function localStorage<T>(work: Promise<T>): Promise<T> {
+        try {
+          return await work;
+        } catch (error) {
+          throw localFailure(error);
+        }
       }
       try {
         if (!DIGEST.test(options.pinnedDigest)) throw failure('configuration');
@@ -271,9 +289,9 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
         }
         checkAbort();
         // A platform phase has one owner. Never accumulate killed-run layer files on its PVC.
-        await rm(temporary, { force: true, recursive: true });
-        await mkdir(temporary, { recursive: true, mode: 0o700 });
-        workspace = await mkdtemp(join(temporary, 'run-'));
+        await localStorage(rm(temporary, { force: true, recursive: true }));
+        await localStorage(mkdir(temporary, { recursive: true, mode: 0o700 }));
+        workspace = await localStorage(mkdtemp(join(temporary, 'run-')));
         let transferred = 0;
         let activeManifestBytes = 0;
         let objectCount = 0;
@@ -422,7 +440,9 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
                   const hash = createHash('sha256');
                   const chunks: Buffer[] = [];
                   const file =
-                    spec.file === undefined ? undefined : await open(spec.file, 'w', 0o600);
+                    spec.file === undefined
+                      ? undefined
+                      : await localStorage(open(spec.file, 'w', 0o600));
                   let size = 0;
                   try {
                     for await (const chunk of res) {
@@ -432,11 +452,11 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
                       if (size > limit) throw failure('size-limit');
                       charge(bytes.length);
                       hash.update(bytes);
-                      if (file !== undefined) await file.writeFile(bytes);
+                      if (file !== undefined) await localStorage(file.writeFile(bytes));
                       else if (!spec.discard) chunks.push(bytes);
                     }
                   } finally {
-                    await file?.close();
+                    if (file !== undefined) await localStorage(file.close());
                   }
                   return {
                     status,
@@ -466,6 +486,10 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
             req.on('error', (error) => {
               detail = { ...detail, ...workbenchErrorDetail(error) };
               cleanup();
+              if (error instanceof WorkbenchImportFailure) {
+                reject(error);
+                return;
+              }
               reject(
                 failure(
                   controller.signal.aborted
@@ -479,7 +503,12 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
               );
             });
             if (spec.body !== undefined && !Buffer.isBuffer(spec.body)) {
-              void pipeline(createReadStream(spec.body.path), req).catch((error: unknown) => {
+              const input = createReadStream(spec.body.path);
+              input.on('error', (error: NodeJS.ErrnoException) => {
+                if (error.syscall === 'open' || error.syscall === 'read')
+                  req.destroy(localFailure(error));
+              });
+              void pipeline(input, req).catch((error: unknown) => {
                 detail = { ...detail, ...workbenchErrorDetail(error) };
                 req.destroy(error instanceof Error ? error : failure('unavailable'));
               });
@@ -713,7 +742,7 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
               status(pushed, [201]);
               wrote = true;
             } finally {
-              await rm(file, { force: true });
+              await localStorage(rm(file, { force: true }));
             }
           }
           const stored = await destinationRequest(
@@ -829,7 +858,7 @@ export function createWorkbenchImportPhase(options: WorkbenchImportOptions): Pla
         clearTimeout(phaseTimer);
         options.signal?.removeEventListener('abort', abort);
         if (workspace !== undefined)
-          await rm(workspace, { recursive: true, force: true }).catch(() => undefined);
+          await localStorage(rm(workspace, { recursive: true, force: true }));
       }
     },
   };

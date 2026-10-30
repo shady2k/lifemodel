@@ -153,7 +153,26 @@ describe('workbench source HTTP boundary', () => {
     const f = await fixture({ reason: 'source-missing', detail });
     const response = await f.request('/api/workbench-status');
     expect(response.status).toBe(200);
-    expect(JSON.parse(response.body)).toMatchObject({ reason: 'source-missing', detail });
+    expect(JSON.parse(response.body).reason).toBe('source-missing');
+    expect(JSON.parse(response.body).detail).toEqual(detail);
+  });
+  it('returns exact destination detail without source location fields', async () => {
+    const detail: WorkbenchImportDetail = {
+      step: 'destination-upload',
+      side: 'destination',
+      status: 500,
+      digest: 'sha256:' + 'a'.repeat(64),
+    };
+    const f = await fixture({
+      detail: {
+        ...detail,
+        sourceOrigin: 'https://registry.example',
+        sourceRepository: 'team/workbench',
+      },
+    });
+    const response = await f.request('/api/workbench-status');
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body).detail).toEqual(detail);
   });
   it('re-projects injected detail without credentialed URLs or arbitrary fields', async () => {
     const f = await fixture({

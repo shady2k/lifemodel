@@ -49,9 +49,11 @@ describe('durable independent workbench import task', () => {
       await task.start();
       await vi.waitFor(() => expect(task.status().state).toBe('failed'));
       const saved = await f.fs.readFile(join(f.root, 'workbench-import.json'));
-      expect(task.status()).toMatchObject({
-        reason: 'unavailable',
-        detail: { errorName: 'Error' },
+      expect(task.status().reason).toBe('unavailable');
+      expect(task.status().detail).toEqual({
+        step: 'preparation',
+        side: 'loader',
+        errorName: 'Error',
       });
       expect(saved + JSON.stringify(entries) + JSON.stringify(task.status())).not.toMatch(
         /user-canary|password-canary/
