@@ -682,7 +682,7 @@ describe('task restart finalization (real Postgres and Valkey, TLS storage)', ()
     expect(storage.seals.size).toBe(0);
     const pending = (await registry.read(task.id))!;
     expect(pending).toMatchObject({
-      state: 'running',
+      state: 'wrapping-up',
       terminalCandidate: 'done',
       terminalReasonCode: 'completed',
       terminalSummary: 'Finished task',
@@ -715,7 +715,7 @@ describe('task restart finalization (real Postgres and Valkey, TLS storage)', ()
     expect(await finalizer().runOnce()).toBe(false);
     expect(await outcomes(task.id)).toHaveLength(0);
     expect(await registry.read(task.id)).toMatchObject({
-      state: 'running',
+      state: 'wrapping-up',
       terminalCandidate: 'failed',
       finalizationPending: true,
     });
@@ -849,7 +849,7 @@ describe('task restart finalization (real Postgres and Valkey, TLS storage)', ()
     expect(receiptSaved).toBe(true);
     expect(await outcomes(task.id)).toHaveLength(0);
     expect(await registry.read(task.id)).toMatchObject({
-      state: 'running',
+      state: 'wrapping-up',
       terminalCandidate: 'stopped',
     });
     await takeover();

@@ -47,12 +47,13 @@ interface Frame {
   direction: string;
   messageId: string;
   sequence: number;
-  kind: 'step' | 'question' | 'terminal';
+  kind: 'step' | 'question' | 'terminal' | 'lifecycle';
   payload: {
     outcome?: string;
     reasonCode?: string;
     summary?: string;
     line?: string;
+    phase?: string;
     questionId?: string;
     text?: string;
     resultObjectId?: string | null;
@@ -131,6 +132,9 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
   let loseTerminalAcks: number;
   let loseReportAcks: boolean;
   let reportMode: 'ok' | '409' | 'lost_then_409';
+  let lifecycleFailure:
+    | { phase: 'running' | 'wrapping-up' | 'both'; mode: 409 | 503 | 'transport' }
+    | undefined;
   let progressReports: Map<string, Frame>;
   let markStatus: number;
   let artifactPutStatus: number;
@@ -173,6 +177,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     loseTerminalAcks = 0;
     loseReportAcks = false;
     reportMode = 'ok';
+    lifecycleFailure = undefined;
     progressReports = new Map();
     markStatus = 200;
     artifactPutStatus = 201;
@@ -306,8 +311,12 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     }
     if (service === 'channel' && call.method === 'POST' && call.path === '/task/events') {
       const frame = JSON.parse(body.toString()) as Frame;
-      if (frame.kind !== 'terminal') {
-        if (reportMode === '409' || (reportMode === 'lost_then_409' && progressReports.size)) {
+      if (frame.kind === 'step' || frame.kind === 'question') {
+        if (
+          reportMode === '409' ||
+          (reportMode === 'lost_then_409' &&
+            [...progressReports.values()].some((f) => f.kind !== 'lifecycle'))
+        ) {
           json(res, 409, {});
           return;
         }
@@ -320,6 +329,17 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
             return;
           }
         }
+      }
+      if (frame.kind === 'lifecycle') {
+        if (
+          lifecycleFailure &&
+          (lifecycleFailure.phase === 'both' || lifecycleFailure.phase === frame.payload.phase)
+        ) {
+          if (lifecycleFailure.mode === 'transport') res.destroy();
+          else json(res, lifecycleFailure.mode, { error: EVENT });
+          return;
+        }
+        progressReports.set(frame.messageId, frame);
       }
       if (frame.kind === 'terminal') {
         if (pendingMarks.size) wireErrors.push('terminal sent while storage mark was pending');
@@ -638,9 +658,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
           ? ['task_tool_report_unavailable']
           : ['task_tool_question_retained', 'task_tool_report_uncertain']
       );
-      expect(calls.filter((call) => call.path === '/task/events').length).toBe(
-        mode === '409' ? 2 : 3
-      );
+      expect(calls.filter((call) => call.path === '/task/events').length).toBe(mode === '409' ? 3 : 4);
     }
   );
 
@@ -821,6 +839,60 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     }
   );
 
+  it.each([
+    { phase: 'running', mode: 409 },
+    { phase: 'wrapping-up', mode: 409 },
+    { phase: 'running', mode: 503 },
+    { phase: 'wrapping-up', mode: 503 },
+    { phase: 'running', mode: 'transport' },
+    { phase: 'wrapping-up', mode: 'transport' },
+    { phase: 'both', mode: 409 },
+  ] as const)(
+    'retains succeeded outputs when lifecycle frames fail: $phase / $mode',
+    async (failure) => {
+      lifecycleFailure = failure;
+      beforeHarness = () => writeFile(join(directory, 'outputs', 'good.txt'), 'Owner artifact');
+      expect(
+        await run({
+          events: [
+            { type: 'step', text: EVENT },
+            { type: 'tool', name: EVENT, status: 'completed' },
+          ],
+          terminal: { outcome: 'succeeded', result: RESULT },
+        })
+      ).toBe(0);
+      expect(terminal().payload).toEqual({
+        outcome: 'succeeded',
+        summary: 'Task result is ready',
+        resultObjectId: 'object_1',
+        artifactObjectIds: ['object_2'],
+      });
+      expect(objects.get('object_1')).toMatchObject({ bytes: Buffer.from(RESULT), mark: 'result' });
+      expect(objects.get('object_2')).toMatchObject({
+        bytes: Buffer.from('Owner artifact'),
+        mark: 'artifact',
+      });
+      expect(durableAtReport).toEqual([['object_1', 'object_2']]);
+      expect(abortCalls).toBe(0);
+      expect(diagnostics).toEqual(
+        failure.phase === 'both'
+          ? ['lifecycle_unavailable', 'lifecycle_unavailable']
+          : ['lifecycle_unavailable']
+      );
+      const lifecycleFrames = calls
+        .filter((call) => call.path === '/task/events')
+        .map((call) => JSON.parse(call.body.toString()) as Frame)
+        .filter((frame) => frame.kind === 'lifecycle');
+      for (const phase of ['running', 'wrapping-up']) {
+        const frames = lifecycleFrames.filter((frame) => frame.payload.phase === phase);
+        const failed = failure.phase === 'both' || failure.phase === phase;
+        expect(frames).toHaveLength(failed && failure.mode !== 409 ? 3 : 1);
+        // Ambiguous transport or server failures replay the same immutable frame.
+        for (const frame of frames) expect(frame).toEqual(frames[0]);
+      }
+    }
+  );
+
   it('takes one start, fetches the briefing after it, and stores only result bytes and artifact IDs', async () => {
     artifactPages = [
       [artifact('artifact_a'), artifact('unmarked', null)],
@@ -849,7 +921,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       attemptId: IDS.attemptId,
       direction: 'task_to_core',
       messageId: expect.stringMatching(/^msg_[0-9a-f-]{36}$/),
-      sequence: 2,
+      sequence: 4,
       kind: 'terminal',
       payload: {
         outcome: 'succeeded',
@@ -858,6 +930,11 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
         artifactObjectIds: ['artifact_a', 'artifact_b'],
       },
     });
+    expect(
+      [...progressReports.values()]
+        .filter((f) => f.kind === 'lifecycle')
+        .map((f) => f.payload.phase)
+    ).toEqual(['running', 'wrapping-up']);
     expect(objects.get('object_1')).toMatchObject({ bytes: Buffer.from(RESULT), mark: 'result' });
     expect(objects.size).toBe(1);
     expect(report.payload).not.toHaveProperty('logObjectId');
@@ -974,8 +1051,8 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
           ? { outcome: 'succeeded' }
           : { outcome: 'failed', reasonCode: 'required_tool_failed' }
       );
-      expect(terminal().sequence).toBe(1); // Trace frames never occupy mailbox sequence numbers.
-      expect(calls.filter((call) => call.path === '/task/events')).toHaveLength(1);
+      expect(terminal().sequence).toBe(2); // Trace frames never occupy mailbox sequence numbers; wrapping does.
+      expect(calls.filter((call) => call.path === '/task/events' && JSON.parse(call.body.toString()).kind !== 'lifecycle')).toHaveLength(1);
       expect(objects.size).toBe(1);
       expect(diagnostics).toEqual([]);
     }
@@ -1061,7 +1138,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       expect(traceFrames.map((frame) => frame.span.endedAt === null)).toEqual(
         mode === 'timeout' ? [true] : [true, false]
       );
-      expect(calls.filter((call) => call.path === '/task/events')).toHaveLength(1);
+      expect(calls.filter((call) => call.path === '/task/events' && JSON.parse(call.body.toString()).kind !== 'lifecycle')).toHaveLength(1);
     }
   );
 

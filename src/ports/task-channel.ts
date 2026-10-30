@@ -53,7 +53,14 @@ export type TaskChannelFrame = FrameIdentity &
     | { readonly kind: 'step'; readonly payload: { readonly line: string } }
     | {
         readonly kind: 'question';
-        readonly payload: { readonly questionId: string; readonly text: string };
+        readonly payload: {
+          readonly questionId: string;
+          readonly text: string;
+        };
+      }
+    | {
+        readonly kind: 'lifecycle';
+        readonly payload: { readonly phase: 'running' | 'wrapping-up' };
       }
     | { readonly kind: 'terminal'; readonly payload: TaskTerminalReport }
   );
@@ -194,6 +201,12 @@ export function validateTaskChannelFrame(value: unknown): TaskChannelFrame {
       !line(payload['text'])
     )
       return invalid();
+  } else if (value['kind'] === 'lifecycle') {
+    if (
+      !keys(payload, ['phase']) ||
+      !['running', 'wrapping-up'].includes(payload['phase'] as string)
+    )
+      return invalid();
   } else if (value['kind'] === 'terminal') {
     const failed = payload['outcome'] === 'failed';
     if (
@@ -328,7 +341,19 @@ export interface TaskQuestion {
   readonly text: string;
   readonly answerCommandId: string | null;
 }
+export type TaskCommandDelivery =
+  | 'queued'
+  | 'delivered'
+  | 'inserted'
+  | 'not_delivered'
+  | 'uncertain';
+export interface TaskCommandDeliveryStatus {
+  readonly commandId: string;
+  readonly kind: 'steer' | 'answer';
+  readonly delivery: TaskCommandDelivery;
+}
 export interface TaskCommandStatus extends TaskCommand {
+  readonly delivery?: TaskCommandDelivery;
   readonly disposition: TaskCommandAck['disposition'] | 'queued';
   /** Arrival order: receivedAt, then receiptId as a stable tie-break. */
   readonly receipts: readonly StoredTaskCommandReceipt[];
@@ -376,7 +401,11 @@ export function isTaskCommandText(value: unknown, frameLimit = 65_536): value is
     Buffer.byteLength(JSON.stringify(command)) <= 60_000 &&
     Buffer.byteLength(
       JSON.stringify({
-        command: { ...command, direction: 'core_to_task', sequence: Number.MAX_SAFE_INTEGER },
+        command: {
+          ...command,
+          direction: 'core_to_task',
+          sequence: Number.MAX_SAFE_INTEGER,
+        },
       })
     ) <= frameLimit
   );

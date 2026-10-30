@@ -26,6 +26,7 @@ import type { ToolRegistry } from './tools/registry.js';
 import { createToolResult, type ToolContext, type ToolParameter } from './tools/types.js';
 import type { LoopContext, LoopCallbacks, ToolExecutionOutcome } from './agentic-loop-types.js';
 import { prevalidateToolArgs } from './tools/validation.js';
+import { taskOutcomeCommandRead } from './loop-orchestrator.js';
 
 /**
  * Robust JSON parser for LLM-generated tool arguments.
@@ -374,9 +375,13 @@ export async function executeToolCalls(
       continue;
     }
 
-    // Response-only capability boundary: no tool, including terminal/control tools,
-    // may act on task-produced text. Enforce even if the provider ignores schemas.
-    if (context.triggerSignal.type === 'task_outcome') {
+    // Enforce the exact read-only outcome capability even if schemas are ignored.
+    const outcomeRead =
+      context.triggerSignal.type === 'task_outcome' &&
+      toolName === 'core.steerTask' &&
+      args['action'] === 'read' &&
+      args['taskId'] === taskOutcomeCommandRead(context);
+    if (context.triggerSignal.type === 'task_outcome' && !outcomeRead) {
       state.toolCallCount++;
       messages.push({
         role: 'tool',

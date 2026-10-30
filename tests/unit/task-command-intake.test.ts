@@ -145,6 +145,44 @@ describe('command intake failure classification', () => {
     hold.resolve({ stored: true });
     await f.intake.stop();
   });
+  it('flushes a receipt that arrives at the end of the previous receipt flight', async () => {
+    const written: unknown[] = [];
+    const f = setup();
+    vi.spyOn(TaskJsonClient.prototype, 'call').mockImplementation(async (_path, body) => {
+      written.push(body);
+      if (written.length === 1) {
+        // Run after the first response continuation finished its Map iteration,
+        // but before its finally releases flight ownership.
+        queueMicrotask(() => queueMicrotask(() => f.intake.receipt({ ...receipt, commandId: 'next' })));
+      }
+      return { stored: true };
+    });
+    f.intake.receipt(receipt);
+    await vi.waitFor(() => expect(written).toHaveLength(2));
+    await f.intake.stop();
+  });
+
+  it('drains insertion receipts emitted by an in-flight native dispatch after intake stops', async () => {
+    const admitted = Promise.withResolvers<'accepted'>();
+    const paths: string[] = [];
+    vi.spyOn(TaskJsonClient.prototype, 'call').mockImplementation(async (path, _body, signal) => {
+      paths.push(path);
+      if (path === '/task/commands') return { command };
+      if (path === '/task/commands/ack' || path === '/task/commands/receipt') return { stored: true };
+      return pending(signal);
+    });
+    const f = setup();
+    f.steer.mockImplementationOnce(() => admitted.promise);
+    f.intake.start();
+    await vi.waitFor(() => expect(f.steer).toHaveBeenCalledOnce());
+    const stopped = f.intake.stop();
+    f.intake.receipt(receipt);
+    admitted.resolve('accepted');
+    await stopped;
+    expect(paths).toContain('/task/commands/ack');
+    expect(paths).toContain('/task/commands/receipt');
+  });
+
   it('a deterministic ACK failure fails closed after one native admission', async () => {
     vi.spyOn(TaskJsonClient.prototype, 'call').mockImplementation(async (path, _body, signal) => {
       if (path === '/task/commands') return { command };

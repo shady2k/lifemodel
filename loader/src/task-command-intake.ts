@@ -74,6 +74,7 @@ export function createTaskCommandIntake(options: {
   function flushReceipts(): void {
     if (receiptFlight || retryTimer || receiptClosing.signal.aborted || !receipts.size) return;
     clearTimeout(retryTimer);
+    let completed = false;
     receiptFlight = (async () => {
       for (const [id, receipt] of receipts) {
         try {
@@ -91,6 +92,7 @@ export function createTaskCommandIntake(options: {
           diagnostic('warn', 'command_receipt_dropped', error);
         }
       }
+      completed = true;
     })()
       .catch(() => {
         if (!stopped) {
@@ -103,6 +105,9 @@ export function createTaskCommandIntake(options: {
       })
       .finally(() => {
         receiptFlight = undefined;
+        // A receipt can arrive after the iterator finishes but before this
+        // promise releases ownership. Its receipt() call saw an active flight.
+        if (completed) flushReceipts();
       });
   }
   async function post(path: string, body: unknown) {
@@ -188,7 +193,7 @@ export function createTaskCommandIntake(options: {
       });
     },
     receipt(event: Extract<TaskHarnessEvent, { type: 'receipt' }>) {
-      if (stopped) return;
+      if (receiptClosing.signal.aborted) return;
       if (receipts.size >= 128) {
         diagnostic('warn', 'command_receipt_capacity');
         return;
@@ -227,7 +232,7 @@ export function createTaskCommandIntake(options: {
         retryTimer = undefined;
         flushReceipts();
         // Drain the bounded receipt attempt before the terminal report.
-        await receiptFlight;
+        while (receiptFlight) await receiptFlight;
         receiptClosing.abort();
         receiptClient.close();
       })());

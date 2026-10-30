@@ -7,6 +7,26 @@ import {
 } from '../../src/ports/task-outcome.js';
 
 describe('task outcome fallback', () => {
+  it('counts missed changes without exposing raw command IDs, and distinguishes uncertainty', () => {
+    const event = validateTaskOutcome({
+      taskId: 'task-1',
+      outcomeKey: 'outcome_task-1',
+      state: 'failed',
+      reasonCode: 'compute_missing',
+      summary: 'Task disappeared.',
+      objects: [],
+      commands: [
+        { commandId: 'private-command-id', kind: 'steer', delivery: 'not_delivered' },
+        { commandId: 'crash-command-id', kind: 'steer', delivery: 'uncertain' },
+      ],
+    });
+    const reply = taskOutcomeFallback(event);
+    expect(reply).toContain('1 change did not reach the task');
+    expect(reply).toContain('may not have been applied');
+    expect(reply).not.toContain('private-command-id');
+    expect(reply).not.toContain('crash-command-id');
+  });
+
   it.each(['constructor', 'unknown_failure'])(
     'uses the fixed generic explanation for allowed unknown reason code %s',
     (reasonCode) => {

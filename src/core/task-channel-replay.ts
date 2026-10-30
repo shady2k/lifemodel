@@ -46,6 +46,10 @@ export function createTaskChannelReplay(options: {
   async function admit(row: StoredTaskChannelFrame, signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
     const frame = row.frame;
+    if (frame.kind === 'lifecycle') {
+      await options.mailbox.markSignalled(frame.taskId, frame.direction, frame.messageId, signal);
+      return;
+    }
     const report = createSignal(
       'task_report',
       'task.channel',
@@ -73,7 +77,10 @@ export function createTaskChannelReplay(options: {
       signal.throwIfAborted();
     }
     if (!pendingAppend) {
-      const append = { key, promise: options.bus.appendTaskSignal(report, key) };
+      const append = {
+        key,
+        promise: options.bus.appendTaskSignal(report, key),
+      };
       pendingAppend = append;
       void append.promise.then(
         () => {

@@ -211,6 +211,7 @@ describe('task namespace network and launch rights', () => {
         verbs: ['create', 'get', 'list', 'watch', 'patch', 'delete'],
       },
       { apiGroups: [''], resources: ['pods'], verbs: ['get', 'list', 'watch', 'delete'] },
+      { apiGroups: [''], resources: ['events'], verbs: ['list'] },
       { apiGroups: [''], resources: ['persistentvolumeclaims'], verbs: ['get', 'list'] },
     ]);
     expect(

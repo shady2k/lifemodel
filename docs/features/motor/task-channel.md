@@ -59,6 +59,31 @@ in `tests/integration/task-mailbox.test.ts` cover later-turn steering, owner
 question round trips, closed/terminal omission, escaping and bounds. These are
 source checks, not the two-real-harness VM acceptance walk.
 
+## Live task state (lifemodel-653.9.17)
+
+The read view and running-tasks snapshot expose `startup: {phase, elapsedSeconds}`
+while starting, and null otherwise. Executor observations use only scheduling,
+image-pull, image-pulled and container-start phases. Image-pulled means the image
+is ready, not that the container has started. Only Started means container-started. The briefing read records harness-starting.
+No Pod messages, image names or node values enter this projection. Elapsed time
+is measured from the phase observation, not reset by repeated reconciliation or
+backward observations. Startup projection failures fall back to waiting-for-scheduling
+and never block launch/adoption or change the observed Job outcome.
+A slow image pull is startup progress, not evidence of a hung task.
+
+The launcher's first agent-session progress event commits a `lifecycle` frame
+with `phase: running`. After the harness turn settles, it commits
+`phase: wrapping-up` before publishing outputs and the terminal report. These
+frames use the existing fenced, immutable mailbox and ACK/replay contract. They
+are best-effort: a failed lifecycle send records a fixed bounded diagnostic but
+never drops the computed result or prevents output collection and terminal reporting.
+Lifecycle frames update only nonterminal state under the task lock, do not wake
+cognition, and cannot regress a wrapping or terminal task. They are task claims,
+not evidence that a command was obeyed. Sealed terminal publication is unchanged.
+The additive migration is `20261015000029_task_startup_visibility.sql`;
+rollback stops new launchers first and leaves the extra columns/frame constraint
+in place so retained lifecycle frames remain readable.
+
 ## Transport and identity
 
 The launcher posts one JSON frame to `https://core.lifemodel.svc:8447/task/events`.
@@ -304,6 +329,41 @@ callback to prove `intakeReady` cannot resolve early. These are source evidence,
 not a deployed-harness or owner-interface acceptance claim. Task-side MCP
 question/step tools and the shared real-adapter round trip are implemented by
 lifemodel-653.9.9 in `tests/integration/task-harness-contract.test.ts`.
+
+### Delivery visibility (lifemodel-653.9.18)
+
+Every command read and running-task context lists command ID, kind and delivery:
+`queued`, `delivered` (native queue admission), `inserted` (a turn saw it),
+`not_delivered`, or `uncertain`. The immutable ACK and ordered receipt history
+remain separate. None proves obedience. Pending commands must not be re-sent
+just because the owner asks for status. Read the full task if the bounded
+context cannot fit all commands. SQL selects only the newest 32 commands with an
+omitted count; the full read retains the existing 1024-command limit.
+
+The projection is shared SQL over durable command/ACK/receipt rows and the
+terminal report or finalization boundary. Only the launcher's own terminal frame
+proves that a command with no ACK or receipt is `not_delivered`: its ACKs drain
+before that frame. A crash or finalization without that frame leaves the command
+`uncertain`, because it may have been inserted before the launcher died. Rejected
+or failed delivery is not delivered. Accepted without insertion remains delivered,
+not applied. A later inserted receipt supersedes earlier uncertainty or deferral.
+Sealed outcome events freeze this metadata (no command text) with the result.
+Outcome turns allow only `core.steerTask(action="read")` for their own task when
+commands need explanation; the executor rejects steering, answers and reads of
+other tasks even if the provider ignores the schema. Other outcome turns retain
+an empty tool allowlist. Before replying about missed or uncertain changes, the
+outcome prompt tells the agent to read their texts with `core.steerTask(action="read")`, never guess from
+IDs or compacted history. The deterministic fallback reports counts, not raw
+command IDs, and quotes bounded excerpts if a successful read is available. It
+says missed changes were not applied and offers a rerun; uncertain changes may
+not have been applied.
+
+Prestart commands wait for `intakeReady`, then use the ordinary journaled send,
+ACK and correlated insertion receipts. Receipt intake remains open while an
+in-flight dispatch drains at shutdown; a receipt arriving as a previous flush
+releases ownership starts a new flush, so it cannot remain stranded in memory; the receipt client closes before terminal
+publication. Both registered harnesses use this same intake contract. These are
+source/store checks, not the deployed VM acceptance walk.
 
 ### Command routes and durable storage
 

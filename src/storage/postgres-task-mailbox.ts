@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from 'pg';
+import { taskCommandDeliverySql, taskAttemptEndedSql } from './task-command-delivery.js';
 import type { TaskProfile } from '../ports/tasks.js';
 import type {
   TaskChannelCursor,
@@ -64,7 +65,11 @@ function record(row: MailboxRow): StoredTaskChannelFrame {
     sequence: Number(row.sequence),
   };
   return {
-    frame: { ...identity, kind: row.kind, payload: row.payload } as TaskChannelFrame,
+    frame: {
+      ...identity,
+      kind: row.kind,
+      payload: row.payload,
+    } as TaskChannelFrame,
     ack: { ...identity, receivedAt: row.received_at.toISOString() },
   };
 }
@@ -322,13 +327,13 @@ export function createPostgresTaskMailbox(deps: {
   });
   async function commandAuthority(client: PoolClient, binding: Binding): Promise<void> {
     liveAttempt(binding);
-    if (binding.state === 'wrapping-up') throw new TaskChannelError(409, 'wrapping_attempt');
     await authority(client, binding, true);
     const terminal = await client.query(
       "SELECT 1 FROM core.task_mailbox WHERE task_id=$1 AND attempt_id=$2 AND kind='terminal'",
       [binding.task_id, binding.attempt_id]
     );
     if (terminal.rowCount) throw new TaskChannelError(409, 'terminal_attempt');
+    if (binding.state === 'wrapping-up') throw new TaskChannelError(409, 'wrapping_attempt');
   }
   async function commandBinding(client: PoolClient, proof: TaskChannelProof, delivery = false) {
     // Empty poll rechecks never take task/launch UPDATE locks. ACK/receipt writes
@@ -341,7 +346,11 @@ export function createPostgresTaskMailbox(deps: {
     return binding;
   }
   function commandRecord(row: { content: TaskCommandInput; sequence: string }): TaskCommand {
-    return { ...row.content, direction: 'core_to_task', sequence: Number(row.sequence) };
+    return {
+      ...row.content,
+      direction: 'core_to_task',
+      sequence: Number(row.sequence),
+    };
   }
   async function readCommands(taskId?: string, commandId?: string): Promise<TaskCommandStatus[]> {
     if (taskId !== undefined && !inputId(taskId)) throw new TaskChannelError(400, 'invalid_input');
@@ -352,14 +361,17 @@ export function createPostgresTaskMailbox(deps: {
         content: TaskCommandInput;
         sequence: string;
         disposition: TaskCommandStatus['disposition'];
+        delivery: NonNullable<TaskCommandStatus['delivery']>;
         receipts: TaskCommandStatus['receipts'];
       }>(
         `SELECT c.content,c.sequence,COALESCE(a.disposition,'queued') AS disposition,
+        ${taskCommandDeliverySql(taskAttemptEndedSql)} AS delivery,
         COALESCE((SELECT jsonb_agg(jsonb_build_object('taskId',r.task_id,'attemptId',c.attempt_id,
           'commandId',r.command_id,'receiptId',r.receipt_id,'disposition',r.disposition,
           'receivedAt',r.received_at) ORDER BY r.received_at,r.receipt_id)
           FROM core.task_command_receipts r WHERE r.task_id=c.task_id AND r.command_id=c.command_id),'[]'::jsonb) AS receipts
-        FROM core.task_commands c LEFT JOIN core.task_command_acks a USING(task_id,command_id)
+        FROM core.task_commands c JOIN core.tasks t ON t.id=c.task_id
+        LEFT JOIN core.task_command_acks a USING(task_id,command_id)
         WHERE ($1::text IS NULL OR c.task_id=$1) AND ($2::text IS NULL OR c.command_id=$2)
         ORDER BY c.sequence LIMIT 1024`,
         [taskId ?? null, commandId ?? null]
@@ -372,6 +384,7 @@ export function createPostgresTaskMailbox(deps: {
         return {
           ...commandRecord(row),
           disposition: row.disposition,
+          delivery: row.delivery,
           receipts,
           currentReceipt: receipts.at(-1) ?? null,
           retryable: row.disposition === 'rejected',
@@ -437,7 +450,11 @@ export function createPostgresTaskMailbox(deps: {
         await allocation(client, binding);
         // Include the envelope, direction, and maximum sequence before commit.
         const wire = {
-          command: { ...command, direction: 'core_to_task', sequence: Number.MAX_SAFE_INTEGER },
+          command: {
+            ...command,
+            direction: 'core_to_task',
+            sequence: Number.MAX_SAFE_INTEGER,
+          },
         };
         if (Buffer.byteLength(JSON.stringify(wire)) > (deps.commandFrameLimit ?? 65_536))
           throw new TaskChannelError(413, 'invalid_frame');
@@ -447,7 +464,10 @@ export function createPostgresTaskMailbox(deps: {
         );
         if (Number(count.rows[0]?.count) >= 1024)
           throw new TaskChannelError(429, 'command_capacity');
-        const inserted = await client.query<{ content: TaskCommandInput; sequence: string }>(
+        const inserted = await client.query<{
+          content: TaskCommandInput;
+          sequence: string;
+        }>(
           `INSERT INTO core.task_commands(task_id,attempt_id,command_id,sequence,content) SELECT $1,$2,$3,COALESCE(max(sequence),0)+1,$4::jsonb FROM core.task_commands WHERE task_id=$1 RETURNING *`,
           [command.taskId, command.attemptId, command.commandId, JSON.stringify(command)]
         );
@@ -472,7 +492,10 @@ export function createPostgresTaskMailbox(deps: {
     pollCommand: (proof, parent) =>
       transaction(async (client) => {
         const binding = await commandBinding(client, proof, true);
-        const result = await client.query<{ content: TaskCommandInput; sequence: string }>(
+        const result = await client.query<{
+          content: TaskCommandInput;
+          sequence: string;
+        }>(
           'SELECT * FROM core.task_commands WHERE task_id=$1 AND attempt_id=$2 AND retired_at IS NULL ORDER BY sequence LIMIT 1',
           [binding.task_id, binding.attempt_id]
         );
@@ -516,10 +539,13 @@ export function createPostgresTaskMailbox(deps: {
           [receipt.taskId, receipt.attemptId, receipt.commandId]
         );
         if (!found.rowCount) throw new TaskChannelError(404, 'not_found');
-        const old = await client.query<{ command_id: string; disposition: string }>(
-          'SELECT * FROM core.task_command_receipts WHERE task_id=$1 AND receipt_id=$2',
-          [receipt.taskId, receipt.receiptId]
-        );
+        const old = await client.query<{
+          command_id: string;
+          disposition: string;
+        }>('SELECT * FROM core.task_command_receipts WHERE task_id=$1 AND receipt_id=$2', [
+          receipt.taskId,
+          receipt.receiptId,
+        ]);
         if (
           old.rows[0] &&
           (old.rows[0].command_id !== receipt.commandId ||
@@ -579,6 +605,11 @@ export function createPostgresTaskMailbox(deps: {
         };
         if (Buffer.byteLength(JSON.stringify(response)) > 1_048_576)
           throw new TaskChannelError(503, 'channel_unavailable');
+        await client.query(
+          `UPDATE core.tasks SET startup_phase='harness-starting',startup_since=clock_timestamp()
+          WHERE id=$1 AND state='starting' AND startup_phase IS DISTINCT FROM 'harness-starting'`,
+          [binding.task_id]
+        );
         return response;
       }, parent),
     readTraceAuthority: async (proof, parent) =>
@@ -664,6 +695,19 @@ export function createPostgresTaskMailbox(deps: {
             await client.query(
               'INSERT INTO core.task_questions(task_id,question_id) VALUES($1,$2)',
               [frame.taskId, frame.payload.questionId]
+            );
+          }
+          if (frame.kind === 'lifecycle') {
+            await client.query(
+              `UPDATE core.tasks SET state=$2,updated_at=clock_timestamp()
+              WHERE id=$1 AND (state='starting' OR (state='running' AND $2='wrapping-up'))`,
+              [frame.taskId, frame.payload.phase]
+            );
+          } else if (frame.kind === 'terminal') {
+            await client.query(
+              `UPDATE core.tasks SET state='wrapping-up',updated_at=clock_timestamp()
+              WHERE id=$1 AND state IN ('starting','running')`,
+              [frame.taskId]
             );
           }
           const inserted = await client.query<MailboxRow>(

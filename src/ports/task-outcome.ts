@@ -1,3 +1,4 @@
+import type { TaskCommandDeliveryStatus } from './task-channel.js';
 import type { TaskManifestObject, TaskOutcomeEvent } from './tasks.js';
 import { validateMessageAttachments, type MessageAttachment } from './message-attachment.js';
 
@@ -47,6 +48,30 @@ export function validateTaskOutcome(value: unknown): TaskOutcomeEvent {
       ...(object['contentType'] !== undefined ? { contentType: object['contentType'] } : {}),
     };
   });
+  let commands: TaskCommandDeliveryStatus[] | undefined;
+  if (event['commands'] !== undefined) {
+    if (!Array.isArray(event['commands']) || event['commands'].length > 1024)
+      throw new Error('Invalid task commands');
+    commands = event['commands'].map((raw: unknown) => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+        throw new Error('Invalid task command');
+      const c = raw as Record<string, unknown>;
+      if (
+        typeof c['commandId'] !== 'string' ||
+        !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(c['commandId']) ||
+        !['steer', 'answer'].includes(c['kind'] as string) ||
+        !['queued', 'delivered', 'inserted', 'not_delivered', 'uncertain'].includes(
+          c['delivery'] as string
+        )
+      )
+        throw new Error('Invalid task command');
+      return {
+        commandId: c['commandId'],
+        kind: c['kind'],
+        delivery: c['delivery'],
+      } as TaskCommandDeliveryStatus;
+    });
+  }
   if (event['state'] === 'done' && !objects.some((object) => object.mark === 'result'))
     throw new Error('Task outcome missing result');
   return {
@@ -56,6 +81,7 @@ export function validateTaskOutcome(value: unknown): TaskOutcomeEvent {
     reasonCode: event['reasonCode'],
     summary: event['summary'],
     objects,
+    ...(commands === undefined ? {} : { commands }),
   };
 }
 
@@ -84,7 +110,10 @@ export function taskOutcomeAttachments(event: TaskOutcomeEvent): MessageAttachme
 }
 
 /** Fixed owner-facing explanation; task text is quoted, never used as instructions. */
-export function taskOutcomeFallback(event: TaskOutcomeEvent): string {
+export function taskOutcomeFallback(
+  event: TaskOutcomeEvent,
+  commandTexts: ReadonlyMap<string, string> = new Map()
+): string {
   const reasons: Record<string, string> = {
     completed: 'The work completed.',
     timeout: 'The task ran out of time.',
@@ -108,5 +137,20 @@ export function taskOutcomeFallback(event: TaskOutcomeEvent): string {
     ? reasons[event.reasonCode]
     : undefined;
   const reason = knownReason ?? 'The task ended without a more specific explanation.';
-  return `${state} ${reason}\nTask output (quoted): ${JSON.stringify(event.summary)}${event.state === 'done' ? '' : '\nNo completed result is available.'}`;
+  const missed = event.commands?.filter((c) => c.delivery === 'not_delivered') ?? [];
+  const uncertain =
+    event.commands?.filter((c) => ['queued', 'delivered', 'uncertain'].includes(c.delivery)) ?? [];
+  const excerpts = missed
+    .flatMap((command) => {
+      const text = commandTexts.get(command.commandId);
+      return typeof text === 'string' ? [JSON.stringify(text.slice(0, 160))] : [];
+    })
+    .slice(0, 8);
+  const delivery = missed.length
+    ? `\n${String(missed.length)} ${missed.length === 1 ? 'change did' : 'changes did'} not reach the task and ${missed.length === 1 ? 'was' : 'were'} not applied.${excerpts.length ? ` Changes (quoted): ${excerpts.join('; ')}.` : ''} I can rerun the task with those changes.`
+    : '';
+  const pending = uncertain.length
+    ? `\n${String(uncertain.length)} ${uncertain.length === 1 ? 'change has' : 'changes have'} no confirmed turn insertion and may not have been applied.`
+    : '';
+  return `${state} ${reason}${delivery}${pending}\nTask output (quoted): ${JSON.stringify(event.summary)}${event.state === 'done' ? '' : '\nNo completed result is available.'}`;
 }

@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, writeFile, rm, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { ScriptedTaskHarness } from '../../loader/src/task-harness.js';
 import { AcpTaskHarness } from '../../loader/src/task-acp.js';
 import { createTaskCommandIntake } from '../../loader/src/task-command-intake.js';
 import { TaskJsonClient } from '../../loader/src/task-launcher-http.js';
@@ -23,7 +24,7 @@ import {
 import { RealCognitionFacade } from '../helpers/core-loop-real-cognition.js';
 import { setPrimaryRecipientId } from '../../src/core/globals.js';
 import { AggregationProcessor } from '../../src/layers/aggregation/processor.js';
-import { createUserMessageSignal } from '../../src/types/signal.js';
+import { createSignal, createUserMessageSignal } from '../../src/types/signal.js';
 import type { ScriptedResponse } from '../helpers/scripted-llm.js';
 import type { TaskChannelFrame, TaskChannelProof } from '../../src/ports/task-channel.js';
 import { TaskChannelError, validateTaskChannelFrame } from '../../src/ports/task-channel.js';
@@ -238,6 +239,280 @@ describe('durable fenced task mailbox', () => {
     }[];
   }
 
+  it('never regresses startup phase or resets its clock on stale observations', async () => {
+    const registry = createPostgresTaskRegistry({ pool: stores.postgres, epoch: 1, settings });
+    const since = new Date(Date.now() - 120_000);
+    await registry.recordStartupObservation(identity.taskId, identity.launchId, {
+      phase: 'container-started',
+      since,
+    });
+    await registry.recordStartupObservation(identity.taskId, identity.launchId, {
+      phase: 'pulling-image',
+      since: new Date(),
+    });
+    let row = await stores.postgres.query(
+      'SELECT startup_phase,startup_since FROM core.tasks WHERE id=$1',
+      [identity.taskId]
+    );
+    expect(row.rows[0]).toEqual({ startup_phase: 'container-started', startup_since: since });
+    await registry.recordStartupObservation(identity.taskId, identity.launchId, {
+      phase: 'container-started',
+      since: new Date(),
+    });
+    row = await stores.postgres.query(
+      'SELECT startup_phase,startup_since FROM core.tasks WHERE id=$1',
+      [identity.taskId]
+    );
+    expect(row.rows[0]).toEqual({ startup_phase: 'container-started', startup_since: since });
+    // A cold pull has a distinct completed-image phase before the container starts.
+    const second = await seed('image-pulled');
+    await registry.recordStartupObservation(second.taskId, second.launchId, {
+      phase: 'image-pulled',
+      since,
+    });
+    expect((await service().read(second.taskId))?.startup?.phase).toBe('image-pulled');
+  });
+
+  it.each([false, true])(
+    'projects unacknowledged commands after attempt end with launcher terminal=%s',
+    async (launcherTerminal) => {
+      const domain = service();
+      const registry = createPostgresTaskRegistry({ pool: stores.postgres, epoch: 1, settings });
+      await domain.steer(identity.taskId, 'crash-window', 'Use N=9');
+      if (launcherTerminal) await mailbox().append(terminal(), identity);
+      const candidate = launcherTerminal
+        ? { state: 'done' as const, reasonCode: 'completed', summary: 'Finished' }
+        : { state: 'failed' as const, reasonCode: 'compute_missing', summary: 'Task disappeared.' };
+      await registry.beginFinalization(identity.taskId, identity.launchId, candidate);
+      const delivery = launcherTerminal ? 'not_delivered' : 'uncertain';
+      expect((await domain.read(identity.taskId))?.commands[0]?.delivery).toBe(delivery);
+      await finalizeTaskFixture(
+        stores.postgres,
+        registry,
+        { id: identity.taskId, launchId: identity.launchId },
+        candidate
+      );
+      expect((await domain.read(identity.taskId))?.commands[0]?.delivery).toBe(delivery);
+      expect((await registry.listOutcomeWork())[0]?.commands?.[0]?.delivery).toBe(delivery);
+    }
+  );
+
+  it('limits running-context SQL to the newest 32 commands and reports the total omitted count', async () => {
+    const domain = service();
+    for (let i = 0; i < 40; i++) await domain.steer(identity.taskId, `bounded-${i}`, `Change ${i}`);
+    const task = (await domain.listActiveContext()).tasks.find(
+      (task) => task.id === identity.taskId
+    )!;
+    expect(task.commands).toHaveLength(32);
+    expect(task.commands?.[0]?.commandId).toBe('bounded-8');
+    expect(task.commands?.at(-1)?.commandId).toBe('bounded-39');
+    expect(task.commandsOmitted).toBe(8);
+    expect((await domain.read(identity.taskId))?.commands).toHaveLength(40);
+  });
+
+  it('publishes starting phase and elapsed time, then running and wrapping from launcher lifecycle frames', async () => {
+    const domain = service();
+    const registry = createPostgresTaskRegistry({
+      pool: stores.postgres,
+      epoch: 1,
+      settings,
+    });
+    expect((await domain.read(identity.taskId))?.state).toBe('starting');
+    await registry.recordStartupObservation(identity.taskId, identity.launchId, {
+      phase: 'pulling-image',
+      since: new Date(Date.now() - 129_000),
+    });
+    const view = await domain.read(identity.taskId);
+    expect(view?.startup).toMatchObject({ phase: 'pulling-image' });
+    expect(view?.startup?.elapsedSeconds).toBeGreaterThanOrEqual(129);
+    expect((await domain.listActiveContext()).tasks[0]?.startup).toEqual(view?.startup);
+    for (const [index, state] of ['running', 'wrapping-up'].entries()) {
+      await mailbox().append(
+        {
+          ...frame(`lifecycle-${index}`, index + 1),
+          kind: 'lifecycle',
+          payload: { phase: state },
+        } as TaskChannelFrame,
+        identity
+      );
+      expect((await domain.read(identity.taskId))?.state).toBe(state);
+      expect((await domain.read(identity.taskId))?.startup).toBeNull();
+      expect((await domain.listActiveContext()).tasks[0]?.state).toBe(state);
+    }
+    // A late startup observation or replay must not regress a running session.
+    await registry.recordStartupObservation(identity.taskId, identity.launchId, {
+      phase: 'container-started',
+      since: new Date(),
+    });
+    expect((await domain.read(identity.taskId))?.state).toBe('wrapping-up');
+  });
+
+  it('delivers commands queued before native intake and stores insertion receipts after startup', async () => {
+    const domain = service();
+    await domain.steer(identity.taskId, 'prestart-one', 'Save the result');
+    await domain.steer(identity.taskId, 'prestart-two', 'Also save an artifact');
+    const ready = Promise.withResolvers<void>();
+    let intake: ReturnType<typeof createTaskCommandIntake>;
+    const harness = new ScriptedTaskHarness({
+      waitForAbort: true,
+      beforeIntake: ready.promise,
+      onEvent: (event) => {
+        if (event.type === 'receipt') intake.receipt(event);
+      },
+    });
+    const calls = vi
+      .spyOn(TaskJsonClient.prototype, 'call')
+      .mockImplementation(async (path, body, signal) => {
+        if (path === '/task/commands') {
+          const command = await mailbox().pollCommand(identity);
+          if (command) return { command };
+          return new Promise((_resolve, reject) => {
+            signal?.addEventListener('abort', () => reject(new Error('closed')), { once: true });
+          });
+        }
+        if (path === '/task/commands/ack')
+          await mailbox().acknowledgeCommand(body as never, identity);
+        else if (path === '/task/commands/receipt')
+          await mailbox().recordCommandReceipt(body as never, identity);
+        else throw new Error('unexpected route');
+        return { stored: true };
+      });
+    intake = createTaskCommandIntake({
+      endpoint: { endpoint: 'https://localhost:1', tokenFile: '/unused', caFile: '/unused' },
+      identity,
+      harness,
+      hardStopAt: Date.now() + 60_000,
+    });
+    const execution = harness.start({ text: 'Find primes', model: 'test' });
+    intake.start();
+    try {
+      expect(calls).not.toHaveBeenCalled();
+      ready.resolve();
+      await expect
+        .poll(async () => (await domain.read(identity.taskId))?.commands.map((c) => c.delivery))
+        .toEqual(['inserted', 'inserted']);
+      expect((await domain.listActiveContext()).tasks[0]?.commands).toEqual([
+        { commandId: 'prestart-one', kind: 'steer', delivery: 'inserted' },
+        { commandId: 'prestart-two', kind: 'steer', delivery: 'inserted' },
+      ]);
+    } finally {
+      await harness.abort();
+      await execution;
+      await intake.stop();
+      calls.mockRestore();
+    }
+  });
+
+  it('keeps prestart commands visible and makes an undelivered late steer explicit in the core outcome reply', async () => {
+    const domain = service();
+    await domain.steer(identity.taskId, 'early-steer', 'Save primes.txt');
+    expect((await domain.read(identity.taskId))?.commands[0]).toMatchObject({ delivery: 'queued' });
+    await mailbox().acknowledgeCommand(
+      {
+        taskId: identity.taskId,
+        attemptId: identity.attemptId,
+        commandId: 'early-steer',
+        disposition: 'accepted',
+      },
+      identity
+    );
+    expect((await domain.read(identity.taskId))?.commands[0]).toMatchObject({
+      delivery: 'delivered',
+    });
+    await mailbox().recordCommandReceipt(
+      {
+        taskId: identity.taskId,
+        attemptId: identity.attemptId,
+        commandId: 'early-steer',
+        receiptId: 'inserted-early',
+        disposition: 'inserted',
+      },
+      identity
+    );
+    expect((await domain.read(identity.taskId))?.commands[0]).toMatchObject({
+      delivery: 'inserted',
+    });
+    const f = await contextBoot([
+      {
+        toolCalls: [
+          {
+            name: 'core.steerTask',
+            args: { action: 'steer', taskId: identity.taskId, text: 'Forbidden mutation' },
+          },
+          { name: 'core.steerTask', args: { action: 'read', taskId: 'task-other' } },
+          { name: 'core.steerTask', args: { action: 'read', taskId: identity.taskId } },
+        ],
+      },
+      { content: '' },
+    ]);
+    try {
+      await domain.steer(identity.taskId, 'late-steer', 'Use N=9 instead of N=7');
+      // The VM's three-second race is event-driven here, without timer waits.
+      // No launcher poll or receipt occurs between the committed steer and terminal frame.
+      await mailbox().append(terminal(), identity);
+      expect((await domain.read(identity.taskId))?.commands[1]).toMatchObject({
+        delivery: 'not_delivered',
+      });
+      await finalizeTaskFixture(
+        stores.postgres,
+        f.registry,
+        { id: identity.taskId, launchId: identity.launchId },
+        {
+          state: 'done',
+          reasonCode: 'completed',
+          summary: 'Primes for N=7 are ready.',
+        }
+      );
+      const event = (await f.registry.listOutcomeWork())[0]!;
+      expect(event.commands).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ commandId: 'late-steer', delivery: 'not_delivered' }),
+        ])
+      );
+      expect(JSON.stringify(event.commands)).not.toContain('Use N=9');
+      await f.bus.append(
+        createSignal(
+          'task_outcome',
+          'task.finalizer',
+          { value: 1 },
+          { data: { kind: 'task_outcome', ...event } }
+        )
+      );
+      await waitFor(() => f.real.calls.length > 0, 'outcome reply');
+      await f.real.calls[0]!.done;
+      await expect.poll(async () => (await f.events()).length).toBe(1);
+      expect((await f.events())[0]!.payload.text).toContain('did not reach the task');
+      expect((await f.events())[0]!.payload.text).toContain('not applied');
+      expect((await f.events())[0]!.payload.text).toContain('rerun');
+      expect((await f.events())[0]!.payload.text).not.toContain('late-steer');
+      expect((await f.events())[0]!.payload.text).toContain('Use N=9 instead of N=7');
+      const prompt = f.real.provider.requests
+        .flatMap((r) => r.messages)
+        .map((m) => m.content)
+        .join('\n');
+      expect(prompt).toContain('late-steer');
+      expect(prompt).toContain('not_delivered');
+      expect(prompt).toContain(
+        'Read the command texts with core.steerTask(action="read") before replying'
+      );
+      expect(prompt).toContain('never guess');
+      expect(f.real.provider.requests[0]?.tools?.map((tool) => tool.function.name)).toEqual([
+        'core_steerTask',
+      ]);
+      const results = f.real.provider.requests
+        .flatMap((request) => request.messages)
+        .filter((message) => message.role === 'tool');
+      expect(
+        results.filter((message) => message.content?.includes('task_outcome_requires_final_reply'))
+          .length
+      ).toBeGreaterThanOrEqual(2);
+      expect((await domain.read(identity.taskId))?.commands).toHaveLength(2);
+    } finally {
+      await f.coreLoop.stop();
+      setPrimaryRecipientId(undefined);
+    }
+  });
+
   it('later owner turn sees the startTask ID without its tool result and commits steering through cognition', async () => {
     const steerArgs = { action: 'steer', taskId: '', text: 'Also save the result in primes.txt' };
     const f = await contextBoot([
@@ -268,6 +543,9 @@ describe('durable fenced task mailbox', () => {
         id: task.id,
         harness: task.harness,
         state: 'starting',
+        startup: expect.objectContaining({ phase: 'waiting-for-scheduling' }),
+        commands: expect.any(Array),
+        commandsOmitted: 0,
         briefing: 'mailbox fixture',
         question: null,
       });

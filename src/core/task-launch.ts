@@ -91,12 +91,7 @@ export function createTaskLaunchReconciler(options: {
   }
   async function ensure(task: TaskRecord) {
     task = await current(task.id, task.launchId);
-    if (
-      task.tombstonedAt ||
-      terminal(task) ||
-      task.terminalCandidate ||
-      (task.state === 'starting' && task.softStopRequestedAt)
-    ) {
+    if (task.tombstonedAt || terminal(task) || task.terminalCandidate || task.softStopRequestedAt) {
       await cleanup(task);
       return;
     }
@@ -133,12 +128,7 @@ export function createTaskLaunchReconciler(options: {
     // Re-read the durable fence immediately before external creation. There is
     // no cross-store transaction: delayed old-epoch CREATE can only stay inert.
     task = await current(task.id, task.launchId);
-    if (
-      task.tombstonedAt ||
-      terminal(task) ||
-      task.terminalCandidate ||
-      (task.state === 'starting' && task.softStopRequestedAt)
-    ) {
+    if (task.tombstonedAt || terminal(task) || task.terminalCandidate || task.softStopRequestedAt) {
       await cleanup(task);
       return;
     }
@@ -152,6 +142,8 @@ export function createTaskLaunchReconciler(options: {
       observed.templateHash
     );
     active();
+    if (observed.startup)
+      await options.registry.recordStartupObservation(task.id, task.launchId, observed.startup);
     if (observed.startedAt)
       await options.registry.initializeAccessIntent(task.id, observed.startedAt);
     if (observed.phase === 'failed' || observed.phase === 'succeeded')
@@ -217,7 +209,7 @@ export function createTaskLaunchReconciler(options: {
               fresh.tombstonedAt ||
               terminal(fresh) ||
               fresh.terminalCandidate ||
-              (fresh.state === 'starting' && fresh.softStopRequestedAt)
+              fresh.softStopRequestedAt
             ) {
               if (fresh) await options.registry.tombstoneLaunch(fresh.id, fresh.launchId);
               active();
@@ -229,7 +221,11 @@ export function createTaskLaunchReconciler(options: {
                 } catch {
                   active();
                   options.logger.warn(
-                    { ...taskContext, code: 'task_pod_evidence_unavailable', count: 1 },
+                    {
+                      ...taskContext,
+                      code: 'task_pod_evidence_unavailable',
+                      count: 1,
+                    },
                     'Task Pod termination evidence unavailable'
                   );
                 }

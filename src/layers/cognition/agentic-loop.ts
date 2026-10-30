@@ -156,7 +156,7 @@ export class AgenticLoop {
       // Model retries/limits exhausted: the trusted outcome still owes a reply.
       // Sending this deterministic reply is a successful answer, not silence.
       if (context.triggerSignal.type === 'task_outcome')
-        return this.outcomeFallback(context, createLoopState());
+        return this.outcomeFallback(context, state);
       if (this.needsQuestionRelay(context, state)) return this.questionFallback(context, state);
       this.logger.error(
         { error: error instanceof Error ? error.message : String(error) },
@@ -168,9 +168,34 @@ export class AgenticLoop {
 
   private outcomeFallback(context: LoopContext, state: LoopState): LoopResult {
     const event = validateTaskOutcome(context.triggerSignal.data);
+    const commandTexts = new Map<string, string>();
+    for (const tool of state.executedTools) {
+      if (
+        tool.name !== 'core.steerTask' ||
+        tool.args['action'] !== 'read' ||
+        tool.args['taskId'] !== event.taskId
+      )
+        continue;
+      const result = state.toolResults.find(
+        (entry) => entry.toolCallId === tool.toolCallId && entry.success
+      );
+      const data = result?.data as
+        | { success?: boolean; task?: { id?: string; commands?: unknown } }
+        | undefined;
+      if (
+        data?.success !== true ||
+        data.task?.id !== event.taskId ||
+        !Array.isArray(data.task.commands)
+      )
+        continue;
+      for (const command of data.task.commands as { commandId?: unknown; text?: unknown }[]) {
+        if (typeof command.commandId === 'string' && typeof command.text === 'string')
+          commandTexts.set(command.commandId, command.text);
+      }
+    }
     state.disposition = 'answer';
     return buildFinalResultFromNaturalCompletion(
-      taskOutcomeFallback(event),
+      taskOutcomeFallback(event, commandTexts),
       state,
       context,
       this.logger

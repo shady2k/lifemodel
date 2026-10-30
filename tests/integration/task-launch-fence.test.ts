@@ -49,6 +49,9 @@ describe('task launch fence (real Postgres, HTTPS Kubernetes API)', () => {
   let jobs: Map<string, any>;
   let requests: { method: string; path: string; body: any }[];
   let allocations: Map<string, any>;
+  let pods: any[];
+  let podListStatus: number;
+  let eventListStatus: number;
   let mode: 'normal' | 'drop-create' | 'conflict-create' | 'allocation-failure';
   let storageCalls: number;
   let creates: number;
@@ -116,8 +119,15 @@ describe('task launch fence (real Postgres, HTTPS Kubernetes API)', () => {
           watchSeen.resolve();
           return;
         }
+        if (req.method === 'GET' && name === 'events') {
+          send(eventListStatus, { items: [] });
+          return;
+        }
         if (req.method === 'GET' && ['pods', 'persistentvolumeclaims'].includes(name)) {
-          send(200, { items: [], metadata: { resourceVersion: '1' } });
+          send(name === 'pods' ? podListStatus : 200, {
+            items: name === 'pods' ? pods : [],
+            metadata: { resourceVersion: '1' },
+          });
           return;
         }
         if (req.method === 'GET' && name === 'jobs') {
@@ -163,6 +173,10 @@ describe('task launch fence (real Postgres, HTTPS Kubernetes API)', () => {
         }
         if (req.method === 'DELETE') {
           const job = jobs.get(name);
+          if (!job) {
+            send(404, {});
+            return;
+          }
           expect(body.preconditions).toEqual({
             uid: job.metadata.uid,
             resourceVersion: job.metadata.resourceVersion,
@@ -197,6 +211,9 @@ describe('task launch fence (real Postgres, HTTPS Kubernetes API)', () => {
     jobs = new Map();
     requests = [];
     allocations = new Map();
+    pods = [];
+    podListStatus = 200;
+    eventListStatus = 200;
     mode = 'normal';
     storageCalls = 0;
     creates = 0;
@@ -331,6 +348,84 @@ describe('task launch fence (real Postgres, HTTPS Kubernetes API)', () => {
       expect(storageCalls).toBe(1);
     }
   );
+  it.each(['events403', 'pods500'] as const)(
+    'adopts and initializes access despite unavailable startup projection (%s)',
+    async (failure) => {
+      const task = await admitted(`projection-${failure}`);
+      await executor().ensureStarted(launch(task));
+      jobs.get(task.jobName).status = { startTime: '2026-10-23T12:00:00Z' };
+      pods = [
+        {
+          metadata: {
+            name: `${task.jobName}-pod`,
+            namespace: 'lifemodel-motor',
+            uid: 'pod-uid',
+            resourceVersion: '1',
+            ownerReferences: [
+              {
+                apiVersion: 'batch/v1',
+                kind: 'Job',
+                controller: true,
+                name: task.jobName,
+                uid: 'job-uid-1',
+              },
+            ],
+          },
+          status: { phase: 'Pending' },
+        },
+      ];
+      if (failure === 'events403') eventListStatus = 403;
+      else podListStatus = 500;
+      expect(await component().runOnce()).toBe(true);
+      expect(await registry.read(task.id)).toMatchObject({
+        state: 'starting',
+        jobUid: 'job-uid-1',
+        startup: { phase: 'waiting-for-scheduling' },
+      });
+      expect(await registry.readAccessIntent(task.id)).toMatchObject({
+        softDueAt: new Date('2026-10-23T12:10:00Z'),
+        hardStopAt: new Date('2026-10-23T12:15:00Z'),
+      });
+      expect(creates).toBe(1);
+    }
+  );
+
+  it.each(['starting', 'running', 'wrapping-up'] as const)(
+    'cleans soft-stopped %s tasks without releasing their reservation',
+    async (state) => {
+      const task = await admitted(`soft-stop-${state}`);
+      expect(await component().runOnce()).toBe(true);
+      await stores.postgres.query('UPDATE core.tasks SET state=$2 WHERE id=$1', [task.id, state]);
+      await registry.recordSoftStop(task.id, task.launchId);
+      expect(await component().resync()).toBe(true);
+      expect(jobs.size).toBe(0);
+      expect(await registry.read(task.id)).toMatchObject({
+        cleanupPending: true,
+        slotReserved: true,
+      });
+      expect((await registry.read(task.id))?.tombstonedAt).not.toBeNull();
+    }
+  );
+
+  it.each(['running', 'wrapping-up'] as const)(
+    'scan cleanup removes a soft-stopped %s task outside the current registry page',
+    async (state) => {
+      const task = await admitted(`scan-soft-stop-${state}`);
+      expect(await component().runOnce()).toBe(true);
+      await stores.postgres.query('UPDATE core.tasks SET state=$2 WHERE id=$1', [task.id, state]);
+      await registry.recordSoftStop(task.id, task.launchId);
+      const scanOnly = new Proxy(registry, {
+        get(target, key) {
+          if (key === 'listLaunchWork') return async () => [];
+          return Reflect.get(target, key, target);
+        },
+      });
+      expect(await component(scanOnly).runOnce()).toBe(true);
+      expect(jobs.size).toBe(0);
+      expect((await registry.read(task.id))?.tombstonedAt).not.toBeNull();
+    }
+  );
+
   it('returns AlreadyExists without overwriting an existing Job on duplicate CREATE', async () => {
     const task = await admitted('duplicate-create');
     const api = executor();

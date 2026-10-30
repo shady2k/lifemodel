@@ -111,7 +111,7 @@ export function createTaskKubernetesClient(
       try {
         if (combined.aborted) throw new TaskExecutorError('aborted');
         if (
-          !/^\/(?:apis\/batch\/v1\/namespaces\/[a-z0-9-]+\/jobs|api\/v1\/namespaces\/[a-z0-9-]+\/(?:pods|persistentvolumeclaims))(?:\/[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)?(?:\?[^#]*)?$/.test(
+          !/^\/(?:apis\/batch\/v1\/namespaces\/[a-z0-9-]+\/jobs|api\/v1\/namespaces\/[a-z0-9-]+\/(?:pods|persistentvolumeclaims|events))(?:\/[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)?(?:\?[^#]*)?$/.test(
             path
           )
         )

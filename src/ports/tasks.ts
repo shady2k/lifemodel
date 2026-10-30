@@ -1,5 +1,10 @@
 import type { TaskHarnessName } from './task-harness-names.js';
-import type { TaskCommand, TaskCommandStatus, TaskQuestion } from './task-channel.js';
+import type {
+  TaskCommand,
+  TaskCommandStatus,
+  TaskQuestion,
+  TaskCommandDeliveryStatus,
+} from './task-channel.js';
 /** Core task authority. Deliberately not exposed through PluginPrimitives. */
 export type TaskState =
   | 'queued'
@@ -11,6 +16,16 @@ export type TaskState =
   | 'stopped';
 export type TaskTerminalState = Extract<TaskState, 'done' | 'failed' | 'stopped'>;
 export type TaskAccessMode = 'active' | 'wrapping' | 'revoked';
+export type TaskStartupPhase =
+  | 'waiting-for-scheduling'
+  | 'pulling-image'
+  | 'image-pulled'
+  | 'container-started'
+  | 'harness-starting';
+export interface TaskStartupStatus {
+  readonly phase: TaskStartupPhase;
+  readonly elapsedSeconds: number;
+}
 
 export interface TaskProfile {
   readonly id: string;
@@ -79,7 +94,9 @@ export interface TaskSealReceipt {
     readonly version: 1;
     readonly sha256: string;
     readonly objects: readonly TaskManifestObject[];
-    readonly excluded?: readonly (TaskManifestObject & { readonly reason: string })[];
+    readonly excluded?: readonly (TaskManifestObject & {
+      readonly reason: string;
+    })[];
   };
 }
 export interface TaskFinalizationCandidate {
@@ -89,6 +106,7 @@ export interface TaskFinalizationCandidate {
 }
 /** Durable logical event; delivery is at-least-once, deduplicated by outcomeKey. */
 export interface TaskOutcomeEvent {
+  readonly commands?: readonly TaskCommandDeliveryStatus[];
   readonly taskId: string;
   readonly outcomeKey: string;
   readonly state: TaskTerminalState;
@@ -111,6 +129,7 @@ export interface TaskRecord {
   readonly acceptedOrder: string;
   readonly urgent: boolean;
   readonly state: TaskState;
+  readonly startup?: TaskStartupStatus | null;
   readonly terminalCandidate: TaskTerminalState | null;
   readonly terminalReasonCode: string | null;
   readonly finalizationPending: boolean;
@@ -163,11 +182,17 @@ export const TASK_CONTEXT_LIMITS = {
   rendered: 24_000,
 } as const;
 export interface TaskContextEntry {
+  readonly commandsOmitted?: number;
+  readonly commands?: readonly TaskCommandDeliveryStatus[];
   readonly id: string;
   readonly harness: string;
   readonly state: TaskState;
+  readonly startup?: TaskStartupStatus | null;
   readonly briefing: string;
-  readonly question: { readonly questionId: string; readonly text: string } | null;
+  readonly question: {
+    readonly questionId: string;
+    readonly text: string;
+  } | null;
 }
 
 export interface TaskContextSnapshot {
@@ -276,6 +301,15 @@ export interface TaskRegistry extends TaskAcceptanceService {
   recordSoftStop(taskId: string, launchId: string): Promise<void>;
   /** Caller must have confirmed compute termination, not just a terminal report. */
   releaseSlot(taskId: string): Promise<void>;
+  /** Informational executor observation only; cannot advance session state. */
+  recordStartupObservation(
+    taskId: string,
+    launchId: string,
+    observation: {
+      readonly phase: TaskStartupPhase;
+      readonly since: Date;
+    }
+  ): Promise<void>;
   /** Persist observed Job.status.startTime before gateway verified binding. */
   initializeAccessIntent(taskId: string, jobStartedAt: Date): Promise<TaskAccessIntent>;
   readAccessIntent(taskId: string): Promise<TaskAccessIntent | null>;
