@@ -1,4 +1,6 @@
 import type { TaskEndTurnInput, TaskEndTurnReconciliation } from './task-harness.js';
+import { createAcpTranscriptMapper, acpToolOutput } from './task-transcript.js';
+import type { TaskHarnessEventSink } from './task-harness.js';
 /** OpenCode v2 configuration only. The protocol client is generic ACP. */
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -204,6 +206,7 @@ export async function reconcileEndTurn(
   input: TaskEndTurnInput
 ): Promise<TaskEndTurnReconciliation> {
   const pending: string[] = [];
+  const insertedCommandIds: string[] = [];
   for (const commandId of input.commandIds) {
     const id = nativeMessageId(commandId);
     const status = await new Promise<string>((resolve) => {
@@ -254,7 +257,26 @@ export async function reconcileEndTurn(
     if (status === 'pending') {
       if (input.continuedCommandIds?.includes(commandId)) return { state: 'unknown' };
       pending.push(commandId);
-    } else if (status !== 'inserted') return { state: 'unknown' };
+    } else if (status === 'inserted') insertedCommandIds.push(commandId);
+    else return { state: 'unknown' };
   }
-  return pending.length ? { state: 'continue', commandIds: pending } : { state: 'idle' };
+  return pending.length
+    ? {
+        state: 'continue',
+        commandIds: pending,
+        ...(insertedCommandIds.length ? { insertedCommandIds } : {}),
+      }
+    : { state: 'idle', ...(insertedCommandIds.length ? { insertedCommandIds } : {}) };
+}
+
+/** Map this adapter's ACP session, including native successor observations. */
+export function createTranscriptMapper(sink?: TaskHarnessEventSink) {
+  return createAcpTranscriptMapper(sink, {
+    name: (tool) =>
+      ['name', 'kind', 'title']
+        .map((key) => tool[key])
+        .find((value): value is string => typeof value === 'string') ?? 'tool',
+    output: acpToolOutput,
+    failed: (tool) => toolOutputFailed(tool['rawOutput'], tool['rawInput']),
+  });
 }

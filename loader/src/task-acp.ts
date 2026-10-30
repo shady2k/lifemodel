@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createTaskModelRelay, type TaskModelRequest } from './task-model-relay.js';
+import { transcriptText } from './task-transcript.js';
 import { AcpTaskTrace } from './task-trace.js';
 import { TASK_PROCESS_SUPERVISOR } from './task-process.js';
 import { TaskSteeringJournal } from './task-steering-journal.js';
@@ -21,6 +22,7 @@ import type {
   TaskEndTurnInput,
   TaskEndTurnReconciliation,
   TaskQuestionState,
+  TaskTranscriptMapper,
 } from './task-harness.js';
 
 type Json = Record<string, unknown>;
@@ -208,6 +210,7 @@ export interface AcpTaskHarnessOptions {
     relayBaseURL: string;
     adapterConfig?: AgentConfiguration['adapterConfig'];
   }) => NodeJS.ProcessEnv;
+  createTranscriptMapper?: (sink?: TaskHarnessEventSink) => TaskTranscriptMapper;
   toolOutputFailed?: (output: unknown, input?: unknown) => boolean;
   admit?: (input: {
     workDirectory: string;
@@ -282,7 +285,29 @@ export class AcpTaskHarness implements TaskHarness {
     let assistantVersion = 0;
     const continuedCommands = new Set<string>();
     const commandTexts = new Map<string, string>();
+    const transcriptCommands = new Map<string, { role: 'steer' | 'answer'; text: string }>();
+    const transcriptInserted = new Set<string>();
+    const captureInserted = (commandId: string) => {
+      const command = transcriptCommands.get(commandId);
+      if (!command || transcriptInserted.has(commandId)) return;
+      transcriptInserted.add(commandId);
+      void Promise.resolve()
+        .then(() =>
+          this.options.onEvent?.({
+            type: 'transcript',
+            entry: {
+              id: `entry_${createHash('sha256').update(`inserted:${commandId}`).digest('hex')}`,
+              time: new Date().toISOString(),
+              role: command.role,
+              text: command.text,
+              tool: null,
+            },
+          })
+        )
+        .catch(() => undefined);
+    };
     const observers = new Set<Promise<void>>();
+    const transcript = this.options.createTranscriptMapper?.(this.options.onEvent);
     const turn = new AcpTurn(this.options.toolOutputFailed, this.options.onEvent);
     let result: TaskHarnessResult = failed('harness_failed');
     const pending = new Map<
@@ -460,6 +485,7 @@ export class AcpTaskHarness implements TaskHarness {
       const applyUpdate = async (update: Json): Promise<void> => {
         if (update['sessionUpdate'] === 'agent_message_chunk') assistantVersion++;
         const event = turn.update(update);
+        transcript?.update(update);
         if (event === 'step') await emit({ type: 'step', text: 'Task is working' });
         if (event === 'tool') {
           const toolStatus = turn.toolStatus(update['toolCallId']);
@@ -599,6 +625,10 @@ export class AcpTaskHarness implements TaskHarness {
           if (previousText === undefined) {
             if (commandTexts.size >= 1024) return 'rejected';
             commandTexts.set(command.commandId, textHash);
+            transcriptCommands.set(command.commandId, {
+              role: command.kind ?? 'steer',
+              text: transcriptText(command.text),
+            });
           }
           const disposition = await steeringJournal.admit(command, () =>
             admit({ workDirectory: work, sessionId: boundSession, ...command })
@@ -620,6 +650,7 @@ export class AcpTaskHarness implements TaskHarness {
                     // needs native evidence even if its receipt already arrived.
                     if (promptID !== undefined && pending.has(promptID))
                       insertedCommands.set(command.commandId, assistantVersion);
+                    captureInserted(command.commandId);
                     await emit(
                       {
                         type: 'receipt',
@@ -691,6 +722,7 @@ export class AcpTaskHarness implements TaskHarness {
             if (steering) this.intake.resolve();
           }
         );
+        transcript?.flush();
         promptResponse = response;
         stopReason = response['stopReason'];
         await queue;
@@ -705,7 +737,7 @@ export class AcpTaskHarness implements TaskHarness {
         if (fault || signal.aborted) throw fault ?? new Error('timeout');
         const commandIds = [...accepted];
         accepted.clear();
-        const reconciliation = this.options.reconcileEndTurn
+        const reconciliation: TaskEndTurnReconciliation = this.options.reconcileEndTurn
           ? await this.options.reconcileEndTurn({
               workDirectory: work,
               sessionId: sessionID,
@@ -718,6 +750,8 @@ export class AcpTaskHarness implements TaskHarness {
             })
           : { state: commandIds.length ? ('unknown' as const) : ('idle' as const) };
         if (fault || signal.aborted) throw fault ?? new Error('timeout');
+        if (reconciliation.state === 'idle' || reconciliation.state === 'continue')
+          for (const id of reconciliation.insertedCommandIds ?? []) captureInserted(id);
         if (reconciliation.state === 'unknown') throw new Error('end_turn_uncertain');
         if (reconciliation.state === 'continue') {
           for (const commandId of reconciliation.commandIds) {
@@ -752,7 +786,9 @@ export class AcpTaskHarness implements TaskHarness {
           await queue;
           turn.continueTurn();
           for (const update of evidence.updates) {
-            if (update.kind === 'reset') turn.continueTurn();
+            if (update.kind === 'inserted') {
+              captureInserted(update.commandId);
+            } else if (update.kind === 'reset') turn.continueTurn();
             else if (update.kind === 'text')
               await applyUpdate({
                 sessionUpdate: 'agent_message_chunk',
@@ -763,6 +799,7 @@ export class AcpTaskHarness implements TaskHarness {
                 sessionUpdate: 'tool_call_update',
                 toolCallId: update.id,
                 status: update.status,
+                title: update.name,
                 rawInput: update.input,
                 rawOutput: update.output,
               });
@@ -828,6 +865,7 @@ export class AcpTaskHarness implements TaskHarness {
         /* preserve cleanup */
       }
     } finally {
+      transcript?.flush();
       turn.finish(result, promptResponse);
       closing = true;
       this.cancelRequest = undefined;

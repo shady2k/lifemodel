@@ -47,8 +47,9 @@ interface Frame {
   direction: string;
   messageId: string;
   sequence: number;
-  kind: 'step' | 'question' | 'terminal' | 'lifecycle';
+  kind: 'step' | 'question' | 'terminal' | 'lifecycle' | 'transcript';
   payload: {
+    role?: string;
     outcome?: string;
     reasonCode?: string;
     summary?: string;
@@ -536,6 +537,52 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     });
   });
 
+  it('transcript: forwards bounded scrubbed session entries and inserted steer/answer claims over the existing channel', async () => {
+    const entry = (id: string, role: 'assistant' | 'tool' | 'steer' | 'answer') => ({
+      type: 'transcript' as const,
+      entry: {
+        id,
+        role,
+        time: '2026-10-30T00:00:00.000Z',
+        text: role === 'tool' ? '' : `session text api_key=planted-key ${TOKENS.model}`,
+        tool:
+          role === 'tool'
+            ? {
+                name: 'shell',
+                status: 'completed' as const,
+                outputTail: `last output token=planted-token ${TOKENS.channel}`,
+              }
+            : null,
+      },
+    });
+    const a = entry('transcript-assistant', 'assistant');
+    expect(
+      await run({
+        events: [
+          a,
+          a,
+          entry('transcript-tool', 'tool'),
+          entry('transcript-steer', 'steer'),
+          entry('transcript-answer', 'answer'),
+        ],
+        terminal: { outcome: 'succeeded', result: RESULT },
+      })
+    ).toBe(0);
+    const entries = calls
+      .filter((call) => call.path === '/task/events')
+      .map((call) => JSON.parse(call.body.toString()) as Frame)
+      .filter((frame) => frame.kind === 'transcript');
+    expect(entries).toHaveLength(5); // briefing plus four unique observations
+    expect(entries.map((frame) => frame.payload.role)).toEqual(
+      expect.arrayContaining(['user-briefing', 'assistant', 'tool', 'steer', 'answer'])
+    );
+    expect(entries.filter((frame) => frame.messageId === a.entry.id)).toHaveLength(1);
+    const serialized = JSON.stringify(entries);
+    for (const canary of [...Object.values(TOKENS), 'planted-key', 'planted-token'])
+      expect(serialized).not.toContain(canary);
+    expect(serialized).toContain('[REDACTED]');
+  });
+
   it.each([false, true])(
     'passes the credential-free shim through the production factory; lost report ACK=%s',
     async (lost) => {
@@ -577,13 +624,16 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
           expect(options.question!.isOpen()).toBe(true);
           const frames = calls
             .filter((call) => call.path === '/task/events')
-            .map((call) => JSON.parse(call.body.toString()));
+            .map((call) => JSON.parse(call.body.toString()))
+            .filter((frame) => frame.kind !== 'transcript');
           expect(frames).toHaveLength(lost ? 4 : 2);
           if (lost) {
             expect(frames[0]).toEqual(frames[1]);
             expect(frames[2]).toEqual(frames[3]);
           }
-          const unique = [...progressReports.values()];
+          const unique = [...progressReports.values()].filter(
+            (frame) => frame.kind !== 'transcript'
+          );
           expect(unique).toEqual([
             expect.objectContaining({ kind: 'step', payload: { line: 'Actual private step' } }),
             expect.objectContaining({
@@ -658,7 +708,12 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
           ? ['task_tool_report_unavailable']
           : ['task_tool_question_retained', 'task_tool_report_uncertain']
       );
-      expect(calls.filter((call) => call.path === '/task/events').length).toBe(mode === '409' ? 3 : 4);
+      expect(
+        calls.filter(
+          (call) =>
+            call.path === '/task/events' && JSON.parse(call.body.toString()).kind !== 'transcript'
+        ).length
+      ).toBe(mode === '409' ? 3 : 4);
     }
   );
 
@@ -921,7 +976,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       attemptId: IDS.attemptId,
       direction: 'task_to_core',
       messageId: expect.stringMatching(/^msg_[0-9a-f-]{36}$/),
-      sequence: 4,
+      sequence: 5,
       kind: 'terminal',
       payload: {
         outcome: 'succeeded',
@@ -1051,8 +1106,13 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
           ? { outcome: 'succeeded' }
           : { outcome: 'failed', reasonCode: 'required_tool_failed' }
       );
-      expect(terminal().sequence).toBe(2); // Trace frames never occupy mailbox sequence numbers; wrapping does.
-      expect(calls.filter((call) => call.path === '/task/events' && JSON.parse(call.body.toString()).kind !== 'lifecycle')).toHaveLength(1);
+      expect(terminal().sequence).toBe(3); // Briefing transcript and wrapping occupy sequence numbers; traces do not.
+      expect(
+        calls.filter(
+          (call) =>
+            call.path === '/task/events' && JSON.parse(call.body.toString()).kind === 'terminal'
+        )
+      ).toHaveLength(1);
       expect(objects.size).toBe(1);
       expect(diagnostics).toEqual([]);
     }
@@ -1138,7 +1198,12 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       expect(traceFrames.map((frame) => frame.span.endedAt === null)).toEqual(
         mode === 'timeout' ? [true] : [true, false]
       );
-      expect(calls.filter((call) => call.path === '/task/events' && JSON.parse(call.body.toString()).kind !== 'lifecycle')).toHaveLength(1);
+      expect(
+        calls.filter(
+          (call) =>
+            call.path === '/task/events' && JSON.parse(call.body.toString()).kind === 'terminal'
+        )
+      ).toHaveLength(1);
     }
   );
 
@@ -1438,7 +1503,8 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
         console: [consoleLog.mock.calls, consoleError.mock.calls],
         frames: calls
           .filter((call) => call.path === '/task/events')
-          .map((call) => JSON.parse(call.body.toString())),
+          .map((call) => JSON.parse(call.body.toString()))
+          .filter((frame) => frame.kind !== 'transcript'),
       });
       for (const secret of [...Object.values(TOKENS), BRIEFING, EVENT, RESULT])
         expect(publicOutput).not.toContain(secret);

@@ -4,6 +4,8 @@ import type {
   TaskCommandStatus,
   TaskQuestion,
   TaskCommandDeliveryStatus,
+  TaskTranscriptQuery,
+  TaskTranscriptPage,
 } from './task-channel.js';
 /** Core task authority. Deliberately not exposed through PluginPrimitives. */
 export type TaskState =
@@ -217,6 +219,7 @@ export interface TaskView extends TaskRecord {
 }
 export interface TaskService extends TaskAcceptanceService {
   read(taskId: string): Promise<TaskView | null>;
+  readTranscript(taskId: string, query?: TaskTranscriptQuery): Promise<TaskTranscriptPage | null>;
   readCommand(commandId: string): Promise<TaskCommandStatus | null>;
   steer(taskId: string, commandId: string, text: string): Promise<TaskCommand>;
   answer(taskId: string, commandId: string, questionId: string, text: string): Promise<TaskCommand>;

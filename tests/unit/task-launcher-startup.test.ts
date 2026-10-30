@@ -39,7 +39,11 @@ beforeAll(() => {
     }).outputText;
     writeFileSync(join(graph, 'loader/dist', file.replace(/\.ts$/, '.js')), output);
   }
-  for (const file of ['task-agent-validation.mjs', 'task-harness-registry.json']) {
+  for (const file of [
+    'task-agent-validation.mjs',
+    'task-transcript-bounds.mjs',
+    'task-harness-registry.json',
+  ]) {
     cpSync(`src/ports/${file}`, join(graph, 'src/ports', file));
   }
   const generated = spawnSync(
@@ -73,7 +77,12 @@ function launch(
       writeFileSync(adapter, `import './clock.js';\n${read(adapter)}`);
     }
     if (options.extraRuntimeModule) writeFileSync(join(dist, options.extraRuntimeModule), '');
-    if (options.missing) rmSync(join(dist, options.missing));
+    if (options.missing)
+      rmSync(
+        options.missing.endsWith('.mjs')
+          ? join(directory, 'src/ports', options.missing)
+          : join(dist, options.missing)
+      );
     if (options.throwing) writeFileSync(join(dist, 'task-launcher.js'), options.throwing);
     const terminationLog = join(directory, 'termination-log');
     const preloader = join(directory, 'capture-termination.mjs');
@@ -136,6 +145,7 @@ describe('workbench launcher startup diagnostics and graph check', () => {
     'task-launcher.js',
     'task-launcher-http.js',
     'model-error-excerpt.js',
+    'task-transcript-bounds.mjs',
     ...adapterModules,
   ])('fails the offline check when the image omits %s, reporting only its basename', (missing) => {
     expect(diagnostic(launch({ missing }))).toEqual({

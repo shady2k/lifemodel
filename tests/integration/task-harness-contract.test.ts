@@ -18,6 +18,7 @@ import { taskHarnessRegistry } from '../../loader/src/task-harness-registry.js';
 import { createTaskModelRelay } from '../../loader/src/task-model-relay.js';
 import { createTaskTools } from '../../loader/src/task-tools.js';
 import { taskToolsContract } from '../helpers/task-tools-contract.js';
+import { createSteerTaskTool } from '../../src/layers/cognition/tools/core/steer-task.js';
 import { createTaskCommandIntake } from '../../loader/src/task-command-intake.js';
 
 const exec = promisify(execFile);
@@ -511,9 +512,81 @@ describe('TaskHarness contract: both pinned adapters and scripted harness', () =
         });
         await intake.stop();
         expect(tools.question.isOpen()).toBe(false);
+        expect(events).toContainEqual({
+          type: 'transcript',
+          entry: expect.objectContaining({ role: 'answer', text: expect.stringContaining(STEER) }),
+        });
         expect((await durable.mailbox.readCommand('question-answer'))?.disposition).toBe(
           'accepted'
         );
+      }, 60000);
+
+      it('transcript: real session tool output and inserted steer/answer reach the durable read view', async () => {
+        const durable = await taskToolsContract(certificate, directory);
+        cleanup.push(() => durable.close());
+        const pending = new Set<Promise<unknown>>();
+        let sequence = 0;
+        const task = await harness(kind, 'steer-long', {
+          onEvent(event) {
+            if (event.type !== 'transcript') return;
+            const entry = event.entry;
+            const flight = durable.mailbox.append(
+              {
+                taskId: durable.first.taskId,
+                attemptId: durable.first.attemptId,
+                direction: 'task_to_core',
+                messageId: entry.id,
+                sequence: ++sequence,
+                kind: 'transcript',
+                payload: entry,
+              },
+              durable.first
+            );
+            pending.add(flight);
+            // Test drains and checks every write; no fire-and-forget assertion.
+            void flight.catch(() => undefined);
+          },
+        });
+        const terminal = task.start(briefing);
+        cleanup.push(async () => {
+          await task.abort();
+          await terminal;
+        });
+        await vi.waitFor(() => access(join(work, 'start-0')), { timeout: 20000, interval: 20 });
+        await task.intakeReady;
+        const steered = `${STEER} STEER-READ-VIEW`;
+        const answered = `[question:transcript-question]\n${STEER} ANSWER-READ-VIEW`;
+        expect(await task.steer({ commandId: 'chat-steer', kind: 'steer', text: steered })).toBe(
+          'accepted'
+        );
+        expect(await task.steer({ commandId: 'chat-answer', kind: 'answer', text: answered })).toBe(
+          'accepted'
+        );
+        expect(await terminal).toMatchObject({ outcome: 'succeeded' });
+        await Promise.all([...pending]);
+        const view = await createSteerTaskTool(durable.service).execute({
+          action: 'read',
+          view: 'transcript',
+          taskId: durable.first.taskId,
+          limit: 50,
+        });
+        expect(view).toMatchObject({
+          success: true,
+          transcript: {
+            entries: expect.arrayContaining([
+              expect.objectContaining({
+                role: 'tool',
+                tool: expect.objectContaining({
+                  status: 'completed',
+                  outputTail: expect.stringContaining('done-0'),
+                }),
+              }),
+              expect.objectContaining({ role: 'steer', text: steered }),
+              expect.objectContaining({ role: 'answer', text: answered }),
+              expect.objectContaining({ role: 'assistant', text: RESULT }),
+            ]),
+          },
+        });
       }, 60000);
 
       it('settles a delayed admission ACK after ACP reply dispatch on the real adapter', async () => {
@@ -703,9 +776,15 @@ describe('TaskHarness contract: both pinned adapters and scripted harness', () =
         expect(events.some((event) => event.type === 'step')).toBe(true);
         expect(JSON.stringify(events)).not.toContain(TOKEN);
         expect(JSON.stringify(events)).not.toContain(BRIEFING);
-        expect(JSON.stringify(events.filter((event) => event.type !== 'trace'))).not.toContain(
-          RESULT
-        );
+        expect(events).toContainEqual({
+          type: 'transcript',
+          entry: expect.objectContaining({ role: 'assistant', text: RESULT }),
+        });
+        expect(
+          JSON.stringify(
+            events.filter((event) => event.type !== 'trace' && event.type !== 'transcript')
+          )
+        ).not.toContain(RESULT);
         if (contractFixtures[kind]!.usesModelEndpoint) {
           expect(requests.length).toBeGreaterThan(0);
           expect(
@@ -764,6 +843,26 @@ describe('TaskHarness contract: both pinned adapters and scripted harness', () =
           expect(await task.steer({ ...command, text: 'changed' })).toBe('rejected');
           expect(await terminal).toEqual({ outcome: 'succeeded', result: RESULT });
           expect(prematureInsertion).toBe(false);
+          expect(events).toContainEqual({
+            type: 'transcript',
+            entry: expect.objectContaining({ role: 'steer', text: expect.stringContaining(STEER) }),
+          });
+          const chatTools = events.filter(
+            (event) => event.type === 'transcript' && event.entry.role === 'tool'
+          );
+          expect(chatTools.length).toBeGreaterThanOrEqual(count * 2);
+          for (let i = 0; i < count; i++)
+            expect(chatTools).toContainEqual({
+              type: 'transcript',
+              entry: expect.objectContaining({
+                role: 'tool',
+                tool: expect.objectContaining({
+                  name: expect.any(String),
+                  status: 'completed',
+                  outputTail: expect.stringContaining(`done-${i}`),
+                }),
+              }),
+            });
           for (let i = 0; i < count; i++) await access(join(work, `done-${i}`));
           expect(events.filter((event) => event.type === 'receipt')).toEqual([
             { type: 'receipt', commandId: command.commandId, disposition: 'inserted' },

@@ -4,6 +4,8 @@ import { mkdir, writeFile, opendir, lstat } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { TaskJsonClient, LauncherError, type TaskEndpoint } from './task-launcher-http.js';
 import { runStorageCli, storageNameValid } from './storage-cli.js';
+import { createTaskTranscriptChannel } from './task-transcript-channel.js';
+import { transcriptText } from './task-transcript.js';
 import { createTaskTraceChannel } from './task-trace-channel.js';
 import { createRegisteredHarness } from './task-harness-factory.js';
 import { createTaskCommandIntake } from './task-command-intake.js';
@@ -210,6 +212,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
   let sequence = 0;
   let started = false;
   let trace: ReturnType<typeof createTaskTraceChannel> | undefined;
+  let transcript: ReturnType<typeof createTaskTranscriptChannel> | undefined;
   let traceId: string | undefined;
   let root: Extract<TaskHarnessEvent, { type: 'trace' }>['span'] | undefined;
   let failureSpanId: string | undefined;
@@ -289,6 +292,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
   }
   async function report(): Promise<void> {
     terminalAttempted = true;
+    await transcript?.close();
     if (root)
       trace?.enqueue({
         ...root,
@@ -375,6 +379,19 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       identity: ids,
       traceId,
     });
+    transcript = createTaskTranscriptChannel({
+      endpoint: endpoint(options.env, 'CHANNEL'),
+      env: options.env,
+      identity: ids,
+      nextSequence: () => ++sequence,
+    });
+    transcript.enqueue({
+      id: `brief_${ids.launchId}`,
+      role: 'user-briefing',
+      time: new Date().toISOString(),
+      text: transcriptText(`${outputInstructions(cwd)}\n\n${briefing['briefing']}`),
+      tool: null,
+    });
     root = {
       spanId: ids.launchId,
       parentSpanId: typeof briefing['parentSpanId'] === 'string' ? briefing['parentSpanId'] : null,
@@ -393,6 +410,10 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
     let eventCount = 0;
     let sessionStarted = false;
     const onEvent = async (event: TaskHarnessEvent): Promise<void> => {
+      if (event.type === 'transcript') {
+        transcript?.enqueue(event.entry);
+        return;
+      }
       if (event.type === 'receipt') {
         commands?.receipt(event);
         return;
@@ -599,6 +620,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
     await commands?.stop();
     options.signal?.removeEventListener('abort', onAbort);
     trace?.close();
+    await transcript?.close();
     await tools?.close();
     channel?.close();
     model?.close();

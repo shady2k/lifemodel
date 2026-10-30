@@ -6,7 +6,7 @@ COPY loader/package.json loader/package-lock.json ./
 RUN npm ci --no-audit --no-fund --ignore-scripts --no-update-notifier --loglevel=http
 COPY loader/tsconfig.json ./
 COPY scripts/task-start-manifest.mjs /scripts/
-COPY src/ports/task-agent-validation.* src/ports/task-harness-registry.json /src/ports/
+COPY src/ports/task-agent-validation.* src/ports/task-transcript-bounds.* src/ports/task-harness-registry.json /src/ports/
 COPY loader/src/ ./src/
 RUN npm run build
 
@@ -33,6 +33,7 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
 # Registry-owned architecture pins, extraction and immutable agent configuration.
 COPY src/ports/task-harness-registry.json /opt/lifemodel/src/ports/task-harness-registry.json
 COPY src/ports/task-agent-validation.mjs /opt/lifemodel/src/ports/task-agent-validation.mjs
+COPY src/ports/task-transcript-bounds.mjs /opt/lifemodel/src/ports/task-transcript-bounds.mjs
 COPY scripts/task-agent-provision.mjs scripts/task-agent-paths.mjs /opt/lifemodel/scripts/
 COPY docker/workbench/ /opt/lifemodel/docker/workbench/
 RUN node /opt/lifemodel/scripts/task-agent-provision.mjs > /tmp/install-agents.sh  && sh -ec "$(cat /tmp/install-agents.sh)"  && rm /tmp/install-agents.sh

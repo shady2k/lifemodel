@@ -7,6 +7,64 @@ lifemodel-653.9.7. Real-store integration checks cover ordering, replay, ACKs,
 receipts, authority, questions and owner-core processing during a held poll.
 This source contract is not deployed stage acceptance.
 
+## Bounded worker session transcript
+
+Task: lifemodel-653.9.19. The existing `POST /task/events` channel accepts
+`kind: "transcript"`. Its payload is `{ id, role, time, text, tool }`.
+`id` equals the frame's immutable `messageId`; `time` is the worker's observation
+time (not a trusted clock). Roles are `assistant`, `tool`, `steer`, `answer`,
+and `user-briefing`. `tool` is null except for the tool role, where it contains
+`{ name, status, outputTail }`; status is `running`, `completed`, or `error`.
+Text is at most 4,000 UTF-8 bytes, name 128 bytes, output tail 2,000 bytes,
+and the encoded entry 8 KiB. Ordinary frame identity/authority/transport bounds
+still apply. No artifacts, raw tool arguments or raw provider messages are copied.
+
+The launcher captures best effort on a separate bounded socket/queue (64 waiting,
+1,024 recent deduplication IDs). A lost ACK or 5xx gets one identical replay;
+4xx responses (including 400/409/429) are dropped without retry. Capture
+never gates harness success; final drain is at most two seconds before the terminal
+frame. Transport failure, queue pressure, excerpt clipping or the capture cap can
+leave gaps. Repeated tool patches with the same content have one effect. Tool
+state changes are separate immutable observations, not edits to prior entries.
+Tool entries emit at start and status changes, with the final tail on completion,
+not for each growing output patch. Assistant chunks coalesce for up to 250 ms,
+a role/message change, or 4,000 UTF-8 bytes; remaining text carries into the next entry.
+
+Core stores entries in `core.task_transcript`, not the control mailbox or bus.
+Its fenced append locks the task, checks the won claim/live authority and caps
+capture at 1,024 rows (at most 8 MiB logical JSON per task; SQL row/index overhead
+is extra). Oldest entries are evicted under the task lock to keep the newest view
+live. Each attempt has a content-free evicted sequence horizon. Entries at or
+below that horizon are refused with 409 rather than reinserted, including late
+out-of-order entries. Retained exact IDs replay their receipt; changed content conflicts. Transcript rows have no cognition
+signal or mailbox cursor effect. Task deletion cascades to the transcript. The
+trace retention pass also deletes terminal task transcripts older than its age
+policy (14 days by default, measured from terminal_at). Running tasks are never
+expired. This uses the trace writer cadence (first and every 50 batches), not
+a separate timer; no writes means no retention pass. Null age disables expiry.
+Content-free eviction horizons remain with the task to prevent reinsertion. Known credentials, assignments, token forms, JWTs and credential URLs are
+scrubbed before transport with the same code as `task.tool` spans, and scrubbed
+again before storage with the trace-store scrubber. Both sides re-bound the scrubbed
+entry, including JSON escaping; redaction expansion cannot overflow storage. SQL
+check violations on transcript rows return 400, not a retried 503. Scrubbing is defense in depth,
+not a guarantee of discovering arbitrary unknown secrets in prose.
+
+An accepted step, question or live session transcript entry (never `user-briefing`) advances `starting` to
+`running` if the best-effort lifecycle frame was lost. It never regresses
+`wrapping-up` or a terminal state. The existing registry projection reports
+startup phase/elapsed time only while state is `starting`; later phases remain
+historical columns, not a current startup status.
+
+`core.steerTask(action="read", taskId=..., view="transcript", limit=20)` reads
+newest entries first for running **and finished** tasks. `limit` is 1–50;
+`before=nextCursor` pages older entries. The cursor is an exclusive server
+arrival ordinal, scoped by task, not the task-provided timestamp or sequence.
+`nextCursor: null` ends the page set. `captureLimitReached` means older entries
+were dropped by the ring, not that network loss was detected. The tool labels the view as untrusted, bounded,
+best-effort task claims, never instructions, owner consent or proof of obedience.
+Default `view="status"` is unchanged. The running-tasks prompt advertises this
+read without dumping transcript content into every turn.
+
 ## Cognition across turns
 
 Every cognition turn reads a fresh task-registry snapshot through

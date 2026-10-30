@@ -46,3 +46,5 @@
 !src/ports/task-harness-registry.json
 
 !src/ports/task-agent-validation.*
+
+!src/ports/task-transcript-bounds.*

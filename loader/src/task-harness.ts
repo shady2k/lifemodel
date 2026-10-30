@@ -29,11 +29,24 @@ export function emitTaskTrace(
 
 export type TaskSteerDisposition = 'accepted' | 'rejected' | 'uncertain';
 export interface TaskSteerCommand {
+  kind?: 'steer' | 'answer';
   commandId: string;
   text: string;
 }
 
+export interface TaskTranscriptEntry {
+  id: string;
+  role: 'assistant' | 'tool' | 'steer' | 'answer' | 'user-briefing';
+  time: string;
+  text: string;
+  tool: { name: string; status: 'running' | 'completed' | 'error'; outputTail: string } | null;
+}
+export interface TaskTranscriptMapper {
+  update(value: unknown): void;
+  flush(): void;
+}
 export type TaskHarnessEvent =
+  | { type: 'transcript'; entry: TaskTranscriptEntry }
   | { type: 'step'; text: string }
   | { type: 'tool'; name: string; status: 'running' | 'completed' | 'error' }
   | { type: 'error'; code: string }
@@ -71,12 +84,14 @@ export interface TaskSuccessorControl {
   reopenIntake(): void;
 }
 export type TaskSuccessorUpdate =
+  | { kind: 'inserted'; commandId: string; text: string }
   | { kind: 'reset' }
   | { kind: 'text'; text: string }
   | {
       kind: 'tool';
       id: string;
       status: 'in_progress' | 'completed' | 'failed';
+      name?: string;
       input?: unknown;
       output?: unknown;
     };
@@ -86,8 +101,8 @@ export interface TaskSuccessorEvidence {
   stopReason: 'end_turn';
 }
 export type TaskEndTurnReconciliation =
-  | { state: 'idle' }
-  | { state: 'continue'; commandIds: string[] }
+  | { state: 'idle'; insertedCommandIds?: string[] }
+  | { state: 'continue'; commandIds: string[]; insertedCommandIds?: string[] }
   | {
       state: 'successor';
       wait: (control: TaskSuccessorControl) => Promise<TaskSuccessorEvidence | undefined>;
@@ -178,6 +193,20 @@ export class ScriptedTaskHarness implements TaskHarness {
     if (previous !== undefined)
       return Promise.resolve(previous === command.text ? 'accepted' : 'rejected');
     this.commands.set(command.commandId, command.text);
+    void Promise.resolve()
+      .then(() =>
+        this.options.onEvent?.({
+          type: 'transcript',
+          entry: {
+            id: `inserted_${command.commandId}`,
+            role: command.kind ?? 'steer',
+            time: new Date().toISOString(),
+            text: command.text.slice(0, 1000),
+            tool: null,
+          },
+        })
+      )
+      .catch(() => undefined);
     void Promise.resolve()
       .then(() =>
         this.options.onEvent?.({

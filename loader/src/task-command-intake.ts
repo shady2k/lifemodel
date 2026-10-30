@@ -160,7 +160,11 @@ export function createTaskCommandIntake(options: {
         }
         const c = command(response['command']);
         const text = c.kind === 'answer' ? `[question:${c.questionId ?? ''}]\n${c.text}` : c.text;
-        const disposition = await options.harness.steer({ commandId: c.commandId, text });
+        const disposition = await options.harness.steer({
+          commandId: c.commandId,
+          text,
+          kind: c.kind,
+        });
         if (c.kind === 'answer' && disposition === 'accepted')
           options.onAnswerAdmitted?.(c.questionId ?? '');
         await post('/task/commands/ack', {

@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from 'pg';
+import type { Logger } from '../types/logger.js';
 import type { TraceRecord, TraceWriter } from '../ports/observability.js';
 
 export interface TraceRetentionPolicy {
@@ -21,6 +22,7 @@ export interface PostgresTraceStoreOptions {
   knownSecrets?: readonly string[];
   retention?: TraceRetentionPolicy;
   pruneEveryBatches?: number;
+  logger?: Pick<Logger, 'warn'>;
 }
 
 const REDACTED = '[REDACTED]';
@@ -147,6 +149,7 @@ export class PostgresTraceStore implements TraceWriter {
   private readonly pruneEvery: number;
   private readonly secrets: readonly string[];
   private readonly retention: TraceRetentionPolicy;
+  private readonly logger: Pick<Logger, 'warn'> | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private writing: Promise<void> | undefined;
   private inFlight = 0;
@@ -160,6 +163,7 @@ export class PostgresTraceStore implements TraceWriter {
     private readonly pool: Pool,
     options: PostgresTraceStoreOptions = {}
   ) {
+    this.logger = options.logger;
     this.maxQueue = positive(options.maxQueue, 10000);
     this.batchSize = Math.min(positive(options.batchSize, 128), this.maxQueue);
     this.interval = positive(options.flushIntervalMs, 200);
@@ -358,6 +362,26 @@ export class PostgresTraceStore implements TraceWriter {
       ) records GROUP BY trace_id ORDER BY max(ended_at) ASC NULLS LAST, trace_id`);
     const { maxAgeDays, maxTraces, maxBytes, maxModelCallTraces } = this.retention;
     const cutoff = maxAgeDays == null ? -Infinity : Date.now() - maxAgeDays * 86400000;
+    if (maxAgeDays != null) {
+      // Accepted fence exception: immutable terminal age policy, not outcome authority.
+      // Isolate failure so neither committed batches nor trace pruning are lost.
+      await client.query('SAVEPOINT task_transcript_retention');
+      try {
+        await client.query(
+          `DELETE FROM core.task_transcript WHERE task_id IN (
+            SELECT id FROM core.tasks WHERE state IN ('done','failed','stopped')
+            AND terminal_at < $1::timestamptz)`,
+          [new Date(cutoff).toISOString()]
+        );
+      } catch {
+        await client.query('ROLLBACK TO SAVEPOINT task_transcript_retention');
+        this.logger?.warn(
+          { code: 'task_transcript_retention_failed' },
+          'Task transcript retention failed'
+        );
+      }
+      await client.query('RELEASE SAVEPOINT task_transcript_retention');
+    }
     // A trace of model-call spans only is the core's own chatter (one per
     // model call, and turns are frequent). Task evidence keeps its whole
     // budget: the two classes are counted apart, so a busy chat cannot evict a

@@ -1,3 +1,4 @@
+import { createPostgresTraceStore } from '../../src/storage/postgres-trace-store.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Pool, type PoolClient } from 'pg';
 import { randomUUID } from 'node:crypto';
@@ -238,6 +239,392 @@ describe('durable fenced task mailbox', () => {
       question: { questionId: string; text: string } | null;
     }[];
   }
+
+  const transcriptFrame = (
+    id: string,
+    sequence: number,
+    text = 'worker text'
+  ): TaskChannelFrame => ({
+    ...frame(id, sequence),
+    kind: 'transcript',
+    payload: { id, role: 'assistant', time: '2026-10-30T00:00:00.000Z', text, tool: null },
+  });
+
+  it('review8: cursor is a signed bigint', async () => {
+    await expect(
+      mailbox().readTranscript(identity.taskId, { before: '9223372036854775808' })
+    ).rejects.toMatchObject({ code: 'invalid_input' });
+  });
+
+  it('review8: SQL rejects malformed transcript IDs', async () => {
+    await mailbox().append(transcriptFrame('source', 1), identity);
+    await expect(
+      stores.postgres.query(
+        "INSERT INTO core.task_transcript(task_id,attempt_id,message_id,sequence,payload) SELECT task_id,attempt_id,'invalid id',2,payload FROM core.task_transcript WHERE task_id=$1",
+        [identity.taskId]
+      )
+    ).rejects.toMatchObject({ code: '23514' });
+  });
+
+  it('review8: transcript rows reject mutation and invalid IDs but allow deletion', async () => {
+    const m = mailbox();
+    await m.append(transcriptFrame('immutable-chat', 1), identity);
+    await expect(
+      stores.postgres.query(
+        "UPDATE core.task_transcript SET payload=jsonb_set(payload,'{text}','\"changed\"') WHERE task_id=$1",
+        [identity.taskId]
+      )
+    ).rejects.toMatchObject({ code: '23514' });
+    await expect(
+      stores.postgres.query(
+        "INSERT INTO core.task_transcript(task_id,attempt_id,message_id,sequence,payload) SELECT task_id,attempt_id,'invalid id',2,payload FROM core.task_transcript WHERE task_id=$1",
+        [identity.taskId]
+      )
+    ).rejects.toMatchObject({ code: '23514' });
+    await expect(
+      m.readTranscript(identity.taskId, { before: '9223372036854775808' })
+    ).rejects.toMatchObject({ code: 'invalid_input' });
+    await stores.postgres.query('DELETE FROM core.task_transcript WHERE task_id=$1', [
+      identity.taskId,
+    ]);
+    expect((await m.readTranscript(identity.taskId)).entries).toHaveLength(0);
+  });
+
+  it('round2: a tool output containing NUL is stored without NUL', async () => {
+    const f = {
+      ...transcriptFrame('nul-output', 1, ''),
+      payload: {
+        id: 'nul-output',
+        role: 'tool' as const,
+        time: new Date().toISOString(),
+        text: '',
+        tool: { name: 'shell', status: 'completed' as const, outputTail: 'before\0after' },
+      },
+    } as TaskChannelFrame;
+    await mailbox().append(f, identity);
+    expect((await mailbox().readTranscript(identity.taskId)).entries[0]?.tool?.outputTail).toBe(
+      'beforeafter'
+    );
+  });
+
+  it('review6: transcript append never requests replay resync', async () => {
+    const settled = vi.fn();
+    const m = createPostgresTaskMailbox({
+      pool: stores.postgres,
+      epoch: 1,
+      onAppendSettled: settled,
+    });
+    await m.append(transcriptFrame('quiet-chat', 1), identity);
+    expect(settled).not.toHaveBeenCalled();
+    await m.append(frame('visible-step', 2), identity);
+    expect(settled).toHaveBeenCalledOnce();
+    expect((await m.listUnsignalled()).map((row) => row.frame.kind)).toEqual(['step']);
+  });
+
+  it('review4: expanded redactions fit stored entry bounds', async () => {
+    const m = mailbox();
+    await m.append(transcriptFrame('expanding', 1, 'token=x '.repeat(500)), identity);
+    const page = await m.readTranscript(identity.taskId);
+    expect(Buffer.byteLength(page.entries[0]?.text ?? '')).toBeLessThanOrEqual(4000);
+    expect(page.entries[0]?.text).not.toContain('token=x');
+    expect(page.entries[0]?.text).toContain('[REDACTED]');
+  });
+
+  it('review4: transcript SQL check violations are client errors', async () => {
+    await stores.postgres
+      .query(`CREATE FUNCTION core.review_check() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture' USING ERRCODE='23514', TABLE='task_transcript'; END; $$;
+      CREATE TRIGGER review_check BEFORE INSERT ON core.task_transcript FOR EACH ROW EXECUTE FUNCTION core.review_check()`);
+    try {
+      await expect(
+        mailbox().append(transcriptFrame('check-failure', 1), identity)
+      ).rejects.toMatchObject({ status: 400, code: 'invalid_input' });
+    } finally {
+      await stores.postgres.query(
+        'DROP TRIGGER review_check ON core.task_transcript; DROP FUNCTION core.review_check()'
+      );
+    }
+  });
+
+  it('review3: trace retention removes only old terminal transcripts', async () => {
+    const m = mailbox();
+    await m.append(transcriptFrame('retained-chat', 1), identity);
+    const prune = async (id: string) => {
+      const writer = createPostgresTraceStore({ pool: stores.postgres, pruneEveryBatches: 1 });
+      writer.enqueue({
+        kind: 'event',
+        event: {
+          recordId: id,
+          traceId: id,
+          spanId: 'root',
+          event: 'test',
+          ts: new Date().toISOString(),
+          fields: {},
+        },
+      });
+      await writer.close();
+    };
+    await prune('active-pass');
+    expect((await m.readTranscript(identity.taskId)).entries).toHaveLength(1);
+    const registry = createPostgresTaskRegistry({ pool: stores.postgres, epoch: 1, settings });
+    await finalizeTaskFixture(
+      stores.postgres,
+      registry,
+      { id: identity.taskId, launchId: identity.launchId },
+      { state: 'failed', reasonCode: 'compute_missing', summary: 'fixture' }
+    );
+    await prune('recent-pass');
+    expect((await m.readTranscript(identity.taskId)).entries).toHaveLength(1);
+    // Backdate only the fixture's immutable terminal clock.
+    await stores.postgres.query('ALTER TABLE core.tasks DISABLE TRIGGER USER');
+    try {
+      await stores.postgres.query(
+        "UPDATE core.tasks SET terminal_at=clock_timestamp()-interval '15 days' WHERE id=$1",
+        [identity.taskId]
+      );
+    } finally {
+      await stores.postgres.query('ALTER TABLE core.tasks ENABLE TRIGGER USER');
+    }
+    await prune('old-pass');
+    expect((await m.readTranscript(identity.taskId)).entries).toHaveLength(0);
+  });
+
+  it('transcript: stores scrubbed tool and assistant excerpts, replays once and pages older entries', async () => {
+    const m = mailbox();
+    const token = 'sk-transcriptCanary123456789012345';
+    const first = transcriptFrame(
+      'entry-first',
+      101,
+      `assistant api_key=assistant-canary ${token}`
+    );
+    const tool = {
+      ...transcriptFrame('entry-tool', 102),
+      payload: {
+        id: 'entry-tool',
+        role: 'tool' as const,
+        time: '2026-10-30T00:00:01.000Z',
+        text: '',
+        tool: { name: 'shell', status: 'completed' as const, outputTail: 'tail token=tool-canary' },
+      },
+    } as TaskChannelFrame;
+    const ack = await m.append(first, identity);
+    expect(await m.append(first, identity)).toEqual(ack);
+    await m.append(tool, identity);
+    await m.append(transcriptFrame('entry-last', 103, 'latest work'), identity);
+    expect(await m.readTranscript(identity.taskId, { limit: 2 })).toMatchObject({
+      entries: [
+        { id: 'entry-last', text: 'latest work' },
+        {
+          id: 'entry-tool',
+          tool: { name: 'shell', status: 'completed', outputTail: 'tail token=[REDACTED]' },
+        },
+      ],
+      captureLimitReached: false,
+    });
+    const page = await m.readTranscript(identity.taskId, { limit: 2 });
+    expect(page.nextCursor).not.toBeNull();
+    const older = await m.readTranscript(identity.taskId, { limit: 2, before: page.nextCursor! });
+    expect(older.entries).toHaveLength(1);
+    expect(older.entries[0]?.id).toBe('entry-first');
+    expect(older.nextCursor).toBeNull();
+    const stored = await stores.postgres.query(
+      'SELECT payload FROM core.task_transcript WHERE task_id=$1',
+      [identity.taskId]
+    );
+    expect(stored.rowCount).toBe(3);
+    for (const value of ['assistant-canary', 'tool-canary', token]) {
+      expect(JSON.stringify(stored.rows)).not.toContain(value);
+      expect(JSON.stringify([page, older])).not.toContain(value);
+    }
+    expect((await m.listUnsignalled()).length).toBe(0);
+    await expect(
+      m.append(
+        { ...first, payload: { ...first.payload, text: 'changed' } } as TaskChannelFrame,
+        identity
+      )
+    ).rejects.toMatchObject({ code: 'message_conflict' });
+  });
+
+  it('transcript: enforces UTF-8 entry bounds and the 1024-entry per-task cap with concurrent intake', async () => {
+    const m = mailbox();
+    expect(() =>
+      validateTaskChannelFrame(transcriptFrame('too-large', 1, '🙂'.repeat(1001)))
+    ).toThrow('invalid_frame');
+    expect(() =>
+      validateTaskChannelFrame(transcriptFrame('escaped', 1, '\u0001'.repeat(4000)))
+    ).toThrow('invalid_frame');
+    await stores.postgres.query(
+      `INSERT INTO core.task_transcript(task_id,attempt_id,message_id,sequence,payload)
+      SELECT $1,$2,'seed-'||n,n,jsonb_build_object('id','seed-'||n,'role','assistant','time','2026-10-30T00:00:00.000Z','text','seed','tool',null)
+      FROM generate_series(1,1023) n`,
+      [identity.taskId, identity.attemptId]
+    );
+    const settled = await Promise.allSettled([
+      m.append(transcriptFrame('cap-a', 2000), identity),
+      m.append(transcriptFrame('cap-b', 2001), identity),
+    ]);
+    expect(settled.filter((s) => s.status === 'fulfilled')).toHaveLength(2);
+    expect((await m.readTranscript(identity.taskId)).entries[0]?.id).toMatch(/^cap-/);
+    await m.append(transcriptFrame('latest-after-cap', 2002), identity);
+    expect((await m.readTranscript(identity.taskId)).entries[0]?.id).toBe('latest-after-cap');
+    await expect(m.append(transcriptFrame('seed-1', 1, 'seed'), identity)).rejects.toMatchObject({
+      code: 'transcript_evicted',
+    });
+    const page = await m.readTranscript(identity.taskId, { limit: 50 });
+    expect(page.entries).toHaveLength(50);
+    expect(page.captureLimitReached).toBe(true);
+    expect(
+      (
+        await stores.postgres.query('SELECT count(*) FROM core.task_transcript WHERE task_id=$1', [
+          identity.taskId,
+        ])
+      ).rows[0].count
+    ).toBe('1024');
+    const accepted =
+      settled[0]?.status === 'fulfilled'
+        ? transcriptFrame('cap-a', 2000)
+        : transcriptFrame('cap-b', 2001);
+    await expect(m.append(accepted, identity)).resolves.toBeDefined();
+    for (const query of [{ limit: 0 }, { limit: 51 }, { before: '-1' }, { before: 'x' }])
+      await expect(m.readTranscript(identity.taskId, query)).rejects.toMatchObject({
+        code: 'invalid_input',
+      });
+    const other = await seed('cap-other');
+    await expect(
+      m.append(
+        { ...transcriptFrame('other-entry', 1), taskId: other.taskId, attemptId: other.attemptId },
+        other
+      )
+    ).resolves.toBeDefined();
+  });
+
+  it.each(['user-briefing', 'assistant', 'tool', 'steer', 'answer'] as const)(
+    'review1: transcript role %s only advances a live session',
+    async (role) => {
+      const m = mailbox();
+      await m.readBriefing(identity);
+      const f = {
+        ...transcriptFrame('role-check', 1),
+        payload: {
+          id: 'role-check',
+          role,
+          time: '2026-10-30T00:00:00.000Z',
+          text: role === 'tool' ? '' : 'observed text',
+          tool:
+            role === 'tool' ? { name: 'shell', status: 'running' as const, outputTail: '' } : null,
+        },
+      } as TaskChannelFrame;
+      await m.append(f, identity);
+      expect(await service().read(identity.taskId)).toMatchObject(
+        role === 'user-briefing'
+          ? { state: 'starting', startup: { phase: 'harness-starting' } }
+          : { state: 'running', startup: null }
+      );
+    }
+  );
+
+  it.each(['step', 'question', 'transcript'] as const)(
+    'transcript: lost running lifecycle recovers on %s without regressing wrapping and hides startup',
+    async (kind) => {
+      const m = mailbox();
+      const f =
+        kind === 'step'
+          ? frame()
+          : kind === 'question'
+            ? ({
+                ...frame(),
+                kind,
+                payload: { questionId: 'message-1', text: 'Which?' },
+              } as TaskChannelFrame)
+            : transcriptFrame('entry-start', 1);
+      await m.readBriefing(identity);
+      expect((await service().read(identity.taskId))?.startup?.phase).toBe('harness-starting');
+      await m.append(f, identity);
+      expect(await service().read(identity.taskId)).toMatchObject({
+        state: 'running',
+        startup: null,
+      });
+      await m.append(
+        { ...frame('wrap', 2), kind: 'lifecycle', payload: { phase: 'wrapping-up' } },
+        identity
+      );
+      await m.append(
+        kind === 'question'
+          ? transcriptFrame('late', 3)
+          : ({
+              ...f,
+              messageId: 'late',
+              sequence: 3,
+              ...(kind === 'transcript' ? { payload: { ...f.payload, id: 'late' } } : {}),
+            } as TaskChannelFrame),
+        identity
+      );
+      expect(await service().read(identity.taskId)).toMatchObject({
+        state: 'wrapping-up',
+        startup: null,
+      });
+    }
+  );
+
+  it('transcript: preserves channel message and sequence identity across control and session tables', async () => {
+    const m = mailbox();
+    await m.append(frame('control', 1), identity);
+    await expect(m.append(transcriptFrame('control', 2), identity)).rejects.toMatchObject({
+      code: 'message_conflict',
+    });
+    await expect(m.append(transcriptFrame('chat', 1), identity)).rejects.toMatchObject({
+      code: 'sequence_conflict',
+    });
+    await m.append(transcriptFrame('chat', 2), identity);
+    await expect(m.append(frame('chat', 3), identity)).rejects.toMatchObject({
+      code: 'message_conflict',
+    });
+    await expect(m.append(frame('control-two', 2), identity)).rejects.toMatchObject({
+      code: 'sequence_conflict',
+    });
+  });
+
+  it('transcript: reuses configured trace secrets before storage and keeps them out of the read view', async () => {
+    const key = 'opaque-unlabelled-sensitive-value';
+    const m = createPostgresTaskMailbox({ pool: stores.postgres, epoch: 1, knownSecrets: [key] });
+    await m.append(transcriptFrame('known-secret', 1, `Reading ${key} safely`), identity);
+    const stored = await stores.postgres.query(
+      'SELECT payload FROM core.task_transcript WHERE task_id=$1',
+      [identity.taskId]
+    );
+    expect(JSON.stringify(stored.rows)).not.toContain(key);
+    expect(JSON.stringify(await m.readTranscript(identity.taskId))).not.toContain(key);
+    expect(JSON.stringify(stored.rows)).toContain('[REDACTED]');
+  });
+
+  it('transcript: steerTask read exposes the running and finished chat without writing commands', async () => {
+    const m = mailbox();
+    await m.append(transcriptFrame('running-chat', 1, 'working now'), identity);
+    const tool = createSteerTaskTool(service());
+    expect(
+      await tool.execute(
+        { action: 'read', taskId: identity.taskId, view: 'transcript', limit: 1 },
+        context
+      )
+    ).toMatchObject({
+      success: true,
+      transcript: { entries: [{ text: 'working now' }] },
+    });
+    const registry = createPostgresTaskRegistry({ pool: stores.postgres, epoch: 1, settings });
+    await finalizeTaskFixture(
+      stores.postgres,
+      registry,
+      { id: identity.taskId, launchId: identity.launchId },
+      { state: 'done', reasonCode: 'completed', summary: 'Finished' }
+    );
+    expect((await service().read(identity.taskId))?.state).toBe('done');
+    expect(
+      await tool.execute({ action: 'read', taskId: identity.taskId, view: 'transcript' }, context)
+    ).toMatchObject({
+      success: true,
+      transcript: { entries: [{ text: 'working now' }] },
+    });
+    expect(await m.readCommands(identity.taskId)).toEqual([]);
+  });
 
   it('never regresses startup phase or resets its clock on stale observations', async () => {
     const registry = createPostgresTaskRegistry({ pool: stores.postgres, epoch: 1, settings });
