@@ -46,7 +46,7 @@ export function createTaskChannelReplay(options: {
   async function admit(row: StoredTaskChannelFrame, signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
     const frame = row.frame;
-    if (frame.kind === 'lifecycle' || frame.kind === 'transcript') {
+    if (frame.kind === 'lifecycle') {
       await options.mailbox.markSignalled(frame.taskId, frame.direction, frame.messageId, signal);
       return;
     }

@@ -250,6 +250,20 @@ describe('durable fenced task mailbox', () => {
     payload: { id, role: 'assistant', time: '2026-10-30T00:00:00.000Z', text, tool: null },
   });
 
+  it('review6: transcript append never requests replay resync', async () => {
+    const settled = vi.fn();
+    const m = createPostgresTaskMailbox({
+      pool: stores.postgres,
+      epoch: 1,
+      onAppendSettled: settled,
+    });
+    await m.append(transcriptFrame('quiet-chat', 1), identity);
+    expect(settled).not.toHaveBeenCalled();
+    await m.append(frame('visible-step', 2), identity);
+    expect(settled).toHaveBeenCalledOnce();
+    expect((await m.listUnsignalled()).map((row) => row.frame.kind)).toEqual(['step']);
+  });
+
   it('review4: expanded redactions fit stored entry bounds', async () => {
     const m = mailbox();
     await m.append(transcriptFrame('expanding', 1, 'token=x '.repeat(500)), identity);

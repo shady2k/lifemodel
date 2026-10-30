@@ -880,7 +880,7 @@ export function createPostgresTaskMailbox(deps: {
         },
         parent,
         () => {
-          if (closing.signal.aborted) return;
+          if (closing.signal.aborted || frame.kind === 'transcript') return;
           reconcile.set(frame.taskId, Symbol());
           deps.onAppendSettled?.();
         }
