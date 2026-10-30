@@ -526,64 +526,25 @@ export class KubernetesTaskExecutor implements TaskExecutor {
     // After binding, loss of that exact Pod is failure evidence even if Job
     // status has not caught up. A different Pod must never stand in for it.
     if (!launch.task.podUid && launch.task.state !== 'starting') return observed;
+    if (!launch.task.podUid) {
+      // Startup progress is disposable. API rollout gaps, denial and transport
+      // failures cannot veto validated Job adoption or its access/start fence.
+      try {
+        return { ...observed, startup: await this.startupProjection(launch, observed, signal) };
+      } catch {
+        return {
+          ...observed,
+          startup: {
+            phase: 'waiting-for-scheduling',
+            since: observed.startedAt ?? launch.task.acceptedAt,
+          },
+        };
+      }
+    }
     const pods = await this.ownedPods(
       { ...launch, task: { ...launch.task, jobUid: observed.jobUid } },
       signal
     );
-    if (!launch.task.podUid) {
-      const pod = pods[0];
-      let phase: NonNullable<TaskJobObservation['startup']>['phase'] = 'waiting-for-scheduling';
-      let since = observed.startedAt ?? launch.task.acceptedAt;
-      if (pod) {
-        const status =
-          pod['status'] && typeof pod['status'] === 'object' ? (pod['status'] as JsonObject) : {};
-        const containers = Array.isArray(status['containerStatuses'])
-          ? status['containerStatuses']
-          : [];
-        const running = containers.some((c) => {
-          const state = object(c)['state'];
-          return state && typeof state === 'object' && !!(state as JsonObject)['running'];
-        });
-        if (running) phase = 'container-started';
-        else {
-          // Event reasons are fixed Kubernetes codes. Never project raw messages,
-          // image names, node names, or container values into cognition.
-          const params = new URLSearchParams({
-            fieldSelector: `involvedObject.uid=${String(object(pod['metadata'])['uid'])}`,
-            limit: '100',
-          });
-          const events = await this.send(
-            'GET',
-            `${this.coreCollection}/events?${params}`,
-            undefined,
-            signal
-          );
-          if (events.status !== 200) throw new TaskExecutorError('api_error');
-          const items = object(events.body)['items'];
-          if (!Array.isArray(items)) throw new TaskExecutorError('api_error');
-          const startup = items
-            .map((value) => object(value))
-            .filter(
-              (event) =>
-                object(event['involvedObject'])['uid'] === object(pod['metadata'])['uid'] &&
-                ['Pulling', 'Pulled', 'Started'].includes(event['reason'] as string)
-            );
-          const last = startup
-            .sort((a, b) =>
-              (typeof a['lastTimestamp'] === 'string' ? a['lastTimestamp'] : '').localeCompare(
-                typeof b['lastTimestamp'] === 'string' ? b['lastTimestamp'] : ''
-              )
-            )
-            .at(-1);
-          if (last) {
-            phase = last['reason'] === 'Pulling' ? 'pulling-image' : 'container-started';
-            const time = new Date(String(last['firstTimestamp'] ?? last['lastTimestamp']));
-            if (Number.isFinite(time.getTime())) since = time;
-          }
-        }
-      }
-      return { ...observed, startup: { phase, since } };
-    }
     const bound = pods.find((pod) => object(pod['metadata'])['uid'] === launch.task.podUid);
     if (!bound) return { ...observed, phase: 'failed', failureReason: 'compute_missing' };
     const status = bound['status'];
@@ -595,6 +556,75 @@ export class KubernetesTaskExecutor implements TaskExecutor {
     )
       return { ...observed, phase: 'failed', failureReason: 'pod_failed' };
     return observed;
+  }
+  private async startupProjection(
+    launch: TaskLaunch,
+    observed: TaskJobObservation,
+    signal?: AbortSignal
+  ): Promise<NonNullable<TaskJobObservation['startup']>> {
+    const pods = await this.ownedPods(
+      { ...launch, task: { ...launch.task, jobUid: observed.jobUid } },
+      signal
+    );
+    const pod = pods[0];
+    let phase: NonNullable<TaskJobObservation['startup']>['phase'] = 'waiting-for-scheduling';
+    let since = observed.startedAt ?? launch.task.acceptedAt;
+    if (pod) {
+      const status =
+        pod['status'] && typeof pod['status'] === 'object' ? (pod['status'] as JsonObject) : {};
+      const containers = Array.isArray(status['containerStatuses'])
+        ? status['containerStatuses']
+        : [];
+      const running = containers.some((c) => {
+        const state = object(c)['state'];
+        return state && typeof state === 'object' && !!(state as JsonObject)['running'];
+      });
+      if (running) phase = 'container-started';
+      else {
+        // Event reasons are fixed Kubernetes codes. Never project raw messages,
+        // image names, node names, or container values into cognition.
+        const params = new URLSearchParams({
+          fieldSelector: `involvedObject.uid=${String(object(pod['metadata'])['uid'])}`,
+          limit: '100',
+        });
+        const events = await this.send(
+          'GET',
+          `${this.coreCollection}/events?${params}`,
+          undefined,
+          signal
+        );
+        if (events.status !== 200) throw new TaskExecutorError('api_error');
+        const items = object(events.body)['items'];
+        if (!Array.isArray(items)) throw new TaskExecutorError('api_error');
+        const startup = items
+          .map((value) => object(value))
+          .filter(
+            (event) =>
+              object(event['involvedObject'])['uid'] === object(pod['metadata'])['uid'] &&
+              ['Pulling', 'Pulled', 'Started'].includes(event['reason'] as string)
+          );
+        const last = startup
+          .sort((a, b) =>
+            String(a['eventTime'] ?? a['lastTimestamp'] ?? '').localeCompare(
+              String(b['eventTime'] ?? b['lastTimestamp'] ?? '')
+            )
+          )
+          .at(-1);
+        if (last) {
+          phase =
+            last['reason'] === 'Pulling'
+              ? 'pulling-image'
+              : last['reason'] === 'Pulled'
+                ? 'image-pulled'
+                : 'container-started';
+          const time = new Date(
+            String(last['eventTime'] ?? last['firstTimestamp'] ?? last['lastTimestamp'])
+          );
+          if (Number.isFinite(time.getTime())) since = time;
+        }
+      }
+    }
+    return { phase, since };
   }
   async ensureStarted(launch: TaskLaunch, signal?: AbortSignal): Promise<TaskJobObservation> {
     if (launch.task.tombstonedAt || ['done', 'failed', 'stopped'].includes(launch.task.state))

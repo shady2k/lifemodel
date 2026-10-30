@@ -168,6 +168,66 @@ describe('exact-UID compute and volume cleanup confirmation', () => {
     expect(JSON.stringify(observation)).not.toContain('PRIVATE');
   });
 
+  it.each([
+    ['Pulling', 'pulling-image'],
+    ['Pulled', 'image-pulled'],
+    ['Started', 'container-started'],
+  ])('projects %s as %s using eventTime before the legacy lastTimestamp', async (reason, phase) => {
+    const { api, request, state } = fixture();
+    const starting = { ...launch, task: { ...task, state: 'starting' as const, podUid: null } };
+    state.job = renderTaskJob(starting);
+    Object.assign(state.job.metadata, { uid: 'job-uid', resourceVersion: '1' });
+    state.pods = [pod('Pending')];
+    const original = request.getMockImplementation()!;
+    request.mockImplementation(async (method, path, body) => {
+      if (path.includes('/events?'))
+        return {
+          status: 200,
+          body: {
+            items: [
+              {
+                involvedObject: { uid: 'pod-uid' },
+                reason: 'Pulling',
+                lastTimestamp: '2026-10-30T22:00:01Z',
+              },
+              { involvedObject: { uid: 'pod-uid' }, reason, eventTime: '2026-10-30T22:00:02Z' },
+            ],
+          },
+        };
+      return original(method, path, body);
+    });
+    expect((await api.observe(starting))?.startup).toEqual({
+      phase,
+      since: new Date('2026-10-30T22:00:02Z'),
+    });
+  });
+
+  it('does not hide failed Job evidence when the startup Pod projection fails', async () => {
+    const { api, request, state } = fixture();
+    const starting = {
+      ...launch,
+      task: {
+        ...task,
+        state: 'starting' as const,
+        podUid: null,
+        acceptedAt: new Date('2026-10-30T22:00:00Z'),
+      },
+    };
+    state.job = renderTaskJob(starting);
+    Object.assign(state.job.metadata, { uid: 'job-uid', resourceVersion: '1' });
+    state.job.status = { conditions: [{ type: 'Failed', status: 'True' }] };
+    const original = request.getMockImplementation()!;
+    request.mockImplementation(async (method, path, body) => {
+      if (path.includes('/pods?')) return { status: 500, body: {} };
+      return original(method, path, body);
+    });
+    expect(await api.ensureStarted(starting)).toMatchObject({
+      phase: 'failed',
+      jobUid: 'job-uid',
+      startup: { phase: 'waiting-for-scheduling', since: starting.task.acceptedAt },
+    });
+  });
+
   it.each(['Pending', 'Running', 'Unknown', undefined])(
     'Job 404 does not confirm an owned %s Pod has terminated',
     async (phase) => {
