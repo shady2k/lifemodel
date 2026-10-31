@@ -225,6 +225,17 @@ transitively pins the workbench; there is no separate signing key in a task.
 The admission policy accepts that repository only by SHA-256 digest. It does
 not duplicate a release-specific digest, avoiding two pin authorities.
 
+## Delivered output names
+
+The launcher saves its semantic report as the reserved `task-report.txt`.
+Work outputs may use `result.txt`, but never the reserved report name.
+`core.startTask` refuses that name in `expectedOutputs` with
+`reserved_output_name`, without consuming the accepted-start slot. The launcher
+refuses reserved work-output names, including explicit CLI uploads, and duplicate
+owner-facing names before success. File reads therefore resolve each delivered
+name to one object. Report text remains an unverified claim, not proof of the
+work file's contents. See [verified work](verified-work.md).
+
 ## Build, verify and update
 
 From a clean checkout, no prepared seed context is needed:

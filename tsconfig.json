@@ -34,7 +34,11 @@
     "forceConsistentCasingInFileNames": true
   },
   // Wildcard discovery prefers a sibling .d.mts; name the runtime source explicitly.
-  "files": ["src/ports/task-agent-validation.mjs", "src/ports/task-transcript-bounds.mjs"],
+  "files": [
+    "src/ports/task-agent-validation.mjs",
+    "src/ports/task-transcript-bounds.mjs",
+    "src/ports/task-output-names.mjs"
+  ],
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
 }

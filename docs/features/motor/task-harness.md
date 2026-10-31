@@ -474,12 +474,15 @@ result and artifact objects only for a sealed `done` outcome, never for
 failed/stopped work.
 
 Every saved object has its plain leaf name as display metadata: `fib.txt` or
-`result.txt`, never the private `launcher_<uuid>/` work path.
-Display names are not unique catalog slots. Immutable object IDs distinguish
-objects, including an agent output also called `result.txt`. Upload IDs are
-`upload_` plus the SHA-256 of the JSON array `[launchId, role, fileName]`.
-This separates the launcher result role from artifacts without changing visible
-names. Up to three attempts reuse that upload ID and mark after a missing storage
+`task-report.txt`, never the private `launcher_<uuid>/` work path.
+`task-report.txt` is reserved for the launcher's semantic report. A work output
+with that name is refused (`output_name_reserved`), including explicit CLI
+uploads. A work file named `result.txt` is valid and distinct from the report.
+Display names are not unique catalog slots, but the launcher refuses duplicate
+owner-facing names (`output_name_ambiguous`) across listing pages before a
+successful terminal report. Every delivered name therefore resolves to one object.
+Upload IDs are `upload_` plus the SHA-256 of the JSON array
+`[launchId, role, fileName]`. This separates upload identities across roles. Up to three attempts reuse that upload ID and mark after a missing storage
 ACK; the module replays its original receipt and the mark is idempotent. Changed
 bytes under that ID conflict rather than creating a second object.
 
@@ -492,7 +495,7 @@ Result text is written, uploaded and marked before collection; a later collectio
 failure retains its already-durable result ID and bytes in the failed
 report, not owner attachments. A storage failure can leave already marked
 partial objects, but never produces a successful report or partial owner reply.
-An empty `result.txt` therefore reflects an empty harness result, not collection
+An empty `task-report.txt` therefore reflects an empty harness result, not collection
 truncating the file. The ACP adapter deliberately returns empty result text for
 failed/aborted turns, including required-tool failure or missing final text;
 earlier prose alone is not an accepted final answer. A storage failure can mask

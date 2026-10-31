@@ -39,6 +39,37 @@ function fixture(bytes: Buffer = Buffer.from('actual delivered content'), size =
 }
 
 describe('bounded delivered file read through the task service and steer tool', () => {
+  it('reads result.txt as the work output and task-report.txt as the separate report', async () => {
+    for (const name of ['result.txt', 'task-report.txt']) {
+      const f = fixture();
+      const work = { ...f.object, name: 'result.txt' };
+      const report = {
+        ...f.object,
+        id: '11111111-1111-4111-8111-111111111111',
+        name: 'task-report.txt',
+        mark: 'result',
+      };
+      const task = {
+        ...f.task,
+        expectedOutputs: ['result.txt'],
+        sealReceipt: {
+          ...f.task.sealReceipt!,
+          manifest: { ...f.task.sealReceipt!.manifest, objects: [work, report] },
+        },
+      };
+      expect(await readDeliveredTaskFile(task, name, f.reader)).toMatchObject({
+        name,
+        text: 'actual delivered content',
+      });
+      expect(f.reader.openTaskArtifact).toHaveBeenCalledWith(
+        name === 'result.txt' ? work.id : report.id,
+        'bytes=0-23',
+        expect.any(AbortSignal),
+        'sealed-space'
+      );
+    }
+  });
+
   it('resolves an exact sealed name, then reads with the existing marked-artifact identity', async () => {
     const f = fixture();
     expect(await f.service.readFile('task-1', 'output.txt')).toEqual({

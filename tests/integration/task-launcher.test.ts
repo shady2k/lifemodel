@@ -749,7 +749,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     expect(await run({ terminal: { outcome: 'succeeded', result: RESULT } })).toBe(0);
     expect(harnessStarts).toEqual([
       {
-        text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\nFiles elsewhere are not retained. Failed-task outputs are retained as partial objects, not delivered as successful work.\nUse the task MCP step tool for short progress reports and question to ask the coordinating agent.\nQuestion returns after storage, not an answer. Wait for the correlated answer via steering.\n\n${BRIEFING}`,
+        text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\ntask-report.txt is reserved for my semantic report; do not use it as a work output name.\nFiles elsewhere are not retained. Failed-task outputs are retained as partial objects, not delivered as successful work.\nUse the task MCP step tool for short progress reports and question to ask the coordinating agent.\nQuestion returns after storage, not an answer. Wait for the correlated answer via steering.\n\n${BRIEFING}`,
         model: 'lifemodel/task',
         softDueAt: expect.any(String),
       },
@@ -957,7 +957,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     expect(harnessCreations).toBe(1);
     expect(harnessStarts).toEqual([
       {
-        text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\nFiles elsewhere are not retained. Failed-task outputs are retained as partial objects, not delivered as successful work.\nUse the task MCP step tool for short progress reports and question to ask the coordinating agent.\nQuestion returns after storage, not an answer. Wait for the correlated answer via steering.\n\n${BRIEFING}`,
+        text: `Files for the owner go in ${join(directory, 'outputs')}/, flat, with their final file names.\nOnly regular files are allowed; no subfolders or symlinks. Maximum: 64 files.\ntask-report.txt is reserved for my semantic report; do not use it as a work output name.\nFiles elsewhere are not retained. Failed-task outputs are retained as partial objects, not delivered as successful work.\nUse the task MCP step tool for short progress reports and question to ask the coordinating agent.\nQuestion returns after storage, not an answer. Wait for the correlated answer via steering.\n\n${BRIEFING}`,
         model: 'lifemodel/task',
         softDueAt: expect.any(String),
       },
@@ -1248,7 +1248,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     const markingResult = deferred();
     const commitMark = deferred();
     beforeMark = async (object) => {
-      if (object.name === 'result.txt') {
+      if (object.name === 'task-report.txt') {
         markingResult.resolve();
         await commitMark.promise;
       }
@@ -1350,6 +1350,53 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     }
   );
 
+  it('keeps a work output result.txt separate from its reserved task-report.txt report', async () => {
+    beforeHarness = () => writeFile(join(directory, 'outputs', 'result.txt'), '2 3 5');
+    expect(await run()).toBe(0);
+    expect(
+      [...objects.values()].map((object) => [object.name, object.mark, object.bytes.toString()])
+    ).toEqual([
+      ['task-report.txt', 'result', 'Task completed.'],
+      ['result.txt', 'artifact', '2 3 5'],
+    ]);
+    expect(new Set([...objects.values()].map((object) => object.name)).size).toBe(objects.size);
+  });
+
+  it('refuses a work output with the reserved report name', async () => {
+    beforeHarness = () =>
+      writeFile(join(directory, 'outputs', 'task-report.txt'), 'not the report');
+    expect(await run()).toBe(1);
+    expect(terminal().payload).toMatchObject({
+      outcome: 'failed',
+      reasonCode: 'output_name_reserved',
+    });
+    expect([...objects.values()].map((object) => object.name)).toEqual(['task-report.txt']);
+  });
+
+  it.each(['artifact', 'result'] as const)(
+    'refuses an explicit %s upload with the reserved name',
+    async (mark) => {
+      artifactPages = [[{ ...artifact('explicit', mark), name: 'task-report.txt' }]];
+      expect(await run()).toBe(1);
+      expect(terminal().payload).toMatchObject({
+        outcome: 'failed',
+        reasonCode: 'output_name_reserved',
+      });
+    }
+  );
+
+  it('refuses ambiguous explicit owner-facing names across listing pages', async () => {
+    artifactPages = [
+      [{ ...artifact('first'), name: 'same.txt' }],
+      [{ ...artifact('second'), name: 'same.txt' }],
+    ];
+    expect(await run()).toBe(1);
+    expect(terminal().payload).toMatchObject({
+      outcome: 'failed',
+      reasonCode: 'output_name_ambiguous',
+    });
+  });
+
   it('retains primes-like outputs as partial objects after a late provider failure', async () => {
     beforeHarness = async () => {
       await writeFile(join(directory, 'outputs', 'primes.py'), 'print(2, 3, 5)');
@@ -1366,7 +1413,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
     expect(
       [...objects.values()].map((object) => [object.name, object.mark, object.bytes.toString()])
     ).toEqual([
-      ['result.txt', 'result', ''],
+      ['task-report.txt', 'result', ''],
       ['primes.py', 'artifact', 'print(2, 3, 5)'],
       ['primes.txt', 'artifact', '2 3 5'],
     ]);
@@ -1513,7 +1560,7 @@ describe('task launcher with scripted harness and real HTTPS services', () => {
       const privateDirectory = (await readdir(directory)).find((name) =>
         name.startsWith('launcher_')
       )!;
-      expect(await readdir(join(directory, privateDirectory))).toEqual(['result.txt']);
+      expect(await readdir(join(directory, privateDirectory))).toEqual(['task-report.txt']);
       expect(calls.some((call) => call.path.includes('log.jsonl'))).toBe(false);
     } finally {
       consoleLog.mockRestore();

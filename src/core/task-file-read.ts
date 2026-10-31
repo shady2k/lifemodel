@@ -2,6 +2,7 @@ import type { TaskArtifactReader } from '../ports/task-artifact-download.js';
 import { ARTIFACT_ID } from '../ports/task-artifact-download.js';
 import type { TaskFileView, TaskRecord } from '../ports/tasks.js';
 import { isTaskOutputName } from '../ports/tasks.js';
+import { TASK_REPORT_NAME } from '../ports/task-output-names.mjs';
 
 export const TASK_FILE_HEAD_BYTES = 8192;
 
@@ -20,7 +21,8 @@ export async function readDeliveredTaskFile(
   name: string,
   reader: TaskArtifactReader | undefined
 ): Promise<TaskFileView> {
-  if (!isTaskOutputName(name)) throw new TaskFileReadError('invalid_file_name');
+  if (name !== TASK_REPORT_NAME && !isTaskOutputName(name))
+    throw new TaskFileReadError('invalid_file_name');
   if (!['done', 'failed', 'stopped'].includes(task.state) || task.sealReceipt?.state !== 'sealed')
     throw new TaskFileReadError('file_not_delivered');
   const matches = task.sealReceipt.manifest.objects.filter(
