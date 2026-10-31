@@ -11,6 +11,8 @@ import {
 import { createTestStores, type TestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
 
+import { postgresKnownSecrets } from '../../src/storage/postgres-known-secrets.js';
+
 import { credentialNameCases } from '../helpers/trace-credential-names.js';
 
 const startedAt = '2026-01-01T00:00:00.000Z';
@@ -474,9 +476,16 @@ describe('Postgres trace persistence and whole-trace retention', () => {
   });
 
   it('scrubs known and shaped credentials before they reach database rows', async () => {
-    const canary = 'private-canary-token-abcdef';
-    const store = writer(noRetention, { knownSecrets: [canary] });
-    store.enqueue(span('trace', 'root', { nested: { output: `${canary} Bearer canary-bearer` } }));
+    const canary = 'private-canary%2Fsegment%3Aabcdef';
+    const decoded = decodeURIComponent(canary);
+    const store = writer(noRetention, {
+      knownSecrets: postgresKnownSecrets(`postgres://core:${canary}@database.invalid/core`),
+    });
+    store.enqueue(
+      span('trace', 'root', {
+        nested: { output: `${canary} ${decoded} Bearer canary-bearer` },
+      })
+    );
     store.enqueue({
       kind: 'event',
       event: {
@@ -496,8 +505,9 @@ describe('Postgres trace persistence and whole-trace retention', () => {
         )
       ).rows
     );
+    expect.soft(persisted.includes(decoded), 'persisted decoded credential leaked').toBe(false);
     for (const value of [canary, 'canary-bearer', 'sk-abcdefghijklmnopqrstuvwxyz'])
-      expect(persisted).not.toContain(value);
+      expect.soft(persisted.includes(value), 'persisted credential leaked').toBe(false);
     expect(persisted).toContain('[REDACTED]');
   });
 
