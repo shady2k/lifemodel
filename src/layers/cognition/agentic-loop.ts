@@ -67,7 +67,12 @@ import { validateToolCallPairs } from './messages/tool-call-validators.js';
 import { buildSystemPrompt } from './prompts/system-prompt.js';
 import { buildTriggerPrompt } from './prompts/trigger-prompt.js';
 import { getTraceContext } from '../../core/trace-context.js';
-import { taskOutcomeFallback, validateTaskOutcome } from '../../ports/task-outcome.js';
+import {
+  taskOutcomeFallback,
+  taskOutcomeLanguage,
+  taskOutcomeRedoFallback,
+  validateTaskOutcome,
+} from '../../ports/task-outcome.js';
 import { UncertainMutationError } from './tools/mutation-error.js';
 import { createToolResult } from './tools/types.js';
 
@@ -253,19 +258,19 @@ export class AgenticLoop {
             (result.data as { success?: boolean } | undefined)?.success === true
         )
     );
-    const delivered = event.objects
-      .filter((object) => object.mark === 'result' || object.mark === 'artifact')
-      .map((object) => `${JSON.stringify(object.name)} (${String(object.size)} bytes)`);
+    const latestOwnerMessage =
+      context.conversationHistory?.findLast((message) => message.role === 'user')?.content ?? '';
+    const language = taskOutcomeLanguage(context.preferredLanguage, latestOwnerMessage);
     state.disposition = 'answer';
     return buildFinalResultFromNaturalCompletion(
-      state.taskRedoRecoveryUncertain
-        ? 'If I started a corrected attempt, I will report on it; I could not confirm its state, so I cannot confirm the result yet.' +
-            (delivered.length
-              ? `\nDelivered files (contents unverified): ${delivered.join('; ')}.`
-              : '')
-        : acceptedRedo
-          ? 'I could not verify the requested result. I have started one corrected attempt and will check it before confirming the result.'
-          : taskOutcomeFallback(event, commandTexts),
+      state.taskRedoRecoveryUncertain || acceptedRedo
+        ? taskOutcomeRedoFallback(
+            event,
+            state.taskRedoRecoveryUncertain === true,
+            language,
+            context.agentIdentity?.gender
+          )
+        : taskOutcomeFallback(event, commandTexts, language, context.agentIdentity?.gender),
       state,
       context,
       this.logger
@@ -332,9 +337,13 @@ export class AgenticLoop {
     const report = context.triggerSignal.data;
     if (report?.kind !== 'task_report' || !report.question)
       throw new Error('Task question fallback requires a normalized question');
+    const latestOwnerMessage =
+      context.conversationHistory?.findLast((message) => message.role === 'user')?.content ?? '';
+    const language = taskOutcomeLanguage(context.preferredLanguage, latestOwnerMessage);
+    const reference = `(${report.taskId}; ${report.question.questionId})`;
     state.disposition = 'answer';
     return buildFinalResultFromNaturalCompletion(
-      `Task ${report.taskId} asks (question ${report.question.questionId}):\n${report.question.text}`,
+      `${language === 'ru' ? 'Мне нужно уточнение' : 'I need clarification'} ${reference}:\n${report.question.text}`,
       state,
       context,
       this.logger

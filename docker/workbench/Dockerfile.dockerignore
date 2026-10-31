@@ -31,3 +31,5 @@
 !scripts/task-agent-paths.mjs
 
 !src/ports/task-transcript-bounds.*
+
+!src/ports/task-output-names.*

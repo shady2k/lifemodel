@@ -175,7 +175,7 @@ describe('task question owner delivery', () => {
         );
         expect(texts).toEqual([
           relay,
-          `Task ${question.taskId} asks (question ${question.questionId}):\n${question.text}`,
+          `I need clarification (${question.taskId}; ${question.questionId}):\n${question.text}`,
         ]);
       }
       expect(rows).toHaveLength(

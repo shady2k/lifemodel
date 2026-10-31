@@ -163,6 +163,9 @@ export interface LoopContext {
   /** User model beliefs */
   userModel: Record<string, unknown>;
 
+  /** Explicit owner preference, before latest-message script detection. */
+  preferredLanguage?: string | null | undefined;
+
   /** Tick ID for batch grouping (NOT causal - use triggerSignal.id for that) */
   tickId: string;
 

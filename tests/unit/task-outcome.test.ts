@@ -3,6 +3,8 @@ import { validateTaskChannelFrame } from '../../src/ports/task-channel.js';
 import {
   taskOutcomeAttachments,
   taskOutcomeFallback,
+  taskOutcomeLanguage,
+  taskOutcomeRedoFallback,
   validateTaskOutcome,
 } from '../../src/ports/task-outcome.js';
 
@@ -96,6 +98,7 @@ describe('verified work outcome metadata', () => {
 
   it.each([
     { expectedOutputs: ['../outside.txt'] },
+    { expectedOutputs: ['task-report.txt'] },
     { expectedOutputs: Array.from({ length: 17 }, (_, i) => `file${String(i)}.txt`) },
     { expectedOutputs: ['duplicate.txt', 'duplicate.txt'] },
     { missingExpectedOutputs: ['bad/name'] },
@@ -163,4 +166,211 @@ describe('task outcome attachments', () => {
   it.each(['failed', 'stopped'])('does not attach retained outputs for %s', (state) => {
     expect(taskOutcomeAttachments(validateTaskOutcome({ ...event, state }))).toEqual([]);
   });
+});
+
+describe('owner language for deterministic outcome and redo replies', () => {
+  const event = validateTaskOutcome({
+    taskId: 'task-language',
+    outcomeKey: 'outcome_language',
+    state: 'failed',
+    reasonCode: 'expected_outputs_missing',
+    summary: 'UNTRUSTED-CLAIM',
+    missingExpectedOutputs: ['result.txt'],
+    expectedOutputs: ['result.txt'],
+    objects: [
+      { id: 'report', name: 'task-report.txt', size: 42, sha256: 'a'.repeat(64), mark: 'result' },
+      { id: 'work', name: 'result.txt', size: 128, sha256: 'b'.repeat(64), mark: 'artifact' },
+      { id: 'log', name: 'private.log', size: 99, sha256: 'c'.repeat(64), mark: 'log' },
+    ],
+    commands: [
+      { commandId: 'private-1', kind: 'steer', delivery: 'not_delivered' },
+      { commandId: 'private-2', kind: 'steer', delivery: 'not_delivered' },
+      { commandId: 'private-3', kind: 'steer', delivery: 'uncertain' },
+    ],
+  });
+  it.each([
+    ['ru', 'Please check.', 'ru'],
+    ['ru-RU', '', 'ru'],
+    ['Russian', '', 'ru'],
+    ['en', 'Проверь файл.', 'en'],
+    ['en-GB', '', 'en'],
+    [null, 'Проверь файл.', 'ru'],
+    ['unknown', 'Проверь файл.', 'ru'],
+    ['unknown', 'Please check.', 'en'],
+    [null, '', 'en'],
+    ['fr', '', 'en'],
+  ] as const)('selects %s with owner text %j as %s', (preference, text, expected) => {
+    expect(taskOutcomeLanguage(preference, text)).toBe(expected);
+  });
+
+  it.each(['ru', 'en'] as const)(
+    'keeps observed facts and quoted changes identical in %s',
+    (language) => {
+      const reply = taskOutcomeFallback(
+        event,
+        new Map([
+          ['private-1', 'Use range 1–700.'],
+          ['private-2', 'Сохрани result.txt.'],
+        ]),
+        language,
+        'female'
+      );
+      expect(reply).toContain('["result.txt"]');
+      expect(reply).toContain('2');
+      expect(reply).toContain('1');
+      expect(reply).toContain('"Use range 1–700."');
+      expect(reply).toContain('"Сохрани result.txt."');
+      expect(reply).toContain(language === 'ru' ? 'не были применены' : 'were not applied');
+      expect(reply).toContain(
+        language === 'ru' ? 'могли не быть применены' : 'may not have been applied'
+      );
+      expect(reply).toContain(
+        language === 'ru' ? 'Я не получила ожидаемые файлы' : 'I did not receive the expected files'
+      );
+      expect(reply).toContain(
+        language === 'ru' ? 'Как мне продолжить?' : 'How would you like me to proceed?'
+      );
+      expect(reply).not.toMatch(/private-|UNTRUSTED-CLAIM|задач|остановилась|исполнитель/);
+
+      const uncertain = taskOutcomeRedoFallback(event, true, language, 'female');
+      expect(uncertain).toContain(
+        language === 'ru'
+          ? 'Если я начала исправленную попытку'
+          : 'If I started a corrected attempt'
+      );
+      expect(uncertain).toContain(
+        language === 'ru' ? 'не смогла подтвердить её состояние' : 'could not confirm its state'
+      );
+      expect(uncertain).toContain('"task-report.txt" (42');
+      expect(uncertain).toContain('"result.txt" (128');
+      expect(uncertain).not.toContain('private.log');
+      const accepted = taskOutcomeRedoFallback(event, false, language, 'female');
+      expect(accepted).toContain(
+        language === 'ru'
+          ? 'Я начала одну исправленную попытку и проверю её'
+          : 'I have started one corrected attempt and will check it'
+      );
+      expect(accepted).not.toMatch(/задач|остановилась|исполнитель/);
+    }
+  );
+
+  it.each([
+    'completed',
+    'timeout',
+    'stopped',
+    'aborted',
+    'compute_missing',
+    'job_failed',
+    'semantic_report_missing',
+    'missing_result',
+    'expected_outputs_missing',
+    'checksum_mismatch',
+    'executor_failed',
+    'launch_failed',
+    'unknown',
+    'constructor',
+  ])('has a first-person Russian fallback for %s', (reasonCode) => {
+    const reply = taskOutcomeFallback({ ...event, reasonCode, commands: [] }, new Map(), 'ru');
+    expect(reply).toMatch(/^Я /);
+    expect(reply).toContain('Как мне продолжить?');
+    expect(reply).not.toMatch(/I could|I did|задач|остановилась|исполнитель/);
+  });
+});
+
+describe('identity and output-name failure replies', () => {
+  const event = validateTaskOutcome({
+    taskId: 'task-identity',
+    outcomeKey: 'outcome_identity',
+    state: 'failed',
+    reasonCode: 'completed',
+    summary: 'UNTRUSTED-NAME invented.txt',
+    objects: [],
+    commands: [{ commandId: 'pending', kind: 'steer', delivery: 'uncertain' }],
+  });
+  it.each([
+    ['female', 'Я получила файлы', 'не смогла', 'не подтвердила', 'Я начала', 'Если я начала'],
+    ['male', 'Я получил файлы', 'не смог', 'не подтвердил', 'Я начал', 'Если я начал'],
+    [
+      'neutral',
+      'Я располагаю файлами',
+      'не могу',
+      'не могу подтвердить',
+      'Я выполняю',
+      'Если исправленная попытка уже начата',
+    ],
+  ] as const)(
+    'uses %s self-reference in ordinary and both redo replies',
+    (gender, received, unable, pending, started, conditional) => {
+      const reply = taskOutcomeFallback(event, new Map(), 'ru', gender);
+      expect(reply).toContain(received);
+      expect(reply).toContain(unable);
+      expect(reply).toContain(pending);
+      expect(taskOutcomeRedoFallback(event, false, 'ru', gender)).toContain(started);
+      expect(taskOutcomeRedoFallback(event, true, 'ru', gender)).toContain(conditional);
+      for (const reasonCode of [
+        'completed',
+        'stopped',
+        'aborted',
+        'compute_missing',
+        'job_failed',
+        'semantic_report_missing',
+        'missing_result',
+        'expected_outputs_missing',
+        'checksum_mismatch',
+        'executor_failed',
+        'launch_failed',
+        'unknown',
+      ]) {
+        const text = taskOutcomeFallback({ ...event, reasonCode }, new Map(), 'ru', gender);
+        if (gender === 'neutral')
+          expect(text).not.toMatch(/получил|смог|начала|прекратил|столкнул|подтвердил/);
+        if (gender === 'male')
+          expect(text).not.toMatch(/получила|смогла|начала|прекратила|столкнулась|подтвердила/);
+      }
+      expect(taskOutcomeFallback(event, new Map(), 'en', gender)).toContain('I received');
+    }
+  );
+  it.each(['ru', 'en'] as const)(
+    'explains reserved and ambiguous names in %s using metadata only',
+    (language) => {
+      const reserved = taskOutcomeFallback(
+        { ...event, reasonCode: 'output_name_reserved' },
+        new Map(),
+        language
+      );
+      expect(reserved).toContain('"task-report.txt"');
+      expect(reserved).toContain(language === 'ru' ? 'зарезервировано' : 'reserved');
+      const object = {
+        id: 'a',
+        name: 'same.txt',
+        size: 1,
+        sha256: 'a'.repeat(64),
+        mark: 'artifact' as const,
+      };
+      const ambiguous = taskOutcomeFallback(
+        {
+          ...event,
+          reasonCode: 'output_name_ambiguous',
+          objects: [object, { ...object, id: 'b' }],
+        },
+        new Map(),
+        language
+      );
+      expect(ambiguous).toContain('["same.txt"]');
+      expect(ambiguous).toContain(
+        language === 'ru' ? 'несколько файлов имеют одно имя' : 'multiple files have the same name'
+      );
+      const unnamed = taskOutcomeFallback(
+        { ...event, reasonCode: 'output_name_ambiguous' },
+        new Map(),
+        language
+      );
+      expect(unnamed).toContain(
+        language === 'ru' ? 'несколько файлов имеют одно имя' : 'multiple files have the same name'
+      );
+      expect(unnamed).not.toContain('same.txt');
+      for (const text of [reserved, ambiguous, unnamed])
+        expect(text).not.toMatch(/UNTRUSTED|invented.txt/);
+    }
+  );
 });

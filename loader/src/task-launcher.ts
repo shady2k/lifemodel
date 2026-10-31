@@ -1,4 +1,5 @@
 /** One process, one start transition, one immutable semantic terminal frame. */
+import { TASK_REPORT_NAME } from '../../src/ports/task-output-names.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, writeFile, opendir, lstat } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
@@ -91,8 +92,8 @@ async function save(
   cwd: string,
   launchId: string
 ): Promise<string> {
-  // Names are display metadata, not unique slots. Separate role/launch upload
-  // identities keep even an output named result.txt distinct from our result.
+  // Role/launch upload identities make retries idempotent. Reserved report
+  // and unique owner-facing names are enforced before a successful terminal.
   const uploadId = `upload_${createHash('sha256')
     .update(JSON.stringify([launchId, role, basename(name)]))
     .digest('hex')}`;
@@ -149,9 +150,11 @@ async function collectOutputs(
         ? 'output_subdirectory'
         : !entry.isFile()
           ? 'output_not_regular'
-          : !storageNameValid(entry.name)
-            ? 'output_name_invalid'
-            : undefined;
+          : entry.name === TASK_REPORT_NAME
+            ? 'output_name_reserved'
+            : !storageNameValid(entry.name)
+              ? 'output_name_invalid'
+              : undefined;
     if (code) {
       if (!warning) throw new LauncherError(code);
       warning(code);
@@ -172,12 +175,21 @@ async function collectOutputs(
 function outputInstructions(cwd: string): string {
   return `Files for the owner go in ${join(cwd, 'outputs')}/, flat, with their final file names.
 Only regular files are allowed; no subfolders or symlinks. Maximum: 64 files.
+I collect outputs/ automatically. Do not also upload these files with the storage CLI: duplicate owner-facing names fail the run (output_name_ambiguous).
+${TASK_REPORT_NAME} is reserved for my semantic report; do not use it as a work output name.
 Files elsewhere are not retained. Failed-task outputs are retained as partial objects, not delivered as successful work.
 Use the task MCP step tool for short progress reports and question to ask the coordinating agent.
 Question returns after storage, not an answer. Wait for the correlated answer via steering.`;
 }
-async function artifacts(env: NodeJS.ProcessEnv, cwd: string): Promise<string[]> {
+async function artifacts(
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  reportId: string | null,
+  warning?: (code: string) => void
+): Promise<string[]> {
   const ids: string[] = [];
+  const names = new Map<string, string[]>();
+  const ambiguous = new Set<string>();
   let cursor: string | undefined;
   for (let pages = 0; pages < 100; pages++) {
     const page = await storage(
@@ -186,6 +198,22 @@ async function artifacts(env: NodeJS.ProcessEnv, cwd: string): Promise<string[]>
       cwd
     );
     for (const item of page['objects'] as Record<string, unknown>[]) {
+      if (item['mark'] === 'artifact' || item['mark'] === 'result') {
+        const name = item['name'];
+        const code =
+          name === TASK_REPORT_NAME && item['id'] !== reportId
+            ? 'output_name_reserved'
+            : typeof name !== 'string' || names.has(name)
+              ? 'output_name_ambiguous'
+              : undefined;
+        if (code) {
+          if (!warning) throw new LauncherError(code);
+          warning(code);
+          if (typeof name === 'string') ambiguous.add(name);
+          continue;
+        }
+        names.set(name as string, typeof item['id'] === 'string' ? [item['id']] : []);
+      }
       if (item['mark'] === 'artifact') {
         const id = item['id'];
         if (typeof id !== 'string' || !ID.test(id) || ids.includes(id) || ids.length === 64)
@@ -194,7 +222,11 @@ async function artifacts(env: NodeJS.ProcessEnv, cwd: string): Promise<string[]>
       }
     }
     // Row count cannot prove EOF: encoded metadata may cut a page short.
-    if (page['nextCursor'] === null) return ids;
+    if (page['nextCursor'] === null) {
+      // Both sides of a duplicate are ambiguous, even across listing pages.
+      const excluded = new Set([...ambiguous].flatMap((name) => names.get(name) ?? []));
+      return ids.filter((id) => !excluded.has(id));
+    }
     cursor = page['nextCursor'] as string;
   }
   throw new LauncherError('artifact_limit');
@@ -515,7 +547,7 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       };
     failureSpanId = result.failureSpanId ? `${ids.launchId}_${result.failureSpanId}` : undefined;
     outputsStartedAt = new Date().toISOString();
-    const resultName = `${directory}/result.txt`;
+    const resultName = `${directory}/${TASK_REPORT_NAME}`;
     terminal.outcome = result.outcome;
     terminal.summary =
       result.outcome === 'succeeded'
@@ -560,7 +592,12 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       )
     );
     await retain(async () => {
-      terminal.artifactObjectIds = await artifacts(options.env, cwd);
+      terminal.artifactObjectIds = await artifacts(
+        options.env,
+        cwd,
+        terminal.resultObjectId,
+        result.outcome === 'succeeded' ? undefined : warning
+      );
     }, true);
     if (skippedEntries || uploadFailures)
       trace?.enqueue({

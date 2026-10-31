@@ -93,6 +93,46 @@ function harness(type: 'task_outcome' | 'user_message' | 'thought' = 'task_outco
 }
 
 describe('startTask redo capability and effect budget', () => {
+  it('refuses the reserved report name without consuming maxCallsPerTurn', async () => {
+    const h = harness('user_message');
+    const input = { briefing: 'Save the work file.', profile: 'small' };
+    await h.call({ ...input, expectedOutputs: ['task-report.txt'] });
+    expect(h.messages.at(-1)?.content).toContain('reserved_output_name');
+    expect(h.applyStartTask).not.toHaveBeenCalled();
+    expect(h.state.toolCallCounts.get('core.startTask') ?? 0).toBe(0);
+    await h.call({ ...input, expectedOutputs: ['result.txt'] });
+    expect(h.applyStartTask).toHaveBeenCalledTimes(1);
+    expect(h.state.toolCallCounts.get('core.startTask')).toBe(1);
+  });
+
+  it('requires a concrete agreed plan only for unclear deliverables and owns the work in first person', () => {
+    const h = harness();
+    for (const prompt of [h.tool.description, buildSystemPrompt(h.context, false)]) {
+      expect(prompt).toContain('does not name what to deliver and in what form');
+      expect(prompt).toContain('several reasonable readings');
+      expect(prompt).toContain(
+        'first propose a concrete plan (what, range, files) and ask for agreement'
+      );
+      expect(prompt).toContain('Сделай мне в фоне отчёт по простым числам.');
+      expect(prompt).toContain('do not invent its range or files');
+      expect(prompt).toContain('Launch at once when the request is clear; do not ask again');
+    }
+    for (const prompt of [
+      h.tool.description,
+      buildSystemPrompt(h.context, false),
+      buildTriggerPrompt(h.context),
+    ]) {
+      expect(prompt).toContain(
+        '«готово», «содержимое файла проверено», «с первого раза не вышло, переделываю»'
+      );
+      expect(prompt).toContain('never «задача завершилась» or «задача остановилась»');
+    }
+    for (const prompt of [buildSystemPrompt(h.context, false), buildTriggerPrompt(h.context)]) {
+      expect(prompt).toContain('task-report.txt and transcript');
+      expect(prompt).not.toContain('result.txt');
+    }
+  });
+
   it('keeps tool, system and outcome instructions aligned with inherited output contracts', () => {
     const h = harness();
     const prompts = [buildSystemPrompt(h.context, false), buildTriggerPrompt(h.context)];
