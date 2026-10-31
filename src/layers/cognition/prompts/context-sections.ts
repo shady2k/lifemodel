@@ -533,7 +533,7 @@ export function buildActiveDesiresSection(context: LoopContext): string | null {
 
   return `<active_desires>
 ${lines.join('\n')}
-Act on one naturally, or defer. Never expose internal concepts (desires, pressure) in messages — just act.
+You can act on one naturally or defer, using the same judgment as INITIATIVE: background work with an unclear deliverable needs an agreed plan first. Internal concepts (desires, pressure) explain your motivation, not the message the owner needs; speak about what you want to explore or do.
 </active_desires>`;
 }
 
