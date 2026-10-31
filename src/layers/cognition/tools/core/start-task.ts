@@ -36,8 +36,7 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
       name: 'expectedOutputs',
       type: 'array',
       required: false,
-      description:
-        `Expected delivered output filenames: at most 16 unique safe flat names. The system saves the work's final message as task-report.txt beside the delivered files; the work does not write this file. Asking the work to write it makes the run fail. It is the work's own claim about what it did, to be checked against the delivered files. When the owner wants a summary file, I name a work file such as summary.txt in both the briefing and expectedOutputs. This system-written name is refused here (reserved_output_name). Omit for answer-only work. Missing files make completion unsuccessful.`,
+      description: `Expected delivered output filenames: at most 16 unique safe flat names. The system saves the work's final message as task-report.txt beside the delivered files; the work does not write this file. Asking the work to write it makes the run fail. It is the work's own claim about what it did, to be checked against the delivered files. When the owner wants a summary file, I name a work file such as summary.txt in both the briefing and expectedOutputs. This system-written name is refused here (reserved_output_name). Omit for answer-only work. Missing files make completion unsuccessful.`,
     },
   ];
   // Only the outcome-specific advertised schema exposes this trusted capability.

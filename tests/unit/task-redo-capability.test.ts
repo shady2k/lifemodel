@@ -140,7 +140,9 @@ describe('startTask redo capability and effect budget', () => {
     async (surface) => {
       const h = harness('user_message');
       const prompt = buildSystemPrompt(h.context, false);
-      const reportParagraphs = prompt.split('\n').filter((line) => line.includes('task-report.txt'));
+      const reportParagraphs = prompt
+        .split('\n')
+        .filter((line) => line.includes('task-report.txt'));
       // Both system mentions need their own explanation, not a distant disclaimer.
       expect(reportParagraphs).toHaveLength(2);
       const advertised = h.registry
