@@ -135,7 +135,14 @@ describe('startTask redo capability and effect budget', () => {
     expect(h.state.toolCallCounts.get('core.startTask')).toBe(1);
   });
 
-  it.each(['ownership', 'read trust', 'expectedOutputs', 'outcome', 'refusal'] as const)(
+  it.each([
+    'ownership',
+    'read trust',
+    'briefing',
+    'expectedOutputs',
+    'outcome',
+    'refusal',
+  ] as const)(
     'explains the system-written report and a separate summary work file in %s',
     async (surface) => {
       const h = harness('user_message');
@@ -156,6 +163,7 @@ describe('startTask redo capability and effect budget', () => {
       const surfaces = {
         ownership: reportParagraphs[0]!,
         'read trust': reportParagraphs[1]!,
+        briefing: advertised.function.parameters.properties['briefing'].description,
         expectedOutputs: advertised.function.parameters.properties['expectedOutputs'].description,
         outcome: buildTriggerPrompt(harness().context)
           .split('\n')

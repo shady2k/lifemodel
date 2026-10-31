@@ -24,7 +24,7 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
       name: 'briefing',
       type: 'string',
       required: true,
-      description: 'Complete task briefing: goal, context, constraints and output files to save.',
+      description: `Complete task briefing: goal, context, constraints and output files to save. The system saves the work's final message as task-report.txt beside the delivered files; the work does not write this file. Asking the work to write it makes the run fail. It is the work's own claim about what it did, to be checked against the delivered files. When the owner wants a summary file, I name a work file such as summary.txt in both the briefing and expectedOutputs.`,
     },
     {
       name: 'profile',
