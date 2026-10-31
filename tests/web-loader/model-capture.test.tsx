@@ -53,7 +53,7 @@ describe('model capture settings control', () => {
             writes.push(body);
             setting =
               body.mode === 'until-disabled'
-                ? { until: 'until-disabled', session: body.session }
+                ? { mode: 'until-disabled', session: body.session }
                 : { until: null };
           }
           return { ok: true, json: async () => setting };

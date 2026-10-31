@@ -200,10 +200,12 @@ export function createExchangeCapture(options: {
       // This entire optional facility is contained: even a broken context or writer cannot escape.
       try {
         const context = options.context(input);
+        const setting = context?.setting;
         if (
           closed ||
           !context ||
-          !isCaptureEnabled(context.setting, input.sessionId ?? undefined, now())
+          !setting ||
+          !isCaptureEnabled(setting, input.sessionId ?? undefined, now())
         )
           return undefined;
         if (active >= (options.active ?? CAPTURE_LIMITS.active)) {
@@ -217,9 +219,10 @@ export function createExchangeCapture(options: {
         const started = now();
         // Indefinite admission still gives each queued row a finite database write deadline.
         const expiresAt =
-          context.setting.until === CAPTURE_UNTIL_DISABLED
+          setting.mode === CAPTURE_UNTIL_DISABLED
             ? new Date(started + MAX_CAPTURE_DURATION_MS).toISOString()
-            : context.setting.until!;
+            : setting.until;
+        if (expiresAt === null) return undefined;
         const secretNames = new Set([
           ...privateHeaders,
           ...[...context.secretHeaders, ...(attempted?.secretHeaders ?? [])].map((name) =>
@@ -332,7 +335,12 @@ export function createExchangeCapture(options: {
                   drop('closed');
                   return;
                 }
-                if (Date.parse(expiresAt) <= now()) {
+                const current = options.context(input);
+                if (
+                  !current ||
+                  !isCaptureEnabled(current.setting, input.sessionId ?? undefined, now()) ||
+                  Date.parse(expiresAt) <= now()
+                ) {
                   drop('expired');
                   return;
                 }

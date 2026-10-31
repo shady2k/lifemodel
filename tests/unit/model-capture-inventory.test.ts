@@ -292,7 +292,7 @@ describe('production model capture inventory', () => {
   });
   it('keeps the one-minute pruning cadence on until disabled even after days of capture', async () => {
     const f = fixture();
-    f.setting = { until: 'until-disabled', session: 'wanted' };
+    f.setting = { mode: 'until-disabled', session: 'wanted' };
     await f.refresh();
     expect(f.inventory.enabled('wanted')).toBe(true);
     expect(f.inventory.enabled('other')).toBe(false);

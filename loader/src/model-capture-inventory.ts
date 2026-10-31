@@ -116,7 +116,7 @@ export function createCaptureInventory(options: {
   return {
     enabled,
     refresh,
-    /** An already-admitted collector can finish after capture turns off. */
+    /** A queued database write can settle after capture turns off. */
     noteWrite() {
       if (closed) return;
       retainedRows = true;

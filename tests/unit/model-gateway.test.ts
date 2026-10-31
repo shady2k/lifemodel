@@ -2647,7 +2647,7 @@ describe('model gateway review round 2: safe reasons, stream positions, slot att
 describe('model gateway opt-in exchange capture', () => {
   it('captures until disabled with the production session filter and stops new rows after the 30-second refresh', async () => {
     let time = Date.now();
-    let setting: ModelCaptureSetting = { until: 'until-disabled', session: 'wanted' };
+    let setting: ModelCaptureSetting = { mode: 'until-disabled', session: 'wanted' };
     const cached = createCachedCaptureReader(
       async () => setting,
       () => time
@@ -2668,6 +2668,7 @@ describe('model gateway opt-in exchange capture', () => {
         inventory.noteWrite();
       },
     });
+    const begin = vi.spyOn(capture, 'begin');
     const f = await fixture(undefined, undefined, undefined, capture, (session) =>
       inventory.enabled(session)
     );
@@ -2687,10 +2688,10 @@ describe('model gateway opt-in exchange capture', () => {
       time += 30_000;
       await inventory.refresh(); // Production refresh interval, not a model-path read.
       expect(inventory.enabled('wanted')).toBe(false);
+      begin.mockClear();
       await (await f.post(undefined, { 'x-lifemodel-session': 'wanted' })).text();
-      // Let all deferred collectors/writes settle before asserting absence.
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      // The completed request never admitted a collector, so no deferred write can follow.
+      expect(begin).not.toHaveBeenCalled();
       expect(rows).toHaveLength(2);
     } finally {
       capture.close();

@@ -228,7 +228,7 @@ describe('gateway capture migration and least privilege', () => {
     let prunes = 0;
     const inventory = createCaptureInventory({
       setting: {
-        current: () => ({ until: 'until-disabled' }),
+        current: () => ({ mode: 'until-disabled' }),
         refresh: async () => {},
       },
       now: () => time,

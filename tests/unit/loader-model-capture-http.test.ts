@@ -145,7 +145,7 @@ describe('capture setting HTTP boundary', () => {
   });
   it('enables until disabled explicitly, preserves its session scope and disables it', async () => {
     const f = await fixture();
-    const expected = { until: 'until-disabled', session: 'chat-1' };
+    const expected = { mode: 'until-disabled', session: 'chat-1' };
     const response = await f.request('/api/model-capture', 'PUT', {
       mode: 'until-disabled',
       session: 'chat-1',

@@ -18,7 +18,7 @@ describe('capture setting', () => {
   it('represents until disabled explicitly in requests, stored values and responses, with the same session filter', () => {
     for (const session of [undefined, 'chat-1']) {
       const scope = session === undefined ? {} : { session };
-      const value = { until: 'until-disabled', ...scope };
+      const value = { mode: 'until-disabled', ...scope } as const;
       expect(captureSettingFromRequest({ mode: 'until-disabled', ...scope }, now)).toEqual(value);
       expect(validateCaptureSetting(value, now, true)).toEqual(value);
       expect(validateCaptureSetting(value, now + 30 * MAX_CAPTURE_DURATION_MS)).toEqual(value);
@@ -26,7 +26,7 @@ describe('capture setting', () => {
       expect(activeCaptureSetting(value, now + 30 * MAX_CAPTURE_DURATION_MS)).toEqual(value);
       expect(isCaptureEnabled(value, session, now + 30 * MAX_CAPTURE_DURATION_MS)).toBe(true);
     }
-    const scoped = { until: 'until-disabled', session: 'chat-1' };
+    const scoped = { mode: 'until-disabled', session: 'chat-1' } as const;
     expect(isCaptureEnabled(scoped, 'chat-2', now)).toBe(false);
     expect(isCaptureEnabled(scoped, undefined, now)).toBe(false);
   });
@@ -47,12 +47,14 @@ describe('capture setting', () => {
     for (const input of [
       { until: 'forever' },
       { until: 'until_disabled' },
-      { until: 'until-disabled', durationMs: null },
-      { until: 'until-disabled', mode: 'until-disabled' },
-      { until: 'until-disabled', session: '' },
-      { until: 'until-disabled', session: 'bad session' },
-      { until: 'until-disabled', session: 'x'.repeat(129) },
-      { mode: 'until-disabled' },
+      { mode: 'until-disabled', durationMs: null },
+      { mode: 'until-disabled', until: null },
+      { mode: 'until-disabled', until: new Date(now + 600_000).toISOString() },
+      { until: 'until-disabled' },
+      { mode: 'until-disabled', session: '' },
+      { mode: 'until-disabled', session: 'bad session' },
+      { mode: 'until-disabled', session: 'x'.repeat(129) },
+      { mode: 'forever' },
     ]) {
       expect(() => validateCaptureSetting(input, now)).toThrow('capture_setting_invalid');
       expect(() => validateCaptureSetting(input, now, true)).toThrow('capture_setting_invalid');
@@ -211,7 +213,7 @@ describe('capture setting Bao boundary', () => {
       method: 'POST',
       body: JSON.stringify({ data: on() }),
     });
-    const indefinite = { until: 'until-disabled', session: 'chat-1' };
+    const indefinite = { mode: 'until-disabled', session: 'chat-1' } as const;
     response = { data: { data: indefinite, metadata: { version: 2 } } };
     expect(await bao.readCapture()).toEqual(indefinite);
     await bao.writeCapture(indefinite);

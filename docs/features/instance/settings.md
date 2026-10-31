@@ -105,14 +105,16 @@ chat/session id, then enable it. Until disabled has no automatic end: capture st
 on until the owner disables it. The page shows this state and warns that it stores
 personal conversation text on this machine. Retention remains 24 hours and 100 MiB
 in every mode; indefinite capture does not mean indefinite storage. Disable stops new captures after the gateway's
-next settings refresh (at most 30 seconds). Expiry is checked on every attempt
+next settings refresh (at most 30 seconds). In-flight calls re-check the current
+enabled state and session filter before finalization, so disabling capture also
+drops their pending evidence after refresh. Expiry is checked on every attempt
 and write, so expiry needs no restart or cleanup action. The setting lives in
 OpenBao at `lifemodel/data/model/capture`; the gateway refreshes it in the
 background and never waits for it on a model call. An unavailable setting or
 secret inventory disables capture. For timed capture, the browser sends a duration;
 the server computes the expiry with its own clock, not the browser clock. Until
 disabled sends `{ "mode": "until-disabled" }` and is stored and returned explicitly
-as `{ "until": "until-disabled" }`, never as a far-future timestamp. Both forms
+as `{ "mode": "until-disabled" }`, never in the timestamp field or as a far-future timestamp. Both forms
 accept the same optional `session` field. Disable sends `{ "durationMs": null }`.
 Each queued row still has a finite write deadline; the database retention rules
 and pruning cadence do not change.
