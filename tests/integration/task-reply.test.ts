@@ -533,7 +533,7 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
     const prompt = instance.cognition.provider.requests[0]!.messages.map(
       (message) => message.content
     ).join('\n');
-    expect(prompt).toContain('Verify before replying');
+    expect(prompt).toContain("I verify before replying in the owner's language");
     expect(prompt).toContain('Claims only: summary, task-report.txt and transcript text');
     expect(prompt).toContain('compare the contents with the owner');
     expect((await instance.events())[0]!.payload.text).toContain(
@@ -886,12 +886,15 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
     ]);
     const prompt = instance.cognition.provider.requests[0]!.messages[0]!.content!;
     expect(prompt).toContain(
-      'Say "started" only after core.startTask returned accepted in this turn'
+      'Saying I started is accurate only after core.startTask returned accepted in this turn'
     );
-    expect(prompt).toContain('Launch at once when the request is clear; do not ask again');
     expect(prompt).toContain(
-      'first propose a concrete plan (what, range, files) and ask for agreement'
+      'When I know what the owner wants delivered from the request or conversation, I act at once'
     );
+    expect(prompt).toContain(
+      'I first propose a concrete plan (what, range, form, files) and ask for agreement'
+    );
+    expect(prompt).toContain('a wrong guess costs the owner a wasted run and a redo');
   });
 
   it('answers at once, then binds sealed result and artifact files with plain names to one reply across duplicate relay and restart', async () => {
