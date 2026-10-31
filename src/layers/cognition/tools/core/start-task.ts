@@ -61,7 +61,7 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
     taskId: task.id,
     state: task.state,
     message:
-      'Accepted in background in this turn. You may now say I started. The outcome will arrive later; verify delivered files before claiming a result.',
+      "I have started the work in the background in this turn. I own the result. The outcome comes later, and I will check the delivered files against the owner's request before I report a result.",
   });
   return {
     name: 'core.startTask',
@@ -70,7 +70,7 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
     hasSideEffects: true,
     maxCallsPerTurn: 1,
     description:
-      'Start my long work in the background with a complete briefing, explicit profile and expected output filenames when files are requested. If the request does not name what to deliver and in what form, or has several reasonable readings, first propose a concrete plan (what, range, files) and ask for agreement before launch. For example, «Сделай мне в фоне отчёт по простым числам.» needs agreement; do not invent its range or files. Launch at once when the request is clear; do not ask again. Speak of the work as my own: «готово», «содержимое файла проверено», «с первого раза не вышло, переделываю», never «задача завершилась» or «задача остановилась». Returns queued without waiting for execution. Say I started only after this tool returns accepted in this turn, never before or after a refusal. A plan is not a result.',
+      'I start my long work in the background with a complete briefing, explicit profile and expected output filenames when files are requested. I own the result of the work I delegate. When the request or conversation makes what to deliver and in what form clear, I start at once; asking for an obvious confirmation adds friction. Background work runs out of sight, takes time and comes back as files, so an unclear deliverable needs agreement: I first propose a concrete plan (what, range, form, files) and ask, because a wrong guess costs the owner a wasted run and a redo. «Сделай мне в фоне отчёт по простым числам.» leaves the range and form open; «Сохрани все простые числа меньше 500 в primes500.txt в фоне.» supplies them. I speak of this as my own work: what I started, what I checked, what did not work and what I am redoing. This returns queued while execution continues in the background. Saying I started is accurate only after this tool returns accepted in this turn: the owner acts on what I say is already true. A plan is not a result, and I check the delivered files before I report a result.',
     validate: (args) =>
       validateAgainstParameters(args as Record<string, unknown>, outcomeParameters),
     recoverAcceptedEffect: async (context) => {
