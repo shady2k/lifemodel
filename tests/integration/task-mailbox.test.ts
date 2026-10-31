@@ -1,3 +1,4 @@
+import { postgresKnownSecrets } from '../../src/storage/postgres-known-secrets.js';
 import { createPostgresTraceStore } from '../../src/storage/postgres-trace-store.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Pool, type PoolClient } from 'pg';
@@ -705,15 +706,25 @@ describe('durable fenced task mailbox', () => {
   });
 
   it('transcript: reuses configured trace secrets before storage and keeps them out of the read view', async () => {
-    const key = 'opaque-unlabelled-sensitive-value';
-    const m = createPostgresTaskMailbox({ pool: stores.postgres, epoch: 1, knownSecrets: [key] });
-    await m.append(transcriptFrame('known-secret', 1, `Reading ${key} safely`), identity);
+    const key = 'opaque-unlabelled%2Fsensitive%3Avalue';
+    const decoded = decodeURIComponent(key);
+    const m = createPostgresTaskMailbox({
+      pool: stores.postgres,
+      epoch: 1,
+      knownSecrets: postgresKnownSecrets(`postgres://core:${key}@database.invalid/core`),
+    });
+    await m.append(
+      transcriptFrame('known-secret', 1, `Reading ${key} ${decoded} safely`),
+      identity
+    );
     const stored = await stores.postgres.query(
       'SELECT payload FROM core.task_transcript WHERE task_id=$1',
       [identity.taskId]
     );
-    expect(JSON.stringify(stored.rows)).not.toContain(key);
-    expect(JSON.stringify(await m.readTranscript(identity.taskId))).not.toContain(key);
+    for (const value of [key, decoded]) {
+      expect(JSON.stringify(stored.rows)).not.toContain(value);
+      expect(JSON.stringify(await m.readTranscript(identity.taskId))).not.toContain(value);
+    }
     expect(JSON.stringify(stored.rows)).toContain('[REDACTED]');
   });
 

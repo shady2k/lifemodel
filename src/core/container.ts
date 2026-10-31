@@ -86,6 +86,7 @@ import { createTaskWorkbenchReadiness, createWorkbenchTaskService } from './task
 import { createTaskChannel } from './task-channel.js';
 import { createTaskKubernetesIdentity } from './task-kubernetes-identity.js';
 import { createPostgresTraceStore } from '../storage/postgres-trace-store.js';
+import { postgresKnownSecrets } from '../storage/postgres-known-secrets.js';
 import { createPostgresTaskMailbox } from '../storage/postgres-task-mailbox.js';
 import { createTaskChannelReplay } from './task-channel-replay.js';
 import { createTaskFinalizer } from './task-finalize.js';
@@ -772,10 +773,7 @@ export async function createContainerAsync(
   const traces = createPostgresTraceStore({
     pool: tracePool,
     logger,
-    knownSecrets: [
-      databaseUrl,
-      ...(typeof rawPostgres.options.password === 'string' ? [rawPostgres.options.password] : []),
-    ],
+    knownSecrets: postgresKnownSecrets(databaseUrl),
   });
   let traceAuthority: ReturnType<typeof createPostgresTaskMailbox> | undefined;
   let traceAuthorityPool: Pool | undefined;
@@ -1601,10 +1599,7 @@ export async function createContainerAsync(
     const identity = createTaskKubernetesIdentity({ timeoutMs });
     const mailbox = createPostgresTaskMailbox({
       pool: channelPool,
-      knownSecrets: [
-        databaseUrl,
-        ...(typeof rawPostgres.options.password === 'string' ? [rawPostgres.options.password] : []),
-      ],
+      knownSecrets: postgresKnownSecrets(databaseUrl),
       commandFrameLimit: Math.min(
         settings['tasks.channel.maxFrameBytes'],
         settings['tasks.channel.maxUnackedBytes'],
