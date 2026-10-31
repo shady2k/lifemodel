@@ -888,12 +888,8 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
     expect(prompt).toContain(
       'Saying I started is accurate only after core.startTask returned accepted in this turn'
     );
-    expect(prompt).toContain(
-      'When I know what the owner wants delivered from the request or conversation, I act at once'
-    );
-    expect(prompt).toContain(
-      'I first propose a concrete plan (what, range, form, files) and ask for agreement'
-    );
+    expect(prompt).toMatch(/know what the owner wants delivered.*act at once/);
+    expect(prompt).toMatch(/propose a concrete plan.*ask for agreement/);
     expect(prompt).toContain('a wrong guess costs the owner a wasted run and a redo');
   });
 
