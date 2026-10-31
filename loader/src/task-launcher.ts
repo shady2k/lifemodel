@@ -176,7 +176,7 @@ function outputInstructions(cwd: string): string {
   return `Files for the owner go in ${join(cwd, 'outputs')}/, flat, with their final file names.
 Only regular files are allowed; no subfolders or symlinks. Maximum: 64 files.
 I collect outputs/ automatically. Do not also upload these files with the storage CLI: duplicate owner-facing names fail the run (output_name_ambiguous).
-${TASK_REPORT_NAME} is reserved for my semantic report; do not use it as a work output name.
+The system saves your final message as ${TASK_REPORT_NAME} beside the delivered files; you do not write this file. Files you write in outputs/ need other names. If your briefing asks for a summary file, give it another name such as summary.txt. Writing ${TASK_REPORT_NAME} in outputs/ makes the run fail.
 Files elsewhere are not retained. Failed-task outputs are retained as partial objects, not delivered as successful work.
 Use the task MCP step tool for short progress reports and question to ask the coordinating agent.
 Question returns after storage, not an answer. Wait for the correlated answer via steering.`;
