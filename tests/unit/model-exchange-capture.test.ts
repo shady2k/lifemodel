@@ -1,6 +1,7 @@
 import { performance } from 'node:perf_hooks';
 import { describe, expect, it, vi } from 'vitest';
 import { renderAttemptHeaders } from '../../loader/src/model.js';
+import type { ModelCaptureSetting } from '../../loader/src/model-capture-setting.js';
 import {
   createExchangeCapture,
   hasUnredactedCaptureSecret,
@@ -28,6 +29,47 @@ const input: CaptureInput = {
   },
 };
 describe('bounded exchange capture', () => {
+  it.each(['disabled', 'session changed', 'expired', 'context unavailable', 'context throws'])(
+    'drops an in-flight indefinite capture when %s before deferred finalization',
+    async (change) => {
+      let setting: ModelCaptureSetting = { mode: 'until-disabled', session: 'chat' };
+      let available = true;
+      let broken = false;
+      const rows: CaptureRow[] = [];
+      const capture = createExchangeCapture({
+        now: () => 1_000,
+        context: () => {
+          if (broken) throw Error('private context failure');
+          return available ? { setting, secrets: [], secretHeaders: [] } : undefined;
+        },
+        write: async (row) => {
+          rows.push(row);
+        },
+      });
+      try {
+        const attempt = capture.begin(input);
+        expect(attempt).toBeDefined();
+        attempt?.response(200, {});
+        attempt?.chunk(Buffer.from('private response'));
+        attempt?.finish();
+        // Change after finish() so only the deferred finalizer can observe it.
+        if (change === 'disabled') setting = { until: null };
+        else if (change === 'session changed')
+          setting = { mode: 'until-disabled', session: 'other-chat' };
+        else if (change === 'expired') setting = { until: new Date(1_000).toISOString() };
+        else if (change === 'context unavailable') available = false;
+        else broken = true;
+        await expect
+          .poll(() => capture.dropped())
+          .toEqual(change === 'context throws' ? { capture_error: 1 } : { expired: 1 });
+        expect(rows).toHaveLength(0);
+      } finally {
+        capture.close();
+      }
+    }
+  );
+
+
   it('checks raw text outside complete redaction markers without joining segments', () => {
     expect(hasUnredactedCaptureSecret('[redacted len=1]', /1|d|e/g)).toBe(false);
     expect(hasUnredactedCaptureSecret('raw-key [redacted len=7]', /raw-key/g)).toBe(true);

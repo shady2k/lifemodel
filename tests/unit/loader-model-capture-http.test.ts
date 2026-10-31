@@ -143,11 +143,34 @@ describe('capture setting HTTP boundary', () => {
     expect(f.writes).toEqual([expected]);
     expect(JSON.parse((await f.request('/api/model-capture')).body)).toEqual(expected);
   });
-  it('rejects indefinite, nonpositive, over-24h and malformed session requests before storage', async () => {
+  it('enables until disabled explicitly, preserves its session scope and disables it', async () => {
+    const f = await fixture();
+    const expected = { mode: 'until-disabled', session: 'chat-1' };
+    const response = await f.request('/api/model-capture', 'PUT', {
+      mode: 'until-disabled',
+      session: 'chat-1',
+    });
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body)).toEqual(expected);
+    expect(f.writes).toEqual([expected]);
+    expect(f.setting).toEqual(expected);
+    expect(JSON.parse((await f.request('/api/model-capture')).body)).toEqual(expected);
+    const off = await f.request('/api/model-capture', 'PUT', { durationMs: null });
+    expect(off.status).toBe(200);
+    expect(JSON.parse(off.body)).toEqual({ until: null });
+    expect(f.writes.at(-1)).toEqual({ until: null });
+  });
+  it('rejects nonpositive, over-24h and malformed mode/session requests before storage', async () => {
     const f = await fixture();
     for (const value of [
       {},
       { durationMs: '600000' },
+      { mode: 'forever' },
+      { mode: 'until-disabled', durationMs: null },
+      { mode: 'until-disabled', durationMs: 600_000 },
+      { mode: 'until-disabled', until: null },
+      { mode: 'until-disabled', session: 'bad session' },
+      { mode: 'until-disabled', extra: true },
       { durationMs: 0 },
       { durationMs: -1 },
       { durationMs: 86_400_001 },

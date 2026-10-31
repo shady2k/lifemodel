@@ -1,13 +1,12 @@
-/** Time-limited, machine-local model debugging. Off unless the owner opts in. */
-export interface ModelCaptureSetting {
-  until: string | null;
-  session?: string;
-}
-/** HTTP writes carry a duration; only the server chooses the expiry timestamp. */
-export interface ModelCaptureRequest {
-  durationMs: number | null;
-  session?: string;
-}
+/** Opt-in, machine-local model debugging with bounded retention. */
+export type ModelCaptureSetting =
+  | { mode: 'until-disabled'; until?: never; session?: string }
+  | { until: string | null; mode?: never; session?: string };
+/** Timed HTTP writes carry a duration; only the server chooses the expiry timestamp. */
+export type ModelCaptureRequest =
+  | { durationMs: number | null; session?: string }
+  | { mode: 'until-disabled'; session?: string };
+export const CAPTURE_UNTIL_DISABLED = 'until-disabled';
 export const MAX_CAPTURE_DURATION_MS = 24 * 60 * 60 * 1000;
 export const CAPTURE_SETTING_PATH = 'lifemodel/data/model/capture';
 export class CaptureSettingError extends Error {
@@ -22,6 +21,15 @@ export function validateCaptureSettingResponse(input: unknown): ModelCaptureSett
   const value = input as Record<string, unknown>;
   const until = value['until'];
   const session = value['session'];
+  if (value['mode'] === CAPTURE_UNTIL_DISABLED) {
+    if (
+      Object.keys(value).some((key) => key !== 'mode' && key !== 'session') ||
+      (session !== undefined &&
+        (typeof session !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(session)))
+    )
+      throw new CaptureSettingError();
+    return { mode: CAPTURE_UNTIL_DISABLED, ...(session === undefined ? {} : { session }) };
+  }
   if (
     Object.keys(value).some((key) => key !== 'until' && key !== 'session') ||
     (until !== null && typeof until !== 'string') ||
@@ -48,7 +56,7 @@ export function validateCaptureSetting(
   forWrite = false
 ): ModelCaptureSetting {
   const value = validateCaptureSettingResponse(input);
-  if (value.until !== null) {
+  if (value.mode !== CAPTURE_UNTIL_DISABLED && value.until !== null) {
     const expiry = Date.parse(value.until);
     if (expiry > now + MAX_CAPTURE_DURATION_MS || (forWrite && expiry <= now))
       throw new CaptureSettingError();
@@ -62,6 +70,15 @@ export function captureSettingFromRequest(input: unknown, now = Date.now()): Mod
   const value = input as Record<string, unknown>;
   const duration = value['durationMs'];
   const session = value['session'];
+  if (value['mode'] === CAPTURE_UNTIL_DISABLED) {
+    if (Object.keys(value).some((key) => key !== 'mode' && key !== 'session'))
+      throw new CaptureSettingError();
+    return validateCaptureSetting(
+      { mode: CAPTURE_UNTIL_DISABLED, ...(session === undefined ? {} : { session }) },
+      now,
+      true
+    );
+  }
   if (Object.keys(value).some((key) => key !== 'durationMs' && key !== 'session'))
     throw new CaptureSettingError();
   if (duration === null) {
@@ -91,8 +108,8 @@ export function isCaptureEnabled(
   now = Date.now()
 ): boolean {
   return (
-    value.until !== null &&
-    Date.parse(value.until) > now &&
+    (value.mode === CAPTURE_UNTIL_DISABLED ||
+      (value.until !== null && Date.parse(value.until) > now)) &&
     (value.session === undefined || value.session === session)
   );
 }
@@ -101,5 +118,5 @@ export function activeCaptureSetting(
   value: ModelCaptureSetting,
   now = Date.now()
 ): ModelCaptureSetting {
-  return value.until !== null && Date.parse(value.until) > now ? { ...value } : { until: null };
+  return isCaptureEnabled(value, value.session, now) ? { ...value } : { until: null };
 }

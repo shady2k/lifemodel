@@ -14,7 +14,53 @@ const now = Date.parse('2026-10-29T10:00:00.000Z');
 const on = (duration = 600_000): ModelCaptureSetting => ({
   until: new Date(now + duration).toISOString(),
 });
-describe('time-limited capture setting', () => {
+describe('capture setting', () => {
+  it('represents until disabled explicitly in requests, stored values and responses, with the same session filter', () => {
+    for (const session of [undefined, 'chat-1']) {
+      const scope = session === undefined ? {} : { session };
+      const value = { mode: 'until-disabled', ...scope } as const;
+      expect(captureSettingFromRequest({ mode: 'until-disabled', ...scope }, now)).toEqual(value);
+      expect(validateCaptureSetting(value, now, true)).toEqual(value);
+      expect(validateCaptureSetting(value, now + 30 * MAX_CAPTURE_DURATION_MS)).toEqual(value);
+      expect(validateCaptureSettingResponse(value)).toEqual(value);
+      expect(activeCaptureSetting(value, now + 30 * MAX_CAPTURE_DURATION_MS)).toEqual(value);
+      expect(isCaptureEnabled(value, session, now + 30 * MAX_CAPTURE_DURATION_MS)).toBe(true);
+    }
+    const scoped = { mode: 'until-disabled', session: 'chat-1' } as const;
+    expect(isCaptureEnabled(scoped, 'chat-2', now)).toBe(false);
+    expect(isCaptureEnabled(scoped, undefined, now)).toBe(false);
+  });
+  it('refuses malformed indefinite requests and stored/response variants', () => {
+    for (const input of [
+      { mode: 'until-disabled', durationMs: null },
+      { mode: 'until-disabled', durationMs: 600_000 },
+      { mode: 'until-disabled', until: null },
+      { mode: 'until-disabled', extra: true },
+      { mode: 'until-disabled', session: '' },
+      { mode: 'until-disabled', session: 'bad session' },
+      { mode: 'until-disabled', session: 'x'.repeat(129) },
+      { mode: 'forever' },
+      { mode: true },
+      { durationMs: 'until-disabled' },
+    ])
+      expect(() => captureSettingFromRequest(input, now)).toThrow('capture_setting_invalid');
+    for (const input of [
+      { until: 'forever' },
+      { until: 'until_disabled' },
+      { mode: 'until-disabled', durationMs: null },
+      { mode: 'until-disabled', until: null },
+      { mode: 'until-disabled', until: new Date(now + 600_000).toISOString() },
+      { until: 'until-disabled' },
+      { mode: 'until-disabled', session: '' },
+      { mode: 'until-disabled', session: 'bad session' },
+      { mode: 'until-disabled', session: 'x'.repeat(129) },
+      { mode: 'forever' },
+    ]) {
+      expect(() => validateCaptureSetting(input, now)).toThrow('capture_setting_invalid');
+      expect(() => validateCaptureSetting(input, now, true)).toThrow('capture_setting_invalid');
+      expect(() => validateCaptureSettingResponse(input)).toThrow('capture_setting_invalid');
+    }
+  });
   it('is off by default, expires exactly on time and optionally matches one session', () => {
     expect(isCaptureEnabled({ until: null }, undefined, now)).toBe(false);
     expect(isCaptureEnabled(on(), undefined, now)).toBe(true);
@@ -167,6 +213,13 @@ describe('capture setting Bao boundary', () => {
       method: 'POST',
       body: JSON.stringify({ data: on() }),
     });
+    const indefinite = { mode: 'until-disabled', session: 'chat-1' } as const;
+    response = { data: { data: indefinite, metadata: { version: 2 } } };
+    expect(await bao.readCapture()).toEqual(indefinite);
+    await bao.writeCapture(indefinite);
+    expect(JSON.parse(requests.at(-1)!.body!)).toEqual({ data: indefinite });
+    response = { data: { data: { ...indefinite, durationMs: null } } };
+    await expect(bao.readCapture()).rejects.toMatchObject({ code: 'unreachable' });
     await expect(bao.writeCapture(on(MAX_CAPTURE_DURATION_MS + 1))).rejects.toThrow(
       'capture_setting_invalid'
     );

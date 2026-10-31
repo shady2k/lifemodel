@@ -1,7 +1,7 @@
 /** Capture wiring: disabled capture reads no secret inventory; retention still runs. */
 import { renderAttemptHeaders, type ModelSlotName, type SlotRead } from './model.js';
 import { prepareCaptureSecrets, type CaptureContext } from './model-exchange-capture.js';
-import type { ModelCaptureSetting } from './model-capture-setting.js';
+import { isCaptureEnabled, type ModelCaptureSetting } from './model-capture-setting.js';
 
 export function createCaptureInventory(options: {
   setting: { current(): ModelCaptureSetting; refresh(): Promise<void> };
@@ -30,9 +30,11 @@ export function createCaptureInventory(options: {
   let pruning = false;
   function setting(sessionId?: string | null): ModelCaptureSetting | undefined {
     const value = options.setting.current();
-    return value.until !== null &&
-      Date.parse(value.until) > now() &&
-      (sessionId === undefined || value.session === undefined || value.session === sessionId)
+    return isCaptureEnabled(
+      value,
+      sessionId === undefined ? value.session : (sessionId ?? undefined),
+      now()
+    )
       ? value
       : undefined;
   }
@@ -114,7 +116,7 @@ export function createCaptureInventory(options: {
   return {
     enabled,
     refresh,
-    /** An already-admitted collector can finish after capture turns off. */
+    /** A queued database write can settle after capture turns off. */
     noteWrite() {
       if (closed) return;
       retainedRows = true;

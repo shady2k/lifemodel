@@ -1,7 +1,12 @@
 /** Opt-in, bounded, fail-open exchange capture. No raw text enters the writer queue. */
 import type { IncomingHttpHeaders } from 'node:http';
 import type { ModelSlotName } from './model.js';
-import type { ModelCaptureSetting } from './model-capture-setting.js';
+import {
+  CAPTURE_UNTIL_DISABLED,
+  MAX_CAPTURE_DURATION_MS,
+  isCaptureEnabled,
+  type ModelCaptureSetting,
+} from './model-capture-setting.js';
 
 export const CAPTURE_LIMITS = { bodyBytes: 1024 * 1024, queue: 8, active: 16 } as const;
 export interface CaptureRow {
@@ -195,11 +200,12 @@ export function createExchangeCapture(options: {
       // This entire optional facility is contained: even a broken context or writer cannot escape.
       try {
         const context = options.context(input);
+        const setting = context?.setting;
         if (
           closed ||
-          !context?.setting.until ||
-          !(Date.parse(context.setting.until) > now()) ||
-          (context.setting.session !== undefined && context.setting.session !== input.sessionId)
+          !context ||
+          !setting ||
+          !isCaptureEnabled(setting, input.sessionId ?? undefined, now())
         )
           return undefined;
         if (active >= (options.active ?? CAPTURE_LIMITS.active)) {
@@ -210,8 +216,13 @@ export function createExchangeCapture(options: {
           drop('queue_full');
           return undefined;
         }
-        const expiresAt = context.setting.until;
         const started = now();
+        // Indefinite admission still gives each queued row a finite database write deadline.
+        const expiresAt =
+          setting.mode === CAPTURE_UNTIL_DISABLED
+            ? new Date(started + MAX_CAPTURE_DURATION_MS).toISOString()
+            : setting.until;
+        if (expiresAt === null) return undefined;
         const secretNames = new Set([
           ...privateHeaders,
           ...[...context.secretHeaders, ...(attempted?.secretHeaders ?? [])].map((name) =>
@@ -324,7 +335,12 @@ export function createExchangeCapture(options: {
                   drop('closed');
                   return;
                 }
-                if (Date.parse(context.setting.until ?? '') <= now()) {
+                const current = options.context(input);
+                if (
+                  !current ||
+                  !isCaptureEnabled(current.setting, input.sessionId ?? undefined, now()) ||
+                  Date.parse(expiresAt) <= now()
+                ) {
                   drop('expired');
                   return;
                 }
