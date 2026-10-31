@@ -135,6 +135,61 @@ describe('startTask redo capability and effect budget', () => {
     expect(h.state.toolCallCounts.get('core.startTask')).toBe(1);
   });
 
+  it.each([
+    'ownership',
+    'read trust',
+    'briefing',
+    'expectedOutputs',
+    'outcome',
+    'refusal',
+  ] as const)(
+    'explains the system-written report and a separate summary work file in %s',
+    async (surface) => {
+      const h = harness('user_message');
+      const prompt = buildSystemPrompt(h.context, false);
+      const reportParagraphs = prompt
+        .split('\n')
+        .filter((line) => line.includes('task-report.txt'));
+      // Both system mentions need their own explanation, not a distant disclaimer.
+      expect(reportParagraphs).toHaveLength(2);
+      const advertised = h.registry
+        .getToolsAsOpenAIFormat()
+        .find((tool) => tool.function.name === 'core_startTask')!;
+      const refusal = await h.tool.execute(
+        { briefing: 'Save the work file.', profile: 'small', expectedOutputs: ['task-report.txt'] },
+        h.toolContext()
+      );
+      expect(refusal).toMatchObject({ success: false, code: 'reserved_output_name' });
+      const surfaces = {
+        ownership: reportParagraphs[0]!,
+        'read trust': reportParagraphs[1]!,
+        briefing: advertised.function.parameters.properties['briefing'].description,
+        expectedOutputs: advertised.function.parameters.properties['expectedOutputs'].description,
+        outcome: buildTriggerPrompt(harness().context)
+          .split('\n')
+          .filter((line) => line.includes('task-report.txt'))
+          .join('\n'),
+        refusal: (refusal as { message: string }).message,
+      };
+      const text = surfaces[surface];
+      // Meaning pins, not whole-sentence snapshots: who writes what, why and how to recover.
+      expect(text).toContain('task-report.txt');
+      expect(text).toMatch(
+        /system saves the work's final message (?:as task-report\.txt|under that name) beside the delivered files/i
+      );
+      expect(text).toMatch(/work does not write this file/);
+      expect(text).toMatch(/Asking the work to write it makes the run fail/);
+      expect(text).toMatch(
+        /work's own claim about what it did.*checked against the delivered files/
+      );
+      expect(text).toMatch(
+        /owner wants a summary file.*work file.*summary\.txt.*briefing and expectedOutputs/
+      );
+      expect(text).not.toContain('reserved for my report');
+      expect(h.applyStartTask).not.toHaveBeenCalled();
+    }
+  );
+
   it('puts the background-work judgment and its reasons beside INITIATIVE for user messages', () => {
     const prompt = buildSystemPrompt(harness('user_message').context, false);
     const instructions = prompt.split('<instructions>')[1]!.split('</instructions>')[0]!;
@@ -282,9 +337,6 @@ describe('startTask redo capability and effect budget', () => {
     expect(ownership).toContain('a refusal leaves the work unstarted');
     expect(ownership).toContain('agree a concrete plan first');
     expect(ownership).toContain("a wrong guess wastes the owner's time");
-    expect(ownership).toContain(
-      'task-report.txt is reserved for my report, separate from the expected work outputs'
-    );
     for (const text of [prompt, h.tool.description, buildTriggerPrompt(harness().context)]) {
       expect(text).not.toMatch(/never [«"](?:задача|the task)|not "the task"|Say «готово»/);
       expect(text).not.toContain('задача завершилась');

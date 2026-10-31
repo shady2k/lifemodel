@@ -330,16 +330,43 @@ describe('identity and output-name failure replies', () => {
       expect(taskOutcomeFallback(event, new Map(), 'en', gender)).toContain('I received');
     }
   );
-  it.each(['ru', 'en'] as const)(
-    'explains reserved and ambiguous names in %s using metadata only',
-    (language) => {
+  it.each([
+    { language: 'ru', gender: 'female', self: 'Я не смогла закончить выполнение' },
+    { language: 'ru', gender: 'male', self: 'Я не смог закончить выполнение' },
+    { language: 'ru', gender: 'neutral', self: 'Я не могу закончить выполнение' },
+    { language: 'en', gender: 'neutral', self: 'I could not finish execution' },
+  ] as const)(
+    'explains the system-written report refusal in $language with $gender self-reference',
+    ({ language, gender, self }) => {
       const reserved = taskOutcomeFallback(
         { ...event, reasonCode: 'output_name_reserved' },
         new Map(),
-        language
+        language,
+        gender
       );
-      expect(reserved).toContain('"task-report.txt"');
-      expect(reserved).toContain(language === 'ru' ? 'зарезервировано' : 'reserved');
+      expect(reserved).toContain(self);
+      expect(reserved).toMatch(
+        language === 'ru'
+          ? /моя запущенная работа попыталась записать файл с именем "task-report\.txt"/
+          : /my running work tried to write a file named "task-report\.txt"/
+      );
+      expect(reserved).toMatch(
+        language === 'ru'
+          ? /система сама создаёт этот файл из итогового сообщения работы/
+          : /system writes that file itself from the work's final message/
+      );
+      expect(reserved).toContain(
+        language === 'ru' ? 'поэтому запуск отклонён' : 'so the run was refused'
+      );
+      expect(reserved).not.toMatch(/зарезервировано|reserved for my/);
+      expect(reserved).not.toContain(event.summary);
+      expect(reserved).not.toMatch(/UNTRUSTED|invented.txt/);
+    }
+  );
+
+  it.each(['ru', 'en'] as const)(
+    'explains ambiguous names in %s using metadata only',
+    (language) => {
       const object = {
         id: 'a',
         name: 'same.txt',
@@ -369,7 +396,7 @@ describe('identity and output-name failure replies', () => {
         language === 'ru' ? 'несколько файлов имеют одно имя' : 'multiple files have the same name'
       );
       expect(unnamed).not.toContain('same.txt');
-      for (const text of [reserved, ambiguous, unnamed])
+      for (const text of [ambiguous, unnamed])
         expect(text).not.toMatch(/UNTRUSTED|invented.txt/);
     }
   );
