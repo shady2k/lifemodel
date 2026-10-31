@@ -175,6 +175,7 @@ async function collectOutputs(
 function outputInstructions(cwd: string): string {
   return `Files for the owner go in ${join(cwd, 'outputs')}/, flat, with their final file names.
 Only regular files are allowed; no subfolders or symlinks. Maximum: 64 files.
+I collect outputs/ automatically. Do not also upload these files with the storage CLI: duplicate owner-facing names fail the run (output_name_ambiguous).
 ${TASK_REPORT_NAME} is reserved for my semantic report; do not use it as a work output name.
 Files elsewhere are not retained. Failed-task outputs are retained as partial objects, not delivered as successful work.
 Use the task MCP step tool for short progress reports and question to ask the coordinating agent.
@@ -183,10 +184,12 @@ Question returns after storage, not an answer. Wait for the correlated answer vi
 async function artifacts(
   env: NodeJS.ProcessEnv,
   cwd: string,
-  reportId: string | null
+  reportId: string | null,
+  warning?: (code: string) => void
 ): Promise<string[]> {
   const ids: string[] = [];
-  const names = new Set<string>();
+  const names = new Map<string, string[]>();
+  const ambiguous = new Set<string>();
   let cursor: string | undefined;
   for (let pages = 0; pages < 100; pages++) {
     const page = await storage(
@@ -197,11 +200,19 @@ async function artifacts(
     for (const item of page['objects'] as Record<string, unknown>[]) {
       if (item['mark'] === 'artifact' || item['mark'] === 'result') {
         const name = item['name'];
-        if (name === TASK_REPORT_NAME && item['id'] !== reportId)
-          throw new LauncherError('output_name_reserved');
-        if (typeof name !== 'string' || names.has(name))
-          throw new LauncherError('output_name_ambiguous');
-        names.add(name);
+        const code =
+          name === TASK_REPORT_NAME && item['id'] !== reportId
+            ? 'output_name_reserved'
+            : typeof name !== 'string' || names.has(name)
+              ? 'output_name_ambiguous'
+              : undefined;
+        if (code) {
+          if (!warning) throw new LauncherError(code);
+          warning(code);
+          if (typeof name === 'string') ambiguous.add(name);
+          continue;
+        }
+        names.set(name as string, typeof item['id'] === 'string' ? [item['id']] : []);
       }
       if (item['mark'] === 'artifact') {
         const id = item['id'];
@@ -211,7 +222,11 @@ async function artifacts(
       }
     }
     // Row count cannot prove EOF: encoded metadata may cut a page short.
-    if (page['nextCursor'] === null) return ids;
+    if (page['nextCursor'] === null) {
+      // Both sides of a duplicate are ambiguous, even across listing pages.
+      const excluded = new Set([...ambiguous].flatMap((name) => names.get(name) ?? []));
+      return ids.filter((id) => !excluded.has(id));
+    }
     cursor = page['nextCursor'] as string;
   }
   throw new LauncherError('artifact_limit');
@@ -577,7 +592,12 @@ export async function runTaskLauncher(options: LauncherOptions): Promise<number>
       )
     );
     await retain(async () => {
-      terminal.artifactObjectIds = await artifacts(options.env, cwd, terminal.resultObjectId);
+      terminal.artifactObjectIds = await artifacts(
+        options.env,
+        cwd,
+        terminal.resultObjectId,
+        result.outcome === 'succeeded' ? undefined : warning
+      );
     }, true);
     if (skippedEntries || uploadFailures)
       trace?.enqueue({

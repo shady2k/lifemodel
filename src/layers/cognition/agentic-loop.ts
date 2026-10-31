@@ -264,8 +264,13 @@ export class AgenticLoop {
     state.disposition = 'answer';
     return buildFinalResultFromNaturalCompletion(
       state.taskRedoRecoveryUncertain || acceptedRedo
-        ? taskOutcomeRedoFallback(event, state.taskRedoRecoveryUncertain === true, language)
-        : taskOutcomeFallback(event, commandTexts, language),
+        ? taskOutcomeRedoFallback(
+            event,
+            state.taskRedoRecoveryUncertain === true,
+            language,
+            context.agentIdentity?.gender
+          )
+        : taskOutcomeFallback(event, commandTexts, language, context.agentIdentity?.gender),
       state,
       context,
       this.logger
@@ -332,9 +337,13 @@ export class AgenticLoop {
     const report = context.triggerSignal.data;
     if (report?.kind !== 'task_report' || !report.question)
       throw new Error('Task question fallback requires a normalized question');
+    const latestOwnerMessage =
+      context.conversationHistory?.findLast((message) => message.role === 'user')?.content ?? '';
+    const language = taskOutcomeLanguage(context.preferredLanguage, latestOwnerMessage);
+    const reference = `(${report.taskId}; ${report.question.questionId})`;
     state.disposition = 'answer';
     return buildFinalResultFromNaturalCompletion(
-      `Task ${report.taskId} asks (question ${report.question.questionId}):\n${report.question.text}`,
+      `${language === 'ru' ? 'Мне нужно уточнение' : 'I need clarification'} ${reference}:\n${report.question.text}`,
       state,
       context,
       this.logger

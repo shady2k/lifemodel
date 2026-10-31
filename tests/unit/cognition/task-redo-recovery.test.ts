@@ -32,6 +32,7 @@ function harness(timeoutMs = 300000) {
   const context = {
     tickId: 'outcome-turn',
     recipientId: 'owner',
+    agentIdentity: { gender: 'female' },
     userModel: {},
     agentState: createDefaultAgentState(),
     triggerSignal: createSignal(
@@ -199,4 +200,81 @@ describe('bounded outcome redo recovery', () => {
       text: expect.stringContaining(uncertainty),
     });
   });
+});
+
+describe('configured identity reaches deterministic replies', () => {
+  it.each(['female', 'male', 'neutral'] as const)(
+    'passes %s identity to all outcome fallback branches',
+    async (gender) => {
+      for (const mode of ['ordinary', 'accepted', 'uncertain']) {
+        const h = harness(100);
+        h.context.agentIdentity = { gender };
+        h.context.preferredLanguage = 'ru';
+        if (mode !== 'uncertain')
+          h.recover.mockResolvedValue(
+            mode === 'accepted' ? ({ success: true } as never) : (undefined as never)
+          );
+        vi.mocked(h.llm.completeWithTools).mockRejectedValue(new Error('model unavailable'));
+        const result = await h.loop.run(h.context);
+        const expected =
+          mode === 'ordinary'
+            ? {
+                female: 'Я получила файлы',
+                male: 'Я получил файлы',
+                neutral: 'Я располагаю файлами',
+              }[gender]
+            : mode === 'accepted'
+              ? { female: 'Я начала одну', male: 'Я начал одну', neutral: 'Я выполняю одну' }[
+                  gender
+                ]
+              : {
+                  female: 'Если я начала',
+                  male: 'Если я начал',
+                  neutral: 'Если исправленная попытка уже начата',
+                }[gender];
+        expect(result.terminal).toMatchObject({
+          type: 'respond',
+          text: expect.stringContaining(expected),
+        });
+      }
+    }
+  );
+});
+
+describe('localized first-person question fallback', () => {
+  it.each([
+    ['ru', 'Please check', 'Мне нужно уточнение'],
+    ['en', 'Проверь', 'I need clarification'],
+    ['unknown', 'Проверь', 'Мне нужно уточнение'],
+    [null, 'Please check', 'I need clarification'],
+  ] as const)(
+    'uses preference %s and latest owner text %j',
+    async (preferredLanguage, content, introduction) => {
+      const h = harness();
+      h.context.preferredLanguage = preferredLanguage;
+      h.context.conversationHistory = [
+        { role: 'user', content },
+        { role: 'assistant', content: 'Не выбирать язык по этому тексту' },
+      ];
+      const question = {
+        questionId: 'question_Exact-17',
+        text: 'Which destination?\n  Сохранить пробелы и «кавычки».',
+        answerCommandId: null,
+      };
+      h.context.triggerSignal = createSignal(
+        'task_report',
+        'test',
+        { value: 1 },
+        { data: { kind: 'task_report', eventKind: 'question', taskId: 'task_Exact-42', question } }
+      );
+      vi.mocked(h.llm.completeWithTools).mockRejectedValue(new Error('model unavailable'));
+      const result = await h.loop.run(h.context);
+      expect(result.terminal).toMatchObject({
+        type: 'respond',
+        text: `${introduction} (task_Exact-42; ${question.questionId}):\n${question.text}`,
+      });
+      expect(result.state.disposition).toBe('answer');
+      expect(result.intents.filter((intent) => intent.type === 'SEND_MESSAGE')).toHaveLength(1);
+    }
+  );
 });

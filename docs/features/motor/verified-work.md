@@ -54,13 +54,22 @@ add an execution system or a second artifact store.
   need an agreed concrete plan (what, range, files) before launch when the
   request does not name what to deliver and in what form or has several reasonable
   readings; clear requests run at once, without another question. Status speaks
-  as my own work: «готово», «проверила файл», «с первого раза не вышло, переделываю»,
+  as my own work: «готово», «содержимое файла проверено», «с первого раза не вышло, переделываю»,
   never «задача завершилась/остановилась».
 - Deterministic fallback and redo replies support Russian and English. The user
   model's supported preferred language wins (including region codes). Otherwise
   Cyrillic in the latest owner message selects Russian; otherwise English.
   Unknown preferences use that same fallback. Names, counts and quoted changes
-  are unchanged between languages. Russian replies stay in first person.
+  are unchanged between languages. Russian replies follow the configured female/male
+  identity; neutral or absent gender uses constructions without gendered past tense.
+  Question relays use the same language selection and first-person voice while
+  preserving question text, task ID and question ID exactly.
+- The launcher collects `outputs/` automatically; do not also upload those files
+  with the storage CLI. Reserved or duplicate names fail successful runs. On
+  unsuccessful runs, invalid entries and all members of duplicate-name groups
+  are skipped, while unrelated partial artifacts remain available.
+
+Transient: old rows and old-launcher rollout are not adapted (No Backward Compatibility).
 
 ## Alternatives not chosen
 

@@ -123,7 +123,7 @@ describe('startTask redo capability and effect budget', () => {
       buildTriggerPrompt(h.context),
     ]) {
       expect(prompt).toContain(
-        '«готово», «проверила файл», «с первого раза не вышло, переделываю»'
+        '«готово», «содержимое файла проверено», «с первого раза не вышло, переделываю»'
       );
       expect(prompt).toContain('never «задача завершилась» or «задача остановилась»');
     }
