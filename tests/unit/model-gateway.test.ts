@@ -2235,6 +2235,90 @@ describe('model gateway custom slot headers', () => {
   });
 });
 
+describe('model gateway nullable response roles', () => {
+  it('passes null-role stream chunks unchanged to the task caller', async () => {
+    const f = await fixture();
+    f.slots.reserve = null;
+    const url = await listen(
+      createServer((req, res) => {
+        void f.app.serveTask(req, res, 'trusted-task', async () => undefined);
+      })
+    );
+    const frames = [
+      { model: 'stream-real', choices: [{ index: 0, delta: { role: null } }] },
+      {
+        model: 'stream-real',
+        choices: [{ index: 0, delta: { role: null, content: 'hello', tool_calls: null } }],
+      },
+      {
+        model: 'stream-real',
+        choices: [{ index: 0, delta: { role: null, content: ' world' }, finish_reason: 'stop' }],
+      },
+    ];
+    const wire =
+      frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('') + 'data: [DONE]\n\n';
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(wire);
+    };
+    const response = await fetch(`${url}/v1/chat/completions`, {
+      method: 'POST',
+      body: JSON.stringify(streamPayload),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(wire);
+    expect(f.attempts).toHaveLength(1);
+    expect(f.lines.filter((line) => line.message === 'Model gateway upstream failed')).toEqual([]);
+  });
+
+  it.each([
+    { role: 'user', got: 'string' },
+    { role: 42, got: 'number' },
+    { role: false, got: 'boolean' },
+    { role: {}, got: 'object' },
+    { role: [], got: 'array' },
+  ])('still refuses stream delta role $role with role_value', async ({ role, got }) => {
+    const f = await fixture();
+    f.slots.reserve = null;
+    f.handlers.primary = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(
+        `data: ${JSON.stringify({
+          model: 'stream-real',
+          choices: [{ index: 0, delta: { role, content: 'hello' } }],
+        })}\n\n` + endStream()
+      );
+    };
+    const response = await f.post(streamPayload);
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      error: { type: 'gateway_error', code: 'bad_response' },
+    });
+    expect(f.attempts).toHaveLength(1);
+    const warnings = f.lines.filter((line) => line.message === 'Model gateway upstream failed');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.fields).toMatchObject({
+      code: 'bad_response',
+      reason: { check: 'role_value', path: 'choices[0].delta.role', got },
+    });
+  });
+
+  it('passes an already accepted buffered null message role unchanged', async () => {
+    const f = await fixture();
+    f.slots.reserve = null;
+    const reply = answer();
+    const wire = JSON.stringify({
+      ...reply,
+      choices: [{ ...reply.choices[0], message: { role: null, content: 'plain text' } }],
+    });
+    f.handlers.primary = (_req, res) => res.end(wire);
+    const response = await f.post();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(JSON.parse(wire));
+    expect(f.attempts).toHaveLength(1);
+  });
+});
+
 describe('model gateway null tool_calls, slot attribution and safe reasons', () => {
   /** A converting endpoint's text answer: null encodes "no tool calls". */
   const textAnswer = (message: Record<string, unknown>) => ({

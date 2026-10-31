@@ -114,7 +114,9 @@ function validateDelta(delta: Record<string, unknown>, path: string): void {
       if (value !== null && typeof value !== 'string')
         throw badResponse('text_field_type', `${path}.${field}`, jsonType(value));
     } else if (field === 'role') {
-      if (value !== 'assistant') throw badResponse('role_value', `${path}.role`, jsonType(value));
+      // A null role encodes an absent role in OpenAI-compatible stream deltas.
+      if (value !== null && value !== 'assistant')
+        throw badResponse('role_value', `${path}.role`, jsonType(value));
     } else if (field === 'tool_calls') {
       // `tool_calls: null` is a common OpenAI-compatible encoding of "no tool calls".
       if (value !== null) {
