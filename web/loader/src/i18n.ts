@@ -9,11 +9,14 @@ export const resources = {
     translation: {
       captureTitle: 'Capture model exchanges',
       captureWarning:
-        'Captures store personal conversation text on this machine. Capture is off by default and stops automatically at expiry. Changes reach the gateway within 30 seconds.',
+        'Captures store personal conversation text on this machine. Capture is off by default. Timed capture stops at expiry; until disabled has no automatic end. Retention stays at 24 hours and 100 MiB. Changes reach the gateway within 30 seconds.',
       captureUntil: 'Capture is on until {{time}}.',
+      captureNoEnd:
+        'Capture is on with no end until you disable it. It stores personal conversation text on this machine.',
+      captureUntilDisabled: 'Until disabled',
       captureOff: 'Capture is off.',
       captureScope: 'Only session: {{session}}',
-      captureDuration: 'Capture duration (24 hours maximum)',
+      captureDuration: 'Capture duration',
       capture10Minutes: '10 minutes',
       capture1Hour: '1 hour',
       capture24Hours: '24 hours',
@@ -216,11 +219,14 @@ export const resources = {
     translation: {
       captureTitle: 'Запись обмена с моделью',
       captureWarning:
-        'Записи содержат личный текст переписки и хранятся на этой машине. По умолчанию запись выключена и останавливается по истечении срока. Шлюз применяет изменения в течение 30 секунд.',
+        'Записи содержат личный текст переписки и хранятся на этой машине. По умолчанию запись выключена. Запись на срок останавливается по его истечении; запись до отключения не имеет автоматического конца. Хранение ограничено 24 часами и 100 МиБ. Шлюз применяет изменения в течение 30 секунд.',
       captureUntil: 'Запись включена до {{time}}.',
+      captureNoEnd:
+        'Запись включена без ограничения срока, пока вы её не отключите. Личный текст переписки хранится на этой машине.',
+      captureUntilDisabled: 'До отключения',
       captureOff: 'Запись выключена.',
       captureScope: 'Только сессия: {{session}}',
-      captureDuration: 'Длительность записи (не более 24 часов)',
+      captureDuration: 'Длительность записи',
       capture10Minutes: '10 минут',
       capture1Hour: '1 час',
       capture24Hours: '24 часа',

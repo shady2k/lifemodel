@@ -11,6 +11,7 @@ import {
   SelectValue,
 } from '@kit/components/ui/select';
 import {
+  CAPTURE_UNTIL_DISABLED,
   isCaptureEnabled,
   validateCaptureSettingResponse,
   type ModelCaptureRequest,
@@ -36,6 +37,7 @@ export function ModelCaptureSettings({ csrfToken }: { csrfToken: string }) {
         if (active) {
           setSetting(value);
           setSession(value.session ?? '');
+          if (value.until === CAPTURE_UNTIL_DISABLED) setDuration(CAPTURE_UNTIL_DISABLED);
           setLoaded(true);
         }
       })
@@ -63,7 +65,9 @@ export function ModelCaptureSettings({ csrfToken }: { csrfToken: string }) {
     const value: ModelCaptureRequest = off
       ? { durationMs: null }
       : {
-          durationMs: Number(duration),
+          ...(duration === CAPTURE_UNTIL_DISABLED
+            ? { mode: CAPTURE_UNTIL_DISABLED }
+            : { durationMs: Number(duration) }),
           ...(session.trim() ? { session: session.trim() } : {}),
         };
     try {
@@ -91,7 +95,9 @@ export function ModelCaptureSettings({ csrfToken }: { csrfToken: string }) {
       {loaded && (
         <p role="status" className="text-sm">
           {enabled
-            ? t('captureUntil', { time: new Date(setting.until ?? '').toLocaleString() })
+            ? setting.until === CAPTURE_UNTIL_DISABLED
+              ? t('captureNoEnd')
+              : t('captureUntil', { time: new Date(setting.until ?? '').toLocaleString() })
             : t('captureOff')}
         </p>
       )}
@@ -120,6 +126,7 @@ export function ModelCaptureSettings({ csrfToken }: { csrfToken: string }) {
               <SelectItem value="600000">{t('capture10Minutes')}</SelectItem>
               <SelectItem value="3600000">{t('capture1Hour')}</SelectItem>
               <SelectItem value="86400000">{t('capture24Hours')}</SelectItem>
+              <SelectItem value={CAPTURE_UNTIL_DISABLED}>{t('captureUntilDisabled')}</SelectItem>
             </SelectContent>
           </Select>
         </div>
