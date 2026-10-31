@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createCaptureInventory } from '../../loader/src/model-capture-inventory.js';
+import { createExchangeCapture } from '../../loader/src/model-exchange-capture.js';
 import { createTestStores, type TestStores } from '../helpers/test-stores.js';
 import { lockTestMigrationRoles } from '../helpers/apply-test-migrations.js';
 import { applyMigrations as applyTestMigrations } from '../../scripts/apply-migrations.js';
@@ -220,6 +222,99 @@ describe('gateway capture migration and least privilege', () => {
         )
       ).rows
     ).toEqual([]);
+  });
+  it('writes until-disabled evidence through the collector and prunes 24-hour age and 100 MiB overflow while still on', async () => {
+    let time = Date.now();
+    let prunes = 0;
+    const inventory = createCaptureInventory({
+      setting: {
+        current: () => ({ until: 'until-disabled' }),
+        refresh: async () => {},
+      },
+      now: () => time,
+      readSlot: async () => ({ state: 'absent' }),
+      passwords: async () => [],
+      prune: async () => {
+        const result = await asRole(
+          'lifemodel_capture_writer',
+          'SELECT observability.prune_model_exchanges() AS remaining'
+        );
+        prunes++;
+        return result.rows[0].remaining;
+      },
+    });
+    const capture = createExchangeCapture({
+      now: () => time,
+      context: (input) => inventory.context(input.sessionId),
+      write: async (row) => {
+        await asRole('lifemodel_capture_writer', append, [row.callId, row.exchange, row.expiresAt]);
+        inventory.noteWrite();
+      },
+    });
+    const count = async () =>
+      (await stores.postgres.query('SELECT count(*)::int n FROM observability.model_exchanges'))
+        .rows[0].n;
+    try {
+      await inventory.refresh();
+      await expect.poll(() => prunes).toBe(1);
+      const attempt = capture.begin({
+        callId: 'indefinite',
+        attempt: 1,
+        slot: 'primary',
+        taskId: null,
+        sessionId: null,
+        inbound: {
+          method: 'POST',
+          path: '/v1/chat/completions',
+          headers: {},
+          body: 'personal text',
+        },
+        upstream: {
+          method: 'POST',
+          url: 'https://model.test/v1/chat/completions',
+          headers: {},
+          body: 'personal text',
+        },
+      });
+      expect(attempt).toBeDefined();
+      attempt!.response(200, {});
+      attempt!.chunk(Buffer.from('reply'));
+      attempt!.finish();
+      await expect.poll(count).toBe(1);
+      expect(
+        (
+          await stores.postgres.query(
+            "SELECT exchange FROM observability.model_exchanges WHERE call_id='indefinite'"
+          )
+        ).rows[0].exchange.response.body
+      ).toBe('reply');
+      // Seed AFTER the write: only scheduled maintenance, not append-time pruning, can remove these.
+      await stores.postgres
+        .query(`INSERT INTO observability.model_exchanges(call_id,attempt,slot,created_at,exchange,size_bytes)
+        SELECT 'fixture-'||n,1,'primary',clock_timestamp()-interval '1 minute'*n,'{}',4194304 FROM generate_series(1,26) n`);
+      await stores.postgres
+        .query(`INSERT INTO observability.model_exchanges(call_id,attempt,slot,created_at,exchange,size_bytes)
+        VALUES('expired',1,'primary',now()-interval '25 hours','{}',1)`);
+      expect(await count()).toBe(28);
+      time += 60_000;
+      await inventory.refresh();
+      await expect.poll(() => prunes).toBe(2);
+      expect(inventory.enabled()).toBe(true);
+      expect(
+        (
+          await stores.postgres.query(
+            "SELECT call_id FROM observability.model_exchanges WHERE call_id IN ('expired','fixture-25','fixture-26')"
+          )
+        ).rows
+      ).toEqual([]);
+      const retained = await stores.postgres.query(
+        'SELECT count(*)::int n, sum(size_bytes)::bigint <= 104857600 AS bounded FROM observability.model_exchanges'
+      );
+      expect(retained.rows).toEqual([{ n: 25, bounded: true }]);
+    } finally {
+      capture.close();
+      inventory.close();
+    }
   });
   it('serializes concurrent appends without dropping attempts', async () => {
     await Promise.all(

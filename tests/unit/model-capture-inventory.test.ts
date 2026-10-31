@@ -290,6 +290,28 @@ describe('production model capture inventory', () => {
     expect(f.passwordReads).toBe(0);
     f.inventory.close();
   });
+  it('keeps the one-minute pruning cadence on until disabled even after days of capture', async () => {
+    const f = fixture();
+    f.setting = { until: 'until-disabled', session: 'wanted' };
+    await f.refresh();
+    expect(f.inventory.enabled('wanted')).toBe(true);
+    expect(f.inventory.enabled('other')).toBe(false);
+    expect(f.prunes).toBe(1);
+    f.time = 60_999;
+    await f.refresh();
+    expect(f.prunes).toBe(1);
+    f.time = 61_000;
+    await f.refresh();
+    expect(f.prunes).toBe(2);
+    f.time = 3 * 86_400_000;
+    await f.refresh();
+    expect(f.inventory.enabled('wanted')).toBe(true);
+    expect(f.prunes).toBe(3);
+    f.time = 3 * 86_400_000 + 60_000;
+    await f.refresh();
+    expect(f.prunes).toBe(4);
+    f.inventory.close();
+  });
   it('prunes each minute while enabled and retries failed maintenance hourly while off', async () => {
     const f = fixture();
     await f.refresh();

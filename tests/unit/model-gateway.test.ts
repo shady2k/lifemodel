@@ -9,7 +9,13 @@ import {
 import { networkInterfaces } from 'node:os';
 import { createModelGateway, GATEWAY_LIMITS } from '../../loader/src/model-gateway-app.js';
 import { connect } from 'node:net';
-import { createRoleBaoClient, createCachedSlotReader } from '../../loader/src/model-bao.js';
+import {
+  createRoleBaoClient,
+  createCachedSlotReader,
+  createCachedCaptureReader,
+} from '../../loader/src/model-bao.js';
+import { createCaptureInventory } from '../../loader/src/model-capture-inventory.js';
+import type { ModelCaptureSetting } from '../../loader/src/model-capture-setting.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 import type { ModelSlot, ModelSlotName } from '../../loader/src/model.js';
 import { createExchangeCapture, type CaptureRow } from '../../loader/src/model-exchange-capture.js';
@@ -2639,6 +2645,59 @@ describe('model gateway review round 2: safe reasons, stream positions, slot att
 });
 
 describe('model gateway opt-in exchange capture', () => {
+  it('captures until disabled with the production session filter and stops new rows after the 30-second refresh', async () => {
+    let time = Date.now();
+    let setting: ModelCaptureSetting = { until: 'until-disabled', session: 'wanted' };
+    const cached = createCachedCaptureReader(
+      async () => setting,
+      () => time
+    );
+    const inventory = createCaptureInventory({
+      setting: cached,
+      now: () => time,
+      readSlot: async () => ({ state: 'absent' }),
+      passwords: async () => [],
+      prune: async () => false,
+    });
+    const rows: CaptureRow[] = [];
+    const capture = createExchangeCapture({
+      now: () => time,
+      context: (input) => inventory.context(input.sessionId),
+      write: async (row) => {
+        rows.push(row);
+        inventory.noteWrite();
+      },
+    });
+    const f = await fixture(undefined, undefined, undefined, capture, (session) =>
+      inventory.enabled(session)
+    );
+    try {
+      await inventory.refresh();
+      await (await f.post(undefined, { 'x-lifemodel-session': 'other' })).text();
+      await (await f.post(undefined, { 'x-lifemodel-session': 'wanted' })).text();
+      await expect.poll(() => rows.length).toBe(1);
+      expect(rows[0]?.sessionId).toBe('wanted');
+      expect(rows[0]?.expiresAt).toBe(new Date(time + 86_400_000).toISOString());
+      // No timed expiry: capture is still on days later after refreshing its inventory.
+      time += 2 * 86_400_000;
+      await inventory.refresh();
+      await (await f.post(undefined, { 'x-lifemodel-session': 'wanted' })).text();
+      await expect.poll(() => rows.length).toBe(2);
+      setting = { until: null }; // Same stored value written by the Disable API.
+      time += 30_000;
+      await inventory.refresh(); // Production refresh interval, not a model-path read.
+      expect(inventory.enabled('wanted')).toBe(false);
+      await (await f.post(undefined, { 'x-lifemodel-session': 'wanted' })).text();
+      // Let all deferred collectors/writes settle before asserting absence.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(rows).toHaveLength(2);
+    } finally {
+      capture.close();
+      inventory.close();
+      f.app.close();
+    }
+  });
   it('does no capture work or header mutation when the production capture gate is off', async () => {
     let begins = 0;
     const capture = {
