@@ -110,7 +110,10 @@ summary or claims content verification it did not do. Even for `done`, it says
 that the files arrived but their contents could not be verified. Unknown codes
 (including `constructor`) get a fixed generic explanation, never inherited
 JavaScript implementation text. This
-fallback is fixed English; ordinary model replies still follow the owner's language.
+fallback uses the user model's supported preferred language (Russian or English),
+else Cyrillic in the latest owner message selects Russian, else English. Unknown
+preferences use the same script fallback. Deterministic redo replies follow the
+same rule; Russian speaks in first person about my own work.
 That fallback uses the same trusted output-attachment compiler as a normal reply.
 Only the committed answer completes the outcome; neither deferral nor silence does.
 

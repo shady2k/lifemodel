@@ -42,6 +42,7 @@ beforeAll(() => {
   for (const file of [
     'task-agent-validation.mjs',
     'task-transcript-bounds.mjs',
+    'task-output-names.mjs',
     'task-harness-registry.json',
   ]) {
     cpSync(`src/ports/${file}`, join(graph, 'src/ports', file));
@@ -146,6 +147,7 @@ describe('workbench launcher startup diagnostics and graph check', () => {
     'task-launcher-http.js',
     'model-error-excerpt.js',
     'task-transcript-bounds.mjs',
+    'task-output-names.mjs',
     ...adapterModules,
   ])('fails the offline check when the image omits %s, reporting only its basename', (missing) => {
     expect(diagnostic(launch({ missing }))).toEqual({

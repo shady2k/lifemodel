@@ -79,6 +79,68 @@ function harness(timeoutMs = 300000) {
 afterEach(() => vi.useRealTimers());
 
 describe('bounded outcome redo recovery', () => {
+  it.each([
+    ['ru', 'Please check.', true],
+    ['en', 'Проверь файл.', false],
+    ['unknown', 'Проверь файл.', true],
+    ['unknown', 'Please check.', false],
+    [null, '', false],
+  ] as const)(
+    'uses preference %s then latest owner script %j in redo recovery',
+    async (preferredLanguage, latest, ru) => {
+      const h = harness(100);
+      h.context.preferredLanguage = preferredLanguage;
+      h.context.conversationHistory = [
+        { role: 'user', content: 'Проверь старое.' },
+        { role: 'user', content: latest },
+        { role: 'assistant', content: 'Не использовать мой текст для выбора языка.' },
+      ];
+      const result = await h.loop.run(h.context);
+      expect(result.terminal).toMatchObject({
+        type: 'respond',
+        text: expect.stringContaining(ru ? 'Если я начала исправленную попытку' : uncertainty),
+      });
+    }
+  );
+
+  it.each(['ru', 'en', 'unknown'] as const)(
+    'uses preference %s for a recovered accepted redo fallback',
+    async (preferredLanguage) => {
+      const h = harness();
+      h.context.preferredLanguage = preferredLanguage;
+      h.recover.mockResolvedValue({ success: true, taskId: 'redo', state: 'queued' } as never);
+      vi.mocked(h.llm.completeWithTools).mockRejectedValue(new Error('model unavailable'));
+      const result = await h.loop.run(h.context);
+      expect(result.terminal).toMatchObject({
+        type: 'respond',
+        text: expect.stringContaining(
+          preferredLanguage === 'ru'
+            ? 'Я начала одну исправленную попытку и проверю её'
+            : 'I have started one corrected attempt and will check it'
+        ),
+      });
+    }
+  );
+
+  it.each(['ru', 'en', 'unknown'] as const)(
+    'uses preference %s for an ordinary outcome fallback',
+    async (preferredLanguage) => {
+      const h = harness();
+      h.context.preferredLanguage = preferredLanguage;
+      h.recover.mockResolvedValue(undefined as never);
+      vi.mocked(h.llm.completeWithTools).mockRejectedValue(new Error('model unavailable'));
+      const result = await h.loop.run(h.context);
+      expect(result.terminal).toMatchObject({
+        type: 'respond',
+        text: expect.stringContaining(
+          preferredLanguage === 'ru'
+            ? 'Я получила файлы, но не смогла проверить'
+            : 'I received the delivered files, but could not verify'
+        ),
+      });
+    }
+  );
+
   it('backs off 200ms then 1000ms and names delivered files in the neutral no-attachment fallback', async () => {
     vi.useFakeTimers();
     const h = harness();

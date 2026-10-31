@@ -1,6 +1,6 @@
 # Verified delegated work
 
-Task: lifemodel-653.9.21. The owner speaks to one agent. Delegated work remains
+Tasks: lifemodel-653.9.21, lifemodel-653.9.23. The owner speaks to one agent. Delegated work remains
 that agent's own work. This change extends the existing task surface; it does not
 add an execution system or a second artifact store.
 
@@ -11,6 +11,12 @@ add an execution system or a second artifact store.
   result text and transcript entries remain untrusted claims.
 - Expected outputs form a durable delivery contract: at most 16 unique, safe,
   flat names, each at most 128 ASCII characters. Answer-only starts omit them.
+  `task-report.txt` is reserved for the launcher's semantic report, never a
+  work output or expected output (`reserved_output_name` at start). A work
+  file named `result.txt` remains valid. The launcher refuses the reserved
+  name in the output folder and in explicit uploads. It also refuses duplicate
+  owner-facing names across its own-space listing, so each delivered name
+  resolves to one object. The report remains readable as untrusted claim text.
   The existing fenced task row owns that contract. Finalization compares it
   with `result`/`artifact` members of the immutable seal manifest before the
   state and event commit together. A log is not a delivered output.
@@ -45,7 +51,16 @@ add an execution system or a second artifact store.
   actual uncertain mutations still fail closed.
 - First-person status uses actual observations. A plan stays a plan. A launch
   is stated only after an accepted receipt in that turn. Ambiguous requests
-  need an agreed plan and expected files; clear requests run at once.
+  need an agreed concrete plan (what, range, files) before launch when the
+  request does not name what to deliver and in what form or has several reasonable
+  readings; clear requests run at once, without another question. Status speaks
+  as my own work: «готово», «проверила файл», «с первого раза не вышло, переделываю»,
+  never «задача завершилась/остановилась».
+- Deterministic fallback and redo replies support Russian and English. The user
+  model's supported preferred language wins (including region codes). Otherwise
+  Cyrillic in the latest owner message selects Russian; otherwise English.
+  Unknown preferences use that same fallback. Names, counts and quoted changes
+  are unchanged between languages. Russian replies stay in first person.
 
 ## Alternatives not chosen
 

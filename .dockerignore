@@ -48,3 +48,5 @@
 !src/ports/task-agent-validation.*
 
 !src/ports/task-transcript-bounds.*
+
+!src/ports/task-output-names.*

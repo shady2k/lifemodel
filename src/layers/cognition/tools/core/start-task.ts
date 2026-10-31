@@ -1,6 +1,7 @@
 import type { Tool, ToolContext, ToolParameter } from '../types.js';
 import { UncertainMutationError } from '../mutation-error.js';
 import { validateAgainstParameters } from '../validation.js';
+import { TASK_REPORT_NAME } from '../../../../ports/task-output-names.mjs';
 import { TASK_PROFILES } from '../../../../ports/task-profiles.js';
 import {
   isTaskExpectedOutputs,
@@ -36,7 +37,7 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
       type: 'array',
       required: false,
       description:
-        'Expected delivered output filenames: at most 16 unique safe flat names. Omit for answer-only work. Missing files make completion unsuccessful.',
+        'Expected delivered output filenames: at most 16 unique safe flat names. task-report.txt is reserved for my report (reserved_output_name). Omit for answer-only work. Missing files make completion unsuccessful.',
     },
   ];
   // Only the outcome-specific advertised schema exposes this trusted capability.
@@ -69,7 +70,7 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
     hasSideEffects: true,
     maxCallsPerTurn: 1,
     description:
-      'Start my long work in the background with a complete briefing, explicit profile and expected output filenames when files are requested. Agree the plan and expected files with the owner first only when the request has doubts or multiple readings; clear requests run at once. Returns queued without waiting for execution. Say I started only after this tool returns accepted in this turn, never before or after a refusal. A plan is not a result.',
+      'Start my long work in the background with a complete briefing, explicit profile and expected output filenames when files are requested. If the request does not name what to deliver and in what form, or has several reasonable readings, first propose a concrete plan (what, range, files) and ask for agreement before launch. For example, «Сделай мне в фоне отчёт по простым числам.» needs agreement; do not invent its range or files. Launch at once when the request is clear; do not ask again. Speak of the work as my own: «готово», «проверила файл», «с первого раза не вышло, переделываю», never «задача завершилась» or «задача остановилась». Returns queued without waiting for execution. Say I started only after this tool returns accepted in this turn, never before or after a refusal. A plan is not a result.',
     validate: (args) =>
       validateAgainstParameters(args as Record<string, unknown>, outcomeParameters),
     recoverAcceptedEffect: async (context) => {
@@ -110,6 +111,11 @@ export function createStartTaskTool(deps: StartTaskToolDeps): Tool {
         if (!profile) return { success: false, code: 'unknown_profile' };
         if (typeof args['briefing'] !== 'string' || !args['briefing'].trim())
           return { success: false, code: 'invalid_briefing' };
+        if (
+          Array.isArray(args['expectedOutputs']) &&
+          args['expectedOutputs'].includes(TASK_REPORT_NAME)
+        )
+          return { success: false, code: 'reserved_output_name' };
         if (args['expectedOutputs'] != null && !isTaskExpectedOutputs(args['expectedOutputs']))
           return { success: false, code: 'invalid_expected_outputs' };
         const trace = getTraceContext();

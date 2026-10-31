@@ -253,6 +253,65 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
       )
     );
   }
+  it.each(['ru', 'en', 'unknown'] as const)(
+    'passes the user model language %s through the processor to the deterministic fallback',
+    async (language) => {
+      const instance = await boot(`task-owner-language:${language}:${randomUUID()}:`, []);
+      const owner = createUser(instance.recipientId);
+      owner.preferences.language = language;
+      instance.cognition.processor.setDependencies({ userModel: new UserModel(owner, logger) });
+      instance.coreLoop.pushSignal(
+        outcome('task-owner-language', `outcome_language_${language}`, 'failed')
+      );
+      await expect.poll(async () => (await instance.events()).length).toBe(1);
+      const text = (await instance.events())[0]!.payload.text;
+      expect(text).toContain(language === 'ru' ? 'Мне не хватило времени.' : 'I ran out of time.');
+      expect(text).not.toMatch(/задач|остановилась|исполнитель/);
+    }
+  );
+
+  it('reads expected result.txt work bytes with a separate report and passes the outcome guard', async () => {
+    const args = { action: 'read', taskId: '', view: 'file', name: 'result.txt' };
+    const reply = 'I checked result.txt: it contains 2, 3 and 5.';
+    const instance = await boot(`task-result-name:${randomUUID()}:`, [
+      { content: 'I finished without reading.' },
+      { toolCalls: [{ name: 'core.steerTask', args }] },
+      { content: reply },
+    ]);
+    const task = await instance.registry.accept({
+      launchKey: 'result-name',
+      briefing: 'Save 2, 3 and 5 in result.txt.',
+      imageRevision,
+      profile: {
+        id: 'small',
+        revision: '1',
+        timeoutSeconds: 600,
+        cpuMillis: 500,
+        memoryBytes: 536870912,
+      },
+      expectedOutputs: ['result.txt'],
+    });
+    args.taskId = task.id;
+    const bytes = Buffer.from('2 3 5');
+    const work = { ...artifact, name: 'result.txt', size: bytes.length, contentType: 'text/plain' };
+    const report = { ...object, name: 'task-report.txt' };
+    instance.fileContents.set(work.id, bytes);
+    await relay(instance, await seal(instance.registry, task, [report, work], 'Unverified claim.'));
+    await expect.poll(async () => (await instance.events()).length).toBe(1);
+    expect((await instance.events())[0]!.payload).toMatchObject({
+      text: reply,
+      attachments: [{ name: 'task-report.txt' }, { name: 'result.txt' }],
+    });
+    expect(instance.fileReads).toEqual([work.id]);
+    expect(instance.cognition.provider.requests).toHaveLength(3);
+    expect(instance.cognition.provider.requests[1]!.messages).toContainEqual(
+      expect.objectContaining({
+        role: 'system',
+        content: expect.stringContaining('Verification required before a final reply'),
+      })
+    );
+  });
+
   it('checks a binary expected file from manifest facts without claiming content inspection or falling back', async () => {
     const args = { action: 'read', taskId: '', view: 'file', name: 'chart.png' };
     const reply = 'I delivered chart.png (8 bytes). I cannot inspect its binary content.';
@@ -475,7 +534,7 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
       (message) => message.content
     ).join('\n');
     expect(prompt).toContain('Verify before replying');
-    expect(prompt).toContain('Claims only: summary, result.txt and transcript text');
+    expect(prompt).toContain('Claims only: summary, task-report.txt and transcript text');
     expect(prompt).toContain('compare the contents with the owner');
     expect((await instance.events())[0]!.payload.text).toContain(
       'I checked primes500.txt: it contains only 2 and 3'
@@ -829,8 +888,10 @@ describe('task conversation replies (real Postgres and Valkey)', () => {
     expect(prompt).toContain(
       'Say "started" only after core.startTask returned accepted in this turn'
     );
-    expect(prompt).toContain('A clear request runs at once');
-    expect(prompt).toContain('agree the plan, including expected files');
+    expect(prompt).toContain('Launch at once when the request is clear; do not ask again');
+    expect(prompt).toContain(
+      'first propose a concrete plan (what, range, files) and ask for agreement'
+    );
   });
 
   it('answers at once, then binds sealed result and artifact files with plain names to one reply across duplicate relay and restart', async () => {

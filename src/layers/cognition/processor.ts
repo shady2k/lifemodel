@@ -523,6 +523,7 @@ export class CognitionProcessor implements CognitionLayer {
       conversationHistory,
       runningTasks,
       userModel: this.userModel?.getBeliefs() ?? {},
+      preferredLanguage: this.userModel?.getLanguage(),
       tickId: context.tickId,
       recipientId, // Still propagate for routing if thought decides to respond
       userId: signalData?.userId,

@@ -125,30 +125,61 @@ export function taskOutcomeAttachments(event: TaskOutcomeEvent): MessageAttachme
   return groups;
 }
 
+/** Supported preference wins; unknown/missing preferences fall back to owner text, then English. */
+export function taskOutcomeLanguage(
+  preferred?: string | null,
+  latestOwnerMessage = ''
+): 'ru' | 'en' {
+  const language = preferred?.trim().toLowerCase().split(/[-_]/)[0];
+  if (language && ['ru', 'russian', 'русский'].includes(language)) return 'ru';
+  if (language && ['en', 'english', 'английский'].includes(language)) return 'en';
+  return /\p{Script=Cyrillic}/u.test(latestOwnerMessage) ? 'ru' : 'en';
+}
+
 /** Fixed owner-facing facts only; the unverified semantic summary is never repeated. */
 export function taskOutcomeFallback(
   event: TaskOutcomeEvent,
-  commandTexts: ReadonlyMap<string, string> = new Map()
+  commandTexts: ReadonlyMap<string, string> = new Map(),
+  language: 'ru' | 'en' = 'en'
 ): string {
-  const reasons: Record<string, string> = {
-    completed:
-      'I received the delivered files, but could not verify their contents. I cannot confirm the requested result yet.',
-    timeout: 'I ran out of time.',
-    stopped: 'I stopped before finishing.',
-    aborted: 'I stopped before finishing.',
-    compute_missing: 'I could no longer find the running work.',
-    job_failed: 'I encountered an execution failure.',
-    semantic_report_missing: 'I did not receive a final result confirmation.',
-    missing_result: 'I did not receive a result file.',
-    expected_outputs_missing: `I did not receive the expected files: ${JSON.stringify(event.missingExpectedOutputs ?? [])}.`,
-    checksum_mismatch: 'I could not verify the result file checksum.',
-    executor_failed: 'I could not finish execution.',
-    launch_failed: 'I could not start execution.',
-  };
+  const ru = language === 'ru';
+  const reasons: Record<string, string> = ru
+    ? {
+        completed:
+          'Я получила файлы, но не смогла проверить их содержимое. Пока не могу подтвердить запрошенный результат.',
+        timeout: 'Мне не хватило времени.',
+        stopped: 'Я прекратила работу, не закончив её.',
+        aborted: 'Я прекратила работу, не закончив её.',
+        compute_missing: 'Я больше не смогла найти запущенную работу.',
+        job_failed: 'Я столкнулась с ошибкой выполнения.',
+        semantic_report_missing: 'Я не получила итогового подтверждения результата.',
+        missing_result: 'Я не получила файл с результатом.',
+        expected_outputs_missing: `Я не получила ожидаемые файлы: ${JSON.stringify(event.missingExpectedOutputs ?? [])}.`,
+        checksum_mismatch: 'Я не смогла проверить контрольную сумму файла с результатом.',
+        executor_failed: 'Я не смогла закончить выполнение.',
+        launch_failed: 'Я не смогла начать выполнение.',
+      }
+    : {
+        completed:
+          'I received the delivered files, but could not verify their contents. I cannot confirm the requested result yet.',
+        timeout: 'I ran out of time.',
+        stopped: 'I stopped before finishing.',
+        aborted: 'I stopped before finishing.',
+        compute_missing: 'I could no longer find the running work.',
+        job_failed: 'I encountered an execution failure.',
+        semantic_report_missing: 'I did not receive a final result confirmation.',
+        missing_result: 'I did not receive a result file.',
+        expected_outputs_missing: `I did not receive the expected files: ${JSON.stringify(event.missingExpectedOutputs ?? [])}.`,
+        checksum_mismatch: 'I could not verify the result file checksum.',
+        executor_failed: 'I could not finish execution.',
+        launch_failed: 'I could not start execution.',
+      };
   const knownReason = Object.hasOwn(reasons, event.reasonCode)
     ? reasons[event.reasonCode]
     : undefined;
-  const reason = knownReason ?? 'I could not confirm a more specific reason.';
+  const reason =
+    knownReason ??
+    (ru ? 'Я не смогла уточнить причину.' : 'I could not confirm a more specific reason.');
   const missed = event.commands?.filter((c) => c.delivery === 'not_delivered') ?? [];
   const uncertain =
     event.commands?.filter((c) => ['queued', 'delivered', 'uncertain'].includes(c.delivery)) ?? [];
@@ -159,13 +190,49 @@ export function taskOutcomeFallback(
     })
     .slice(0, 8);
   const delivery = missed.length
-    ? `\n${String(missed.length)} ${missed.length === 1 ? 'change did' : 'changes did'} not reach my running work and ${missed.length === 1 ? 'was' : 'were'} not applied.${excerpts.length ? ` Changes (quoted): ${excerpts.join('; ')}.` : ''}`
+    ? ru
+      ? `\nНе дошли до моей запущенной работы и не были применены изменения: ${String(missed.length)}.${excerpts.length ? ` Изменения (цитаты): ${excerpts.join('; ')}.` : ''}`
+      : `\n${String(missed.length)} ${missed.length === 1 ? 'change did' : 'changes did'} not reach my running work and ${missed.length === 1 ? 'was' : 'were'} not applied.${excerpts.length ? ` Changes (quoted): ${excerpts.join('; ')}.` : ''}`
     : '';
   const pending = uncertain.length
-    ? `\n${String(uncertain.length)} ${uncertain.length === 1 ? 'change has' : 'changes have'} no confirmed turn insertion and may not have been applied.`
+    ? ru
+      ? `\nЯ не подтвердила включение изменений в ход работы: ${String(uncertain.length)}. Они могли не быть применены.`
+      : `\n${String(uncertain.length)} ${uncertain.length === 1 ? 'change has' : 'changes have'} no confirmed turn insertion and may not have been applied.`
     : '';
-  // The semantic report is an untrusted claim. A fallback did not inspect
-  // file contents, so it must never turn that claim into the owner's result.
-  const state = event.state === 'done' ? '' : 'I could not complete the work. ';
-  return `${state}${reason}${delivery}${pending} How would you like me to proceed?`;
+  // A fallback did not inspect file contents; never turn the report into a result.
+  const state =
+    event.state === 'done'
+      ? ''
+      : ru
+        ? 'Я не смогла завершить работу. '
+        : 'I could not complete the work. ';
+  return `${state}${reason}${delivery}${pending} ${ru ? 'Как мне продолжить?' : 'How would you like me to proceed?'}`;
+}
+
+/** A redo receipt or uncertain recovery never verifies the original contents. */
+export function taskOutcomeRedoFallback(
+  event: TaskOutcomeEvent,
+  uncertain: boolean,
+  language: 'ru' | 'en'
+): string {
+  if (!uncertain)
+    return language === 'ru'
+      ? 'Я не смогла проверить запрошенный результат. Я начала одну исправленную попытку и проверю её, прежде чем подтвердить результат.'
+      : 'I could not verify the requested result. I have started one corrected attempt and will check it before confirming the result.';
+  const delivered = event.objects
+    .filter((object) => object.mark === 'result' || object.mark === 'artifact')
+    .map(
+      (object) =>
+        `${JSON.stringify(object.name)} (${String(object.size)} ${language === 'ru' ? 'байт' : 'bytes'})`
+    );
+  const text =
+    language === 'ru'
+      ? 'Если я начала исправленную попытку, я сообщу о ней; я не смогла подтвердить её состояние, поэтому пока не могу подтвердить результат.'
+      : 'If I started a corrected attempt, I will report on it; I could not confirm its state, so I cannot confirm the result yet.';
+  return (
+    text +
+    (delivered.length
+      ? `\n${language === 'ru' ? 'Полученные файлы (содержимое не проверено)' : 'Delivered files (contents unverified)'}: ${delivered.join('; ')}.`
+      : '')
+  );
 }

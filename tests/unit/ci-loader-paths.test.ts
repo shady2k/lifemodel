@@ -21,6 +21,8 @@ describe('loader image CI path classification', () => {
     for (const path of [
       'src/ports/task-transcript-bounds.mjs',
       'src/ports/task-transcript-bounds.d.mts',
+      'src/ports/task-output-names.mjs',
+      'src/ports/task-output-names.d.mts',
     ])
       expect(
         execFileSync('sh', [selector], {

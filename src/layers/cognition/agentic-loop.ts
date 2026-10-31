@@ -67,7 +67,12 @@ import { validateToolCallPairs } from './messages/tool-call-validators.js';
 import { buildSystemPrompt } from './prompts/system-prompt.js';
 import { buildTriggerPrompt } from './prompts/trigger-prompt.js';
 import { getTraceContext } from '../../core/trace-context.js';
-import { taskOutcomeFallback, validateTaskOutcome } from '../../ports/task-outcome.js';
+import {
+  taskOutcomeFallback,
+  taskOutcomeLanguage,
+  taskOutcomeRedoFallback,
+  validateTaskOutcome,
+} from '../../ports/task-outcome.js';
 import { UncertainMutationError } from './tools/mutation-error.js';
 import { createToolResult } from './tools/types.js';
 
@@ -253,19 +258,14 @@ export class AgenticLoop {
             (result.data as { success?: boolean } | undefined)?.success === true
         )
     );
-    const delivered = event.objects
-      .filter((object) => object.mark === 'result' || object.mark === 'artifact')
-      .map((object) => `${JSON.stringify(object.name)} (${String(object.size)} bytes)`);
+    const latestOwnerMessage =
+      context.conversationHistory?.findLast((message) => message.role === 'user')?.content ?? '';
+    const language = taskOutcomeLanguage(context.preferredLanguage, latestOwnerMessage);
     state.disposition = 'answer';
     return buildFinalResultFromNaturalCompletion(
-      state.taskRedoRecoveryUncertain
-        ? 'If I started a corrected attempt, I will report on it; I could not confirm its state, so I cannot confirm the result yet.' +
-            (delivered.length
-              ? `\nDelivered files (contents unverified): ${delivered.join('; ')}.`
-              : '')
-        : acceptedRedo
-          ? 'I could not verify the requested result. I have started one corrected attempt and will check it before confirming the result.'
-          : taskOutcomeFallback(event, commandTexts),
+      state.taskRedoRecoveryUncertain || acceptedRedo
+        ? taskOutcomeRedoFallback(event, state.taskRedoRecoveryUncertain === true, language)
+        : taskOutcomeFallback(event, commandTexts, language),
       state,
       context,
       this.logger
