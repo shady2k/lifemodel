@@ -7,6 +7,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -193,6 +194,37 @@ describe('workbench launcher startup diagnostics and graph check', () => {
       module: 'unknown',
     });
   });
+
+  it('root build:loader emits a nonempty trusted start-module inventory', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'root-loader-build-'));
+    try {
+      for (const path of [
+        'package.json',
+        'loader',
+        'src/ports',
+        'scripts/task-start-manifest.mjs',
+      ]) {
+        mkdirSync(join(directory, path, '..'), { recursive: true });
+        cpSync(path, join(directory, path), { recursive: true });
+      }
+      symlinkSync(resolve('node_modules'), join(directory, 'node_modules'), 'dir');
+      const result = spawnSync('npm', ['run', 'build:loader'], {
+        cwd: directory,
+        encoding: 'utf8',
+        timeout: 60_000,
+      });
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      const emitted = read(join(directory, 'loader/dist/task-launcher-main.js'));
+      expect(emitted).not.toContain('/* task-start-module-manifest */ []');
+      const inventory = emitted.match(/Object\.freeze\((\[[^\]]*\])\)/);
+      expect(inventory).not.toBeNull();
+      const names = JSON.parse(inventory![1]!) as string[];
+      expect(names.length).toBeGreaterThan(0);
+      expect(names).toEqual(expect.arrayContaining(['task-launcher.js', 'task-output-names.mjs']));
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }, 70_000);
 
   it('builds the trusted manifest before copying the complete graph into the image', () => {
     const loader = JSON.parse(read('loader/package.json')) as { scripts: { build: string } };

@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc && cp -r src/runtime/builtin-skills dist/runtime/builtin-skills",
-    "build:loader": "tsc -p loader/tsconfig.json",
+    "build:loader": "tsc -p loader/tsconfig.json && node scripts/task-start-manifest.mjs loader",
     "start": "node dist/index.js",
     "lint": "eslint src/ loader/ web/app/ web/loader/src/",
     "lint:fix": "eslint src/ loader/ web/app/ web/loader/src/ --fix",
