@@ -476,7 +476,7 @@ describe('Postgres trace persistence and whole-trace retention', () => {
   });
 
   it('scrubs known and shaped credentials before they reach database rows', async () => {
-    const canary = 'private-canary%2Ftoken%3Aabcdef';
+    const canary = 'private-canary%2Fsegment%3Aabcdef';
     const decoded = decodeURIComponent(canary);
     const store = writer(noRetention, {
       knownSecrets: postgresKnownSecrets(`postgres://core:${canary}@database.invalid/core`),
@@ -505,8 +505,9 @@ describe('Postgres trace persistence and whole-trace retention', () => {
         )
       ).rows
     );
-    for (const value of [canary, decoded, 'canary-bearer', 'sk-abcdefghijklmnopqrstuvwxyz'])
-      expect(persisted).not.toContain(value);
+    expect.soft(persisted.includes(decoded), 'persisted decoded credential leaked').toBe(false);
+    for (const value of [canary, 'canary-bearer', 'sk-abcdefghijklmnopqrstuvwxyz'])
+      expect.soft(persisted.includes(value), 'persisted credential leaked').toBe(false);
     expect(persisted).toContain('[REDACTED]');
   });
 
