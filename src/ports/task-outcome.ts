@@ -186,7 +186,7 @@ export function taskOutcomeFallback(
         checksum_mismatch: `Я ${couldNot} проверить контрольную сумму файла с результатом.`,
         executor_failed: `Я ${couldNot} закончить выполнение.`,
         launch_failed: `Я ${couldNot} начать выполнение.`,
-        output_name_reserved: `Я не могу использовать имя ${JSON.stringify(TASK_REPORT_NAME)} для рабочего файла: оно зарезервировано для моего итогового отчёта.`,
+        output_name_reserved: `Я ${couldNot} закончить выполнение: моя запущенная работа попыталась записать файл с именем ${JSON.stringify(TASK_REPORT_NAME)}; система сама создаёт этот файл из итогового сообщения работы, поэтому запуск отклонён.`,
         output_name_ambiguous: `Я не могу однозначно выбрать файл: несколько файлов имеют одно имя${ambiguousNames}.`,
       }
     : {
@@ -203,7 +203,7 @@ export function taskOutcomeFallback(
         checksum_mismatch: 'I could not verify the result file checksum.',
         executor_failed: 'I could not finish execution.',
         launch_failed: 'I could not start execution.',
-        output_name_reserved: `I cannot use ${JSON.stringify(TASK_REPORT_NAME)} for a work file: that name is reserved for my final report.`,
+        output_name_reserved: `I could not finish execution: my running work tried to write a file named ${JSON.stringify(TASK_REPORT_NAME)}; the system writes that file itself from the work's final message, so the run was refused.`,
         output_name_ambiguous: `I cannot select a file unambiguously: multiple files have the same name${ambiguousNames}.`,
       };
   const knownReason = Object.hasOwn(reasons, event.reasonCode)
