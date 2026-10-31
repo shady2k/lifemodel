@@ -627,7 +627,7 @@ describe('task immutable object API', () => {
         if (!reason && outcome !== 'failed') expect(reports[0]).not.toHaveProperty('reasonCode');
         expect(catalog.some((row: any) => row.name === 'outside.txt')).toBe(false);
         expect(catalog.some((row: any) => row.name.startsWith('launcher_'))).toBe(false);
-        expect(catalog.find((row: any) => row.mark === 'result').name).toBe('result.txt');
+        expect(catalog.find((row: any) => row.mark === 'result').name).toBe('task-report.txt');
         expect(catalog.some((row: any) => row.mark === 'log')).toBe(false);
         expect(catalog.some((row: any) => row.name === 'log.jsonl')).toBe(false);
         expect(reports[0]).not.toHaveProperty('logObjectId');
