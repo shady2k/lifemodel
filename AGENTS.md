@@ -422,7 +422,7 @@ holder fence protects Postgres writes. Neither makes a cross-store transaction.
 
 ## Design Principles
 
-**We are building a digital human, not a chatbot.**
+**We are building a digital human, not a chatbot.** These are principles P3–P10 of `docs/vision.md`, which keeps the full numbered list milestones and designs refer to.
 
 1. **Energy Conservation** — Layered processing: autonomic first (free),
    conscious thought only when needed (expensive). (`src/core/energy.ts`,

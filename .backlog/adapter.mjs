@@ -29,6 +29,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { landedFor, mainLine } from './landed.mjs';
+import { documentsAt } from './documents.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MECHANISM = join(HERE, 'sync', 'tracker-sync.mjs');
@@ -278,6 +279,10 @@ export function readWithLanded(argv) {
   const r = readRaw(argv);
   const out = normalize(r.rows, r.source);
   if (r.at) out.landed = landedFor(r.at, mainLine().sha);
+  // The charter's outcomes and the vision, from the revision the state stands
+  // for; the store as it is now reads the working tree.
+  const asOf = val(argv, '--at') || val(argv, '--at-or-before') ? r.at : null;
+  Object.assign(out, documentsAt(asOf));
   return out;
 }
 
