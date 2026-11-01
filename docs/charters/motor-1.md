@@ -12,6 +12,27 @@ its own container with its own files, network and limits, and the owner talks to
 lifemodel while tasks run. The decisions behind each outcome are recorded on
 lifemodel-653 (2026-10-13, 2026-10-14, 2026-10-19).
 
+## Closed 2026-11-01
+
+Closed by the owner on what it delivered (plan of 2026-10-30, «Давай.
+Закрывай» on 2026-11-01): **the agent runs tasks again, each in its own
+container.** Accepted: outcome 1, CI builds and renders what is deployed
+(lifemodel-5f4q); of outcome 2 (lifemodel-653), stages 1-4: the owner's task
+limits in the loader (lifemodel-653.6), each task's files in its own storage
+space (lifemodel-653.7), long work asked in the chat and returned as a reply by
+a task running as a Kubernetes Job (lifemodel-653.8), and the agent and a
+running task talking live, with the task's agent switched between OpenCode and
+prime-agent by a loader setting (lifemodel-653.9, accepted at 78a2ec1f).
+Findings: 11 of 11.
+
+Moved to `motor-2`, which follows `observability-1`: the rest of outcome 2 —
+stage 5, stopping, the queue and surviving a core restart (lifemodel-653.10,
+with the OpenCode transcript-order finding lifemodel-653.9.28), its end-to-end
+acceptance (lifemodel-653.1) and the workbench image kept resident
+(lifemodel-653.13); outcomes 3-5 (lifemodel-ey3e, lifemodel-hf2k with its
+implemented lifemodel-hf2k.1, lifemodel-97bj); and the model input cache
+(lifemodel-fyjz). The text below is the charter as it stood.
+
 ## Outcomes
 
 Each outcome is one feature issue labelled `motor-1`. Checks run on the owner's
