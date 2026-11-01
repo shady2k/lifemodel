@@ -46,7 +46,7 @@ for f in .githooks/pre-commit .githooks/commit-msg .githooks/pre-push .githooks/
     .githooks/post-commit .githooks/post-merge .githooks/post-checkout; do
     [ -f "$f" ] || need "$f is missing from this checkout"
 done
-for f in adapter.mjs commits.mjs gate.mjs merge-gate.mjs recorded.mjs claim.mjs ready.mjs config.json br-policy.yaml \
+for f in adapter.mjs documents.mjs landed.mjs commits.mjs gate.mjs merge-gate.mjs recorded.mjs claim.mjs ready.mjs config.json br-policy.yaml \
     sync/tracker-sync.mjs sync/tracker-sync.version sync/argv.mjs sync/regular-file.mjs sync/trackers/br.mjs sync/supervisors/systemd-user/tracker-sync.service; do
     [ -f ".backlog/$f" ] || need ".backlog/$f is missing from this checkout"
 done

@@ -19,6 +19,37 @@ One owner. lifemodel is the owner's personal companion and agent.
   lifemodel ships as signed releases, the same for everyone, and runs on a
   dedicated VM installed by one command.
 
+## Key journeys
+
+Agreed by the owner on 2026-11-01. Every milestone outcome names the journeys
+and principles it serves by these ids.
+
+- J1: The owner talks with lifemodel in the web chat and steers it through conversation.
+- J2: lifemodel decides on its own when to think, act and reach out to the owner.
+- J3: The owner asks for long work; lifemodel hands it to a task in its own bounds, keeps talking meanwhile, and returns the result as a reply.
+- J4: The owner asks, and lifemodel changes its own code and reports; a broken change is cheap to undo.
+- J5: The owner installs his own instance with one command on a dedicated machine and sees from the loader what every part did.
+
+## Principles
+
+Agreed by the owner on 2026-11-01: the direction above, the design principles
+in `AGENTS.md`, and the owner's rules of 2026-10-24, 2026-10-26 and 2026-10-31.
+
+- P1: Safety comes from cheap rollback and from limits the agent cannot change, not from forbidding change.
+- P2: One owner, his own instance on his own machine; nothing personal leaves it.
+- P3: Energy conservation: autonomic first, conscious thought only when needed.
+- P4: Emergence over polling.
+- P5: Signals, not events.
+- P6: Plugin isolation.
+- P7: No backward compatibility: clean breaks.
+- P8: No attribute prefix routing.
+- P9: Restart-safe scheduling.
+- P10: Long-term architecture over quick wins; open standards.
+- P11: Replaceable parts stand behind a seam; generic code names no vendor.
+- P12: Registries and endpoints are loader settings, never hard-coded.
+- P13: Declare the untrusted zone and guard its edge; no containers inside containers.
+- P14: The agent's instructions state meaning and reasons, not bans.
+
 ## Roadmap
 
 The path leads to evolution first: the thinnest end-to-end version in which the

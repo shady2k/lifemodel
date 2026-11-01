@@ -41,6 +41,7 @@ owner's test VM, never on a real instance; interfaces are accepted by PRA-001.
   appears, that each of the four filters narrows the results, that the page
   refuses without the loader's login, and that it still answers with the core
   and the chat stopped.
+  Serves: J5, J1, P2
 - O2: **One chat message is followed through the whole platform by one request
   id** (lifemodel-2mou). The model-call spans and the gateway exchange capture
   already exist (PRs #159, #160, #162). What remains is to record the core's
@@ -53,6 +54,7 @@ owner's test VM, never on a real instance; interfaces are accepted by PRA-001.
   kubectl. The captured response shapes of every configured model pass through
   the gateway, streamed and buffered. A response that breaks what the gateway
   needs is still refused, with its field and type.
+  Serves: J1, J2, J5, P10
 - O3: **Required checks reject, before a merge, the failures that the owner and
   the test machine caught in motor-1** (lifemodel-0kcv). Repetition makes a test
   that fails at random far less likely to reach main, but it cannot guarantee it.
@@ -69,6 +71,7 @@ owner's test VM, never on a real instance; interfaces are accepted by PRA-001.
 
   A pull request with stable tests passes, and the PR records its CI cost. A
   shrunk file lowers its recorded count. Main as it stands passes.
+  Serves: J4, P1, P11, P12
 
 ## Out
 

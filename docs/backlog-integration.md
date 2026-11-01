@@ -88,16 +88,25 @@ the repository's installation, and each person's plugin and hooks are their own.
   `check-commits.mjs`, `check-docs.mjs`, `check-product.mjs`, and `check-present.mjs` with
   `document-format.mjs` beside it, and `regular-file.mjs` and `argv.mjs`, which
   every check imports — byte-for-byte copies of shady2k-skills
-  0.126.0's `skills/backlog/setup-shady2k-skills/` at setup version 0.56.0,
+  0.130.0's `skills/backlog/setup-shady2k-skills/` at setup version 0.59.0,
   never edited here. Their `--version` is the installation. Proving it: `cmp`
   each against the plugin copy.
-- **Charter outcomes:** none with ids yet. The rules that read them
-  (`orphaned-outcome`, `unobservable-first-stage`, `unserved-outcome`), the
-  vision's journeys and principles with ids, `Serves:` lines and `codePaths`
-  are adopted with the next charter, `observability-1` (owner, 2026-10-20, at
-  the 0.51.0 setup: adopting them on motor-1, whose three features are not yet
-  staged and with no document gate, would refuse every landing and every
-  feature commit). Until then they report nothing and `codePaths` is absent.
+- **Charter outcomes and the vision:** adopted with `observability-1`
+  (owner, 2026-11-01, setup 0.59.0, lifemodel-xwef). `docs/vision.md` keeps
+  the owner's journeys (`## Key journeys`, J1-J5) and principles
+  (`## Principles`, P1-P14), one per line with the id in front. The current
+  milestone's charter (`docs/charters/<currentMilestone>.md`) declares its
+  outcomes under `## Outcomes` as `- O1: **<title>** ...`, each ending with an
+  indented `Serves: J1, P2` line. `.backlog/documents.mjs` reads both, at the
+  judged revision (the working tree for the store as it is now), and the
+  adapter and the gate put them into the export as `outcomes` and `vision`;
+  `orphaned-outcome` and `unserved-outcome` read them. A stage names the
+  outcomes it serves in its body with `Serves: O1`; the older convention of
+  naming a leaf's parent stage there now reads `Part of:`. `codePaths` stays
+  absent: the commit rule it switches on judges change records, which wait for
+  the document gate below. The charter's different-model judgement record
+  belongs to that gate (`missing-judgement`); until it is installed, the
+  judgement is kept on the charter task (lifemodel-7lfx).
 - **Present documents:** the config's `presentDocuments` — `AGENTS.md`,
   `README.md`, `docs/architecture.md`, `docs/concepts/*.md`,
   `docs/features/**/*.md`, `docs/plugins/*.md`. `npm run present` runs the
@@ -134,9 +143,10 @@ the repository's installation, and each person's plugin and hooks are their own.
   state under each code revision's own name, written once and never moved) and
   `.tracker-sync/machines.json` (machine ordinals). br's database there is this
   machine's own, rebuilt from the state files, never committed. The project's
-  statuses (`submitted`, `implemented`) are br's policy file, which the recipe
-  does not carry: `.backlog/br-policy.yaml` is the project's copy, and `npm run
-  connect` installs it as the store's `.beads/policy.yaml`. Every checkout and
+  statuses (`submitted`, `implemented`) are br's policy file. Since 0.130.0 the
+  recipe carries it between machines as a state file too; `.backlog/br-policy.yaml`
+  stays the project's copy, which `npm run connect` installs as the store's
+  `.beads/policy.yaml`. Every checkout and
   worktree has `.beads` as a link to the store's `.beads` (ignored in
   `.gitignore`); a new worktree gets it from the post-checkout hook. No code
   branch carries a tracker record, and the pre-commit hook refuses a staged path
@@ -154,7 +164,7 @@ the repository's installation, and each person's plugin and hooks are their own.
 - **Tracker synchronization:** `.backlog/sync/tracker-sync.mjs` with the recipe
   `.backlog/sync/trackers/br.mjs` and the systemd template
   `.backlog/sync/supervisors/systemd-user/tracker-sync.service`, byte-for-byte
-  copies of shady2k-skills 0.126.0, with `argv.mjs` and `regular-file.mjs`
+  copies of shady2k-skills 0.130.0, with `argv.mjs` and `regular-file.mjs`
   beside the mechanism (`tracker-sync.version`; `node
   .backlog/sync/tracker-sync.mjs status --expect-version <the set's version>`
   says whether this copy is behind). **No background sync runs** (owner,
@@ -169,7 +179,8 @@ the repository's installation, and each person's plugin and hooks are their own.
   `watch --interval 10 --debounce 2 --max-age 5` (publish 2 s after the last
   write or 5 s at most, the other machines' state every 10 s), with `loginctl
   enable-linger <user>` to outlive logout and reboot. Every network operation
-  is killed after 10 s (push) or 20 s (fetch). A claim and a status transition through
+  is killed after 10 s (push) or 20 s (fetch), and one recipe command (a br
+  import or export of the store) after 120 s, the recipe timeout. A claim and a status transition through
   the mechanism (`claim`, `transition`) are written against the state just
   merged from the remote and count only once they are on it; a lost one is exit
   3, said, and nothing is left behind. Two machines claiming one item in the same

@@ -20,6 +20,10 @@
  * itself - a full copy per revision, 5 GB beside 10 MB of items in one store - and
  * are converted to references the first time a command meets a store that still
  * holds them; a copy no store commit holds is kept and reported, never guessed.
+ * A copy is matched against a commit on the state files a commit can hold - the
+ * recipe's declared files the store's own git does not ignore - because a
+ * recording written from the working tree may carry a file the tracker keeps
+ * locally and no commit ever holds.
  * A referenced commit that is missing stops the read loudly: the state of that
  * revision is not taken from a later one.
  *
@@ -64,9 +68,17 @@
  * the maximum batch age, whichever comes first, so a stream of writes is still
  * published within the maximum age. Every network git operation is killed after
  * its timeout (10 s for a push, 20 s for a fetch) and reported as unreachable or
- * refused rather than hanging. Network operations run outside the store mutation
- * lock. A conditional operation snapshots and imports under the local lock, then
- * pushes its isolated candidate; unrelated live writes survive timeout or retry.
+ * refused rather than hanging. A recipe command is killed after the recipe
+ * timeout (--recipe-timeout, recorded by connect, 120 s by default). Network
+ * operations run outside the store mutation lock. A conditional operation
+ * snapshots under the local lock (a copy of the live database where the recipe
+ * can seed one, an import otherwise), then pushes its isolated candidate;
+ * unrelated live writes survive timeout or retry.
+ *
+ * WORK IN PROPORTION TO THE CHANGE: a merge where only one side moved the state
+ * merges nothing, and the database takes in only what changed where the recipe
+ * declares importChanged; a whole-store import runs only where the database's
+ * state is not known (a refused flush, a new machine) or the recipe asks for it.
  *
  * WHY A REF OUTSIDE THE BRANCHES STARTS NO CODE CI, and how far that goes: a
  * push event's ref is a branch or a tag. GitHub documents github.ref as "the
@@ -89,13 +101,13 @@
  */
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync, readdirSync, openSync, closeSync, unlinkSync, readSync, renameSync, rmdirSync, realpathSync, cpSync, lstatSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, writeSync, rmSync, statSync, readdirSync, openSync, closeSync, unlinkSync, readSync, renameSync, rmdirSync, realpathSync, cpSync, lstatSync } from 'node:fs';
 import { dirname, join, resolve, basename, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { ValueNeeded, inlineValue, valueOf } from './argv.mjs';
-import { notRegularFile, requireRegularFile } from './regular-file.mjs';
+import { notRegularFile, notRegularFileSaid, requireRegularFile } from './regular-file.mjs';
 
 const HERE = dirname(new URL(import.meta.url).pathname);
 const DEFAULT_REF = 'refs/tracker/state';
@@ -402,11 +414,26 @@ async function resolveRecipe() {
     + `This copy ships ${all.length ? all.map((r) => `${r.path}${r.broken ? ' (broken)' : ` (declares tracker ${r.tracker || r.name})`}`).join(', ') : 'none'}`);
 }
 
+/** How long one recipe command may run, in ms: --recipe-timeout, else the value
+ * connect recorded for this machine, else 120 s.
+ *
+ * Bounded on purpose: a tracker command that hangs (its own store lock, a slow
+ * disk) must not hold the store's lock with it, or the next session's claim
+ * would wait on it. But the bound is the store's, not the mechanism's: a whole-store
+ * import of thousands of items measured 32-38 s on an idle machine, and the
+ * fixed 20 s this replaced killed it under load (#52). It is recorded beside the
+ * other bounds (debounce, batch age, sync interval) so a project with a larger
+ * store raises it without editing the mechanism. */
+const RECIPE_TIMEOUT_S = 120;
+function recipeTimeoutMs() {
+  const v = CURRENT.flags['recipe-timeout'] ?? readConfig(CURRENT.flags, CURRENT.repoRoot).recipeTimeout ?? RECIPE_TIMEOUT_S;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) die(2, `the recipe timeout must be a number of seconds above 0, not ${JSON.stringify(v)} (--recipe-timeout, or recipeTimeout in ${configPath(CURRENT.flags, CURRENT.repoRoot)})`);
+  return n * 1000;
+}
+
 /** Run one of the recipe's declared commands in the store. */
-// Bounded on purpose: a tracker command that hangs (its own store lock, a slow
-// disk) must not hold the store's lock with it, or the next session's claim
-// would wait on it. 20 s is longer than any export this mechanism runs.
-async function recipe(decl, map, { cwd, timeoutMs = 20000 } = {}) {
+async function recipe(decl, map, { cwd, timeoutMs = recipeTimeoutMs() } = {}) {
   const r = CURRENT.recipe;
   const raw = decl.split('.').reduce((o, k) => (o === null || o === undefined ? o : o[k]), r);
   if (!raw) die(1, `the recipe ${r.path} declares no ${decl}`);
@@ -421,7 +448,9 @@ async function recipe(decl, map, { cwd, timeoutMs = 20000 } = {}) {
 async function recipeOk(decl, map, opts) {
   const r = await recipe(decl, map, opts);
   if (r.code !== 0) die(r.code === 127 || r.missing ? 2 : 1,
-    `the recipe's ${decl} command failed (${r.code}): ${text(r) || 'no output'}`);
+    r.timedOut
+      ? `the recipe's ${decl} command was stopped after ${(opts?.timeoutMs ?? recipeTimeoutMs()) / 1000} s, the recipe timeout (--recipe-timeout, recorded by connect): ${text(r) || 'no output'}`
+      : `the recipe's ${decl} command failed (${r.code}): ${text(r) || 'no output'}`);
   return r.stdout;
 }
 
@@ -502,7 +531,7 @@ async function mergeDatabaseIntoState({ code, said }) {
   const side = join(machineDir(CURRENT.flags, CURRENT.repoRoot), 'database-export');
   rmSync(side, { recursive: true, force: true });
   mkdirSync(side, { recursive: true });
-  const forced = await recipe('exportSide', { out: quote(side) }, { timeoutMs: 120000 });
+  const forced = await recipe('exportSide', { out: quote(side) }, { timeoutMs: Math.max(120000, recipeTimeoutMs()) });
   if (forced.code !== 0 || forced.missing)
     die(2, `the tracker refused to flush its database (${code}): ${said}. Its forced export to a side file failed (${forced.code}): ${text(forced).split('\n')[0] || 'no output'}. ${atRisk()}, so nothing is merged and nothing is written`);
   const fromDatabase = sideParts(side);
@@ -581,6 +610,43 @@ async function ensureStore({ create = false } = {}) {
 }
 
 const stateFiles = () => CURRENT.recipe.stateFiles;
+
+/** The state files a store commit can hold: the recipe's declared files that the
+ * store's own git does not ignore.
+ *
+ * A recording written from the store's working tree can carry a file the tracker
+ * keeps locally - a project's own `.gitignore` can ignore the database's mirror -
+ * so no commit of any revision holds it, and requiring it made every recording a
+ * store written by 0.121.0 holds unmatchable (#49).
+ *
+ * Asked of git, never of a file name: a project's ignore rules are the only
+ * authority on what its commits can hold, they differ per project, and a rule that
+ * named a tracker's files here would be wrong in the next project.
+ *
+ * A file a commit cannot hold can neither be part of a recorded state nor tell two
+ * states apart, so it is left out of both sides of the comparison. */
+let comparableFiles = null;
+async function comparableStateFiles() {
+  if (comparableFiles) return comparableFiles;
+  const all = stateFiles();
+  // No --no-index: git does not ignore a file it already tracks, and such a file IS
+  // in every commit. Asking with --no-index would drop it from what is compared while
+  // a commit still holds it, and then a recording written from a digest over the rest
+  // would not read back (#49 review).
+  const r = await git(['check-ignore', '--', ...all], { cwd: CURRENT.store });
+  // 0 says at least one of them is ignored, 1 that none is. Anything else is git
+  // unable to answer, and then every declared file is compared whole - the rule
+  // before this one - said out loud: a kept recording must never look like its own
+  // verdict, and a silent narrowing is how #49 happened the first time.
+  if (r.code !== 0 && r.code !== 1) {
+    say(`tracker-sync: the store's git could not say which state files it ignores (${text(r).split('\n')[0] || `exit ${r.code}`}); every declared state file is compared whole, so a recording that carries a file no commit holds is kept`);
+    comparableFiles = all.slice();
+    return comparableFiles;
+  }
+  const ignored = new Set(r.stdout.split('\n').map((l) => l.trim()).filter(Boolean));
+  comparableFiles = all.filter((p) => !ignored.has(p));
+  return comparableFiles;
+}
 
 /** Write one state file into the store from a revision's tree, or from nowhere. */
 async function stateFrom(rev) {
@@ -721,18 +787,94 @@ async function mergeParts({ ours, theirs, base, order = [], orderLocal = [] }) {
   return parseSide(readFileSync(paths.out, 'utf8'));
 }
 
+/** Bring the tracker's database to the state files.
+ *
+ * `before` is the state the database last held, when the caller knows it: the
+ * state files right after a flush. A recipe that declares `importChanged` is then
+ * handed that state and imports only what differs from it, and says so; one that
+ * does not, or a caller that does not know, imports the whole store. A tracker's
+ * whole-store import grows with the store, not with the change: on thousands of
+ * items it measured tens of seconds and hundreds of megabytes per run, once per
+ * merge (#52). */
+async function importState(before) {
+  if (!before || !CURRENT.recipe.importChanged) return recipeOk('import', {});
+  const f = join(machineDir(CURRENT.flags, CURRENT.repoRoot), 'import-before.txt');
+  // Written part by part: a state of thousands of items is not copied into one
+  // more string to be written.
+  const fd = openSync(f, 'w');
+  try {
+    let first = true;
+    for (const [p, c] of before) {
+      if (c === null) continue;
+      writeSync(fd, `${first ? '' : '\n'}=== ${p}\n`); writeSync(fd, c);
+      first = false;
+    }
+  } finally { closeSync(fd); }
+  try { return await recipeOk('importChanged', { before: quote(f) }); } finally { rmSync(f, { force: true }); }
+}
+
+/** The state files as the database holds them after a flush, or null where the
+ * flush does not prove that (see flushDatabase): only then may an import take in
+ * just the difference. */
+const heldByDatabase = (flushed, parts) => (flushed && flushed.ok && !flushed.nothing && !flushed.merged ? parts : null);
+
+/** The blob of each state file a commit can hold, as it stands in the store's
+ * working tree; a file that is not there is absent from the map. */
+async function worktreeStateBlobs() {
+  const out = new Map();
+  for (const p of await comparableStateFiles()) {
+    const f = join(CURRENT.store, p);
+    requireRegularFile(f, 'a state file');
+    if (!existsSync(f)) continue;
+    out.set(p, (await gitOk(['hash-object', '--', p], { cwd: CURRENT.store })).trim());
+  }
+  return out;
+}
+const sameBlobs = (a, b) => a.size === b.size && [...a].every(([p, oid]) => b.get(p) === oid);
+
 /** Merge the remote's tip into ours, per item, through the recipe, per F3.
- * Caller holds the lock: this is local work only. */
-async function mergeAndCommit(tip) {
+ * Caller holds the lock: this is local work only.
+ *
+ * The tracker's database is flushed first, so `ours` is the state it holds and a
+ * write that reached it after the last commit is merged, not overwritten. Then the
+ * work follows the change, not the store (#52): where the remote moved no state
+ * file since the merge base, ours IS the merge and nothing is merged or imported;
+ * where we moved none, theirs is, and only what it changed is imported; only where
+ * both sides moved does the recipe merge per item. */
+async function mergeAndCommit(tip, { flushed: done } = {}) {
+  // A caller that flushed a moment ago under the same lock hands its result on:
+  // a refused flush is merged from the database once, not twice.
+  const flushed = done || await flushDatabase();
   const head = await headOid();
   const base = (await git(['merge-base', head, tip], { cwd: CURRENT.store })).stdout.trim();
   const oursParts = await storeParts();
-  const theirsParts = await stateFrom(tip);
-  const baseParts = base ? await stateFrom(base) : stateFiles().map((p) => [p, null]);
-  const order = (await git(['log', '--first-parent', '--format=%H', base ? `${base}..${tip}` : tip], { cwd: CURRENT.store })).stdout.split('\n').filter(Boolean).reverse();
-  const orderLocal = (await git(['log', '--first-parent', '--format=%H', head], { cwd: CURRENT.store })).stdout.split('\n').filter(Boolean);
-  const merged = await mergeParts({ ours: oursParts, theirs: theirsParts, base: baseParts, order, orderLocal });
-  await writeState(merged);
+  const baseBlobs = base ? await stateBlobsAt(base) : null;
+  // The state the database holds, when it is known to be ours: a flush the
+  // tracker refused leaves state files that are not the database's (a merge of
+  // its side export, or a filled file over an empty database), and then only a
+  // whole import brings the database to the merged state.
+  const held = heldByDatabase(flushed, oursParts);
+  // Whether the database must take in the merged state, and from what.
+  let mustImport = !held;
+  if (baseBlobs && sameBlobs(await stateBlobsAt(tip), baseBlobs)) {
+    // Nothing of the tracker's moved on the remote: our state stands as it is.
+  } else if (baseBlobs && sameBlobs(await worktreeStateBlobs(), baseBlobs)) {
+    // Nothing of ours moved: the remote's state is the merge, exactly as a
+    // fast-forward takes it. A file the store's git ignores is never in a commit,
+    // so it is the machine's own and is left where it is.
+    const comparable = await comparableStateFiles();
+    const theirs = (await stateFrom(tip)).filter(([p]) => comparable.includes(p));
+    await writeStateExact(theirs);
+    mustImport = true;
+  } else {
+    const theirsParts = await stateFrom(tip);
+    const baseParts = base ? await stateFrom(base) : stateFiles().map((p) => [p, null]);
+    const order = (await git(['log', '--first-parent', '--format=%H', base ? `${base}..${tip}` : tip], { cwd: CURRENT.store })).stdout.split('\n').filter(Boolean).reverse();
+    const orderLocal = (await git(['log', '--first-parent', '--format=%H', head], { cwd: CURRENT.store })).stdout.split('\n').filter(Boolean);
+    const merged = await mergeParts({ ours: oursParts, theirs: theirsParts, base: baseParts, order, orderLocal });
+    await writeState(merged);
+    mustImport = true;
+  }
   // recordings travel beside the tracker items and are immutable: two different
   // states for one revision are a refusal, never a newer-wins choice.
   const listIn = async (rev) => (await git(['ls-tree', '-r', '--name-only', rev, '--', '.tracker-sync/recordings'], { cwd: CURRENT.store })).stdout.split('\n').filter(Boolean);
@@ -751,7 +893,7 @@ async function mergeAndCommit(tip) {
   }
   await recipeIsland(head, tip);
   keepIdentity();
-  await recipeOk('import', {});
+  if (mustImport) await importState(held);
   return commitState(`tracker store: merge ${head.slice(0, 12)} and ${tip.slice(0, 12)} per item`, [head, tip]);
 }
 /** The mechanism's own files under .tracker-sync travel beside the state. */
@@ -813,7 +955,7 @@ async function syncOnce({ needsRemote, push, quiet, skipOnTimeout = false } = {}
     // flush is understood through the recipe: a refusal that proves nothing is
     // unexported is said and the state files stand, and every other refusal is
     // merged in per item, or stops here - never read as "nothing unexported".
-    await flushDatabase();
+    const flushed = await flushDatabase();
     if (fast) {
       // Our own unpublished writes are a commit of their own; the push that
       // follows merges the remote in rather than dropping them.
@@ -821,14 +963,17 @@ async function syncOnce({ needsRemote, push, quiet, skipOnTimeout = false } = {}
       // and committed, never merely committed and left as they are: a state that
       // is stale against the remote is exactly what makes a claim land twice,
       // because the recipe is asked about the state in front of it.
-      if (migrated.migrated || await hasUncommittedState()) return mergeAndCommit(remote.tip);
-      // Nothing of ours is unpublished: the remote's state replaces this store's.
+      if (migrated.migrated || await hasUncommittedState()) return mergeAndCommit(remote.tip, { flushed });
+      // Nothing of ours is unpublished: the remote's state replaces this store's,
+      // and the database, which holds exactly the state being replaced, takes in
+      // only what the remote changed.
+      const held = heldByDatabase(flushed, await storeParts());
       await gitOk(['reset', '--hard', remote.tip], { cwd: CURRENT.store });
       keepIdentity();
-      await recipeOk('import', {});
+      await importState(held);
       return remote.tip;
     }
-    return mergeAndCommit(remote.tip);
+    return mergeAndCommit(remote.tip, { flushed });
   };
   let oid;
   try {
@@ -848,6 +993,9 @@ async function syncOnce({ needsRemote, push, quiet, skipOnTimeout = false } = {}
  * The push itself is a network call and runs outside the lock; the merge is local
  * work and takes it. */
 async function pushOid(oid, { quiet, attempts = 3, skipOnTimeout = false } = {}) {
+  // The last refusal, kept for the line that gives up: "three pushes were refused"
+  // is a verdict, and what the remote answered is the cause (#49's addendum).
+  let lastSaid = '';
   for (let i = 0; i < attempts; i++) {
     const r = await git(['push', 'origin', `${oid}:${CURRENT.ref}`], { cwd: CURRENT.store, timeoutMs: 10000 });
     if (r.code === 0) return { ok: true, oid };
@@ -855,6 +1003,7 @@ async function pushOid(oid, { quiet, attempts = 3, skipOnTimeout = false } = {})
     // A hosting policy that refuses this ref is its own class (exit 5): named,
     // never retried as if the remote had merely moved.
     if (isPolicy(r)) die(5, `the remote refused ${CURRENT.ref}: ${text(r)}`);
+    lastSaid = text(r).split('\n')[0] || `exit ${r.code}`;
     if (isRefused(r)) {
       const remote = await fetchRemote();
       if (!remote.ok) { if (!quiet) say('tracker-sync: the push was refused and the remote is unreachable; the write is kept here'); return { ok: false, unreachable: true }; }
@@ -875,7 +1024,7 @@ async function pushOid(oid, { quiet, attempts = 3, skipOnTimeout = false } = {})
     }
     die(1, `the push failed: ${text(r)}`);
   }
-  say('tracker-sync: the push did not land after three attempts; the write is kept here and the next tick tries again');
+  say(`tracker-sync: the push did not land after ${attempts} attempts (last: ${lastSaid || 'no answer'}); the write is kept here and the next tick tries again`);
   return { ok: false, refused: true };
 }
 // ---- publish, sync, claim, transition, record -------------------------------
@@ -1243,18 +1392,31 @@ async function stateTextAt(oid, where = 'the recording') {
  * bytes. */
 async function recordingState(text, where) {
   const ref = parseRecording(text);
-  if (!ref) return { text };
+  if (!ref) {
+    // A whole copy written before references existed is read on the files a commit
+    // can hold, exactly as a reference is. Without this, a copy and the reference
+    // its own store migrated it to read as two different recordings of one revision:
+    // one machine still on the old form and one that has migrated would refuse the
+    // revision as "recorded twice with different states".
+    const parts = snapshotParts(text);
+    if (!parts) return { text };
+    const files = await comparableStateFiles();
+    const comparable = parts.filter(([p]) => files.includes(p));
+    return { text: comparable.length < parts.length ? sideText(comparable) : text };
+  }
   const state = await stateTextAt(ref.store, where);
   if (ref.digest && ref.digest !== `sha256:${sha256(state)}`)
     die(1, `${where} binds store commit ${ref.store.slice(0, 12)} to a state that commit no longer holds: the store ref's history was rewritten outside this mechanism, and the state of that revision is not guessed`);
   return { text: state, store: ref.store };
 }
 
-/** The blob each of the recipe's state files has at a commit. Comparing blob ids
- * answers "does this commit hold exactly this state" without reading the content
- * twice, which is what makes a migration over a thousand recordings cheap. */
+/** The blob each of the recipe's state files a commit can hold has at a commit.
+ * Comparing blob ids answers "does this commit hold this state" without reading
+ * the content twice, which is what makes a migration over a thousand recordings
+ * cheap. A declared file the store's git ignores is not asked for: no commit of
+ * any revision holds it, and listing it would answer nothing. */
 async function stateBlobsAt(oid) {
-  const r = await git(['ls-tree', '-r', oid, '--', ...stateFiles()], { cwd: CURRENT.store });
+  const r = await git(['ls-tree', '-r', oid, '--', ...(await comparableStateFiles())], { cwd: CURRENT.store });
   const out = new Map();
   if (r.code !== 0) return out;
   for (const line of r.stdout.split('\n')) {
@@ -1272,11 +1434,30 @@ async function blobOf(text) {
   return r.stdout.trim();
 }
 
-/** Is this commit's tree exactly the state a snapshot holds? Compared as blob
- * ids, and as sets: a state file the snapshot omits is one the export would not
- * have printed either. */
+/** Is this commit the state a snapshot holds? Every state file the snapshot
+ * printed that a commit can hold must be in this commit, byte for byte: blob ids
+ * are content, so equal ids are equal bytes.
+ *
+ * What may differ, and why it can never make two different tracker states one
+ * state:
+ *
+ *   - a file the store's git ignores. No commit of any revision holds it, so it
+ *     is in no state a recording can be compared with; the copy the recording
+ *     printed is the working tree's, which the tracker rebuilds from the files
+ *     commits do hold. It cannot distinguish two states, because no commit ever
+ *     carried either version of it.
+ *   - a declared file the commit holds and the recording did not print. The
+ *     recording is silent about it, so nothing is claimed about it, and it cannot
+ *     make two states one either: a state is told from another by a file some
+ *     recording printed. What it can do is leave two candidate commits, and then
+ *     the earliest - the commit that added the recording, which is the state the
+ *     record run saw - is named, never a later one.
+ *
+ * A file the recording printed that the commit lacks is never a match: the
+ * recording holds tracker data no commit holds, and a conversion that dropped it
+ * would lose that data. */
 function sameState(commitBlobs, snapshotBlobs) {
-  if (commitBlobs.size !== snapshotBlobs.size) return false;
+  if (!snapshotBlobs.size) return false;
   for (const [p, oid] of snapshotBlobs) if (commitBlobs.get(p) !== oid) return false;
   return true;
 }
@@ -1302,8 +1483,8 @@ function snapshotParts(text) {
  * newest commit that held it: one git call for the whole chain, because a
  * migration that walked commits one by one would take minutes inside a hook. */
 async function storeHistoryStates() {
-  const out = new Map();
-  const r = await git(['log', '--first-parent', '--raw', '--no-abbrev', '--format=%H', '--', ...stateFiles()], { cwd: CURRENT.store });
+  const history = { byKey: new Map(), byPair: null };
+  const r = await git(['log', '--first-parent', '--raw', '--no-abbrev', '--format=%H', '--', ...(await comparableStateFiles())], { cwd: CURRENT.store });
   const commits = [];
   let cur = null;
   for (const line of r.stdout.split('\n')) {
@@ -1313,41 +1494,314 @@ async function storeHistoryStates() {
     const m = /^:\d+ \d+ ([0-9a-f]+) [0-9a-f]+ \w+\t(.*)$/.exec(line);
     if (m && cur) cur.entries.push({ old: m[1], path: m[2] });
   }
-  if (!commits.length) return out;
+  if (!commits.length) {
+    // A history too large for the output bound is said, never read as "no commit
+    // holds this state": nothing is converted from a guess.
+    if (r.code !== 0) say(`tracker-sync: the store's state history could not be read in one call (${text(r).split('\n')[0] || 'no output'}); a recording no commit of the log holds is kept, not converted`);
+    return history;
+  }
   let state = await stateBlobsAt(commits[0].oid);
   const keyOf = (m) => [...m.entries()].sort().map(([p, o]) => `${p}:${o}`).join('|');
   for (const c of commits) {
     const key = keyOf(state);
-    if (!out.has(key)) out.set(key, c.oid);
+    if (!history.byKey.has(key)) history.byKey.set(key, c.oid);
     for (const e of c.entries) {
       if (/^0+$/.test(e.old)) state.delete(e.path); else state.set(e.path, e.old);
     }
   }
-  return out;
+  return history;
+}
+
+/** The state the ref's history held that this recording holds: the newest one
+ * carrying every file the recording printed, in the same bytes. A commit may hold
+ * a declared file the recording did not print (see sameState), so the newest exact
+ * key is asked for first and the rest is answered from an index built on demand:
+ * the pairs a recording prints point at the states that hold them, so a store of a
+ * thousand recordings never walks the whole history per recording. */
+function historyStateFor(history, blobs) {
+  const pairs = [...blobs].map(([p, o]) => `${p}:${o}`).sort();
+  if (!pairs.length) return null;
+  const exact = history.byKey.get(pairs.join('|'));
+  if (exact) return exact;
+  if (!history.byPair) {
+    history.byPair = new Map();
+    for (const key of history.byKey.keys()) {
+      for (const pair of key.split('|')) {
+        if (!history.byPair.has(pair)) history.byPair.set(pair, []);
+        history.byPair.get(pair).push(key);
+      }
+    }
+  }
+  let shortest = null;
+  for (const pair of pairs) {
+    const keys = history.byPair.get(pair);
+    if (!keys) return null;
+    if (!shortest || keys.length < shortest.length) shortest = keys;
+  }
+  const found = [];
+  for (const key of shortest) {
+    const have = new Set(key.split('|'));
+    let holds = true;
+    for (const pair of pairs) if (!have.has(pair)) { holds = false; break; }
+    if (holds) found.push(key);
+  }
+  if (!found.length) return null;
+  // More than one state carries everything the recording printed, and they differ in
+  // a file it is silent about: naming one of them would be a guess between two
+  // tracker states, so none is named and the recording is kept with that cause. The
+  // commit that ADDED a recording is still its first candidate, and there the answer
+  // is the state the record run saw.
+  if (new Set(found).size > 1) return { ambiguous: [...new Set(found)].sort() };
+  return history.byKey.get(found[0]) || null;
 }
 
 /** Turn every snapshot recording into a reference, and keep the ones no store
  * commit holds so a person can see them. Runs under the store lock, replaces each
  * file with an atomic rename (a kill leaves the snapshot or the reference, never
- * neither, and never half of one), and is idempotent: a reference is left alone. */
+ * neither, and never half of one), and is idempotent: a reference is left alone.
+ *
+ * Bounded memory, whatever the store holds (#49): the first pass keeps the NAMES
+ * of the snapshots, the second reads one, converts it, writes it and drops it, and
+ * the only things that grow with the number of recordings are names and oids -
+ * nothing grows with the size of one. What it converts it commits in batches of
+ * MIGRATION_BATCH, so a run killed in the middle keeps its progress on the ref.
+ *
+ * A recording it keeps says WHY, in the words of that recording's own case: which
+ * state file differs, which file the commit lacks, which commit it was compared
+ * with. "No store commit holds that state" is a verdict, not a cause, and the
+ * reporter of #49 had to add a debug print to learn what it meant. */
+/** How many converted recordings are committed at a time. A migration over a
+ * thousand snapshots spends minutes in git, and a run killed in the middle must
+ * keep its progress on the ref, not only in the store's working tree. */
+const MIGRATION_BATCH = 100;
+
+/** The migration's own rule, as a version: what the machine remembers about a
+ * pass is only valid for the rule that produced it, so a new rule reads the store
+ * again instead of trusting an answer it would no longer give. */
+const MIGRATION_RULE = 'comparable-state-1';
+
+/** Every cause a recording is kept for, in plain words: what status groups them
+ * by, and what the one line after a run names. The list of all of them, with the
+ * file and the commit each was compared with, is in the machine's own folder. */
+const KEEP_CAUSES = {
+  'not-a-regular-file': 'not a regular file',
+  'not-a-recording': 'its text does not read back as a recording this mechanism wrote',
+  'text-not-recoverable': 'its text does not come back byte for byte, so no state file could be read from it',
+  'no-comparable-file': "every state file it prints is one the store's git ignores, so no commit holds any of it",
+  'no-candidate': "no state the store's history held could be compared with it",
+  'states-agree': 'several states the history held carry what it prints and differ in a file it is silent about',
+  'file-not-held': 'a state file it prints is in no commit the store holds',
+  'file-differs': 'a state file differs from the nearest commit',
+};
+const keepRecording = (out, name, cause, said) => out.kept.push({ name, cause, said });
+
+const migrationMemoryPath = (flags, repoRoot) => join(machineDir(flags, repoRoot), 'migration.json');
+const migrationListPath = (flags, repoRoot) => join(machineDir(flags, repoRoot), 'migration-kept.txt');
+
+/** Write one of the machine's own files atomically: a kill leaves the old file or
+ * the new one, never half of one. */
+function writeAtomic(file, body) {
+  mkdirSync(dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, body);
+  renameSync(tmp, file);
+}
+
+/** Commit the recordings the migration has converted and not committed yet. The
+ * message says how many this commit carried, so a run interrupted before the last
+ * batch leaves commits that read on their own. */
+async function flushConverted(out) {
+  const n = out.pending;
+  out.pending = 0;
+  out.oid = await commitState(`tracker store: ${n} recording${n === 1 ? ' is a reference' : 's are references'} to the state commits they name`, [await headOid()]);
+  out.commits++;
+  return out.oid;
+}
+
+/** Recordings the store's working tree holds changed and no commit does: what a
+ * migration killed between a rename and its commit left behind. Counted from
+ * `git status`, so nothing is read, and a temporary file a kill left is not
+ * counted as a recording. */
+async function recordingsWaitingForCommit() {
+  const r = await git(['status', '--porcelain', '--', '.tracker-sync/recordings'], { cwd: CURRENT.store });
+  if (r.code !== 0) return 0;
+  return r.stdout.split('\n').filter((l) => l.trim() && !l.includes('.migrating-') && /\.[a-z]{2,}$/.test(l.trim().slice(3).trim())).length;
+}
+
+/** What a pass can depend on, as one digest: this rule's version, the state files
+ * a commit can hold (a project's ignore rules can change), the ref's head (a state
+ * a recording needs can only arrive or go with a commit), and every whole-state
+ * recording's name, size and mtime. The pass over a thousand recordings no commit
+ * holds took about a minute, and it ran on every record, sync and publish; the
+ * answer changes only when one of these does (#49). */
+async function migrationMark(names, recDir, historyDigest = null) {
+  const h = createHash('sha256');
+  h.update(`rule\t${MIGRATION_RULE}\n`);
+  h.update(`files\t${(await comparableStateFiles()).join('\t')}\n`);
+  // The STATES the ref's history holds, not the head's oid: a publish commits the
+  // state after the migration ran, so an oid would make every command that
+  // published read a thousand recordings again. A commit that carries a state no
+  // commit held before can make a kept recording convertible, and it adds a key
+  // here; a commit that commits a state the history already holds adds none, and
+  // cannot change the answer.
+  // The history of the pass that answered for these recordings, never a newer one: a
+  // batch commit can add a state while the pass runs, and a block of recordings
+  // compared before it landed must not be remembered as compared against it.
+  const history = historyDigest || createHash('sha256').update([...(await storeHistoryStates()).byKey.keys()].sort().join('\n')).digest('hex');
+  h.update(`history\t${history}\n`);
+  let whole = 0;
+  for (const n of names) {
+    let st = null;
+    try { st = statSync(join(recDir, n)); } catch { /* gone since it was listed */ }
+    if (!st) continue;
+    whole++;
+    h.update(`${n}\t${st.size}\t${st.mtimeMs}\n`);
+  }
+  return { digest: h.digest('hex'), whole, history };
+}
+
+/** The memory a pass left, or null when there is none or it is unreadable: an
+ * unreadable one is not a reason to read a thousand recordings again by itself, so
+ * it is simply not a match. */
+function readMigrationMemory() {
+  try {
+    const f = migrationMemoryPath(CURRENT.flags, CURRENT.repoRoot);
+    requireRegularFile(f, "the migration's memory");
+    const d = JSON.parse(readFileSync(f, 'utf8'));
+    return d && typeof d.digest === 'string' ? d : null;
+  } catch { return null; }
+}
+
+/** What this pass kept, by cause, with one example of each, and every kept
+ * recording on its own line with what it was compared with - the list a person
+ * reads instead of adding a debug print (#49). Both files are the machine's own,
+ * never the ref's, and both are rewritten by a pass, so neither grows with the
+ * store. */
+/** What a pass did, as two numbers a person and this mechanism's own proof can
+ * read without timing anything: how many times the recordings were read, and how
+ * many commands reused that answer instead of repeating it (#49). A pass that
+ * converted nothing is not a failure - it is an answer - but a pass repeated on
+ * every command is. */
+function rememberPass(field) {
+  const mem = readMigrationMemory() || {};
+  const next = { ...mem, [field]: (Number(mem[field]) || 0) + 1 };
+  if (field === 'passes') next.at = nowIso(); else next.lastSkip = nowIso();
+  writeAtomic(migrationMemoryPath(CURRENT.flags, CURRENT.repoRoot), `${JSON.stringify(next, null, 2)}\n`);
+}
+
+async function writeMigrationMemory(recDir, rest, out, historyDigest = null) {
+  const counts = {}; const examples = {}; const rows = [];
+  for (const k of out.kept) {
+    counts[k.cause] = (counts[k.cause] || 0) + 1;
+    if (!examples[k.cause]) examples[k.cause] = k.name;
+    rows.push(`${k.name}\t${k.cause}\t${k.said}`);
+  }
+  const list = migrationListPath(CURRENT.flags, CURRENT.repoRoot);
+  writeAtomic(list, rows.length ? `${rows.join('\n')}\n` : '');
+  const mark = await migrationMark(rest, recDir, historyDigest);
+  const prev = readMigrationMemory() || {};
+  writeAtomic(migrationMemoryPath(CURRENT.flags, CURRENT.repoRoot), `${JSON.stringify({
+    ...prev, rule: MIGRATION_RULE, digest: mark.digest, whole: mark.whole,
+    kept: counts, examples, list: rows.length ? list : null, at: nowIso(),
+    passes: (Number(prev.passes) || 0) + 1,
+  }, null, 2)}\n`);
+  out.keptCounts = counts;
+  out.keptExamples = examples;
+  out.listPath = rows.length ? list : null;
+}
+
+/** The kept recordings in plain words, biggest group first: the number, the cause,
+ * and - with `examples` - the recording to look at. */
+function keptSaid(counts, examples = null) {
+  return Object.entries(counts || {})
+    .sort((a, b) => b[1] - a[1])
+    .map(([cause, n]) => `${n} × ${KEEP_CAUSES[cause] || cause}${examples && examples[cause] ? ` (for example ${examples[cause]})` : ''}`);
+}
+
+/** Why this snapshot is not the state of this commit, in one sentence: the first
+ * state file the commit lacks, or the first one whose bytes differ, named with the
+ * commit it was compared with. null when every file the recording prints is the
+ * commit's. */
+function stateDifference(atParts, compare, oid) {
+  const at = new Map(atParts || []);
+  for (const [p, body] of compare) {
+    if (!at.has(p)) return { cause: 'file-not-held', said: `store commit ${String(oid).slice(0, 12)} holds no ${p}, which this recording prints` };
+    const there = at.get(p);
+    if (there !== body) {
+      return { cause: 'file-differs', said: `${p} differs from store commit ${String(oid).slice(0, 12)}'s (the commit's is ${Buffer.byteLength(there, 'utf8')} bytes, this recording's ${Buffer.byteLength(body, 'utf8')})` };
+    }
+  }
+  return null;
+}
+
+/** What the migration kept and why, as the last pass recorded it, checked against
+ * the recordings as they stand now: a memory that does not describe this store is
+ * not read as this store's answer, and `status` then says the states are new
+ * rather than naming a cause that may no longer hold. Reads no recording. */
+async function migrationReport(names) {
+  if (!names || !names.length) return null;
+  const mem = readMigrationMemory();
+  if (!mem || mem.rule !== MIGRATION_RULE) return { known: false };
+  const mark = await migrationMark(names, join(CURRENT.store, '.tracker-sync', 'recordings'));
+  if (mark.digest !== mem.digest) return { known: false };
+  return { known: true, kept: mem.kept || {}, examples: mem.examples || {}, list: mem.list || null, whole: mark.whole,
+    passes: Number(mem.passes) || 0, skips: Number(mem.skips) || 0, at: mem.at || null };
+}
+
 async function migrateRecordings() {
   const recDir = join(CURRENT.store, '.tracker-sync', 'recordings');
-  const out = { converted: 0, kept: [], freed: 0 };
+  const out = { converted: 0, kept: [], freed: 0, pending: 0, commits: 0, oid: null, skipped: false, remembered: null, examined: 0 };
   let names = [];
   try { names = readdirSync(recDir).filter((n) => n.endsWith('.jsonl')).sort(); } catch { return out; }
+  // Names only. A snapshot is a whole state, a few megabytes, and a store can hold
+  // a thousand of them: keeping their text here was 4-6 GB of live strings and the
+  // migration died of it before converting one recording (#49). `isReferenceFile()`
+  // reads the first 64 bytes, which is what `status` already counts with.
   const snapshots = [];
   for (const n of names) {
-    let t;
-    try { requireRegularFile(join(recDir, n), 'a recording'); t = readFileSync(join(recDir, n), 'utf8'); } catch { out.kept.push({ name: n, why: 'not a regular file' }); continue; }
-    if (!parseRecording(t)) snapshots.push([n, t]);
+    const file = join(recDir, n);
+    const notRegular = notRegularFileSaid(file);
+    if (notRegular !== null) { keepRecording(out, n, 'not-a-regular-file', notRegular); continue; }
+    if (!isReferenceFile(file)) { snapshots.push(n); continue; }
+    // A file that looks like a reference and is not one is reported, as it always
+    // was: nothing is converted from it and nothing is hidden about it. A
+    // reference is a line or two, so reading this one is not the leak.
+    let t = null;
+    try { t = readFileSync(file, 'utf8'); } catch { keepRecording(out, n, 'not-a-regular-file', `${file} could not be read`); continue; }
+    if (!parseRecording(t)) keepRecording(out, n, 'not-a-recording', `it starts ${JSON.stringify(t.trim().slice(0, 40))} and names no store commit the way this mechanism writes one`);
   }
   if (!snapshots.length) return out;
+  // The same store, the same rule, the same recordings, the same head, the same
+  // ignore rules: the pass would say exactly what the last one said, so it is not
+  // repeated. A recording that changed, a commit that arrived or went, a project
+  // that started or stopped ignoring a state file, and a new rule all change this
+  // digest, and each of them can change the answer.
+  // A project's ignore rules can change while a watch runs, and a pass is the one
+  // place that decides what may differ: the answer is asked of git again here.
+  comparableFiles = null;
+  const before = await migrationMark(snapshots, recDir);
+  const remembered = readMigrationMemory();
+  if (remembered && remembered.rule === MIGRATION_RULE && remembered.digest === before.digest) {
+    out.skipped = true;
+    out.remembered = remembered;
+    rememberPass('skips');
+    out.keptCounts = remembered.kept || {};
+    out.keptExamples = remembered.examples || {};
+    out.listPath = remembered.list || null;
+    return out;
+  }
+  const files = await comparableStateFiles();
   // The commit that added a recording file is its first candidate: that commit's
   // tree is the state the record run captured. The ref's whole history answers
   // only for the rest, and is built once for all of them.
   const added = new Map();
   const log = await git(['log', '--first-parent', '--format=%H', '--diff-filter=A', '--name-only', '--', '.tracker-sync/recordings'], { cwd: CURRENT.store });
   let cur = null;
+  // The list of commits that added a recording is names and oids only - one line
+  // per recording, never its text - so this grows with the number of recordings and
+  // not with their size. A log this machine cannot read whole is said, and the
+  // state history below still answers for every snapshot.
+  if (log.code !== 0) say(`tracker-sync: the commits that added the recordings could not be read in one call (${text(log).split('\n')[0] || 'no output'}); the migration answers from the state the ref's history holds`);
   for (const line of log.stdout.split('\n')) {
     const t = line.trim();
     if (!t) continue;
@@ -1358,31 +1812,86 @@ async function migrateRecordings() {
     added.get(name).push(cur);
   }
   let history = null;
-  for (const [name, text] of snapshots) {
-    const parts = snapshotParts(text);
-    if (!parts) { out.kept.push({ name, why: 'not a recording this mechanism wrote' }); continue; }
+  // One recording at a time, and its text dropped before the next is read: the
+  // migration's memory is one state, whatever the store holds. Only names, oids
+  // and the states the ref's history held stay, and those do not grow with the
+  // size of a recording.
+  for (let i = 0; i < snapshots.length; i++) {
+    const name = snapshots[i];
+    out.examined++;
+    let whole;
+    try { whole = readFileSync(join(recDir, name), 'utf8'); } catch { keepRecording(out, name, 'not-a-regular-file', `${join(recDir, name)} could not be read`); continue; }
+    const parts = snapshotParts(whole);
+    if (!parts) {
+      keepRecording(out, name, /^=== [^\n]+$/m.test(whole) ? 'text-not-recoverable' : 'not-a-recording',
+        /^=== [^\n]+$/m.test(whole)
+          ? `its ${Buffer.byteLength(whole, 'utf8')} bytes do not come back byte for byte from the state files they mark, so no state could be read from it`
+          : 'it prints no state file header ("=== <path>"), so it holds no state this mechanism knows how to read');
+      continue;
+    }
+    // Only the files a commit can hold are compared; the rest are named, so a change
+    // in a project's ignore rules is visible rather than silent.
+    const compare = parts.filter(([p]) => files.includes(p));
+    const local = parts.filter(([p]) => !files.includes(p)).map(([p]) => p);
+    if (!compare.length) {
+      keepRecording(out, name, 'no-comparable-file', `every state file it prints (${local.join(', ')}) is one the store's git ignores, so no commit holds any of it`);
+      continue;
+    }
     const blobs = new Map();
-    for (const [p, body] of parts) blobs.set(p, await blobOf(body));
-    const key = [...blobs.entries()].sort().map(([p, o]) => `${p}:${o}`).join('|');
+    for (const [p, body] of compare) blobs.set(p, await blobOf(body));
+    const near = (added.get(name) || [])[0] || null;
     let oid = null;
     for (const c of added.get(name) || []) {
       if (sameState(await stateBlobsAt(c), blobs)) { oid = c; break; }
     }
     if (!oid) {
       if (!history) history = await storeHistoryStates();
-      oid = history.get(key) || null;
+      const found = historyStateFor(history, blobs);
+      if (found && found.ambiguous) {
+        keepRecording(out, name, 'states-agree', `the store's history held ${found.ambiguous.length} states that carry every file it prints and differ in the ones it does not, so none is named: ${found.ambiguous.slice(0, 3).map((k) => k).join(' / ')}`);
+        continue;
+      }
+      oid = found;
     }
-    if (!oid) { out.kept.push({ name, why: 'no store commit holds that state' }); continue; }
-    // Byte for byte before anything is replaced: the reference must export exactly
-    // what the snapshot exports, or it is not the same recording.
-    if ((await stateTextAt(oid)) !== text) { out.kept.push({ name, why: 'the commit holding that state exports other bytes' }); continue; }
-    const next = recordingText(oid, text);
+    if (!oid) {
+      // No commit holds it as a whole. The concrete cause is how its files differ
+      // from the nearest state there is - the commit that added it, and with none
+      // the state the store's head holds - because "no store commit holds that
+      // state" is a verdict that sent the reporter of #49 to a debug print.
+      const nearOid = near || await headOid();
+      const nearText = await stateTextAt(nearOid);
+      const nearParts = snapshotParts(nearText);
+      const difference = nearParts ? stateDifference(nearParts, compare, nearOid) : null;
+      keepRecording(out, name, difference ? difference.cause : 'no-candidate', difference ? difference.said
+        : `${near ? `the commit that added it, ${String(near).slice(0, 12)},` : 'no commit added it,'} and none of the ${history.byKey.size} state${history.byKey.size === 1 ? '' : 's'} the ref's history held carries every file it prints (${compare.map(([p]) => p).join(', ')})`);
+      continue;
+    }
+    // Byte for byte before anything is replaced, on the files being compared: the
+    // reference must export the state the snapshot printed, or it is not the same
+    // recording and nothing is converted from a guess.
+    const atText = await stateTextAt(oid);
+    const atParts = snapshotParts(atText);
+    const difference = atParts ? stateDifference(atParts, compare, oid) : { cause: 'file-differs', said: `store commit ${String(oid).slice(0, 12)} could not be read back as the state files it holds` };
+    if (difference) { keepRecording(out, name, difference.cause, difference.said); continue; }
+    // The reference names the commit and digests the state that commit exports, so
+    // a reader checks the digest against the same bytes a snapshot returned.
+    const next = recordingText(oid, atText);
     const tmp = join(recDir, `.${name}.migrating-${process.pid}`);
     writeFileSync(tmp, next);
     renameSync(tmp, join(recDir, name));
     out.converted++;
-    out.freed += Math.max(0, Buffer.byteLength(text, 'utf8') - Buffer.byteLength(next, 'utf8'));
+    out.pending++;
+    out.freed += Math.max(0, Buffer.byteLength(whole, 'utf8') - Buffer.byteLength(next, 'utf8'));
+    snapshots[i] = null;
+    // Dropped before the next recording is read, so the peak is one state and not
+    // the whole store's worth of them.
+    whole = null;
+    if (out.pending >= MIGRATION_BATCH) await flushConverted(out);
   }
+  // What is still a whole state, and why, remembered for the next command: a store
+  // whose recordings no commit can hold is not read again on every record, sync and
+  // publish, and its owner reads the causes here instead of adding a print (#49).
+  await writeMigrationMemory(recDir, snapshots.filter(Boolean), out, before.history);
   return out;
 }
 
@@ -1402,12 +1911,20 @@ async function migrateStore({ announce = false, force = false } = {}) {
     const r = CURRENT.recipe.prune ? await recipe('prune', {}) : null;
     if (r) pruned = { code: r.code, said: text(r).split('\n')[0] || null, failed: r.code !== 0 };
   }
-  let oid = null;
-  if (conv.converted)
-    oid = await commitState(`tracker store: ${conv.converted} recordings are references to the state commits they name`, [await headOid()]);
-  if (announce && (swept.candidates || conv.converted || pruned?.failed))
-    say(`tracker-sync: cleaned ${swept.candidates} dead candidate${swept.candidates === 1 ? '' : 's'} (${humanBytes(swept.bytes)}), ${conv.converted} recording${conv.converted === 1 ? '' : 's'} now reference their state instead of copying it (${humanBytes(conv.freed)}), ${conv.kept.length} kept for a person${pruned ? `; backup prune exit ${pruned.code}` : ''}`);
-  return { swept, ...conv, pruned, oid, migrated: !!(swept.candidates || conv.converted) };
+  let oid = conv.oid || null;
+  // What the migration converted but did not commit reaches the ref here: the tail
+  // of a run killed between its last batch and its commit, or the whole of a run
+  // killed before any batch. It is counted from the store's own status, so a run
+  // that converts nothing new still publishes what an interruption left.
+  if (!conv.pending) conv.pending = conv.converted ? 0 : await recordingsWaitingForCommit();
+  if (conv.pending) oid = await flushConverted(conv);
+  // One line after a run that changed something, and the top cause when it kept
+  // anything: "1110 kept for a person" is a verdict, and the cause and the list are
+  // what an owner needs. A pass that converted nothing and kept everything for the
+  // same reason said all this once already, so it says nothing here.
+  if (announce && (swept.candidates || conv.converted || conv.commits || pruned?.failed || (conv.kept.length && !conv.skipped)))
+    say(`tracker-sync: cleaned ${swept.candidates} dead candidate${swept.candidates === 1 ? '' : 's'} (${humanBytes(swept.bytes)}), ${conv.converted} recording${conv.converted === 1 ? '' : 's'} now reference their state instead of copying it (${humanBytes(conv.freed)}), ${conv.kept.length} kept: ${keptSaid(conv.keptCounts).slice(0, 2).join('; ') || 'no cause said'} - every one is listed in ${conv.listPath || machineDir(CURRENT.flags, CURRENT.repoRoot)}${pruned ? `; backup prune exit ${pruned.code}` : ''}`);
+  return { swept, ...conv, pruned, oid, migrated: !!(swept.candidates || conv.converted || conv.commits) };
 }
 
 
@@ -1485,6 +2002,21 @@ async function isolatedCandidate(kind, item, prepare) {
       diagnostic.bytes = copied.bytes;
       diagnostic.snapshotMs = Date.now() - snapshotStart;
       save();
+      // The candidate's database, copied from the live one where the recipe can:
+      // the live database was flushed into `before` a moment ago, so a copy of it
+      // is the candidate's state without a whole-store import (#52). Run before
+      // the isolation below, because it is the one command that must name the
+      // live store; one that declines is not a failure, the import follows.
+      let seeded = false;
+      if (CURRENT.recipe.seed) {
+        const seedStart = Date.now();
+        const sd = await recipe('seed', { live: quote(live) }, { cwd: candidate });
+        seeded = sd.code === 0;
+        diagnostic.seeded = seeded;
+        diagnostic.seedMs = Date.now() - seedStart;
+        if (!seeded) diagnostic.seedSaid = text(sd).split('\n')[0] || `exit ${sd.code}`;
+        save();
+      }
       CURRENT.store = canonicalPath(candidate);
       CURRENT.isolatedFrom = live;
       // pointer.env is trusted recipe-produced launcher shell text. Preserve
@@ -1501,11 +2033,13 @@ async function isolatedCandidate(kind, item, prepare) {
         throw new Error('cannot isolate conditional recipe: pointer.env launcher returned invalid environment');
       }
       keepIdentity();
-      const importStart = Date.now();
-      const imported = await recipe('import', {});
-      diagnostic.importMs = Date.now() - importStart;
-      save();
-      if (imported.code !== 0) return { failed: imported, decl: 'import' };
+      if (!seeded) {
+        const importStart = Date.now();
+        const imported = await recipe('import', {});
+        diagnostic.importMs = Date.now() - importStart;
+        save();
+        if (imported.code !== 0) return { failed: imported, decl: 'import' };
+      }
       return prepare(before);
     });
     if (!step.oid) {
@@ -1585,7 +2119,6 @@ async function reconcileCandidate(step) {
 
 async function integrateCandidate(step) {
   await locked(async () => {
-    await flushDatabase();
     await mergeAndCommit(step.oid);
   });
 }
@@ -1646,18 +2179,21 @@ function diskReport() {
   const machine = dirSize(dir);
   const store = dirSize(CURRENT.store);
   const recs = join(CURRENT.store, '.tracker-sync', 'recordings');
-  let recordings = 0; let snapshots = 0;
+  let recordings = 0; let snapshots = 0; const snapshotNames = [];
   try {
     for (const name of readdirSync(recs)) {
       if (!name.endsWith('.jsonl')) continue;
       recordings++;
-      if (!isReferenceFile(join(recs, name))) snapshots++;
+      // A directory or a pipe named like a recording is not a state: it is kept and
+      // named by the migration, and counting it here would make the machine's own
+      // memory of the pass disagree with the pass itself.
+      if (notRegularFile(join(recs, name)) === null && !isReferenceFile(join(recs, name))) { snapshots++; snapshotNames.push(name); }
     }
   } catch {}
   return {
     machineDir: { path: dir, bytes: machine.bytes, files: machine.files },
     store: { path: CURRENT.store, bytes: store.bytes, files: store.files },
-    recordings: { total: recordings, snapshots },
+    recordings: { total: recordings, snapshots, snapshotNames },
     candidates: {
       total: found.created.length, stale: stale.length, staleBytes: stale.reduce((n, c) => n + c.bytes, 0),
       staleList: stale, retained: retained.length, retainedList: retained,
@@ -1721,7 +2257,11 @@ async function recordRun({ revision, checkout, fromTree }) {
           rev = rev || head;
           if (rev !== head)
             die(1, `revision ${String(rev).slice(0, 12)} is not ${ck2}'s HEAD (${head.slice(0, 12)}): only a revision cut or landed now is recorded, because a later state is not that revision's`);
-          parts = await storeParts();
+          // Only the files a commit can hold: the recording digests the state a
+          // reader gets back from the commit, and a file the store's git ignores is
+          // in no commit, so a digest that covered it would never verify (#49).
+          const files = await comparableStateFiles();
+          parts = (await storeParts()).filter(([p]) => files.includes(p));
         }
         // The commit the candidate's own state files come from: the state this
         // revision has is already in the store's history, and the recording names
@@ -1772,7 +2312,10 @@ async function recordRun({ revision, checkout, fromTree }) {
       mkdirSync(dirname(file), { recursive: true });
       // A reference, not a copy: the store's history already holds this state, and
       // a copy per revision grew one store to 5 GB against 10 MB of items (#45).
-      writeFileSync(file, recordingText(stateOid, sideText(parts)));
+      // The digest covers the state the commit exports, which is what every reader
+      // computes: a projection of the working tree's parts would not read back when
+      // the commit holds a declared file the working tree does not (#49 review).
+      writeFileSync(file, recordingText(stateOid, await stateTextAt(stateOid)));
       return { oid: await commitState(`tracker store: record ${String(rev).slice(0, 12)}`, [await headOid()]) };
     });
     if (step.already) {
@@ -2023,6 +2566,9 @@ async function connectRun(flags) {
     }
     const machineName = String(flags.machine || (await run('hostname', [], {})).stdout.trim() || 'machine');
     writeConfig(flags, repoRoot, { machine: machineName });
+    // The recipe timeout is this machine's bound, read by every later command;
+    // the watcher's own bounds are on its launch line.
+    if (flags['recipe-timeout'] !== undefined) writeConfig(flags, repoRoot, { recipeTimeout: recipeTimeoutMs() / 1000 });
     if (CURRENT.recipe.ordinal) {
       const name = machineName;
       await recipeOk('ordinal', { machine: quote(name) });
@@ -2099,6 +2645,7 @@ async function statusRun(flags) {
     const disk = diskReport();
     out.recordings = disk.recordings.total;
     out.snapshots = disk.recordings.snapshots;
+    out.migration = await migrationReport(disk.recordings.snapshotNames);
     out.disk = disk;
     const remote = await fetchRemote();
     out.unreachable = !remote.ok;
@@ -2148,7 +2695,15 @@ async function statusRun(flags) {
   say(`store       ${out.store}`);
   say(`head        ${out.head ? out.head.slice(0, 12) : 'none'}${out.remote ? `  remote ${out.remote.slice(0, 12)}` : '  remote none'}${out.unreachable ? '  UNREACHABLE' : ''}`);
   say(`queued      ${out.queued.unpublished ?? 0} local, ${out.queued.behind ?? 0} to take`);
-  say(`recordings  ${out.recordings}${out.snapshots ? `  (${out.snapshots} still whole states: the next record, sync or publish turns them into references)` : ''}`);
+  say(`recordings  ${out.recordings}${out.snapshots ? `  (${out.snapshots} still whole states${out.migration && out.migration.known ? '' : ': the next record, sync or publish converts them, or says which cannot be'})` : ''}`);
+  // What the last pass kept and why, grouped by cause, with one example each: an
+  // owner must not have to add a debug print to learn what a kept recording means
+  // (#49). A memory that does not describe this store is not read as its answer.
+  if (out.snapshots && out.migration && out.migration.known) {
+    say(`kept        ${Object.keys(out.migration.kept).length ? keptSaid(out.migration.kept, out.migration.examples).join('; ') : 'nothing: these whole states are newer than the last pass'}`);
+    say(`migration   the recordings were read ${out.migration.passes} time${out.migration.passes === 1 ? '' : 's'}, and ${out.migration.skips} command${out.migration.skips === 1 ? '' : 's'} reused that answer instead of reading ${out.migration.whole} of them again`);
+    if (out.migration.list) say(`list        ${out.migration.list}`);
+  }
   say(`disk        machine folder ${humanBytes(out.disk?.machineDir.bytes)} (${out.disk?.machineDir.files} files), store ${humanBytes(out.disk?.store.bytes)} (${out.disk?.store.files} files)`);
   say(`leftovers   ${swept.candidates} dead candidate${swept.candidates === 1 ? '' : 's'} removed now (${humanBytes(swept.bytes)}, ${swept.results} result file${swept.results === 1 ? '' : 's'})`
     + `${out.disk?.candidates.retained ? `; ${out.disk.candidates.retained} unknown outcome${out.disk.candidates.retained === 1 ? '' : 's'} kept for a reconcile` : ''}`);
@@ -2287,7 +2842,7 @@ function usage(code = 1) {
     '  watch [--interval <s>] [--debounce <s>] [--max-age <s>]',
     '  recipes | version | help',
     '',
-    'options:  --recipe <file>  --state <dir>  --repo <checkout>',
+    'options:  --recipe <file>  --state <dir>  --repo <checkout>  --recipe-timeout <s> (connect records it)',
     'The recipe names the tracker; this mechanism never does. TRACKER_RECIPE is read too.',
   ].join('\n');
   (code === 0 ? say : (s) => process.stderr.write(`${s}\n`))(t);

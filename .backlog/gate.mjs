@@ -28,6 +28,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalize, readAt, readNow } from './adapter.mjs';
 import { landedFor, mainLine } from './landed.mjs';
+import { documentsAt } from './documents.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const git = (...a) => execFileSync('git', a, { encoding: 'utf8', maxBuffer: 1 << 30, stdio: ['ignore', 'pipe', 'ignore'] });
@@ -35,18 +36,22 @@ const git = (...a) => execFileSync('git', a, { encoding: 'utf8', maxBuffer: 1 <<
 // A rules file the check imports and cannot find crashes node with exit 1, which
 // would read as "this change adds a problem". It is a missing input, said as one.
 const RULES = ['check.mjs', 'time-format.mjs', 'regular-file.mjs', 'argv.mjs'];
+// documents.mjs sits beside this file and is imported, so a missing one fails the import loudly.
 
 // Each judged state carries the main line's commits as they stood where it was
 // recorded (landed.mjs): `main` is the base CI judges against, or this clone's
 // main line locally, so a branch's own commits never count as landed.
-function withLanded(state, at, main) {
+function withLanded(state, at, main, documentsRev = at) {
   state.landed = landedFor(at, main);
+  // The outcomes and vision the rules read, from the same revision (the working
+  // tree when documentsRev is null): a baseline is judged by its own charter.
+  Object.assign(state, documentsAt(documentsRev));
   return state;
 }
 
 function baselineOf(base, ref, main) {
   const r = readAt(base, { ref, orBefore: true });
-  if (r) return withLanded(normalize(r.rows, r.source), r.at, main);
+  if (r) return withLanded(normalize(r.rows, r.source), r.at, main, base);
   return { generatedAt: new Date().toISOString(), source: `empty (no recording at or before ${base})`, issues: [] };
 }
 
@@ -111,7 +116,7 @@ function main(argv) {
       now = withLanded(normalize(r.rows, r.source), r.at, main);
     } else {
       const r = readNow({ offline: argv.includes('--offline') });
-      now = withLanded(normalize(r.rows, r.source), git('rev-parse', 'HEAD').trim(), main);
+      now = withLanded(normalize(r.rows, r.source), git('rev-parse', 'HEAD').trim(), main, null);
     }
     if (!json) console.log(`judged:   ${now.source}`);
     const nowFile = join(dir, 'now.json');

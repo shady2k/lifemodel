@@ -14,7 +14,7 @@ fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 command -v node >/dev/null 2>&1 || fail "node is not on PATH — the backlog gate runs on it. Install Node.js 24+ or run: npm run connect"
 
 gate=.backlog
-for f in adapter.mjs gate.mjs merge-gate.mjs config.json; do
+for f in adapter.mjs documents.mjs landed.mjs gate.mjs merge-gate.mjs config.json; do
     if [ ! -f "$gate/$f" ]; then
         printf 'pre-commit: %s is missing from this checkout; run npm run connect, which names what is missing\n' "$gate/$f" >&2
         exit 1
