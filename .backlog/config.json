@@ -1,10 +1,14 @@
 {
   "strength": "block-new",
-  "currentMilestone": "motor-1",
+  "currentMilestone": "observability-1",
   "milestoneLabels": [
     "instance-1",
     "motor-1",
     "observability-1",
+    "instructions-1",
+    "registry-1",
+    "motor-2",
+    "observability-2",
     "generations-1",
     "self-change-1",
     "upstream-1",
@@ -37,7 +41,7 @@
   "findingLabels": [
     "finding"
   ],
-  "findingBudget": 11,
+  "findingBudget": 8,
   "staleDays": 14,
   "holdDays": 2,
   "bulkCluster": 20,
