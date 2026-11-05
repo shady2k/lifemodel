@@ -50,6 +50,13 @@ the repository's installation, and each person's plugin and hooks are their own.
 - **Features and stages:** beads `epic`. A feature is a root epic wearing the
   milestone label; a stage is an epic under it. A stage's coordinator holds it
   (assignee) while it is being integrated.
+- **Feature agreement:** the owner's agreement to a feature's direction and then
+  its plan are two lines in the feature's body, which the gate reads:
+  `Agreed direction: <time> — "<owner's words>"` and
+  `Agreed plan: <time> — "<owner's words>"`, written with `br update <id>
+  --description`. The config's `agreementExempt` holds the features already
+  under way when the rule was adopted (setup 0.66.0, 2026-11-05,
+  lifemodel-rw0d): none were, so it is absent.
 - **Implemented:** the `br` status `implemented`, declared in
   `.beads/policy.yaml`, set by the coordinator with the transition comment
   `implemented: <merge revision> -- <related-check evidence>`. Neither ready
@@ -88,7 +95,7 @@ the repository's installation, and each person's plugin and hooks are their own.
   `check-commits.mjs`, `check-docs.mjs`, `check-product.mjs`, and `check-present.mjs` with
   `document-format.mjs` beside it, and `regular-file.mjs` and `argv.mjs`, which
   every check imports — byte-for-byte copies of shady2k-skills
-  0.130.0's `skills/backlog/setup-shady2k-skills/` at setup version 0.59.0,
+  0.137.0's `skills/backlog/setup-shady2k-skills/` at setup version 0.66.0,
   never edited here. Their `--version` is the installation. Proving it: `cmp`
   each against the plugin copy.
 - **Charter outcomes and the vision:** adopted with `observability-1`
@@ -164,7 +171,7 @@ the repository's installation, and each person's plugin and hooks are their own.
 - **Tracker synchronization:** `.backlog/sync/tracker-sync.mjs` with the recipe
   `.backlog/sync/trackers/br.mjs` and the systemd template
   `.backlog/sync/supervisors/systemd-user/tracker-sync.service`, byte-for-byte
-  copies of shady2k-skills 0.130.0, with `argv.mjs` and `regular-file.mjs`
+  copies of shady2k-skills 0.137.0, with `argv.mjs` and `regular-file.mjs`
   beside the mechanism (`tracker-sync.version`; `node
   .backlog/sync/tracker-sync.mjs status --expect-version <the set's version>`
   says whether this copy is behind). **No background sync runs** (owner,
