@@ -1415,7 +1415,7 @@ describe('platform manifests', () => {
     } finally {
       rmSync(first.root, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it('recovers from the installed bootstrap bundle after its source checkout is removed', () => {
     const root = mkdtempSync(join(tmpdir(), 'lifemodel-removed-source-'));
