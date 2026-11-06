@@ -341,8 +341,9 @@ describe('the disposable launch boundary', () => {
     expect(testArgs.join(' ')).toContain('LIFEMODEL_TEST_DATABASE_URL=');
     expect(testArgs.join(' ')).not.toContain('--network none');
   });
-  it('executes static checks before the suite without recursive npm scripts', () => {
+  it('runs the file-size ratchet first, then static checks, then the suite', () => {
     expect(innerSteps('check', []).map(([name]) => name)).toEqual([
+      'node',
       'tsc',
       'tsc',
       'tsc',
@@ -351,23 +352,24 @@ describe('the disposable launch boundary', () => {
       'prettier',
       'vitest',
     ]);
-    expect(innerSteps('check', [])[0]).toEqual(['tsc', '--noEmit']);
-    expect(innerSteps('check', [])[1]).toEqual(['tsc', '-p', 'loader/tsconfig.json', '--noEmit']);
-    expect(innerSteps('check', [])[2]).toEqual(['tsc', '-p', 'web/app/tsconfig.json', '--noEmit']);
-    expect(innerSteps('check', [])[3]).toEqual([
+    expect(innerSteps('check', [])[0]).toEqual(['node', 'scripts/check-file-sizes.mjs']);
+    expect(innerSteps('check', [])[1]).toEqual(['tsc', '--noEmit']);
+    expect(innerSteps('check', [])[2]).toEqual(['tsc', '-p', 'loader/tsconfig.json', '--noEmit']);
+    expect(innerSteps('check', [])[3]).toEqual(['tsc', '-p', 'web/app/tsconfig.json', '--noEmit']);
+    expect(innerSteps('check', [])[4]).toEqual([
       'tsc',
       '-p',
       'web/loader/tsconfig.json',
       '--noEmit',
     ]);
-    expect(innerSteps('check', [])[4]).toEqual([
+    expect(innerSteps('check', [])[5]).toEqual([
       'eslint',
       'src/',
       'loader/',
       'web/app/',
       'web/loader/src/',
     ]);
-    expect(innerSteps('check', [])[5]).toEqual([
+    expect(innerSteps('check', [])[6]).toEqual([
       'prettier',
       '--check',
       'src/**/*.ts',
@@ -377,6 +379,22 @@ describe('the disposable launch boundary', () => {
       'web/kit/**/*.{ts,tsx,css,json,html}',
     ]);
     expect(innerSteps('test', ['test-file.ts'])[0].at(-1)).toBe('--maxWorkers=2');
+  });
+  it('carries the file-size ratchet and its baseline into the test container snapshot', () => {
+    const root = mkdtempSync(join(tmpdir(), 'snapshot-file-sizes-'));
+    try {
+      writeFileSync(join(root, 'package.json'), '{}');
+      writeFileSync(join(root, 'package-lock.json'), '{}');
+      mkdirSync(join(root, 'scripts'));
+      writeFileSync(join(root, 'scripts', 'check-file-sizes.mjs'), '// ratchet');
+      writeFileSync(join(root, 'scripts', 'file-size-baseline.json'), '{"files":{}}');
+      const snapshot = join(root, 'snapshot');
+      stageSnapshot(root, snapshot);
+      expect(existsSync(join(snapshot, 'scripts', 'check-file-sizes.mjs'))).toBe(true);
+      expect(existsSync(join(snapshot, 'scripts', 'file-size-baseline.json'))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
   it('preserves a child failure and times out a child that never settles', async () => {
     expect((await command(process.execPath, ['-e', 'process.exit(7)'])).code).toBe(7);
