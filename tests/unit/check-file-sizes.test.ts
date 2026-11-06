@@ -6,7 +6,6 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   applyUpdate,
-  bootstrapBaseline,
   checkTree,
   countLines,
   LIMIT,
@@ -260,19 +259,19 @@ describe('the file-size ratchet (lifemodel-5zoc)', () => {
     }
   });
 
-  it('writes a sorted baseline with a trailing newline and bootstraps only once', () => {
+  it('reports no violations and how many listed files stay above the limit', () => {
     const root = fixture();
     try {
-      const baselinePath = join(root, 'scripts', 'file-size-baseline.json');
-      writeLines(root, 'tests/z.test.ts', 1000);
+      writeBaseline(root, { 'src/a.ts': 900, 'tests/b.test.ts': 1200 });
       writeLines(root, 'src/a.ts', 900);
-      writeLines(root, 'src/b.ts', 800);
-      bootstrapBaseline({ root, baselinePath });
-      expect(readFileSync(baselinePath, 'utf8')).toBe(
-        '{\n  "files": {\n    "src/a.ts": 900,\n    "tests/z.test.ts": 1000\n  }\n}\n'
-      );
-      expect(() => bootstrapBaseline({ root, baselinePath })).toThrow(/already exists/i);
-      expect(readFileSync(baselinePath, 'utf8')).toContain('"src/a.ts": 900');
+      writeLines(root, 'tests/b.test.ts', 1200);
+      const run = runScript(root, []);
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('no violations');
+      expect(run.output).toContain(`2 listed files stay above the ${LIMIT}-line limit`);
+      // The old success line claimed no file was over the limit, which was
+      // false while the baseline held grandfathered files.
+      expect(run.output).not.toContain('none over');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

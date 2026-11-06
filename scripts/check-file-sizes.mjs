@@ -15,7 +15,6 @@
  * produce the same failures, sorted by path.
  */
 import {
-  existsSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -185,7 +184,7 @@ export function checkTree({ root, baselinePath }) {
     }
   }
   failures.sort(byPath);
-  return { checked: counts.size, failures };
+  return { checked: counts.size, listed: Object.keys(baseline).length, failures };
 }
 
 function formatFailure(failure) {
@@ -268,23 +267,6 @@ export function applyUpdate({ root, baselinePath }) {
   return plan;
 }
 
-/**
- * One-time creation of the baseline from the current tree. It refuses to run
- * over an existing baseline: after this, only `--update` may change the list,
- * and only downward.
- */
-export function bootstrapBaseline({ root, baselinePath }) {
-  if (existsSync(baselinePath)) {
-    throw new Error(
-      `The file-size baseline at ${baselinePath} already exists; use \`${UPDATE_COMMAND}\` to lower counts and remove entries.`
-    );
-  }
-  const files = {};
-  for (const [relative, count] of scanTree(root)) if (count > LIMIT) files[relative] = count;
-  writeFileSync(baselinePath, serializeBaseline(files));
-  return { files };
-}
-
 function formatChange(change) {
   switch (change.reason) {
     case 'lowered':
@@ -305,23 +287,17 @@ export function run(args, options = {}) {
   try {
     if (args.length === 1 && (args[0] === '--help' || args[0] === '-h')) {
       console.log(
-        'Usage: node scripts/check-file-sizes.mjs [--update|--bootstrap]\n' +
+        'Usage: node scripts/check-file-sizes.mjs [--update]\n' +
           `  no option   fail when any counted file grew past its recorded size or the ${LIMIT}-line limit\n` +
-          '  --update    lower counts and remove entries in the baseline (never raise or add)\n' +
-          '  --bootstrap create the baseline once, from the current tree'
+          '  --update    lower counts and remove entries in the baseline (never raise or add)'
       );
       return 0;
     }
-    if (args.length > 1 || (args.length === 1 && !['--update', '--bootstrap'].includes(args[0]))) {
-      console.error('Usage: node scripts/check-file-sizes.mjs [--update|--bootstrap]');
+    if (args.length > 1 || (args.length === 1 && args[0] !== '--update')) {
+      console.error('Usage: node scripts/check-file-sizes.mjs [--update]');
       return 2;
     }
     const mode = args[0] ?? 'check';
-    if (mode === '--bootstrap') {
-      const { files } = bootstrapBaseline({ root, baselinePath });
-      console.log(`Created ${baselinePath} with ${Object.keys(files).length} entries.`);
-      return 0;
-    }
     if (mode === '--update') {
       const plan = planUpdate({ root, baselinePath });
       if (plan.blocking.length) {
@@ -338,9 +314,12 @@ export function run(args, options = {}) {
       for (const change of plan.changes) console.log(formatChange(change));
       return 0;
     }
-    const { checked, failures } = checkTree({ root, baselinePath });
+    const { checked, listed, failures } = checkTree({ root, baselinePath });
     if (!failures.length) {
-      console.log(`File-size ratchet: ${checked} files checked, none over the ${LIMIT}-line limit.`);
+      console.log(
+        `File-size ratchet: ${checked} files checked, no violations; ` +
+          `${listed} listed ${listed === 1 ? 'file stays' : 'files stay'} above the ${LIMIT}-line limit.`
+      );
       return 0;
     }
     console.error(
