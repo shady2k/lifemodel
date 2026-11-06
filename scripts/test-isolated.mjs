@@ -57,6 +57,9 @@ export const REPEAT_NEIGHBOURS = Object.freeze([
   }),
 ]);
 const CONTAINER_BIN = '/opt/deps/node_modules/.bin';
+// The only commands that run outside the disposable boundary: both are
+// dependency-free, read files only, and so cannot execute the checkout.
+export const CHECK_SCRIPTS = Object.freeze(['scripts/check-file-sizes.mjs', 'scripts/check-vendor-names.mjs']);
 const FILES = ['package.json', 'package-lock.json', 'tsconfig.json', 'vitest.config.ts',
   'eslint.config.js', '.prettierrc', '.prettierignore', '.gitignore', '.dockerignore', 'AGENTS.md', 'README.md', 'LICENSE'];
 const DIRS = ['db', 'src', 'loader', 'web', 'tests', 'scripts', 'cli', 'docker', 'deploy', 'docs', '.backlog', '.githooks', '.husky', '.github'];
@@ -200,13 +203,12 @@ export function innerSteps(mode, args) {
     return Array.from({ length: REPEAT_RUNS }, () => ['vitest', 'run', ...files, '--maxWorkers=2']);
   }
   const suite = ['vitest', 'run', ...args, '--maxWorkers=2'];
-  // The file-size ratchet and the vendor-name check need no dependencies and
-  // fail fastest, so they run first (lifemodel-5zoc, lifemodel-1be4). Then the
-  // loader and web app are separate TypeScript projects: typecheck all three,
-  // then lint and format source, then the suite last.
+  // The file-size ratchet and the vendor-name check are not here: they read
+  // the real checkout before the boundary (lifemodel-5zoc, lifemodel-1be4).
+  // The loader and web app are separate TypeScript projects: typecheck all
+  // three, then lint and format source, then the suite last.
   return mode === 'check'
-    ? [['node', 'scripts/check-file-sizes.mjs'], ['node', 'scripts/check-vendor-names.mjs'],
-      ['tsc', '--noEmit'], ['tsc', '-p', 'loader/tsconfig.json', '--noEmit'], ['tsc', '-p', 'web/app/tsconfig.json', '--noEmit'], ['tsc', '-p', 'web/loader/tsconfig.json', '--noEmit'],
+    ? [['tsc', '--noEmit'], ['tsc', '-p', 'loader/tsconfig.json', '--noEmit'], ['tsc', '-p', 'web/app/tsconfig.json', '--noEmit'], ['tsc', '-p', 'web/loader/tsconfig.json', '--noEmit'],
       ['eslint', 'src/', 'loader/', 'web/app/', 'web/loader/src/'], ['prettier', '--check', 'src/**/*.ts', 'loader/**/*.ts', 'web/app/**/*.{ts,tsx,css,json,html}', 'web/loader/**/*.{ts,tsx,css,json,html}', 'web/kit/**/*.{ts,tsx,css,json,html}'], suite]
     : [suite];
 }
@@ -282,10 +284,11 @@ export function command(program, args, { timeoutMs = 60_000, signal, live = fals
 
 function quote(value) { return `'${value.replaceAll("'", "'\\''")}'`; }
 
-// One step as the container's shell sees it: an installed dependency runs from
-// the dependency tree, `node` is the container's own runtime.
+// One step as the container's shell sees it: every command is an installed
+// dependency from the dependency tree. No check runs here any more; the two
+// read-only checks run on the checkout, outside this boundary.
 export function stepCommand([binary, ...args], binDirectory = CONTAINER_BIN) {
-  return [binary === 'node' ? 'node' : quote(`${binDirectory}/${binary}`), ...args.map(quote)].join(' ');
+  return [quote(`${binDirectory}/${binary}`), ...args.map(quote)].join(' ');
 }
 
 // One repetition per line, each labelled and each ending the script with its
@@ -301,6 +304,27 @@ export function repeatScriptLines(commands) {
 export async function run(argv, dependencies = {}) {
   let parsed;
   try { parsed = parseArgs(argv); } catch (error) { log(error.message); return 2; }
+  const runCommand = dependencies.command ?? command;
+  const root = dependencies.root ?? ROOT;
+  // The two dependency-free checks read the checkout itself, before anything
+  // is staged or any image is touched. They see every source file the real
+  // tree holds, including files the snapshot filter would leave out, and a
+  // failure stops the run with that exit code: no container starts. Nothing
+  // else runs outside the boundary (lifemodel-5zoc, lifemodel-1be4).
+  if (parsed.mode === 'check') {
+    try {
+      for (const script of CHECK_SCRIPTS) {
+        const check = await runCommand(process.execPath, [path.join(root, script)], { live: true });
+        if (check.code) {
+          log(`${script} failed (${check.code}); no container started`);
+          return check.code;
+        }
+      }
+    } catch (error) {
+      log(error.message);
+      return error.exitCode ?? 1;
+    }
+  }
   let release;
   try { release = acquireLock(dependencies.lockDirectory); } catch (error) { log(error.message); return 2; }
   const controller = new AbortController();
@@ -308,8 +332,6 @@ export async function run(argv, dependencies = {}) {
   const ownedImages = new Set();
   const ownedNetworks = new Set();
   const temporary = fs.mkdtempSync(path.join(dependencies.tempRoot ?? os.tmpdir(), 'lifemodel-test-'));
-  const runCommand = dependencies.command ?? command;
-  const root = dependencies.root ?? ROOT;
   const stop = (exitCode, reason) => controller.abort(Object.assign(new Error(reason), { exitCode }));
   const onInt = () => stop(130, 'Interrupted (SIGINT)');
   const onTerm = () => stop(143, 'Interrupted (SIGTERM)');

@@ -23,6 +23,7 @@ import {
   containerArgs,
   command,
   STORE_IMAGES,
+  CHECK_SCRIPTS,
   REPEAT_NEIGHBOURS,
   REPEAT_RUNS,
   networkCreateArgs,
@@ -346,10 +347,8 @@ describe('the disposable launch boundary', () => {
     expect(testArgs.join(' ')).toContain('LIFEMODEL_TEST_DATABASE_URL=');
     expect(testArgs.join(' ')).not.toContain('--network none');
   });
-  it('runs the file-size ratchet, then the vendor-name check, then static checks, then the suite', () => {
+  it('runs static checks and the suite inside the boundary, without the two read-only checks', () => {
     expect(innerSteps('check', []).map(([name]) => name)).toEqual([
-      'node',
-      'node',
       'tsc',
       'tsc',
       'tsc',
@@ -358,25 +357,23 @@ describe('the disposable launch boundary', () => {
       'prettier',
       'vitest',
     ]);
-    expect(innerSteps('check', [])[0]).toEqual(['node', 'scripts/check-file-sizes.mjs']);
-    expect(innerSteps('check', [])[1]).toEqual(['node', 'scripts/check-vendor-names.mjs']);
-    expect(innerSteps('check', [])[2]).toEqual(['tsc', '--noEmit']);
-    expect(innerSteps('check', [])[3]).toEqual(['tsc', '-p', 'loader/tsconfig.json', '--noEmit']);
-    expect(innerSteps('check', [])[4]).toEqual(['tsc', '-p', 'web/app/tsconfig.json', '--noEmit']);
-    expect(innerSteps('check', [])[5]).toEqual([
+    expect(innerSteps('check', [])[0]).toEqual(['tsc', '--noEmit']);
+    expect(innerSteps('check', [])[1]).toEqual(['tsc', '-p', 'loader/tsconfig.json', '--noEmit']);
+    expect(innerSteps('check', [])[2]).toEqual(['tsc', '-p', 'web/app/tsconfig.json', '--noEmit']);
+    expect(innerSteps('check', [])[3]).toEqual([
       'tsc',
       '-p',
       'web/loader/tsconfig.json',
       '--noEmit',
     ]);
-    expect(innerSteps('check', [])[6]).toEqual([
+    expect(innerSteps('check', [])[4]).toEqual([
       'eslint',
       'src/',
       'loader/',
       'web/app/',
       'web/loader/src/',
     ]);
-    expect(innerSteps('check', [])[7]).toEqual([
+    expect(innerSteps('check', [])[5]).toEqual([
       'prettier',
       '--check',
       'src/**/*.ts',
@@ -385,30 +382,49 @@ describe('the disposable launch boundary', () => {
       'web/loader/**/*.{ts,tsx,css,json,html}',
       'web/kit/**/*.{ts,tsx,css,json,html}',
     ]);
+    // The two dependency-free checks read the checkout itself (lifemodel-5zoc,
+    // lifemodel-1be4); nothing runs them inside the container.
+    for (const step of innerSteps('check', [])) expect(step).not.toContain('node');
     expect(innerSteps('test', ['test-file.ts'])[0].at(-1)).toBe('--maxWorkers=2');
   });
-  it('carries the check scripts and their committed data into the test container snapshot', () => {
-    const root = mkdtempSync(join(tmpdir(), 'snapshot-check-scripts-'));
+  it('runs the two read-only checks on the checkout first, and their failure starts no container', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'launcher-checks-'));
+    const scriptCalls: string[][] = [];
+    const dockerCalls: string[][] = [];
+    let codes = [1];
+    const fake = async (program: string, args: string[]) => {
+      if (program === process.execPath) {
+        scriptCalls.push(args);
+        return { code: codes.shift() ?? 0, stdout: '', stderr: '' };
+      }
+      dockerCalls.push(args);
+      return { code: 0, stdout: '', stderr: '' };
+    };
     try {
-      writeFileSync(join(root, 'package.json'), '{}');
-      writeFileSync(join(root, 'package-lock.json'), '{}');
-      mkdirSync(join(root, 'scripts'));
-      for (const file of [
-        ['check-file-sizes.mjs', '// ratchet'],
-        ['file-size-baseline.json', '{"files":{}}'],
-        ['check-vendor-names.mjs', '// vendor names'],
-        ['vendor-names.json', '{"names":[],"exceptions":[]}'],
-      ])
-        writeFileSync(join(root, 'scripts', file[0]), file[1]);
-      const snapshot = join(root, 'snapshot');
-      stageSnapshot(root, snapshot);
-      for (const file of [
-        'check-file-sizes.mjs',
-        'file-size-baseline.json',
-        'check-vendor-names.mjs',
-        'vendor-names.json',
-      ])
-        expect(existsSync(join(snapshot, 'scripts', file))).toBe(true);
+      const first = await run(['check'], {
+        root,
+        tempRoot: root,
+        lockDirectory: join(root, 'lock'),
+        command: fake,
+      });
+      expect(first).toBe(1);
+      expect(scriptCalls).toEqual([[join(root, CHECK_SCRIPTS[0])]]);
+      expect(dockerCalls).toEqual([]);
+
+      scriptCalls.length = 0;
+      codes = [0, 1];
+      const second = await run(['check'], {
+        root,
+        tempRoot: root,
+        lockDirectory: join(root, 'lock'),
+        command: fake,
+      });
+      expect(second).toBe(1);
+      expect(scriptCalls).toEqual([
+        [join(root, CHECK_SCRIPTS[0])],
+        [join(root, CHECK_SCRIPTS[1])],
+      ]);
+      expect(dockerCalls).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

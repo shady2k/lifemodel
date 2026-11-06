@@ -260,7 +260,7 @@ describe('the vendor-name check (lifemodel-1be4)', () => {
     }
   });
 
-  it('scans source and JSON under src, loader and web only, skipping generated and non-source files', () => {
+  it('scans source and JSON under src, loader and web, sees source under coverage, data and dist, and skips only real generated output', () => {
     const root = fixture();
     try {
       for (const relative of [
@@ -269,9 +269,15 @@ describe('the vendor-name check (lifemodel-1be4)', () => {
         'web/app/c.mjs',
         'loader/src/d.tsx',
         'src/node_modules/vendored.ts',
-        'src/dist/generated.ts',
+        'loader/dist/generated.ts',
+        'web/app/dist/generated.ts',
+        'web/loader/dist/generated.ts',
+        'coverage/report.html',
+        // A source directory named coverage, data or dist is source: the
+        // check must scan it (lifemodel-1be4 review F2).
         'src/coverage/report.html',
-        'src/.vite/cache.ts',
+        'src/data/task.ts',
+        'src/dist/generated.ts',
         'src/notes.md',
         'src/data.yaml',
         'tests/fixture.ts',
@@ -288,9 +294,29 @@ describe('the vendor-name check (lifemodel-1be4)', () => {
         'loader/src/d.tsx',
         'src/a.ts',
         'src/b.json',
+        'src/coverage/report.html',
+        'src/data/task.ts',
+        'src/dist/generated.ts',
         'web/app/c.mjs',
       ]);
       expect(checkTree({ root, listPath: list }).violations.map((v) => v.path)).toEqual(scanned);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not fail on untracked generated output at the exact places the build writes it', () => {
+    const root = fixture();
+    try {
+      for (const relative of [
+        'loader/dist/bundle.ts',
+        'web/app/dist/bundle.ts',
+        'web/loader/dist/bundle.ts',
+      ])
+        writeFile(root, relative, ['opencode']);
+      const list = writeList(root, [{ name: 'opencode', allowed: [] }]);
+      expect(scanTree(root)).toEqual([]);
+      expect(checkTree({ root, listPath: list })).toMatchObject({ violations: [], stale: [] });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

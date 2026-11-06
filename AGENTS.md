@@ -94,7 +94,7 @@ tick), Energy & state are physiology. Start with `README.md` and
 | `npm run test:docker` | the launcher's docker mode (`node scripts/test-isolated.mjs docker`) |
 | `node scripts/test-isolated.mjs repeat -- <test files>` | run those files and fixed store-heavy neighbours five times in one disposable container, in sequence, stopping at the first failed repetition and returning its exit code; CI's product job runs it for a pull request's new and changed test files |
 | `npm run test:watch` | explicitly unsupported: the launcher runs the suite one-shot and bounded and has no watch option yet, and watch on the host is refused by the entrypoint policy — run `node scripts/test-isolated.mjs test -- <path>` instead |
-| `npm run check` | every product check in one command — the file-size ratchet first, then the vendor-name check, then typecheck, lint, the format check and the suite (`--maxWorkers=2`), all started through the isolated launcher (`node scripts/test-isolated.mjs check`), stopping at the first failure; the exact command CI's product job runs |
+| `npm run check` | every product check in one command — the file-size ratchet then the vendor-name check, both on the checkout, then typecheck, lint, the format check and the suite (`--maxWorkers=2`) inside the isolated boundary, all started by `node scripts/test-isolated.mjs check`, stopping at the first failure; the exact command CI's product job runs |
 | `npm run check:file-sizes` | the file-size ratchet alone: every source or test file over its recorded size, over the 800-line limit, or stale in `scripts/file-size-baseline.json` fails |
 | `npm run check:file-sizes:update` | the only way to change the baseline: it lowers counts and removes entries, never raises a count or adds a file |
 | `node scripts/check-vendor-names.mjs` | the vendor-name check alone: a reviewed vendor name outside its adapter, default setting or listed exception fails, and so does a listed exception that no longer matches |
@@ -192,6 +192,13 @@ disposable test boundary, `scripts/test-isolated.mjs
   store pools and the per-file databases as they do in the full check. It is
   not a suite-wide run, and `repeat` with no test file is a usage error, never
   a pass;
+- only two read-only checks run outside the boundary: in `check` mode the
+  launcher runs `node scripts/check-file-sizes.mjs` and then
+  `node scripts/check-vendor-names.mjs` on the checkout, before it stages a
+  snapshot or touches an image, and stops with the first one's exit code. Both
+  are dependency-free and read files only, so they cannot execute the checkout;
+  they see every source file it holds, including files the snapshot filter
+  leaves out. Everything else runs inside the boundary;
 - the entrypoint policy is itself tested: `tests/unit/test-entrypoints.test.ts`
   reads committed config surfaces (package.json scripts, vitest config, the
   pre-commit hook, CI, lockfile agreement and store-image/network policy) and
@@ -211,9 +218,10 @@ Prerequisites for test runs and checks: **Node.js ≥ 24 and Docker**. Watch
   bounded (Test isolation, above).
 - `npm run check` is the one command with CI's verdict — CI's `ci-product` job
   runs the same launcher command, `node scripts/test-isolated.mjs check`, on
-  node 24 behind GitHub's disposable Docker daemon: the file-size ratchet
-  first, then the vendor-name check, then typecheck, lint, the format check and
-  the suite (at most 2 workers), stopping at the first failure. No `npm ci` runs on the `ci-product` host. A manifest that disagrees with
+  node 24 behind GitHub's disposable Docker daemon: the file-size ratchet then
+  the vendor-name check on the checkout, then typecheck, lint, the format check
+  and the suite inside the boundary (at most 2 workers), stopping at the first
+  failure. No `npm ci` runs on the `ci-product` host. A manifest that disagrees with
   `package-lock.json` fails the entrypoint policy tests in the suite, which is
   what `npm ci` used to prove before the checks started.
 - Run one file: `node scripts/test-isolated.mjs test --

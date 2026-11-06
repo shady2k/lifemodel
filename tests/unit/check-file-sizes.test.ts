@@ -149,18 +149,44 @@ describe('the file-size ratchet (lifemodel-5zoc)', () => {
     expect(countLines('one\ntwo\n')).toBe(2);
   });
 
-  it('walks only source and markup files, and skips generated and vendored directories', () => {
+  it('walks source and markup, sees source under coverage and data, and skips only real generated output', () => {
     const root = fixture();
     try {
-      writeBaseline(root, {});
+      const baselinePath = writeBaseline(root, {});
       writeLines(root, 'tests/fixtures/data.json', 2000);
       writeLines(root, 'web/app/notes.md', 2000);
       writeLines(root, 'src/node_modules/vendored.ts', 2000);
+      writeLines(root, 'loader/dist/generated.ts', 2000);
       writeLines(root, 'web/app/dist/generated.ts', 2000);
-      writeLines(root, 'tests/coverage/report.html', 2000);
+      writeLines(root, 'web/loader/dist/generated.ts', 2000);
+      writeLines(root, 'coverage/report.html', 2000);
       writeLines(root, 'scripts/tool.mjs', 2000);
+      // A source directory named coverage or data is source: the ratchet must
+      // see it (lifemodel-5zoc review F2).
+      writeLines(root, 'src/coverage/report.html', 2000);
+      writeLines(root, 'src/data/state.ts', 2000);
       const counts = scanTree(root);
-      expect([...counts.keys()]).toEqual([]);
+      expect([...counts.keys()]).toEqual(['src/coverage/report.html', 'src/data/state.ts']);
+      expect(checkTree({ root, baselinePath }).failures).toEqual([
+        { path: 'src/coverage/report.html', count: 2000, reason: 'new' },
+        { path: 'src/data/state.ts', count: 2000, reason: 'new' },
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not fail on untracked generated output at the exact places the build writes it', () => {
+    const root = fixture();
+    try {
+      const baselinePath = writeBaseline(root, {});
+      // An owner's checkout holds these after a build; they are generated,
+      // untracked, and over the limit, and the check must not judge them.
+      writeLines(root, 'loader/dist/bundle.ts', 2000);
+      writeLines(root, 'web/app/dist/bundle.ts', 2000);
+      writeLines(root, 'web/loader/dist/bundle.ts', 2000);
+      expect(scanTree(root).size).toBe(0);
+      expect(checkTree({ root, baselinePath }).failures).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
