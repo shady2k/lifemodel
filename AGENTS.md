@@ -92,8 +92,12 @@ tick), Energy & state are physiology. Start with `README.md` and
 | `npm start` | run the build (`dist/index.js`) |
 | `npm run test` | run the whole test suite inside the disposable test boundary (`node scripts/test-isolated.mjs test`) |
 | `npm run test:docker` | the launcher's docker mode (`node scripts/test-isolated.mjs docker`) |
+| `node scripts/test-isolated.mjs repeat -- <test files>` | run those files and fixed store-heavy neighbours five times in one disposable container, in sequence, stopping at the first failed repetition and returning its exit code; CI's product job runs it for a pull request's new and changed test files |
 | `npm run test:watch` | explicitly unsupported: the launcher runs the suite one-shot and bounded and has no watch option yet, and watch on the host is refused by the entrypoint policy — run `node scripts/test-isolated.mjs test -- <path>` instead |
-| `npm run check` | every product check in one command — typecheck, lint, the format check and the suite (`--maxWorkers=2`), all started through the isolated launcher (`node scripts/test-isolated.mjs check`), stopping at the first failure; the exact command CI's product job runs |
+| `npm run check` | every product check in one command — the file-size ratchet then the vendor-name check, both on the checkout, then typecheck, lint, the format check and the suite (`--maxWorkers=2`) inside the isolated boundary, all started by `node scripts/test-isolated.mjs check`, stopping at the first failure; the exact command CI's product job runs |
+| `npm run check:file-sizes` | the file-size ratchet alone: every source or test file over its recorded size, over the 800-line limit, or stale in `scripts/file-size-baseline.json` fails |
+| `npm run check:file-sizes:update` | the only way to change the baseline: it lowers counts and removes entries, never raises a count or adds a file |
+| `node scripts/check-vendor-names.mjs` | the vendor-name check alone: a reviewed vendor name outside its adapter, default setting or listed exception fails, and so does a listed exception that no longer matches |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run lint` | ESLint over `src/` and `loader/` (`lint:fix` to auto-fix) |
 | `npm run format` / `format:check` | Prettier over `src/**/*.ts` and `loader/**/*.ts` |
@@ -116,7 +120,7 @@ runs.
 Local and ordinary CI suites never start on the host. Their entrypoints — `npm run test`,
 `npm run check`, the husky pre-commit hook, CI's product job — goes through the
 disposable test boundary, `scripts/test-isolated.mjs
-<check|test|docker> [--timeout-ms <ms>] [-- <vitest args>]`:
+<check|test|docker|repeat> [--timeout-ms <ms>] [-- <vitest args>]`:
 
 - a run is one-shot and bounded, with at most 2 vitest workers enforced twice —
   by the launcher and by `vitest.config.ts`;
@@ -178,13 +182,31 @@ disposable test boundary, `scripts/test-isolated.mjs
   there is no owner-socket, privileged or host-suite fallback. Deletion is
   awaited from outside the machine; an unconfirmed deletion keeps its claim
   for next-run recovery and cannot turn a successful suite into a green run;
+- `repeat` mode runs the test files it is given, and a fixed list of
+  store-heavy neighbour files (`REPEAT_NEIGHBOURS`, each with its reason), five
+  times in sequence in one container, under the same boundary, store services
+  and `--maxWorkers=2` as the other modes. Five is `REPEAT_RUNS`. It stops at
+  the first failed repetition, reports which repetition failed, and returns
+  that repetition's exit code; it adds no retry. The neighbours are about a
+  minute of test work, so the given files compete for the two workers, the
+  store pools and the per-file databases as they do in the full check. It is
+  not a suite-wide run, and `repeat` with no test file is a usage error, never
+  a pass. A repeat run that exceeds the launcher's 25-minute deadline fails; the
+  deadline is not raised for it (coordinator's decision, 2026-11-06);
+- only two read-only checks run outside the boundary: in `check` mode the
+  launcher runs `node scripts/check-file-sizes.mjs` and then
+  `node scripts/check-vendor-names.mjs` on the checkout, before it stages a
+  snapshot or touches an image, and stops with the first one's exit code. Both
+  are dependency-free and read files only, so they cannot execute the checkout;
+  they see every source file it holds, including files the snapshot filter
+  leaves out. Everything else runs inside the boundary;
 - the entrypoint policy is itself tested: `tests/unit/test-entrypoints.test.ts`
   reads committed config surfaces (package.json scripts, vitest config, the
   pre-commit hook, CI, lockfile agreement and store-image/network policy) and
   refuses a
   raw vitest start on the host in every CI job.
 
-CI builds the standalone core, web and task workbench images and checks their runtime entrypoint module graphs offline before publishing them. The loader PR build and signed core/web/loader/workbench releases run the same `scripts/smoke-image-modules.sh` check before any push. `--check-modules` loads static imports and exits before configuration, stores or service startup; it does not exercise dynamic plugin imports or model loading. The core compiler explicitly includes the shared validator `.mjs` in `tsconfig.json` because wildcard discovery prefers its sibling `.d.mts`. CI also builds the platform loader image on pull requests that touch its inputs, without publishing it, and runs `nix flake check` on pull requests that touch what the flake reads (the `ci-nix` job); all tests run through the isolated launcher. The workbench check imports the task launcher graph without running it; `--self-check` separately checks the installed tools. Launcher startup failures write bounded public codes to stderr and `/dev/termination-log`. Before task Pod deletion, core captures bounded, scrubbed termination evidence in `task.pod` spans for `lifemodel doctor trace`.
+CI builds the standalone core, web and task workbench images and checks their runtime entrypoint module graphs offline before publishing them. The loader PR build and signed core/web/loader/workbench releases run the same `scripts/smoke-image-modules.sh` check before any push. `--check-modules` loads static imports and exits before configuration, stores or service startup; it does not exercise dynamic plugin imports or model loading. The core compiler explicitly includes the shared validator `.mjs` in `tsconfig.json` because wildcard discovery prefers its sibling `.d.mts`. CI also builds the platform loader image on pull requests that touch its inputs, without publishing it, and runs `nix flake check` on pull requests that touch what the flake reads (the `ci-nix` job); all tests run through the isolated launcher. On a pull request, the required `ci-product` job runs the full check, then repeats that change's new and changed test files five times in one container (`scripts/ci-repeat-test-paths.sh` selects them); a change that brought no such file skips the repetition at no cost, and a diff that cannot be computed fails the step rather than skipping it. The workbench check imports the task launcher graph without running it; `--self-check` separately checks the installed tools. Launcher startup failures write bounded public codes to stderr and `/dev/termination-log`. Before task Pod deletion, core captures bounded, scrubbed termination evidence in `task.pod` spans for `lifemodel doctor trace`.
 
 Prerequisites for test runs and checks: **Node.js ≥ 24 and Docker**. Watch
 (`test:watch`) is explicitly unsupported, never a host fallback.
@@ -197,13 +219,22 @@ Prerequisites for test runs and checks: **Node.js ≥ 24 and Docker**. Watch
   bounded (Test isolation, above).
 - `npm run check` is the one command with CI's verdict — CI's `ci-product` job
   runs the same launcher command, `node scripts/test-isolated.mjs check`, on
-  node 24 behind GitHub's disposable Docker daemon: typecheck, lint, the
-  format check and the suite (at most 2 workers), stopping at the first
+  node 24 behind GitHub's disposable Docker daemon: the file-size ratchet then
+  the vendor-name check on the checkout, then typecheck, lint, the format check
+  and the suite inside the boundary (at most 2 workers), stopping at the first
   failure. No `npm ci` runs on the `ci-product` host. A manifest that disagrees with
   `package-lock.json` fails the entrypoint policy tests in the suite, which is
   what `npm ci` used to prove before the checks started.
 - Run one file: `node scripts/test-isolated.mjs test --
   tests/unit/energy-management.test.ts` (unit or ordinary integration tests).
+- A pull request's new and changed test files are repeated before merge: CI's
+  required product job runs the full check, then
+  `node scripts/test-isolated.mjs repeat -- <files>` over the added or changed
+  `tests/**/*.test.ts` that still exist (`scripts/ci-repeat-test-paths.sh`),
+  five times beside the fixed neighbours. Run the same thing locally when a
+  test is suspected of passing at random:
+  `node scripts/test-isolated.mjs repeat -- tests/unit/x.test.ts`. A helper or
+  fixture change repeats nothing.
 - Tests do not use pino's file transport: it writes from a worker thread that a
   test cannot stop, and it raced the removal of temp directories. Use a
   recording or in-memory logger (`tests/helpers/test-logger.ts`), or

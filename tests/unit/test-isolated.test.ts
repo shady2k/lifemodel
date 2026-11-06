@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import {
   mkdtempSync,
   mkdirSync,
@@ -17,16 +18,21 @@ import {
   stageSnapshot,
   acquireLock,
   innerSteps,
+  repeatScriptLines,
+  stepCommand,
   containerArgs,
   command,
   STORE_IMAGES,
+  CHECK_SCRIPTS,
+  REPEAT_NEIGHBOURS,
+  REPEAT_RUNS,
   networkCreateArgs,
   storeContainerArgs,
   testStoreEnv,
   run,
 } from '../../scripts/test-isolated.mjs';
 
-function controlledDocker({ stale = false, complete = false } = {}) {
+function controlledDocker({ stale = false, complete = false, exitCode = 0 } = {}) {
   const calls: string[][] = [];
   return {
     calls,
@@ -45,7 +51,7 @@ function controlledDocker({ stale = false, complete = false } = {}) {
           : { code: 0, stdout: 'base-image/amd64', stderr: '' };
       }
       if (args[0] === 'start' && args.includes('-a')) {
-        if (complete) return { code: 0, stdout: '', stderr: '' };
+        if (complete) return { code: exitCode, stdout: '', stderr: '' };
         return await new Promise((_resolve, reject) => {
           options.signal?.addEventListener('abort', () => reject(options.signal?.reason), {
             once: true,
@@ -341,7 +347,7 @@ describe('the disposable launch boundary', () => {
     expect(testArgs.join(' ')).toContain('LIFEMODEL_TEST_DATABASE_URL=');
     expect(testArgs.join(' ')).not.toContain('--network none');
   });
-  it('executes static checks before the suite without recursive npm scripts', () => {
+  it('runs static checks and the suite inside the boundary, without the two read-only checks', () => {
     expect(innerSteps('check', []).map(([name]) => name)).toEqual([
       'tsc',
       'tsc',
@@ -376,7 +382,52 @@ describe('the disposable launch boundary', () => {
       'web/loader/**/*.{ts,tsx,css,json,html}',
       'web/kit/**/*.{ts,tsx,css,json,html}',
     ]);
+    // The two dependency-free checks read the checkout itself (lifemodel-5zoc,
+    // lifemodel-1be4); nothing runs them inside the container.
+    for (const step of innerSteps('check', [])) expect(step).not.toContain('node');
     expect(innerSteps('test', ['test-file.ts'])[0].at(-1)).toBe('--maxWorkers=2');
+  });
+  it('runs the two read-only checks on the checkout first, and their failure starts no container', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'launcher-checks-'));
+    const scriptCalls: string[][] = [];
+    const dockerCalls: string[][] = [];
+    let codes = [1];
+    const fake = async (program: string, args: string[]) => {
+      if (program === process.execPath) {
+        scriptCalls.push(args);
+        return { code: codes.shift() ?? 0, stdout: '', stderr: '' };
+      }
+      dockerCalls.push(args);
+      return { code: 0, stdout: '', stderr: '' };
+    };
+    try {
+      const first = await run(['check'], {
+        root,
+        tempRoot: root,
+        lockDirectory: join(root, 'lock'),
+        command: fake,
+      });
+      expect(first).toBe(1);
+      expect(scriptCalls).toEqual([[join(root, CHECK_SCRIPTS[0])]]);
+      expect(dockerCalls).toEqual([]);
+
+      scriptCalls.length = 0;
+      codes = [0, 1];
+      const second = await run(['check'], {
+        root,
+        tempRoot: root,
+        lockDirectory: join(root, 'lock'),
+        command: fake,
+      });
+      expect(second).toBe(1);
+      expect(scriptCalls).toEqual([
+        [join(root, CHECK_SCRIPTS[0])],
+        [join(root, CHECK_SCRIPTS[1])],
+      ]);
+      expect(dockerCalls).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
   it('preserves a child failure and times out a child that never settles', async () => {
     expect((await command(process.execPath, ['-e', 'process.exit(7)'])).code).toBe(7);
@@ -442,6 +493,151 @@ describe('the disposable launch boundary', () => {
       expect(docker.calls).toContainEqual(['rm', '-f', 'stale-container']);
       expect(docker.calls).toContainEqual(['network', 'rm', 'stale-network']);
       expect(docker.calls).toContainEqual(['image', 'rm', 'stale-image']);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("repeat mode: a pull request's new and changed test files (lifemodel-hbsi)", () => {
+  const repoRoot = process.cwd();
+
+  it('repeats the given test files five times, beside the same store neighbours', () => {
+    const files = ['tests/unit/a.test.ts', 'tests/integration/b.test.ts'];
+    const neighbours = REPEAT_NEIGHBOURS.map(({ file }) => file);
+    expect(REPEAT_RUNS).toBe(5);
+    const steps = innerSteps('repeat', files);
+    expect(steps).toHaveLength(REPEAT_RUNS);
+    for (const step of steps) {
+      expect(step).toEqual(['vitest', 'run', ...files, ...neighbours, '--maxWorkers=2']);
+    }
+  });
+
+  it('names every neighbour with a reason, and every neighbour is a test file that exists', () => {
+    expect(REPEAT_NEIGHBOURS.length).toBeGreaterThan(0);
+    for (const { file, reason } of REPEAT_NEIGHBOURS) {
+      expect(file, 'a neighbour under tests/').toMatch(/^tests\/.+\.test\.ts$/);
+      expect(reason.trim().length, `${file} says why it is a neighbour`).toBeGreaterThan(20);
+      expect(existsSync(join(repoRoot, file)), `${file} exists`).toBe(true);
+    }
+  });
+
+  it('accepts repeat with test files and refuses it with none', () => {
+    expect(parseArgs(['repeat', '--', 'tests/unit/a.test.ts']).mode).toBe('repeat');
+    expect(parseArgs(['repeat', '--timeout-ms', '60000', '--', 'tests/unit/a.test.ts'])).toEqual({
+      mode: 'repeat',
+      vitestArgs: ['tests/unit/a.test.ts'],
+      timeoutMs: 60_000,
+    });
+    // A repetition of nothing would pass without running anything.
+    expect(() => parseArgs(['repeat'])).toThrow(/repeat/);
+    expect(() => parseArgs(['repeat', '--'])).toThrow(/repeat/);
+  });
+
+  it('renders one labelled repetition per run, each stopping on its own failure', () => {
+    const lines = repeatScriptLines(['first', 'second']);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("'vitest repetition 1 of 2'");
+    expect(lines[1]).toContain("'vitest repetition 2 of 2'");
+    // Each line runs its command and ends the script with that command's code,
+    // so the next repetition never starts after a failure.
+    for (const line of lines) expect(line).toContain('|| { status=$?; echo');
+    expect(lines.every((line) => line.includes('exit $status'))).toBe(true);
+  });
+
+  it('stops at the first failed repetition and passes its exit code on', () => {
+    const root = mkdtempSync(join(tmpdir(), 'repeat-fail-'));
+    try {
+      const bin = join(root, 'bin');
+      mkdirSync(bin);
+      const counter = join(root, 'runs');
+      // A test file that fails one run in several, as the plant does: only the
+      // third repetition exits non-zero.
+      writeFileSync(
+        join(bin, 'vitest'),
+        `#!/bin/sh\nprintf 'run\\n' >> '${counter}'\ncount=$(wc -l < '${counter}')\n[ "$count" -lt 3 ] || exit 7\nexit 0\n`,
+        { mode: 0o755 }
+      );
+      const commands = innerSteps('repeat', ['tests/unit/planted.test.ts']).map((step) =>
+        stepCommand(step, bin)
+      );
+      let failure: { status?: number; stderr?: string } | undefined;
+      try {
+        execFileSync('sh', ['-ec', repeatScriptLines(commands).join(' && ')], { encoding: 'utf8' });
+      } catch (error) {
+        failure = error as { status?: number; stderr?: string };
+      }
+      expect(failure, 'the third repetition fails').toBeDefined();
+      expect(failure?.status).toBe(7);
+      expect(String(failure?.stderr)).toContain('vitest repetition 3 of 5 failed');
+      expect(readFileSync(counter, 'utf8').trim().split('\n')).toHaveLength(3);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('runs every repetition when they all pass', () => {
+    const root = mkdtempSync(join(tmpdir(), 'repeat-pass-'));
+    try {
+      const bin = join(root, 'bin');
+      mkdirSync(bin);
+      const counter = join(root, 'runs');
+      writeFileSync(join(bin, 'vitest'), `#!/bin/sh\nprintf 'run\\n' >> '${counter}'\nexit 0\n`, {
+        mode: 0o755,
+      });
+      const commands = innerSteps('repeat', ['tests/unit/stable.test.ts']).map((step) =>
+        stepCommand(step, bin)
+      );
+      const output = execFileSync('sh', ['-ec', repeatScriptLines(commands).join(' && ')], {
+        encoding: 'utf8',
+      });
+      expect(output).toContain('vitest repetition 5 of 5');
+      expect(readFileSync(counter, 'utf8').trim().split('\n')).toHaveLength(REPEAT_RUNS);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("passes the failed repetition's exit code out of the launcher", async () => {
+    const root = mkdtempSync(join(tmpdir(), 'repeat-exit-'));
+    launcherFixture(root);
+    const docker = controlledDocker({ complete: true, exitCode: 3 });
+    try {
+      const result = await run(['repeat', '--timeout-ms', '5000', '--', 'tests/unit/a.test.ts'], {
+        root: join(root, 'source'),
+        tempRoot: root,
+        lockDirectory: join(root, 'lock'),
+        command: docker.command,
+      });
+      expect(result).toBe(3);
+      // One container, one script: every repetition inside the same boundary.
+      const created = docker.calls.filter((args) => args[0] === 'create');
+      const script = created.at(-1)?.at(-1) ?? '';
+      expect(script.match(/echo 'vitest repetition \d of 5'/g)).toEqual([
+        "echo 'vitest repetition 1 of 5'",
+        "echo 'vitest repetition 2 of 5'",
+        "echo 'vitest repetition 3 of 5'",
+        "echo 'vitest repetition 4 of 5'",
+        "echo 'vitest repetition 5 of 5'",
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses repeat mode with no test files, without starting a container', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'repeat-none-'));
+    launcherFixture(root);
+    const docker = controlledDocker({ complete: true });
+    try {
+      const result = await run(['repeat'], {
+        root: join(root, 'source'),
+        tempRoot: root,
+        lockDirectory: join(root, 'lock'),
+        command: docker.command,
+      });
+      expect(result).toBe(2);
+      expect(docker.calls).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

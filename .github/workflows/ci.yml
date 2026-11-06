@@ -1,7 +1,9 @@
 # CI — product checks, backlog checks, and standalone core-image delivery.
 #
 # `changes` classifies the change. `ci-product` runs the isolated full check when
-# product code changed. `ci-backlog` runs the tracked-work gates and the
+# product code changed and, on a pull request, repeats that change's new and
+# changed test files five times in one container (lifemodel-hbsi).
+# `ci-backlog` runs the tracked-work gates and the
 # present-documents check. `ci-core-image` builds the standalone core image on
 # product pull requests with read-only permissions. Three publish jobs ask for
 # packages: write, and only they do: `ci-core-image-publish` and
@@ -166,22 +168,48 @@ jobs:
   # missing answer. Branch protection requiring `changes` too is the other half
   # of the guarantee: a failed `changes` job is then a red required check.
   ci-product:
-    timeout-minutes: 40
+    # Two launcher deadlines of up to 25 minutes each: the full check and, on a
+    # pull request, the repetition of its new and changed test files
+    # (lifemodel-hbsi). The full check took 10 to 13 minutes on GitHub's runner
+    # on main before this feature.
+    timeout-minutes: 65
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.product == 'true') && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The repetition step below diffs the pull request's base against its
+          # head commit, and both ends of that range are revisions of this
+          # history: a shallow clone has neither (as the `changes` job).
+          fetch-depth: 0
 
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
       # The launcher, not the host: no `npm ci` here, no `node_modules` in this
-      # checkout, and the checks and the suite never start in it. The daemon
-      # behind the launcher is the disposable Docker daemon of this runner.
+      # checkout, and the suite never starts in it. The launcher first runs the
+      # two dependency-free, read-only checks on this checkout (they read files
+      # and cannot execute it); everything else runs in the disposable
+      # boundary. The daemon behind the launcher is this runner's disposable
+      # Docker daemon.
       - name: Typecheck, lint, the format check and the suite, inside the isolated test boundary
         run: node scripts/test-isolated.mjs check
+
+      # A test that passes in the author's runs and fails at random in the full
+      # check is what this job exists to catch before main does (lifemodel-hbsi):
+      # the change's own new and changed test files run five times in one
+      # disposable container, beside fixed store-heavy neighbours, so they
+      # compete for the two workers as they do above. A change that added or
+      # changed no test file costs nothing here. A diff that cannot be computed
+      # fails the step: an unknown change is never a reason to skip.
+      - name: Repeat the pull request's new and changed test files
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: scripts/ci-repeat-changed-tests.sh
 
   # Rebuild pinned shadcn add output and compare it with the kit registry lock.
   ci-shadcn-provenance:

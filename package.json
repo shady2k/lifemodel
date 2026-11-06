@@ -21,6 +21,8 @@
     "test:docker": "node scripts/test-isolated.mjs docker",
     "test:watch": "echo 'test:watch is unsupported: the isolated launcher runs the suite one-shot and bounded and has no watch option yet, and watch on the host is forbidden by the test entrypoint policy; run one bounded suite instead: node scripts/test-isolated.mjs test -- <path>' >&2 && exit 1",
     "check": "node scripts/test-isolated.mjs check",
+  "check:file-sizes": "node scripts/check-file-sizes.mjs",
+  "check:file-sizes:update": "node scripts/check-file-sizes.mjs --update",
     "prepare": "husky",
     "browser:auth": "tsx cli/browser-auth.ts",
     "connect": "sh scripts/connect-clone.sh",

@@ -1,0 +1,393 @@
+#!/usr/bin/env node
+/**
+ * Vendor-name check (lifemodel-1be4).
+ *
+ * Generic code names no vendor: a task harness lives behind its adapter and its
+ * registry default, a registry host behind the loader's pull-source setting, a
+ * model provider behind its adapter. This check scans source and JSON under
+ * src/, loader/ and web/ for the reviewed names in scripts/vendor-names.json.
+ * A name is accepted only at a path the list allows for that name, or at a
+ * reviewed exception. An exception that no longer finds its name fails too, so
+ * the debt list can only shrink. An allowed path must be a file the scan
+ * contains (the name need not occur there), so a renamed adapter cannot leave
+ * a dead permission behind.
+ *
+ * Matching is by text on whole tokens, case-insensitively, so comments count.
+ * The same tree and list always produce the same failures, sorted by path.
+ * No dependencies, no clock, no network, no git.
+ */
+import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+export const LIST_NAME = 'vendor-names.json';
+
+/** The trees the check holds: product, loader, web applications. */
+export const SOURCE_ROOTS = ['src', 'loader', 'web'];
+
+/**
+ * Scanned: source, web markup and styles, and JSON. JSON is included because a
+ * registry, harness or provider setting is data. Skipped by type: Markdown,
+ * YAML, images and other prose or data files, where a vendor name is a
+ * document, not a seam. tests/, docs/, deploy/, scripts/, docker/ and .github/
+ * are outside the scanned roots: a name belongs there.
+ */
+const SOURCE_EXTENSIONS = new Set([
+  '.ts',
+  '.tsx',
+  '.mts',
+  '.cts',
+  '.js',
+  '.jsx',
+  '.mjs',
+  '.cjs',
+  '.css',
+  '.html',
+  '.json',
+]);
+
+/**
+ * Generated output, skipped only at the exact places this repository writes
+ * it, and installed dependencies:
+ * - node_modules, wherever it appears: installed dependencies, vendored and
+ *   not this repository's source. Vite's cache is node_modules/.vite, so it
+ *   is inside this directory too.
+ * - dist/ and coverage/ at the tree root: `tsc` (package.json "build") writes
+ *   dist/, and Vitest's coverage run writes coverage/ (vitest.config.ts).
+ * - loader/dist/: `tsc -p loader/tsconfig.json` (package.json "build:loader").
+ * - web/app/dist/ and web/loader/dist/: the two Vite builds (package.json
+ *   "build:app" and "build:loader-ui", both outDir "dist" from their config).
+ *
+ * A directory with one of these names anywhere else is source and is scanned:
+ * `src/coverage/report.html` and `src/data/task.ts` are generic code.
+ */
+const GENERATED_DIRECTORIES = new Set([
+  'dist',
+  'coverage',
+  'loader/dist',
+  'web/app/dist',
+  'web/loader/dist',
+]);
+
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * The name as a case-insensitive literal without the `i` flag: that flag
+ * would also make `[A-Z]` in the boundary lookarounds match lower case, and
+ * `opencodex` would pass as `opencode`.
+ */
+function caseInsensitiveLiteral(name) {
+  return [...name]
+    .map((character) => {
+      const lower = character.toLowerCase();
+      const upper = character.toUpperCase();
+      return lower === upper ? escapeRegExp(character) : `[${lower}${upper}]`;
+    })
+    .join('');
+}
+
+/**
+ * A vendor name is a word in code: it may sit in an identifier, but only where
+ * an identifier really starts a new word. The boundaries are
+ * - anything outside [A-Za-z0-9] (start or end, or a hyphen or dot, as in
+ *   `opencode.json` or `x-openrouter-provider`), which includes `_`; and
+ * - a camelCase change: a lowercase or digit followed by an uppercase letter
+ *   (`opencodeAdapter`, `myOpenCode`), or a lowercase followed by an uppercase
+ *   at the end (`OPENCODE_CONFIG` is the first rule, at its underscore).
+ *
+ * A digit or a letter with no case change is still part of the identifier:
+ * `opencodex`, `xopencode` and `opencode2` do not match.
+ */
+const START_BOUNDARY = '(?:(?<![A-Za-z0-9])|(?<=[a-z0-9])(?=[A-Z]))';
+const END_BOUNDARY = '(?:(?![A-Za-z0-9])|(?<=[a-z])(?=[A-Z]))';
+
+/** Case-insensitive word matcher, including identifier and camelCase forms. */
+export function tokenPattern(name) {
+  return new RegExp(`${START_BOUNDARY}${caseInsensitiveLiteral(name)}${END_BOUNDARY}`);
+}
+
+export function hasVendorName(line, name) {
+  return tokenPattern(name).test(line);
+}
+
+export function isScannedPath(relative) {
+  if (typeof relative !== 'string' || relative === '') return false;
+  if (relative.startsWith('/') || relative.includes('\\')) return false;
+  const segments = relative.split('/');
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..'))
+    return false;
+  if (!SOURCE_ROOTS.some((root) => relative.startsWith(`${root}/`))) return false;
+  return SOURCE_EXTENSIONS.has(path.posix.extname(relative));
+}
+
+/**
+ * Every scanned file under the three roots, sorted by path. A missing source
+ * root is an error: a tree that silently lost a directory would silently lose
+ * its check.
+ */
+export function scanTree(root) {
+  const files = [];
+  function walk(directory, relativeDirectory) {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const relative = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
+      // A symlink is neither a directory nor a file here: it is not a file this tree owns.
+      if (entry.isDirectory()) {
+        if (entry.name === 'node_modules' || GENERATED_DIRECTORIES.has(relative)) continue;
+        walk(path.join(directory, entry.name), relative);
+      } else if (entry.isFile() && SOURCE_EXTENSIONS.has(path.extname(entry.name))) {
+        files.push(relative);
+      }
+    }
+  }
+  for (const relative of SOURCE_ROOTS) {
+    const directory = path.join(root, relative);
+    let stat;
+    try {
+      stat = statSync(directory);
+    } catch (error) {
+      throw new Error(`The source tree ${relative}/ is missing at ${directory}: ${error.message}`);
+    }
+    if (!stat.isDirectory()) throw new Error(`The source tree ${relative}/ is not a directory`);
+    walk(directory, relative);
+  }
+  return files.sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+}
+
+const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+function invalid(listPath, detail) {
+  return new Error(`The vendor-name list at ${listPath} is invalid: ${detail}`);
+}
+
+function unknownKeys(listPath, where, value, allowed) {
+  const extra = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (extra.length) throw invalid(listPath, `${where} has unknown key ${extra[0]}`);
+}
+
+function requireReason(listPath, where, value) {
+  if (typeof value !== 'string' || value.trim() === '')
+    throw invalid(listPath, `${where}.reason must say why the place or exception is reviewed`);
+}
+
+/** Parse and validate the committed list. Any structural problem is an input error. */
+export function parseList(value, listPath = 'scripts/vendor-names.json') {
+  if (!isObject(value)) throw invalid(listPath, 'the document must be an object');
+  unknownKeys(listPath, 'the document', value, ['names', 'exceptions']);
+  if (!Array.isArray(value.names) || value.names.length === 0)
+    throw invalid(listPath, '"names" must be a non-empty array');
+
+  const names = [];
+  const seenNames = new Set();
+  for (const [index, entry] of value.names.entries()) {
+    const where = `names[${index}]`;
+    if (!isObject(entry)) throw invalid(listPath, `${where} must be an object`);
+    unknownKeys(listPath, where, entry, ['name', 'allowed']);
+    if (
+      typeof entry.name !== 'string' ||
+      !/^[a-z0-9][a-z0-9._-]*$/.test(entry.name) ||
+      entry.name.includes('..')
+    )
+      throw invalid(listPath, `${where}.name must be a lower-case vendor name`);
+    if (seenNames.has(entry.name)) throw invalid(listPath, `name ${entry.name} is listed twice`);
+    seenNames.add(entry.name);
+    if (!Array.isArray(entry.allowed))
+      throw invalid(listPath, `${where}.allowed must be an array (it may be empty)`);
+    const allowed = [];
+    const seenPaths = new Set();
+    for (const [placeIndex, place] of entry.allowed.entries()) {
+      const placeWhere = `${where}.allowed[${placeIndex}]`;
+      if (!isObject(place)) throw invalid(listPath, `${placeWhere} must be an object`);
+      unknownKeys(listPath, placeWhere, place, ['path', 'reason']);
+      if (!isScannedPath(place.path))
+        throw invalid(
+          listPath,
+          `${placeWhere}.path must be a source or JSON path under src/, loader/ or web/, not ${JSON.stringify(place.path)}`
+        );
+      if (seenPaths.has(place.path))
+        throw invalid(listPath, `${entry.name} allows ${place.path} twice`);
+      seenPaths.add(place.path);
+      requireReason(listPath, placeWhere, place.reason);
+      allowed.push({ path: place.path, reason: place.reason });
+    }
+    names.push({ name: entry.name, allowed });
+  }
+
+  if (!Array.isArray(value.exceptions))
+    throw invalid(listPath, '"exceptions" must be an array (it may be empty)');
+  const exceptions = [];
+  const seenExceptions = new Set();
+  const allowedBy = new Map(names.map((entry) => [entry.name, new Set(entry.allowed.map((p) => p.path))]));
+  for (const [index, entry] of value.exceptions.entries()) {
+    const where = `exceptions[${index}]`;
+    if (!isObject(entry)) throw invalid(listPath, `${where} must be an object`);
+    unknownKeys(listPath, where, entry, ['name', 'path', 'reason']);
+    if (typeof entry.name !== 'string' || !seenNames.has(entry.name))
+      throw invalid(listPath, `${where}.name must be one of the declared names`);
+    if (!isScannedPath(entry.path))
+      throw invalid(
+        listPath,
+        `${where}.path must be a source or JSON path under src/, loader/ or web/, not ${JSON.stringify(entry.path)}`
+      );
+    requireReason(listPath, where, entry.reason);
+    if (allowedBy.get(entry.name).has(entry.path))
+      throw invalid(listPath, `${entry.name} at ${entry.path} is both allowed and an exception`);
+    const key = exceptionKey(entry.name, entry.path);
+    if (seenExceptions.has(key))
+      throw invalid(listPath, `exception ${entry.name} at ${entry.path} is listed twice`);
+    seenExceptions.add(key);
+    exceptions.push({ name: entry.name, path: entry.path, reason: entry.reason });
+  }
+  return { names, exceptions };
+}
+
+/** The committed list. Missing or unreadable is an error, never a pass. */
+export function readList(listPath) {
+  let text;
+  try {
+    text = readFileSync(listPath, 'utf8');
+  } catch (error) {
+    throw new Error(
+      `The vendor-name list at ${listPath} cannot be read: ${error.message}. ` +
+        'It is a required input; a missing list is never a pass.'
+    );
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`The vendor-name list at ${listPath} is not valid JSON: ${error.message}`);
+  }
+  return parseList(parsed, listPath);
+}
+
+const exceptionKey = (name, file) => `${name}\u0000${file}`;
+const compareText = (left, right) => (left < right ? -1 : left > right ? 1 : 0);
+const compareViolations = (left, right) =>
+  compareText(left.path, right.path) || left.line - right.line || compareText(left.name, right.name);
+const compareStale = (left, right) =>
+  compareText(left.path, right.path) || compareText(left.name, right.name);
+
+export function checkTree({ root, listPath }) {
+  const list = readList(listPath);
+  const files = scanTree(root);
+  const allowedBy = new Map(
+    list.names.map((entry) => [entry.name, entry.allowed.map((place) => place.path).sort()])
+  );
+  const compiled = [...list.names]
+    .sort((left, right) => compareText(left.name, right.name))
+    .map((entry) => ({ name: entry.name, pattern: tokenPattern(entry.name) }));
+  const exceptions = new Map(
+    list.exceptions.map((entry) => [exceptionKey(entry.name, entry.path), entry])
+  );
+  const matched = new Set();
+  const violations = [];
+  for (const file of files) {
+    const lines = readFileSync(path.join(root, file), 'utf8').split('\n');
+    for (const [index, line] of lines.entries()) {
+      for (const { name, pattern } of compiled) {
+        if (!pattern.test(line)) continue;
+        const allowed = allowedBy.get(name) ?? [];
+        if (allowed.includes(file)) continue;
+        const key = exceptionKey(name, file);
+        if (exceptions.has(key)) {
+          matched.add(key);
+          continue;
+        }
+        violations.push({ path: file, line: index + 1, name, allowed });
+      }
+    }
+  }
+  violations.sort(compareViolations);
+  const stale = list.exceptions
+    .filter((entry) => !matched.has(exceptionKey(entry.name, entry.path)))
+    .map((entry) => ({ name: entry.name, path: entry.path }))
+    .sort(compareStale);
+  // An allowed path must be a file the check really scans. The name need not
+  // occur there (a default registry host can be allowed before anything uses
+  // it), but a renamed or deleted adapter must not leave a dead permission.
+  const scanned = new Set(files);
+  const missingAllowed = list.names
+    .flatMap((entry) =>
+      entry.allowed
+        .filter((place) => !scanned.has(place.path))
+        .map((place) => ({ name: entry.name, path: place.path }))
+    )
+    .sort(compareStale);
+  return { checked: files.length, violations, stale, missingAllowed };
+}
+
+function formatViolation(violation) {
+  const places = violation.allowed.length
+    ? violation.allowed.join(', ')
+    : 'none (no adapter or default setting in this tree)';
+  return `${violation.path}:${violation.line}: ${violation.name} is a vendor name; allowed places for it: ${places}`;
+}
+
+export function run(args, options = {}) {
+  const scriptPath = fileURLToPath(import.meta.url);
+  const root = options.root ?? path.resolve(path.dirname(scriptPath), '..');
+  const listPath = options.listPath ?? path.join(path.dirname(scriptPath), LIST_NAME);
+  if (args.length) {
+    console.error('Usage: node scripts/check-vendor-names.mjs');
+    return 2;
+  }
+  try {
+    const { checked, violations, stale, missingAllowed } = checkTree({ root, listPath });
+    if (!violations.length && !stale.length && !missingAllowed.length) {
+      console.log(
+        `Vendor-name check: ${checked} files checked; no vendor name outside its adapter, default setting or reviewed exception.`
+      );
+      return 0;
+    }
+    const listLabel = path.relative(root, listPath) || listPath;
+    const blocks = [];
+    if (violations.length) {
+      blocks.push(
+        `${violations.length} vendor-name violation${violations.length === 1 ? '' : 's'}:\n` +
+          violations.map((violation) => `  ${formatViolation(violation)}`).join('\n')
+      );
+    }
+    if (stale.length) {
+      blocks.push(
+        `${stale.length} stale exception${stale.length === 1 ? '' : 's'}:\n` +
+          stale
+            .map(
+              (entry) =>
+                `  ${entry.path}: ${entry.name} is listed as an exception but no longer appears there; remove its entry from ${listLabel}.`
+            )
+            .join('\n')
+      );
+    }
+    if (missingAllowed.length) {
+      blocks.push(
+        `${missingAllowed.length} allowed path${missingAllowed.length === 1 ? '' : 's'} that the check does not scan:\n` +
+          missingAllowed
+            .map(
+              (entry) =>
+                `  ${entry.path}: ${entry.name} allows this path but it is not among the scanned files; remove its entry from ${listLabel}.`
+            )
+            .join('\n')
+      );
+    }
+    console.error(blocks.join('\n\n'));
+    return 1;
+  } catch (error) {
+    console.error(error.message);
+    return 2;
+  }
+}
+
+function invokedDirectly() {
+  try {
+    return (
+      process.argv[1] &&
+      realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (invokedDirectly()) process.exitCode = run(process.argv.slice(2));

@@ -19,6 +19,48 @@ export const STORE_IMAGES = Object.freeze({
 });
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TIMEOUT = 25 * 60_000;
+// A pull request's new and changed test files run this many times in sequence
+// in one container: a test that fails at random is more likely to fail here,
+// before it reaches main (lifemodel-hbsi). Finite repetition cannot promise
+// that it will.
+export const REPEAT_RUNS = 5;
+// Fixed neighbours of every repetition. They use the shared Valkey and
+// Postgres stores, so the changed files compete for the two workers, the
+// store pools and the per-file databases as they do in the full check — the
+// condition a test that waits on a timer or counts shared resources fails
+// under. Together they are about a minute of test work (measured: 61-62s of
+// tests, about 36s wall per repetition under two workers). They are not the
+// whole suite: a repeated run is not a suite-wide run.
+export const REPEAT_NEIGHBOURS = Object.freeze([
+  Object.freeze({
+    file: 'tests/integration/task-restart.test.ts',
+    reason: 'the task service and its mailbox across core restarts on both stores (~20s)',
+  }),
+  Object.freeze({
+    file: 'tests/integration/task-reply.test.ts',
+    reason: 'the task reply path through the stores and the core loop (~13s)',
+  }),
+  Object.freeze({
+    file: 'tests/integration/task-briefing.test.ts',
+    reason: 'task briefings and their channel frames over Postgres and Valkey (~11s)',
+  }),
+  Object.freeze({
+    file: 'tests/integration/transcript-postgres.test.ts',
+    reason: 'transcript, conversation and owner-intake rows in Postgres (~9s)',
+  }),
+  Object.freeze({
+    file: 'tests/integration/owner-message-intake-core.test.ts',
+    reason: 'owner-message intake against Postgres and Valkey, with a real child process (~5s)',
+  }),
+  Object.freeze({
+    file: 'tests/integration/snapshot-outbox.test.ts',
+    reason: 'the tick snapshot, bus watermark and outbox across both stores (~4s)',
+  }),
+]);
+const CONTAINER_BIN = '/opt/deps/node_modules/.bin';
+// The only commands that run outside the disposable boundary: both are
+// dependency-free, read files only, and so cannot execute the checkout.
+export const CHECK_SCRIPTS = Object.freeze(['scripts/check-file-sizes.mjs', 'scripts/check-vendor-names.mjs']);
 const FILES = ['package.json', 'package-lock.json', 'tsconfig.json', 'vitest.config.ts',
   'eslint.config.js', '.prettierrc', '.prettierignore', '.gitignore', '.dockerignore', 'AGENTS.md', 'README.md', 'LICENSE'];
 const DIRS = ['db', 'src', 'loader', 'web', 'tests', 'scripts', 'cli', 'docker', 'deploy', 'docs', '.backlog', '.githooks', '.husky', '.github'];
@@ -32,10 +74,14 @@ export function parseArgs(args) {
   let timeoutMs = TIMEOUT;
   if (own.length === 2 && own[0] === '--timeout-ms') timeoutMs = Number(own[1]);
   else if (own.length) throw new Error('Unknown launcher option; use --timeout-ms <ms> before --');
-  if (!['check', 'test', 'docker'].includes(mode) || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > TIMEOUT) {
-    throw new Error('Usage: node scripts/test-isolated.mjs <check|test|docker> [--timeout-ms <1..1500000>] [-- <vitest args>]');
+  if (!['check', 'test', 'docker', 'repeat'].includes(mode) || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > TIMEOUT) {
+    throw new Error('Usage: node scripts/test-isolated.mjs <check|test|docker|repeat> [--timeout-ms <1..1500000>] [-- <vitest args>]');
   }
   const vitestArgs = separator < 0 ? [] : rest.slice(separator + 1);
+  // Repeating nothing would pass without running anything.
+  if (mode === 'repeat' && vitestArgs.length === 0) {
+    throw new Error('repeat mode needs at least one test file: node scripts/test-isolated.mjs repeat [--timeout-ms <ms>] -- <test files>');
+  }
   // Users select test paths/name filters, not a different execution policy.
   for (const arg of vitestArgs) {
     if (/^(?:-w|--(?:watch|ui|inspect|pool|maxWorkers|minWorkers|fileParallelism|execArgv|config|workspace|project|merge-reports))(?:$|[=.-])/i.test(arg)
@@ -151,9 +197,17 @@ export function acquireLock(directory = path.join(os.tmpdir(), `lifemodel-test-$
 }
 
 export function innerSteps(mode, args) {
+  if (mode === 'repeat') {
+    // One container, one worker policy: the changed files and their fixed
+    // neighbours, five times in sequence (lifemodel-hbsi).
+    const files = [...args, ...REPEAT_NEIGHBOURS.map(({ file }) => file)];
+    return Array.from({ length: REPEAT_RUNS }, () => ['vitest', 'run', ...files, '--maxWorkers=2']);
+  }
   const suite = ['vitest', 'run', ...args, '--maxWorkers=2'];
-  // The loader and web app are separate TypeScript projects: typecheck all three,
-  // then lint and format source, then the suite last.
+  // The file-size ratchet and the vendor-name check are not here: they read
+  // the real checkout before the boundary (lifemodel-5zoc, lifemodel-1be4).
+  // The loader and web app are separate TypeScript projects: typecheck all
+  // three, then lint and format source, then the suite last.
   return mode === 'check'
     ? [['tsc', '--noEmit'], ['tsc', '-p', 'loader/tsconfig.json', '--noEmit'], ['tsc', '-p', 'web/app/tsconfig.json', '--noEmit'], ['tsc', '-p', 'web/loader/tsconfig.json', '--noEmit'],
       ['eslint', 'src/', 'loader/', 'web/app/', 'web/loader/src/'], ['prettier', '--check', 'src/**/*.ts', 'loader/**/*.ts', 'web/app/**/*.{ts,tsx,css,json,html}', 'web/loader/**/*.{ts,tsx,css,json,html}', 'web/kit/**/*.{ts,tsx,css,json,html}'], suite]
@@ -231,9 +285,47 @@ export function command(program, args, { timeoutMs = 60_000, signal, live = fals
 
 function quote(value) { return `'${value.replaceAll("'", "'\\''")}'`; }
 
+// One step as the container's shell sees it: every command is an installed
+// dependency from the dependency tree. No check runs here any more; the two
+// read-only checks run on the checkout, outside this boundary.
+export function stepCommand([binary, ...args], binDirectory = CONTAINER_BIN) {
+  return [quote(`${binDirectory}/${binary}`), ...args.map(quote)].join(' ');
+}
+
+// One repetition per line, each labelled and each ending the script with its
+// own command's exit code: the first failed repetition stops the sequence and
+// its status is the launcher's. No retry.
+export function repeatScriptLines(commands) {
+  return commands.map((command, index) => {
+    const label = `vitest repetition ${index + 1} of ${commands.length}`;
+    return `echo ${quote(label)}; ${command} || { status=$?; echo ${quote(`${label} failed`)} >&2; exit $status; }`;
+  });
+}
+
 export async function run(argv, dependencies = {}) {
   let parsed;
   try { parsed = parseArgs(argv); } catch (error) { log(error.message); return 2; }
+  const runCommand = dependencies.command ?? command;
+  const root = dependencies.root ?? ROOT;
+  // The two dependency-free checks read the checkout itself, before anything
+  // is staged or any image is touched. They see every source file the real
+  // tree holds, including files the snapshot filter would leave out, and a
+  // failure stops the run with that exit code: no container starts. Nothing
+  // else runs outside the boundary (lifemodel-5zoc, lifemodel-1be4).
+  if (parsed.mode === 'check') {
+    try {
+      for (const script of CHECK_SCRIPTS) {
+        const check = await runCommand(process.execPath, [path.join(root, script)], { live: true });
+        if (check.code) {
+          log(`${script} failed (${check.code}); no container started`);
+          return check.code;
+        }
+      }
+    } catch (error) {
+      log(error.message);
+      return error.exitCode ?? 1;
+    }
+  }
   let release;
   try { release = acquireLock(dependencies.lockDirectory); } catch (error) { log(error.message); return 2; }
   const controller = new AbortController();
@@ -241,8 +333,6 @@ export async function run(argv, dependencies = {}) {
   const ownedImages = new Set();
   const ownedNetworks = new Set();
   const temporary = fs.mkdtempSync(path.join(dependencies.tempRoot ?? os.tmpdir(), 'lifemodel-test-'));
-  const runCommand = dependencies.command ?? command;
-  const root = dependencies.root ?? ROOT;
   const stop = (exitCode, reason) => controller.abort(Object.assign(new Error(reason), { exitCode }));
   const onInt = () => stop(130, 'Interrupted (SIGINT)');
   const onTerm = () => stop(143, 'Interrupted (SIGTERM)');
@@ -356,8 +446,9 @@ export async function run(argv, dependencies = {}) {
 
       const name = `lifemodel-test-run-${randomUUID()}`;
       owned.add(name);
-      const steps = innerSteps(parsed.mode, parsed.vitestArgs).map(([binary, ...args]) =>
-        [quote(`/opt/deps/node_modules/.bin/${binary}`), ...args.map(quote)].join(' ')).join(' && ');
+      // Everything else is an installed dependency; `node` is the container's own runtime.
+      const commands = innerSteps(parsed.mode, parsed.vitestArgs).map((step) => stepCommand(step));
+      const steps = (parsed.mode === 'repeat' ? repeatScriptLines(commands) : commands).join(' && ');
       const linkDependencies = 'const fs=require("node:fs"); for(const name of fs.readdirSync("/opt/deps/node_modules")) fs.symlinkSync("/opt/deps/node_modules/"+name,"/tmp/work/node_modules/"+name)';
       const script = 'cp -R /snapshot /tmp/work; mkdir /tmp/work/node_modules; node -e ' + quote(linkDependencies) + '; cd /tmp/work; '
         + 'git init -q -b main; git -c user.name=lifemodel-test -c user.email=test@lifemodel.local -c core.hooksPath=/dev/null add -A; '

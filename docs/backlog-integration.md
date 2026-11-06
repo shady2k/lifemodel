@@ -388,46 +388,46 @@ the repository's installation, and each person's plugin and hooks are their own.
   reports test strength, not a correctness verdict, and does not block the
   change. A skipped check is recorded as skipped, never as passed.
 - **Reviewer:** `shady2k-gateway/gpt-6.1-sol` (another model than the
-  workers), at stage acceptance, in its own prime-agent session:
-  `prime-agent --provider shady2k-gateway --model gpt-6.1-sol` (the
-  `openai-codex` provider has no key since 2026-10-15). Its brief must
+  workers), at stage acceptance, in its own box session; a worker's subagent
+  on that model is the consultation form (owner, 2026-11-06). Its brief must
   explicitly allow writing its report file (told "read-only", it wrote none).
   At most two model review rounds per task; after that the coordinator
-  verifies the fixes itself (owner, 2026-10-16). The fallback is a
-  same-model independent session, disclosed as the same model. Independent
+  verifies the fixes itself (owner, 2026-10-16). The fallback is a same-model
+  independent box session, disclosed as the same model. Independent
   review is required for acceptance.
-- **Parallel execution:** one git worktree per worker (herdr worktrees for
-  prime-agent worker sessions), up to the config's `maxWorkers`. Claims are
+- **Parallel execution:** one box per feature and one fresh session per task,
+  up to the config's `maxWorkers`; the coordinator stays on its machine and
+  fetches the results (owner, 2026-11-06). Claims are
   atomic and exclusive (`claim_exclusive` in `.beads/config.yaml`) through
   `node .backlog/claim.mjs <id> --actor '<full agent name>'`; the holder is the agent
   doing the work under its full name
   `<harness>-<role>:<person>@<machine>:<branch>#<session>`, never the person.
   Generated files and `package-lock.json` count as collisions. The stage's
   coordinator merges and records `implemented`.
-- **Starting a worker:** `prime-agent --provider shady2k-gateway --model
-  deepseek-v4.1-flash-auto` in the worker's herdr pane (the default since
-  2026-10-18, owner; the most security-critical code, and a worker that is
-  not coping, go to `gpt-6.1-sol`; deepseek gives a second review opinion on
-  security-heavy work, never on its own), then check the pane footer before
-  dispatching. Always name
-  `--provider shady2k-gateway`: a bare `--model` may resolve to a provider
-  with no key here, and the worker never starts. A brief says
-  that the owner's rules in `AGENTS.md` are not reworded to fit the code: a
-  violation is filed as a finding and the rule stays (a worker once weakened
-  Plugin Isolation that way). A brief also carries the tracker claim
-  (`node .backlog/claim.mjs <id> --actor '<full agent name>'`), not only the run
-  script's claim record: without it the gate reads the span as ended. A leaf
-  set `implemented` must sit under a stage.
+- **Starting a worker:** `box session new --executor prime --model
+  shady2k-gateway/deepseek-v4.1-flash-auto`, one box per feature and a fresh
+  session for each task (owner, 2026-11-06; the most security-critical code,
+  and a worker that is not coping, go to `gpt-6.1-sol`; deepseek gives a
+  second review opinion on security-heavy work, never on its own). Check the
+  session before dispatching. A brief says that the owner's rules in
+  `AGENTS.md` are not reworded to fit the code: a violation is filed as a
+  finding and the rule stays (a worker once weakened Plugin Isolation that
+  way). A brief also says to run launcher commands in the foreground: this
+  box does not notify a worker when a background command ends. It carries the
+  tracker claim (`node .backlog/claim.mjs <id> --actor '<full agent name>'`),
+  not only the run script's claim record: without it the gate reads the span
+  as ended. A leaf set `implemented` must sit under a stage.
 - **One task, one fresh session; one stage, one fresh reviewer.** A worker
   session that ran several rework rounds degraded around 300k tokens of context
   (garbled reasoning, tests that did not exercise their scenario); a reviewer
   session that ran all day reviewed the wrong commits. Start a new worker
   session for each task and a new reviewer session for each stage.
-- **Watching a worker:** every wait on a worker also watches its session
-  transcript (`~/.prime/agent/sessions/<id>.jsonl`) and wakes the coordinator
-  after about 10 minutes of silence, not only when its report file appears. A
-  worker can end its turn mid-task and sit at its prompt: one stood idle for an
-  hour while the wait polled only for the report.
+- **Watching a worker:** `box wait` is the wait for a worker; when it returns,
+  the coordinator fetches the result (owner, 2026-11-06). A worker's background
+  command is not notified to it, so its brief says to run launcher commands in
+  the foreground. A worker can end its turn mid-task and sit at its prompt:
+  read its report file and transcript before treating the wait as a completed
+  task (one stood idle for an hour while the wait polled only for the report).
 - **Run bookkeeping that the gate enforces:** when the coordinator posts its
   claim record on a feature, it also sets the feature `in_progress` with
   itself as assignee; otherwise the gate reads the span as ended with no

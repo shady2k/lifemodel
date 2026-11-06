@@ -81,14 +81,65 @@ export function ciEntrypointPolicy(source: string): void {
       }
     }
     if (name === 'ci-product') {
-      if (!body.join('\n').includes(
-        "      - uses: actions/setup-node@v7\n        with:\n          node-version: '24'",
-      )) fail('product must use Node 24');
-      if (commands.length !== 1 || commands[0] !== 'node scripts/test-isolated.mjs check') {
-        fail('product must run only the isolated check');
+      if (
+        !body
+          .join('\n')
+          .includes(
+            "      - uses: actions/setup-node@v7\n        with:\n          node-version: '24'"
+          )
+      )
+        fail('product must use Node 24');
+      // This one required job holds the full check and, on a pull request, the
+      // repetition of its new and changed test files (lifemodel-hbsi). The
+      // whole selection shell is scripts/ci-repeat-changed-tests.sh; this job
+      // pins exactly two commands, in that order.
+      if (commands.length !== 2) {
+        fail('product must run exactly the isolated check and the repeat script');
       }
-      if (body.some((line) => /^\s+(?:env|container|services|defaults):/.test(line))) {
+      if (commands[0] !== 'node scripts/test-isolated.mjs check') {
+        fail('product must run the isolated check first');
+      }
+      if (commands[1] !== 'scripts/ci-repeat-changed-tests.sh') {
+        fail('product must repeat changed test files through scripts/ci-repeat-changed-tests.sh');
+      }
+      if (!body.join('\n').includes("        if: ${{ github.event_name == 'pull_request' }}")) {
+        fail('product must repeat test files on pull requests only');
+      }
+      // Job-level execution overrides are unsupported.
+      if (body.some((line) => /^ {4}(?:env|container|services|defaults):/.test(line))) {
         fail('unsupported product execution override');
+      }
+      // The repeat step may pass exactly the two expressions its script reads.
+      // Any other step-level variable could hide host execution in a run line
+      // (`HOST_SUITE: vitest run` beside `$HOST_SUITE`), which the run-command
+      // rule never sees. No other step gets an environment at all.
+      const repeatRun = body.findIndex(
+        (line) => line === '        run: scripts/ci-repeat-changed-tests.sh'
+      );
+      let repeatStepStart = -1;
+      for (let i = repeatRun - 1; i >= 0; i--) {
+        if (/^ {6}- /.test(body[i])) {
+          repeatStepStart = i;
+          break;
+        }
+      }
+      if (repeatStepStart < 0) fail('product repeat step has no supported layout');
+      const envAt = body
+        .map((line, index) => ({ line, index }))
+        .filter(({ line }) => /^\s+env:\s*$/.test(line));
+      if (envAt.length !== 1) fail('product may pass only the repeat step its two expressions');
+      const envIndex = envAt[0].index;
+      const expectedEnv = [
+        '        env:',
+        '          BASE_REF: ${{ github.base_ref }}',
+        '          HEAD_SHA: ${{ github.event.pull_request.head.sha }}',
+      ];
+      if (
+        envIndex < repeatStepStart ||
+        body.slice(envIndex, envIndex + 3).join('\n') !== expectedEnv.join('\n') ||
+        (body[envIndex + 3] !== undefined && /^ {10,}\S/.test(body[envIndex + 3]))
+      ) {
+        fail('unsupported product step environment');
       }
     }
   }
