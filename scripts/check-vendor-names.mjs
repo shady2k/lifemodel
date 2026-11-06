@@ -8,7 +8,9 @@
  * src/, loader/ and web/ for the reviewed names in scripts/vendor-names.json.
  * A name is accepted only at a path the list allows for that name, or at a
  * reviewed exception. An exception that no longer finds its name fails too, so
- * the debt list can only shrink.
+ * the debt list can only shrink. An allowed path must be a file the scan
+ * contains (the name need not occur there), so a renamed adapter cannot leave
+ * a dead permission behind.
  *
  * Matching is by text on whole tokens, case-insensitively, so comments count.
  * The same tree and list always produce the same failures, sorted by path.
@@ -67,16 +69,43 @@ const GENERATED_DIRECTORIES = new Set([
   'web/loader/dist',
 ]);
 
-/** A token character. Hyphens and dots separate tokens, as `opencode.json` does. */
-const TOKEN_CHARACTER = 'A-Za-z0-9_';
-
 function escapeRegExp(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** Case-insensitive, whole-token matcher: `xopencode` does not match, `OpenCode` does. */
+/**
+ * The name as a case-insensitive literal without the `i` flag: that flag
+ * would also make `[A-Z]` in the boundary lookarounds match lower case, and
+ * `opencodex` would pass as `opencode`.
+ */
+function caseInsensitiveLiteral(name) {
+  return [...name]
+    .map((character) => {
+      const lower = character.toLowerCase();
+      const upper = character.toUpperCase();
+      return lower === upper ? escapeRegExp(character) : `[${lower}${upper}]`;
+    })
+    .join('');
+}
+
+/**
+ * A vendor name is a word in code: it may sit in an identifier, but only where
+ * an identifier really starts a new word. The boundaries are
+ * - anything outside [A-Za-z0-9] (start or end, or a hyphen or dot, as in
+ *   `opencode.json` or `x-openrouter-provider`), which includes `_`; and
+ * - a camelCase change: a lowercase or digit followed by an uppercase letter
+ *   (`opencodeAdapter`, `myOpenCode`), or a lowercase followed by an uppercase
+ *   at the end (`OPENCODE_CONFIG` is the first rule, at its underscore).
+ *
+ * A digit or a letter with no case change is still part of the identifier:
+ * `opencodex`, `xopencode` and `opencode2` do not match.
+ */
+const START_BOUNDARY = '(?:(?<![A-Za-z0-9])|(?<=[a-z0-9])(?=[A-Z]))';
+const END_BOUNDARY = '(?:(?![A-Za-z0-9])|(?<=[a-z])(?=[A-Z]))';
+
+/** Case-insensitive word matcher, including identifier and camelCase forms. */
 export function tokenPattern(name) {
-  return new RegExp(`(?<![${TOKEN_CHARACTER}])${escapeRegExp(name)}(?![${TOKEN_CHARACTER}])`, 'i');
+  return new RegExp(`${START_BOUNDARY}${caseInsensitiveLiteral(name)}${END_BOUNDARY}`);
 }
 
 export function hasVendorName(line, name) {
@@ -275,7 +304,18 @@ export function checkTree({ root, listPath }) {
     .filter((entry) => !matched.has(exceptionKey(entry.name, entry.path)))
     .map((entry) => ({ name: entry.name, path: entry.path }))
     .sort(compareStale);
-  return { checked: files.length, violations, stale };
+  // An allowed path must be a file the check really scans. The name need not
+  // occur there (a default registry host can be allowed before anything uses
+  // it), but a renamed or deleted adapter must not leave a dead permission.
+  const scanned = new Set(files);
+  const missingAllowed = list.names
+    .flatMap((entry) =>
+      entry.allowed
+        .filter((place) => !scanned.has(place.path))
+        .map((place) => ({ name: entry.name, path: place.path }))
+    )
+    .sort(compareStale);
+  return { checked: files.length, violations, stale, missingAllowed };
 }
 
 function formatViolation(violation) {
@@ -294,13 +334,14 @@ export function run(args, options = {}) {
     return 2;
   }
   try {
-    const { checked, violations, stale } = checkTree({ root, listPath });
-    if (!violations.length && !stale.length) {
+    const { checked, violations, stale, missingAllowed } = checkTree({ root, listPath });
+    if (!violations.length && !stale.length && !missingAllowed.length) {
       console.log(
         `Vendor-name check: ${checked} files checked; no vendor name outside its adapter, default setting or reviewed exception.`
       );
       return 0;
     }
+    const listLabel = path.relative(root, listPath) || listPath;
     const blocks = [];
     if (violations.length) {
       blocks.push(
@@ -309,13 +350,23 @@ export function run(args, options = {}) {
       );
     }
     if (stale.length) {
-      const listLabel = path.relative(root, listPath) || listPath;
       blocks.push(
         `${stale.length} stale exception${stale.length === 1 ? '' : 's'}:\n` +
           stale
             .map(
               (entry) =>
                 `  ${entry.path}: ${entry.name} is listed as an exception but no longer appears there; remove its entry from ${listLabel}.`
+            )
+            .join('\n')
+      );
+    }
+    if (missingAllowed.length) {
+      blocks.push(
+        `${missingAllowed.length} allowed path${missingAllowed.length === 1 ? '' : 's'} that the check does not scan:\n` +
+          missingAllowed
+            .map(
+              (entry) =>
+                `  ${entry.path}: ${entry.name} allows this path but it is not among the scanned files; remove its entry from ${listLabel}.`
             )
             .join('\n')
       );

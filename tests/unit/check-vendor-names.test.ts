@@ -126,15 +126,38 @@ describe('the vendor-name check (lifemodel-1be4)', () => {
     }
   });
 
-  it('accepts the adapter and the default setting, and rejects them for another name', () => {
+  it('accepts a matched name in its allowed adapter and refuses the same content at a generic path', () => {
     const root = fixture();
     try {
-      writeFile(root, 'loader/src/task-opencode.ts', ['OPENCODE_CONFIG = "x";']);
-      writeFile(root, 'loader/src/workbench-source.ts', ["registry: 'https://ghcr.io',"]);
+      // A real match, not an identifier the matcher would miss: this is the
+      // adapter the list allows.
+      writeFile(root, 'loader/src/task-opencode.ts', ['const executable = "opencode";']);
+      const list = writeList(root, [{ name: 'opencode', allowed: opencodeAllowed() }]);
+      expect(checkTree({ root, listPath: list })).toMatchObject({ violations: [], stale: [] });
+
+      writeFile(root, 'src/core/task-runner.ts', ['const executable = "opencode";']);
+      expect(checkTree({ root, listPath: list }).violations).toEqual([
+        {
+          path: 'src/core/task-runner.ts',
+          line: 1,
+          name: 'opencode',
+          allowed: ['loader/src/task-opencode.ts'],
+        },
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails an allowed path the scan does not contain, and allows a name the path does not use', () => {
+    const root = fixture();
+    try {
+      writeFile(root, 'loader/src/workbench-source.ts', ['const host = "example";']);
+      writeFile(root, 'loader/src/task-opencode.ts', ['const executable = "opencode";']);
       const list = writeList(root, [
         { name: 'opencode', allowed: opencodeAllowed() },
         {
-          name: 'ghcr.io',
+          name: 'docker.io',
           allowed: [
             {
               path: 'loader/src/workbench-source.ts',
@@ -143,17 +166,34 @@ describe('the vendor-name check (lifemodel-1be4)', () => {
           ],
         },
       ]);
-      expect(checkTree({ root, listPath: list })).toMatchObject({ violations: [], stale: [] });
+      // docker.io does not occur, but its allowed path is a scanned file: a
+      // permitted default need not be used yet.
+      expect(checkTree({ root, listPath: list })).toMatchObject({
+        violations: [],
+        stale: [],
+        missingAllowed: [],
+      });
 
-      writeFile(root, 'loader/src/task-opencode.ts', ["registry: 'https://ghcr.io',"]);
-      expect(checkTree({ root, listPath: list }).violations).toEqual([
+      // A renamed adapter leaves a dead permission, and the check fails it.
+      const dead = writeList(root, [
         {
-          path: 'loader/src/task-opencode.ts',
-          line: 1,
-          name: 'ghcr.io',
-          allowed: ['loader/src/workbench-source.ts'],
+          name: 'opencode',
+          allowed: [
+            ...opencodeAllowed(),
+            {
+              path: 'loader/src/renamed-adapter.ts',
+              reason: 'The OpenCode adapter configures this harness.',
+            },
+          ],
         },
       ]);
+      expect(checkTree({ root, listPath: dead }).missingAllowed).toEqual([
+        { name: 'opencode', path: 'loader/src/renamed-adapter.ts' },
+      ]);
+      const run = runScript(root, []);
+      expect(run.status).toBe(1);
+      expect(run.output).toContain('loader/src/renamed-adapter.ts');
+      expect(run.output).toContain('remove its entry');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -190,7 +230,7 @@ describe('the vendor-name check (lifemodel-1be4)', () => {
     }
   });
 
-  it('matches case-insensitively, only as a whole token, and includes comments', () => {
+  it('matches case-insensitively at word and camelCase boundaries, in identifiers and comments', () => {
     const root = fixture();
     try {
       writeFile(root, 'src/names.ts', [
@@ -199,6 +239,10 @@ describe('the vendor-name check (lifemodel-1be4)', () => {
         '// OpenCode does name the vendor, in a comment',
         '// see openrouter.ai for the ranking',
         "import provider from '@openrouter/ai-sdk-provider';",
+        'const OPENCODE_CONFIG = "x";',
+        'const opencodeAdapter = () => {};',
+        'const myOpenCode = true;',
+        'const task_opencode_x = true;',
       ]);
       const list = writeList(root, [
         { name: 'opencode', allowed: opencodeAllowed() },
@@ -223,11 +267,23 @@ describe('the vendor-name check (lifemodel-1be4)', () => {
           name: 'openrouter',
           allowed: [],
         },
+        { path: 'src/names.ts', line: 6, name: 'opencode', allowed: ['loader/src/task-opencode.ts'] },
+        { path: 'src/names.ts', line: 7, name: 'opencode', allowed: ['loader/src/task-opencode.ts'] },
+        { path: 'src/names.ts', line: 8, name: 'opencode', allowed: ['loader/src/task-opencode.ts'] },
+        { path: 'src/names.ts', line: 9, name: 'opencode', allowed: ['loader/src/task-opencode.ts'] },
       ]);
       expect(hasVendorName('xopencode', 'opencode')).toBe(false);
       expect(hasVendorName('opencodex', 'opencode')).toBe(false);
-      expect(hasVendorName('_opencode_', 'opencode')).toBe(false);
       expect(hasVendorName('OpenCode', 'opencode')).toBe(true);
+      // Underscore and a camelCase change start a new word in an identifier
+      // (lifemodel-1be4 review F3).
+      expect(hasVendorName('_opencode_', 'opencode')).toBe(true);
+      expect(hasVendorName('OPENCODE_CONFIG', 'opencode')).toBe(true);
+      expect(hasVendorName('opencodeAdapter', 'opencode')).toBe(true);
+      expect(hasVendorName('myOpenCode', 'opencode')).toBe(true);
+      expect(hasVendorName('task_opencode_x', 'opencode')).toBe(true);
+      expect(hasVendorName('myghcr.io', 'ghcr.io')).toBe(false);
+      expect(hasVendorName('myGhcr.io', 'ghcr.io')).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
