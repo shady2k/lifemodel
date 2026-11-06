@@ -81,13 +81,32 @@ export function ciEntrypointPolicy(source: string): void {
       }
     }
     if (name === 'ci-product') {
-      if (!body.join('\n').includes(
-        "      - uses: actions/setup-node@v7\n        with:\n          node-version: '24'",
-      )) fail('product must use Node 24');
-      if (commands.length !== 1 || commands[0] !== 'node scripts/test-isolated.mjs check') {
-        fail('product must run only the isolated check');
+      if (
+        !body
+          .join('\n')
+          .includes(
+            "      - uses: actions/setup-node@v7\n        with:\n          node-version: '24'"
+          )
+      )
+        fail('product must use Node 24');
+      // This one required job holds the full check and, on a pull request, the
+      // repetition of its new and changed test files (lifemodel-hbsi). Both go
+      // through the launcher, in that order; nothing else runs here.
+      if (commands[0] !== 'node scripts/test-isolated.mjs check') {
+        fail('product must run the isolated check first');
       }
-      if (body.some((line) => /^\s+(?:env|container|services|defaults):/.test(line))) {
+      if (
+        commands.length !== 2 ||
+        !commands[1].includes('node scripts/test-isolated.mjs repeat --')
+      ) {
+        fail('product must repeat changed test files through the isolated launcher');
+      }
+      if (!body.join('\n').includes("        if: ${{ github.event_name == 'pull_request' }}")) {
+        fail('product must repeat test files on pull requests only');
+      }
+      // Job-level execution overrides are unsupported. A step-level `env:` is
+      // how the jobs pass an expression to a step, and is allowed.
+      if (body.some((line) => /^ {4}(?:env|container|services|defaults):/.test(line))) {
         fail('unsupported product execution override');
       }
     }

@@ -131,6 +131,33 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
     expect(job).not.toContain('packages: write');
   });
 
+  it("repeats a pull request's new and changed test files after the full check (lifemodel-hbsi)", () => {
+    const ci = readFileSync(join(repoRoot, '.github/workflows/ci.yml'), 'utf8');
+    const start = ci.indexOf('\n  ci-product:');
+    expect(start).toBeGreaterThan(0);
+    // The job body reaches to the next job header, or to the end of the file.
+    const job = ci.slice(start + 1).split(/\n(?=  [a-z][a-z0-9-]*:\n)/)[0];
+    // Two launcher deadlines of up to 25 minutes each: the full check and the
+    // repeated test files run in this one required job.
+    expect(job).toContain('timeout-minutes: 65');
+    // One checkout holds both ends of the diff, as the `changes` job's does.
+    expect(job).toContain('fetch-depth: 0');
+    expect(job).toContain('scripts/ci-repeat-test-paths.sh');
+    expect(job).toContain('node scripts/test-isolated.mjs repeat --');
+    // The repeat step runs on pull requests only, and only after the check.
+    const check = job.indexOf('node scripts/test-isolated.mjs check');
+    const repeat = job.indexOf('node scripts/test-isolated.mjs repeat');
+    expect(check).toBeGreaterThan(-1);
+    expect(repeat).toBeGreaterThan(check);
+    const repeatStep = job.slice(job.lastIndexOf('      - name:', repeat), repeat);
+    expect(repeatStep).toContain("if: ${{ github.event_name == 'pull_request' }}");
+    expect(repeatStep).toContain('no added or changed test file to repeat');
+    // A diff that cannot be computed fails the step; it never skips.
+    expect(job).toContain('the diff cannot be computed');
+    // It prints the files and what the repetition cost.
+    expect(job).toContain('repeat run took');
+  });
+
   it('the nix check job runs the flake check without publishing or a write token', () => {
     const ci = readFileSync(join(repoRoot, '.github/workflows/ci.yml'), 'utf8');
     const start = ci.indexOf('\n  ci-nix:');
@@ -222,6 +249,9 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
         '          docker push ghcr.io/shady2k/lifemodel-workbench:main\n',
         '          npm ci\n'
       ),
+      // The repeat step without the launcher runs nothing: there is no
+      // repetition outside the boundary.
+      ci.replace('          node scripts/test-isolated.mjs repeat -- "$@" || status=$?\n', ''),
     ];
     for (const changed of mutations) {
       expect(changed).not.toBe(ci);

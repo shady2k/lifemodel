@@ -19,6 +19,44 @@ export const STORE_IMAGES = Object.freeze({
 });
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TIMEOUT = 25 * 60_000;
+// A pull request's new and changed test files run this many times in sequence
+// in one container: a test that fails at random must fail here, before it
+// reaches main (lifemodel-hbsi).
+export const REPEAT_RUNS = 5;
+// Fixed neighbours of every repetition. They use the shared Valkey and
+// Postgres stores, so the changed files compete for the two workers, the
+// store pools and the per-file databases as they do in the full check — the
+// condition a test that waits on a timer or counts shared resources fails
+// under. Together they are about a minute of test work (measured: 61-62s of
+// tests, about 36s wall per repetition under two workers). They are not the
+// whole suite: a repeated run is not a suite-wide run.
+export const REPEAT_NEIGHBOURS = Object.freeze([
+  Object.freeze({
+    file: 'tests/integration/task-restart.test.ts',
+    reason: 'the task service and its mailbox across core restarts on both stores (~20s)',
+  }),
+  Object.freeze({
+    file: 'tests/integration/task-reply.test.ts',
+    reason: 'the task reply path through the stores and the core loop (~13s)',
+  }),
+  Object.freeze({
+    file: 'tests/integration/task-briefing.test.ts',
+    reason: 'task briefings and their channel frames over Postgres and Valkey (~11s)',
+  }),
+  Object.freeze({
+    file: 'tests/integration/transcript-postgres.test.ts',
+    reason: 'transcript, conversation and owner-intake rows in Postgres (~9s)',
+  }),
+  Object.freeze({
+    file: 'tests/integration/owner-message-intake-core.test.ts',
+    reason: 'owner-message intake against Postgres and Valkey, with a real child process (~5s)',
+  }),
+  Object.freeze({
+    file: 'tests/integration/snapshot-outbox.test.ts',
+    reason: 'the tick snapshot, bus watermark and outbox across both stores (~4s)',
+  }),
+]);
+const CONTAINER_BIN = '/opt/deps/node_modules/.bin';
 const FILES = ['package.json', 'package-lock.json', 'tsconfig.json', 'vitest.config.ts',
   'eslint.config.js', '.prettierrc', '.prettierignore', '.gitignore', '.dockerignore', 'AGENTS.md', 'README.md', 'LICENSE'];
 const DIRS = ['db', 'src', 'loader', 'web', 'tests', 'scripts', 'cli', 'docker', 'deploy', 'docs', '.backlog', '.githooks', '.husky', '.github'];
@@ -32,10 +70,14 @@ export function parseArgs(args) {
   let timeoutMs = TIMEOUT;
   if (own.length === 2 && own[0] === '--timeout-ms') timeoutMs = Number(own[1]);
   else if (own.length) throw new Error('Unknown launcher option; use --timeout-ms <ms> before --');
-  if (!['check', 'test', 'docker'].includes(mode) || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > TIMEOUT) {
-    throw new Error('Usage: node scripts/test-isolated.mjs <check|test|docker> [--timeout-ms <1..1500000>] [-- <vitest args>]');
+  if (!['check', 'test', 'docker', 'repeat'].includes(mode) || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > TIMEOUT) {
+    throw new Error('Usage: node scripts/test-isolated.mjs <check|test|docker|repeat> [--timeout-ms <1..1500000>] [-- <vitest args>]');
   }
   const vitestArgs = separator < 0 ? [] : rest.slice(separator + 1);
+  // Repeating nothing would pass without running anything.
+  if (mode === 'repeat' && vitestArgs.length === 0) {
+    throw new Error('repeat mode needs at least one test file: node scripts/test-isolated.mjs repeat [--timeout-ms <ms>] -- <test files>');
+  }
   // Users select test paths/name filters, not a different execution policy.
   for (const arg of vitestArgs) {
     if (/^(?:-w|--(?:watch|ui|inspect|pool|maxWorkers|minWorkers|fileParallelism|execArgv|config|workspace|project|merge-reports))(?:$|[=.-])/i.test(arg)
@@ -151,6 +193,12 @@ export function acquireLock(directory = path.join(os.tmpdir(), `lifemodel-test-$
 }
 
 export function innerSteps(mode, args) {
+  if (mode === 'repeat') {
+    // One container, one worker policy: the changed files and their fixed
+    // neighbours, five times in sequence (lifemodel-hbsi).
+    const files = [...args, ...REPEAT_NEIGHBOURS.map(({ file }) => file)];
+    return Array.from({ length: REPEAT_RUNS }, () => ['vitest', 'run', ...files, '--maxWorkers=2']);
+  }
   const suite = ['vitest', 'run', ...args, '--maxWorkers=2'];
   // The file-size ratchet and the vendor-name check need no dependencies and
   // fail fastest, so they run first (lifemodel-5zoc, lifemodel-1be4). Then the
@@ -233,6 +281,22 @@ export function command(program, args, { timeoutMs = 60_000, signal, live = fals
 }
 
 function quote(value) { return `'${value.replaceAll("'", "'\\''")}'`; }
+
+// One step as the container's shell sees it: an installed dependency runs from
+// the dependency tree, `node` is the container's own runtime.
+export function stepCommand([binary, ...args], binDirectory = CONTAINER_BIN) {
+  return [binary === 'node' ? 'node' : quote(`${binDirectory}/${binary}`), ...args.map(quote)].join(' ');
+}
+
+// One repetition per line, each labelled and each ending the script with its
+// own command's exit code: the first failed repetition stops the sequence and
+// its status is the launcher's. No retry.
+export function repeatScriptLines(commands) {
+  return commands.map((command, index) => {
+    const label = `vitest repetition ${index + 1} of ${commands.length}`;
+    return `echo ${quote(label)}; ${command} || { status=$?; echo ${quote(`${label} failed`)} >&2; exit $status; }`;
+  });
+}
 
 export async function run(argv, dependencies = {}) {
   let parsed;
@@ -360,8 +424,8 @@ export async function run(argv, dependencies = {}) {
       const name = `lifemodel-test-run-${randomUUID()}`;
       owned.add(name);
       // Everything else is an installed dependency; `node` is the container's own runtime.
-      const steps = innerSteps(parsed.mode, parsed.vitestArgs).map(([binary, ...args]) =>
-        [binary === 'node' ? 'node' : quote(`/opt/deps/node_modules/.bin/${binary}`), ...args.map(quote)].join(' ')).join(' && ');
+      const commands = innerSteps(parsed.mode, parsed.vitestArgs).map((step) => stepCommand(step));
+      const steps = (parsed.mode === 'repeat' ? repeatScriptLines(commands) : commands).join(' && ');
       const linkDependencies = 'const fs=require("node:fs"); for(const name of fs.readdirSync("/opt/deps/node_modules")) fs.symlinkSync("/opt/deps/node_modules/"+name,"/tmp/work/node_modules/"+name)';
       const script = 'cp -R /snapshot /tmp/work; mkdir /tmp/work/node_modules; node -e ' + quote(linkDependencies) + '; cd /tmp/work; '
         + 'git init -q -b main; git -c user.name=lifemodel-test -c user.email=test@lifemodel.local -c core.hooksPath=/dev/null add -A; '
