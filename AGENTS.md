@@ -93,9 +93,10 @@ tick), Energy & state are physiology. Start with `README.md` and
 | `npm run test` | run the whole test suite inside the disposable test boundary (`node scripts/test-isolated.mjs test`) |
 | `npm run test:docker` | the launcher's docker mode (`node scripts/test-isolated.mjs docker`) |
 | `npm run test:watch` | explicitly unsupported: the launcher runs the suite one-shot and bounded and has no watch option yet, and watch on the host is refused by the entrypoint policy — run `node scripts/test-isolated.mjs test -- <path>` instead |
-| `npm run check` | every product check in one command — the file-size ratchet first, then typecheck, lint, the format check and the suite (`--maxWorkers=2`), all started through the isolated launcher (`node scripts/test-isolated.mjs check`), stopping at the first failure; the exact command CI's product job runs |
+| `npm run check` | every product check in one command — the file-size ratchet first, then the vendor-name check, then typecheck, lint, the format check and the suite (`--maxWorkers=2`), all started through the isolated launcher (`node scripts/test-isolated.mjs check`), stopping at the first failure; the exact command CI's product job runs |
 | `npm run check:file-sizes` | the file-size ratchet alone: every source or test file over its recorded size, over the 800-line limit, or stale in `scripts/file-size-baseline.json` fails |
 | `npm run check:file-sizes:update` | the only way to change the baseline: it lowers counts and removes entries, never raises a count or adds a file |
+| `node scripts/check-vendor-names.mjs` | the vendor-name check alone: a reviewed vendor name outside its adapter, default setting or listed exception fails, and so does a listed exception that no longer matches |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run lint` | ESLint over `src/` and `loader/` (`lint:fix` to auto-fix) |
 | `npm run format` / `format:check` | Prettier over `src/**/*.ts` and `loader/**/*.ts` |
@@ -200,8 +201,8 @@ Prerequisites for test runs and checks: **Node.js ≥ 24 and Docker**. Watch
 - `npm run check` is the one command with CI's verdict — CI's `ci-product` job
   runs the same launcher command, `node scripts/test-isolated.mjs check`, on
   node 24 behind GitHub's disposable Docker daemon: the file-size ratchet
-  first, then typecheck, lint, the format check and the suite (at most 2
-  workers), stopping at the first failure. No `npm ci` runs on the `ci-product` host. A manifest that disagrees with
+  first, then the vendor-name check, then typecheck, lint, the format check and
+  the suite (at most 2 workers), stopping at the first failure. No `npm ci` runs on the `ci-product` host. A manifest that disagrees with
   `package-lock.json` fails the entrypoint policy tests in the suite, which is
   what `npm ci` used to prove before the checks started.
 - Run one file: `node scripts/test-isolated.mjs test --

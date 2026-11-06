@@ -1,0 +1,123 @@
+{
+  "names": [
+    {
+      "name": "opencode",
+      "allowed": [
+        {
+          "path": "src/ports/task-harness-registry.json",
+          "reason": "The task-harness registry is the default setting: it declares the harness command, version, provision archives, config path and adapter module."
+        },
+        {
+          "path": "loader/src/task-opencode.ts",
+          "reason": "The OpenCode adapter: it builds OpenCode's native configuration and environment."
+        }
+      ]
+    },
+    {
+      "name": "prime-agent",
+      "allowed": [
+        {
+          "path": "src/ports/task-harness-registry.json",
+          "reason": "The task-harness registry is the default setting: it declares the harness command, version, provision archives, config path and adapter module."
+        },
+        {
+          "path": "loader/src/task-prime-agent.ts",
+          "reason": "The Prime Agent adapter: it writes the daemon's native models and settings and speaks its prime-agent.daemon protocol."
+        }
+      ]
+    },
+    {
+      "name": "ghcr.io",
+      "allowed": [
+        {
+          "path": "loader/src/workbench-source.ts",
+          "reason": "The default workbench pull source: a registry host is a loader setting here, not in generic code."
+        }
+      ]
+    },
+    {
+      "name": "docker.io",
+      "allowed": [
+        {
+          "path": "loader/src/workbench-source.ts",
+          "reason": "The default workbench pull source: a registry host is a loader setting here, not in generic code."
+        }
+      ]
+    },
+    {
+      "name": "quay.io",
+      "allowed": [
+        {
+          "path": "loader/src/workbench-source.ts",
+          "reason": "The default workbench pull source: a registry host is a loader setting here, not in generic code."
+        }
+      ]
+    },
+    {
+      "name": "openrouter",
+      "allowed": []
+    }
+  ],
+  "exceptions": [
+    {
+      "name": "openrouter",
+      "path": "src/core/event-bus.ts",
+      "reason": "The EventBus doc comment at line 39 lists openrouter as an example event channel; the bus itself has no OpenRouter code."
+    },
+    {
+      "name": "openrouter",
+      "path": "src/layers/cognition/llm-adapter.ts",
+      "reason": "The module comment at lines 5-6 names OpenRouter among the backends the provider-agnostic adapter works with."
+    },
+    {
+      "name": "openrouter",
+      "path": "src/llm/provider.ts",
+      "reason": "Doc comments name OpenRouter as the source of generation ids (line 168), upstream provider names (line 195) and routed error upstreams (line 223)."
+    },
+    {
+      "name": "openrouter",
+      "path": "src/llm/tool-schema.ts",
+      "reason": "The comment at line 51 says strict is placed on the tool object for OpenRouter compatibility."
+    },
+    {
+      "name": "openrouter",
+      "path": "src/plugins/providers/model-params.ts",
+      "reason": "The module and rule comments (lines 4, 13, 45, 75) describe these per-model adjustments as OpenRouter routing preferences and cite an openrouter.ai ranking."
+    },
+    {
+      "name": "opencode",
+      "path": "src/plugins/providers/model-params.ts",
+      "reason": "Comments at lines 51 and 130 cite OpenCode's empirical findings for model parameter and tool-schema behaviour."
+    },
+    {
+      "name": "openrouter",
+      "path": "src/plugins/providers/provider-transforms.ts",
+      "reason": "Comments at lines 5 and 33 describe the cache-control transform as shared by OpenRouter providers and routed by OpenRouter to the upstream provider."
+    },
+    {
+      "name": "openrouter",
+      "path": "src/plugins/providers/transcript-compiler.ts",
+      "reason": "The comment at line 6 contrasts OpenRouter's silent same-role normalization with local-model failures."
+    },
+    {
+      "name": "openrouter",
+      "path": "src/plugins/providers/vercel-ai-provider.ts",
+      "reason": "Comments and code name OpenRouter's x-openrouter-provider response header (lines 332-345, 1062-1063), the @openrouter/ai-sdk-provider schema bug (lines 186, 495, 645), extraBody and providerOptions.openrouter (lines 522, 604), and nested error parsing (line 1157)."
+    },
+    {
+      "name": "openrouter",
+      "path": "src/ports/llm.ts",
+      "reason": "The port's doc comment at line 6 lists OpenRouter among example provider backends."
+    },
+    {
+      "name": "openrouter",
+      "path": "src/types/event.ts",
+      "reason": "The Event doc comment at line 13 lists openrouter as an example channel implementation."
+    },
+    {
+      "name": "opencode",
+      "path": "loader/src/task-process.ts",
+      "reason": "The comment at lines 2-4 says OpenCode's shell tools start their own process groups, which is why the supervisor uses a subreaper."
+    }
+  ]
+}

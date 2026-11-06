@@ -152,11 +152,12 @@ export function acquireLock(directory = path.join(os.tmpdir(), `lifemodel-test-$
 
 export function innerSteps(mode, args) {
   const suite = ['vitest', 'run', ...args, '--maxWorkers=2'];
-  // The file-size ratchet needs no dependencies and fails fastest, so it runs
-  // first (lifemodel-5zoc). Then the loader and web app are separate TypeScript
-  // projects: typecheck all three, then lint and format source, then the suite last.
+  // The file-size ratchet and the vendor-name check need no dependencies and
+  // fail fastest, so they run first (lifemodel-5zoc, lifemodel-1be4). Then the
+  // loader and web app are separate TypeScript projects: typecheck all three,
+  // then lint and format source, then the suite last.
   return mode === 'check'
-    ? [['node', 'scripts/check-file-sizes.mjs'],
+    ? [['node', 'scripts/check-file-sizes.mjs'], ['node', 'scripts/check-vendor-names.mjs'],
       ['tsc', '--noEmit'], ['tsc', '-p', 'loader/tsconfig.json', '--noEmit'], ['tsc', '-p', 'web/app/tsconfig.json', '--noEmit'], ['tsc', '-p', 'web/loader/tsconfig.json', '--noEmit'],
       ['eslint', 'src/', 'loader/', 'web/app/', 'web/loader/src/'], ['prettier', '--check', 'src/**/*.ts', 'loader/**/*.ts', 'web/app/**/*.{ts,tsx,css,json,html}', 'web/loader/**/*.{ts,tsx,css,json,html}', 'web/kit/**/*.{ts,tsx,css,json,html}'], suite]
     : [suite];
