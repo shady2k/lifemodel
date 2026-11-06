@@ -142,20 +142,28 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
     expect(job).toContain('timeout-minutes: 65');
     // One checkout holds both ends of the diff, as the `changes` job's does.
     expect(job).toContain('fetch-depth: 0');
-    expect(job).toContain('scripts/ci-repeat-test-paths.sh');
-    expect(job).toContain('node scripts/test-isolated.mjs repeat --');
+    // The step runs one script and nothing else; its whole shell lives there.
+    expect(job).toContain('        run: scripts/ci-repeat-changed-tests.sh\n');
+    expect(job).toContain('          BASE_REF: ${{ github.base_ref }}');
+    expect(job).toContain('          HEAD_SHA: ${{ github.event.pull_request.head.sha }}');
     // The repeat step runs on pull requests only, and only after the check.
-    const check = job.indexOf('node scripts/test-isolated.mjs check');
-    const repeat = job.indexOf('node scripts/test-isolated.mjs repeat');
+    const check = job.indexOf('run: node scripts/test-isolated.mjs check');
+    const repeat = job.indexOf('run: scripts/ci-repeat-changed-tests.sh');
     expect(check).toBeGreaterThan(-1);
     expect(repeat).toBeGreaterThan(check);
     const repeatStep = job.slice(job.lastIndexOf('      - name:', repeat), repeat);
     expect(repeatStep).toContain("if: ${{ github.event_name == 'pull_request' }}");
-    expect(repeatStep).toContain('no added or changed test file to repeat');
+    // The script owns the diff, the selection and the launcher call, and paths
+    // travel NUL-delimited through the whole chain.
+    const script = readFileSync(join(repoRoot, 'scripts', 'ci-repeat-changed-tests.sh'), 'utf8');
+    expect(script).toContain('git diff -z --no-renames --name-only');
+    expect(script).toContain('scripts/ci-repeat-test-paths.sh');
+    expect(script).toContain('node scripts/test-isolated.mjs repeat --');
     // A diff that cannot be computed fails the step; it never skips.
-    expect(job).toContain('the diff cannot be computed');
+    expect(script).toContain('the diff cannot be computed');
+    expect(script).toContain('no added or changed test file to repeat');
     // It prints the files and what the repetition cost.
-    expect(job).toContain('repeat run took');
+    expect(script).toContain('repeat run took');
   });
 
   it('the nix check job runs the flake check without publishing or a write token', () => {
@@ -249,9 +257,19 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
         '          docker push ghcr.io/shady2k/lifemodel-workbench:main\n',
         '          npm ci\n'
       ),
-      // The repeat step without the launcher runs nothing: there is no
-      // repetition outside the boundary.
-      ci.replace('          node scripts/test-isolated.mjs repeat -- "$@" || status=$?\n', ''),
+      // Step-level environment is limited to the two expressions the repeat
+      // script reads. A host suite hidden there is executable from the step's
+      // own run line, which the run-command scan never sees.
+      ci.replace(
+        '          BASE_REF: ${{ github.base_ref }}\n          HEAD_SHA: ${{ github.event.pull_request.head.sha }}\n        run: scripts/ci-repeat-changed-tests.sh',
+        '          BASE_REF: ${{ github.base_ref }}\n          HEAD_SHA: ${{ github.event.pull_request.head.sha }}\n          HOST_SUITE: vitest run\n        run: scripts/ci-repeat-changed-tests.sh'
+      ),
+      // The step runs the script and nothing else: an early success before the
+      // call would make the repeat unreachable.
+      ci.replace(
+        '        run: scripts/ci-repeat-changed-tests.sh\n',
+        '        run: |\n          exit 0\n          scripts/ci-repeat-changed-tests.sh\n'
+      ),
     ];
     for (const changed of mutations) {
       expect(changed).not.toBe(ci);

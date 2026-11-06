@@ -205,30 +205,7 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -eu
-          base=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA") || {
-            echo "no merge base of origin/$BASE_REF and $HEAD_SHA in this checkout: the diff cannot be computed" >&2
-            exit 2
-          }
-          git diff --no-renames --name-only "$base...$HEAD_SHA" > "$RUNNER_TEMP/repeat-changed-paths.txt" || {
-            echo "git could not read $base...$HEAD_SHA in this checkout: the diff cannot be computed" >&2
-            exit 2
-          }
-          scripts/ci-repeat-test-paths.sh < "$RUNNER_TEMP/repeat-changed-paths.txt" > "$RUNNER_TEMP/repeat-files.txt"
-          if [ ! -s "$RUNNER_TEMP/repeat-files.txt" ]; then
-            echo "no added or changed test file to repeat"
-            exit 0
-          fi
-          echo "repeating:"
-          cat "$RUNNER_TEMP/repeat-files.txt"
-          set --
-          while IFS= read -r file; do set -- "$@" "$file"; done < "$RUNNER_TEMP/repeat-files.txt"
-          start=$(date +%s)
-          status=0
-          node scripts/test-isolated.mjs repeat -- "$@" || status=$?
-          echo "repeat run took $(( $(date +%s) - start ))s"
-          exit "$status"
+        run: scripts/ci-repeat-changed-tests.sh
 
   # Rebuild pinned shadcn add output and compare it with the kit registry lock.
   ci-shadcn-provenance:

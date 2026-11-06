@@ -1,13 +1,15 @@
 /**
  * Tests for the repeat selector (scripts/ci-repeat-test-paths.sh).
  *
- * The selector reads one change's paths on stdin, exactly as `git diff
- * --name-only` prints them, and prints the test files the repeat mode runs:
- * added or changed files under tests/ that still exist. A helper, a fixture or
- * a deleted test repeats nothing. CI runs the repeat mode only when this list
- * is non-empty, so a wrong answer either repeats files that did not change or
- * leaves a new test unrepeated. It reads nothing but its stdin and the working
- * tree, and the same input always prints the same, sorted list.
+ * The selector reads one change's paths on stdin NUL-delimited, exactly as
+ * `git diff -z --name-only` prints them, and prints the test files the repeat
+ * mode runs NUL-delimited: added or changed files under tests/ that still
+ * exist. A helper, a fixture or a deleted test repeats nothing. CI runs the
+ * repeat mode only when this list is non-empty, so a wrong answer either
+ * repeats files that did not change or leaves a new test unrepeated. It reads
+ * nothing but its stdin and the working tree, and the same input always
+ * prints the same, sorted list. NUL delimiters keep every byte of a name:
+ * a space, a tab or a quote needs no quoting and cannot split a path.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -22,7 +24,7 @@ const script = fileURLToPath(new URL('../../scripts/ci-repeat-test-paths.sh', im
 interface Selection {
   /** The exit status of the selector. */
   status: number | null;
-  /** The paths it printed, one per line, as CI passes them to the launcher. */
+  /** The paths it printed, NUL-delimited, as CI passes them to the launcher. */
   files: string[];
   /** What it said on stderr, where an empty selection is explained. */
   note: string;
@@ -53,17 +55,17 @@ describe('scripts/ci-repeat-test-paths.sh', () => {
   });
 
   function select(input: string, args: string[] = []): Selection {
-    const result = spawnSync('sh', [script, ...args], { cwd: dir, input, encoding: 'utf8' });
+    const result = spawnSync('bash', [script, ...args], { cwd: dir, input, encoding: 'utf8' });
     return {
       status: result.status,
-      files: result.stdout.split('\n').filter((line) => line !== ''),
+      files: result.stdout.split('\u0000').filter((file) => file !== ''),
       note: result.stderr,
     };
   }
 
-  /** The input CI feeds it: git's path list, one path per line. */
+  /** The input CI feeds it: git's NUL-delimited path list. */
   function paths(...files: string[]): string {
-    return files.map((file) => `${file}\n`).join('');
+    return files.map((file) => `${file}\u0000`).join('');
   }
 
   it('prints an added test file', () => {
@@ -145,14 +147,38 @@ describe('scripts/ci-repeat-test-paths.sh', () => {
     );
   });
 
-  it('treats an empty line as no path rather than as a path', () => {
+  it('treats an empty path as no path rather than as a path', () => {
     expect(select(paths('', 'tests/unit/added.test.ts', '')).files).toEqual([
       'tests/unit/added.test.ts',
     ]);
   });
 
-  it('reads a last line without a trailing newline', () => {
+  it('reads a last path without a trailing NUL', () => {
     expect(select('tests/unit/added.test.ts').files).toEqual(['tests/unit/added.test.ts']);
+  });
+
+  it('keeps a space, a tab and a quote in a test file name byte for byte', () => {
+    for (const file of [
+      'tests/unit/with space.test.ts',
+      'tests/unit/tab\tname.test.ts',
+      "tests/unit/quote'name.test.ts",
+    ]) {
+      mkdirSync(join(dir, dirname(file)), { recursive: true });
+      writeFileSync(join(dir, file), 'export const a = 1;\n');
+    }
+    expect(
+      select(
+        paths(
+          'tests/unit/with space.test.ts',
+          'tests/unit/tab\tname.test.ts',
+          "tests/unit/quote'name.test.ts"
+        )
+      ).files
+    ).toEqual([
+      "tests/unit/quote'name.test.ts",
+      'tests/unit/tab\tname.test.ts',
+      'tests/unit/with space.test.ts',
+    ]);
   });
 
   it('refuses arguments: the change is read from stdin alone', () => {
