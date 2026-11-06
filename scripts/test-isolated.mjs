@@ -20,8 +20,9 @@ export const STORE_IMAGES = Object.freeze({
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TIMEOUT = 25 * 60_000;
 // A pull request's new and changed test files run this many times in sequence
-// in one container: a test that fails at random must fail here, before it
-// reaches main (lifemodel-hbsi).
+// in one container: a test that fails at random is more likely to fail here,
+// before it reaches main (lifemodel-hbsi). Finite repetition cannot promise
+// that it will.
 export const REPEAT_RUNS = 5;
 // Fixed neighbours of every repetition. They use the shared Valkey and
 // Postgres stores, so the changed files compete for the two workers, the

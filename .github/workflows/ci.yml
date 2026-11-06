@@ -170,7 +170,8 @@ jobs:
   ci-product:
     # Two launcher deadlines of up to 25 minutes each: the full check and, on a
     # pull request, the repetition of its new and changed test files
-    # (lifemodel-hbsi). It takes 10 to 13 minutes today.
+    # (lifemodel-hbsi). The full check took 10 to 13 minutes on GitHub's runner
+    # on main before this feature.
     timeout-minutes: 65
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.product == 'true') && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}

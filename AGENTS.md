@@ -191,7 +191,8 @@ disposable test boundary, `scripts/test-isolated.mjs
   minute of test work, so the given files compete for the two workers, the
   store pools and the per-file databases as they do in the full check. It is
   not a suite-wide run, and `repeat` with no test file is a usage error, never
-  a pass;
+  a pass. A repeat run that exceeds the launcher's 25-minute deadline fails; the
+  deadline is not raised for it (coordinator's decision, 2026-11-06);
 - only two read-only checks run outside the boundary: in `check` mode the
   launcher runs `node scripts/check-file-sizes.mjs` and then
   `node scripts/check-vendor-names.mjs` on the checkout, before it stages a
