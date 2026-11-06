@@ -371,3 +371,4 @@ export interface TaskRegistry extends TaskAcceptanceService {
     }
   ): Promise<TaskAccessIntent>;
 }
+export const plantedHarness = 'opencode';
