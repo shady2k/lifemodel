@@ -59,7 +59,7 @@
     "tests/unit/loader-openbao.test.ts": 1642,
     "tests/unit/loader-workbench-import.test.ts": 1287,
     "tests/unit/model-gateway.test.ts": 3060,
-    "tests/unit/platform-manifests.test.ts": 1703,
+    "tests/unit/platform-manifests.test.ts": 1689,
     "tests/unit/plugins/calories/calories-tool.test.ts": 1146,
     "tests/unit/task-settings-registry.test.ts": 1605,
     "tests/unit/task-steering-lifecycle.test.ts": 812,

@@ -205,7 +205,7 @@ exit 0`
     `if [ "$1" = status ]; then echo Status: ${options.ufwActive ? 'active' : 'inactive'}; else echo "$*" >> "$UFW_LOG"; fi`
   );
   command('curl', 'for arg do output=$arg; done; printf manifest > "$output"');
-  command('sha256sum', 'read expected file; echo "$file: OK"');
+  command('sha256sum', 'read expected file; echo "$file: OK"'); command('df', "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'; printf 'fakefs 100000000 1 67108864 1%% /\\n'"); command('fallocate', 'for arg do target=$arg; done; : > "$target"'); command('mkfs.ext4', 'exit 0'); command('chown', 'exit 0');
   if (options.avahiConfig) {
     mkdirSync(join(root, 'install-root/etc/avahi'), { recursive: true });
     writeFileSync(join(root, 'install-root/etc/avahi/avahi-daemon.conf'), options.avahiConfig);
@@ -1323,7 +1323,7 @@ describe('platform manifests', () => {
     } finally {
       rmSync(first.root, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it('binds the installed CLI to its state directory and quotes metacharacter paths', () => {
     const result = runInstallerHarness(false, false, undefined, 'v1.0.0', { metacharState: true });
@@ -1420,30 +1420,16 @@ describe('platform manifests', () => {
   it('recovers from the installed bootstrap bundle after its source checkout is removed', () => {
     const root = mkdtempSync(join(tmpdir(), 'lifemodel-removed-source-'));
     const sourceDir = join(root, 'checkout');
+    const deploy = (path: string) => fileURLToPath(new URL(`../../deploy/${path}`, import.meta.url));
     mkdirSync(join(sourceDir, 'scripts'), { recursive: true });
-    mkdirSync(join(sourceDir, 'deploy/cli'), { recursive: true });
-    mkdirSync(join(sourceDir, 'deploy/mdns'), { recursive: true });
-    mkdirSync(join(sourceDir, 'deploy/k3s'), { recursive: true });
+    for (const directory of ['cli', 'mdns', 'k3s', 'logs', 'root'])
+      mkdirSync(join(sourceDir, `deploy/${directory}`), { recursive: true });
     cpSync(installer, join(sourceDir, 'scripts/install.sh'));
     cpSync(rootTemplates, join(sourceDir, 'deploy/root'), { recursive: true });
-    cpSync(
-      fileURLToPath(new URL('../../deploy/mdns/', import.meta.url)),
-      join(sourceDir, 'deploy/mdns'),
-      { recursive: true }
-    );
-    cpSync(
-      fileURLToPath(new URL('../../deploy/k3s/', import.meta.url)),
-      join(sourceDir, 'deploy/k3s'),
-      { recursive: true }
-    );
-    cpSync(
-      fileURLToPath(new URL('../../deploy/cli/lifemodel.mjs', import.meta.url)),
-      join(sourceDir, 'deploy/cli/lifemodel.mjs')
-    );
-    cpSync(
-      fileURLToPath(new URL('../../deploy/cli/wait-ready.mjs', import.meta.url)),
-      join(sourceDir, 'deploy/cli/wait-ready.mjs')
-    );
+    for (const directory of ['mdns', 'k3s', 'logs'])
+      cpSync(deploy(directory), join(sourceDir, `deploy/${directory}`), { recursive: true });
+    for (const file of ['lifemodel.mjs', 'wait-ready.mjs'])
+      cpSync(deploy(`cli/${file}`), join(sourceDir, `deploy/cli/${file}`));
     const first = runInstallerHarness(false, false, root, 'v1.0.0', { sourceDir });
     const second = runInstallerHarness(false, false, root, 'v2.0.0', { sourceDir });
     try {

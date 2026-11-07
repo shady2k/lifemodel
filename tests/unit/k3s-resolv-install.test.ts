@@ -263,6 +263,18 @@ describe('the installer hands k3s a resolv.conf it accepts', () => {
         `#!/bin/sh\ncase "$1" in */wait-ready.mjs) exit 0 ;; */resolv-conf.mjs) if flock -n "$LIFEMODEL_INSTALL_ROOT/run/lifemodel/k3s-resolv.lock" true; then echo "installer generator overlaps publication without lock" >&2; exit 73; fi ;; esac\nexec ${JSON.stringify(process.execPath)} "$@"\n`
       );
       writeFake(join(bin, 'apt-get'), `#!/bin/sh\necho "$*" >> "$APT_LOG"\nexit 0\n`);
+      // The log volume needs host disk, a loop-formatted image and a chown of
+      // its data directory; the test host provides none of those (lifemodel-vbog.4.2).
+      writeFake(
+        join(bin, 'df'),
+        `#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'\nprintf 'fakefs 100000000 1 67108864 1%% /\\n'\n`
+      );
+      writeFake(
+        join(bin, 'fallocate'),
+        `#!/bin/sh\nfor arg do target=$arg; done\n: > "$target"\n`
+      );
+      writeFake(join(bin, 'mkfs.ext4'), '#!/bin/sh\nexit 0\n');
+      writeFake(join(bin, 'chown'), '#!/bin/sh\nexit 0\n');
       writeFake(
         join(bin, 'ip'),
         `#!/bin/sh\nif [ "$1" = -j ]; then printf '%s\\n' '[{"dev":"eth0","metric":100}]'; else exit 1; fi\n`

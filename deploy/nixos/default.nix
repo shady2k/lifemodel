@@ -42,6 +42,19 @@ let
   k3sResolvConf = "/run/lifemodel/k3s-resolv.conf";
   k3sResolvScript = ../k3s/k3s-resolv.sh;
   k3sResolvGenerator = ../k3s/resolv-conf.mjs;
+  # The log store's own file-backed ext4 volume (ADR-016 §5). Both installers
+  # run deploy/logs/logs-volume.sh; this one is the same script as a store path.
+  logsVolumeImage = "/var/lib/lifemodel-logs.img";
+  logsVolumeDir = "/var/lib/lifemodel-logs";
+  logsVolumeScript = pkgs.writeShellScript "lifemodel-logs-volume"
+    (builtins.readFile ../logs/logs-volume.sh);
+  # <number>K, <number>M or <number>G, 1024-based like fallocate; null if the
+  # value is malformed. The minimum is the same 2G the shared script enforces.
+  logsVolumeMiB = size:
+    let parts = builtins.match "([0-9]+)([KMG])" size;
+    in if parts == null then null else
+      let number = builtins.fromJSON (builtins.elemAt parts 0); unit = builtins.elemAt parts 1;
+      in if unit == "K" then (number + 1023) / 1024 else if unit == "M" then number else number * 1024;
   otherFlux = (config.services.fluxcd.enable or false) || (config.fluxcd.enable or false);
   publisher = pkgs.writeShellScriptBin "lifemodel-mdns-publish" (builtins.readFile ../mdns/publish-name);
   mdnsNames = [ "${cfg.name}.local" "boot-${cfg.name}.local" "vault-${cfg.name}.local" ];
@@ -92,6 +105,11 @@ in
       };
       publicKey = mkOption { type = types.nullOr types.str; default = null; description = "PEM public key used for cosign verification."; };
     };
+    logsVolumeSize = mkOption {
+      type = types.str;
+      default = "3G";
+      description = "Size of the file-backed ext4 volume the log store uses, <number>K/M/G and at least 2G (ADR-016 §5).";
+    };
     generatedRootInstance = mkOption { type = types.path; readOnly = true; internal = true; default = renderedInstance; };
     generatedRootOCI = mkOption { type = types.path; readOnly = true; internal = true; default = renderedOCI; };
     generatedRootKustomization = mkOption { type = types.path; readOnly = true; internal = true; default = renderedKustomization; };
@@ -114,6 +132,8 @@ in
         message = "platform tags and verification regexes must not contain newlines"; }
       { assertion = cfg.verify.mode != "key" || cfg.verify.publicKey != null;
         message = "services.lifemodel.verify.publicKey is required when verify.mode = key"; }
+      { assertion = logsVolumeMiB cfg.logsVolumeSize != null && logsVolumeMiB cfg.logsVolumeSize >= 2048;
+        message = "services.lifemodel.logsVolumeSize must be <number>K/M/G and at least 2G; got: ${cfg.logsVolumeSize}"; }
       { assertion = !otherFlux; message = "services.lifemodel cannot be enabled with another Flux installation"; }
       { assertion = toString config.services.k3s.package == toString lifemodelK3s;
         message = "services.k3s.package must be the pinned lifemodelK3s package"; }
@@ -139,6 +159,13 @@ in
       service-cidr: 10.43.0.0/16
     '';
     environment.systemPackages = [ lifemodelK3s lifemodelCli publisher ];
+    # A log volume must never keep the machine from booting: nofail, and the
+    # unit creates the image before this mount is attempted.
+    fileSystems."${logsVolumeDir}" = {
+      device = logsVolumeImage;
+      fsType = "ext4";
+      options = [ "loop" "nofail" ];
+    };
     services.avahi = {
       enable = true;
       publish.enable = true;
@@ -160,6 +187,15 @@ in
       };
     };
     systemd.services = mdnsUnits // {
+    lifemodel-logs-volume = {
+      description = "Create the file-backed ext4 volume for lifemodel logs";
+      wantedBy = [ "multi-user.target" ];
+      before = [ "var-lib-lifemodel\\x2dlogs.mount" "k3s.service" ];
+      unitConfig = { DefaultDependencies = false; RequiresMountsFor = "/var/lib"; };
+      serviceConfig = { Type = "oneshot"; RemainAfterExit = true; TimeoutStartSec = 300; };
+      path = [ pkgs.coreutils pkgs.e2fsprogs pkgs.util-linux ];
+      script = "exec ${logsVolumeScript} ${lib.escapeShellArg cfg.logsVolumeSize}";
+    };
     lifemodel-k3s-resolv = {
       description = "Write the resolv.conf k3s gives the kubelet and CoreDNS";
       wantedBy = [ "multi-user.target" ];

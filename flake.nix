@@ -63,6 +63,7 @@
           cp -r ${./deploy/k3s}/. $TMPDIR/work/deploy/k3s/
           cp ${./scripts/install.sh} $TMPDIR/work/scripts/install.sh
           cp -r ${./deploy/root} $TMPDIR/work/deploy/root
+          cp -r ${./deploy/logs} $TMPDIR/work/deploy/logs
           busybox sh $TMPDIR/work/scripts/install.sh --platform-url ${url} --tag ${lib.escapeShellArg tag} \
             --verify ${mode} --lan-interface eth0 ${lib.optionalString (mode == "key") "--public-key-file ${pkgs.writeText "platform-cosign.pub" verifyKey}"} \
             --render-only $out ${extraArgs}
@@ -240,6 +241,7 @@
         mkdir -p $TMPDIR/work/scripts $TMPDIR/work/deploy
         cp ${./scripts/install.sh} $TMPDIR/work/scripts/install.sh
         cp -r ${./deploy/root} $TMPDIR/work/deploy/root
+        cp -r ${./deploy/logs} $TMPDIR/work/deploy/logs
         if output=$(busybox sh $TMPDIR/work/scripts/install.sh \
           --platform-url ${platformUrl} --tag v1.0.0 --verify key --render-only $TMPDIR/out 2>&1); then
           echo "installer accepted key mode without --public-key-file" >&2
@@ -262,6 +264,116 @@
       installScript = builtins.readFile ./scripts/install.sh;
       installK3sVersionLine = lib.findFirst (line: lib.hasPrefix "K3S_VERSION=" line) "" (lib.splitString "\n" installScript);
       installK3sVersion = builtins.elemAt (builtins.match "K3S_VERSION=\"([^\"]+)\"" installK3sVersionLine) 0;
+      # The log store's file-backed volume (ADR-016 §5): one rule, both
+      # installers, and the same minimum the shared script enforces.
+      logsVolumeDir = "/var/lib/lifemodel-logs";
+      logsVolumeImage = "/var/lib/lifemodel-logs.img";
+      logsVolumeMountUnit = "var-lib-lifemodel\\x2dlogs.mount";
+      logsVolumeTooSmall = evaluate ({ ... }: { services.lifemodel.logsVolumeSize = "1G"; });
+      logsVolumeLarger = evaluate ({ ... }: { services.lifemodel.logsVolumeSize = "5G"; });
+      logsVolumeInstallerLarger = renderOnly "keyless" platformUrl "v1.0.0" "--logs-volume-size 5G";
+      logsVolumeModule =
+        assert keyless.config.services.lifemodel.logsVolumeSize == "3G";
+        assert keyless.config.fileSystems.${logsVolumeDir}.device == logsVolumeImage;
+        assert keyless.config.fileSystems.${logsVolumeDir}.fsType == "ext4";
+        assert lib.elem "loop" keyless.config.fileSystems.${logsVolumeDir}.options;
+        assert lib.elem "nofail" keyless.config.fileSystems.${logsVolumeDir}.options;
+        assert lib.elem logsVolumeMountUnit keyless.config.systemd.services.lifemodel-logs-volume.before;
+        assert lib.elem "k3s.service" keyless.config.systemd.services.lifemodel-logs-volume.before;
+        assert keyless.config.systemd.services.lifemodel-logs-volume.unitConfig.DefaultDependencies == false;
+        assert keyless.config.systemd.services.lifemodel-logs-volume.serviceConfig.Type == "oneshot";
+        assert keyless.config.systemd.services.lifemodel-logs-volume.serviceConfig.RemainAfterExit == true;
+        assert lib.hasInfix "3G" keyless.config.systemd.services.lifemodel-logs-volume.script;
+        assert lib.hasInfix "5G" logsVolumeLarger.config.systemd.services.lifemodel-logs-volume.script;
+        # A size below 2 GiB fails evaluation, naming the minimum and the value.
+        assert !(builtins.tryEval logsVolumeTooSmall.config.system.build.toplevel.drvPath).success;
+        assert lib.any (entry: !entry.assertion
+          && lib.hasInfix "1G" entry.message && lib.hasInfix "2G" entry.message)
+          logsVolumeTooSmall.config.assertions;
+        pkgs.runCommand "lifemodel-logs-volume-module" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
+          mkdir -p scripts deploy/logs
+          cp ${./scripts/check-k3s-commands.mjs} scripts/check-k3s-commands.mjs
+          cp ${./deploy/logs}/logs-volume.sh deploy/logs/
+          node scripts/check-k3s-commands.mjs --dir deploy/logs \
+            --path ${lib.makeBinPath keyless.config.systemd.services.lifemodel-logs-volume.path} \
+            logs-volume.sh
+          touch $out
+        '';
+      logsVolumeBehaviour = pkgs.runCommand "lifemodel-logs-volume-behaviour" {
+        nativeBuildInputs = [ pkgs.bash pkgs.coreutils pkgs.e2fsprogs pkgs.util-linux pkgs.gnugrep ];
+      } ''
+        set -eu
+        export PATH=${lib.makeBinPath [ pkgs.bash pkgs.coreutils pkgs.e2fsprogs pkgs.util-linux pkgs.gnugrep ]}
+        image=$TMPDIR/volume.img
+        bash ${./deploy/logs/logs-volume.sh} 3G "$image" "$TMPDIR/mnt"
+        test -s "$image"
+        test "$(stat -c %s "$image")" -eq $((3 * 1024 * 1024 * 1024))
+        # A fresh image's root and the store's data directory belong to
+        # 1000:1000, so the store writes without the kubelet's fsGroup.
+        debugfs -R 'stat /' "$image" > root.stat 2>/dev/null
+        grep -E 'User: +1000' root.stat
+        grep -E 'Group: +1000' root.stat
+        debugfs -R 'stat /data' "$image" > data.stat 2>/dev/null
+        grep -E 'User: +1000' data.stat
+        grep -E 'Group: +1000' data.stat
+        grep -E 'Mode: +0750' data.stat
+        # An existing image is left alone, even for a larger size.
+        touch -d '2001-01-01 00:00:00' "$image"
+        bash ${./deploy/logs/logs-volume.sh} 4G "$image" "$TMPDIR/mnt"
+        test "$(stat -c %Y "$image")" -eq "$(date -d '2001-01-01 00:00:00' +%s)"
+        # Below the minimum and larger than the disk are refused, with figures.
+        if bash ${./deploy/logs/logs-volume.sh} 1G "$TMPDIR/small.img" "$TMPDIR/mnt" 2> small.err; then
+          echo 'logs volume accepted a size below the minimum' >&2; exit 1
+        fi
+        grep -F '1G' small.err
+        grep -F '2G' small.err
+        test ! -e "$TMPDIR/small.img"
+        if bash ${./deploy/logs/logs-volume.sh} 999999G "$TMPDIR/big.img" "$TMPDIR/mnt" 2> big.err; then
+          echo 'logs volume accepted a size the disk cannot hold' >&2; exit 1
+        fi
+        grep -F '999999G' big.err
+        grep -F 'free on' big.err
+        test ! -e "$TMPDIR/big.img"
+        touch $out
+      '';
+      logsVolumeInstaller =
+        assert lib.hasInfix "ExecStart=/usr/lib/lifemodel/logs-volume.sh 3G"
+          (builtins.readFile (scriptKeyless + "/systemd/lifemodel-logs-volume.service"));
+        assert lib.hasInfix "Before=${logsVolumeMountUnit} k3s.service"
+          (builtins.readFile (scriptKeyless + "/systemd/lifemodel-logs-volume.service"));
+        assert builtins.readFile (scriptKeyless + "/fstab")
+          == "/var/lib/lifemodel-logs.img /var/lib/lifemodel-logs ext4 loop,nofail 0 0\n";
+        assert lib.hasInfix "logs-volume.sh 5G"
+          (builtins.readFile (logsVolumeInstallerLarger + "/systemd/lifemodel-logs-volume.service"));
+        pkgs.runCommand "lifemodel-logs-volume-installer-render" { nativeBuildInputs = [ pkgs.gnugrep ]; } ''
+          set -eu
+          unit=${scriptKeyless}/systemd/lifemodel-logs-volume.service
+          grep -F 'DefaultDependencies=no' "$unit"
+          grep -F 'Type=oneshot' "$unit"
+          grep -F 'RemainAfterExit=yes' "$unit"
+          grep -F 'TimeoutStartSec=300' "$unit"
+          grep -F 'WantedBy=multi-user.target' "$unit"
+          if grep -F '@LOGS_VOLUME' "$unit"; then
+            echo 'installer left an unresolved log volume template value' >&2; exit 1
+          fi
+          touch $out
+        '';
+      logsVolumeInstallerRefusal = pkgs.runCommand "lifemodel-logs-volume-installer-refusal" {
+        nativeBuildInputs = [ pkgs.busybox pkgs.gnugrep pkgs.bash ];
+      } ''
+        mkdir -p $TMPDIR/work/scripts $TMPDIR/work/deploy
+        cp ${./scripts/install.sh} $TMPDIR/work/scripts/install.sh
+        cp -r ${./deploy/logs} $TMPDIR/work/deploy/logs
+        if output=$(busybox sh $TMPDIR/work/scripts/install.sh --platform-url ${platformUrl} \
+          --tag v1.0.0 --verify keyless --logs-volume-size 1G --render-only $TMPDIR/out 2>&1); then
+          echo 'installer accepted a logs volume below the minimum' >&2; exit 1
+        fi
+        printf '%s\n' "$output" | busybox grep -F '1G'
+        printf '%s\n' "$output" | busybox grep -F '2G'
+        printf '%s\n' "$output" | busybox grep -F 'minimum'
+        test ! -e $TMPDIR/out/systemd/lifemodel-logs-volume.service
+        touch $out
+      '';
       forcedConsumerOverride = evaluate ({ ... }: {
         services.k3s.package = lib.mkForce pkgs.hello;
       });
@@ -636,6 +748,10 @@
         mdns-module-evaluation = mdnsEvaluation;
         mdns-installer-unit-render = mdnsInstallerUnits;
         k3s-resolv-module-evaluation = resolvConfModuleEvaluation;
+        logs-volume-module = logsVolumeModule;
+        logs-volume-behaviour = logsVolumeBehaviour;
+        logs-volume-installer = logsVolumeInstaller;
+        logs-volume-installer-refusal = logsVolumeInstallerRefusal;
         k3s-resolv-installer-render = resolvConfInstallerUnits;
         k3s-resolv-behaviour = resolvConfBehaviour;
         platform-kustomize-wiring = renderedPlatform;

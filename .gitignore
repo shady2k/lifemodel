@@ -3,6 +3,9 @@ node_modules/
 
 # Build output
 dist/
+# Nix build output links (nix build, nix flake check)
+/result
+/result-*
 
 # The release seed bundle is temporary build context and is removed after use.
 .docker-context/
