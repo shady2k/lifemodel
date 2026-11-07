@@ -415,7 +415,16 @@ describe('the vendor-name check (lifemodel-1be4)', () => {
   it('pins the required vendor names and their allowed places in the committed list', () => {
     const list = readList(listPath);
     const names = list.names.map((entry) => entry.name).sort();
-    expect(names).toEqual(['docker.io', 'ghcr.io', 'opencode', 'openrouter', 'prime-agent', 'quay.io']);
+    expect(names).toEqual([
+      'docker.io',
+      'ghcr.io',
+      'opencode',
+      'openrouter',
+      'prime-agent',
+      'quay.io',
+      'timberio',
+      'victoria-logs',
+    ]);
     const allowed = (name: string): string[] =>
       list.names
         .find((entry) => entry.name === name)
@@ -432,6 +441,8 @@ describe('the vendor-name check (lifemodel-1be4)', () => {
     for (const registry of ['docker.io', 'ghcr.io', 'quay.io'])
       expect(allowed(registry)).toEqual(['loader/src/workbench-source.ts']);
     expect(allowed('openrouter')).toEqual([]);
+    expect(allowed('timberio')).toEqual([]);
+    expect(allowed('victoria-logs')).toEqual([]);
   });
 
   it('passes on this repository as it stands', () => {

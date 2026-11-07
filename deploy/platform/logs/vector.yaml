@@ -1,0 +1,215 @@
+# The collector (ADR-016 §1, §2, §3): one Vector DaemonSet that reads every
+# pod's log files on the node, normalizes each line with the VRL program below,
+# and writes newline-delimited JSON to the store. The record shape is decided
+# here, once, before the store: the page filters stored fields and parses
+# nothing.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logs-collector-config
+  namespace: lifemodel-logs
+data:
+  vector.yaml: |
+    data_dir: /var/lib/lifemodel-logs-collector
+    sources:
+      kubernetes:
+        type: kubernetes_logs
+        # The DaemonSet passes its node through the downward API. The source
+        # reads only that node's /var/log/pods.
+        self_node_name: ${VECTOR_SELF_NODE_NAME}
+    transforms:
+      normalize:
+        type: remap
+        inputs:
+          - kubernetes
+        source: |
+          # One record per line: Kubernetes owns module, namespace, pod, container, node
+          # and untrusted; the line owns level and conversation_id (ADR-016 §2).
+          raw = string(.message) ?? ""
+          parsed = parse_json(raw) ?? null
+          structured = if is_object(parsed) { parsed } else { {} }
+
+          has_structured_level = is_object(parsed) && get!(parsed, ["level"]) != null
+          level = "unknown"
+          if has_structured_level {
+            raw_level = structured.level
+            if is_integer(raw_level) {
+              level = if raw_level == 10 { "trace" } else if raw_level == 20 { "debug" } else if raw_level == 30 { "info" } else if raw_level == 40 { "warn" } else if raw_level == 50 { "error" } else if raw_level == 60 { "fatal" } else { "unknown" }
+            } else if is_string(raw_level) {
+              word = downcase(string!(raw_level))
+              level = if word == "trace" || word == "10" { "trace" } else if word == "debug" || word == "20" { "debug" } else if word == "info" || word == "30" { "info" } else if word == "warn" || word == "warning" || word == "40" { "warn" } else if word == "error" || word == "err" || word == "50" { "error" } else if word == "fatal" || word == "critical" || word == "panic" || word == "60" { "fatal" } else { "unknown" }
+            }
+          } else {
+            found = parse_regex(raw, r'(?i)\b(?P<level>trace|debug|info|warn|warning|error|err|fatal|critical|panic)\b') ?? {}
+            word = downcase(string(get!(found, ["level"])) ?? "")
+            level = if word == "trace" { "trace" } else if word == "debug" { "debug" } else if word == "info" { "info" } else if word == "warn" || word == "warning" { "warn" } else if word == "error" || word == "err" { "error" } else if word == "fatal" || word == "critical" || word == "panic" { "fatal" } else { "unknown" }
+          }
+
+          labels = object(.kubernetes.pod_labels) ?? {}
+          name_label = get!(labels, ["app.kubernetes.io/name"])
+          app_label = get!(labels, ["app"])
+          k8s_app_label = get!(labels, ["k8s-app"])
+          cluster_label = get!(labels, ["cnpg.io/cluster"])
+          module = if is_string(name_label) { name_label } else if is_string(app_label) { app_label } else if is_string(k8s_app_label) { k8s_app_label } else if is_string(cluster_label) { cluster_label } else { "unknown" }
+
+          namespace = string(.kubernetes.pod_namespace) ?? ""
+          pod = string(.kubernetes.pod_name) ?? ""
+          container = string(.kubernetes.container_name) ?? ""
+          node = string(.kubernetes.pod_node_name) ?? ""
+          stream = string(.stream) ?? "unknown"
+          message = strip_ansi_escape_codes(raw)
+          record_time = if exists(.timestamp) { .timestamp } else { now() }
+
+          conversation_id = null
+          error_type = null
+          reason_check = null
+          reason_path = null
+          reason_got = null
+          if is_object(parsed) {
+            candidate = parsed.conversation_id
+            if is_string(candidate) { conversation_id = candidate }
+            # A task line cannot create a promoted failure field (ADR-016 §9 point 5).
+            if namespace != "lifemodel-motor" {
+              candidate = parsed.error_type
+              if is_string(candidate) { error_type = candidate }
+              reason = parsed.reason
+              if is_object(reason) {
+                candidate = reason.check
+                if is_string(candidate) { reason_check = candidate }
+                candidate = reason.path
+                if is_string(candidate) { reason_path = candidate }
+                candidate = reason.got
+                if is_string(candidate) { reason_got = candidate }
+              }
+            }
+          }
+
+          . = {
+            "timestamp": record_time,
+            "message": message,
+            "module": module,
+            "namespace": namespace,
+            "pod": pod,
+            "container": container,
+            "node": node,
+            "stream": stream,
+            "level": level,
+            "untrusted": namespace == "lifemodel-motor",
+          }
+          if conversation_id != null { .conversation_id = conversation_id }
+          if error_type != null { .error_type = error_type }
+          if reason_check != null { .reason_check = reason_check }
+          if reason_path != null { .reason_path = reason_path }
+          if reason_got != null { .reason_got = reason_got }
+    sinks:
+      logs-store:
+        type: http
+        inputs:
+          - normalize
+        # One plain HTTP protocol (ADR-016 §3). _msg_field and _time_field are
+        # not optional: without them the store keeps the whole event under
+        # _msg and stamps it with its own receipt time.
+        uri: http://logs-store.lifemodel-system.svc:9428/insert/jsonline?_stream_fields=module,namespace,level,untrusted&_msg_field=message&_time_field=timestamp
+        method: post
+        compression: gzip
+        encoding:
+          codec: json
+        framing:
+          method: newline_delimited
+        batch:
+          max_events: 2000
+          timeout_secs: 1
+        buffer:
+          type: memory
+          max_events: 500000
+          when_full: block
+        request:
+          headers:
+            Content-Type: application/stream+json
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: logs-collector
+  namespace: lifemodel-logs
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: logs-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: logs-collector
+    spec:
+      serviceAccountName: logs-collector
+      automountServiceAccountToken: true
+      tolerations:
+        # One collector on every node, including the platform's sole server.
+        - operator: Exists
+      securityContext:
+        # uid 0 with every capability dropped is the measured working shape:
+        # a non-root user with CAP_DAC_READ_SEARCH is not ambient across exec,
+        # and /var/log/pods is 0750 root:root (ADR-016 §7).
+        runAsUser: 0
+        runAsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: logs-collector
+          image: docker.io/timberio/vector@sha256:f6c23b5a7e16fb2838d33619ef7acf4bad2289a7cf22bc90efc2371f520c4ea2
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config
+            - /etc/vector/vector.yaml
+          env:
+            - name: VECTOR_SELF_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 300Mi
+          volumeMounts:
+            # The kubelet's files, read-only.
+            - name: pods
+              mountPath: /var/log/pods
+              readOnly: true
+            # The persistent checkpoint directory on the node's disk, the only
+            # writable host mount.
+            - name: checkpoints
+              mountPath: /var/lib/lifemodel-logs-collector
+            - name: config
+              mountPath: /etc/vector
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: pods
+          hostPath:
+            path: /var/log/pods
+            type: Directory
+        - name: checkpoints
+          hostPath:
+            path: /var/lib/lifemodel-logs-collector
+            type: DirectoryOrCreate
+        - name: config
+          configMap:
+            name: logs-collector-config
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi

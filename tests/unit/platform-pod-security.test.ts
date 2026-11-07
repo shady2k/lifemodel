@@ -1,0 +1,420 @@
+import { describe, expect, it } from 'vitest';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import YAML from 'yaml';
+
+// ADR-016 §1, §5, §7 and check L13: the collector's namespace is the one
+// privileged exception, it holds exactly one workload, and its two host mounts
+// are the only ones the platform grants. The store is a restricted single-pod
+// Deployment on its own retained local volume. Both log steps run at
+// wait: false so a broken log pod cannot hold the platform's readiness.
+
+const platformRoot = fileURLToPath(new URL('../../deploy/platform/', import.meta.url));
+const vectorDigest =
+  'sha256:f6c23b5a7e16fb2838d33619ef7acf4bad2289a7cf22bc90efc2371f520c4ea2';
+const vectorImage = `docker.io/timberio/vector@${vectorDigest}`;
+const storeDigest =
+  'sha256:251121fa882af99b95ba0c230a4a2f412ea602d2698c64a96c58dc9842bb755d';
+const storeImage = `docker.io/victoriametrics/victoria-logs@${storeDigest}`;
+const workloadKinds = new Set([
+  'DaemonSet',
+  'Deployment',
+  'StatefulSet',
+  'ReplicaSet',
+  'Job',
+  'CronJob',
+  'Pod',
+]);
+
+type Resource = { file: string; object: Record<string, any> };
+
+function yamlFiles(directory: string): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      // Vendored Helm charts are Go templates, not standalone Kubernetes YAML.
+      return entry.name === 'charts' ? [] : yamlFiles(path);
+    }
+    return entry.name.endsWith('.yaml') && entry.name !== 'kustomization.yaml' ? [path] : [];
+  });
+}
+
+let cachedObjects: Resource[] | undefined;
+
+function platformObjects(): Resource[] {
+  // Twelve tests read the same platform tree; parsing the large rendered
+  // charts once keeps this file from competing with the installer harness
+  // tests that share the second worker.
+  if (cachedObjects) return cachedObjects;
+  cachedObjects = yamlFiles(platformRoot).flatMap((file) => {
+    const documents = YAML.parseAllDocuments(readFileSync(file, 'utf8'));
+    expect(documents.flatMap((document) => document.errors), `invalid YAML in ${file}`).toEqual(
+      []
+    );
+    return documents
+      .map((document) => document.toJSON() as Record<string, any> | null)
+      .filter((object): object is Record<string, any> => Boolean(object))
+      .map((object) => ({ file, object }));
+  });
+  return cachedObjects;
+}
+
+function find(resources: Resource[], kind: string, name: string): Resource {
+  const found = resources.find(
+    (resource) => resource.object.kind === kind && resource.object.metadata?.name === name
+  );
+  expect(found, `missing ${kind}/${name}`).toBeDefined();
+  return found!;
+}
+
+function collectorPodSpec(resources: Resource[]): Record<string, any> {
+  const daemonset = find(resources, 'DaemonSet', 'logs-collector').object;
+  return daemonset.spec.template.spec;
+}
+
+function assertCollectorPodSecurity(podSpec: Record<string, any>): void {
+  const pod = podSpec.securityContext ?? {};
+  if (pod.runAsUser !== 0) throw new Error('collector pod must run as uid 0');
+  if (pod.seccompProfile?.type !== 'RuntimeDefault')
+    throw new Error('collector pod must use the RuntimeDefault seccomp profile');
+
+  const container = (podSpec.containers ?? []).find(
+    (candidate: any) => candidate.name === 'logs-collector'
+  );
+  if (!container) throw new Error('missing logs-collector container');
+  const context = container.securityContext ?? {};
+  if (context.privileged === true) throw new Error('collector must not be privileged');
+  if (context.allowPrivilegeEscalation !== false)
+    throw new Error('collector must not allow privilege escalation');
+  if (context.readOnlyRootFilesystem !== true)
+    throw new Error('collector root filesystem must be read-only');
+  if ((context.capabilities?.add ?? []).length > 0)
+    throw new Error('collector must not add a capability');
+  if (context.capabilities?.drop?.includes('ALL') !== true)
+    throw new Error('collector must drop every capability');
+  if (context.runAsUser !== 0) throw new Error('collector container must run as uid 0');
+  if (context.seccompProfile?.type !== 'RuntimeDefault')
+    throw new Error('collector container must use the RuntimeDefault seccomp profile');
+
+  const hostPathVolumes = (podSpec.volumes ?? []).filter((volume: any) => volume.hostPath);
+  const paths = hostPathVolumes.map((volume: any) => [volume.name, volume.hostPath.path]);
+  if (JSON.stringify(paths) !== JSON.stringify([
+    ['pods', '/var/log/pods'],
+    ['checkpoints', '/var/lib/lifemodel-logs-collector'],
+  ]))
+    throw new Error('collector must mount exactly the two host paths of ADR-016 §1');
+
+  const mounts = (container.volumeMounts ?? []).filter((mount: any) =>
+    ['pods', 'checkpoints'].includes(mount.name)
+  );
+  const podMount = mounts.find((mount: any) => mount.name === 'pods');
+  const checkpointMount = mounts.find((mount: any) => mount.name === 'checkpoints');
+  if (!podMount || podMount.mountPath !== '/var/log/pods' || podMount.readOnly !== true)
+    throw new Error('collector must mount /var/log/pods read-only');
+  if (
+    !checkpointMount ||
+    checkpointMount.mountPath !== '/var/lib/lifemodel-logs-collector' ||
+    checkpointMount.readOnly === true
+  )
+    throw new Error('collector must mount its checkpoint directory read-write');
+}
+
+function egressRulePorts(policy: Record<string, any>): any[] {
+  return (policy.spec.egress ?? []).flatMap((rule: any) => rule.ports ?? []);
+}
+
+function egressPeers(policy: Record<string, any>): any[] {
+  return (policy.spec.egress ?? []).flatMap((rule: any) => rule.to ?? []);
+}
+
+describe('platform pod security (ADR-016 L13)', () => {
+  it('is the only privileged namespace and holds exactly the collector DaemonSet', () => {
+    const resources = platformObjects();
+    const namespaces = resources.filter((resource) => resource.object.kind === 'Namespace');
+    expect(namespaces.length).toBeGreaterThan(0);
+    for (const { object } of namespaces) {
+      const levels = ['enforce', 'audit', 'warn'].map(
+        (level) => object.metadata.labels?.[`pod-security.kubernetes.io/${level}`]
+      );
+      if (object.metadata.name === 'lifemodel-logs') {
+        expect(levels).toEqual(['privileged', 'privileged', 'privileged']);
+      } else {
+        expect(levels).toEqual(['restricted', 'restricted', 'restricted']);
+      }
+    }
+
+    const workloads = resources
+      .filter(
+        (resource) =>
+          workloadKinds.has(resource.object.kind) &&
+          resource.object.metadata?.namespace === 'lifemodel-logs'
+      )
+      .map((resource) => `${resource.object.kind}/${resource.object.metadata.name}`);
+    expect(workloads).toEqual(['DaemonSet/logs-collector']);
+  });
+
+  it('grants the collector uid 0 with no capability and exactly two host mounts', () => {
+    const resources = platformObjects();
+    const podSpec = collectorPodSpec(resources);
+    expect(() => assertCollectorPodSecurity(podSpec)).not.toThrow();
+  });
+
+  it('gives the collector read-only metadata access and nothing else', () => {
+    const resources = platformObjects();
+    const role = find(resources, 'ClusterRole', 'logs-collector').object;
+    expect(role.rules).toEqual([
+      {
+        apiGroups: [''],
+        resources: ['pods', 'namespaces', 'nodes'],
+        verbs: ['get', 'list', 'watch'],
+      },
+    ]);
+    const binding = find(resources, 'ClusterRoleBinding', 'logs-collector').object;
+    expect(binding.roleRef).toEqual({
+      apiGroup: 'rbac.authorization.k8s.io',
+      kind: 'ClusterRole',
+      name: 'logs-collector',
+    });
+    expect(binding.subjects).toEqual([
+      { kind: 'ServiceAccount', name: 'logs-collector', namespace: 'lifemodel-logs' },
+    ]);
+    expect(find(resources, 'ServiceAccount', 'logs-collector').object.metadata.namespace).toBe(
+      'lifemodel-logs'
+    );
+  });
+
+  it('writes newline-delimited JSON to the store with the insert fields of §3', () => {
+    const resources = platformObjects();
+    const configMap = find(resources, 'ConfigMap', 'logs-collector-config').object;
+    const config = YAML.parse(configMap.data['vector.yaml']);
+    expect(config.transforms.normalize.type).toBe('remap');
+    const sink = config.sinks['logs-store'];
+    expect(sink.uri).toBe(
+      'http://logs-store.lifemodel-system.svc:9428/insert/jsonline?_stream_fields=module,namespace,level,untrusted&_msg_field=message&_time_field=timestamp'
+    );
+    expect(sink.framing).toEqual({ method: 'newline_delimited' });
+    expect(sink.encoding).toEqual({ codec: 'json' });
+    expect(sink.batch).toEqual({ max_events: 2000, timeout_secs: 1 });
+    expect(sink.buffer).toEqual({ type: 'memory', max_events: 500000, when_full: 'block' });
+  });
+
+  it('fails when a third host mount is added, and passes again once it is reverted', () => {
+    const resources = platformObjects();
+    const podSpec = collectorPodSpec(resources);
+    const mutated = structuredClone(podSpec);
+    mutated.volumes.push({ name: 'extra', hostPath: { path: '/var/log' } });
+    mutated.containers
+      .find((container: any) => container.name === 'logs-collector')
+      .volumeMounts.push({ name: 'extra', mountPath: '/var/log', readOnly: true });
+    expect(() => assertCollectorPodSecurity(mutated)).toThrow(/two host paths/);
+    // The mutation was in memory only: the committed manifest still passes.
+    expect(() => assertCollectorPodSecurity(collectorPodSpec(resources))).not.toThrow();
+  });
+
+  it('fails when the persistent checkpoint mount is removed', () => {
+    const resources = platformObjects();
+    const mutated = structuredClone(collectorPodSpec(resources));
+    mutated.volumes = mutated.volumes.filter((volume: any) => volume.name !== 'checkpoints');
+    mutated.containers.find((container: any) => container.name === 'logs-collector').volumeMounts =
+      mutated.containers
+        .find((container: any) => container.name === 'logs-collector')
+        .volumeMounts.filter((mount: any) => mount.name !== 'checkpoints');
+    expect(() => assertCollectorPodSecurity(mutated)).toThrow(/two host paths|checkpoint/);
+  });
+});
+
+describe('the log platform steps (ADR-016 §1, §5)', () => {
+  it('runs both steps after platform-instance with wait: false', () => {
+    const steps = [
+      ['logs-store-reconciler.yaml', 'platform-logs-store', './logs-store'],
+      ['logs-reconciler.yaml', 'platform-logs', './logs'],
+    ] as const;
+    for (const [file, name, path] of steps) {
+      const documents = YAML.parseAllDocuments(
+        readFileSync(join(platformRoot, file), 'utf8')
+      ).map((document) => document.toJSON());
+      expect(documents).toHaveLength(1);
+      const reconciler = documents[0] as Record<string, any>;
+      expect(reconciler.kind).toBe('Kustomization');
+      expect(reconciler.metadata.name).toBe(name);
+      expect(reconciler.spec.path).toBe(path);
+      expect(reconciler.spec.prune).toBe(true);
+      expect(reconciler.spec.wait).toBe(false);
+      expect(reconciler.spec.dependsOn).toEqual([{ name: 'platform-instance' }]);
+      expect(reconciler.spec.sourceRef).toEqual({
+        kind: 'OCIRepository',
+        name: 'platform',
+      });
+    }
+    const root = YAML.parse(readFileSync(join(platformRoot, 'kustomization.yaml'), 'utf8'));
+    expect(root.resources).toEqual(
+      expect.arrayContaining(['logs-store-reconciler.yaml', 'logs-reconciler.yaml'])
+    );
+  });
+
+  it('pins both images by digest only', () => {
+    const resources = platformObjects();
+    const collector = find(resources, 'DaemonSet', 'logs-collector').object;
+    expect(collector.spec.template.spec.containers[0].image).toBe(vectorImage);
+    const store = find(resources, 'Deployment', 'logs-store').object;
+    expect(store.spec.template.spec.containers[0].image).toBe(storeImage);
+    for (const image of [vectorImage, storeImage]) {
+      expect(image).toMatch(/^[^@]+@sha256:[0-9a-f]{64}$/);
+      // A tag must not stand beside the digest: the reference is digest-only.
+      expect(image.split('@')[0]).not.toMatch(/:[^/]+$/);
+    }
+  });
+
+  it('places both vendor image references only in the log step manifests', () => {
+    const resources = platformObjects();
+    const holders = (needle: string) =>
+      resources
+        .filter((resource) => JSON.stringify(resource.object).includes(needle))
+        .map((resource) => relative(platformRoot, resource.file))
+        .sort();
+    expect(holders('timberio/vector')).toEqual(['logs/vector.yaml']);
+    expect(holders('victoriametrics/victoria-logs')).toEqual(['logs-store/logs-store.yaml']);
+  });
+
+  it('declares no retention argument and never enables deletion', () => {
+    const resources = platformObjects();
+    const store = find(resources, 'Deployment', 'logs-store').object;
+    const container = store.spec.template.spec.containers[0];
+    const args: string[] = [...(container.command ?? []), ...(container.args ?? [])];
+    expect(args).toEqual(expect.arrayContaining(['-envflag.enable', '-envflag.prefix=VL_']));
+    for (const argument of args) {
+      expect(argument).not.toMatch(/^-retention/);
+      expect(argument).not.toBe('-delete.enable');
+      expect(argument).not.toMatch(/^-delete\.enable/);
+    }
+    // The retention values arrive through the defaults ConfigMap and the
+    // loader's later ConfigMap, never as a second competing argument.
+    expect(container.envFrom).toEqual([
+      { configMapRef: { name: 'lifemodel-logs-settings-defaults' } },
+      { configMapRef: { name: 'lifemodel-logs-settings', optional: true } },
+    ]);
+    const defaults = find(resources, 'ConfigMap', 'lifemodel-logs-settings-defaults').object;
+    expect(defaults.metadata.namespace).toBe('lifemodel-system');
+    expect(defaults.data.VL_retentionPeriod).toBe('14d');
+    expect(defaults.data.VL_retention_maxDiskSpaceUsageBytes).toBe('1610612736');
+    expect(defaults.data.VL_storage_minFreeDiskSpaceBytes).toBe('805306368');
+  });
+
+  it('runs the store as 1000:1000 on its own retained local volume', () => {
+    const resources = platformObjects();
+    const store = find(resources, 'Deployment', 'logs-store').object;
+    const pod = store.spec.template.spec;
+    expect(store.spec.strategy.type).toBe('Recreate');
+    expect(store.spec.replicas).toBe(1);
+    expect(pod.securityContext.runAsUser).toBe(1000);
+    expect(pod.securityContext.runAsGroup).toBe(1000);
+    expect(pod.securityContext.fsGroup).toBe(1000);
+    expect(pod.securityContext.runAsNonRoot).toBe(true);
+    expect(pod.securityContext.seccompProfile?.type).toBe('RuntimeDefault');
+    const container = pod.containers[0];
+    expect(container.securityContext.readOnlyRootFilesystem).toBe(true);
+    expect(container.securityContext.allowPrivilegeEscalation).toBe(false);
+    expect(container.securityContext.capabilities.drop).toContain('ALL');
+
+    const pv = find(resources, 'PersistentVolume', 'lifemodel-logs').object;
+    expect(pv.spec.local.path).toBe('/var/lib/lifemodel-logs/data');
+    expect(pv.spec.storageClassName).toBe('');
+    expect(pv.spec.persistentVolumeReclaimPolicy).toBe('Retain');
+    expect(pv.spec.accessModes).toEqual(['ReadWriteOnce']);
+    expect(pv.spec.nodeAffinity).toBeDefined();
+
+    const pvc = find(resources, 'PersistentVolumeClaim', 'logs-store').object;
+    expect(pvc.metadata.namespace).toBe('lifemodel-system');
+    expect(pvc.spec.volumeName).toBe('lifemodel-logs');
+    expect(pvc.spec.storageClassName).toBe('');
+    expect(pvc.spec.accessModes).toEqual(['ReadWriteOnce']);
+
+    const dataMount = container.volumeMounts.find((mount: any) => mount.name === 'data');
+    expect(dataMount.mountPath).toBe('/data');
+    expect(pod.volumes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'data', persistentVolumeClaim: { claimName: 'logs-store' } }),
+      ])
+    );
+    expect(container.args).toEqual(expect.arrayContaining(['-storageDataPath=/data']));
+  });
+});
+
+describe('the log network policies (ADR-016 §7)', () => {
+  it('permits the collector only DNS, TCP 6443 and the store, and no ingress', () => {
+    const resources = platformObjects();
+    const collector = find(resources, 'NetworkPolicy', 'logs-collector-access').object;
+    expect(collector.metadata.namespace).toBe('lifemodel-logs');
+    expect(collector.spec.ingress).toEqual([]);
+    expect(collector.spec.policyTypes).toEqual(expect.arrayContaining(['Ingress', 'Egress']));
+    expect(egressRulePorts(collector)).toEqual([
+      { protocol: 'UDP', port: 53 },
+      { protocol: 'TCP', port: 53 },
+      { protocol: 'TCP', port: 6443 },
+      { protocol: 'TCP', port: 9428 },
+    ]);
+    const peers = egressPeers(collector);
+    expect(peers).toEqual(
+      expect.arrayContaining([
+        {
+          namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } },
+          podSelector: { matchLabels: { 'k8s-app': 'kube-dns' } },
+        },
+        { ipBlock: { cidr: '0.0.0.0/0' } },
+        {
+          namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' } },
+          podSelector: { matchLabels: { 'app.kubernetes.io/name': 'logs-store' } },
+        },
+      ])
+    );
+    const defaultDeny = find(resources, 'NetworkPolicy', 'lifemodel-logs-default-deny').object;
+    expect(defaultDeny.metadata.namespace).toBe('lifemodel-logs');
+    expect(defaultDeny.spec).toEqual({
+      podSelector: {},
+      policyTypes: ['Ingress', 'Egress'],
+      ingress: [],
+      egress: [],
+    });
+  });
+
+  it('admits only the collector and the loader to the store, with no store egress', () => {
+    const resources = platformObjects();
+    const access = find(resources, 'NetworkPolicy', 'logs-store-access').object;
+    expect(access.metadata.namespace).toBe('lifemodel-system');
+    expect(access.spec.ingress).toEqual([
+      {
+        from: [
+          {
+            namespaceSelector: {
+              matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-logs' },
+            },
+            podSelector: { matchLabels: { 'app.kubernetes.io/name': 'logs-collector' } },
+          },
+          {
+            namespaceSelector: {
+              matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' },
+            },
+            podSelector: { matchLabels: { 'app.kubernetes.io/name': 'loader' } },
+          },
+        ],
+        ports: [{ protocol: 'TCP', port: 9428 }],
+      },
+    ]);
+    expect(access.spec.egress).toEqual([]);
+    const deny = find(resources, 'NetworkPolicy', 'logs-store-deny').object;
+    expect(deny.spec).toEqual({
+      podSelector: { matchLabels: { 'app.kubernetes.io/name': 'logs-store' } },
+      policyTypes: ['Ingress', 'Egress'],
+      ingress: [],
+      egress: [],
+    });
+    const loader = find(resources, 'NetworkPolicy', 'loader-access').object;
+    const storeRoute = (loader.spec.egress ?? []).find((rule: any) =>
+      (rule.to ?? []).some(
+        (peer: any) => peer.podSelector?.matchLabels?.['app.kubernetes.io/name'] === 'logs-store'
+      )
+    );
+    expect(storeRoute?.ports).toEqual([{ protocol: 'TCP', port: 9428 }]);
+  });
+});

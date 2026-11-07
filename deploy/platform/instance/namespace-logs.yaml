@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lifemodel-logs
+  labels:
+    # ADR-016 §1 and §7: the collector is the one privileged workload on the
+    # platform. No level below privileged can mount /var/log/pods, and the
+    # exception is bounded by this namespace holding exactly that DaemonSet.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
