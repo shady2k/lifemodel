@@ -172,7 +172,9 @@ Constraints that bound every option, with their source:
 - **Store.** `logs-store` is a single-replica Deployment with `Recreate`
   strategy in `lifemodel-system`, the VictoriaLogs image pinned by digest, its
   own ServiceAccount, one PVC bound to a PersistentVolume of its own (§5) and one
-  HTTP listener.
+  HTTP listener. It runs as uid **1000**, gid **1000**, with `fsGroup: 1000` — the
+  `restricted` level its namespace enforces — so everything it writes into the
+  volume belongs to `1000:1000` (§5 states why that number matters to the evictor).
   Requests `cpu: 200m`, `memory: 128Mi`; limits `cpu: 3`, `memory: 1Gi`. Measured
   inside that 1 GiB limit: 46 MiB after a restart with 5.3 GiB of data, 451–757 MiB
   while ingesting, and **793 MiB peak** through a full-speed realistic flood with
@@ -417,9 +419,10 @@ day of data.
 
 **The setting.** `logs.retention` (`{days, maxBytes}`) is the owner's retention:
 default 14 days and **1.5 GiB**, and the byte figure is the store's data bound, not
-a disk quota. 1.5 GiB is what fits the 3 GiB volume below with its margin
-(1.5 GiB + 768 MiB = 2.25 GiB); the old 5 GiB bound no longer fits anything the
-owner is willing to give up. It is stored in `/var/lib/loader/logs.json` with
+a disk quota. 1.5 GiB is what fits the 3 GiB volume: the bound plus the evictor's
+threshold (1.5 GiB, below) is the volume exactly, which is the largest bound the
+page accepts; the old 5 GiB bound no longer fits anything the owner is willing to
+give up. It is stored in `/var/lib/loader/logs.json` with
 `{version, days, maxBytes, desiredRevision, appliedRevision, appliedAt}` and
 published into the platform's existing settings projection: ConfigMap
 `lifemodel-system/lifemodel-logs-settings`, the same mechanism as
@@ -519,14 +522,18 @@ store's namespace keeps its level and only the collector's namespace needs the
   keep the machine from booting — plus a `systemd.services` unit ordered before
   that mount which creates the image with `fallocate -l <size>`, formats it once
   with `mkfs.ext4`, mounts nothing itself and leaves an existing image alone. The
-  unit also creates `/var/lib/lifemodel-logs/data` (the PV's path, § above). It is
+  unit also creates `/var/lib/lifemodel-logs/data` (the PV's path, § above) owned by
+  **`1000:1000`, mode 0750** — the uid the store and the evictor run as (§5), so a
+  fresh volume is writable without relying on the kubelet's `fsGroup` handling of
+  a `local` volume. It is
   ordered `before = [ "k3s.service" ]` only as a best effort: with `nofail`,
   k3s starts whether or not the mount succeeded, and the store pod waits in
   `ContainerCreating` instead of the host waiting in boot. `e2fsprogs` and
   `util-linux` are in the unit's `path` (`check-k3s-commands.mjs` covers that
   list, as it already does for the resolv and DNS units).
 - `scripts/install.sh` does the same steps (`fallocate`, `mkfs.ext4`,
-  `mount -o loop`, `mkdir data`) and installs the same unit with
+  `mount -o loop`, `install -d -o 1000 -g 1000 -m 0750 data`) and installs the
+  same unit with
   `--logs-volume-size SIZE` (default `3G`); `--render-only DIR` prints the unit
   and the systemd fragments it would install, which is the mode `flake check`
   renders. On a machine **already installed**, the same command is a no-op for
@@ -538,8 +545,9 @@ store's namespace keeps its level and only the collector's namespace needs the
   the PVC is new, and the volume directory starts empty, so a store that had never
   run simply begins with no history.
 - `flake check` gains an assertion on both rendered outputs: the mount point, the
-  `data` subdirectory, the image path, `nofail`, the size option reaching both,
-  and the unit's binary list.
+  `data` subdirectory (mode 0750, owner 1000:1000), the image path, `nofail`, the
+  size option reaching both, the unit's binary list, and a size below 2 GiB
+  refused.
 
 *The file is a reservation, not a sparse claim.* `fallocate` allocates the blocks
 up front, so the host's free space really drops by the size of the volume; a
@@ -551,6 +559,13 @@ does not continue: it prints the size asked for, the free space it found, and
 stops before creating anything (`--logs-volume-size` is how it is changed). On
 NixOS the unit fails with the same sentence and the mount never appears, so the
 platform starts without logs rather than with a half-made volume.
+
+*The smallest volume is 2 GiB, and both installers refuse less.* The evictor's
+threshold is the margin plus 768 MiB (§5), so a 3 GiB volume keeps at most 1.5 GiB
+of logs, a 2 GiB volume at most 0.75 GiB — and at 1 GiB the threshold would be the
+whole volume, so every run would remove everything and keep nothing. The
+installer prints the size, the minimum and stops, and `flake check` asserts the
+refusal on both rendered outputs.
 
 *The volume's owner.* The PV is a cluster-scoped `local` volume created by the
 signed artifact's `platform-logs-store` step, bound to the store's PVC by
@@ -597,16 +612,20 @@ store Pending forever, which is the state the page names.
 
 **The bound, the volume and what a flood reaches.** The retention byte bound
 (`maxBytes`) and the volume are two different limits, and the page keeps them
-consistent with one rule it can actually evaluate: it **refuses a byte bound
-whose value plus the margin exceeds the volume's size**, and says which numbers
-do not fit. It cannot predict the two-day floor — that is the store keeping the
-newest two days whatever the bound says — so the floor can still take usage above
-the bound, and then the volume is what holds it, not the setting. The store keeps at least the two newest days whatever the
-bound says (measured: a 300 MiB bound let usage reach 444 MiB), so **the volume,
-not the byte bound, is the limit a flood actually reaches**: today's incompressible
-flood fills the volume, not the bound. That is the point of giving logs their own
-filesystem — the flood spends its own space, and displacement gives it back
-without touching the rest of the machine (below).
+consistent with one rule it can actually evaluate: it **refuses a byte bound that
+exceeds the volume minus the evictor's threshold** — 1.5 GiB at the 3 GiB default
+— and says which numbers do not fit. The evictor keeps free space at or above the
+threshold, so a bound above `volume − threshold` could never be reached: accepting
+it would tell the owner that their bound does something when the evictor removes
+the day first. It cannot predict the two-day floor either — that is the store
+keeping the newest two days whatever the bound says — so the floor can still take
+usage above the bound, and then the volume is what holds it, not the setting. The
+store keeps at least the two newest days whatever the bound says (measured: a
+300 MiB bound let usage reach 444 MiB), so **the volume, not the byte bound, is
+the limit a flood actually reaches**: today's incompressible flood fills the
+volume, not the bound. That is the point of giving logs their own filesystem — the
+flood spends its own space, and displacement gives it back without touching the
+rest of the machine (below).
 
 **The margin inside the volume, and the evidence for it.** The store runs with
 `-storage.minFreeDiskSpaceBytes` as a **share of the volume**, default 25 %, so a
@@ -640,21 +659,24 @@ what makes the stop clean. The 25 % share is a hypothesis from these three runs 
 about 1.1× at 3 GiB in the last round), and L05 re-measures at the owner's size.
 
 **Why 3 GiB by default.** The owner asked for less disk («просто сократи объем»).
-The 1.5 GiB bound, plus a 25 % margin (768 MiB), plus the room a merge needs
-(measured 450 MB at a 5 GiB store in the shared run, less at this size) is about
-2.8 GiB; 3 GiB rounds up and leaves a minute of realistic flood and the two-day
-floor some slack. It is the size the owner gives up on the host, and it is an
-install option, not a constant in code. The volume is small on purpose:
-displacement, not size, is what keeps it working.
+The default bound (1.5 GiB) plus the evictor's threshold (1.5 GiB = the 25 %
+margin, 768 MiB, plus 768 MiB of flood headroom) is exactly 3 GiB, and the room a
+merge needs (measured 450 MB at a 5 GiB store in the shared run, less at this
+size) comes out of the margin inside the threshold. It is the size the owner gives
+up on the host, and it is an install option, not a constant in code. The volume is
+small on purpose: displacement, not size, is what keeps it working.
 
 **The alarm.** The page shows, above the results and on the settings page,
 `log volume low: N MiB above the store's margin` when the store's
 `vl_free_disk_space_bytes` is within 512 MiB of the margin,
 `the store is refusing writes (read-only)` when `vl_storage_is_read_only` is 1 —
-with `the log evictor is failing or has not run` and the age of its last
-successful run — and `retention does not fit this volume` when the owner's byte
-bound leaves no room. All of it comes from the two gauges, the volume size the
-adapter already knows, and the evictor's own records.
+adding `the log evictor is failing or has not run` and the age of its last
+successful run **only when that run is older than about two minutes**, so a
+one-minute refusal between runs does not blame a working evictor — and
+`retention does not fit this volume` when the byte bound exceeds the volume minus
+the evictor's threshold. The settings form refuses such a bound with the two
+numbers and the largest one that fits. All of it comes from the two gauges, the
+volume size the adapter already knows, and the evictor's own records.
 
 **What stays on the shared filesystem, and what bounds it.** Two things remain
 outside the volume, and both are the kubelet's: the container log files the
@@ -692,8 +714,13 @@ object the owner and the platform can see.
 
 *The CronJob.* `schedule: "* * * * *"` (every minute, the smallest a CronJob
 allows), `concurrencyPolicy: Forbid`, `activeDeadlineSeconds: 60`,
-`backoffLimit: 0`, `successfulJobsHistoryLimit: 1`, `failedJobsHistoryLimit: 1` —
-one readable success and one readable failure, never a retry storm. The pod runs
+`startingDeadlineSeconds: 55`, `backoffLimit: 0`, `successfulJobsHistoryLimit: 1`,
+`failedJobsHistoryLimit: 1` — one readable success and one readable failure, never
+a retry storm. `startingDeadlineSeconds` is what keeps the schedule alive: with
+`Forbid` and no deadline a missed start is counted, and after 100 of them the
+controller stops creating Jobs for that CronJob ("too many missed start times");
+with the deadline it looks only at the most recent minute, so a stuck run or a
+suspended cluster does not wedge it. The pod runs
 on the loader image with its own entry point
 (`command: ['node', '/opt/lifemodel/loader/dist/log-evictor.js']`, the same pattern
 as the storage module), so it is pinned by the same release digest as the loader
@@ -705,24 +732,31 @@ kubelet serves both pods.
 *What a run does.* It reads the volume's free space; when it is below the
 threshold it calls `POST /internal/partition/detach?name=YYYYMMDD` on the store
 through its Service, then removes `partitions/YYYYMMDD` from the volume, then looks
-again and acts on the next partition — yesterday's first, today's as the last case.
+again and repeats until free space is above the threshold. It always takes the
+**oldest partition present** — every day the retention bound keeps goes before a
+newer one, and today's partition only when nothing older is left.
 `/internal/partition/detach` returns only after the queries reading that partition
 have stopped, and a restart re-attaches a directory that is still on disk, so
 **removal directly follows detach in the same run** and the pod does not exit
-before the directory is gone. Measured: detach + `rm` took 0.05, 0.12 and 0.13 s
-for three drops.
+before the directory is gone; **removal happens only after `detach` returned
+200**, because removing a directory the store still has open is unsafe. Measured:
+detach + `rm` took 0.05, 0.12 and 0.13 s for three drops. When no partition is left
+and free space is still below the threshold — the volume holds something else —
+the run removes nothing and exits non-zero, so the state is a visible failed Job
+and not a silent loop.
 
-*The threshold is a hypothesis and the check re-measures it (L16).* The evictor
-acts when free space falls below **1.5 GiB, about half of the 3 GiB volume**. The
-arithmetic: the margin is 768 MiB, one minute of a realistic flood writes about
-**7 MB/s on disk** (420 MB, 13 % of the volume — measured: pino-like JSON lines,
+*The threshold is derived from the volume, and it is a hypothesis the check
+re-measures (L16).* The threshold is **the margin (25 % of the volume) plus
+768 MiB**: 1.5 GiB at the 3 GiB default, 1.25 GiB at 2 GiB, 1.75 GiB at 4 GiB. The
+fixed 768 MiB is one minute of a realistic flood on disk plus slack: measured
+**7 MB/s** (420 MB a minute, 13 % of a 3 GiB volume — pino-like JSON lines,
 564-byte records, 6.49× compression, 1.29 GB on disk from 6.41 GB of body in
-178 s), and one minute plus the margin is 1.19 GiB; 1.5 GiB leaves about 300 MB
-for the CronJob's own start and a merge's undershoot. Below the threshold nothing
-is removed. An **incompressible** flood writes about 63 MB/s (2.12 GB in 33.5 s,
-measured), so from 1.5 GiB it reaches the write stop in about 24 s and waits there
-until the next run: **a refusal of up to about one minute is expected in that
-case**, and the collector retries it from its buffer (§6).
+178 s), and a CronJob may start up to a minute after it was due. Below the
+threshold nothing is removed. An **incompressible** flood writes about 63 MB/s
+(2.12 GB in 33.5 s, measured), so from the threshold it reaches the write stop in
+about 24 s and waits there until the next run: **a refusal of up to about one
+minute is expected in that case even when the evictor works**, and the collector
+retries it from its buffer (§6).
 
 *What it costs, stated plainly.* When one day fills the volume, **all of that day's
 logs so far are removed at once**, including the lines that would explain the
@@ -739,30 +773,62 @@ no other volume, writes nothing to the log volume, and writes to stdout **only
 when it acts or fails**, so the collector stores one short line per drop and
 nothing per idle run.
 
-*The image, its rights and its key.* The CronJob runs as uid 1000 (the image's
-`loader` user) with `runAsNonRoot`, `readOnlyRootFilesystem`,
-`allowPrivilegeEscalation: false`, every capability dropped and
-`seccompProfile: RuntimeDefault` — the `restricted` level, which this namespace
-enforces (only the collector's namespace is `privileged`, §7). No ServiceAccount
-token is mounted: it calls no API, and its NetworkPolicy (§7) names the store's
-port and cluster DNS and nothing else. The partition key
-lives in Secret `lifemodel-logs-partition-key` in `lifemodel-system`; **only the
-store and this CronJob mount it** — the store as a file behind
-`-partitionManageAuthKey=file://…`, the job as a `secretKeyRef` — no other workload
-holds it, it never appears in a manifest, in a Job's arguments or in a log line,
-and a roll of the key is a Secret update plus a store restart through the existing
-revision path (§ above).
+*The image, its rights and its key.* The CronJob runs as uid **1000**, gid
+**1000**, `fsGroup: 1000` (the image's `loader` user) with `runAsNonRoot`,
+`readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, every capability
+dropped and `seccompProfile: RuntimeDefault` — the `restricted` level, which this
+namespace enforces (only the collector's namespace is `privileged`, §7). No
+ServiceAccount token is mounted: it calls no API, and its NetworkPolicy (§7) names
+the store's port and cluster DNS and nothing else.
+
+*The same owner on both sides.* The store runs as 1000:1000 too, and the host unit
+creates the volume's data directory as 1000:1000, so the job can remove what the
+store wrote. Measured on the pinned image: with the volume's root owned by
+1000:1000 and the store started with `--user 1000:1000`, it created
+`partitions/20261107` as `drwxr-xr-x 1000 1000`; after `detach`, the same uid
+removed that directory successfully. `fsGroup: 1000` is set on both pods for the
+same reason but is not relied on: the ownership comes from the host directory, not
+from the kubelet's handling of a `local` volume.
+
+*The key, and how it travels.* The partition key lives in Secret
+`lifemodel-logs-partition-key` in `lifemodel-system`; **only the store and this
+CronJob mount it** — the store as a file, read with
+`-partitionManageAuthKey=file:///etc/vl/partition-key` (`-help` documents `file://`
+for that flag, and it was measured on the pinned image: the store accepted
+`/internal/partition/list` with the key read from that file and answered
+`Expected to receive non-empty authKey when -partitionManageAuthKey is set`
+without it) — and the job as a `secretKeyRef`. No other workload holds it and it
+never appears in a manifest. The endpoint accepts the key only as the `authKey`
+query argument, so the job sends
+`POST /internal/partition/detach?name=YYYYMMDD&authKey=…`; measured, the store
+wrote the key nowhere: its log for a run with a live key, 500 rows and one detach
+had **no** line containing the key, none containing `authKey`, and none for
+`/internal/partition`, and its own `/flags` prints
+`-partitionManageAuthKey="secret"`, so the adapter's `/flags` read cannot expose
+it either. The job's own line carries only the day, the bytes freed and the
+reason. A roll of the key is a Secret update plus a store restart through the
+existing revision path (§ above).
 
 *If it crashes or stays down, or its image cannot start.* Nothing else is hurt:
-the volume fills, the store answers 429 and keeps serving reads, the collector retries from its in-memory
-buffer (§6), and the page says `the store is refusing writes (read-only); the log
-evictor is failing or has not run` with the age of the last successful run. A
-missed or failed run is also a Job object (`kubectl get jobs -n lifemodel-system`).
-Read-only is therefore possible **only** while the evictor is failing, and the page
-says so; the collector's 429 retry is what covers that window. Proved against a
-stub (Vector 0.61.0 with forced 429s: eight refusals retried with 0.2-7.4 s
-backoff, all 1 000 lines delivered exactly once); **not yet proved against the
-real collector and store** — that part is L16.
+the volume fills, the store answers 429 and keeps serving reads, the collector
+retries from its in-memory buffer (§6), and the page says `the store is refusing
+writes (read-only)` and names the evictor's last successful run. A missed or
+failed run is also a Job object (`kubectl get jobs -n lifemodel-system`). If the
+store's Deployment is rolling or the store is down when a run starts, `detach`
+fails (connection refused, or a partition that is not attached), the run removes
+nothing and exits non-zero, and the next minute's run tries again.
+
+**Read-only has two causes, and the page tells them apart.** One is the evictor
+failing or not running. The other is an **incompressible flood**: writes are
+refused for up to about a minute between two runs even while the evictor works,
+because one run cannot start sooner (§ above). So the page always shows `the store
+is refusing writes (read-only)` when `vl_storage_is_read_only` is 1, and adds
+`the log evictor is failing or has not run` **only when its last successful run is
+older than about two minutes** — two intervals, so a refusal between runs does not
+blame a working evictor. The collector's 429 retry covers both windows: proved
+against a stub (Vector 0.61.0 with forced 429s: eight refusals retried with
+0.2-7.4 s backoff, all 1 000 lines delivered exactly once); **not yet proved
+against the real collector and store** — that part is L16.
 
 *What the owner sees.* Each drop writes one structured line from the evictor
 (`module=logs-evictor`, the day, the bytes freed, the reason) and the logs page
@@ -1143,8 +1209,8 @@ the modules themselves so that the shape carries meaning.
 | The store's `vl_free_disk_space_bytes` and `vl_storage_is_read_only` describe the filesystem the store writes to | a deployment where the data path is a bind mount of another filesystem. Then the margin and the page's gauges must read the volume |
 | A file-backed ext4 volume mounted with the `loop` option behaves like a block device of its size: free space never exceeds the file, and the store's writes and merges stay inside it | a filesystem that reports more free space than the file holds (a sparse image), or a host that reflinks it. Measured on two such images (§5); L05 re-measures at the owner's size |
 | An instance's disk size is unspecified, and the log volume's size is an install option (**3 GiB by default**) rather than a figure in this design | an instance where the installer refuses the default for want of room; the owner then sets a smaller `--logs-volume-size` and a smaller retention bound to match |
-| The log volume is one node's file, and its PV is `ReadWriteOnce`: the store and the evictor's pod mount it at different times on that node | a multi-node store, or a kubelet that refuses the second mount while the first pod runs; then the volume needs `ReadWriteMany`, or one CronJob per node pinning to the store's node |
-| The evictor's 1.5 GiB threshold keeps free space above the 25 % margin between two runs, at 7 MB/s of realistic flood | a realistic flood faster than about 12 MB/s on disk, or a run that starts a minute late; then the store refuses for a moment and L16 re-measures the threshold. An incompressible flood is expected to refuse for up to a minute (63 MB/s) |
+| The log volume is one node's file and its PV is `ReadWriteOnce`: the store's pod and the evictor's job pod **mount it at the same time on that node**, which a single-node `ReadWriteOnce` allows (the restriction is across nodes, not across pods) | a multi-node cluster where the job lands on another node; then the job must pin to the store's node (`nodeAffinity` on the PV's node) or the volume needs `ReadWriteMany`, and L16 asserts the concurrent mount on a deployed build |
+| The evictor's threshold (the margin plus 768 MiB — 1.5 GiB at the default volume) keeps free space above the 25 % margin between two runs, at 7 MB/s of realistic flood | a realistic flood faster than about 12 MB/s on disk, or a run that starts a minute late; then the store refuses for a moment and L16 re-measures the threshold. An incompressible flood is expected to refuse for up to a minute (63 MB/s) |
 | The partition key in `lifemodel-logs-partition-key` is mounted only by the store and the evictor, and never logged | a manifest or a script that mounts it elsewhere, or a job that prints its arguments or environment; L16 and the manifest test assert the mounts |
 | The gateway's `x-lifemodel-session` header carries the conversation on every model call the core makes | a new caller of the gateway that sends none; its failures then have no conversation, which is what the current code already does |
 
@@ -1163,7 +1229,7 @@ that runs each is named. No check may pass on a fixture that cannot fail.
 | L03 | No value from an upstream response body reaches any stored log (F2) | `WALK-LOGS-MARKER`: a 32-character marker in a non-2xx response body and another in a refused 2xx body, driven through the **real core and gateway**, with the exchange capture **off** and then **on**; then a text search for each marker over the whole store, and the same search over every module's records. Assert: absent with the capture off, present only in the capture with it on, and the failure line carries `error_type` with `reason_check/path/got`. Repository part: `tests/unit/model-gateway.test.ts` asserts the response envelope has no `message`, and that the core's provider logs and errors carry no body text |
 | L04 | A request that ends in failure is stored as `error`, an attempt that will be retried as `warn` (F6, N7) | `WALK-LOGS-LEVEL` and `tests/unit/model-gateway.test.ts`, four cases: primary 500 with **no reserve** (must end in a final `error` record); primary 400 with a **reserve configured** (non-retryable, must end in `error`, not `warn`); primary 500 with a reserve that succeeds (the attempt is `warn`, and there is **no** terminal error record); primary 500 with a reserve that also fails (terminal `error`). Each asserts the final gateway record for the request, not merely the core's |
 | L05 | The log volume holds what a flood can do: a full volume with Postgres committing beside it, the store refusing cleanly, and the platform unharmed (F1, F8, N1, N3) | `WALK-LOGS-VOLUME`, on a deployed build with the volume at its install size: a Postgres pod committing every 200 ms on the host's *shared* filesystem and the log volume filled by an incompressible flood at full speed. Assert: the volume's busy percentage is reported and the host's shared filesystem never loses a byte to it; the store answers 429 read from the response, with no panic and no restart; reads keep answering; the store's free space never falls more than **10 % of the volume** below the margin, with the merge counters beside it; the page shows `log volume low` then `read-only`; retention or the evictor frees space and writes accept again without a restart; and the Postgres commits and the loader's page both continue. Then the throttle part: a task pod at full speed **concurrently with a trusted writer**, plus a task pod writing **20 KB lines**; the trusted writer loses nothing, the throttled pods' `input`/`accepted` windows reconcile, and the event rate is reported as the limit it is. One failure case belongs to the same walk: **with the host unit disabled so nothing is mounted**, the store must not start (its pod stays `ContainerCreating`), nothing must appear under `/var/lib/lifemodel-logs` on the root filesystem, the page must say the volume is not mounted, and enabling the unit must bring the store up with no other restart. A full volume is L16's case, not this walk's. The test VM has about 6 GiB free, so its volume size is an option there, not the default. Measured here on loop-mounted images: 3 GiB volume — 149 MB below a 768 MiB margin, no panic, 907,600 rows readable; 3 GiB volume in the displacement round — 694 MB below the same margin, no panic, 1,678,600 rows readable; 6 GiB volume — 548 MB below a 1.5 GiB margin, no panic, space recovered by merges |
-| L06 | Retention: the byte bound drops oldest day partitions first, the age bound applies independently, and a bound that does not fit the volume is refused; inside the two-day floor retention drops nothing and the evictor acts (L16) | `WALK-LOGS-BOUND`: 300 MiB byte bound, 600 MiB of today (no eviction), a 200-record canary 10 days old, a 0.7 GiB flood across 10 days (canary and older days gone, today kept); then a *separate* run with only `retentionPeriod` shortened and no byte pressure (the older day is gone and nothing else); then the page asked for a byte bound larger than the volume, which is **refused with the numbers**, and one that fits, which is accepted. Measured on the prototype for the first three; the two-day floor above the bound was measured as a 300 MiB bound reaching 444 MiB |
+| L06 | Retention: the byte bound drops oldest day partitions first, the age bound applies independently, and a bound above `volume − threshold` is refused (it could never be reached, because the evictor removes a day first); inside the two-day floor retention drops nothing and the evictor acts (L16) | `WALK-LOGS-BOUND`: 300 MiB byte bound, 600 MiB of today (no eviction), a 200-record canary 10 days old, a 0.7 GiB flood across 10 days (canary and older days gone, today kept); then a *separate* run with only `retentionPeriod` shortened and no byte pressure (the older day is gone and nothing else); then the page asked for a byte bound larger than the volume minus the evictor's threshold, which is **refused with the numbers**, and one that fits (`volume − threshold`, and one 1 MiB below it), which is accepted. Measured on the prototype for the first three; the two-day floor above the bound was measured as a 300 MiB bound reaching 444 MiB |
 
 | L07 | What a collector crash loses, at the buffer's edge (F10, N10) | `WALK-LOGS-CRASH`: with the store down, write numbered lines **until the sink's buffer is at its configured maximum** (the run waits for `vector_buffer_size_events` to reach `vector_buffer_max_size_events`, with enough input to fill it and the source's received counter well above it); if that state is not reached the run prints `TEST NOT VALID` and **fails**. Then `kill -9` the **vector process** by its host pid (`k3s crictl inspect` — pid 1 means nothing was killed, which also fails), recover, and count missing and duplicate lines and the restart count. The acceptable outcome is stated, not judged afterwards: every line not yet rotated away by the kubelet is delivered **at least once** and no line is lost that was still in `/var/log/pods`; lines the kubelet has rotated away may be lost, and duplicates are allowed. If a run loses a line that was still in the kubelet's files, the guarantee changes to "delivered lines are never corrupted" and the design does not claim more. An unsaturated crash is a separate, informative case, never a substitute |
 | L08 | The setting applies through the ConfigMap mapping, a durable desired revision, idempotent reconcile, and the admission lists (F3, F7, N6) | `WALK-LOGS-SETTING`: change 14 d → 7 d, 7 d → 14 d, crash the loader after the ConfigMap write and before the annotation (both orders), and repeat an identical PUT. Assert: `GET /flags` through the adapter holds the desired values (which requires `-envflag.prefix=VL_`); `applied` only when the Deployment's `observedGeneration` has caught up, `updatedReplicas`/`availableReplicas` equal the replicas, the pod's revision annotation equals `desiredRevision`, and the flags agree — `pending` with a reason otherwise; a first install boots from the defaults ConfigMap with the loader's ConfigMap absent (`optional: true`). Rendered-manifest tests assert both admission ConfigMap lists admit `lifemodel-logs-settings` for the loader's create **and** update and that another identity is refused, that the Deployment patch is clamped to the two annotation maps, that the Deployment declares no retention argument, and that the release manifest does not declare the revision annotation. Measured on the prototype: the env mapping alone (`/flags` in three configurations) and 2.6/3.7 s without an endpoint, healthy at 3.0/4.6 s |
@@ -1174,7 +1240,7 @@ that runs each is named. No check may pass on a fixture that cannot fail.
 | L13 | The collector's namespace is the only `privileged` one, it holds exactly the collector, and its mounts are exactly the two named paths with their modes (F15) | `tests/unit/platform-pod-security.test.ts`: every namespace manifest in `deploy/platform` is `baseline` or `restricted` except `lifemodel-logs`, which is `privileged` and holds exactly the DaemonSet; the collector container has no `privileged`, no added capability, `readOnlyRootFilesystem`, `runAsUser: 0`, all capabilities dropped, and exactly two `hostPath` volumes — `/var/log/pods` read-only and `/var/lib/lifemodel-logs-collector` read-write. A persistent checkpoint is required, so a check that would remove it fails |
 | L14 | The page never shows a healthy page for a stopped collector, and says when it does not know (F9) | `WALK-LOGS-FRESH`: stop the collector with the store healthy, then make the store read-only. Assert: within 90 s the page shows `collection stopped N minutes ago; results may be incomplete` above the results, and names `read-only` in the store case; restarting the collector returns the age below the threshold within one heartbeat period. Also assert the state **before any heartbeat has ever been stored**: the page shows `collection status unknown` rather than a healthy or an empty answer; and that a stalled pod-log collection with a healthy heartbeat is visible — the heartbeat is per collector, so the check kills the file source's reading (an unreadable `/var/log/pods` mount for one run) and asserts the page still says the results may be incomplete. **Not measured end to end**: Docker stored the heartbeats and the page's query found them; on the cluster two runs stored 0 in every phase, for a cause not found. This check runs in the first stage that deploys the collector |
 | L15 | Paging is total and latency is inside the page's deadline (F13) | `tests/integration/logs-paging.test.ts` and `WALK-LOGS-LATENCY`: a fixture with 5,000 records at one timestamp and 300 byte-identical lines at another, paged in 250-record pages through the adapter, quiet and with ingest running; assert every record exactly once, no duplicate, and the same page twice returns the same bytes; then 40 queries per filter with the real form at the store's bound, p95 under 2.5 s (measured: 81–176 ms at 5.38 GB) |
-| L16 | New logs displace the oldest ones on a deployed build: with the volume holding only today's and yesterday's partitions, the evictor frees space with nobody acting, and below its threshold it removes nothing (the owner's direction, 2026-11-07; F8, N1) | `WALK-LOGS-EVICT`, on a deployed build with the volume at its install size (3 GiB on the owner's machine; an option on the test VM): fill with today's and yesterday's records until free space passes the evictor's threshold, then keep writing at full speed for five minutes. Assert: the store does not restart (`restartCount` unchanged) and its log has no panic; each drop is one `module=logs-evictor` line naming the day and the bytes freed, and a notice with the day and time appears on the page; the oldest remaining row moves forward at each drop and what the collector accepted is still found (numbered and counted per window), except the rows acknowledged inside a detach-to-remove window, which are counted and reported; writes keep being accepted and any 429 window is shorter than two eviction intervals; and in a quiet period below the threshold two consecutive runs remove nothing and log nothing. The **real collector's** loss during a refusal is asserted here, not on the stub: stop the evictor for two minutes, let the store refuse, count the lines written in the window against those found after it. Measured here on loop-mounted images at 3 GiB with the store at its 1 GiB limit: three drops in 300 s, 23 845 600 rows accepted and 1 886 400 retained, no refused post, no restart, 793 MiB peak, 16 200 rows lost in the three detach windows |
+| L16 | New logs displace the oldest ones on a deployed build: with the volume holding only today's and yesterday's partitions, the evictor frees space with nobody acting, and below its threshold it removes nothing (the owner's direction, 2026-11-07; F8, N1) | `WALK-LOGS-EVICT`, on a deployed build with the volume at its install size (3 GiB on the owner's machine; an option on the test VM): fill with today's and yesterday's records until free space passes the evictor's threshold, then keep writing at full speed for five minutes. Assert: the store does not restart (`restartCount` unchanged) and its log has no panic; each drop is one `module=logs-evictor` line naming the day and the bytes freed, and a notice with the day and time appears on the page; the oldest remaining row moves forward at each drop and what the collector accepted is still found (numbered and counted per window), except the rows acknowledged inside a detach-to-remove window, which are counted and reported; writes keep being accepted and any 429 window is shorter than two eviction intervals; and in a quiet period below the threshold two consecutive runs remove nothing and log nothing. The **real collector's** loss during a refusal is asserted here, not on the stub: stop the evictor for two minutes, let the store refuse, count the lines written in the window against those found after it. Three more assertions belong to this walk: the job's pod mounts the volume **while the store's pod has it mounted** (same node) and its `rm` succeeds as uid 1000:1000 on files the store created (the ownership arrangement of §5, checked with `ls -ln` on the volume); during an incompressible flood the page shows `the store is refusing writes (read-only)` **without** `the log evictor is failing or has not run`; and after stopping the evictor for more than two minutes the page adds that line. Measured here on loop-mounted images at 3 GiB with the store at its 1 GiB limit: three drops in 300 s, 23 845 600 rows accepted and 1 886 400 retained, no refused post, no restart, 793 MiB peak, 16 200 rows lost in the three detach windows |
 
 ## The principles this serves
 
@@ -1290,9 +1356,10 @@ stage that first deploys the collector:
   size; if a merge exceeds the margin there the store stops, the page says so, and
   nothing outside the volume is harmed.
 - **Displacement is the answer to a full volume, and its thresholds are
-  hypotheses.** The evictor's one-minute cadence and 1.5 GiB threshold are
-  arithmetic from measured rates (7 MB/s realistic, 63 MB/s incompressible), not a
-  measurement of the deployed loop; L16 re-measures both, and a refusal of up to
+  hypotheses.** The evictor's one-minute cadence and its threshold (the 25 %
+  margin plus 768 MiB — 1.5 GiB at the default volume) are arithmetic from measured
+  rates (7 MB/s realistic, 63 MB/s incompressible), not a measurement of the
+  deployed loop; L16 re-measures both, and a refusal of up to
   about a minute under an incompressible flood is expected. What is decided: the
   oldest day goes whole, today's last, and no deletion API is enabled.
 - **Not measured, and named so acceptance does not imply otherwise:** what a
