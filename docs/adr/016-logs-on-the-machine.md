@@ -15,9 +15,11 @@ exchange capture; logs are read like conversations; nothing leaves the machine.
 This revision answers the design review of 2026-11-07 (`F1`–`F15`). Every
 number below is measured unless it is marked *inherited* (taken from an existing
 document or an earlier decision) or *not measured*. Measurements come from two
-places, and each figure says which: a throwaway single-node k3s running the
-prototype manifests, and pinned-image Docker runs for the parts that need no
-cluster (the store's merge behaviour, the record contract, paging and latency).
+places, and each figure says which: the test VM's single-node k3s, where the real
+platform runs and was **read only** except for the proof namespaces, and
+pinned-image Docker runs for the parts that need no cluster (the store's merge
+behaviour, the record contract, paging, latency and the throttle's window
+accounting).
 No machine size is a product figure; an instance's disk size is unspecified.
 
 Every design promise carries either a measurement or a named check, and a check
@@ -75,7 +77,7 @@ runs them again on the owner's machine.
 
 | # | Scenario | Measure of acceptance |
 | --- | --- | --- |
-| 1 | A planted model failure and a restart of the failing module: found by time and conversation with no kubectl | One page query by the failure's minute and its conversation returns the gateway's line: `module=model-gateway`, `level=error`, `error_type`, `reason_check`, `reason_path`, `reason_got`; the module's replacement pod's line after the restart is in the same answer; zero shell commands. Basis: the store keeps the previous pod's lines (2,000 of 2,000 measured through a pod deletion), the failure's own level is `error` (§9 point 6) and the filters answer in 101–176 ms p95 with the adapter's real form at 5.38 GB (measured, §4) |
+| 1 | A planted model failure and a restart of the failing module: found by time and conversation with no kubectl | One page query by the failure's minute and its conversation returns the gateway's line: `module=model-gateway`, `level=error`, `error_type`, `reason_check`, `reason_path`, `reason_got`; the module's replacement pod's line after the restart is in the same answer; zero shell commands. Basis: the store keeps the previous pod's lines (2,000 of 2,000 measured through a pod deletion), the failure's own level is `error` (§9 point 6) and the filters answer at 176 ms (1-hour window), 104 ms (module) and 118 ms (conversation) p95 with the adapter's real form at 5.38 GB (measured, §4) |
 | 2 | Core and chat stopped: the page answers | The page's API answers from the loader pod alone. The loader has no route to the core or the web module, and the store has no route to either (its only peers are the loader and the collector, §7) |
 | 3 | No login: page and API refuse | Every logs route answers 404 on any other host and refuses without a session, like the rest of the loader's table (ADR-012 §4) |
 | 4 | Every module appears and each of four filters narrows | Every platform workload's pod carries a label the collector turns into `module` (§2, measured for `app.kubernetes.io/name`, `app`, `cnpg.io/cluster` and the no-label fallback); the filters are timed with the adapter's real query form (window, newest first, page size) at 5.4 GB stored: p95 176 ms for a 1-hour window, 104 ms for a module, 101 ms for module+level, 118 ms for a conversation, 81 ms for a text search (measured, §4). Coverage of every real workload is check L01 |
@@ -268,15 +270,23 @@ adapter reads `_time` for the order and `_msg` for the body; nothing else is
 store-specific.
 
 **Modules.** The module list comes from one grouped query over the store:
-`* | stats by (module) count()`, cached for a minute in the adapter. No other
-endpoint and no vendor-specific API: the replacement contract is "accepts this
-JSON at this URL, answers LogsQL at that URL".
+`* | stats by (module) count()`, cached for a minute in the adapter.
 
-Why this seam matters: neither side needs the other's API. Replacing the
-collector is a new process that writes the same JSON; replacing the store is a
-new process that reads the same JSON and answers the query endpoint. The loader
-never speaks the insert protocol and the collector never speaks the query
-protocol.
+**The replacement contract, written whole (N9).** It is not "JSON plus one
+endpoint". A replacement store implements five operations: the insert URL above;
+`POST /select/logsql/query` for records and counts; `GET /health`; `GET /metrics`
+with two named gauges (free disk space, read-only); and `GET /flags` returning the
+process's effective flags. It must also answer LogsQL's range filter, field
+filters, `sort by`, `offset`, `limit`, `stats by` and `count()` — the subset
+listed in §4, and nothing else. Those names are the store's own, so they are
+parsed in one file, `loader/src/logs-store-adapter.ts` (§4); the rest of the
+loader sees a store interface with `query`, `count`, `available`,
+`freeDiskSpace`, `readOnly` and `flags`.
+
+Why this seam matters: neither side needs the other's *implementation*.
+Replacing the collector is a new process that writes the same JSON; replacing the
+store is a new process that answers the five operations above. The loader never
+speaks the insert protocol and the collector never speaks the query protocol.
 
 
 ### 4. Reading: one adapter in the loader, one page on the loader's host
@@ -290,19 +300,34 @@ protocol.
   else. No route passes a caller's query string through: the page's fields become
   field filters with quoted, escaped values, so the loader's login is the only
   authority and LogsQL is never an interface to the owner's browser.
-- **The query form and its cursor (F13).** Every page is
-  `_time:[start, end] <filters> | sort by (_time desc, _msg desc) | offset N | limit <page>`,
-  and the window is fixed at the first page of a scroll: `end` is the time of
-  that first query. New records therefore fall outside the window and cannot
-  shift the offsets, and the order is total for distinct messages. Measured at
-  5.4 GB stored: 5,000 records sharing one timestamp paged in 20 pages of 250
-  came back as 5,000 distinct, 0 duplicates, 0 missing — quiet, and again while
-  1.36 GB was ingested during the pass. 300 **byte-identical** lines at one
-  timestamp (same `_time`, same `_msg`, same `_stream_id`) paged 300 of 300, and
-  two identical page queries returned the same bytes. The order among fully
-  identical lines is not defined by their content, so identical lines are
-  indistinguishable to the page by design; that is stated on the page's help
-  text, not worked around.
+- **The query form and its cursor protocol (F13, N4).** Every page is
+  `_time:[start, end] <filters> | sort by (_time desc, _msg desc, pod desc) | offset N | limit <page>`,
+  with `end` set at the first page, and `pod` as a further key so that two
+  **different** records sharing `_time` and `_msg` still have an order (measured:
+  the store accepts the three-key sort and returns the same bytes for the same
+  query). A pinned event-time window is **not a snapshot**: a collector draining
+  its backlog writes records whose event time is inside the window but earlier
+  than the rows already read, so they enter before the offset. Measured: 500
+  records in the window, page 1 of 250, then one late record inserted inside the
+  window; the window's count became 501, page 2 returned 250 rows, and the late
+  record appeared on **no** page of the first two — a record was repeated in its
+  place. The page therefore uses a **cursor protocol, not a promise**: it reports
+  the results as of the first page, and at every page it re-reads the window's
+  count with one cheap query. If the count changed, the answer is marked
+  `incomplete — records arrived while you were scrolling` and offers a refresh
+  from the first page; the page never claims every record exactly once. Records
+  that are **byte-identical** (same time, message, pod, stream) remain
+  indistinguishable, which the page's help states.
+- **The adapter's internal contract, and where the vendor stays (N6, N9).** The
+  adapter is split in two files: `loader/src/logs-query.ts` builds the filters and
+  the cursor, and `loader/src/logs-store-adapter.ts` is the only place that knows
+  the store's metric and flag names. It uses exactly these operations:
+  `POST /select/logsql/query` (records and counts), `GET /health` (availability),
+  `GET /metrics` (two gauges: free disk space and the read-only flag) and
+  `GET /flags` (the process's effective flags, used to prove a retention change
+  applied). A replacement store implements those five operations and nothing
+  else; the two `vl_*` gauge names and the flag names live in the adapter, which
+  is the only vendor-aware file — generic code elsewhere names none.
 - **Unavailable is an answer, not an empty list.** If the store does not answer
   within 5 s, or answers 5xx, or answers 429 (read-only), the adapter returns
   `{state: "unavailable", reason: <code>}` — never an empty table. A 200 with
@@ -316,7 +341,7 @@ protocol.
   collector from a refusing store. *Not measured end to end:* the Docker run
   stored the heartbeats (4 in 8 s, 8 in 16 s at a 2 s interval) and the page's
   query found them, but on the cluster two runs stored 0 in every phase for a
-  cause not found, so the signal's wiring is check L09.
+  cause not found, so the signal's wiring is check L14.
 - **The page** is `web/loader/src/Logs.tsx` behind the loader's login on
   `boot-<name>.local/logs`, reached from the settings page. It reuses the kit
   components and the i18n pattern: a filter row (time range, module, level,
@@ -325,12 +350,18 @@ protocol.
   "unavailable" with the reason. "Read like conversations" is the reading shape
   of the chat's transcript: time on the left, module and level as chips, the
   message as the body, fields behind a disclosure; no raw JSON view by default.
-- **Routes** are `GET /api/logs` (query), `GET /api/logs/modules` (the module
-  list, §3) and `GET`/`PUT /api/logs/settings` (the retention setting, §5).
-  They are added to the loader's route table exactly as ADR-012 §4's table
-  requires: on `boot-<name>.local` only, the method the table names, a session on
-  every route including `GET`, the CSRF token header and an exact Origin on
-  `PUT`, `no-store`, CSP and `nosniff` as the existing API routes.
+- **Routes (N8).** The new routes are `GET /api/logs` (query),
+  `GET /api/logs/modules` (the module list, §3) and `GET`/`PUT
+  /api/logs/settings` (the retention setting, §5). The matrix is stated per
+  route **and per authentication state**, because the loader's table already has
+  public exceptions that must survive: `GET /api/state`, `POST /api/setup` and
+  `POST /api/login` answer **without a session** on `boot-<name>.local` — the
+  first start needs them to choose the setup or login screen. Every new logs
+  route requires a session on **every** method, `GET` included; `PUT` also
+  requires the CSRF header and an exact Origin; all of them carry `no-store`, CSP
+  and `nosniff`, answer 404 on any other host and 405 on a wrong method. The
+  extracted table keeps every existing pair, including `PUT /api/model-capture`,
+  and L11 asserts the matrix by route and auth state.
 - **Where the code goes, given the file-size limit.** `loader/src/http.ts`
   (1,512 lines, recorded) and `web/loader/src/App.tsx` (1,310 lines, recorded)
   cannot grow by one line. The logs work therefore lands in new files —
@@ -345,8 +376,9 @@ protocol.
   as it gains; if it cannot, the logs page is reached by path and the App change
   waits for the split the O3 rule implies.
 
-Measured query cost with the adapter's real form at 5.38 GB stored on disk,
-40 queries each, 100-record pages:
+Measured query cost with the adapter's real form — about **4.3 GB on disk when
+paging ran, 5.38 GB when the latency queries ran** — 40 queries each, 100-record
+pages:
 
 | Filter | p50 | p95 | max |
 | --- | --- | --- | --- |
@@ -420,13 +452,35 @@ store: the endpoint stops answering 2.6 s and 3.7 s after the patch, is healthy
 again at 3.0 s and 4.6 s, and the store itself opens its data in 41–83 ms — the
 wait is Kubernetes' delete-then-create.
 
-**New, narrow rights.** Two, both on fixed names in `lifemodel-system`:
-`get`/`update` on ConfigMap `lifemodel-logs-settings` (inside the existing
-settings Role) and `get`/`patch` on Deployment `logs-store`, clamped by a
-ValidatingAdmissionPolicy in A0 to `metadata.annotations` and
-`spec.template.metadata.annotations` of that Deployment. The annotation is not
-declared in the release manifest, so Flux's server-side apply does not own it; a
-check asserts that.
+**New, narrow rights, and the two admission lists they need (N6).** The rights
+alone are not enough: the admission clamps in
+`deploy/platform/a0/admission-policies.yaml` decide which ConfigMap names may
+appear in `lifemodel-system`, and the new projection is not in either list today.
+So the change is three parts, all checked:
+- the loader's settings Role gains `get`/`update` on ConfigMap
+  `lifemodel-logs-settings` and `get`/`patch` on Deployment `logs-store` in
+  `lifemodel-system`, in `deploy/platform/a/loader-settings-rbac.yaml`;
+- **both** admission ConfigMap lists in `admission-policies.yaml` — the
+  create-by-loader clamp and the loader-exclusive ownership list — gain
+  `lifemodel-logs-settings`, and the Deployment clamp admits a patch to
+  `metadata.annotations` and `spec.template.metadata.annotations` of `logs-store`
+  only;
+- a test asserts, from the rendered manifests, that the loader may create and
+  update that ConfigMap, that another identity may not, and that the Deployment
+  patch is refused for any other field.
+
+**How "applied" is proved, with those rights.** The loader reads the Deployment
+and its pod, and the store's flags through the adapter's `GET /flags`. The
+predicate is: `status.observedGeneration` equal to the generation the loader
+patched, `status.updatedReplicas` and `status.availableReplicas` equal to the
+replica count, the pod's own `controller-revision-hash`-equivalent annotation
+matching the loader's `desiredRevision`, and the flags read back from that pod
+equal to the desired ones. Pod metadata does not carry a Deployment's generation,
+so the loader writes the revision into the template as an annotation and reads
+it back from the pod's annotations; it needs only `get` on pods in
+`lifemodel-system` for that, which is added to the same Role. Until every
+condition holds the page says `pending` with the reason
+(`store_unavailable`, `rollout_timeout`, `forbidden`, `mismatch`).
 
 **The disk: what the byte bound does not do.** The store's data lives on a
 `local-path` PVC, which is a directory on the node's filesystem — the same one as
@@ -434,25 +488,27 @@ Postgres, k3s and the loader. The byte bound limits *data*, and the store stops
 accepting writes when the filesystem's free space falls to
 `-storage.minFreeDiskSpaceBytes`. It does **not** reserve space, and **the write
 stop does not stop merges**: measured with pinned images on a Docker volume, in
-two runs, the store refused writes 116 MB and 302 MB below the margin and then
-free space kept falling — to **451 MB below the margin at a 4.7–5.0 GB store**,
-and to **4,678 MB below** at a 13.2 GB store, over 61 s and still falling when
-that run ended, with merges active and the store's own size growing while it was
-read-only. A merge shows as a single-second drop: 295 MB and 304 MB respectively.
-The third measurement is the cluster run of §6: 675 MB in 7 s at about 2.4 GB on
-disk. So the temporary space a merge needs grows with the data being merged;
-nothing in the store's flags bounds it (`-help` has `-inmemoryDataFlushInterval`,
-which only bounds how long buffered data may sit, and no merge-concurrency
-setting).
+two runs, the first sampled read-only state was 115,757,056 and 302,399,488 bytes
+below the margin and free space kept falling — to **450,441,216 bytes below at a
+4.7–5.0 GB store**, and to **4,678,209,536 bytes below at a 13.2 GB store**, over
+60 s of samples and still falling when that run ended, with merges active in 52
+of 52 read-only samples and the store's own size growing while read-only. A merge
+shows as a single-second drop: 295,325,696 and 303,562,752 bytes. The cluster
+run's own drop (675,176,448 bytes in 7 s, wrapper's timing) is consistent with a
+merge but has no merge counter beside it. So the temporary space a merge needs
+grows with the data being merged; nothing in the store's flags bounds it
+(`-help` has `-inmemoryDataFlushInterval`, which only bounds how long buffered
+data may sit, and no merge-concurrency setting). No ratio from a merge that had
+not finished bounds the next merge.
 
 **The margin, and its basis.** The store therefore runs with a margin, and the
 default is **2.5 GiB**:
 
 | Measured store | deepest free below the margin | as a share of store size |
 | --- | --- | --- |
-| 0.63 GB (cluster run) | 41 MB | 6.5 % |
-| 4.7–5.0 GB (Docker) | 451 MB | 9.6 % |
-| 13.2 GB (Docker) | 4,678 MB | 35 %, still falling when the run ended |
+| 0.63 GB (cluster run) | 40,845,312 B | 6.5 % |
+| 4.7–5.0 GB (Docker) | 450,441,216 B | 9.6 % |
+| 13.2 GB (Docker) | 4,678,209,536 B | 35 %, still falling when the run ended |
 
 A margin of half the byte bound (2.5 GiB beside the 5 GiB default) covers the
 35 % case with room, and covers the 5 GiB case many times over. This is a
@@ -472,48 +528,87 @@ below fire.
 `the store is refusing writes (read-only)` when `vl_storage_is_read_only` is 1.
 Both numbers come from the two gauges the adapter already reads.
 
-**The kubelet's image GC sits on the same filesystem.** kubelet removes unused
-images when the node's usage reaches 85 % — floored, so it fires below 16 % free
-— and that is a product fact on any machine with the default settings: a margin
-below that threshold means the kubelet deletes images *before* the store stops,
-which on a machine that must not pull images again is worse than a stopped store.
-A cluster run showed exactly that (three unused images removed at 16 % free). The
-margin must therefore be chosen so the store stops above the kubelet's threshold;
-2.5 GiB is stated against the store, and where a disk is small enough that 2.5
-GiB sits below 16 % of it, the byte bound is what the owner lowers first.
+**The kubelet's image GC sits on the same filesystem, and the arithmetic goes the
+other way.** kubelet removes unused images when the node's usage reaches 85 % —
+floored, so it fires below 16 % free. A 2.5 GiB margin is below that threshold on
+any filesystem **larger** than about 16 GiB, so on most disks the kubelet deletes
+images long before the store stops; the smaller the disk, the closer the two
+come, and it is only on a disk of roughly 16 GiB or less that the store stops
+first. An earlier sentence here had the inequality backwards and told the owner
+to lower the byte bound, which does not raise the stop threshold at all. That
+remedy is withdrawn: the byte bound and the margin are independent settings, and
+the image GC is a reason to keep spare space above 16 % — not a rule this design
+enforces. (Two runs showed it: three unused images removed at 16 % free, and the
+wrapper's own images lost to the same threshold.)
 
-**The untrusted writer is also throttled (F1).** Independent of the disk, the
-collector rate-limits the untrusted namespace per pod with a `throttle` transform
-(`threshold: 500`, `window_secs: 1`, `key_field` the pod name); trusted
-namespaces are not limited. The rate's basis: a task's legitimate output is
-progress lines at a few per second, so 500/s allows a 100× burst for several
-seconds while capping a runaway flood at about 100 KB/s per pod. Measured: a task
-pod writing 300,000 lines in about 2 s stored 20,650 and discarded 248,883
-(another run: 8,444 and 291,556 — exactly 300,000), with the collector at 102 MiB
-and no restarts; a trusted pod beside it kept all 300 of its lines. A discarded
-line is counted per pod and written to the store as a window record
-(`module="collector-window"`, `seen=<n>`, `gap_pod`), so the page can show the
-gap for that pod: Measured window records of 65,145, 74,290 and 59,608 lines for
-the flooding pod. The count is a window count, not a per-line log line, and a
-pod whose window is still open has no record yet.
+**This is not containment (N1, N2).** The margin stops inserts; it does not bound
+the allocations a merge makes, and the disk it shares with Postgres, k3s and the
+loader can still be exhausted by a merge. The design says so, shows the page's
+read-only and low-space state, and leaves the storage boundary itself as the
+owner's decision; it does not describe the margin as a reservation, a quota or a
+safety guarantee.
 
+**The untrusted writer is limited by an event count, and that is all it is (N3,
+N5).** The collector applies a `throttle` transform to the untrusted namespace,
+per pod, `threshold: 500` events per `window_secs: 1`, with the pod name as the
+key. This is an **event-count limit** and nothing more:
+
+- it does not bound bytes. 500 lines of 20 KB is about 10 MB/s, and the collector
+  still reads, decodes and evaluates every line it discards, so a task writing
+  large lines gets both throughput and collector work out of proportion to the
+  count. That case is stated, not covered: a line larger than the collector's
+  `max_line_bytes` is truncated, and there is no byte budget;
+- it does not bound the day's total disk use — the store's byte bound and the
+  margin are the only figures there, and neither is a containment (below);
+- the rate's basis is a task's legitimate output, which is progress lines at a
+  few per second; 500/s is a ceiling on events, chosen so a runaway task cannot
+  hold a core busy forever, not a size guarantee.
+
+Measured: a task pod writing 300,000 lines in about 2 s stored 20,650 and left
+248,883 discarded (another run: 8,444 and 291,556 — exactly 300,000), with the
+collector at 102 MiB and no restarts. The trusted pod beside it kept all 300 of
+its lines, but the two writers did **not** overlap: the trusted writer finished
+before the task burst began, so this measures unthrottled collection, not
+simultaneous fairness under attack. The check L05 now runs both at once and adds
+large records.
+
+**What the page can say about a throttled pod (N5).** Two window counters per pod
+are computed in the collector and written to the store as one record each
+(`module="throttle-window"`): `input` (everything the pod wrote, counted before
+the throttle) and `accepted` (what the throttle passed). `input` alone is not
+loss — a pod under the limit has `input == accepted`. Measured in Docker: a
+50/s writer under a 100/s threshold produced windows of 299 and 300 input with
+299 and 300 accepted (nothing discarded); a 50/s writer under a 10/s threshold
+produced windows of 300 input with 69 accepted, and 299 with 60. So
+`discarded = input − accepted` **per pod and per window**. `discarded = input − accepted`
+is exact only inside one window pair; the two counters are separate windows, so a
+pod whose two windows do not both exist, whose records were dropped by their own
+sink, or whose count has not arrived yet is shown as `unknown`, never as zero.
+The record carries only the pod, the two counters and the window's start and end
+time — no message text, no metadata — so a flood cannot inflate it.
 
 ### 6. Bounds and failure behaviour, measured
+
+Figures are from the test VM's cluster (the real platform running beside the
+proof namespaces, read only there) and from Docker runs of the pinned images.
+Each says which, and each is labelled with the limit the raw output supports.
 
 | Event | What was measured |
 | --- | --- |
 | Bound passed within the last two days | No eviction. 600 MiB of today's records into a 300 MiB byte bound: usage 444 MiB, every record kept |
 | Bound passed with older partitions present | Oldest partitions dropped first: the canary partition from 10 days ago and every older day of a second flood were dropped, today's 357,400 records stayed, usage 491 MiB |
-| The write stop at a margin, on a shared filesystem | One filesystem holding a Postgres pod and the store with an 8 GB margin: Postgres committed 0 → 913 rows throughout with no failed insert; the store refused writes (429, 235 refusals) with the lowest free 41 MB under the margin at a store of 0.63 GB, 46 s under it; reads kept answering (252,400 rows); deleting a 256 MiB filler made writes resume (`insert=200`) with restarts=0 |
-| What the write stop does not stop | Merges: 451 MB below the margin at a 4.7–5.0 GB store and 4,678 MB below at 13.2 GB, still falling, both with merges active under read-only; 675 MB in 7 s at a 2.4 GB store on the cluster. §5 |
+| The write stop at a margin, on a shared filesystem (cluster) | One filesystem holding a Postgres pod and the store with an 8 GB margin: Postgres 0 → 913 rows and no failed insert was recorded (`pgfail` empty) — narrower than "no commit can fail"; the store stopped accepting writes with the lowest 1 s sample **41 MB under the margin** (7,959,154,688 against 8,000,000,000) at a store of **629,470,627 bytes**, with **46 samples** under the margin (not 46 elapsed seconds: the sampler lost time), then accepted again (`insert=200`, restarts=0) after a 256 MiB filler was deleted. Reads kept answering (252,400 rows). The flood's 235 "refusals" are **broken-pipe outcomes** of a store that answers 429 and closes without reading the body, not 235 observed HTTP 429 responses; the 429 text itself comes from the store's own log. At the minimum sample `active_merges` was 0, so that minimum is not attributable to merge space |
+| What the write stop does not stop (Docker, pinned store) | At a **4.7–5.0 GB** store the deepest sampled free space was **450,441,216 bytes below** the margin (first sampled read-only deficit 115,757,056; largest one-second drop 295,325,696; merges active in 3 of 42 read-only samples). At a **13.2 GB** store (final size 13,202,649,343) it was **4,678,209,536 bytes below** the margin (first sampled read-only deficit 302,399,488; largest one-second drop 303,562,752; merges active in **52 of 52** read-only samples; 60 s from first sampled read-only to the last sample, and the run ended before the merge did; a lower free-space reading of 5,047,037,376 below the margin appears near the log's end without paired merge metrics, so 4.68 GB is the sampled minimum, not the deepest point). §5 |
+| A drop on the cluster (wrapper account) | Run 2 shows 6,222,786,560 → 5,547,610,112 bytes (675,176,448) at the end of an interrupted run; the seven-second timing comes from the wrapper's account, and the later sample has no merge metrics, so the drop is consistent with a merge, not correlated with one. The 3,236,528,890 figure is accepted input bytes, not disk bytes |
 | Store down 5 minutes | Writers unaffected; the collector stayed ready at 73 → 80 MiB for the ~700 buffered records; after the store returned the backlog was in it within ~10 s; 945 of 945 lines present |
 | Collector restarted after 5 minutes down | 1,327 of 1,327 lines present, no duplicate (checkpoint on the node's disk); a pod deleted during the outage lost all 100 of its lines because the kubelet removed its directory first |
-| A collector killed with its buffer full | **Not measured.** The run intended for it never reached the buffer edge: the sink had been down long enough that the buffer's size gauge read 0 while 20,000 lines had been received, and the pid the run read was not the process. What the mechanism implies: with `acknowledgements: {enabled: false}` (kubernetes_logs does not support end-to-end acknowledgements — measured: Vector warns and ignores the setting), the checkpoint advances on delivery only, so a crash re-reads from the last delivered line and loses only what the kubelet has already rotated away; what it buffered in memory is lost with the process. Check L07 measures the loss at the buffer's edge |
+| A collector killed with its buffer full | **Not measured.** The run intended for it never reached the buffer edge: the buffer's size gauge read 0 while 20,000 lines had been received, and the pid it read was 1. What the mechanism implies: `acknowledgements` is inert here (kubernetes_logs does not support end-to-end acknowledgements — measured: Vector warns and ignores it), the checkpoint advances on delivery only, so a crash re-reads from the last delivered line and loses only what the kubelet has already rotated away, plus whatever was in memory. L07 sets the saturated state and the acceptable loss |
 | A module restarted (pod replaced) | The previous pod's lines stay; a new pod's lines appear under the same `module` |
-| A 500,000-line burst (~500 MB in ~25 s, two kubelet rotations) | 500,000 records stored, none missing (before the throttle was added; the throttle now applies to the task namespace only) |
-| A task pod at full speed, throttled | 300,000 lines written in ~2 s: 20,650 stored + 248,883 discarded in one run, 8,444 + 291,556 in another, collector 102 MiB, no restart; the trusted pod beside it kept 300 of 300 |
+| A 500,000-line burst (~500 MB in ~25 s, two kubelet rotations) | 500,000 records stored, none missing (measured before the throttle existed; the throttle applies to the task namespace only) |
+| A task pod at full speed, throttled (cluster) | 300,000 lines written in about 2 s: **20,650 stored + 248,883 discarded** in one run (**30,467 unaccounted at sampling** — the two counters were read at different times while the buffer still held records, so this is not a reconciled total), and **8,444 + 291,556 = 300,000 exactly** in another. Collector 102 MiB, 588 m CPU, no restart. The trusted pod kept 300 of 300, but wrote **before** the burst, so this is not simultaneous fairness. The measured sink buffer was 100,000 events, not the 500,000 of §3, so 102 MiB is not that buffer's worst case |
 | Store restart on a retention change, 1 GiB store | 2.6 s / 3.7 s without an answering endpoint; healthy at 3.0 s / 4.6 s |
-| The heartbeat through the collector's pipeline | Docker: stored (4 in 8 s, 8 in 16 s) and found by the page's query. Cluster: **0 in every phase, cause not found**; check L09 |
+| The heartbeat through the collector's pipeline | Docker: stored and found by the page's query (4 in 8 s, 8 in 16 s at a 2 s interval; author-reported from the Docker run). On the cluster: **0 in every phase, cause not found**; check L14 |
+
 
 **Ingest is `glob_minimum_cooldown_ms: 1000` and this is a product setting.** The
 source rescans for new files once a second; that delay is also how long a new
@@ -575,7 +670,7 @@ is stated rather than fixed.
     The pod keeps `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`,
     `seccompProfile: RuntimeDefault`, a read-only `/var/log/pods` mount, and
     exactly **two** writable/host mounts: `/var/log/pods` read-only and the
-    checkpoint directory `/var/lib/lifemodel-logs-collector` read-write (L12
+    checkpoint directory `/var/lib/lifemodel-logs-collector` read-write (L13
     asserts both, with their modes).
   What this exception is *not*: no `privileged: true`, no added capability, no
   host network, no host PID, no Docker socket. The namespace holds one workload,
@@ -648,15 +743,21 @@ the modules themselves so that the shape carries meaning.
    slot's `{session}` placeholder, ADR-013), so the two failure lines at
    `loader/src/model-gateway-app.ts:850` and `:886` gain
    `conversation_id: <the header value, or absent>`. No new header on the wire.
-4. **`conversation_id` reaches the core's turn lines, as that exact name.** The
-   mixin at `src/core/logger.ts:109` copies context keys onto every line
+4. **`conversation_id` reaches the core's turn lines, as that exact name (N11).**
+   The mixin at `src/core/logger.ts:109` copies context keys onto every line
    unchanged, so adding `conversationId` would emit `conversationId` — a field
    the collector does not read (measured: a camelCase `conversationId` produces
-   no `conversation_id`). The change is therefore explicit: `TraceContext`
-   (`src/core/trace-context.ts`) gains `conversationId`, set where a turn's
-   signal is claimed (the conversation is the signal's `recipientId`), and the
-   mixin maps it to the emitted key **`conversation_id`**, beside its other
-   keys. One assignment puts it on the turn's model calls, tool results,
+   no `conversation_id`). The change is explicit: `TraceContext`
+   (`src/core/trace-context.ts`) gains `conversationId`, and the mixin maps it to
+   the emitted key **`conversation_id`**. Which conversation: **the one cognition
+   runs the turn for**, resolved by the same rule cognition uses, not the raw
+   signal recipient. A reply carries its recipient, but a proactive signal
+   (`thought`, `contact_urge`, a reminder) has none, and
+   `src/layers/cognition/processor.ts` then falls back to the primary recipient.
+   The id is therefore set where the turn's recipient is settled and the trace
+   context is established, before the turn's work, so a recipient-less turn is
+   logged under the same conversation the chat shows. L02 includes a
+   recipient-less, non-user trigger so the two rules cannot drift apart. One assignment puts it on the turn's model calls, tool results,
    warnings and outcome lines; a tick-level context has none, the same rule
    `triggerType` already follows. The check sends real logger output through the
    collector's VRL (L02), not six hand-written lines.
@@ -687,21 +788,22 @@ the modules themselves so that the shape carries meaning.
    type", exactly O1's words, and never carries a model's text. Check L03 runs a
    non-2xx marker and a refused 2xx marker through the real core and gateway,
    with the capture on and off, and searches every stored log.
-6. **Terminal failure is `error`; a retried attempt stays `warn` (F6).** The two
-   gateway failure statements call `logger.warn` today
-   (`model-gateway-app.ts:850`, `:886`), so a failure that ended the request
-   would be stored as `warn` and the owner's `level=error` filter would miss it.
-   The change is at those call sites: the line logged when **no retry remains**
-   — the one after the failover loop for a final slot failure, and the one in
-   the outer catch that returns the caller's error — becomes `error`; a line
-   logged for an attempt that will be retried on another slot stays `warn`. The
-   two statements are reachable from three paths — the per-slot failure in the
-   loop, the outer catch for a non-retryable code (401/403/4xx other than 429),
-   and the task-authorization refusal — and the first two end the request. The
-   per-slot line is `error` when the loop has no slot left after it and `warn`
-   otherwise; the core's own `'🤖 LLM request failed'` line (`src/llm/provider.ts:519`)
-   is already `error` and stays so. Check L04 asserts the level at these call
-   sites with an exact failure scenario.
+6. **Severity comes from the request's outcome, not from the slot's position
+   (F6, N7).** The gateway decides `error` or `warn` **after** it knows whether
+   the request is over: retry eligibility (the code's class, `signal.aborted`)
+   and reserve availability are settled first, and one **final gateway record**
+   is written for the request with the outcome's level — `error` when the request
+   ends in failure at any slot, `warn` only for an attempt that will really be
+   retried on another slot. That replaces "the per-slot line is `error` when the
+   loop has no slot left", which misclassified two real cases: primary returns a
+   non-retryable 400 while a reserve is configured (logged `warn`, then thrown
+   without retry), and primary returns 500 with **no** reserve configured (the
+   loop breaks, and the outer catch suppresses its own line because the failure
+   was already logged). The terminal record is written even when the same
+   failure was already logged as a retried attempt, so a request that ends is
+   always findable by `level=error`. The core's own `'🤖 LLM request failed'`
+   line (`src/llm/provider.ts:519`) is already `error` and stays so. L04 covers
+   both cases above and asserts the final gateway record, not only the core's.
 
 
 ## Consequences
@@ -729,12 +831,14 @@ the modules themselves so that the shape carries meaning.
   write stop does not stop merges (§5). With the 5 GiB default the design
   reserves 2.5 GiB beside it; below that, a merge can take free space below the
   margin and Postgres then writes into a shrinking disk. The store stops first,
-  the page says so, and the alarm fires near the margin — that is the whole
-  containment.
-- **A task pod cannot exceed the throttle, and a throttled line is a gap the page
-  shows.** A trusted module is never throttled: a fast trusted writer can still
-  fill the disk as fast as the collector can store, which is why the margin is
-  the second line and not the throttle.
+  the page says so, and the alarm fires near the margin. That is a warning, not a
+  boundary: the disk is the owner's decision.
+- **The throttle is an event count, and a throttled pod's loss is reported as
+  `input` and `accepted` per window, or `unknown`.** It does not bound bytes: a
+  task writing large lines is not held to any size, and the collector still reads
+  each discarded line. A trusted module is not throttled at all, so a fast
+  trusted writer fills the disk as fast as the collector can store. Neither the
+  throttle nor the margin is containment; the disk is the owner's decision.
 - Measured cost: collector 45–102 MiB RSS (26 pods idle; 102 MiB through a
   150,000-line/s burst); store 46 MiB right after a start with 5.3 GiB of data,
   451–757 MiB while ingesting, up to 3.2 cores while merging on 4 CPUs. Disk: 5.3
@@ -765,7 +869,7 @@ the modules themselves so that the shape carries meaning.
 | VictoriaLogs's retention and read-only semantics: at least the two last days are kept whatever the byte bound says; a full filesystem stops writes with 429 and the store keeps serving reads; merges keep running and need temporary space | a version change to those semantics. The pin is a digest; L05/L06 fail if they move |
 | A `local-path` PVC is a directory on the node's filesystem and reserves nothing | a storage class that enforces quotas, or a node where the storage path is a separate filesystem. Then L05's margin measures the wrong filesystem |
 | The store's `vl_free_disk_space_bytes` and `vl_storage_is_read_only` describe the filesystem the store writes to | a deployment where the data path is a bind mount of another filesystem. Then the margin and the page's gauges must read the volume |
-| An instance's disk size is unspecified, so the margin (2.5 GiB) is a default the owner can raise from the settings page | a disk small enough that 2.5 GiB sits below kubelet's 16 % GC threshold; then images are collected before the store stops (§5), and the byte bound is what to lower first |
+| An instance's disk size is unspecified, so the margin (2.5 GiB) is a default; it sits below kubelet's 16 % image-GC threshold on any filesystem larger than about 16 GiB, so images may be collected before the store stops | a filesystem of roughly 16 GiB or less, where the store stops first; the relation between the margin and the GC threshold is part of the open storage decision (§5, Open) |
 | The gateway's `x-lifemodel-session` header carries the conversation on every model call the core makes | a new caller of the gateway that sends none; its failures then have no conversation, which is what the current code already does |
 
 
@@ -779,19 +883,19 @@ that runs each is named. No check may pass on a fixture that cannot fail.
 | ID | Requirement / origin | Check and fixture |
 | --- | --- | --- |
 | L01 | Every workload and container on the node is collected, including the new log workloads and the platform's own; a pod with no metadata label is visible as `module=unknown` with its `pod` and `namespace` (F14) | `WALK-LOGS-ALL`: build the expected inventory from the cluster (`kubectl get pods -o jsonpath` over every namespace, plus the collectors and the store themselves), plant one identifiable line per container, then compare **by name** — every expected pod/container has its record, every record names an expected one, and `module` matches the label chain. A namespace-count check is kept as an additional check, never the oracle. Repository part: the ServiceAccount grants only `get/list/watch` on pods, namespaces and nodes |
-| L02 | The record contract of §2, sent through the **real** logger and the **real** VRL (F4, F5) | `tests/unit/logs-record-shape.test.ts`: run a pino logger built by `createLogger` with a trace context carrying `conversationId`, feed its stdout line into the collector's VRL with the pinned `vrl` binary, and assert `conversation_id`, `module`, `level`, `stream`, `untrusted` and the promoted `error_type`/`reason_*`. Fixtures cover every level (pino 10–60 and the words incl. `err`), a coloured pretty line, a malformed JSON line, a line with no level, a forged `module`/`level`, and a `lifemodel-motor` line (no promoted fields). Passing here requires the snake_case mapping of §9 point 4 |
+| L02 | The record contract of §2, sent through the **real** logger and the **real** VRL (F4, F5, N11) | `tests/unit/logs-record-shape.test.ts`: run a pino logger built by `createLogger` through the real turn path, feed its stdout line into the collector's VRL with the pinned `vrl` binary, and assert `conversation_id`, `module`, `level`, `stream`, `untrusted` and the promoted `error_type`/`reason_*`. Fixtures: a reply trigger **and a recipient-less, non-user trigger** (`thought`), which must log under the primary recipient's conversation id — the same rule cognition uses; every level (pino 10–60 and the words incl. `err`), a coloured pretty line, a malformed JSON line, a line with no level, a forged `module`/`level`, a `lifemodel-motor` line (no promoted fields) |
 | L03 | No value from an upstream response body reaches any stored log (F2) | `WALK-LOGS-MARKER`: a 32-character marker in a non-2xx response body and another in a refused 2xx body, driven through the **real core and gateway**, with the exchange capture **off** and then **on**; then a text search for each marker over the whole store, and the same search over every module's records. Assert: absent with the capture off, present only in the capture with it on, and the failure line carries `error_type` with `reason_check/path/got`. Repository part: `tests/unit/model-gateway.test.ts` asserts the response envelope has no `message`, and that the core's provider logs and errors carry no body text |
-| L04 | A terminal gateway failure is stored as `error`, a retried attempt as `warn` (F6) | `WALK-LOGS-LEVEL`: force a non-retryable 4xx and a final 5xx with a second slot configured, then assert the stored record for the request that ended is `level=error` and the record for the attempt that failed over is `warn`. Repository part: `tests/unit/model-gateway.test.ts` asserts the level of the exact call sites of §9 point 6 |
-| L05 | The write stop holds at the margin on the **shared** filesystem, with another store committing through it, and writes resume without a restart (F1, F8) | `WALK-LOGS-MARGIN`: one filesystem, a Postgres pod committing every 200 ms, the store with the default margin, then an incompressible flood until refusals. Assert: no failed commit; refusals are 429 with no panic and no restart; reads keep answering; the lowest free space (1 s samples) is reported and the deepest point below the margin is inside the stated figure for the store's size; deleting an unrelated filler file makes writes accept again with no restart. Measured on the prototype: 41 MB under the margin at a 0.63 GB store, 46 s under, resume `insert=200`, restarts 0, Postgres 0 → 913 rows |
+| L04 | A request that ends in failure is stored as `error`, an attempt that will be retried as `warn` (F6, N7) | `WALK-LOGS-LEVEL` and `tests/unit/model-gateway.test.ts`, four cases: primary 500 with **no reserve** (must end in a final `error` record); primary 400 with a **reserve configured** (non-retryable, must end in `error`, not `warn`); primary 500 with a reserve that succeeds (the attempt is `warn`, and there is **no** terminal error record); primary 500 with a reserve that also fails (terminal `error`). Each asserts the final gateway record for the request, not merely the core's |
+| L05 | The margin's write stop on the **shared** filesystem, with another store committing through it, and the throttle's behaviour (F1, F8, N3) | `WALK-LOGS-MARGIN`: one filesystem, a Postgres pod committing every 200 ms, the store with the default margin, then an incompressible flood until writes stop. Assert: no failed insert; the store answers 429 (read from the response, not only from a broken pipe) with no panic and no restart; reads keep answering; the lowest free space at 1 s and the deepest point below the margin are reported for the store's size, and a merge's overshoot is recorded with the merge counters; deleting an unrelated filler makes writes accept again with no restart. Then, in the same walk, the throttle part: a task pod at full speed **concurrently with a trusted writer**, and a second task pod writing **20 KB lines**, asserting the trusted writer loses nothing, the throttled pods' `input` and `accepted` window records reconcile, and large lines are admitted at the event rate — which is reported as the limit, not as a byte bound. Measured on the prototype: 41 MB under the margin at a 0.63 GB store, 46 samples under it, resume `insert=200`, restarts 0, Postgres 0 → 913 rows |
 | L06 | Retention: the byte bound drops oldest day partitions first, and the age bound applies independently | `WALK-LOGS-BOUND`: 300 MiB byte bound, 600 MiB of today (no eviction), a 200-record canary 10 days old, a 0.7 GiB flood across 10 days (canary and older days gone, today kept), then a *separate* run with only `retentionPeriod` shortened and no byte pressure (the older day is gone and nothing else). Measured on the prototype for the first three |
-| L07 | What a collector crash loses (F10) | `WALK-LOGS-CRASH`: with the store down, 20,000 numbered lines, the checkpoint on the node; then `kill -9` the **vector process** by its host pid (`k3s crictl inspect`) while the buffer's size gauge is non-zero and the source's received counter is above zero — if either is zero the run prints `TEST NOT VALID` and fails rather than pass. Then recovery, and count missing and duplicate lines, and the container's restart count. **Not measured yet**: the run that tried it never reached the buffer edge, so the ADR states only the mechanism (checkpoint advances on delivery; memory buffer lost) |
-| L08 | The setting applies through the ConfigMap mapping, a durable desired revision, and idempotent reconcile (F3, F7) | `WALK-LOGS-SETTING`: change 14 d → 7 d, 7 d → 14 d, then crash the loader after the ConfigMap write and before the annotation (both orders), and a repeated identical PUT. Assert: the store's `/flags` holds the desired values (which requires `-envflag.prefix=VL_`); the page says `applied` only when `observedGeneration` and a Ready pod of that template and `/flags` all agree, `pending` otherwise, and the revision in the store matches `logs.json`; a first install boots from the defaults ConfigMap with the loader's ConfigMap absent (`optional: true`); a check asserts the Deployment declares no retention argument and the release manifest does not declare the revision annotation. Measured on the prototype: env mapping (`/flags` in three configurations), and 2.6/3.7 s without an endpoint, healthy at 3.0/4.6 s |
+| L07 | What a collector crash loses, at the buffer's edge (F10, N10) | `WALK-LOGS-CRASH`: with the store down, write numbered lines **until the sink's buffer is at its configured maximum** (the run waits for `vector_buffer_size_events` to reach `vector_buffer_max_size_events`, with enough input to fill it and the source's received counter well above it); if that state is not reached the run prints `TEST NOT VALID` and **fails**. Then `kill -9` the **vector process** by its host pid (`k3s crictl inspect` — pid 1 means nothing was killed, which also fails), recover, and count missing and duplicate lines and the restart count. The acceptable outcome is stated, not judged afterwards: every line not yet rotated away by the kubelet is delivered **at least once** and no line is lost that was still in `/var/log/pods`; lines the kubelet has rotated away may be lost, and duplicates are allowed. If a run loses a line that was still in the kubelet's files, the guarantee changes to "delivered lines are never corrupted" and the design does not claim more. An unsaturated crash is a separate, informative case, never a substitute |
+| L08 | The setting applies through the ConfigMap mapping, a durable desired revision, idempotent reconcile, and the admission lists (F3, F7, N6) | `WALK-LOGS-SETTING`: change 14 d → 7 d, 7 d → 14 d, crash the loader after the ConfigMap write and before the annotation (both orders), and repeat an identical PUT. Assert: `GET /flags` through the adapter holds the desired values (which requires `-envflag.prefix=VL_`); `applied` only when the Deployment's `observedGeneration` has caught up, `updatedReplicas`/`availableReplicas` equal the replicas, the pod's revision annotation equals `desiredRevision`, and the flags agree — `pending` with a reason otherwise; a first install boots from the defaults ConfigMap with the loader's ConfigMap absent (`optional: true`). Rendered-manifest tests assert both admission ConfigMap lists admit `lifemodel-logs-settings` for the loader's create **and** update and that another identity is refused, that the Deployment patch is clamped to the two annotation maps, that the Deployment declares no retention argument, and that the release manifest does not declare the revision annotation. Measured on the prototype: the env mapping alone (`/flags` in three configurations) and 2.6/3.7 s without an endpoint, healthy at 3.0/4.6 s |
 | L09 | A log step does not gate the platform's readiness (F11) | `WALK-LOGS-WAIT`: on the deployed build, a root Kustomization at `wait: true` over a child at `wait: false` whose pod cannot start (a bad image) and one healthy neighbour child; assert the root is Ready and the page shows the failure, and that the same fixture at `wait: true` keeps the root NotReady. **Not measured**: the prototype's own Flux fixture did not reconcile its children (`ReconciliationFailed` on all three, with the source itself `Ready`), so `wait: false` is unproven. The fixture mistake is named in the report; this check runs in the first stage that deploys the collector |
 | L10 | The permitted egress set is exactly DNS, TCP 6443 to any address, and the store (F12) | `WALK-LOGS-EGRESS`: a probe pod carrying the collector's labels, a witness pod outside the policy, and listeners on another namespace's pod. Assert open: the store's 9428, DNS 53, the API Service 443, the node address 6443, **and another namespace's pod on 6443**; assert refused: that pod on 8080 and 443, a public resolver on 53, a public host on 443. Measured on the prototype exactly as asserted |
-| L11 | The logs routes refuse without a session and exist only on the loader's host — and the existing routes keep their matrix (F-route, GET auth) | `tests/unit/loader-routes.test.ts`: the table names every method/path pair — `GET /api/state`, `GET /api/model`, `GET /api/model-status`, `GET /api/model-capture`, `GET|PUT /api/workbench-source`, `GET /api/workbench-status`, `PUT /api/model/primary`, `PUT|DELETE /api/model/reserve`, `GET /api/settings`, `PUT /api/settings/<key>`, `POST /api/setup|login|password|logout|onboarding/device`, `GET /logs`, `GET /api/logs`, `GET /api/logs/modules`, `GET|PUT /api/logs/settings` — and for each: another host 404, wrong method 405, **no session refused on GET too**, `PUT` without CSRF or with a wrong Origin 403, `no-store`/CSP/`nosniff` present. The matrix must cover the routes that exist today, not only the new ones |
+| L11 | Every route keeps its matrix, stated per route and authentication state, and every new logs route needs a session (F-route, GET auth, N8) | `tests/unit/loader-routes.test.ts`: the table names every method/path pair — `GET /api/state`, `GET /api/model`, `GET /api/model-status`, `GET|PUT /api/model-capture`, `GET|PUT /api/workbench-source`, `GET /api/workbench-status`, `PUT /api/model/primary`, `PUT|DELETE /api/model/reserve`, `GET /api/settings`, `PUT /api/settings/<key>`, `POST /api/setup|login|password|logout|onboarding/device`, `GET /logs`, `GET /api/logs`, `GET /api/logs/modules`, `GET|PUT /api/logs/settings` — with the authentication state each one allows: `GET /api/state`, `POST /api/setup` and `POST /api/login` answer **without** a session (first start), everything else under `/api/` requires one, and **every logs route requires one on every method, `GET` included**. For every pair: another host 404, wrong method 405, `PUT` without CSRF or with a wrong Origin 403, `no-store`/CSP/`nosniff` present. An unauthenticated bootstrap (state → setup or login) is asserted to keep working |
 | L12 | No listed file grows | `npm run check:file-sizes`: `loader/src/http.ts` ≤ 1,512 lines and `web/loader/src/App.tsx` ≤ 1,310, every new file under 800 |
 | L13 | The collector's namespace is the only `privileged` one, it holds exactly the collector, and its mounts are exactly the two named paths with their modes (F15) | `tests/unit/platform-pod-security.test.ts`: every namespace manifest in `deploy/platform` is `baseline` or `restricted` except `lifemodel-logs`, which is `privileged` and holds exactly the DaemonSet; the collector container has no `privileged`, no added capability, `readOnlyRootFilesystem`, `runAsUser: 0`, all capabilities dropped, and exactly two `hostPath` volumes — `/var/log/pods` read-only and `/var/lib/lifemodel-logs-collector` read-write. A persistent checkpoint is required, so a check that would remove it fails |
-| L14 | The page never shows a healthy page for a stopped collector (F9) | `WALK-LOGS-FRESH`: stop the collector with the store healthy, then make the store read-only. Assert: within 90 s the page shows `collection stopped N minutes ago; results may be incomplete` above the results, and names `read-only` in the store case; restarting the collector returns the age below the threshold within one heartbeat period. **Not measured end to end**: Docker stored the heartbeats and the page's query found them; on the cluster two runs stored 0 in every phase, for a cause not found. This check runs in the first stage that deploys the collector |
+| L14 | The page never shows a healthy page for a stopped collector, and says when it does not know (F9) | `WALK-LOGS-FRESH`: stop the collector with the store healthy, then make the store read-only. Assert: within 90 s the page shows `collection stopped N minutes ago; results may be incomplete` above the results, and names `read-only` in the store case; restarting the collector returns the age below the threshold within one heartbeat period. Also assert the state **before any heartbeat has ever been stored**: the page shows `collection status unknown` rather than a healthy or an empty answer; and that a stalled pod-log collection with a healthy heartbeat is visible — the heartbeat is per collector, so the check kills the file source's reading (an unreadable `/var/log/pods` mount for one run) and asserts the page still says the results may be incomplete. **Not measured end to end**: Docker stored the heartbeats and the page's query found them; on the cluster two runs stored 0 in every phase, for a cause not found. This check runs in the first stage that deploys the collector |
 | L15 | Paging is total and latency is inside the page's deadline (F13) | `tests/integration/logs-paging.test.ts` and `WALK-LOGS-LATENCY`: a fixture with 5,000 records at one timestamp and 300 byte-identical lines at another, paged in 250-record pages through the adapter, quiet and with ingest running; assert every record exactly once, no duplicate, and the same page twice returns the same bytes; then 40 queries per filter with the real form at the store's bound, p95 under 2.5 s (measured: 81–176 ms at 5.38 GB) |
 
 ## The principles this serves
@@ -818,9 +922,10 @@ that runs each is named. No check may pass on a fixture that cannot fail.
   `untrusted=true`. Its `module`, `namespace`, `pod` and `untrusted` cannot be set
   from the line, and it cannot create a promoted failure field (§2, measured). It
   *can* choose its `level` and `conversation_id`, so every task record is marked
-  and a conversation filter's answer marks them; and it is rate-limited per pod so
-  a flood cannot take the shared filesystem (§5). Nothing about a task's line
-  grants it anything: the page is the loader's, behind its login.
+  and a conversation filter's answer marks them. Its write rate is limited per pod
+  by an event count (§5) — an event count, which does not bound bytes, and does
+  not bound the disk. Nothing about a task's line grants it anything: the page is
+  the loader's, behind its login.
 
 ## What it extends and replaces
 
@@ -877,14 +982,17 @@ stage that first deploys the collector:
 
 ## Open, and what this record does not decide
 
-- **The 5 GiB byte bound's safety is the owner's decision.** The design reserves
-  a 2.5 GiB margin beside it (§5), and states what is left unprotected: a merge
-  larger than the margin takes the shared filesystem below it, and the other
-  stores on it then write into a shrinking disk. If an instance's disk cannot
-  spare 2.5 GiB, the byte bound is the thing to lower, and that choice is theirs.
+- **The storage boundary is the owner's open decision.** Two things are true
+  today and are not fixed here: the margin stops inserts but not the merge
+  allocations that can take the shared filesystem below it, and the 2.5 GiB
+  default sits below kubelet's 16 % image-GC threshold on any filesystem larger
+  than about 16 GiB. A bounded allocation for the store's data *and* merge
+  temporary space is the shape of a fix; which boundary, and how the margin and
+  the image-GC threshold relate, is for the owner to decide. Until then this ADR
+  claims no containment and no reservation.
 - **The merge margin is a hypothesis from two store sizes**, the larger of which
-  was still falling when its run ended. L05 re-measures it; if a third size
-  exceeds half the bound, the number changes and the design does not.
+  was still falling when its run ended, so no ratio from it bounds the next
+  merge. L05 re-measures it, and the open storage decision above may replace it.
 - **Not measured, and named so acceptance does not imply otherwise:** what a
   collector crash loses at the buffer edge (L07); the freshness signal end to
   end on a cluster (L14, where two runs stored no heartbeat for a cause not
@@ -899,7 +1007,8 @@ stage that first deploys the collector:
 
 ## Appendix: how each measured value was produced
 
-Two places. On a throwaway single-node k3s, the proof manifests live in
+Two places. On the test VM's single-node k3s — the real platform running, read
+only outside the proof namespaces — the proof manifests live in
 `/var/lib/logs-proof/<name>` during a run and are thrown away; the scripts that
 produce them are collected beside this design, not in the repository, and this
 record refers to the checks, not to them. The parts that need no cluster ran in
