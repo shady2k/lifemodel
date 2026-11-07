@@ -12,7 +12,13 @@ are marked untrusted; retention is a loader setting, 14 days or 5 GiB, whichever
 comes first; the upstream `errorExcerpt` leaves the logs and stays in the
 exchange capture; logs are read like conversations; nothing leaves the machine.
 
-This revision answers the design review of 2026-11-07 (`F1`–`F15`). Every
+This revision answers two model reviews: the first of 2026-11-07 (`F1`–`F15`)
+and the second, the **last model review** (gpt-6.1-sol, at `cd9cc6b8`, findings
+`N1`–`N11` and its evidence audit), whose findings are answered in the text that
+follows. The storage decision the second review left open was then taken by the
+owner — a volume of its own for logs (§5) — and that section was verified by the
+coordinator against the installers and a Docker measurement, not by another model
+review. Every
 number below is measured unless it is marked *inherited* (taken from an existing
 document or an earlier decision) or *not measured*. Measurements come from two
 places, and each figure says which: the test VM's single-node k3s, where the real
@@ -495,17 +501,31 @@ store's namespace keeps its level and only the collector's namespace needs the
 *How the host creates it, in both installers:*
 - `deploy/nixos/default.nix` gains `services.lifemodel.logsVolumeSize` (default
   `"8G"`) and a `fileSystems."/var/lib/lifemodel-logs"` entry whose device is the
-  image file with the `loop` option, plus a `systemd.services` unit ordered
-  before that mount which creates the image with `fallocate -l <size>`, formats
-  it once with `mkfs.ext4` and leaves an existing one alone. `e2fsprogs` and
+  image file with the `loop` and **`nofail`** options — a log volume must never
+  keep the machine from booting — plus a `systemd.services` unit ordered before
+  that mount which creates the image with `fallocate -l <size>`, formats it once
+  with `mkfs.ext4`, mounts nothing itself and leaves an existing image alone. The
+  unit also creates `/var/lib/lifemodel-logs/data` (the PV's path, § above). It is
+  ordered `before = [ "k3s.service" ]` only as a best effort: with `nofail`,
+  k3s starts whether or not the mount succeeded, and the store pod waits in
+  `ContainerCreating` instead of the host waiting in boot. `e2fsprogs` and
   `util-linux` are in the unit's `path` (`check-k3s-commands.mjs` covers that
   list, as it already does for the resolv and DNS units).
-- `scripts/install.sh` does the same three steps (`fallocate`, `mkfs.ext4`,
-  `mount -o loop`) and installs the same unit, with `--logs-volume-size SIZE`
-  (default `8G`); `--render-only DIR` prints the unit and the fstab/systemd
-  fragments it would install, which is the mode `flake check` renders.
+- `scripts/install.sh` does the same steps (`fallocate`, `mkfs.ext4`,
+  `mount -o loop`, `mkdir data`) and installs the same unit with
+  `--logs-volume-size SIZE` (default `8G`); `--render-only DIR` prints the unit
+  and the systemd fragments it would install, which is the mode `flake check`
+  renders. On a machine **already installed**, the same command is a no-op for
+  k3s and the platform and adds the volume: it creates the image if absent,
+  mounts it, and the store's pod binds on its next retry. After a reboot the unit
+  runs before the mount and the mount's `nofail` keeps a broken volume from
+  blocking boot; nothing has to be re-run by hand. **An upgrade of an existing
+  instance adds the volume with no compatibility code**: the artifact's PV is new,
+  the PVC is new, and the volume directory starts empty, so a store that had never
+  run simply begins with no history.
 - `flake check` gains an assertion on both rendered outputs: the mount point, the
-  image path, the size option reaching both, and the unit's binary list.
+  `data` subdirectory, the image path, `nofail`, the size option reaching both,
+  and the unit's binary list.
 
 *The file is a reservation, not a sparse claim.* `fallocate` allocates the blocks
 up front, so the host's free space really drops by the size of the volume; a
@@ -533,18 +553,41 @@ installer option, or on NixOS by changing the option, and the installer grows th
 image and the filesystem. That is stated on the page next to the retention
 fields.
 
-*No volume, no gate.* If the volume is missing the PVC stays unbound, the store
-pod stays Pending, and nothing else is affected: the two log steps run at
-`wait: false` (§1), the platform starts, and the logs page answers
-`unavailable — the log store is not ready` with the reason and the freshness line
-(§4). The collector keeps running and keeps its checkpoint on the host; when the
-volume appears, the store starts and the buffered lines arrive.
+*The guarantee cannot vanish silently (the failure this section exists to
+prevent).* The PV object is in the signed artifact, so a PVC created against it
+**binds even when the host never mounted anything** — and then the store would
+start, write to an ordinary directory on the root filesystem, and fill the disk it
+shares with Postgres while reporting nothing wrong. The PV's path is therefore a
+**subdirectory that only exists inside the mounted filesystem**,
+`/var/lib/lifemodel-logs/data`, created by the host unit *after* it creates the
+filesystem and mounts it. With no mount, kubelet cannot mount the volume, the store
+pod stays in `ContainerCreating`, and **not one byte** reaches the root filesystem.
+What the page says then: `unavailable — the log store's volume is not mounted` (the
+store never answers `/health`), with the freshness line above the results (§4), and
+nothing else about the platform changes: both log steps run at `wait: false` (§1)
+and the platform starts. The collector keeps running with its checkpoint on the
+host; when the unit mounts the volume, kubelet retries the mount, the pod starts,
+and the buffered lines arrive with no restart of anything else.
+
+*The PV is retained, and a released PV does not rebind by itself.* The PV sets
+`persistentVolumeReclaimPolicy: Retain`, so deleting the claim never deletes the
+data. But a `Retain` volume whose claim is gone goes to `Released` and stays
+bound to the old claim's UID; re-applying the same manifest does **not** rebind
+it. The design therefore handles it rather than assuming it: the store's PVC names
+the PV by `volumeName`, and the artifact's step is applied through a small
+pre-flight in the loader's first-start plan that, when the PV is `Released` and
+no claim of the current generation exists, clears the stale
+`spec.claimRef` — the one supported way to make a retained volume claimable
+again — and then lets the claim bind. Without that, a re-install would leave the
+store Pending forever, which is the state the page names.
 
 **The bound, the volume and what a flood reaches.** The retention byte bound
 (`maxBytes`) and the volume are two different limits, and the page keeps them
-consistent: it **refuses a byte bound that does not fit the volume** — bound plus
-the margin plus the two-day floor above the volume's size — and says which
-numbers do not fit. The store keeps at least the two newest days whatever the
+consistent with one rule it can actually evaluate: it **refuses a byte bound
+whose value plus the margin exceeds the volume's size**, and says which numbers
+do not fit. It cannot predict the two-day floor — that is the store keeping the
+newest two days whatever the bound says — so the floor can still take usage above
+the bound, and then the volume is what holds it, not the setting. The store keeps at least the two newest days whatever the
 bound says (measured: a 300 MiB bound let usage reach 444 MiB), so **the volume,
 not the byte bound, is the limit a flood actually reaches**: today's incompressible
 flood fills the volume, not the bound. That is the point of giving logs their own
@@ -561,13 +604,17 @@ speed (pinned images):
 | 3 GiB | 2 GiB | 768 MiB | 1.5 GB accepted | 149 MB below (656 MB free, 4.9 % of the volume) | no panic, no restart; 429 read-only; 907,600 rows still readable; store `running` |
 | 6 GiB | 5 GiB | 1.5 GiB | 5.5 GB accepted in 178 s | 548 MB below (1.06 GB free, 8.9 % of the volume) | no panic, no restart; reads fine (1,776,800 rows); merges freed space from 1.06 GB back to 1.49 GB while read-only |
 
-So on a dedicated filesystem the store **refuses cleanly**, a merge does not hit
-ENOSPC, and it **does not stay stuck**: merges free space and the store answers
-again once the flood stops. The earlier round's panic was on a *shared* disk
-whose whole filesystem filled; that is the failure this volume removes. The 25 %
-share is a hypothesis from these two sizes (it absorbed the deepest undershoot
-with about 3× room at 3 GiB and 3× at 6 GiB), and L05 re-measures at the sizes the
-owner runs.
+So on a dedicated filesystem the store **refuses cleanly**, and in these two runs
+at these sizes a merge did not hit ENOSPC: merges freed space, and the store
+answered again once the flood stopped. **What separates these runs from the first
+round's panic is the margin, not the volume.** The first round did use a volume of
+its own — a 574 MiB ext4 loop device, 1.5 GiB offered — and it panicked with
+`FATAL: cannot write ... no space left on device` because nothing stopped the
+writes before the filesystem filled; the store then restarted and served reads
+with 429 writes. The volume alone is not the guarantee; the margin inside it is
+what makes the stop clean. The 25 % share is a hypothesis from these two sizes (it
+absorbed the deepest undershoot with about 3× room at 3 GiB and 3× at 6 GiB), and
+L05 re-measures at the owner's size.
 
 **Why 8 GiB by default.** The 5 GiB bound, plus a 25 % margin (2 GiB), plus the
 room a merge needs for a 5 GiB store (measured 450 MB at that size in the shared
@@ -603,13 +650,37 @@ store's data and its merge temporary space cannot leave it, and the host has
 already given up that space, so a flood of logs cannot take space that Postgres,
 k3s or the loader need. That is the whole claim, and it is now true by
 construction rather than by a probability. What the volume does not do: it does
-not stop the store from filling *its own* volume (that is what it is for), it does
-not protect the kubelet's rotated log files and the collector's checkpoint on the
-host (bounded above), and it does not bound a merge *inside* the volume — that is
-the margin's job, and if a merge there ever exceeds it, the store stops and the
-page says so. A store that were left full for good would keep answering reads and
-refusing writes; the page names that state, and the owner's remedy is the
-retention setting or a larger volume at install.
+not stop the store from filling *its own* volume (that is what it is for), it
+does not protect the kubelet's rotated log files and the collector's checkpoint
+on the host (bounded above), and it does not bound a merge *inside* the volume —
+that is the margin's job, and if a merge there ever exceeds it, the store stops
+and the page says so.
+
+**When today's flood has filled the volume, what actually frees space (and what
+does not).** This is the design's sharpest remaining failure, stated plainly.
+The store keeps the two newest days whatever the byte bound says, so **lowering
+retention frees nothing while the full volume holds only today's and yesterday's
+partitions**: new logs are refused for up to two days, in the moment the owner is
+repairing something. Nothing in the store deletes a current partition on demand:
+`-help` offers `-delete.enable` and the partition-management auth key, and in the
+pinned image (v1.53.0, single node) the `/delete` path answers `unsupported path
+requested: "/delete"` even with the flag on (measured), so there is no supported
+API. The recovery that works was measured here: **stop the store, remove the
+newest day's directory under the data path's `partitions/`, start it again** — it
+opened its storage in 0.017 s, served 0 rows, and accepted writes with 200. So
+the design names it as a `lifemodel doctor` command (not a page feature), running
+with the store scaled to zero:
+
+```
+lifemodel doctor logs drop-partition --date <YYYY-MM-DD>   # stops the store, moves the
+    # directory aside rather than deleting it, restarts the store, reports the space freed
+```
+
+It moves the directory rather than deleting it, so an owner can put it back. The
+page's read-only state names that command. Who can cause it: any writer that is
+not a task pod — the throttle covers `lifemodel-motor` only — so a trusted module
+with a bug, or a task running outside that namespace, can fill the volume with one
+day's lines.
 
 **The untrusted writer is limited by an event count, and that is all it is (N3,
 N5).** The collector applies a `throttle` transform to the untrusted namespace,
@@ -621,8 +692,8 @@ key. This is an **event-count limit** and nothing more:
   large lines gets both throughput and collector work out of proportion to the
   count. That case is stated, not covered: a line larger than the collector's
   `max_line_bytes` is truncated, and there is no byte budget;
-- it does not bound the day's total disk use — the store's byte bound and the
-  margin are the only figures there, and neither is a containment (below);
+- it does not bound the day's total disk use: the volume is what bounds that
+  (below), and the throttle has nothing to do with it;
 - the rate's basis is a task's legitimate output, which is progress lines at a
   few per second; 500/s is a ceiling on events, chosen so a runaway task cannot
   hold a core busy forever, not a size guarantee.
@@ -950,7 +1021,7 @@ that runs each is named. No check may pass on a fixture that cannot fail.
 | L02 | The record contract of §2, sent through the **real** logger and the **real** VRL (F4, F5, N11) | `tests/unit/logs-record-shape.test.ts`: run a pino logger built by `createLogger` through the real turn path, feed its stdout line into the collector's VRL with the pinned `vrl` binary, and assert `conversation_id`, `module`, `level`, `stream`, `untrusted` and the promoted `error_type`/`reason_*`. Fixtures: a reply trigger **and a recipient-less, non-user trigger** (`thought`), which must log under the primary recipient's conversation id — the same rule cognition uses; every level (pino 10–60 and the words incl. `err`), a coloured pretty line, a malformed JSON line, a line with no level, a forged `module`/`level`, a `lifemodel-motor` line (no promoted fields) |
 | L03 | No value from an upstream response body reaches any stored log (F2) | `WALK-LOGS-MARKER`: a 32-character marker in a non-2xx response body and another in a refused 2xx body, driven through the **real core and gateway**, with the exchange capture **off** and then **on**; then a text search for each marker over the whole store, and the same search over every module's records. Assert: absent with the capture off, present only in the capture with it on, and the failure line carries `error_type` with `reason_check/path/got`. Repository part: `tests/unit/model-gateway.test.ts` asserts the response envelope has no `message`, and that the core's provider logs and errors carry no body text |
 | L04 | A request that ends in failure is stored as `error`, an attempt that will be retried as `warn` (F6, N7) | `WALK-LOGS-LEVEL` and `tests/unit/model-gateway.test.ts`, four cases: primary 500 with **no reserve** (must end in a final `error` record); primary 400 with a **reserve configured** (non-retryable, must end in `error`, not `warn`); primary 500 with a reserve that succeeds (the attempt is `warn`, and there is **no** terminal error record); primary 500 with a reserve that also fails (terminal `error`). Each asserts the final gateway record for the request, not merely the core's |
-| L05 | The log volume holds what a flood can do: a full volume with Postgres committing beside it, the store refusing cleanly, and the platform unharmed (F1, F8, N1, N3) | `WALK-LOGS-VOLUME`, on a deployed build with the volume at its install size: a Postgres pod committing every 200 ms on the host's *shared* filesystem and the log volume filled by an incompressible flood at full speed. Assert: the volume's busy percentage is reported and the host's shared filesystem never loses a byte to it; the store answers 429 read from the response, with no panic and no restart; reads keep answering; the store's free space never falls more than **10 % of the volume** below the margin, with the merge counters beside it; the page shows `log volume low` then `read-only`; retention frees space and writes accept again without a restart; and the Postgres commits and the loader's page both continue. Then the throttle part: a task pod at full speed **concurrently with a trusted writer**, plus a task pod writing **20 KB lines**; the trusted writer loses nothing, the throttled pods' `input`/`accepted` windows reconcile, and the event rate is reported as the limit it is. The test VM has about 6 GiB free, so its volume size is an option there, not the default. Measured here on loop-mounted images: 3 GiB volume — 149 MB below a 768 MiB margin, no panic, 907,600 rows readable; 6 GiB volume — 548 MB below a 1.5 GiB margin, no panic, space recovered by merges |
+| L05 | The log volume holds what a flood can do: a full volume with Postgres committing beside it, the store refusing cleanly, and the platform unharmed (F1, F8, N1, N3) | `WALK-LOGS-VOLUME`, on a deployed build with the volume at its install size: a Postgres pod committing every 200 ms on the host's *shared* filesystem and the log volume filled by an incompressible flood at full speed. Assert: the volume's busy percentage is reported and the host's shared filesystem never loses a byte to it; the store answers 429 read from the response, with no panic and no restart; reads keep answering; the store's free space never falls more than **10 % of the volume** below the margin, with the merge counters beside it; the page shows `log volume low` then `read-only`; retention frees space and writes accept again without a restart; and the Postgres commits and the loader's page both continue. Then the throttle part: a task pod at full speed **concurrently with a trusted writer**, plus a task pod writing **20 KB lines**; the trusted writer loses nothing, the throttled pods' `input`/`accepted` windows reconcile, and the event rate is reported as the limit it is. Two failure cases belong to the same walk: **with the host unit disabled so nothing is mounted**, the store must not start (its pod stays `ContainerCreating`), nothing must appear under `/var/lib/lifemodel-logs` on the root filesystem, the page must say the volume is not mounted, and enabling the unit must bring the store up with no other restart; and **with a full volume holding only today's partition**, retention must free nothing and `lifemodel doctor logs drop-partition` must move the day aside, restart the store and let writes accept again. The test VM has about 6 GiB free, so its volume size is an option there, not the default. Measured here on loop-mounted images: 3 GiB volume — 149 MB below a 768 MiB margin, no panic, 907,600 rows readable; 6 GiB volume — 548 MB below a 1.5 GiB margin, no panic, space recovered by merges |
 | L06 | Retention: the byte bound drops oldest day partitions first, the age bound applies independently, and a bound that does not fit the volume is refused | `WALK-LOGS-BOUND`: 300 MiB byte bound, 600 MiB of today (no eviction), a 200-record canary 10 days old, a 0.7 GiB flood across 10 days (canary and older days gone, today kept); then a *separate* run with only `retentionPeriod` shortened and no byte pressure (the older day is gone and nothing else); then the page asked for a byte bound larger than the volume, which is **refused with the numbers**, and one that fits, which is accepted. Measured on the prototype for the first three; the two-day floor above the bound was measured as a 300 MiB bound reaching 444 MiB |
 
 | L07 | What a collector crash loses, at the buffer's edge (F10, N10) | `WALK-LOGS-CRASH`: with the store down, write numbered lines **until the sink's buffer is at its configured maximum** (the run waits for `vector_buffer_size_events` to reach `vector_buffer_max_size_events`, with enough input to fill it and the source's received counter well above it); if that state is not reached the run prints `TEST NOT VALID` and **fails**. Then `kill -9` the **vector process** by its host pid (`k3s crictl inspect` — pid 1 means nothing was killed, which also fails), recover, and count missing and duplicate lines and the restart count. The acceptable outcome is stated, not judged afterwards: every line not yet rotated away by the kubelet is delivered **at least once** and no line is lost that was still in `/var/log/pods`; lines the kubelet has rotated away may be lost, and duplicates are allowed. If a run loses a line that was still in the kubelet's files, the guarantee changes to "delivered lines are never corrupted" and the design does not claim more. An unsaturated crash is a separate, informative case, never a substitute |
@@ -1068,6 +1139,12 @@ stage that first deploys the collector:
   and 6 GiB), where the deepest undershoot was 4.9 % and 8.9 % of the volume.
   L05 re-measures at the owner's size; if a merge exceeds the margin there the
   store stops, the page says so, and nothing outside the volume is harmed.
+- **A volume full of today's lines is refused until someone frees it.** Retention
+  cannot help for up to two days, no supported API deletes a current partition in
+  the pinned image, and the measured recovery is `lifemodel doctor
+  logs drop-partition` with the store stopped (§5). That command is the design's
+  answer; whether it should exist at all, and how large the default volume must
+  be to make it rare, is the owner's call.
 - **Not measured, and named so acceptance does not imply otherwise:** what a
   collector crash loses at the buffer edge (L07); the freshness signal end to
   end on a cluster (L14, where two runs stored no heartbeat for a cause not
