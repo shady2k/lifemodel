@@ -1,0 +1,52 @@
+# The store's own routes (ADR-016 §7). A second platform workload in
+# lifemodel-system inherits none of the loader's permits: this policy is the
+# whole of what the store may do.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: logs-store-access
+  namespace: lifemodel-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: logs-store
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Reader and writer are roles, not a boundary: the collector and the loader
+    # reach the same unauthenticated listener, and no other workload may.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-logs
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: logs-collector
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: loader
+      ports:
+        - protocol: TCP
+          port: 9428
+  egress: []
+---
+# The store connects to nothing. This object is scoped to the store so its
+# empty egress stays true even if a future policy opens a route namespace-wide.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: logs-store-deny
+  namespace: lifemodel-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: logs-store
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []

@@ -1,0 +1,61 @@
+# The collector's only routes (ADR-016 §7): DNS, the platform's inherited TCP
+# 6443 exception and the store. There is no ingress: the kubelet's probes come
+# from the node, not through pod networking.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: lifemodel-logs-default-deny
+  namespace: lifemodel-logs
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: logs-collector-access
+  namespace: lifemodel-logs
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: logs-collector
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # k3s DNATs the API Service to a node address that static manifests cannot
+    # know. TCP 6443 to any address is the platform's inherited exception; the
+    # projected ServiceAccount token authenticates the API calls.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 6443
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: logs-store
+      ports:
+        - protocol: TCP
+          port: 9428

@@ -7,7 +7,13 @@ resources:
   - b-reconciler.yaml
   - c-reconciler.yaml
   - d-reconciler.yaml
+  # Logs are not on the platform's path: both steps depend only on the instance
+  # and run at wait: false, so a broken log pod never gates a platform step
+  # (ADR-016 §1).
+  - logs-store-reconciler.yaml
+  - logs-reconciler.yaml
 
 # Platform order: A0 -> A -> B (CNPG CRDs/operator) -> C (shared state) ->
 # D (the storage module, which reads the database C creates). Each later step
-# declares its dependency in its reconciler.
+# declares its dependency in its reconciler. The log steps stand beside that
+# chain, not in it.

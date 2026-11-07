@@ -1,0 +1,14 @@
+# The retention defaults the store starts from before the loader has ever run
+# (ADR-016 §5). Flux owns this object and never writes it again; the loader's
+# own lifemodel-logs-settings ConfigMap is listed after it in the store's
+# envFrom and wins once it exists. The byte figures are 1.5 GiB and 768 MiB
+# (25 % of the 3 GiB volume) in bytes, which the flag parser accepts.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lifemodel-logs-settings-defaults
+  namespace: lifemodel-system
+data:
+  VL_retentionPeriod: "14d"
+  VL_retention_maxDiskSpaceUsageBytes: "1610612736"
+  VL_storage_minFreeDiskSpaceBytes: "805306368"

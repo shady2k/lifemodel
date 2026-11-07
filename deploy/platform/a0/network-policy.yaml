@@ -90,6 +90,18 @@ spec:
       ports:
         - protocol: TCP
           port: 8081
+    # The loader is the store's only reader: the logs page and its settings
+    # (ADR-016 §4, §7). The collector is the only writer.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: logs-store
+      ports:
+        - protocol: TCP
+          port: 9428
 
     # Model checks may reach public endpoints and RFC1918 LAN Ollama; application validation blocks pod/service and metadata ranges.
     - to:

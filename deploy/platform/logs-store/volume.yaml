@@ -1,0 +1,47 @@
+# The log store's own volume (ADR-016 §5). The host creates and mounts a
+# file-backed ext4 filesystem at /var/lib/lifemodel-logs; the PV's path is a
+# subdirectory that exists only inside that mount. With no mount, kubelet
+# cannot mount the volume and the store pod stays in ContainerCreating, so no
+# byte reaches the root filesystem Postgres, k3s and the loader share.
+#
+# The PV is cluster-scoped and owned by this step: a pruned and re-applied PV
+# rebinds to the same host directory and no log line is lost by a reconcile.
+# The claim names it by volumeName and the volume is retained, so deleting the
+# claim never deletes the data.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: lifemodel-logs
+spec:
+  capacity:
+    storage: 3Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  local:
+    path: /var/lib/lifemodel-logs/data
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        # The platform is one node. A signed static artifact cannot know the
+        # host's hostname, so the affinity names the hostname label's presence
+        # on that sole node rather than a value it cannot render.
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: Exists
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: logs-store
+  namespace: lifemodel-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  volumeName: lifemodel-logs
+  resources:
+    requests:
+      storage: 3Gi

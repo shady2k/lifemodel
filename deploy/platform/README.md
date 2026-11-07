@@ -18,6 +18,14 @@ fails closed per task request until C and the migrations are available. SQL
 and its copied credentials never gate gateway startup or readiness. See
 [ADR-010](../../docs/adr/010-container-generations.md) for the decision.
 
+Two log steps stand beside that chain: `platform-logs-store` applies the log
+store and its own local volume, `platform-logs` applies the collector. Both
+depend only on `platform-instance` and both run at `wait: false`, so a log pod
+that cannot start holds only its own step and never the platform's readiness
+(ADR-016 §1). The collector is the one privileged workload on the platform, in
+its own `lifemodel-logs` namespace; the store runs restricted in
+`lifemodel-system` on a file-backed volume the host mounts (ADR-016 §5, §7).
+
 ## Release images
 
 The signed platform artifact pins the loader (also model gateway and storage),
