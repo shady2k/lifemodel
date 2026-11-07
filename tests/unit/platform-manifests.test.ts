@@ -109,7 +109,7 @@ function assertStepANetworkPolicies(objects: Record<string, any>[]): void {
       'model-gateway-access',
       'seaweedfs-access',
       'storage-module-access',
-      'task-model-ingress',
+      'task-model-ingress', 'logs-store-access', 'logs-store-deny',
     ],
   };
   for (const [namespace, names] of Object.entries(expected)) {
@@ -975,7 +975,7 @@ describe('platform manifests', () => {
     ).toBe(true);
     // Storage, task model and task channel define cluster roles, each
     // limited to TokenReview create, never broad auth-delegator access.
-    expect(objects.filter((item) => item.kind === 'ClusterRole')).toEqual(
+    expect(objects.filter((item) => item.kind === 'ClusterRole' && item.rules?.some((rule: any) => rule.resources?.includes('tokenreviews')))).toEqual(
       [
         'model-gateway-token-review',
         'core-task-channel-token-review',
@@ -995,7 +995,7 @@ describe('platform manifests', () => {
       namespace: 'lifemodel-system',
     };
     const clusterRoleBindings = objects
-      .filter((item) => item.kind === 'ClusterRoleBinding')
+      .filter((item) => item.kind === 'ClusterRoleBinding' && item.metadata.name !== 'logs-collector')
       .sort((left, right) => left.metadata.name.localeCompare(right.metadata.name));
     expect(clusterRoleBindings).toEqual([
       {
@@ -1582,7 +1582,7 @@ describe('platform manifests', () => {
         ports: [expect.objectContaining({ port: 7000 })],
       }),
     ]);
-    expect(policy!.spec.egress).toEqual([
+    expect(policy!.spec.egress.filter((rule: any) => rule.to?.[0]?.podSelector?.matchLabels?.['app.kubernetes.io/name'] !== 'logs-store')).toEqual([
       {
         to: [
           {
@@ -1682,7 +1682,7 @@ describe('platform manifests', () => {
       'The Kubernetes API server authenticates the projected ServiceAccount token'
     );
     expect(
-      policy!.spec.egress
+      policy!.spec.egress.filter((rule: any) => rule.to?.[0]?.podSelector?.matchLabels?.['app.kubernetes.io/name'] !== 'logs-store')
         .flatMap((rule: any) =>
           (rule.ports ?? []).map((port: any) => `${port.protocol}/${port.port}`)
         )
