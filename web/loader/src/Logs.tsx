@@ -254,7 +254,7 @@ export function Logs() {
           {records !== null && records.length > 0 && (
             <>
               <p className="mb-2 text-xs text-muted-foreground">
-                {t('logsRecordCount', { total: records.length })}
+                {t('logsRecordCount', { count: records.length })}
               </p>
               <ul className="divide-y divide-border rounded-lg border border-border bg-card">
                 {records.map((record, index) => {
