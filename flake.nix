@@ -316,6 +316,7 @@
         grep -E 'User: +1000' root.stat
         grep -E 'Group: +1000' root.stat
         debugfs -R 'stat /data' "$image" > data.stat 2>/dev/null
+        grep -E 'Type: +directory' data.stat
         grep -E 'User: +1000' data.stat
         grep -E 'Group: +1000' data.stat
         grep -E 'Mode: +0750' data.stat
