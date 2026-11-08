@@ -1,0 +1,90 @@
+# The log evictor (ADR-016 §5, check L16): new logs displace the oldest ones
+# with nobody acting. A CronJob in the store's namespace, running the loader
+# image's own entry point, so no third vendor image exists for one statvfs, one
+# HTTP call and one rm.
+#
+# One minute is the smallest schedule a CronJob allows, and startingDeadline
+# keeps the schedule alive: with Forbid and no deadline a missed start counts,
+# and after 100 of them the controller stops creating Jobs ("too many missed
+# start times"). backoffLimit 0 is no retry storm; one success and one failure
+# stay readable.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: logs-evictor
+  namespace: lifemodel-system
+spec:
+  schedule: "* * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 55
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      # A run that outlives a minute would hold the next start off anyway
+      # (Forbid); the deadline makes it a failed Job instead of a stuck one.
+      activeDeadlineSeconds: 60
+      backoffLimit: 0
+      template:
+        metadata:
+          # The collector reads `module` from this label; the job's own line
+          # carries only the day, the bytes freed and the reason.
+          labels:
+            app.kubernetes.io/name: logs-evictor
+        spec:
+          restartPolicy: Never
+          # It calls no API: no token is mounted, and its NetworkPolicy names
+          # the store's port and cluster DNS and nothing else.
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: logs-evictor
+              # Kustomize pins the pushed loader digest, the same one the loader,
+              # the model gateway and the storage module run.
+              image: ghcr.io/shady2k/lifemodel-loader:release-placeholder
+              imagePullPolicy: IfNotPresent
+              command: ['node', '/opt/lifemodel/loader/dist/log-evictor.js']
+              env:
+                # The store's Service, the only peer the job may reach.
+                - name: LIFEMODEL_LOGS_STORE_URL
+                  value: http://logs-store.lifemodel-system.svc:9428
+                - name: LIFEMODEL_LOGS_VOLUME_PATH
+                  value: /data
+                # The partition key, as a secretKeyRef and never as a value or a
+                # file: the store reads the same Secret as a file of its own
+                # (ADR-016 §5). The entry point never logs it.
+                - name: LIFEMODEL_LOGS_PARTITION_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: lifemodel-logs-partition-key
+                      key: partition-key
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+                seccompProfile:
+                  type: RuntimeDefault
+              resources:
+                # A Node start, one HTTP call and one rm; nothing is measured
+                # beyond the request (ADR-016 §5).
+                requests:
+                  cpu: 20m
+                  memory: 32Mi
+              volumeMounts:
+                # The same volume the store has mounted, read-write: one node's
+                # kubelet serves both pods, and a ReadWriteOnce volume is
+                # exclusive across nodes, not across pods.
+                - name: data
+                  mountPath: /data
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: logs-store

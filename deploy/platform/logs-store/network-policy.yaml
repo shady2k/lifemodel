@@ -15,7 +15,9 @@ spec:
     - Egress
   ingress:
     # Reader and writer are roles, not a boundary: the collector and the loader
-    # reach the same unauthenticated listener, and no other workload may.
+    # reach the same unauthenticated listener, no other workload may, and the
+    # evictor's job pods add the store's own protocol's only other caller
+    # (ADR-016 §5, §7).
     - from:
         - namespaceSelector:
             matchLabels:
@@ -29,6 +31,12 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: loader
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: logs-evictor
       ports:
         - protocol: TCP
           port: 9428
@@ -50,3 +58,44 @@ spec:
     - Egress
   ingress: []
   egress: []
+---
+# The evictor is a client only (ADR-016 §7): its egress is TCP 9428 to the
+# store's pods and DNS to kube-dns, because the Service name must resolve, and
+# nothing else. No ingress: nothing reaches it, and it mounts no host path and
+# no Secret but the partition key.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: logs-evictor-access
+  namespace: lifemodel-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: logs-evictor
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: logs-store
+      ports:
+        - protocol: TCP
+          port: 9428
