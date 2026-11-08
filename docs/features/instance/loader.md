@@ -24,6 +24,12 @@ default-deny NetworkPolicy and restricted ServiceAccount.
 The platform loader performs resumable setup in the order defined by
 [ADR-010](../../adr/010-container-generations.md):
 
+Before the recorded phases, and on every bootstrap attempt, the loader clears
+the stale `spec.claimRef` of the retained log store volume when that volume is
+`Released` and its claim has been recreated (ADR-016 §5). It reads the volume and
+the store's claim by name, patches nothing else, and never touches a volume that
+is not `Released`.
+
 1. Initialize OpenBao, persist and verify custody, unseal it, configure the
    loader Kubernetes-auth policy, and revoke the bootstrap root token after
    hand-off.

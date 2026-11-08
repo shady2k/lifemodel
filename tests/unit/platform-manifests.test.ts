@@ -1010,6 +1010,19 @@ describe('platform manifests', () => {
         subjects: [{ kind: 'ServiceAccount', name: 'core', namespace: 'lifemodel' }],
       },
       {
+        // The loader's log volume pre-flight (ADR-016 §5): get and patch on
+        // the one PersistentVolume, by name, and nothing else cluster-wide.
+        apiVersion: 'rbac.authorization.k8s.io/v1',
+        kind: 'ClusterRoleBinding',
+        metadata: { name: 'loader-logs-volume' },
+        roleRef: {
+          apiGroup: 'rbac.authorization.k8s.io',
+          kind: 'ClusterRole',
+          name: 'loader-logs-volume',
+        },
+        subjects: [{ kind: 'ServiceAccount', name: 'loader', namespace: 'lifemodel-system' }],
+      },
+      {
         apiVersion: 'rbac.authorization.k8s.io/v1',
         kind: 'ClusterRoleBinding',
         metadata: { name: 'model-gateway-token-review' },
