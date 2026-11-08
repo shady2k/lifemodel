@@ -1,9 +1,11 @@
 #!/bin/sh
 # Create the lifemodel log volume: one preallocated ext4 image (ADR-016 §5).
-# Both installers run this script with the size their option names. It creates
-# the image if it is absent, writes the store's data directory into it, and
-# mounts nothing: the host's mount (the module's fileSystems entry, the
-# installer's fstab line) mounts the image at /var/lib/lifemodel-logs.
+# Both installers run this script with the size their option names, followed by
+# the image path and mount point they declare. It creates the image if it is
+# absent, writes the store's data directory into it, and mounts nothing: the
+# host's mount (the module's fileSystems entry, the installer's fstab line)
+# mounts the image at /var/lib/lifemodel-logs. A lone SIZE uses the defaults
+# below, the same pair both installers declare.
 #
 # The image is a reservation, not a sparse claim: fallocate allocates the
 # blocks, so the host's free space really drops by the size asked for. The
@@ -70,11 +72,13 @@ grow_image() {
   fi
 }
 
-[ "$#" -ge 2 ] || usage
+[ "$#" -ge 1 ] || usage
 if [ "$1" = check ]; then
+  [ "$#" -eq 2 ] || usage
   validate "$2"
   exit 0
 fi
+[ "$#" -le 3 ] || usage
 
 SIZE=$1
 IMAGE=${2:-/var/lib/lifemodel-logs.img}

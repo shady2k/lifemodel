@@ -80,7 +80,7 @@ describe('the installers create the file-backed log volume', () => {
     const { out, status, output } = render(root);
     expect(status, output).toBe(0);
     const unit = readFileSync(join(out, 'systemd', volumeUnit), 'utf8');
-    expect(unit).toContain(`ExecStart=${volumeScript} 3G`);
+    expect(unit).toContain(`ExecStart=${volumeScript} 3G ${volumeImage} ${volumeDir}`);
     expect(unit).toContain(`Before=${mountUnit} k3s.service`);
     expect(unit).toContain('DefaultDependencies=no');
     expect(unit).toContain('Type=oneshot');
@@ -96,7 +96,7 @@ describe('the installers create the file-backed log volume', () => {
     const large = render(workspace('large'), '--logs-volume-size', '5G');
     expect(large.status, large.output).toBe(0);
     expect(readFileSync(join(large.out, 'systemd', volumeUnit), 'utf8')).toContain(
-      `ExecStart=${volumeScript} 5G`
+      `ExecStart=${volumeScript} 5G ${volumeImage} ${volumeDir}`
     );
 
     const small = render(workspace('small'), '--logs-volume-size', '1G');
@@ -108,6 +108,57 @@ describe('the installers create the file-backed log volume', () => {
     const malformed = render(workspace('malformed'), '--logs-volume-size', '4GiB');
     expect(malformed.status, malformed.output).not.toBe(0);
     expect(malformed.output).toContain('4GiB');
+  }, 120_000);
+
+  it('runs the rendered unit line against a temporary image', () => {
+    const root = workspace('unit-runs');
+    const { out, status, output } = render(root);
+    expect(status, output).toBe(0);
+    const execStart = readFileSync(join(out, 'systemd', volumeUnit), 'utf8')
+      .split('\n')
+      .find((line) => line.startsWith('ExecStart='))!
+      .slice('ExecStart='.length);
+    // At boot the host runs this exact line. The repository copy of the script
+    // is the one the installer installs, so only the image and mount point move.
+    const image = join(root, 'volume.img');
+    const mount = join(root, 'mnt');
+    const args = execStart
+      .replace(volumeScript, '')
+      .replace(volumeImage, image)
+      .replace(volumeDir, mount)
+      .split(' ')
+      .filter((arg) => arg !== '');
+    const bin = join(root, 'bin');
+    writeFake(
+      join(bin, 'df'),
+      `#!/bin/sh\nprintf 'fakefs 100000000 1 67108864 1%% /\\n'\n`
+    );
+    writeFake(
+      join(bin, 'fallocate'),
+      `#!/bin/sh
+previous=""
+for arg do
+  if [ "$previous" = -l ]; then size=$arg; fi
+  previous=$arg
+  target=$arg
+done
+truncate -s "$size" "$target"
+`
+    );
+    writeFake(join(bin, 'mkfs.ext4'), `#!/bin/sh\nexit 0\n`);
+    writeFake(join(bin, 'chown'), `#!/bin/sh\nexit 0\n`);
+    const result = spawnSync(
+      'sh',
+      [fileURLToPath(new URL('../../deploy/logs/logs-volume.sh', import.meta.url)), ...args],
+      {
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      }
+    );
+    expect(result.status, `${result.stdout}${result.stderr}`).toBe(0);
+    expect(statSync(image).size).toBe(3 * 1024 ** 3);
+    expect(existsSync(mount)).toBe(true);
   }, 120_000);
 
   it('refuses a size the disk cannot hold, naming the size and the free space', () => {
@@ -135,7 +186,7 @@ describe('the installers create the file-backed log volume', () => {
       join(root, 'install-root/etc/systemd/system', volumeUnit),
       'utf8'
     );
-    expect(unit).toContain(`ExecStart=${volumeScript} 3G`);
+    expect(unit).toContain(`ExecStart=${volumeScript} 3G ${volumeImage} ${volumeDir}`);
     expect(first.systemctl).toContain(`enable ${volumeUnit}`);
     expect(first.systemctl).toContain(`start ${mountUnit}`);
     const fstab = join(root, 'install-root/etc/fstab');

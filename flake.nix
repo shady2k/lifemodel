@@ -283,8 +283,10 @@
         assert keyless.config.systemd.services.lifemodel-logs-volume.unitConfig.DefaultDependencies == false;
         assert keyless.config.systemd.services.lifemodel-logs-volume.serviceConfig.Type == "oneshot";
         assert keyless.config.systemd.services.lifemodel-logs-volume.serviceConfig.RemainAfterExit == true;
-        assert lib.hasInfix "3G" keyless.config.systemd.services.lifemodel-logs-volume.script;
-        assert lib.hasInfix "5G" logsVolumeLarger.config.systemd.services.lifemodel-logs-volume.script;
+        assert lib.hasInfix "3G ${logsVolumeImage} ${logsVolumeDir}"
+          keyless.config.systemd.services.lifemodel-logs-volume.script;
+        assert lib.hasInfix "5G ${logsVolumeImage} ${logsVolumeDir}"
+          logsVolumeLarger.config.systemd.services.lifemodel-logs-volume.script;
         # A size below 2 GiB fails evaluation, naming the minimum and the value.
         assert !(builtins.tryEval logsVolumeTooSmall.config.system.build.toplevel.drvPath).success;
         assert lib.any (entry: !entry.assertion
@@ -361,6 +363,15 @@
         grep -F '999999G' big.err
         grep -F 'free on' big.err
         test ! -e "$TMPDIR/big.img"
+        # A lone SIZE is the usage line's shortest form: it is refused for the
+        # minimum, not for the argument count, and creates nothing.
+        set +e
+        bash ${./deploy/logs/logs-volume.sh} 1G 2> single.err
+        single_rc=$?
+        set -e
+        test "$single_rc" -eq 1
+        grep -F '1G' single.err
+        grep -F 'below the minimum' single.err
         touch $out
       '';
       # The command the rendered unit runs, executed for real against a
@@ -383,13 +394,14 @@
         touch $out
       '';
       logsVolumeInstaller =
-        assert lib.hasInfix "ExecStart=/usr/lib/lifemodel/logs-volume.sh 3G"
+        assert lib.hasInfix
+          "ExecStart=/usr/lib/lifemodel/logs-volume.sh 3G ${logsVolumeImage} ${logsVolumeDir}"
           (builtins.readFile (scriptKeyless + "/systemd/lifemodel-logs-volume.service"));
         assert lib.hasInfix "Before=${logsVolumeMountUnit} k3s.service"
           (builtins.readFile (scriptKeyless + "/systemd/lifemodel-logs-volume.service"));
         assert builtins.readFile (scriptKeyless + "/fstab")
           == "/var/lib/lifemodel-logs.img /var/lib/lifemodel-logs ext4 loop,nofail 0 0\n";
-        assert lib.hasInfix "logs-volume.sh 5G"
+        assert lib.hasInfix "logs-volume.sh 5G ${logsVolumeImage} ${logsVolumeDir}"
           (builtins.readFile (logsVolumeInstallerLarger + "/systemd/lifemodel-logs-volume.service"));
         pkgs.runCommand "lifemodel-logs-volume-installer-render" { nativeBuildInputs = [ pkgs.gnugrep ]; } ''
           set -eu

@@ -194,7 +194,7 @@ in
       unitConfig = { DefaultDependencies = false; RequiresMountsFor = "/var/lib"; };
       serviceConfig = { Type = "oneshot"; RemainAfterExit = true; TimeoutStartSec = 300; };
       path = [ pkgs.coreutils pkgs.e2fsprogs pkgs.util-linux ];
-      script = "exec ${logsVolumeScript} ${lib.escapeShellArg cfg.logsVolumeSize}";
+      script = "exec ${logsVolumeScript} ${lib.escapeShellArg cfg.logsVolumeSize} ${lib.escapeShellArg logsVolumeImage} ${lib.escapeShellArg logsVolumeDir}";
     };
     lifemodel-k3s-resolv = {
       description = "Write the resolv.conf k3s gives the kubelet and CoreDNS";
