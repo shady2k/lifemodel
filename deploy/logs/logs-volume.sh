@@ -112,15 +112,29 @@ if [ "$(( mib * 1024 ))" -gt "$avail_kb" ]; then
 fi
 
 # The data directory and the filesystem root belong to 1000:1000, written into
-# the fresh filesystem by mkfs instead of by a mount the unit does not do.
-staging=$(mktemp -d)
+# the fresh image itself: mkfs.ext4 sets the root's owner and debugfs creates
+# the data directory with its owner and mode. Nothing is chowned on the host,
+# which a sandboxed builder cannot do (chown fails there).
 partial="$IMAGE.partial"
-trap 'rm -rf "$staging" "$partial"' EXIT HUP INT TERM
-mkdir -p "$staging/data"
-chown 1000:1000 "$staging/data"
-chmod 0750 "$staging/data"
+trap 'rm -f "$partial"' EXIT HUP INT TERM
 fallocate -l "$SIZE" "$partial"
-mkfs.ext4 -q -F -E root_owner=1000:1000 -d "$staging" "$partial"
+mkfs.ext4 -q -F -E root_owner=1000:1000 "$partial"
+debugfs -w -R 'mkdir /data' "$partial" 2>/dev/null
+debugfs -w -R 'sif /data uid 1000' "$partial" 2>/dev/null
+debugfs -w -R 'sif /data gid 1000' "$partial" 2>/dev/null
+debugfs -w -R 'sif /data mode 040750' "$partial" 2>/dev/null
+# debugfs reports a failed command on stderr and still exits 0, so the inode is
+# read back: the store needs the directory, with this owner and mode, on the
+# host's own e2fsprogs too and not only on the one the flake check uses. An
+# absent field leaves the expansion unchanged.
+data_inode=$(debugfs -R 'stat /data' "$partial" 2>/dev/null | tr -d ' ')
+if [ "${data_inode#*Type:directory}" = "$data_inode" ] ||
+  [ "${data_inode#*Mode:0750}" = "$data_inode" ] ||
+  [ "${data_inode#*User:1000}" = "$data_inode" ] ||
+  [ "${data_inode#*Group:1000}" = "$data_inode" ]; then
+  echo "logs-volume: the fresh image has no /data owned by 1000:1000 mode 0750" >&2
+  exit 1
+fi
 # mkfs punches holes for the lazily initialised tables; reserve them again so
 # the image stays a reservation and not a sparse claim (ADR-016 §5).
 fallocate -l "$SIZE" "$partial"

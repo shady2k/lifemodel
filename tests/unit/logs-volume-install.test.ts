@@ -37,6 +37,17 @@ function writeFake(path: string, body: string): void {
   chmodSync(path, 0o755);
 }
 
+// The script writes the data directory into the fresh image with debugfs, which
+// needs no host chown (lifemodel-vbog.4.2). The fake records the commands and
+// answers the read-back with the inode a formatted image would hold.
+const debugfsFake = `#!/bin/sh
+printf '%s\\n' "$*" >> "$DEBUGFS_LOG"
+case "$*" in
+  *'stat /data'*) printf '%s\\n' 'Inode: 12   Type: directory    Mode:  0750   Flags: 0x80000' 'User:  1000   Group:  1000   Project:     0   Size: 4096' ;;
+esac
+exit 0
+`;
+
 function render(root: string, ...args: string[]) {
   const bin = join(root, 'bin');
   mkdirSync(bin, { recursive: true });
@@ -146,14 +157,18 @@ truncate -s "$size" "$target"
 `
     );
     writeFake(join(bin, 'mkfs.ext4'), `#!/bin/sh\nexit 0\n`);
-    writeFake(join(bin, 'chown'), `#!/bin/sh\nexit 0\n`);
+    writeFake(join(bin, 'debugfs'), debugfsFake);
     const result = spawnSync(
       'sh',
       [fileURLToPath(new URL('../../deploy/logs/logs-volume.sh', import.meta.url)), ...args],
       {
         encoding: 'utf8',
         timeout: 30_000,
-        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          DEBUGFS_LOG: join(root, 'debugfs.log'),
+        },
       }
     );
     expect(result.status, `${result.stdout}${result.stderr}`).toBe(0);
@@ -178,10 +193,15 @@ truncate -s "$size" "$target"
     expect(readFileSync(join(root, 'fallocate.log'), 'utf8')).toContain('-l 3G');
     const mkfs = readFileSync(join(root, 'mkfs.log'), 'utf8');
     expect(mkfs).toContain('-E root_owner=1000:1000');
-    expect(mkfs).toContain('-d ');
-    // The data directory the store mounts is in the image, mode 0750.
-    expect(readFileSync(join(root, 'mkfs-data.log'), 'utf8').trim()).toBe('750');
-    expect(readFileSync(join(root, 'chown.log'), 'utf8')).toMatch(/1000:1000 .*\/data\n/);
+    // The data directory the store mounts is written into the image with
+    // debugfs, mode 0750; a sandboxed builder cannot chown a staging tree.
+    expect(mkfs).not.toContain('-d ');
+    const debugfs = readFileSync(join(root, 'debugfs.log'), 'utf8');
+    expect(debugfs).toContain('-w -R mkdir /data ');
+    expect(debugfs).toContain('-w -R sif /data uid 1000 ');
+    expect(debugfs).toContain('-w -R sif /data gid 1000 ');
+    expect(debugfs).toContain('-w -R sif /data mode 040750 ');
+    expect(existsSync(join(root, 'chown.log'))).toBe(false);
     const unit = readFileSync(
       join(root, 'install-root/etc/systemd/system', volumeUnit),
       'utf8'
@@ -291,15 +311,10 @@ exit 0
         join(bin, 'mkfs.ext4'),
         `#!/bin/sh
 printf '%s\\n' "$*" >> "$MKFS_LOG"
-previous=""
-for arg do
-  if [ "$previous" = -d ]; then stat -c '%a' "$arg/data" >> "$MKFS_DATA_LOG"; fi
-  previous=$arg
-done
 exit 0
 `
       );
-      writeFake(join(bin, 'chown'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$CHOWN_LOG"\nexit 0\n`);
+      writeFake(join(bin, 'debugfs'), debugfsFake);
       writeFake(
         join(bin, 'systemctl'),
         `#!/bin/sh
@@ -349,8 +364,7 @@ exit 0
         K3S_CALLS: join(root, 'k3s-calls.log'),
         FALLOCATE_LOG: join(root, 'fallocate.log'),
         MKFS_LOG: join(root, 'mkfs.log'),
-        MKFS_DATA_LOG: join(root, 'mkfs-data.log'),
-        CHOWN_LOG: join(root, 'chown.log'),
+        DEBUGFS_LOG: join(root, 'debugfs.log'),
         RESIZE2FS_LOG: join(root, 'resize2fs.log'),
         LOSETUP_LOG: join(root, 'losetup.log'),
         FAKE_LOOP_DEVICE: options.loopDevice ?? '',

@@ -195,14 +195,21 @@ exit 0`
     );
     command('sha256sum', 'if [ "$1" = -c ]; then cat >/dev/null; exit 0; fi; exit 64');
     // The log volume's image and its data directory: host disk, a loop image
-    // and a chown the test host does not provide (lifemodel-vbog.4.2).
+    // and the debugfs calls that write the directory into the image, which need
+    // no host chown (lifemodel-vbog.4.2).
     command(
       'df',
       `printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'; printf 'fakefs 100000000 1 67108864 1%% /\\n'`
     );
     command('fallocate', 'for arg do target=$arg; done; : > "$target"');
     command('mkfs.ext4', 'exit 0');
-    command('chown', 'exit 0');
+    command(
+      'debugfs',
+      `case "$*" in
+  *'stat /data'*) printf '%s\\n' 'Inode: 12   Type: directory    Mode:  0750   Flags: 0x80000' 'User:  1000   Group:  1000   Project:     0   Size: 4096' ;;
+esac
+exit 0`
+    );
     const result = await promisify(execFile)('sh', [join(bundle, 'scripts/install.sh')], {
       cwd: f.dir,
       env: {
