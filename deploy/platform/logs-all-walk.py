@@ -14,7 +14,13 @@ What it proves
    else `k8s-app`, else `cnpg.io/cluster`, else `unknown`) and its `pod` field.
    Missing pods are listed one per line. Pods that are not Running (a completed
    Job pod, a pod still being created) are named as such and are not required:
-   they may never have written a line.
+   they may never have written a line. A Running pod the API does not name is
+   then checked on this node's own log files
+   (`/var/log/pods/<namespace>_<pod>_<uid>/<container>/*.log`, the uid from its
+   metadata), by size and modification time only: if every file is empty it is
+   a NOTE "wrote no line"; if the newest file is older than the lookback it is
+   a NOTE "last line older than the lookback". Neither is a failure. A pod whose
+   files hold a line inside the lookback and is still not found stays a FAIL.
 
 The log workloads themselves (`logs-collector`, `logs-store`) are part of that
 inventory, which is L13's evidence on a deployed build.
@@ -34,6 +40,8 @@ Arguments (defaults are the test VM's)
   --namespace NS         namespace of the restarted pod (default lifemodel)
   --pod NAME             the pod to restart (default core-0)
   --lookback-hours N     how far back the inventory scan may reach (default 336)
+  --log-root PATH        the kubelet's pod log directory on this node
+                         (default /var/log/pods)
   --max-pages N          record pages read per module, 200 records each (default 40)
   --pre-minutes N        how far before the restart its kept lines are searched (default 60)
   --timeout SECONDS      bound on waiting for the restarted pod to be Ready (default 600)
@@ -230,6 +238,37 @@ def phase_of(pod):
     return str(pod.get('status', {}).get('phase') or 'Unknown')
 
 
+def pod_log_files(log_root, namespace, name, uid):
+    """This node's log files for one pod, by path only; never their contents."""
+    if not uid:
+        return []
+    root = Path(log_root) / ('%s_%s_%s' % (namespace, name, uid))
+    try:
+        return sorted(path for path in root.rglob('*.log') if path.is_file())
+    except OSError:
+        return []
+
+
+def absent_reason(log_root, namespace, name, uid, start):
+    """Why a pod the logs API does not name can hold no line inside the lookback.
+
+    Only file sizes and modification times are read, never the files: lines are
+    read through the logs API alone. None means the pod stays a failure.
+    """
+    try:
+        stats = [(path.stat().st_size, path.stat().st_mtime)
+                 for path in pod_log_files(log_root, namespace, name, uid)]
+    except OSError:
+        return None
+    if not stats:
+        return None
+    if all(size == 0 for size, _ in stats):
+        return 'wrote no line'
+    if max(mtime for _, mtime in stats) * 1000 < start:
+        return 'last line older than the lookback'
+    return None
+
+
 def find_pod(options, namespace, name):
     result = kubectl(['-n', namespace, 'get', 'pod', name, '-o', 'json'], options)
     if result.returncode != 0:
@@ -281,10 +320,10 @@ def inventory(report, loader, options, deadline):
             report.note('%s/%s is %s and is not required to have a record' % (
                 namespace, name, phase_of(pod)))
             continue
-        required[(namespace, name)] = module_of(metadata.get('labels'))
+        required[(namespace, name)] = (module_of(metadata.get('labels')), metadata.get('uid'))
 
     wanted_by_module = {}
-    for (namespace, name), module in required.items():
+    for (namespace, name), (module, _uid) in required.items():
         wanted_by_module.setdefault(module, set()).add(name)
 
     start = now_ms() - options.lookback_hours * 3600 * 1000
@@ -299,8 +338,8 @@ def inventory(report, loader, options, deadline):
     wait_until = min(deadline, time.monotonic() + options.wait_seconds)
     while True:
         missing = sorted(
-            (namespace, name, module)
-            for (namespace, name), module in required.items()
+            (namespace, name, module, uid)
+            for (namespace, name), (module, uid) in required.items()
             if name not in found
         )
         if not missing or time.monotonic() >= wait_until:
@@ -313,20 +352,32 @@ def inventory(report, loader, options, deadline):
             found.update(seen)
             pages[module] = pages.get(module, 0) + count
 
-    for namespace, name, module in missing:
+    unexplained = []
+    noted = 0
+    for namespace, name, module, uid in missing:
+        reason = absent_reason(options.log_root, namespace, name, uid, start)
+        if reason is None:
+            unexplained.append((namespace, name, module))
+            continue
+        noted += 1
+        report.note('pod %s/%s (module %s) %s, so it is not counted as a failure'
+                    % (namespace, name, module, reason))
+    for namespace, name, module in unexplained:
         report.fail(
             'pod %s/%s (module %s) is found through the logs API' % (namespace, name, module),
             'no record in %d page(s) over the last %d hour(s)'
             % (pages.get(module, 0), options.lookback_hours),
         )
-    if not missing:
+    if not unexplained:
         report.pass_(
-            'every Running pod from k3s kubectl get pods -A is found through the logs API',
-            '%d pods, at most %d page(s) per module' % (len(required), options.max_pages),
+            'every Running pod from k3s kubectl get pods -A is found through the logs API '
+            'or wrote no line inside the lookback',
+            '%d pods, %d not found, at most %d page(s) per module'
+            % (len(required), noted, options.max_pages),
         )
 
     wrong = []
-    for (namespace, name), module in sorted(required.items()):
+    for (namespace, name), (module, _uid) in sorted(required.items()):
         fields = found.get(name)
         if fields is None:
             continue
@@ -415,6 +466,7 @@ def main():
     parser.add_argument('--namespace', default='lifemodel')
     parser.add_argument('--pod', default='core-0')
     parser.add_argument('--lookback-hours', type=int, default=336)
+    parser.add_argument('--log-root', default='/var/log/pods')
     parser.add_argument('--max-pages', type=int, default=40)
     parser.add_argument('--pre-minutes', type=int, default=60)
     parser.add_argument('--timeout', type=int, default=600)

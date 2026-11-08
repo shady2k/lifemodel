@@ -14,7 +14,8 @@
 # 3. kubelet says why: a FailedMount event names the missing volume path.
 # 4. Starting the installer's mount unit again (var-lib-lifemodel\x2dlogs.mount,
 #    the same unit scripts/install.sh installs) with no other change brings the
-#    store Ready and the loader's logs API answers.
+#    store Ready and the loader's logs API answers within --api-wait seconds: a
+#    Service's endpoints follow readiness with a short lag.
 #
 # Arguments (defaults are the test VM's)
 # --------------------------------------
@@ -37,6 +38,9 @@
 #                         (default var-lib-lifemodel\x2dlogs.mount)
 #   --observe-seconds N   how long the store pod must stay not Ready (default 45)
 #   --ready-timeout N     bound on the store becoming Ready again (default 600)
+#   --api-wait N          bound on the logs API answering after the remount
+#                         (default 60): a Service's endpoints follow readiness
+#                         with a short lag
 #
 # What it changes and restores
 # ----------------------------
@@ -63,6 +67,7 @@ PV_PATH=/var/lib/lifemodel-logs/data
 MOUNT_UNIT='var-lib-lifemodel\x2dlogs.mount'
 OBSERVE_SECONDS=45
 READY_TIMEOUT=600
+API_WAIT=60
 
 usage() {
   sed -n '2,/^set -u/{/^set -u/!s/^# \{0,1\}//p}' "$0" >&2
@@ -84,6 +89,7 @@ while [ "$#" -gt 0 ]; do
     --mount-unit) [ "$#" -ge 2 ] || usage; MOUNT_UNIT=$2; shift 2 ;;
     --observe-seconds) [ "$#" -ge 2 ] || usage; OBSERVE_SECONDS=$2; shift 2 ;;
     --ready-timeout) [ "$#" -ge 2 ] || usage; READY_TIMEOUT=$2; shift 2 ;;
+    --api-wait) [ "$#" -ge 2 ] || usage; API_WAIT=$2; shift 2 ;;
     -h|--help) usage ;;
     *) echo "unknown argument: $1" >&2; usage ;;
   esac
@@ -337,7 +343,11 @@ else
   fail 'the store is Ready after the remount' "not Ready within ${READY_TIMEOUT}s"
 fi
 
-check 'the logs API answers after the remount' logs_api_answers
+if wait_until "$API_WAIT" logs_api_answers; then
+  pass 'the logs API answers after the remount' "answered within ${API_WAIT}s"
+else
+  fail 'the logs API answers after the remount' "no answer within ${API_WAIT}s"
+fi
 
 printf 'RESULT %d assertion(s) failed\n' "$FAILS"
 exit $(( FAILS > 0 ? 1 : 0 ))
