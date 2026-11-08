@@ -11,8 +11,10 @@
 # blocks, so the host's free space really drops by the size asked for. The
 # image's root and its data directory belong to 1000:1000, the uid the store
 # and the evictor run as, so a fresh volume is writable without the kubelet's
-# fsGroup. An existing image is grown to a larger size, refused a smaller one,
-# and left untouched at an equal size: the log volume is never shrunk.
+# fsGroup. An existing image is grown to a larger size and refused a smaller
+# one; on every run the filesystem is made to fill the image, so a growth whose
+# resize2fs failed or was interrupted is finished by the next run. The log
+# volume is never shrunk.
 set -eu
 
 # Below this the evictor's threshold is the whole volume, so every run would
@@ -59,16 +61,24 @@ free_kb() {
   df -P -k "$(dirname "$1")" | tail -n 1 | tr -s ' ' '\t' | cut -f 4
 }
 
-# Grow the image and its filesystem. A mounted image is resized online through
+# The filesystem's size in bytes, from its own superblock; it fails when the
+# superblock cannot be read, so an unknown size never passes for a full one.
+filesystem_bytes() {
+  blocks=$(dumpe2fs -h "$1" 2>/dev/null | grep '^Block count:' | tr -cd '0-9')
+  block_size=$(dumpe2fs -h "$1" 2>/dev/null | grep '^Block size:' | tr -cd '0-9')
+  [ -n "$blocks" ] && [ -n "$block_size" ] || return 1
+  printf '%s' "$(( blocks * block_size ))"
+}
+
+# Make the filesystem fill the image. A mounted image is resized online through
 # the loop device that carries it; an unmounted one is resized as a file.
-grow_image() {
-  fallocate -l "$1" "$2"
-  device=$(losetup -j "$2" 2>/dev/null | cut -d: -f1 | head -n 1)
+resize_filesystem() {
+  device=$(losetup -j "$1" 2>/dev/null | cut -d: -f1 | head -n 1)
   if [ -n "$device" ]; then
     losetup -c "$device"
     resize2fs "$device"
   else
-    resize2fs "$2"
+    resize2fs "$1"
   fi
 }
 
@@ -87,20 +97,31 @@ validate "$SIZE"
 wanted_bytes=$(( mib * 1048576 ))
 if [ -e "$IMAGE" ]; then
   current_bytes=$(stat -c %s "$IMAGE")
-  if [ "$wanted_bytes" -eq "$current_bytes" ]; then
-    exit 0
-  fi
   if [ "$wanted_bytes" -lt "$current_bytes" ]; then
     echo "logs-volume: logs volume size $SIZE is smaller than the existing image's $(( current_bytes / 1048576 )) MiB; the log volume is never shrunk" >&2
     exit 1
   fi
-  needed_kb=$(( (wanted_bytes - current_bytes) / 1024 ))
-  avail_kb=$(free_kb "$IMAGE")
-  if [ "$needed_kb" -gt "$avail_kb" ]; then
-    echo "logs-volume: logs volume size $SIZE does not fit: growing needs $(( needed_kb / 1024 )) MiB but $(( avail_kb / 1024 )) MiB free on $(dirname "$IMAGE")" >&2
-    exit 1
+  if [ "$wanted_bytes" -gt "$current_bytes" ]; then
+    needed_kb=$(( (wanted_bytes - current_bytes) / 1024 ))
+    avail_kb=$(free_kb "$IMAGE")
+    if [ "$needed_kb" -gt "$avail_kb" ]; then
+      echo "logs-volume: logs volume size $SIZE does not fit: growing needs $(( needed_kb / 1024 )) MiB but $(( avail_kb / 1024 )) MiB free on $(dirname "$IMAGE")" >&2
+      exit 1
+    fi
+    fallocate -l "$SIZE" "$IMAGE"
+    current_bytes=$(stat -c %s "$IMAGE")
   fi
-  grow_image "$SIZE" "$IMAGE"
+  # fallocate runs before resize2fs, so a resize that failed or was interrupted
+  # leaves the image grown and the filesystem short of it. Every run reconciles
+  # the two, not only the run that grew the image: an equal size with a short
+  # filesystem must not report success while the volume keeps its old capacity.
+  filesystem_current=$(filesystem_bytes "$IMAGE") || {
+    echo "logs-volume: cannot read the filesystem of $IMAGE" >&2
+    exit 1
+  }
+  if [ "$filesystem_current" -lt "$current_bytes" ]; then
+    resize_filesystem "$IMAGE"
+  fi
   exit 0
 fi
 
