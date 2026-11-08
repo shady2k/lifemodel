@@ -10,6 +10,7 @@ describe('platform loader configuration', () => {
       httpPort: 7000,
       openBaoAddress: 'http://openbao.openbao.svc:8200',
       modelStatusUrl: 'http://model-gateway.lifemodel-system.svc:8081/status',
+      logsStoreUrl: 'http://logs-store.lifemodel-system.svc:9428',
       instanceName: 'lifemodel',
     });
   });
@@ -27,6 +28,7 @@ describe('platform loader configuration', () => {
       httpPort: 7100,
       openBaoAddress: 'http://bao.test:8200',
       modelStatusUrl: 'http://model-gateway.lifemodel-system.svc:8081/status',
+      logsStoreUrl: 'http://logs-store.lifemodel-system.svc:9428',
       instanceName: 'home',
     });
   });
@@ -47,6 +49,21 @@ describe('platform loader configuration', () => {
     for (const value of ['gateway.test:8081/status', 'ftp://gateway.test/status'])
       expect(() =>
         loadConfig({ LIFEMODEL_NAME: 'home', LIFEMODEL_MODEL_GATEWAY_STATUS_URL: value })
+      ).toThrow(LoaderFatalError);
+  });
+  it('reads the log store URL and refuses a value that is not HTTP', () => {
+    expect(
+      loadConfig({
+        LIFEMODEL_NAME: 'home',
+        LIFEMODEL_LOGS_STORE_URL: 'http://store.test:9428',
+      }).logsStoreUrl
+    ).toBe('http://store.test:9428');
+    expect(
+      loadConfig({ LIFEMODEL_NAME: 'home', LIFEMODEL_LOGS_STORE_URL: '' }).logsStoreUrl
+    ).toBe('http://logs-store.lifemodel-system.svc:9428');
+    for (const value of ['store.test:9428', 'ftp://store.test:9428'])
+      expect(() =>
+        loadConfig({ LIFEMODEL_NAME: 'home', LIFEMODEL_LOGS_STORE_URL: value })
       ).toThrow(LoaderFatalError);
   });
   it('rejects invalid ports instead of silently choosing a fallback', () => {

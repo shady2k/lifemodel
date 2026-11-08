@@ -31,6 +31,9 @@ export type RouteHandlerName =
   | 'settingWrite'
   | 'modelSlotWrite'
   | 'modelReserveDelete'
+  | 'logsPage'
+  | 'logsQuery'
+  | 'logsModules'
   | 'bootPage'
   | 'notFound'
   | 'favicon'
@@ -234,6 +237,34 @@ export const ROUTES: readonly RouteEntry[] = [
     csrf: true,
     wrongMethod: 405,
     handler: 'settingWrite',
+  },
+  // The logs page and its API: a session on every method, GET included.
+  {
+    host: 'boot',
+    method: 'GET',
+    path: '/logs',
+    auth: 'session',
+    csrf: false,
+    wrongMethod: 405,
+    handler: 'logsPage',
+  },
+  {
+    host: 'boot',
+    method: 'GET',
+    path: '/api/logs',
+    auth: 'session',
+    csrf: false,
+    wrongMethod: 405,
+    handler: 'logsQuery',
+  },
+  {
+    host: 'boot',
+    method: 'GET',
+    path: '/api/logs/modules',
+    auth: 'session',
+    csrf: false,
+    wrongMethod: 405,
+    handler: 'logsModules',
   },
   {
     host: 'boot',

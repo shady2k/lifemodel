@@ -13,27 +13,38 @@ export interface LoaderConfig {
   openBaoAddress: string;
   /** The platform gateway's health listener, read by the settings page (ADR-013 D6). */
   modelStatusUrl: string;
+  /** The log store's HTTP base, read by the logs page (ADR-016 §4, P12). */
+  logsStoreUrl: string;
 }
 
 /** The gateway's own listener on its Service, pinned by ADR-013 D5/D6. */
 const DEFAULT_MODEL_STATUS_URL = 'http://model-gateway.lifemodel-system.svc:8081/status';
 
-function readModelStatusUrl(env: NodeJS.ProcessEnv): string {
-  const raw = env['LIFEMODEL_MODEL_GATEWAY_STATUS_URL'];
-  if (raw === undefined || raw === '') return DEFAULT_MODEL_STATUS_URL;
+/** The log store's Service listener (ADR-016 §3, §4). */
+const DEFAULT_LOGS_STORE_URL = 'http://logs-store.lifemodel-system.svc:9428';
+
+function readHttpUrl(env: NodeJS.ProcessEnv, name: string, fallback: string): string {
+  const raw = env[name];
+  if (raw === undefined || raw === '') return fallback;
   let parsed: URL;
   try {
     parsed = new URL(raw);
   } catch {
-    throw new LoaderFatalError(
-      `LIFEMODEL_MODEL_GATEWAY_STATUS_URL must be an HTTP URL, got "${raw}"`
-    );
+    throw new LoaderFatalError(`${name} must be an HTTP URL, got "${raw}"`);
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
-    throw new LoaderFatalError(
-      `LIFEMODEL_MODEL_GATEWAY_STATUS_URL must be an HTTP URL, got "${raw}"`
-    );
-  return parsed.href;
+    throw new LoaderFatalError(`${name} must be an HTTP URL, got "${raw}"`);
+  return parsed.pathname === '/' && parsed.search === '' && parsed.hash === ''
+    ? parsed.origin
+    : parsed.href;
+}
+
+function readModelStatusUrl(env: NodeJS.ProcessEnv): string {
+  return readHttpUrl(env, 'LIFEMODEL_MODEL_GATEWAY_STATUS_URL', DEFAULT_MODEL_STATUS_URL);
+}
+
+function readLogsStoreUrl(env: NodeJS.ProcessEnv): string {
+  return readHttpUrl(env, 'LIFEMODEL_LOGS_STORE_URL', DEFAULT_LOGS_STORE_URL);
 }
 
 function readPort(env: NodeJS.ProcessEnv): number {
@@ -64,6 +75,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): LoaderConfig {
     httpPort: readPort(env),
     openBaoAddress: env['LIFEMODEL_OPENBAO_ADDRESS'] ?? 'http://openbao.openbao.svc:8200',
     modelStatusUrl: readModelStatusUrl(env),
+    logsStoreUrl: readLogsStoreUrl(env),
     instanceName,
   };
 }

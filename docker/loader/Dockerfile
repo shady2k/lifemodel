@@ -28,6 +28,7 @@ COPY web/kit/components/ui/*.tsx ./web/kit/components/ui/
 COPY web/kit/hooks/*.ts ./web/kit/hooks/
 COPY web/kit/lib/*.ts web/kit/lib/*.tsx ./web/kit/lib/
 COPY web/loader/index.html ./web/loader/index.html
+COPY web/loader/logs.html ./web/loader/logs.html
 COPY web/loader/vite.config.ts ./web/loader/vite.config.ts
 COPY web/loader/tsconfig.json ./web/loader/tsconfig.json
 COPY web/loader/package.json ./web/loader/package.json
@@ -44,6 +45,8 @@ COPY loader/src/reasoning-effort.ts ./loader/src/reasoning-effort.ts
 COPY loader/src/model-capture-setting.ts ./loader/src/model-capture-setting.ts
 # Pure workbench status contract; never copy the server task and its I/O into the UI stage.
 COPY loader/src/workbench-status.ts ./loader/src/workbench-status.ts
+# The logs page types its record from the store adapter; the adapter itself stays server-side.
+COPY loader/src/logs-store-adapter.ts ./loader/src/logs-store-adapter.ts
 RUN npm run build:loader-ui -- --emptyOutDir
 
 # Compile the TypeScript loader with its isolated manifests.

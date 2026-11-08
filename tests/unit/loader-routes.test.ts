@@ -6,7 +6,7 @@
  * each pair through the real server; one test asserts that the extracted route
  * table declares exactly this matrix.
  */
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -25,12 +25,18 @@ import type { LoaderState } from '../../loader/src/state.js';
 import type { ModelSlot, ModelSlots } from '../../loader/src/model.js';
 import type { SettingsSectionSnapshot } from '../../loader/src/settings/store.js';
 import { ROUTES } from '../../loader/src/route-table.js';
+import {
+  startLogsStoreFixture,
+  type LogsStoreFixture,
+} from '../helpers/logs-store-fixture.js';
 
 const BOOT = 'boot-lifemodel.local';
 const APP = 'lifemodel.local';
 const UNKNOWN = 'unknown.local';
 const LOOPBACK = '127.0.0.1';
 const SERVICE = 'loader.lifemodel-system.svc.cluster.local';
+const LOGS_FROM = Date.parse('2026-11-07T10:00:00.000Z');
+const LOGS_TO = Date.parse('2026-11-07T11:00:00.000Z');
 
 type RouteHost = 'boot' | 'app' | 'loopback' | 'service';
 type RouteMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'ANY';
@@ -56,6 +62,21 @@ interface ExpectedRoute {
   body?: unknown;
   /** The authenticated probe's content type (JSON unless stated). */
   contentType?: string;
+}
+
+/** The logs routes require a session on every method, GET included (L11). */
+function logsRoute(path: string, requestPath: string, anonymous: number[]): ExpectedRoute {
+  return {
+    host: 'boot',
+    method: 'GET',
+    path,
+    requestPath,
+    auth: 'session',
+    csrf: false,
+    wrongMethod: 405,
+    anonymous,
+    authenticated: [200],
+  };
 }
 
 const MATRIX: readonly ExpectedRoute[] = [
@@ -270,6 +291,14 @@ const MATRIX: readonly ExpectedRoute[] = [
     authenticated: [200],
     body: { value: 4 },
   },
+  // The logs page and its API: a session on every method, GET included.
+  logsRoute('/logs', '/logs', [303]),
+  logsRoute(
+    '/api/logs',
+    `/api/logs?from=${String(LOGS_FROM)}&to=${String(LOGS_TO)}&module=core`,
+    [403]
+  ),
+  logsRoute('/api/logs/modules', '/api/logs/modules', [403]),
   // The boot host's pages and files. Only GET is served; /logout is a known
   // path with no page here, so its GET answer is the plain 404.
   {
@@ -394,6 +423,11 @@ const HOSTS: Record<RouteHost, string> = {
 
 const servers: LoaderHttp[] = [];
 const roots: string[] = [];
+let logsStore: LogsStoreFixture;
+
+beforeAll(async () => {
+  logsStore = await startLogsStoreFixture();
+});
 
 interface Fixture {
   base: string;
@@ -419,6 +453,7 @@ function uiRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'loader-routes-'));
   roots.push(root);
   writeFileSync(join(root, 'index.html'), '<main>loader</main>');
+  writeFileSync(join(root, 'logs.html'), '<main>logs</main>');
   writeFileSync(join(root, 'favicon.svg'), '<svg/>');
   mkdirSync(join(root, 'assets'));
   writeFileSync(join(root, 'assets', 'app.js'), 'console.log(1);');
@@ -455,7 +490,10 @@ async function start(): Promise<Fixture> {
     state,
     logger: createRecordingLogger([]),
     clock,
-    config: loadConfig({ LIFEMODEL_NAME: 'lifemodel' }),
+    config: loadConfig({
+      LIFEMODEL_NAME: 'lifemodel',
+      LIFEMODEL_LOGS_STORE_URL: logsStore.url,
+    }),
     uiRoot: uiRoot(),
     modelSlots: slots,
     modelChecker: async () => {},
@@ -557,6 +595,7 @@ function bodyOf(route: ExpectedRoute): string | undefined {
 
 afterAll(async () => {
   await Promise.all(servers.splice(0).map(({ close }) => close()));
+  await logsStore.close();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 

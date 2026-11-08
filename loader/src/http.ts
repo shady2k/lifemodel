@@ -76,6 +76,8 @@ import {
   type WorkbenchSource,
 } from './workbench-source.js';
 import type { WorkbenchImportStatus } from './workbench-task.js';
+import { CSP, redirect, sendText } from './http-responses.js';
+import { createLogsHandlers } from './logs-routes.js';
 import { safeWorkbenchImportDetail } from './workbench-import.js';
 
 export interface WorkbenchHttp {
@@ -113,24 +115,6 @@ export interface LoaderHttp {
   close(): Promise<void>;
 }
 const MAX_FORM_BYTES = 8192;
-const CSP =
-  "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
-
-function sendText(res: ServerResponse, status: number, body: string): void {
-  res.writeHead(status, {
-    'content-type': 'text/plain; charset=utf-8',
-    'cache-control': 'no-store',
-  });
-  res.end(body);
-}
-function redirect(
-  res: ServerResponse,
-  location: string,
-  headers: Record<string, string> = {}
-): void {
-  res.writeHead(303, { location, 'cache-control': 'no-store', ...headers });
-  res.end();
-}
 export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
   const { state, logger, clock, pki, config } = deps;
   const slots: ModelSlots = deps.modelSlots ?? {
@@ -1367,7 +1351,15 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     else redirect(res, next);
     return;
   }
+  const logsHandlers = createLogsHandlers({
+    state,
+    config,
+    uiRoot,
+    sessionToken,
+    hasSession,
+  });
   const handlers: Record<RouteHandlerName, RouteHandler> = {
+    ...logsHandlers,
     apiState,
     setupOrLogin,
     password,

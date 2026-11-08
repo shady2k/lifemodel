@@ -12,5 +12,15 @@ export default defineConfig({
       '@kit': fileURLToPath(new URL('../kit', import.meta.url)),
     },
   },
-  build: { outDir: 'dist', emptyOutDir: true, assetsInlineLimit: 0 },
+  build: {
+    outDir: 'dist',
+    emptyOutDir: true,
+    assetsInlineLimit: 0,
+    rollupOptions: {
+      input: {
+        main: fileURLToPath(new URL('./index.html', import.meta.url)),
+        logs: fileURLToPath(new URL('./logs.html', import.meta.url)),
+      },
+    },
+  },
 });
