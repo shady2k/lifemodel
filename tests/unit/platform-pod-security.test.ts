@@ -3,6 +3,11 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
+import {
+  LOGS_CLAIM_NAME,
+  LOGS_CLAIM_NAMESPACE,
+  LOGS_VOLUME_NAME,
+} from '../../loader/src/logs-volume-claim.js';
 
 // ADR-016 §1, §5, §7 and check L13: the collector's namespace is the one
 // privileged exception, it holds exactly one workload, and its two host mounts
@@ -416,5 +421,165 @@ describe('the log network policies (ADR-016 §7)', () => {
       )
     );
     expect(storeRoute?.ports).toEqual([{ protocol: 'TCP', port: 9428 }]);
+  });
+});
+
+/**
+ * The pre-flight that reclaims the retained log volume (ADR-016 §5) needs
+ * `get` and `patch` on the one PersistentVolume, by name, and `get` on the
+ * store's own claim so it can tell the current claim from a previous one.
+ * Anything wider - another verb, another volume, a wildcard, or a claim grant
+ * that is not by name - fails here.
+ */
+function loaderRules(resources: Resource[]): { scope: string; rule: Record<string, any> }[] {
+  const isLoader = (subjects: any[] | undefined) =>
+    (subjects ?? []).some(
+      (subject: any) =>
+        subject.kind === 'ServiceAccount' &&
+        subject.name === 'loader' &&
+        subject.namespace === 'lifemodel-system'
+    );
+  const referenced = new Map<string, Record<string, any>>();
+  for (const { object } of resources) {
+    if (object.kind !== 'Role' && object.kind !== 'ClusterRole') continue;
+    const namespace = object.kind === 'Role' ? object.metadata.namespace : '';
+    referenced.set(`${object.kind}/${namespace}/${object.metadata.name}`, object);
+  }
+  const rules: { scope: string; rule: Record<string, any> }[] = [];
+  for (const { object } of resources) {
+    if (object.kind !== 'RoleBinding' && object.kind !== 'ClusterRoleBinding') continue;
+    if (!isLoader(object.subjects)) continue;
+    const role = referenced.get(
+      `${object.roleRef.kind}/${object.kind === 'RoleBinding' ? object.metadata.namespace : ''}/${object.roleRef.name}`
+    );
+    if (!role) throw new Error(`binding ${object.metadata.name} names an absent role`);
+    const scope =
+      object.kind === 'ClusterRoleBinding' ? 'cluster' : `namespace ${object.metadata.namespace}`;
+    for (const rule of role.rules ?? []) rules.push({ scope, rule });
+  }
+  return rules;
+}
+
+function storageRules(resources: Resource[]): { scope: string; rule: Record<string, any> }[] {
+  return loaderRules(resources).filter(({ rule }) =>
+    (rule.resources ?? []).some(
+      (resource: string) => resource === '*' || resource.startsWith('persistentvolume')
+    )
+  );
+}
+
+function assertLogsVolumeRbac(resources: Resource[]): void {
+  const volume = find(resources, 'PersistentVolume', 'lifemodel-logs').object;
+  const claim = find(resources, 'PersistentVolumeClaim', 'logs-store').object;
+  const expected = [
+    {
+      scope: 'cluster',
+      rule: {
+        apiGroups: [''],
+        resources: ['persistentvolumes'],
+        resourceNames: [volume.metadata.name],
+        verbs: ['get', 'patch'],
+      },
+    },
+    {
+      scope: `namespace ${claim.metadata.namespace}`,
+      rule: {
+        apiGroups: [''],
+        resources: ['persistentvolumeclaims'],
+        resourceNames: [claim.metadata.name],
+        verbs: ['get'],
+      },
+    },
+  ];
+  const actual = storageRules(resources);
+  if (JSON.stringify(actual) !== JSON.stringify(expected))
+    throw new Error(
+      `the loader's log volume grant is wider than get/patch on one volume: ${JSON.stringify(actual)}`
+    );
+}
+
+describe('the loader grant on the log volume (ADR-016 §5)', () => {
+  it('is exactly get and patch on that one volume, and get on its claim', () => {
+    const resources = platformObjects();
+    expect(() => assertLogsVolumeRbac(resources)).not.toThrow();
+    // The names the code uses are the ones the artifact declares.
+    const volume = find(resources, 'PersistentVolume', 'lifemodel-logs').object;
+    const claim = find(resources, 'PersistentVolumeClaim', 'logs-store').object;
+    expect(volume.metadata.name).toBe(LOGS_VOLUME_NAME);
+    expect(claim.metadata.name).toBe(LOGS_CLAIM_NAME);
+    expect(claim.metadata.namespace).toBe(LOGS_CLAIM_NAMESPACE);
+    const volumeRule = storageRules(resources).find(({ rule }) =>
+      rule.resources.includes('persistentvolumes')
+    );
+    expect(volumeRule?.rule).toEqual({
+      apiGroups: [''],
+      resources: ['persistentvolumes'],
+      resourceNames: ['lifemodel-logs'],
+      verbs: ['get', 'patch'],
+    });
+    const binding = find(resources, 'ClusterRoleBinding', 'loader-logs-volume').object;
+    expect(binding.roleRef).toEqual({
+      apiGroup: 'rbac.authorization.k8s.io',
+      kind: 'ClusterRole',
+      name: 'loader-logs-volume',
+    });
+    expect(binding.subjects).toEqual([
+      { kind: 'ServiceAccount', name: 'loader', namespace: 'lifemodel-system' },
+    ]);
+    const a0 = YAML.parse(
+      readFileSync(join(platformRoot, 'a0/kustomization.yaml'), 'utf8')
+    ) as Record<string, any>;
+    expect(a0.resources).toContain('logs-volume-rbac.yaml');
+  });
+
+  it('fails when the grant is widened in any way', () => {
+    const resources = platformObjects();
+    const clone = (): Resource[] => structuredClone(resources) as Resource[];
+    const role = (items: Resource[]) => find(items, 'ClusterRole', 'loader-logs-volume').object;
+    const widened = (mutate: (rules: any[]) => void): Resource[] => {
+      const items = clone();
+      mutate(role(items).rules);
+      return items;
+    };
+    const cases: [string, Resource[]][] = [
+      ['an extra verb', widened((rules) => rules[0].verbs.push('delete'))],
+      ['an extra volume name', widened((rules) => rules[0].resourceNames.push('lifemodel-logs-2'))],
+      ['no name restriction', widened((rules) => delete rules[0].resourceNames)],
+      ['another resource', widened((rules) => rules[0].resources.push('persistentvolumeclaims'))],
+      [
+        'a claim grant without a name',
+        (() => {
+          const items = clone();
+          const rules = find(items, 'Role', 'loader-logs-claim').object.rules;
+          delete rules[0].resourceNames;
+          return items;
+        })(),
+      ],
+      [
+        'a claim grant with another verb',
+        (() => {
+          const items = clone();
+          find(items, 'Role', 'loader-logs-claim').object.rules[0].verbs.push('update');
+          return items;
+        })(),
+      ],
+      [
+        'a cluster-wide claim grant',
+        (() => {
+          const items = clone();
+          find(items, 'ClusterRole', 'loader-logs-volume').object.rules.push({
+            apiGroups: [''],
+            resources: ['persistentvolumeclaims'],
+            verbs: ['get'],
+          });
+          return items;
+        })(),
+      ],
+    ];
+    for (const [reason, items] of cases) {
+      expect(() => assertLogsVolumeRbac(items), reason).toThrow(/wider than/);
+    }
+    // The committed manifests still pass: the mutations were in memory only.
+    expect(() => assertLogsVolumeRbac(platformObjects())).not.toThrow();
   });
 });

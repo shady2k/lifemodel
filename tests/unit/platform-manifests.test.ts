@@ -997,54 +997,24 @@ describe('platform manifests', () => {
     const clusterRoleBindings = objects
       .filter((item) => item.kind === 'ClusterRoleBinding' && item.metadata.name !== 'logs-collector')
       .sort((left, right) => left.metadata.name.localeCompare(right.metadata.name));
-    expect(clusterRoleBindings).toEqual([
-      {
+    // One binding per identity: the TokenReview roles, the auth-delegator, and
+    // the loader's log-volume grant (ADR-016 §5) - get and patch on one volume,
+    // by name, and nothing wider.
+    expect(clusterRoleBindings).toEqual(
+      [
+        ['core-task-channel-token-review', 'core', 'lifemodel'],
+        ['loader-logs-volume', 'loader', 'lifemodel-system'],
+        ['model-gateway-token-review', 'model-gateway', 'lifemodel-system'],
+        ['openbao-auth-delegator', 'openbao', 'openbao', 'system:auth-delegator'],
+        ['storage-module-token-review', 'storage-module', 'lifemodel-system'],
+      ].map(([name, account, namespace, role = name]) => ({
         apiVersion: 'rbac.authorization.k8s.io/v1',
         kind: 'ClusterRoleBinding',
-        metadata: { name: 'core-task-channel-token-review' },
-        roleRef: {
-          apiGroup: 'rbac.authorization.k8s.io',
-          kind: 'ClusterRole',
-          name: 'core-task-channel-token-review',
-        },
-        subjects: [{ kind: 'ServiceAccount', name: 'core', namespace: 'lifemodel' }],
-      },
-      {
-        apiVersion: 'rbac.authorization.k8s.io/v1',
-        kind: 'ClusterRoleBinding',
-        metadata: { name: 'model-gateway-token-review' },
-        roleRef: {
-          apiGroup: 'rbac.authorization.k8s.io',
-          kind: 'ClusterRole',
-          name: 'model-gateway-token-review',
-        },
-        subjects: [
-          { kind: 'ServiceAccount', name: 'model-gateway', namespace: 'lifemodel-system' },
-        ],
-      },
-      {
-        apiVersion: 'rbac.authorization.k8s.io/v1',
-        kind: 'ClusterRoleBinding',
-        metadata: { name: 'openbao-auth-delegator' },
-        roleRef: {
-          apiGroup: 'rbac.authorization.k8s.io',
-          kind: 'ClusterRole',
-          name: 'system:auth-delegator',
-        },
-        subjects: [{ kind: 'ServiceAccount', name: 'openbao', namespace: 'openbao' }],
-      },
-      {
-        apiVersion: 'rbac.authorization.k8s.io/v1',
-        kind: 'ClusterRoleBinding',
-        metadata: { name: 'storage-module-token-review' },
-        roleRef: {
-          apiGroup: 'rbac.authorization.k8s.io',
-          kind: 'ClusterRole',
-          name: 'storage-module-token-review',
-        },
-        subjects: [moduleSubject],
-      },
-    ]);
+        metadata: { name },
+        roleRef: { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: role },
+        subjects: [{ kind: 'ServiceAccount', name: account, namespace }],
+      }))
+    );
     const identityRoles = objects
       .filter(
         (item) => item.kind === 'Role' && item.metadata?.name === 'storage-module-identity-read'

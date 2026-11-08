@@ -22,6 +22,7 @@ import {
   type PkiManager,
 } from './pki.js';
 import { createKubernetesTlsStores } from './pki-kubernetes.js';
+import { createLogsVolumeClaimPreflight } from './logs-volume-claim.js';
 import type { LoaderLogger } from './logger.js';
 import { createLoaderState, describe, type LoaderState } from './state.js';
 import {
@@ -70,6 +71,8 @@ export interface LoaderAppDeps {
   platformGiteaPhases?: PlatformPhase[];
   platformGiteaApi?: GiteaApi;
   platformBootstrap?: { runInitial(): Promise<void>; unsealIfSealed(): Promise<void> };
+  /** The log volume pre-flight before the first-start phases; tests replace it. */
+  logsVolumeClaim?: { run(): Promise<void> };
   /** The SeaweedFS S3 custody phase (ADR-015 S-D1); tests replace it. */
   platformStorageCustody?: PlatformPhase;
   pki?: PkiManager;
@@ -194,7 +197,19 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
             }),
           }),
       });
-      return bootstrap;
+      // ADR-016 §5: before the durable phases, and on every bootstrap attempt,
+      // a released log volume that still holds a previous claim's UID gets that
+      // stale claimRef cleared, so the recreated claim binds. It needs only the
+      // Kubernetes API - no OpenBao, no later step - and it is the reason the
+      // store's claim is not left Pending forever.
+      const logsVolumeClaim = deps.logsVolumeClaim ?? createLogsVolumeClaimPreflight({ logger });
+      return {
+        runInitial: async () => {
+          await logsVolumeClaim.run();
+          await bootstrap.runInitial();
+        },
+        unsealIfSealed: () => bootstrap.unsealIfSealed(),
+      };
     })();
 
   const settings: SettingsStore =

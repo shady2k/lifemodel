@@ -1,0 +1,59 @@
+# The log store's retained volume (ADR-016 §5). The PV sets
+# persistentVolumeReclaimPolicy: Retain, so a claim that is deleted leaves the
+# volume Released with the old claim's UID and it never binds again by itself.
+# The loader's first-start pre-flight clears that stale spec.claimRef - the one
+# supported way to make a retained volume claimable - and needs exactly this:
+# get and patch, by name, on the one volume, and get on the store's own claim
+# so it can tell the current claim from a previous one. No list, no watch, no
+# other volume, no delete, and no access to any claim other than this one.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: loader-logs-volume
+rules:
+  - apiGroups: ['']
+    resources: ['persistentvolumes']
+    resourceNames:
+      - lifemodel-logs
+    verbs: ['get', 'patch']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: loader-logs-volume
+subjects:
+  - kind: ServiceAccount
+    name: loader
+    namespace: lifemodel-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: loader-logs-volume
+---
+# The claim itself: read by name only, to compare its UID with the one the
+# released volume still holds.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: loader-logs-claim
+  namespace: lifemodel-system
+rules:
+  - apiGroups: ['']
+    resources: ['persistentvolumeclaims']
+    resourceNames:
+      - logs-store
+    verbs: ['get']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: loader-logs-claim
+  namespace: lifemodel-system
+subjects:
+  - kind: ServiceAccount
+    name: loader
+    namespace: lifemodel-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: loader-logs-claim
