@@ -395,6 +395,8 @@ render_logs_volume_files() {
   install -d -m 0755 "$render_dir/systemd"
   sed -e "s|@LOGS_VOLUME_SH@|$LOGS_VOLUME_SCRIPT|g" \
       -e "s|@LOGS_VOLUME_SIZE@|$LOGS_VOLUME_SIZE|g" \
+      -e "s|@LOGS_VOLUME_IMAGE@|$LOGS_VOLUME_IMAGE|g" \
+      -e "s|@LOGS_VOLUME_DIR@|$LOGS_VOLUME_DIR|g" \
       "$template" > "$render_dir/systemd/$LOGS_VOLUME_UNIT.service"
   printf '%s %s ext4 loop,nofail 0 0\n' "$LOGS_VOLUME_IMAGE" "$LOGS_VOLUME_DIR" > "$render_dir/fstab"
 }
