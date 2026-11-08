@@ -108,8 +108,9 @@ would then be the whole volume — and a size the image's filesystem cannot hold
 naming both figures. Re-running it with a larger `--logs-volume-size` grows the
 image and its filesystem (online while the volume is mounted, with the same
 free-space refusal for the difference); a smaller size is refused with the
-existing image's size and nothing is changed, and an equal size changes nothing.
-The log volume is never shrunk. A fresh image's root and its `data` directory
+existing image's size and nothing is changed, and an equal size leaves the image
+alone while finishing a filesystem an earlier resize left short of it. The log
+volume is never shrunk. A fresh image's root and its `data` directory
 belong to uid 1000, the uid the store runs as, so the store writes without the
 kubelet's `fsGroup`. `nofail` means a broken volume never keeps the machine from
 booting: the store pod waits instead, and nothing else is held.

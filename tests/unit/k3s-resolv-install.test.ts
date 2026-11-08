@@ -293,6 +293,17 @@ exit 0
 `
       );
       writeFake(join(bin, 'losetup'), '#!/bin/sh\nexit 0\n');
+      // The volume script reconciles an existing image's filesystem to the
+      // image on every run, so it reads the filesystem's size first.
+      writeFake(
+        join(bin, 'dumpe2fs'),
+        `#!/bin/sh
+for arg do target=$arg; done
+bytes=$(stat -c %s "$target")
+printf 'Block count:              %s\\n' "$(( bytes / 4096 ))"
+printf 'Block size:               4096\\n'
+`
+      );
       writeFake(join(bin, 'resize2fs'), '#!/bin/sh\nexit 0\n');
       writeFake(
         join(bin, 'ip'),

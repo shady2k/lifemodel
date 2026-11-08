@@ -373,6 +373,23 @@
         test "$single_rc" -eq 1
         grep -F '1G' single.err
         grep -F 'below the minimum' single.err
+        # An image grown past its filesystem is finished on the next run at the
+        # same size. fallocate enlarges the image before resize2fs runs, so a
+        # resize2fs that failed or was interrupted leaves exactly this state,
+        # and a run that only compared the image with the wanted size would
+        # report success forever while the filesystem kept its old capacity.
+        fallocate -l 5G "$image"
+        blocks_short=$(dumpe2fs -h "$image" 2>/dev/null | grep '^Block count:' | tr -cd '0-9')
+        test "$blocks_short" -lt $((5 * 1024 * 1024 * 1024 / 4096))
+        bash ${./deploy/logs/logs-volume.sh} 5G "$image" "$TMPDIR/mnt"
+        block_size=$(dumpe2fs -h "$image" 2>/dev/null | grep '^Block size:' | tr -cd '0-9')
+        blocks_after=$(dumpe2fs -h "$image" 2>/dev/null | grep '^Block count:' | tr -cd '0-9')
+        test "$blocks_after" -gt "$blocks_short"
+        test "$(( blocks_after * block_size ))" -eq $((5 * 1024 * 1024 * 1024))
+        # The run after it finds the filesystem filling the image and does nothing.
+        touch -d '2001-01-01 00:00:00' "$image"
+        bash ${./deploy/logs/logs-volume.sh} 5G "$image" "$TMPDIR/mnt"
+        test "$(stat -c %Y "$image")" -eq "$(date -d '2001-01-01 00:00:00' +%s)"
         touch $out
       '';
       # The command the rendered unit runs, executed for real against a

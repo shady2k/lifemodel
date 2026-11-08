@@ -7,6 +7,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  truncateSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -248,6 +249,27 @@ truncate -s "$size" "$target"
     expect(readFileSync(join(root, 'resize2fs.log'), 'utf8')).toContain('/dev/loop7');
   }, 120_000);
 
+  it('finishes a filesystem an interrupted resize left short of the image', () => {
+    const root = workspace('reconcile');
+    const image = join(root, 'install-root/var/lib/lifemodel-logs.img');
+    const resized = join(root, 'resize2fs.log');
+    expect(install(root).status).toBe(0);
+    // fallocate enlarges the image before resize2fs runs, so a resize2fs that
+    // failed or was interrupted leaves the image at its size and the
+    // filesystem at the old one. The next run at the same size finishes it.
+    truncateSync(image, 4 * 1024 ** 3);
+    writeFileSync(join(root, 'fs-bytes'), String(3 * 1024 ** 3));
+    const reconciled = install(root, { size: '4G' });
+    expect(reconciled.status, reconciled.output).toBe(0);
+    expect(existsSync(resized), 'a filesystem short of its image was not resized').toBe(true);
+    expect(readFileSync(resized, 'utf8')).toContain(image);
+    expect(readFileSync(join(root, 'fs-bytes'), 'utf8').trim()).toBe(String(4 * 1024 ** 3));
+    // The run after it finds the filesystem filling the image and does nothing.
+    const resizeCalls = readFileSync(resized, 'utf8');
+    expect(install(root, { size: '4G' }).status).toBe(0);
+    expect(readFileSync(resized, 'utf8')).toBe(resizeCalls);
+  }, 120_000);
+
   function install(
     root: string,
     options: { size?: string; freeKb?: number; loopDevice?: string } = {}
@@ -300,18 +322,31 @@ fi
 exit 0
 `
       );
+      // The filesystem's size has a file of its own: dumpe2fs reads it, the
+      // image's size when nothing wrote it yet, and resize2fs makes it the
+      // image's size. A missed resize is a size left behind the image's.
+      writeFake(
+        join(bin, 'dumpe2fs'),
+        `#!/bin/sh
+for arg do target=$arg; done
+if [ -f "$FAKE_FS_BYTES" ]; then bytes=$(cat "$FAKE_FS_BYTES"); else bytes=$(stat -c %s "$target"); fi
+printf 'Block count:              %s\\n' "$(( bytes / 4096 ))"
+printf 'Block size:               4096\\n'
+`
+      );
       writeFake(
         join(bin, 'resize2fs'),
         `#!/bin/sh
 printf '%s\\n' "$*" >> "$RESIZE2FS_LOG"
-exit 0
+stat -c %s "$FAKE_IMAGE" > "$FAKE_FS_BYTES"
 `
       );
       writeFake(
         join(bin, 'mkfs.ext4'),
         `#!/bin/sh
 printf '%s\\n' "$*" >> "$MKFS_LOG"
-exit 0
+for arg do target=$arg; done
+stat -c %s "$target" > "$FAKE_FS_BYTES"
 `
       );
       writeFake(join(bin, 'debugfs'), debugfsFake);
@@ -369,6 +404,8 @@ exit 0
         LOSETUP_LOG: join(root, 'losetup.log'),
         FAKE_LOOP_DEVICE: options.loopDevice ?? '',
         FAKE_FREE_KB: String(options.freeKb ?? 64 * 1024 * 1024),
+        FAKE_IMAGE: join(root, 'install-root/var/lib/lifemodel-logs.img'),
+        FAKE_FS_BYTES: join(root, 'fs-bytes'),
         LIFEMODEL_INSTALL_ROOT: join(root, 'install-root'),
         LIFEMODEL_STATE_DIR: join(root, 'state'),
         LIFEMODEL_INSTANCE_ENV: join(root, 'absent.env'),
