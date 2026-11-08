@@ -43,6 +43,18 @@ LIFEMODEL_RESOLV_MJS="/usr/lib/lifemodel/resolv-conf.mjs"
 LIFEMODEL_DNS_APPLY_SH="/usr/lib/lifemodel/k3s-dns-apply.sh"
 K3S_RESOLV_DROPIN="/etc/rancher/k3s/config.yaml.d/lifemodel-resolv-conf.yaml"
 
+# The log store's own file-backed ext4 volume (ADR-016 §5). The unit creates
+# the image once; the fstab line mounts it with nofail, so a broken volume never
+# keeps the machine from booting.
+LOGS_VOLUME_SIZE="3G"
+LOGS_VOLUME_IMAGE="/var/lib/lifemodel-logs.img"
+LOGS_VOLUME_DIR="/var/lib/lifemodel-logs"
+LOGS_VOLUME_SCRIPT="/usr/lib/lifemodel/logs-volume.sh"
+LOGS_VOLUME_UNIT="lifemodel-logs-volume"
+LOGS_VOLUME_MOUNT_UNIT="var-lib-lifemodel\x2dlogs.mount"
+LOGS_VOLUME_SOURCE="$SCRIPT_DIR/../deploy/logs"
+[ -d "$LOGS_VOLUME_SOURCE" ] || LOGS_VOLUME_SOURCE="$SCRIPT_DIR/deploy/logs"
+
 K3S_VERSION="1.35.8+k3s1"
 FLUX_VERSION="v2.9.6"
 FLUX_INSTALL_URL="https://github.com/fluxcd/flux2/releases/download/v2.9.6/install.yaml"
@@ -86,6 +98,7 @@ Cluster:
   --insecure-registry      render insecure: true (plain-HTTP registry)
   --render-only DIR        write the rendered root objects to DIR and exit
                            without touching the host
+  --logs-volume-size SIZE  file-backed log volume size (default: 3G, minimum: 2G)
   --root-templates DIR     use shared templates from DIR (for packaging/checks)
   -h, --help               show this help
 EOF
@@ -116,10 +129,16 @@ while [ "$#" -gt 0 ]; do
     --insecure-registry) INSECURE_REGISTRY=true; shift ;;
     --render-only)       require_value "$@"; RENDER_ONLY_DIR=$2; shift 2 ;;
     --root-templates)    require_value "$@"; ROOT_TEMPLATES=$2; shift 2 ;;
+    --logs-volume-size)  require_value "$@"; LOGS_VOLUME_SIZE=$2; shift 2 ;;
     -h|--help)           usage; exit 0 ;;
     *)                   die "unknown option: $1" ;;
   esac
 done
+
+# The log volume's size is one rule, held by the script both installers run:
+# it names the minimum and the value given (ADR-016 §5).
+[ -f "$LOGS_VOLUME_SOURCE/logs-volume.sh" ] || die "missing template: $LOGS_VOLUME_SOURCE/logs-volume.sh"
+sh "$LOGS_VOLUME_SOURCE/logs-volume.sh" check "$LOGS_VOLUME_SIZE"
 
 # The saved record is data, never a shell program. Parse only literal known
 # assignments; validate the whole record even when explicit flags override it.
@@ -366,12 +385,27 @@ service-cidr: 10.43.0.0/16
 EOF
 }
 
+# The unit that creates the log volume image, and the fstab line that mounts
+# it with nofail. Rendered here so --render-only and a real install write the
+# same bytes.
+render_logs_volume_files() {
+  render_dir=$1
+  template="$LOGS_VOLUME_SOURCE/lifemodel-logs-volume.service.in"
+  [ -f "$template" ] || die "missing template: $template"
+  install -d -m 0755 "$render_dir/systemd"
+  sed -e "s|@LOGS_VOLUME_SH@|$LOGS_VOLUME_SCRIPT|g" \
+      -e "s|@LOGS_VOLUME_SIZE@|$LOGS_VOLUME_SIZE|g" \
+      "$template" > "$render_dir/systemd/$LOGS_VOLUME_UNIT.service"
+  printf '%s %s ext4 loop,nofail 0 0\n' "$LOGS_VOLUME_IMAGE" "$LOGS_VOLUME_DIR" > "$render_dir/fstab"
+}
+
 # Render-only mode: write the rendered objects and exit, touching nothing.
 if [ -n "$RENDER_ONLY_DIR" ]; then
   mkdir -p "$RENDER_ONLY_DIR"
   render_root_objects "$RENDER_ONLY_DIR"
   render_k3s_resolv_files "$RENDER_ONLY_DIR"
   render_k3s_registry_files "$RENDER_ONLY_DIR"
+  render_logs_volume_files "$RENDER_ONLY_DIR"
   exit 0
 fi
 
@@ -411,7 +445,7 @@ node_major=$(node -p 'Number(process.versions.node.split(".")[0])')
 [ "$node_major" -ge 18 ] || die "Node.js 18 or newer is required; found $(node --version)"
 command -v apt-get >/dev/null 2>&1 || die "apt-get is required to install avahi-daemon and avahi-utils"
 apt-get update
-apt-get install -y avahi-daemon avahi-utils
+apt-get install -y avahi-daemon avahi-utils e2fsprogs util-linux
 lan_interface=$LAN_INTERFACE
 if [ -z "$lan_interface" ]; then
   routes=$(ip -j -4 route show default) || die "cannot read IPv4 default routes; pass --lan-interface"
@@ -499,6 +533,7 @@ resolv_render=$(mktemp -d)
 trap 'rm -rf "$resolv_render"' EXIT HUP INT TERM
 render_k3s_resolv_files "$resolv_render"
 render_k3s_registry_files "$resolv_render"
+render_logs_volume_files "$resolv_render"
 install -d -m 0755 "$host_root/usr/lib/lifemodel" "$host_root/etc/systemd/system" \
   "$host_root/etc/rancher/k3s/config.yaml.d" "$host_root/run/lifemodel" \
   "$host_root/etc/systemd/system/k3s.service.d"
@@ -540,6 +575,26 @@ if [ "$resolv_result" = changed ]; then k3s_resolv_changed=1; fi
 [ -s "$host_root$K3S_RESOLV_CONF" ] || die "k3s resolver missing or empty"
 # Load prerequisites before either an upstream first start or our restart.
 systemctl daemon-reload
+
+# The log volume exists before k3s and the platform. The shared script refuses a
+# size below the minimum or one the disk cannot hold before it creates anything
+# (ADR-016 §5); the unit creates the image once and the fstab line mounts it
+# with nofail, so a broken volume never keeps the machine from booting.
+sh "$LOGS_VOLUME_SOURCE/logs-volume.sh" "$LOGS_VOLUME_SIZE" \
+  "$host_root$LOGS_VOLUME_IMAGE" "$host_root$LOGS_VOLUME_DIR"
+install -m 0755 "$LOGS_VOLUME_SOURCE/logs-volume.sh" "$host_root$LOGS_VOLUME_SCRIPT"
+install -m 0644 "$resolv_render/systemd/$LOGS_VOLUME_UNIT.service" \
+  "$host_root/etc/systemd/system/$LOGS_VOLUME_UNIT.service"
+logs_volume_fstab=$(cat "$resolv_render/fstab")
+logs_volume_fstab_file="$host_root/etc/fstab"
+if ! { [ -f "$logs_volume_fstab_file" ] && grep -Fqx "$logs_volume_fstab" "$logs_volume_fstab_file"; }; then
+  printf '%s\n' "$logs_volume_fstab" >> "$logs_volume_fstab_file"
+fi
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload
+  systemctl enable "$LOGS_VOLUME_UNIT.service"
+  systemctl start "$LOGS_VOLUME_MOUNT_UNIT" || die "the log volume did not mount; run lifemodel doctor"
+fi
 
 
 k3s_installed_before=0
@@ -708,6 +763,12 @@ if [ -d "$K3S_RESOLV_SOURCE" ] && [ "$K3S_RESOLV_SOURCE" != "$bundle_dir/deploy/
   install -m 0644 "$K3S_RESOLV_SOURCE/lifemodel-k3s-resolv.path.in" "$bundle_dir/deploy/k3s/lifemodel-k3s-resolv.path.in"
   install -m 0644 "$K3S_RESOLV_SOURCE/config.yaml.d/lifemodel-resolv-conf.yaml" \
     "$bundle_dir/deploy/k3s/config.yaml.d/lifemodel-resolv-conf.yaml"
+fi
+if [ -d "$LOGS_VOLUME_SOURCE" ] && [ "$LOGS_VOLUME_SOURCE" != "$bundle_dir/deploy/logs" ]; then
+  install -d -m 0755 "$bundle_dir/deploy/logs"
+  install -m 0755 "$LOGS_VOLUME_SOURCE/logs-volume.sh" "$bundle_dir/deploy/logs/logs-volume.sh"
+  install -m 0644 "$LOGS_VOLUME_SOURCE/lifemodel-logs-volume.service.in" \
+    "$bundle_dir/deploy/logs/lifemodel-logs-volume.service.in"
 fi
 if [ "$SCRIPT_DIR/install.sh" != "$bundle_script" ]; then install -m 0755 "$SCRIPT_DIR/install.sh" "$bundle_script"; fi
 install -d -m 0755 "$bundle_dir/deploy/cli"

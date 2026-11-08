@@ -38,6 +38,8 @@ Optional flags (run `sh scripts/install.sh --help` for all flags):
   keyless identity. `--insecure-registry` is only for a VM-local HTTP registry.
 - `--render-only DIR` writes the rendered manifests without installing anything;
   `--root-templates DIR` overrides the packaged root templates.
+- `--logs-volume-size 3G` sets the file-backed log volume (default `3G`,
+  minimum `2G`); see [Log volume](#log-volume).
 
 The installer runs as root, installs k3s, Flux and LAN name publication, then
 waits for verified HTTPS before printing the address and
@@ -93,6 +95,24 @@ before any host change. The installer also recovers identity from
 `/var/lib/lifemodel/instance-name` and the cluster's `lifemodel-instance`
 ConfigMap, and refuses conflicts between surviving records. Do not edit the
 saved record as shell code; only validated literal assignments are accepted.
+
+## Log volume
+
+The log store keeps its data on a file-backed ext4 image of its own,
+`/var/lib/lifemodel-logs.img`, mounted at `/var/lib/lifemodel-logs` with
+`loop,nofail`. The `lifemodel-logs-volume.service` unit creates the image with
+`fallocate` and `mkfs.ext4`; the fstab line mounts it. The image is a
+reservation, not a sparse claim: the host's free space really drops by the size
+you choose. The installer refuses a size below `2G` — the evictor's threshold
+would then be the whole volume — and a size the image's filesystem cannot hold,
+naming both figures. Re-running it with a larger `--logs-volume-size` grows the
+image and its filesystem (online while the volume is mounted, with the same
+free-space refusal for the difference); a smaller size is refused with the
+existing image's size and nothing is changed, and an equal size changes nothing.
+The log volume is never shrunk. A fresh image's root and its `data` directory
+belong to uid 1000, the uid the store runs as, so the store writes without the
+kubelet's `fsGroup`. `nofail` means a broken volume never keeps the machine from
+booting: the store pod waits instead, and nothing else is held.
 
 ## Instance registry and node trust
 
@@ -188,6 +208,10 @@ Add this flake as an input and enable `services.lifemodel` on the dedicated VM:
   };
 }
 ```
+
+`services.lifemodel.logsVolumeSize` (default `"3G"`, at least `2G`) sizes the
+same file-backed log volume the generic installer creates; the module refuses a
+smaller value when it evaluates. See [Log volume](#log-volume).
 
 The core image requires an x86-64-v2 CPU or newer for memory search. For a VM, configure the vCPU type as `host` or an x86-64-v2 model; a default `Common KVM processor` / `qemu64` may expose only x86-64-v1. `lifemodel doctor` warns if `/proc/cpuinfo` lacks `sse4_2` or `popcnt`.
 
