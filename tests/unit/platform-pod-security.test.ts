@@ -402,6 +402,12 @@ describe('the log network policies (ADR-016 §7)', () => {
             },
             podSelector: { matchLabels: { 'app.kubernetes.io/name': 'loader' } },
           },
+          {
+            namespaceSelector: {
+              matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' },
+            },
+            podSelector: { matchLabels: { 'app.kubernetes.io/name': 'logs-evictor' } },
+          },
         ],
         ports: [{ protocol: 'TCP', port: 9428 }],
       },

@@ -3,5 +3,14 @@ kind: Kustomization
 resources:
   - volume.yaml
   - settings-defaults.yaml
+  - partition-key.yaml
   - logs-store.yaml
+  - evictor.yaml
   - network-policy.yaml
+images:
+  # The evictor runs the loader's image with its own entry point; the release
+  # flow pins this digest to the same pushed loader digest A0, A and D use
+  # (ADR-016 §5).
+  - name: ghcr.io/shady2k/lifemodel-loader
+    newName: ghcr.io/shady2k/lifemodel-loader
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
