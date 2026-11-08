@@ -363,6 +363,25 @@
         test ! -e "$TMPDIR/big.img"
         touch $out
       '';
+      # The command the rendered unit runs, executed for real against a
+      # temporary image and mount point: the arguments the unit passes are the
+      # whole contract with the shared script, and a partial list (the size
+      # alone) used to end in the script's usage line with no image created.
+      logsVolumeUnitRuns = pkgs.runCommand "lifemodel-logs-volume-unit-runs" {
+        nativeBuildInputs = [ pkgs.bash pkgs.coreutils pkgs.e2fsprogs pkgs.util-linux pkgs.gnused ];
+      } ''
+        set -eu
+        export PATH=${lib.makeBinPath [ pkgs.bash pkgs.coreutils pkgs.e2fsprogs pkgs.util-linux pkgs.gnused ]}
+        unit=${lib.escapeShellArg keyless.config.systemd.services.lifemodel-logs-volume.script}
+        args=$(printf '%s\n' "$unit" | sed -e 's|^exec [^ ]* *||' \
+          -e "s|${logsVolumeImage}|$TMPDIR/volume.img|g" \
+          -e "s|${logsVolumeDir}|$TMPDIR/mnt|g")
+        test -n "$args"
+        bash ${./deploy/logs/logs-volume.sh} $args
+        test "$(stat -c %s "$TMPDIR/volume.img")" -eq $((3 * 1024 * 1024 * 1024))
+        test -d "$TMPDIR/mnt"
+        touch $out
+      '';
       logsVolumeInstaller =
         assert lib.hasInfix "ExecStart=/usr/lib/lifemodel/logs-volume.sh 3G"
           (builtins.readFile (scriptKeyless + "/systemd/lifemodel-logs-volume.service"));
@@ -399,6 +418,24 @@
         printf '%s\n' "$output" | busybox grep -F '2G'
         printf '%s\n' "$output" | busybox grep -F 'minimum'
         test ! -e $TMPDIR/out/systemd/lifemodel-logs-volume.service
+        touch $out
+      '';
+      # The ExecStart line the installer writes, executed the way the host runs
+      # it at boot: the same shared script and the same arguments, against a
+      # temporary image and mount point.
+      logsVolumeInstallerUnitRuns = pkgs.runCommand "lifemodel-logs-volume-installer-unit-runs" {
+        nativeBuildInputs = [ pkgs.bash pkgs.coreutils pkgs.e2fsprogs pkgs.util-linux pkgs.gnused ];
+      } ''
+        set -eu
+        export PATH=${lib.makeBinPath [ pkgs.bash pkgs.coreutils pkgs.e2fsprogs pkgs.util-linux pkgs.gnused ]}
+        line=$(sed -n 's/^ExecStart=//p' ${scriptKeyless}/systemd/lifemodel-logs-volume.service)
+        args=$(printf '%s\n' "$line" | sed -e 's|^/usr/lib/lifemodel/logs-volume.sh *||' \
+          -e "s|${logsVolumeImage}|$TMPDIR/volume.img|g" \
+          -e "s|${logsVolumeDir}|$TMPDIR/mnt|g")
+        test -n "$args"
+        bash ${./deploy/logs/logs-volume.sh} $args
+        test "$(stat -c %s "$TMPDIR/volume.img")" -eq $((3 * 1024 * 1024 * 1024))
+        test -d "$TMPDIR/mnt"
         touch $out
       '';
       forcedConsumerOverride = evaluate ({ ... }: {
@@ -777,8 +814,10 @@
         k3s-resolv-module-evaluation = resolvConfModuleEvaluation;
         logs-volume-module = logsVolumeModule;
         logs-volume-behaviour = logsVolumeBehaviour;
+        logs-volume-unit-runs = logsVolumeUnitRuns;
         logs-volume-installer = logsVolumeInstaller;
         logs-volume-installer-refusal = logsVolumeInstallerRefusal;
+        logs-volume-installer-unit-runs = logsVolumeInstallerUnitRuns;
         k3s-resolv-installer-render = resolvConfInstallerUnits;
         k3s-resolv-behaviour = resolvConfBehaviour;
         platform-kustomize-wiring = renderedPlatform;
