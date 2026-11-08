@@ -73,17 +73,17 @@ describe('the log store adapter query form', () => {
       '_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200'
     );
     expect(buildRecordsQuery({ from: FROM, to: TO, module: 'core' })).toBe(
-      '_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] module:"core" | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200'
+      '_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] module:="core" | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200'
     );
     expect(LOGS_PAGE_SIZE).toBe(200);
   });
 
   it('quotes and escapes a module value instead of letting it reach LogsQL', () => {
     expect(buildRecordsQuery({ from: FROM, to: TO, module: 'core" OR *' })).toBe(
-      '_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] module:"core\\" OR *" | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200'
+      '_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] module:="core\\" OR *" | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200'
     );
     expect(buildRecordsQuery({ from: FROM, to: TO, module: 'core\\' })).toBe(
-      '_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] module:"core\\\\" | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200'
+      '_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] module:="core\\\\" | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200'
     );
   });
 });
@@ -95,7 +95,7 @@ describe('the log store adapter against recorded responses', () => {
     const result = await store.query(buildRecordsQuery({ from: FROM, to: TO }));
     expect(result.state).toBe('ok');
     if (result.state !== 'ok') throw new Error(result.reason);
-    expect(result.records).toHaveLength(8);
+    expect(result.records).toHaveLength(9);
     expect(result.records[0]).toEqual({
       time: '2026-11-07T11:00:00Z',
       message: 'outside window',
@@ -138,6 +138,8 @@ describe('the log store adapter against recorded responses', () => {
     if (result.state !== 'ok') throw new Error(result.reason);
     expect(result.records).toHaveLength(4);
     expect(result.records.every((record) => record.fields['module'] === 'core')).toBe(true);
+    // The phrase form module:"core" would also match the module core-web.
+    expect(result.records.map((record) => record.fields['module'])).not.toContain('core-web');
     expect(fixture.requests[0]?.query).toBe(buildRecordsQuery({ from: FROM, to: TO, module: 'core' }));
   });
 
@@ -146,7 +148,7 @@ describe('the log store adapter against recorded responses', () => {
     const logs = createLogsQuery({ store: createLogsStore({ url: fixture.url }) });
     const result = await logs.records({ from: FROM, to: MID });
     if (result.state !== 'ok') throw new Error(result.reason);
-    expect(result.records).toHaveLength(6);
+    expect(result.records).toHaveLength(7);
     expect(result.records.map((record) => record.time)).not.toContain('2026-11-07T10:45:00Z');
     expect(result.records.map((record) => record.time)).not.toContain('2026-11-07T11:00:00Z');
   });
@@ -158,7 +160,7 @@ describe('the log store adapter against recorded responses', () => {
     const first = await store.modules();
     expect(first).toEqual({
       state: 'ok',
-      modules: ['core', 'loader', 'model-gateway', 'storage-module', 'task-harness'],
+      modules: ['core', 'core-web', 'loader', 'model-gateway', 'storage-module', 'task-harness'],
     });
     now = 59_999;
     expect(await store.modules()).toEqual(first);

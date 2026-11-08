@@ -144,12 +144,12 @@ describe('the logs API', () => {
     expect(response.headers['cache-control']).toBe('no-store');
     const body = JSON.parse(response.body) as { state: string; records: { time: string }[] };
     expect(body.state).toBe('ok');
-    expect(body.records).toHaveLength(8);
+    expect(body.records).toHaveLength(9);
     expect(body.records[0]?.time).toBe('2026-11-07T11:00:00Z');
 
     const narrow = await loader.get(`/api/logs?from=${String(FROM)}&to=${String(MID)}`);
     const narrowBody = JSON.parse(narrow.body) as { records: { time: string }[] };
-    expect(narrowBody.records).toHaveLength(6);
+    expect(narrowBody.records).toHaveLength(7);
     expect(narrowBody.records.map((record) => record.time)).not.toContain('2026-11-07T11:00:00Z');
   });
 
@@ -165,7 +165,8 @@ describe('the logs API', () => {
     };
     expect(body.records).toHaveLength(4);
     expect(body.records.every((record) => record.fields['module'] === 'core')).toBe(true);
-    expect(fixture.requests.at(-1)?.query).toContain('module:"core"');
+    expect(body.records.some((record) => record.fields['module'] === 'core-web')).toBe(false);
+    expect(fixture.requests.at(-1)?.query).toContain('module:="core"');
   });
 
   it('returns the modules seen by the store', async () => {
@@ -175,7 +176,7 @@ describe('the logs API', () => {
     expect(response.status).toBe(200);
     expect(JSON.parse(response.body)).toEqual({
       state: 'ok',
-      modules: ['core', 'loader', 'model-gateway', 'storage-module', 'task-harness'],
+      modules: ['core', 'core-web', 'loader', 'model-gateway', 'storage-module', 'task-harness'],
     });
   });
 
@@ -184,6 +185,13 @@ describe('the logs API', () => {
     const loader = await start(fixture.url);
     const response = await loader.get('/api/logs?from=soon&to=later');
     expect(response.status).toBe(400);
+    expect(JSON.parse(response.body)).toEqual({ state: 'invalid', reason: 'filter' });
+    const beyondDateRange = await loader.get(`/api/logs?from=1e20&to=${String(TO)}`);
+    expect(beyondDateRange.status).toBe(400);
+    expect(JSON.parse(beyondDateRange.body)).toEqual({ state: 'invalid', reason: 'filter' });
+    const beyondDateRangeEnd = await loader.get(`/api/logs?from=${String(FROM)}&to=1e20`);
+    expect(beyondDateRangeEnd.status).toBe(400);
+    expect(JSON.parse(beyondDateRangeEnd.body)).toEqual({ state: 'invalid', reason: 'filter' });
     expect(fixture.requests).toHaveLength(0);
   });
 

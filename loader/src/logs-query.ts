@@ -44,7 +44,7 @@ export function buildRecordsQuery(filter: LogsFilter): string {
   const moduleFilter =
     filter.module === undefined || filter.module === null || filter.module === ''
       ? ''
-      : ` module:${quoteLogsValue(filter.module)}`;
+      : ` module:=${quoteLogsValue(filter.module)}`;
   return `${range}${moduleFilter} | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit ${String(LOGS_PAGE_SIZE)}`;
 }
 

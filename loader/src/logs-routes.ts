@@ -30,6 +30,9 @@ export interface LogsHandlers {
   readonly logsModules: RouteHandler;
 }
 
+/** The largest time value JavaScript's Date can represent, in milliseconds. */
+const MAX_DATE_MS = 8_640_000_000_000_000;
+
 function hasControlCharacter(value: string): boolean {
   for (const character of value) {
     const code = character.codePointAt(0) ?? 0;
@@ -86,6 +89,8 @@ export function createLogsHandlers(deps: LogsHandlerDeps): LogsHandlers {
     if (
       !Number.isInteger(from) ||
       !Number.isInteger(to) ||
+      Math.abs(from) > MAX_DATE_MS ||
+      Math.abs(to) > MAX_DATE_MS ||
       from > to ||
       moduleName.length > 128 ||
       hasControlCharacter(moduleName)
