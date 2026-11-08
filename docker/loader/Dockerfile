@@ -47,6 +47,8 @@ COPY loader/src/model-capture-setting.ts ./loader/src/model-capture-setting.ts
 COPY loader/src/workbench-status.ts ./loader/src/workbench-status.ts
 # The logs page types its record from the store adapter; the adapter itself stays server-side.
 COPY loader/src/logs-store-adapter.ts ./loader/src/logs-store-adapter.ts
+# The logs page filters by the collector's closed level set, which the adapter's query file owns.
+COPY loader/src/logs-query.ts ./loader/src/logs-query.ts
 RUN npm run build:loader-ui -- --emptyOutDir
 
 # Compile the TypeScript loader with its isolated manifests.
