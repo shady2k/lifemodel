@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -147,9 +148,38 @@ describe('the installers create the file-backed log volume', () => {
     expect(readFileSync(fstab, 'utf8').trim().split('\n')).toHaveLength(1);
   }, 120_000);
 
+  it('grows an existing image, refuses a smaller size and leaves an equal one alone', () => {
+    const root = workspace('grow');
+    const image = join(root, 'install-root/var/lib/lifemodel-logs.img');
+    expect(install(root).status).toBe(0);
+    expect(statSync(image).size).toBe(3 * 1024 ** 3);
+    const grown = install(root, { size: '4G' });
+    expect(grown.status, grown.output).toBe(0);
+    expect(statSync(image).size).toBe(4 * 1024 ** 3);
+    expect(readFileSync(join(root, 'fallocate.log'), 'utf8')).toContain('-l 4G');
+    expect(readFileSync(join(root, 'resize2fs.log'), 'utf8')).toContain(image);
+    // An equal size changes nothing at all.
+    const allocated = readFileSync(join(root, 'fallocate.log'), 'utf8');
+    expect(install(root, { size: '4G' }).status).toBe(0);
+    expect(readFileSync(join(root, 'fallocate.log'), 'utf8')).toBe(allocated);
+    // A smaller size is refused with both figures and never shrinks the image.
+    const shrink = install(root, { size: '2G' });
+    expect(shrink.status, shrink.output).not.toBe(0);
+    expect(shrink.output).toContain('2G');
+    expect(shrink.output).toContain('4096 MiB');
+    expect(shrink.output).toContain('never shrunk');
+    expect(statSync(image).size).toBe(4 * 1024 ** 3);
+    // A mounted image is grown online through the loop device that carries it.
+    const online = install(root, { size: '5G', loopDevice: '/dev/loop7' });
+    expect(online.status, online.output).toBe(0);
+    expect(statSync(image).size).toBe(5 * 1024 ** 3);
+    expect(readFileSync(join(root, 'losetup.log'), 'utf8')).toContain('-c /dev/loop7');
+    expect(readFileSync(join(root, 'resize2fs.log'), 'utf8')).toContain('/dev/loop7');
+  }, 120_000);
+
   function install(
     root: string,
-    options: { size?: string; freeKb?: number } = {}
+    options: { size?: string; freeKb?: number; loopDevice?: string } = {}
   ): { status: number | null; output: string; systemctl: string } {
     const bin = join(root, 'bin');
     const systemctlLog = join(root, 'systemctl.log');
@@ -180,8 +210,30 @@ printf 'fakefs 100000000 1 %s 1%% %s\\n' "${'$'}{FAKE_FREE_KB:-67108864}" "$targ
         join(bin, 'fallocate'),
         `#!/bin/sh
 printf '%s\\n' "$*" >> "$FALLOCATE_LOG"
-for arg do target=$arg; done
-: > "$target"
+previous=""
+for arg do
+  if [ "$previous" = -l ]; then size=$arg; fi
+  previous=$arg
+  target=$arg
+done
+truncate -s "$size" "$target"
+`
+      );
+      writeFake(
+        join(bin, 'losetup'),
+        `#!/bin/sh
+printf '%s\\n' "$*" >> "$LOSETUP_LOG"
+if [ "$1" = -j ] && [ -n "$FAKE_LOOP_DEVICE" ]; then
+  printf '%s: [1]:0 (%s)\\n' "$FAKE_LOOP_DEVICE" "$2"
+fi
+exit 0
+`
+      );
+      writeFake(
+        join(bin, 'resize2fs'),
+        `#!/bin/sh
+printf '%s\\n' "$*" >> "$RESIZE2FS_LOG"
+exit 0
 `
       );
       writeFake(
@@ -248,6 +300,9 @@ exit 0
         MKFS_LOG: join(root, 'mkfs.log'),
         MKFS_DATA_LOG: join(root, 'mkfs-data.log'),
         CHOWN_LOG: join(root, 'chown.log'),
+        RESIZE2FS_LOG: join(root, 'resize2fs.log'),
+        LOSETUP_LOG: join(root, 'losetup.log'),
+        FAKE_LOOP_DEVICE: options.loopDevice ?? '',
         FAKE_FREE_KB: String(options.freeKb ?? 64 * 1024 * 1024),
         LIFEMODEL_INSTALL_ROOT: join(root, 'install-root'),
         LIFEMODEL_STATE_DIR: join(root, 'state'),

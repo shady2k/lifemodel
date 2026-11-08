@@ -205,7 +205,7 @@ exit 0`
     `if [ "$1" = status ]; then echo Status: ${options.ufwActive ? 'active' : 'inactive'}; else echo "$*" >> "$UFW_LOG"; fi`
   );
   command('curl', 'for arg do output=$arg; done; printf manifest > "$output"');
-  command('sha256sum', 'read expected file; echo "$file: OK"'); command('df', "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'; printf 'fakefs 100000000 1 67108864 1%% /\\n'"); command('fallocate', 'for arg do target=$arg; done; : > "$target"'); command('mkfs.ext4', 'exit 0'); command('chown', 'exit 0');
+  command('sha256sum', 'read expected file; echo "$file: OK"'); command('df', "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'; printf 'fakefs 100000000 1 67108864 1%% /\\n'"); command('fallocate', 'previous=""; for arg do if [ "$previous" = -l ]; then size=$arg; fi; previous=$arg; target=$arg; done; truncate -s "$size" "$target"'); command('mkfs.ext4', 'exit 0'); command('chown', 'exit 0'); command('losetup', 'exit 0'); command('resize2fs', 'exit 0');
   if (options.avahiConfig) {
     mkdirSync(join(root, 'install-root/etc/avahi'), { recursive: true });
     writeFileSync(join(root, 'install-root/etc/avahi/avahi-daemon.conf'), options.avahiConfig);
@@ -286,7 +286,7 @@ describe('platform manifests', () => {
     return Object.fromEntries(
       files
         .sort()
-        .filter((file) => existsSync(join(root, file)))
+        .filter((file) => existsSync(join(root, file)) && !file.endsWith('var/lib/lifemodel-logs.img'))
         .map((file) => [file, readFileSync(join(root, file)).toString('base64')])
     );
   }

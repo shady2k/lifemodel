@@ -100,16 +100,19 @@ saved record as shell code; only validated literal assignments are accepted.
 
 The log store keeps its data on a file-backed ext4 image of its own,
 `/var/lib/lifemodel-logs.img`, mounted at `/var/lib/lifemodel-logs` with
-`loop,nofail`. The `lifemodel-logs-volume.service` unit creates the image once
-with `fallocate` and `mkfs.ext4` and leaves an existing image alone; the fstab
-line mounts it. The image is a reservation, not a sparse claim: the host's free
-space really drops by the size you choose, once. The installer refuses a size
-below `2G` — the evictor's threshold would then be the whole volume — and a size
-the image's filesystem cannot hold, naming both figures; change it with
-`--logs-volume-size SIZE` and re-run. A fresh image's root and its `data`
-directory belong to uid 1000, the uid the store runs as, so the store writes
-without the kubelet's `fsGroup`. `nofail` means a broken volume never keeps the
-machine from booting: the store pod waits instead, and nothing else is held.
+`loop,nofail`. The `lifemodel-logs-volume.service` unit creates the image with
+`fallocate` and `mkfs.ext4`; the fstab line mounts it. The image is a
+reservation, not a sparse claim: the host's free space really drops by the size
+you choose. The installer refuses a size below `2G` — the evictor's threshold
+would then be the whole volume — and a size the image's filesystem cannot hold,
+naming both figures. Re-running it with a larger `--logs-volume-size` grows the
+image and its filesystem (online while the volume is mounted, with the same
+free-space refusal for the difference); a smaller size is refused with the
+existing image's size and nothing is changed, and an equal size changes nothing.
+The log volume is never shrunk. A fresh image's root and its `data` directory
+belong to uid 1000, the uid the store runs as, so the store writes without the
+kubelet's `fsGroup`. `nofail` means a broken volume never keeps the machine from
+booting: the store pod waits instead, and nothing else is held.
 
 ## Instance registry and node trust
 

@@ -317,10 +317,37 @@
         grep -E 'User: +1000' data.stat
         grep -E 'Group: +1000' data.stat
         grep -E 'Mode: +0750' data.stat
-        # An existing image is left alone, even for a larger size.
+        # The file is a reservation, not a sparse claim.
+        test "$(( $(stat -c %b "$image") * 512 ))" -ge "$(stat -c %s "$image")"
+        # An equal size changes nothing.
         touch -d '2001-01-01 00:00:00' "$image"
-        bash ${./deploy/logs/logs-volume.sh} 4G "$image" "$TMPDIR/mnt"
+        bash ${./deploy/logs/logs-volume.sh} 3G "$image" "$TMPDIR/mnt"
         test "$(stat -c %Y "$image")" -eq "$(date -d '2001-01-01 00:00:00' +%s)"
+        # A larger size grows the image and its filesystem.
+        blocks_before=$(dumpe2fs -h "$image" 2>/dev/null | grep '^Block count:' | tr -cd '0-9')
+        bash ${./deploy/logs/logs-volume.sh} 4G "$image" "$TMPDIR/mnt"
+        test "$(stat -c %s "$image")" -eq $((4 * 1024 * 1024 * 1024))
+        test "$(( $(stat -c %b "$image") * 512 ))" -ge "$(stat -c %s "$image")"
+        blocks_after=$(dumpe2fs -h "$image" 2>/dev/null | grep '^Block count:' | tr -cd '0-9')
+        test "$blocks_after" -gt "$blocks_before"
+        # A smaller size is refused with both figures, and nothing changes.
+        touch -d '2001-01-01 00:00:00' "$image"
+        if bash ${./deploy/logs/logs-volume.sh} 2G "$image" "$TMPDIR/mnt" 2> shrink.err; then
+          echo 'logs volume accepted a smaller size than the image' >&2; exit 1
+        fi
+        grep -F '2G' shrink.err
+        grep -F '4096 MiB' shrink.err
+        grep -F 'never shrunk' shrink.err
+        test "$(stat -c %s "$image")" -eq $((4 * 1024 * 1024 * 1024))
+        test "$(stat -c %Y "$image")" -eq "$(date -d '2001-01-01 00:00:00' +%s)"
+        # A growth the disk cannot hold is refused with the difference and the free space.
+        if bash ${./deploy/logs/logs-volume.sh} 999999G "$image" "$TMPDIR/mnt" 2> grow.err; then
+          echo 'logs volume grew past the free space' >&2; exit 1
+        fi
+        grep -F '999999G' grow.err
+        grep -F 'growing needs' grow.err
+        grep -F 'free on' grow.err
+        test "$(stat -c %s "$image")" -eq $((4 * 1024 * 1024 * 1024))
         # Below the minimum and larger than the disk are refused, with figures.
         if bash ${./deploy/logs/logs-volume.sh} 1G "$TMPDIR/small.img" "$TMPDIR/mnt" 2> small.err; then
           echo 'logs volume accepted a size below the minimum' >&2; exit 1

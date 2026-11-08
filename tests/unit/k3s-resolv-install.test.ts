@@ -271,10 +271,20 @@ describe('the installer hands k3s a resolv.conf it accepts', () => {
       );
       writeFake(
         join(bin, 'fallocate'),
-        `#!/bin/sh\nfor arg do target=$arg; done\n: > "$target"\n`
+        `#!/bin/sh
+previous=""
+for arg do
+  if [ "$previous" = -l ]; then size=$arg; fi
+  previous=$arg
+  target=$arg
+done
+truncate -s "$size" "$target"
+`
       );
       writeFake(join(bin, 'mkfs.ext4'), '#!/bin/sh\nexit 0\n');
       writeFake(join(bin, 'chown'), '#!/bin/sh\nexit 0\n');
+      writeFake(join(bin, 'losetup'), '#!/bin/sh\nexit 0\n');
+      writeFake(join(bin, 'resize2fs'), '#!/bin/sh\nexit 0\n');
       writeFake(
         join(bin, 'ip'),
         `#!/bin/sh\nif [ "$1" = -j ]; then printf '%s\\n' '[{"dev":"eth0","metric":100}]'; else exit 1; fi\n`
