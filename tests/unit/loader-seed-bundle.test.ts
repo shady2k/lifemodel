@@ -263,6 +263,7 @@ describe('loader image release seed bundle', () => {
       'web/kit/lib/*.ts',
       'web/kit/lib/*.tsx',
       'web/loader/index.html',
+      'web/loader/logs.html',
       'web/loader/vite.config.ts',
       'web/loader/tsconfig.json',
       'web/loader/package.json',
@@ -275,6 +276,7 @@ describe('loader image release seed bundle', () => {
       'loader/src/reasoning-effort.ts',
       'loader/src/model-capture-setting.ts',
       'loader/src/workbench-status.ts',
+      'loader/src/logs-store-adapter.ts',
     ]);
   });
 
