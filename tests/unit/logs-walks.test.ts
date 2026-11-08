@@ -160,6 +160,7 @@ function runInventory(pods: readonly FakePod[]): InventoryRun {
       });
       if (!pod.found) continue;
       records[pod.module] = [
+        ...(records[pod.module] ?? []),
         {
           time: new Date(now).toISOString(),
           fields: { pod: pod.name, namespace: pod.namespace, module: pod.module },
@@ -241,6 +242,63 @@ describe('the inventory walk on a fake node', () => {
     expect(noted).toContain('lifemodel-system/model-gateway-55676495fc-q7x2m');
     expect(noted).toContain('wrote no line');
     expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  });
+
+  it('tells same-named pods in two namespaces apart when only one has records', () => {
+    const run = runInventory([
+      FOUND,
+      {
+        namespace: 'other',
+        name: 'core-0',
+        uid: '4b7d0a41-0000-4000-8000-000000000005',
+        module: 'core',
+        files: ['recent'],
+        found: false,
+      },
+    ]);
+    const failed = run.failures.join('\n');
+    expect(failed).toContain('pod other/core-0 (module core) is found through the logs API');
+    expect(failed).not.toContain('lifemodel/core-0');
+    // Every per-pod line names its namespace and pod, never the pod name alone.
+    for (const line of [...run.failures, ...run.notes]) {
+      expect(line).toMatch(/pod \S+\/\S+/);
+    }
+    expect(run.status).toBe(1);
+  });
+
+  it('notes the same-named pod whose log file is empty, naming its namespace', () => {
+    const run = runInventory([
+      FOUND,
+      {
+        namespace: 'other',
+        name: 'core-0',
+        uid: '4b7d0a41-0000-4000-8000-000000000006',
+        module: 'core',
+        files: ['empty'],
+        found: false,
+      },
+    ]);
+    expect(run.notes.join('\n')).toContain('pod other/core-0 (module core) wrote no line');
+    expect(run.notes.join('\n')).not.toContain('lifemodel/core-0');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  });
+
+  it('finds both same-named pods in two namespaces when both have records', () => {
+    const run = runInventory([
+      FOUND,
+      {
+        namespace: 'other',
+        name: 'core-0',
+        uid: '4b7d0a41-0000-4000-8000-000000000007',
+        module: 'core',
+        files: ['recent'],
+        found: true,
+      },
+    ]);
+    expect(run.failures).toEqual([]);
+    expect(run.notes).toEqual([]);
     expect(run.status).toBe(0);
   });
 

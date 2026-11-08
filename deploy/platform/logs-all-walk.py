@@ -280,7 +280,7 @@ def find_pod(options, namespace, name):
 
 
 def scan_module(loader, module, wanted, start, max_pages, deadline):
-    """Walk one module's records newest first; return the pods it names."""
+    """Walk one module's records newest first; return the (namespace, pod) it names."""
     found = {}
     pages = 0
     end = now_ms()
@@ -292,9 +292,9 @@ def scan_module(loader, module, wanted, start, max_pages, deadline):
         times = []
         for record in records:
             fields = record.get('fields') if isinstance(record.get('fields'), dict) else {}
-            pod = fields.get('pod')
-            if pod in wanted and pod not in found:
-                found[pod] = fields
+            key = (fields.get('namespace'), fields.get('pod'))
+            if key in wanted and key not in found:
+                found[key] = fields
             moment = parse_ms(record.get('time'))
             if moment is not None:
                 times.append(moment)
@@ -324,13 +324,13 @@ def inventory(report, loader, options, deadline):
 
     wanted_by_module = {}
     for (namespace, name), (module, _uid) in required.items():
-        wanted_by_module.setdefault(module, set()).add(name)
+        wanted_by_module.setdefault(module, set()).add((namespace, name))
 
     start = now_ms() - options.lookback_hours * 3600 * 1000
     found = {}
     pages = {}
-    for module, names in sorted(wanted_by_module.items()):
-        seen, count = scan_module(loader, module, names, start, options.max_pages, deadline)
+    for module, keys in sorted(wanted_by_module.items()):
+        seen, count = scan_module(loader, module, keys, start, options.max_pages, deadline)
         found.update(seen)
         pages[module] = count
 
@@ -340,15 +340,15 @@ def inventory(report, loader, options, deadline):
         missing = sorted(
             (namespace, name, module, uid)
             for (namespace, name), (module, uid) in required.items()
-            if name not in found
+            if (namespace, name) not in found
         )
         if not missing or time.monotonic() >= wait_until:
             break
         time.sleep(10)
         start = now_ms() - options.lookback_hours * 3600 * 1000
         for module in sorted({item[2] for item in missing}):
-            names = {item[1] for item in missing if item[2] == module}
-            seen, count = scan_module(loader, module, names, start, options.max_pages, wait_until)
+            keys = {(item[0], item[1]) for item in missing if item[2] == module}
+            seen, count = scan_module(loader, module, keys, start, options.max_pages, wait_until)
             found.update(seen)
             pages[module] = pages.get(module, 0) + count
 
@@ -378,7 +378,7 @@ def inventory(report, loader, options, deadline):
 
     wrong = []
     for (namespace, name), (module, _uid) in sorted(required.items()):
-        fields = found.get(name)
+        fields = found.get((namespace, name))
         if fields is None:
             continue
         if fields.get('module') != module or fields.get('namespace') != namespace:
@@ -413,7 +413,9 @@ def restart_and_find(report, loader, options, deadline):
     restart_at = now_ms()
     result = kubectl(['-n', options.namespace, 'delete', 'pod', options.pod, '--wait=false'], options)
     if result.returncode != 0:
-        report.fail('the pod is deleted for the restart', 'kubectl delete returned non-zero')
+        report.fail('the pod is deleted for the restart',
+                    '%s/%s: kubectl delete returned non-zero'
+                    % (options.namespace, options.pod))
         return False
 
     end = min(deadline, time.monotonic() + options.timeout)
@@ -434,23 +436,21 @@ def restart_and_find(report, loader, options, deadline):
     start = restart_at - options.pre_minutes * 60 * 1000
     records = loader.records(start, restart_at - 1, module)
     kept = [record for record in records
-            if isinstance(record.get('fields'), dict) and record['fields'].get('pod') == options.pod]
+            if isinstance(record.get('fields'), dict)
+            and record['fields'].get('namespace') == options.namespace
+            and record['fields'].get('pod') == options.pod]
     newest = max((parse_ms(record.get('time')) or 0 for record in kept), default=0)
     report.check(
         bool(kept),
         'the module\'s lines from before the restart are found by time and module',
-        '%d line(s) of module %s for pod %s before %s'
-        % (len(kept), module, options.pod, stamp(restart_at)),
+        '%d line(s) of module %s for %s/%s before %s'
+        % (len(kept), module, options.namespace, options.pod, stamp(restart_at)),
     )
     report.check(
         newest < restart_at,
         'the kept lines are older than the restart',
-        'newest kept line ' + (stamp(newest) if newest else 'none'),
-    )
-    report.check(
-        all(record['fields'].get('namespace') == options.namespace for record in kept),
-        'the kept lines name their namespace',
-        'field namespace',
+        '%s/%s, newest kept line %s'
+        % (options.namespace, options.pod, stamp(newest) if newest else 'none'),
     )
     return True
 
