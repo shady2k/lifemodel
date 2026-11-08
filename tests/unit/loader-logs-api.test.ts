@@ -185,13 +185,21 @@ describe('the logs API', () => {
     const loader = await start(fixture.url);
     const response = await loader.get('/api/logs?from=soon&to=later');
     expect(response.status).toBe(400);
-    expect(JSON.parse(response.body)).toEqual({ state: 'invalid', reason: 'filter' });
+    expect(JSON.parse(response.body)).toEqual({ state: 'invalid', reason: 'filter', field: 'from' });
     const beyondDateRange = await loader.get(`/api/logs?from=1e20&to=${String(TO)}`);
     expect(beyondDateRange.status).toBe(400);
-    expect(JSON.parse(beyondDateRange.body)).toEqual({ state: 'invalid', reason: 'filter' });
+    expect(JSON.parse(beyondDateRange.body)).toEqual({
+      state: 'invalid',
+      reason: 'filter',
+      field: 'from',
+    });
     const beyondDateRangeEnd = await loader.get(`/api/logs?from=${String(FROM)}&to=1e20`);
     expect(beyondDateRangeEnd.status).toBe(400);
-    expect(JSON.parse(beyondDateRangeEnd.body)).toEqual({ state: 'invalid', reason: 'filter' });
+    expect(JSON.parse(beyondDateRangeEnd.body)).toEqual({
+      state: 'invalid',
+      reason: 'filter',
+      field: 'to',
+    });
     expect(fixture.requests).toHaveLength(0);
   });
 
