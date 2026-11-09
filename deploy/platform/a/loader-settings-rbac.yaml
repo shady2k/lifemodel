@@ -57,14 +57,16 @@ roleRef:
   kind: Role
   name: loader-storage-settings
 ---
-# The owner's retention setting (ADR-016 §5, N6). The loader writes one
-# ConfigMap the store reads through envFrom, bumps the store's revision
-# annotation so `Recreate` replaces its single pod, and reads that pod back to
-# prove which template generation answers. Each right is by name and verb:
-# get and update on the one ConfigMap, create (it does not exist on a first
-# start), get and patch on the one Deployment, and a labelled read of its pods.
-# A pod read by label is a collection read, which RBAC names `list`; there is no
-# pod name to ask for, because the Deployment names its pod itself.
+# The owner's retention setting and the partition key (ADR-016 §5, N6). The
+# loader writes one ConfigMap the store reads through envFrom, bumps the store's
+# revision annotations so `Recreate` replaces its single pod, and reads that pod
+# back to prove which template generation answers. It also fills the partition
+# key's Secret once, at first start, and restarts the store for it. Each right
+# is by name and verb: get and update on the one ConfigMap, create (it does not
+# exist on a first start), get and patch on the one Secret, get and patch on the
+# one Deployment, and a labelled read of its pods. A pod read by label is a
+# collection read, which RBAC names `list`; there is no pod name to ask for,
+# because the Deployment names its pod itself.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -78,6 +80,13 @@ rules:
   - apiGroups: ['']
     resources: ['configmaps']
     verbs: ['create']
+  # The partition key's own Secret (ADR-016 §5): read it to see whether a value
+  # exists, and patch the value and its revision onto it once. No other Secret,
+  # no create, no list, no delete.
+  - apiGroups: ['']
+    resources: ['secrets']
+    resourceNames: ['lifemodel-logs-partition-key']
+    verbs: ['get', 'patch']
   - apiGroups: ['apps']
     resources: ['deployments']
     resourceNames: ['logs-store']

@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import YAML from 'yaml';
 import { evaluate } from '@marcbachmann/cel-js';
 import {
+  LOGS_PARTITION_KEY_REVISION_ANNOTATION,
   LOGS_SETTINGS_CONFIGMAP,
   LOGS_SETTINGS_REVISION_ANNOTATION,
   LOGS_STORE_DEPLOYMENT,
@@ -270,5 +271,134 @@ describe("the store Deployment's clamp (N6)", () => {
     });
     // The policies are Deny-bound, so a refusal is an answer, never a warning.
     expect(clamp.spec.failurePolicy).toBe('Fail');
+  });
+});
+describe("the store Deployment's clamp and the partition key's annotation", () => {
+  const keyRevision = '1-1111222233334444';
+  const current = {
+    apiVersion: 'apps/v1',
+    kind: 'Deployment',
+    metadata: { name: LOGS_STORE_DEPLOYMENT, namespace: 'lifemodel-system', generation: 4 },
+    spec: {
+      replicas: 1,
+      strategy: { type: 'Recreate' },
+      selector: { matchLabels: { 'app.kubernetes.io/name': 'logs-store' } },
+      template: {
+        metadata: { labels: { 'app.kubernetes.io/name': 'logs-store' } },
+        spec: {
+          containers: [
+            {
+              name: 'logs-store',
+              image: 'registry.example/logs@sha256:abc',
+              args: ['-envflag.enable', '-envflag.prefix=VL_'],
+            },
+          ],
+        },
+      },
+    },
+    status: { observedGeneration: 4 },
+  };
+  const keyed = (annotations: Record<string, string>) => {
+    const next = structuredClone(current);
+    next.metadata.annotations = { ...annotations };
+    next.spec.template.metadata.annotations = { ...annotations };
+    next.metadata.generation = 5;
+    return next;
+  };
+  const update = (object: unknown, oldObject: unknown = current) => ({
+    request: {
+      operation: 'UPDATE',
+      namespace: 'lifemodel-system',
+      name: LOGS_STORE_DEPLOYMENT,
+      userInfo: { username: LOADER },
+    },
+    object,
+    oldObject,
+  });
+
+  it('admits the key revision alone, and beside the settings revision', () => {
+    const clamp = policy('loader-logs-store-deployment-admission');
+    // A first install: the store has never had retention written, so the
+    // settings annotation is not there yet and the key patch is the first one.
+    expect(
+      admits(clamp, update(keyed({ [LOGS_PARTITION_KEY_REVISION_ANNOTATION]: keyRevision })))
+    ).toBe(true);
+    expect(
+      admits(
+        clamp,
+        update(
+          keyed({
+            [LOGS_SETTINGS_REVISION_ANNOTATION]: '3-9f8e7d6c5b4a',
+            [LOGS_PARTITION_KEY_REVISION_ANNOTATION]: keyRevision,
+          })
+        )
+      )
+    ).toBe(true);
+    // The settings patch after a key was written: both maps keep the key.
+    const settings = keyed({ [LOGS_PARTITION_KEY_REVISION_ANNOTATION]: keyRevision });
+    const patch = structuredClone(settings);
+    patch.metadata.annotations[LOGS_SETTINGS_REVISION_ANNOTATION] = '4-aaaa';
+    patch.spec.template.metadata.annotations[LOGS_SETTINGS_REVISION_ANNOTATION] = '4-aaaa';
+    expect(admits(clamp, update(patch, settings))).toBe(true);
+  });
+
+  it('refuses the key annotation anywhere but in both maps, together and unchanged elsewhere', () => {
+    const clamp = policy('loader-logs-store-deployment-admission');
+    const mutations: [string, (next: any) => void][] = [
+      [
+        'a key revision on the object only',
+        (next) => {
+          next.spec.template.metadata.annotations = {};
+        },
+      ],
+      [
+        'a key revision on the template only',
+        (next) => {
+          next.metadata.annotations = {};
+        },
+      ],
+      [
+        'two different key revisions',
+        (next) => {
+          next.spec.template.metadata.annotations[LOGS_PARTITION_KEY_REVISION_ANNOTATION] = '1-old';
+        },
+      ],
+      [
+        'neither revision',
+        (next) => {
+          next.metadata.annotations = {};
+          next.spec.template.metadata.annotations = {};
+        },
+      ],
+      [
+        'another image while the key is bumped',
+        (next) => {
+          next.spec.template.spec.containers[0].image = 'other';
+        },
+      ],
+      [
+        'another replica count while the key is bumped',
+        (next) => {
+          next.spec.replicas = 2;
+        },
+      ],
+      [
+        'another pod label while the key is bumped',
+        (next) => {
+          next.spec.template.metadata.labels.extra = 'x';
+        },
+      ],
+      [
+        'another argument while the key is bumped',
+        (next) => {
+          next.spec.template.spec.containers[0].args.push('-retentionPeriod=9d');
+        },
+      ],
+    ];
+    for (const [reason, mutate] of mutations) {
+      const next = keyed({ [LOGS_PARTITION_KEY_REVISION_ANNOTATION]: keyRevision });
+      mutate(next);
+      expect(admits(clamp, update(next)), reason).toBe(false);
+    }
   });
 });

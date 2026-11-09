@@ -23,6 +23,7 @@ import {
 } from './pki.js';
 import { createKubernetesTlsStores } from './pki-kubernetes.js';
 import { createLogsVolumeClaimPreflight } from './logs-volume-claim.js';
+import { createLogsPartitionKeyBootstrap } from './logs-partition-key.js';
 import { createLogsSettings, observedFromStore, type LogsSettings } from './logs-settings.js';
 import { createLogsSettingsCluster } from './logs-settings-cluster.js';
 import { createLogsStore } from './logs-store-adapter.js';
@@ -76,6 +77,8 @@ export interface LoaderAppDeps {
   platformBootstrap?: { runInitial(): Promise<void>; unsealIfSealed(): Promise<void> };
   /** The log volume pre-flight before the first-start phases; tests replace it. */
   logsVolumeClaim?: { run(): Promise<void> };
+  /** The partition key's first-start check (ADR-016 §5); tests replace it. */
+  logsPartitionKey?: { run(): Promise<void> };
   /** The owner's retention setting (ADR-016 §5); tests replace it. */
   logsSettings?: LogsSettings;
   /** The SeaweedFS S3 custody phase (ADR-015 S-D1); tests replace it. */
@@ -121,6 +124,24 @@ export function platformFirstStartPhases(deps: FirstStartPhaseDeps): PlatformPha
     deps.valkey ?? createKubernetesValkeySecretPhase(),
     deps.capture ?? createKubernetesCaptureSecretPhase(),
   ];
+}
+
+/**
+ * ADR-016 §5: the two log checks in front of the first-start phase plan, on
+ * every bootstrap attempt. The claim check comes first and may fail, because a
+ * Released volume is what keeps the store from starting at all; the partition
+ * key check follows it and never blocks the plan.
+ */
+export function createLogPreflights(deps: {
+  volumeClaim: { run(): Promise<void> };
+  partitionKey: { run(): Promise<void> };
+}): { run(): Promise<void> } {
+  return {
+    run: async () => {
+      await deps.volumeClaim.run();
+      await deps.partitionKey.run();
+    },
+  };
 }
 
 export interface LoaderApp {
@@ -172,6 +193,9 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
     api: giteaApi,
     runPhases: createPlatformPhaseRunner(phaseStore),
   });
+  // One client for the store's settings objects and its partition key: the same
+  // narrow API, the same named paths.
+  const logsCluster = createLogsSettingsCluster();
   const platformStorageCustody =
     deps.platformStorageCustody ??
     createStorageCustodyPhase({
@@ -204,13 +228,20 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       });
       // ADR-016 §5: before the durable phases, and on every bootstrap attempt,
       // a released log volume that still holds a previous claim's UID gets that
-      // stale claimRef cleared, so the recreated claim binds. It needs only the
-      // Kubernetes API - no OpenBao, no later step - and it is the reason the
-      // store's claim is not left Pending forever.
+      // stale claimRef cleared, so the recreated claim binds - and an empty
+      // partition key gets one random key and the store restart that proves it.
+      // Both need only the Kubernetes API, no OpenBao and no later step, and
+      // both are why the store is not left Pending or without a key.
       const logsVolumeClaim = deps.logsVolumeClaim ?? createLogsVolumeClaimPreflight({ logger });
+      const preflights = createLogPreflights({
+        volumeClaim: logsVolumeClaim,
+        partitionKey:
+          deps.logsPartitionKey ??
+          createLogsPartitionKeyBootstrap({ cluster: logsCluster, logger }),
+      });
       return {
         runInitial: async () => {
-          await logsVolumeClaim.run();
+          await preflights.run();
           await bootstrap.runInitial();
         },
         unsealIfSealed: () => bootstrap.unsealIfSealed(),
@@ -237,7 +268,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       path: join(config.volumeRoot, 'logs.json'),
       logger,
       now: () => clock.now(),
-      cluster: createLogsSettingsCluster(),
+      cluster: logsCluster,
       flags: async () => observedFromStore(await logsStore.retentionFlags()),
     });
   const readWorkbenchSource = async () =>
