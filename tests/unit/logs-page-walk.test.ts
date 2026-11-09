@@ -82,6 +82,81 @@ describe('the browser walk', () => {
     expect(source()).not.toMatch(/recordItems\(page\)\.cou?nt/);
   });
 
+  it('awaits every async locator method it calls', () => {
+    const lines = source().split('\n');
+    const methods = 'count|textContent|isVisible|getAttribute|inputValue|innerText'
+      + '|allTextContents|evaluateAll';
+    const call = new RegExp(`\\.(${methods})\\(`);
+    for (const [index, line] of lines.entries()) {
+      if (!call.test(line)) continue;
+      // A promise the async helper returns is awaited by whoever calls it.
+      if (line.trim().startsWith('return ')) continue;
+      expect(line, `line ${index + 1}: ${line.trim()}`).toContain('await ');
+    }
+  });
+
+  it('never calls an async locator method on an awaited promise instead of its value', () => {
+    const text = source();
+    const methods =
+      /^\.(count|textContent|isVisible|getAttribute|inputValue|innerText|allTextContents|evaluateAll)\(/;
+    const found: string[] = [];
+    for (let at = text.indexOf('(await '); at >= 0; at = text.indexOf('(await ', at + 1)) {
+      // `await (await recordItems(page)).count()` awaits the call; `(await
+      // recordItems(page)).count()` awaits the locator and reads a promise.
+      if (/await\s+$/.test(text.slice(Math.max(0, at - 8), at))) continue;
+      let depth = 0;
+      let end = -1;
+      for (let index = at; index < text.length; index++) {
+        if (text[index] === '(') depth += 1;
+        else if (text[index] === ')') {
+          depth -= 1;
+          if (depth === 0) {
+            end = index;
+            break;
+          }
+        }
+      }
+      if (end >= 0 && methods.test(text.slice(end + 1))) {
+        found.push(text.slice(at, end + 12).replace(/\s+/g, ' '));
+      }
+    }
+    expect(found).toEqual([]);
+  });
+
+  it('judges a second page by the API count and the page\'s own button', () => {
+    const text = source();
+    // The count line counts the records drawn - 200 on every full first page -
+    // so it cannot say that the window holds more than one page.
+    expect(text).not.toMatch(/line\.count \?\? 0\) > 200/);
+    expect(text).toContain("getByRole('button', { name: words.more");
+    expect(text).toContain('more.isVisible()');
+    // The window's own total comes from the API, with the window the page got.
+    expect(text).toMatch(/api\(page, `\/api\/logs\?from=\$\{wide\.from\}&to=\$\{wide\.to\}&limit=1`\)/);
+    expect(text).toContain('the second page adds at most one page');
+    expect(text).toContain('the count line follows the drawn records');
+  });
+
+  it('finds a conversation id by narrowing module by module', () => {
+    const text = source();
+    expect(text).toContain('/api/logs/modules');
+    expect(text).toContain('module=${encodeURIComponent(name)}');
+    expect(text).toContain('conversation_id');
+    // Not valid only when every module was read and none carried one, and the
+    // line says how many were read.
+    expect(text).toMatch(/of the \$\{moduleNames\.length\} modules/);
+  });
+
+  it('reloads once before believing the retention card\'s read error', () => {
+    const text = source();
+    expect(text).toMatch(/retentionErrorLine\(/);
+    expect(text).toContain("unavailable: 'could not be read'");
+    expect(text).toContain("unavailable: 'Не удалось прочитать настройку хранения'");
+    expect(text).toMatch(/reload/i);
+    // A persistent error is one failure that quotes the page, never three
+    // number failures and never a silent pass.
+    expect(text).toContain('the retention card reads the retention setting');
+  });
+
   it('prints a RESTORE line and exits on the failure count', () => {
     const text = source();
     expect(text).toMatch(/finally\s*\{/);
