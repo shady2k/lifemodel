@@ -29,7 +29,9 @@ const DEFAULT_CONFIG: LoggerConfig = {
   logDir: './data/logs',
   maxFiles: 10,
   level: 'info',
-  pretty: process.env['NODE_ENV'] !== 'production',
+  // Off: one JSON record per line, which is what a cluster module's stdout must
+  // be (ADR-016 §9 point 2). A development run sets pretty explicitly.
+  pretty: false,
   file: true,
 };
 
@@ -130,7 +132,7 @@ function createTraceMixin(): () => Record<string, unknown> {
  * Create a configured logger instance.
  *
  * Features:
- * - Console output with pino-pretty (in development)
+ * - JSON on stdout; pretty output only when `pretty` is set explicitly
  * - File output with timestamp-based filename
  * - Auto-cleanup of old and empty log files (max 10)
  * - Auto-injection of trace context via mixin (AsyncLocalStorage)
