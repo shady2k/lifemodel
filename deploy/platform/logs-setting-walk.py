@@ -93,13 +93,12 @@ from logs_walk_support import (  # noqa: E402
     Cluster,
     Loader,
     Report,
-    Store,
     WalkError,
     common_arguments,
-    connect_store,
-    free_port,
-    PortForward,
+    days_of,
+    quantity,
     read_password,
+    read_store_flags,
     wait_until,
 )
 
@@ -108,23 +107,6 @@ MARGIN_SHARE = 0.25
 REVISION_ANNOTATION = 'lifemodel.dev/logs-settings-revision'
 SETTINGS_CONFIGMAP = 'lifemodel-logs-settings'
 PENDING_REASONS = ('store_unavailable', 'rollout_timeout', 'forbidden', 'mismatch')
-SUFFIXES = {
-    'Ki': 1024,
-    'Mi': MIB,
-    'Gi': 1024 * MIB,
-    'Ti': 1024 * 1024 * MIB,
-    'KiB': 1024,
-    'MiB': MIB,
-    'GiB': 1024 * MIB,
-    'TiB': 1024 * 1024 * MIB,
-    'K': 1000,
-    'M': 1000 * 1000,
-    'G': 1000 * 1000 * 1000,
-    'T': 1000 * 1000 * 1000 * 1000,
-    'k': 1000,
-}
-
-
 def margin_bytes(volume_bytes):
     """The share of the volume the store keeps for its merges (ADR-016 §5)."""
     return int(math.ceil(volume_bytes * MARGIN_SHARE))
@@ -137,39 +119,6 @@ def desired_flags(days, max_bytes, volume_bytes):
         'VL_retention_maxDiskSpaceUsageBytes': str(max_bytes),
         'VL_storage_minFreeDiskSpaceBytes': str(margin_bytes(volume_bytes)),
     }
-
-
-def quantity(text):
-    """A byte quantity the way the store prints one: bytes, or a suffix form."""
-    if not isinstance(text, str):
-        return None
-    value = text.strip()
-    digits = ''
-    suffix = ''
-    for character in value:
-        if character.isdigit() or (character == '.' and '.' not in digits and digits != ''):
-            digits += character
-        else:
-            suffix += character
-    if digits == '':
-        return None
-    try:
-        number = float(digits)
-    except ValueError:
-        return None
-    factor = SUFFIXES.get(suffix, 1 if suffix == '' else None)
-    if factor is None:
-        return None
-    return int(number * factor)
-
-
-def days_of(period):
-    if not isinstance(period, str) or not period.endswith('d'):
-        return None
-    try:
-        return int(period[:-1])
-    except ValueError:
-        return None
 
 
 def flags_agree(flags, expected):
@@ -237,29 +186,8 @@ def apply_change(report, loader, days, max_bytes, bound_seconds):
     return applied
 
 
-def read_flags(report, options, cluster):
-    """`/flags` from the store pod through a port-forward of its own.
-
-    A fresh forward for every read: the store's pod is replaced by each change,
-    and a forward opened before the replacement does not survive it.
-    """
-    port = free_port()
-    forward = PortForward(options.kubectl, options.namespace, 'deploy/' + options.store, port).start()
-    try:
-        if not forward.wait_ready(timeout=60):
-            report.not_valid('the store never answered its port-forward: the /flags read '
-                             'cannot be asserted')
-            return None
-        return Store(port=port).flags()
-    except WalkError:
-        report.not_valid('the store\'s /flags endpoint did not answer')
-        return None
-    finally:
-        forward.close()
-
-
 def check_flags(report, options, cluster, expected, name):
-    flags = read_flags(report, options, cluster)
+    flags = read_store_flags(report, options, cluster)
     if flags is None:
         return False
     agree, observed, wanted = flags_agree(flags, expected)

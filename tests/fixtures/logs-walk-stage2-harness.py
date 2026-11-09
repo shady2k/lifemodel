@@ -413,6 +413,69 @@ def setting_flags(walk, fixture):
     return report
 
 
+BOUND_LIMITS = {'volumeBytes': 3221225472, 'evictorThresholdBytes': 1610612736,
+                'largestMaxBytes': 1610612736}
+
+BOUND_REFUSED = {
+    'status': 400,
+    'body': {'state': 'refused', 'reason': 'above_volume', 'maxBytes': 1610612737,
+             'largestMaxBytes': 1610612736, 'volumeBytes': 3221225472,
+             'evictorThresholdBytes': 1610612736},
+}
+
+BOUND_ACCEPTED = {'status': 200, 'body': {'state': 'ok', 'applied': True, 'pending': None,
+                                          'days': 14, 'maxBytes': 1610612736,
+                                          'desiredRevision': '3-abcdef'}}
+
+
+@mode('bound-refusal')
+def bound_refusal(walk, fixture):
+    report = walk.Report()
+    walk.check_limits(report, BOUND_LIMITS)
+    loader = FakeLoader({'putAnswers': [BOUND_REFUSED, BOUND_ACCEPTED, BOUND_ACCEPTED]})
+    walk.check_refusals(report, options(), loader, 14, BOUND_LIMITS)
+    return report
+
+
+@mode('bound-refusal-accepted')
+def bound_refusal_accepted(walk, fixture):
+    report = walk.Report()
+    walk.check_limits(report, BOUND_LIMITS)
+    loader = FakeLoader({'putAnswers': [BOUND_ACCEPTED]})
+    walk.check_refusals(report, options(), loader, 14, BOUND_LIMITS)
+    return report
+
+
+@mode('bound-days')
+def bound_days(walk, fixture):
+    report = walk.Report()
+    aged = walk.only_older_days_removed(['20261030', '20261105', '20261109'], ['20261109'],
+                                        '20261108')
+    younger = walk.only_older_days_removed(['20261107', '20261109'], ['20261109'], '20261105')
+    print('DAYS ' + json.dumps({'olderOnly': aged['olderOnly'],
+                                'youngerRemoved': aged['youngerRemoved'],
+                                'youngerCase': younger['youngerRemoved'],
+                                'dropped': aged['dropped']}))
+    return report
+
+
+@mode('bound-canary-absent')
+def bound_canary_absent(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 0}]})
+    walk.require_records(report, loader, 0, 'walk-bound-1', 200,
+                         'the canary 10 days back is stored before the flood')
+    return report
+
+
+@mode('bound-count')
+def bound_count(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 200}]})
+    print('COUNT %d' % walk.records_in_window(loader, 0, 'walk-bound-1'))
+    return report
+
+
 def run_mode(mode_name, walk_path, fixture_path):
     walk = load(walk_path)
     with open(fixture_path, encoding='utf8') as handle:

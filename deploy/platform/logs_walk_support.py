@@ -44,6 +44,12 @@ DEFAULT_STORE_PORT = 9428
 MIB = 1024 * 1024
 GIB = 1024 * MIB
 RESPONSE_LIMIT = 16 * 1024 * 1024
+SUFFIXES = {
+    'Ki': 1024, 'Mi': MIB, 'Gi': 1024 * MIB, 'Ti': 1024 * 1024 * MIB,
+    'KiB': 1024, 'MiB': MIB, 'GiB': 1024 * MIB, 'TiB': 1024 * 1024 * MIB,
+    'K': 1000, 'M': 1000 * 1000, 'G': 1000 * 1000 * 1000, 'T': 1000 * 1000 * 1000 * 1000,
+    'k': 1000,
+}
 
 # The collector's own write protocol (ADR-016 §3): the message and the event
 # time are the fields the sink names, so a walk's record is shaped like a real
@@ -641,6 +647,65 @@ def connect_store(report, options, cluster):
         report.fail('the store answers its port-forward', options.store)
         return None, None
     return Store(port=port), forward
+
+
+def quantity(text):
+    """A byte quantity the way the store prints one: bytes, or a suffix form."""
+    if not isinstance(text, str):
+        return None
+    value = text.strip()
+    digits = ''
+    suffix = ''
+    for character in value:
+        if character.isdigit() or (character == '.' and '.' not in digits and digits != ''):
+            digits += character
+        else:
+            suffix += character
+    if digits == '':
+        return None
+    try:
+        number = float(digits)
+    except ValueError:
+        return None
+    if suffix == '':
+        factor = 1
+    else:
+        factor = SUFFIXES.get(suffix)
+    if factor is None:
+        return None
+    return int(number * factor)
+
+
+def days_of(period):
+    """`14d` as 14; None for any other form."""
+    if not isinstance(period, str) or not period.endswith('d'):
+        return None
+    try:
+        return int(period[:-1])
+    except ValueError:
+        return None
+
+
+def read_store_flags(report, options, cluster, what='the /flags read'):
+    """`/flags` from the store pod through a port-forward of its own.
+
+    A fresh forward for every read: the store's pod is replaced by each retention
+    change, and a forward opened before the replacement does not survive it.
+    """
+    port = free_port()
+    forward = PortForward(options.kubectl, options.namespace, 'deploy/' + options.store, port).start()
+    try:
+        if not forward.wait_ready(timeout=60):
+            report.not_valid('the store never answered its port-forward: %s cannot be asserted'
+                             % what)
+            return None
+        return Store(port=port).flags()
+    except WalkError:
+        report.not_valid('the store\'s /flags endpoint did not answer: %s cannot be asserted'
+                         % what)
+        return None
+    finally:
+        forward.close()
 
 
 def tail_lines(text, count):
