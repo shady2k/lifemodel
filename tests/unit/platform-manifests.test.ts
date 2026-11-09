@@ -260,7 +260,11 @@ exit 0`
   return { status: result.status, output: `${result.stdout}${result.stderr}`, root };
 }
 
-describe('platform manifests', () => {
+// Most of this suite's time is the installer-harness tests below, which run
+// scripts/install.sh as a real subprocess: two or three runs in a test, 1.2-5.2 s
+// measured alone on an idle box. The suite declares 30 s for that work instead
+// of the 5 s default, which a loaded two-worker run pushed those tests past.
+describe('platform manifests', { timeout: 30_000 }, () => {
   // Snapshot actual host files, package/service/firewall logs and release state.
   // Read-only cluster identity discovery is asserted separately below.
   function hostSnapshot(root: string): Record<string, string> {
@@ -1238,15 +1242,11 @@ describe('platform manifests', () => {
         'namespace'
       );
       const second = runInstallerHarness(false, false, first.root);
-      try {
-        expect(second.status, second.output).toBe(0);
-        expect(readFileSync(join(second.root, 'kubectl.log'), 'utf8')).toContain('flux');
-        expect(readFileSync(join(second.root, 'state', 'platform-history'), 'utf8')).toBe(
-          'tag=v1.0.0\n'
-        );
-      } finally {
-        /* the shared root is removed by the outer finally */
-      }
+      expect(second.status, second.output).toBe(0);
+      expect(readFileSync(join(second.root, 'kubectl.log'), 'utf8')).toContain('flux');
+      expect(readFileSync(join(second.root, 'state', 'platform-history'), 'utf8')).toBe(
+        'tag=v1.0.0\n'
+      );
     } finally {
       rmSync(first.root, { recursive: true, force: true });
     }
@@ -1293,7 +1293,7 @@ describe('platform manifests', () => {
     } finally {
       rmSync(first.root, { recursive: true, force: true });
     }
-  }, 30_000);
+  });
 
   it('binds the installed CLI to its state directory and quotes metacharacter paths', () => {
     const result = runInstallerHarness(false, false, undefined, 'v1.0.0', { metacharState: true });
@@ -1385,7 +1385,7 @@ describe('platform manifests', () => {
     } finally {
       rmSync(first.root, { recursive: true, force: true });
     }
-  }, 30_000);
+  });
 
   it('recovers from the installed bootstrap bundle after its source checkout is removed', () => {
     const root = mkdtempSync(join(tmpdir(), 'lifemodel-removed-source-'));

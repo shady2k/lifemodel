@@ -545,8 +545,20 @@ describe('storage settings bootstrap and authority', () => {
             : [];
       });
     }
-    const objects = manifestFiles('deploy/platform').flatMap(documents).filter(Boolean);
-    const bindings = objects.filter(
+    const texts = manifestFiles('deploy/platform').map((file) => ({
+      file,
+      text: readFileSync(file, 'utf8'),
+    }));
+    // Parsing the vendored chart templates and the committed operator render
+    // costs seconds under a loaded suite. A binding to this ServiceAccount must
+    // name it, so a file whose text does not hold that name cannot add one.
+    const objects = (needles: string[]) =>
+      texts
+        .filter(({ text }) => needles.some((needle) => text.includes(needle)))
+        .flatMap(({ file }) => documents(file))
+        .filter(Boolean);
+    const shipped = objects(['storage-module']);
+    const bindings = shipped.filter(
       (item) =>
         ['RoleBinding', 'ClusterRoleBinding'].includes(item.kind) &&
         item.subjects?.some(
@@ -558,12 +570,12 @@ describe('storage settings bootstrap and authority', () => {
     );
     expect(bindings.length).toBeGreaterThan(0);
     for (const binding of bindings) {
-      const role = objects.find(
-        (item) =>
-          item.kind === binding.roleRef.kind &&
-          item.metadata.name === binding.roleRef.name &&
-          (item.kind === 'ClusterRole' || item.metadata.namespace === binding.metadata.namespace)
-      );
+      const matches = (item: any) =>
+        item.kind === binding.roleRef.kind &&
+        item.metadata.name === binding.roleRef.name &&
+        (item.kind === 'ClusterRole' || item.metadata.namespace === binding.metadata.namespace);
+      // The role it references may sit in a manifest that does not name the account.
+      const role = shipped.find(matches) ?? objects([binding.roleRef.name]).find(matches);
       expect(role).toBeDefined();
       for (const rule of role.rules) {
         if (rule.apiGroups.includes('') || rule.apiGroups.includes('*')) {
