@@ -28,11 +28,20 @@ export interface LogsStoreFixture {
   close(): Promise<void>;
 }
 
-const EXCHANGES: RecordedExchange[] = (
-  JSON.parse(
-    readFileSync(fileURLToPath(new URL('../fixtures/logs-store-protocol.json', import.meta.url)), 'utf8')
-  ) as { exchanges: RecordedExchange[] }
-).exchanges;
+const loaded = new Map<string, RecordedExchange[]>();
+
+/** The exchanges of one recorded fixture file under `tests/fixtures/`. */
+function exchangesOf(name: string): RecordedExchange[] {
+  const cached = loaded.get(name);
+  if (cached !== undefined) return cached;
+  const exchanges = (
+    JSON.parse(readFileSync(fileURLToPath(new URL(`../fixtures/${name}`, import.meta.url)), 'utf8')) as {
+      exchanges: RecordedExchange[];
+    }
+  ).exchanges;
+  loaded.set(name, exchanges);
+  return exchanges;
+}
 
 function closeServer(server: Server): Promise<void> {
   return new Promise((resolve) => {
@@ -43,7 +52,10 @@ function closeServer(server: Server): Promise<void> {
   });
 }
 
-export async function startLogsStoreFixture(): Promise<LogsStoreFixture> {
+export async function startLogsStoreFixture(
+  name = 'logs-store-protocol.json'
+): Promise<LogsStoreFixture> {
+  const exchanges = exchangesOf(name);
   const requests: RecordedRequest[] = [];
   const server = createServer((req, res) => {
     let body = '';
@@ -56,7 +68,7 @@ export async function startLogsStoreFixture(): Promise<LogsStoreFixture> {
       const query = new URLSearchParams(body).get('query') ?? '';
       const method = req.method ?? '';
       requests.push({ method, path, query });
-      const exchange = EXCHANGES.find(
+      const exchange = exchanges.find(
         (entry) =>
           entry.request.method === method &&
           entry.request.path === path &&

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import i18n from '../../web/loader/src/i18n';
 import '../../web/loader/src/logs-i18n';
@@ -26,6 +26,7 @@ function stubFetch(answer: unknown): void {
 }
 
 beforeEach(async () => {
+  HTMLElement.prototype.scrollIntoView = vi.fn();
   window.matchMedia = ((media: string) => ({
     get matches() {
       return false;
@@ -74,5 +75,50 @@ describe('logs page record count', () => {
     const { container } = render(<Logs />);
     expect(await screen.findByText(expected)).toBeInTheDocument();
     expect(container.textContent).not.toContain('{{');
+  });
+});
+
+describe('logs page filter row', () => {
+  it.each([
+    ['en', ['Level', 'Conversation', 'Text']],
+    ['ru', ['Уровень', 'Беседа', 'Текст']],
+  ] as const)('offers level, conversation and text in %s', async (language, labels) => {
+    await i18n.changeLanguage(language);
+    stubFetch({ state: 'ok', records: records(1) });
+    render(<Logs />);
+    await screen.findByRole('list');
+    for (const label of labels) expect(screen.getByLabelText(label)).toBeInTheDocument();
+  });
+
+  it('sends the chosen level, conversation and text with the search', async () => {
+    await i18n.changeLanguage('en');
+    const calls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        calls.push(url);
+        return {
+          ok: true,
+          json: async () =>
+            url === '/api/logs/modules' ? { state: 'ok', modules: [] } : { state: 'ok', records: [] },
+        };
+      })
+    );
+    const { container } = render(<Logs />);
+    await screen.findByText('No records in this range.');
+    fireEvent.click(container.querySelector('#logs-level')!);
+    fireEvent.click(await screen.findByRole('option', { name: 'error' }));
+    fireEvent.change(container.querySelector('#logs-conversation')!, {
+      target: { value: 'conv_1' },
+    });
+    fireEvent.change(container.querySelector('#logs-text')!, { target: { value: 'needle' } });
+    fireEvent.submit(container.querySelector('form')!);
+    await waitFor(() => {
+      expect(calls.filter((url) => url.startsWith('/api/logs?'))).toHaveLength(2);
+    });
+    const last = calls.filter((url) => url.startsWith('/api/logs?')).at(-1) ?? '';
+    expect(last).toContain('level=error');
+    expect(last).toContain('conversation_id=conv_1');
+    expect(last).toContain('text=needle');
   });
 });

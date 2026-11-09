@@ -1,7 +1,8 @@
 /**
- * The loader's logs page (ADR-016 §4): one time range and one module, the
- * newest records first, and the store's unavailable answer with its reason.
- * Level, conversation and paging are stage 2 and are deliberately absent.
+ * The loader's logs page (ADR-016 §4): a filter row of time range, module,
+ * level, conversation and text, the newest records first, and the store's
+ * unavailable answer with its reason. Paging, freshness and retention are
+ * later tasks and are deliberately absent.
  */
 import { Fragment, useCallback, useEffect, useState, type SyntheticEvent } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -18,9 +19,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@kit/components/ui/select';
+import {
+  LOGS_CONVERSATION_MAX_LENGTH,
+  LOGS_LEVELS,
+  LOGS_TEXT_MAX_LENGTH,
+} from '../../../loader/src/logs-query.js';
 import type { LogsRecord } from '../../../loader/src/logs-store-adapter.js';
 
 const ALL_MODULES = '__all__';
+const ALL_LEVELS = '__all__';
 
 interface Unavailable {
   state: 'unavailable';
@@ -31,6 +38,15 @@ interface Unavailable {
 interface RecordsAnswer {
   state: 'ok';
   records: LogsRecord[];
+}
+
+interface PageFilter {
+  from: number;
+  to: number;
+  module: string;
+  level: string;
+  conversation: string;
+  text: string;
 }
 
 function localInputValue(date: Date): string {
@@ -56,26 +72,46 @@ function levelClass(level: string): string {
   return 'text-muted-foreground';
 }
 
+/** The label the page shows for a request parameter the API refused. */
+function labelKeyOf(field: string): string {
+  if (field === 'from') return 'logsTimeFrom';
+  if (field === 'to') return 'logsTimeTo';
+  if (field === 'module') return 'logsModule';
+  if (field === 'level') return 'logsLevel';
+  if (field === 'conversation_id') return 'logsConversation';
+  return 'logsText';
+}
+
 export function Logs() {
   const { t, i18n } = useTranslation();
   const [from, setFrom] = useState(() => initialRange().from);
   const [to, setTo] = useState(() => initialRange().to);
   const [moduleName, setModuleName] = useState('');
+  const [level, setLevel] = useState('');
+  const [conversation, setConversation] = useState('');
+  const [text, setText] = useState('');
   const [modules, setModules] = useState<string[]>([]);
   const [records, setRecords] = useState<LogsRecord[] | null>(null);
   const [unavailable, setUnavailable] = useState<Unavailable | null>(null);
-  const [rangeInvalid, setRangeInvalid] = useState(false);
+  const [invalid, setInvalid] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const load = useCallback(async (fromMs: number, toMs: number, module: string) => {
+  const load = useCallback(async (filter: PageFilter) => {
     setBusy(true);
-    setRangeInvalid(false);
+    setInvalid(null);
     try {
-      const params = new URLSearchParams({ from: String(fromMs), to: String(toMs) });
-      if (module !== '') params.set('module', module);
+      const params = new URLSearchParams({
+        from: String(filter.from),
+        to: String(filter.to),
+      });
+      if (filter.module !== '') params.set('module', filter.module);
+      if (filter.level !== '') params.set('level', filter.level);
+      if (filter.conversation !== '') params.set('conversation_id', filter.conversation);
+      if (filter.text !== '') params.set('text', filter.text);
       const response = await fetch(`/api/logs?${params.toString()}`);
       if (response.status === 400) {
-        setRangeInvalid(true);
+        const value = (await response.json().catch(() => null)) as { field?: string } | null;
+        setInvalid(value?.field ?? 'filter');
         setRecords(null);
         setUnavailable(null);
         return;
@@ -112,7 +148,14 @@ export function Logs() {
     setFrom(range.from);
     setTo(range.to);
     void loadModules();
-    void load(new Date(range.from).getTime(), new Date(range.to).getTime(), '');
+    void load({
+      from: new Date(range.from).getTime(),
+      to: new Date(range.to).getTime(),
+      module: '',
+      level: '',
+      conversation: '',
+      text: '',
+    });
   }, [load, loadModules]);
 
   useEffect(() => {
@@ -130,10 +173,10 @@ export function Logs() {
     const fromMs = new Date(from).getTime();
     const toMs = new Date(to).getTime();
     if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || fromMs > toMs) {
-      setRangeInvalid(true);
+      setInvalid('range');
       return;
     }
-    void load(fromMs, toMs, moduleName);
+    void load({ from: fromMs, to: toMs, module: moduleName, level, conversation, text });
   }
 
   return (
@@ -173,10 +216,7 @@ export function Logs() {
 
         <Card>
           <CardContent className="p-4 sm:p-6">
-            <form
-              className="grid gap-4 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_1fr_auto]"
-              onSubmit={submit}
-            >
+            <form className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3" onSubmit={submit}>
               <div className="space-y-2">
                 <Label htmlFor="logs-from">{t('logsTimeFrom')}</Label>
                 <Input
@@ -220,8 +260,53 @@ export function Logs() {
                   </SelectContent>
                 </Select>
               </div>
-              <div className="flex items-end">
-                <Button className="w-full" disabled={busy}>
+              <div className="space-y-2">
+                <Label htmlFor="logs-level">{t('logsLevel')}</Label>
+                <Select
+                  value={level === '' ? ALL_LEVELS : level}
+                  onValueChange={(value) => {
+                    setLevel(value === ALL_LEVELS ? '' : value);
+                  }}
+                >
+                  <SelectTrigger id="logs-level">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={ALL_LEVELS}>{t('logsAllLevels')}</SelectItem>
+                    {LOGS_LEVELS.map((name) => (
+                      <SelectItem key={name} value={name}>
+                        {name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="logs-conversation">{t('logsConversation')}</Label>
+                <Input
+                  id="logs-conversation"
+                  value={conversation}
+                  maxLength={LOGS_CONVERSATION_MAX_LENGTH}
+                  placeholder={t('logsConversationPlaceholder')}
+                  onChange={(event) => {
+                    setConversation(event.target.value);
+                  }}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="logs-text">{t('logsText')}</Label>
+                <Input
+                  id="logs-text"
+                  value={text}
+                  maxLength={LOGS_TEXT_MAX_LENGTH}
+                  placeholder={t('logsTextPlaceholder')}
+                  onChange={(event) => {
+                    setText(event.target.value);
+                  }}
+                />
+              </div>
+              <div className="flex items-end sm:col-span-2 lg:col-span-3">
+                <Button className="w-full sm:w-auto" disabled={busy}>
                   {busy ? t('logsSearching') : t('logsSearch')}
                 </Button>
               </div>
@@ -229,9 +314,13 @@ export function Logs() {
           </CardContent>
         </Card>
 
-        {rangeInvalid && (
+        {invalid !== null && (
           <Alert variant="destructive" role="alert">
-            <AlertDescription>{t('logsInvalidRange')}</AlertDescription>
+            <AlertDescription>
+              {invalid === 'range'
+                ? t('logsInvalidRange')
+                : t('logsInvalidFilter', { field: t(labelKeyOf(invalid)) })}
+            </AlertDescription>
           </Alert>
         )}
 
@@ -258,7 +347,7 @@ export function Logs() {
               </p>
               <ul className="divide-y divide-border rounded-lg border border-border bg-card">
                 {records.map((record, index) => {
-                  const level = fieldOf(record, 'level');
+                  const recordLevel = fieldOf(record, 'level');
                   return (
                     <li key={`${record.time}-${String(index)}`} className="px-4 py-3">
                       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
@@ -266,9 +355,9 @@ export function Logs() {
                           {new Date(record.time).toLocaleString(i18n.language)}
                         </time>
                         <Badge variant="secondary">{fieldOf(record, 'module') ?? '—'}</Badge>
-                        {level !== undefined && (
-                          <Badge variant="outline" className={levelClass(level)}>
-                            {level}
+                        {recordLevel !== undefined && (
+                          <Badge variant="outline" className={levelClass(recordLevel)}>
+                            {recordLevel}
                           </Badge>
                         )}
                         {fieldOf(record, 'untrusted') === 'true' && (

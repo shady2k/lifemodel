@@ -277,6 +277,7 @@ describe('loader image release seed bundle', () => {
       'loader/src/model-capture-setting.ts',
       'loader/src/workbench-status.ts',
       'loader/src/logs-store-adapter.ts',
+      'loader/src/logs-query.ts',
     ]);
   });
 

@@ -11,7 +11,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { LoaderConfig } from './config.js';
 import type { PasswordRecord } from './auth.js';
 import { CSP, redirect, sendText } from './http-responses.js';
-import { createLogsQuery } from './logs-query.js';
+import { createLogsQuery, parseLogsFilter } from './logs-query.js';
 import { createLogsStore } from './logs-store-adapter.js';
 import type { RouteHandler, RouteRequest } from './route-table.js';
 import type { LoaderState } from './state.js';
@@ -28,17 +28,6 @@ export interface LogsHandlers {
   readonly logsPage: RouteHandler;
   readonly logsQuery: RouteHandler;
   readonly logsModules: RouteHandler;
-}
-
-/** The largest time value JavaScript's Date can represent, in milliseconds. */
-const MAX_DATE_MS = 8_640_000_000_000_000;
-
-function hasControlCharacter(value: string): boolean {
-  for (const character of value) {
-    const code = character.codePointAt(0) ?? 0;
-    if (code < 0x20 || code === 0x7f) return true;
-  }
-  return false;
 }
 
 function sendJson(res: ServerResponse, status: number, value: unknown): void {
@@ -81,28 +70,12 @@ export function createLogsHandlers(deps: LogsHandlerDeps): LogsHandlers {
       return;
     }
     const url = new URL(req.url ?? '/', 'http://localhost');
-    const fromRaw = url.searchParams.get('from');
-    const toRaw = url.searchParams.get('to');
-    const moduleName = url.searchParams.get('module') ?? '';
-    const from = fromRaw === null || fromRaw.trim() === '' ? Number.NaN : Number(fromRaw);
-    const to = toRaw === null || toRaw.trim() === '' ? Number.NaN : Number(toRaw);
-    if (
-      !Number.isInteger(from) ||
-      !Number.isInteger(to) ||
-      Math.abs(from) > MAX_DATE_MS ||
-      Math.abs(to) > MAX_DATE_MS ||
-      from > to ||
-      moduleName.length > 128 ||
-      hasControlCharacter(moduleName)
-    ) {
-      sendJson(res, 400, { state: 'invalid', reason: 'filter' });
+    const parsed = parseLogsFilter(url.searchParams);
+    if (parsed.state === 'invalid') {
+      sendJson(res, 400, { state: 'invalid', reason: 'filter', field: parsed.field });
       return;
     }
-    const result = await logs.records({
-      from,
-      to,
-      module: moduleName === '' ? null : moduleName,
-    });
+    const result = await logs.records(parsed.filter);
     sendJson(res, result.state === 'ok' ? 200 : 503, result);
   }
 
