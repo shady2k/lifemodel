@@ -163,18 +163,26 @@ class FakeStore:
         return None
 
 
+DEPLOYED = {'spec': {'replicas': 1},
+            'status': {'updatedReplicas': 1, 'availableReplicas': 1}}
+
+
 class FakeCluster:
     """A fake kubectl: the DaemonSet JSON, pod lists, and scripted patch results.
 
     The collector's readiness follows the number of patches the walk applied, so
     a fixture says "Ready, then stopped by the first patch, then Ready again":
-    that is the sequence a restart walks through, without counting polls.
+    that is the sequence a restart walks through, without counting polls. The
+    store Deployment it reports is scripted the same way, one state per read, so
+    a walk that waits for a rollout finishes on the read the fixture says.
     """
 
     def __init__(self, fixture):
         self.daemonset = fixture.get('daemonset')
         self.collector_states = fixture.get('collectorStates', [{'ready': 1, 'desired': 1,
                                                                  'readyPods': 1}])
+        self.deployment_states = fixture.get('deploymentStates') or [DEPLOYED]
+        self.deployment_reads = 0
         self.patch_script = fixture.get('patchScript', [])
         self.patches = []
         self.secret = fixture.get('secret', '')
@@ -204,9 +212,16 @@ class FakeCluster:
             body.setdefault('status', {})['numberReady'] = state.get('ready', 0)
             body['status']['desiredNumberScheduled'] = state.get('desired', 0)
             return body
+        if 'deployment' in args:
+            index = min(self.deployment_reads, len(self.deployment_states) - 1)
+            self.deployment_reads += 1
+            return json.loads(json.dumps(self.deployment_states[index]))
         if 'pods' in args:
             return {'items': self.pods(None)}
         return None
+
+    def deployments(self):
+        return self.deployment_reads
 
     def pods(self, namespace, selector=None):
         state = self.current_state()
@@ -433,6 +448,18 @@ def setting_flags(walk, fixture):
     print('FLAGS ' + json.dumps({'agree': agree, 'days': observed['days'],
                                  'maxBytes': observed['maxBytes'],
                                  'minFreeBytes': observed['minFreeBytes']}))
+    return report
+
+
+@mode('setting-rollout')
+def setting_rollout(walk, fixture):
+    """The wait between `applied` and the `/flags` read, on a scripted Deployment."""
+    report = walk.Report()
+    cluster = FakeCluster({'deploymentStates': fixture.get('deploymentStates') or [DEPLOYED]})
+    finished = walk.wait_store_rollout(report, cluster, options(), fixture.get('bound', 5),
+                                       "the store's own /flags")
+    print('ROLLOUT ' + json.dumps({'finished': finished,
+                                   'deployments': cluster.deployments()}))
     return report
 
 

@@ -17,7 +17,10 @@ What it proves
    only happens when the VL_-prefixed ConfigMap keys reach the flags through
    `-envflag.enable -envflag.prefix=VL_`; and the ConfigMap
    `lifemodel-system/lifemodel-logs-settings` holds the same values under their
-   VL_ keys with the desired revision.
+   VL_ keys with the desired revision. The read happens only after the rollout it
+   waits for has finished (the Deployment's updated and available replicas equal
+   its replicas), because a forward opened while `Recreate` replaces the store's
+   pod binds the pod that is about to go and never answers again.
 3. A repeated PUT of the identical body changes no revision: `desiredRevision`,
    the Deployment's generation and the store pod's uid and restartCount are all
    unchanged, so nothing restarted.
@@ -55,7 +58,9 @@ Arguments (defaults are the test VM's)
   --days N               the first change's day count (default 7)
   --days-next N          the second change's day count, and the repeated PUT's
                          (default 14)
-  --apply-bound N        bound on `applied` after each change (default 180 s)
+  --apply-bound N        bound on `applied` after each change, and on the
+                         store's rollout before the flags are read (default
+                         180 s)
   --loader-restart-bound N  bound on the replacement loader answering after the
                          crash case (default 300 s)
   --deadline-seconds N   the whole walk's bound (default 3600)
@@ -186,7 +191,52 @@ def apply_change(report, loader, days, max_bytes, bound_seconds):
     return applied
 
 
+def store_rollout_finished(deployment):
+    """The Deployment's rollout is done: every replica is updated and available."""
+    if not isinstance(deployment, dict):
+        return False
+    spec = deployment.get('spec') or {}
+    status = deployment.get('status') or {}
+    try:
+        replicas = int(spec.get('replicas', 1))
+        updated = int(status.get('updatedReplicas') or 0)
+        available = int(status.get('availableReplicas') or 0)
+    except (TypeError, ValueError):
+        return False
+    return replicas > 0 and updated == replicas and available == replicas
+
+
+def wait_store_rollout(report, cluster, options, bound_seconds, name):
+    """Wait for the rollout the applied answer promised, before `/flags` is read.
+
+    `applied` means the loader read the desired flags from a Ready pod of the new
+    template, but that answer can still race the Deployment's own status, and a
+    port-forward opened while `Recreate` is mid-rollout binds the pod that is
+    about to go. Only a Deployment whose updated and available replicas equal its
+    replicas is the state the flags are asserted on.
+    """
+    started = time.monotonic()
+
+    def attempt():
+        deployment = deploy_deployment(cluster, options)
+        return deployment if store_rollout_finished(deployment) else None
+
+    deployment = wait_until(started + bound_seconds, 2, attempt)
+    if deployment is None:
+        report.not_valid('the store\'s rollout did not finish within %d s: %s cannot be asserted'
+                         % (bound_seconds, name))
+        return False
+    status = deployment.get('status') or {}
+    report.pass_('the store\'s rollout finished before the flags are read',
+                 '%s/%s replicas updated and available, %.0f s after the wait started'
+                 % (status.get('updatedReplicas'), (deployment.get('spec') or {}).get('replicas'),
+                    time.monotonic() - started))
+    return True
+
+
 def check_flags(report, options, cluster, expected, name):
+    if not wait_store_rollout(report, cluster, options, options.apply_bound, name):
+        return False
     flags = read_store_flags(report, options, cluster)
     if flags is None:
         return False

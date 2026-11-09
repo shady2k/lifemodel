@@ -36,11 +36,14 @@ function python(args: readonly string[]): Run {
 
 let directory = '';
 
-function harness(mode: string): Run {
+function harness(mode: string, data: Record<string, unknown> = {}): Run {
   const fixture = join(directory, mode + '.json');
-  writeFileSync(fixture, '{}');
+  writeFileSync(fixture, JSON.stringify(data));
   return python([HARNESS, mode, WALK, fixture]);
 }
+
+const ROLLING = { spec: { replicas: 1 }, status: { updatedReplicas: 0, availableReplicas: 0 } };
+const DEPLOYED = { spec: { replicas: 1 }, status: { updatedReplicas: 1, availableReplicas: 1 } };
 
 beforeAll(() => {
   directory = mkdtempSync(join(tmpdir(), 'logs-setting-walk-'));
@@ -116,6 +119,35 @@ describe('a fake node for the setting walk', () => {
     expect(run.passes.join('\n')).toContain('the write demands the CSRF token and the exact Origin');
     expect(run.status).toBe(0);
   }, 30000);
+
+  it('reads the flags only after the Deployment reports its rollout finished', () => {
+    const run = harness('setting-rollout', { deploymentStates: [ROLLING, ROLLING, DEPLOYED] });
+    const line = run.lines.find((entry) => entry.startsWith('ROLLOUT '));
+    const value = JSON.parse((line ?? '').slice('ROLLOUT '.length));
+    expect(value.finished).toBe(true);
+    // Two reads while the old pod was still one of the replicas, the third done.
+    expect(value.deployments).toBe(3);
+    expect(run.passes.join('\n')).toContain('the store\'s rollout finished before the flags are read');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 30000);
+
+  it('does not read the flags on a rollout that never finishes', () => {
+    const run = harness('setting-rollout', { deploymentStates: [ROLLING], bound: 1 });
+    const line = run.lines.find((entry) => entry.startsWith('ROLLOUT '));
+    const value = JSON.parse((line ?? '').slice('ROLLOUT '.length));
+    expect(value.finished).toBe(false);
+    expect(run.invalid.join('\n')).toContain('the store\'s rollout did not finish');
+    expect(run.status).toBe(1);
+  }, 30000);
+
+  it('waits for the rollout inside the flags check, before the forward is opened', () => {
+    const source = readFileSync(WALK, 'utf8');
+    const check = source.slice(source.indexOf('def check_flags'));
+    const body = check.slice(0, check.indexOf('def read_configmap'));
+    expect(body).toMatch(/wait_store_rollout\(/);
+    expect(body.indexOf('wait_store_rollout(')).toBeLessThan(body.indexOf('read_store_flags('));
+  });
 
   it('reads the three flags back as the numbers the setting means', () => {
     const run = harness('setting-flags');

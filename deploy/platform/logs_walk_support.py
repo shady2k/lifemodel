@@ -21,7 +21,9 @@ The conventions every walk follows, and this file keeps where it can:
 The store is reached over plain HTTP on a local port that
 `kubectl port-forward deploy/logs-store <port>:9428` opens: port-forward is not
 subject to the store's NetworkPolicy, and the forward's pid is kept so the walk
-kills exactly the process it started, never a pattern match.
+kills exactly the process it started, never a pattern match. A forward stays
+bound to the pod it resolved, so it is replaced on a fresh port when a roll of
+the store replaces that pod (`StoreForward`).
 """
 import base64
 import http.client
@@ -268,9 +270,11 @@ class Loader:
 class Store:
     """The log store's HTTP protocol on a local port-forward (ADR-016 §3)."""
 
-    def __init__(self, host='127.0.0.1', port=DEFAULT_STORE_PORT):
+    def __init__(self, host='127.0.0.1', port=None, forward=None):
         self.host = host
-        self.port = port
+        self.forward = forward
+        self.port = port if port is not None else (
+            forward.port if forward is not None else DEFAULT_STORE_PORT)
         self.connection = None
 
     def _connection(self, timeout):
@@ -285,6 +289,15 @@ class Store:
             except OSError:
                 pass
         self.connection = None
+
+    def _renew_forward(self):
+        """A fresh forward after the store's pod was replaced; False if it never came up."""
+        if self.forward is None:
+            return False
+        if not self.forward.renew():
+            return False
+        self.port = self.forward.port
+        return True
 
     def _http(self, method, path, body=None, headers=None, timeout=60):
         merged = {'accept': '*/*'}
@@ -302,6 +315,12 @@ class Store:
                 self._drop()
                 if attempt:
                     raise WalkError('store_unreachable: ' + type(error).__name__) from None
+                # A retention change (and the partition key, and anything else that
+                # rolls the store) replaces the Deployment's pod, and a forward is
+                # bound to the pod it resolved when it started: the retry needs a
+                # new forward on a new port, or it fails against the dead one again.
+                if not self._renew_forward():
+                    raise WalkError('store_unreachable: forward') from None
         raise WalkError('store_unreachable')
 
     def query(self, logsql, timeout=60):
@@ -456,6 +475,48 @@ class PortForward:
             except OSError:
                 pass
             self.log_path = None
+
+
+class StoreForward:
+    """The port-forward a store client holds, and how it is replaced.
+
+    A port-forward is bound to the pod it resolved when it started. Every roll of
+    the store — a retention change, the partition key, a replaced pod — recreates
+    that pod (`Recreate`), and the forward then logs `failed to find sandbox` or
+    `lost connection to pod` and never answers again. So a store client opens its
+    forward through this object: `renew()` closes the dead one and starts a new
+    one on a fresh port, and says so when that new one never comes up.
+    """
+
+    def __init__(self, kubectl, namespace, target, forward_factory=None, ready_timeout=90):
+        self.kubectl = kubectl
+        self.namespace = namespace
+        self.target = target
+        self.forward_factory = forward_factory or PortForward
+        self.ready_timeout = ready_timeout
+        self.forward = None
+        self.port = None
+
+    def open(self):
+        """A forward on a free port; False when the one started never answered."""
+        self.close()
+        port = free_port()
+        forward = self.forward_factory(self.kubectl, self.namespace, self.target, port).start()
+        if not forward.wait_ready(self.ready_timeout):
+            forward.close()
+            return False
+        self.forward = forward
+        self.port = port
+        return True
+
+    def renew(self):
+        return self.open()
+
+    def close(self):
+        if self.forward is not None:
+            self.forward.close()
+        self.forward = None
+        self.port = None
 
 
 def free_port():
@@ -643,14 +704,16 @@ def read_password(path):
 
 
 def connect_store(report, options, cluster):
-    """A store client on its own port-forward; the forward is returned for close."""
-    port = free_port()
-    forward = PortForward(options.kubectl, options.namespace, 'deploy/' + options.store, port).start()
-    if not forward.wait_ready():
-        forward.close()
+    """A store client on its own port-forward; the forward is returned for close.
+
+    The client replaces the forward itself when the store's pod is replaced, so
+    the handle returned here is what the walk closes when it is done.
+    """
+    forward = StoreForward(options.kubectl, options.namespace, 'deploy/' + options.store)
+    if not forward.open():
         report.fail('the store answers its port-forward', options.store)
         return None, None
-    return Store(port=port), forward
+    return Store(forward=forward), forward
 
 
 def quantity(text):
@@ -693,17 +756,18 @@ def days_of(period):
 def read_store_flags(report, options, cluster, what='the /flags read'):
     """`/flags` from the store pod through a port-forward of its own.
 
-    A fresh forward for every read: the store's pod is replaced by each retention
-    change, and a forward opened before the replacement does not survive it.
+    A fresh forward for every read, opened after the walk waited for the rollout
+    it is about to assert; if the store's pod is replaced while the read runs, the
+    client renews the forward and asks again.
     """
-    port = free_port()
-    forward = PortForward(options.kubectl, options.namespace, 'deploy/' + options.store, port).start()
+    forward = StoreForward(options.kubectl, options.namespace, 'deploy/' + options.store,
+                           ready_timeout=60)
     try:
-        if not forward.wait_ready(timeout=60):
+        if not forward.open():
             report.not_valid('the store never answered its port-forward: %s cannot be asserted'
                              % what)
             return None
-        store = Store(port=port)
+        store = Store(forward=forward)
         try:
             return store.flags()
         finally:
