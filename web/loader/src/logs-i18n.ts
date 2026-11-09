@@ -51,6 +51,29 @@ const en = {
   logsStoreReadOnly: 'the store is refusing writes (read-only)',
   logsEvictorStale: 'the log evictor is failing or has not run',
   logsEvictionNotice: 'logs for {{date}} were removed at {{time}}; {{bytes}} bytes freed',
+  logsRetentionTitle: 'Retention',
+  logsRetentionDescription:
+    'How long logs are kept, and how much space they may take before the oldest days are dropped.',
+  logsRetentionDays: 'Days kept',
+  logsRetentionSize: 'Size limit (MiB)',
+  logsRetentionLargest: 'The largest bound this volume can reach is {{size}}.',
+  logsRetentionSave: 'Save retention',
+  logsRetentionSaving: 'Saving…',
+  logsRetentionApplied: 'Applied at {{time}}: the store runs {{days}} days with a {{size}} limit.',
+  logsRetentionAppliedNow: 'Applied: the store runs {{days}} days with a {{size}} limit.',
+  logsRetentionPending: 'Waiting for the store to run the new values: {{reason}}',
+  logsRetentionPending_store_unavailable: 'it is restarting or not answering',
+  logsRetentionPending_rollout_timeout: 'it did not finish its restart in time',
+  logsRetentionPending_forbidden: 'the loader may not write its settings',
+  logsRetentionPending_mismatch: 'it still answers the previous values',
+  logsRetentionRefused:
+    'Refused: {{asked}} is above {{largest}}, the largest bound this volume can reach. The rest of the space is the evictor’s threshold.',
+  logsRetentionDoesNotFit:
+    'retention does not fit this volume: the saved bound {{asked}} is above {{largest}}',
+  logsRetentionVolumeNote:
+    'Raising the volume is an installation step, not a setting here: use the installer option or the NixOS option.',
+  logsRetentionUnavailable: 'The retention setting could not be read. Reason: {{reason}}.',
+  logsRetentionInvalid: 'The {{field}} value is not valid.',
 };
 
 const ru = {
@@ -106,6 +129,30 @@ const ru = {
   logsStoreReadOnly: 'хранилище не принимает записи (только чтение)',
   logsEvictorStale: 'вытеснитель логов не работает или ещё не запускался',
   logsEvictionNotice: 'логи за {{date}} удалены в {{time}}; освобождено {{bytes}} байт',
+  logsRetentionTitle: 'Хранение',
+  logsRetentionDescription:
+    'Сколько хранятся логи и сколько места они могут занять, прежде чем старые дни будут удалены.',
+  logsRetentionDays: 'Хранить дней',
+  logsRetentionSize: 'Предел размера (МиБ)',
+  logsRetentionLargest: 'Наибольший предел, который может достичь этот том: {{size}}.',
+  logsRetentionSave: 'Сохранить хранение',
+  logsRetentionSaving: 'Сохранение…',
+  logsRetentionApplied:
+    'Применено в {{time}}: хранилище работает {{days}} дней с пределом {{size}}.',
+  logsRetentionAppliedNow: 'Применено: хранилище работает {{days}} дней с пределом {{size}}.',
+  logsRetentionPending: 'Ожидание, пока хранилище применит новые значения: {{reason}}',
+  logsRetentionPending_store_unavailable: 'оно перезапускается или не отвечает',
+  logsRetentionPending_rollout_timeout: 'оно не завершило перезапуск вовремя',
+  logsRetentionPending_forbidden: 'загрузчику нельзя записывать его настройки',
+  logsRetentionPending_mismatch: 'оно всё ещё отвечает прежними значениями',
+  logsRetentionRefused:
+    'Отказано: {{asked}} больше {{largest}} — наибольшего предела, которого может достичь этот том. Остальное место — порог вытеснителя.',
+  logsRetentionDoesNotFit:
+    'хранение не помещается в этот том: сохранённый предел {{asked}} больше {{largest}}',
+  logsRetentionVolumeNote:
+    'Увеличение тома — шаг установки, а не настройка здесь: используйте параметр установщика или опцию NixOS.',
+  logsRetentionUnavailable: 'Не удалось прочитать настройку хранения. Причина: {{reason}}.',
+  logsRetentionInvalid: 'Значение «{{field}}» задано неверно.',
 };
 
 i18n.addResourceBundle('en', 'translation', en, true, true);

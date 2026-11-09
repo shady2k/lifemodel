@@ -1,0 +1,274 @@
+/**
+ * The two admission lists the retention setting needs, and the Deployment clamp
+ * (ADR-016 §5, N6; check L08).
+ *
+ * The loader's rights alone are not enough: the A0 policies decide which
+ * ConfigMap names may exist in `lifemodel-system` and who may own them. Both
+ * lists now carry `lifemodel-logs-settings`, the loader may create and update
+ * it, another identity may not, and the store's Deployment accepts a change to
+ * its two revision annotation maps from nobody but the loader and to nothing
+ * else.
+ */
+import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import YAML from 'yaml';
+import { evaluate } from '@marcbachmann/cel-js';
+import {
+  LOGS_SETTINGS_CONFIGMAP,
+  LOGS_SETTINGS_REVISION_ANNOTATION,
+  LOGS_STORE_DEPLOYMENT,
+} from '../../loader/src/logs-settings-cluster.js';
+
+const root = fileURLToPath(new URL('../../deploy/platform/', import.meta.url));
+const resources = YAML.parse(readFileSync(join(root, 'a0/kustomization.yaml'), 'utf8'))
+  .resources as string[];
+const objects = resources.flatMap((resource) =>
+  YAML.parseAllDocuments(readFileSync(join(root, 'a0', resource), 'utf8')).map((doc) =>
+    doc.toJSON()
+  )
+);
+
+const LOADER = 'system:serviceaccount:lifemodel-system:loader';
+const CNPG = 'system:serviceaccount:cnpg-system:cloudnative-pg';
+
+function policy(name: string): any {
+  return objects.find(
+    (item: any) => item.kind === 'ValidatingAdmissionPolicy' && item.metadata.name === name
+  );
+}
+
+function binding(policyName: string): any {
+  return objects.find(
+    (item: any) =>
+      item.kind === 'ValidatingAdmissionPolicyBinding' && item.spec.policyName === policyName
+  );
+}
+
+/**
+ * The apiserver's decision: the resource rules and the conditions select the
+ * request, then the validation decides. `matched: false` means the policy does
+ * not apply at all, which is not the same answer as a refusal.
+ */
+function decision(
+  policyObject: any,
+  context: { request: { operation?: string }; object: unknown; oldObject?: unknown }
+): { matched: boolean; allowed: boolean } {
+  const operations: string[] =
+    policyObject.spec.matchConstraints.resourceRules[0].operations ?? [];
+  const conditions = (policyObject.spec.matchConditions ?? []) as { expression: string }[];
+  const matched =
+    (context.request.operation === undefined ||
+      operations.includes(context.request.operation)) &&
+    conditions.every((condition) => Boolean(evaluate(condition.expression, context as never)));
+  if (!matched) return { matched: false, allowed: false };
+  return {
+    matched: true,
+    allowed: Boolean(evaluate(policyObject.spec.validations[0].expression, context as never)),
+  };
+}
+
+/** The same, for a policy whose rules always apply to the request under test. */
+function admits(
+  policyObject: any,
+  context: { request: unknown; object: unknown; oldObject?: unknown }
+): boolean {
+  const answer = decision(policyObject, context as never);
+  if (!answer.matched) throw new Error('the policy does not apply to this request');
+  return answer.allowed;
+}
+
+const settingsConfigMap = {
+  apiVersion: 'v1',
+  kind: 'ConfigMap',
+  metadata: { name: LOGS_SETTINGS_CONFIGMAP, namespace: 'lifemodel-system' },
+  data: {
+    VL_retentionPeriod: '7d',
+    VL_retention_maxDiskSpaceUsageBytes: '1073741824',
+    VL_storage_minFreeDiskSpaceBytes: '805306368',
+  },
+};
+
+describe('the loader ConfigMap clamp admits the log settings projection (N6)', () => {
+  it('admits its create and its update, in the store namespace, for the loader only', () => {
+    const clamp = policy('loader-configmap-admission');
+    const create = {
+      request: { operation: 'CREATE', namespace: 'lifemodel-system', userInfo: { username: LOADER } },
+      object: settingsConfigMap,
+    };
+    expect(admits(clamp, create)).toBe(true);
+    expect(
+      admits(clamp, {
+        request: { ...create.request, operation: 'UPDATE' },
+        object: settingsConfigMap,
+      })
+    ).toBe(true);
+    // Another identity is not the clamp's subject: its own denial is the
+    // ownership list below, and the clamp refuses no deletion for anyone.
+    expect(
+      admits(clamp, {
+        request: { ...create.request, operation: 'DELETE' },
+        object: settingsConfigMap,
+      })
+    ).toBe(false);
+    // A ConfigMap the projection does not name is refused for the loader too.
+    for (const name of ['lifemodel-logs-settings-copy', 'lifemodel-storage-settings-2', 'other']) {
+      expect(
+        admits(clamp, {
+          request: create.request,
+          object: { metadata: { name, namespace: 'lifemodel-system' } },
+        }),
+        name
+      ).toBe(false);
+    }
+    // And the same name in another namespace is not this projection.
+    expect(
+      admits(clamp, {
+        request: { ...create.request, namespace: 'lifemodel' },
+        object: { ...settingsConfigMap, metadata: { ...settingsConfigMap.metadata, namespace: 'lifemodel' } },
+      })
+    ).toBe(false);
+  });
+
+  it('reserves the projection to the loader against every other identity', () => {
+    const ownership = policy('platform-settings-ownership-admission');
+    expect(admits(ownership, {
+      request: { operation: 'CREATE', namespace: 'lifemodel-system', name: LOGS_SETTINGS_CONFIGMAP, userInfo: { username: LOADER } },
+      object: settingsConfigMap,
+    })).toBe(true);
+    expect(admits(ownership, {
+      request: { operation: 'UPDATE', namespace: 'lifemodel-system', name: LOGS_SETTINGS_CONFIGMAP, userInfo: { username: LOADER } },
+      object: settingsConfigMap,
+    })).toBe(true);
+    for (const operation of ['CREATE', 'UPDATE', 'DELETE']) {
+      expect(
+        admits(ownership, {
+          request: { operation, namespace: 'lifemodel-system', name: LOGS_SETTINGS_CONFIGMAP, userInfo: { username: CNPG } },
+          object: operation === 'DELETE' ? null : settingsConfigMap,
+        }),
+        `${operation} by the operator`
+      ).toBe(false);
+    }
+    // The list still names both projections: the storage module's as before.
+    const condition = ownership.spec.matchConditions[0].expression as string;
+    expect(condition).toContain('lifemodel-storage-settings');
+    expect(condition).toContain(LOGS_SETTINGS_CONFIGMAP);
+  });
+});
+
+describe("the store Deployment's clamp (N6)", () => {
+  const revision = '3-9f8e7d6c5b4a';
+  const current = {
+    apiVersion: 'apps/v1',
+    kind: 'Deployment',
+    metadata: { name: LOGS_STORE_DEPLOYMENT, namespace: 'lifemodel-system', generation: 4 },
+    spec: {
+      replicas: 1,
+      strategy: { type: 'Recreate' },
+      selector: { matchLabels: { 'app.kubernetes.io/name': 'logs-store' } },
+      template: {
+        metadata: { labels: { 'app.kubernetes.io/name': 'logs-store' } },
+        spec: {
+          containers: [
+            {
+              name: 'logs-store',
+              image: 'registry.example/logs@sha256:abc',
+              args: ['-envflag.enable', '-envflag.prefix=VL_'],
+            },
+          ],
+        },
+      },
+    },
+    status: { observedGeneration: 4 },
+  };
+  const bumped = () => {
+    const next = structuredClone(current);
+    next.metadata.annotations = { [LOGS_SETTINGS_REVISION_ANNOTATION]: revision };
+    next.spec.template.metadata.annotations = { [LOGS_SETTINGS_REVISION_ANNOTATION]: revision };
+    next.metadata.generation = 5;
+    return next;
+  };
+  const update = (object: unknown, oldObject: unknown = current, username = LOADER) => ({
+    request: {
+      operation: 'UPDATE',
+      namespace: 'lifemodel-system',
+      name: LOGS_STORE_DEPLOYMENT,
+      userInfo: { username },
+    },
+    object,
+    oldObject,
+  });
+
+  it('admits the two annotation maps and nothing else', () => {
+    const clamp = policy('loader-logs-store-deployment-admission');
+    expect(binding('loader-logs-store-deployment-admission')?.spec.validationActions).toEqual([
+      'Deny',
+    ]);
+    expect(binding('loader-logs-store-deployment-admission')?.spec.policyName).toBe(
+      'loader-logs-store-deployment-admission'
+    );
+    expect(admits(clamp, update(bumped()))).toBe(true);
+  });
+
+  it('refuses every other field of that Deployment', () => {
+    const clamp = policy('loader-logs-store-deployment-admission');
+    const mutations: [string, (next: any) => void][] = [
+      ['another replica count', (next) => (next.spec.replicas = 2)],
+      ['another strategy', (next) => (next.spec.strategy = { type: 'RollingUpdate' })],
+      ['another selector', (next) => (next.spec.selector.matchLabels.extra = 'x')],
+      ['another image', (next) => (next.spec.template.spec.containers[0].image = 'other')],
+      ['another argument', (next) => next.spec.template.spec.containers[0].args.push('-retentionPeriod=9d')],
+      ['another pod label', (next) => (next.spec.template.metadata.labels.extra = 'x')],
+      ['another object label', (next) => (next.metadata.labels = { extra: 'x' })],
+      ['another name', (next) => (next.metadata.name = 'logs-store-2')],
+      [
+        'an annotation on one map only',
+        (next) => delete next.spec.template.metadata.annotations,
+      ],
+      [
+        'two different revisions',
+        (next) => (next.spec.template.metadata.annotations[LOGS_SETTINGS_REVISION_ANNOTATION] = '1-old'),
+      ],
+    ];
+    for (const [reason, mutate] of mutations) {
+      const next = bumped();
+      mutate(next);
+      expect(admits(clamp, update(next)), reason).toBe(false);
+    }
+  });
+
+  it('does not apply to another identity, another object or a create', () => {
+    const clamp = policy('loader-logs-store-deployment-admission');
+    // The clamp's subject is the loader: another identity's update of that
+    // object is not selected by it at all.
+    expect(decision(clamp, update(bumped(), current, CNPG)).matched).toBe(false);
+    expect(
+      decision(clamp, {
+        ...update(bumped()),
+        request: { ...update(bumped()).request, name: 'another-deployment' },
+      }).matched
+    ).toBe(false);
+    expect(
+      decision(clamp, {
+        ...update(bumped()),
+        request: { ...update(bumped()).request, namespace: 'lifemodel' },
+      }).matched
+    ).toBe(false);
+    // Nor does a create of the object: only an update is matched.
+    expect(
+      decision(clamp, {
+        ...update(bumped()),
+        request: { ...update(bumped()).request, operation: 'CREATE' },
+      }).matched
+    ).toBe(false);
+    const rules = clamp.spec.matchConstraints.resourceRules[0];
+    expect(rules).toMatchObject({
+      apiGroups: ['apps'],
+      resources: ['deployments'],
+      operations: ['UPDATE'],
+    });
+    // The policies are Deny-bound, so a refusal is an answer, never a warning.
+    expect(clamp.spec.failurePolicy).toBe('Fail');
+  });
+});

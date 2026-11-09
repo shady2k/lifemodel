@@ -56,3 +56,46 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: loader-storage-settings
+---
+# The owner's retention setting (ADR-016 §5, N6). The loader writes one
+# ConfigMap the store reads through envFrom, bumps the store's revision
+# annotation so `Recreate` replaces its single pod, and reads that pod back to
+# prove which template generation answers. Each right is by name and verb:
+# get and update on the one ConfigMap, create (it does not exist on a first
+# start), get and patch on the one Deployment, and a labelled read of its pods.
+# A pod read by label is a collection read, which RBAC names `list`; there is no
+# pod name to ask for, because the Deployment names its pod itself.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: loader-logs-settings
+  namespace: lifemodel-system
+rules:
+  - apiGroups: ['']
+    resources: ['configmaps']
+    resourceNames: ['lifemodel-logs-settings']
+    verbs: ['get', 'update']
+  - apiGroups: ['']
+    resources: ['configmaps']
+    verbs: ['create']
+  - apiGroups: ['apps']
+    resources: ['deployments']
+    resourceNames: ['logs-store']
+    verbs: ['get', 'patch']
+  - apiGroups: ['']
+    resources: ['pods']
+    verbs: ['list']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: loader-logs-settings
+  namespace: lifemodel-system
+subjects:
+  - kind: ServiceAccount
+    name: loader
+    namespace: lifemodel-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: loader-logs-settings

@@ -1,0 +1,13 @@
+{
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/flags",
+        "query": ""
+      },
+      "status": 200,
+      "body": "-envflag.enable=\"true\"\n-envflag.prefix=\"VL_\"\n-httpListenAddr=\":9428\"\n-partitionManageAuthKey=\"secret\"\n-retention.maxDiskSpaceUsageBytes=\"1610612736\"\n-retentionPeriod=\"14d\"\n-storage.minFreeDiskSpaceBytes=\"805306368\"\n-storageDataPath=\"/data\"\n"
+    }
+  ]
+}
