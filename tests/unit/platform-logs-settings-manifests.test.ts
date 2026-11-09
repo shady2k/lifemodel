@@ -3,9 +3,9 @@
  *
  * The store starts from the defaults ConfigMap with the loader's absent, no
  * manifest declares the revision annotation, the Deployment passes no retention
- * argument of its own, the loader's rights on the projection and the Deployment
- * are exactly the ones the code uses, and nothing Flux applies owns the
- * loader's ConfigMap.
+ * argument of its own, the loader's rights on the projection, the partition
+ * key's Secret and the Deployment are exactly the ones the code uses, and
+ * nothing Flux applies owns the loader's ConfigMap.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -21,6 +21,8 @@ import {
   LOGS_STORE_DEPLOYMENT,
   LOGS_STORE_DEPLOYMENT_PATH,
   LOGS_STORE_PODS_PATH,
+  LOGS_PARTITION_KEY_SECRET,
+  LOGS_PARTITION_KEY_SECRET_PATH,
 } from '../../loader/src/logs-settings-cluster.js';
 import { LOGS_CLAIM_NAME, LOGS_VOLUME_NAME } from '../../loader/src/logs-volume-claim.js';
 import {
@@ -144,7 +146,7 @@ describe('the store boots from the defaults with the loader absent', () => {
   });
 });
 
-/** The loader's rights on the projection and the store, exactly as declared. */
+/** The loader's rights on the projection, the partition key and the store. */
 function assertLogsSettingsRbac(resources: Resource[]): void {
   const expected = [
     {
@@ -154,6 +156,12 @@ function assertLogsSettingsRbac(resources: Resource[]): void {
       verbs: ['get', 'update'],
     },
     { apiGroups: [''], resources: ['configmaps'], verbs: ['create'] },
+    {
+      apiGroups: [''],
+      resources: ['secrets'],
+      resourceNames: [LOGS_PARTITION_KEY_SECRET],
+      verbs: ['get', 'patch'],
+    },
     {
       apiGroups: ['apps'],
       resources: ['deployments'],
@@ -165,7 +173,7 @@ function assertLogsSettingsRbac(resources: Resource[]): void {
   const role = find(resources, 'Role', 'loader-logs-settings');
   if (JSON.stringify(role.rules) !== JSON.stringify(expected))
     throw new Error(
-      `the loader's log settings grant is not exactly the four named rules: ${JSON.stringify(role.rules)}`
+      `the loader's log settings grant is not exactly the five named rules: ${JSON.stringify(role.rules)}`
     );
   const binding = find(resources, 'RoleBinding', 'loader-logs-settings');
   if (binding.metadata.namespace !== 'lifemodel-system') throw new Error('binding is in another namespace');
@@ -177,7 +185,7 @@ function assertLogsSettingsRbac(resources: Resource[]): void {
 }
 
 describe("the loader's rights on the projection and the store (N6)", () => {
-  it('are exactly the four named rules, and the code reads the paths they allow', () => {
+  it('are exactly the five named rules, and the code reads the paths they allow', () => {
     expect(() => assertLogsSettingsRbac(rbacResources)).not.toThrow();
     // The names the code uses are the ones the manifests declare.
     expect(LOGS_SETTINGS_CONFIGMAP).toBe('lifemodel-logs-settings');
@@ -194,6 +202,11 @@ describe("the loader's rights on the projection and the store (N6)", () => {
     expect(LOGS_STORE_PODS_PATH).toBe(
       '/api/v1/namespaces/lifemodel-system/pods?labelSelector=app.kubernetes.io%2Fname%3Dlogs-store'
     );
+    // The partition key's one Secret, by name: read it and patch its value.
+    expect(LOGS_PARTITION_KEY_SECRET).toBe('lifemodel-logs-partition-key');
+    expect(LOGS_PARTITION_KEY_SECRET_PATH).toBe(
+      '/api/v1/namespaces/lifemodel-system/secrets/lifemodel-logs-partition-key'
+    );
   });
 
   it('fails when the grant is widened in any way', () => {
@@ -202,10 +215,17 @@ describe("the loader's rights on the projection and the store (N6)", () => {
       ['an extra verb', (rules) => rules[0].verbs.push('delete')],
       ['an extra ConfigMap name', (rules) => rules[0].resourceNames.push('other')],
       ['no ConfigMap name', (rules) => delete rules[0].resourceNames],
-      ['another verb on the Deployment', (rules) => rules[2].verbs.push('update')],
-      ['no Deployment name', (rules) => delete rules[2].resourceNames],
-      ['another API group', (rules) => rules[3].apiGroups.push('apps')],
-      ['a pod get as well as a list', (rules) => rules[3].verbs.push('get')],
+      ['another verb on the Deployment', (rules) => rules[3].verbs.push('update')],
+      ['no Deployment name', (rules) => delete rules[3].resourceNames],
+      ['another API group', (rules) => rules[4].apiGroups.push('apps')],
+      ['a pod get as well as a list', (rules) => rules[4].verbs.push('get')],
+      ['an update verb on the partition key', (rules) => rules[2].verbs.push('update')],
+      ['a partition key by another name', (rules) => rules[2].resourceNames.push('other')],
+      ['no partition key name', (rules) => delete rules[2].resourceNames],
+      [
+        'secrets clustered',
+        (rules) => rules.push({ apiGroups: [''], resources: ['secrets'], verbs: ['get'] }),
+      ],
       ['configmaps clustered', (rules) => rules.push({ apiGroups: [''], resources: ['configmaps'], verbs: ['get'] })],
     ];
     for (const [reason, mutate] of cases) {

@@ -161,10 +161,12 @@ spec:
   validationActions: [Deny]
 ---
 # The log store's Deployment is the loader's to restart for a retention change
-# and for nothing else (ADR-016 §5, N6). The template's revision annotation is
-# what makes `Recreate` replace the store's pod; a change to any other field -
-# replicas, strategy, selector, the pod spec, labels, or the object's own name -
-# is refused, and so is an answer whose two annotation maps disagree.
+# or a partition key it wrote, and for nothing else (ADR-016 §5, N6). Either
+# template annotation - the settings revision or the partition key revision,
+# which is a separate value and never the key - makes `Recreate` replace the
+# store's pod; a change to any other field - replicas, strategy, selector, the
+# pod spec, labels, or the object's own name - is refused, and so is an
+# annotation that reaches one map without the other or disagrees between them.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -207,11 +209,19 @@ spec:
         object.spec.template.spec == oldObject.spec.template.spec &&
         has(object.metadata.annotations) &&
         has(object.spec.template.metadata.annotations) &&
-        'lifemodel.dev/logs-settings-revision' in object.metadata.annotations &&
-        'lifemodel.dev/logs-settings-revision' in object.spec.template.metadata.annotations &&
-        object.metadata.annotations['lifemodel.dev/logs-settings-revision'] ==
-          object.spec.template.metadata.annotations['lifemodel.dev/logs-settings-revision']
-      message: the loader may only patch the two logs settings revision annotations on the logs-store Deployment
+        (('lifemodel.dev/logs-settings-revision' in object.metadata.annotations) ==
+          ('lifemodel.dev/logs-settings-revision' in object.spec.template.metadata.annotations)) &&
+        (('lifemodel.dev/logs-partition-key-revision' in object.metadata.annotations) ==
+          ('lifemodel.dev/logs-partition-key-revision' in object.spec.template.metadata.annotations)) &&
+        (('lifemodel.dev/logs-settings-revision' in object.metadata.annotations) ||
+          ('lifemodel.dev/logs-partition-key-revision' in object.metadata.annotations)) &&
+        (!('lifemodel.dev/logs-settings-revision' in object.metadata.annotations) ||
+          (object.metadata.annotations['lifemodel.dev/logs-settings-revision'] ==
+           object.spec.template.metadata.annotations['lifemodel.dev/logs-settings-revision'])) &&
+        (!('lifemodel.dev/logs-partition-key-revision' in object.metadata.annotations) ||
+          (object.metadata.annotations['lifemodel.dev/logs-partition-key-revision'] ==
+           object.spec.template.metadata.annotations['lifemodel.dev/logs-partition-key-revision']))
+      message: the loader may only patch the logs settings and partition key revision annotations on the logs-store Deployment
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

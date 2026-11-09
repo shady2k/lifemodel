@@ -449,6 +449,8 @@ describe('the applied predicate', () => {
     templateRevision: '2-abc',
     progressDeadlineExceeded: false,
     podRevisions: ['2-abc'],
+    templateKeyRevision: null,
+    podKeyRevisions: [],
     ...over,
   });
   const agreed: ObservedRetentionFlags = expected;

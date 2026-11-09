@@ -18,6 +18,10 @@ import {
   LOGS_STORE_DEPLOYMENT,
   LOGS_STORE_DEPLOYMENT_PATH,
   LOGS_STORE_PODS_PATH,
+  LOGS_PARTITION_KEY_FIELD,
+  LOGS_PARTITION_KEY_REVISION_ANNOTATION,
+  LOGS_PARTITION_KEY_SECRET,
+  LOGS_PARTITION_KEY_SECRET_PATH,
 } from '../../loader/src/logs-settings-cluster.js';
 import type {
   KubernetesObjectApi,
@@ -271,6 +275,8 @@ describe("the store's Deployment", () => {
         templateRevision: null,
         progressDeadlineExceeded: true,
         podRevisions: [REVISION],
+        templateKeyRevision: null,
+        podKeyRevisions: [null],
       },
     });
   });
@@ -301,5 +307,176 @@ describe("the claim's capacity", () => {
       api: stubApi({}, { [`GET ${LOGS_CLAIM_PATH}`]: 403 }).api,
     });
     expect(await refused.volumeBytes()).toEqual({ state: 'forbidden' });
+  });
+});
+const KEY = 'partition-key-value-of-32-bytes-__';
+const KEY_REVISION = '1-0123456789abcdef';
+
+const secret = () => ({
+  apiVersion: 'v1',
+  kind: 'Secret',
+  metadata: {
+    name: LOGS_PARTITION_KEY_SECRET,
+    namespace: 'lifemodel-system',
+    resourceVersion: '7',
+    annotations: { [LOGS_PARTITION_KEY_REVISION_ANNOTATION]: KEY_REVISION },
+  },
+  type: 'Opaque',
+  data: { [LOGS_PARTITION_KEY_FIELD]: Buffer.from(KEY, 'utf8').toString('base64') },
+});
+
+describe("the partition key's Secret", () => {
+  it('reads the value the store mounts as a file and the revision beside it', async () => {
+    const { api, calls } = stubApi({ [LOGS_PARTITION_KEY_SECRET_PATH]: secret() });
+    const cluster = createLogsSettingsCluster({ api });
+    expect(await cluster.readPartitionKey()).toEqual({
+      state: 'ok',
+      value: { present: true, value: KEY, revision: KEY_REVISION },
+    });
+    expect(calls).toEqual([{ method: 'GET', path: LOGS_PARTITION_KEY_SECRET_PATH }]);
+  });
+
+  it('calls an empty, keyless or absent value simply empty', async () => {
+    for (const body of [
+      { ...secret(), data: {} },
+      { ...secret(), data: { [LOGS_PARTITION_KEY_FIELD]: '' } },
+    ]) {
+      const cluster = createLogsSettingsCluster({
+        api: stubApi({ [LOGS_PARTITION_KEY_SECRET_PATH]: body }).api,
+      });
+      expect(await cluster.readPartitionKey()).toEqual({
+        state: 'ok',
+        value: { present: true, value: null, revision: KEY_REVISION },
+      });
+    }
+    const missing = createLogsSettingsCluster({ api: stubApi({}).api });
+    expect(await missing.readPartitionKey()).toEqual({
+      state: 'ok',
+      value: { present: false, value: null, revision: null },
+    });
+  });
+
+  it('is unavailable or forbidden when it cannot be read', async () => {
+    for (const [status, state] of [
+      [403, 'forbidden'],
+      [500, 'unavailable'],
+    ] as const) {
+      const cluster = createLogsSettingsCluster({
+        api: stubApi({}, { [`GET ${LOGS_PARTITION_KEY_SECRET_PATH}`]: status }).api,
+      });
+      expect(await cluster.readPartitionKey()).toEqual({ state });
+    }
+  });
+
+  it('patches the value and the revision in one merge patch', async () => {
+    const { api, calls } = stubApi({ [LOGS_PARTITION_KEY_SECRET_PATH]: secret() });
+    const cluster = createLogsSettingsCluster({ api });
+    expect(await cluster.writePartitionKey(KEY, KEY_REVISION)).toEqual({
+      state: 'ok',
+      value: 'written',
+    });
+    expect(calls.map((call) => [call.method, call.path])).toEqual([
+      ['PATCH', LOGS_PARTITION_KEY_SECRET_PATH],
+    ]);
+    expect(JSON.parse(calls[0]!.body ?? '{}')).toEqual({
+      data: { [LOGS_PARTITION_KEY_FIELD]: Buffer.from(KEY, 'utf8').toString('base64') },
+      metadata: { annotations: { [LOGS_PARTITION_KEY_REVISION_ANNOTATION]: KEY_REVISION } },
+    });
+  });
+
+  it('writes only the revision when the key is already there', async () => {
+    const { api, calls } = stubApi({ [LOGS_PARTITION_KEY_SECRET_PATH]: secret() });
+    const cluster = createLogsSettingsCluster({ api });
+    expect(await cluster.writePartitionKey(null, '2-new')).toEqual({
+      state: 'ok',
+      value: 'written',
+    });
+    expect(JSON.parse(calls[0]!.body ?? '{}')).toEqual({
+      metadata: { annotations: { [LOGS_PARTITION_KEY_REVISION_ANNOTATION]: '2-new' } },
+    });
+  });
+
+  it('turns a refused patch into forbidden and an answerless one into unavailable', async () => {
+    for (const [status, state] of [
+      [403, 'forbidden'],
+      [500, 'unavailable'],
+    ] as const) {
+      const cluster = createLogsSettingsCluster({
+        api: stubApi({}, { [`PATCH ${LOGS_PARTITION_KEY_SECRET_PATH}`]: status }).api,
+      });
+      expect(await cluster.writePartitionKey(KEY, KEY_REVISION)).toEqual({ state });
+    }
+  });
+});
+
+describe("the partition key's revision on the store Deployment", () => {
+  it('patches the two annotation maps and nothing else', async () => {
+    const current = deployment();
+    const { api, calls } = stubApi({
+      [LOGS_STORE_DEPLOYMENT_PATH]: {
+        ...current,
+        metadata: { ...current.metadata, generation: 8 },
+      },
+    });
+    const cluster = createLogsSettingsCluster({ api });
+    expect(await cluster.writeDeploymentKeyRevision(KEY_REVISION)).toEqual({
+      state: 'ok',
+      value: { state: 'patched', generation: 8 },
+    });
+    expect(calls.map((call) => call.method)).toEqual(['GET', 'PATCH']);
+    const patch = JSON.parse(calls[1]!.body ?? '{}') as Record<string, any>;
+    expect(Object.keys(patch).sort()).toEqual(['metadata', 'spec']);
+    expect(patch.metadata).toEqual({
+      annotations: { [LOGS_PARTITION_KEY_REVISION_ANNOTATION]: KEY_REVISION },
+    });
+    expect(patch.spec).toEqual({
+      template: {
+        metadata: { annotations: { [LOGS_PARTITION_KEY_REVISION_ANNOTATION]: KEY_REVISION } },
+      },
+    });
+  });
+
+  it('leaves a Deployment that already carries it alone, and reads it back with the pods', async () => {
+    const current = deployment();
+    const annotated = {
+      ...current,
+      metadata: {
+        ...current.metadata,
+        annotations: { [LOGS_PARTITION_KEY_REVISION_ANNOTATION]: KEY_REVISION },
+      },
+    };
+    annotated.spec = structuredClone(current.spec);
+    (annotated.spec.template.metadata as Record<string, unknown>).annotations = {
+      [LOGS_PARTITION_KEY_REVISION_ANNOTATION]: KEY_REVISION,
+    };
+    const { api, calls } = stubApi({
+      [LOGS_STORE_DEPLOYMENT_PATH]: annotated,
+      [LOGS_STORE_PODS_PATH]: pods({
+        [LOGS_SETTINGS_REVISION_ANNOTATION]: REVISION,
+        [LOGS_PARTITION_KEY_REVISION_ANNOTATION]: KEY_REVISION,
+      }),
+    });
+    const cluster = createLogsSettingsCluster({ api });
+    expect(await cluster.writeDeploymentKeyRevision(KEY_REVISION)).toEqual({
+      state: 'ok',
+      value: { state: 'unchanged', generation: 4 },
+    });
+    expect(calls.map((call) => call.method)).toEqual(['GET']);
+    const observation = await cluster.observeDeployment();
+    if (observation.state !== 'ok') throw new Error('the Deployment is readable');
+    expect(observation.value.templateKeyRevision).toBe(KEY_REVISION);
+    expect(observation.value.podKeyRevisions).toEqual([KEY_REVISION]);
+  });
+
+  it('answers forbidden when the patch is refused', async () => {
+    const cluster = createLogsSettingsCluster({
+      api: stubApi(
+        { [LOGS_STORE_DEPLOYMENT_PATH]: deployment() },
+        {
+          [`PATCH ${LOGS_STORE_DEPLOYMENT_PATH}`]: 403,
+        }
+      ).api,
+    });
+    expect(await cluster.writeDeploymentKeyRevision(KEY_REVISION)).toEqual({ state: 'forbidden' });
   });
 });

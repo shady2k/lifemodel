@@ -171,12 +171,15 @@ describe('the store side of the partition key (ADR-016 §5)', () => {
     });
   });
 
-  it('names the Secret only where it is read, and no manifest holds a key', () => {
+  it('names the Secret only where it is read or granted, and no manifest holds a key', () => {
     const holders = yamlFiles(platformRoot)
       .filter((file) => readFileSync(file, 'utf8').includes(KEY_SECRET))
       .map((file) => relative(platformRoot, file))
       .sort();
+    // The two consumers, the object itself, and the loader's by-name right to
+    // fill the value once (ADR-016 §5): no other workload mounts or names it.
     expect(holders).toEqual([
+      'a/loader-settings-rbac.yaml',
       'logs-store/evictor.yaml',
       'logs-store/logs-store.yaml',
       'logs-store/partition-key.yaml',
