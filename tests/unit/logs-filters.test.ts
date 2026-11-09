@@ -6,7 +6,12 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { createLogsStore, type LogsRecord } from '../../loader/src/logs-store-adapter.js';
-import { buildRecordsQuery, createLogsQuery, type LogsFilter } from '../../loader/src/logs-query.js';
+import {
+  buildRecordsQuery,
+  createLogsQuery,
+  LOGS_PAGE_SIZE,
+  type LogsFilter,
+} from '../../loader/src/logs-query.js';
 import { startLogsStoreFixture, type LogsStoreFixture } from '../helpers/logs-store-fixture.js';
 
 const FROM = Date.parse('2026-11-07T10:00:00.000Z');
@@ -35,9 +40,14 @@ function lines(records: readonly LogsRecord[]): string[] {
   );
 }
 
+/** The page's record query: the last request that orders and bounds records. */
+function recordQuery(fixture: LogsStoreFixture): string {
+  return fixture.requests.filter(({ query }) => query.includes('| sort by ')).at(-1)?.query ?? '';
+}
+
 async function matching(fixture: LogsStoreFixture, filter: LogsFilter): Promise<string[]> {
   const logs = createLogsQuery({ store: createLogsStore({ url: fixture.url }) });
-  const result = await logs.records(filter);
+  const result = await logs.page({ filter, offset: 0, limit: LOGS_PAGE_SIZE, expected: null });
   if (result.state !== 'ok') throw new Error(result.reason);
   return lines(result.records);
 }
@@ -51,7 +61,9 @@ describe('the log filter query form', () => {
     expect(buildRecordsQuery({ ...FILTER, conversationId: 'conv_1' })).toBe(
       `${RANGE} conversation_id:="conv_1" ${ORDER}`
     );
-    expect(buildRecordsQuery({ ...FILTER, text: 'needle' })).toBe(`${RANGE} _msg:"needle" ${ORDER}`);
+    expect(buildRecordsQuery({ ...FILTER, text: 'needle' })).toBe(
+      `${RANGE} _msg:"needle" ${ORDER}`
+    );
   });
 
   it('adds every filter, in one order, when all are set', () => {
@@ -63,7 +75,9 @@ describe('the log filter query form', () => {
         conversationId: 'conv_2',
         text: 'needle',
       })
-    ).toBe(`${RANGE} module:="core" level:="info" conversation_id:="conv_2" _msg:"needle" ${ORDER}`);
+    ).toBe(
+      `${RANGE} module:="core" level:="info" conversation_id:="conv_2" _msg:"needle" ${ORDER}`
+    );
   });
 
   it('keeps a phrase and a value with a space inside one quoted value', () => {
@@ -79,7 +93,7 @@ describe('the log filter query form', () => {
 
     const fixture = await recorded();
     expect(await matching(fixture, { ...FILTER, text: crafted })).toEqual([]);
-    expect(fixture.requests.at(-1)?.query).toBe(built);
+    expect(recordQuery(fixture)).toBe(built);
   });
 
   it('cannot change the query where the unescaped value would match two records', async () => {
@@ -107,7 +121,7 @@ describe('each log filter against the recorded store', () => {
   it('returns the records inside the range alone', async () => {
     const fixture = await recorded();
     expect(await matching(fixture, FILTER)).toHaveLength(10);
-    expect(fixture.requests.at(-1)?.query).toBe(`${RANGE} ${ORDER}`);
+    expect(recordQuery(fixture)).toBe(`${RANGE} ${ORDER}`);
   });
 
   it('returns exactly the records of one module', async () => {
@@ -128,7 +142,7 @@ describe('each log filter against the recorded store', () => {
       '2026-11-07T10:25:00Z model-gateway warn conv_2 the reserve answered slowly',
       '2026-11-07T10:10:00Z core warn conv_1 retrying the upstream call',
     ]);
-    expect(fixture.requests.at(-1)?.query).toBe(`${RANGE} level:="warn" ${ORDER}`);
+    expect(recordQuery(fixture)).toBe(`${RANGE} level:="warn" ${ORDER}`);
   });
 
   it('returns exactly the records of one conversation, untrusted ones included', async () => {
@@ -139,7 +153,7 @@ describe('each log filter against the recorded store', () => {
       '2026-11-07T10:10:00Z core warn conv_1 retrying the upstream call',
       '2026-11-07T10:05:00Z core info conv_1 needle in the first bucket',
     ]);
-    expect(fixture.requests.at(-1)?.query).toBe(`${RANGE} conversation_id:="conv_1" ${ORDER}`);
+    expect(recordQuery(fixture)).toBe(`${RANGE} conversation_id:="conv_1" ${ORDER}`);
   });
 
   it('returns exactly the records holding the searched text', async () => {
@@ -151,7 +165,7 @@ describe('each log filter against the recorded store', () => {
     expect(await matching(fixture, { ...FILTER, text: 'first bucket' })).toEqual([
       '2026-11-07T10:05:00Z core info conv_1 needle in the first bucket',
     ]);
-    expect(fixture.requests.at(-1)?.query).toBe(`${RANGE} _msg:"first bucket" ${ORDER}`);
+    expect(recordQuery(fixture)).toBe(`${RANGE} _msg:"first bucket" ${ORDER}`);
   });
 
   it('returns the intersection when every filter is set', async () => {
@@ -165,7 +179,7 @@ describe('each log filter against the recorded store', () => {
         text: 'needle',
       })
     ).toEqual(['2026-11-07T10:40:00Z core info conv_2 needle in the second bucket']);
-    expect(fixture.requests.at(-1)?.query).toBe(
+    expect(recordQuery(fixture)).toBe(
       `${RANGE} module:="core" level:="info" conversation_id:="conv_2" _msg:"needle" ${ORDER}`
     );
   });
@@ -179,6 +193,6 @@ describe('each log filter against the recorded store', () => {
       conversationId: '',
       text: null,
     });
-    expect(fixture.requests.at(-1)?.query).toBe(`${RANGE} ${ORDER}`);
+    expect(recordQuery(fixture)).toBe(`${RANGE} ${ORDER}`);
   });
 });

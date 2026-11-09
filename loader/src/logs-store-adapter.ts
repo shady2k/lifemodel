@@ -39,8 +39,12 @@ export type LogsModulesResult =
   | { readonly state: 'ok'; readonly modules: readonly string[] }
   | LogsUnavailable;
 
+/** The window's record count, read with one query (ADR-016 §4). */
+export type LogsCountResult = { readonly state: 'ok'; readonly count: number } | LogsUnavailable;
+
 export interface LogsStore {
   query(logsql: string): Promise<LogsStoreResult>;
+  count(logsql: string): Promise<LogsCountResult>;
   modules(): Promise<LogsModulesResult>;
 }
 
@@ -54,6 +58,8 @@ export interface LogsStoreOptions {
 
 const QUERY_PATH = 'select/logsql/query';
 const MODULES_QUERY = '* | stats by (module) count()';
+/** The field the store's `count()` aggregation writes its answer into. */
+const COUNT_FIELD = 'count(*)';
 const MODULES_TTL_MS = 60_000;
 const DEFAULT_TIMEOUT_MS = 5_000;
 
@@ -89,6 +95,22 @@ function parseRecords(body: string): LogsRecord[] | null {
     records.push({ time, message, fields });
   }
   return records;
+}
+
+/** The store answers a count with one JSON line holding `count(*)`. */
+function parseCount(body: string): number | null {
+  const lines = body.split('\n').filter((line) => line.trim() !== '');
+  if (lines.length !== 1) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(lines[0] ?? '');
+  } catch {
+    return null;
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const raw = (value as Record<string, unknown>)[COUNT_FIELD];
+  const count = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : Number.NaN;
+  return Number.isInteger(count) && count >= 0 ? count : null;
 }
 
 function parseModules(body: string): string[] | null {
@@ -139,6 +161,13 @@ export function createLogsStore(options: LogsStoreOptions): LogsStore {
       const records = parseRecords(answer.body);
       if (records === null) return { state: 'unavailable', reason: 'invalid_response' };
       return { state: 'ok', records };
+    },
+    async count(logsql) {
+      const answer = await request(logsql);
+      if (answer.state !== 'ok') return answer;
+      const count = parseCount(answer.body);
+      if (count === null) return { state: 'unavailable', reason: 'invalid_response' };
+      return { state: 'ok', count };
     },
     async modules() {
       const at = now();

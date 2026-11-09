@@ -1,8 +1,12 @@
 /**
  * The loader's logs page (ADR-016 §4): a filter row of time range, module,
  * level, conversation and text, the newest records first, and the store's
- * unavailable answer with its reason. Paging, freshness and retention are
- * later tasks and are deliberately absent.
+ * unavailable answer with its reason.
+ *
+ * The list pages through one window, whose end is fixed at the first page.
+ * Every page re-reads the window's count, and a page whose count changed says
+ * so: records arrived while the reader was scrolling, and the refresh reads
+ * the first page again. Freshness and retention are later tasks.
  */
 import { Fragment, useCallback, useEffect, useState, type SyntheticEvent } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -35,9 +39,20 @@ interface Unavailable {
   status?: number;
 }
 
-interface RecordsAnswer {
+interface PageAnswer {
   state: 'ok';
   records: LogsRecord[];
+  offset: number;
+  limit: number;
+  count: number;
+  incomplete: boolean;
+}
+
+/** One request's place in the window; a first page names none of it. */
+interface PagePlace {
+  offset: number | null;
+  limit: number | null;
+  expected: number | null;
 }
 
 interface PageFilter {
@@ -72,14 +87,15 @@ function levelClass(level: string): string {
   return 'text-muted-foreground';
 }
 
-/** The label the page shows for a request parameter the API refused. */
-function labelKeyOf(field: string): string {
+/** The label the page shows for a refused filter, or null for a page bound. */
+function labelKeyOf(field: string): string | null {
   if (field === 'from') return 'logsTimeFrom';
   if (field === 'to') return 'logsTimeTo';
   if (field === 'module') return 'logsModule';
   if (field === 'level') return 'logsLevel';
   if (field === 'conversation_id') return 'logsConversation';
-  return 'logsText';
+  if (field === 'text') return 'logsText';
+  return null;
 }
 
 export function Logs() {
@@ -95,8 +111,15 @@ export function Logs() {
   const [unavailable, setUnavailable] = useState<Unavailable | null>(null);
   const [invalid, setInvalid] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** The filter the shown records belong to, so a later page reuses it. */
+  const [applied, setApplied] = useState<PageFilter | null>(null);
+  /** The window's record count as the first page read it. */
+  const [windowCount, setWindowCount] = useState<number | null>(null);
+  const [nextOffset, setNextOffset] = useState<number | null>(null);
+  const [pageLimit, setPageLimit] = useState<number | null>(null);
+  const [incomplete, setIncomplete] = useState(false);
 
-  const load = useCallback(async (filter: PageFilter) => {
+  const load = useCallback(async (filter: PageFilter, place: PagePlace, append: boolean) => {
     setBusy(true);
     setInvalid(null);
     try {
@@ -108,6 +131,9 @@ export function Logs() {
       if (filter.level !== '') params.set('level', filter.level);
       if (filter.conversation !== '') params.set('conversation_id', filter.conversation);
       if (filter.text !== '') params.set('text', filter.text);
+      if (place.offset !== null) params.set('offset', String(place.offset));
+      if (place.limit !== null) params.set('limit', String(place.limit));
+      if (place.expected !== null) params.set('expected', String(place.expected));
       const response = await fetch(`/api/logs?${params.toString()}`);
       if (response.status === 400) {
         const value = (await response.json().catch(() => null)) as { field?: string } | null;
@@ -116,14 +142,20 @@ export function Logs() {
         setUnavailable(null);
         return;
       }
-      const value = (await response.json()) as RecordsAnswer | Unavailable;
+      const value = (await response.json()) as PageAnswer | Unavailable;
       if (value.state === 'unavailable') {
         setUnavailable(value);
         setRecords(null);
         return;
       }
       setUnavailable(null);
-      setRecords(value.records);
+      setRecords((current) =>
+        append && current !== null ? [...current, ...value.records] : value.records
+      );
+      setWindowCount(value.count);
+      setNextOffset(value.offset + value.limit);
+      setPageLimit(value.limit);
+      setIncomplete((current) => current || (append && value.incomplete));
     } catch {
       setUnavailable({ state: 'unavailable', reason: 'unreachable' });
       setRecords(null);
@@ -131,6 +163,28 @@ export function Logs() {
       setBusy(false);
     }
   }, []);
+
+  /** The first page: a new window, whose end stays fixed for its pages. */
+  const first = useCallback(
+    async (filter: PageFilter) => {
+      setApplied(filter);
+      setIncomplete(false);
+      await load(filter, { offset: null, limit: null, expected: null }, false);
+    },
+    [load]
+  );
+
+  /** The page after the last record shown, expecting the first page's count. */
+  const more = useCallback(async () => {
+    if (applied === null || nextOffset === null || pageLimit === null) return;
+    await load(applied, { offset: nextOffset, limit: pageLimit, expected: windowCount }, true);
+  }, [applied, load, nextOffset, pageLimit, windowCount]);
+
+  /** The refresh a page marked incomplete offers: the window from its start. */
+  const refresh = useCallback(async () => {
+    if (applied === null) return;
+    await first(applied);
+  }, [applied, first]);
 
   const loadModules = useCallback(async () => {
     try {
@@ -148,7 +202,7 @@ export function Logs() {
     setFrom(range.from);
     setTo(range.to);
     void loadModules();
-    void load({
+    void first({
       from: new Date(range.from).getTime(),
       to: new Date(range.to).getTime(),
       module: '',
@@ -156,7 +210,7 @@ export function Logs() {
       conversation: '',
       text: '',
     });
-  }, [load, loadModules]);
+  }, [first, loadModules]);
 
   useEffect(() => {
     const preference = window.matchMedia('(prefers-color-scheme: dark)');
@@ -168,6 +222,13 @@ export function Logs() {
     };
   }, []);
 
+  function invalidText(field: string): string {
+    if (field === 'range') return t('logsInvalidRange');
+    const key = labelKeyOf(field);
+    if (key === null) return t('logsInvalidParameter', { parameter: field });
+    return t('logsInvalidFilter', { field: t(key) });
+  }
+
   function submit(event: SyntheticEvent<HTMLFormElement>): void {
     event.preventDefault();
     const fromMs = new Date(from).getTime();
@@ -176,7 +237,7 @@ export function Logs() {
       setInvalid('range');
       return;
     }
-    void load({ from: fromMs, to: toMs, module: moduleName, level, conversation, text });
+    void first({ from: fromMs, to: toMs, module: moduleName, level, conversation, text });
   }
 
   return (
@@ -316,11 +377,7 @@ export function Logs() {
 
         {invalid !== null && (
           <Alert variant="destructive" role="alert">
-            <AlertDescription>
-              {invalid === 'range'
-                ? t('logsInvalidRange')
-                : t('logsInvalidFilter', { field: t(labelKeyOf(invalid)) })}
-            </AlertDescription>
+            <AlertDescription>{invalidText(invalid)}</AlertDescription>
           </Alert>
         )}
 
@@ -335,6 +392,26 @@ export function Logs() {
             </AlertDescription>
           </Alert>
         )}
+
+        {incomplete && (
+          <Alert role="status">
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+              <span>{t('logsIncomplete')}</span>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={busy}
+                onClick={() => {
+                  void refresh();
+                }}
+              >
+                {t('logsRefresh')}
+              </Button>
+            </AlertDescription>
+          </Alert>
+        )}
+
+        <p className="text-xs text-muted-foreground">{t('logsHelp')}</p>
 
         <section aria-live="polite" aria-busy={busy}>
           {records !== null && records.length === 0 && (
@@ -386,6 +463,20 @@ export function Logs() {
                   );
                 })}
               </ul>
+              {nextOffset !== null && windowCount !== null && nextOffset < windowCount && (
+                <div className="mt-3 flex justify-end">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => {
+                      void more();
+                    }}
+                  >
+                    {t('logsMore')}
+                  </Button>
+                </div>
+              )}
             </>
           )}
         </section>

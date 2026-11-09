@@ -1,5 +1,5 @@
 {
-  "description": "Recorded VictoriaLogs responses for the loader's log filters (ADR-016 \u00a72, \u00a74): level, conversation_id and a text search beside the time range and module. Records were inserted through the collector insert protocol; every response was captured verbatim. Field filters use the exact-match form field:=\"value\"; the text search uses the phrase form _msg:\"value\". The last three exchanges are the escaping cases: for a quote-and-OR value the adapter sends the escaped phrase (no match) while the unescaped form a naive concatenation would send matches two records; the third is a crafted value with quotes, a backslash and a pipe, sent escaped and matched literally.",
+  "description": "Recorded VictoriaLogs responses for the loader's log filters (ADR-016 §2, §4): level, conversation_id and a text search beside the time range and module. Records were inserted through the collector insert protocol; every response was captured verbatim. Field filters use the exact-match form field:=\"value\"; the text search uses the phrase form _msg:\"value\". The last three exchanges are the escaping cases: for a quote-and-OR value the adapter sends the escaped phrase (no match) while the unescaped form a naive concatenation would send matches two records; the third is a crafted value with quotes, a backslash and a pipe, sent escaped and matched literally. The window-count answer of each record query was captured the same way, from a store holding these records. Recorded by scripts/check-logs-paging.mjs --record.",
   "capturedFrom": "docker.io/victoriametrics/victoria-logs@sha256:251121fa882af99b95ba0c230a4a2f412ea602d2698c64a96c58dc9842bb755d (v1.53.0), captured 2026-11-08",
   "exchanges": [
     {
@@ -101,6 +101,96 @@
       },
       "status": 200,
       "body": "{\"_msg\":\"needle in the second bucket\",\"_stream\":\"{level=\\\"info\\\",module=\\\"core\\\",namespace=\\\"core-system\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"0000000000000000eb02baafd50b619749596465a7c35c07\",\"_time\":\"2026-11-07T10:40:00Z\",\"container\":\"core\",\"conversation_id\":\"conv_2\",\"level\":\"info\",\"module\":\"core\",\"namespace\":\"core-system\",\"node\":\"node1\",\"pod\":\"core-0\",\"stream\":\"stdout\",\"untrusted\":\"false\"}\n{\"_msg\":\"needle in the first bucket\",\"_stream\":\"{level=\\\"info\\\",module=\\\"core\\\",namespace=\\\"core-system\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"0000000000000000eb02baafd50b619749596465a7c35c07\",\"_time\":\"2026-11-07T10:05:00Z\",\"container\":\"core\",\"conversation_id\":\"conv_1\",\"level\":\"info\",\"module\":\"core\",\"namespace\":\"core-system\",\"node\":\"node1\",\"pod\":\"core-0\",\"stream\":\"stdout\",\"untrusted\":\"false\"}\n"
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/select/logsql/query",
+        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] | stats count()"
+      },
+      "status": 200,
+      "body": "{\"count(*)\":\"10\"}\n"
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/select/logsql/query",
+        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] module:=\"core\" | stats count()"
+      },
+      "status": 200,
+      "body": "{\"count(*)\":\"4\"}\n"
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/select/logsql/query",
+        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] level:=\"warn\" | stats count()"
+      },
+      "status": 200,
+      "body": "{\"count(*)\":\"3\"}\n"
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/select/logsql/query",
+        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] conversation_id:=\"conv_1\" | stats count()"
+      },
+      "status": 200,
+      "body": "{\"count(*)\":\"4\"}\n"
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/select/logsql/query",
+        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] _msg:\"needle\" | stats count()"
+      },
+      "status": 200,
+      "body": "{\"count(*)\":\"2\"}\n"
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/select/logsql/query",
+        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] _msg:\"first bucket\" | stats count()"
+      },
+      "status": 200,
+      "body": "{\"count(*)\":\"1\"}\n"
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/select/logsql/query",
+        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] module:=\"core\" level:=\"info\" conversation_id:=\"conv_2\" _msg:\"needle\" | stats count()"
+      },
+      "status": 200,
+      "body": "{\"count(*)\":\"1\"}\n"
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/select/logsql/query",
+        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] _msg:\"x\\\" OR _msg:\\\"needle | delete \\\\\" | stats count()"
+      },
+      "status": 200,
+      "body": "{\"count(*)\":\"0\"}\n"
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/select/logsql/query",
+        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] _msg:\"x\\\" OR _msg:\\\"needle\" | stats count()"
+      },
+      "status": 200,
+      "body": "{\"count(*)\":\"0\"}\n"
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/select/logsql/query",
+        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] _msg:\"x\" OR _msg:\"needle\" | stats count()"
+      },
+      "status": 200,
+      "body": "{\"count(*)\":\"2\"}\n"
     }
   ]
 }

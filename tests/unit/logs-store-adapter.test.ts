@@ -6,11 +6,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { createLogsStore } from '../../loader/src/logs-store-adapter.js';
-import {
-  buildRecordsQuery,
-  createLogsQuery,
-  LOGS_PAGE_SIZE,
-} from '../../loader/src/logs-query.js';
+import { buildRecordsQuery, createLogsQuery, LOGS_PAGE_SIZE } from '../../loader/src/logs-query.js';
 import { startLogsStoreFixture, type LogsStoreFixture } from '../helpers/logs-store-fixture.js';
 
 const FROM = Date.parse('2026-11-07T10:00:00.000Z');
@@ -134,19 +130,31 @@ describe('the log store adapter against recorded responses', () => {
   it('narrows by module through the store filter', async () => {
     const fixture = await recorded();
     const logs = createLogsQuery({ store: createLogsStore({ url: fixture.url }) });
-    const result = await logs.records({ from: FROM, to: TO, module: 'core' });
+    const result = await logs.page({
+      filter: { from: FROM, to: TO, module: 'core' },
+      offset: 0,
+      limit: LOGS_PAGE_SIZE,
+      expected: null,
+    });
     if (result.state !== 'ok') throw new Error(result.reason);
     expect(result.records).toHaveLength(4);
     expect(result.records.every((record) => record.fields['module'] === 'core')).toBe(true);
     // The phrase form module:"core" would also match the module core-web.
     expect(result.records.map((record) => record.fields['module'])).not.toContain('core-web');
-    expect(fixture.requests[0]?.query).toBe(buildRecordsQuery({ from: FROM, to: TO, module: 'core' }));
+    expect(fixture.requests[0]?.query).toBe(
+      buildRecordsQuery({ from: FROM, to: TO, module: 'core' })
+    );
   });
 
   it('narrows by time through the store range', async () => {
     const fixture = await recorded();
     const logs = createLogsQuery({ store: createLogsStore({ url: fixture.url }) });
-    const result = await logs.records({ from: FROM, to: MID });
+    const result = await logs.page({
+      filter: { from: FROM, to: MID },
+      offset: 0,
+      limit: LOGS_PAGE_SIZE,
+      expected: null,
+    });
     if (result.state !== 'ok') throw new Error(result.reason);
     expect(result.records).toHaveLength(7);
     expect(result.records.map((record) => record.time)).not.toContain('2026-11-07T10:45:00Z');
@@ -178,6 +186,41 @@ describe('the log store adapter against recorded responses', () => {
     });
     const result = await createLogsStore({ url }).query('*');
     expect(result).toEqual({ state: 'ok', records: [] });
+  });
+});
+
+describe('the log store adapter reads the window count', () => {
+  it('returns the count the store answered for the window', async () => {
+    const fixture = await recorded();
+    const store = createLogsStore({ url: fixture.url });
+    const range = (from: number, to: number) =>
+      `_time:[${new Date(from).toISOString()}, ${new Date(to).toISOString()}] | stats count()`;
+    expect(await store.count(range(FROM, TO))).toEqual({ state: 'ok', count: 9 });
+    expect(await store.count(range(FROM, MID))).toEqual({ state: 'ok', count: 7 });
+    expect(
+      await store.count(
+        `${range(FROM, TO).replace(' | stats count()', '')} module:="core" | stats count()`
+      )
+    ).toEqual({ state: 'ok', count: 4 });
+  });
+
+  it('says unavailable instead of zero when the count cannot be read', async () => {
+    const port = await closedPort();
+    const result = await createLogsStore({ url: `http://127.0.0.1:${String(port)}` }).count(
+      '* | stats count()'
+    );
+    expect(result).toEqual({ state: 'unavailable', reason: 'connection_refused' });
+  });
+
+  it('says unavailable with invalid_response for a body that is not a count', async () => {
+    const url = await listen((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/stream+json' });
+      res.end('{"rows":3}\n');
+    });
+    expect(await createLogsStore({ url }).count('* | stats count()')).toEqual({
+      state: 'unavailable',
+      reason: 'invalid_response',
+    });
   });
 });
 
