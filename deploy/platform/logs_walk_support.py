@@ -33,6 +33,7 @@ import shlex
 import socket
 import ssl
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from urllib.parse import urlencode
@@ -304,6 +305,13 @@ class Store:
         self.port = self.forward.port
         return True
 
+    def _forward_reason(self):
+        """Why the renewal gave up, for the walk's failure line; empty when unknown."""
+        if self.forward is None:
+            return ''
+        detail = self.forward.failure_detail()
+        return (' - ' + detail) if detail else ''
+
     def _http(self, method, path, body=None, headers=None, timeout=60):
         merged = {'accept': '*/*'}
         merged.update(headers or {})
@@ -325,7 +333,7 @@ class Store:
                 # bound to the pod it resolved when it started: the retry needs a
                 # new forward on a new port, or it fails against the dead one again.
                 if not self._renew_forward():
-                    raise WalkError('store_unreachable: forward') from None
+                    raise WalkError('store_unreachable: forward' + self._forward_reason()) from None
         raise WalkError('store_unreachable')
 
     def query(self, logsql, timeout=60):
@@ -437,44 +445,61 @@ class PortForward:
         self.local_port = local_port
         self.process = None
         self.log_path = None
+        self.death = None
 
     def start(self):
-        self.log_path = Path('/tmp/logs-walk-portforward-%d.log' % os.getpid())
-        handle = open(self.log_path, 'wb')
-        try:
+        handle, name = tempfile.mkstemp(prefix='logs-walk-portforward-', suffix='.log')
+        os.close(handle)
+        self.log_path = Path(name)
+        with open(self.log_path, 'wb') as sink:
             self.process = subprocess.Popen(
-                self.argv, stdout=handle, stderr=handle, start_new_session=True
+                self.argv, stdout=sink, stderr=sink, start_new_session=True
             )
-        finally:
-            handle.close()
         return self
 
     def wait_ready(self, timeout=90):
+        """True when the port accepts; False with `death` saying which way it failed."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self.process is not None and self.process.poll() is not None:
+                self.death = 'the process exited with code %s' % self.process.returncode
                 return False
             try:
                 with socket.create_connection(('127.0.0.1', self.local_port), timeout=2):
                     return True
             except OSError:
                 time.sleep(0.5)
+        self.death = 'nothing accepted 127.0.0.1:%d within %d s' % (self.local_port, timeout)
         return False
 
-    def close(self):
-        if self.process is None:
-            return
+    def log_tail(self, count=20):
+        """The forward's own last lines: kubectl's messages, never a secret."""
+        if self.log_path is None:
+            return []
         try:
-            self.process.terminate()
-            self.process.wait(timeout=5)
-        except (OSError, subprocess.SubprocessError):
+            text = self.log_path.read_text(errors='replace')
+        except OSError:
+            return []
+        return [line.rstrip() for line in text.splitlines() if line.strip()][-count:]
+
+    def close(self, keep_log=False):
+        """Stop the forward; keep its log when it died or never came up.
+
+        The log is kubectl's own output and is the only evidence of why a start
+        did not answer, so a failed start keeps it and `log_tail` can quote it.
+        """
+        if self.process is not None:
             try:
-                self.process.kill()
+                self.process.terminate()
                 self.process.wait(timeout=5)
             except (OSError, subprocess.SubprocessError):
-                pass
-        self.process = None
-        if self.log_path is not None:
+                try:
+                    self.process.kill()
+                    self.process.wait(timeout=5)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            self.process = None
+        if self.log_path is not None and not keep_log:
             try:
                 self.log_path.unlink()
             except OSError:
@@ -490,32 +515,65 @@ class StoreForward:
     that pod (`Recreate`), and the forward then logs `failed to find sandbox` or
     `lost connection to pod` and never answers again. So a store client opens its
     forward through this object: `renew()` closes the dead one and starts a new
-    one on a fresh port, and says so when that new one never comes up.
+    one on a fresh port.
+
+    A start can also fail on its own for a moment — measured on vm-lifemodel: a
+    renewal right after the store's pod was replaced never came up, and the same
+    start worked three minutes later — so `open()` tries again a few times over a
+    bounded interval before it gives up, and it keeps each failed start's log:
+    `failure_detail()` reads back why they died.
     """
 
-    def __init__(self, kubectl, namespace, target, forward_factory=None, ready_timeout=90):
+    def __init__(self, kubectl, namespace, target, forward_factory=None, ready_timeout=90,
+                 start_attempts=3, retry_interval=15):
         self.kubectl = kubectl
         self.namespace = namespace
         self.target = target
         self.forward_factory = forward_factory or PortForward
         self.ready_timeout = ready_timeout
+        self.start_attempts = start_attempts
+        self.retry_interval = retry_interval
         self.forward = None
         self.port = None
+        self.failures = []
 
     def open(self):
-        """A forward on a free port; False when the one started never answered."""
+        """A forward on a free port; False when every start never answered.
+
+        `start_attempts` starts, `retry_interval` seconds apart (three tries over
+        30 s by default); a failed start keeps its log for `failure_detail()`.
+        """
         self.close()
-        port = free_port()
-        forward = self.forward_factory(self.kubectl, self.namespace, self.target, port).start()
-        if not forward.wait_ready(self.ready_timeout):
-            forward.close()
-            return False
-        self.forward = forward
-        self.port = port
-        return True
+        self.failures = []
+        for attempt in range(1, self.start_attempts + 1):
+            port = free_port()
+            forward = self.forward_factory(self.kubectl, self.namespace, self.target, port).start()
+            if forward.wait_ready(self.ready_timeout):
+                self.forward = forward
+                self.port = port
+                return True
+            self.failures.append((forward.death or 'it never answered',
+                                  list(forward.log_tail())))
+            forward.close(keep_log=True)
+            if attempt < self.start_attempts:
+                time.sleep(self.retry_interval)
+        return False
 
     def renew(self):
         return self.open()
+
+    def failure_detail(self):
+        """Why no start answered, in one line, with each start's own last words."""
+        if not self.failures:
+            return ''
+        parts = []
+        for number, (death, lines) in enumerate(self.failures, 1):
+            text = '%d) %s' % (number, death)
+            if lines:
+                text += '; kubectl: ' + ' | '.join(lines[-5:])
+            parts.append(text)
+        return '%d start(s) %g s apart: %s' % (
+            len(self.failures), self.retry_interval, '; '.join(parts))
 
     def close(self):
         if self.forward is not None:
@@ -716,7 +774,9 @@ def connect_store(report, options, cluster):
     """
     forward = StoreForward(options.kubectl, options.namespace, 'deploy/' + options.store)
     if not forward.open():
-        report.fail('the store answers its port-forward', options.store)
+        detail = forward.failure_detail()
+        report.fail('the store answers its port-forward',
+                    options.store + ((' - ' + detail) if detail else ''))
         return None, None
     return Store(forward=forward), forward
 

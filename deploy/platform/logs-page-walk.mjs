@@ -14,20 +14,27 @@
 //     refuses writes.
 //  3. The retention card draws the two numbers the API holds (days and the byte
 //     bound in MiB) and says the store runs them (applied) or is still waiting
-//     (pending with its reason).
+//     (pending with its reason). When the card draws its own read error instead -
+//     the loader's read of the store failed at that moment - the page is
+//     reloaded once; a second error is one failure that quotes the card's line,
+//     never three failures of numbers the card did not draw.
 //  4. The level, conversation and text filters narrow the list: every record
 //     drawn after a level filter carries that level chip, the record count
 //     equals the API's count for the same filter, and every message drawn after
-//     a text filter contains the searched words.
+//     a text filter contains the searched words. A conversation id is found by
+//     narrowing module by module, because the only records carrying one can be
+//     older than the newest page of the window.
 //  5. The level chips of the core's records carry a real level and never
 //     `unknown`. This is a NOTE, not a FAIL, when the core's own records read
 //     back from the API already hold `unknown`: that is an older core image, not
 //     a page defect. The API is asked first, so the distinction is made from
 //     evidence.
-//  6. Paging: a window with more than one page of records shows the second page
-//     when "Show older records" is pressed (the list grows and the new records
-//     are not the first page's), and going back to /logs returns to the first
-//     page.
+//  6. Paging: the window's total comes from the API, and the page offers "Show
+//     older records" while it holds more than one page - its count line counts
+//     the records drawn, so it is 200 on every full first page and never says
+//     more. Pressing the button appends up to one page, the count line follows
+//     the drawn records and the new records are not the first page's, and going
+//     back to /logs returns to the first page.
 // Usage:
 //   node logs-page-walk.mjs <password-file> <out-dir> [--host HOST] [--target ADDRESS]
 // The password is read from the file and never printed. The host is reached
@@ -114,6 +121,7 @@ const WORDS = {
     readOnly: 'refusing writes',
     applied: 'Applied',
     pending: 'Waiting for the store',
+    unavailable: 'could not be read',
     more: 'Show older records',
   },
   ru: {
@@ -124,6 +132,7 @@ const WORDS = {
     readOnly: 'не принимает записи',
     applied: 'Применено',
     pending: 'Ожидание, пока хранилище',
+    unavailable: 'Не удалось прочитать настройку хранения',
     more: 'Показать более старые записи',
   },
 };
@@ -168,6 +177,25 @@ async function countLine(page) {
   const text = (await page.locator('section p').first().textContent()) ?? '';
   const match = /(\d+)/.exec(text.replace(/[\u00a0\u202f]/g, ' '));
   return { text: text.trim(), count: match ? Number(match[1]) : null };
+}
+
+/** Wait, bounded, for the page to stop redrawing the list (`aria-busy`). */
+async function listSettled(page) {
+  await page
+    .locator('section[aria-busy="false"]')
+    .first()
+    .waitFor({ timeout: 30000 })
+    .catch(() => {});
+}
+
+/** The card's own read-error line, or null when the card drew numbers. */
+function retentionErrorLine(text, phrase) {
+  return (
+    text
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line.includes(phrase)) ?? null
+  );
 }
 
 async function messageTexts(page) {
@@ -234,7 +262,7 @@ try {
       const range = windowSeconds(1);
       const statusAnswer = await api(page, `/api/logs?from=${range.from}&to=${range.to}&limit=1&status=1`);
       const status = statusAnswer.body?.status ?? {};
-      const pageText = () => page.locator('main').innerText();
+      const pageText = async () => (await page.locator('main').innerText()) ?? '';
       const bodyText = await pageText();
       const collection = status.collection?.state ?? 'unknown';
       if (collection === 'stopped') {
@@ -252,10 +280,28 @@ try {
       );
       note(`${tag}: status area read (collection ${collection}, storeReadOnly ${String(status.storeReadOnly)})`);
 
-      // The retention card, tied to the settings answer.
+      // The retention card, tied to the settings answer. The loader's own read of
+      // the store can fail for a moment - measured: Firefox ru-RU-dark drew the
+      // card's read error with empty fields while the other three runs drew the
+      // numbers - and the card then says so instead of drawing numbers. That is
+      // not three wrong numbers: the page is reloaded once after a few seconds,
+      // and only a second error is a failure, and then it is one failure that
+      // quotes what the page said.
+      let cardError = null;
+      for (let attempt = 0; ; attempt++) {
+        const cardText = await page.locator('#logs-settings').innerText();
+        cardError = retentionErrorLine(cardText, words.unavailable);
+        if (cardError === null || attempt >= 1) break;
+        note(`${tag}: the retention card shows its read error; reloading /logs once`);
+        await page.waitForTimeout(5000);
+        await page.goto(`https://${HOST}/logs`, { waitUntil: 'networkidle' });
+        await page.waitForTimeout(1500);
+      }
       const settingsAnswer = await api(page, '/api/logs/settings');
       const settings = settingsAnswer.body ?? {};
-      if (settingsAnswer.status !== 200 || settings.state !== 'ok') {
+      if (cardError !== null) {
+        check(false, `${tag}: the retention card reads the retention setting`, cardError);
+      } else if (settingsAnswer.status !== 200 || settings.state !== 'ok') {
         notValid(`${tag}: GET /api/logs/settings did not answer: the retention card cannot be judged`);
       } else {
         const days = await page.locator('#logs-retention-days').inputValue();
@@ -269,8 +315,8 @@ try {
           applied ? card.includes(words.applied) : card.includes(words.pending),
           `${tag}: the retention card says ${applied ? 'applied' : 'pending'} as the API does`
         );
-        await page.screenshot({ path: shot('retention') });
       }
+      await page.screenshot({ path: shot('retention') });
 
       // The level chips of the core's records, from the API first.
       const coreRange = windowSeconds(1);
@@ -298,15 +344,37 @@ try {
         await submit(page);
       }
 
-      // The conversation filter narrows the list to the API's count.
+      // The conversation filter narrows the list to the API's count. A person
+      // narrows it by module first, and so does the walk: a record carrying a
+      // conversation id can be older than the newest page of the whole window
+      // (measured on the VM: the latency walk's 60 records in the module
+      // `walk-latency-filter` were), so each module the page's own select lists
+      // is read newest-first and the first conversation id found is used.
       const conversationRange = windowSeconds(6);
-      const conversationAnswer = await api(page, `/api/logs?from=${conversationRange.from}&to=${conversationRange.to}&limit=200`);
-      const conversationRecord = (conversationAnswer.body?.records ?? [])
-        .find((record) => typeof record.fields?.conversation_id === 'string');
-      if (!conversationRecord) {
-        notValid(`${tag}: no record in the last six hours carries a conversation id: the conversation filter cannot be judged`);
+      const modulesAnswer = await api(page, '/api/logs/modules');
+      const moduleNames = modulesAnswer.body?.state === 'ok'
+        ? (modulesAnswer.body.modules ?? []).filter((name) => typeof name === 'string')
+        : [];
+      let conversationId = null;
+      let conversationModule = null;
+      for (const name of moduleNames) {
+        const answer = await api(page, `/api/logs?from=${conversationRange.from}&to=${conversationRange.to}&module=${encodeURIComponent(name)}&limit=200`);
+        const record = (answer.body?.records ?? []).find(
+          (entry) => typeof entry.fields?.conversation_id === 'string'
+            && entry.fields.conversation_id.length > 0
+        );
+        if (record) {
+          conversationId = record.fields.conversation_id;
+          conversationModule = name;
+          break;
+        }
+      }
+      if (moduleNames.length === 0) {
+        notValid(`${tag}: /api/logs/modules listed no module to narrow the conversation filter by (status ${modulesAnswer.status})`);
+      } else if (conversationId === null) {
+        notValid(`${tag}: none of the ${moduleNames.length} modules the API lists has a record with a conversation id in the last six hours: the conversation filter cannot be judged`);
       } else {
-        const conversationId = conversationRecord.fields.conversation_id;
+        note(`${tag}: the conversation record comes from module ${conversationModule}`);
         const expected = await api(page, `/api/logs?from=${conversationRange.from}&to=${conversationRange.to}&conversation_id=${encodeURIComponent(conversationId)}&limit=1`);
         await page.locator('#logs-from').fill(toInput(new Date(conversationRange.from)));
         await page.locator('#logs-to').fill(toInput(new Date(conversationRange.to)));
@@ -341,30 +409,64 @@ try {
       }
 
       // Paging: a window wide enough for a second page, then back to the first.
+      // The page's count line counts the records drawn - 200 on every full first
+      // page - so it cannot say the window holds more: that is the API's count
+      // for the same window, and the "Show older records" button the page draws
+      // while `nextOffset < windowCount` (Logs.tsx). On the VM the last six hours
+      // hold about 180,000 records, so the first window tried must offer it.
+      const more = page.getByRole('button', { name: words.more, exact: true });
       let firstCount = 0;
+      let windowCount = 0;
       let paged = false;
-      for (const hours of [24, 24 * 7, 24 * 14]) {
+      for (const hours of [6, 24, 24 * 7]) {
         const wide = windowSeconds(hours);
         await page.locator('#logs-from').fill(toInput(new Date(wide.from)));
         await page.locator('#logs-to').fill(toInput(new Date(wide.to)));
         await submit(page);
-        const line = await countLine(page);
-        firstCount = (await recordItems(page)).count();
-        if ((line.count ?? 0) > 200 && firstCount > 0) {
+        await listSettled(page);
+        const windowAnswer = await api(page, `/api/logs?from=${wide.from}&to=${wide.to}&limit=1`);
+        windowCount = windowAnswer.body?.count ?? 0;
+        firstCount = await (await recordItems(page)).count();
+        const offered = await more.isVisible();
+        if (windowCount > firstCount && firstCount > 0 && offered) {
           paged = true;
           break;
         }
       }
       if (!paged) {
-        notValid(`${tag}: no window holds more than one page of records: paging cannot be judged`);
+        notValid(`${tag}: no window offered a second page (the API counted ${windowCount} record(s)): paging cannot be judged`);
       } else {
+        check(windowCount > firstCount, `${tag}: the API says the window holds more than one page`,
+          `count ${windowCount}, ${firstCount} drawn`);
+        check(await more.isVisible(), `${tag}: the page offers "Show older records" for that window`);
+        const line = await countLine(page);
+        check(line.count === firstCount, `${tag}: the count line counts the records drawn`,
+          `page "${line.text}", ${firstCount} drawn`);
         const firstPage = await messageTexts(page);
-        await page.locator('section button').first().click();
-        await page.waitForTimeout(1500);
-        const grown = (await recordItems(page)).count();
+        await more.click();
+        // The page appends the next page and the count line counts it; wait for
+        // that number to pass the first page's rather than for a fixed delay.
+        await page
+          .waitForFunction(
+            (expected) => {
+              const line = document.querySelector('section p');
+              const text = (line?.textContent ?? '').replace(/[\u00a0\u202f]/g, ' ');
+              const match = /(\d+)/.exec(text);
+              return match !== null && Number(match[1]) > expected;
+            },
+            firstCount,
+            { timeout: 30000 }
+          )
+          .catch(() => {});
+        const grown = await (await recordItems(page)).count();
+        const grownLine = await countLine(page);
         const secondPage = await messageTexts(page);
         const newOnes = secondPage.slice(firstPage.length);
         check(grown > firstPage.length, `${tag}: the second page is appended`, `${firstPage.length} -> ${grown}`);
+        check(grown - firstPage.length <= 200, `${tag}: the second page adds at most one page`,
+          `${grown - firstPage.length} new record(s)`);
+        check(grownLine.count === grown, `${tag}: the count line follows the drawn records`,
+          `line ${grownLine.count}, ${grown} drawn`);
         check(
           newOnes.length > 0 && newOnes.filter((text) => firstPage.includes(text)).length === 0,
           `${tag}: the second page holds records the first page did not`
@@ -372,7 +474,7 @@ try {
         await page.screenshot({ path: shot('second-page') });
         await page.goto(`https://${HOST}/logs`, { waitUntil: 'networkidle' });
         await page.waitForTimeout(1500);
-        const back = (await recordItems(page)).count();
+        const back = await (await recordItems(page)).count();
         const backMessages = await messageTexts(page);
         check(
           back >= 1 && back <= firstPage.length && backMessages[0] === firstPage[0],
