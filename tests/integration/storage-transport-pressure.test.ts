@@ -147,6 +147,10 @@ describe('storage transport pressure across many task spaces (ADR-015 S10)', () 
       // A backend PUT record exists only after an actual socket dispatch. A
       // complete first/second chunk on every request proves that these are 20
       // overlapping transports, not 20 queued attempts or sequential uploads.
+      // Twenty dispatches through real admission and 4 MiB chunk buffers can
+      // take more than five seconds while another file starves this worker;
+      // fifteen is still a bound inside this test's own 30 s budget, and the
+      // wait ends as soon as the event it checks happens.
       await expect
         .poll(
           () => ({
@@ -157,7 +161,7 @@ describe('storage transport pressure across many task spaces (ADR-015 S10)', () 
             active: h.admission.snapshot().active,
             queued: h.admission.snapshot().queued,
           }),
-          { timeout: 5000 }
+          { timeout: 15_000 }
         )
         .toMatchObject({ reached: 20, completed: 0 });
       expect(completed).toBe(0);
