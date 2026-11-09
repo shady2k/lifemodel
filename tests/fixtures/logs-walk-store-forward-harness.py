@@ -1,14 +1,19 @@
-"""Drives the walks' store client through a forward the store's pod kills.
+"""Drives the walks' store client through a fake forwarded endpoint.
 
 The walks reach the store through `kubectl port-forward deploy/logs-store`, and
 a port-forward is bound to the pod it resolved when it started: a retention
 change (and the partition key, and anything else that rolls the store) replaces
 that pod, and the forward logs `failed to find sandbox` or `lost connection to
 pod` and never answers again. This harness hands `logs_walk_support.StoreForward`
-a fake forward factory whose forwards are local `/flags` endpoints, so the unit
-test can hold the replacement without a cluster: the first forward answers one
-request and closes its listener, the client opens a second one on a fresh port,
-and the retried request is answered there.
+a fake forward factory whose forwards are local HTTP listeners, so the unit test
+can hold two things without a cluster:
+
+- the replacement: the first forward answers one request and closes its
+  listener, the client opens a second one on a fresh port, and the retried
+  request is answered there;
+- the request target: the fake store refuses a target that does not start with
+  `/` with 400, exactly as the real store did (`GET flags` answered 400 where
+  `GET /flags` answered 200), so a path that lost its slash fails the test.
 
 usage: logs-walk-store-forward-harness.py <mode> <support.py>
 """
@@ -27,14 +32,34 @@ def load(path):
     return module
 
 
-class FakeForward:
-    """One forwarded `/flags` endpoint: a listener that can be closed mid-run."""
+def flags_answer(days):
+    return '/flags\n' + '\n'.join([
+        '-retentionPeriod="%dd"' % days,
+        '-retention.maxDiskSpaceUsageBytes="314572800"',
+        '-storage.minFreeDiskSpaceBytes="805306368"',
+    ]) + '\n'
 
-    def __init__(self, local_port, flags, requests_before_death):
+
+# The seam's operations (ADR-016 §3), each on its own absolute path.
+STORE_ROUTES = {
+    '/flags': flags_answer(14),
+    '/metrics': 'vl_free_disk_space_bytes 2147483648\nvl_storage_is_read_only 0\n',
+    '/select/logsql/query': '{"count(*)": 1}\n',
+    '/insert/jsonline': '',
+    '/internal/partition/detach': 'ok',
+    '/internal/partition/list': '[]',
+}
+
+
+class FakeForward:
+    """One forwarded endpoint: routes by path, refuses a target without a slash."""
+
+    def __init__(self, local_port, routes, requests_before_death):
         self.local_port = local_port
-        self.flags = flags
+        self.routes = routes
         self.requests_before_death = requests_before_death
         self.requests = 0
+        self.targets = []
         self.stopped = False
         self.closed = False
         self.listener = None
@@ -76,18 +101,32 @@ class FakeForward:
         if not request:
             return
         self.requests += 1
-        body = ('/flags\n' + '\n'.join(self.flags) + '\n').encode()
+        parts = request.split(b'\r\n', 1)[0].split()
+        target = parts[1].decode('utf8', 'replace') if len(parts) > 1 else ''
+        self.targets.append(target)
+        if not target.startswith('/'):
+            # `http.client` sends the path exactly as given, and the store
+            # answers 400 to a request target that does not start with `/`.
+            self._respond(connection, 400, b'Bad Request')
+        else:
+            body = self.routes.get(target.split('?')[0])
+            if body is None:
+                self._respond(connection, 404, b'Not Found')
+            else:
+                self._respond(connection, 200, body.encode())
+        if self.requests >= self.requests_before_death:
+            # The replaced pod: the forward is gone and the next connect is refused.
+            self.stop()
+
+    def _respond(self, connection, status, body):
         response = (
-            b'HTTP/1.0 200 OK\r\ncontent-type: text/plain\r\ncontent-length: '
-            + str(len(body)).encode() + b'\r\n\r\n' + body
+            ('HTTP/1.0 %d %s\r\ncontent-type: text/plain\r\ncontent-length: %d\r\n\r\n'
+             % (status, b'OK' if status == 200 else body, len(body))).encode() + body
         )
         try:
             connection.sendall(response)
         except OSError:
             pass
-        if self.requests >= self.requests_before_death:
-            # The replaced pod: the forward is gone and the next connect is refused.
-            self.stop()
 
     def wait_ready(self, timeout=90):
         deadline = time.monotonic() + timeout
@@ -124,7 +163,7 @@ class FakeForwardFactory:
 
     def __call__(self, kubectl, namespace, target, local_port):
         entry = self.script[min(len(self.forwards), len(self.script) - 1)]
-        forward = FakeForward(local_port, entry['flags'], entry['requests'])
+        forward = FakeForward(local_port, entry['routes'], entry['requests'])
         self.forwards.append(forward)
         return forward
 
@@ -134,33 +173,32 @@ class FakeForwardFactory:
                 for forward in self.forwards]
 
 
-def flags_answer(days):
-    return [
-        '-retentionPeriod="%dd"' % days,
-        '-retention.maxDiskSpaceUsageBytes="314572800"',
-        '-storage.minFreeDiskSpaceBytes="805306368"',
-    ]
-
-
 MODES = {
     # The first forward dies after answering once; the second answers normally.
-    'forward-replaced': [{'flags': flags_answer(7), 'requests': 1},
-                         {'flags': flags_answer(14), 'requests': 1000}],
+    'forward-replaced': [{'routes': {'/flags': flags_answer(7)}, 'requests': 1},
+                         {'routes': {'/flags': flags_answer(14)}, 'requests': 1000}],
     # Every forward is gone: the renewal itself fails.
-    'forward-never-replaced': [{'flags': flags_answer(7), 'requests': 1},
-                               {'flags': flags_answer(14), 'requests': 0}],
+    'forward-never-replaced': [{'routes': {'/flags': flags_answer(7)}, 'requests': 1},
+                               {'routes': {'/flags': flags_answer(14)}, 'requests': 0}],
+    # Every operation of the seam once, on a store that refuses a relative target.
+    'store-paths': [{'routes': STORE_ROUTES, 'requests': 1000}],
 }
 
 
-def main(mode, support_path):
-    support = load(support_path)
-    factory = FakeForwardFactory(MODES[mode])
+def open_store(support, script):
+    factory = FakeForwardFactory(script)
     tunnel = support.StoreForward('fake-kubectl', 'lifemodel-system', 'deploy/logs-store',
                                   forward_factory=factory)
     if not tunnel.open():
         print('FORWARD NOT OPEN')
+        return None, None, factory
+    return support.Store(forward=tunnel), tunnel, factory
+
+
+def read_flags_twice(support, mode):
+    store, tunnel, factory = open_store(support, MODES[mode])
+    if store is None:
         return 1
-    store = support.Store(forward=tunnel)
     reads = []
     try:
         for _ in range(2):
@@ -175,6 +213,46 @@ def main(mode, support_path):
     print('READS ' + json.dumps(reads))
     print('FORWARDS ' + json.dumps(factory.report()))
     return 0
+
+
+def store_paths(support):
+    store, tunnel, factory = open_store(support, MODES['store-paths'])
+    if store is None:
+        return 1
+    results = {}
+
+    def record(name, call):
+        try:
+            call()
+            results[name] = 'ok'
+        except support.WalkError as error:
+            results[name] = str(error)
+
+    try:
+        record('flags', store.flags)
+        record('metrics', store.metrics)
+        record('query', lambda: store.query('*', timeout=20))
+        record('count', lambda: store.count('*', timeout=20))
+        record('insert', lambda: store.insert([{'timestamp': '2026-11-09T00:00:00Z',
+                                                'message': 'walk store paths',
+                                                'module': 'walk-store-paths'}], timeout=20))
+        record('detach', lambda: store.detach('20261109', ''))
+        record('partitionList', store.partition_list)
+    finally:
+        store.close()
+        tunnel.close()
+    print('TARGETS ' + json.dumps(factory.forwards[0].targets))
+    print('RESULTS ' + json.dumps(results))
+    return 0
+
+
+def main(mode, support_path):
+    support = load(support_path)
+    if mode == 'store-paths':
+        return store_paths(support)
+    if mode in MODES:
+        return read_flags_twice(support, mode)
+    raise SystemExit('unknown mode: ' + mode)
 
 
 if __name__ == '__main__':

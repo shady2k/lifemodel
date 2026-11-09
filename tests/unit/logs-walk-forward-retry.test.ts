@@ -51,6 +51,29 @@ describe("the store client survives the store's pod being replaced", () => {
     expect(forwards[1].port).not.toBe(forwards[0].port);
   });
 
+  it('sends every store request target with its leading slash', () => {
+    const result = run('store-paths');
+    expect(result.status).toBe(0);
+    const targets = value<string[]>(result, 'TARGETS ');
+    for (const target of targets) expect(target.startsWith('/'), target).toBe(true);
+    expect(value<Record<string, string>>(result, 'RESULTS ')).toEqual({
+      flags: 'ok',
+      metrics: 'ok',
+      query: 'ok',
+      count: 'ok',
+      insert: 'ok',
+      detach: 'ok',
+      partitionList: 'ok',
+    });
+    // The seam's five operations, each on its own absolute path (ADR-016 §3).
+    expect(targets).toContain('/flags');
+    expect(targets).toContain('/metrics');
+    expect(targets.some((target) => target.startsWith('/select/logsql/query'))).toBe(true);
+    expect(targets.some((target) => target.startsWith('/insert/jsonline'))).toBe(true);
+    expect(targets.some((target) => target.startsWith('/internal/partition/detach'))).toBe(true);
+    expect(targets.some((target) => target.startsWith('/internal/partition/list'))).toBe(true);
+  });
+
   it("keeps the walk's error when even the new forward does not answer", () => {
     const result = run('forward-never-replaced');
     expect(result.status).toBe(0);

@@ -57,7 +57,7 @@ SUFFIXES = {
 # time are the fields the sink names, so a walk's record is shaped like a real
 # one instead of being whatever the store would do with a bare JSON object.
 INSERT_PATH = (
-    'insert/jsonline?_stream_fields=module,namespace,level,untrusted'
+    '/insert/jsonline?_stream_fields=module,namespace,level,untrusted'
     '&_msg_field=message&_time_field=timestamp'
 )
 
@@ -268,7 +268,12 @@ class Loader:
 
 
 class Store:
-    """The log store's HTTP protocol on a local port-forward (ADR-016 §3)."""
+    """The log store's HTTP protocol on a local port-forward (ADR-016 §3).
+
+    Every path is absolute: `http.client` sends the path as the request target,
+    and the store answers 400 to `GET flags` where it answers 200 to `GET /flags`
+    (measured on the VM).
+    """
 
     def __init__(self, host='127.0.0.1', port=None, forward=None):
         self.host = host
@@ -326,7 +331,7 @@ class Store:
     def query(self, logsql, timeout=60):
         status, data = self._http(
             'POST',
-            'select/logsql/query',
+            '/select/logsql/query',
             urlencode({'query': logsql}).encode(),
             {'content-type': 'application/x-www-form-urlencoded'},
             timeout,
@@ -355,7 +360,7 @@ class Store:
 
     def flags(self):
         """`/flags` as `name -> value`; the process's effective flags (ADR-016 §5)."""
-        status, data = self._http('GET', 'flags')
+        status, data = self._http('GET', '/flags')
         if status != 200:
             raise WalkError('store_flags_%d' % status)
         flags = {}
@@ -372,7 +377,7 @@ class Store:
 
     def metrics(self):
         """The store's gauges as `name -> float`, without the labels."""
-        status, data = self._http('GET', 'metrics')
+        status, data = self._http('GET', '/metrics')
         if status != 200:
             raise WalkError('store_metrics_%d' % status)
         gauges = {}
@@ -404,12 +409,12 @@ class Store:
     def detach(self, day, key):
         """The store's detach: it answers only after the readers of that day stop."""
         query = 'name=' + day + ('&authKey=' + key if key else '')
-        status, data = self._http('POST', 'internal/partition/detach?' + query)
+        status, data = self._http('POST', '/internal/partition/detach?' + query)
         return status, data.decode('utf8', 'replace')
 
     def partition_list(self, key=None):
         query = '' if key is None else '?authKey=' + key
-        status, data = self._http('GET', 'internal/partition/list' + query)
+        status, data = self._http('GET', '/internal/partition/list' + query)
         return status, data.decode('utf8', 'replace')
 
     def close(self):
