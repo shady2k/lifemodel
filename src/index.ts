@@ -7,6 +7,7 @@
 import 'dotenv/config';
 
 import type { Server } from 'node:http';
+import { inspect } from 'node:util';
 import { startCoreHealthServer } from './core/health-server.js';
 
 import {
@@ -30,6 +31,23 @@ let container: Container | undefined;
 let settingsServer: SettingsServer | undefined;
 let healthServer: Server | undefined;
 let isShuttingDown = false;
+
+/**
+ * One JSON record on stderr for the two moments no logger exists yet: before
+ * the container is built, and when it never was. A module's stdout and stderr
+ * are a log stream the collector parses (ADR-016 §2), so no plain text.
+ */
+function writeStderrRecord(level: 'fatal' | 'error', msg: string, error?: unknown): void {
+  const err =
+    error === undefined
+      ? undefined
+      : error instanceof Error
+        ? { name: error.name, message: error.message }
+        : { value: inspect(error, { depth: 2, breakLength: Infinity }) };
+  process.stderr.write(
+    `${JSON.stringify({ time: new Date().toISOString(), level, msg, ...(err ? { err } : {}) })}\n`
+  );
+}
 
 async function main(): Promise<void> {
   // Create the application container with async initialization
@@ -198,8 +216,7 @@ export async function runStopSequence(options: {
       pending: () => ({ step: active.stopProgress(), ...active.coreLoop.stopReport() }),
     });
   } else {
-    // eslint-disable-next-line no-console
-    console.error(`Shutdown triggered: ${reason}`, error ?? '');
+    writeStderrRecord('fatal', `Shutdown triggered: ${reason}`, error);
   }
 
   const activeHealthServer = healthServer;
@@ -285,8 +302,7 @@ if (process.env['LIFEMODEL_ENTRYPOINT_AUTOSTART'] === '0') {
   // The pieces are imported; wiring belongs to the caller.
 } else {
   main().catch((error: unknown) => {
-    // eslint-disable-next-line no-console
-    console.error('Failed to start:', error);
+    writeStderrRecord('error', 'Failed to start', error);
     process.exit(1);
   });
 }

@@ -11,13 +11,18 @@
  *
  * It extracts the remap program from deploy/platform/logs/vector.yaml, builds
  * Vector unit tests from tests/fixtures/logs-vrl/cases.json, and runs them in
- * the digest-pinned image. No dependencies and no cluster.
+ * the digest-pinned image. It also feeds the REAL output of the core's logger
+ * (pretty unset) and of the loader image's logger through the same program
+ * (ADR-016 §9 points 1 and 2): those lines come from the seed
+ * tests/fixtures/logs-vrl/real-logger-lines.ts run by tsx, so this needs the
+ * checkout's node_modules. No cluster.
  */
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { realLoggerCases } from './logs-vrl-real-loggers.mjs';
 
 const IMAGE =
   'docker.io/timberio/vector@sha256:f6c23b5a7e16fb2838d33619ef7acf4bad2289a7cf22bc90efc2371f520c4ea2';
@@ -90,7 +95,7 @@ function main() {
   const fixtures = JSON.parse(readFileSync(fixturePath, 'utf8'));
   if (!Array.isArray(fixtures.cases) || fixtures.cases.length === 0)
     throw new Error(`${fixturePath}: no cases`);
-  const config = buildConfig(program, fixtures.cases);
+  const config = buildConfig(program, [...fixtures.cases, ...realLoggerCases()]);
 
   const directory = mkdtempSync(join(tmpdir(), 'lifemodel-logs-vrl-'));
   try {

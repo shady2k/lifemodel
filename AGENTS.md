@@ -257,6 +257,9 @@ Created at runtime relative to the working directory; the root is `data/`
   at `trace`, which `LOG_LEVEL` cannot select — read tool calls and results
   in the conversation log instead (`src/llm/provider.ts`,
   `src/config/config-loader.ts`). The newest 10 non-empty files are kept
+  (also: stdout is one JSON record per line, because the collector parses it
+  and names the module from the pod label; pretty, colourised stdout is a
+  development choice — `LOG_PRETTY=true` — ADR-016 §9)
   (`src/core/logger.ts`)
 - `data/logs/conversation-<timestamp>.log` — the LLM exchanges, formatted,
   not verbatim: role markers and separators, indented content, only the new

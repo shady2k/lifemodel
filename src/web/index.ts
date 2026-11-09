@@ -102,12 +102,12 @@ async function main(): Promise<void> {
     server.listen({ host: '0.0.0.0', port }),
     operations.listen({ host: '0.0.0.0', port: internalPort }),
   ]);
-  process.stdout.write('Web server listening\n');
+  logger.info('Web server listening');
 }
 
 void main().catch((error: unknown) => {
-  process.stderr.write(
-    `${error instanceof Error ? error.message : 'Web server failed to start'}\n`
-  );
+  // The web module's stdout and stderr are one log stream the collector parses
+  // (ADR-016 §2): no plain text line.
+  logger.error({ err: error }, 'Web server failed to start');
   process.exitCode = 1;
 });

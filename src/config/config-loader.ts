@@ -210,6 +210,16 @@ export class ConfigLoader {
       config.logging.level = logLevel as MergedConfig['logging']['level'];
     }
 
+    // Pretty output is a development choice, set explicitly (ADR-016 §9 point 2):
+    // a cluster module's stdout is JSON the collector parses.
+    const logPretty = process.env['LOG_PRETTY'];
+    if (logPretty !== undefined) {
+      if (logPretty !== 'true' && logPretty !== 'false') {
+        throw new Error('LOG_PRETTY must be exactly true or false');
+      }
+      config.logging.pretty = logPretty === 'true';
+    }
+
     // Data paths
     const dataPath = process.env['DATA_PATH'];
     if (dataPath) {
