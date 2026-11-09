@@ -125,15 +125,23 @@ from logs_walk_support import (  # noqa: E402
     Report,
     Volume,
     WalkError,
+    check_read_only_gauge,
     common_arguments,
     connect_store,
+    fill_volume,
+    margin_bytes,
     now_ms,
     parse_ms,
+    probe_write,
     quantity,
+    read_only_of,
     read_password,
     read_store_flags,
     stamp,
+    wait_refused,
     wait_until,
+    watch_read_only,
+    window,
 )
 
 # ADR-016 §4: a heartbeat every 30 s, and the page warns past 90 s.
@@ -141,16 +149,8 @@ STOPPED_THRESHOLD_MS = 90_000
 COLLECTOR_NAMESPACE = 'lifemodel-logs'
 COLLECTOR = 'logs-collector'
 STOP_VALUE = 'stop'
-MARGIN_SHARE = 0.25
-READ_ONLY_GAUGE = 'vl_storage_is_read_only'
 HEARTBEAT_MODULE = 'collector-heartbeat'
-FILLER_CHUNK = 32 * 1024 * 1024
 MIB = 1024 * 1024
-
-
-def window(seconds=3600):
-    end = now_ms()
-    return end - seconds * 1000, end
 
 
 def collection_of(answer):
@@ -166,11 +166,6 @@ def collection_state(answer):
 def stopped_for_ms(answer):
     value = collection_of(answer).get('stoppedForMs')
     return value if isinstance(value, int) else None
-
-
-def read_only_of(answer):
-    value = ((answer or {}).get('status') or {}).get('storeReadOnly')
-    return value if isinstance(value, bool) else None
 
 
 def describe(answer):
@@ -364,117 +359,6 @@ def process_heartbeat_ms(store):
     if not records:
         return None
     return parse_ms(records[0].get('_time'))
-
-
-def probe_write(store):
-    """One tiny write through the collector's sink protocol: (status, body)."""
-    status, body = store.insert([{
-        'timestamp': stamp(now_ms()),
-        'message': 'walk-fresh probe',
-        'module': 'walk-fresh',
-        'namespace': 'walk',
-        'pod': 'walk-fresh',
-        'container': 'walk',
-        'stream': 'stdout',
-        'level': 'info',
-        'untrusted': False,
-    }])
-    return status, (body.decode('utf8', 'replace')[:200] if body else '')
-
-
-def margin_bytes(volume, store_margin=None):
-    """The free space the walk fills past: the store's own margin, when it is readable.
-
-    `-storage.minFreeDiskSpaceBytes` is 25 % of the *claim's* capacity, which is
-    larger than the filesystem's own total (ext4 keeps its metadata), so a
-    quarter of `statvfs`'s total can sit above the store's threshold and a fill
-    to it would never make the store refuse. The flag is the number the store
-    enforces, so it is the number the walk fills past.
-    """
-    if isinstance(store_margin, int) and store_margin > 0:
-        return store_margin
-    total, _avail = volume.space()
-    return int(total * MARGIN_SHARE)
-
-
-def fill_volume(report, options, volume, store, threshold):
-    """Spend the volume's free space below the store's margin; True when reached.
-
-    The chunk is written as uid 1000, the store's own user, on the filesystem the
-    store reads. The filler lives in a directory of its own under the PV path,
-    beside `partitions/`, which the store does not read.
-    """
-    deadline = time.monotonic() + options.fill_timeout
-    volume.prepare_filler()
-    while time.monotonic() < deadline:
-        _total, avail = volume.space()
-        if avail <= threshold:
-            return True, avail, threshold
-        chunk = min(FILLER_CHUNK, max(MIB, avail - threshold + 8 * MIB))
-        if not volume.write_filler(chunk):
-            report.fail('the volume is filled as uid 1000', 'the write as uid 1000 failed')
-            return False, avail, threshold
-        if probe_write(store)[0] == 429:
-            return True, volume.space()[1], threshold
-    _total, avail = volume.space()
-    return False, avail, threshold
-
-
-def wait_refused(report, store, bound_seconds, interval=1.0):
-    """Probe until the store refuses a write; every answer, within the bound.
-
-    Read-only is decided per insert request, but the free-space figure behind it
-    is cached for two seconds per path, so the probe straight after the last
-    filler write can still be accepted while the volume is already below the
-    margin. Probing again is how the walk reaches the state the store itself
-    reaches; it is not a retry of a failed assertion, and when the store never
-    refuses the NOTE lists what it answered each time.
-    """
-    started = time.monotonic()
-    answers = []
-    while True:
-        status, body = probe_write(store)
-        answers.append(status)
-        if status == 429:
-            return status, body, answers
-        if time.monotonic() - started >= bound_seconds:
-            report.note('the store never refused a write in %d probe(s) over %d s: it answered %s'
-                        % (len(answers), bound_seconds, ', '.join(str(s) for s in answers)))
-            return status, body, answers
-        time.sleep(interval)
-
-
-def check_read_only_gauge(report, store):
-    """The store's own read-only gauge, the signal the page's line comes from."""
-    try:
-        gauge = store.metrics().get(READ_ONLY_GAUGE)
-    except WalkError:
-        gauge = None
-    if gauge is None:
-        report.note('the store exports no %s gauge in this run; the page\'s read-only line '
-                    'comes from it, so an API answer of storeReadOnly is the only evidence'
-                    % READ_ONLY_GAUGE)
-        return
-    report.check(gauge == 1, 'the store\'s own %s gauge is 1 when it refuses a write'
-                 % READ_ONLY_GAUGE, 'gauge=%s' % ('1' if gauge == 1 else str(gauge)))
-
-
-def watch_read_only(report, loader, name, bound_seconds, free_bytes):
-    """Wait for the API's answer to say the store refuses writes, or fail."""
-    started = time.monotonic()
-
-    def attempt():
-        return read_only_of(loader.logs_status(*window())) is True
-
-    reached = wait_until(started + bound_seconds, 3, attempt)
-    elapsed = time.monotonic() - started
-    answer = loader.logs_status(*window())
-    if reached:
-        report.pass_(name, 'storeReadOnly=true, %.0f s after the filler, %d MiB free'
-                     % (elapsed, free_bytes // MIB))
-    else:
-        report.fail(name, describe(answer))
-    return reached
 
 
 def unknown_case(report, loader):

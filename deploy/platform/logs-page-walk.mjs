@@ -33,8 +33,14 @@
 //     older records" while it holds more than one page - its count line counts
 //     the records drawn, so it is 200 on every full first page and never says
 //     more. Pressing the button appends up to one page, the count line follows
-//     the drawn records and the new records are not the first page's, and going
-//     back to /logs returns to the first page.
+//     the drawn records, and no appended record is one the first page drew.
+//     A record is compared by what the page draws for it - its time line, its
+//     module chip and its message - never by message text alone, which repeats
+//     every few seconds ("collector heartbeat"). Going back to /logs returns to
+//     the default window, which ends now, so the reload is judged against the
+//     page's own first-page answer for that reloaded form (one page drawn, its
+//     first record first, "Show older records" back to its first-page state),
+//     never against the earlier page.
 // Usage:
 //   node logs-page-walk.mjs <password-file> <out-dir> [--host HOST] [--target ADDRESS]
 // The password is read from the file and never printed. The host is reached
@@ -61,6 +67,13 @@ import { chromium, firefox } from 'playwright-core';
 import net from 'node:net';
 import { readFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
+import {
+  PAGE_SIZE,
+  describeIdentity,
+  identityOfAnswer,
+  repeatedRecords,
+  sameIdentity,
+} from './logs-page-records.mjs';
 
 function argument(name, fallback) {
   const index = process.argv.indexOf(name);
@@ -201,6 +214,19 @@ function retentionErrorLine(text, phrase) {
 async function messageTexts(page) {
   const items = await recordItems(page);
   return items.evaluateAll((nodes) => nodes.map((node) => (node.querySelector('p')?.textContent ?? '').trim()));
+}
+
+/** Each drawn record as the page identifies it: its time line, module chip and message. */
+async function recordIdentities(page) {
+  const items = await recordItems(page);
+  return items.evaluateAll((nodes) =>
+    nodes.map((node) => ({
+      // `<time dateTime>` carries the record's own `_time`, not the localised line.
+      time: node.querySelector('time')?.dateTime ?? '',
+      module: node.querySelector('[data-slot="badge"][data-variant="secondary"]')?.textContent?.trim() ?? '',
+      message: (node.querySelector('p')?.textContent ?? '').trim(),
+    }))
+  );
 }
 
 try {
@@ -442,7 +468,7 @@ try {
         const line = await countLine(page);
         check(line.count === firstCount, `${tag}: the count line counts the records drawn`,
           `page "${line.text}", ${firstCount} drawn`);
-        const firstPage = await messageTexts(page);
+        const firstPage = await recordIdentities(page);
         await more.click();
         // The page appends the next page and the count line counts it; wait for
         // that number to pass the first page's rather than for a fixed delay.
@@ -458,29 +484,78 @@ try {
             { timeout: 30000 }
           )
           .catch(() => {});
-        const grown = await (await recordItems(page)).count();
+        const drawnAfter = await recordIdentities(page);
         const grownLine = await countLine(page);
-        const secondPage = await messageTexts(page);
-        const newOnes = secondPage.slice(firstPage.length);
-        check(grown > firstPage.length, `${tag}: the second page is appended`, `${firstPage.length} -> ${grown}`);
-        check(grown - firstPage.length <= 200, `${tag}: the second page adds at most one page`,
-          `${grown - firstPage.length} new record(s)`);
-        check(grownLine.count === grown, `${tag}: the count line follows the drawn records`,
-          `line ${grownLine.count}, ${grown} drawn`);
+        const appended = drawnAfter.slice(firstPage.length);
+        const repeats = repeatedRecords(firstPage, appended);
+        // A message text repeats every few seconds on a live machine ("collector
+        // heartbeat", CoreDNS's import-glob warning), so the two pages are
+        // compared by the record the page draws: time line, module chip, message.
+        const sharedTexts = appended.filter(
+          (entry) => firstPage.some((held) => held.message === entry.message)
+        ).length;
+        check(drawnAfter.length > firstPage.length, `${tag}: the second page is appended`,
+          `${firstPage.length} -> ${drawnAfter.length}`);
+        check(drawnAfter.length - firstPage.length <= PAGE_SIZE,
+          `${tag}: the second page adds at most one page`,
+          `${drawnAfter.length - firstPage.length} new record(s)`);
+        check(grownLine.count === drawnAfter.length, `${tag}: the count line follows the drawn records`,
+          `line ${grownLine.count}, ${drawnAfter.length} drawn`);
         check(
-          newOnes.length > 0 && newOnes.filter((text) => firstPage.includes(text)).length === 0,
-          `${tag}: the second page holds records the first page did not`
+          appended.length > 0 && repeats.length === 0,
+          `${tag}: the second page holds records the first page did not`,
+          `${appended.length} appended record(s), each compared with the ${firstPage.length} drawn on `
+          + 'the first page by time, module and message'
+          + (sharedTexts > 0
+            ? `; ${sharedTexts} message text(s) repeat across the pages, and those records differ`
+            : '')
+          + (repeats.length > 0
+            ? `; drawn twice: ${repeats.slice(0, 3).map((entry) => describeIdentity(entry)).join('; ')}`
+            : '')
         );
         await page.screenshot({ path: shot('second-page') });
-        await page.goto(`https://${HOST}/logs`, { waitUntil: 'networkidle' });
+        // The reload returns to the default window, which ends now: newer records
+        // have arrived, so the earlier page is not what the reload must draw. The
+        // page's own first-page answer is: same window, read as the reload read
+        // it, and it is what the drawn list must be.
+        let answered = null;
+        const [reloadAnswer] = await Promise.all([
+          page
+            .waitForResponse(
+              (response) => response.url().includes('/api/logs?') && response.url().includes('status=1'),
+              { timeout: 30000 }
+            )
+            .catch(() => null),
+          page.goto(`https://${HOST}/logs`, { waitUntil: 'networkidle' }),
+        ]);
         await page.waitForTimeout(1500);
-        const back = await (await recordItems(page)).count();
-        const backMessages = await messageTexts(page);
-        check(
-          back >= 1 && back <= firstPage.length && backMessages[0] === firstPage[0],
-          `${tag}: going back to /logs shows the first page again`,
-          `${back} record(s), first record unchanged`
-        );
+        if (reloadAnswer !== null) answered = await reloadAnswer.json().catch(() => null);
+        const backRecords = await recordIdentities(page);
+        const answeredRecords = (answered?.records ?? []).map((record) => identityOfAnswer(record));
+        const answeredCount = typeof answered?.count === 'number' ? answered.count : null;
+        const offeredAgain = await more.isVisible();
+        if (answered === null || answered.state !== 'ok') {
+          check(false, `${tag}: going back to /logs answers its first page`,
+            'no successful /api/logs?status=1 answer was seen for the reload');
+        } else {
+          check(
+            backRecords.length >= 1 && backRecords.length === answeredRecords.length,
+            `${tag}: going back to /logs draws the first page and nothing appended`,
+            `${backRecords.length} record(s) drawn, the reload's own first-page answer holds `
+            + `${answeredRecords.length}`
+          );
+          check(
+            answeredRecords.length > 0 && sameIdentity(backRecords[0], answeredRecords[0]),
+            `${tag}: going back to /logs draws the answer's first record first`,
+            `drawn ${describeIdentity(backRecords[0])}, the answer's first `
+            + `${describeIdentity(answeredRecords[0])}`
+          );
+          check(
+            answeredCount !== null && offeredAgain === (answeredCount > PAGE_SIZE),
+            `${tag}: "Show older records" is back to its first-page state`,
+            `visible ${String(offeredAgain)}, the reload's window holds ${answeredCount} record(s)`
+          );
+        }
         await page.screenshot({ path: shot('first-page-again') });
       }
       check(errors.length === 0, `${tag}: no page error ${errors.join(' | ')}`);

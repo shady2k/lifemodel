@@ -240,6 +240,13 @@ class FakeCluster:
         self.patch_script = fixture.get('patchScript', [])
         self.patches = []
         self.secret = fixture.get('secret', '')
+        # The evictor's CronJob keeps `successfulJobsHistoryLimit: 1`, so a fake
+        # lists one completed Job while `lastSuccessfulTime` advances: counting
+        # Job objects can never show two runs (ADR-016 §5).
+        self.cronjob_times = fixture.get('cronjobTimes') or []
+        self.cronjob_active = fixture.get('cronjobActive') or []
+        self.cronjob_reads = 0
+        self.jobs = fixture.get('jobs') or []
         self.calls = []
 
     def run(self, args, timeout=120, stdin=None):
@@ -298,6 +305,21 @@ class FakeCluster:
             return json.loads(json.dumps(self.deployment_states[index]))
         if 'pods' in args:
             return {'items': self.pods(None)}
+        if 'cronjob' in args:
+            reads = max(len(self.cronjob_times), len(self.cronjob_active))
+            if reads == 0:
+                return None
+            index = min(self.cronjob_reads, reads - 1)
+            self.cronjob_reads += 1
+            status = {}
+            if self.cronjob_times:
+                status['lastSuccessfulTime'] = self.cronjob_times[
+                    min(index, len(self.cronjob_times) - 1)]
+            if self.cronjob_active:
+                status['active'] = self.cronjob_active[min(index, len(self.cronjob_active) - 1)]
+            return {'status': status}
+        if 'jobs' in args:
+            return {'items': json.loads(json.dumps(self.jobs))}
         return None
 
     def deployments(self):
@@ -362,8 +384,10 @@ def options(**values):
         age_days=1, age_old_days_back=3, largest_max_bytes=None, largest_extra_bytes=1,
         loader_namespace='lifemodel-system', loader_selector='app.kubernetes.io/name=loader',
         apply_bound=5, retention_bound=5, flag_wait=5, flood_seconds=1, fill_bound=5, burst_mib=1,
-        writer_interval_ms=50, quiet_seconds=0, suspend_seconds=1, scratch_days_back=20,
+        writer_interval_ms=50, writer_namespace='lifemodel-logs-walk',
+        quiet_seconds=0, suspend_seconds=1, scratch_days_back=20,
         recover_bound=5, settle_seconds=0, cronjob='logs-evictor', writer_rate=5,
+        run_sample_seconds=1, evictor_bound=5, read_only_bound=5, suspend_poll_seconds=1,
         peak_bytes=0, index_poll=1, query_count=40, limit_ms=2500, page_limit=250,
         filter_records=60,
         same_time_records=4, identical_records=2, window_minutes=60,
@@ -755,15 +779,165 @@ def evict_arith(walk, fixture):
     return report
 
 
+EVICT_DAY_MS = 86_400_000
+EVICT_RUN_ID = 'walk-evict-1'
+
+
+def evict_base():
+    """A fixed UTC midnight: the fixture's days are deterministic, never the test's."""
+    return 1_794_240_000_000 - 1_794_240_000_000 % EVICT_DAY_MS
+
+
+def evict_writer_log(written):
+    return '\n'.join('walk-evict %s seq=%d t=%d level=info' % (EVICT_RUN_ID, sequence, moment)
+                     for sequence, moment in written)
+
+
+def evict_writer_record(walk, sequence, moment):
+    return {'time': walk.stamp(moment),
+            'message': 'walk-evict %s seq=%d t=%d' % (EVICT_RUN_ID, sequence, moment)}
+
+
 @mode('evict-writer')
 def evict_writer(walk, fixture):
+    """Today's day is dropped after lines were accepted in it (ADR-016 §5).
+
+    The store partitions by `_time`'s day, and the evictor removes a day entire,
+    today's only when nothing older is left; the store re-creates today's day for
+    the lines written after that drop. So window 1's lines 1 and 2 are lost with
+    the day the first drop names, and line 5 is lost with the second drop's day,
+    while only lines 3 and 4 are found. The old accounting — found or lost, a
+    loss allowed only in a window that ended with a drop — would call window 1
+    (which ends with a drop, but has two lines lost with their day before it) a
+    failure and count line 5 lost as well.
+    """
     report = walk.Report()
-    written = [(1, 1000), (2, 2000), (3, 3000), (4, 4000), (5, 4500)]
-    windows = walk.writer_windows(written, {1, 2, 3}, [500, 3500, 5000])
-    print('WRITER ' + json.dumps({
-        'windows': windows,
-        'lossInDropWindowsOnly': walk.loss_in_drop_windows_only(windows),
-    }))
+    base = evict_base()
+    written = [(1, base + 1000), (2, base + 2000), (3, base + 3000), (4, base + 4000),
+               (5, base + 4500)]
+    walk.pod_log = lambda cluster, namespace, name: evict_writer_log(written)
+    records = [evict_writer_record(walk, 3, base + 3000),
+               evict_writer_record(walk, 4, base + 4000)]
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': len(records),
+                                         'records': records}]})
+    result = {'started': base + 500, 'ended': base + 5000,
+              'drops': [{'time': base + 3500, 'day': walk.day_of(base + 2000)},
+                        {'time': base + 4800, 'day': walk.day_of(base + 4500)}]}
+    walk.collect_writer(report, options(), loader, FakeCluster({}), EVICT_RUN_ID, result, {})
+    return report
+
+
+@mode('evict-writer-lost')
+def evict_writer_lost(walk, fixture):
+    """A line in a day no drop names, outside a detach window, is lost."""
+    report = walk.Report()
+    base = evict_base()
+    written = [(1, base + 1000), (2, base + 2000), (3, base + 3000)]
+    walk.pod_log = lambda cluster, namespace, name: evict_writer_log(written)
+    records = [evict_writer_record(walk, 3, base + 3000)]
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': len(records),
+                                         'records': records}]})
+    result = {'started': base + 500, 'ended': base + 3500, 'drops': []}
+    walk.collect_writer(report, options(), loader, FakeCluster({}), EVICT_RUN_ID, result, {})
+    return report
+
+
+@mode('evict-quiet')
+def evict_quiet(walk, fixture):
+    """Two runs from what survives them, with one Job of history kept."""
+    report = walk.Report()
+    now = walk.now_ms()
+    first = walk.stamp(now - 120_000)
+    second = walk.stamp(now - 60_000)
+    cluster = FakeCluster({
+        'cronjobTimes': [first, first, second, second, second],
+        'jobs': [{'metadata': {'name': 'logs-evictor-29000000',
+                               'ownerReferences': [{'name': 'logs-evictor'}]},
+                  'status': {'succeeded': 1, 'completionTime': first}}],
+    })
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 0, 'records': []}]})
+    walk.quiet_case(report, options(quiet_seconds=2, run_sample_seconds=1), loader, cluster,
+                    FakeVolume({}))
+    return report
+
+
+@mode('evict-quiet-one')
+def evict_quiet_one(walk, fixture):
+    """One run's timestamp and one Job in the history: not two runs."""
+    report = walk.Report()
+    first = walk.stamp(walk.now_ms() - 60_000)
+    cluster = FakeCluster({
+        'cronjobTimes': [first],
+        'jobs': [{'metadata': {'name': 'logs-evictor-29000000',
+                               'ownerReferences': [{'name': 'logs-evictor'}]},
+                  'status': {'succeeded': 1, 'completionTime': first}}],
+    })
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 0, 'records': []}]})
+    walk.quiet_case(report, options(quiet_seconds=2, run_sample_seconds=1), loader, cluster,
+                    FakeVolume({}))
+    return report
+
+
+def evict_store_read_only(volume):
+    """A store that refuses writes while the filler holds the volume below its margin."""
+    store = FakeStore({})
+    held = {'filler': True}
+
+    def insert(lines, timeout=120):
+        store.inserts.append(lines)
+        below = volume.avail <= 805306368
+        return (429 if held['filler'] and below else 200), b''
+
+    store.insert = insert
+    cleared = volume.clear_filler
+
+    def clear_filler():
+        held['filler'] = False
+        return cleared()
+
+    volume.clear_filler = clear_filler
+    return store
+
+
+def evict_read_only_cluster(walk):
+    return FakeCluster({'cronjobTimes': [walk.stamp(walk.now_ms() - 30_000)]})
+
+
+@mode('evict-read-only')
+def evict_read_only(walk, fixture):
+    """The read-only line with a healthy evictor: the filler, not a day, takes the space."""
+    report = walk.Report()
+    volume = FakeVolume({'totalBytes': 3 * 1024**3, 'availBytes': 2 * 1024**3,
+                         'availStepBytes': 64 * 1024**2, 'availFloorBytes': 700 * 1024**2})
+    store = evict_store_read_only(volume)
+    walk.read_store_flags = lambda *args, **kwargs: {'storage.minFreeDiskSpaceBytes': '805306368'}
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', read_only=True, evictor_stale=False),
+        status_answer('live', read_only=True, evictor_stale=False),
+        status_answer('live', read_only=False, evictor_stale=False),
+    ]})
+    walk.read_only_case(report, options(fill_timeout=5, refuse_bound=2, read_only_bound=2,
+                                        evictor_bound=2, recover_bound=2),
+                        loader, evict_read_only_cluster(walk), store, volume)
+    return report
+
+
+@mode('evict-read-only-blames')
+def evict_read_only_blames(walk, fixture):
+    """Read-only with a stale evictor is the state this case is not: the line appears."""
+    report = walk.Report()
+    volume = FakeVolume({'totalBytes': 3 * 1024**3, 'availBytes': 2 * 1024**3,
+                         'availStepBytes': 64 * 1024**2, 'availFloorBytes': 700 * 1024**2})
+    store = evict_store_read_only(volume)
+    walk.read_store_flags = lambda *args, **kwargs: {'storage.minFreeDiskSpaceBytes': '805306368'}
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', read_only=True, evictor_stale=True),
+        status_answer('live', read_only=True, evictor_stale=True),
+        status_answer('live', read_only=False, evictor_stale=False),
+    ]})
+    walk.read_only_case(report, options(fill_timeout=5, refuse_bound=2, read_only_bound=2,
+                                        evictor_bound=2, recover_bound=2),
+                        loader, evict_read_only_cluster(walk), store, volume)
     return report
 
 
@@ -808,6 +982,119 @@ def evict_partition_open(walk, fixture):
     report = walk.Report()
     store = FakeStore({'partitionListAnswers': [{'status': 200, 'body': '[]'}]})
     walk.check_partition_refusal(report, store, 'scripted-key')
+    return report
+
+
+@mode('evict-suspend')
+def evict_suspend(walk, fixture):
+    """The line absent before the suspension, added by it, gone after the resume."""
+    report = walk.Report()
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', evictor_stale=False),
+        status_answer('live', evictor_stale=True),
+        status_answer('live', evictor_stale=False),
+    ]})
+    cluster = FakeCluster({'patchScript': [0, 0],
+                           'cronjobTimes': [walk.stamp(walk.now_ms() - 30_000)]})
+    walk.suspend_case(report, options(evictor_bound=1, suspend_seconds=1), loader, cluster)
+    print('PATCHES ' + json.dumps(cluster.patches))
+    return report
+
+
+@mode('evict-suspend-stale')
+def evict_suspend_stale(walk, fixture):
+    """Already stale before the suspension: the line would prove nothing."""
+    report = walk.Report()
+    loader = FakeLoader({'statusAnswers': [status_answer('live', evictor_stale=True)]})
+    walk.suspend_case(report, options(evictor_bound=1, suspend_seconds=1), loader,
+                      FakeCluster({'patchScript': [0, 0]}))
+    return report
+
+
+def evict_suspend_options(**values):
+    base = {'evictor_bound': 1, 'suspend_seconds': 8, 'suspend_poll_seconds': 1}
+    base.update(values)
+    return options(**base)
+
+
+@mode('evict-suspend-unavailable-first')
+def evict_suspend_unavailable_first(walk, fixture):
+    """Two unreadable polls, then the line: the case survives them and says so."""
+    report = walk.Report()
+    first = walk.stamp(walk.now_ms() - 5_000)
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', evictor_stale=False),
+        {'state': 'unavailable', 'reason': 'timeout'},
+        {'state': 'unavailable', 'reason': 'unreachable'},
+        status_answer('live', evictor_stale=True),
+        # The resume's own poll: the next run made the line go away.
+        status_answer('live', evictor_stale=False),
+    ]})
+    cluster = FakeCluster({'patchScript': [0, 0], 'cronjobTimes': [first]})
+    walk.suspend_case(report, evict_suspend_options(), loader, cluster)
+    print('POLLS ' + json.dumps(loader.status_calls))
+    return report
+
+
+@mode('evict-suspend-unavailable-all')
+def evict_suspend_unavailable_all(walk, fixture):
+    """The API never answered the status: that is its own result, not a missing line."""
+    report = walk.Report()
+    first = walk.stamp(walk.now_ms() - 5_000)
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', evictor_stale=False),
+        {'state': 'unavailable', 'reason': 'timeout'},
+        {'state': 'unavailable', 'reason': 'timeout'},
+        # The resume's own poll: the line cannot be seen either, so it stays a
+        # not-valid case of the line rather than a wrong-line failure.
+        status_answer('live', evictor_stale=False),
+    ]})
+    cluster = FakeCluster({'patchScript': [0, 0], 'cronjobTimes': [first]})
+    walk.suspend_case(report, evict_suspend_options(suspend_seconds=0.5), loader, cluster)
+    return report
+
+
+@mode('evict-suspend-running-job')
+def evict_suspend_running_job(walk, fixture):
+    """A Job running at the suspension finishes later and moves the last success.
+
+    The first poll's CronJob shows an active Job and a last success far older
+    than two intervals; the second shows that Job completed with a fresh last
+    success. The stale clock must start from the fresh one, and an active Job
+    must never be read as "the line is due".
+    """
+    report = walk.Report()
+    now = walk.now_ms()
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', evictor_stale=False),
+        status_answer('live', evictor_stale=False),
+        status_answer('live', evictor_stale=False),
+        status_answer('live', evictor_stale=True),
+        status_answer('live', evictor_stale=False),
+    ]})
+    cluster = FakeCluster({
+        'patchScript': [0, 0],
+        'cronjobTimes': [walk.stamp(now - 300_000), walk.stamp(now - 2_000)],
+        'cronjobActive': [['logs-evictor-29000000'], []],
+    })
+    walk.suspend_case(report, evict_suspend_options(), loader, cluster)
+    return report
+
+
+@mode('evict-suspend-never')
+def evict_suspend_never(walk, fixture):
+    """The API answers throughout and the line never comes: the polls say what it said."""
+    report = walk.Report()
+    # The last success is already old and no Job is active: the line is due at
+    # the first poll, and the poll's own words say what the API answered.
+    first = walk.stamp(walk.now_ms() - 300_000)
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', evictor_stale=False),
+        status_answer('live', evictor_stale=False),
+        status_answer('live', evictor_stale=False),
+    ]})
+    cluster = FakeCluster({'patchScript': [0, 0], 'cronjobTimes': [first]})
+    walk.suspend_case(report, evict_suspend_options(), loader, cluster)
     return report
 
 

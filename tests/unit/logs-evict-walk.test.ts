@@ -72,7 +72,12 @@ describe('the evict walk\'s argument handling', () => {
       '--poll-seconds',
       '--settle-seconds',
       '--quiet-seconds',
+      '--run-sample-seconds',
       '--suspend-seconds',
+      '--evictor-bound',
+      '--fill-timeout',
+      '--refuse-bound',
+      '--read-only-bound',
     ]) {
       expect(help).toContain(name);
     }
@@ -86,7 +91,7 @@ describe('the evict walk\'s argument handling', () => {
 
 describe('the evict walk states every assertion of its row', () => {
   it('names the restart, the panic, the drop lines, the writer, the 429 window and the suspend', () => {
-    const header = readFileSync(WALK, 'utf8').split('\n').slice(0, 130).join('\n');
+    const header = readFileSync(WALK, 'utf8').split('\n').slice(0, 170).join('\n');
     expect(header).toContain('WALK-LOGS-EVICT');
     expect(header).toContain('ADR-016 L16');
     expect(header).toMatch(/restartCount/);
@@ -95,6 +100,8 @@ describe('the evict walk states every assertion of its row', () => {
     expect(header).toMatch(/429/);
     expect(header).toMatch(/suspend/);
     expect(header).toMatch(/partition/);
+    expect(header).toMatch(/lastSuccessfulTime/);
+    expect(header).toMatch(/dropped with its day/);
     expect(header).toMatch(/What it does not cover/);
   });
 
@@ -122,17 +129,67 @@ describe('a fake node for the evict walk', () => {
     expect(run.status).toBe(0);
   }, 30000);
 
-  it('counts the writer\'s lines per window and finds the loss only in a drop window', () => {
+  it('counts a line in a day the evictor removed as dropped with its day', () => {
     const run = harness('evict-writer');
-    const value = jsonLine<{
-      windows: { written: number; found: number; lost: number; drop: boolean }[];
-      lossInDropWindowsOnly: boolean;
-    }>(run, 'WRITER');
-    expect(value.windows.map((window) => window.lost)).toEqual([0, 2]);
-    expect(value.windows[1]?.drop).toBe(true);
-    expect(value.lossInDropWindowsOnly).toBe(true);
+    const window = (index: number): string =>
+      run.notes.find((line) => line.startsWith(`NOTE writer window ${index}`)) ?? '';
+    // The first drop names the day lines 1 and 2 went to; the second names
+    // today's day, which line 5 was written into after the first drop.
+    expect(window(1)).toContain('wrote 3, found 1, dropped with its day 2, lost 0');
+    // Window 1 follows no drop: only the day rule could excuse its two lines.
+    expect(window(1)).toContain('drop after: false');
+    expect(window(2)).toContain('wrote 2, found 1, dropped with its day 1, lost 0');
+    expect(run.passes.join('\n')).toContain('3 dropped with its day, 0 lost');
+    expect(run.failures).toEqual([]);
     expect(run.status).toBe(0);
   }, 30000);
+
+  it('fails a row lost in a day no drop names and outside a detach window', () => {
+    const run = harness('evict-writer-lost');
+    expect(run.notes.join('\n')).toContain('dropped with its day 0, lost 2');
+    expect(run.failures.join('\n')).toContain(
+      'a row is lost only with the day the evictor removed or inside a window that ended with a ' +
+        'detach and a remove',
+    );
+    expect(run.status).toBe(1);
+  }, 30000);
+
+  it('counts two runs from the CronJob while it keeps one Job of history', () => {
+    const run = harness('evict-quiet');
+    expect(run.passes.join('\n')).toContain('two distinct evictor runs completed');
+    expect(run.passes.join('\n')).toContain('2 run(s) in 2 s');
+    expect(run.passes.join('\n')).toContain('one Job of history is kept');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 30000);
+
+  it('fails the quiet window when only one run is visible', () => {
+    const run = harness('evict-quiet-one');
+    expect(run.failures.join('\n')).toContain('two distinct evictor runs completed');
+    expect(run.failures.join('\n')).toContain('1 run(s) in 2 s');
+    expect(run.status).toBe(1);
+  }, 30000);
+
+  it('proves the read-only line while the evictor is healthy and removes the filler', () => {
+    const run = harness('evict-read-only');
+    const pass = run.passes.join('\n');
+    expect(pass).toContain('the volume is filled below the store\'s margin while the evictor is');
+    expect(pass).toContain('the store refuses a write (429) with the volume below its margin');
+    expect(pass).toContain('the API says the store is refusing writes (read-only)');
+    expect(pass).toContain('the page shows read-only without blaming the evictor');
+    expect(pass).toContain('the store accepts writes again after the filler is removed');
+    expect(pass).toContain('the API says the store is not read-only after the filler is removed');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 60000);
+
+  it('fails when the status read blames the evictor', () => {
+    const run = harness('evict-read-only-blames');
+    expect(run.failures.join('\n')).toContain(
+      'the page shows read-only without blaming the evictor while its last run is recent',
+    );
+    expect(run.status).toBe(1);
+  }, 60000);
 
   it('reports a fill that never reaches the threshold as not reached', () => {
     const run = harness('evict-fill-never');
@@ -155,6 +212,61 @@ describe('a fake node for the evict walk', () => {
   it('fails when the same list answers without a key', () => {
     const run = harness('evict-partition-open');
     expect(run.failures.join('\n')).toContain('authKey');
+    expect(run.status).toBe(1);
+  }, 30000);
+
+  it('shows the evictor line absent before the suspension, added by it and gone after', () => {
+    const run = harness('evict-suspend');
+    const pass = run.passes.join('\n');
+    expect(pass).toContain('the evictor line is absent while the evictor runs');
+    expect(pass).toContain('the evictor is suspended');
+    expect(pass).toContain('the API adds the evictor line');
+    expect(pass).toContain('the evictor line goes away after the next successful run');
+    expect(jsonLine<string[]>(run, 'PATCHES')).toHaveLength(2);
+    expect(run.status).toBe(0);
+  }, 30000);
+
+  it('keeps the API\'s unreadable polls as their own result', () => {
+    const run = harness('evict-suspend-unavailable-all');
+    const failure = run.failures.join('\n');
+    // Not "the line never came": the API answered nothing, and that is named.
+    expect(failure).toContain('the API answers the evictor\'s status while the evictor is suspended');
+    expect(failure).toContain('unreadable');
+    expect(failure).toContain('state=unavailable');
+    expect(run.invalid.join('\n')).toContain('cannot be judged');
+    expect(run.status).toBe(1);
+  }, 60000);
+
+  it('survives an unreadable start and passes once the line comes', () => {
+    const run = harness('evict-suspend-unavailable-first');
+    const pass = run.passes.join('\n');
+    expect(pass).toContain('the API adds the evictor line once its last run is older than two intervals');
+    expect(pass).toContain('2 with no answer');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 60000);
+
+  it('starts the stale clock from the last success seen after the suspension', () => {
+    const run = harness('evict-suspend-running-job');
+    const pass = run.passes.join('\n');
+    expect(pass).toContain('the API adds the evictor line');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 60000);
+
+  it('reports every poll it made when the line never comes', () => {
+    const run = harness('evict-suspend-never');
+    const failure = run.failures.join('\n');
+    expect(failure).toContain('the API adds the evictor line');
+    expect(failure).toContain('poll(s)');
+    expect(failure).toContain('stale=false');
+    expect(failure).toContain('CronJob last=');
+    expect(run.status).toBe(1);
+  }, 60000);
+
+  it('refuses to blame the suspension for a line that was already there', () => {
+    const run = harness('evict-suspend-stale');
+    expect(run.invalid.join('\n')).toContain('the evictor is not fresh before it is suspended');
     expect(run.status).toBe(1);
   }, 30000);
 
