@@ -19,7 +19,7 @@ const volumePath = `/api/v1/persistentvolumes/${LOGS_VOLUME_NAME}`;
 const claimPath = `/api/v1/namespaces/${LOGS_CLAIM_NAMESPACE}/persistentvolumeclaims/${LOGS_CLAIM_NAME}`;
 
 interface RecordedCall {
-  method: 'get' | 'patch';
+  method: 'get' | 'patch' | 'create' | 'update';
   path: string;
   body?: string;
 }
@@ -28,6 +28,8 @@ function kubernetesObjects(objects: Record<string, Record<string, unknown>>): {
   api: {
     get(path: string): Promise<{ status: number; body: string }>;
     patch(path: string, body: string): Promise<{ status: number; body: string }>;
+    create(path: string, body: string): Promise<{ status: number; body: string }>;
+    update(path: string, body: string): Promise<{ status: number; body: string }>;
   };
   calls: RecordedCall[];
   patchStatus(status: number): void;
@@ -52,6 +54,16 @@ function kubernetesObjects(objects: Record<string, Record<string, unknown>>): {
         return patchStatus === 200
           ? { status: 200, body: '{}' }
           : { status: patchStatus, body: '{"message":"conflict"}' };
+      },
+      // The pre-flight reads and patches only; the shared client's write verbs
+      // are here so this fake is the client's whole interface.
+      create: async (path, body) => {
+        calls.push({ method: 'create', path, body });
+        return { status: 201, body: '{}' };
+      },
+      update: async (path, body) => {
+        calls.push({ method: 'update', path, body });
+        return { status: 200, body: '{}' };
       },
     },
   };
