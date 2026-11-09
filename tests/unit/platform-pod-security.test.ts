@@ -13,6 +13,7 @@ import {
   LOGS_EVICTOR_NAMESPACE,
   LOGS_EVICTOR_PATH,
 } from '../../loader/src/logs-evictor-status.js';
+import { renderStep } from '../helpers/kustomize-config-maps.js';
 
 // ADR-016 §1, §5, §7 and check L13: the collector's namespace is the one
 // privileged exception, it holds exactly one workload, and its two host mounts
@@ -25,6 +26,17 @@ const vectorDigest = 'sha256:f6c23b5a7e16fb2838d33619ef7acf4bad2289a7cf22bc90efc
 const vectorImage = `docker.io/timberio/vector@${vectorDigest}`;
 const storeDigest = 'sha256:251121fa882af99b95ba0c230a4a2f412ea602d2698c64a96c58dc9842bb755d';
 const storeImage = `docker.io/victoriametrics/victoria-logs@${storeDigest}`;
+// The collector's configuration is the logs step's generator input, mounted as
+// vector.yaml (deploy/platform/logs/kustomization.yaml).
+const collectorConfig = (): Record<string, any> =>
+  YAML.parse(readFileSync(join(platformRoot, 'logs/config/vector.yaml'), 'utf8'));
+
+// The store's defaults are the store step's generator input, read by envFrom.
+const storeDefaults = (): Record<string, any> =>
+  renderStep(join(platformRoot, 'logs-store')).generated.find(
+    (item) => item.baseName === 'lifemodel-logs-settings-defaults'
+  )!.object.data;
+
 const workloadKinds = new Set([
   'DaemonSet',
   'Deployment',
@@ -197,9 +209,7 @@ describe('platform pod security (ADR-016 L13)', () => {
   });
 
   it('writes newline-delimited JSON to the store with the insert fields of §3', () => {
-    const resources = platformObjects();
-    const configMap = find(resources, 'ConfigMap', 'logs-collector-config').object;
-    const config = YAML.parse(configMap.data['vector.yaml']);
+    const config = collectorConfig();
     expect(config.transforms.normalize.type).toBe('remap');
     const sink = config.sinks['logs-store'];
     expect(sink.uri).toBe(
@@ -306,11 +316,11 @@ describe('the log platform steps (ADR-016 §1, §5)', () => {
       { configMapRef: { name: 'lifemodel-logs-settings-defaults' } },
       { configMapRef: { name: 'lifemodel-logs-settings', optional: true } },
     ]);
-    const defaults = find(resources, 'ConfigMap', 'lifemodel-logs-settings-defaults').object;
-    expect(defaults.metadata.namespace).toBe('lifemodel-system');
-    expect(defaults.data.VL_retentionPeriod).toBe('14d');
-    expect(defaults.data.VL_retention_maxDiskSpaceUsageBytes).toBe('1610612736');
-    expect(defaults.data.VL_storage_minFreeDiskSpaceBytes).toBe('805306368');
+    expect(storeDefaults()).toEqual({
+      VL_retentionPeriod: '14d',
+      VL_retention_maxDiskSpaceUsageBytes: '1610612736',
+      VL_storage_minFreeDiskSpaceBytes: '805306368',
+    });
   });
 
   it('runs the store as 1000:1000 on its own retained local volume', () => {
@@ -698,11 +708,6 @@ describe("the loader grant on the evictor's CronJob (ADR-016 §5)", () => {
 });
 
 describe('the collector heartbeat (ADR-016 §4, check L14)', () => {
-  function collectorConfig(): Record<string, any> {
-    const configMap = find(platformObjects(), 'ConfigMap', 'logs-collector-config').object;
-    return YAML.parse(configMap.data['vector.yaml']) as Record<string, any>;
-  }
-
   it('beats every 30 s and travels the store sink the pod records use', () => {
     const config = collectorConfig();
     expect(config.sources.heartbeat).toEqual({

@@ -9,7 +9,8 @@
  *
  *   flock /work/check.lock node scripts/check-logs-vrl.mjs
  *
- * It extracts the remap program from deploy/platform/logs/vector.yaml, builds
+ * It extracts the remap program from deploy/platform/logs/config/vector.yaml
+ * (the input of the collector's generated ConfigMap), builds
  * Vector unit tests from tests/fixtures/logs-vrl/cases.json, and runs them in
  * the digest-pinned image. It also feeds the REAL output of the core's logger
  * (pretty unset) and of the loader image's logger through the same program
@@ -22,35 +23,30 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import YAML from 'yaml';
 import { realLoggerCases } from './logs-vrl-real-loggers.mjs';
 import { checkCollectorHeartbeat } from './logs-heartbeat-check.mjs';
 
 const IMAGE =
   'docker.io/timberio/vector@sha256:f6c23b5a7e16fb2838d33619ef7acf4bad2289a7cf22bc90efc2371f520c4ea2';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const manifestPath = join(root, 'deploy', 'platform', 'logs', 'vector.yaml');
+// The configuration is the generator's input for the logs step's ConfigMap
+// (deploy/platform/logs/kustomization.yaml); the pod mounts it as vector.yaml.
+const configPath = join(root, 'deploy', 'platform', 'logs', 'config', 'vector.yaml');
 const fixturePath = join(root, 'tests', 'fixtures', 'logs-vrl', 'cases.json');
 
-/** The remap program is a literal block inside the ConfigMap's vector.yaml. */
+/** The remap program is the `source` of the configuration's normalize transform. */
 function extractProgram(text) {
-  const marker = '\n        source: |\n';
-  const start = text.indexOf(marker);
-  if (start < 0) throw new Error(`${manifestPath}: the remap source block is missing`);
-  const program = [];
-  for (const line of text.slice(start + marker.length).split('\n')) {
-    if (line.trim() === '') {
-      program.push('');
-      continue;
-    }
-    if (!line.startsWith('          ')) break;
-    program.push(line.slice(10));
-  }
-  const source = program.join('\n').trimEnd();
+  const config = YAML.parse(text);
+  const source = config?.transforms?.normalize?.source;
+  if (typeof source !== 'string')
+    throw new Error(`${configPath}: the normalize transform has no remap source`);
+  const program = source.trimEnd();
   for (const required of ['parse_json', 'strip_ansi_escape_codes', 'untrusted', 'conversation_id']) {
-    if (!source.includes(required))
-      throw new Error(`${manifestPath}: the remap program no longer contains ${required}`);
+    if (!program.includes(required))
+      throw new Error(`${configPath}: the remap program no longer contains ${required}`);
   }
-  return source;
+  return program;
 }
 
 /** A VRL literal for a fixture value. JSON string escaping is valid VRL. */
@@ -92,7 +88,7 @@ function buildConfig(program, cases) {
 }
 
 function main() {
-  const program = extractProgram(readFileSync(manifestPath, 'utf8'));
+  const program = extractProgram(readFileSync(configPath, 'utf8'));
   const fixtures = JSON.parse(readFileSync(fixturePath, 'utf8'));
   if (!Array.isArray(fixtures.cases) || fixtures.cases.length === 0)
     throw new Error(`${fixturePath}: no cases`);

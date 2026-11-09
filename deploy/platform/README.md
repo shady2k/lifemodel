@@ -31,7 +31,12 @@ point: below a quarter of the volume plus 768 MiB of free space it detaches the
 oldest day partition in the store, removes that directory only after the
 detach answered 200, and writes one line per drop. It reads the partition key
 from Secret `lifemodel-logs-partition-key`, which only it and the store hold
-(ADR-016 §5, check L16).
+(ADR-016 §5, check L16). Each log step generates the ConfigMap its workload
+reads - the collector's configuration from `logs/config/vector.yaml` and the
+store's retention defaults from `logs-store/config/settings-defaults.env` - so
+the name carries the content hash and a release that changes either replaces
+that pod; the owner's `lifemodel-logs-settings` ConfigMap is not generated
+there and stays loader-owned (ADR-016 §1, §5).
 
 ## Release images
 

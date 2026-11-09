@@ -26,7 +26,9 @@ import YAML from 'yaml';
 const IMAGE =
   'docker.io/timberio/vector@sha256:f6c23b5a7e16fb2838d33619ef7acf4bad2289a7cf22bc90efc2371f520c4ea2';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const manifestPath = join(root, 'deploy', 'platform', 'logs', 'vector.yaml');
+// The configuration is the generator's input for the logs step's ConfigMap
+// (deploy/platform/logs/kustomization.yaml); the pod mounts it as vector.yaml.
+const configPath = join(root, 'deploy', 'platform', 'logs', 'config', 'vector.yaml');
 const INTERVAL_SECONDS = 30;
 /** Long enough for the first two beats: one at start, one a period later. */
 const RUN_SECONDS = 65;
@@ -36,16 +38,12 @@ function fail(message) {
   throw new Error(message);
 }
 
-/** The ConfigMap's own vector.yaml, parsed. */
+/** The collector's configuration, parsed. */
 function collectorConfig() {
-  const documents = YAML.parseAllDocuments(readFileSync(manifestPath, 'utf8')).map((document) =>
-    document.toJSON()
-  );
-  const configMap = documents.find(
-    (item) => item?.kind === 'ConfigMap' && item.metadata?.name === 'logs-collector-config'
-  );
-  if (!configMap) fail(`${manifestPath}: the collector ConfigMap is missing`);
-  return YAML.parse(configMap.data['vector.yaml']);
+  const config = YAML.parse(readFileSync(configPath, 'utf8'));
+  if (config?.sources === undefined || config?.sinks === undefined)
+    fail(`${configPath}: the collector configuration is missing`);
+  return config;
 }
 
 /** What the manifest must say about the heartbeat, before it is run. */

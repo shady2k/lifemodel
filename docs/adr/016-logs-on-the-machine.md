@@ -169,6 +169,17 @@ Constraints that bound every option, with their source:
   `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`,
   `seccompProfile: RuntimeDefault` and no `privileged` flag (§7 states why root
   and why the namespace's Pod Security is an exception).
+- **The collector's configuration is a generated object (lifemodel-vbog.5.10).**
+  The step's kustomization generates `logs-collector-config` from
+  `deploy/platform/logs/config/vector.yaml`, so the generator's content hash
+  suffixes the ConfigMap name and kustomize rewrites the DaemonSet's volume
+  reference to it; a release that changes the configuration changes the pod
+  template and replaces the collector's pods on the next reconcile. Vector runs
+  with `--config /etc/vector/vector.yaml` and no `--watch-config`, so a fixed
+  name would leave a running collector on the configuration it started with.
+  Measured on vm-lifemodel, 2026-11-09 (WALK-LOGS-FRESH, lifemodel-vbog.5.9):
+  after the stage 2 platform was applied the collector kept stage 1's
+  configuration for hours and stored no heartbeat until the walk restarted it.
 - **Store.** `logs-store` is a single-replica Deployment with `Recreate`
   strategy in `lifemodel-system`, the VictoriaLogs image pinned by digest, its
   own ServiceAccount, one PVC bound to a PersistentVolume of its own (§5) and one
@@ -452,12 +463,18 @@ why the mapping was measured through a ConfigMap rather than on a command line.
 
 **Bootstrap order (F3).** The store must start before the loader has ever run.
 The signed artifact therefore carries a defaults ConfigMap
-(`lifemodel-logs-settings-defaults`, owned by Flux, never written by anyone) and
-the store's `envFrom` lists the loader's ConfigMap **after** it with
+(`lifemodel-logs-settings-defaults`, owned by Flux, never written by anyone, and
+generated so that its name carries the content hash described below) and the
+store's `envFrom` lists the loader's ConfigMap **after** it with
 `optional: true`, so on a first start the defaults apply and, once the loader
 has written its own, the later entry wins. Flux owns the defaults; **Flux must
 not own the loader's ConfigMap**, or a reconcile would revert the owner's
-setting.
+setting. The defaults are generated as well (lifemodel-vbog.5.10): the step's
+kustomization turns `deploy/platform/logs-store/config/settings-defaults.env`
+into a ConfigMap whose name carries its content hash, and the store's `envFrom`
+is rewritten to that name, so a release that changes a default changes the pod
+template and replaces the store's pod; the store reads `envFrom` once, at
+start.
 
 **How a change reaches the store (F7).** The loader writes `logs.json` with a new
 `desiredRevision` (a counter plus a hash of the effective flags), then the
