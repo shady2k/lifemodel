@@ -69,6 +69,19 @@ describe('the browser walk', () => {
     expect(section).not.toMatch(/check\(coreLevels/);
   });
 
+  it('awaits every page helper, so a locator is never read off its promise', () => {
+    const lines = source().split('\n');
+    for (const name of ['api', 'fillFilter', 'submit', 'recordItems', 'countLine', 'messageTexts']) {
+      for (const [index, line] of lines.entries()) {
+        if (!line.includes(`${name}(`)) continue;
+        if (new RegExp(`^\\s*(async )?function ${name}\\(`).test(line)) continue;
+        expect(line, `line ${index + 1}: ${line.trim()}`).toContain(`await ${name}(`);
+      }
+    }
+    // `await recordItems(page).count()` reads the count off the promise.
+    expect(source()).not.toMatch(/recordItems\(page\)\.cou?nt/);
+  });
+
   it('prints a RESTORE line and exits on the failure count', () => {
     const text = source();
     expect(text).toMatch(/finally\s*\{/);
