@@ -14,6 +14,7 @@ import { loadConfig } from '../../loader/src/config.js';
 import { createTestClock } from '../../loader/src/clock.js';
 import { createRecordingLogger } from '../../loader/src/logger.js';
 import type { LoaderState } from '../../loader/src/state.js';
+import { LOGS_PAGE_SIZE_MAX } from '../../loader/src/logs-query.js';
 import { startLogsStoreFixture, type LogsStoreFixture } from '../helpers/logs-store-fixture.js';
 
 const BOOT = 'boot-lifemodel.local';
@@ -142,6 +143,23 @@ describe('the logs API refuses a filter that cannot be queried', () => {
       const response = await get(`/api/logs?${RANGE}&level=${level}`);
       expect(response.status, level).not.toBe(400);
     }
+  });
+});
+
+describe('the logs API refuses a page bound that cannot be read', () => {
+  it.each([
+    ['an offset that is not a whole number', 'offset=1.5', 'offset'],
+    ['a negative offset', 'offset=-1', 'offset'],
+    ['a page size of zero', 'limit=0', 'limit'],
+    ['a page size past the bound', `limit=${String(LOGS_PAGE_SIZE_MAX + 1)}`, 'limit'],
+    ['an expected count that is not a number', 'expected=many', 'expected'],
+    ['a negative expected count', 'expected=-1', 'expected'],
+  ] as const)('answers 400 naming the parameter for %s', async (_case, query, field) => {
+    const { fixture, get } = await start();
+    const response = await get(`/api/logs?${RANGE}&${query}`);
+    expect(response.status).toBe(400);
+    expect(JSON.parse(response.body)).toEqual(refusal(field));
+    expect(fixture.requests).toHaveLength(0);
   });
 });
 

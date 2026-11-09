@@ -11,7 +11,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { LoaderConfig } from './config.js';
 import type { PasswordRecord } from './auth.js';
 import { CSP, redirect, sendText } from './http-responses.js';
-import { createLogsQuery, parseLogsFilter } from './logs-query.js';
+import { createLogsQuery, parseLogsPageQuery } from './logs-query.js';
 import { createLogsStore } from './logs-store-adapter.js';
 import type { RouteHandler, RouteRequest } from './route-table.js';
 import type { LoaderState } from './state.js';
@@ -70,12 +70,12 @@ export function createLogsHandlers(deps: LogsHandlerDeps): LogsHandlers {
       return;
     }
     const url = new URL(req.url ?? '/', 'http://localhost');
-    const parsed = parseLogsFilter(url.searchParams);
+    const parsed = parseLogsPageQuery(url.searchParams);
     if (parsed.state === 'invalid') {
       sendJson(res, 400, { state: 'invalid', reason: 'filter', field: parsed.field });
       return;
     }
-    const result = await logs.records(parsed.filter);
+    const result = await logs.page(parsed.request);
     sendJson(res, result.state === 'ok' ? 200 : 503, result);
   }
 
