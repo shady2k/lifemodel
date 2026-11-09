@@ -79,7 +79,9 @@ export function createLogsPartitionStore(options: LogsPartitionStoreOptions): Lo
         const days: unknown = await response.json();
         if (
           !Array.isArray(days) ||
-          !days.every((day) => typeof day === 'string' && /^\d{8}$/.test(day))
+          !days.every(
+            (day: unknown): day is string => typeof day === 'string' && /^\d{8}$/.test(day)
+          )
         )
           return { state: 'failed', reason: 'rejected', status: response.status };
         return { state: 'listed', days };
