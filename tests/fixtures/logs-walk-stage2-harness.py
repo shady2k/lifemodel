@@ -243,6 +243,7 @@ def options(**values):
         heartbeat_fresh=60, stop_label_key='lifemodel.dev/walk-fresh-stop',
         byte_bound_mib=300, today_mib=1, old_day_mib=1, old_days=2, days_case=14,
         age_days=1, age_old_days_back=3, largest_max_bytes=None, largest_extra_bytes=1,
+        loader_namespace='lifemodel-system', loader_selector='app.kubernetes.io/name=loader',
         apply_bound=5, flag_wait=5, flood_seconds=1, fill_bound=5, writer_rate=5,
         peak_bytes=0, index_poll=1, query_count=40, limit_ms=2500, page_limit=250,
         same_time_records=4, identical_records=2, window_minutes=60,
@@ -276,6 +277,18 @@ DAEMONSET = {
         ],
     }}},
 }
+
+SETTING_APPLIED = {
+    'state': 'ok', 'days': 7, 'maxBytes': 314572800, 'desiredRevision': '2-abcdef',
+    'appliedRevision': '2-abcdef', 'appliedAt': '2026-11-09T00:00:00Z', 'applied': True,
+    'pending': None, 'limits': {'volumeBytes': 3221225472, 'evictorThresholdBytes': 1610612736,
+                                'largestMaxBytes': 1610612736},
+    'fitsVolume': True,
+}
+
+SETTING_PENDING = dict(SETTING_APPLIED, applied=False, appliedRevision=None, appliedAt=None,
+                       pending='store_unavailable')
+
 
 MODES = {}
 
@@ -351,6 +364,52 @@ def fresh_fill_never(walk, fixture):
     reached, avail, threshold = walk.fill_volume(report, options(fill_timeout=1), volume,
                                                  FakeStore({}))
     print('REACHED %s %d %d' % (reached, avail, threshold))
+    return report
+
+
+@mode('setting-apply')
+def setting_apply(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({
+        'putAnswers': [{'status': 200, 'body': SETTING_PENDING}],
+        'settingsAnswers': [SETTING_PENDING, SETTING_APPLIED],
+    })
+    walk.apply_change(report, loader, 7, 314572800, 5)
+    return report
+
+
+@mode('setting-never-applied')
+def setting_never_applied(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({
+        'putAnswers': [{'status': 200, 'body': SETTING_PENDING}],
+        'settingsAnswers': [SETTING_PENDING],
+    })
+    walk.apply_change(report, loader, 7, 314572800, 1)
+    return report
+
+
+@mode('setting-refusal')
+def setting_refusal(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({'putAnswers': [{'status': 403, 'body': {'state': 'refused'}},
+                                        {'status': 403, 'body': {'state': 'refused'}}]})
+    walk.check_refusals(report, loader, 7, 314572800)
+    return report
+
+
+@mode('setting-flags')
+def setting_flags(walk, fixture):
+    report = walk.Report()
+    expected = walk.desired_flags(7, 300 * 1024 * 1024, 3 * 1024**3)
+    agree, observed, wanted = walk.flags_agree({
+        'retentionPeriod': '7d',
+        'retention.maxDiskSpaceUsageBytes': '314572800',
+        'storage.minFreeDiskSpaceBytes': '805306368',
+    }, expected)
+    print('FLAGS ' + json.dumps({'agree': agree, 'days': observed['days'],
+                                 'maxBytes': observed['maxBytes'],
+                                 'minFreeBytes': observed['minFreeBytes']}))
     return report
 
 
