@@ -31,6 +31,29 @@ What it proves
    heartbeats and nothing but retention or the evictor removes them) and points
    at the loader's own unit test for that decision.
 
+What the store does with its free space (VictoriaLogs v1.53.0, the digest in
+`deploy/platform/logs-store/logs-store.yaml`): the read-only decision is taken
+per insert request - `app/vlinsert/jsonline/jsonline.go:36` calls
+`insertutil.CanWriteData()`, and `app/vlstorage/main.go:526`
+(`Storage.CanWriteData`) answers `429 Too Many Requests` through `http.Error`
+with "cannot add rows into storage in read-only mode; ... lack of free disk
+space at -storageDataPath=...". The decision itself is
+`lib/logstorage/storage.go:1335` (`Storage.IsReadOnly`):
+`fs.MustGetFreeSpace(s.path)` below `minFreeDiskSpaceBytes`, where `s.path` is
+`-storageDataPath` (`/data`, the volume) and, on Linux, free means
+`stat.Bavail * stat.Bsize`
+(`vendor/github.com/VictoriaMetrics/VictoriaMetrics/lib/fs/fs_linux.go`,
+`freeSpace`) - the same `f_bavail` number the walk reads on the host. That
+reading is cached for two seconds per path
+(`vendor/github.com/VictoriaMetrics/VictoriaMetrics/lib/fs/fs.go:297`,
+`MustGetFreeSpace`), and only a later insert or a `/metrics` scrape refreshes
+it, so one probe straight after the last filler write can still be accepted
+while the volume is already below the margin. The walk therefore keeps probing
+within `--refuse-bound` and prints every answer when the store never refuses,
+and it reads the store's own `vl_storage_is_read_only` gauge
+(`app/vlstorage/main.go:697`) beside the 429: that gauge is the signal the
+loader's `storeReadOnly` reads.
+
 Every assertion reads the API's status (the first page answered with `status=1`),
 never the screen, so the walk proves the answer the page draws from.
 
@@ -59,6 +82,8 @@ Arguments (defaults are the test VM's)
                          (default 300 s)
   --fill-timeout N       bound on filling the volume below the store's margin
                          (default 300 s)
+  --refuse-bound N       bound on the store refusing a write after the fill, in
+                         seconds (default 30)
   --heartbeat-fresh N    how young the process heartbeat must be while the
                          pod-log reading is stalled, in seconds (default 60)
   --deadline-seconds N   the whole walk's bound (default 3600)
@@ -380,7 +405,46 @@ def fill_volume(report, options, volume, store, threshold):
     return False, avail, threshold
 
 
-def watch_read_only(report, loader, store, name, bound_seconds, free_bytes):
+def wait_refused(report, store, bound_seconds, interval=1.0):
+    """Probe until the store refuses a write; every answer, within the bound.
+
+    Read-only is decided per insert request, but the free-space figure behind it
+    is cached for two seconds per path, so the probe straight after the last
+    filler write can still be accepted while the volume is already below the
+    margin. Probing again is how the walk reaches the state the store itself
+    reaches; it is not a retry of a failed assertion, and when the store never
+    refuses the NOTE lists what it answered each time.
+    """
+    started = time.monotonic()
+    answers = []
+    while True:
+        status, body = probe_write(store)
+        answers.append(status)
+        if status == 429:
+            return status, body, answers
+        if time.monotonic() - started >= bound_seconds:
+            report.note('the store never refused a write in %d probe(s) over %d s: it answered %s'
+                        % (len(answers), bound_seconds, ', '.join(str(s) for s in answers)))
+            return status, body, answers
+        time.sleep(interval)
+
+
+def check_read_only_gauge(report, store):
+    """The store's own read-only gauge, the signal the page's line comes from."""
+    try:
+        gauge = store.metrics().get(READ_ONLY_GAUGE)
+    except WalkError:
+        gauge = None
+    if gauge is None:
+        report.note('the store exports no %s gauge in this run; the page\'s read-only line '
+                    'comes from it, so an API answer of storeReadOnly is the only evidence'
+                    % READ_ONLY_GAUGE)
+        return
+    report.check(gauge == 1, 'the store\'s own %s gauge is 1 when it refuses a write'
+                 % READ_ONLY_GAUGE, 'gauge=%s' % ('1' if gauge == 1 else str(gauge)))
+
+
+def watch_read_only(report, loader, name, bound_seconds, free_bytes):
     """Wait for the API's answer to say the store refuses writes, or fail."""
     started = time.monotonic()
 
@@ -395,17 +459,6 @@ def watch_read_only(report, loader, store, name, bound_seconds, free_bytes):
                      % (elapsed, free_bytes // MIB))
     else:
         report.fail(name, describe(answer))
-    try:
-        gauge = store.metrics().get(READ_ONLY_GAUGE)
-    except WalkError:
-        gauge = None
-    if gauge is None:
-        report.note('the store exports no %s gauge in this run; the page\'s read-only line '
-                    'comes from it, so the API answer above is the only evidence available'
-                    % READ_ONLY_GAUGE)
-    else:
-        report.check(gauge == 1, 'the store\'s own %s gauge is 1 while it refuses writes'
-                     % READ_ONLY_GAUGE, 'gauge=%s' % ('1' if gauge == 1 else str(gauge)))
     return reached
 
 
@@ -517,14 +570,17 @@ def run(report, options, loader, cluster, store, volume, state):
     else:
         report.pass_('the volume is filled below the store\'s margin as uid 1000',
                      '%d MiB free, margin %d MiB' % (avail // MIB, threshold // MIB))
-        refused, _body = probe_write(store)
+        refused, _body, answers = wait_refused(report, store, options.refuse_bound)
         if refused != 429:
-            report.not_valid('the store did not refuse a write with %d MiB free: the read-only '
-                             'state was not reached' % (avail // MIB))
+            report.not_valid('the store did not refuse a write within %d s with %d MiB free: '
+                             'it answered %s'
+                             % (options.refuse_bound, avail // MIB,
+                                ', '.join(str(status) for status in answers)))
         else:
             report.pass_('the store refuses a write (429) with the volume below its margin',
-                         'the refusal is the state the page must name')
-            watch_read_only(report, loader, store,
+                         '%d probe(s); the refusal is the state the page must name' % len(answers))
+            check_read_only_gauge(report, store)
+            watch_read_only(report, loader,
                             'the API says the store is refusing writes (read-only)',
                             options.stopped_bound, avail)
     if not volume.clear_filler():
@@ -571,6 +627,7 @@ def main(argv=None):
     parser.add_argument('--live-bound', type=int, default=150)
     parser.add_argument('--ready-timeout', type=int, default=300)
     parser.add_argument('--fill-timeout', type=int, default=300)
+    parser.add_argument('--refuse-bound', type=int, default=30)
     parser.add_argument('--heartbeat-fresh', type=int, default=60)
     options = parser.parse_args(argv)
 

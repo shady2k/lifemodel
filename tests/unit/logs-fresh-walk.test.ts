@@ -36,6 +36,12 @@ function python(args: readonly string[]): Run {
   };
 }
 
+function jsonLine<T>(run: Run, prefix: string): T {
+  const line = run.lines.find((entry) => entry.startsWith(prefix + ' '));
+  expect(line).toBeDefined();
+  return JSON.parse((line ?? '').slice(prefix.length + 1)) as T;
+}
+
 let directory = '';
 
 function harness(mode: string): Run {
@@ -90,7 +96,7 @@ describe('the fresh walk\'s argument handling', () => {
 
 describe('the fresh walk states its cases and its limits', () => {
   it('names the collector stop, the pod-log stall, the read-only store and the unknown state', () => {
-    const header = readFileSync(WALK, 'utf8').split('\n').slice(0, 90).join('\n');
+    const header = readFileSync(WALK, 'utf8').split('\n').slice(0, 140).join('\n');
     expect(header).toContain('WALK-LOGS-FRESH');
     expect(header).toContain('ADR-016 L14');
     expect(header).toMatch(/collection stopped/);
@@ -98,6 +104,18 @@ describe('the fresh walk states its cases and its limits', () => {
     expect(header).toMatch(/read-only/);
     expect(header).toMatch(/collection status unknown|before any heartbeat/);
     expect(header).toMatch(/What it does not cover/);
+  });
+
+  it('states what the store\'s own source says about the read-only state', () => {
+    const header = readFileSync(WALK, 'utf8').split('\n').slice(0, 140).join('\n');
+    // The decision, the free-space number it compares, its cache, and the gauge
+    // the loader reads: each with the store source's own file and line.
+    expect(header).toContain('lib/logstorage/storage.go:1335');
+    expect(header).toContain('f_bavail');
+    expect(header).toContain('fs.go:297');
+    expect(header).toContain('429 Too Many Requests');
+    expect(header).toContain('vl_storage_is_read_only');
+    expect(header).toContain('app/vlstorage/main.go:697');
   });
 
   it('asserts on the API status and never on the screen', () => {
@@ -144,6 +162,24 @@ describe('a fake node for the fresh walk', () => {
     expect(run.failures.join('\n')).toContain('vl_storage_is_read_only gauge is 1');
     expect(run.invalid).toEqual([]);
     expect(run.status).toBe(1);
+  }, 30000);
+
+  it('keeps probing until the store refuses, and lists every answer', () => {
+    const run = harness('fresh-refused-late');
+    expect(jsonLine<{ status: number; answers: number[] }>(run, 'REFUSED')).toEqual({
+      status: 429,
+      answers: [200, 200, 429],
+    });
+  }, 30000);
+
+  it('says what the store answered each time it never refuses', () => {
+    const run = harness('fresh-refused-never');
+    expect(jsonLine<{ status: number; answers: number[] }>(run, 'REFUSED')).toEqual({
+      status: 200,
+      answers: [200],
+    });
+    expect(run.notes.join('\n')).toContain('never refused a write');
+    expect(run.notes.join('\n')).toContain('answered 200');
   }, 30000);
 
   it('reports an unreached fill as not reached, never as an assertion', () => {

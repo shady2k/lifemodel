@@ -275,7 +275,7 @@ def options(**values):
         origin_host='boot-lifemodel.local', ca_file=None, kubectl='k3s kubectl',
         namespace='lifemodel-system', store='logs-store', mount='/var/lib/lifemodel-logs',
         pv_path='/var/lib/lifemodel-logs/data', deadline_seconds=3600,
-        stopped_bound=5, live_bound=5, ready_timeout=5, fill_timeout=5,
+        stopped_bound=5, live_bound=5, ready_timeout=5, fill_timeout=5, refuse_bound=2,
         heartbeat_fresh=60, stop_label_key='lifemodel.dev/walk-fresh-stop',
         byte_bound_mib=300, today_mib=1, old_day_mib=1, old_days=2, days_case=14,
         age_days=1, age_old_days_back=3, largest_max_bytes=None, largest_extra_bytes=1,
@@ -380,7 +380,8 @@ def fresh_read_only(walk, fixture):
         status_answer('live', read_only=False),
         status_answer('live', read_only=True),
     ]})
-    walk.watch_read_only(report, loader, store,
+    walk.check_read_only_gauge(report, store)
+    walk.watch_read_only(report, loader,
                          'the API says the store is refusing writes (read-only)', 5, 700 * 1024**2)
     return report
 
@@ -390,8 +391,29 @@ def fresh_read_only_never(walk, fixture):
     report = walk.Report()
     store = FakeStore({'metricAnswers': [{'vl_storage_is_read_only': 0.0}]})
     loader = FakeLoader({'statusAnswers': [status_answer('live', read_only=False)]})
-    walk.watch_read_only(report, loader, store,
+    walk.check_read_only_gauge(report, store)
+    walk.watch_read_only(report, loader,
                          'the API says the store is refusing writes (read-only)', 1, 700 * 1024**2)
+    return report
+
+
+@mode('fresh-refused-late')
+def fresh_refused_late(walk, fixture):
+    # The store's free-space reading is cached for 2 s, so the first probes after
+    # the filler can still be accepted; the walk must keep probing.
+    report = walk.Report()
+    store = FakeStore({'insertStatuses': [200, 200, 429]})
+    status, _body, answers = walk.wait_refused(report, store, 2)
+    print('REFUSED ' + json.dumps({'status': status, 'answers': answers}))
+    return report
+
+
+@mode('fresh-refused-never')
+def fresh_refused_never(walk, fixture):
+    report = walk.Report()
+    store = FakeStore({'insertStatuses': [200]})
+    status, _body, answers = walk.wait_refused(report, store, 0)
+    print('REFUSED ' + json.dumps({'status': status, 'answers': answers}))
     return report
 
 
