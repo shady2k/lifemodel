@@ -10,6 +10,11 @@
  * Failure is an answer, never a silent success: a refused connection, a
  * timeout or any status but 200 returns a reason and the key is not in it. The
  * response body is never read - it may quote the request's query.
+ *
+ * A failed result with `status: null` got no HTTP answer at all - the
+ * connection was refused, reset or timed out - and is the one failure the
+ * evictor retries for a bounded time (ADR-016 §5). A non-200 status is the
+ * store's verdict and is never retried.
  */
 export const LOGS_PARTITION_DETACH_PATH = 'internal/partition/detach';
 

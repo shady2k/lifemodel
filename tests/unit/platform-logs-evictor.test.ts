@@ -13,6 +13,7 @@ import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 import { describe, expect, it } from 'vitest';
+import { CONNECT_RETRY_WINDOW_MS } from '../../loader/src/log-evictor.js';
 
 const platformRoot = fileURLToPath(new URL('../../deploy/platform/', import.meta.url));
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -75,6 +76,14 @@ describe('the logs-evictor CronJob (ADR-016 §5)', () => {
       backoffLimit: 0,
       template: { spec: { restartPolicy: 'Never' } },
     });
+  });
+
+  it("bounds the evictor's retry of a refused connection inside the Job deadline", () => {
+    // A new pod's network policy is synced a second after it starts, so the run
+    // retries a connection that got no answer (ADR-016 §5); the window has to
+    // leave room for the run's own work before activeDeadlineSeconds.
+    const deadlineMs = Number(cronJob?.spec.jobTemplate.spec.activeDeadlineSeconds) * 1000;
+    expect(CONNECT_RETRY_WINDOW_MS).toBeLessThan(deadlineMs);
   });
 
   it("runs the loader image's own entry point, pinned by the loader digest", () => {
