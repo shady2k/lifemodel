@@ -44,6 +44,13 @@ const en = {
   logs_reason_read_only: 'the store is refusing writes (read-only)',
   logs_reason_http_error: 'the store answered with an error',
   logs_reason_invalid_response: 'the store answered with an unreadable response',
+  logsCollectionUnknown: 'collection status unknown',
+  logsCollectionStopped_one: 'collection stopped {{count}} minute ago; results may be incomplete',
+  logsCollectionStopped_other:
+    'collection stopped {{count}} minutes ago; results may be incomplete',
+  logsStoreReadOnly: 'the store is refusing writes (read-only)',
+  logsEvictorStale: 'the log evictor is failing or has not run',
+  logsEvictionNotice: 'logs for {{date}} were removed at {{time}}; {{bytes}} bytes freed',
 };
 
 const ru = {
@@ -87,6 +94,18 @@ const ru = {
   logs_reason_read_only: 'хранилище не принимает записи (только чтение)',
   logs_reason_http_error: 'хранилище ответило ошибкой',
   logs_reason_invalid_response: 'хранилище ответило нечитаемым ответом',
+  logsCollectionUnknown: 'состояние сбора неизвестно',
+  logsCollectionStopped_one:
+    'сбор логов остановился {{count}} минуту назад; результаты могут быть неполными',
+  logsCollectionStopped_few:
+    'сбор логов остановился {{count}} минуты назад; результаты могут быть неполными',
+  logsCollectionStopped_many:
+    'сбор логов остановился {{count}} минут назад; результаты могут быть неполными',
+  logsCollectionStopped_other:
+    'сбор логов остановился {{count}} минут назад; результаты могут быть неполными',
+  logsStoreReadOnly: 'хранилище не принимает записи (только чтение)',
+  logsEvictorStale: 'вытеснитель логов не работает или ещё не запускался',
+  logsEvictionNotice: 'логи за {{date}} удалены в {{time}}; освобождено {{bytes}} байт',
 };
 
 i18n.addResourceBundle('en', 'translation', en, true, true);

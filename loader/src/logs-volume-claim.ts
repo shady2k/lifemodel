@@ -95,8 +95,14 @@ function defaultRequest(timeoutMs: number): NonNullable<KubernetesObjectApiOptio
     });
 }
 
-/** The in-cluster client; it can only read and patch the paths it is handed. */
-function createKubernetesObjectApi(options: KubernetesObjectApiOptions = {}): KubernetesObjectApi {
+/**
+ * The in-cluster client; it can only read and patch the paths it is handed.
+ * Other narrow log reads (the evictor's CronJob) use the same client, so the
+ * platform has one way to reach the API.
+ */
+export function createKubernetesObjectApi(
+  options: KubernetesObjectApiOptions = {}
+): KubernetesObjectApi {
   const host =
     options.apiServer ??
     `https://${process.env['KUBERNETES_SERVICE_HOST'] ?? 'kubernetes.default.svc'}:${process.env['KUBERNETES_SERVICE_PORT_HTTPS'] ?? '443'}`;

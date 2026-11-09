@@ -77,7 +77,7 @@ import {
 } from './workbench-source.js';
 import type { WorkbenchImportStatus } from './workbench-task.js';
 import { CSP, redirect, sendText } from './http-responses.js';
-import { createLogsHandlers } from './logs-routes.js';
+import { createLogsHandlers, type LogsStatusDep } from './logs-routes.js';
 import { safeWorkbenchImportDetail } from './workbench-import.js';
 
 export interface WorkbenchHttp {
@@ -115,7 +115,7 @@ export interface LoaderHttp {
   close(): Promise<void>;
 }
 const MAX_FORM_BYTES = 8192;
-export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
+export function createLoaderHttp(deps: LoaderHttpDeps & LogsStatusDep): LoaderHttp {
   const { state, logger, clock, pki, config } = deps;
   const slots: ModelSlots = deps.modelSlots ?? {
     read: () => Promise.reject(new Error('model storage unavailable')),
@@ -1352,8 +1352,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     return;
   }
   const logsHandlers = createLogsHandlers({
-    state,
-    config,
+    ...deps,
     uiRoot,
     sessionToken,
     hasSession,

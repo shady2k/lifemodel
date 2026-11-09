@@ -23,6 +23,7 @@ import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { realLoggerCases } from './logs-vrl-real-loggers.mjs';
+import { checkCollectorHeartbeat } from './logs-heartbeat-check.mjs';
 
 const IMAGE =
   'docker.io/timberio/vector@sha256:f6c23b5a7e16fb2838d33619ef7acf4bad2289a7cf22bc90efc2371f520c4ea2';
@@ -107,7 +108,12 @@ function main() {
       { stdio: 'inherit' }
     );
     if (result.error) throw result.error;
-    return result.status ?? 1;
+    if ((result.status ?? 1) !== 0) return result.status ?? 1;
+    // The heartbeat is proved by running the committed source, not by reading
+    // it: its record's fields and cadence, and the read-back line through the
+    // program the pod records use (ADR-016 §4, check L14).
+    checkCollectorHeartbeat({ normalizeProgram: program });
+    return 0;
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request as httpRequest, createServer } from 'node:http';
-import { createLoaderHttp, type LoaderHttp } from '../../loader/src/http.js';
+import { createLoaderHttp, type LoaderHttp, type LoaderHttpDeps } from '../../loader/src/http.js';
 import { createSession, hashPassword, type PasswordRecord } from '../../loader/src/auth.js';
 import { loadConfig } from '../../loader/src/config.js';
 import { createTestClock } from '../../loader/src/clock.js';
@@ -39,10 +39,20 @@ function uiRoot(): string {
   return root;
 }
 
-async function start(storeUrl: string): Promise<{
+async function start(
+  storeUrl: string,
+  extra: { logsStatus?: LoaderHttpDeps['logsStatus'] } = {}
+): Promise<{
   record: PasswordRecord;
   token: string;
-  get(path: string, authenticated?: boolean): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }>;
+  get(
+    path: string,
+    authenticated?: boolean
+  ): Promise<{
+    status: number;
+    headers: Record<string, string | string[] | undefined>;
+    body: string;
+  }>;
 }> {
   const record = await hashPassword('owner password');
   const clock = createTestClock();
@@ -63,6 +73,7 @@ async function start(storeUrl: string): Promise<{
     clock,
     config: loadConfig({ LIFEMODEL_NAME: 'lifemodel', LIFEMODEL_LOGS_STORE_URL: storeUrl }),
     uiRoot: uiRoot(),
+    ...(extra.logsStatus === undefined ? {} : { logsStatus: extra.logsStatus }),
     pki: {
       bootstrap: async () => {},
       report: async () => ({
@@ -185,7 +196,11 @@ describe('the logs API', () => {
     const loader = await start(fixture.url);
     const response = await loader.get('/api/logs?from=soon&to=later');
     expect(response.status).toBe(400);
-    expect(JSON.parse(response.body)).toEqual({ state: 'invalid', reason: 'filter', field: 'from' });
+    expect(JSON.parse(response.body)).toEqual({
+      state: 'invalid',
+      reason: 'filter',
+      field: 'from',
+    });
     const beyondDateRange = await loader.get(`/api/logs?from=1e20&to=${String(TO)}`);
     expect(beyondDateRange.status).toBe(400);
     expect(JSON.parse(beyondDateRange.body)).toEqual({
@@ -206,7 +221,9 @@ describe('the logs API', () => {
   it('refuses without a session', async () => {
     const fixture = await recorded();
     const loader = await start(fixture.url);
-    expect((await loader.get(`/api/logs?from=${String(FROM)}&to=${String(TO)}`, false)).status).toBe(403);
+    expect(
+      (await loader.get(`/api/logs?from=${String(FROM)}&to=${String(TO)}`, false)).status
+    ).toBe(403);
     expect((await loader.get('/api/logs/modules', false)).status).toBe(403);
     const page = await loader.get('/logs', false);
     expect(page.status).toBe(303);
@@ -235,6 +252,69 @@ describe('the logs API', () => {
     const modules = await loader.get('/api/logs/modules');
     expect(modules.status).toBe(503);
     expect(JSON.parse(modules.body)).toEqual({
+      state: 'unavailable',
+      reason: 'connection_refused',
+    });
+  });
+});
+
+describe('the logs page status route (ADR-016 §4, §5)', () => {
+  const eviction = {
+    time: '2026-11-07T09:55:00Z',
+    day: '20261107',
+    freedBytes: 123456789,
+    reason: 'below_threshold',
+    message: '{"msg":"the oldest log day was removed"}',
+  };
+  const state = {
+    collection: { state: 'stopped' as const, stoppedForMs: 600_000 },
+    storeReadOnly: true,
+    evictor: { lastSuccessAt: null, stale: true },
+    evictions: [eviction],
+  };
+
+  it('carries the freshness, the store alarm and the notices when asked', async () => {
+    const fixture = await recorded();
+    const windows: { from: number; to: number }[] = [];
+    const loader = await start(fixture.url, {
+      logsStatus: {
+        read: async (window) => {
+          windows.push(window);
+          return state;
+        },
+      },
+    });
+    const response = await loader.get(`/api/logs?from=${String(FROM)}&to=${String(TO)}&status=1`);
+    expect(response.status).toBe(200);
+    const body = JSON.parse(response.body) as { state: string; status: unknown };
+    expect(body.state).toBe('ok');
+    expect(body.status).toEqual(state);
+    expect(windows).toEqual([{ from: FROM, to: TO }]);
+  });
+
+  it('omits the status when the request does not ask for it', async () => {
+    const fixture = await recorded();
+    let reads = 0;
+    const loader = await start(fixture.url, {
+      logsStatus: {
+        read: async () => {
+          reads += 1;
+          return state;
+        },
+      },
+    });
+    const response = await loader.get(`/api/logs?from=${String(FROM)}&to=${String(TO)}`);
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body)).not.toHaveProperty('status');
+    expect(reads).toBe(0);
+  });
+
+  it('keeps the unavailable answer first: no status beside a failed query', async () => {
+    const port = await closedPort();
+    const loader = await start(`http://127.0.0.1:${String(port)}`);
+    const response = await loader.get(`/api/logs?from=${String(FROM)}&to=${String(TO)}&status=1`);
+    expect(response.status).toBe(503);
+    expect(JSON.parse(response.body)).toEqual({
       state: 'unavailable',
       reason: 'connection_refused',
     });
