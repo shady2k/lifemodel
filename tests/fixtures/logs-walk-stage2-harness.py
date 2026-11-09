@@ -163,18 +163,26 @@ class FakeStore:
         return None
 
 
+DEPLOYED = {'spec': {'replicas': 1},
+            'status': {'updatedReplicas': 1, 'availableReplicas': 1}}
+
+
 class FakeCluster:
     """A fake kubectl: the DaemonSet JSON, pod lists, and scripted patch results.
 
     The collector's readiness follows the number of patches the walk applied, so
     a fixture says "Ready, then stopped by the first patch, then Ready again":
-    that is the sequence a restart walks through, without counting polls.
+    that is the sequence a restart walks through, without counting polls. The
+    store Deployment it reports is scripted the same way, one state per read, so
+    a walk that waits for a rollout finishes on the read the fixture says.
     """
 
     def __init__(self, fixture):
         self.daemonset = fixture.get('daemonset')
         self.collector_states = fixture.get('collectorStates', [{'ready': 1, 'desired': 1,
                                                                  'readyPods': 1}])
+        self.deployment_states = fixture.get('deploymentStates') or [DEPLOYED]
+        self.deployment_reads = 0
         self.patch_script = fixture.get('patchScript', [])
         self.patches = []
         self.secret = fixture.get('secret', '')
@@ -204,9 +212,16 @@ class FakeCluster:
             body.setdefault('status', {})['numberReady'] = state.get('ready', 0)
             body['status']['desiredNumberScheduled'] = state.get('desired', 0)
             return body
+        if 'deployment' in args:
+            index = min(self.deployment_reads, len(self.deployment_states) - 1)
+            self.deployment_reads += 1
+            return json.loads(json.dumps(self.deployment_states[index]))
         if 'pods' in args:
             return {'items': self.pods(None)}
         return None
+
+    def deployments(self):
+        return self.deployment_reads
 
     def pods(self, namespace, selector=None):
         state = self.current_state()
@@ -269,6 +284,7 @@ def options(**values):
         writer_interval_ms=50, quiet_seconds=0, suspend_seconds=1, scratch_days_back=20,
         recover_bound=5, settle_seconds=0, cronjob='logs-evictor', writer_rate=5,
         peak_bytes=0, index_poll=1, query_count=40, limit_ms=2500, page_limit=250,
+        filter_records=60,
         same_time_records=4, identical_records=2, window_minutes=60,
         ingest_mib_per_s=1, paging_minutes_back=3, keep_mib=0,
     )
@@ -433,6 +449,18 @@ def setting_flags(walk, fixture):
     print('FLAGS ' + json.dumps({'agree': agree, 'days': observed['days'],
                                  'maxBytes': observed['maxBytes'],
                                  'minFreeBytes': observed['minFreeBytes']}))
+    return report
+
+
+@mode('setting-rollout')
+def setting_rollout(walk, fixture):
+    """The wait between `applied` and the `/flags` read, on a scripted Deployment."""
+    report = walk.Report()
+    cluster = FakeCluster({'deploymentStates': fixture.get('deploymentStates') or [DEPLOYED]})
+    finished = walk.wait_store_rollout(report, cluster, options(), fixture.get('bound', 5),
+                                       "the store's own /flags")
+    print('ROLLOUT ' + json.dumps({'finished': finished,
+                                   'deployments': cluster.deployments()}))
     return report
 
 
@@ -616,6 +644,28 @@ def latency_round_fail(walk, fixture):
     loader = FakeLoader({'logAnswers': [{'state': 'ok', 'records': [], 'count': 0}],
                          'delayMs': 5})
     walk.run_filter_round(report, loader, 'quiet', [('time', {})], 3, 1, 60)
+    return report
+
+
+@mode('latency-filters')
+def latency_filters(walk, fixture):
+    report = walk.Report()
+    store = FakeStore({})
+    record = {'time': '2026-11-09T00:00:00Z', 'message': 'walk-latency-1 filter fixture',
+              'fields': {'module': 'walk-latency-filter', 'level': 'warn',
+                         'conversation_id': 'walk-latency-1-conv'}}
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 5, 'records': [record]}]})
+    state = {'run_id': 'walk-latency-1'}
+    conversation = walk.write_filter_fixture(report, store, loader, state, 5)
+    filters = walk.filters_from(report, loader, conversation) or []
+    lines = [line for batch in store.inserts for line in batch]
+    print('FILTERS ' + json.dumps({
+        'conversation': conversation,
+        'inserted': len(lines),
+        'modules': sorted({line.get('module') for line in lines}),
+        'withConversation': sum(1 for line in lines if line.get('conversation_id')),
+        'filters': [name for name, _base in filters],
+    }))
     return report
 
 

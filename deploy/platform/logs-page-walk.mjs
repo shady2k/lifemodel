@@ -286,7 +286,7 @@ try {
         await page.locator('#logs-level').click();
         await page.getByRole('option', { name: level, exact: true }).click();
         await submit(page);
-        const items = recordItems(page);
+        const items = await recordItems(page);
         const badges = await page.locator('section ul li .inline-flex, section ul li [class*=badge]').allTextContents();
         check((await items.count()) > 0, `${tag}: records are found with the level filter (${level})`);
         check(badges.includes(level), `${tag}: the level chip carries the filtered level (${level})`);
@@ -349,7 +349,7 @@ try {
         await page.locator('#logs-to').fill(toInput(new Date(wide.to)));
         await submit(page);
         const line = await countLine(page);
-        firstCount = await recordItems(page).count();
+        firstCount = (await recordItems(page)).count();
         if ((line.count ?? 0) > 200 && firstCount > 0) {
           paged = true;
           break;
@@ -361,7 +361,7 @@ try {
         const firstPage = await messageTexts(page);
         await page.locator('section button').first().click();
         await page.waitForTimeout(1500);
-        const grown = await recordItems(page).count();
+        const grown = (await recordItems(page)).count();
         const secondPage = await messageTexts(page);
         const newOnes = secondPage.slice(firstPage.length);
         check(grown > firstPage.length, `${tag}: the second page is appended`, `${firstPage.length} -> ${grown}`);
@@ -372,7 +372,7 @@ try {
         await page.screenshot({ path: shot('second-page') });
         await page.goto(`https://${HOST}/logs`, { waitUntil: 'networkidle' });
         await page.waitForTimeout(1500);
-        const back = await recordItems(page).count();
+        const back = (await recordItems(page)).count();
         const backMessages = await messageTexts(page);
         check(
           back >= 1 && back <= firstPage.length && backMessages[0] === firstPage[0],
