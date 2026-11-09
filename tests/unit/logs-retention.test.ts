@@ -15,8 +15,8 @@ import {
   marginBytesOf,
   parseByteQuantity,
   parseKubernetesQuantity,
+  observedFlagsOf,
   parseRetentionDays,
-  parseStoreFlags,
   retentionLimits,
   storeFlagsOf,
   type LogsRetentionLimits,
@@ -126,30 +126,37 @@ describe('the store flags the setting becomes (F3)', () => {
     });
   });
 
-  it('reads back the three flags the store prints, and ignores the one it must not show', () => {
-    const text = [
-      '-envflag.enable="true"',
-      '-partitionManageAuthKey="secret"',
-      '-retention.maxDiskSpaceUsageBytes="1610612736"',
-      '-retentionPeriod="14d"',
-      '-storage.minFreeDiskSpaceBytes="805306368"',
-      '',
-    ].join('\n');
-    expect(parseStoreFlags(text)).toEqual({
-      days: 14,
-      maxBytes: 1_610_612_736,
-      minFreeBytes: 805_306_368,
-    });
+  it('reads the three values the store printed as the numbers they mean', () => {
+    expect(
+      observedFlagsOf({
+        retentionPeriod: '14d',
+        retentionMaxDiskSpaceUsageBytes: '1610612736',
+        storageMinFreeDiskSpaceBytes: '805306368',
+      })
+    ).toEqual({ days: 14, maxBytes: 1_610_612_736, minFreeBytes: 805_306_368 });
     // The measured 123MiB form of the same flag is the same number.
     expect(
-      parseStoreFlags('-retention.maxDiskSpaceUsageBytes="123MiB"\n-retentionPeriod="3d"\n')
+      observedFlagsOf({
+        retentionPeriod: '3d',
+        retentionMaxDiskSpaceUsageBytes: '123MiB',
+        storageMinFreeDiskSpaceBytes: null,
+      })
     ).toEqual({ days: 3, maxBytes: 123 * MIB, minFreeBytes: null });
-    expect(parseStoreFlags('')).toEqual({ days: null, maxBytes: null, minFreeBytes: null });
-    expect(parseStoreFlags('-retentionPeriod="forever"')).toEqual({
-      days: null,
-      maxBytes: null,
-      minFreeBytes: null,
-    });
+    expect(
+      observedFlagsOf({
+        retentionPeriod: null,
+        retentionMaxDiskSpaceUsageBytes: null,
+        storageMinFreeDiskSpaceBytes: null,
+      })
+    ).toEqual({ days: null, maxBytes: null, minFreeBytes: null });
+    // A form this loader does not read never compares equal to a number.
+    expect(
+      observedFlagsOf({
+        retentionPeriod: 'forever',
+        retentionMaxDiskSpaceUsageBytes: '1610612736',
+        storageMinFreeDiskSpaceBytes: '805306368',
+      }).days
+    ).toBeNull();
   });
 
   it('agrees only when all three flags equal the desired ones', () => {

@@ -10,7 +10,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { LoaderConfig } from './config.js';
-import type { PasswordRecord } from './auth.js';
+import { sameOrigin, verifyCsrf, type PasswordRecord } from './auth.js';
 import { CSP, redirect, sendText } from './http-responses.js';
 import { createLogsQuery, parseLogsPageQuery } from './logs-query.js';
 import { createLogsStore } from './logs-store-adapter.js';
@@ -30,17 +30,10 @@ export interface LogsHandlerDeps {
   readonly logsStatus?: LogsStatusQuery;
   /** The owner's retention setting (ADR-016 §5). */
   readonly logsSettings?: Pick<LogsSettings, 'status' | 'write'>;
-  /** The exact-Origin check the loader's other writes use (L11). */
-  readonly refuseOrigin?: (req: IncomingMessage) => string | null;
-  /** The CSRF check the loader's other writes use (L11). */
-  readonly verifyCsrf?: (token: string, record: PasswordRecord, session: string) => boolean;
 }
 
 /** The optional seams the loader's composition root passes in (ADR-016 §4, §5). */
-export type LogsStatusDep = Pick<
-  LogsHandlerDeps,
-  'logsStatus' | 'logsSettings' | 'refuseOrigin' | 'verifyCsrf'
->;
+export type LogsStatusDep = Pick<LogsHandlerDeps, 'logsStatus' | 'logsSettings'>;
 
 export interface LogsHandlers {
   readonly logsPage: RouteHandler;
@@ -162,12 +155,12 @@ export function createLogsHandlers(deps: LogsHandlerDeps): LogsHandlers {
       res.end();
       return;
     }
-    const originRefused =
-      deps.refuseOrigin === undefined || deps.refuseOrigin(req) !== null ? true : false;
-    const csrfRefused =
-      deps.verifyCsrf === undefined ||
-      !deps.verifyCsrf(header(req, 'x-csrf-token') ?? '', record, session);
-    if (originRefused || csrfRefused) {
+    // The exact Origin the loader's other writes demand, and the CSRF token
+    // that may only be sent from it (L11).
+    if (
+      !sameOrigin(header(req, 'origin'), undefined, `boot-${deps.config.instanceName}.local`) ||
+      !verifyCsrf(header(req, 'x-csrf-token') ?? '', record, session)
+    ) {
       sendJson(res, 403, { state: 'refused', reason: 'origin_or_csrf' });
       return;
     }
@@ -181,7 +174,7 @@ export function createLogsHandlers(deps: LogsHandlerDeps): LogsHandlers {
       const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       size += part.length;
       if (size > MAX_SETTINGS_BODY_BYTES) break;
-      chunks.push(part);
+      chunks.push(Buffer.from(part));
     }
     if (size > MAX_SETTINGS_BODY_BYTES) {
       res.writeHead(413);

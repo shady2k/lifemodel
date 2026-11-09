@@ -17,6 +17,7 @@
  * one reason (`store_unavailable`, `rollout_timeout`, `forbidden`, `mismatch`).
  */
 import type { FileSystem } from './fs.js';
+import type { LogsRetentionFlagsResult } from './logs-store-adapter.js';
 import type { LoaderLogger } from './logger.js';
 import type { LogsSettingsCluster, LogsStoreDeployment } from './logs-settings-cluster.js';
 import {
@@ -27,6 +28,7 @@ import {
   desiredRevisionOf,
   flagValuesOf,
   flagsAgree,
+  observedFlagsOf,
   retentionLimits,
   storeFlagsOf,
   type LogsRetention,
@@ -83,6 +85,17 @@ export type LogsSettingsWriteResult =
   | { readonly state: 'volume_unknown' }
   | { readonly state: 'forbidden' }
   | { readonly state: 'unavailable' };
+
+/**
+ * The adapter's raw `/flags` values as the numbers the setting compares. The
+ * adapter stays free of the retention arithmetic, so the page's bundle never
+ * pulls in the server's file and crypto modules.
+ */
+export function observedFromStore(answer: LogsRetentionFlagsResult): LogsRetentionFlagsRead {
+  return answer.state === 'ok'
+    ? { state: 'ok', observed: observedFlagsOf(answer.flags) }
+    : { state: 'unavailable' };
+}
 
 export interface LogsSettingsDeps {
   readonly fs: FileSystem;

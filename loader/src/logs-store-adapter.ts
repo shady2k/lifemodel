@@ -10,7 +10,6 @@
  * Unavailable is an answer, never an empty list: a refused connection, a
  * timeout, a 5xx, a read-only 429 or an unreadable body returns a reason.
  */
-import { parseStoreFlags, type LogsRetentionFlagsRead } from './logs-retention.js';
 export type LogsUnavailableReason =
   | 'timeout'
   | 'connection_refused'
@@ -79,6 +78,17 @@ export type LogsEvictionsResult =
 /** The window's record count, read with one query (ADR-016 §4). */
 export type LogsCountResult = { readonly state: 'ok'; readonly count: number } | LogsUnavailable;
 
+/** The three retention flags as the store prints them: raw, exactly as received. */
+export interface LogsStoreRetentionFlags {
+  readonly retentionPeriod: string | null;
+  readonly retentionMaxDiskSpaceUsageBytes: string | null;
+  readonly storageMinFreeDiskSpaceBytes: string | null;
+}
+
+export type LogsRetentionFlagsResult =
+  | { readonly state: 'ok'; readonly flags: LogsStoreRetentionFlags }
+  | LogsUnavailable;
+
 export interface LogsStore {
   query(logsql: string): Promise<LogsStoreResult>;
   /**
@@ -86,7 +96,7 @@ export interface LogsStore {
    * `/flags`. Nothing else leaves this file: the same answer prints the
    * partition key (ADR-016 §5).
    */
-  retentionFlags(): Promise<LogsRetentionFlagsRead>;
+  retentionFlags(): Promise<LogsRetentionFlagsResult>;
   count(logsql: string): Promise<LogsCountResult>;
   modules(): Promise<LogsModulesResult>;
   heartbeats(): Promise<LogsHeartbeatsResult>;
@@ -195,6 +205,30 @@ function parseModules(body: string): string[] | null {
   return [...modules].sort();
 }
 
+/**
+ * One line of the store's `/flags` as `name → value`, quotes removed. Every
+ * other flag stays in this file: the answer carries the three retention values
+ * and nothing that could quote another one.
+ */
+function parseRetentionFlagLines(text: string): LogsStoreRetentionFlags {
+  const flags = new Map<string, string>();
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line.startsWith('-')) continue;
+    const separator = line.indexOf('=');
+    if (separator < 0) continue;
+    let value = line.slice(separator + 1).trim();
+    if (value.length >= 2 && value.startsWith('"') && value.endsWith('"'))
+      value = value.slice(1, -1);
+    flags.set(line.slice(1, separator), value);
+  }
+  return {
+    retentionPeriod: flags.get('retentionPeriod') ?? null,
+    retentionMaxDiskSpaceUsageBytes: flags.get('retention.maxDiskSpaceUsageBytes') ?? null,
+    storageMinFreeDiskSpaceBytes: flags.get('storage.minFreeDiskSpaceBytes') ?? null,
+  };
+}
+
 /** The store's read-only gauge value, or null when the body carries none. */
 function parseReadOnly(body: string): boolean | null {
   for (const raw of body.split('\n')) {
@@ -283,8 +317,8 @@ export function createLogsStore(options: LogsStoreOptions): LogsStore {
   return {
     async retentionFlags() {
       const answer = await send(flagsEndpoint, { method: 'GET' });
-      if (answer.state !== 'ok') return { state: 'unavailable' };
-      return { state: 'ok', observed: parseStoreFlags(answer.body) };
+      if (answer.state !== 'ok') return answer;
+      return { state: 'ok', flags: parseRetentionFlagLines(answer.body) };
     },
     async query(logsql) {
       const answer = await request(logsql);

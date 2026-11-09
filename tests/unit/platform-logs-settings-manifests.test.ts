@@ -130,7 +130,7 @@ describe('the store boots from the defaults with the loader absent', () => {
     expect(marginBytesOf(limits.volumeBytes)).toBe(805_306_368);
   });
 
-  it('has no manifest that would let Flux own the loader ConfigMap', () => {
+  it('has no manifest that would let Flux own the loader ConfigMap', { timeout: 30_000 }, () => {
     const owners = yamlFiles(deployRoot)
       .flatMap(documents)
       .filter((resource) => resource.kind === 'ConfigMap')

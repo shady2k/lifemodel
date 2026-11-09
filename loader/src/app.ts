@@ -23,7 +23,7 @@ import {
 } from './pki.js';
 import { createKubernetesTlsStores } from './pki-kubernetes.js';
 import { createLogsVolumeClaimPreflight } from './logs-volume-claim.js';
-import { createLogsSettings, type LogsSettings } from './logs-settings.js';
+import { createLogsSettings, observedFromStore, type LogsSettings } from './logs-settings.js';
 import { createLogsSettingsCluster } from './logs-settings-cluster.js';
 import { createLogsStore } from './logs-store-adapter.js';
 import type { LoaderLogger } from './logger.js';
@@ -238,7 +238,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       logger,
       now: () => clock.now(),
       cluster: createLogsSettingsCluster(),
-      flags: () => logsStore.retentionFlags(),
+      flags: async () => observedFromStore(await logsStore.retentionFlags()),
     });
   const readWorkbenchSource = async () =>
     (await bao.api.readWorkbenchSource()) ?? { ...DEFAULT_WORKBENCH_SOURCE };

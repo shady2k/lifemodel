@@ -161,37 +161,29 @@ export function flagValuesOf(
   };
 }
 
-/** One line of the store's `/flags` as `name → value`, quotes removed. */
-function flagLines(text: string): Map<string, string> {
-  const flags = new Map<string, string>();
-  for (const raw of text.split('\n')) {
-    const line = raw.trim();
-    if (!line.startsWith('-')) continue;
-    const separator = line.indexOf('=');
-    if (separator < 0) continue;
-    const name = line.slice(1, separator);
-    let value = line.slice(separator + 1).trim();
-    if (value.length >= 2 && value.startsWith('"') && value.endsWith('"'))
-      value = value.slice(1, -1);
-    flags.set(name, value);
-  }
-  return flags;
+/** The three retention flags exactly as the store printed them. */
+export interface LogsStoreFlagText {
+  readonly retentionPeriod: string | null;
+  readonly retentionMaxDiskSpaceUsageBytes: string | null;
+  readonly storageMinFreeDiskSpaceBytes: string | null;
 }
 
 /**
- * The three flags the setting owns, read from the store's own `/flags`. Every
- * other flag stays in this file: the answer carries these three values and
- * nothing that could quote another one.
+ * The store's three flags as the numbers they mean. A value it did not print,
+ * or printed in a form this loader does not read, stays null so the comparison
+ * cannot pass by accident.
  */
-export function parseStoreFlags(text: string): ObservedRetentionFlags {
-  const flags = flagLines(text);
-  const period = flags.get('retentionPeriod');
-  const maxBytes = flags.get('retention.maxDiskSpaceUsageBytes');
-  const minFree = flags.get('storage.minFreeDiskSpaceBytes');
+export function observedFlagsOf(text: LogsStoreFlagText): ObservedRetentionFlags {
   return {
-    days: period === undefined ? null : parseRetentionDays(period),
-    maxBytes: maxBytes === undefined ? null : parseByteQuantity(maxBytes),
-    minFreeBytes: minFree === undefined ? null : parseByteQuantity(minFree),
+    days: text.retentionPeriod === null ? null : parseRetentionDays(text.retentionPeriod),
+    maxBytes:
+      text.retentionMaxDiskSpaceUsageBytes === null
+        ? null
+        : parseByteQuantity(text.retentionMaxDiskSpaceUsageBytes),
+    minFreeBytes:
+      text.storageMinFreeDiskSpaceBytes === null
+        ? null
+        : parseByteQuantity(text.storageMinFreeDiskSpaceBytes),
   };
 }
 

@@ -17,7 +17,11 @@ describe("the store's own flags through the adapter", () => {
       const answer = await store.retentionFlags();
       expect(answer).toEqual({
         state: 'ok',
-        observed: { days: 14, maxBytes: 1_610_612_736, minFreeBytes: 805_306_368 },
+        flags: {
+          retentionPeriod: '14d',
+          retentionMaxDiskSpaceUsageBytes: '1610612736',
+          storageMinFreeDiskSpaceBytes: '805306368',
+        },
       });
       // The answer carries the three numbers, never the body: the same body
       // prints the partition key.

@@ -1356,8 +1356,6 @@ export function createLoaderHttp(deps: LoaderHttpDeps & LogsStatusDep): LoaderHt
     uiRoot,
     sessionToken,
     hasSession,
-    refuseOrigin,
-    verifyCsrf,
   });
   const handlers: Record<RouteHandlerName, RouteHandler> = {
     ...logsHandlers,
