@@ -44,6 +44,9 @@ class FakeLoader:
         self.settings_answers = fixture.get('settingsAnswers', [])
         self.settings_calls = 0
         self.logs_calls = 0
+        self.delay_ms = fixture.get('delayMs', 0)
+        self.request_answers = fixture.get('requestAnswers', [])
+        self.request_calls = []
 
     def logs_status(self, from_ms, to_ms):
         index = min(self.status_calls, len(self.status_answers) - 1) if self.status_answers else 0
@@ -59,11 +62,23 @@ class FakeLoader:
         return answers[min(index, len(answers) - 1)]
 
     def logs(self, params):
+        if self.delay_ms:
+            import time as _time
+            _time.sleep(self.delay_ms / 1000.0)
         index = min(self.logs_calls, len(self.log_answers) - 1) if self.log_answers else 0
         self.logs_calls += 1
         if not self.log_answers:
             return None
         return self.log_answers[index]
+
+    def request(self, method, path, body=None, headers=None):
+        index = min(len(self.request_calls), len(self.request_answers) - 1) \
+            if self.request_answers else 0
+        self.request_calls.append(path)
+        if not self.request_answers:
+            return 500, b''
+        answer = self.request_answers[index]
+        return answer.get('status', 200), answer.get('body', '').encode()
 
     def settings(self):
         index = min(self.settings_calls, len(self.settings_answers) - 1) if self.settings_answers else 0
@@ -563,6 +578,85 @@ def evict_stale(walk, fixture):
         'stale': walk.evictor_stale(now - 180_000, now),
         'never': walk.evictor_stale(None, now),
     }))
+    return report
+
+
+def latency_page(sequence, moment='2026-11-09T00:00:00Z'):
+    return {'time': moment, 'message': 'walk-latency run-1 seq=%06d' % sequence, 'fields': {}}
+
+
+def latency_identical(moment='2026-11-09T00:00:01Z'):
+    return {'time': moment, 'message': 'walk-latency run-1 identical', 'fields': {}}
+
+
+def latency_page_answer(count, records, offset, limit):
+    return {'state': 'ok', 'count': count, 'records': records, 'offset': offset,
+            'limit': limit, 'incomplete': False}
+
+
+@mode('latency-percentiles')
+def latency_percentiles(walk, fixture):
+    report = walk.Report()
+    stats = walk.summarise([float(value) for value in range(1, 101)])
+    print('PERCENTILES ' + json.dumps(stats))
+    return report
+
+
+@mode('latency-round-pass')
+def latency_round_pass(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'records': [], 'count': 0}]})
+    walk.run_filter_round(report, loader, 'quiet', [('time', {})], 3, 2500, 60)
+    return report
+
+
+@mode('latency-round-fail')
+def latency_round_fail(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'records': [], 'count': 0}],
+                         'delayMs': 5})
+    walk.run_filter_round(report, loader, 'quiet', [('time', {})], 3, 1, 60)
+    return report
+
+
+@mode('latency-paging-ok')
+def latency_paging_ok(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({
+        'logAnswers': [
+            latency_page_answer(6, [latency_page(1), latency_page(2), latency_page(3),
+                                    latency_page(4)], 0, 4),
+            latency_page_answer(6, [latency_identical(), latency_identical()], 4, 4),
+        ],
+        'requestAnswers': [{'status': 200, 'body': 'SAME-PAGE'}] * 2,
+    })
+    walk.check_paging(report, loader, {'from': '0', 'to': '1', 'text': 'run-1'}, 4, 4, 2)
+    return report
+
+
+@mode('latency-paging-dup')
+def latency_paging_dup(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({
+        'logAnswers': [
+            latency_page_answer(6, [latency_page(1), latency_page(2), latency_page(3),
+                                    latency_page(4)], 0, 4),
+            latency_page_answer(6, [latency_page(4), latency_identical()], 4, 4),
+        ],
+        'requestAnswers': [{'status': 200, 'body': 'SAME-PAGE'}] * 2,
+    })
+    walk.check_paging(report, loader, {'from': '0', 'to': '1', 'text': 'run-1'}, 4, 4, 2)
+    return report
+
+
+@mode('latency-paging-absent')
+def latency_paging_absent(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({
+        'logAnswers': [latency_page_answer(0, [], 0, 4)],
+        'requestAnswers': [{'status': 200, 'body': 'SAME-PAGE'}] * 2,
+    })
+    walk.check_paging(report, loader, {'from': '0', 'to': '1', 'text': 'run-1'}, 4, 4, 2)
     return report
 
 
