@@ -103,7 +103,7 @@ MODULE = 'walk-latency'
 FILTER_MODULE = 'walk-latency-filter'
 FILTER_LEVEL = 'warn'
 RECORD_PAYLOAD_BYTES = 384
-IDENTITY = re.compile(r'walk-latency (\S+) seq=(\d+)')
+IDENTITY = re.compile(r'(walk-latency-\d+) seq=(\d+)')
 PARTITION_KEY_SECRET = 'lifemodel-logs-partition-key'
 
 
@@ -326,7 +326,7 @@ def write_paging_fixture(report, store, moment_ms, numbered, identical, run_id):
             'stream': 'stdout',
             'level': 'info',
             'untrusted': False,
-        } for sequence in range(start, min(start + 2000, numbered))]
+        } for sequence in range(start + 1, min(start + 2000, numbered) + 1)]
         status, _body = store.insert(lines)
         if status not in (200, 204):
             report.fail('the paging fixture is written', 'insert answered %d' % status)

@@ -609,17 +609,35 @@ def evict_stale(walk, fixture):
     return report
 
 
-def latency_page(sequence, moment='2026-11-09T00:00:00Z'):
-    return {'time': moment, 'message': 'walk-latency run-1 seq=%06d' % sequence, 'fields': {}}
-
-
-def latency_identical(moment='2026-11-09T00:00:01Z'):
-    return {'time': moment, 'message': 'walk-latency run-1 identical', 'fields': {}}
-
-
 def latency_page_answer(count, records, offset, limit):
     return {'state': 'ok', 'count': count, 'records': records, 'offset': offset,
             'limit': limit, 'incomplete': False}
+
+
+PAGING_RUN_ID = 'walk-latency-1794240778634'
+
+
+def latency_paging_answers(walk, numbered, identical, limit):
+    """The paging window as the walk itself writes it.
+
+    The records come from the walk's own `write_paging_fixture` through a
+    recording store, so the message this node answers with is byte for byte what
+    the walk writes to the real store. A parse that no longer matches the written
+    message, or a numbering the check does not expect, fails here instead of on
+    the VM.
+    """
+    store = FakeStore({})
+    report = walk.Report()
+    if not walk.write_paging_fixture(report, store, 1_794_240_778_634, numbered, identical,
+                                     PAGING_RUN_ID):
+        raise SystemExit('the walk did not write its paging fixture')
+    records = [{'time': line['timestamp'], 'message': line['message'], 'fields': {}}
+               for batch in store.inserts for line in batch]
+    count = len(records)
+    answers = [latency_page_answer(count, records[offset:offset + limit], offset, limit)
+               for offset in range(0, count, limit)]
+    params = {'from': '0', 'to': '1', 'text': PAGING_RUN_ID}
+    return answers, params
 
 
 @mode('latency-percentiles')
@@ -672,30 +690,26 @@ def latency_filters(walk, fixture):
 @mode('latency-paging-ok')
 def latency_paging_ok(walk, fixture):
     report = walk.Report()
+    answers, params = latency_paging_answers(walk, 4, 2, 4)
     loader = FakeLoader({
-        'logAnswers': [
-            latency_page_answer(6, [latency_page(1), latency_page(2), latency_page(3),
-                                    latency_page(4)], 0, 4),
-            latency_page_answer(6, [latency_identical(), latency_identical()], 4, 4),
-        ],
+        'logAnswers': answers,
         'requestAnswers': [{'status': 200, 'body': 'SAME-PAGE'}] * 2,
     })
-    walk.check_paging(report, loader, {'from': '0', 'to': '1', 'text': 'run-1'}, 4, 4, 2)
+    walk.check_paging(report, loader, params, 4, 4, 2)
     return report
 
 
 @mode('latency-paging-dup')
 def latency_paging_dup(walk, fixture):
     report = walk.Report()
+    answers, params = latency_paging_answers(walk, 4, 2, 4)
+    # Repeat the first numbered record on the second page: the walk must see it.
+    answers[-1]['records'][0] = answers[0]['records'][0]
     loader = FakeLoader({
-        'logAnswers': [
-            latency_page_answer(6, [latency_page(1), latency_page(2), latency_page(3),
-                                    latency_page(4)], 0, 4),
-            latency_page_answer(6, [latency_page(4), latency_identical()], 4, 4),
-        ],
+        'logAnswers': answers,
         'requestAnswers': [{'status': 200, 'body': 'SAME-PAGE'}] * 2,
     })
-    walk.check_paging(report, loader, {'from': '0', 'to': '1', 'text': 'run-1'}, 4, 4, 2)
+    walk.check_paging(report, loader, params, 4, 4, 2)
     return report
 
 
