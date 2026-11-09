@@ -80,6 +80,13 @@ describe('the browser walk', () => {
     }
     // `await recordItems(page).count()` reads the count off the promise.
     expect(source()).not.toMatch(/recordItems\(page\)\.cou?nt/);
+    for (const name of ['recordIdentities']) {
+      for (const [index, line] of lines.entries()) {
+        if (!line.includes(`${name}(`)) continue;
+        if (new RegExp(`^\\s*(async )?function ${name}\\(`).test(line)) continue;
+        expect(line, `line ${index + 1}: ${line.trim()}`).toContain(`await ${name}(`);
+      }
+    }
   });
 
   it('awaits every async locator method it calls', () => {
@@ -134,6 +141,33 @@ describe('the browser walk', () => {
     expect(text).toMatch(/api\(page, `\/api\/logs\?from=\$\{wide\.from\}&to=\$\{wide\.to\}&limit=1`\)/);
     expect(text).toContain('the second page adds at most one page');
     expect(text).toContain('the count line follows the drawn records');
+  });
+
+  it('compares pages by the record the page draws, never by message text', () => {
+    const text = source();
+    // A message text repeats every few seconds ("collector heartbeat"), so the
+    // identity is the time line, the module chip and the message together.
+    expect(text).toContain("from './logs-page-records.mjs'");
+    expect(text).toContain('await recordIdentities(page)');
+    expect(text).toContain('repeatedRecords(');
+    expect(text).toContain('by time, module and message');
+    expect(text).not.toMatch(/newOnes/);
+    expect(text).not.toMatch(/firstPage\.includes\(text\)/);
+  });
+
+  it('judges the reload by the reloaded form\'s own first-page answer', () => {
+    const text = source();
+    const section = text.slice(text.indexOf('let answered = null;'), text.indexOf('first-page-again'));
+    // The reload goes back to the default window, which ends now: newer records
+    // have arrived, so the earlier page cannot be the comparison.
+    expect(section).toContain('waitForResponse');
+    expect(text).toContain('identityOfAnswer(');
+    expect(text).toContain('describeIdentity(');
+    expect(section).not.toContain('first record unchanged');
+    // The earlier page's first record is not the comparison.
+    expect(section).not.toContain('firstPage[0]');
+    expect(text).toContain('draws the first page and nothing appended');
+    expect(text).toContain('is back to its first-page state');
   });
 
   it('finds a conversation id by narrowing module by module', () => {
