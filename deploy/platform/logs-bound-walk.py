@@ -16,7 +16,11 @@ What it proves
    days back are gone or going, and today's records — protected by the store's
    own two-newest-day floor — are all still found. The walk reads the day
    partitions on the volume before and after and prints which days went, so the
-   "oldest first" order is visible and not only inferred.
+   "oldest first" order is visible and not only inferred. The canary and the
+   flood days are written and read back while the largest byte bound this volume
+   can reach is set, and only then is the 300 MiB bound applied: the store's own
+   parts can already exceed a small bound, and its background watcher would then
+   drop the canary's day before the walk could read it back (below).
 3. A separate case with only the age bound shortened (1 day, the byte bound left
    at 300 MiB and no byte pressure) drops the old day and nothing younger than
    the age deadline; today's records stay.
@@ -24,6 +28,21 @@ What it proves
    it reads through the API counts only its own lines. Records are written
    through the store's own `/insert/jsonline` protocol with `_time_field`, so
    their event time is the day the walk asks for, not the receipt time.
+
+What the store does with the byte bound (VictoriaLogs v1.53.0, the digest in
+`deploy/platform/logs-store/logs-store.yaml`): an insert is not checked against
+it. `lib/logstorage/storage.go:1147` (`Storage.MustAddRows`) only drops rows whose
+day is outside `-retentionPeriod` (`getMinAllowedDay`, `storage.go:1072`, with the
+`skipping log entry with too small timestamp` warning) and puts the rest into
+that day's partition. The bound is enforced by a background watcher,
+`watchMaxDiskSpaceUsage` (`storage.go:831`): about every 10 s it sums the
+partitions newest first and, once the sum passes the bound, drops every partition
+up to that one — never the two newest days (`storage.go:869`) and none at all
+while two or fewer partitions exist. So a canary written into an old day under a
+bound the store already exceeds has its partition created and then dropped by the
+watcher, not refused at insert; that is what the vm-lifemodel run saw, and why
+the read-back waits for the store's flush and why the case writes before it
+applies the bound.
 
 The two-day floor above the byte bound (a bound is a floor on partitions, and the
 volume — not the bound — is what a flood reaches) is L16's case, not this walk's:
@@ -111,6 +130,9 @@ from logs_walk_support import (  # noqa: E402
 )
 
 MIB = 1024 * 1024
+# The store flushes its in-memory buffer a few seconds after an insert, so a
+# read-back waits for its count instead of believing one read.
+RECORDS_BOUND_SECONDS = 60
 RUN_MODULE = 'walk-bound'
 RECORD_PAYLOAD_BYTES = 384
 BATCH_LINES = 2000
@@ -266,18 +288,30 @@ def records_in_window(loader, moment_ms, run_id):
     return count if isinstance(count, int) else None
 
 
-def require_records(report, loader, moment_ms, run_id, expected, name):
-    """The records are in the store before any retention result is judged."""
-    count = records_in_window(loader, moment_ms, run_id)
-    if count is None:
+def require_records(report, loader, moment_ms, run_id, expected, name,
+                    bound_seconds=RECORDS_BOUND_SECONDS):
+    """The records are in the store before any retention result is judged.
+
+    The store keeps an in-memory buffer and flushes it a few seconds after the
+    insert, so one read straight after the write can still count nothing; the
+    count is waited for within `bound_seconds`.
+    """
+    seen = {'count': None}
+
+    def attempt():
+        seen['count'] = records_in_window(loader, moment_ms, run_id)
+        return seen['count'] is not None and seen['count'] >= expected
+
+    if wait_until(time.monotonic() + bound_seconds, 2, attempt):
+        report.pass_(name, '%d records of the run stored in that day' % seen['count'])
+        return seen['count']
+    if seen['count'] is None:
         report.not_valid('%s: the API did not answer its count' % name)
         return None
-    if count < expected:
-        report.not_valid('%s: only %d of %d records were stored, so a deletion cannot be told '
-                         'from a write that never landed' % (name, count, expected))
-        return None
-    report.pass_(name, '%d records of the run stored in that day' % count)
-    return count
+    report.not_valid('%s: only %d of %d records were stored within %d s, so a deletion cannot '
+                     'be told from a write that never landed'
+                     % (name, seen['count'], expected, bound_seconds))
+    return None
 
 
 def wait_records_gone(loader, moment_ms, run_id, bound_seconds):
@@ -310,14 +344,36 @@ def read_partition_key(cluster, state):
     return state['key']
 
 
+def largest_bound(options, loader):
+    """The largest byte bound this volume can reach, or None when it is unknown."""
+    if isinstance(options.largest_max_bytes, int):
+        return options.largest_max_bytes
+    limits = (settings_answer(loader) or {}).get('limits') or {}
+    largest = limits.get('largestMaxBytes')
+    return largest if isinstance(largest, int) else None
+
+
 def byte_case(report, options, loader, cluster, store, volume, run_id, state):
-    """The byte bound drops the oldest day partitions first."""
+    """The byte bound drops the oldest day partitions first.
+
+    The case's own days are written and read back while the largest byte bound
+    this volume can reach is set, and only then is the 300 MiB bound applied.
+    Written the other way round (measured on vm-lifemodel), the parts the store
+    already held took the total past the new bound, and its background watcher
+    dropped the canary's day while the flood was still being written, so the
+    read-back found 0 of 200 records and the case could not be judged.
+    """
     byte_bound = options.byte_bound_mib * MIB
-    if not set_retention(report, loader, options.days_case, byte_bound, options.apply_bound):
-        report.not_valid('the store does not run the byte bound: the retention case is void')
+    largest = largest_bound(options, loader)
+    if largest is None:
+        report.not_valid('the largest byte bound is unknown: the retention case cannot be isolated')
         return False
-    if not check_bound_flags(report, options, cluster, options.days_case, byte_bound):
-        report.not_valid('the store\'s flags do not hold the byte bound: the retention case is void')
+    if not set_retention(report, loader, options.days_case, largest, options.apply_bound):
+        report.not_valid('the store does not take the largest bound: the retention case is void')
+        return False
+    if not check_bound_flags(report, options, cluster, options.days_case, largest):
+        report.not_valid('the store\'s flags do not hold the largest bound: the retention case '
+                         'is void')
         return False
     now = now_ms()
     canary_moment = now - options.canary_days_back * 86400 * 1000
@@ -346,8 +402,17 @@ def byte_case(report, options, loader, cluster, store, volume, run_id, state):
                            'the flood day %s is stored' % day_of(moment)) is None:
             return False
 
+    # Every record the case judges is in the store, and the day partitions are
+    # listed as they are before the bound can act; only now is the 300 MiB bound
+    # applied.
     before = volume.partitions()
     report.note('day partitions before the byte bound acts: %s' % ', '.join(before))
+    if not set_retention(report, loader, options.days_case, byte_bound, options.apply_bound):
+        report.not_valid('the store does not run the byte bound: the retention case is void')
+        return False
+    if not check_bound_flags(report, options, cluster, options.days_case, byte_bound):
+        report.not_valid('the store\'s flags do not hold the byte bound: the retention case is void')
+        return False
     gone = wait_records_gone(loader, canary_moment, run_id, options.retention_bound)
     report.check(gone, 'the oldest day partition is dropped first: the canary 10 days back is gone',
                  'day %s, within %d s' % (day_of(canary_moment), options.retention_bound))
@@ -371,11 +436,8 @@ def age_case(report, options, loader, cluster, store, volume, run_id, state):
     is written while the 14-day bound still accepts it, and only then is the age
     bound shortened to --age-days.
     """
-    largest = options.largest_max_bytes
+    largest = largest_bound(options, loader)
     if largest is None:
-        limits = (settings_answer(loader) or {}).get('limits') or {}
-        largest = limits.get('largestMaxBytes')
-    if not isinstance(largest, int):
         report.not_valid('the largest byte bound is unknown: the age case cannot be isolated')
         return False
     if not set_retention(report, loader, options.days_case, largest, options.apply_bound):

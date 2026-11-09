@@ -353,12 +353,13 @@ def options(**values):
         origin_host='boot-lifemodel.local', ca_file=None, kubectl='k3s kubectl',
         namespace='lifemodel-system', store='logs-store', mount='/var/lib/lifemodel-logs',
         pv_path='/var/lib/lifemodel-logs/data', deadline_seconds=3600,
+        canary_days_back=10, canary_records=200,
         stopped_bound=5, live_bound=5, ready_timeout=5, fill_timeout=5, refuse_bound=2,
         heartbeat_fresh=60, stop_label_key='lifemodel.dev/walk-fresh-stop',
         byte_bound_mib=300, today_mib=1, old_day_mib=1, old_days=2, days_case=14,
         age_days=1, age_old_days_back=3, largest_max_bytes=None, largest_extra_bytes=1,
         loader_namespace='lifemodel-system', loader_selector='app.kubernetes.io/name=loader',
-        apply_bound=5, flag_wait=5, flood_seconds=1, fill_bound=5, burst_mib=1,
+        apply_bound=5, retention_bound=5, flag_wait=5, flood_seconds=1, fill_bound=5, burst_mib=1,
         writer_interval_ms=50, quiet_seconds=0, suspend_seconds=1, scratch_days_back=20,
         recover_bound=5, settle_seconds=0, cronjob='logs-evictor', writer_rate=5,
         peak_bytes=0, index_poll=1, query_count=40, limit_ms=2500, page_limit=250,
@@ -648,7 +649,85 @@ def bound_canary_absent(walk, fixture):
     report = walk.Report()
     loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 0}]})
     walk.require_records(report, loader, 0, 'walk-bound-1', 200,
-                         'the canary 10 days back is stored before the flood')
+                         'the canary 10 days back is stored before the flood', 0)
+    return report
+
+
+@mode('bound-canary-late')
+def bound_canary_late(walk, fixture):
+    # The store flushes its in-memory buffer a few seconds after the insert, so a
+    # single read straight after the write can still count nothing.
+    report = walk.Report()
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 0},
+                                        {'state': 'ok', 'count': 200}]})
+    count = walk.require_records(report, loader, 0, 'walk-bound-1', 200,
+                                 'the canary 10 days back is stored before the flood', 5)
+    print('REQUIRED ' + json.dumps(count))
+    return report
+
+
+@mode('bound-byte-order')
+def bound_byte_order(walk, fixture):
+    """The byte case writes and reads back before the bound can act (VM round 3).
+
+    The store held about 258 MB of parts when the walk applied its 300 MiB bound,
+    so the first flood day took the total over the bound and the background
+    watcher dropped the canary's day before the walk read it back. The order the
+    case asks for is: the largest bound this volume can reach, the writes, their
+    read-back, and only then the 300 MiB bound.
+    """
+    report = walk.Report()
+    order = []
+    current = {'days': 14, 'maxBytes': BOUND_LIMITS['largestMaxBytes']}
+    loader = FakeLoader({
+        'settingsAnswers': [{'state': 'ok', 'applied': True, 'days': 14,
+                             'maxBytes': BOUND_LIMITS['largestMaxBytes'],
+                             'limits': BOUND_LIMITS}],
+        'putAnswers': [{'status': 200, 'body': {'state': 'ok', 'desiredRevision': '1-aaaaaa'}}],
+        'logAnswers': [
+            {'state': 'ok', 'count': 200},
+            {'state': 'ok', 'count': 1736},
+            {'state': 'ok', 'count': 1736},
+            {'state': 'ok', 'count': 1736},
+            {'state': 'ok', 'count': 0},
+            {'state': 'ok', 'count': 1736},
+        ],
+    })
+    store = FakeStore({})
+    canary_day = walk.day_of(walk.now_ms() - 10 * 86400 * 1000)
+    volume = FakeVolume({'partitions': [canary_day]})
+    put = loader.put_settings
+
+    def recorded_put(days, max_bytes, csrf, *args, **kwargs):
+        order.append(['bound', max_bytes])
+        current.update(days=days, maxBytes=max_bytes)
+        return put(days, max_bytes, csrf, *args, **kwargs)
+
+    insert = store.insert
+
+    def recorded_insert(lines, timeout=120):
+        order.append(['insert', len(lines)])
+        return insert(lines, timeout=timeout)
+
+    logs = loader.logs
+
+    def recorded_logs(params):
+        answer = logs(params)
+        if isinstance(answer, dict) and answer.get('count') == 0:
+            # The store dropped that day: the volume no longer lists it.
+            volume.days = []
+        return answer
+
+    loader.put_settings = recorded_put
+    store.insert = recorded_insert
+    loader.logs = recorded_logs
+    walk.read_store_flags = lambda *args, **kwargs: {
+        'retentionPeriod': '%dd' % current['days'],
+        'retention.maxDiskSpaceUsageBytes': str(current['maxBytes']),
+    }
+    walk.byte_case(report, options(), loader, FakeCluster({}), store, volume,
+                   'walk-bound-1', {'written_days': set()})
+    print('ORDER ' + json.dumps(order))
     return report
 
 

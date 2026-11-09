@@ -19,8 +19,10 @@ usage: logs-walk-store-forward-harness.py <mode> <support.py>
 """
 import importlib.util
 import json
+import os
 import socket
 import sys
+import tempfile
 import threading
 import time
 
@@ -54,14 +56,18 @@ STORE_ROUTES = {
 class FakeForward:
     """One forwarded endpoint: routes by path, refuses a target without a slash."""
 
-    def __init__(self, local_port, routes, requests_before_death):
+    def __init__(self, local_port, routes, requests_before_death, death='', log=None):
         self.local_port = local_port
         self.routes = routes
         self.requests_before_death = requests_before_death
+        self.death_text = death
+        self.log_lines = list(log or [])
+        self.death = None
         self.requests = 0
         self.targets = []
         self.stopped = False
         self.closed = False
+        self.kept_log = False
         self.listener = None
 
     def start(self):
@@ -132,13 +138,20 @@ class FakeForward:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self.stopped:
+                self.death = self.death_text or 'the process exited with code 1'
                 return False
             try:
                 with socket.create_connection(('127.0.0.1', self.local_port), timeout=2):
                     return True
             except OSError:
                 time.sleep(0.05)
+        self.death = 'nothing accepted 127.0.0.1:%d within %d s' % (self.local_port, timeout)
         return False
+
+    def log_tail(self, count=20):
+        # The one message kubectl wrote for this start, as the walk would read it
+        # from its own log file.
+        return self.log_lines[-count:]
 
     def stop(self):
         if self.stopped:
@@ -149,8 +162,9 @@ class FakeForward:
         except OSError:
             pass
 
-    def close(self):
+    def close(self, keep_log=False):
         self.closed = True
+        self.kept_log = keep_log
         self.stop()
 
 
@@ -163,23 +177,42 @@ class FakeForwardFactory:
 
     def __call__(self, kubectl, namespace, target, local_port):
         entry = self.script[min(len(self.forwards), len(self.script) - 1)]
-        forward = FakeForward(local_port, entry['routes'], entry['requests'])
+        forward = FakeForward(local_port, entry['routes'], entry['requests'],
+                              entry.get('death', ''), entry.get('log'))
         self.forwards.append(forward)
         return forward
 
     def report(self):
         return [{'port': forward.local_port, 'requests': forward.requests,
-                 'stopped': forward.stopped, 'closed': forward.closed}
+                 'stopped': forward.stopped, 'closed': forward.closed,
+                 'keptLog': forward.kept_log,
+                 'death': forward.death, 'log': forward.log_lines}
                 for forward in self.forwards]
+
+
+# kubectl's own words for a start that never came up (no secret).
+SANDBOX_LOG = ['error: unable to forward port because pod is not running. Current status=Pending']
+CONNECTION_LOG = ['E1109 12:00:00.000000 1 portforward.go:406] lost connection to pod']
+NEVER_LOG = ['error: lost connection to pod']
 
 
 MODES = {
     # The first forward dies after answering once; the second answers normally.
     'forward-replaced': [{'routes': {'/flags': flags_answer(7)}, 'requests': 1},
                          {'routes': {'/flags': flags_answer(14)}, 'requests': 1000}],
-    # Every forward is gone: the renewal itself fails.
+    # Every forward is gone: the renewal itself fails, and each start says why.
     'forward-never-replaced': [{'routes': {'/flags': flags_answer(7)}, 'requests': 1},
-                               {'routes': {'/flags': flags_answer(14)}, 'requests': 0}],
+                               {'routes': {}, 'requests': 0,
+                                'death': 'the process exited with code 1',
+                                'log': NEVER_LOG}],
+    # The store's pod is not serving yet: the first two starts never come up.
+    'forward-retried': [
+        {'routes': {}, 'requests': 0, 'death': 'the process exited with code 1',
+         'log': SANDBOX_LOG},
+        {'routes': {}, 'requests': 0,
+         'death': 'nothing accepted 127.0.0.1:41777 within 1 s', 'log': CONNECTION_LOG},
+        {'routes': {'/flags': flags_answer(14)}, 'requests': 1000},
+    ],
     # Every operation of the seam once, on a store that refuses a relative target.
     'store-paths': [{'routes': STORE_ROUTES, 'requests': 1000}],
 }
@@ -187,8 +220,11 @@ MODES = {
 
 def open_store(support, script):
     factory = FakeForwardFactory(script)
+    # The retries are a few milliseconds apart here; the walk's own default is
+    # three tries 15 s apart, which the defaults mode reports.
     tunnel = support.StoreForward('fake-kubectl', 'lifemodel-system', 'deploy/logs-store',
-                                  forward_factory=factory)
+                                  forward_factory=factory, start_attempts=3,
+                                  retry_interval=0.001)
     if not tunnel.open():
         print('FORWARD NOT OPEN')
         return None, None, factory
@@ -212,6 +248,69 @@ def read_flags_twice(support, mode):
         tunnel.close()
     print('READS ' + json.dumps(reads))
     print('FORWARDS ' + json.dumps(factory.report()))
+    return 0
+
+
+def forward_retried(support):
+    """The first two starts never come up; the third answers (transient failure)."""
+    store, tunnel, factory = open_store(support, MODES['forward-retried'])
+    if store is None:
+        print('OPEN false')
+        return 0
+    try:
+        first = store.flags().get('retentionPeriod')
+    finally:
+        store.close()
+        tunnel.close()
+    print('OPEN ' + json.dumps({'opened': True, 'flags': first}))
+    print('FORWARDS ' + json.dumps(factory.report()))
+    return 0
+
+
+def forward_death_detail(support):
+    """Every start fails: the detail names each death and kubectl's words."""
+    factory = FakeForwardFactory(MODES['forward-never-replaced'][1:])
+    tunnel = support.StoreForward('fake-kubectl', 'lifemodel-system', 'deploy/logs-store',
+                                  forward_factory=factory, start_attempts=3,
+                                  retry_interval=0.001)
+    opened = tunnel.open()
+    print('OPEN ' + json.dumps(opened))
+    print('DETAIL ' + json.dumps(tunnel.failure_detail()))
+    print('FORWARDS ' + json.dumps(factory.report()))
+    return 0
+
+
+def forward_defaults(support):
+    tunnel = support.StoreForward('fake-kubectl', 'lifemodel-system', 'deploy/logs-store')
+    print('DEFAULTS ' + json.dumps({'attempts': tunnel.start_attempts,
+                                    'interval': tunnel.retry_interval}))
+    return 0
+
+
+def portforward_death(support):
+    """A real start whose kubectl exits at once: death, its log, and the log kept."""
+    directory = tempfile.mkdtemp(prefix='logs-walk-kubectl-')
+    script = os.path.join(directory, 'kubectl-fails')
+    with open(script, 'w', encoding='utf8') as handle:
+        handle.write('#!/bin/sh\n'
+                     'echo "error: unable to forward port because pod is not running" >&2\n'
+                     'exit 1\n')
+    os.chmod(script, 0o755)
+    forward = support.PortForward(script, 'lifemodel-system', 'deploy/logs-store',
+                                 support.free_port())
+    forward.start()
+    ready = forward.wait_ready(5)
+    death = forward.death
+    lines = forward.log_tail()
+    path = str(forward.log_path)
+    forward.close(keep_log=True)
+    kept = os.path.exists(path)
+    forward.close()
+    gone = not os.path.exists(path)
+    if os.path.exists(path):
+        forward.close()
+    print('DEATH ' + json.dumps({'ready': ready, 'death': death, 'lines': lines,
+                                 'kept': kept, 'gone': gone}))
     return 0
 
 
@@ -250,6 +349,14 @@ def main(mode, support_path):
     support = load(support_path)
     if mode == 'store-paths':
         return store_paths(support)
+    if mode == 'forward-retried':
+        return forward_retried(support)
+    if mode == 'forward-death-detail':
+        return forward_death_detail(support)
+    if mode == 'forward-defaults':
+        return forward_defaults(support)
+    if mode == 'portforward-death':
+        return portforward_death(support)
     if mode in MODES:
         return read_flags_twice(support, mode)
     raise SystemExit('unknown mode: ' + mode)
