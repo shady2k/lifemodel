@@ -6,8 +6,9 @@ What it proves
 --------------
 1. Forty queries per filter — a time window, `module`, `level`,
    `conversation_id` and a text search — with the page's real form (the same
-   field filters the loader builds, 100-record pages, a window that steps back a
-   minute per query). The conversation id is the walk's own: the instance has no
+   field filters the loader builds, 100-record pages — every other query asking
+   for the page after the first — and a window that steps back a minute per
+   query). The conversation id is the walk's own: the instance has no
    conversation record unless one of the owner's has run through the store, so
    the walk writes `--filter-records` records of its own, with its run id, in the
    module `walk-latency-filter`, and waits until the API reads them back before
@@ -15,7 +16,18 @@ What it proves
    again with an ingest writing into the store, and fails when a p95 reaches
    2.5 s. The numbers are printed so a reviewer can see how far from the
    deadline they are, not only whether they passed.
-2. Paging through the API at 250 records per page over a window the walk wrote
+2. The status the first page asks for (`status=1`: the collector's two
+   heartbeats, the store's read-only gauge and the evictor's lines) is measured
+   the same way, 40 requests over the same stepped windows, and fails at the
+   same deadline. It never asserts that collection is live: a missing heartbeat
+   is a state the page must show (L14), not a latency failure.
+3. `--large-window-records N` plants N records in every window the rounds
+   measure, so a page over a window that large is measured without waiting for
+   a flood: the records are spread over the span the rounds step through, which
+   writes about `N * (query-count + window-minutes) / window-minutes` records —
+   2.5 million at the default counts and 1.5 million requested. The walk then
+   reads each measured window's count back and reports it.
+4. Paging through the API at 250 records per page over a window the walk wrote
    itself: 1,000 numbered records at one timestamp and 300 byte-identical lines
    at another. Every numbered record appears exactly once, nothing is repeated,
    the identical group's rows are all accounted for, every page reports a stable
@@ -44,18 +56,24 @@ Arguments (defaults are the test VM's)
   --page-limit N         records per page in the paging check (default 250)
   --paging-minutes-back N  how far back the paging window is written (default 3)
   --filter-records N     records the conversation fixture writes (default 60)
+  --large-window-records N
+                         records planted in every window the rounds measure
+                         (default 0: measure the instance as it is)
   --deadline-seconds N   the whole walk's bound (default 1800)
 
 What it changes and restores
 ----------------------------
-It writes records through the store's insert protocol — the conversation
-fixture before the measurement, the paging fixture, a short ingest while the
-second round of queries runs, and nothing else — and in
+It writes records through the store's insert protocol — the large window when
+`--large-window-records` is given, the conversation fixture before the
+measurement, the paging fixture, a short ingest while the second round of
+queries runs, and nothing else — and in
 the `finally` stops the ingest, closes the port-forward and removes its own day
 partitions if any are not today's (after the store detaches them; the partition
 key is read into a variable and never printed). Today's records stay: they are
 logs. The setting and the CronJob are untouched, and the RESTORE line says
-which days, if any, were removed.
+which days, if any, were removed. The large window's records are logs of a past
+span too: they stay, like today's, and the run that planted them reports how
+many.
 
 What it does not cover
 ----------------------
@@ -103,6 +121,12 @@ MODULE = 'walk-latency'
 FILTER_MODULE = 'walk-latency-filter'
 FILTER_LEVEL = 'warn'
 RECORD_PAYLOAD_BYTES = 384
+# The large window's lines are small: the cost is the window's size, not a line's.
+LARGE_RECORD_CHARS = 160
+# The page the filter rounds ask for, and the later page every other query asks for.
+PAGE_LIMIT = 100
+# How long planted records may take to become readable before the run is invalid.
+LARGE_WINDOW_ARRIVAL_SECONDS = 600
 IDENTITY = re.compile(r'walk-latency (\S+) seq=(\d+)')
 PARTITION_KEY_SECRET = 'lifemodel-logs-partition-key'
 
@@ -140,16 +164,22 @@ def measure(loader, params):
     return elapsed
 
 
-def run_filter_round(report, loader, label, filters, count, limit_ms, window_minutes=60):
+def run_filter_round(report, loader, label, filters, count, limit_ms, window_minutes=60,
+                     anchor_ms=None):
     """One round of queries per filter; p50/p95 printed, FAIL at the deadline."""
     ok = True
+    anchor = now_ms() if anchor_ms is None else anchor_ms
     for name, base in filters:
         samples = []
         for index in range(count):
-            to = now_ms() - index * 60_000
+            to = anchor - index * 60_000
             params = dict(base)
             params.update({'from': str(to - window_minutes * 60_000), 'to': str(to),
-                           'limit': '100'})
+                           'limit': str(PAGE_LIMIT)})
+            # Every other query is the page after the first: the boundary read
+            # of a later page covers more of the window than the first page's.
+            if index % 2 == 1:
+                params['offset'] = str(PAGE_LIMIT)
             elapsed = measure(loader, params)
             if elapsed is None:
                 samples = None
@@ -283,6 +313,122 @@ def latency_batch(count, moment_ms, run_id):
             'untrusted': False,
         })
     return lines
+
+
+def large_window_batch(run_id, sequences, start_ms, step_ms):
+    """A slice of the large window: one record per `step_ms` from `start_ms`."""
+    lines = []
+    for sequence in sequences:
+        lines.append({
+            'timestamp': stamp(start_ms + sequence * step_ms),
+            'message': '%s large %08d %s' % (run_id, sequence,
+                                             'x' * LARGE_RECORD_CHARS),
+            'module': MODULE,
+            'namespace': 'walk',
+            'pod': 'walk-latency-large',
+            'container': 'walk',
+            'stream': 'stdout',
+            'level': 'info',
+            'untrusted': False,
+        })
+    return lines
+
+
+def write_large_window(report, store, loader, options, state):
+    """Plant `--large-window-records` records in every window the rounds measure.
+
+    The rounds step back a minute per query, so their windows span
+    `query-count + window-minutes` minutes; spreading the records evenly over
+    that span puts the requested count in each of them, and the rounds then
+    measure windows inside that span instead of windows ending now (planting
+    takes minutes). The walk reads the newest and the oldest measured window's
+    count back before it measures, so a run whose planting did not arrive is
+    not reported as a latency run over a large window.
+    """
+    requested = options.large_window_records
+    if requested <= 0:
+        return True
+    span_minutes = options.query_count + options.window_minutes
+    total = int(requested * span_minutes / options.window_minutes)
+    step_ms = span_minutes * 60_000 / total
+    start_ms = now_ms() - span_minutes * 60_000
+    end_ms = start_ms + span_minutes * 60_000
+    print('NOTE planting %d records, about %d in every %d-minute window the walk measures'
+          % (total, int(total * options.window_minutes / span_minutes), options.window_minutes))
+    written = 0
+    batch = 5000
+    for start in range(0, total, batch):
+        sequences = range(start, min(start + batch, total))
+        status, _body = store.insert(large_window_batch(state['run_id'], sequences, start_ms,
+                                                        step_ms))
+        if status not in (200, 204):
+            report.not_valid('the large window was not written (insert answered %d): the page '
+                             'cannot be measured over it' % status)
+            return False
+        written += len(sequences)
+    tolerance = requested - max(1, requested // 100)
+
+    def windows():
+        newest_from = end_ms - options.window_minutes * 60_000
+        oldest_from = end_ms - span_minutes * 60_000
+        return (window_count(loader, newest_from, end_ms),
+                window_count(loader, oldest_from, oldest_from + options.window_minutes * 60_000))
+
+    def arrived():
+        newest, oldest = windows()
+        return (newest is not None and oldest is not None and
+                newest >= tolerance and oldest >= tolerance)
+
+    if not wait_until(time.monotonic() + LARGE_WINDOW_ARRIVAL_SECONDS, 5, arrived):
+        report.not_valid('the large window\'s records never all arrived: the page cannot be '
+                         'measured over it')
+        return False
+    newest, oldest = windows()
+    report.pass_('the large window is stored',
+                 '%d records written; the measured windows hold %s and %s records'
+                 % (written, newest, oldest))
+    state['large_anchor'] = end_ms
+    return True
+
+
+def window_count(loader, from_ms, to_ms):
+    """The API's count for one window, or None when it does not answer."""
+    answer = loader.logs({'from': str(from_ms), 'to': str(to_ms), 'limit': '1'})
+    if answer is None or answer.get('state') != 'ok':
+        return None
+    count = answer.get('count')
+    return count if isinstance(count, int) else None
+
+
+def run_status_round(report, loader, count, limit_ms, window_minutes, anchor_ms=None):
+    """The status the first page asks for: 40 requests, p95 printed, FAIL at the deadline."""
+    anchor = now_ms() if anchor_ms is None else anchor_ms
+    samples = []
+    for index in range(count):
+        to = anchor - index * 60_000
+        params = {'from': str(to - window_minutes * 60_000), 'to': str(to),
+                  'limit': '1', 'status': '1'}
+        started = time.monotonic()
+        answer = loader.logs(params)
+        elapsed = (time.monotonic() - started) * 1000.0
+        if answer is None or answer.get('state') != 'ok':
+            report.not_valid('the status did not answer: its latency cannot be measured '
+                             '(%s)' % ((answer or {}).get('reason', 'http_or_invalid')))
+            return False
+        status = answer.get('status')
+        if not isinstance(status, dict) or not isinstance(status.get('collection'), dict):
+            report.not_valid('the first page answered without a status')
+            return False
+        samples.append(elapsed)
+    stats = summarise(samples)
+    print('NOTE quiet round, status: p50 %.0f ms, p95 %.0f ms, max %.0f ms over %d requests'
+          % (stats['p50'], stats['p95'], stats['max'], stats['count']))
+    return report.check(
+        stats['p95'] < limit_ms,
+        'the status stays inside the page\'s deadline',
+        'p50 %.0f ms, p95 %.0f ms, max %.0f ms over %d requests'
+        % (stats['p50'], stats['p95'], stats['max'], stats['count']),
+    )
 
 
 def start_ingest(store, run_id, mib_per_s):
@@ -422,18 +568,23 @@ def check_paging(report, loader, params, limit, numbered, identical):
 
 
 def run(report, options, loader, store, state):
+    if not write_large_window(report, store, loader, options, state):
+        return False
     conversation = write_filter_fixture(report, store, loader, state, options.filter_records)
     if conversation is None:
         return False
     filters = filters_from(report, loader, conversation)
     if filters is None:
         return False
+    anchor = state.get('large_anchor')
     run_filter_round(report, loader, 'quiet', filters, options.query_count, options.limit_ms,
-                     options.window_minutes)
+                     options.window_minutes, anchor)
+    run_status_round(report, loader, options.query_count, options.limit_ms,
+                     options.window_minutes, anchor)
     stop, thread = start_ingest(store, state['run_id'], options.ingest_mib_per_s)
     try:
         run_filter_round(report, loader, 'with ingest running', filters, options.query_count,
-                         options.limit_ms, options.window_minutes)
+                         options.limit_ms, options.window_minutes, anchor)
     finally:
         stop.set()
         thread.join(timeout=30)
@@ -500,6 +651,7 @@ def main(argv=None):
     parser.add_argument('--identical-records', type=int, default=300)
     parser.add_argument('--page-limit', type=int, default=250)
     parser.add_argument('--filter-records', type=int, default=60)
+    parser.add_argument('--large-window-records', type=int, default=0)
     parser.add_argument('--paging-minutes-back', type=int, default=3)
     options = parser.parse_args(argv)
 

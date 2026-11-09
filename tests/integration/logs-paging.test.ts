@@ -8,9 +8,17 @@
  * recorded answers; the same script runs this walk against the live pinned
  * store on a host that has Docker, which is where the store really answers.
  *
+ * The page is read in two steps when the window is longer than the page
+ * reaches: a `_time`-only query finds the record at the page's last position,
+ * and the ordered query reads down to that record's own `_time`. The recorded
+ * answers hold both queries of every page, so a reader can see the form the
+ * store answered and the page it returned.
+ *
  * The late-insert case is two recordings of one store: the quiet window, read
  * before one record arrived, and the same window after it arrived.
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createLogsStore, type LogsRecord } from '../../loader/src/logs-store-adapter.js';
 import {
@@ -25,6 +33,7 @@ const FROM = Date.parse('2026-11-07T09:00:00.000Z');
 const TO = Date.parse('2026-11-07T11:00:00.000Z');
 const RANGE = '_time:[2026-11-07T09:00:00.000Z, 2026-11-07T11:00:00.000Z]';
 const ORDER = '| sort by (_time desc, _msg desc, pod desc)';
+const BOUNDARY_ORDER = '| sort by (_time desc) |';
 const COUNT_QUERY = `${RANGE} | stats count()`;
 const FILTER: LogsFilter = { from: FROM, to: TO };
 
@@ -47,6 +56,14 @@ async function recorded(name: string): Promise<{ fixture: LogsStoreFixture; logs
   const fixture = await startLogsStoreFixture(name);
   fixtures.push(fixture);
   return { fixture, logs: createLogsQuery({ store: createLogsStore({ url: fixture.url }) }) };
+}
+
+/** The store's own answer to each query of one fixture file, by its text. */
+function answersOf(name: string): Map<string, string> {
+  const file = JSON.parse(
+    readFileSync(fileURLToPath(new URL(`../fixtures/${name}`, import.meta.url)), 'utf8')
+  ) as { exchanges: { request: { query: string }; body: string }[] };
+  return new Map(file.exchanges.map(({ request, body }) => [request.query, body]));
 }
 
 /** A record's identity: what a reader can tell one stored line from another by. */
@@ -89,15 +106,23 @@ function recordsOf(pages: readonly LogsPage[]): LogsRecord[] {
   return pages.flatMap((page) => [...page.records]);
 }
 
-/** The paged query each page's records were read with. */
-function pageQueries(fixture: LogsStoreFixture): { offset: number; limit: number }[] {
-  const pages: { offset: number; limit: number }[] = [];
-  for (const { query } of fixture.requests) {
-    const match = /\| offset (\d+) \| limit (\d+)$/.exec(query);
-    if (match === null) continue;
-    pages.push({ offset: Number(match[1]), limit: Number(match[2]) });
-  }
-  return pages;
+/** The offset a query's page bound names, or null when it names none. */
+function offsetOf(query: string): number | null {
+  const match = /\| offset (\d+) \| limit (\d+)$/u.exec(query);
+  return match === null ? null : Number(match[1]);
+}
+
+/** The `_time` a boundary answer holds: the one record the query read. */
+function boundaryTime(answer: string | undefined): string | null {
+  const line = (answer ?? '').split('\n').find((candidate) => candidate.trim() !== '');
+  if (line === undefined) return null;
+  const time = (JSON.parse(line) as { _time?: unknown })._time;
+  return typeof time === 'string' ? time : null;
+}
+
+/** The lower time bound a query filters on. */
+function rangeStart(query: string): string | null {
+  return /^_time:\[([^,]+), /u.exec(query)?.[1] ?? null;
 }
 
 describe('paging a quiet log window', () => {
@@ -125,26 +150,74 @@ describe('paging a quiet log window', () => {
     // window, so no record is repeated and none is skipped.
     expect(counted(recordsOf(pages))).toEqual(expectedWindow());
 
-    // One window for every page: its end was fixed at the first page.
-    const pagesRead = pageQueries(fixture);
-    expect(pagesRead).toEqual(
-      Array.from({ length: pages.length }, (_, index) => ({
-        offset: index * PAGE_SIZE,
-        limit: PAGE_SIZE,
-      }))
-    );
-    for (const { query } of fixture.requests) {
-      expect(query.startsWith(RANGE), query).toBe(true);
-      if (!query.includes(ORDER)) expect(query).toBe(COUNT_QUERY);
+    // One window for every page: its end was fixed at the first page, and its
+    // start is the first page's or the `_time` a boundary query answered with.
+    const queries = fixture.requests.map(({ query }) => query);
+    for (const query of queries) {
+      expect(query.startsWith('_time:[')).toBe(true);
+      expect(query).toContain(', 2026-11-07T11:00:00.000Z]');
     }
-    // Every page re-read the window's count with one query.
-    expect(fixture.requests.filter(({ query }) => query === COUNT_QUERY)).toHaveLength(
-      pages.length
+    const reads = queries.filter((query) => query.includes(`${ORDER} | offset`));
+    const boundary = queries.filter((query) => query.includes(BOUNDARY_ORDER));
+    expect(reads.map(offsetOf)).toEqual(pages.map((_page, index) => index * PAGE_SIZE));
+    // Every page: the window's count, then its boundary, then its records. The
+    // last page holds fewer records than the page reaches, so it has none.
+    expect(queries).toEqual(
+      pages.flatMap((_page, index) => [
+        COUNT_QUERY,
+        ...(index < pages.length - 1 ? [boundary[index] ?? ''] : []),
+        reads[index] ?? '',
+      ])
     );
   });
 
-  it('returns the same bytes for the same page read twice', async () => {
+  it('finds each page by the record at its last position, then reads down to it', async () => {
     const { fixture, logs } = await recorded('logs-paging-quiet.json');
+    const answers = answersOf('logs-paging-quiet.json');
+    const pages: LogsPage[] = [];
+    let expected: number | null = null;
+    for (let offset = 0; ; offset += PAGE_SIZE) {
+      const page = await logs.page({ filter: FILTER, offset, limit: PAGE_SIZE, expected });
+      if (page.state !== 'ok') throw new Error(page.reason);
+      pages.push(page);
+      expected = page.count;
+      if (page.records.length < PAGE_SIZE) break;
+    }
+
+    const queries = fixture.requests.map(({ query }) => query);
+    const reads = queries.filter((query) => query.includes(`${ORDER} | offset`));
+    const boundary = queries.filter((query) => query.includes(BOUNDARY_ORDER));
+    // Every page but the last reaches past the window, so every page but the
+    // last is found by its boundary; the last reads the window as it is.
+    expect(boundary).toHaveLength(pages.length - 1);
+    expect(boundary.map(offsetOf)).toEqual(
+      pages.slice(0, -1).map((_page, index) => (index + 1) * PAGE_SIZE - 1)
+    );
+    expect(boundary.every((query) => query.endsWith('| limit 1'))).toBe(true);
+
+    for (const [index, read] of reads.entries()) {
+      const page = pages[index];
+      if (page === undefined) throw new Error('the fixture has no such page');
+      if (index === reads.length - 1) {
+        // The last page holds fewer records than the page reaches.
+        expect(rangeStart(read)).toBe('2026-11-07T09:00:00.000Z');
+        continue;
+      }
+      const found = boundary[index];
+      if (found === undefined) throw new Error('the fixture has no boundary for this page');
+      expect(answers.get(found)).toBeDefined();
+      expect(rangeStart(read)).toBe(boundaryTime(answers.get(found)));
+      // Every record of the page is at or after the boundary's time.
+      for (const record of page.records) {
+        expect(Date.parse(record.time)).toBeGreaterThanOrEqual(
+          Date.parse(boundaryTime(answers.get(found)) ?? '')
+        );
+      }
+    }
+  });
+
+  it('returns the same bytes for the same page read twice', async () => {
+    const { logs } = await recorded('logs-paging-quiet.json');
     const first = await logs.page({
       filter: FILTER,
       offset: 500,
