@@ -100,6 +100,10 @@ class FakeStore:
         self.partition_list_answers = fixture.get('partitionListAnswers', [{'status': 200, 'body': 'ok'}])
         self.inserts = []
         self.queries = []
+        # A stand-in for the volume: each insert spends `drain` bytes on it, so a
+        # fake flood can drive a fake filesystem past the evictor's threshold.
+        self.volume = None
+        self.drain = 0
         self.detaches = []
         self.partition_lists = 0
 
@@ -114,6 +118,8 @@ class FakeStore:
     def insert(self, lines, timeout=120):
         index = min(len(self.inserts), len(self.insert_statuses) - 1)
         self.inserts.append(lines)
+        if self.volume is not None and self.drain:
+            self.volume.avail = max(self.volume.floor, self.volume.avail - self.drain)
         return self.insert_statuses[index], b''
 
     def query(self, logsql, timeout=60):
@@ -244,7 +250,9 @@ def options(**values):
         byte_bound_mib=300, today_mib=1, old_day_mib=1, old_days=2, days_case=14,
         age_days=1, age_old_days_back=3, largest_max_bytes=None, largest_extra_bytes=1,
         loader_namespace='lifemodel-system', loader_selector='app.kubernetes.io/name=loader',
-        apply_bound=5, flag_wait=5, flood_seconds=1, fill_bound=5, writer_rate=5,
+        apply_bound=5, flag_wait=5, flood_seconds=1, fill_bound=5, burst_mib=1,
+        writer_interval_ms=50, quiet_seconds=0, suspend_seconds=1, scratch_days_back=20,
+        recover_bound=5, settle_seconds=0, cronjob='logs-evictor', writer_rate=5,
         peak_bytes=0, index_poll=1, query_count=40, limit_ms=2500, page_limit=250,
         same_time_records=4, identical_records=2, window_minutes=60,
         ingest_mib_per_s=1, paging_minutes_back=3, keep_mib=0,
@@ -473,6 +481,88 @@ def bound_count(walk, fixture):
     report = walk.Report()
     loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 200}]})
     print('COUNT %d' % walk.records_in_window(loader, 0, 'walk-bound-1'))
+    return report
+
+
+@mode('evict-arith')
+def evict_arith(walk, fixture):
+    report = walk.Report()
+    samples = [(1000, 200), (2000, 429), (3000, 200), (4000, 429), (5000, 200)]
+    windows = walk.refusal_windows(samples)
+    gap = walk.longest_gap([(1, 4000), (2, 5000), (3, 8000), (4, 9000)])
+    print('ARITH ' + json.dumps({
+        'windows': [{'seconds': window['seconds']} for window in windows],
+        'gapSeconds': gap['seconds'],
+        'longestWindow': max(window['seconds'] for window in windows),
+    }))
+    return report
+
+
+@mode('evict-writer')
+def evict_writer(walk, fixture):
+    report = walk.Report()
+    written = [(1, 1000), (2, 2000), (3, 3000), (4, 4000), (5, 4500)]
+    windows = walk.writer_windows(written, {1, 2, 3}, [500, 3500, 5000])
+    print('WRITER ' + json.dumps({
+        'windows': windows,
+        'lossInDropWindowsOnly': walk.loss_in_drop_windows_only(windows),
+    }))
+    return report
+
+
+@mode('evict-fill-never')
+def evict_fill_never(walk, fixture):
+    report = walk.Report()
+    volume = FakeVolume({'totalBytes': 3 * 1024**3, 'availBytes': 2 * 1024**3,
+                         'availStepBytes': 0})
+    walk.flood(report, options(fill_bound=1, flood_seconds=1, poll_seconds=1), volume,
+               FakeStore({}), FakeLoader({'logAnswers': [{'state': 'ok', 'records': [],
+                                                          'count': 0}]}), 'walk-evict-1')
+    return report
+
+
+@mode('evict-fill')
+def evict_fill(walk, fixture):
+    report = walk.Report()
+    volume = FakeVolume({'totalBytes': 3 * 1024**3, 'availBytes': 2 * 1024**3,
+                         'availStepBytes': 0})
+    store = FakeStore({})
+    store.volume = volume
+    store.drain = 100 * 1024**2
+    walk.flood(report, options(fill_bound=5, flood_seconds=1, poll_seconds=1), volume,
+               store, FakeLoader({'logAnswers': [{'state': 'ok', 'records': [],
+                                                  'count': 0}]}), 'walk-evict-1')
+    return report
+
+
+@mode('evict-partition')
+def evict_partition(walk, fixture):
+    report = walk.Report()
+    store = FakeStore({'partitionListAnswers': [{
+        'status': 400,
+        'body': 'Expected to receive non-empty authKey when -partitionManageAuthKey is set',
+    }]})
+    walk.check_partition_refusal(report, store, 'scripted-key')
+    return report
+
+
+@mode('evict-partition-open')
+def evict_partition_open(walk, fixture):
+    report = walk.Report()
+    store = FakeStore({'partitionListAnswers': [{'status': 200, 'body': '[]'}]})
+    walk.check_partition_refusal(report, store, 'scripted-key')
+    return report
+
+
+@mode('evict-stale')
+def evict_stale(walk, fixture):
+    report = walk.Report()
+    now = 1_000_000_000
+    print('STALE ' + json.dumps({
+        'fresh': walk.evictor_stale(now - 30_000, now),
+        'stale': walk.evictor_stale(now - 180_000, now),
+        'never': walk.evictor_stale(None, now),
+    }))
     return report
 
 

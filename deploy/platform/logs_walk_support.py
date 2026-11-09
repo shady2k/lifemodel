@@ -507,6 +507,10 @@ class Cluster:
         body = self.json(args + ['-o', 'json'])
         return (body or {}).get('items', [])
 
+    def apply(self, manifest, namespace=None):
+        """Apply one object from a JSON manifest, the way the walk creates a pod."""
+        return self.run(['apply', '-f', '-'], timeout=120, stdin=json.dumps(manifest))
+
     def is_ready(self, namespace, name):
         pod = self.pod(namespace, name)
         conditions = ((pod or {}).get('status') or {}).get('conditions') or []
