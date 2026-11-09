@@ -116,6 +116,7 @@ from logs_walk_support import (  # noqa: E402
     Cluster,
     Loader,
     Report,
+    Volume,
     WalkError,
     common_arguments,
     connect_store,
