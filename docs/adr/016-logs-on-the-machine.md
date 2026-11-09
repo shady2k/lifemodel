@@ -332,7 +332,7 @@ speaks the insert protocol and the collector never speaks the query protocol.
   else. No route passes a caller's query string through: the page's fields become
   field filters with quoted, escaped values, so the loader's login is the only
   authority and LogsQL is never an interface to the owner's browser.
-- **The query form and its cursor protocol (F13, N4).** Every page is
+- **The query form and its cursor protocol (F13, N4).** A page's order is
   `_time:[start, end] <filters> | sort by (_time desc, _msg desc, pod desc) | offset N | limit <page>`,
   with `end` set at the first page, and `pod` as a further key so that two
   **different** records sharing `_time` and `_msg` still have an order (measured:
@@ -350,6 +350,40 @@ speaks the insert protocol and the collector never speaks the query protocol.
   from the first page; the page never claims every record exactly once. Records
   that are **byte-identical** (same time, message, pod, stream) remain
   indistinguishable, which the page's help states.
+- **Why the read is in two steps (L15).** Ordering by `_msg` and `pod` reads
+  and compares every message the window holds. Measured through a port-forward
+  against the store the eviction walk's flood had filled with 1,680,000 records
+  in the last hour (2026-11-09): the order above took **4.94 s** for the first
+  page, **5.98 s** with `level=info`, **5.27 s** at offset 200, and **0.02 s**
+  over five minutes, while the same hour's `_time`-only sort took **0.16 s** and
+  its `stats count()` **0.025 s**. So the tie-break costs an amount that grows
+  with the window, and the deadline (p95 under 2.5 s) passes at about 850,000
+  records in an hour — a flood, exactly when someone opens the page. The records
+  are therefore read in two steps, with the order and the cursor contract above
+  unchanged:
+  1. the **boundary**:
+     `_time:[start, end] <filters> | sort by (_time desc) | offset N+limit-1 | limit 1`
+     — the cheap shape — names the `_time` T of the record the order puts in
+     the page's last position;
+  2. the **page**:
+     `_time:[T, end] <filters> | sort by (_time desc, _msg desc, pod desc) | offset N | limit <page>`
+     reads only the records at or after T.
+
+  Every record the order puts in positions N..N+limit−1 has a time at or after
+  T, and every record that ties at T is inside the range, so no tie is split and
+  the page is the same bytes the single full sort returns, while the read shrinks
+  to roughly the page's own reach instead of the window. The window's count is
+  read first, because it decides this: fewer than N+limit records and the window
+  is read as it is in one query. That last page — and a page whose offset is
+  past the window — is the one read the boundary cannot shorten, because its
+  last position is the window's oldest record, which bounds nothing below it;
+  it pays the single sort's cost, so paging to the very end of a flood window is
+  as expensive as the old form was. `tests/unit/logs-page-boundary.test.ts`
+  holds the equality of the two reads on a fixture whose boundary falls inside a
+  group of ties, on a later page and on a window shorter than the page reaches;
+  `tests/integration/logs-paging.test.ts` holds the pinned store's recorded
+  answers for every page of the 5,000-record window; `WALK-LOGS-LATENCY
+  --large-window-records` plants a window that large on the VM, with no flood.
 - **The adapter's internal contract, and where the vendor stays (N6, N9).** The
   adapter is split in two files: `loader/src/logs-query.ts` builds the filters and
   the cursor, and `loader/src/logs-store-adapter.ts` is the only place that knows
@@ -366,14 +400,21 @@ speaks the insert protocol and the collector never speaks the query protocol.
   zero rows means the store really holds no matching line.
 - **Freshness (F9).** The collector emits a heartbeat record through the same
   pipeline every 30 s (`module="collector-heartbeat"`). The adapter reads the
-  newest one's `_time` with one query and the page shows, above the results,
+  newest one's `_time` with one query — one module's records, ordered by `_time`
+  alone, so the cheap shape above rather than the tie-break's — and the page
+  shows, above the results,
   `collection stopped N minutes ago; results may be incomplete` when that age
   passes 90 s. When the store's `vl_storage_is_read_only` is 1 the page adds
   `the store is refusing writes (read-only)`, so a reader can tell a stopped
   collector from a refusing store. *Not measured end to end:* the Docker run
   stored the heartbeats (4 in 8 s, 8 in 16 s at a 2 s interval) and the page's
   query found them, but on the cluster two runs stored 0 in every phase for a
-  cause not found, so the signal's wiring is check L14.
+  cause not found, so the signal's wiring is check L14. The status is read only
+  after the page's records answered and rides on that answer (one status read
+  per window), so the walk that measures the page measures the status beside it
+  (L15). The 2026-11-09 flood's `collection unknown` arrived with an answer,
+  which makes it a heartbeat query that did not answer or a store holding no
+  heartbeat — L14's signal — rather than a page that timed out.
 - **The page** is `web/loader/src/Logs.tsx` behind the loader's login on
   `boot-<name>.local/logs`, reached from the settings page. It reuses the kit
   components and the i18n pattern: a filter row (time range, module, level,
@@ -1287,7 +1328,7 @@ that runs each is named. No check may pass on a fixture that cannot fail.
 | L12 | No listed file grows | `npm run check:file-sizes`: `loader/src/http.ts` ≤ 1,512 lines and `web/loader/src/App.tsx` ≤ 1,310, every new file under 800 |
 | L13 | The collector's namespace is the only `privileged` one, it holds exactly the collector, and its mounts are exactly the two named paths with their modes (F15) | `tests/unit/platform-pod-security.test.ts`: every namespace manifest in `deploy/platform` is `baseline` or `restricted` except `lifemodel-logs`, which is `privileged` and holds exactly the DaemonSet; the collector container has no `privileged`, no added capability, `readOnlyRootFilesystem`, `runAsUser: 0`, all capabilities dropped, and exactly two `hostPath` volumes — `/var/log/pods` read-only and `/var/lib/lifemodel-logs-collector` read-write. A persistent checkpoint is required, so a check that would remove it fails |
 | L14 | The page never shows a healthy page for a stopped collector, and says when it does not know (F9) | `WALK-LOGS-FRESH`: stop the collector with the store healthy, then make the store read-only. Assert: within 90 s the page shows `collection stopped N minutes ago; results may be incomplete` above the results, and names `read-only` in the store case; restarting the collector returns the age below the threshold within one heartbeat period. Also assert the state **before any heartbeat has ever been stored**: the page shows `collection status unknown` rather than a healthy or an empty answer; and that a stalled pod-log collection with a healthy heartbeat is visible — the heartbeat is per collector, so the check kills the file source's reading (an unreadable `/var/log/pods` mount for one run) and asserts the page still says the results may be incomplete. **Not measured end to end**: Docker stored the heartbeats and the page's query found them; on the cluster two runs stored 0 in every phase, for a cause not found. This check runs in the first stage that deploys the collector |
-| L15 | Paging is total and latency is inside the page's deadline (F13) | `tests/integration/logs-paging.test.ts` and `WALK-LOGS-LATENCY`: a fixture with 5,000 records at one timestamp and 300 byte-identical lines at another, paged in 250-record pages through the adapter, quiet and with ingest running; assert every record exactly once, no duplicate, and the same page twice returns the same bytes; then 40 queries per filter with the real form at the store's bound, p95 under 2.5 s (measured: 81–176 ms at 5.38 GB) |
+| L15 | Paging is total and latency is inside the page's deadline (F13) | `tests/unit/logs-page-boundary.test.ts`, `tests/integration/logs-paging.test.ts` and `WALK-LOGS-LATENCY`. The equality the two-step read rests on: `logs-page-boundary.test.ts` asks the loader for pages of a window whose boundary falls inside a group of ties — first page, later page, a window shorter than the page reaches, an offset past the end — and asserts each page is the records one full three-key sort returns, with the boundary query's shape and order (`sort by (_time desc) | offset N+limit-1 | limit 1`), and that a small window is still one ordered read. `logs-paging.test.ts` pages the recorded pinned store (5,000 records at one timestamp, 300 byte-identical lines at another) in 250-record pages through the adapter, quiet and after one late record; assert every record exactly once, no duplicate, each page read at its own offset after its boundary, and the same page twice returns the same bytes. `WALK-LOGS-LATENCY` then measures 40 queries per filter — time, `module`, `level`, `conversation_id`, text, every other one the page after the first — and 40 status requests (the first page's `status=1`) with the real form, p95 under 2.5 s; `--large-window-records N` plants N records in every measured window so this can be measured at 1.5 million records without a flood (measured before the two-step read: 4.94 s for the ordered query over 1.68 million records in an hour against 0.16 s for the `_time`-only sort and 0.025 s for the count; measured on the prototype at 5.38 GB, the filters were 62–176 ms p95). The VM figure at 1.5 million records is the owner's to take with the walk |
 | L16 | New logs displace the oldest ones on a deployed build: with the volume holding only today's and yesterday's partitions, the evictor frees space with nobody acting, and below its threshold it removes nothing (the owner's direction, 2026-11-07; F8, N1) | `WALK-LOGS-EVICT`, on a deployed build with the volume at its install size (3 GiB on the owner's machine; an option on the test VM): fill with today's and yesterday's records until free space passes the evictor's threshold, then keep writing at full speed for five minutes. Assert: the store does not restart (`restartCount` unchanged) and its log has no panic; each drop is one `module=logs-evictor` line naming the day and the bytes freed, and a notice with the day and time appears on the page; the oldest remaining row moves forward at each drop and what the collector accepted is still found (numbered and counted per window), except the rows acknowledged inside a detach-to-remove window, which are counted and reported; writes keep being accepted and any 429 window is shorter than two eviction intervals; and in a quiet period below the threshold two consecutive runs remove nothing and log nothing. The **real collector's** loss during a refusal is asserted here, not on the stub: stop the evictor for two minutes, let the store refuse, count the lines written in the window against those found after it. Three more assertions belong to this walk: the job's pod mounts the volume **while the store's pod has it mounted** (same node) and its `rm` succeeds as uid 1000:1000 on files the store created (the ownership arrangement of §5, checked with `ls -ln` on the volume); during an incompressible flood the page shows `the store is refusing writes (read-only)` **without** `the log evictor is failing or has not run`; and after stopping the evictor for more than two minutes the page adds that line. Measured here on loop-mounted images at 3 GiB with the store at its 1 GiB limit: three drops in 300 s, 23 845 600 rows accepted and 1 886 400 retained, no refused post, no restart, 793 MiB peak, 16 200 rows lost in the three detach windows |
 
 ## The principles this serves

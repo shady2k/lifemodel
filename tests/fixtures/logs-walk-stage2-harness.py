@@ -44,6 +44,7 @@ class FakeLoader:
         self.settings_answers = fixture.get('settingsAnswers', [])
         self.settings_calls = 0
         self.logs_calls = 0
+        self.log_params = []
         self.delay_ms = fixture.get('delayMs', 0)
         self.request_answers = fixture.get('requestAnswers', [])
         self.request_calls = []
@@ -65,6 +66,7 @@ class FakeLoader:
         if self.delay_ms:
             import time as _time
             _time.sleep(self.delay_ms / 1000.0)
+        self.log_params.append(dict(params))
         index = min(self.logs_calls, len(self.log_answers) - 1) if self.log_answers else 0
         self.logs_calls += 1
         if not self.log_answers:
@@ -933,6 +935,88 @@ def latency_paging_absent(walk, fixture):
         'requestAnswers': [{'status': 200, 'body': 'SAME-PAGE'}] * 2,
     })
     walk.check_paging(report, loader, {'from': '0', 'to': '1', 'text': 'run-1'}, 4, 4, 2)
+    return report
+
+
+def status_page_answer(count=0, state='live'):
+    return {'state': 'ok', 'count': count, 'records': [], 'offset': 0, 'limit': 1,
+            'incomplete': False,
+            'status': {'collection': {'state': state, 'stoppedForMs': None},
+                       'storeReadOnly': False,
+                       'evictor': {'lastSuccessAt': None, 'stale': False},
+                       'evictions': []}}
+
+
+@mode('latency-status-ok')
+def latency_status_ok(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({'logAnswers': [status_page_answer(10, state='unknown')]})
+    walk.run_status_round(report, loader, 3, 2500, 60)
+    print('STATUS ' + json.dumps({'params': loader.log_params}))
+    return report
+
+
+@mode('latency-status-fail')
+def latency_status_fail(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({'logAnswers': [status_page_answer(10)], 'delayMs': 5})
+    walk.run_status_round(report, loader, 3, 1, 60)
+    return report
+
+
+@mode('latency-status-absent')
+def latency_status_absent(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 10, 'records': []}]})
+    walk.run_status_round(report, loader, 3, 2500, 60)
+    return report
+
+
+@mode('latency-large-window')
+def latency_large_window(walk, fixture):
+    report = walk.Report()
+    walk.LARGE_WINDOW_ARRIVAL_SECONDS = 0.01
+    store = FakeStore({})
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 1000, 'records': []}]})
+    state = {'run_id': 'walk-latency-1'}
+    planted = walk.write_large_window(
+        report, store, loader,
+        options(large_window_records=1000, query_count=2, window_minutes=60), state)
+    lines = [line for batch in store.inserts for line in batch]
+    print('LARGE ' + json.dumps({
+        'planted': bool(planted),
+        'written': len(lines),
+        'modules': sorted({line.get('module') for line in lines}),
+        'firstTime': lines[0].get('timestamp') if lines else None,
+        'lastTime': lines[-1].get('timestamp') if lines else None,
+        'anchor': state.get('large_anchor'),
+    }))
+    return report
+
+
+@mode('latency-large-window-absent')
+def latency_large_window_absent(walk, fixture):
+    report = walk.Report()
+    walk.LARGE_WINDOW_ARRIVAL_SECONDS = 0.01
+    store = FakeStore({})
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 3, 'records': []}]})
+    state = {'run_id': 'walk-latency-1'}
+    walk.write_large_window(
+        report, store, loader,
+        options(large_window_records=1000, query_count=2, window_minutes=60), state)
+    return report
+
+
+@mode('latency-large-window-insert-refused')
+def latency_large_window_insert_refused(walk, fixture):
+    report = walk.Report()
+    walk.LARGE_WINDOW_ARRIVAL_SECONDS = 0.01
+    store = FakeStore({'insertStatuses': [429]})
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 1000, 'records': []}]})
+    state = {'run_id': 'walk-latency-1'}
+    walk.write_large_window(
+        report, store, loader,
+        options(large_window_records=10, query_count=2, window_minutes=60), state)
     return report
 
 

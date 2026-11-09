@@ -158,9 +158,14 @@ export function parseLogsFilter(params: URLSearchParams): LogsFilterAnswer {
   };
 }
 
-/** The window and the field filters, without any ordering or page bound. */
-function filterClause(filter: LogsFilter): string {
-  const range = `_time:[${new Date(filter.from).toISOString()}, ${new Date(filter.to).toISOString()}]`;
+/**
+ * The window and the field filters, without any ordering or page bound. A
+ * caller that has read a boundary record's own `_time` passes it, so the store
+ * filters on the time string it printed instead of one the loader reformatted.
+ */
+function filterClause(filter: LogsFilter, earliestTime: string | null = null): string {
+  const from = earliestTime ?? new Date(filter.from).toISOString();
+  const range = `_time:[${from}, ${new Date(filter.to).toISOString()}]`;
   const filters: string[] = [];
   const module = filter.module ?? '';
   if (module !== '') filters.push(`module:=${quoteLogsValue(module)}`);
@@ -174,14 +179,36 @@ function filterClause(filter: LogsFilter): string {
 }
 
 /**
- * One page of the window, ordered by time, message and pod: the pod key keeps
- * two different records that share a time and a message in one order.
+ * The record at the page's last position, by time alone: the page's boundary.
+ *
+ * The three-key sort reads and compares every message in the window to order
+ * it (measured: 4.94 s over 1.68 million records, against 0.16 s for a
+ * `_time`-only sort). This query orders by time, which the store keeps in
+ * blocks, so it stays cheap however large the window is, and reads one record.
  */
-export function buildRecordsQuery(
+export function buildBoundaryQuery(
   filter: LogsFilter,
   page: LogsPageBound = { offset: 0, limit: LOGS_PAGE_SIZE }
 ): string {
-  return `${filterClause(filter)} | sort by (_time desc, _msg desc, pod desc) | offset ${String(page.offset)} | limit ${String(page.limit)}`;
+  const last = page.offset + page.limit - 1;
+  return `${filterClause(filter)} | sort by (_time desc) | offset ${String(last)} | limit 1`;
+}
+
+/**
+ * One page of the window, ordered by time, message and pod: the pod key keeps
+ * two different records that share a time and a message in one order.
+ *
+ * `earliestTime` is the `_time` the boundary query answered with. Every record
+ * the full order puts in the page's positions has that time or a later one, so
+ * reading down to it returns the same page from a much smaller read; a record
+ * that ties at the boundary time is inside the range, so no tie is split.
+ */
+export function buildRecordsQuery(
+  filter: LogsFilter,
+  page: LogsPageBound = { offset: 0, limit: LOGS_PAGE_SIZE },
+  earliestTime: string | null = null
+): string {
+  return `${filterClause(filter, earliestTime)} | sort by (_time desc, _msg desc, pod desc) | offset ${String(page.offset)} | limit ${String(page.limit)}`;
 }
 
 /** The window's record count: what tells a later page that records arrived. */
@@ -214,25 +241,41 @@ export function parseLogsPageQuery(params: URLSearchParams): LogsPageQueryAnswer
 export function createLogsQuery({ store }: { readonly store: LogsStore }): LogsQuery {
   return {
     async page(request) {
-      // The records first, then the window's count. A record that arrives
-      // between the two is counted but cannot be on this page, so the page
-      // says its answer is incomplete instead of claiming a total read.
-      const records = await store.query(buildRecordsQuery(request.filter, request));
-      if (records.state !== 'ok') return records;
+      const page: LogsPageBound = { offset: request.offset, limit: request.limit };
+      // The window's count first: one aggregation over the window, cheap at any
+      // size (measured: 0.025 s over 1.68 million records), and it decides both
+      // what the page reports and how its records are read.
       const count = await store.count(buildCountQuery(request.filter));
       if (count.state !== 'ok') return count;
       // A later page without the first page's count cannot tell whether
       // records arrived since, so it does not claim completeness either.
       const changed =
         request.expected === null ? request.offset > 0 : count.count !== request.expected;
-      return {
+      const answer = (records: readonly LogsRecord[]): LogsPage => ({
         state: 'ok',
-        records: records.records,
+        records,
         offset: request.offset,
         limit: request.limit,
         count: count.count,
         incomplete: changed,
+      });
+      const read = async (logsql: string): Promise<LogsPageAnswer> => {
+        const records = await store.query(logsql);
+        return records.state === 'ok' ? answer(records.records) : records;
       };
+      // Fewer records than the page reaches: the window as it is, in one read.
+      // Its last position is the window's oldest record, which bounds nothing,
+      // so this is the one page the boundary cannot shorten.
+      if (count.count < request.offset + request.limit)
+        return read(buildRecordsQuery(request.filter, page));
+      // Otherwise the order is by time first, so the record at the page's last
+      // position bounds every record the page can hold. Its `_time`, read by
+      // the cheap time-only sort, starts the ordered read (ADR-016 §4, L15).
+      // A boundary that races away is read as the whole window, as above.
+      const boundary = await store.query(buildBoundaryQuery(request.filter, page));
+      if (boundary.state !== 'ok') return boundary;
+      const earliest = boundary.records[0]?.time ?? null;
+      return read(buildRecordsQuery(request.filter, page, earliest));
     },
     modules: () => store.modules(),
   };

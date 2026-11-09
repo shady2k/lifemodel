@@ -57,7 +57,7 @@ afterAll(() => {
   rmSync(directory, { recursive: true, force: true });
 });
 
-describe('the latency walk\'s argument handling', () => {
+describe("the latency walk's argument handling", () => {
   it('prints its usage and exits 0 on --help', () => {
     const run = python([WALK, '--help']);
     expect(run.status).toBe(0);
@@ -71,6 +71,7 @@ describe('the latency walk\'s argument handling', () => {
       '--same-time-records',
       '--identical-records',
       '--page-limit',
+      '--large-window-records',
     ]) {
       expect(help).toContain(name);
     }
@@ -115,7 +116,7 @@ describe('the latency walk states what it proves and what it does not', () => {
     expect(run.status).toBe(0);
   }, 30000);
 
-  it('measures through the loader\'s own route, not the store', () => {
+  it("measures through the loader's own route, not the store", () => {
     const source = readFileSync(WALK, 'utf8');
     expect(source).toContain('/api/logs');
     expect(source).toContain('percentile');
@@ -137,10 +138,12 @@ describe('a fake node for the latency walk', () => {
 
   it('passes a round inside the deadline and fails one past it', () => {
     const passed = harness('latency-round-pass');
-    expect(passed.passes.join('\n')).toContain('the time filter stays inside the page\'s deadline');
+    expect(passed.passes.join('\n')).toContain("the time filter stays inside the page's deadline");
     expect(passed.status).toBe(0);
     const failed = harness('latency-round-fail');
-    expect(failed.failures.join('\n')).toContain('the time filter stays inside the page\'s deadline');
+    expect(failed.failures.join('\n')).toContain(
+      "the time filter stays inside the page's deadline"
+    );
     expect(failed.status).toBe(1);
   }, 30000);
 
@@ -165,5 +168,71 @@ describe('a fake node for the latency walk', () => {
     const run = harness('latency-paging-absent');
     expect(run.invalid.join('\n')).toContain('paging cannot be judged');
     expect(run.status).toBe(1);
+  }, 30000);
+});
+
+describe('the status the first page asks for', () => {
+  it('is measured over the same stepped windows, and an unknown collection still passes', () => {
+    const run = harness('latency-status-ok');
+    const value = jsonLine<{ params: Record<string, string>[] }>(run, 'STATUS');
+    expect(value.params).toHaveLength(3);
+    for (const params of value.params) {
+      expect(params['status']).toBe('1');
+      expect(params['limit']).toBe('1');
+    }
+    // The windows step back a minute per request, so no two asks are the same.
+    const ends = value.params.map((params) => Number(params['to']));
+    expect(ends[0]! - ends[1]!).toBe(60_000);
+    expect(run.passes.join('\n')).toContain("the status stays inside the page's deadline");
+    expect(run.invalid).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 30000);
+
+  it('fails past the deadline and is not valid without a status answer', () => {
+    const failed = harness('latency-status-fail');
+    expect(failed.failures.join('\n')).toContain("the status stays inside the page's deadline");
+    expect(failed.status).toBe(1);
+    const absent = harness('latency-status-absent');
+    expect(absent.invalid.join('\n')).toContain('the first page answered without a status');
+    expect(absent.status).toBe(1);
+  }, 30000);
+});
+
+describe('the large window option', () => {
+  it('plants the requested count in every measured window and anchors the rounds', () => {
+    const run = harness('latency-large-window');
+    const value = jsonLine<{
+      planted: boolean;
+      written: number;
+      modules: string[];
+      firstTime: string | null;
+      lastTime: string | null;
+      anchor: number | null;
+    }>(run, 'LARGE');
+    // 1,000 records in every 60-minute window over a 62-minute span.
+    expect(value.planted).toBe(true);
+    expect(value.written).toBe(Math.round((1000 * 62) / 60));
+    expect(value.modules).toEqual(['walk-latency']);
+    expect(value.firstTime).not.toBeNull();
+    expect(value.lastTime).not.toBeNull();
+    expect(Date.parse(value.lastTime ?? '')).toBeGreaterThan(Date.parse(value.firstTime ?? ''));
+    // The rounds measure windows inside the planted span: the anchor is its end,
+    // one step after the last planted record.
+    expect(value.anchor).not.toBeNull();
+    expect((value.anchor ?? 0) - Date.parse(value.lastTime ?? '')).toBeGreaterThan(0);
+    // The anchor is the span's end: one step after the last record, whose
+    // timestamp `stamp` truncates to the second.
+    expect((value.anchor ?? 0) - Date.parse(value.lastTime ?? '')).toBeLessThanOrEqual(5000);
+    expect(run.passes.join('\n')).toContain('the large window is stored');
+    expect(run.status).toBe(0);
+  }, 30000);
+
+  it('is not valid when the records never arrive or the store refuses them', () => {
+    const absent = harness('latency-large-window-absent');
+    expect(absent.invalid.join('\n')).toContain('never all arrived');
+    expect(absent.status).toBe(1);
+    const refused = harness('latency-large-window-insert-refused');
+    expect(refused.invalid.join('\n')).toContain('the large window was not written');
+    expect(refused.status).toBe(1);
   }, 30000);
 });

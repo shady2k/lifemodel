@@ -340,23 +340,46 @@ async function quietCase({ query, adapter }) {
       'the same page read twice returns the same bytes'
     );
 
-    const offsets = queries
-      .slice(0, walkLength)
-      .map((logsql) => /\| offset (\d+) \| limit (\d+)$/.exec(logsql))
-      .filter((match) => match !== null)
-      .map((match) => Number(match[1]));
+    const walked = queries.slice(0, walkLength);
+    const offsetOf = (logsql) => {
+      const match = /\| offset (\d+) \| limit (\d+)$/.exec(logsql);
+      return match === null ? null : Number(match[1]);
+    };
+    const reads = walked.filter((logsql) =>
+      logsql.includes('| sort by (_time desc, _msg desc, pod desc) |')
+    );
+    const boundary = walked.filter((logsql) => logsql.includes('| sort by (_time desc) |'));
     check(
-      offsets.every((offset, index) => offset === index * PAGE),
-      'each page was read at its own offset, in order'
+      reads.map(offsetOf).every((offset, index) => offset === index * PAGE),
+      'each page was read at its own offset, in order',
+      `${String(reads.length)} ordered reads`
     );
     check(
-      queries.every((logsql) => logsql.startsWith(`_time:[${FROM}, ${TO}]`)),
+      boundary.every((logsql, index) => offsetOf(logsql) === (index + 1) * PAGE - 1) &&
+        boundary.every((logsql) => logsql.endsWith('| limit 1')),
+      'each page was found by the record at its last position, by time alone',
+      `${String(boundary.length)} boundary reads`
+    );
+    check(
+      walked.every((logsql) => logsql.startsWith('_time:[') && logsql.includes(`, ${TO}]`)),
       'the window end stayed at the first page'
     );
     check(
-      queries.slice(0, walkLength).filter((logsql) => logsql.endsWith('| stats count()')).length ===
-        pages.length,
+      walked.filter((logsql) => logsql.endsWith('| stats count()')).length === pages.length,
       'every page re-read the window count with one query'
+    );
+    const boundaryTimes = await Promise.all(
+      boundary.map(async (logsql) => {
+        const answer = await raw(store, logsql);
+        const line = answer.body.split('\n').find((candidate) => candidate.trim() !== '');
+        return line === undefined ? null : JSON.parse(line)._time;
+      })
+    );
+    check(
+      reads
+        .slice(0, -1)
+        .every((logsql, index) => logsql.startsWith(`_time:[${boundaryTimes[index]}, `)),
+      'each ordered read starts at the time its boundary answered'
     );
 
     if (record) {

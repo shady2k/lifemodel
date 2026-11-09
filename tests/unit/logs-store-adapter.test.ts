@@ -6,7 +6,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { createLogsStore } from '../../loader/src/logs-store-adapter.js';
-import { buildRecordsQuery, createLogsQuery, LOGS_PAGE_SIZE } from '../../loader/src/logs-query.js';
+import {
+  buildCountQuery,
+  buildRecordsQuery,
+  createLogsQuery,
+  LOGS_PAGE_SIZE,
+} from '../../loader/src/logs-query.js';
 import { startLogsStoreFixture, type LogsStoreFixture } from '../helpers/logs-store-fixture.js';
 
 const FROM = Date.parse('2026-11-07T10:00:00.000Z');
@@ -141,9 +146,11 @@ describe('the log store adapter against recorded responses', () => {
     expect(result.records.every((record) => record.fields['module'] === 'core')).toBe(true);
     // The phrase form module:"core" would also match the module core-web.
     expect(result.records.map((record) => record.fields['module'])).not.toContain('core-web');
-    expect(fixture.requests[0]?.query).toBe(
-      buildRecordsQuery({ from: FROM, to: TO, module: 'core' })
-    );
+    // The window's count first, then the ordered window: the page's records.
+    expect(fixture.requests.map(({ query }) => query)).toEqual([
+      buildCountQuery({ from: FROM, to: TO, module: 'core' }),
+      buildRecordsQuery({ from: FROM, to: TO, module: 'core' }),
+    ]);
   });
 
   it('narrows by time through the store range', async () => {
