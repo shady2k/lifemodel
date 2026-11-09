@@ -46,7 +46,8 @@ export function logPartitionBytes(volumePath: string, day: string): Promise<numb
 
 /**
  * Removes the partition directory from the volume. It is called only after the
- * store answered the detach with 200; a failure here fails the run.
+ * store answered detach with 200 or its attached list confirmed the day's absence;
+ * a failure here fails the run.
  */
 export async function removeLogPartition(volumePath: string, day: string): Promise<void> {
   await rm(join(volumePath, 'partitions', day), { recursive: true, force: false });
