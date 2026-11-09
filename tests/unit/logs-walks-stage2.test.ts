@@ -60,7 +60,7 @@ describe('the stage-2 walks share one set of clients', () => {
 
 describe.each(STAGE2_WALKS)('$path', ({ path, id, browser }) => {
   it('names its walk and states what it proves, changes and restores', () => {
-    const header = text(path).split('\n').slice(0, 80).join('\n');
+    const header = text(path).split('\n').slice(0, 220).join('\n');
     expect(header).toContain(id);
     expect(header).toMatch(/What it proves/);
     expect(header).toMatch(/What it changes/);

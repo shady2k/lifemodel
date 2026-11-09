@@ -385,7 +385,7 @@ def fresh_fill_never(walk, fixture):
     volume = FakeVolume({'totalBytes': 3 * 1024**3, 'availBytes': 2 * 1024**3,
                          'availStepBytes': 0})
     reached, avail, threshold = walk.fill_volume(report, options(fill_timeout=1), volume,
-                                                 FakeStore({}))
+                                                 FakeStore({}), 805306368)
     print('REACHED %s %d %d' % (reached, avail, threshold))
     return report
 

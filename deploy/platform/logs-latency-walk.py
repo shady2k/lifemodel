@@ -416,7 +416,7 @@ def restore(report, options, cluster, store, state):
                                                'partition-key')
                     state['key'] = key
                 status, _body = store.detach(day, key)
-                if status == 200:
+                if status == 200 and state.get('remove_day') is not None:
                     state['remove_day'](day)
                     removed.append(day)
                 else:

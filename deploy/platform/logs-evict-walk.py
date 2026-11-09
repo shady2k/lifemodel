@@ -70,8 +70,11 @@ Arguments (defaults are the test VM's)
   --writer-interval-ms N the writer pod's line interval (default 50)
   --quiet-seconds N      the quiet window below the threshold (default 150)
   --suspend-seconds N    bound on the suspended CronJob turning stale (default 220)
-  --scratch-days-back N  the day of the partition the job-shaped pod removes
-                         (default 20)
+  --scratch-days-back N  the day of the partition the job-shaped pod removes;
+                         it is inside the retention period, so the store accepts
+                         the records and does not age them out (default 3)
+  --collector-namespace NS  the collector's namespace (default lifemodel-logs)
+  --collector NAME       the collector's DaemonSet (default logs-collector)
   --recover-bound N      bound on writes being accepted again (default 300 s)
   --deadline-seconds N   the whole walk's bound (default 3600)
 
@@ -312,6 +315,18 @@ def drop_line(record):
         return None
     return {'time': parse_ms(record.get('time')), 'day': day, 'freedBytes': int(freed),
             'reason': body.get('reason')}
+
+
+def collector_ready(cluster, options):
+    """The collector's DaemonSet readiness: the numbered lines arrive through it."""
+    body = cluster.json(['-n', options.collector_namespace, 'get', 'daemonset',
+                         options.collector, '-o', 'json'])
+    if body is None:
+        return False
+    status = body.get('status') or {}
+    ready = int(status.get('numberReady') or 0)
+    desired = int(status.get('desiredNumberScheduled') or 0)
+    return desired >= 1 and ready == desired
 
 
 def store_pod(cluster, options):
@@ -594,6 +609,10 @@ def flood(report, options, volume, store, loader, run_id):
                     result['oldest'].append(oldest_record_ms(store))
     result['ended'] = now_ms()
     result['filled'] = filled_at is not None
+    if result['filled']:
+        report.note('the flood wrote about %.1f GiB in %.0f s and ended at %.2f GiB free'
+                    % (result['bytes'] / GIB, (result['ended'] - result['started']) / 1000.0,
+                       volume.space()[1] / GIB))
     return result
 
 
@@ -731,9 +750,12 @@ def suspend_case(report, options, loader, cluster):
     def stale():
         return evictor_stale_of(loader.logs_status(*window())) is True
 
+    last = cronjob_last_success(cluster, options)
     reached = wait_until(time.monotonic() + options.suspend_seconds, 10, stale)
     report.check(reached, 'the API adds the evictor line once its last run is older than two '
-                 'intervals', 'last successful run parsed from the CronJob')
+                 'intervals',
+                 'last successful run %s'
+                 % (stamp(last) if last else 'never, as the CronJob reports it'))
     if not set_suspend(cluster, options, False):
         report.fail('the evictor is resumed', 'the patch was refused')
         return reached
@@ -760,6 +782,11 @@ def run(report, options, loader, cluster, store, volume, state):
                                             'partition-key')
     except WalkError:
         state['key'] = ''
+    if not report.check(collector_ready(cluster, options), 'the collector is Ready before the flood',
+                        '%s/%s' % (options.collector_namespace, options.collector)):
+        report.not_valid('the collector is not Ready: the writer pod\'s numbered lines would never '
+                         'reach the store')
+        return False
     state['run_id'] = 'walk-evict-%d' % now_ms()
     partition_evidence(report, options, cluster, store, volume, state['run_id'], state)
     quiet_case(report, options, loader, cluster, volume)
@@ -843,7 +870,9 @@ def main(argv=None):
     parser.add_argument('--writer-interval-ms', type=int, default=50)
     parser.add_argument('--quiet-seconds', type=int, default=150)
     parser.add_argument('--suspend-seconds', type=int, default=220)
-    parser.add_argument('--scratch-days-back', type=int, default=20)
+    parser.add_argument('--scratch-days-back', type=int, default=3)
+    parser.add_argument('--collector-namespace', default='lifemodel-logs')
+    parser.add_argument('--collector', default='logs-collector')
     parser.add_argument('--recover-bound', type=int, default=300)
     options = parser.parse_args(argv)
 

@@ -703,7 +703,11 @@ def read_store_flags(report, options, cluster, what='the /flags read'):
             report.not_valid('the store never answered its port-forward: %s cannot be asserted'
                              % what)
             return None
-        return Store(port=port).flags()
+        store = Store(port=port)
+        try:
+            return store.flags()
+        finally:
+            store.close()
     except WalkError:
         report.not_valid('the store\'s /flags endpoint did not answer: %s cannot be asserted'
                          % what)

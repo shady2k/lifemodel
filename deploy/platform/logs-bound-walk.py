@@ -55,6 +55,8 @@ Arguments (defaults are the test VM's)
   --old-days N           how many flood days, 2 to N+1 days back (default 8)
   --age-days N           the shortened age bound of the separate case (default 1)
   --age-old-days-back N  the old day the age case writes and expects dropped (default 3)
+  --largest-max-bytes N  the largest byte bound, when the walk should not read it
+                         from the API's limits
   --retention-bound N    bound on the store acting on a bound (default 600 s)
   --apply-bound N        bound on a change reaching `applied` (default 180 s)
   --deadline-seconds N   the whole walk's bound (default 3600)
@@ -361,13 +363,25 @@ def byte_case(report, options, loader, cluster, store, volume, run_id, state):
 
 
 def age_case(report, options, loader, cluster, store, volume, run_id, state):
-    """Only the age bound shortened: the old day goes, nothing younger does."""
-    byte_bound = options.byte_bound_mib * MIB
-    if not set_retention(report, loader, options.age_days, byte_bound, options.apply_bound):
-        report.not_valid('the store does not run the shortened age bound: the case is void')
+    """Only the age bound shortened: the old day goes, nothing younger does.
+
+    The byte bound is first raised to the largest bound that fits, so no byte
+    pressure can act and the day is dropped by the age bound alone; the old day
+    is written while the 14-day bound still accepts it, and only then is the age
+    bound shortened to --age-days.
+    """
+    largest = options.largest_max_bytes
+    if largest is None:
+        limits = (settings_answer(loader) or {}).get('limits') or {}
+        largest = limits.get('largestMaxBytes')
+    if not isinstance(largest, int):
+        report.not_valid('the largest byte bound is unknown: the age case cannot be isolated')
         return False
-    if not check_bound_flags(report, options, cluster, options.age_days, byte_bound):
-        report.not_valid('the store\'s flags do not hold the age bound: the case is void')
+    if not set_retention(report, loader, options.days_case, largest, options.apply_bound):
+        report.not_valid('the store does not take the raised byte bound: the age case is void')
+        return False
+    if not check_bound_flags(report, options, cluster, options.days_case, largest):
+        report.not_valid('the store\'s flags do not hold the raised byte bound: the case is void')
         return False
     now = now_ms()
     old_moment = now - options.age_old_days_back * 86400 * 1000
@@ -380,6 +394,12 @@ def age_case(report, options, loader, cluster, store, volume, run_id, state):
     state['written_days'].add(day_of(old_moment))
     if require_records(report, loader, old_moment, run_id, wanted,
                        'the old day is stored before the age bound is judged') is None:
+        return False
+    if not set_retention(report, loader, options.age_days, largest, options.apply_bound):
+        report.not_valid('the store does not run the shortened age bound: the case is void')
+        return False
+    if not check_bound_flags(report, options, cluster, options.age_days, largest):
+        report.not_valid('the store\'s flags do not hold the age bound: the case is void')
         return False
     today_before = records_in_window(loader, now, run_id)
     before = volume.partitions()
@@ -476,6 +496,7 @@ def main(argv=None):
     parser.add_argument('--retention-bound', type=int, default=600)
     parser.add_argument('--apply-bound', type=int, default=180)
     parser.add_argument('--largest-extra-bytes', type=int, default=1)
+    parser.add_argument('--largest-max-bytes', type=int)
     options = parser.parse_args(argv)
 
     report = Report()

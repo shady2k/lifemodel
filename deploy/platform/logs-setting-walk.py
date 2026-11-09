@@ -213,11 +213,6 @@ def deploy_deployment(cluster, options):
     return cluster.json(['-n', options.namespace, 'get', 'deployment', options.store, '-o', 'json'])
 
 
-def template_revision(deployment):
-    return ((((deployment or {}).get('spec') or {}).get('template') or {})
-            .get('metadata') or {}).get('annotations', {}).get(REVISION_ANNOTATION)
-
-
 def store_pod(cluster, options):
     pods = cluster.pods(options.namespace, 'app.kubernetes.io/name=' + options.store)
     if not pods:
@@ -256,11 +251,19 @@ def crash_case(report, loader, cluster, options, previous_revision, store_expect
     if not previous_revision:
         report.not_valid('no previous revision was seen: the crash state cannot be produced')
         return False
-    if not rollback_revision(cluster, options, previous_revision):
-        report.not_valid('the Deployment annotation could not be rolled back: the crash state '
-                         'was not produced')
-        return False
-    answer = settings_answer(loader) or {}
+    answer = {}
+    for attempt in range(3):
+        if not rollback_revision(cluster, options, previous_revision):
+            report.not_valid('the Deployment annotation could not be rolled back: the crash state '
+                             'was not produced')
+            return False
+        answer = settings_answer(loader) or {}
+        if answer.get('applied') is not True:
+            break
+        # The loader's own 30 s reconcile repaired the annotation inside the read;
+        # roll it back again and read once more.
+        report.note('the loader reconciled the annotation before the read (attempt %d): '
+                    'rolling it back again' % (attempt + 1))
     report.check(
         answer.get('applied') is not True and answer.get('pending') in PENDING_REASONS,
         'the state between the two writes reads pending, never applied',

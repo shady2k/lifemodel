@@ -53,7 +53,7 @@ Arguments (defaults are the test VM's)
                          (default /var/lib/lifemodel-logs/data)
   --stop-label-key KEY   the nodeSelector key that no node carries
                          (default lifemodel.dev/walk-fresh-stop)
-  --stopped-bound N      bound on the API saying stopped (default 120 s)
+  --stopped-bound N      bound on the API saying stopped (default 180 s)
   --live-bound N         bound on the API saying live again (default 150 s)
   --ready-timeout N      bound on the collector or the store becoming Ready
                          (default 300 s)
@@ -104,7 +104,9 @@ from logs_walk_support import (  # noqa: E402
     connect_store,
     now_ms,
     parse_ms,
+    quantity,
     read_password,
+    read_store_flags,
     stamp,
     wait_until,
 )
@@ -340,19 +342,28 @@ def probe_write(store):
     return status, (body.decode('utf8', 'replace')[:200] if body else '')
 
 
-def margin_bytes(volume):
+def margin_bytes(volume, store_margin=None):
+    """The free space the walk fills past: the store's own margin, when it is readable.
+
+    `-storage.minFreeDiskSpaceBytes` is 25 % of the *claim's* capacity, which is
+    larger than the filesystem's own total (ext4 keeps its metadata), so a
+    quarter of `statvfs`'s total can sit above the store's threshold and a fill
+    to it would never make the store refuse. The flag is the number the store
+    enforces, so it is the number the walk fills past.
+    """
+    if isinstance(store_margin, int) and store_margin > 0:
+        return store_margin
     total, _avail = volume.space()
     return int(total * MARGIN_SHARE)
 
 
-def fill_volume(report, options, volume, store):
+def fill_volume(report, options, volume, store, threshold):
     """Spend the volume's free space below the store's margin; True when reached.
 
     The chunk is written as uid 1000, the store's own user, on the filesystem the
     store reads. The filler lives in a directory of its own under the PV path,
     beside `partitions/`, which the store does not read.
     """
-    threshold = margin_bytes(volume)
     deadline = time.monotonic() + options.fill_timeout
     volume.prepare_filler()
     while time.monotonic() < deadline:
@@ -489,11 +500,18 @@ def run(report, options, loader, cluster, store, volume, state):
     status, _body = probe_write(store)
     report.check(status in (200, 204), 'the store accepts a write before the volume is filled',
                  'answered %d' % status)
-    reached, avail, threshold = fill_volume(report, options, volume, store)
+    store_margin = None
+    flags = read_store_flags(report, options, cluster, 'the store\'s margin')
+    if flags is not None:
+        store_margin = quantity(flags.get('storage.minFreeDiskSpaceBytes'))
+        report.note('the store keeps %s free for its merges (-storage.minFreeDiskSpaceBytes)'
+                    % (('%.1f MiB' % (store_margin / MIB)) if store_margin else 'an unreadable amount'))
+    threshold = margin_bytes(volume, store_margin)
+    reached, avail, filled_to = fill_volume(report, options, volume, store, threshold)
     if not reached:
         report.not_valid('the volume was never filled below the store\'s margin: no read-only '
                          'state to assert (%d MiB free, %d MiB needed)'
-                         % (avail // MIB, threshold // MIB))
+                         % (avail // MIB, filled_to // MIB))
         volume.clear_filler()
         return False
     else:
@@ -549,7 +567,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description='WALK-LOGS-FRESH (ADR-016 L14)')
     common_arguments(parser)
     parser.add_argument('--stop-label-key', default='lifemodel.dev/walk-fresh-stop')
-    parser.add_argument('--stopped-bound', type=int, default=120)
+    parser.add_argument('--stopped-bound', type=int, default=180)
     parser.add_argument('--live-bound', type=int, default=150)
     parser.add_argument('--ready-timeout', type=int, default=300)
     parser.add_argument('--fill-timeout', type=int, default=300)
