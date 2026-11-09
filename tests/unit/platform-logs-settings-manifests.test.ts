@@ -25,6 +25,7 @@ import {
   LOGS_PARTITION_KEY_SECRET_PATH,
 } from '../../loader/src/logs-settings-cluster.js';
 import { LOGS_CLAIM_NAME, LOGS_VOLUME_NAME } from '../../loader/src/logs-volume-claim.js';
+import { renderStep } from '../helpers/kustomize-config-maps.js';
 import {
   LOGS_RETENTION_DEFAULT_DAYS,
   LOGS_RETENTION_DEFAULT_MAX_BYTES,
@@ -63,12 +64,17 @@ function find(resources: Resource[], kind: string, name: string): Resource {
 
 const storeResources = [
   'volume.yaml',
-  'settings-defaults.yaml',
   'partition-key.yaml',
   'logs-store.yaml',
   'evictor.yaml',
   'network-policy.yaml',
 ].flatMap((name) => documents(join(platformRoot, 'logs-store', name)));
+
+// The defaults are the store step's generator input, not a fixed-name object.
+const storeDefaults = (): Record<string, any> =>
+  renderStep(join(platformRoot, 'logs-store')).generated.find(
+    (item) => item.baseName === 'lifemodel-logs-settings-defaults'
+  )!.object;
 
 const rbacResources = documents(join(platformRoot, 'a/loader-settings-rbac.yaml'));
 
@@ -107,8 +113,9 @@ describe('the store boots from the defaults with the loader absent', () => {
   });
 
   it('carries the defaults the loader computes for the volume it ships', () => {
-    const defaults = find(storeResources, 'ConfigMap', 'lifemodel-logs-settings-defaults');
+    const defaults = storeDefaults();
     expect(defaults.metadata.namespace).toBe('lifemodel-system');
+    expect(defaults.metadata.name).toMatch(/^lifemodel-logs-settings-defaults-[0-9a-f]{10}$/);
     const claim = find(storeResources, 'PersistentVolumeClaim', 'logs-store');
     const volumeBytes = parseKubernetesQuantity(claim.spec.resources.requests.storage);
     expect(volumeBytes).not.toBeNull();
