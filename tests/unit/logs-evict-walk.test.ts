@@ -91,7 +91,7 @@ describe('the evict walk\'s argument handling', () => {
 
 describe('the evict walk states every assertion of its row', () => {
   it('names the restart, the panic, the drop lines, the writer, the 429 window and the suspend', () => {
-    const header = readFileSync(WALK, 'utf8').split('\n').slice(0, 130).join('\n');
+    const header = readFileSync(WALK, 'utf8').split('\n').slice(0, 170).join('\n');
     expect(header).toContain('WALK-LOGS-EVICT');
     expect(header).toContain('ADR-016 L16');
     expect(header).toMatch(/restartCount/);
@@ -225,6 +225,44 @@ describe('a fake node for the evict walk', () => {
     expect(jsonLine<string[]>(run, 'PATCHES')).toHaveLength(2);
     expect(run.status).toBe(0);
   }, 30000);
+
+  it('keeps the API\'s unreadable polls as their own result', () => {
+    const run = harness('evict-suspend-unavailable-all');
+    const failure = run.failures.join('\n');
+    // Not "the line never came": the API answered nothing, and that is named.
+    expect(failure).toContain('the API answers the evictor\'s status while the evictor is suspended');
+    expect(failure).toContain('unreadable');
+    expect(failure).toContain('state=unavailable');
+    expect(run.invalid.join('\n')).toContain('cannot be judged');
+    expect(run.status).toBe(1);
+  }, 60000);
+
+  it('survives an unreadable start and passes once the line comes', () => {
+    const run = harness('evict-suspend-unavailable-first');
+    const pass = run.passes.join('\n');
+    expect(pass).toContain('the API adds the evictor line once its last run is older than two intervals');
+    expect(pass).toContain('2 with no answer');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 60000);
+
+  it('starts the stale clock from the last success seen after the suspension', () => {
+    const run = harness('evict-suspend-running-job');
+    const pass = run.passes.join('\n');
+    expect(pass).toContain('the API adds the evictor line');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 60000);
+
+  it('reports every poll it made when the line never comes', () => {
+    const run = harness('evict-suspend-never');
+    const failure = run.failures.join('\n');
+    expect(failure).toContain('the API adds the evictor line');
+    expect(failure).toContain('poll(s)');
+    expect(failure).toContain('stale=false');
+    expect(failure).toContain('CronJob last=');
+    expect(run.status).toBe(1);
+  }, 60000);
 
   it('refuses to blame the suspension for a line that was already there', () => {
     const run = harness('evict-suspend-stale');

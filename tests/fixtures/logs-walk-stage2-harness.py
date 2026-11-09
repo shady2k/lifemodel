@@ -242,6 +242,7 @@ class FakeCluster:
         # lists one completed Job while `lastSuccessfulTime` advances: counting
         # Job objects can never show two runs (ADR-016 §5).
         self.cronjob_times = fixture.get('cronjobTimes') or []
+        self.cronjob_active = fixture.get('cronjobActive') or []
         self.cronjob_reads = 0
         self.jobs = fixture.get('jobs') or []
         self.calls = []
@@ -303,11 +304,18 @@ class FakeCluster:
         if 'pods' in args:
             return {'items': self.pods(None)}
         if 'cronjob' in args:
-            if not self.cronjob_times:
+            reads = max(len(self.cronjob_times), len(self.cronjob_active))
+            if reads == 0:
                 return None
-            index = min(self.cronjob_reads, len(self.cronjob_times) - 1)
+            index = min(self.cronjob_reads, reads - 1)
             self.cronjob_reads += 1
-            return {'status': {'lastSuccessfulTime': self.cronjob_times[index]}}
+            status = {}
+            if self.cronjob_times:
+                status['lastSuccessfulTime'] = self.cronjob_times[
+                    min(index, len(self.cronjob_times) - 1)]
+            if self.cronjob_active:
+                status['active'] = self.cronjob_active[min(index, len(self.cronjob_active) - 1)]
+            return {'status': status}
         if 'jobs' in args:
             return {'items': json.loads(json.dumps(self.jobs))}
         return None
@@ -377,7 +385,7 @@ def options(**values):
         writer_interval_ms=50, writer_namespace='lifemodel-logs-walk',
         quiet_seconds=0, suspend_seconds=1, scratch_days_back=20,
         recover_bound=5, settle_seconds=0, cronjob='logs-evictor', writer_rate=5,
-        run_sample_seconds=1, evictor_bound=5, read_only_bound=5,
+        run_sample_seconds=1, evictor_bound=5, read_only_bound=5, suspend_poll_seconds=1,
         peak_bytes=0, index_poll=1, query_count=40, limit_ms=2500, page_limit=250,
         filter_records=60,
         same_time_records=4, identical_records=2, window_minutes=60,
@@ -998,6 +1006,93 @@ def evict_suspend_stale(walk, fixture):
     loader = FakeLoader({'statusAnswers': [status_answer('live', evictor_stale=True)]})
     walk.suspend_case(report, options(evictor_bound=1, suspend_seconds=1), loader,
                       FakeCluster({'patchScript': [0, 0]}))
+    return report
+
+
+def evict_suspend_options(**values):
+    base = {'evictor_bound': 1, 'suspend_seconds': 8, 'suspend_poll_seconds': 1}
+    base.update(values)
+    return options(**base)
+
+
+@mode('evict-suspend-unavailable-first')
+def evict_suspend_unavailable_first(walk, fixture):
+    """Two unreadable polls, then the line: the case survives them and says so."""
+    report = walk.Report()
+    first = walk.stamp(walk.now_ms() - 5_000)
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', evictor_stale=False),
+        {'state': 'unavailable', 'reason': 'timeout'},
+        {'state': 'unavailable', 'reason': 'unreachable'},
+        status_answer('live', evictor_stale=True),
+        # The resume's own poll: the next run made the line go away.
+        status_answer('live', evictor_stale=False),
+    ]})
+    cluster = FakeCluster({'patchScript': [0, 0], 'cronjobTimes': [first]})
+    walk.suspend_case(report, evict_suspend_options(), loader, cluster)
+    print('POLLS ' + json.dumps(loader.status_calls))
+    return report
+
+
+@mode('evict-suspend-unavailable-all')
+def evict_suspend_unavailable_all(walk, fixture):
+    """The API never answered the status: that is its own result, not a missing line."""
+    report = walk.Report()
+    first = walk.stamp(walk.now_ms() - 5_000)
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', evictor_stale=False),
+        {'state': 'unavailable', 'reason': 'timeout'},
+        {'state': 'unavailable', 'reason': 'timeout'},
+        # The resume's own poll: the line cannot be seen either, so it stays a
+        # not-valid case of the line rather than a wrong-line failure.
+        status_answer('live', evictor_stale=False),
+    ]})
+    cluster = FakeCluster({'patchScript': [0, 0], 'cronjobTimes': [first]})
+    walk.suspend_case(report, evict_suspend_options(suspend_seconds=0.5), loader, cluster)
+    return report
+
+
+@mode('evict-suspend-running-job')
+def evict_suspend_running_job(walk, fixture):
+    """A Job running at the suspension finishes later and moves the last success.
+
+    The first poll's CronJob shows an active Job and a last success far older
+    than two intervals; the second shows that Job completed with a fresh last
+    success. The stale clock must start from the fresh one, and an active Job
+    must never be read as "the line is due".
+    """
+    report = walk.Report()
+    now = walk.now_ms()
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', evictor_stale=False),
+        status_answer('live', evictor_stale=False),
+        status_answer('live', evictor_stale=False),
+        status_answer('live', evictor_stale=True),
+        status_answer('live', evictor_stale=False),
+    ]})
+    cluster = FakeCluster({
+        'patchScript': [0, 0],
+        'cronjobTimes': [walk.stamp(now - 300_000), walk.stamp(now - 2_000)],
+        'cronjobActive': [['logs-evictor-29000000'], []],
+    })
+    walk.suspend_case(report, evict_suspend_options(), loader, cluster)
+    return report
+
+
+@mode('evict-suspend-never')
+def evict_suspend_never(walk, fixture):
+    """The API answers throughout and the line never comes: the polls say what it said."""
+    report = walk.Report()
+    # The last success is already old and no Job is active: the line is due at
+    # the first poll, and the poll's own words say what the API answered.
+    first = walk.stamp(walk.now_ms() - 300_000)
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', evictor_stale=False),
+        status_answer('live', evictor_stale=False),
+        status_answer('live', evictor_stale=False),
+    ]})
+    cluster = FakeCluster({'patchScript': [0, 0], 'cronjobTimes': [first]})
+    walk.suspend_case(report, evict_suspend_options(), loader, cluster)
     return report
 
 

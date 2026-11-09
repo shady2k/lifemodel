@@ -53,7 +53,15 @@ What it proves
 7. The evictor suspended (`suspend: true` on the CronJob) for two minutes: the
    line is absent while it runs, the API's status adds `the log evictor is
    failing or has not run` once its last success is older than two intervals,
-   and after the resume and the next successful run it goes away again.
+   and after the resume and the next successful run it goes away again. Every
+   poll keeps what it asked and what answered - the answer's state and reason,
+   `evictor.stale` and `evictor.lastSuccessAt`, the CronJob's own last success
+   and active Jobs, and the elapsed seconds - so a failure says what the API
+   said; an API that never answered is its own result, never "the line never
+   came". The staleness is due two intervals plus slack after the last success
+   the walk saw AFTER the suspension, and no active Job ends the wait: a Job
+   already running when the CronJob was suspended can still succeed and move
+   `lastSuccessfulTime` forward.
 
 Arguments (defaults are the test VM's)
 -------------------------------------
@@ -86,7 +94,12 @@ Arguments (defaults are the test VM's)
   --quiet-seconds N      the quiet window below the threshold (default 150)
   --run-sample-seconds N how often the CronJob's last successful run is read in
                          the quiet window (default 10, so two runs are seen)
-  --suspend-seconds N    bound on the suspended CronJob turning stale (default 220)
+  --suspend-seconds N    overall bound on the suspended CronJob turning stale;
+                         it allows a Job already running (its own deadline is
+                         60 s) to finish and two intervals to pass after that
+                         (default 360)
+  --suspend-poll-seconds N  how often the status and the CronJob are read while
+                         the evictor is suspended (default 10)
   --evictor-bound N      bound on the evictor having a recent successful run
                          before the read-only state is produced (default 180)
   --fill-timeout N       bound on filling the volume below the store's margin
@@ -175,6 +188,10 @@ GIB = 1024 * MIB
 HEADROOM_BYTES = 768 * MIB
 EVICTION_INTERVAL_MS = 60_000
 EVICTOR_STALE_MS = 120_000
+# The loader reads the CronJob afresh per request, but the controller writes
+# `lastSuccessfulTime` only when it observes a completed Job: the line can come
+# a poll or two after the two intervals.
+STALE_SLACK_MS = 30_000
 EVICTOR_MODULE = 'logs-evictor'
 WRITER_MODULE = 'walk-evict-writer'
 REMOVER_MODULE = 'walk-evict-rm'
@@ -425,6 +442,91 @@ def evictor_image(cluster, options):
 def cronjob_last_success(cluster, options):
     body = cronjob_json(cluster, options) or {}
     return parse_ms(((body.get('status') or {}).get('lastSuccessfulTime')))
+
+
+def cronjob_state(cluster, options):
+    """The evictor's CronJob as the walk sees it: last success and active Jobs.
+
+    `known` is False when kubectl did not answer: an unread CronJob must not end
+    the wait - its active Jobs are then unknown, not absent.
+    """
+    body = cronjob_json(cluster, options)
+    status = (body or {}).get('status') or {}
+    active = [name for name in (status.get('active') or []) if isinstance(name, str)]
+    return {'known': body is not None, 'lastSuccess': parse_ms(status.get('lastSuccessfulTime')),
+            'active': active}
+
+
+def evictor_last_success_of(answer):
+    """The API's own reading of the CronJob's last success, in milliseconds."""
+    return parse_ms(((status_of(answer).get('evictor') or {}).get('lastSuccessAt')))
+
+
+def poll_line(poll):
+    """One status poll in a detail line: what was asked and what answered."""
+    stale = poll['stale']
+    active = 'unknown' if not poll['cronKnown'] else (
+        ','.join(poll['active']) if poll['active'] else 'none')
+    parts = ['t+%.0fs' % poll['elapsedSeconds'], 'state=%s' % poll['state']]
+    if poll['reason']:
+        parts.append('reason=%s' % poll['reason'])
+    parts.append('stale=%s' % ('unknown' if stale is None else str(stale).lower()))
+    parts.append('api last=%s' % (stamp(poll['apiLast']) if poll['apiLast'] else 'none'))
+    parts.append('CronJob last=%s' % (stamp(poll['cronLast']) if poll['cronLast'] else 'none'))
+    parts.append('active=%s' % active)
+    return ' '.join(parts)
+
+
+def staleness_due_ms(last_success_ms, now, active, cron_known=True):
+    """Milliseconds until the line is due, or None while a run may still move it.
+
+    The line is due two intervals (plus slack) after the last success the walk
+    has seen, and never while the CronJob lists an active Job or could not be
+    read: a Job created before the suspension can still complete and move
+    `lastSuccessfulTime`, which restarts the two intervals.
+    """
+    if last_success_ms is None or active or not cron_known:
+        return None
+    return last_success_ms + EVICTOR_STALE_MS + STALE_SLACK_MS - now
+
+
+def watch_suspension(loader, cluster, options):
+    """Poll the status and the CronJob until the line appears, it is due, or the bound.
+
+    Every poll is kept, whatever it said: a state the API could not answer and
+    an unknown staleness are evidence of their own, not of a missing line.
+    """
+    observations = []
+    started = time.monotonic()
+    hard_deadline = started + options.suspend_seconds
+    last_seen = None
+    while True:
+        answer = loader.logs_status(*window())
+        cron = cronjob_state(cluster, options)
+        api_last = evictor_last_success_of(answer)
+        seen = [moment for moment in (api_last, cron['lastSuccess']) if moment is not None]
+        if seen:
+            last_seen = max(seen) if last_seen is None else max(last_seen, max(seen))
+        poll = {
+            'elapsedSeconds': time.monotonic() - started,
+            'state': answer.get('state') or 'unreadable',
+            'reason': answer.get('reason') or '',
+            'stale': evictor_stale_of(answer),
+            'apiLast': api_last,
+            'cronLast': cron['lastSuccess'],
+            'cronKnown': cron['known'],
+            'active': cron['active'],
+        }
+        observations.append(poll)
+        if poll['stale'] is True:
+            break
+        due = staleness_due_ms(last_seen, now_ms(), cron['active'], cron['known'])
+        if due is not None and due <= 0:
+            break
+        if time.monotonic() >= hard_deadline:
+            break
+        time.sleep(max(0.2, options.suspend_poll_seconds))
+    return observations
 
 
 def set_suspend(cluster, options, suspend):
@@ -920,16 +1022,25 @@ def collect_writer(report, options, loader, cluster, run_id, result, state):
 def suspend_case(report, options, loader, cluster):
     """Two minutes suspended: the API adds the evictor line; the next run removes it."""
 
+    probes = []
+
     def not_stale():
-        return evictor_stale_of(loader.logs_status(*window())) is False
+        answer = loader.logs_status(*window())
+        probes.append(answer)
+        return evictor_stale_of(answer) is False
 
     # The line must be absent first: the read-only case fills the volume with
     # something the evictor cannot remove, so its runs may have failed since the
     # last success, and a line that was there before the suspension would prove
     # nothing about the suspension.
     if not wait_until(time.monotonic() + options.evictor_bound, 5, not_stale):
-        report.not_valid('the evictor is not fresh before it is suspended: the line cannot be '
-                         'shown to come from the suspension')
+        last = probes[-1] if probes else {}
+        report.not_valid('the evictor is not fresh before it is suspended: state=%s%s, '
+                         'stale=%s in the last of %d probe(s)'
+                         % (last.get('state', 'unreadable'),
+                            (' reason=%s' % last['reason']) if last.get('reason') else '',
+                            ('unknown' if last.get('state') != 'ok'
+                             else str(evictor_stale_of(last)).lower()), len(probes)))
         return False
     report.pass_('the evictor line is absent while the evictor runs',
                  'the CronJob\'s last success is recent')
@@ -938,15 +1049,28 @@ def suspend_case(report, options, loader, cluster):
         return False
     report.pass_('the evictor is suspended', 'CronJob %s suspend=true' % options.cronjob)
 
-    def stale():
-        return evictor_stale_of(loader.logs_status(*window())) is True
-
-    last = cronjob_last_success(cluster, options)
-    reached = wait_until(time.monotonic() + options.suspend_seconds, 10, stale)
-    report.check(reached, 'the API adds the evictor line once its last run is older than two '
-                 'intervals',
-                 'last successful run %s'
-                 % (stamp(last) if last else 'never, as the CronJob reports it'))
+    observations = watch_suspension(loader, cluster, options)
+    polls = len(observations)
+    unreadable = [poll for poll in observations if poll['state'] != 'ok']
+    known = [poll for poll in observations if poll['stale'] is not None]
+    last_polls = '; '.join(poll_line(poll) for poll in observations[-4:])
+    reached = observations[-1]['stale'] is True
+    if reached:
+        report.pass_('the API adds the evictor line once its last run is older than two intervals',
+                     'stale=true at t+%.0fs after %d poll(s), %d with no answer; %s'
+                     % (observations[-1]['elapsedSeconds'], polls, len(unreadable), last_polls))
+    elif not known:
+        # Not one poll carried a staleness: the API did not answer, which is its
+        # own result and not a line that never came.
+        report.fail('the API answers the evictor\'s status while the evictor is suspended',
+                    'every one of %d poll(s) was unreadable: %s' % (polls, last_polls))
+        report.not_valid('the API never answered the evictor\'s status during the suspension: '
+                         'the evictor line cannot be judged')
+    else:
+        report.fail('the API adds the evictor line once its last run is older than two intervals',
+                    '%d poll(s), %d with no answer; the line is due two intervals plus %d s after '
+                    'the last success: %s'
+                    % (polls, len(unreadable), STALE_SLACK_MS // 1000, last_polls))
     if not set_suspend(cluster, options, False):
         report.fail('the evictor is resumed', 'the patch was refused')
         return reached
@@ -1069,7 +1193,8 @@ def main(argv=None):
     parser.add_argument('--writer-interval-ms', type=int, default=50)
     parser.add_argument('--quiet-seconds', type=int, default=150)
     parser.add_argument('--run-sample-seconds', type=int, default=10)
-    parser.add_argument('--suspend-seconds', type=int, default=220)
+    parser.add_argument('--suspend-seconds', type=int, default=360)
+    parser.add_argument('--suspend-poll-seconds', type=float, default=10)
     parser.add_argument('--evictor-bound', type=int, default=180)
     parser.add_argument('--fill-timeout', type=int, default=300)
     parser.add_argument('--refuse-bound', type=int, default=30)
