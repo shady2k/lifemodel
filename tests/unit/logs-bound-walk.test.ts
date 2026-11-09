@@ -135,6 +135,41 @@ describe('a fake node for the bound walk', () => {
     expect(run.status).toBe(0);
   }, 30000);
 
+  it('waits for the store to flush before counting a canary as missing', () => {
+    const run = harness('bound-canary-late');
+    expect(jsonLine(run, 'REQUIRED')).toBe(200);
+    expect(run.passes.join('\n')).toContain('the canary 10 days back is stored before the flood');
+    expect(run.invalid).toEqual([]);
+  }, 30000);
+
+  it('writes and reads its days back before the byte bound can drop them', () => {
+    const run = harness('bound-byte-order');
+    const order = jsonLine<string[][] | Array<[string, number]>>(run, 'ORDER') as Array<
+      [string, number]
+    >;
+    const largest = 1610612736;
+    const bound = 314572800;
+    // The bound the case starts from is the largest this volume can reach, so
+    // nothing it writes is dropped while it is written.
+    expect(order[0]).toEqual(['bound', largest]);
+    const inserts = order
+      .map((event, position) => ({ event, position }))
+      .filter((entry) => entry.event[0] === 'insert')
+      .map((entry) => entry.position);
+    const lastBound = order.map((event) => event[0]).lastIndexOf('bound');
+    expect(inserts.length).toBeGreaterThan(0);
+    // Every write is in before the 300 MiB bound is asked for.
+    expect(Math.max(...inserts)).toBeLessThan(lastBound);
+    expect(order[lastBound]).toEqual(['bound', bound]);
+    const pass = run.passes.join('\n');
+    expect(pass).toContain('the canary 10 days back is stored before the flood');
+    expect(pass).toContain("today's records are stored before the flood");
+    expect(pass).toContain('the oldest day partition is dropped first');
+    expect(run.failures).toEqual([]);
+    expect(run.invalid).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 30000);
+
   it('marks a canary that was never stored as TEST NOT VALID, not as a retention result', () => {
     const run = harness('bound-canary-absent');
     expect(run.invalid.join('\n')).toContain('canary');

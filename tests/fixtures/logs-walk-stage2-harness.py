@@ -169,6 +169,51 @@ DEPLOYED = {'spec': {'replicas': 1},
             'status': {'updatedReplicas': 1, 'availableReplicas': 1}}
 
 
+def patch_operation(document, operation):
+    """Apply one JSON-patch operation to `document`; False when the API refuses it."""
+    path = operation.get('path') or ''
+    parts = [part.replace('~1', '/').replace('~0', '~') for part in path.split('/')[1:]]
+    if not path.startswith('/') or not parts:
+        return False
+    node = document
+    for part in parts[:-1]:
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        elif isinstance(node, list) and part.isdigit() and int(part) < len(node):
+            node = node[int(part)]
+        else:
+            return False
+    last = parts[-1]
+    kind = operation.get('op')
+    if isinstance(node, list):
+        if not last.isdigit() or int(last) >= len(node):
+            return False
+        if kind == 'remove':
+            del node[int(last)]
+            return True
+        if kind not in ('add', 'replace') or operation.get('value') is None:
+            return False
+        if kind == 'add':
+            node.insert(int(last), operation['value'])
+        else:
+            node[int(last)] = operation['value']
+        return True
+    if not isinstance(node, dict) or kind not in ('add', 'replace', 'remove'):
+        return False
+    if kind == 'remove':
+        if last not in node:
+            return False
+        del node[last]
+        return True
+    if kind == 'replace' and last not in node:
+        return False
+    if operation.get('value') is None:
+        # A null nodeSelector or a null volume is not a pod template the API takes.
+        return False
+    node[last] = operation['value']
+    return True
+
+
 class FakeCluster:
     """A fake kubectl: the DaemonSet JSON, pod lists, and scripted patch results.
 
@@ -177,10 +222,17 @@ class FakeCluster:
     that is the sequence a restart walks through, without counting polls. The
     store Deployment it reports is scripted the same way, one state per read, so
     a walk that waits for a rollout finishes on the read the fixture says.
+
+    A patch the script accepts is still applied to the template the walk reads
+    back, and refused when the API would refuse it: a `remove` of a path that is
+    not there, and a `replace` with a null value, answer non-zero like a rejected
+    JSON patch does.
     """
 
     def __init__(self, fixture):
         self.daemonset = fixture.get('daemonset')
+        template = ((self.daemonset or {}).get('spec') or {}).get('template') or {}
+        self.template = json.loads(json.dumps(template))
         self.collector_states = fixture.get('collectorStates', [{'ready': 1, 'desired': 1,
                                                                  'readyPods': 1}])
         self.deployment_states = fixture.get('deploymentStates') or [DEPLOYED]
@@ -200,8 +252,33 @@ class FakeCluster:
             index = min(len(self.patches), len(self.patch_script) - 1)
             code = self.patch_script[index] if self.patch_script else 0
             self.patches.append(payload)
+            if code == 0:
+                code = self.apply_patch(payload)
             return Result(returncode=code)
         return Result(returncode=0)
+
+    def apply_patch(self, payload):
+        """Apply a merge or JSON patch to the template the walk reads back."""
+        try:
+            body = json.loads(payload)
+        except ValueError:
+            return 1
+        if isinstance(body, dict):
+            wanted = ((body.get('spec') or {}).get('template') or {}).get('spec') or {}
+            spec = self.template.setdefault('spec', {})
+            for key, value in wanted.items():
+                if isinstance(value, dict) and isinstance(spec.get(key), dict):
+                    spec[key] = {**spec[key], **value}
+                else:
+                    spec[key] = json.loads(json.dumps(value))
+            return 0
+        # A JSON patch addresses the DaemonSet, so its paths start at /spec/template.
+        document = {'spec': {'template': self.template}}
+        for operation in body if isinstance(body, list) else [body]:
+            if not patch_operation(document, operation):
+                return 1
+        self.template = document['spec']['template']
+        return 0
 
     def current_state(self):
         return self.collector_states[min(len(self.patches), len(self.collector_states) - 1)]
@@ -209,7 +286,8 @@ class FakeCluster:
     def json(self, args, timeout=120):
         self.calls.append(' '.join(args))
         if 'daemonset' in args:
-            body = json.loads(json.dumps(self.daemonset))
+            body = json.loads(json.dumps(self.daemonset)) if self.daemonset else {}
+            body.setdefault('spec', {})['template'] = json.loads(json.dumps(self.template))
             state = self.current_state()
             body.setdefault('status', {})['numberReady'] = state.get('ready', 0)
             body['status']['desiredNumberScheduled'] = state.get('desired', 0)
@@ -277,12 +355,13 @@ def options(**values):
         origin_host='boot-lifemodel.local', ca_file=None, kubectl='k3s kubectl',
         namespace='lifemodel-system', store='logs-store', mount='/var/lib/lifemodel-logs',
         pv_path='/var/lib/lifemodel-logs/data', deadline_seconds=3600,
-        stopped_bound=5, live_bound=5, ready_timeout=5, fill_timeout=5,
+        canary_days_back=10, canary_records=200,
+        stopped_bound=5, live_bound=5, ready_timeout=5, fill_timeout=5, refuse_bound=2,
         heartbeat_fresh=60, stop_label_key='lifemodel.dev/walk-fresh-stop',
         byte_bound_mib=300, today_mib=1, old_day_mib=1, old_days=2, days_case=14,
         age_days=1, age_old_days_back=3, largest_max_bytes=None, largest_extra_bytes=1,
         loader_namespace='lifemodel-system', loader_selector='app.kubernetes.io/name=loader',
-        apply_bound=5, flag_wait=5, flood_seconds=1, fill_bound=5, burst_mib=1,
+        apply_bound=5, retention_bound=5, flag_wait=5, flood_seconds=1, fill_bound=5, burst_mib=1,
         writer_interval_ms=50, quiet_seconds=0, suspend_seconds=1, scratch_days_back=20,
         recover_bound=5, settle_seconds=0, cronjob='logs-evictor', writer_rate=5,
         peak_bytes=0, index_poll=1, query_count=40, limit_ms=2500, page_limit=250,
@@ -382,7 +461,8 @@ def fresh_read_only(walk, fixture):
         status_answer('live', read_only=False),
         status_answer('live', read_only=True),
     ]})
-    walk.watch_read_only(report, loader, store,
+    walk.check_read_only_gauge(report, store)
+    walk.watch_read_only(report, loader,
                          'the API says the store is refusing writes (read-only)', 5, 700 * 1024**2)
     return report
 
@@ -392,8 +472,62 @@ def fresh_read_only_never(walk, fixture):
     report = walk.Report()
     store = FakeStore({'metricAnswers': [{'vl_storage_is_read_only': 0.0}]})
     loader = FakeLoader({'statusAnswers': [status_answer('live', read_only=False)]})
-    walk.watch_read_only(report, loader, store,
+    walk.check_read_only_gauge(report, store)
+    walk.watch_read_only(report, loader,
                          'the API says the store is refusing writes (read-only)', 1, 700 * 1024**2)
+    return report
+
+
+@mode('fresh-refused-late')
+def fresh_refused_late(walk, fixture):
+    # The store's free-space reading is cached for 2 s, so the first probes after
+    # the filler can still be accepted; the walk must keep probing.
+    report = walk.Report()
+    store = FakeStore({'insertStatuses': [200, 200, 429]})
+    status, _body, answers = walk.wait_refused(report, store, 2)
+    print('REFUSED ' + json.dumps({'status': status, 'answers': answers}))
+    return report
+
+
+@mode('fresh-refused-never')
+def fresh_refused_never(walk, fixture):
+    report = walk.Report()
+    store = FakeStore({'insertStatuses': [200]})
+    status, _body, answers = walk.wait_refused(report, store, 0)
+    print('REFUSED ' + json.dumps({'status': status, 'answers': answers}))
+    return report
+
+
+@mode('fresh-restore-twice')
+def fresh_restore_twice(walk, fixture):
+    # The walk restores the selector and the pod-log volume once already (after
+    # case 1 and case 2); the final restore must see nothing left to do, not
+    # send the same patch again and report the machine as not put back.
+    report = walk.Report()
+    cluster = FakeCluster({'daemonset': DAEMONSET, 'patchScript': [0]})
+    volume = FakeVolume({})
+    state = {}
+    stopped = walk.stop_collector(cluster, options(), state)
+    selector = [walk.restore_collector_selector(cluster, state),
+                walk.restore_collector_selector(cluster, state)]
+    stalled = walk.stall_pod_logs(cluster, state)
+    pods = [walk.restore_pod_logs(cluster, state), walk.restore_pod_logs(cluster, state)]
+    print('RESTORE ' + json.dumps({'stopped': stopped, 'stalled': stalled,
+                                   'selector': selector, 'pods': pods,
+                                   'patches': len(cluster.patches)}))
+    walk.restore(report, options(ready_timeout=1), cluster, volume, state, None)
+    return report
+
+
+@mode('fresh-restore-report')
+def fresh_restore_report(walk, fixture):
+    report = walk.Report()
+    # Every patch is refused, and both changes are still recorded as pending.
+    cluster = FakeCluster({'daemonset': DAEMONSET, 'patchScript': [1]})
+    state = {'nodeSelector': None,
+             'podsVolume': {'name': 'pods',
+                            'hostPath': {'path': '/var/log/pods', 'type': 'Directory'}}}
+    walk.restore(report, options(ready_timeout=1), cluster, FakeVolume({}), state, None)
     return report
 
 
@@ -517,7 +651,85 @@ def bound_canary_absent(walk, fixture):
     report = walk.Report()
     loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 0}]})
     walk.require_records(report, loader, 0, 'walk-bound-1', 200,
-                         'the canary 10 days back is stored before the flood')
+                         'the canary 10 days back is stored before the flood', 0)
+    return report
+
+
+@mode('bound-canary-late')
+def bound_canary_late(walk, fixture):
+    # The store flushes its in-memory buffer a few seconds after the insert, so a
+    # single read straight after the write can still count nothing.
+    report = walk.Report()
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 0},
+                                        {'state': 'ok', 'count': 200}]})
+    count = walk.require_records(report, loader, 0, 'walk-bound-1', 200,
+                                 'the canary 10 days back is stored before the flood', 5)
+    print('REQUIRED ' + json.dumps(count))
+    return report
+
+
+@mode('bound-byte-order')
+def bound_byte_order(walk, fixture):
+    """The byte case writes and reads back before the bound can act (VM round 3).
+
+    The store held about 258 MB of parts when the walk applied its 300 MiB bound,
+    so the first flood day took the total over the bound and the background
+    watcher dropped the canary's day before the walk read it back. The order the
+    case asks for is: the largest bound this volume can reach, the writes, their
+    read-back, and only then the 300 MiB bound.
+    """
+    report = walk.Report()
+    order = []
+    current = {'days': 14, 'maxBytes': BOUND_LIMITS['largestMaxBytes']}
+    loader = FakeLoader({
+        'settingsAnswers': [{'state': 'ok', 'applied': True, 'days': 14,
+                             'maxBytes': BOUND_LIMITS['largestMaxBytes'],
+                             'limits': BOUND_LIMITS}],
+        'putAnswers': [{'status': 200, 'body': {'state': 'ok', 'desiredRevision': '1-aaaaaa'}}],
+        'logAnswers': [
+            {'state': 'ok', 'count': 200},
+            {'state': 'ok', 'count': 1736},
+            {'state': 'ok', 'count': 1736},
+            {'state': 'ok', 'count': 1736},
+            {'state': 'ok', 'count': 0},
+            {'state': 'ok', 'count': 1736},
+        ],
+    })
+    store = FakeStore({})
+    canary_day = walk.day_of(walk.now_ms() - 10 * 86400 * 1000)
+    volume = FakeVolume({'partitions': [canary_day]})
+    put = loader.put_settings
+
+    def recorded_put(days, max_bytes, csrf, *args, **kwargs):
+        order.append(['bound', max_bytes])
+        current.update(days=days, maxBytes=max_bytes)
+        return put(days, max_bytes, csrf, *args, **kwargs)
+
+    insert = store.insert
+
+    def recorded_insert(lines, timeout=120):
+        order.append(['insert', len(lines)])
+        return insert(lines, timeout=timeout)
+
+    logs = loader.logs
+
+    def recorded_logs(params):
+        answer = logs(params)
+        if isinstance(answer, dict) and answer.get('count') == 0:
+            # The store dropped that day: the volume no longer lists it.
+            volume.days = []
+        return answer
+
+    loader.put_settings = recorded_put
+    store.insert = recorded_insert
+    loader.logs = recorded_logs
+    walk.read_store_flags = lambda *args, **kwargs: {
+        'retentionPeriod': '%dd' % current['days'],
+        'retention.maxDiskSpaceUsageBytes': str(current['maxBytes']),
+    }
+    walk.byte_case(report, options(), loader, FakeCluster({}), store, volume,
+                   'walk-bound-1', {'written_days': set()})
+    print('ORDER ' + json.dumps(order))
     return report
 
 
@@ -611,17 +823,35 @@ def evict_stale(walk, fixture):
     return report
 
 
-def latency_page(sequence, moment='2026-11-09T00:00:00Z'):
-    return {'time': moment, 'message': 'walk-latency run-1 seq=%06d' % sequence, 'fields': {}}
-
-
-def latency_identical(moment='2026-11-09T00:00:01Z'):
-    return {'time': moment, 'message': 'walk-latency run-1 identical', 'fields': {}}
-
-
 def latency_page_answer(count, records, offset, limit):
     return {'state': 'ok', 'count': count, 'records': records, 'offset': offset,
             'limit': limit, 'incomplete': False}
+
+
+PAGING_RUN_ID = 'walk-latency-1794240778634'
+
+
+def latency_paging_answers(walk, numbered, identical, limit):
+    """The paging window as the walk itself writes it.
+
+    The records come from the walk's own `write_paging_fixture` through a
+    recording store, so the message this node answers with is byte for byte what
+    the walk writes to the real store. A parse that no longer matches the written
+    message, or a numbering the check does not expect, fails here instead of on
+    the VM.
+    """
+    store = FakeStore({})
+    report = walk.Report()
+    if not walk.write_paging_fixture(report, store, 1_794_240_778_634, numbered, identical,
+                                     PAGING_RUN_ID):
+        raise SystemExit('the walk did not write its paging fixture')
+    records = [{'time': line['timestamp'], 'message': line['message'], 'fields': {}}
+               for batch in store.inserts for line in batch]
+    count = len(records)
+    answers = [latency_page_answer(count, records[offset:offset + limit], offset, limit)
+               for offset in range(0, count, limit)]
+    params = {'from': '0', 'to': '1', 'text': PAGING_RUN_ID}
+    return answers, params
 
 
 @mode('latency-percentiles')
@@ -674,30 +904,26 @@ def latency_filters(walk, fixture):
 @mode('latency-paging-ok')
 def latency_paging_ok(walk, fixture):
     report = walk.Report()
+    answers, params = latency_paging_answers(walk, 4, 2, 4)
     loader = FakeLoader({
-        'logAnswers': [
-            latency_page_answer(6, [latency_page(1), latency_page(2), latency_page(3),
-                                    latency_page(4)], 0, 4),
-            latency_page_answer(6, [latency_identical(), latency_identical()], 4, 4),
-        ],
+        'logAnswers': answers,
         'requestAnswers': [{'status': 200, 'body': 'SAME-PAGE'}] * 2,
     })
-    walk.check_paging(report, loader, {'from': '0', 'to': '1', 'text': 'run-1'}, 4, 4, 2)
+    walk.check_paging(report, loader, params, 4, 4, 2)
     return report
 
 
 @mode('latency-paging-dup')
 def latency_paging_dup(walk, fixture):
     report = walk.Report()
+    answers, params = latency_paging_answers(walk, 4, 2, 4)
+    # Repeat the first numbered record on the second page: the walk must see it.
+    answers[-1]['records'][0] = answers[0]['records'][0]
     loader = FakeLoader({
-        'logAnswers': [
-            latency_page_answer(6, [latency_page(1), latency_page(2), latency_page(3),
-                                    latency_page(4)], 0, 4),
-            latency_page_answer(6, [latency_page(4), latency_identical()], 4, 4),
-        ],
+        'logAnswers': answers,
         'requestAnswers': [{'status': 200, 'body': 'SAME-PAGE'}] * 2,
     })
-    walk.check_paging(report, loader, {'from': '0', 'to': '1', 'text': 'run-1'}, 4, 4, 2)
+    walk.check_paging(report, loader, params, 4, 4, 2)
     return report
 
 
