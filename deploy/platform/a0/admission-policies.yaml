@@ -65,7 +65,7 @@ spec:
           has(object.data) && size(object.data) == 1 && 'ca.crt' in object.data &&
           !has(object.binaryData)) ||
          (request.namespace == 'lifemodel-system' &&
-          (object.metadata.name == 'lifemodel-storage-settings' ||
+          (object.metadata.name in ['lifemodel-storage-settings', 'lifemodel-logs-settings'] ||
            (request.operation == 'UPDATE' && object.metadata.name in ['lifemodel-ca', 'lifemodel-pki-status']))))
       message: loader may only create or update the named settings projections or update its existing PKI ConfigMaps; deletion is forbidden
 ---
@@ -77,10 +77,11 @@ spec:
   policyName: loader-configmap-admission
   validationActions: [Deny]
 ---
-# Exclusive ownership of the authoritative settings projection: the exact
-# resource is reserved for the loader against every requester, so no other
+# Exclusive ownership of the authoritative settings projections: the exact
+# resources are reserved for the loader against every requester, so no other
 # identity with ConfigMap write RBAC (an operator's service account, for
-# instance) can create, update or delete it. Unrelated ConfigMaps never match.
+# instance) can create, update or delete one. Unrelated ConfigMaps never match.
+# The log store keeps the owner's retention setting in the second projection.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -103,10 +104,10 @@ spec:
       # request.name, not the (absent on DELETE) new object.
       expression: >-
         (request.namespace == 'lifemodel' && request.name == 'lifemodel-platform-settings') ||
-        (request.namespace == 'lifemodel-system' && request.name == 'lifemodel-storage-settings')
+        (request.namespace == 'lifemodel-system' && request.name in ['lifemodel-storage-settings', 'lifemodel-logs-settings'])
   validations:
     - expression: request.userInfo.username == 'system:serviceaccount:lifemodel-system:loader'
-      message: only the loader may create, update or delete the platform settings ConfigMap
+      message: only the loader may create, update or delete the platform settings ConfigMaps
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -157,6 +158,67 @@ metadata:
   name: application-kustomization-admission
 spec:
   policyName: application-kustomization-admission
+  validationActions: [Deny]
+---
+# The log store's Deployment is the loader's to restart for a retention change
+# and for nothing else (ADR-016 §5, N6). The template's revision annotation is
+# what makes `Recreate` replace the store's pod; a change to any other field -
+# replicas, strategy, selector, the pod spec, labels, or the object's own name -
+# is refused, and so is an answer whose two annotation maps disagree.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: loader-logs-store-deployment-admission
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: [lifemodel-system]
+    resourceRules:
+      - apiGroups: [apps]
+        apiVersions: [v1]
+        operations: [UPDATE]
+        resources: [deployments]
+  matchConditions:
+    - name: loader-identity
+      expression: request.userInfo.username == 'system:serviceaccount:lifemodel-system:loader'
+    - name: logs-store
+      expression: request.namespace == 'lifemodel-system' && request.name == 'logs-store'
+  validations:
+    - expression: >-
+        object.metadata.name == oldObject.metadata.name &&
+        object.metadata.namespace == oldObject.metadata.namespace &&
+        ((!has(object.metadata.labels) && !has(oldObject.metadata.labels)) ||
+          (has(object.metadata.labels) && has(oldObject.metadata.labels) &&
+           object.metadata.labels == oldObject.metadata.labels)) &&
+        ((!has(object.metadata.finalizers) && !has(oldObject.metadata.finalizers)) ||
+          (has(object.metadata.finalizers) && has(oldObject.metadata.finalizers) &&
+           object.metadata.finalizers == oldObject.metadata.finalizers)) &&
+        ((!has(object.metadata.ownerReferences) && !has(oldObject.metadata.ownerReferences)) ||
+          (has(object.metadata.ownerReferences) && has(oldObject.metadata.ownerReferences) &&
+           object.metadata.ownerReferences == oldObject.metadata.ownerReferences)) &&
+        object.spec.replicas == oldObject.spec.replicas &&
+        object.spec.strategy == oldObject.spec.strategy &&
+        object.spec.selector == oldObject.spec.selector &&
+        object.spec.template.metadata.labels == oldObject.spec.template.metadata.labels &&
+        object.spec.template.spec == oldObject.spec.template.spec &&
+        has(object.metadata.annotations) &&
+        has(object.spec.template.metadata.annotations) &&
+        'lifemodel.dev/logs-settings-revision' in object.metadata.annotations &&
+        'lifemodel.dev/logs-settings-revision' in object.spec.template.metadata.annotations &&
+        object.metadata.annotations['lifemodel.dev/logs-settings-revision'] ==
+          object.spec.template.metadata.annotations['lifemodel.dev/logs-settings-revision']
+      message: the loader may only patch the two logs settings revision annotations on the logs-store Deployment
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: loader-logs-store-deployment-admission
+spec:
+  policyName: loader-logs-store-deployment-admission
   validationActions: [Deny]
 ---
 # Flux may CREATE the A0 public-CA placeholders in core and motor. Only loader

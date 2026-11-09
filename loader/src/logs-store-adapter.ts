@@ -10,6 +10,7 @@
  * Unavailable is an answer, never an empty list: a refused connection, a
  * timeout, a 5xx, a read-only 429 or an unreadable body returns a reason.
  */
+import { parseStoreFlags, type LogsRetentionFlagsRead } from './logs-retention.js';
 export type LogsUnavailableReason =
   | 'timeout'
   | 'connection_refused'
@@ -80,6 +81,12 @@ export type LogsCountResult = { readonly state: 'ok'; readonly count: number } |
 
 export interface LogsStore {
   query(logsql: string): Promise<LogsStoreResult>;
+  /**
+   * The three flags the retention setting owns, read from the store's own
+   * `/flags`. Nothing else leaves this file: the same answer prints the
+   * partition key (ADR-016 §5).
+   */
+  retentionFlags(): Promise<LogsRetentionFlagsRead>;
   count(logsql: string): Promise<LogsCountResult>;
   modules(): Promise<LogsModulesResult>;
   heartbeats(): Promise<LogsHeartbeatsResult>;
@@ -97,6 +104,7 @@ export interface LogsStoreOptions {
 
 const QUERY_PATH = 'select/logsql/query';
 const METRICS_PATH = 'metrics';
+const FLAGS_PATH = 'flags';
 const MODULES_QUERY = '* | stats by (module) count()';
 /** The field the store's `count()` aggregation writes its answer into. */
 const COUNT_FIELD = 'count(*)';
@@ -232,6 +240,7 @@ export function createLogsStore(options: LogsStoreOptions): LogsStore {
   const base = options.url.endsWith('/') ? options.url : `${options.url}/`;
   const endpoint = new URL(QUERY_PATH, base);
   const metricsEndpoint = new URL(METRICS_PATH, base);
+  const flagsEndpoint = new URL(FLAGS_PATH, base);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const now = options.now ?? Date.now;
   let cached: { at: number; modules: string[] } | null = null;
@@ -272,6 +281,11 @@ export function createLogsStore(options: LogsStoreOptions): LogsStore {
   }
 
   return {
+    async retentionFlags() {
+      const answer = await send(flagsEndpoint, { method: 'GET' });
+      if (answer.state !== 'ok') return { state: 'unavailable' };
+      return { state: 'ok', observed: parseStoreFlags(answer.body) };
+    },
     async query(logsql) {
       const answer = await request(logsql);
       if (answer.state !== 'ok') return answer;

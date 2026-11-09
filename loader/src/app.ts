@@ -23,6 +23,9 @@ import {
 } from './pki.js';
 import { createKubernetesTlsStores } from './pki-kubernetes.js';
 import { createLogsVolumeClaimPreflight } from './logs-volume-claim.js';
+import { createLogsSettings, type LogsSettings } from './logs-settings.js';
+import { createLogsSettingsCluster } from './logs-settings-cluster.js';
+import { createLogsStore } from './logs-store-adapter.js';
 import type { LoaderLogger } from './logger.js';
 import { createLoaderState, describe, type LoaderState } from './state.js';
 import {
@@ -73,6 +76,8 @@ export interface LoaderAppDeps {
   platformBootstrap?: { runInitial(): Promise<void>; unsealIfSealed(): Promise<void> };
   /** The log volume pre-flight before the first-start phases; tests replace it. */
   logsVolumeClaim?: { run(): Promise<void> };
+  /** The owner's retention setting (ADR-016 §5); tests replace it. */
+  logsSettings?: LogsSettings;
   /** The SeaweedFS S3 custody phase (ADR-015 S-D1); tests replace it. */
   platformStorageCustody?: PlatformPhase;
   pki?: PkiManager;
@@ -222,6 +227,19 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       logger,
       projection: deps.settingsProjection ?? createPlatformSettingsProjection(),
     });
+  // The retention setting's two halves: the store's own flags through the
+  // adapter, and the cluster objects the desired revision is written to.
+  const logsStore = createLogsStore({ url: config.logsStoreUrl, now: () => clock.now() });
+  const logsSettings: LogsSettings =
+    deps.logsSettings ??
+    createLogsSettings({
+      fs,
+      path: join(config.volumeRoot, 'logs.json'),
+      logger,
+      now: () => clock.now(),
+      cluster: createLogsSettingsCluster(),
+      flags: () => logsStore.retentionFlags(),
+    });
   const readWorkbenchSource = async () =>
     (await bao.api.readWorkbenchSource()) ?? { ...DEFAULT_WORKBENCH_SOURCE };
   const workbenchTask =
@@ -260,6 +278,26 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       await Promise.race([clock.sleep(30_000), stopped]);
       if (stopping) return;
       if (settings.section().projection.state === 'failed') await settings.projectNow();
+    }
+  }
+
+  /**
+   * ADR-016 §5: a change reaches the store in three writes, so a crash between
+   * two of them must reconcile from `logs.json` on the next start, and a
+   * change the owner made while the Deployment was rolling out must converge
+   * without another click. Every pass is idempotent and never fatal.
+   */
+  async function reconcileLogsSettingsUntilStopped(): Promise<void> {
+    while (!stopping) {
+      try {
+        await logsSettings.reconcile();
+      } catch (error) {
+        logger.warn(
+          { error: describe(error) },
+          'the log store retention settings could not be reconciled'
+        );
+      }
+      await Promise.race([clock.sleep(30_000), stopped]);
     }
   }
 
@@ -344,6 +382,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
           clock,
           pki,
           config,
+          logsSettings,
           modelSlots,
           modelCapture: {
             read: () => bao.api.readCapture(),
@@ -375,6 +414,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         void bootstrapUntilStopped();
         void renewPkiUntilStopped();
         void projectSettingsUntilStopped();
+        void reconcileLogsSettingsUntilStopped();
       } catch (error) {
         logger.error({ error: describe(error) }, 'the platform loader could not start');
         deps.exit(1);

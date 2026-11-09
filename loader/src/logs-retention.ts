@@ -138,6 +138,11 @@ export interface ObservedRetentionFlags {
   readonly minFreeBytes: number | null;
 }
 
+/** The store's own flags answer, read through the adapter's `GET /flags`. */
+export type LogsRetentionFlagsRead =
+  | { readonly state: 'ok'; readonly observed: ObservedRetentionFlags }
+  | { readonly state: 'unavailable' };
+
 /** The values the desired flags must read back as. */
 export interface RetentionFlagValues {
   readonly days: number;

@@ -114,6 +114,20 @@ function parseBody(response: { status: number; body: string }): ObjectBody | nul
   }
 }
 
+/**
+ * The three ConfigMap keys the store reads through `-envflag.enable
+ * -envflag.prefix=VL_` (ADR-016 §5, F3). The env mapping is the one measured
+ * working configuration; the flag names it becomes live beside it in
+ * `logs-retention.ts`.
+ */
+export function configMapLogData(flags: LogsStoreFlags): Record<string, string> {
+  return {
+    VL_retentionPeriod: flags.retentionPeriod,
+    VL_retention_maxDiskSpaceUsageBytes: flags.retentionMaxDiskSpaceUsageBytes,
+    VL_storage_minFreeDiskSpaceBytes: flags.storageMinFreeDiskSpaceBytes,
+  };
+}
+
 function configMapBody(flags: LogsStoreFlags, revision: string, resourceVersion?: string) {
   return {
     apiVersion: 'v1',
@@ -129,14 +143,16 @@ function configMapBody(flags: LogsStoreFlags, revision: string, resourceVersion?
       },
       ...(resourceVersion === undefined ? {} : { resourceVersion }),
     },
-    data: { ...flags },
+    data: configMapLogData(flags),
   };
 }
 
 function sameFlags(data: Record<string, string> | undefined, flags: LogsStoreFlags): boolean {
   if (data === undefined) return false;
-  const keys = Object.keys(flags) as (keyof LogsStoreFlags)[];
-  return keys.every((key) => data[key] === flags[key]);
+  const expected = configMapLogData(flags);
+  const keys = Object.keys(expected);
+  if (Object.keys(data).length !== keys.length) return false;
+  return keys.every((key) => data[key] === expected[key]);
 }
 
 function parseDeployment(

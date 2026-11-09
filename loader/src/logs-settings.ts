@@ -30,8 +30,8 @@ import {
   retentionLimits,
   storeFlagsOf,
   type LogsRetention,
+  type LogsRetentionFlagsRead,
   type LogsRetentionLimits,
-  type ObservedRetentionFlags,
   type RetentionFlagValues,
 } from './logs-retention.js';
 
@@ -82,11 +82,6 @@ export type LogsSettingsWriteResult =
     }
   | { readonly state: 'volume_unknown' }
   | { readonly state: 'forbidden' }
-  | { readonly state: 'unavailable' };
-
-/** The store's own flags answer, read through the adapter's `/flags`. */
-export type LogsRetentionFlagsRead =
-  | { readonly state: 'ok'; readonly observed: ObservedRetentionFlags }
   | { readonly state: 'unavailable' };
 
 export interface LogsSettingsDeps {

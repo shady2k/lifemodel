@@ -12,6 +12,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request as httpRequest } from 'node:http';
 import { createLoaderHttp, type LoaderHttp } from '../../loader/src/http.js';
+import { retentionLimits } from '../../loader/src/logs-retention.js';
+import type { LogsSettingsStatus } from '../../loader/src/logs-settings.js';
 import {
   createSession,
   csrfToken,
@@ -30,389 +32,13 @@ import {
   type LogsStoreFixture,
 } from '../helpers/logs-store-fixture.js';
 
+import { MATRIX, type ExpectedRoute, type RouteHost } from '../fixtures/loader-route-matrix.js';
+
 const BOOT = 'boot-lifemodel.local';
 const APP = 'lifemodel.local';
 const UNKNOWN = 'unknown.local';
 const LOOPBACK = '127.0.0.1';
 const SERVICE = 'loader.lifemodel-system.svc.cluster.local';
-const LOGS_FROM = Date.parse('2026-11-07T10:00:00.000Z');
-const LOGS_TO = Date.parse('2026-11-07T11:00:00.000Z');
-
-type RouteHost = 'boot' | 'app' | 'loopback' | 'service';
-type RouteMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'ANY';
-
-interface ExpectedRoute {
-  host: RouteHost;
-  method: RouteMethod;
-  /** The path the route table declares: a literal, `:key` or `*`. */
-  path: string;
-  /** The path a behaviour probe requests. */
-  requestPath: string;
-  /** `none`: the route does not require a session. `session`: it does. */
-  auth: 'none' | 'session';
-  /** A write that needs the CSRF header and the exact Origin. */
-  csrf: boolean;
-  /** The answer to a method this path does not serve (405 known, 404 unknown). */
-  wrongMethod: 404 | 405;
-  /** The answer with no session at all. */
-  anonymous: readonly number[];
-  /** The answer with a session, a valid Origin and (for a write) a CSRF token. */
-  authenticated?: readonly number[];
-  /** The body the authenticated probe sends. */
-  body?: unknown;
-  /** The authenticated probe's content type (JSON unless stated). */
-  contentType?: string;
-}
-
-/** The logs routes require a session on every method, GET included (L11). */
-function logsRoute(path: string, requestPath: string, anonymous: number[]): ExpectedRoute {
-  return {
-    host: 'boot',
-    method: 'GET',
-    path,
-    requestPath,
-    auth: 'session',
-    csrf: false,
-    wrongMethod: 405,
-    anonymous,
-    authenticated: [200],
-  };
-}
-
-const MATRIX: readonly ExpectedRoute[] = [
-  // First start: these three answer without a session on the boot host.
-  {
-    host: 'boot',
-    method: 'GET',
-    path: '/api/state',
-    requestPath: '/api/state',
-    auth: 'none',
-    csrf: false,
-    wrongMethod: 405,
-    anonymous: [200],
-    authenticated: [200],
-  },
-  {
-    host: 'boot',
-    method: 'POST',
-    path: '/api/setup',
-    requestPath: '/api/setup',
-    auth: 'none',
-    csrf: false,
-    wrongMethod: 405,
-    anonymous: [409],
-    authenticated: [409],
-    body: { password: 'secure owner password' },
-  },
-  {
-    host: 'boot',
-    method: 'POST',
-    path: '/api/login',
-    requestPath: '/api/login',
-    auth: 'none',
-    csrf: false,
-    wrongMethod: 405,
-    anonymous: [200],
-    authenticated: [200],
-    body: { password: 'owner password' },
-  },
-  // Everything else under /api/ requires a session; a write also needs CSRF.
-  {
-    host: 'boot',
-    method: 'POST',
-    path: '/api/password',
-    requestPath: '/api/password',
-    auth: 'session',
-    csrf: true,
-    wrongMethod: 405,
-    anonymous: [401],
-    // A refused content type: the rotation itself is covered by its own test.
-    authenticated: [415],
-    contentType: 'text/plain',
-    body: { currentPassword: 'owner password', newPassword: 'a brand new secure password' },
-  },
-  {
-    host: 'boot',
-    method: 'POST',
-    path: '/api/logout',
-    requestPath: '/api/logout',
-    auth: 'session',
-    csrf: true,
-    wrongMethod: 405,
-    anonymous: [401],
-  },
-  {
-    host: 'boot',
-    method: 'POST',
-    path: '/api/onboarding/device',
-    requestPath: '/api/onboarding/device',
-    auth: 'session',
-    csrf: true,
-    wrongMethod: 405,
-    anonymous: [401],
-    authenticated: [409],
-    body: {},
-  },
-  {
-    host: 'boot',
-    method: 'GET',
-    path: '/api/model',
-    requestPath: '/api/model',
-    auth: 'session',
-    csrf: false,
-    wrongMethod: 405,
-    anonymous: [403],
-    authenticated: [200],
-  },
-  {
-    host: 'boot',
-    method: 'GET',
-    path: '/api/model-capture',
-    requestPath: '/api/model-capture',
-    auth: 'session',
-    csrf: false,
-    wrongMethod: 405,
-    anonymous: [403],
-    authenticated: [200],
-  },
-  {
-    host: 'boot',
-    method: 'PUT',
-    path: '/api/model-capture',
-    requestPath: '/api/model-capture',
-    auth: 'session',
-    csrf: true,
-    wrongMethod: 405,
-    anonymous: [401],
-    authenticated: [200],
-    body: { durationMs: null },
-  },
-  {
-    host: 'boot',
-    method: 'GET',
-    path: '/api/model-status',
-    requestPath: '/api/model-status',
-    auth: 'session',
-    csrf: false,
-    wrongMethod: 405,
-    anonymous: [403],
-    authenticated: [200],
-  },
-  {
-    host: 'boot',
-    method: 'GET',
-    path: '/api/workbench-source',
-    requestPath: '/api/workbench-source',
-    auth: 'session',
-    csrf: false,
-    wrongMethod: 405,
-    anonymous: [403],
-    authenticated: [200],
-  },
-  {
-    host: 'boot',
-    method: 'PUT',
-    path: '/api/workbench-source',
-    requestPath: '/api/workbench-source',
-    auth: 'session',
-    csrf: true,
-    wrongMethod: 405,
-    anonymous: [401],
-    authenticated: [200],
-    body: { registry: 'https://ghcr.io', repository: 'owner/repo' },
-  },
-  {
-    host: 'boot',
-    method: 'GET',
-    path: '/api/workbench-status',
-    requestPath: '/api/workbench-status',
-    auth: 'session',
-    csrf: false,
-    wrongMethod: 405,
-    anonymous: [403],
-    authenticated: [200],
-  },
-  {
-    host: 'boot',
-    method: 'PUT',
-    path: '/api/model/primary',
-    requestPath: '/api/model/primary',
-    auth: 'session',
-    csrf: true,
-    wrongMethod: 405,
-    anonymous: [401],
-    authenticated: [200],
-    body: { kind: 'openai', baseUrl: 'https://models.example/v1', model: 'm' },
-  },
-  {
-    host: 'boot',
-    method: 'PUT',
-    path: '/api/model/reserve',
-    requestPath: '/api/model/reserve',
-    auth: 'session',
-    csrf: true,
-    wrongMethod: 405,
-    anonymous: [401],
-    authenticated: [200],
-    body: { kind: 'openai', baseUrl: 'https://models.example/v1', model: 'm' },
-  },
-  {
-    host: 'boot',
-    method: 'DELETE',
-    path: '/api/model/reserve',
-    requestPath: '/api/model/reserve',
-    auth: 'session',
-    csrf: true,
-    wrongMethod: 405,
-    anonymous: [401],
-    authenticated: [200],
-    body: {},
-  },
-  {
-    host: 'boot',
-    method: 'GET',
-    path: '/api/settings',
-    requestPath: '/api/settings',
-    auth: 'session',
-    csrf: false,
-    wrongMethod: 405,
-    anonymous: [403],
-    authenticated: [200],
-  },
-  {
-    host: 'boot',
-    method: 'PUT',
-    path: '/api/settings/:key',
-    requestPath: '/api/settings/tasks.concurrency',
-    auth: 'session',
-    csrf: true,
-    wrongMethod: 405,
-    anonymous: [401],
-    authenticated: [200],
-    body: { value: 4 },
-  },
-  // The logs page and its API: a session on every method, GET included.
-  logsRoute('/logs', '/logs', [303]),
-  logsRoute(
-    '/api/logs',
-    `/api/logs?from=${String(LOGS_FROM)}&to=${String(LOGS_TO)}&module=core`,
-    [403]
-  ),
-  logsRoute('/api/logs/modules', '/api/logs/modules', [403]),
-  // The boot host's pages and files. Only GET is served; /logout is a known
-  // path with no page here, so its GET answer is the plain 404.
-  {
-    host: 'boot',
-    method: 'GET',
-    path: '/',
-    requestPath: '/',
-    auth: 'none',
-    csrf: false,
-    wrongMethod: 405,
-    anonymous: [200],
-  },
-  {
-    host: 'boot',
-    method: 'GET',
-    path: '/login',
-    requestPath: '/login',
-    auth: 'none',
-    csrf: false,
-    wrongMethod: 405,
-    anonymous: [200],
-  },
-  {
-    host: 'boot',
-    method: 'GET',
-    path: '/setup',
-    requestPath: '/setup',
-    auth: 'none',
-    csrf: false,
-    wrongMethod: 405,
-    anonymous: [303],
-  },
-  {
-    host: 'boot',
-    method: 'GET',
-    path: '/logout',
-    requestPath: '/logout',
-    auth: 'none',
-    csrf: false,
-    wrongMethod: 405,
-    anonymous: [404],
-  },
-  {
-    host: 'boot',
-    method: 'GET',
-    path: '/favicon.svg',
-    requestPath: '/favicon.svg',
-    auth: 'none',
-    csrf: false,
-    wrongMethod: 404,
-    anonymous: [200],
-  },
-  {
-    host: 'boot',
-    method: 'GET',
-    path: '/assets/*',
-    requestPath: '/assets/app.js',
-    auth: 'none',
-    csrf: false,
-    wrongMethod: 404,
-    anonymous: [200],
-  },
-  {
-    host: 'boot',
-    method: 'GET',
-    path: '/ca.crt',
-    requestPath: '/ca.crt',
-    auth: 'none',
-    csrf: false,
-    wrongMethod: 404,
-    anonymous: [200],
-  },
-  // The two authentication seams answer every method; they read only headers.
-  {
-    host: 'app',
-    method: 'GET',
-    path: '/_auth/handoff',
-    requestPath: '/_auth/handoff',
-    auth: 'none',
-    csrf: false,
-    wrongMethod: 404,
-    anonymous: [303],
-  },
-  {
-    host: 'loopback',
-    method: 'ANY',
-    path: '/_auth/handoff',
-    requestPath: '/_auth/handoff',
-    auth: 'none',
-    csrf: false,
-    wrongMethod: 404,
-    anonymous: [303],
-  },
-  {
-    host: 'loopback',
-    method: 'ANY',
-    path: '/_auth/verify',
-    requestPath: '/_auth/verify',
-    auth: 'none',
-    csrf: false,
-    wrongMethod: 404,
-    anonymous: [401],
-  },
-  {
-    host: 'service',
-    method: 'ANY',
-    path: '/_auth/verify',
-    requestPath: '/_auth/verify',
-    auth: 'none',
-    csrf: false,
-    wrongMethod: 404,
-    anonymous: [401],
-  },
-];
 
 const HOSTS: Record<RouteHost, string> = {
   boot: BOOT,
@@ -460,6 +86,19 @@ function uiRoot(): string {
   return root;
 }
 
+/** The retention status the settings routes answer in the matrix. */
+const LOGS_SETTINGS: LogsSettingsStatus = {
+  days: 14,
+  maxBytes: 1_610_612_736,
+  desiredRevision: null,
+  appliedRevision: null,
+  appliedAt: null,
+  applied: true,
+  pending: null,
+  limits: retentionLimits(3 * 1024 * 1024 * 1024),
+  fitsVolume: true,
+};
+
 async function start(): Promise<Fixture> {
   const record = await hashPassword('owner password');
   const clock = createTestClock();
@@ -502,6 +141,10 @@ async function start(): Promise<Fixture> {
     settings: {
       section: () => section,
       set: async () => ({ value: 4, revision: 2 }),
+    },
+    logsSettings: {
+      status: async () => LOGS_SETTINGS,
+      write: async () => ({ state: 'ok', status: LOGS_SETTINGS }),
     },
     workbench: {
       read: async () => ({ registry: 'https://ghcr.io', repository: 'owner/repo' }),

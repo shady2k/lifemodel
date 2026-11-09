@@ -34,6 +34,8 @@ export type RouteHandlerName =
   | 'logsPage'
   | 'logsQuery'
   | 'logsModules'
+  | 'logsSettingsRead'
+  | 'logsSettingsWrite'
   | 'bootPage'
   | 'notFound'
   | 'favicon'
@@ -265,6 +267,26 @@ export const ROUTES: readonly RouteEntry[] = [
     csrf: false,
     wrongMethod: 405,
     handler: 'logsModules',
+  },
+  // The owner's retention setting: read on GET, written on PUT, both under a
+  // session and the write with the CSRF header and the exact Origin.
+  {
+    host: 'boot',
+    method: 'GET',
+    path: '/api/logs/settings',
+    auth: 'session',
+    csrf: false,
+    wrongMethod: 405,
+    handler: 'logsSettingsRead',
+  },
+  {
+    host: 'boot',
+    method: 'PUT',
+    path: '/api/logs/settings',
+    auth: 'session',
+    csrf: true,
+    wrongMethod: 405,
+    handler: 'logsSettingsWrite',
   },
   {
     host: 'boot',
