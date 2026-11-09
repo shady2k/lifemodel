@@ -49,12 +49,32 @@ function status(fields: Partial<Record<string, unknown>> = {}) {
 }
 
 /** Answers each log request through `answers` and returns the requested URLs. */
+/**
+ * The page now carries the retention card, which reads `/api/state` for its CSRF
+ * token and `/api/logs/settings` for the setting; this file answers both so a
+ * records test does not depend on them.
+ */
+const SETTINGS = {
+  state: 'ok',
+  days: 14,
+  maxBytes: 1_610_612_736,
+  desiredRevision: null,
+  appliedRevision: null,
+  appliedAt: null,
+  applied: true,
+  pending: null,
+  limits: null,
+  fitsVolume: null,
+};
+
 function stubAnswers(answers: (url: string) => unknown): string[] {
   const urls: string[] = [];
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string) => {
       urls.push(url);
+      if (url === '/api/state') return { ok: true, json: async () => ({ csrfToken: 'token' }) };
+      if (url === '/api/logs/settings') return { ok: true, json: async () => SETTINGS };
       const body = url === '/api/logs/modules' ? { state: 'ok', modules: [] } : answers(url);
       return { ok: true, json: async () => body };
     })
@@ -138,6 +158,8 @@ describe('logs page filter row', () => {
       'fetch',
       vi.fn(async (url: string) => {
         calls.push(url);
+        if (url === '/api/state') return { ok: true, json: async () => ({ csrfToken: 'token' }) };
+        if (url === '/api/logs/settings') return { ok: true, json: async () => SETTINGS };
         return {
           ok: true,
           json: async () => (url === '/api/logs/modules' ? { state: 'ok', modules: [] } : page([])),
@@ -152,7 +174,7 @@ describe('logs page filter row', () => {
       target: { value: 'conv_1' },
     });
     fireEvent.change(container.querySelector('#logs-text')!, { target: { value: 'needle' } });
-    fireEvent.submit(container.querySelector('form')!);
+    fireEvent.submit(screen.getByRole('button', { name: 'Show logs' }).closest('form')!);
     await waitFor(() => {
       expect(calls.filter((url) => url.startsWith('/api/logs?'))).toHaveLength(2);
     });

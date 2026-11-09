@@ -6,7 +6,8 @@
  * The list pages through one window, whose end is fixed at the first page.
  * Every page re-reads the window's count, and a page whose count changed says
  * so: records arrived while the reader was scrolling, and the refresh reads
- * the first page again. Freshness and retention are later tasks.
+ * the first page again. Above it sits the owner's retention setting, whose own
+ * component says when the store runs it (ADR-016 §5).
  */
 import { Fragment, useCallback, useEffect, useState, type SyntheticEvent } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -29,6 +30,7 @@ import {
   LOGS_TEXT_MAX_LENGTH,
 } from '../../../loader/src/logs-query.js';
 import type { LogsRecord } from '../../../loader/src/logs-store-adapter.js';
+import { LogsSettings } from './LogsSettings';
 
 const ALL_MODULES = '__all__';
 const ALL_LEVELS = '__all__';
@@ -358,6 +360,8 @@ export function Logs() {
             </Button>
           </div>
         </header>
+
+        <LogsSettings />
 
         <Card>
           <CardContent className="p-4 sm:p-6">
