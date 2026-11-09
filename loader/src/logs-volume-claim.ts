@@ -24,12 +24,16 @@ export interface KubernetesObjectResponse {
   body: string;
 }
 
-/** The two verbs the pre-flight needs, on one path it names itself. */
+/** The verbs the log reads and the settings projection need, on paths they name themselves. */
 export interface KubernetesObjectApi {
-  /** One named object; 404 when it does not exist. */
+  /** One named object, or a labelled collection; 404 when it does not exist. */
   get(path: string): Promise<KubernetesObjectResponse>;
   /** A merge patch (`application/merge-patch+json`) on that object. */
   patch(path: string, patch: string): Promise<KubernetesObjectResponse>;
+  /** A create (`POST`) at a collection path, with a JSON body. */
+  create(path: string, body: string): Promise<KubernetesObjectResponse>;
+  /** A replace (`PUT`) of one named object, with its resourceVersion. */
+  update(path: string, body: string): Promise<KubernetesObjectResponse>;
 }
 
 export interface KubernetesObjectApiOptions {
@@ -96,9 +100,9 @@ function defaultRequest(timeoutMs: number): NonNullable<KubernetesObjectApiOptio
 }
 
 /**
- * The in-cluster client; it can only read and patch the paths it is handed.
- * Other narrow log reads (the evictor's CronJob) use the same client, so the
- * platform has one way to reach the API.
+ * The in-cluster client; it can only read, create, replace and patch the paths
+ * it is handed. The evictor's CronJob read and the retention setting's
+ * projection use the same client, so the platform has one way to reach the API.
  */
 export function createKubernetesObjectApi(
   options: KubernetesObjectApiOptions = {}
@@ -126,6 +130,8 @@ export function createKubernetesObjectApi(
   return {
     get: (path) => send(path, 'GET', undefined, undefined),
     patch: (path, patch) => send(path, 'PATCH', patch, 'application/merge-patch+json'),
+    create: (path, body) => send(path, 'POST', body, 'application/json'),
+    update: (path, body) => send(path, 'PUT', body, 'application/json'),
   };
 }
 
