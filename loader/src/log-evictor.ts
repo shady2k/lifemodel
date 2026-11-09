@@ -6,10 +6,11 @@
  * detaches the oldest day partition in the store, removes that directory only
  * after the detach answered 200, and looks again - never the other way round,
  * because a directory the store still has open must not be removed. One line
- * per drop; nothing on a run that drops nothing. A detach that fails removes
- * nothing and fails the run, and so does a run that finds no partition left
- * while the volume is still below the threshold: a failed Job the owner can
- * see, never a silent loop.
+ * per drop; nothing on a run that drops nothing. A detach no connection
+ * answered is retried first (below); one that still fails removes nothing and
+ * fails the run, and so does a run that finds no partition left while the
+ * volume is still below the threshold: a failed Job the owner can see, never a
+ * silent loop.
  *
  * `module` on the stored record is the pod's `app.kubernetes.io/name`, set by
  * the collector; this line carries the day, the bytes freed and the reason.
@@ -19,7 +20,11 @@
  */
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
-import { createLogsPartitionStore, type LogsPartitionStore } from './logs-partition-store.js';
+import {
+  createLogsPartitionStore,
+  type LogsPartitionStore,
+  type PartitionDetachResult,
+} from './logs-partition-store.js';
 import { listLogPartitions, logPartitionBytes, removeLogPartition } from './logs-partitions.js';
 import { evictorThresholdBytes, readVolumeSpace, type VolumeSpace } from './logs-volume-space.js';
 
@@ -29,17 +34,53 @@ export const EVICTOR_VOLUME_MOUNT = '/data';
 /** The store's Service, the only peer the job is allowed besides DNS. */
 const DEFAULT_STORE_URL = 'http://logs-store.lifemodel-system.svc:9428';
 
+/**
+ * A detach that got no answer at all - a connection refused, reset or timed
+ * out, which is what a new pod's not-yet-synced network policy produces - is
+ * retried, because the store answers a second later and a run that gave up
+ * would drop nothing and fail the Job (ADR-016 §5). The window and the
+ * backoff fit inside the Job's 60 s deadline; a store that answers, whatever
+ * its status, is not retried: that answer is its verdict.
+ */
+export const CONNECT_RETRY_WINDOW_MS = 20_000;
+export const CONNECT_RETRY_DELAYS_MS: readonly number[] = [
+  250, 500, 1000, 2000, 4000, 4000, 4000, 4000,
+];
+
+export interface ConnectRetry {
+  /** The longest a run spends retrying, the attempts themselves included. */
+  readonly windowMs: number;
+  /** The waits in order; the last one repeats. */
+  readonly delaysMs: readonly number[];
+  readonly sleep: (ms: number) => Promise<void>;
+  readonly now: () => number;
+}
+
+const realSleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(done, ms));
+
+export const DEFAULT_CONNECT_RETRY: ConnectRetry = {
+  windowMs: CONNECT_RETRY_WINDOW_MS,
+  delaysMs: CONNECT_RETRY_DELAYS_MS,
+  sleep: realSleep,
+  now: () => Date.now(),
+};
+
 export interface LogEvictorDeps {
   readonly volumePath: string;
   readonly store: LogsPartitionStore;
   readonly space: (path: string) => Promise<VolumeSpace>;
   readonly write: (line: string) => void;
+  readonly connectRetry?: ConnectRetry;
 }
 
 function failureLine(
   reason: string,
   space: VolumeSpace | null,
-  detail: { readonly day?: string; readonly status?: number | null } = {}
+  detail: {
+    readonly day?: string;
+    readonly status?: number | null;
+    readonly attempts?: number;
+  } = {}
 ): string {
   return JSON.stringify({
     time: new Date().toISOString(),
@@ -48,6 +89,7 @@ function failureLine(
     reason,
     ...(detail.day === undefined ? {} : { day: detail.day }),
     ...(detail.status === undefined || detail.status === null ? {} : { status: detail.status }),
+    ...(detail.attempts === undefined || detail.attempts < 2 ? {} : { attempts: detail.attempts }),
     ...(space === null
       ? {}
       : {
@@ -68,7 +110,32 @@ function dropLine(day: string, freedBytes: number): string {
   });
 }
 
+/**
+ * Detach, retrying only an attempt no answer came from: a failure that carries
+ * a status is the store's own verdict and is returned at once.
+ */
+async function detachWithRetry(
+  store: LogsPartitionStore,
+  day: string,
+  retry: ConnectRetry
+): Promise<{ readonly result: PartitionDetachResult; readonly attempts: number }> {
+  const startedAt = retry.now();
+  let result = await store.detach(day);
+  let attempts = 1;
+  while (result.state === 'failed' && result.status === null) {
+    const delayMs = retry.delaysMs[Math.min(attempts - 1, retry.delaysMs.length - 1)];
+    // The window counts its own attempts: a store that hangs until the request
+    // timeout must not stretch the wait past the Job's deadline.
+    if (delayMs === undefined || retry.now() - startedAt + delayMs > retry.windowMs) break;
+    await retry.sleep(delayMs);
+    attempts += 1;
+    result = await store.detach(day);
+  }
+  return { result, attempts };
+}
+
 export async function runLogEvictor(deps: LogEvictorDeps): Promise<number> {
+  const retry = deps.connectRetry ?? DEFAULT_CONNECT_RETRY;
   const read = async (): Promise<VolumeSpace | null> => {
     try {
       return await deps.space(deps.volumePath);
@@ -93,9 +160,9 @@ export async function runLogEvictor(deps: LogEvictorDeps): Promise<number> {
       deps.write(failureLine('no_partition', space));
       return 1;
     }
-    const detach = await deps.store.detach(day);
+    const { result: detach, attempts } = await detachWithRetry(deps.store, day, retry);
     if (detach.state !== 'detached') {
-      deps.write(failureLine(detach.reason, space, { day, status: detach.status }));
+      deps.write(failureLine(detach.reason, space, { day, status: detach.status, attempts }));
       return 1;
     }
     let freedBytes: number;

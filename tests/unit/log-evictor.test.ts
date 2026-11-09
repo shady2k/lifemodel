@@ -14,7 +14,13 @@ import { createServer, type Server } from 'node:http';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runLogEvictor, type LogEvictorDeps } from '../../loader/src/log-evictor.js';
+import {
+  CONNECT_RETRY_DELAYS_MS,
+  CONNECT_RETRY_WINDOW_MS,
+  runLogEvictor,
+  type ConnectRetry,
+  type LogEvictorDeps,
+} from '../../loader/src/log-evictor.js';
 import {
   evictorThresholdBytes,
   readVolumeSpace,
@@ -23,6 +29,7 @@ import {
 import {
   createLogsPartitionStore,
   LOGS_PARTITION_DETACH_PATH,
+  type PartitionDetachFailure,
   type PartitionDetachResult,
 } from '../../loader/src/logs-partition-store.js';
 
@@ -77,6 +84,44 @@ function fakeStore(result?: PartitionDetachResult): FakeStore {
   };
 }
 
+/** A store that answers nothing for its first `refusals` connections, then detaches. */
+function refusingStore(
+  refusals: number,
+  reason: PartitionDetachFailure = 'connection_refused'
+): FakeStore {
+  const calls: string[] = [];
+  return {
+    calls,
+    detach: (day: string) => {
+      calls.push(day);
+      const result: PartitionDetachResult =
+        calls.length <= refusals ? { state: 'failed', reason, status: null } : { state: 'detached' };
+      return Promise.resolve(result);
+    },
+  };
+}
+
+/** A retry policy whose waits are recorded instead of slept. */
+function fastRetry(overrides: Partial<ConnectRetry> = {}): {
+  retry: ConnectRetry;
+  sleeps: number[];
+} {
+  const sleeps: number[] = [];
+  let clock = 0;
+  const retry: ConnectRetry = {
+    windowMs: 10,
+    delaysMs: [1, 2, 3],
+    sleep: (ms) => {
+      sleeps.push(ms);
+      clock += ms;
+      return Promise.resolve();
+    },
+    now: () => clock,
+    ...overrides,
+  };
+  return { retry, sleeps };
+}
+
 /** Free-space readings in order; the last one repeats. */
 function spaces(...available: number[]) {
   let index = 0;
@@ -87,7 +132,12 @@ function spaces(...available: number[]) {
   };
 }
 
-function harness(deps: { volumePath: string; store: FakeStore; space: LogEvictorDeps['space'] }): {
+function harness(deps: {
+  volumePath: string;
+  store: FakeStore;
+  space: LogEvictorDeps['space'];
+  retry?: ConnectRetry;
+}): {
   code: () => Promise<number>;
   lines: string[];
 } {
@@ -98,6 +148,8 @@ function harness(deps: { volumePath: string; store: FakeStore; space: LogEvictor
       store: deps.store,
       space: deps.space,
       write: (line) => lines.push(line),
+      // A run under test never waits out the real window.
+      connectRetry: deps.retry ?? fastRetry().retry,
     });
   return { code, lines };
 }
@@ -195,16 +247,24 @@ describe('a log evictor run (ADR-016 §5, L16)', () => {
     expectNoKey(run.lines);
   });
 
-  it('removes nothing and fails when the store refuses the connection', async () => {
+  it('retries a connection that got no answer, then fails with the reason', async () => {
     const root = volume(['20261106']);
-    const store = fakeStore({ state: 'failed', reason: 'connection_refused', status: null });
-    const run = harness({ volumePath: root, store, space: spaces(THRESHOLD - 1) });
+    const store = refusingStore(Number.POSITIVE_INFINITY);
+    const { retry, sleeps } = fastRetry();
+    const run = harness({ volumePath: root, store, space: spaces(THRESHOLD - 1), retry });
 
     expect(await run.code()).not.toBe(0);
     expect(existsSync(join(root, 'partitions', '20261106'))).toBe(true);
-    expect(entries(run.lines)[0]).toMatchObject({
+    expect(store.calls.length).toBeGreaterThan(1);
+    expect(store.calls).toHaveLength(sleeps.length + 1);
+    expect(sleeps.reduce((total, ms) => total + ms, 0)).toBeLessThanOrEqual(retry.windowMs);
+    const [line, ...rest] = entries(run.lines);
+    expect(rest).toEqual([]);
+    expect(line).toMatchObject({
       level: 'error',
       reason: 'connection_refused',
+      attempts: store.calls.length,
+      day: '20261106',
     });
     expectNoKey(run.lines);
   });
@@ -238,6 +298,113 @@ describe('a log evictor run (ADR-016 §5, L16)', () => {
     expect(line).toMatchObject({ level: 'error', reason: 'volume_unreadable' });
     expect(run.lines[0]).not.toContain('statfs failed');
     expectNoKey(run.lines);
+  });
+});
+
+describe('a detach that got no answer (ADR-016 §5)', () => {
+  it('retries a refused connection and then detaches and removes', async () => {
+    const root = volume(['20261106', '20261107']);
+    const store = refusingStore(2);
+    const { retry, sleeps } = fastRetry();
+    const run = harness({
+      volumePath: root,
+      store,
+      space: spaces(THRESHOLD - 1, 2 * GiB),
+      retry,
+    });
+
+    expect(await run.code()).toBe(0);
+    expect(store.calls).toEqual(['20261106', '20261106', '20261106']);
+    expect(sleeps).toEqual([1, 2]);
+    expect(existsSync(join(root, 'partitions', '20261106'))).toBe(false);
+    expect(existsSync(join(root, 'partitions', '20261107'))).toBe(true);
+    const [line, ...rest] = entries(run.lines);
+    expect(rest).toEqual([]);
+    expect(line).toMatchObject({
+      level: 'info',
+      day: '20261106',
+      freedBytes: 4096,
+      reason: 'below_threshold',
+    });
+    expectNoKey(run.lines);
+  });
+
+  it.each(['connection_refused', 'timeout', 'unreachable'] as const)(
+    'retries a %s and then detaches',
+    async (reason) => {
+      const root = volume(['20261106']);
+      const store = refusingStore(1, reason);
+      const { retry } = fastRetry();
+      const run = harness({ volumePath: root, store, space: spaces(THRESHOLD - 1, 2 * GiB), retry });
+
+      expect(await run.code()).toBe(0);
+      expect(store.calls).toEqual(['20261106', '20261106']);
+      expect(entries(run.lines)[0]).toMatchObject({ level: 'info', day: '20261106' });
+    }
+  );
+
+  it('does not retry an HTTP answer, whatever its status', async () => {
+    for (const status of [400, 401, 503]) {
+      const root = volume(['20261106']);
+      const store = fakeStore({ state: 'failed', reason: 'rejected', status });
+      const { retry, sleeps } = fastRetry();
+      const run = harness({ volumePath: root, store, space: spaces(THRESHOLD - 1), retry });
+
+      expect(await run.code()).not.toBe(0);
+      expect(store.calls).toEqual(['20261106']);
+      expect(sleeps).toEqual([]);
+      const [line] = entries(run.lines);
+      expect(line).toMatchObject({ level: 'error', reason: 'rejected', status });
+      expect(line?.attempts).toBeUndefined();
+    }
+  });
+
+  it('makes no extra attempt when the store answers at once', async () => {
+    const root = volume(['20261106']);
+    const store = fakeStore();
+    const { retry, sleeps } = fastRetry();
+    const run = harness({ volumePath: root, store, space: spaces(THRESHOLD - 1, 2 * GiB), retry });
+
+    expect(await run.code()).toBe(0);
+    expect(store.calls).toEqual(['20261106']);
+    expect(sleeps).toEqual([]);
+  });
+
+  it('stops when the attempts themselves have used the window', async () => {
+    const root = volume(['20261106']);
+    const store = refusingStore(Number.POSITIVE_INFINITY);
+    const sleeps: number[] = [];
+    let clock = 0;
+    const retry: ConnectRetry = {
+      windowMs: 100,
+      delaysMs: [10],
+      sleep: (ms) => {
+        sleeps.push(ms);
+        clock += ms;
+        return Promise.resolve();
+      },
+      // Each attempt costs 60 ms, as one that waits out its request timeout does.
+      now: () => {
+        clock += 60;
+        return clock;
+      },
+    };
+    const run = harness({ volumePath: root, store, space: spaces(THRESHOLD - 1), retry });
+
+    expect(await run.code()).not.toBe(0);
+    expect(store.calls).toHaveLength(2);
+    expect(sleeps).toEqual([10]);
+    expect(entries(run.lines)[0]).toMatchObject({ attempts: 2, reason: 'connection_refused' });
+  });
+
+  it('keeps the whole backoff inside the window', () => {
+    // The window itself is held to the CronJob's deadline in
+    // tests/unit/platform-logs-evictor.test.ts, against the manifest.
+    expect(CONNECT_RETRY_WINDOW_MS).toBe(20_000);
+    expect(CONNECT_RETRY_DELAYS_MS.reduce((total, ms) => total + ms, 0)).toBeLessThanOrEqual(
+      CONNECT_RETRY_WINDOW_MS
+    );
+    expect(CONNECT_RETRY_DELAYS_MS[0]).toBeGreaterThan(0);
   });
 });
 

@@ -857,7 +857,14 @@ writes (read-only)` and names the evictor's last successful run. A missed or
 failed run is also a Job object (`kubectl get jobs -n lifemodel-system`). If the
 store's Deployment is rolling or the store is down when a run starts, `detach`
 fails (connection refused, or a partition that is not attached), the run removes
-nothing and exits non-zero, and the next minute's run tries again.
+nothing and exits non-zero, and the next minute's run tries again. A pod's network
+policy reaches it only after the policy controller syncs it — measured on the
+owner's machine on 2026-11-09: the evictor's pod got `ECONNREFUSED` for its first
+second and 200 every second after — so a detach that no connection answered
+(refused, reset or timed out) is retried with a short backoff for at most 20 s,
+inside the Job's 60 s deadline, before the run logs `the log evictor removed
+nothing`; an HTTP answer, whatever its status, is the store's verdict and is not
+retried.
 
 **Read-only has two causes, and the page tells them apart.** One is the evictor
 failing or not running. The other is an **incompressible flood**: writes are
