@@ -402,3 +402,164 @@ describe("the store Deployment's clamp and the partition key's annotation", () =
     }
   });
 });
+
+/**
+ * The clamp compares the whole object, not a list of named fields (N6). A
+ * merge patch the loader did not write can carry any field beside the
+ * revision annotation - `spec.paused` above all - and a named-field list
+ * admitted whatever it forgot to name. So the test drives a Deployment as the
+ * apiserver returns it: status, managed fields and a resource version the
+ * apiserver changes, and one patch the loader really sends beside each field
+ * the object must refuse.
+ */
+describe("the store Deployment's clamp compares the whole object (N6)", () => {
+  const revision = '7-9f8e7d6c5b4a';
+  const previousRevision = '6-1a2b3c4d5e6f';
+  const current = {
+    apiVersion: 'apps/v1',
+    kind: 'Deployment',
+    metadata: {
+      name: LOGS_STORE_DEPLOYMENT,
+      namespace: 'lifemodel-system',
+      uid: '3c1d0f52-2b7e-4a6f-9c1d-7e5a4b3c2d1e',
+      creationTimestamp: '2026-11-01T00:00:00Z',
+      resourceVersion: '9001',
+      generation: 7,
+      labels: { 'app.kubernetes.io/name': 'logs-store' },
+      annotations: {
+        [LOGS_SETTINGS_REVISION_ANNOTATION]: previousRevision,
+        'lifemodel.dev/owner': 'platform',
+      },
+      managedFields: [{ manager: 'flux', operation: 'Apply' }],
+    },
+    spec: {
+      replicas: 1,
+      paused: false,
+      minReadySeconds: 0,
+      revisionHistoryLimit: 10,
+      strategy: { type: 'Recreate' },
+      selector: { matchLabels: { 'app.kubernetes.io/name': 'logs-store' } },
+      template: {
+        metadata: {
+          labels: { 'app.kubernetes.io/name': 'logs-store' },
+          annotations: {
+            [LOGS_SETTINGS_REVISION_ANNOTATION]: previousRevision,
+            'lifemodel.dev/owner': 'platform',
+          },
+        },
+        spec: {
+          containers: [
+            {
+              name: 'logs-store',
+              image: 'registry.example/logs@sha256:abc',
+              args: ['-envflag.enable', '-envflag.prefix=VL_'],
+            },
+          ],
+        },
+      },
+    },
+    status: {
+      observedGeneration: 7,
+      replicas: 1,
+      updatedReplicas: 1,
+      availableReplicas: 1,
+    },
+  };
+  /** The object the apiserver answers with after the loader's own merge patch. */
+  const patched = () => {
+    const next = structuredClone(current);
+    next.metadata.annotations[LOGS_SETTINGS_REVISION_ANNOTATION] = revision;
+    next.spec.template.metadata.annotations[LOGS_SETTINGS_REVISION_ANNOTATION] = revision;
+    next.metadata.generation = 8;
+    next.metadata.resourceVersion = '9002';
+    next.metadata.managedFields.push({ manager: 'loader', operation: 'Update' });
+    next.status.observedGeneration = 8;
+    return next;
+  };
+  const update = (object: unknown, oldObject: unknown = current) => ({
+    request: {
+      operation: 'UPDATE',
+      namespace: 'lifemodel-system',
+      name: LOGS_STORE_DEPLOYMENT,
+      userInfo: { username: LOADER },
+    },
+    object,
+    oldObject,
+  });
+  const clamp = () => policy('loader-logs-store-deployment-admission');
+
+  it('admits the loader revision patch, with the fields the apiserver rewrites', () => {
+    expect(admits(clamp(), update(patched()))).toBe(true);
+    // The partition key's pair travels the same way, on top of the settings one.
+    const keyed = patched();
+    keyed.metadata.annotations[LOGS_PARTITION_KEY_REVISION_ANNOTATION] = '1-0000111122223333';
+    keyed.spec.template.metadata.annotations[LOGS_PARTITION_KEY_REVISION_ANNOTATION] =
+      '1-0000111122223333';
+    expect(admits(clamp(), update(keyed, patched()))).toBe(true);
+    // An identical resend is no change, and so not a change of anything else.
+    expect(admits(clamp(), update(patched(), patched()))).toBe(true);
+  });
+
+  it('refuses spec.paused set in the same patch', () => {
+    const paused = patched();
+    paused.spec.paused = true;
+    expect(admits(clamp(), update(paused))).toBe(false);
+    // The store stops replacing its pod for good: a later retention or
+    // partition-key rollout then never takes effect.
+    const onlyPaused = structuredClone(current);
+    onlyPaused.spec.paused = true;
+    expect(admits(clamp(), update(onlyPaused))).toBe(false);
+  });
+
+  it('refuses a field of the spec or the template that the clamp does not name', () => {
+    const mutations: [string, (next: ReturnType<typeof patched>) => void][] = [
+      ['another minimum ready time', (next) => (next.spec.minReadySeconds = 5)],
+      ['another revision history limit', (next) => (next.spec.revisionHistoryLimit = 2)],
+      ['a strategy that keeps the old pod', (next) => {
+        next.spec.strategy = { type: 'RollingUpdate' };
+      }],
+      ['another template field', (next) => {
+        (next.spec.template.spec as any).hostNetwork = true;
+      }],
+      ['another container beside the store', (next) => {
+        next.spec.template.spec.containers.push({
+          name: 'sidecar',
+          image: 'registry.example/sidecar@sha256:def',
+          args: [],
+        });
+      }],
+    ];
+    for (const [reason, mutate] of mutations) {
+      const next = patched();
+      mutate(next);
+      expect(admits(clamp(), update(next)), reason).toBe(false);
+    }
+  });
+
+  it('refuses another annotation key, or another value under a kept key', () => {
+    const mutations: [string, (next: ReturnType<typeof patched>) => void][] = [
+      ['an annotation added on the object', (next) => {
+        next.metadata.annotations['lifemodel.dev/extra'] = 'x';
+      }],
+      ['an annotation added on the pod template', (next) => {
+        next.spec.template.metadata.annotations['lifemodel.dev/extra'] = 'x';
+      }],
+      ['an annotation kept on the object alone', (next) => {
+        delete next.spec.template.metadata.annotations['lifemodel.dev/owner'];
+      }],
+      ['a changed value under another key', (next) => {
+        next.metadata.annotations['lifemodel.dev/owner'] = 'someone';
+        next.spec.template.metadata.annotations['lifemodel.dev/owner'] = 'someone';
+      }],
+      ['a removed annotation', (next) => {
+        delete next.metadata.annotations['lifemodel.dev/owner'];
+        delete next.spec.template.metadata.annotations['lifemodel.dev/owner'];
+      }],
+    ];
+    for (const [reason, mutate] of mutations) {
+      const next = patched();
+      mutate(next);
+      expect(admits(clamp(), update(next)), reason).toBe(false);
+    }
+  });
+});
