@@ -94,6 +94,27 @@ describe('the latency walk states what it proves and what it does not', () => {
     expect(header).toMatch(/What it does not cover/);
   });
 
+  it('writes its own conversation record and measures the filter on it', () => {
+    const run = harness('latency-filters');
+    const written = jsonLine<{
+      conversation: string;
+      inserted: number;
+      modules: string[];
+      withConversation: number;
+      filters: string[];
+    }>(run, 'FILTERS');
+    // The VM has no conversation of the owner's: the walk brings its own, in a
+    // module of its own, so the conversation filter measures a real query.
+    expect(written.conversation).toBeTruthy();
+    expect(written.inserted).toBeGreaterThan(0);
+    expect(written.modules).toEqual(['walk-latency-filter']);
+    expect(written.withConversation).toBe(written.inserted);
+    expect(written.filters).toContain('conversation');
+    expect(run.invalid).toEqual([]);
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 30000);
+
   it('measures through the loader\'s own route, not the store', () => {
     const source = readFileSync(WALK, 'utf8');
     expect(source).toContain('/api/logs');

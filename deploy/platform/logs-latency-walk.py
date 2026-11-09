@@ -7,7 +7,11 @@ What it proves
 1. Forty queries per filter — a time window, `module`, `level`,
    `conversation_id` and a text search — with the page's real form (the same
    field filters the loader builds, 100-record pages, a window that steps back a
-   minute per query). The walk prints p50, p95 and max for each filter, quiet and
+   minute per query). The conversation id is the walk's own: the instance has no
+   conversation record unless one of the owner's has run through the store, so
+   the walk writes `--filter-records` records of its own, with its run id, in the
+   module `walk-latency-filter`, and waits until the API reads them back before
+   the measurement. The walk prints p50, p95 and max for each filter, quiet and
    again with an ingest writing into the store, and fails when a p95 reaches
    2.5 s. The numbers are printed so a reviewer can see how far from the
    deadline they are, not only whether they passed.
@@ -39,12 +43,14 @@ Arguments (defaults are the test VM's)
   --identical-records N  byte-identical lines written at another timestamp (default 300)
   --page-limit N         records per page in the paging check (default 250)
   --paging-minutes-back N  how far back the paging window is written (default 3)
+  --filter-records N     records the conversation fixture writes (default 60)
   --deadline-seconds N   the whole walk's bound (default 1800)
 
 What it changes and restores
 ----------------------------
-It writes records through the store's insert protocol — the paging fixture, a
-short ingest while the second round of queries runs, and nothing else — and in
+It writes records through the store's insert protocol — the conversation
+fixture before the measurement, the paging fixture, a short ingest while the
+second round of queries runs, and nothing else — and in
 the `finally` stops the ingest, closes the port-forward and removes its own day
 partitions if any are not today's (after the store detaches them; the partition
 key is read into a variable and never printed). Today's records stay: they are
@@ -91,6 +97,11 @@ from logs_walk_support import (  # noqa: E402
 
 MIB = 1024 * 1024
 MODULE = 'walk-latency'
+# The conversation filter needs a record that carries a conversation id, and the
+# VM has no conversation of the owner's: the walk writes its own, in a module of
+# its own, so the filter is measured on a query the page really makes.
+FILTER_MODULE = 'walk-latency-filter'
+FILTER_LEVEL = 'warn'
 RECORD_PAYLOAD_BYTES = 384
 IDENTITY = re.compile(r'walk-latency (\S+) seq=(\d+)')
 PARTITION_KEY_SECRET = 'lifemodel-logs-partition-key'
@@ -161,8 +172,12 @@ def run_filter_round(report, loader, label, filters, count, limit_ms, window_min
     return ok
 
 
-def filters_from(report, loader):
-    """The values the real records offer, so each filter measures a query the page makes."""
+def filters_from(report, loader, conversation):
+    """The values the records offer, so each filter measures a query the page makes.
+
+    The conversation id is the walk's own fixture (`write_filter_fixture`); the
+    others are read from the last hour's records.
+    """
     answer = loader.logs({'from': str(now_ms() - 3600_000), 'to': str(now_ms()), 'limit': '200'})
     if answer is None or answer.get('state') != 'ok' or not (answer.get('records') or []):
         report.not_valid('the last hour holds no record: no filter value can be chosen')
@@ -170,7 +185,6 @@ def filters_from(report, loader):
     records = answer['records']
     module = None
     level = None
-    conversation = None
     text = None
     for record in records:
         fields = record.get('fields') or {}
@@ -178,13 +192,11 @@ def filters_from(report, loader):
             module = fields['module']
         if level is None and isinstance(fields.get('level'), str) and fields['level'] != 'unknown':
             level = fields['level']
-        if conversation is None and isinstance(fields.get('conversation_id'), str):
-            conversation = fields['conversation_id']
         if text is None:
             for word in re.findall(r'[A-Za-z][A-Za-z0-9_-]{3,}', record.get('message') or ''):
                 text = word
                 break
-        if all(value is not None for value in (module, level, conversation, text)):
+        if all(value is not None for value in (module, level, text)):
             break
     filters = [('time', {})]
     if module:
@@ -195,11 +207,7 @@ def filters_from(report, loader):
         filters.append(('level', {'level': level}))
     else:
         report.not_valid('no record names a level: the level filter cannot be measured')
-    if conversation:
-        filters.append(('conversation', {'conversation_id': conversation}))
-    else:
-        report.not_valid('no record carries a conversation id: the conversation filter cannot be '
-                         'measured')
+    filters.append(('conversation', {'conversation_id': conversation}))
     if text:
         filters.append(('text', {'text': text}))
     else:
@@ -207,6 +215,54 @@ def filters_from(report, loader):
     report.note('the filters measure module=%s level=%s conversation=%s text=%s'
                 % (module, level, conversation, text))
     return filters
+
+
+def filter_batch(count, run_id, conversation, moment_ms):
+    """The walk's own conversation fixture, in a module of its own."""
+    moment = stamp(moment_ms)
+    return [{
+        'timestamp': moment,
+        'message': '%s filter fixture seq=%06d retries=3' % (run_id, sequence),
+        'module': FILTER_MODULE,
+        'namespace': 'walk',
+        'pod': 'walk-latency-filter',
+        'container': 'walk',
+        'stream': 'stdout',
+        'level': FILTER_LEVEL,
+        'conversation_id': conversation,
+        'untrusted': False,
+    } for sequence in range(count)]
+
+
+def write_filter_fixture(report, store, loader, state, count):
+    """Write records that carry a conversation id, and wait until the API reads them.
+
+    The conversation filter is one of the page's five, and the instance has no
+    conversation record unless one of the owner's has run through the store: the
+    walk writes `count` records of its own with its run id and returns the
+    conversation id they share, or None when they never arrived.
+    """
+    conversation = state['run_id'] + '-conv'
+    status, _body = store.insert(filter_batch(count, state['run_id'], conversation, now_ms()))
+    if status not in (200, 204):
+        report.not_valid('the conversation fixture was not written (insert answered %d): the '
+                         'conversation filter cannot be measured' % status)
+        return None
+    params = {'from': str(now_ms() - 600_000), 'to': str(now_ms() + 60_000),
+              'module': FILTER_MODULE, 'limit': '1'}
+
+    def arrived():
+        answer = loader.logs(params)
+        return answer is not None and answer.get('state') == 'ok' and answer.get('count') == count
+
+    if not wait_until(time.monotonic() + 60, 2, arrived):
+        report.not_valid("the conversation fixture's %d records never all arrived: the "
+                         'conversation filter cannot be measured' % count)
+        return None
+    report.pass_('the conversation fixture is stored',
+                 '%d records in module %s carrying conversation %s'
+                 % (count, FILTER_MODULE, conversation))
+    return conversation
 
 
 def latency_batch(count, moment_ms, run_id):
@@ -366,7 +422,10 @@ def check_paging(report, loader, params, limit, numbered, identical):
 
 
 def run(report, options, loader, store, state):
-    filters = filters_from(report, loader)
+    conversation = write_filter_fixture(report, store, loader, state, options.filter_records)
+    if conversation is None:
+        return False
+    filters = filters_from(report, loader, conversation)
     if filters is None:
         return False
     run_filter_round(report, loader, 'quiet', filters, options.query_count, options.limit_ms,
@@ -440,6 +499,7 @@ def main(argv=None):
     parser.add_argument('--same-time-records', type=int, default=1000)
     parser.add_argument('--identical-records', type=int, default=300)
     parser.add_argument('--page-limit', type=int, default=250)
+    parser.add_argument('--filter-records', type=int, default=60)
     parser.add_argument('--paging-minutes-back', type=int, default=3)
     options = parser.parse_args(argv)
 

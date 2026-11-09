@@ -284,6 +284,7 @@ def options(**values):
         writer_interval_ms=50, quiet_seconds=0, suspend_seconds=1, scratch_days_back=20,
         recover_bound=5, settle_seconds=0, cronjob='logs-evictor', writer_rate=5,
         peak_bytes=0, index_poll=1, query_count=40, limit_ms=2500, page_limit=250,
+        filter_records=60,
         same_time_records=4, identical_records=2, window_minutes=60,
         ingest_mib_per_s=1, paging_minutes_back=3, keep_mib=0,
     )
@@ -643,6 +644,28 @@ def latency_round_fail(walk, fixture):
     loader = FakeLoader({'logAnswers': [{'state': 'ok', 'records': [], 'count': 0}],
                          'delayMs': 5})
     walk.run_filter_round(report, loader, 'quiet', [('time', {})], 3, 1, 60)
+    return report
+
+
+@mode('latency-filters')
+def latency_filters(walk, fixture):
+    report = walk.Report()
+    store = FakeStore({})
+    record = {'time': '2026-11-09T00:00:00Z', 'message': 'walk-latency-1 filter fixture',
+              'fields': {'module': 'walk-latency-filter', 'level': 'warn',
+                         'conversation_id': 'walk-latency-1-conv'}}
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 5, 'records': [record]}]})
+    state = {'run_id': 'walk-latency-1'}
+    conversation = walk.write_filter_fixture(report, store, loader, state, 5)
+    filters = walk.filters_from(report, loader, conversation) or []
+    lines = [line for batch in store.inserts for line in batch]
+    print('FILTERS ' + json.dumps({
+        'conversation': conversation,
+        'inserted': len(lines),
+        'modules': sorted({line.get('module') for line in lines}),
+        'withConversation': sum(1 for line in lines if line.get('conversation_id')),
+        'filters': [name for name, _base in filters],
+    }))
     return report
 
 
