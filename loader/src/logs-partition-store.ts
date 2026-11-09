@@ -1,15 +1,15 @@
 /**
  * The store's partition API, in one file (ADR-016 §5).
  *
- * The evictor's only call into the store: `POST /internal/partition/detach`
- * with the day and the partition key as query arguments. It answers 200 only
+ * The evictor detaches through: `POST /internal/partition/detach`
+ * with the day and the partition key as form fields. It answers 200 only
  * after the queries reading that partition have stopped, which is what makes
  * removing the directory safe. The path is the store's own protocol, so it is
  * named here and nowhere else.
  *
  * Failure is an answer, never a silent success: a refused connection, a
  * timeout or any status but 200 returns a reason and the key is not in it. The
- * response body is never read - it may quote the request's query.
+ * detach error body is never read; list answers are validated before use.
  *
  * A failed result with `status: null` got no HTTP answer at all - the
  * connection was refused, reset or timed out - and is the one failure the
@@ -29,7 +29,12 @@ export type PartitionDetachResult =
       readonly status: number | null;
     };
 
+export type PartitionListResult =
+  | { readonly state: 'listed'; readonly days: string[] }
+  | Extract<PartitionDetachResult, { state: 'failed' }>;
+
 export interface LogsPartitionStore {
+  list(): Promise<PartitionListResult>;
   detach(day: string): Promise<PartitionDetachResult>;
 }
 
@@ -59,13 +64,36 @@ export function createLogsPartitionStore(options: LogsPartitionStoreOptions): Lo
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   return {
-    async detach(day: string): Promise<PartitionDetachResult> {
-      const target = new URL(endpoint);
-      target.searchParams.set('name', day);
-      target.searchParams.set('authKey', options.key);
+    async list(): Promise<PartitionListResult> {
+      const target = new URL('list', endpoint);
       try {
         const response = await fetch(target, {
           method: 'POST',
+          body: new URLSearchParams({ authKey: options.key }),
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        if (response.status !== 200) {
+          await response.body?.cancel();
+          return { state: 'failed', reason: 'rejected', status: response.status };
+        }
+        const days: unknown = await response.json();
+        if (
+          !Array.isArray(days) ||
+          !days.every((day) => typeof day === 'string' && /^\d{8}$/.test(day))
+        )
+          return { state: 'failed', reason: 'rejected', status: response.status };
+        return { state: 'listed', days };
+      } catch (error) {
+        return { state: 'failed', reason: failureReason(error), status: null };
+      }
+    },
+    async detach(day: string): Promise<PartitionDetachResult> {
+      const target = new URL(endpoint);
+      const body = new URLSearchParams({ name: day, authKey: options.key });
+      try {
+        const response = await fetch(target, {
+          method: 'POST',
+          body,
           signal: AbortSignal.timeout(timeoutMs),
         });
         await response.body?.cancel();

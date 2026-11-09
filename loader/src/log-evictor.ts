@@ -4,7 +4,7 @@
  *
  * A run reads the volume's free space and, while it is below the threshold,
  * detaches the oldest day partition in the store, removes that directory only
- * after the detach answered 200, and looks again - never the other way round,
+ * after a 200 detach or an attached list confirming its absence, then looks again,
  * because a directory the store still has open must not be removed. One line
  * per drop; nothing on a run that drops nothing. A detach no connection
  * answered is retried first (below); one that still fails removes nothing and
@@ -24,6 +24,7 @@ import {
   createLogsPartitionStore,
   type LogsPartitionStore,
   type PartitionDetachResult,
+  type PartitionListResult,
 } from './logs-partition-store.js';
 import { listLogPartitions, logPartitionBytes, removeLogPartition } from './logs-partitions.js';
 import { evictorThresholdBytes, readVolumeSpace, type VolumeSpace } from './logs-volume-space.js';
@@ -99,7 +100,7 @@ function failureLine(
   });
 }
 
-function dropLine(day: string, freedBytes: number): string {
+function dropLine(day: string, freedBytes: number, alreadyDetached: boolean): string {
   return JSON.stringify({
     time: new Date().toISOString(),
     level: 'info',
@@ -107,20 +108,20 @@ function dropLine(day: string, freedBytes: number): string {
     day,
     freedBytes,
     reason: 'below_threshold',
+    ...(alreadyDetached ? { alreadyDetached: true } : {}),
   });
 }
 
 /**
- * Detach, retrying only an attempt no answer came from: a failure that carries
+ * Retry a partition call only when no answer came: a failure that carries
  * a status is the store's own verdict and is returned at once.
  */
-async function detachWithRetry(
-  store: LogsPartitionStore,
-  day: string,
+async function partitionCallWithRetry<T extends PartitionDetachResult | PartitionListResult>(
+  call: () => Promise<T>,
   retry: ConnectRetry
-): Promise<{ readonly result: PartitionDetachResult; readonly attempts: number }> {
+): Promise<{ readonly result: T; readonly attempts: number }> {
   const startedAt = retry.now();
-  let result = await store.detach(day);
+  let result = await call();
   let attempts = 1;
   while (result.state === 'failed' && result.status === null) {
     const delayMs = retry.delaysMs[Math.min(attempts - 1, retry.delaysMs.length - 1)];
@@ -129,7 +130,7 @@ async function detachWithRetry(
     if (delayMs === undefined || retry.now() - startedAt + delayMs > retry.windowMs) break;
     await retry.sleep(delayMs);
     attempts += 1;
-    result = await store.detach(day);
+    result = await call();
   }
   return { result, attempts };
 }
@@ -160,10 +161,30 @@ export async function runLogEvictor(deps: LogEvictorDeps): Promise<number> {
       deps.write(failureLine('no_partition', space));
       return 1;
     }
-    const { result: detach, attempts } = await detachWithRetry(deps.store, day, retry);
-    if (detach.state !== 'detached') {
-      deps.write(failureLine(detach.reason, space, { day, status: detach.status, attempts }));
+    const { result: attached, attempts: listAttempts } = await partitionCallWithRetry(
+      () => deps.store.list(),
+      retry
+    );
+    if (attached.state === 'failed') {
+      deps.write(
+        failureLine(attached.reason, space, {
+          day,
+          status: attached.status,
+          attempts: listAttempts,
+        })
+      );
       return 1;
+    }
+    const alreadyDetached = !attached.days.includes(day);
+    if (!alreadyDetached) {
+      const { result: detach, attempts } = await partitionCallWithRetry(
+        () => deps.store.detach(day),
+        retry
+      );
+      if (detach.state !== 'detached') {
+        deps.write(failureLine(detach.reason, space, { day, status: detach.status, attempts }));
+        return 1;
+      }
     }
     let freedBytes: number;
     try {
@@ -173,7 +194,7 @@ export async function runLogEvictor(deps: LogEvictorDeps): Promise<number> {
       deps.write(failureLine('remove_failed', space, { day }));
       return 1;
     }
-    deps.write(dropLine(day, freedBytes));
+    deps.write(dropLine(day, freedBytes, alreadyDetached));
     const next = await read();
     if (next === null) return 1;
     space = next;

@@ -70,6 +70,7 @@ function volume(days: string[], bytesPerDay = 4096): string {
 
 interface FakeStore {
   readonly calls: string[];
+  list(): Promise<{ state: 'listed'; days: string[] }>;
   detach(day: string): Promise<PartitionDetachResult>;
 }
 
@@ -77,6 +78,7 @@ function fakeStore(result?: PartitionDetachResult): FakeStore {
   const calls: string[] = [];
   return {
     calls,
+    list: async () => ({ state: 'listed', days: ['20261105', '20261106', '20261107'] }),
     detach: (day: string) => {
       calls.push(day);
       return Promise.resolve(result ?? { state: 'detached' });
@@ -92,10 +94,13 @@ function refusingStore(
   const calls: string[] = [];
   return {
     calls,
+    list: async () => ({ state: 'listed', days: ['20261105', '20261106', '20261107'] }),
     detach: (day: string) => {
       calls.push(day);
       const result: PartitionDetachResult =
-        calls.length <= refusals ? { state: 'failed', reason, status: null } : { state: 'detached' };
+        calls.length <= refusals
+          ? { state: 'failed', reason, status: null }
+          : { state: 'detached' };
       return Promise.resolve(result);
     },
   };
@@ -335,7 +340,12 @@ describe('a detach that got no answer (ADR-016 §5)', () => {
       const root = volume(['20261106']);
       const store = refusingStore(1, reason);
       const { retry } = fastRetry();
-      const run = harness({ volumePath: root, store, space: spaces(THRESHOLD - 1, 2 * GiB), retry });
+      const run = harness({
+        volumePath: root,
+        store,
+        space: spaces(THRESHOLD - 1, 2 * GiB),
+        retry,
+      });
 
       expect(await run.code()).toBe(0);
       expect(store.calls).toEqual(['20261106', '20261106']);
@@ -432,8 +442,7 @@ describe('the store partition protocol (ADR-016 §5)', () => {
     const request = new URL(seen[0]?.url ?? '/', url);
     expect(seen[0]?.method).toBe('POST');
     expect(request.pathname).toBe(`/${LOGS_PARTITION_DETACH_PATH}`);
-    expect(request.searchParams.get('name')).toBe('20261106');
-    expect(request.searchParams.get('authKey')).toBe(KEY);
+    expect(request.search).toBe('');
   });
 
   it('reports a non-200 answer as rejected, without carrying the body', async () => {

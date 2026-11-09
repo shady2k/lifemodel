@@ -788,8 +788,9 @@ single node the store's mount and the job's do not conflict, because one node's
 kubelet serves both pods.
 
 *What a run does.* It reads the volume's free space; when it is below the
-threshold it calls `POST /internal/partition/detach?name=YYYYMMDD` on the store
-through its Service, then removes `partitions/YYYYMMDD` from the volume, then looks
+threshold it reads `POST /internal/partition/list` and, if the oldest day is
+attached, calls `POST /internal/partition/detach` on the store through its Service,
+then removes `partitions/YYYYMMDD` from the volume, then looks
 again and repeats until free space is above the threshold. It always takes the
 **oldest partition present** — every day the retention bound keeps goes before a
 newer one, and today's partition only when nothing older is left.
@@ -797,7 +798,10 @@ newer one, and today's partition only when nothing older is left.
 have stopped, and a restart re-attaches a directory that is still on disk, so
 **removal directly follows detach in the same run** and the pod does not exit
 before the directory is gone; **removal happens only after `detach` returned
-200**, because removing a directory the store still has open is unsafe. Measured:
+200 or the attached list confirms the day is already detached**, because removing
+a directory the store still has open is unsafe. The latter finishes a lost detach
+answer or a run killed before removal on its next run, logging the usual drop
+with `alreadyDetached: true` and without another detach. Measured:
 detach + `rm` took 0.05, 0.12 and 0.13 s for three drops. When no partition is left
 and free space is still below the threshold — the volume holds something else —
 the run removes nothing and exits non-zero, so the state is a visible failed Job
@@ -856,15 +860,14 @@ for that flag, and it was measured on the pinned image: the store accepted
 `/internal/partition/list` with the key read from that file and answered
 `Expected to receive non-empty authKey when -partitionManageAuthKey is set`
 without it) — and the job as a `secretKeyRef`. No other workload holds it and it
-never appears in a manifest. The endpoint accepts the key only as the `authKey`
-query argument, so the job sends
-`POST /internal/partition/detach?name=YYYYMMDD&authKey=…`; measured, the store
-wrote the key nowhere: its log for a run with a live key, 500 rows and one detach
-had **no** line containing the key, none containing `authKey`, and none for
-`/internal/partition`, and its own `/flags` prints
-`-partitionManageAuthKey="secret"`, so the adapter's `/flags` read cannot expose
-it either. The job's own line carries only the day, the bytes freed and the
-reason. A roll of the key is a Secret update plus a store restart through the
+never appears in a manifest. Every partition call sends `authKey` (and `name`
+for detach) in an `application/x-www-form-urlencoded` POST body, never a URL:
+v1.53.0's `app/vlstorage/main.go` partition handlers and its vendored
+`lib/httpserver/httpserver.go` `CheckAuthFlag` read `r.FormValue`, which accepts
+these bodies. Error logging masks form keys but not URL query keys, so the prior
+successful-detach measurement did not establish safety for an error. The job's own
+line carries only the day, the bytes freed, the reason and, when applicable, the
+already-detached marker. A roll of the key is a Secret update plus a store restart through the
 existing revision path (§ above).
 
 **The first key is the loader's to write.** The artifact ships the Secret empty,
@@ -897,7 +900,7 @@ retries from its in-memory buffer (§6), and the page says `the store is refusin
 writes (read-only)` and names the evictor's last successful run. A missed or
 failed run is also a Job object (`kubectl get jobs -n lifemodel-system`). If the
 store's Deployment is rolling or the store is down when a run starts, `detach`
-fails (connection refused, or a partition that is not attached), the run removes
+or the attached-list read fails (connection refused or an HTTP refusal), the run removes
 nothing and exits non-zero, and the next minute's run tries again. A pod's network
 policy reaches it only after the policy controller syncs it — measured on the
 owner's machine on 2026-11-09: the evictor's pod got `ECONNREFUSED` for its first
