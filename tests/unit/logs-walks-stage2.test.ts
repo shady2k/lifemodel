@@ -64,20 +64,39 @@ describe.each(STAGE2_WALKS)('$path', ({ path, id, browser }) => {
     expect(header).toContain(id);
     expect(header).toMatch(/What it proves/);
     expect(header).toMatch(/What it changes/);
-    // The row it covers is named so a reviewer can follow it from the ADR.
-    expect(header).toMatch(/ADR-016 L\d\d/);
+    // The row it covers is named so a reviewer can follow it from the ADR (the
+    // page walk serves the ADR's sections and PRA-001, not one constraint row).
+    expect(header).toMatch(browser ? /ADR-016/ : /ADR-016 L\d\d/);
   });
 
   it('reports PASS, FAIL and NOTE lines and exits on the failure count', () => {
     const source = text(path);
-    expect(source).toContain('PASS');
-    expect(source).toContain('FAIL');
-    expect(source).toContain('NOTE');
-    expect(source).toMatch(/failures|FAILS/);
+    if (browser) {
+      expect(source).toContain('PASS');
+      expect(source).toContain('FAIL');
+      expect(source).toContain('NOTE');
+    } else {
+      // The five Python walks print through the one Report beside them, so a
+      // verdict line cannot drift per script.
+      expect(source).toMatch(/Report\(/);
+      expect(source).toContain('report.check(');
+    }
+    // The exit status comes from the failure count, never a printed line alone.
+    if (browser) {
+      expect(source).toMatch(/process\.exit\(failures \? 1 : 0\)/);
+    } else {
+      expect(source).toContain('return report.result()');
+    }
   });
 
   it('marks a walk that never reached the state it asserts on', () => {
-    expect(text(path)).toContain('TEST NOT VALID');
+    const source = text(path);
+    if (browser) {
+      expect(source).toContain('TEST NOT VALID');
+    } else {
+      expect(source).toMatch(/not_valid\(/);
+      expect(text('deploy/platform/logs_walk_support.py')).toContain('TEST NOT VALID');
+    }
   });
 
   it('restores what it changed on every exit and says so', () => {
