@@ -167,6 +167,51 @@ DEPLOYED = {'spec': {'replicas': 1},
             'status': {'updatedReplicas': 1, 'availableReplicas': 1}}
 
 
+def patch_operation(document, operation):
+    """Apply one JSON-patch operation to `document`; False when the API refuses it."""
+    path = operation.get('path') or ''
+    parts = [part.replace('~1', '/').replace('~0', '~') for part in path.split('/')[1:]]
+    if not path.startswith('/') or not parts:
+        return False
+    node = document
+    for part in parts[:-1]:
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        elif isinstance(node, list) and part.isdigit() and int(part) < len(node):
+            node = node[int(part)]
+        else:
+            return False
+    last = parts[-1]
+    kind = operation.get('op')
+    if isinstance(node, list):
+        if not last.isdigit() or int(last) >= len(node):
+            return False
+        if kind == 'remove':
+            del node[int(last)]
+            return True
+        if kind not in ('add', 'replace') or operation.get('value') is None:
+            return False
+        if kind == 'add':
+            node.insert(int(last), operation['value'])
+        else:
+            node[int(last)] = operation['value']
+        return True
+    if not isinstance(node, dict) or kind not in ('add', 'replace', 'remove'):
+        return False
+    if kind == 'remove':
+        if last not in node:
+            return False
+        del node[last]
+        return True
+    if kind == 'replace' and last not in node:
+        return False
+    if operation.get('value') is None:
+        # A null nodeSelector or a null volume is not a pod template the API takes.
+        return False
+    node[last] = operation['value']
+    return True
+
+
 class FakeCluster:
     """A fake kubectl: the DaemonSet JSON, pod lists, and scripted patch results.
 
@@ -175,10 +220,17 @@ class FakeCluster:
     that is the sequence a restart walks through, without counting polls. The
     store Deployment it reports is scripted the same way, one state per read, so
     a walk that waits for a rollout finishes on the read the fixture says.
+
+    A patch the script accepts is still applied to the template the walk reads
+    back, and refused when the API would refuse it: a `remove` of a path that is
+    not there, and a `replace` with a null value, answer non-zero like a rejected
+    JSON patch does.
     """
 
     def __init__(self, fixture):
         self.daemonset = fixture.get('daemonset')
+        template = ((self.daemonset or {}).get('spec') or {}).get('template') or {}
+        self.template = json.loads(json.dumps(template))
         self.collector_states = fixture.get('collectorStates', [{'ready': 1, 'desired': 1,
                                                                  'readyPods': 1}])
         self.deployment_states = fixture.get('deploymentStates') or [DEPLOYED]
@@ -198,8 +250,33 @@ class FakeCluster:
             index = min(len(self.patches), len(self.patch_script) - 1)
             code = self.patch_script[index] if self.patch_script else 0
             self.patches.append(payload)
+            if code == 0:
+                code = self.apply_patch(payload)
             return Result(returncode=code)
         return Result(returncode=0)
+
+    def apply_patch(self, payload):
+        """Apply a merge or JSON patch to the template the walk reads back."""
+        try:
+            body = json.loads(payload)
+        except ValueError:
+            return 1
+        if isinstance(body, dict):
+            wanted = ((body.get('spec') or {}).get('template') or {}).get('spec') or {}
+            spec = self.template.setdefault('spec', {})
+            for key, value in wanted.items():
+                if isinstance(value, dict) and isinstance(spec.get(key), dict):
+                    spec[key] = {**spec[key], **value}
+                else:
+                    spec[key] = json.loads(json.dumps(value))
+            return 0
+        # A JSON patch addresses the DaemonSet, so its paths start at /spec/template.
+        document = {'spec': {'template': self.template}}
+        for operation in body if isinstance(body, list) else [body]:
+            if not patch_operation(document, operation):
+                return 1
+        self.template = document['spec']['template']
+        return 0
 
     def current_state(self):
         return self.collector_states[min(len(self.patches), len(self.collector_states) - 1)]
@@ -207,7 +284,8 @@ class FakeCluster:
     def json(self, args, timeout=120):
         self.calls.append(' '.join(args))
         if 'daemonset' in args:
-            body = json.loads(json.dumps(self.daemonset))
+            body = json.loads(json.dumps(self.daemonset)) if self.daemonset else {}
+            body.setdefault('spec', {})['template'] = json.loads(json.dumps(self.template))
             state = self.current_state()
             body.setdefault('status', {})['numberReady'] = state.get('ready', 0)
             body['status']['desiredNumberScheduled'] = state.get('desired', 0)
@@ -414,6 +492,39 @@ def fresh_refused_never(walk, fixture):
     store = FakeStore({'insertStatuses': [200]})
     status, _body, answers = walk.wait_refused(report, store, 0)
     print('REFUSED ' + json.dumps({'status': status, 'answers': answers}))
+    return report
+
+
+@mode('fresh-restore-twice')
+def fresh_restore_twice(walk, fixture):
+    # The walk restores the selector and the pod-log volume once already (after
+    # case 1 and case 2); the final restore must see nothing left to do, not
+    # send the same patch again and report the machine as not put back.
+    report = walk.Report()
+    cluster = FakeCluster({'daemonset': DAEMONSET, 'patchScript': [0]})
+    volume = FakeVolume({})
+    state = {}
+    stopped = walk.stop_collector(cluster, options(), state)
+    selector = [walk.restore_collector_selector(cluster, state),
+                walk.restore_collector_selector(cluster, state)]
+    stalled = walk.stall_pod_logs(cluster, state)
+    pods = [walk.restore_pod_logs(cluster, state), walk.restore_pod_logs(cluster, state)]
+    print('RESTORE ' + json.dumps({'stopped': stopped, 'stalled': stalled,
+                                   'selector': selector, 'pods': pods,
+                                   'patches': len(cluster.patches)}))
+    walk.restore(report, options(ready_timeout=1), cluster, volume, state, None)
+    return report
+
+
+@mode('fresh-restore-report')
+def fresh_restore_report(walk, fixture):
+    report = walk.Report()
+    # Every patch is refused, and both changes are still recorded as pending.
+    cluster = FakeCluster({'daemonset': DAEMONSET, 'patchScript': [1]})
+    state = {'nodeSelector': None,
+             'podsVolume': {'name': 'pods',
+                            'hostPath': {'path': '/var/log/pods', 'type': 'Directory'}}}
+    walk.restore(report, options(ready_timeout=1), cluster, FakeVolume({}), state, None)
     return report
 
 

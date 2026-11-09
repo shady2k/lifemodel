@@ -283,15 +283,23 @@ def stop_collector(cluster, options, state):
 
 
 def restore_collector_selector(cluster, state):
+    """Put the nodeSelector the walk found back; True when nothing is left to do.
+
+    The recorded original is dropped only once the patch was accepted, so a
+    second restore (the walk already restores the selector after case 1) has
+    nothing to re-apply instead of removing a path that is already absent.
+    """
     if 'nodeSelector' not in state:
         return True
-    original = state.get('nodeSelector')
+    original = state['nodeSelector']
     if original is None:
         operation = {'op': 'remove', 'path': '/spec/template/spec/nodeSelector'}
     else:
         operation = {'op': 'add', 'path': '/spec/template/spec/nodeSelector', 'value': original}
-    state['nodeSelector'] = None
-    return patch_template(cluster, [operation])
+    if not patch_template(cluster, [operation]):
+        return False
+    del state['nodeSelector']
+    return True
 
 
 def volume_position(cluster, name):
@@ -326,18 +334,25 @@ def stall_pod_logs(cluster, state):
 
 
 def restore_pod_logs(cluster, state):
+    """Put the pod-log volume the walk found back; True when nothing is left to do.
+
+    Like the selector, the recorded original is dropped only after the patch was
+    accepted: the walk restores it after case 2, and the final restore must not
+    replace the volume with the empty record it kept for the retry.
+    """
     if 'podsVolume' not in state:
         return True
     position = volume_position(cluster, 'pods')
     if position is None:
         return False
-    original = state.get('podsVolume')
-    state['podsVolume'] = None
-    return patch_template(cluster, [{
+    if not patch_template(cluster, [{
         'op': 'replace',
         'path': '/spec/template/spec/volumes/%d' % position,
-        'value': original,
-    }])
+        'value': state['podsVolume'],
+    }]):
+        return False
+    del state['podsVolume']
+    return True
 
 
 def process_heartbeat_ms(store):
@@ -596,27 +611,39 @@ def run(report, options, loader, cluster, store, volume, state):
 
 
 def restore(report, options, cluster, volume, state, forwarding):
-    """Put back every change, then say what the machine looks like now."""
-    restored = True
-    try:
-        restored = restore_collector_selector(cluster, state) and restored
-        restored = restore_pod_logs(cluster, state) and restored
-    except WalkError:
-        restored = False
-    if not volume.clear_filler():
-        restored = False
+    """Put back every change, then say what the machine looks like now.
+
+    Each step says on its own whether it had anything left to put back, and an
+    incomplete restore names the step that did not: a `RESTORE incomplete` line
+    that only says "check the template by hand" leaves the operator to find out
+    which of the walk's own changes is still there.
+    """
+    incomplete = []
+    steps = (
+        ('the collector nodeSelector', lambda: restore_collector_selector(cluster, state)),
+        ('the collector pod-log volume', lambda: restore_pod_logs(cluster, state)),
+        ('the filler on the volume', volume.clear_filler),
+    )
+    for name, step in steps:
+        try:
+            if not step():
+                incomplete.append(name)
+        except WalkError:
+            incomplete.append(name)
     if forwarding is not None:
         forwarding.close()
     try:
         ready = wait_collector(cluster, options, ready=True)
     except WalkError:
         ready = False
-    if restored and ready:
+    if not incomplete and ready:
         print('RESTORE collector %s/%s Ready with the pod template the walk found, no filler on %s'
               % (COLLECTOR_NAMESPACE, COLLECTOR, options.mount))
     else:
-        print('RESTORE incomplete: collector %s/%s is %s; check its pod template and %s by hand'
-              % (COLLECTOR_NAMESPACE, COLLECTOR, 'Ready' if ready else 'NOT Ready', options.mount))
+        print('RESTORE incomplete: %s; collector %s/%s is %s; check its pod template and %s by hand'
+              % (', '.join(incomplete) or 'the collector did not come back Ready',
+                 COLLECTOR_NAMESPACE, COLLECTOR, 'Ready' if ready else 'NOT Ready',
+                 options.mount))
 
 
 def main(argv=None):

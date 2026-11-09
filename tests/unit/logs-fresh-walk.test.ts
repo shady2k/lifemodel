@@ -182,6 +182,26 @@ describe('a fake node for the fresh walk', () => {
     expect(run.notes.join('\n')).toContain('answered 200');
   }, 30000);
 
+  it('restores each change once and leaves nothing for the final restore to redo', () => {
+    const run = harness('fresh-restore-twice');
+    expect(jsonLine<Record<string, unknown>>(run, 'RESTORE')).toEqual({
+      stopped: true,
+      stalled: true,
+      selector: [true, true],
+      pods: [true, true],
+      patches: 4,
+    });
+    expect(run.lines.join('\n')).toContain('RESTORE collector lifemodel-logs/logs-collector Ready');
+    expect(run.lines.join('\n')).not.toContain('RESTORE incomplete');
+  }, 30000);
+
+  it('names the step that did not put the machine back', () => {
+    const run = harness('fresh-restore-report');
+    const incomplete = run.lines.find((line) => line.startsWith('RESTORE incomplete:'));
+    expect(incomplete).toContain('the collector nodeSelector');
+    expect(incomplete).toContain('the collector pod-log volume');
+  }, 30000);
+
   it('reports an unreached fill as not reached, never as an assertion', () => {
     const run = harness('fresh-fill-never');
     const reached = run.lines.find((line) => line.startsWith('REACHED '));
