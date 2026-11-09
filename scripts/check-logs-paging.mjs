@@ -365,8 +365,9 @@ async function quietCase({ query, adapter }) {
       'the window end stayed at the first page'
     );
     check(
-      walked.filter((logsql) => logsql.endsWith('| stats count()')).length === pages.length,
-      'every page re-read the window count with one query'
+      walked.filter((logsql) => logsql.endsWith('| stats count()')).length === pages.length * 2,
+      'every page read the window count before its records and again after them',
+      `${String(pages.length * 2)} count queries over ${String(pages.length)} pages`
     );
     const boundaryTimes = await Promise.all(
       boundary.map(async (logsql) => {

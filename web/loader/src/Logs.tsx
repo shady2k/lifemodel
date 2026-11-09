@@ -231,7 +231,7 @@ export function Logs() {
       setWindowCount(value.count);
       setNextOffset(value.offset + value.limit);
       setPageLimit(value.limit);
-      setIncomplete((current) => current || (append && value.incomplete));
+      setIncomplete((current) => (append ? current || value.incomplete : value.incomplete));
     } catch {
       setUnavailable({ state: 'unavailable', reason: 'unreachable' });
       setRecords(null);
@@ -314,6 +314,14 @@ export function Logs() {
         : t('logsCollectionStopped', {
             count: Math.max(1, Math.round((status.collection.stoppedForMs ?? 0) / 60_000)),
           });
+
+  /**
+   * The eviction notices and the records as one list. A window whose records an
+   * eviction displaced entirely still has notices to draw, so the list is drawn
+   * from the entries rather than the records.
+   */
+  const entries: LogsEntry[] =
+    records === null ? [] : entriesWithNotices(records, status?.evictions ?? []);
 
   function submit(event: SyntheticEvent<HTMLFormElement>): void {
     event.preventDefault();
@@ -523,13 +531,15 @@ export function Logs() {
           {records !== null && records.length === 0 && (
             <p className="text-sm text-muted-foreground">{t('logsNoRecords')}</p>
           )}
-          {records !== null && records.length > 0 && (
+          {entries.length > 0 && (
             <>
-              <p className="mb-2 text-xs text-muted-foreground">
-                {t('logsRecordCount', { count: records.length })}
-              </p>
+              {records !== null && records.length > 0 && (
+                <p className="mb-2 text-xs text-muted-foreground">
+                  {t('logsRecordCount', { count: records.length })}
+                </p>
+              )}
               <ul className="divide-y divide-border rounded-lg border border-border bg-card">
-                {entriesWithNotices(records, status?.evictions ?? []).map((entry, position) => {
+                {entries.map((entry, position) => {
                   if (entry.kind === 'notice') {
                     const notice = entry.notice;
                     return (

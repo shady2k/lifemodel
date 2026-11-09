@@ -344,10 +344,17 @@ speaks the insert protocol and the collector never speaks the query protocol.
   window; the window's count became 501, page 2 returned 250 rows, and the late
   record appeared on **no** page of the first two — a record was repeated in its
   place. The page therefore uses a **cursor protocol, not a promise**: it reports
-  the results as of the first page, and at every page it re-reads the window's
-  count with one cheap query. If the count changed, the answer is marked
-  `incomplete — records arrived while you were scrolling` and offers a refresh
-  from the first page; the page never claims every record exactly once. Records
+  the results as of the first page, and at every page it reads the window's
+  count with one cheap query before its records and again after them. If the
+  count read before the records differs from the first page's, or the two
+  counts differ from each other, the answer is marked `incomplete — records
+  arrived while you were scrolling` and offers a refresh from the first page;
+  the page never claims every record exactly once. The recount catches an
+  arrival inside the page's own read, which moves every position after its own:
+  on the last page of a window that arrival repeats a record and omits the
+  window's oldest while the count read at the start still matched the first
+  page's, so nothing else would report it. The recount is one more query of the
+  same shape as the first, so the cost measured for it below applies. Records
   that are **byte-identical** (same time, message, pod, stream) remain
   indistinguishable, which the page's help states.
 - **Why the read is in two steps (L15).** Ordering by `_msg` and `pod` reads

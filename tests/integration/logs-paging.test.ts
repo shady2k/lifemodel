@@ -160,13 +160,15 @@ describe('paging a quiet log window', () => {
     const reads = queries.filter((query) => query.includes(`${ORDER} | offset`));
     const boundary = queries.filter((query) => query.includes(BOUNDARY_ORDER));
     expect(reads.map(offsetOf)).toEqual(pages.map((_page, index) => index * PAGE_SIZE));
-    // Every page: the window's count, then its boundary, then its records. The
-    // last page holds fewer records than the page reaches, so it has none.
+    // Every page: the window's count, then its boundary, then its records, then
+    // the count again. The last page holds fewer records than the page reaches,
+    // so it has none.
     expect(queries).toEqual(
       pages.flatMap((_page, index) => [
         COUNT_QUERY,
         ...(index < pages.length - 1 ? [boundary[index] ?? ''] : []),
         reads[index] ?? '',
+        COUNT_QUERY,
       ])
     );
   });
