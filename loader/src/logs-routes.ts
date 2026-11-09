@@ -13,6 +13,8 @@ import type { PasswordRecord } from './auth.js';
 import { CSP, redirect, sendText } from './http-responses.js';
 import { createLogsQuery, parseLogsPageQuery } from './logs-query.js';
 import { createLogsStore } from './logs-store-adapter.js';
+import { createLogsStatus, type LogsStatusQuery } from './logs-status.js';
+import { createLogsEvictorStatus } from './logs-evictor-status.js';
 import type { RouteHandler, RouteRequest } from './route-table.js';
 import type { LoaderState } from './state.js';
 
@@ -22,7 +24,12 @@ export interface LogsHandlerDeps {
   readonly uiRoot: string;
   readonly sessionToken: (req: IncomingMessage, record: PasswordRecord) => string | null;
   readonly hasSession: (req: IncomingMessage) => Promise<boolean>;
+  /** The freshness, the store alarm and the evictor's notices (ADR-016 §4, §5). */
+  readonly logsStatus?: LogsStatusQuery;
 }
+
+/** The one optional seam the loader's composition root passes in (ADR-016 §4, §5). */
+export type LogsStatusDep = Pick<LogsHandlerDeps, 'logsStatus'>;
 
 export interface LogsHandlers {
   readonly logsPage: RouteHandler;
@@ -39,7 +46,11 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
 }
 
 export function createLogsHandlers(deps: LogsHandlerDeps): LogsHandlers {
-  const logs = createLogsQuery({ store: createLogsStore({ url: deps.config.logsStoreUrl }) });
+  const store = createLogsStore({ url: deps.config.logsStoreUrl });
+  const logs = createLogsQuery({ store });
+  const status =
+    deps.logsStatus ??
+    createLogsStatus({ store, evictor: createLogsEvictorStatus(), now: Date.now });
 
   async function logsPage({ req, res }: RouteRequest): Promise<void> {
     const record = await deps.state.readAuth();
@@ -76,7 +87,21 @@ export function createLogsHandlers(deps: LogsHandlerDeps): LogsHandlers {
       return;
     }
     const result = await logs.page(parsed.request);
-    sendJson(res, result.state === 'ok' ? 200 : 503, result);
+    if (result.state !== 'ok') {
+      sendJson(res, 503, result);
+      return;
+    }
+    // The page asks for the status with its first page; later pages keep the
+    // answer they were given, so one window costs one status read.
+    if (url.searchParams.get('status') !== '1') {
+      sendJson(res, 200, result);
+      return;
+    }
+    const window = parsed.request.filter;
+    sendJson(res, 200, {
+      ...result,
+      status: await status.read({ from: window.from, to: window.to }),
+    });
   }
 
   async function logsModules({ req, res }: RouteRequest): Promise<void> {

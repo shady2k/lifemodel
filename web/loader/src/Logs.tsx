@@ -33,10 +33,77 @@ import type { LogsRecord } from '../../../loader/src/logs-store-adapter.js';
 const ALL_MODULES = '__all__';
 const ALL_LEVELS = '__all__';
 
+/** The day a record belongs to, as the store names a partition: `YYYYMMDD`. */
+function recordDay(record: LogsRecord): string {
+  return record.time.slice(0, 10).replace(/-/g, '');
+}
+
+/** A removed day as a local date, so the notice reads like the list beside it. */
+function noticeDate(day: string, language: string): string {
+  const year = day.slice(0, 4);
+  const month = day.slice(4, 6);
+  const date = day.slice(6, 8);
+  return new Date(`${year}-${month}-${date}T00:00:00Z`).toLocaleDateString(language, {
+    dateStyle: 'medium',
+    timeZone: 'UTC',
+  });
+}
+
+/** An eviction notice and the records it belongs above. */
+type LogsEntry =
+  | { kind: 'record'; record: LogsRecord }
+  | { kind: 'notice'; notice: EvictionNotice };
+
+/**
+ * Records newest first, each eviction notice above the first record whose day
+ * is on or before the removed day — the place in the list where those logs
+ * would have been. A day older than every record shown puts its notice after
+ * the list. A record an evictor notice already shows is not repeated.
+ */
+export function entriesWithNotices(
+  records: readonly LogsRecord[],
+  notices: readonly EvictionNotice[]
+): LogsEntry[] {
+  const before = new Map<number, EvictionNotice[]>();
+  const shown = new Set<string>();
+  for (const notice of notices) {
+    if (notice.day === null) continue;
+    const day = notice.day;
+    shown.add(`${notice.time}|${notice.message}`);
+    let index = records.findIndex((record) => recordDay(record) <= day);
+    if (index < 0) index = records.length;
+    before.set(index, [...(before.get(index) ?? []), notice]);
+  }
+  const entries: LogsEntry[] = [];
+  records.forEach((record, index) => {
+    for (const notice of before.get(index) ?? []) entries.push({ kind: 'notice', notice });
+    if (!shown.has(`${record.time}|${record.message}`)) entries.push({ kind: 'record', record });
+  });
+  for (const notice of before.get(records.length) ?? []) entries.push({ kind: 'notice', notice });
+  return entries;
+}
+
 interface Unavailable {
   state: 'unavailable';
   reason: string;
   status?: number;
+}
+
+/** One evictor line, shown as a notice rather than as an ordinary record. */
+interface EvictionNotice {
+  time: string;
+  day: string | null;
+  freedBytes: number | null;
+  reason: string | null;
+  message: string;
+}
+
+/** The freshness, store alarm and eviction notices the first page carries. */
+interface PageStatus {
+  collection: { state: 'live' | 'stopped' | 'unknown'; stoppedForMs: number | null };
+  storeReadOnly: boolean | null;
+  evictor: { lastSuccessAt: string | null; stale: boolean | null };
+  evictions: EvictionNotice[];
 }
 
 interface PageAnswer {
@@ -46,6 +113,7 @@ interface PageAnswer {
   limit: number;
   count: number;
   incomplete: boolean;
+  status?: PageStatus;
 }
 
 /** One request's place in the window; a first page names none of it. */
@@ -118,6 +186,8 @@ export function Logs() {
   const [nextOffset, setNextOffset] = useState<number | null>(null);
   const [pageLimit, setPageLimit] = useState<number | null>(null);
   const [incomplete, setIncomplete] = useState(false);
+  /** The window's freshness, store alarm and eviction notices. */
+  const [status, setStatus] = useState<PageStatus | null>(null);
 
   const load = useCallback(async (filter: PageFilter, place: PagePlace, append: boolean) => {
     setBusy(true);
@@ -134,6 +204,9 @@ export function Logs() {
       if (place.offset !== null) params.set('offset', String(place.offset));
       if (place.limit !== null) params.set('limit', String(place.limit));
       if (place.expected !== null) params.set('expected', String(place.expected));
+      // The status belongs to the window, not to one page: the first page asks
+      // for it and a later page keeps the answer it was given.
+      if (!append) params.set('status', '1');
       const response = await fetch(`/api/logs?${params.toString()}`);
       if (response.status === 400) {
         const value = (await response.json().catch(() => null)) as { field?: string } | null;
@@ -152,6 +225,7 @@ export function Logs() {
       setRecords((current) =>
         append && current !== null ? [...current, ...value.records] : value.records
       );
+      if (value.status !== undefined) setStatus(value.status);
       setWindowCount(value.count);
       setNextOffset(value.offset + value.limit);
       setPageLimit(value.limit);
@@ -228,6 +302,16 @@ export function Logs() {
     if (key === null) return t('logsInvalidParameter', { parameter: field });
     return t('logsInvalidFilter', { field: t(key) });
   }
+
+  /** The one freshness line above the results, or null while nothing is wrong. */
+  const collectionLine: string | null =
+    status === null || status.collection.state === 'live'
+      ? null
+      : status.collection.state === 'unknown'
+        ? t('logsCollectionUnknown')
+        : t('logsCollectionStopped', {
+            count: Math.max(1, Math.round((status.collection.stoppedForMs ?? 0) / 60_000)),
+          });
 
   function submit(event: SyntheticEvent<HTMLFormElement>): void {
     event.preventDefault();
@@ -413,6 +497,24 @@ export function Logs() {
 
         <p className="text-xs text-muted-foreground">{t('logsHelp')}</p>
 
+        {collectionLine !== null && (
+          <Alert role="status">
+            <AlertDescription>{collectionLine}</AlertDescription>
+          </Alert>
+        )}
+
+        {status?.storeReadOnly === true && (
+          <Alert variant="destructive" role="status">
+            <AlertDescription>{t('logsStoreReadOnly')}</AlertDescription>
+          </Alert>
+        )}
+
+        {status?.evictor.stale === true && (
+          <Alert variant="destructive" role="status">
+            <AlertDescription>{t('logsEvictorStale')}</AlertDescription>
+          </Alert>
+        )}
+
         <section aria-live="polite" aria-busy={busy}>
           {records !== null && records.length === 0 && (
             <p className="text-sm text-muted-foreground">{t('logsNoRecords')}</p>
@@ -423,10 +525,30 @@ export function Logs() {
                 {t('logsRecordCount', { count: records.length })}
               </p>
               <ul className="divide-y divide-border rounded-lg border border-border bg-card">
-                {records.map((record, index) => {
+                {entriesWithNotices(records, status?.evictions ?? []).map((entry, position) => {
+                  if (entry.kind === 'notice') {
+                    const notice = entry.notice;
+                    return (
+                      <li
+                        key={`notice-${notice.time}-${String(position)}`}
+                        role="note"
+                        className="bg-muted/40 px-4 py-3 text-sm text-muted-foreground"
+                      >
+                        {t('logsEvictionNotice', {
+                          date: noticeDate(notice.day ?? '', i18n.language),
+                          time: new Date(notice.time).toLocaleString(i18n.language),
+                          bytes:
+                            notice.freedBytes === null
+                              ? ''
+                              : notice.freedBytes.toLocaleString(i18n.language),
+                        })}
+                      </li>
+                    );
+                  }
+                  const record = entry.record;
                   const recordLevel = fieldOf(record, 'level');
                   return (
-                    <li key={`${record.time}-${String(index)}`} className="px-4 py-3">
+                    <li key={`${record.time}-${String(position)}`} className="px-4 py-3">
                       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                         <time dateTime={record.time}>
                           {new Date(record.time).toLocaleString(i18n.language)}

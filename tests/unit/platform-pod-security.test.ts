@@ -8,6 +8,11 @@ import {
   LOGS_CLAIM_NAMESPACE,
   LOGS_VOLUME_NAME,
 } from '../../loader/src/logs-volume-claim.js';
+import {
+  LOGS_EVICTOR_NAME,
+  LOGS_EVICTOR_NAMESPACE,
+  LOGS_EVICTOR_PATH,
+} from '../../loader/src/logs-evictor-status.js';
 
 // ADR-016 §1, §5, §7 and check L13: the collector's namespace is the one
 // privileged exception, it holds exactly one workload, and its two host mounts
@@ -16,11 +21,9 @@ import {
 // wait: false so a broken log pod cannot hold the platform's readiness.
 
 const platformRoot = fileURLToPath(new URL('../../deploy/platform/', import.meta.url));
-const vectorDigest =
-  'sha256:f6c23b5a7e16fb2838d33619ef7acf4bad2289a7cf22bc90efc2371f520c4ea2';
+const vectorDigest = 'sha256:f6c23b5a7e16fb2838d33619ef7acf4bad2289a7cf22bc90efc2371f520c4ea2';
 const vectorImage = `docker.io/timberio/vector@${vectorDigest}`;
-const storeDigest =
-  'sha256:251121fa882af99b95ba0c230a4a2f412ea602d2698c64a96c58dc9842bb755d';
+const storeDigest = 'sha256:251121fa882af99b95ba0c230a4a2f412ea602d2698c64a96c58dc9842bb755d';
 const storeImage = `docker.io/victoriametrics/victoria-logs@${storeDigest}`;
 const workloadKinds = new Set([
   'DaemonSet',
@@ -54,9 +57,10 @@ function platformObjects(): Resource[] {
   if (cachedObjects) return cachedObjects;
   cachedObjects = yamlFiles(platformRoot).flatMap((file) => {
     const documents = YAML.parseAllDocuments(readFileSync(file, 'utf8'));
-    expect(documents.flatMap((document) => document.errors), `invalid YAML in ${file}`).toEqual(
-      []
-    );
+    expect(
+      documents.flatMap((document) => document.errors),
+      `invalid YAML in ${file}`
+    ).toEqual([]);
     return documents
       .map((document) => document.toJSON() as Record<string, any> | null)
       .filter((object): object is Record<string, any> => Boolean(object))
@@ -104,10 +108,13 @@ function assertCollectorPodSecurity(podSpec: Record<string, any>): void {
 
   const hostPathVolumes = (podSpec.volumes ?? []).filter((volume: any) => volume.hostPath);
   const paths = hostPathVolumes.map((volume: any) => [volume.name, volume.hostPath.path]);
-  if (JSON.stringify(paths) !== JSON.stringify([
-    ['pods', '/var/log/pods'],
-    ['checkpoints', '/var/lib/lifemodel-logs-collector'],
-  ]))
+  if (
+    JSON.stringify(paths) !==
+    JSON.stringify([
+      ['pods', '/var/log/pods'],
+      ['checkpoints', '/var/lib/lifemodel-logs-collector'],
+    ])
+  )
     throw new Error('collector must mount exactly the two host paths of ADR-016 §1');
 
   const mounts = (container.volumeMounts ?? []).filter((mount: any) =>
@@ -236,9 +243,9 @@ describe('the log platform steps (ADR-016 §1, §5)', () => {
       ['logs-reconciler.yaml', 'platform-logs', './logs'],
     ] as const;
     for (const [file, name, path] of steps) {
-      const documents = YAML.parseAllDocuments(
-        readFileSync(join(platformRoot, file), 'utf8')
-      ).map((document) => document.toJSON());
+      const documents = YAML.parseAllDocuments(readFileSync(join(platformRoot, file), 'utf8')).map(
+        (document) => document.toJSON()
+      );
       expect(documents).toHaveLength(1);
       const reconciler = documents[0] as Record<string, any>;
       expect(reconciler.kind).toBe('Kustomization');
@@ -339,7 +346,10 @@ describe('the log platform steps (ADR-016 §1, §5)', () => {
     expect(dataMount.mountPath).toBe('/data');
     expect(pod.volumes).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ name: 'data', persistentVolumeClaim: { claimName: 'logs-store' } }),
+        expect.objectContaining({
+          name: 'data',
+          persistentVolumeClaim: { claimName: 'logs-store' },
+        }),
       ])
     );
     expect(container.args).toEqual(expect.arrayContaining(['-storageDataPath=/data']));
@@ -587,5 +597,146 @@ describe('the loader grant on the log volume (ADR-016 §5)', () => {
     }
     // The committed manifests still pass: the mutations were in memory only.
     expect(() => assertLogsVolumeRbac(platformObjects())).not.toThrow();
+  });
+});
+
+/**
+ * The page names the evictor's last successful run (ADR-016 §5, check L14), so
+ * the loader may read that one CronJob's status: `get` on `cronjobs` restricted
+ * to `logs-evictor` in `lifemodel-system`. Nothing wider - another verb, no
+ * name restriction, another resource, another API group, or a cluster-wide
+ * grant - fails here.
+ */
+function batchRules(resources: Resource[]): { scope: string; rule: Record<string, any> }[] {
+  return loaderRules(resources).filter(
+    ({ rule }) =>
+      (rule.apiGroups ?? []).includes('batch') ||
+      (rule.resources ?? []).some((resource: string) =>
+        ['jobs', 'cronjobs', '*'].includes(resource)
+      )
+  );
+}
+
+function assertLogsEvictorRbac(resources: Resource[]): void {
+  const expected = [
+    {
+      scope: `namespace ${LOGS_EVICTOR_NAMESPACE}`,
+      rule: {
+        apiGroups: ['batch'],
+        resources: ['cronjobs'],
+        resourceNames: [LOGS_EVICTOR_NAME],
+        verbs: ['get'],
+      },
+    },
+  ];
+  const actual = batchRules(resources);
+  if (JSON.stringify(actual) !== JSON.stringify(expected))
+    throw new Error(
+      `the loader's evictor grant is wider than get on one CronJob: ${JSON.stringify(actual)}`
+    );
+}
+
+describe("the loader grant on the evictor's CronJob (ADR-016 §5)", () => {
+  it('is exactly get on that one CronJob, and the code reads that path', () => {
+    const resources = platformObjects();
+    expect(() => assertLogsEvictorRbac(resources)).not.toThrow();
+    expect(LOGS_EVICTOR_PATH).toBe(
+      `/apis/batch/v1/namespaces/${LOGS_EVICTOR_NAMESPACE}/cronjobs/${LOGS_EVICTOR_NAME}`
+    );
+    const cronJob = find(resources, 'CronJob', LOGS_EVICTOR_NAME).object;
+    expect(cronJob.metadata.namespace).toBe(LOGS_EVICTOR_NAMESPACE);
+    const binding = find(resources, 'RoleBinding', 'loader-logs-evictor').object;
+    expect(binding.metadata.namespace).toBe(LOGS_EVICTOR_NAMESPACE);
+    expect(binding.roleRef).toEqual({
+      apiGroup: 'rbac.authorization.k8s.io',
+      kind: 'Role',
+      name: 'loader-logs-evictor',
+    });
+    expect(binding.subjects).toEqual([
+      { kind: 'ServiceAccount', name: 'loader', namespace: 'lifemodel-system' },
+    ]);
+    const a0 = YAML.parse(
+      readFileSync(join(platformRoot, 'a0/kustomization.yaml'), 'utf8')
+    ) as Record<string, any>;
+    expect(a0.resources).toContain('logs-evictor-rbac.yaml');
+  });
+
+  it('fails when the grant is widened in any way', () => {
+    const resources = platformObjects();
+    const clone = (): Resource[] => structuredClone(resources) as Resource[];
+    const role = (items: Resource[]) => find(items, 'Role', 'loader-logs-evictor').object;
+    const widened = (mutate: (rules: any[]) => void): Resource[] => {
+      const items = clone();
+      mutate(role(items).rules);
+      return items;
+    };
+    const cases: [string, Resource[]][] = [
+      ['an extra verb', widened((rules) => rules[0].verbs.push('list'))],
+      ['an extra job name', widened((rules) => rules[0].resourceNames.push('logs-evictor-2'))],
+      ['no name restriction', widened((rules) => delete rules[0].resourceNames)],
+      ['jobs as well', widened((rules) => rules[0].resources.push('jobs'))],
+      ['another API group', widened((rules) => rules[0].apiGroups.push('apps'))],
+      [
+        'a cluster-wide grant',
+        (() => {
+          const items = clone();
+          find(items, 'ClusterRole', 'loader-logs-volume').object.rules.push({
+            apiGroups: ['batch'],
+            resources: ['cronjobs'],
+            verbs: ['get'],
+          });
+          return items;
+        })(),
+      ],
+    ];
+    for (const [reason, items] of cases) {
+      expect(() => assertLogsEvictorRbac(items), reason).toThrow(/wider than/);
+    }
+    // The committed manifests still pass: the mutations were in memory only.
+    expect(() => assertLogsEvictorRbac(platformObjects())).not.toThrow();
+  });
+});
+
+describe('the collector heartbeat (ADR-016 §4, check L14)', () => {
+  function collectorConfig(): Record<string, any> {
+    const configMap = find(platformObjects(), 'ConfigMap', 'logs-collector-config').object;
+    return YAML.parse(configMap.data['vector.yaml']) as Record<string, any>;
+  }
+
+  it('beats every 30 s and travels the store sink the pod records use', () => {
+    const config = collectorConfig();
+    expect(config.sources.heartbeat).toEqual({
+      type: 'demo_logs',
+      format: 'shuffle',
+      lines: ['collector heartbeat'],
+      interval: 30,
+    });
+    expect(config.transforms['collector-heartbeat'].inputs).toEqual(['heartbeat']);
+    expect(config.sinks['logs-store'].inputs).toEqual(['normalize', 'collector-heartbeat']);
+    // The record the store holds names its own module and says which copy it is.
+    const program: string = config.transforms['collector-heartbeat'].source;
+    for (const field of ['collector-heartbeat', 'heartbeat', 'namespace']) {
+      expect(program).toContain(`"${field}"`);
+    }
+  });
+
+  it('writes a copy to the collector stdout so the file source reads it back', () => {
+    const config = collectorConfig();
+    // Without this copy the page could not tell a stalled pod-log read from a
+    // healthy collector: the store-bound record is written by the process
+    // itself and never touches /var/log/pods.
+    expect(config.sinks['heartbeat-canary']).toEqual({
+      type: 'console',
+      target: 'stdout',
+      inputs: ['collector-heartbeat'],
+      encoding: { codec: 'json' },
+    });
+    // Only the heartbeat event reaches stdout, so no record can echo itself.
+    expect(config.sinks['heartbeat-canary'].inputs).not.toContain('normalize');
+    // The read-back line names the heartbeat module only inside the collector's
+    // own namespace, so no other pod can forge one.
+    const program: string = config.transforms.normalize.source;
+    expect(program).toContain('.kubernetes.pod_namespace == "lifemodel-logs"');
+    expect(program).toContain('module = "collector-heartbeat"');
   });
 });

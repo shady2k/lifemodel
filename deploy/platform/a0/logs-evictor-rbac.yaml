@@ -1,0 +1,30 @@
+# The evictor's last successful run (ADR-016 §5, check L14). The page names
+# `the log evictor is failing or has not run` only when the CronJob's
+# `status.lastSuccessfulTime` is older than about two minutes, and reading that
+# one field needs exactly this: get, on that one CronJob, in the store's
+# namespace. No list, no watch, no other verb, no other job.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: loader-logs-evictor
+  namespace: lifemodel-system
+rules:
+  - apiGroups: ['batch']
+    resources: ['cronjobs']
+    resourceNames:
+      - logs-evictor
+    verbs: ['get']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: loader-logs-evictor
+  namespace: lifemodel-system
+subjects:
+  - kind: ServiceAccount
+    name: loader
+    namespace: lifemodel-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: loader-logs-evictor
