@@ -610,44 +610,131 @@ def evictor_seen(loader, result):
 
 
 def throttle_case(report, options, loader, cluster, state):
-    """The throttle: task pods at full speed beside a trusted writer (ADR-016 §6)."""
-    seconds = options.throttle_seconds
-    report.note('motor admission requires a core-owned workbench task; a bare proof writer '
-                'may be denied. No policy exception or creator impersonation is used.')
-    for manifest in (
-        writer_manifest(options, TASKS_NAMESPACE, 'walk-task-fast', TASK_MODULE,
-                        state['task_fast'], seconds, 1),
-        writer_manifest(options, TASKS_NAMESPACE, 'walk-task-large', TASK_MODULE,
-                        state['task_large'], seconds, 50, size=20 * 1024),
-        writer_manifest(options, options.writer_namespace, 'walk-trusted-writer', TRUSTED_MODULE,
-                        state['trusted_run'], seconds + 20, options.trusted_interval_ms),
-    ):
-        if not create_pod(report, cluster, manifest):
-            return False
-    text = metrics_text(options, cluster)
-    if text is None or 'walk_throttle_window' not in text:
-        report.not_valid('the collector\'s loopback exporter carries no throttle-window '
-                         'counters: the throttle cannot be judged')
+    """Admitted task writers overlap a trusted writer; absent evidence is invalid."""
+    from logs_walk_support import parse_ms, start_task_writer
+
+    seconds, launch_bound = options.throttle_seconds, 180
+    if not 1 <= seconds <= 120:
+        report.not_valid('throttle_seconds must be 1..120 with the 180 s launch allowance')
         return False
-    windows = throttle_windows(text)
+    trusted_manifest = writer_manifest(
+        options, options.writer_namespace, 'walk-trusted-writer', TRUSTED_MODULE,
+        state['trusted_run'], seconds + 2 * launch_bound + 20,
+        options.trusted_interval_ms)
+    if not create_pod(report, cluster, trusted_manifest):
+        return False
+    if not wait_running(cluster, options.writer_namespace, 'walk-trusted-writer'):
+        report.not_valid('the trusted writer did not become Running')
+        return False
+    fast = start_task_writer(report, options, loader, cluster, state['task_fast'],
+                             1000, seconds + launch_bound, bound=launch_bound)
+    if fast is None:
+        return False
+    large = start_task_writer(report, options, loader, cluster, state['task_large'],
+                              20, seconds, size=20 * 1024, bound=launch_bound)
+    if large is None:
+        return False
+    time.sleep(seconds + 2)
+    intervals = []
+    written = []
+    for namespace, pod, prefix, run_id, module in (
+        (options.writer_namespace, 'walk-trusted-writer', TRUSTED_MODULE,
+         state['trusted_run'], TRUSTED_MODULE),
+        (TASKS_NAMESPACE, fast[0], TASK_MODULE, state['task_fast'], fast[1]),
+        (TASKS_NAMESPACE, large[0], TASK_MODULE, state['task_large'], large[1]),
+    ):
+        if namespace == options.writer_namespace:
+            result = cluster.run(['-n', namespace, 'logs', pod, '--timestamps',
+                                  '--tail=200000'], timeout=120)
+            lines = result.stdout.splitlines() if result.returncode == 0 else []
+            stamps = [parse_ms(line.split(' ', 1)[0]) for line in lines
+                      if numbered(line, prefix, run_id)]
+            written = numbered(result.stdout if result.returncode == 0 else '',
+                               TRUSTED_MODULE, state['trusted_run'])
+        else:
+            # Core owns task cleanup: its completed pod may already be gone.
+            stamps = []
+            deadline = time.monotonic() + options.recover_bound
+            while time.monotonic() < deadline:
+                stamps = []
+                offset, end = 0, str(now_ms())
+                while time.monotonic() < deadline:
+                    answer = loader.logs({'from': str(state['throttle_start']), 'to': end,
+                                          'module': module, 'text': run_id,
+                                          'limit': '1000', 'offset': str(offset)})
+                    if not answer or answer.get('state') != 'ok':
+                        break
+                    records = answer.get('records') or []
+                    for record in records:
+                        fields = record.get('fields') or {}
+                        if (fields.get('module') == module and fields.get('pod') == pod
+                                and fields.get('namespace') == TASKS_NAMESPACE
+                                and fields.get('untrusted') == 'true'
+                                and numbered(record.get('message'), prefix, run_id)):
+                            stamp = parse_ms(record.get('time'))
+                            if stamp is not None:
+                                stamps.append(stamp)
+                    if len(records) < 1000:
+                        break
+                    offset += len(records)
+                if len(set(stamps)) >= 2:
+                    break
+                time.sleep(5)
+        stamps = [stamp for stamp in stamps if stamp is not None]
+        if len(set(stamps)) < 2:
+            report.not_valid('a writer has fewer than two timestamped numbered lines: ' + pod)
+            return False
+        intervals.append((min(stamps), max(stamps)))
+    overlap = min(end for _, end in intervals) - max(start for start, _ in intervals)
+    if overlap <= 0:
+        report.not_valid('timestamped writer records prove no common task/trusted writer overlap')
+        return False
+    report.pass_('both task writers actually overlap the trusted writer',
+                 '%d ms common timestamp interval' % overlap)
+    windows = []
+    deadline = time.monotonic() + options.recover_bound
+    task_pods = {fast[0], large[0]}
+    while time.monotonic() < deadline:
+        text = metrics_text(options, cluster)
+        paired = set()
+        for pod in task_pods:
+            samples = [line for line in (text or '').splitlines()
+                       if 'pod="' + pod + '"' in line]
+            if (any(line.startswith('walk_throttle_window_input') for line in samples)
+                    and any(line.startswith('walk_throttle_window_accepted') for line in samples)):
+                paired.add(pod)
+        windows = [entry for entry in throttle_windows(text)
+                   if entry['pod'] in paired and entry['pod'] in task_pods]
+        if {entry['pod'] for entry in windows if entry['input'] > 0} == task_pods:
+            break
+        time.sleep(5)
+    if {entry['pod'] for entry in windows if entry['input'] > 0} != task_pods:
+        report.not_valid('no nonempty input/accepted throttle-window evidence for both actual '
+                         'task pods; unrelated pods cannot prove this burst')
+        return False
+    report.note('counter evidence identifies these task pods, not a timestamped common '
+                'window; timestamped writer records prove overlap separately')
     verdict = throttle_verdict(windows)
-    report.check(verdict['ok'], 'each throttled pod\'s input and accepted counters reconcile',
+    report.check(verdict['ok'], "each throttled pod's input and accepted counters reconcile",
                  verdict['detail'])
-    pod = cluster.run(['-n', options.writer_namespace, 'logs', 'walk-trusted-writer',
-                       '--tail=200000'], timeout=120)
-    written = numbered(pod.stdout if pod.returncode == 0 else '', TRUSTED_MODULE,
-                       state['trusted_run'])
-    answer_ok = False
     found = []
     deadline = time.monotonic() + options.recover_bound
     while time.monotonic() < deadline:
-        found = numbered(json.dumps(loader.logs({'from': str(state['throttle_start']),
-                                                 'to': str(now_ms()), 'module': TRUSTED_MODULE,
-                                                 'text': state['trusted_run'],
-                                                 'limit': '1000'})),
-                         TRUSTED_MODULE, state['trusted_run'])
-        if written and len(found) >= len(written):
-            answer_ok = True
+        found = []
+        offset = 0
+        end = str(now_ms())
+        while time.monotonic() < deadline:
+            answer = loader.logs({'from': str(state['throttle_start']), 'to': end,
+                                  'module': TRUSTED_MODULE, 'text': state['trusted_run'],
+                                  'limit': '1000', 'offset': str(offset)})
+            if not answer or answer.get('state') != 'ok':
+                break
+            records = answer.get('records') or []
+            found.extend(numbered(json.dumps(records), TRUSTED_MODULE, state['trusted_run']))
+            if len(records) < 1000:
+                break
+            offset += len(records)
+        if set(written).issubset(found):
             break
         time.sleep(5)
     trusted = trusted_verdict(written, found)
