@@ -11,6 +11,14 @@ sources:
   # pod's log file and the file source reads it back like any pod's line.
   # The page then has two proofs: the collector and the store's write path
   # answer, and this node's pod-log files are still being read.
+  # The collector's own internal metrics (ADR-016 §6, L07). Exported on the
+  # pod's loopback only: `kubectl port-forward` reaches it - the kubelet's
+  # stream, not pod networking - and nothing else in the cluster can. No
+  # Service, no container port, no NetworkPolicy route, and no egress: the
+  # exporter listens, so the permitted set of L10 is unchanged. WALK-LOGS-CRASH
+  # reads the sink's buffer gauges here.
+  internal_metrics:
+    type: internal_metrics
   heartbeat:
     type: demo_logs
     format: shuffle
@@ -133,6 +141,12 @@ transforms:
         "heartbeat": true,
       }
 sinks:
+  # Vector's internal metrics, on 127.0.0.1:9598 only (see the source above).
+  metrics:
+    type: prometheus_exporter
+    inputs:
+      - internal_metrics
+    address: 127.0.0.1:9598
   # The heartbeat's copy that comes back through the pod log files: the
   # collector's own stdout is a container log like any other, and the
   # kubelet's file is what the file source above tails.

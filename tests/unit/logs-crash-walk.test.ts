@@ -89,6 +89,7 @@ describe('the crash walk states its rows and what it cannot prove', () => {
     expect(value.saturated).toBe(false);
     expect(value.text).toContain('internal_metrics');
     expect(value.text).toContain('prometheus_exporter');
+    expect(value.text).toContain('127.0.0.1:9598');
     expect(value.text).toContain('vector.yaml');
   });
 

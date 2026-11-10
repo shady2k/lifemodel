@@ -1034,6 +1034,16 @@ Each says which, and each is labelled with the limit the raw output supports.
 | The heartbeat through the collector's pipeline | Docker: stored and found by the page's query (4 in 8 s, 8 in 16 s at a 2 s interval; author-reported from the Docker run). On the cluster: **0 in every phase, cause not found**; check L14 |
 
 
+**The collector's own metrics, and who reads them (lifemodel-vbog.7.1).** The
+collector exports Vector's internal metrics (`sources.internal_metrics` of type
+`internal_metrics` into a `sinks.metrics` of type `prometheus_exporter`) on
+**`127.0.0.1:9598`**, the pod's own loopback: `kubectl port-forward` reads them -
+the kubelet's stream, not pod networking - and nothing else in the cluster can,
+so no Service, no container port and no NetworkPolicy rule is added and the
+permitted egress set of L10 is unchanged; the sink's buffer gauges
+(`vector_buffer_size_events`, `vector_buffer_max_size_events`) and the source's
+received counter are what `WALK-LOGS-CRASH` reads there for L07.
+
 **Ingest is `glob_minimum_cooldown_ms: 1000` and this is a product setting.** The
 source rescans for new files once a second; that delay is also how long a new
 pod's lines wait before they are read, and a pod that lives shorter than the
@@ -1048,8 +1058,10 @@ is stated rather than fixed.
   object, plus one permit list: DNS to kube-dns (UDP and TCP 53), **TCP 6443 to
   any address** (the platform's inherited exception: k3s DNATs the API Service to
   a node address, so the policy cannot name the API's address), and TCP 9428 to
-  `logs-store`'s pods in `lifemodel-system`. No ingress — the kubelet's probes
-  come from the node, not through pod networking. The ServiceAccount is
+  `logs-store`'s pods in `lifemodel-system` (§6, and the collector's metrics
+  exporter on the pod's loopback adds neither an ingress rule nor an egress
+  destination: a loopback listener is invisible to the policy). No ingress — the
+  kubelet's probes come from the node, not through pod networking. The ServiceAccount is
   read-only: `get`/`list`/`watch` on `pods`, `namespaces` and `nodes`, and
   nothing else (measured: `kubernetes_logs` needs all three; without `nodes` it
   logs `cannot list resource "nodes"` and fails to annotate every event).

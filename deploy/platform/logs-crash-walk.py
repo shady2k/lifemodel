@@ -28,14 +28,14 @@ What it proves
 
 How the buffer is read, and when it cannot be
 ---------------------------------------------
-The collector's configuration decides whether its internal metrics exist at all.
-This walk reads them from a Prometheus exporter on the collector pod
-(`--metrics-port`, default 9598) and never guesses: `deploy/platform/logs/config/
-vector.yaml` currently declares neither a `sources.internal_metrics` of type
-`internal_metrics` nor a `sinks.metrics` of type `prometheus_exporter` (and no
-`api:` block for `vector top`), so this deployment exposes no buffer gauge. The
-walk says exactly that, names the configuration the saturated case needs, prints
-TEST NOT VALID and fails; the unsaturated case still runs and is reported.
+This walk reads them from the collector's own Prometheus exporter
+(`--metrics-port`, default 9598), declared in `deploy/platform/logs/config/
+vector.yaml` as a `sources.internal_metrics` of type `internal_metrics` and a
+`sinks.metrics` of type `prometheus_exporter` on 127.0.0.1:9598 - the pod's
+loopback, read through a kubectl port-forward (ADR-016 §6). It never guesses: when
+nothing answers there, or the answer carries no buffer gauge, the walk prints
+TEST NOT VALID with the reason and fails; the unsaturated case still runs and is
+reported.
 
 Arguments (defaults are the test VM's)
 -------------------------------------
@@ -242,12 +242,11 @@ def saturated(state):
 
 def collectors_metrics_gap(reason):
     """The exact configuration the saturated case needs, when nothing exposes it."""
-    return ('the collector exposes no internal metrics: %s. The saturated case needs '
-            'a `sources.internal_metrics` of `type: internal_metrics` and a '
-            '`sinks.metrics` of `type: prometheus_exporter` fed by it (address '
-            '0.0.0.0:<metrics-port>), or an `api: {enabled: true}` block for '
-            '`vector top`; deploy/platform/logs/config/vector.yaml declares none, so '
-            'the buffer state cannot be known and is not guessed.' % (reason or 'no answer'))
+    return ('the collector exposes no internal metrics: %s. '
+            'deploy/platform/logs/config/vector.yaml declares a `sources.internal_metrics` of '
+            '`type: internal_metrics` and a `sinks.metrics` of `type: prometheus_exporter` on '
+            '127.0.0.1:9598 (ADR-016 §6), so the collector or the port-forward to it is at '
+            'fault; the buffer state is not guessed.' % (reason or 'no answer'))
 
 
 def store_replicas(cluster, options):
