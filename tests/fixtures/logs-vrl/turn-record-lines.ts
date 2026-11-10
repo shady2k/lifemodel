@@ -104,10 +104,20 @@ async function writeTurn(mode: 'reply' | 'thought', resultPath: string): Promise
       sleepSchedule: { sleepHour: 0, wakeHour: 0 },
       // A reply may answer in plain text; a proactive trigger refuses it and
       // needs the JSON response, so each mode is scripted for its own turn.
-      script:
+      memoryProvider: { save: async () => undefined } as never,
+      script: [
+        {
+          toolCalls: [
+            {
+              name: 'core.remember',
+              args: { subject: 'project', attribute: 'language', value: 'TypeScript' },
+            },
+          ],
+        },
         mode === 'reply'
-          ? [{ content: 'Understood.' }]
-          : [{ content: JSON.stringify({ response: 'Quietly thinking it over.' }) }],
+          ? { content: 'Understood.' }
+          : { content: JSON.stringify({ response: 'Quietly thinking it over.' }) },
+      ],
     });
     const cognition = instance.cognition as unknown as RealCognitionFacade;
     const signal =

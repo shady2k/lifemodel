@@ -16,7 +16,9 @@ describe('provider failure structure', () => {
         response.writeHead(status, {
           'content-type': 'application/json',
           'x-private-detail': header,
-          'x-request-id': 'upstream-request-123',
+          'x-request-id': header,
+          'request-id': header,
+          'x-openrouter-provider': header,
         });
         response.end(
           JSON.stringify(status === 200 ? { invalid: true } : { error: { message: 'refused' } })
@@ -70,7 +72,6 @@ describe('provider failure structure', () => {
             'x-private-detail',
             'x-request-id',
           ]),
-          responseRequestId: 'upstream-request-123',
           requestHost: `127.0.0.1:${String(address.port)}`,
           hasTools: false,
           toolCount: 0,
@@ -81,6 +82,7 @@ describe('provider failure structure', () => {
         { role: 'user', contentType: 'string' },
       ]);
       expect(failure?.obj).not.toHaveProperty('responseHeaders');
+      expect(failure?.obj).not.toHaveProperty('responseRequestId');
       expect(failure?.obj).not.toHaveProperty('requestUrl');
       expect(
         logs

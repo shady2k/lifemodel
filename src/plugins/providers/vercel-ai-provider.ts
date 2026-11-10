@@ -944,7 +944,6 @@ export class VercelAIProvider extends BaseLLMProvider {
               : undefined,
           httpStatus: call.wire.httpStatus,
           responseHeaderNames: Object.keys(responseHeaders ?? {}),
-          responseRequestId: responseHeaders?.['x-request-id'] ?? responseHeaders?.['request-id'],
           requestHost:
             requestUrl && URL.canParse(requestUrl) ? new URL(requestUrl).host : undefined,
           // Log message count and structure to help debug schema issues

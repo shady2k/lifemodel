@@ -16,6 +16,7 @@ import type {
 } from '../../../../src/layers/cognition/agentic-loop.js';
 import type { ToolRegistry } from '../../../../src/layers/cognition/tools/registry.js';
 import type { Signal } from '../../../../src/types/signal.js';
+import { LLMError } from '../../../../src/llm/provider.js';
 
 // Mock logger
 const mockLogger = {
@@ -99,6 +100,27 @@ function createMockLlm(
 }
 
 describe('Provider Error Escalation', () => {
+  it.each([false, true])(
+    'does not log upstream header values on retry (retryable=%s)',
+    async (retryable) => {
+      const marker = 'UPSTREAM_HEADER_PRIVATE_123456789';
+      const llm = createMockLlm(0);
+      vi.mocked(llm.completeWithTools).mockRejectedValueOnce(
+        new LLMError('refused', 'endpoint', {
+          statusCode: retryable ? 500 : 400,
+          retryable,
+          upstreamProvider: marker,
+        })
+      );
+      const loop = createAgenticLoop(mockLogger as any, llm, createEmptyToolRegistry());
+      await loop.run(createTestContext());
+      expect(mockLogger.warn).toHaveBeenCalled();
+      for (const level of ['trace', 'debug', 'info', 'warn', 'error'] as const) {
+        expect(JSON.stringify(mockLogger[level].mock.calls)).not.toContain(marker);
+      }
+    }
+  );
+
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -143,12 +165,14 @@ describe('Provider Error Escalation', () => {
     // Flow: fast error x2 → escalate → smart error x2 → fall through to handleNaturalCompletion
     // handleNaturalCompletion with null content → forceRespond → 3 more errors → error message
     const mockLlm = createMockLlm(100); // Always error
-    const loop = createAgenticLoop(
-      mockLogger as any,
-      mockLlm,
-      createEmptyToolRegistry(),
-      { maxIterations: 20, timeoutMs: 30000, maxToolCalls: 20, abortOnNewMessage: false, maxInputTokens: 10000, maxOutputTokens: 5000 }
-    );
+    const loop = createAgenticLoop(mockLogger as any, mockLlm, createEmptyToolRegistry(), {
+      maxIterations: 20,
+      timeoutMs: 30000,
+      maxToolCalls: 20,
+      abortOnNewMessage: false,
+      maxInputTokens: 10000,
+      maxOutputTokens: 5000,
+    });
 
     const result = await loop.run(createTestContext());
 
@@ -162,12 +186,14 @@ describe('Provider Error Escalation', () => {
 
   it('returns noAction for proactive trigger when all retries exhausted', async () => {
     const mockLlm = createMockLlm(100); // Always error
-    const loop = createAgenticLoop(
-      mockLogger as any,
-      mockLlm,
-      createEmptyToolRegistry(),
-      { maxIterations: 20, timeoutMs: 30000, maxToolCalls: 20, abortOnNewMessage: false, maxInputTokens: 10000, maxOutputTokens: 5000 }
-    );
+    const loop = createAgenticLoop(mockLogger as any, mockLlm, createEmptyToolRegistry(), {
+      maxIterations: 20,
+      timeoutMs: 30000,
+      maxToolCalls: 20,
+      abortOnNewMessage: false,
+      maxInputTokens: 10000,
+      maxOutputTokens: 5000,
+    });
 
     const context = createTestContext({
       triggerSignal: createTestSignal({ type: 'contact_urge' }),
@@ -184,12 +210,14 @@ describe('Provider Error Escalation', () => {
     // If previousAttempt is set, useSmart starts as true
     // 2 errors on smart → fall through (no second escalation since already smart)
     const mockLlm = createMockLlm(100); // Always error
-    const loop = createAgenticLoop(
-      mockLogger as any,
-      mockLlm,
-      createEmptyToolRegistry(),
-      { maxIterations: 20, timeoutMs: 30000, maxToolCalls: 20, abortOnNewMessage: false, maxInputTokens: 10000, maxOutputTokens: 5000 }
-    );
+    const loop = createAgenticLoop(mockLogger as any, mockLlm, createEmptyToolRegistry(), {
+      maxIterations: 20,
+      timeoutMs: 30000,
+      maxToolCalls: 20,
+      abortOnNewMessage: false,
+      maxInputTokens: 10000,
+      maxOutputTokens: 5000,
+    });
 
     const context = createTestContext({
       previousAttempt: {
