@@ -144,13 +144,6 @@ export class IntentApplicator {
   private pluginControlChain: Promise<void> = Promise.resolve();
 
   /**
-   * SEND_MESSAGE chains still running. The stop drain awaits these (bounded
-   * by the stop deadline) so the answer of a turn completed during the drain
-   * is delivered before the channels are released; a failed send is logged in
-   * its chain, never silently dropped.
-   */
-
-  /**
    * Intensity-to-delta mapping for SET_INTEREST intent.
    */
   private static readonly INTENSITY_DELTAS: Record<InterestIntensity, number> = {
@@ -206,7 +199,10 @@ export class IntentApplicator {
       let intentCtx: TraceContext;
       if (trace?.parentSignalId ?? trace?.tickId) {
         const traceId = trace.parentSignalId ?? trace.tickId ?? tickCtx.traceId;
-        const options: { correlationId?: string; parentId?: string } = {};
+        const conversationId = trace.conversationId ?? tickCtx.conversationId;
+        const options: Parameters<typeof createTraceContext>[1] = {
+          ...(conversationId === undefined ? {} : { conversationId }),
+        };
         if (trace.tickId !== undefined) options.correlationId = trace.tickId;
         else if (tickCtx.correlationId !== undefined) options.correlationId = tickCtx.correlationId;
         if (trace.parentSignalId !== undefined) options.parentId = trace.parentSignalId;
