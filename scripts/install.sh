@@ -597,6 +597,13 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl enable "$LOGS_VOLUME_UNIT.service"
   systemctl start "$LOGS_VOLUME_MOUNT_UNIT" || die "the log volume did not mount; run lifemodel doctor"
 fi
+# Reconcile existing installations too. Failure leaves the collector's Directory
+# hostPath absent, so logging cannot fall through onto the host root filesystem.
+# Logging readiness must not hold up the rest of the platform (ADR-016).
+if ! sh "$LOGS_VOLUME_SOURCE/logs-volume.sh" prepare \
+  "$host_root$LOGS_VOLUME_IMAGE" "$host_root$LOGS_VOLUME_DIR"; then
+  printf '%s\n' 'install.sh: collector storage unavailable; run lifemodel doctor' >&2
+fi
 
 
 k3s_installed_before=0

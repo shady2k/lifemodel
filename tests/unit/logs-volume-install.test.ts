@@ -141,10 +141,7 @@ describe('the installers create the file-backed log volume', () => {
       .split(' ')
       .filter((arg) => arg !== '');
     const bin = join(root, 'bin');
-    writeFake(
-      join(bin, 'df'),
-      `#!/bin/sh\nprintf 'fakefs 100000000 1 67108864 1%% /\\n'\n`
-    );
+    writeFake(join(bin, 'df'), `#!/bin/sh\nprintf 'fakefs 100000000 1 67108864 1%% /\\n'\n`);
     writeFake(
       join(bin, 'fallocate'),
       `#!/bin/sh
@@ -203,13 +200,11 @@ truncate -s "$size" "$target"
     expect(debugfs).toContain('-w -R sif /data gid 1000 ');
     expect(debugfs).toContain('-w -R sif /data mode 040750 ');
     expect(existsSync(join(root, 'chown.log'))).toBe(false);
-    const unit = readFileSync(
-      join(root, 'install-root/etc/systemd/system', volumeUnit),
-      'utf8'
-    );
+    const unit = readFileSync(join(root, 'install-root/etc/systemd/system', volumeUnit), 'utf8');
     expect(unit).toContain(`ExecStart=${volumeScript} 3G ${volumeImage} ${volumeDir}`);
     expect(first.systemctl).toContain(`enable ${volumeUnit}`);
     expect(first.systemctl).toContain(`start ${mountUnit}`);
+    expect(existsSync(join(root, 'install-root', volumeDir, 'collector'))).toBe(true);
     const fstab = join(root, 'install-root/etc/fstab');
     expect(readFileSync(fstab, 'utf8').trim()).toBe(
       `${volumeImage} ${volumeDir} ext4 loop,nofail 0 0`
@@ -316,8 +311,8 @@ truncate -s "$size" "$target"
         join(bin, 'losetup'),
         `#!/bin/sh
 printf '%s\\n' "$*" >> "$LOSETUP_LOG"
-if [ "$1" = -j ] && [ -n "$FAKE_LOOP_DEVICE" ]; then
-  printf '%s: [1]:0 (%s)\\n' "$FAKE_LOOP_DEVICE" "$2"
+if [ "$1" = -j ] && { [ -n "$FAKE_LOOP_DEVICE" ] || [ -f "$LIFEMODEL_INSTALL_ROOT/logs-mounted" ]; }; then
+  printf '%s: [1]:0 (%s)\\n' "${'$'}{FAKE_LOOP_DEVICE:-/dev/loop7}" "$2"
 fi
 exit 0
 `
@@ -350,10 +345,19 @@ stat -c %s "$target" > "$FAKE_FS_BYTES"
 `
       );
       writeFake(join(bin, 'debugfs'), debugfsFake);
+      writeFake(join(bin, 'chown'), '#!/bin/sh\nexit 0\n');
+      writeFake(
+        join(bin, 'findmnt'),
+        `#!/bin/sh
+[ -f "$LIFEMODEL_INSTALL_ROOT/logs-mounted" ] || exit 1
+case "$*" in *FSTYPE*) echo ext4 ;; *) echo "${'$'}{FAKE_LOOP_DEVICE:-/dev/loop7}" ;; esac
+`
+      );
       writeFake(
         join(bin, 'systemctl'),
         `#!/bin/sh
 printf '%s\\n' "$*" >> "$SYSTEMCTL_LOG"
+case "$*" in *'logs.mount') touch "$LIFEMODEL_INSTALL_ROOT/logs-mounted" ;; esac
 if [ "$*" = 'start lifemodel-k3s-dns-apply.service' ]; then
   exec sh "$LIFEMODEL_INSTALL_ROOT/usr/lib/lifemodel/k3s-dns-apply.sh" "$LIFEMODEL_INSTALL_ROOT/run/lifemodel/k3s-resolv.conf" "$LIFEMODEL_INSTALL_ROOT/usr/lib/lifemodel/resolv-conf.mjs" /etc/resolv.conf /run/systemd/resolve/resolv.conf
 fi
@@ -385,8 +389,21 @@ exit 0
 `
       );
     }
+    // Each invocation starts with the chosen offline/online resize scenario.
+    // The fake mount is published only by systemctl later in that invocation.
+    rmSync(join(root, 'install-root/logs-mounted'), { force: true });
     const previous = existsSync(systemctlLog) ? readFileSync(systemctlLog, 'utf8').length : 0;
-    const args = [installer, '--platform-url', 'oci://example.test/platform', '--tag', 'v1.0.0', '--lan-interface', 'eth0', '--root-templates', rootTemplates];
+    const args = [
+      installer,
+      '--platform-url',
+      'oci://example.test/platform',
+      '--tag',
+      'v1.0.0',
+      '--lan-interface',
+      'eth0',
+      '--root-templates',
+      rootTemplates,
+    ];
     if (options.size) args.push('--logs-volume-size', options.size);
     const result = spawnSync('sh', args, {
       encoding: 'utf8',

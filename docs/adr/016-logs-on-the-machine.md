@@ -163,9 +163,9 @@ Constraints that bound every option, with their source:
   signed platform artifact. Requests `cpu: 50m`, `memory: 64Mi`; limits
   `cpu: 1`, `memory: 300Mi` (measured RSS 45–102 MiB with 26 pods and one
   150,000-line/s burst).
-  It mounts `/var/log/pods` read-only and its own data directory (checkpoints)
-  read-write on the node's disk, at `/var/lib/lifemodel-logs-collector`, and
-  nothing else. Its container runs uid 0 with every capability dropped,
+  It mounts `/var/log/pods` read-only and its data directory (checkpoints and
+  disk buffer) read-write from `/var/lib/lifemodel-logs/collector` on the dedicated
+  log filesystem, at `/var/lib/lifemodel-logs-collector` inside the pod (§6). Its container runs uid 0 with every capability dropped,
   `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`,
   `seccompProfile: RuntimeDefault` and no `privileged` flag (§7 states why root
   and why the namespace's Pod Security is an exception).
@@ -285,8 +285,8 @@ Content-Type: application/stream+json
 
 `_msg_field=message` and `_time_field=timestamp` are not optional: without them
 the store keeps the whole event object under `_msg` and stamps it with its own
-receipt time. Batches of 2,000 events or one second, memory buffer of 500,000
-events, `when_full: block`. Measured ingest: 5 GiB of records in 79.6 s
+receipt time. Batches of 2,000 events or one second, disk buffer of 320 MiB
+(`max_size: 335544320`), `when_full: block` (§6, lifemodel-vbog.7.6). Measured ingest: 5 GiB of records in 79.6 s
 (67.5 MB/s), 6 GiB of incompressible records in 486 s (13.3 MB/s, store CPU-bound
 while compressing on 4 cores). The store answers 200 on success, and 429 with
 `cannot add rows into storage in read-only mode` when it stops accepting writes
@@ -1043,7 +1043,7 @@ Each says which, and each is labelled with the limit the raw output supports.
 | A drop on the cluster (wrapper account) | Run 2 shows 6,222,786,560 → 5,547,610,112 bytes (675,176,448) at the end of an interrupted run; the seven-second timing comes from the wrapper's account, and the later sample has no merge metrics, so the drop is consistent with a merge, not correlated with one. The 3,236,528,890 figure is accepted input bytes, not disk bytes |
 | Store down 5 minutes | Writers unaffected; the collector stayed ready at 73 → 80 MiB for the ~700 buffered records; after the store returned the backlog was in it within ~10 s; 945 of 945 lines present |
 | Collector restarted after 5 minutes down | 1,327 of 1,327 lines present, no duplicate (checkpoint on the node's disk); a pod deleted during the outage lost all 100 of its lines because the kubelet removed its directory first |
-| A collector killed with its buffer full | **Not measured.** The run intended for it never reached the buffer edge: the buffer's size gauge read 0 while 20,000 lines had been received, and the pid it read was 1. What the mechanism implies: `acknowledgements` is inert here (kubernetes_logs does not support end-to-end acknowledgements — measured: Vector warns and ignores it), the checkpoint advances on delivery only, so a crash re-reads from the last delivered line and loses only what the kubelet has already rotated away, plus whatever was in memory. L07 sets the saturated state and the acceptable loss |
+| A collector killed with its buffer full | The original saturated crash was not measured. The 2026-11-10 owner-reported VM outage exposed lost checkpointed-but-undelivered records with the former memory buffer. Vector 0.61.0 kubernetes_logs cannot acknowledge delivery; checkpoints advance before the downstream send, not on sink success. The disk buffer below preserves synchronized records across a collector restart, with a residual pre-buffer/flush window and possible replay duplicates. L07 measures that weaker contract; it does not promise every retained kubelet line is replayed |
 | A module restarted (pod replaced) | The previous pod's lines stay; a new pod's lines appear under the same `module` |
 | A 500,000-line burst (~500 MB in ~25 s, two kubelet rotations) | 500,000 records stored, none missing (measured before the throttle existed; the throttle applies to the task namespace only) |
 | A task pod at full speed, throttled (cluster) | 300,000 lines written in about 2 s: **20,650 stored + 248,883 discarded** in one run (**30,467 unaccounted at sampling** — the two counters were read at different times while the buffer still held records, so this is not a reconciled total), and **8,444 + 291,556 = 300,000 exactly** in another. Collector 102 MiB, 588 m CPU, no restart. The trusted pod kept 300 of 300, but wrote **before** the burst, so this is not simultaneous fairness. The measured sink buffer was 100,000 events, not the 500,000 of §3, so 102 MiB is not that buffer's worst case |
@@ -1052,6 +1052,101 @@ Each says which, and each is labelled with the limit the raw output supports.
 | A delete task at the designed limit (Docker, pinned store) | At `--memory=1g`: one delete of the older half of a 988 MB partition finished in 13.9 s (peak RSS 228 868 kB, rows 11.23 M → 5.62 M, free 1.93 → 2.43 GB) and left **2 509 blank rows**; at 40 % free the same task never started (free 1.28 GB below the 1.64 GB partition; `cannot proceed … retrying later` every second for 159 s, nothing deleted); under a flood a delete OOM-killed the store (exit 137, `OOMKilled`), and at `--memory=2g` a delete that matched every row of a 210 MB partition OOM-killed it too; the task survives in `delete_tasks.json`, so two restarts reloaded it and died again within about a second (§5) |
 | The heartbeat through the collector's pipeline | Docker: stored and found by the page's query (4 in 8 s, 8 in 16 s at a 2 s interval; author-reported from the Docker run). On the cluster: **0 in every phase, cause not found**; check L14 |
 
+
+**Outage recovery correction (lifemodel-vbog.7.6, owner decision 2026-11-10).**
+The source remains `kubernetes_logs`: pod-label identity and CRI parsing in §2
+are unchanged. In the pinned [v0.61.0 source](https://github.com/vectordotdev/vector/blob/v0.61.0/src/sources/kubernetes_logs/mod.rs#L604-L606),
+`can_acknowledge()` is false; [line 991 updates the checkpoint before the downstream
+send at line 1018](https://github.com/vectordotdev/vector/blob/v0.61.0/src/sources/kubernetes_logs/mod.rs#L991-L1018).
+The earlier claim that this checkpoint advanced only on delivery was incorrect.
+Enabling sink acknowledgements cannot change that source behavior, so no such
+setting is presented as an end-to-end durability guarantee.
+
+The `logs-store` sink now uses `buffer: {type: disk, max_size: 335544320,
+when_full: block}`: **320 MiB**, above Vector's 268435488-byte minimum.
+The global data directory remains `/var/lib/lifemodel-logs-collector` inside the
+pod, but its host backing is now **`/var/lib/lifemodel-logs/collector`**,
+a sibling of the store PV's `/var/lib/lifemodel-logs/data`. Both installers
+prepare it only after verifying the exact ext4 loop mount backed by the log
+image, with owner `0:0` and mode `0750` for the capless uid-0 collector; the
+store sibling remains `1000:1000`. The hostPath uses `Directory`, never `DirectoryOrCreate`; a missing
+mount/directory prevents collector startup rather than writing onto root.
+The evictor mounts only `data` and removes only `data/partitions/YYYYMMDD`,
+never the sibling collector directory. This remains a single-node allocation.
+
+The existing eviction threshold is the store's 25% merge margin plus **768 MiB**
+headroom. The 320 MiB bound consumes less than half that headroom, leaving
+448 MiB; even reserving another 128 MiB conservatively for segment/ledger and
+filesystem accounting leaves 320 MiB before the store's margin. Vector's
+[disk implementation](https://github.com/vectordotdev/vector/blob/v0.61.0/lib/vector-buffers/src/variants/disk_v2/common.rs#L393-L431)
+already accounts for an outstanding 128 MiB segment in its maximum. This is a
+budget, not a reservation or a guarantee of free space: a late evictor, concurrent
+store writes/merges, ext4 reserve and an already-full volume can still cause
+write refusal. No flood reaches the root filesystem. At 1,500 events/s and
+1 KiB serialized events, 320 MiB is at most about 218 s before serialization
+and segment overhead; 20 KiB events reduce that to about 11 s. When full, the
+sink blocks the topology and eventually file reading. Kubelet retention remains
+finite; back-pressure with this source is not end-to-end acknowledged replay.
+
+Vector [synchronizes disk data every 500 ms](https://github.com/vectordotdev/vector/blob/v0.61.0/lib/vector-buffers/src/config.rs#L241-L252).
+Synchronized buffer records are retained for delivery across a collector restart
+on the same healthy volume and unchanged sink id. Events already checkpointed
+but still in source/transform/channel memory, or not yet synchronized, can be
+lost. The 500 ms interval does **not** bound the entire pre-buffer loss window
+under back-pressure. A response lost after store acceptance, HTTP retries, or
+recovery before a durable delivery position is saved can produce duplicates;
+this is not exactly-once delivery. Permanent sink rejection, disk corruption,
+node/volume loss and kubelet rotation/deletion are not repaired. Moving the data
+directory starts new source checkpoints on upgrade: retained files can be read
+again and duplicated; the old root checkpoint directory is not deleted or copied.
+
+The collector keeps its **300Mi** limit. With backlog on disk rather than
+500,000 heap events, expected process memory is nearer the earlier 45–102 MiB
+baseline plus source/transform queues, HTTP batches and compression; this is an
+expectation, not a new measurement or hard RSS bound. Kernel-accounted dirty page
+cache and unusually large events can still consume cgroup memory. L07 must measure
+RSS/cgroup usage during saturation and drain; no limit increase is assumed.
+
+A kubelet exec liveness check runs every **30 s**. It restarts the collector
+after **300 s without sink delivery-counter progress while the store's `/health`
+continues to answer 2xx**. The heartbeat ensures ordinary idle traffic. Both
+HTTP reads have 3 s deadlines; an unresponsive exporter with a healthy store
+counts as no progress. A store outage resets the observation window and returns
+healthy, never causing a delivery-stall restart. A counter reset, startup or an
+observation gap over 60 s starts fresh grace. State is ephemeral in `/tmp`.
+The check uses existing image tools, loopback metrics and the already-permitted
+store route; no Service, credential, capability or network permit is added.
+A healthy health endpoint is not proof the store accepts inserts: a read-only
+store may trigger this rule; restarts cannot cure disk refusal. A gap in probe
+execution also delays recovery. These limits must not be hidden by the page.
+
+**Diagnosis, not a claimed root cause.** The owner's VM report shows a live
+collector retrying two requests with `channel closed`/timeouts, no store insert
+requests or TCP connection, an unresponsive loopback exporter, 245–269 MiB
+memory and zero restarts. `channel closed` is a client transport failure, not
+proof that a stale Service backend is cached forever. The pinned HTTP client
+uses Hyper's pooled client ([construction](https://github.com/vectordotdev/vector/blob/v0.61.0/src/http.rs#L105-L143)).
+The request defaults use a 60 s attempt timeout, effectively unlimited retries,
+1 s initial Fibonacci backoff and a 30 s maximum **between retries**, not a
+30 s overall retry deadline ([settings](https://github.com/vectordotdev/vector/blob/v0.61.0/src/sinks/util/service.rs)).
+Repeated request ids can therefore be retries of retained batches rather than
+new inserts. The [0.61.0 release notes](https://vector.dev/releases/0.61.0/)
+do not identify a matching HTTP-sink wedge fix. No speculative timeout/pool
+setting is changed as a cure.
+
+Without the VM or a reproducible failure, the strongest competing explanations
+are client/connection-task failure and runtime starvation from flood/memory/CPU
+pressure. Near-limit memory is not an OOM diagnosis; zero conntrack entries does
+not locate where scheduling stopped. To distinguish them, reproduce the same
+store-pod replacement under numbered load and sample source received bytes/events,
+sink sent/errors, disk-buffer bytes, cgroup memory/CPU throttling/pressure, and
+loopback exporter latency alongside bounded packet capture of DNS and SYNs.
+Compare direct store health from the same pod and insert request counts; capture
+Vector task/thread stacks while wedged before restarting. Healthy scheduling
+with repeated pool failures but no SYNs points toward the client; stalled metrics
+and CPU/memory pressure across tasks points toward starvation. Then vary only
+load or connection reuse in a separate controlled run. The saved 459-line log can
+refine timing/error chains but cannot alone prove either mechanism.
 
 **The collector's own metrics, and who reads them (lifemodel-vbog.7.1).** The
 collector exports Vector's internal metrics (`sources.internal_metrics` of type
@@ -1368,7 +1463,7 @@ that runs each is named. No check may pass on a fixture that cannot fail.
 | L05 | The log volume holds what a flood can do: a full volume with Postgres committing beside it, the store refusing cleanly, and the platform unharmed (F1, F8, N1, N3) | `WALK-LOGS-VOLUME`, on a deployed build with the volume at its install size: a Postgres pod committing every 200 ms on the host's *shared* filesystem and the log volume filled by an incompressible flood at full speed. Assert: the volume's busy percentage is reported and the host's shared filesystem never loses a byte to it; the store answers 429 read from the response, with no panic and no restart; reads keep answering; the store's free space never falls more than **10 % of the volume** below the margin, with the merge counters beside it; the page shows `log volume low` then `read-only`; retention or the evictor frees space and writes accept again without a restart; and the Postgres commits and the loader's page both continue. Then the throttle part: a task pod at full speed **concurrently with a trusted writer**, plus a task pod writing **20 KB lines**; the trusted writer loses nothing, the throttled pods' `input`/`accepted` windows reconcile, and the event rate is reported as the limit it is. One failure case belongs to the same walk: **with the host unit disabled so nothing is mounted**, the store must not start (its pod stays `ContainerCreating`), nothing must appear under `/var/lib/lifemodel-logs` on the root filesystem, the page must say the volume is not mounted, and enabling the unit must bring the store up with no other restart. A full volume is L16's case, not this walk's. The volume's size is an installer option (`scripts/install.sh --logs-volume-size`, NixOS `services.lifemodel.logsVolumeSize`), so a machine may run a smaller volume than the 3 GiB default; every walk takes the installed size and never assumes the default. Measured here on loop-mounted images: 3 GiB volume — 149 MB below a 768 MiB margin, no panic, 907,600 rows readable; 3 GiB volume in the displacement round — 694 MB below the same margin, no panic, 1,678,600 rows readable; 6 GiB volume — 548 MB below a 1.5 GiB margin, no panic, space recovered by merges |
 | L06 | Retention: the byte bound drops oldest day partitions first, the age bound applies independently, and a bound above `volume − threshold` is refused (it could never be reached, because the evictor removes a day first); inside the two-day floor retention drops nothing and the evictor acts (L16) | `WALK-LOGS-BOUND`: 300 MiB byte bound, 600 MiB of today (no eviction), a 200-record canary 10 days old, a 0.7 GiB flood across 10 days (canary and older days gone, today kept); then a *separate* run with only `retentionPeriod` shortened and no byte pressure (the older day is gone and nothing else); then the page asked for a byte bound larger than the volume minus the evictor's threshold, which is **refused with the numbers**, and one that fits (`volume − threshold`, and one 1 MiB below it), which is accepted. Measured on the prototype for the first three; the two-day floor above the bound was measured as a 300 MiB bound reaching 444 MiB |
 
-| L07 | What a collector crash loses, at the buffer's edge (F10, N10) | `WALK-LOGS-CRASH`: with the store down, write numbered lines **until the sink's buffer is at its configured maximum** (the run waits for `vector_buffer_size_events` to reach `vector_buffer_max_size_events`, with enough input to fill it and the source's received counter well above it); if that state is not reached the run prints `TEST NOT VALID` and **fails**. Then `kill -9` the **vector process** by its host pid (`k3s crictl inspect` — pid 1 means nothing was killed, which also fails), recover, and count missing and duplicate lines and the restart count. The acceptable outcome is stated, not judged afterwards: every line not yet rotated away by the kubelet is delivered **at least once** and no line is lost that was still in `/var/log/pods`; lines the kubelet has rotated away may be lost, and duplicates are allowed. If a run loses a line that was still in the kubelet's files, the guarantee changes to "delivered lines are never corrupted" and the design does not claim more. An unsaturated crash is a separate, informative case, never a substitute |
+| L07 | Collector restart durability and stalled-sink recovery (lifemodel-vbog.7.6) | `WALK-LOGS-CRASH` must reach the configured disk-byte bound (not the obsolete event-count maximum); an unchanged event-gauge walk is not valid disk-buffer evidence. With the store down, plant numbered records, record source checkpoints and synchronized disk-buffer bytes, kill the actual Vector host pid, recover the store and count delivered/missing/duplicate records. Records proven synchronized into the buffer must survive collector restart while the same volume and sink identity remain intact; pre-buffer and unsynchronized records may be lost even while their kubelet files remain. Duplicates are allowed. Separately replace the store pod during a flood, verify byte/RSS bounds and drain; force a sink stall with a healthy store and prove the 300 s no-progress rule restarts the collector, then keep the store down for longer and prove no liveness restart. Missing saturation, durable-record proof, actual process kill or delivery counters means TEST NOT VALID, never acceptance |
 | L08 | The setting applies through the ConfigMap mapping, a durable desired revision, idempotent reconcile, and the admission lists (F3, F7, N6) | `WALK-LOGS-SETTING`: change 14 d → 7 d, 7 d → 14 d, crash the loader after the ConfigMap write and before the annotation (both orders), and repeat an identical PUT. Assert: `GET /flags` through the adapter holds the desired values (which requires `-envflag.prefix=VL_`); `applied` only when the Deployment's `observedGeneration` has caught up, `updatedReplicas`/`availableReplicas` equal the replicas, the pod's revision annotation equals `desiredRevision`, and the flags agree — `pending` with a reason otherwise; a first install boots from the defaults ConfigMap with the loader's ConfigMap absent (`optional: true`). Rendered-manifest tests assert both admission ConfigMap lists admit `lifemodel-logs-settings` for the loader's create **and** update and that another identity is refused, that the Deployment patch is clamped to the two annotation maps, that the Deployment declares no retention argument, and that the release manifest does not declare the revision annotation. The same unit and rendered-manifest tests cover the partition key at first start: an empty Secret is written once with one random key and the store restart is requested through its own template annotation, a non-empty key is untouched with no restart, a crash between the two writes requests the same restart again, the loader's new right is `get` and `patch` on that one Secret by name, and the Deployment clamp admits that second annotation pair while still refusing every other field. Measured on the prototype: the env mapping alone (`/flags` in three configurations) and 2.6/3.7 s without an endpoint, healthy at 3.0/4.6 s |
 | L09 | A log step does not gate the platform's readiness (F11) | `WALK-LOGS-WAIT`: on the deployed build, a root Kustomization at `wait: true` over a child at `wait: false` whose pod cannot start (a bad image) and one healthy neighbour child; assert the root is Ready and the page shows the failure, and that the same fixture at `wait: true` keeps the root NotReady. **Not measured**: the prototype's own Flux fixture did not reconcile its children (`ReconciliationFailed` on all three, with the source itself `Ready`), so `wait: false` is unproven. The fixture mistake is named in the report; this check runs in the first stage that deploys the collector |
 | L10 | The permitted egress set is exactly DNS, TCP 6443 to any address, and the store (F12) | `WALK-LOGS-EGRESS`: a probe pod carrying the collector's labels, a witness pod outside the policy, and listeners on another namespace's pod. Assert open: the store's 9428, DNS 53, the API Service 443, the node address 6443, **and another namespace's pod on 6443**; assert refused: that pod on 8080 and 443, a public resolver on 53, a public host on 443. Measured on the prototype exactly as asserted |

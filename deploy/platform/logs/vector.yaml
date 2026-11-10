@@ -59,6 +59,13 @@ spec:
                 - ALL
             seccompProfile:
               type: RuntimeDefault
+          livenessProbe:
+            exec:
+              command: ['/bin/bash', '/etc/vector/check-delivery.sh']
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 1
           resources:
             requests:
               cpu: 50m
@@ -71,8 +78,8 @@ spec:
             - name: pods
               mountPath: /var/log/pods
               readOnly: true
-            # The persistent checkpoint directory on the node's disk, the only
-            # writable host mount.
+            # Checkpoints and sink buffer share a sibling of the store's /data
+            # on the dedicated log filesystem. No root-filesystem fallback.
             - name: checkpoints
               mountPath: /var/lib/lifemodel-logs-collector
             - name: config
@@ -87,8 +94,8 @@ spec:
             type: Directory
         - name: checkpoints
           hostPath:
-            path: /var/lib/lifemodel-logs-collector
-            type: DirectoryOrCreate
+            path: /var/lib/lifemodel-logs/collector
+            type: Directory
         - name: config
           configMap:
             name: logs-collector-config

@@ -15,3 +15,4 @@ configMapGenerator:
     namespace: lifemodel-logs
     files:
       - vector.yaml=config/vector.yaml
+      - check-delivery.sh=config/check-delivery.sh

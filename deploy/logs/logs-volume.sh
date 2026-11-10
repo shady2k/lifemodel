@@ -22,7 +22,7 @@ set -eu
 MINIMUM=2G
 
 usage() {
-  printf 'usage: %s check SIZE | %s SIZE [IMAGE [MOUNTPOINT]]\n' "$0" "$0" >&2
+  printf 'usage: %s check SIZE | %s SIZE [IMAGE [MOUNTPOINT]] | %s prepare IMAGE MOUNTPOINT\n' "$0" "$0" "$0" >&2
   exit 2
 }
 
@@ -82,7 +82,37 @@ resize_filesystem() {
   fi
 }
 
+# Only a verified mount of our image may hold collector checkpoints and disk
+# buffers. Never create this directory on the host root when the mount failed.
+prepare_collector() {
+  image=$1
+  mount=$2
+  if [ -L "$mount" ] || [ -L "$mount/collector" ]; then
+    echo "logs-volume: refusing a symlink for collector storage" >&2
+    exit 1
+  fi
+  source=$(findmnt -rn -M "$mount" -o SOURCE) || {
+    echo "logs-volume: collector storage requires the mounted log volume" >&2
+    exit 1
+  }
+  fs_type=$(findmnt -rn -M "$mount" -o FSTYPE)
+  devices=$(losetup -j "$image" | cut -d: -f1)
+  if [ "$fs_type" != ext4 ] || [ -z "$source" ] ||
+    ! printf '%s\n' "$devices" | grep -Fxq "$source"; then
+    echo "logs-volume: collector storage is not on the expected ext4 log image" >&2
+    exit 1
+  fi
+  mkdir -p "$mount/collector"
+  chown 0:0 "$mount/collector"
+  chmod 0750 "$mount/collector"
+}
+
 [ "$#" -ge 1 ] || usage
+if [ "$1" = prepare ]; then
+  [ "$#" -eq 3 ] || usage
+  prepare_collector "$2" "$3"
+  exit 0
+fi
 if [ "$1" = check ]; then
   [ "$#" -eq 2 ] || usage
   validate "$2"
