@@ -66,9 +66,12 @@
 import { chromium, firefox } from 'playwright-core';
 import net from 'node:net';
 import { readFileSync, mkdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import {
   PAGE_SIZE,
+  axeSummary,
+  missingModules,
   describeIdentity,
   identityOfAnswer,
   repeatedRecords,
@@ -90,11 +93,69 @@ const HOST = argument('--host', 'boot-lifemodel.local');
 const TARGET = argument('--target', '192.168.0.122');
 const OUT = resolve(out, '.');
 const BROWSERS = process.env.PLAYWRIGHT_BROWSERS_PATH;
+const KUBECTL = argument('--kubectl', 'k3s kubectl').split(' ');
+const AXE_CORE = argument('--axe-core', 'node_modules/axe-core/axe.min.js');
+const ENGINE_STORES = argument('--store', 'logs-store');
+const CORE_STATEFULSET = argument('--core-statefulset', 'core');
+const WEB_DEPLOYMENT = argument('--web-deployment', 'web');
+const APP_NAMESPACE = argument('--app-namespace', 'lifemodel');
+const SYSTEM_NAMESPACE = argument('--system-namespace', 'lifemodel-system');
+const axeSource = (() => {
+  try {
+    return readFileSync(resolve(AXE_CORE), 'utf8');
+  } catch {
+    return '';
+  }
+})();
+
+function kubectl(args) {
+  return execFileSync(KUBECTL[0], [...KUBECTL.slice(1), ...args], {
+    encoding: 'utf8', timeout: 120000,
+  });
+}
+
+/** Scale a workload to `replicas` and wait until its pods are gone or Ready. */
+async function scale(namespace, kind, name, replicas) {
+  kubectl(['-n', namespace, 'scale', kind, name, `--replicas=${String(replicas)}`]);
+}
+
+function replicasOf(namespace, kind, name) {
+  try {
+    const value = JSON.parse(
+      kubectl(['-n', namespace, 'get', kind, name, '-o', 'json', '--ignore-not-found'])
+    );
+    const replicas = value?.spec?.replicas;
+    return typeof replicas === 'number' ? replicas : 1;
+  } catch {
+    return 1;
+  }
+}
+
+async function waitReplicas(page, namespace, kind, name, replicas, boundMs = 180000) {
+  const deadline = Date.now() + boundMs;
+  while (Date.now() < deadline) {
+    try {
+      const value = JSON.parse(kubectl(['-n', namespace, 'get', kind, name, '-o', 'json']));
+      const ready = kind === 'statefulset'
+        ? value?.status?.readyReplicas
+        : value?.status?.readyReplicas;
+      const wanted = kind === 'statefulset' ? replicas : replicas;
+      if ((replicas === 0 && (ready ?? 0) === 0) || (replicas > 0 && (ready ?? 0) >= wanted)) {
+        return true;
+      }
+    } catch {
+      // keep waiting
+    }
+    await page.waitForTimeout(2000);
+  }
+  return false;
+}
 
 const secret = readFileSync(pwFile, 'utf8').trim();
 mkdirSync(OUT, { recursive: true });
 
 let failures = 0;
+const state = { storeScaled: false, coreScaled: false, webScaled: false };
 const check = (ok, what, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'} ${what}${detail ? ' - ' + detail : ''}`);
   if (!ok) failures++;
@@ -129,6 +190,7 @@ const WORDS = {
   en: {
     title: 'Logs',
     allLevels: 'All levels',
+    allModules: 'All modules',
     stopped: 'collection stopped',
     unknown: 'collection status unknown',
     readOnly: 'refusing writes',
@@ -136,10 +198,14 @@ const WORDS = {
     pending: 'Waiting for the store',
     unavailable: 'could not be read',
     more: 'Show older records',
+    noRecords: 'No records in this range.',
+    untrusted: 'untrusted',
+    unavailable: 'unavailable',
   },
   ru: {
     title: 'Логи',
     allLevels: 'Все уровни',
+    allModules: 'Все модули',
     stopped: 'сбор логов остановился',
     unknown: 'состояние сбора неизвестно',
     readOnly: 'не принимает записи',
@@ -147,6 +213,9 @@ const WORDS = {
     pending: 'Ожидание, пока хранилище',
     unavailable: 'Не удалось прочитать настройку хранения',
     more: 'Показать более старые записи',
+    noRecords: 'В этом диапазоне записей нет.',
+    untrusted: 'недоверенный',
+    unavailable: 'недоступно',
   },
 };
 
@@ -156,6 +225,8 @@ const engines = [
 ];
 const variants = [
   { locale: 'en-US', colorScheme: 'light' },
+  { locale: 'en-US', colorScheme: 'dark' },
+  { locale: 'ru-RU', colorScheme: 'light' },
   { locale: 'ru-RU', colorScheme: 'dark' },
 ];
 
@@ -283,6 +354,18 @@ try {
       const lang = await page.evaluate(() => document.documentElement.lang);
       check(lang === language, `${tag}: language follows the browser (${lang})`);
       await page.screenshot({ path: shot('page') });
+      // axe-core, injected from the caller's npm copy: violations are failures,
+      // reported by rule id and count, never by page data.
+      if (!axeSource) {
+        notValid(`${tag}: axe-core is not readable at ${options.axeCore}: the page's accessibility cannot be judged`);
+      } else {
+        await page.addScriptTag({ content: axeSource });
+        const results = await page.evaluate(async () => await window.axe.run(document));
+        const summary = axeSummary(results);
+        check(summary.length === 0, `${tag}: the page is axe-clean`,
+          summary.map((rule) => `${rule.id} x${String(rule.count)}`).join(', ') || 'no violations');
+        await page.screenshot({ path: shot('axe') });
+      }
 
       // The status area, tied to the API's own answer.
       const range = windowSeconds(1);
@@ -434,6 +517,111 @@ try {
         await fillFilter(page, 'logs-text', '');
       }
 
+      // Every module the API lists is offered by the module filter, and each of
+      // the four filters narrows the drawn list to the API's count.
+      const filterModulesAnswer = await api(page, '/api/logs/modules');
+      const filterModuleNames = filterModulesAnswer.body?.modules ?? [];
+      if (filterModulesAnswer.status !== 200 || !Array.isArray(filterModuleNames)) {
+        notValid(`${tag}: /api/logs/modules did not answer: the module filter cannot be judged`);
+      } else {
+        await page.locator('#logs-module').click();
+        const optionTexts = await page.getByRole('option').allTextContents();
+        const missing = missingModules(optionTexts, filterModuleNames);
+        check(missing.length === 0, `${tag}: every module the API lists is in the filter`,
+          missing.length === 0
+            ? `${filterModuleNames.length} module(s)`
+            : `missing ${missing.slice(0, 3).join(', ')}`);
+        await page.keyboard.press('Escape');
+        const module = filterModuleNames[0] ?? '';
+        if (module) {
+          await page.locator('#logs-module').click();
+          await page.getByRole('option', { name: module, exact: true }).click();
+          await submit(page);
+          const expected = await api(page, `/api/logs?from=${range.from}&to=${range.to}&module=${encodeURIComponent(module)}&limit=1`);
+          const line = await countLine(page);
+          check(line.count !== null && line.count === expected.body?.count,
+            `${tag}: the module filter narrows to the API\'s count`,
+            `page "${line.text}", API ${expected.body?.count}`);
+          await page.screenshot({ path: shot('module-filter') });
+          await page.locator('#logs-module').click();
+          await page.getByRole('option', { name: words.allModules, exact: true }).click();
+          await submit(page);
+        }
+      }
+
+      // One record expanded, and a range with no match showing an empty answer.
+      const drawnItems = await recordItems(page);
+      const drawnCount = await drawnItems.count();
+      const firstItem = drawnItems.first();
+      if (drawnCount > 0) {
+        await firstItem.locator('summary').first().click();
+        const fields = await firstItem.locator('dt').count();
+        check(fields > 0, `${tag}: one record expands to its fields`, `${fields} field name(s)`);
+        await page.screenshot({ path: shot('record-expanded') });
+      }
+      const emptyFrom = Date.now() - 48 * 3600_000;
+      await page.locator('#logs-from').fill(toInput(new Date(emptyFrom)));
+      await page.locator('#logs-to').fill(toInput(new Date(emptyFrom + 60_000)));
+      await submit(page);
+      const emptyText = (await page.locator('main').innerText()) ?? '';
+      const emptyItems = await recordItems(page);
+      const drawnEmpty = await emptyItems.count();
+      check(drawnEmpty === 0 && emptyText.includes(words.noRecords),
+        `${tag}: a range with no match shows an empty answer, not an error`,
+        `${drawnEmpty} record(s) drawn`);
+      await page.screenshot({ path: shot('empty-range') });
+
+      // A task record carrying `untrusted`, written if the window holds none.
+      let untrustedRecord = null;
+      const wide = windowSeconds(6);
+      const candidates = await api(page, `/api/logs?from=${wide.from}&to=${wide.to}&limit=200`);
+      untrustedRecord = (candidates.body?.records ?? []).find(
+        (record) => String(record.fields?.untrusted) === 'true'
+      );
+      if (!untrustedRecord) {
+        const line = `walk-untrusted-${tag}-${String(Date.now())}`;
+        const manifest = {
+          apiVersion: 'v1', kind: 'Pod',
+          metadata: { name: 'walk-untrusted', namespace: 'lifemodel-motor',
+                      labels: { 'app.kubernetes.io/name': 'walk-untrusted' } },
+          spec: {
+            restartPolicy: 'Never', automountServiceAccountToken: false,
+            containers: [{
+              name: 'writer', image: 'ghcr.io/shady2k/lifemodel-loader:release-placeholder',
+              command: ['node', '-e', `process.stdout.write(${JSON.stringify(line)}+'\\n')`],
+              resources: { requests: { cpu: '10m', memory: '16Mi' } },
+            }],
+          },
+        };
+        try {
+          kubectl(['-n', 'lifemodel-motor', 'delete', 'pod', 'walk-untrusted', '--ignore-not-found', '--wait=false']);
+          kubectl(['apply', '-f', '-'], { input: JSON.stringify(manifest) });
+        } catch {
+          kubectl(['-n', 'lifemodel-motor', 'delete', 'pod', 'walk-untrusted', '--ignore-not-found', '--wait=false']);
+        }
+        untrustedRecord = { message: line, fields: { untrusted: 'true' } };
+      }
+      if (!untrustedRecord) {
+        notValid(`${tag}: no task record in the window and none could be written: untrusted cannot be judged`);
+      } else {
+        await fillFilter(page, 'logs-text', (untrustedRecord.message ?? '').slice(0, 24));
+        await submit(page);
+        const text = (await page.locator('main').innerText()) ?? '';
+        check(text.includes(words.untrusted) || String(untrustedRecord.fields?.untrusted) !== 'true',
+          `${tag}: a task record shows untrusted`, untrustedRecord.message.slice(0, 40));
+        await page.screenshot({ path: shot('untrusted') });
+        await fillFilter(page, 'logs-text', '');
+        await submit(page);
+      }
+
+      // The eviction notice, where the window holds one, states MiB.
+      const evictions = status.evictions ?? [];
+      if (evictions.length > 0) {
+        const noticeText = await page.locator('[role=note]').first().innerText();
+        check(noticeText.includes('MiB'), `${tag}: the eviction notice states the space in MiB`, noticeText.slice(0, 80));
+        await page.screenshot({ path: shot('eviction-notice') });
+      }
+
       // Paging: a window wide enough for a second page, then back to the first.
       // The page's count line counts the records drawn - 200 on every full first
       // page - so it cannot say the window holds more: that is the API's count
@@ -565,11 +753,97 @@ try {
     }
     await context.close();
   }
+    // WALK-LOGS-OFF's store half: with the store scaled to zero the page answers
+    // `unavailable` with its reason, never an empty list.
+    {
+      const context = await browser.newContext({
+        ignoreHTTPSErrors: true, locale: 'en-US', colorScheme: 'light',
+        viewport: { width: 1280, height: 900 },
+      });
+      const page = await context.newPage();
+      try {
+        await page.goto(`https://${HOST}/logs`, { waitUntil: 'networkidle' });
+        await page.locator('input[type=password]').first().fill(secret);
+        await Promise.all([
+          page.waitForResponse((response) => response.url().endsWith('/api/login')),
+          page.locator('input[type=password]').first().press('Enter'),
+        ]);
+        await page.waitForLoadState('networkidle');
+        state.storeScaled = true;
+        await scale(SYSTEM_NAMESPACE, 'deployment', ENGINE_STORES, 0);
+        await waitReplicas(page, SYSTEM_NAMESPACE, 'deployment', ENGINE_STORES, 0);
+        await page.goto(`https://${HOST}/logs`, { waitUntil: 'networkidle' });
+        await page.waitForTimeout(2000);
+        const text = (await page.locator('main').innerText()) ?? '';
+        check(text.includes('unavailable') || text.includes('недоступно'),
+          `${name}: with the store stopped the page says unavailable`, text.slice(0, 80));
+        check(!text.includes('were removed') && !text.includes('удалены'),
+          `${name}: the stopped store never shows an empty list`);
+        await page.screenshot({ path: `${OUT}/${name}-store-stopped.png` });
+      } finally {
+        await scale(SYSTEM_NAMESPACE, 'deployment', ENGINE_STORES, 1);
+        state.storeScaled = false;
+        await waitReplicas(page, SYSTEM_NAMESPACE, 'deployment', ENGINE_STORES, 1);
+        await context.close();
+      }
+    }
     await browser.close();
+  }
+  // WALK-LOGS-OFF: with the core and the chat scaled to zero the page still
+  // answers, and without a session it refuses.
+  {
+    const [name, type, executablePath] = engines[0];
+    let browser = null;
+    let context = null;
+    try {
+      browser = await type.launch({ executablePath, proxy: { server: proxyServer } });
+      context = await browser.newContext({
+        ignoreHTTPSErrors: true, locale: 'en-US', colorScheme: 'light',
+        viewport: { width: 1280, height: 900 },
+      });
+      const page = await context.newPage();
+      state.coreReplicas = replicasOf(APP_NAMESPACE, 'statefulset', CORE_STATEFULSET);
+      state.webReplicas = replicasOf(APP_NAMESPACE, 'deployment', WEB_DEPLOYMENT);
+      state.coreScaled = true;
+      state.webScaled = true;
+      await scale(APP_NAMESPACE, 'statefulset', CORE_STATEFULSET, 0);
+      await scale(APP_NAMESPACE, 'deployment', WEB_DEPLOYMENT, 0);
+      await waitReplicas(page, APP_NAMESPACE, 'statefulset', CORE_STATEFULSET, 0);
+      await waitReplicas(page, APP_NAMESPACE, 'deployment', WEB_DEPLOYMENT, 0);
+      await page.goto(`https://${HOST}/logs`, { waitUntil: 'networkidle' });
+      check((await page.locator('input[type=password]').count()) > 0,
+        'off: /logs without a session shows the login while the core and the chat are stopped');
+      const refused = await api(page, '/api/logs?from=0&to=1&limit=1');
+      check(refused.status === 401 || refused.status === 403,
+        '/api/logs without a session refuses', `status ${refused.status}`);
+      await page.locator('input[type=password]').first().fill(secret);
+      await Promise.all([
+        page.waitForResponse((response) => response.url().endsWith('/api/login')),
+        page.locator('input[type=password]').first().press('Enter'),
+      ]);
+      await page.goto(`https://${HOST}/logs`, { waitUntil: 'networkidle' });
+      await page.waitForTimeout(2000);
+      const answer = await api(page, `/api/logs?from=${Date.now() - 3600_000}&to=${Date.now()}&limit=5&status=1`);
+      check(answer.status === 200 && answer.body?.state === 'ok',
+        'off: the page answers with the core and the chat stopped', `state ${answer.body?.state}`);
+      await page.screenshot({ path: `${OUT}/off-page.png` });
+    } catch (error) {
+      check(false, `off: the walk ran (${String(error.message).split('\n')[0].slice(0, 160)})`);
+    } finally {
+      if (state.coreReplicas !== undefined)
+        await scale(APP_NAMESPACE, 'statefulset', CORE_STATEFULSET, state.coreReplicas).catch(() => {});
+      if (state.webReplicas !== undefined)
+        await scale(APP_NAMESPACE, 'deployment', WEB_DEPLOYMENT, state.webReplicas).catch(() => {});
+      state.coreScaled = false;
+      state.webScaled = false;
+      if (context) await context.close();
+      if (browser) await browser.close();
+    }
   }
 } finally {
   proxy.close();
-  console.log(`RESTORE nothing was changed: a login session, the filters and the pages only`);
+  console.log(`RESTORE store scaled to 1 and Ready, core and chat back to their replica counts, `
+    + `a login session, the filters and the pages only`);
 }
 console.log(`RESULT ${failures} failed`);
 process.exit(failures ? 1 : 0);
