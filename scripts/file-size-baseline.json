@@ -23,7 +23,7 @@
     "src/plugins/news/index.ts": 948,
     "src/plugins/news/news-signal-filter.ts": 802,
     "src/plugins/news/tools/news-tool.ts": 1590,
-    "src/plugins/providers/vercel-ai-provider.ts": 1300,
+    "src/plugins/providers/vercel-ai-provider.ts": 1296,
     "src/plugins/reminder/reminder-tool.ts": 1656,
     "src/runtime/container/container-manager.ts": 1459,
     "src/runtime/container/tool-server.ts": 1110,

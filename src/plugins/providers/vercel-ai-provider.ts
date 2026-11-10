@@ -943,19 +943,15 @@ export class VercelAIProvider extends BaseLLMProvider {
               ? (error as { statusCode: number }).statusCode
               : undefined,
           httpStatus: call.wire.httpStatus,
-          responseHeaders,
-          requestUrl,
+          responseHeaderNames: Object.keys(responseHeaders ?? {}),
+          responseRequestId: responseHeaders?.['x-request-id'] ?? responseHeaders?.['request-id'],
+          requestHost:
+            requestUrl && URL.canParse(requestUrl) ? new URL(requestUrl).host : undefined,
           // Log message count and structure to help debug schema issues
           messageCount: coreMessages.length,
           messages: coreMessages.map((m) => ({
             role: m.role,
             contentType: Array.isArray(m.content) ? 'array' : typeof m.content,
-            contentPreview:
-              typeof m.content === 'string'
-                ? m.content.slice(0, 200)
-                : Array.isArray(m.content)
-                  ? `[${String(m.content.length)} parts] ${JSON.stringify(m.content).slice(0, 200)}`
-                  : JSON.stringify(m.content).slice(0, 200),
           })),
           hasTools: !!(aiTools && Object.keys(aiTools).length > 0),
           toolCount: aiTools ? Object.keys(aiTools).length : 0,
