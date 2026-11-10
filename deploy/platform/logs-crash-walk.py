@@ -219,13 +219,33 @@ def read_metrics(options, cluster):
     return values, 'HTTP 200'
 
 
-def source_rate_sample(values, reason=''):
-    """The Kubernetes source counter, separate from a backpressured sink buffer."""
+def source_rate_sample(values, reason, options, before_writers=False):
+    """Sum only this walk's pod-labelled Kubernetes source series."""
+    counts = {pod: None for pod in writer_names(options)}
+    if values is not None:
+        for (name, labels), value in values.items():
+            if name != RECEIVED:
+                continue
+            parsed = dict((key, double or single) for key, double, single in re.findall(
+                r"([a-zA-Z_][a-zA-Z_0-9]*)=(?:\"([^\"]*)\"|'([^']*)')", labels))
+            pod = parsed.get('pod_name')
+            if (parsed.get('component_id') == 'kubernetes'
+                    and parsed.get('pod_namespace') == options.writer_namespace and pod in counts):
+                counts[pod] = (counts[pod] or 0) + int(value)
+        if before_writers:
+            counts = {pod: count if count is not None else 0 for pod, count in counts.items()}
     return {'metric': RECEIVED, 'component': 'kubernetes',
-            'received': component_value(values, RECEIVED, 'kubernetes')
-                        if values is not None else None,
+            'namespace': options.writer_namespace, 'per_writer': counts,
+            'received': sum(counts.values()) if all(count is not None for count in counts.values())
+                        else None,
             'status': (reason or 'HTTP 200') if values is not None
                       else (reason or 'scrape unavailable')}
+
+
+def source_counter_reset(before, current):
+    return any(count is not None and current['per_writer'].get(pod) is not None
+               and current['per_writer'][pod] < count
+               for pod, count in before['per_writer'].items())
 
 
 def source_rate_report(report, before, current, elapsed, target):
@@ -234,10 +254,13 @@ def source_rate_report(report, before, current, elapsed, target):
                 'before=%s current=%s'
                 % (before['status'], current['status'], current['metric'],
                    current['component'], first, last))
-    if first is None or last is None or last < first or elapsed <= 0:
+    report.note('source writers pod_namespace=%s before=%s current=%s'
+                % (current['namespace'], json.dumps(before['per_writer'], sort_keys=True),
+                   json.dumps(current['per_writer'], sort_keys=True)))
+    reset = source_counter_reset(before, current)
+    if first is None or last is None or reset or elapsed <= 0:
         report.note('achieved source rate unavailable; target %.0f lines/s total%s'
-                    % (target, '; counter reset' if first is not None
-                       and last is not None and last < first else ''))
+                    % (target, '; counter reset' if reset else ''))
         return None
     rate = (last - first) / elapsed
     report.note('achieved source rate %.0f lines/s; target %.0f lines/s total'
@@ -265,12 +288,14 @@ def wait_source_pickup(report, options, cluster, baseline, sample_memory):
         if not safe_load(report, options) or not sample_memory():
             return None
         values, reason = read_metrics(options, cluster)
-        current = source_rate_sample(values, reason)
+        current = source_rate_sample(values, reason, options)
         received = current['received']
         elapsed = time.monotonic() - started
         report.note('source pickup elapsed=%.0f s exporter=%s before=%s current=%s required=%d'
                     % (elapsed, current['status'], first, received, target))
-        if received is not None and received < first:
+        report.note('source pickup writers pod_namespace=%s counts=%s'
+                    % (current['namespace'], json.dumps(current['per_writer'], sort_keys=True)))
+        if source_counter_reset(baseline, current):
             report.not_valid('source pickup counter reset; cannot establish discovery')
             return None
         if received is not None and received - first >= target:
@@ -756,7 +781,8 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                     return False
                 return sample_memory()
             source_before = wait_source_pickup(report, options, cluster,
-                                               source_rate_sample(metrics, reason), pickup_safety)
+                                               source_rate_sample(metrics, reason, options, before_writers=True),
+                                               pickup_safety)
             if source_before is None:
                 return False
             fill_deadline = time.monotonic() + options.fill_bound
@@ -768,7 +794,7 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                     return False
                 metrics, reason = read_metrics(options, cluster)
                 elapsed = max(1.0, time.monotonic() - started_fill)
-                source_rate_report(report, source_before, source_rate_sample(metrics, reason),
+                source_rate_report(report, source_before, source_rate_sample(metrics, reason, options),
                                    elapsed, options.writer_rate)
                 state_now = buffer_state(metrics) if metrics is not None else {}
                 if not sample_memory():

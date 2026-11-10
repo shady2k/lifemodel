@@ -16,7 +16,7 @@ describe('crash walk waits for new writer log discovery', () => {
   it('ignores heartbeat-sized changes until three seconds of target lines arrive', () => {
     const { output, value } = run('delayed');
     expect(value.seconds).toBe(60);
-    expect(value.result.received).toBe(6100);
+    expect(value.result.received).toBe(18300);
     expect(output).toMatch(/pickup.*120/);
     expect(output).toContain('5100');
     expect(output).toMatch(/picked up.*60/);
