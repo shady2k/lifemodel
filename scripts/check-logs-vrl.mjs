@@ -12,12 +12,15 @@
  * It extracts the remap program from deploy/platform/logs/config/vector.yaml
  * (the input of the collector's generated ConfigMap), builds Vector unit tests
  * from tests/fixtures/logs-vrl/cases.json, and runs them in the digest-pinned
- * image (`scripts/logs-record-shape.mjs` owns the run, so the suite's own
- * record-shape check exercises the same code). It also feeds the REAL output of
- * the core's logger (pretty unset) and of the loader image's logger through the
- * same program (ADR-016 §9 points 1 and 2): those lines come from the seed
- * tests/fixtures/logs-vrl/real-logger-lines.ts run by tsx, so this needs the
- * checkout's node_modules.
+ * image or a `vector` binary named by `LIFEMODEL_VECTOR_BIN`
+ * (`scripts/logs-vector-runner.mjs`; `scripts/logs-record-shape.mjs` owns the
+ * run, so the suite's own record-shape check exercises the same code). It also
+ * feeds the REAL output of the core's logger (pretty unset) and of the loader
+ * image's logger through the same program (ADR-016 §9 points 1 and 2): those
+ * lines come from the seed tests/fixtures/logs-vrl/real-logger-lines.ts run by
+ * tsx, so this needs the checkout's node_modules. The CI job `ci-logs-vrl`
+ * runs this script inside its check image, which carries both (no Docker socket
+ * there); on the host the image is started through the Docker CLI.
  *
  * Then the turn's own lines (ADR-016 §9 point 4, check L02): a reply turn and a
  * recipient-less `thought` turn, written by the real CoreLoop and the real
@@ -33,8 +36,8 @@ import {
   recordShapeCases,
   runVrlCases,
   turnRecordRuns,
-  vrlRunner,
 } from './logs-record-shape.mjs';
+import { vectorRunner } from './logs-vector-runner.mjs';
 import { realLoggerCases } from './logs-vrl-real-loggers.mjs';
 import { checkCollectorHeartbeat } from './logs-heartbeat-check.mjs';
 
@@ -42,7 +45,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fixturePath = join(root, 'tests', 'fixtures', 'logs-vrl', 'cases.json');
 
 function main() {
-  const runner = vrlRunner();
+  const runner = vectorRunner();
   if (!runner) {
     console.error(
       'logs VRL check: no VRL runner here. Set LIFEMODEL_VECTOR_BIN to a vector binary, ' +
@@ -70,7 +73,7 @@ function main() {
   // The heartbeat is proved by running the committed source, not by reading
   // it: its record's fields and cadence, and the read-back line through the
   // program the pod records use (ADR-016 §4, check L14).
-  checkCollectorHeartbeat({ normalizeProgram: program });
+  checkCollectorHeartbeat({ normalizeProgram: program, runner });
   return 0;
 }
 

@@ -12,9 +12,14 @@
  * read-back record names the heartbeat module. That is the wiring L14 walks on
  * a deployed build; it cannot be seen by reading the manifest.
  *
- * It is called by `scripts/check-logs-vrl.mjs`, which owns the host-only run:
+ * It is called by `scripts/check-logs-vrl.mjs`, which owns the run: the CI job
+ * `ci-logs-vrl` on a pull request, and a person on the host with
  *
  *   flock /work/check.lock node scripts/check-logs-vrl.mjs
+ *
+ * The pinned binary runs natively when the runner names one (the CI job's check
+ * image ships it) and in its image otherwise
+ * (`scripts/logs-vector-runner.mjs`).
  */
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,8 +28,6 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 
-const IMAGE =
-  'docker.io/timberio/vector@sha256:f6c23b5a7e16fb2838d33619ef7acf4bad2289a7cf22bc90efc2371f520c4ea2';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // The configuration is the generator's input for the logs step's ConfigMap
 // (deploy/platform/logs/kustomization.yaml); the pod mounts it as vector.yaml.
@@ -80,47 +83,36 @@ function assertWiring(config) {
 }
 
 /** Runs the committed heartbeat source and transform for a period. */
-function runHeartbeat(directory) {
+function runHeartbeat(directory, runner) {
   const config = collectorConfig();
+  // Where the runner reads a written config and its sink from: the mounted
+  // directory for the binary, /work inside the pinned image.
+  const base = runner.basePath(directory);
+  const path = (name) => (base === directory ? join(directory, name) : `${base}/${name}`);
   const runConfig = {
-    data_dir: '/work/data',
+    data_dir: path('data'),
     sources: { heartbeat: config.sources['heartbeat'] },
     transforms: { 'collector-heartbeat': config.transforms['collector-heartbeat'] },
     sinks: {
       out: {
         type: 'file',
-        path: '/work/heartbeat.jsonl',
+        path: path('heartbeat.jsonl'),
         inputs: ['collector-heartbeat'],
         encoding: { codec: 'json' },
       },
     },
   };
   writeFileSync(join(directory, 'vector.yaml'), YAML.stringify(runConfig));
-  const start = spawnSync(
-    'docker',
-    [
-      'run',
-      '-d',
-      '--name',
-      CONTAINER,
-      '-e',
-      'VECTOR_SELF_NODE_NAME=node1',
-      '-v',
-      `${directory}:/work`,
-      '-w',
-      '/work',
-      IMAGE,
-      '--config',
-      '/work/vector.yaml',
-    ],
-    { encoding: 'utf8' }
-  );
-  if (start.error) throw start.error;
-  if (start.status !== 0) fail(`the collector did not start: ${start.stderr.trim()}`);
+  const stop = runner.startCollector({
+    directory,
+    configName: 'vector.yaml',
+    containerName: CONTAINER,
+    env: { VECTOR_SELF_NODE_NAME: 'node1' },
+  });
   try {
     spawnSync('sleep', [String(RUN_SECONDS)]);
   } finally {
-    spawnSync('docker', ['rm', '-f', CONTAINER], { encoding: 'utf8' });
+    stop();
   }
   return readFileSync(join(directory, 'heartbeat.jsonl'), 'utf8')
     .split('\n')
@@ -152,7 +144,7 @@ function assertRecords(records) {
 }
 
 /** The read-back line through the committed normalizing program. */
-function assertReadBack(directory, records, program) {
+function assertReadBack(directory, records, program, runner) {
   const line = JSON.stringify(records[0]);
   const kubernetes = (namespace) => ({
     pod_name: 'logs-collector-x2k9',
@@ -198,11 +190,7 @@ function assertReadBack(directory, records, program) {
     ],
   };
   writeFileSync(join(directory, 'read-back.json'), JSON.stringify(config, null, 2));
-  const result = spawnSync(
-    'docker',
-    ['run', '--rm', '-v', `${directory}:/work:ro`, IMAGE, 'test', '/work/read-back.json'],
-    { encoding: 'utf8' }
-  );
+  const result = runner.test(directory, 'read-back.json');
   if (result.error) throw result.error;
   if (config.tests.length !== 2) fail('the read-back check lost a case');
   const output = `${result.stdout}\n${result.stderr}`;
@@ -215,16 +203,16 @@ function assertReadBack(directory, records, program) {
  * the committed source and transform, the committed normalizing program, and
  * the fields the page's two queries select.
  */
-export function checkCollectorHeartbeat({ normalizeProgram }) {
+export function checkCollectorHeartbeat({ normalizeProgram, runner }) {
   assertWiring(collectorConfig());
   console.log('test heartbeat wiring (manifest) ... passed');
   const directory = mkdtempSync(join(tmpdir(), 'lifemodel-logs-heartbeat-'));
   try {
-    const records = assertRecords(runHeartbeat(directory));
+    const records = assertRecords(runHeartbeat(directory, runner));
     console.log(
       `test heartbeat cadence and record (${String(records.length)} records in ${String(RUN_SECONDS)} s) ... passed`
     );
-    const readBack = assertReadBack(directory, records, normalizeProgram);
+    const readBack = assertReadBack(directory, records, normalizeProgram, runner);
     for (const line of readBack.split('\n').filter((entry) => entry.includes('... passed')))
       console.log(line.replace(/^test /, 'test heartbeat '));
   } finally {

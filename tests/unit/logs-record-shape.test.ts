@@ -30,8 +30,8 @@ import {
   tickLine,
   turnLines,
   turnRecordRuns,
-  vrlRunner,
 } from '../../scripts/logs-record-shape.mjs';
+import { vectorRunner } from '../../scripts/logs-vector-runner.mjs';
 import collectorFixtures from '../fixtures/logs-vrl/cases.json';
 
 interface LogLine {
@@ -62,7 +62,7 @@ type Mode = (typeof MODES)[number];
 let runs: { levels: LogLine[] } & Record<Mode, TurnRun>;
 
 /** The pinned VRL, or undefined: the boundary has no way to run it. */
-const runner = vrlRunner();
+const runner = vectorRunner();
 
 beforeAll(() => {
   runs = turnRecordRuns() as typeof runs;

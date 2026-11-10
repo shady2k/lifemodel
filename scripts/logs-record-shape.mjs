@@ -3,18 +3,17 @@
  * real turn's own lines, and the run through the collector's real VRL program
  * with the pinned Vector binary.
  *
- * Two runners, so the same cases are checked wherever they can be:
- *
- * - a `vector` binary named by `LIFEMODEL_VECTOR_BIN` (the pinned release's
- *   own `test` subcommand);
- * - otherwise the Docker CLI and the digest-pinned Vector image
- *   `scripts/check-logs-vrl.mjs` already uses.
+ * The runner (`scripts/logs-vector-runner.mjs`) is the pinned binary itself when
+ * `LIFEMODEL_VECTOR_BIN` names one - the CI job's check image ships it
+ * (`docker/logs-vrl/Dockerfile`) - and otherwise the Docker CLI with the
+ * digest-pinned image.
  *
  * Neither is reachable from the isolated test boundary (it mounts no Docker
  * socket and attaches the test container to no network), so
  * `tests/unit/logs-record-shape.test.ts` asserts the lines themselves there and
- * prints why the VRL half did not run; `scripts/check-logs-vrl.mjs` runs the
- * whole case list on the host, through the same functions here.
+ * prints why the VRL half did not run. The CI job `ci-logs-vrl` runs the whole
+ * case list on the GitHub runner for a change that touches what it reads, and a
+ * person can run it on the host with:
  *
  *   flock /work/check.lock node scripts/check-logs-vrl.mjs
  */
@@ -23,9 +22,6 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import YAML from 'yaml';
-
-export const PINNED_VECTOR_IMAGE =
-  'docker.io/timberio/vector@sha256:f6c23b5a7e16fb2838d33619ef7acf4bad2289a7cf22bc90efc2371f520c4ea2';
 
 /** The generator's input for the logs step's ConfigMap; the pod mounts it. */
 export const COLLECTOR_CONFIG = 'deploy/platform/logs/config/vector.yaml';
@@ -234,36 +230,6 @@ export function buildVectorTestConfig(program, cases) {
   };
 }
 
-function works(program, args) {
-  const result = spawnSync(program, args, { encoding: 'utf8', timeout: 30_000 });
-  return result.error === undefined && result.status === 0;
-}
-
-/**
- * The pinned VRL, or undefined when this machine has no way to run it: the
- * isolated test boundary has neither the binary nor a Docker socket.
- */
-export function vrlRunner() {
-  const binary = process.env['LIFEMODEL_VECTOR_BIN'];
-  if (binary) {
-    return {
-      label: `the vector binary at ${binary}`,
-      run: (directory, name) =>
-        spawnSync(binary, ['test', join(directory, name)], { encoding: 'utf8', timeout: 300_000 }),
-    };
-  }
-  if (!works('docker', ['version', '--format', '{{.Server.Version}}'])) return undefined;
-  return {
-    label: `Docker ${PINNED_VECTOR_IMAGE}`,
-    run: (directory, name) =>
-      spawnSync(
-        'docker',
-        ['run', '--rm', '-v', `${directory}:/work:ro`, PINNED_VECTOR_IMAGE, 'test', `/work/${name}`],
-        { encoding: 'utf8', timeout: 300_000 }
-      ),
-  };
-}
-
 /** Run the cases through the program: the collector's own verdict. */
 export function runVrlCases(cases, runner) {
   const program = collectorProgram();
@@ -271,7 +237,7 @@ export function runVrlCases(cases, runner) {
   try {
     const name = 'vector-test.json';
     writeFileSync(join(directory, name), JSON.stringify(buildVectorTestConfig(program, cases), null, 2));
-    const result = runner.run(directory, name);
+    const result = runner.test(directory, name);
     const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`.trim();
     return { ok: result.error === undefined && result.status === 0, output, cases: cases.length };
   } finally {

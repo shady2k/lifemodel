@@ -13,8 +13,11 @@
 # by the release workflow and, without pushing it, by `ci-loader-image` on pull
 # requests that touch its inputs. `ci-nix` runs `nix flake check` on pull
 # requests that touch what the flake reads, so a broken platform resource list
-# cannot merge green (lifemodel-lut.3.6). There is no Docker-run instance image
-# or host-side test exception.
+# cannot merge green (lifemodel-lut.3.6). `ci-logs-vrl` runs the collector's
+# record-contract check (ADR-016 L02) in its own check image on pull requests
+# that touch what the check reads, because that check needs the pinned Vector
+# binary and the checkout's dependencies and CI installs neither on the host.
+# There is no Docker-run instance image or host-side test exception.
 #
 # `--no-renames` in the first job is not a detail: `git diff --name-only`
 # reports a detected rename by its destination alone, so moving product code
@@ -84,6 +87,7 @@ jobs:
       loader_image: ${{ steps.classify.outputs.loader_image }}
       workbench_image: ${{ steps.classify.outputs.workbench_image }}
       nix_flake_check: ${{ steps.classify.outputs.nix_flake_check }}
+      logs_vrl_check: ${{ steps.classify.outputs.logs_vrl_check }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -149,6 +153,7 @@ jobs:
           scripts/ci-loader-paths.sh < "$out" >> "$GITHUB_OUTPUT"
           scripts/ci-workbench-paths.sh < "$out" >> "$GITHUB_OUTPUT"
           scripts/ci-nix-paths.sh < "$out" >> "$GITHUB_OUTPUT"
+          scripts/ci-logs-vrl-paths.sh < "$out" >> "$GITHUB_OUTPUT"
 
   # The product checks, as the one command a person runs before pushing. It is
   # skipped for a change that cannot touch product code and while a pull
@@ -632,3 +637,31 @@ jobs:
         uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31
       - name: Check the flake with the build logs of its checks
         run: nix flake check --print-build-logs
+
+  # Run the collector's record-contract check (ADR-016 §2 and §9 point 4, check
+  # L02) on pull requests whose changes reach what the check reads. It cannot run
+  # in the suite: the isolated test boundary mounts no Docker socket and attaches
+  # the test container to no network, so the pinned Vector binary has no way to
+  # start there, and the suite checks only the lines the core writes. This job is
+  # the other half - the lines through the collector's real remap program - and
+  # without it the stored record shape could drift with every check green.
+  #
+  # The check needs the pinned Vector binary and the checkout's dependencies, and
+  # CI installs nothing on the host (AGENTS.md, "Test isolation"), so
+  # scripts/ci-logs-vrl.sh builds docker/logs-vrl/Dockerfile from this checkout
+  # and runs the check inside that image: no network, no Docker socket, no
+  # published artifact, no write token. scripts/ci-logs-vrl-paths.sh selects the
+  # change, so a change the check never reads skips the job.
+  ci-logs-vrl:
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.logs_vrl_check == 'true') && !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Run the collector contract check in its check image
+        run: scripts/ci-logs-vrl.sh

@@ -191,6 +191,27 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
     expect(job).not.toContain('packages: write');
   });
 
+  it('the collector contract job runs the check in its own image without a write token', () => {
+    const ci = readFileSync(join(repoRoot, '.github/workflows/ci.yml'), 'utf8');
+    const start = ci.indexOf('\n  ci-logs-vrl:');
+    expect(start).toBeGreaterThan(0);
+    // The job body reaches to the next job header, or to the end of the file.
+    const job = ci.slice(start + 1).split(/\n(?=  [a-z][a-z0-9-]*:\n)/)[0];
+    expect(job).toContain('needs: changes');
+    expect(job).toContain("github.event_name == 'pull_request'");
+    expect(job).toContain("needs.changes.result != 'success'");
+    expect(job).toContain("needs.changes.outputs.logs_vrl_check == 'true'");
+    expect(job).toContain('!github.event.pull_request.draft');
+    expect(job).toContain('persist-credentials: false');
+    expect(job).toContain('timeout-minutes:');
+    // The one command the job exists for. The image build and the container run
+    // live in the script, where the host-install rule below does not have to
+    // read them: nothing is installed on the runner.
+    expect(job).toContain('run: scripts/ci-logs-vrl.sh');
+    expect(job).not.toMatch(/docker (?:build|run|login|push)/);
+    expect(job).not.toContain('packages: write');
+  });
+
   it('puts pinned migration lint inside the required backlog job', () => {
     const ci = readFileSync(join(repoRoot, '.github/workflows/ci.yml'), 'utf8');
     const backlogStart = ci.indexOf('  ci-backlog:');
