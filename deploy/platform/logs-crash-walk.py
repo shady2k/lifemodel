@@ -57,7 +57,11 @@ Arguments (defaults are the test VM's)
   --fill-bound N         bound on reaching a full buffer (default 600 s)
   --recover-bound N      bound on the collector and the store recovering
                          (default 300 s)
-  --writer-interval-ms N the writer pod's line interval (default 20)
+  --writer-pods N        how many writer pods fill the buffer in tight loops
+                         (default 3; the buffer needs about 850 line(s)/s for ten
+                         minutes, and the achieved rate is reported)
+  --memory-limit-bytes N the collector container's memory limit, the ceiling the
+                         buffer must fit in (default 300 MiB, the deployed limit)
   --saturated-seconds N  how long the saturated writer keeps writing after the
                          buffer is full before the kill (default 15)
   --unsaturated-lines N  lines the unsaturated case writes (default 5000)
@@ -90,6 +94,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from logs_walk_support import (  # noqa: E402
+    MIB,
     Cluster,
     Loader,
     PortForward,
@@ -107,19 +112,29 @@ BUFFER_SIZE = 'vector_buffer_size_events'
 BUFFER_MAX = 'vector_buffer_max_size_events'
 RECEIVED = 'vector_component_received_events_total'
 WRITER_SCRIPT = (
-    "const run=process.argv[1],seconds=Number(process.argv[2]),interval=Number(process.argv[3]);"
-    "let seq=0;const end=Date.now()+seconds*1000;"
-    "const timer=setInterval(()=>{if(Date.now()>end){clearInterval(timer);return;}"
-    "seq+=1;process.stdout.write('walk-crash '+run+' seq='+seq+' t='+Date.now()+'\\n');"
-    "},interval);"
+    # A tight loop: the buffer holds 500,000 events, so a 20 ms timer (~850 lines/s
+    # for ten minutes) cannot fill it. Each pod's sequence numbers have their own
+    # base, so one run id covers several pods without collisions.
+    "const run=process.argv[1],seconds=Number(process.argv[2]),base=Number(process.argv[3]);"
+    "let seq=base;const end=Date.now()+seconds*1000;"
+    "while(Date.now()<end){for(let n=0;n<200;n++){seq+=1;"
+    "process.stdout.write('walk-crash '+run+' seq='+seq+' t='+Date.now()+'\\n');}}"
 )
 
 
-def writer_manifest(image, options, run_id, seconds):
+def writer_name(index):
+    return 'walk-crash-writer' if index == 1 else 'walk-crash-writer-%d' % index
+
+
+def writer_names(options):
+    return [writer_name(index) for index in range(1, (options.writer_pods or 1) + 1)]
+
+
+def writer_manifest(image, options, run_id, seconds, index=1, interval=20):
     return {
         'apiVersion': 'v1',
         'kind': 'Pod',
-        'metadata': {'name': 'walk-crash-writer', 'namespace': options.writer_namespace,
+        'metadata': {'name': writer_name(index), 'namespace': options.writer_namespace,
                      'labels': {'app.kubernetes.io/name': WRITER_MODULE}},
         'spec': {
             'restartPolicy': 'Never',
@@ -130,7 +145,7 @@ def writer_manifest(image, options, run_id, seconds):
                 'name': 'writer',
                 'image': image,
                 'command': ['node', '-e', WRITER_SCRIPT, run_id, str(seconds),
-                            str(options.writer_interval_ms)],
+                            str((index - 1) * 50_000_000)],
                 'securityContext': {'readOnlyRootFilesystem': True,
                                     'allowPrivilegeEscalation': False,
                                     'capabilities': {'drop': ['ALL']}},
@@ -184,14 +199,20 @@ def parse_metrics(text, names):
 
 
 def component_value(values, name, component):
-    """One component's sample: the sink's buffer, the source's received counter."""
+    """One component's series, picked by its `component_id` label.
+
+    The exporter carries every component's series - the `metrics` and
+    `heartbeat-canary` sinks each have their own 500-event buffer - so the
+    sink's gauge is the one whose `component_id` names it, never the first
+    sample with that name.
+    """
     for (sample, labels), value in values.items():
         if sample != name:
             continue
-        if 'component_id="%s"' % component in labels or "component_id='%s'" % component in labels:
-            return int(value)
-        if component == 'any' and 'component_id=' in labels:
-            return int(value)
+        if 'component_id="%s"' % component not in labels \
+                and "component_id='%s'" % component not in labels:
+            continue
+        return int(value)
     return None
 
 
@@ -220,8 +241,10 @@ def read_metrics(options, cluster):
         forward.close()
     values = parse_metrics(body, {BUFFER_SIZE, BUFFER_MAX, RECEIVED})
     if not any(sample == BUFFER_SIZE for sample, _labels in values):
-        return None, ('the exporter answers but carries no %s (Vector %d)'
-                      % (BUFFER_SIZE, len(body)))
+        return None, ('the exporter answered %d bytes but carries no %s'
+                      % (len(body), BUFFER_SIZE))
+    if component_value(values, BUFFER_SIZE, 'logs-store') is None:
+        return None, ('the exporter carries %s but none for component_id="logs-store"' % BUFFER_SIZE)
     return values, ''
 
 
@@ -242,13 +265,15 @@ def saturated(state):
 
 
 def collectors_metrics_gap(reason):
-    """The exact configuration the saturated case needs, when nothing exposes it."""
-    return ('the collector exposes no internal metrics: %s. '
-            'deploy/platform/logs/config/vector.yaml declares a `sources.internal_metrics` of '
-            '`type: internal_metrics` and a `sinks.metrics` of `type: prometheus_exporter` on '
-            '127.0.0.1:9598 (ADR-016 §6), so the collector or the port-forward to it is at '
-            'fault; the buffer state is not guessed.' % (reason or 'no answer'))
-
+    """Why the sink's buffer cannot be read, in the exporter's own words."""
+    if 'nothing answered port' in (reason or ''):
+        return ('the exporter cannot be scraped: %s. deploy/platform/logs/config/vector.yaml '
+                'declares a `sources.internal_metrics` of `type: internal_metrics` and a '
+                '`sinks.metrics` of `type: prometheus_exporter` on 127.0.0.1:9598 (ADR-016 §6), '
+                'so the collector or the port-forward to it is at fault; the buffer state is '
+                'not guessed.' % reason)
+    return ("the exporter answered but the sink's buffer is not in it: %s; the buffer state is "
+            'not guessed' % (reason or 'no reason'))
 
 def store_replicas(cluster, options):
     body = cluster.json(['-n', options.namespace, 'get', 'deployment', options.store,
@@ -343,10 +368,13 @@ def diagnostic_tail(text):
 
 def writer_read(cluster, options, run_id):
     """Keep kubectl's outcome alongside numbered lines so failures explain themselves."""
-    result = cluster.run(['-n', options.writer_namespace, 'logs', 'walk-crash-writer',
-                          '--tail=100000'], timeout=120)
     written = []
-    if result.returncode == 0:
+    result = None
+    for name in writer_names(options):
+        result = cluster.run(['-n', options.writer_namespace, 'logs', name,
+                              '--tail=100000'], timeout=120)
+        if result.returncode != 0:
+            continue
         for line in result.stdout.splitlines():
             match = WRITER_LINE.search(line)
             if match and match.group(1) == run_id:
@@ -391,7 +419,7 @@ def wait_writer(report, options, cluster, run_id):
     """Do not inspect the buffer until a Running writer has produced a numbered line."""
     observation = {'pod': None, 'read': None}
     def started():
-        pod = cluster.pod(options.writer_namespace, 'walk-crash-writer')
+        pod = cluster.pod(options.writer_namespace, writer_name(1))
         observation['pod'] = pod
         if ((pod or {}).get('status') or {}).get('phase') != 'Running':
             return False
@@ -496,6 +524,58 @@ def sequence_ranges(sequences):
     return ', '.join(parts)
 
 
+def collector_memory(cluster, options):
+    """The collector container's memory from crictl stats: (bytes, reason)."""
+    pod = collector_pod_name(cluster, options)
+    if not pod:
+        return None, 'the collector has no pod'
+    listing = cluster.run([options.crictl, 'ps', '--name', pod, '--output', 'json'])
+    try:
+        containers = json.loads(listing.stdout or '{}').get('containers') or []
+    except ValueError:
+        return None, 'crictl ps answered no JSON'
+    target = next((container.get('id') for container in containers
+                   if (container.get('labels') or {}).get('io.kubernetes.container.name')
+                   == 'logs-collector'), None)
+    if not target:
+        return None, 'crictl ps lists no logs-collector container'
+    stats = cluster.run([options.crictl, 'stats', target, '--output', 'json'])
+    try:
+        value = json.loads(stats.stdout or '{}')
+    except ValueError:
+        return None, 'crictl stats answered no JSON'
+    entries = value.get('stats') if isinstance(value.get('stats'), list) else [value]
+    for entry in entries:
+        memory = (entry or {}).get('memory') or {}
+        used = memory.get('usageBytes', memory.get('usage'))
+        if isinstance(used, int) and used > 0:
+            return used, ''
+    return None, 'crictl stats carries no memory figure'
+
+
+def termination_reason(cluster, options):
+    """How the collector's container last ended: OOMKilled, Error, or nothing."""
+    pod = collector_pod(cluster, options) or {}
+    for status in ((pod.get('status') or {}).get('containerStatuses') or []):
+        last = (status.get('lastState') or {}).get('terminated') or {}
+        reason = last.get('reason')
+        if isinstance(reason, str):
+            return '%s (exit %s)' % (reason, last.get('exitCode'))
+    return ''
+
+
+def memory_verdict(peak, limit, buffer_size, maximum, restarts_before, restarts_after, reason):
+    """The buffer's maximum must fit the collector's memory limit (ADR-016 §6)."""
+    restarted = restarts_after != restarts_before
+    detail = ('peak memory %s, limit %s, buffer %d of %d, restarts %d -> %d%s'
+              % (('%.1f MiB' % (peak / MIB)) if peak else 'unknown',
+                 ('%.1f MiB' % (limit / MIB)) if limit else 'unknown',
+                 buffer_size if buffer_size is not None else -1, maximum,
+                 restarts_before, restarts_after,
+                 (', last termination %s' % reason) if reason else ''))
+    return {'ok': not restarted, 'restarted': restarted, 'detail': detail}
+
+
 def crash_case(report, options, loader, cluster, state, saturated_case):
     """One crash: write, kill, recover, count - saturated or informative."""
     label = 'saturated' if saturated_case else 'unsaturated'
@@ -514,6 +594,11 @@ def crash_case(report, options, loader, cluster, state, saturated_case):
         return False
     seconds = options.fill_bound + options.saturated_seconds + 120
     applied = cluster.apply(writer_manifest(image, options, run_id, seconds))
+    for index in range(2, (options.writer_pods or 1) + 1):
+        if cluster.apply(writer_manifest(image, options, run_id, seconds,
+                                         index)).returncode != 0:
+            report.not_valid('the writer pod %s was not created' % writer_name(index))
+            return False
     if applied.returncode != 0:
         report.not_valid('the writer pod was not created: %s' % tail(applied.stderr))
         return False
@@ -521,28 +606,60 @@ def crash_case(report, options, loader, cluster, state, saturated_case):
         return False
     started = now_ms()
     try:
+        oom = None
         if saturated_case:
             fill_deadline = time.monotonic() + options.fill_bound
+            restarts_before = collector_restarts(cluster, options)
+            peak = 0
+            last_memory = time.monotonic()
+            started_fill = time.monotonic()
+            received_before = (buffer_state(read_metrics(options, cluster)[0])
+                               .get('received') if read_metrics(options, cluster)[0] else None)
             while True:
                 metrics, reason = read_metrics(options, cluster)
-                if metrics is not None and saturated(buffer_state(metrics)):
-                    state_ok = True
+                state_now = buffer_state(metrics) if metrics is not None else {}
+                if metrics is not None and saturated(state_now):
+                    elapsed = max(1.0, time.monotonic() - started_fill)
+                    rate = ((state_now.get('received') or 0) - (received_before or 0)) / elapsed
                     report.pass_('the sink buffer is at its configured maximum',
-                                 'size %d, max %d, received %d'
-                                 % (buffer_state(metrics)['size'], buffer_state(metrics)['max'],
-                                    buffer_state(metrics)['received']))
+                                 'size %d, max %d, received %d, %.0f line(s)/s'
+                                 % (state_now['size'], state_now['max'],
+                                    state_now['received'] or 0, rate))
                     break
+                if time.monotonic() - last_memory >= 10:
+                    last_memory = time.monotonic()
+                    used, _why = collector_memory(cluster, options)
+                    if used is not None:
+                        peak = max(peak, used)
+                    restarts_now = collector_restarts(cluster, options)
+                    if restarts_now != restarts_before:
+                        oom = {'peak': peak, 'buffer': state_now.get('size'),
+                               'max': state_now.get('max') or 0,
+                               'restarts': (restarts_before, restarts_now),
+                               'reason': termination_reason(cluster, options)}
+                        break
                 if time.monotonic() >= fill_deadline:
                     report.not_valid(
-                        'the sink buffer never reached its maximum within %d s: the last '
-                        'reading was %s (%s)'
+                        'the sink buffer never reached its maximum within %d s at this write '
+                        'rate: the last reading was %s (%s); the writer must supply about 850 '
+                        'line(s)/s for ten minutes for 500,000 events'
                         % (options.fill_bound,
-                           json.dumps(buffer_state(metrics)) if metrics is not None else 'none',
-                           reason or 'no exporter'))
+                           json.dumps(state_now) if state_now else 'none',
+                           reason or 'the exporter answered'))
                     return False
                 time.sleep(3)
-            # Keep writing past the full buffer, so the lines behind it are real.
-            time.sleep(options.saturated_seconds)
+            if oom is not None:
+                verdict_memory = memory_verdict(oom['peak'], options.memory_limit_bytes,
+                                                oom['buffer'], oom['max'], oom['restarts'][0],
+                                                oom['restarts'][1], oom['reason'])
+                report.fail('the collector\'s buffer cannot reach its maximum inside its '
+                            'memory limit', verdict_memory['detail'])
+                # The crash a full buffer really causes: count it as the crash.
+                report.note('the collector restarted before the buffer was full; the crash '
+                            'that follows is the unplanned one')
+            else:
+                # Keep writing past the full buffer, so the lines behind it are real.
+                time.sleep(options.saturated_seconds)
         else:
             wait_until(time.monotonic() + 60, 3,
                        lambda: len(writer_lines(cluster, options, run_id))
@@ -550,14 +667,15 @@ def crash_case(report, options, loader, cluster, state, saturated_case):
             report.note('the unsaturated case wrote %d line(s) with the buffer below its maximum'
                         % len(writer_lines(cluster, options, run_id)))
         written = writer_lines(cluster, options, run_id)
-        pid, detail = vector_pid(cluster, options)
-        if pid is None:
-            report.not_valid('nothing was killed: %s' % detail)
-            return False
-        killed = cluster.run(['kill', '-9', str(pid)]).returncode == 0
-        report.check(killed, 'the vector process is killed by its host pid', detail)
-        if not killed:
-            return False
+        if oom is None:
+            pid, detail = vector_pid(cluster, options)
+            if pid is None:
+                report.not_valid('nothing was killed: %s' % detail)
+                return False
+            killed = cluster.run(['kill', '-9', str(pid)]).returncode == 0
+            report.check(killed, 'the vector process is killed by its host pid', detail)
+            if not killed:
+                return False
         if not set_replicas(cluster, options, state['replicas']):
             report.fail('the store is scaled back up', options.store)
             return False
@@ -591,8 +709,9 @@ def crash_case(report, options, loader, cluster, state, saturated_case):
                         % (verdict['detail'], collector_restarts(cluster, options)))
         return True
     finally:
-        cluster.run(['-n', options.writer_namespace, 'delete', 'pod', 'walk-crash-writer',
-                     '--ignore-not-found', '--wait=false'])
+        for name in writer_names(options):
+            cluster.run(['-n', options.writer_namespace, 'delete', 'pod', name,
+                         '--ignore-not-found', '--wait=false'])
 
 
 def count_deliveries(loader, from_ms, run_id):
@@ -678,8 +797,9 @@ def restore(report, options, loader, cluster, state):
             restored = False
             print('RESTORE incomplete: the store is not Ready at %d replica(s)'
                   % state['replicas'])
-    cluster.run(['-n', options.writer_namespace, 'delete', 'pod', 'walk-crash-writer',
-                 '--ignore-not-found', '--wait=false'])
+    for name in writer_names(options):
+        cluster.run(['-n', options.writer_namespace, 'delete', 'pod', name,
+                     '--ignore-not-found', '--wait=false'])
     if state.get('created_namespace'):
         restored = cluster.run(['delete', 'namespace', options.writer_namespace,
                                 '--wait=false']).returncode == 0 and restored
@@ -703,7 +823,8 @@ def main(argv=None):
     parser.add_argument('--crictl', default='k3s crictl')
     parser.add_argument('--fill-bound', type=int, default=600)
     parser.add_argument('--recover-bound', type=int, default=300)
-    parser.add_argument('--writer-interval-ms', type=int, default=20)
+    parser.add_argument('--writer-pods', type=int, default=3)
+    parser.add_argument('--memory-limit-bytes', type=int, default=300 * 1024 * 1024)
     parser.add_argument('--saturated-seconds', type=int, default=15)
     parser.add_argument('--unsaturated-lines', type=int, default=5000)
     parser.add_argument('--settle-seconds', type=int, default=60)

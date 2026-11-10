@@ -60,6 +60,7 @@ def options(**values):
         collector_namespace='lifemodel-logs', collector='logs-collector',
         writer_namespace='lifemodel-logs-walk', metrics_port=9598, crictl='k3s crictl',
         fill_bound=2, recover_bound=2, writer_interval_ms=20, saturated_seconds=0,
+        writer_pods=1, memory_limit_bytes=300 * 1024 * 1024,
         unsaturated_lines=10, settle_seconds=0,
     )
     for name, value in values.items():
@@ -239,6 +240,69 @@ def writer_gates_buffer(walk, fixture):
     walk.read_metrics = lambda *args: (events.append('buffer') or ({}, ''))
     walk.crash_case(report, options(), None, cluster, {}, True)
     print('ORDER ' + json.dumps(events))
+    return report
+
+
+@mode('slow-writer')
+def slow_writer(walk, fixture):
+    """The buffer never fills at the writer's rate: the state is not valid, not passed."""
+    report = walk.Report()
+    state = {'size': 0, 'max': 500000, 'received': 143}
+    print('SLOW ' + json.dumps({'saturated': walk.saturated(state), 'state': state}))
+    return report
+
+
+@mode('metrics-scrape-fails')
+def metrics_scrape_fails(walk, fixture):
+    """No scrape: the gap says exactly that."""
+    report = walk.Report()
+    gap = walk.collectors_metrics_gap('nothing answered port 9598 on logs-collector-abc '
+                                      '(nothing accepted 127.0.0.1:9555 within 20 s)')
+    print('GAP ' + json.dumps({'text': gap}))
+    return report
+
+
+@mode('metrics-component')
+def metrics_component(walk, fixture):
+    """The logs-store series is picked by component_id, not the first of that name."""
+    report = walk.Report()
+    body = '\n'.join([
+        'vector_buffer_size_events{component_id="metrics",component_kind="sink"} 3',
+        'vector_buffer_size_events{component_id="logs-store",component_kind="sink"} 0',
+        'vector_buffer_max_size_events{component_id="metrics",component_kind="sink"} 500',
+        'vector_buffer_max_size_events{component_id="logs-store",component_kind="sink"} 500000',
+        'vector_component_received_events_total{component_id="kubernetes"} 143',
+    ])
+    values = walk.parse_metrics(body, {'vector_buffer_size_events',
+                                       'vector_buffer_max_size_events',
+                                       'vector_component_received_events_total'})
+    print('STATE ' + json.dumps(walk.buffer_state(values)))
+    return report
+
+
+@mode('metrics-no-store-series')
+def metrics_no_store_series(walk, fixture):
+    """An exporter without the logs-store series is a named reason."""
+    report = walk.Report()
+    gap = walk.collectors_metrics_gap('the exporter carries vector_buffer_size_events but none '
+                                      'for component_id="logs-store"')
+    print('GAP ' + json.dumps({'text': gap}))
+    return report
+
+
+@mode('oom-before-full')
+def oom_before_full(walk, fixture):
+    """The collector restarted before the buffer filled: its own FAIL, with the peak."""
+    report = walk.Report()
+    value = walk.memory_verdict(290 * 1024 * 1024, 300 * 1024 * 1024, 410000, 500000,
+                                0, 1, 'OOMKilled (exit 137)')
+    report.check(not value['restarted'],
+                 'the collector\'s buffer cannot reach its maximum inside its memory limit',
+                 value['detail'])
+    counting = walk.crash_verdict(list(range(1, 11)), set(range(1, 9)), set(range(1, 11)), 0)
+    report.note('still counting the unplanned crash: %s' % counting['detail'])
+    print('OOM ' + json.dumps({'ok': value['ok'], 'detail': value['detail'],
+                               'counting': counting['detail']}))
     return report
 
 
