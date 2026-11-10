@@ -54,8 +54,8 @@ Arguments (defaults are the test VM's)
                          uses for Postgres and its own writes (default
                          /var/lib/lifemodel-logs-walk-shared; removed after)
   --postgres-image IMG   default docker.io/library/postgres:17-bookworm
-  --postgres-bytes N     the walk's small Postgres quota on the shared
-                         filesystem (default 64 MiB; the real write is far less)
+  --postgres-bytes N     planning value only, not a quota (default 64 MiB);
+                         actual root allocations are measured by category
   --commit-interval-ms N default 200
   --flood-seconds N      full-speed flood duration (default 300)
   --fill-bound N         bound on reaching the store's write stop (default 900 s)
@@ -76,8 +76,10 @@ a Postgres pod and writer pods, and a shared-filesystem directory with the
 Postgres data in it; it writes into the log volume. The `finally` deletes the
 pods and namespaces it created and the shared directory, removes its filler and
 its flood files, waits for the store to be Ready and prints a RESTORE line with
-both filesystems' free space. On the VM's ~6 GiB free root disk the walk uses at
-most --postgres-bytes (64 MiB) there, and the flood stays inside the log volume.
+both filesystems' free space. Image content and snapshots, rotated container logs, Postgres data and walk
+files consume shared root space. They are measured separately after pod startup;
+--postgres-bytes is a legacy planning value, not an enforced quota. The store
+flood stays inside its mounted log volume.
 
 What it does not cover
 ----------------------
@@ -114,6 +116,11 @@ from logs_walk_support import (  # noqa: E402
     write_burst,
 )
 
+from logs_flood_support import (  # noqa: E402
+    check_commits, create_pod, is_drop, pod_diagnostics, refusal_verdict, wait_running,
+)
+from logs_flood_accounting import accounting_snapshot, report_accounting  # noqa: E402
+
 THROTTLE_EVENTS = 500
 TASKS_NAMESPACE = 'lifemodel-motor'
 TRUSTED_MODULE = 'walk-trusted-writer'
@@ -131,15 +138,17 @@ def walk_namespace(name):
 def postgres_manifest(options, commits):
     """A Postgres pod whose data sits on the host's shared filesystem."""
     script = (
-        'set -e; docker-entrypoint.sh postgres & '
-        "until pg_isready -q -h 127.0.0.1; do sleep 0.2; done; "
-        "psql -q -h 127.0.0.1 -c 'create table if not exists walk_commits (id bigint primary key, "
-        "at timestamptz)' >/dev/null; "
-        'i=0; while [ $i -lt %d ]; do s=$(date +%%s%%N); '
-        'if psql -q -h 127.0.0.1 -c "insert into walk_commits values ($i, clock_timestamp())" '
+        'set -e; docker-entrypoint.sh postgres & server=$!; '
+        "i=0; until psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d postgres "
+        "-c 'select 1' >/dev/null 2>>/tmp/walkerr; do "
+        "kill -0 $server; i=$((i+1)); [ $i -lt 150 ]; sleep 0.2; done; "
+        "psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d postgres -c 'create table if not exists walk_commits (id bigint primary key, "
+        "at timestamptz)' >/dev/null 2>>/tmp/walkerr; "
+        'i=0; while kill -0 $server; do s=$(date +%%s%%N); '
+        'if psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d postgres -c "insert into walk_commits values ($i, clock_timestamp())" '
         '>/dev/null 2>>/tmp/walkerr; then r=ok; else r=error; fi; '
         'e=$(date +%%s%%N); echo "commit $s $e $r"; i=$((i+1)); sleep %s; done; sleep 3600'
-        % (commits, options.commit_interval_ms / 1000.0))
+        % (options.commit_interval_ms / 1000.0))
     return {
         'apiVersion': 'v1',
         'kind': 'Pod',
@@ -148,6 +157,7 @@ def postgres_manifest(options, commits):
         'spec': {
             'restartPolicy': 'Never',
             'automountServiceAccountToken': False,
+            'securityContext': {'runAsUser': 999, 'runAsGroup': 999},
             'containers': [{
                 'name': 'postgres',
                 'image': options.postgres_image,
@@ -158,8 +168,7 @@ def postgres_manifest(options, commits):
                         {'name': 'POSTGRES_PASSWORD', 'value': 'walk'}],
                 'resources': {'requests': {'cpu': '100m', 'memory': '128Mi'},
                               'limits': {'cpu': '1', 'memory': '512Mi'}},
-                'volumeMounts': [{'name': 'data', 'mountPath': '/data',
-                                  'subPath': 'pgdata'}],
+                'volumeMounts': [{'name': 'data', 'mountPath': '/data'}],
             }],
             'volumes': [{'name': 'data', 'hostPath': {
                 'path': os.path.join(options.shared_path, 'pg'),
@@ -199,7 +208,8 @@ def writer_manifest(options, namespace, name, module, run_id, seconds, interval,
                 'securityContext': {'readOnlyRootFilesystem': True,
                                     'allowPrivilegeEscalation': False,
                                     'capabilities': {'drop': ['ALL']}},
-                'resources': {'requests': {'cpu': '50m', 'memory': '32Mi'}},
+                'resources': {'requests': {'cpu': '50m', 'memory': '32Mi'},
+                              'limits': {'cpu': '500m', 'memory': '128Mi'}},
             }],
         },
     }
@@ -282,7 +292,7 @@ def commit_verdict(commits):
         gap = (second - first) / 1e9
         if longest is None or gap > longest:
             longest = gap
-    return {'ok': not errors, 'errors': len(errors), 'longest': longest,
+    return {'ok': bool(times) and not errors, 'errors': len(errors), 'longest': longest,
             'detail': '%d commit(s), %d error(s), longest gap %s s'
                       % (len(commits), len(errors),
                          ('%.2f' % longest) if longest is not None else 'none')}
@@ -452,25 +462,46 @@ def ensure_namespace(report, cluster, name, state):
     return True
 
 
+def prepare_flood(report, options, cluster, state):
+    """Finish pulls and initialization before measuring shared-disk movement."""
+    manifests = (postgres_manifest(options, 0),
+                 writer_manifest(options, options.writer_namespace, 'walk-flood-trusted',
+                                 TRUSTED_MODULE, state['trusted_run'], 3600,
+                                 options.trusted_interval_ms))
+    for manifest in manifests:
+        if not create_pod(report, cluster, manifest):
+            return False
+        namespace, name = manifest['metadata']['namespace'], manifest['metadata']['name']
+        if not wait_running(cluster, namespace, name):
+            report.not_valid('pod %s/%s did not become Running before the flood' % (namespace, name))
+            pod_diagnostics(report, cluster, namespace, name)
+            return False
+    def committed():
+        text = cluster.run(['-n', options.shared_namespace, 'logs', 'walk-flood-pg',
+                            '--tail=100'], timeout=30)
+        return text.returncode == 0 and any(entry['result'] == 'ok'
+                                           for entry in commit_records(text.stdout))
+    if not wait_until(time.monotonic() + 60, 1, committed):
+        report.not_valid('Postgres recorded zero successful pre-flood commits')
+        pod_diagnostics(report, cluster, options.shared_namespace, 'walk-flood-pg')
+        return False
+    return True
+
+
 def flood_case(report, options, loader, cluster, store, volume, state):
     """The flood with Postgres committing beside it on the shared filesystem."""
+    if not prepare_flood(report, options, cluster, state):
+        return False
+    baseline = accounting_snapshot(options, cluster)
     shared_before = shared_space()[1]
     device = loop_device(options.mount)
-    report.note('the log volume is %s; the shared filesystem has %.2f GiB free and this walk '
-                'uses at most %d MiB of it (Postgres data + flood logs)'
-                % (device or 'not a loop device', shared_before / GIB,
-                   options.postgres_bytes // MIB))
-    commits = int(options.flood_seconds * 1000 / options.commit_interval_ms) + 300
-    for manifest in (postgres_manifest(options, commits),
-                     writer_manifest(options, options.writer_namespace, 'walk-trusted-writer',
-                                     TRUSTED_MODULE, state['trusted_run'], 3000,
-                                     options.trusted_interval_ms)):
-        if cluster.apply(manifest).returncode != 0:
-            report.not_valid('the pod %s was not created' % manifest['metadata']['name'])
-            return False
+    report.note('baseline after all flood pods are Running and Postgres has committed; '
+                'volume device %s, shared free %.2f GiB; Postgres data and container logs '
+                'are measured, not a quota' % (device or 'unknown', shared_before / GIB))
     pod_before = store_pod(cluster, options)
     result = {'samples': [], 'statuses': [], 'drops': [], 'seen': set(),
               'started': now_ms(), 'throttled': False}
+    flood_start_ns = time.time_ns()
     start_mono = time.monotonic()
     io_before = diskstats_io_ms(device) if device else None
     fill_deadline = time.monotonic() + options.fill_bound
@@ -485,13 +516,11 @@ def flood_case(report, options, loader, cluster, store, volume, state):
         result['samples'].append((now_ms(), status))
         if flood_end is None and (status == 429 or moment > fill_deadline):
             flood_end = moment + options.flood_seconds
-            report.pass_('the store refuses a write under the flood',
-                         '429 from the response' if status == 429
-                         else 'the fill bound ended before a refusal')
+            report.note('observed HTTP 429; measuring sustained flood' if status == 429
+                        else 'fill bound ended; refusal evidence will be judged separately')
         if moment % max(1, options.poll_seconds) < 0.01 or len(result['samples']) % 8 == 0:
             free, merges = free_space(store)
             answer = loader.logs_status(*window())
-            result['samples'].append((now_ms(), status))
             result['statuses'].append({
                 'state': answer.get('state'),
                 'reason': answer.get('reason'),
@@ -504,11 +533,14 @@ def flood_case(report, options, loader, cluster, store, volume, state):
                                lambda: evictor_seen(loader, result))
             if epoch:
                 result['throttled'] = True
+    flood_end_ns = time.time_ns()
+    accounting_after = accounting_snapshot(options, cluster)
     io_after = diskstats_io_ms(device) if device else None
     elapsed = time.monotonic() - start_mono
     report.note('the volume was busy %s%% of %.0f s%s'
                 % (('%.1f' % busy_percent(io_before, io_after, elapsed, device))
-                   if device else 'unknown (not a loop device)', elapsed,
+                   if busy_percent(io_before, io_after, elapsed, device) is not None
+                   else 'unknown (diskstats unavailable)', elapsed,
                    '' if device else '; /proc/diskstats has no loop device for the mount'))
     flags = read_store_flags(report, options, cluster, 'the store\'s margin')
     margin = quantity((flags or {}).get('storage.minFreeDiskSpaceBytes'))
@@ -517,18 +549,7 @@ def flood_case(report, options, loader, cluster, store, volume, state):
     report.check(verdict['ok'],
                  'the store\'s free space stays within 10 % of the volume below its margin',
                  verdict['detail'])
-    shared_after = shared_space()[1]
-    shared = shared_verdict(shared_before, shared_after, options.postgres_bytes + 32 * MIB)
-    report.check(shared['ok'], 'the shared filesystem never loses a byte to the flood',
-                 shared['detail'])
-    pod_after = store_pod(cluster, options)
-    restarted = (pod_before is None or pod_after is None
-                 or pod_before.get('uid') != pod_after.get('uid')
-                 or pod_before.get('restarts') != pod_after.get('restarts'))
-    report.check(not restarted, 'the store did not restart under the flood',
-                 'uid %s -> %s, restarts %s -> %s'
-                 % ((pod_before or {}).get('uid'), (pod_after or {}).get('uid'),
-                    (pod_before or {}).get('restarts'), (pod_after or {}).get('restarts')))
+    report_accounting(report, baseline, accounting_after, 32 * MIB)
     log = store_log(cluster, options)
     bad = [line for line in log.splitlines() if 'panic' in line.lower() or 'FATAL:' in line]
     report.check(not bad, 'the store\'s log holds no panic and no FATAL line',
@@ -543,28 +564,36 @@ def flood_case(report, options, loader, cluster, store, volume, state):
                      'in %d sample(s)' % sum(1 for sample in result['statuses']
                                              if sample.get('readOnly')))
     elif low:
-        report.note('the page said the volume was low but never read-only: the evictor freed '
-                    'space first (ADR-016 §5)')
+        report.note('the page said low volume but not read-only; verified evictor drops=%d '
+                    '(ADR-016 §5)' % len(result['drops']))
     else:
         report.note('the page said neither low volume nor read-only in %d sample(s): %s'
                     % (len(result['statuses']),
                        ', '.join(sorted({str(sample.get('state')) for sample in result['statuses']}))))
-    accepted = wait_until(time.monotonic() + options.recover_bound, 10,
-                          lambda: write_burst(store, now_ms(), state['flood_run'], 1, 'after',
-                                              module='walk-flood')[0] in (200, 204))
-    report.check(bool(accepted), 'writes are accepted again without a store restart',
+    def recovered():
+        status = write_burst(store, now_ms(), state['flood_run'], 1, 'after',
+                             module='walk-flood')[0]
+        result['samples'].append((now_ms(), status))
+        return status in (200, 204)
+    accepted = wait_until(time.monotonic() + options.recover_bound, 10, recovered)
+    refusal_verdict(report, result['samples'], result['drops'])
+    pod_after = store_pod(cluster, options)
+    restarted = (pod_before is None or pod_after is None
+                 or pod_before.get('uid') != pod_after.get('uid')
+                 or pod_before.get('restarts') != pod_after.get('restarts'))
+    report.check(not restarted, 'the store did not restart under the flood',
+                 'uid %s -> %s, restarts %s -> %s'
+                 % ((pod_before or {}).get('uid'), (pod_after or {}).get('uid'),
+                    (pod_before or {}).get('restarts'), (pod_after or {}).get('restarts')))
+    report.check(bool(accepted) and not restarted, 'writes are accepted again without a store restart',
                  'within %d s of the flood' % options.recover_bound)
     reads_ok = reading_verdict(result['statuses'])
     report.check(reads_ok['ok'], 'the loader\'s page kept answering', reads_ok['detail'])
     text = cluster.run(['-n', options.shared_namespace, 'logs', 'walk-flood-pg',
                         '--tail=200000'], timeout=120)
-    commit = commit_verdict(commit_records(text.stdout if text.returncode == 0 else ''))
-    report.check(commit['ok'], 'Postgres committed throughout with no error', commit['detail'])
-    report.check(commit['longest'] is not None
-                 and commit['longest'] <= options.commit_gap_bound,
-                 'the longest Postgres commit gap is within its bound',
-                 '%.2f s, bound %d s'
-                 % (commit['longest'] or 0, options.commit_gap_bound))
+    records = commit_records(text.stdout if text.returncode == 0 else '')
+    if not check_commits(report, records, flood_start_ns, flood_end_ns, options.commit_gap_bound):
+        pod_diagnostics(report, cluster, options.shared_namespace, 'walk-flood-pg')
     return True
 
 
@@ -574,7 +603,7 @@ def evictor_seen(loader, result):
     records = (answer or {}).get('records') or []
     for record in records:
         identity = '%s|%s' % (record.get('time'), record.get('message'))
-        if identity not in result['seen']:
+        if is_drop(record) and identity not in result['seen']:
             result['seen'].add(identity)
             result['drops'].append(record)
     return bool(result['drops'])
@@ -583,6 +612,8 @@ def evictor_seen(loader, result):
 def throttle_case(report, options, loader, cluster, state):
     """The throttle: task pods at full speed beside a trusted writer (ADR-016 §6)."""
     seconds = options.throttle_seconds
+    report.note('motor admission requires a core-owned workbench task; a bare proof writer '
+                'may be denied. No policy exception or creator impersonation is used.')
     for manifest in (
         writer_manifest(options, TASKS_NAMESPACE, 'walk-task-fast', TASK_MODULE,
                         state['task_fast'], seconds, 1),
@@ -591,8 +622,7 @@ def throttle_case(report, options, loader, cluster, state):
         writer_manifest(options, options.writer_namespace, 'walk-trusted-writer', TRUSTED_MODULE,
                         state['trusted_run'], seconds + 20, options.trusted_interval_ms),
     ):
-        if cluster.apply(manifest).returncode != 0:
-            report.not_valid('the pod %s was not created' % manifest['metadata']['name'])
+        if not create_pod(report, cluster, manifest):
             return False
     text = metrics_text(options, cluster)
     if text is None or 'walk_throttle_window' not in text:
@@ -629,7 +659,7 @@ def throttle_case(report, options, loader, cluster, state):
 def restore(report, options, loader, cluster, volume, state):
     """Delete the walk's pods and namespaces and its shared directory, report space."""
     restored = True
-    for namespace, names in ((options.writer_namespace, ['walk-trusted-writer']),
+    for namespace, names in ((options.writer_namespace, ['walk-trusted-writer', 'walk-flood-trusted']),
                              (options.shared_namespace, ['walk-flood-pg']),
                              (TASKS_NAMESPACE, ['walk-task-fast', 'walk-task-large'])):
         for name in names:
@@ -684,7 +714,8 @@ def run(report, options, loader, cluster, store, volume, state):
     state['task_fast'] = 'walk-task-fast-%d' % now_ms()
     state['task_large'] = 'walk-task-large-%d' % now_ms()
     state['throttle_start'] = now_ms()
-    flood_case(report, options, loader, cluster, store, volume, state)
+    if not flood_case(report, options, loader, cluster, store, volume, state):
+        return False
     throttle_case(report, options, loader, cluster, state)
     return True
 
