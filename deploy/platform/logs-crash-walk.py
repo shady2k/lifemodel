@@ -57,9 +57,13 @@ Arguments (defaults are the test VM's)
   --fill-bound N         bound on reaching a full buffer (default 600 s)
   --recover-bound N      bound on the collector and the store recovering
                          (default 300 s)
-  --writer-pods N        how many writer pods fill the buffer in tight loops
-                         (default 3; the buffer needs about 850 line(s)/s for ten
-                         minutes, and the achieved rate is reported)
+  --writer-pods N        paced writer pods (default 3)
+  --writer-rate N        total target lines/s (default/maximum 1700), about five
+                         minutes for 500,000 events; source achieved rate reported
+  --max-load N           stop if node /proc/loadavg one-minute load exceeds this
+                         bound (default/maximum 8); unavailable load is not valid
+  --restore-bound N      retry bound per restore step (default 600 s), commands
+                         get 180 s, including after timeout or escaping exceptions
   --memory-limit-bytes N the collector container's memory limit, the ceiling the
                          buffer must fit in (default 300 MiB, the deployed limit)
   --saturated-seconds N  how long the saturated writer keeps writing after the
@@ -90,6 +94,8 @@ import os
 import re
 import sys
 import time
+import signal
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -112,15 +118,13 @@ BUFFER_SIZE = 'vector_buffer_size_events'
 BUFFER_MAX = 'vector_buffer_max_size_events'
 RECEIVED = 'vector_component_received_events_total'
 WRITER_SCRIPT = (
-    # A tight loop: the buffer holds 500,000 events, so a 20 ms timer (~850 lines/s
-    # for ten minutes) cannot fill it. Each pod's sequence numbers have their own
-    # base, so one run id covers several pods without collisions.
     "const run=process.argv[1],seconds=Number(process.argv[2]),base=Number(process.argv[3]);"
+    "const rate=Number(process.argv[4]),batch=Math.min(20,Math.max(1,Math.floor(rate/50)));"
     "let seq=base;const end=Date.now()+seconds*1000;"
-    "while(Date.now()<end){for(let n=0;n<200;n++){seq+=1;"
-    "process.stdout.write('walk-crash '+run+' seq='+seq+' t='+Date.now()+'\\n');}}"
+    "function write(){if(Date.now()>=end)return;for(let n=0;n<batch;n++){seq+=1;"
+    "process.stdout.write('walk-crash '+run+' seq='+seq+' t='+Date.now()+'\\n');}"
+    "setTimeout(write,batch*1000/rate);}write();"
 )
-
 
 def writer_name(index):
     return 'walk-crash-writer' if index == 1 else 'walk-crash-writer-%d' % index
@@ -145,7 +149,8 @@ def writer_manifest(image, options, run_id, seconds, index=1, interval=20):
                 'name': 'writer',
                 'image': image,
                 'command': ['node', '-e', WRITER_SCRIPT, run_id, str(seconds),
-                            str((index - 1) * 50_000_000)],
+                            str((index - 1) * 50_000_000),
+                            str(options.writer_rate / options.writer_pods)],
                 'securityContext': {'readOnlyRootFilesystem': True,
                                     'allowPrivilegeEscalation': False,
                                     'capabilities': {'drop': ['ALL']}},
@@ -279,7 +284,9 @@ def store_replicas(cluster, options):
     body = cluster.json(['-n', options.namespace, 'get', 'deployment', options.store,
                          '-o', 'json']) or {}
     replicas = (body.get('spec') or {}).get('replicas')
-    return replicas if isinstance(replicas, int) and replicas >= 0 else 1
+    if not isinstance(replicas, int) or replicas < 0:
+        raise WalkError('store_replicas_unavailable')
+    return replicas
 
 
 def set_replicas(cluster, options, replicas):
@@ -372,7 +379,7 @@ def writer_read(cluster, options, run_id):
     result = None
     for name in writer_names(options):
         result = cluster.run(['-n', options.writer_namespace, 'logs', name,
-                              '--tail=100000'], timeout=120)
+                              '--tail=100000'], timeout=15)
         if result.returncode != 0:
             continue
         for line in result.stdout.splitlines():
@@ -380,6 +387,18 @@ def writer_read(cluster, options, run_id):
             if match and match.group(1) == run_id:
                 written.append(int(match.group(2)))
     return written, result
+
+
+def emitted_count(cluster, options, run_id):
+    """Last sequence per pod is cumulative even when older kubelet lines rotated."""
+    total = 0
+    for index, name in enumerate(writer_names(options)):
+        result = cluster.run(['-n', options.writer_namespace, 'logs', name, '--tail=1'], timeout=15)
+        match = WRITER_LINE.search(result.stdout) if result.returncode == 0 else None
+        if not match or match.group(1) != run_id:
+            raise WalkError('writer_rate_unavailable')
+        total += int(match.group(2)) - index * 50_000_000
+    return total
 
 
 def writer_lines(cluster, options, run_id):
@@ -419,6 +438,8 @@ def wait_writer(report, options, cluster, run_id):
     """Do not inspect the buffer until a Running writer has produced a numbered line."""
     observation = {'pod': None, 'read': None}
     def started():
+        if not safe_load(report, options):
+            raise WalkError('node_load_bound')
         pod = cluster.pod(options.writer_namespace, writer_name(1))
         observation['pod'] = pod
         if ((pod or {}).get('status') or {}).get('phase') != 'Running':
@@ -576,8 +597,42 @@ def memory_verdict(peak, limit, buffer_size, maximum, restarts_before, restarts_
     return {'ok': not restarted, 'restarted': restarted, 'detail': detail}
 
 
+def node_load():
+    """This operator walk runs on the node, as do its crictl and kubelet reads."""
+    return float(Path('/proc/loadavg').read_text().split()[0])
+
+
+def watch_load(report, options, stop):
+    """Interrupt even a blocked staged command; main owns all restoration."""
+    while not stop.wait(1):
+        if not safe_load(report, options):
+            os.kill(os.getpid(), signal.SIGINT)
+            return
+
+
+def require_safe_load(report, options):
+    if not safe_load(report, options):
+        raise WalkError('node_load_bound')
+    return True
+
+
+def safe_load(report, options):
+    try:
+        load = node_load()
+    except (OSError, ValueError, IndexError):
+        report.not_valid('node load average unavailable; stop writers to protect the VM')
+        return False
+    if not 0 <= load <= options.max_load:
+        report.not_valid('node one-minute load %.2f exceeds bound %.2f; stopping writers'
+                         % (load, options.max_load))
+        return False
+    return True
+
+
 def crash_case(report, options, loader, cluster, state, saturated_case):
     """One crash: write, kill, recover, count - saturated or informative."""
+    if not safe_load(report, options):
+        return False
     label = 'saturated' if saturated_case else 'unsaturated'
     metrics, reason = read_metrics(options, cluster) if saturated_case else (None, '')
     state_ok = True
@@ -612,15 +667,27 @@ def crash_case(report, options, loader, cluster, state, saturated_case):
             restarts_before = collector_restarts(cluster, options)
             peak = 0
             last_memory = time.monotonic()
+            emitted_before = emitted_count(cluster, options, run_id)
             started_fill = time.monotonic()
-            received_before = (buffer_state(read_metrics(options, cluster)[0])
-                               .get('received') if read_metrics(options, cluster)[0] else None)
+            initial_metrics, _reason = read_metrics(options, cluster)
+            received_before = buffer_state(initial_metrics).get('received') if initial_metrics else None
             while True:
+                if not safe_load(report, options):
+                    return False
                 metrics, reason = read_metrics(options, cluster)
+                elapsed = max(1.0, time.monotonic() - started_fill)
+                rate = ((buffer_state(metrics).get('received') or 0)
+                        - (received_before or 0)) / elapsed if metrics is not None else 0
+                report.note('achieved source rate %.0f lines/s; target %.0f lines/s total'
+                            % (rate, options.writer_rate))
                 state_now = buffer_state(metrics) if metrics is not None else {}
                 if metrics is not None and saturated(state_now):
                     elapsed = max(1.0, time.monotonic() - started_fill)
                     rate = ((state_now.get('received') or 0) - (received_before or 0)) / elapsed
+                    emitted = emitted_count(cluster, options, run_id) - emitted_before
+                    report.note('achieved writer rate %.0f lines/s total; target %.0f'
+                                % (emitted / max(1, time.monotonic() - started_fill),
+                                   options.writer_rate))
                     report.pass_('the sink buffer is at its configured maximum',
                                  'size %d, max %d, received %d, %.0f line(s)/s'
                                  % (state_now['size'], state_now['max'],
@@ -628,6 +695,10 @@ def crash_case(report, options, loader, cluster, state, saturated_case):
                     break
                 if time.monotonic() - last_memory >= 10:
                     last_memory = time.monotonic()
+                    emitted = emitted_count(cluster, options, run_id) - emitted_before
+                    report.note('achieved writer rate %.0f lines/s total; target %.0f'
+                                % (emitted / max(1, time.monotonic() - started_fill),
+                                   options.writer_rate))
                     used, _why = collector_memory(cluster, options)
                     if used is not None:
                         peak = max(peak, used)
@@ -641,8 +712,8 @@ def crash_case(report, options, loader, cluster, state, saturated_case):
                 if time.monotonic() >= fill_deadline:
                     report.not_valid(
                         'the sink buffer never reached its maximum within %d s at this write '
-                        'rate: the last reading was %s (%s); the writer must supply about 850 '
-                        'line(s)/s for ten minutes for 500,000 events'
+                        'rate: the last reading was %s (%s); target 1700 line(s)/s total '
+                        'fills 500,000 events in about five minutes'
                         % (options.fill_bound,
                            json.dumps(state_now) if state_now else 'none',
                            reason or 'the exporter answered'))
@@ -659,13 +730,23 @@ def crash_case(report, options, loader, cluster, state, saturated_case):
                             'that follows is the unplanned one')
             else:
                 # Keep writing past the full buffer, so the lines behind it are real.
-                time.sleep(options.saturated_seconds)
+                until = time.monotonic() + options.saturated_seconds
+                while time.monotonic() < until:
+                    if not safe_load(report, options):
+                        return False
+                    time.sleep(min(3, max(0, until - time.monotonic())))
         else:
-            wait_until(time.monotonic() + 60, 3,
-                       lambda: len(writer_lines(cluster, options, run_id))
-                       >= options.unsaturated_lines)
+            deadline = time.monotonic() + 60
+            while len(writer_lines(cluster, options, run_id)) < options.unsaturated_lines:
+                if not safe_load(report, options):
+                    return False
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(3)
             report.note('the unsaturated case wrote %d line(s) with the buffer below its maximum'
                         % len(writer_lines(cluster, options, run_id)))
+        if not safe_load(report, options):
+            return False
         written = writer_lines(cluster, options, run_id)
         if oom is None:
             pid, detail = vector_pid(cluster, options)
@@ -680,14 +761,17 @@ def crash_case(report, options, loader, cluster, state, saturated_case):
             report.fail('the store is scaled back up', options.store)
             return False
         if not wait_until(time.monotonic() + options.recover_bound, 5,
-                          lambda: collector_running(cluster, options)):
+                          lambda: require_safe_load(report, options) and collector_running(cluster, options)):
             report.not_valid('the collector did not come back within %d s'
                              % options.recover_bound)
             return False
         report.check(wait_until(time.monotonic() + options.recover_bound, 5,
-                                lambda: store_ready(cluster, options)),
+                                lambda: require_safe_load(report, options) and store_ready(cluster, options)),
                      'the store answers again', options.store)
-        time.sleep(options.settle_seconds)
+        until = time.monotonic() + options.settle_seconds
+        while time.monotonic() < until:
+            require_safe_load(report, options)
+            time.sleep(min(3, max(0, until - time.monotonic())))
         delivered = delivered_lines(loader, started, run_id)
         pod_name = None
         pods = cluster.pods(options.writer_namespace, 'app.kubernetes.io/name=' + WRITER_MODULE)
@@ -710,8 +794,11 @@ def crash_case(report, options, loader, cluster, state, saturated_case):
         return True
     finally:
         for name in writer_names(options):
-            cluster.run(['-n', options.writer_namespace, 'delete', 'pod', name,
-                         '--ignore-not-found', '--wait=false'])
+            restore_step(report, 'delete ' + name, lambda name=name: cluster.run(
+                ['-n', options.writer_namespace, 'delete', 'pod', name,
+                 '--ignore-not-found', '--grace-period=1', '--wait=true',
+                 '--timeout=170s'], timeout=180).returncode == 0,
+                options.restore_bound)
 
 
 def count_deliveries(loader, from_ms, run_id):
@@ -740,11 +827,11 @@ def ensure_namespace(report, cluster, options, state):
     body = cluster.json(['get', 'namespace', options.writer_namespace, '-o', 'json'])
     if body is not None:
         return True
+    state['created_namespace'] = True  # A timed-out create may still have succeeded.
     result = cluster.run(['create', 'namespace', options.writer_namespace])
     if result.returncode != 0:
         report.not_valid('the walk\'s own namespace was not created: %s' % tail(result.stderr))
         return False
-    state['created_namespace'] = True
     return True
 
 
@@ -756,6 +843,10 @@ def free_port():
 
 
 def run(report, options, loader, cluster, state):
+    if not safe_load(report, options):
+        return False
+    report.note('writers target %.0f lines/s total across %d pods; node load bound %.2f'
+                % (options.writer_rate, options.writer_pods, options.max_load))
     state['writer_image'] = writer_image(cluster, options)
     if not report.check(bool(state['writer_image']), 'the evictor names the Node writer image',
                         'logs-evictor'):
@@ -788,29 +879,53 @@ def run(report, options, loader, cluster, state):
     return saturated_ok
 
 
+def restore_step(report, name, action, bound):
+    """A failed recovery command must not skip the remaining recovery steps."""
+    def attempt():
+        try:
+            return bool(action())
+        except BaseException as error:
+            report.note('RESTORE retry %s: %s' % (name, type(error).__name__))
+            return False
+    deadline = time.monotonic() + bound
+    while True:
+        try:
+            if wait_until(deadline, 5, attempt):
+                return True
+            break
+        except BaseException as error:
+            report.note('RESTORE interrupted %s: %s; continuing' % (name, type(error).__name__))
+            if time.monotonic() >= deadline:
+                break
+    report.fail('RESTORE ' + name, 'incomplete after %d seconds; repair by hand' % bound)
+    return False
+
+
 def restore(report, options, loader, cluster, state):
-    """Scale the store back, delete the walk's pod and namespace, unstick the collector."""
+    """Stop load first; retry each recovery step independently of the others."""
+    bound = options.restore_bound
+    def command(args):
+        return cluster.run(args, timeout=180).returncode == 0
     restored = True
-    if state.get('replicas') is not None:
-        restored = set_replicas(cluster, options, state['replicas']) and restored
-        if not wait_until(time.monotonic() + 180, 5, lambda: store_ready(cluster, options)):
-            restored = False
-            print('RESTORE incomplete: the store is not Ready at %d replica(s)'
-                  % state['replicas'])
     for name in writer_names(options):
-        cluster.run(['-n', options.writer_namespace, 'delete', 'pod', name,
-                     '--ignore-not-found', '--wait=false'])
+        restored = restore_step(report, 'delete ' + name, lambda name=name: command(
+            ['-n', options.writer_namespace, 'delete', 'pod', name,
+             '--ignore-not-found', '--grace-period=1', '--wait=true',
+             '--timeout=170s']), bound) and restored
+    if state.get('replicas') is not None:
+        restored = restore_step(report, 'scale store', lambda: command(
+            ['-n', options.namespace, 'scale', 'deployment', options.store,
+             '--replicas=%d' % state['replicas']]), bound) and restored
+        restored = restore_step(report, 'store Ready', lambda: store_ready(cluster, options),
+                                bound) and restored
     if state.get('created_namespace'):
-        restored = cluster.run(['delete', 'namespace', options.writer_namespace,
-                                '--wait=false']).returncode == 0 and restored
-    if not wait_until(time.monotonic() + 180, 5, lambda: collector_running(cluster, options)):
-        restored = False
-        print('RESTORE incomplete: the collector is not Running')
-    print('RESTORE store %s at %s replica(s), writer pod and namespace deleted=%s, collector '
-          'Running' % (options.store, state.get('replicas'),
-                       str(bool(state.get('created_namespace'))).lower()))
-    if not restored:
-        print('RESTORE incomplete: check the store Deployment and the collector by hand')
+        restored = restore_step(report, 'delete namespace', lambda: command(
+            ['delete', 'namespace', options.writer_namespace, '--ignore-not-found',
+             '--wait=true', '--timeout=170s']), bound) and restored
+    restored = restore_step(report, 'collector Running',
+                            lambda: collector_running(cluster, options), bound) and restored
+    print('RESTORE complete=%s store replicas=%s; writer cleanup and readiness checked'
+          % (str(restored).lower(), state.get('replicas')))
 
 
 def main(argv=None):
@@ -824,11 +939,18 @@ def main(argv=None):
     parser.add_argument('--fill-bound', type=int, default=600)
     parser.add_argument('--recover-bound', type=int, default=300)
     parser.add_argument('--writer-pods', type=int, default=3)
+    parser.add_argument('--writer-rate', type=float, default=1700)
+    parser.add_argument('--max-load', type=float, default=8.0)
+    parser.add_argument('--restore-bound', type=int, default=600)
     parser.add_argument('--memory-limit-bytes', type=int, default=300 * 1024 * 1024)
     parser.add_argument('--saturated-seconds', type=int, default=15)
     parser.add_argument('--unsaturated-lines', type=int, default=5000)
     parser.add_argument('--settle-seconds', type=int, default=60)
     options = parser.parse_args(argv)
+    if (options.writer_pods < 1 or not 0 < options.writer_rate <= 1700
+            or not 0 < options.max_load <= 8 or options.restore_bound < 180):
+        parser.error('require writer-pods >= 1, 0 < writer-rate <= 1700, '
+                     '0 < max-load <= 8 and restore-bound >= 180')
 
     report = Report()
     cluster = Cluster(options.kubectl)
@@ -851,12 +973,23 @@ def main(argv=None):
             return False
         return run(report, options, loader, cluster, state)
 
+    stop_monitor = threading.Event()
+    monitor = threading.Thread(target=watch_load, args=(report, options, stop_monitor), daemon=True)
     try:
+        monitor.start()
         ran = stage()
-    except WalkError as error:
-        report.fail('the walk runs to its end', str(error))
+    except BaseException as error:
+        report.fail('the walk runs to its end', type(error).__name__)
     finally:
-        restore(report, options, loader, cluster, state)
+        stop_monitor.set()
+        try:
+            monitor.join()
+        except BaseException:
+            pass  # Restoration still owns the exit, including an interrupted join.
+        try:
+            restore(report, options, loader, cluster, state)
+        except BaseException as error:
+            report.fail('RESTORE interrupted; repair by hand', type(error).__name__)
     if ran is not True and report.failures == 0 and report.invalid == 0:
         report.not_valid('the walk reached none of its cases')
     return report.result()
