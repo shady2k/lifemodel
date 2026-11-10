@@ -74,6 +74,9 @@ describe('the evict walk\'s argument handling', () => {
       '--quiet-seconds',
       '--run-sample-seconds',
       '--stranded-bound',
+      '--flush-bound',
+      '--kustomization',
+      '--flux-namespace',
       '--suspend-seconds',
       '--evictor-bound',
       '--fill-timeout',
@@ -104,6 +107,8 @@ describe('the evict walk states every assertion of its row', () => {
     expect(header).toMatch(/lastSuccessfulTime/);
     expect(header).toMatch(/stranded_partition/);
     expect(header).toMatch(/logs-stranded-days/);
+    expect(header).toMatch(/kustomize-controller/);
+    expect(header).toMatch(/flush/);
     expect(header).toMatch(/dropped with its day/);
     expect(header).toMatch(/What it does not cover/);
   });
@@ -177,6 +182,33 @@ describe('a fake node for the evict walk', () => {
     expect(run.passes.join('\n')).toContain('2 dropped with its day, 0 lost');
     expect(run.failures).toEqual([]);
     expect(run.status).toBe(0);
+  }, 30000);
+
+  it('waits for the store\'s count to settle before judging the tail', () => {
+    const run = harness('evict-writer-flush-late');
+    expect(run.notes.join('\n')).toContain('settled at 201');
+    expect(run.passes.join('\n')).toContain('200 line(s), none lost');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 60000);
+
+  it('names the missing sequences and their distance from the count', () => {
+    const run = harness('evict-writer-missing');
+    const failure = run.failures.join('\n');
+    expect(failure).toContain('16 not found: seq 66..81');
+    expect(failure).toContain('written -');
+    expect(failure).toContain('ms from the count');
+    expect(run.status).toBe(1);
+  }, 60000);
+
+  it('reads the oldest row over the whole retention, and says when no drop could move it', () => {
+    const moved = harness('evict-oldest-in-day');
+    expect(moved.passes.join('\n')).toContain('the oldest remaining row moves forward');
+    expect(moved.status).toBe(0);
+    const later = harness('evict-oldest-later');
+    expect(later.notes.join('\n')).toContain('was in none of the dropped days');
+    expect(later.failures).toEqual([]);
+    expect(later.status).toBe(0);
   }, 30000);
 
   it('fails a row lost in a day no drop names and outside a detach window', () => {
@@ -297,7 +329,8 @@ describe('a fake node for the evict walk', () => {
     expect(pass).toContain('the evictor is suspended');
     expect(pass).toContain('the API adds the evictor line');
     expect(pass).toContain('the evictor line goes away after the next successful run');
-    expect(jsonLine<string[]>(run, 'PATCHES')).toHaveLength(2);
+    // The Flux Kustomization is suspended first and resumed last, around the CronJob.
+    expect(jsonLine<string[]>(run, 'PATCHES')).toHaveLength(4);
     expect(run.status).toBe(0);
   }, 30000);
 
@@ -336,6 +369,14 @@ describe('a fake node for the evict walk', () => {
     expect(failure).toContain('poll(s)');
     expect(failure).toContain('stale=false');
     expect(failure).toContain('CronJob last=');
+    expect(run.status).toBe(1);
+  }, 60000);
+
+  it('fails as its own result when something puts suspend: false back, naming it', () => {
+    const run = harness('evict-suspend-reapplied');
+    const failure = run.failures.join('\n');
+    expect(failure).toContain('the suspended CronJob stays suspended');
+    expect(failure).toContain('kustomize-controller');
     expect(run.status).toBe(1);
   }, 60000);
 

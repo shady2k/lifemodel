@@ -30,7 +30,9 @@ What it proves
      freed (read through the API), and each of them proves its detach answered
      200;
    - the oldest remaining row moves forward after each drop (sampled through the
-     store as the oldest `_time`);
+     store as the oldest `_time` over its whole retention, so a day older than
+     the walk's own window still shows it; when the oldest row was in none of the
+     dropped days, no drop could move it and the walk says so as a NOTE);
    - writes are accepted again after the drops, and every window in which the
      store answered 429 is shorter than two eviction intervals.
 5. The read-only line while the evictor is healthy, produced the way the
@@ -63,9 +65,14 @@ What it proves
    volume sat at the threshold, as a run across midnight does - is part of the
    accounting too. The writer pod keeps writing past the flood, and the walk
    waits (--tail-bound) until two eviction intervals have passed since the last
-   drop it sees, so the lines after that drop exist: every one of them must be
-   found (not lost, not dropped), there must be at least 200 of them, and the
-   longest gap of accepted new lines is stated from them. A run with no line
+   drop it sees, so the lines after that drop exist. The writer pod is stopped
+   when its log is read, and the store's count of the writer's lines is followed
+   until two polls agree (bounded by --flush-bound) before any line is judged, so
+   the collector's flush delay cannot read as loss. Then every line after the
+   last drop must be found (not lost, not dropped), there must be at least 200 of
+   them, and the longest gap of accepted new lines is stated from them; a missing
+   line is printed as its sequence ranges and their distance from the count, and
+   a line missing from the middle stays a FAIL. A run with no line
    after the last drop, or no drop at all, is TEST NOT VALID with the reason,
    never a pass.
 7. The evictor suspended (`suspend: true` on the CronJob) for two minutes: the
@@ -79,7 +86,12 @@ What it proves
    came". The staleness is due two intervals plus slack after the last success
    the walk saw AFTER the suspension, and no active Job ends the wait: a Job
    already running when the CronJob was suspended can still succeed and move
-   `lastSuccessfulTime` forward.
+   `lastSuccessfulTime` forward. kustomize-controller re-applies the platform
+   every ten minutes and would put `suspend: false` back, so the Flux
+   Kustomization that owns the CronJob is suspended before it and resumed after
+   it, on every exit path (RESTORE names both). Each poll reads the CronJob's own
+   `spec.suspend`: a flip to false is its own FAIL, and its `managedFields`
+   names who wrote it.
 8. A stranded day (ADR-016 §5): the walk writes a day older than every partition
    present (or strands the oldest one itself when that is already at the
    retention edge), detaches it by hand through the store and leaves its
@@ -109,6 +121,10 @@ Arguments (defaults are the test VM's)
   --pv-path PATH         the PV's path inside that mount
                          (default /var/lib/lifemodel-logs/data)
   --cronjob NAME         the evictor's CronJob (default logs-evictor)
+  --kustomization NAME   the Flux Kustomization that owns the CronJob and is
+                         suspended while the CronJob is (default
+                         platform-logs-store)
+  --flux-namespace NS    where that Kustomization lives (default flux-system)
   --writer-namespace NS  where the numbered writer pod runs; its own namespace
                          (default lifemodel-logs-walk)
   --flood-seconds N      how long the full-speed flood lasts after the threshold
@@ -127,6 +143,9 @@ Arguments (defaults are the test VM's)
   --stranded-bound N     bound on each step of the stranded-day case: the failed
                          run, the annotation, the store restart, the re-attach
                          and the drop (default 600 s)
+  --flush-bound N        bound on waiting for the store's count of the writer's
+                         lines to stop changing after the writer is stopped
+                         (default 120 s)
   --writer-interval-ms N the writer pod's line interval (default 50)
   --quiet-seconds N      the quiet window below the threshold (default 150)
   --run-sample-seconds N how often the CronJob's last successful run is read in
@@ -371,6 +390,78 @@ def collected_drops(loader, result):
     return drops
 
 
+def stop_writer(cluster, options):
+    """Delete the writer pod once its log is read: no line arrives after the cut-off."""
+    try:
+        cluster.run(['-n', options.writer_namespace, 'delete', 'pod', 'walk-evict-writer',
+                     '--ignore-not-found', '--wait=false'])
+    except WalkError:
+        return False
+    return True
+
+
+def writer_line_count(loader, result, run_id):
+    """The store's count of the writer's lines since the flood's start, or None."""
+    answer = loader.logs({'from': str(result['started']), 'to': str(now_ms()),
+                          'module': WRITER_MODULE, 'text': run_id, 'limit': '1'})
+    if answer is None or answer.get('state') != 'ok':
+        return None
+    count = answer.get('count')
+    return count if isinstance(count, int) else None
+
+
+def wait_flushed(report, options, loader, result, run_id):
+    """Wait until the store's count of the writer's lines stops changing, and say it.
+
+    The collector flushes a few seconds after a line is written, so the newest
+    lines are absent from a read taken straight after the cut-off. With the
+    writer stopped, the count is polled until two consecutive reads agree (or
+    --flush-bound ends), and only then are the lines judged.
+    """
+    deadline = time.monotonic() + options.flush_bound
+    previous = None
+    stable = 0
+    polls = 0
+    while True:
+        count = writer_line_count(loader, result, run_id)
+        polls += 1
+        if count is not None and count == previous:
+            stable += 1
+            if stable >= 2:
+                break
+        else:
+            stable = 0
+        if count is not None:
+            previous = count
+        if time.monotonic() >= deadline:
+            report.note('the store\'s count of the writer\'s lines did not settle within %d s '
+                        '(last %s): the lines are read as they are'
+                        % (options.flush_bound, previous))
+            return previous
+        time.sleep(max(1, options.poll_seconds))
+    report.note('the store\'s count of the writer\'s lines settled at %d after %d poll(s)'
+                % (previous, polls))
+    return previous
+
+
+def sequence_ranges(sequences):
+    """A sorted number list as ranges: `1, 3..5, 9`."""
+    ordered = sorted(sequences)
+    parts = []
+    start = previous = None
+    for value in ordered:
+        if start is None:
+            start = previous = value
+        elif value == previous + 1:
+            previous = value
+        else:
+            parts.append(str(start) if start == previous else '%d..%d' % (start, previous))
+            start = previous = value
+    if start is not None:
+        parts.append(str(start) if start == previous else '%d..%d' % (start, previous))
+    return ', '.join(parts)
+
+
 def wait_past_last_drop(report, options, loader, result):
     """Wait until two eviction intervals have passed since the last drop seen.
 
@@ -468,10 +559,14 @@ def write_burst(store, moment_ms, run_id, mib, kind):
 
 
 def oldest_record_ms(store):
-    """The oldest stored `_time`, read from the store as one aggregation."""
-    start = stamp(now_ms() - 30 * 86400 * 1000)
-    end = stamp(now_ms())
-    rows = store.query('_time:[%s, %s] | stats min(_time)' % (start, end))
+    """The oldest stored `_time` over the whole retention, as one aggregation.
+
+    No lower bound: a dropped day can hold rows older than the walk's own
+    window - the latency walk plants rows an hour back, into the previous UTC
+    day - and a window that starts after them would never see the oldest row
+    move.
+    """
+    rows = store.query('* | stats min(_time)')
     if len(rows) != 1:
         return None
     return parse_ms(rows[0].get('min(_time)'))
@@ -574,16 +669,29 @@ def cronjob_last_success(cluster, options):
 
 
 def cronjob_state(cluster, options):
-    """The evictor's CronJob as the walk sees it: last success and active Jobs.
+    """The evictor's CronJob as the walk sees it: last success, active Jobs and suspend.
 
     `known` is False when kubectl did not answer: an unread CronJob must not end
-    the wait - its active Jobs are then unknown, not absent.
+    the wait - its active Jobs are then unknown, not absent. `managers` names
+    the field managers whose entries write `spec.suspend`, so a suspension that
+    flips can say who flipped it.
     """
     body = cronjob_json(cluster, options)
     status = (body or {}).get('status') or {}
+    spec = (body or {}).get('spec') or {}
+    suspend = spec.get('suspend') if isinstance(spec.get('suspend'), bool) else None
+    managers = []
+    for entry in ((body or {}).get('metadata') or {}).get('managedFields') or []:
+        if not isinstance(entry, dict) or entry.get('subresource'):
+            continue
+        if 'suspend' not in json.dumps(entry.get('fieldsV1') or {}):
+            continue
+        manager = entry.get('manager')
+        if isinstance(manager, str) and manager not in managers:
+            managers.append(manager)
     active = [name for name in (status.get('active') or []) if isinstance(name, str)]
     return {'known': body is not None, 'lastSuccess': parse_ms(status.get('lastSuccessfulTime')),
-            'active': active}
+            'active': active, 'suspend': suspend, 'managers': managers}
 
 
 def evictor_last_success_of(answer):
@@ -603,6 +711,8 @@ def poll_line(poll):
     parts.append('api last=%s' % (stamp(poll['apiLast']) if poll['apiLast'] else 'none'))
     parts.append('CronJob last=%s' % (stamp(poll['cronLast']) if poll['cronLast'] else 'none'))
     parts.append('active=%s' % active)
+    suspend = poll['cronSuspend']
+    parts.append('CronJob suspend=%s' % ('unknown' if suspend is None else str(suspend).lower()))
     parts.append('readOnly=%s' % ('unknown' if poll['readOnly'] is None
                                  else str(poll['readOnly']).lower()))
     return ' '.join(parts)
@@ -634,6 +744,8 @@ def poll_evictor_state(loader, cluster, options, started):
         'cronLast': cron['lastSuccess'],
         'cronKnown': cron['known'],
         'active': cron['active'],
+        'cronSuspend': cron['suspend'],
+        'managers': cron['managers'],
         'readOnly': read_only_of(answer),
     }
 
@@ -655,6 +767,9 @@ def watch_suspension(loader, cluster, options):
             last_seen = max(seen) if last_seen is None else max(last_seen, max(seen))
         observations.append(poll)
         if poll['stale'] is True:
+            break
+        if poll['cronSuspend'] is not True:
+            # Something put `suspend: false` back: nothing below proves anything.
             break
         due = staleness_due_ms(last_seen, now_ms(), poll['active'], poll['cronKnown'])
         if due is not None and due <= 0:
@@ -739,6 +854,20 @@ def runs_in_window(cluster, options, seconds, interval=10):
             break
         time.sleep(interval)
     return max(len(times), len(jobs))
+
+
+def set_kustomization_suspend(cluster, options, suspend):
+    """Suspend or resume the Flux Kustomization that owns the evictor's CronJob.
+
+    kustomize-controller re-applies the platform's objects every ten minutes
+    (measured: `CronJob/logs-evictor: configured` three times in three hours),
+    which puts `suspend: false` back. Suspending the Kustomization is what makes
+    the suspension hold; it is resumed on every exit path.
+    """
+    return cluster.run([
+        '-n', options.flux_namespace, 'patch', 'kustomization', options.kustomization,
+        '--type=merge', '-p', json.dumps({'spec': {'suspend': suspend}}),
+    ]).returncode == 0
 
 
 def ensure_namespace(report, cluster, options, state):
@@ -988,6 +1117,34 @@ def flood(report, options, volume, store, loader, run_id):
     return result
 
 
+def check_oldest_moved(report, result, drops):
+    """The oldest remaining row moves forward at each drop - when a drop can move it.
+
+    The oldest row is read over the store's whole retention, so a dropped day
+    older than the walk's window still shows it. When the oldest row was in none
+    of the dropped days, nothing the evictor removed could move it: that is a
+    NOTE with the reason, never a FAIL.
+    """
+    oldest = [moment for moment in result['oldest'] if moment is not None]
+    before = result['oldestBefore']
+    moved = (before is not None and oldest and oldest[-1] > before
+             and all(later >= earlier for earlier, later in zip(oldest, oldest[1:])))
+    held = [drop['day'] for drop in drops
+            if before is not None and day_bounds(drop['day'])[0] <= before
+            <= day_bounds(drop['day'])[1]]
+    if before is None:
+        report.not_valid('the store held no readable row before the flood: the oldest row has '
+                         'no state to move from')
+    elif not held:
+        report.note('the oldest row %s was in none of the dropped days (%s), so no drop could '
+                    'move it' % (stamp(before), ', '.join(drop['day'] for drop in drops)))
+    else:
+        report.check(bool(moved), 'the oldest remaining row moves forward at each drop',
+                     'oldest %s -> %s, the oldest row being in the dropped day %s'
+                     % (stamp(before), stamp(oldest[-1]) if oldest else 'none',
+                        ', '.join(held)))
+
+
 def evaluate_flood(report, options, result, loader, cluster, store, pod_before, state):
     """The assertions of the displacement itself."""
     pod_after = store_pod(cluster, options)
@@ -1019,14 +1176,7 @@ def evaluate_flood(report, options, result, loader, cluster, store, pod_before, 
         report.pass_('each drop line proves its detach answered 200',
                      'the evictor writes the line only after the detach returned and the '
                      'directory was removed')
-        oldest = [moment for moment in result['oldest'] if moment is not None]
-        moved = (result['oldestBefore'] is not None and oldest
-                 and oldest[-1] > result['oldestBefore']
-                 and all(later >= earlier for earlier, later in zip(oldest, oldest[1:])))
-        report.check(bool(moved), 'the oldest remaining row moves forward at each drop',
-                     'oldest %s -> %s' % (
-                         stamp(result['oldestBefore']) if result['oldestBefore'] else 'none',
-                         stamp(oldest[-1]) if oldest else 'none'))
+        check_oldest_moved(report, result, drops)
     accepted = wait_until(time.monotonic() + options.recover_bound, 10,
                           lambda: write_burst(store, now_ms(), state['run_id'], 1, 'after')[0]
                           in (200, 204))
@@ -1160,9 +1310,14 @@ def collect_writer(report, options, loader, cluster, run_id, result, state):
         match = WRITER_LINE.search(line)
         if match and match.group(1) == run_id:
             written.append((int(match.group(2)), int(match.group(3))))
+    # The pod's log is read; the pod is stopped so no line arrives after the
+    # cut-off, and the store's count is followed until the collector's flush
+    # stops moving it before any line is judged.
+    stop_writer(cluster, options)
     if not written:
         report.not_valid('the writer pod wrote no numbered line the walk could read')
         return False
+    wait_flushed(report, options, loader, result, run_id)
     found = set()
     found_times = {}
     offset = 0
@@ -1247,13 +1402,18 @@ def tail_after_drop(report, written, found, drop, logged_at):
                          % (drop['day'], stamp(drop['time']), span))
         return
     missing = [sequence for sequence, _moment in tail if sequence not in found]
+    missing_text = 'none lost'
+    if missing:
+        missing_offsets = [moment - logged_at for sequence, moment in tail if sequence in missing]
+        missing_text = ('%d not found: seq %s, written %+d..%+d ms from the count'
+                        % (len(missing), sequence_ranges(missing),
+                           min(missing_offsets), max(missing_offsets)))
     report.check(
         not missing and len(tail) >= TAIL_MIN_LINES and logged_at - drop['time']
         >= 2 * EVICTION_INTERVAL_MS,
         'every line written after the last drop is found, and there are enough of them',
         '%d line(s), %s, over %.0f s since %s at %s was removed'
-        % (len(tail), 'none lost' if not missing else '%d not found' % len(missing), span,
-           drop['day'], stamp(drop['time'])))
+        % (len(tail), missing_text, span, drop['day'], stamp(drop['time'])))
     gap = longest_gap([(sequence, moment) for sequence, moment in tail if sequence in found])
     if gap is None:
         report.note('the longest gap of accepted new lines after the last drop cannot be '
@@ -1267,8 +1427,13 @@ def tail_after_drop(report, written, found, drop, logged_at):
                  'two eviction intervals', '%.1f s' % gap['seconds'])
 
 
-def suspend_case(report, options, loader, cluster):
-    """Two minutes suspended: the API adds the evictor line; the next run removes it."""
+def suspend_case(report, options, loader, cluster, state):
+    """Two minutes suspended: the API adds the evictor line; the next run removes it.
+
+    kustomize-controller re-applies the platform every ten minutes and would put
+    `suspend: false` back, so the Flux Kustomization that owns the CronJob is
+    suspended first and resumed last, on every exit path.
+    """
 
     probes = []
 
@@ -1292,6 +1457,16 @@ def suspend_case(report, options, loader, cluster):
         return False
     report.pass_('the evictor line is absent while the evictor runs',
                  'the CronJob\'s last success is recent')
+    if not set_kustomization_suspend(cluster, options, True):
+        report.fail('the Flux Kustomization is suspended so it cannot re-apply the CronJob',
+                    '%s/%s spec.suspend=true was refused'
+                    % (options.flux_namespace, options.kustomization))
+        report.not_valid('the Kustomization cannot be held still: the suspension cannot be '
+                         'judged')
+        return False
+    state['flux_suspended'] = True
+    report.pass_('the Flux Kustomization is suspended',
+                 '%s/%s spec.suspend=true' % (options.flux_namespace, options.kustomization))
     if not set_suspend(cluster, options, True):
         report.fail('the evictor is suspended for two minutes', 'the patch was refused')
         return False
@@ -1301,9 +1476,19 @@ def suspend_case(report, options, loader, cluster):
     polls = len(observations)
     unreadable = [poll for poll in observations if poll['state'] != 'ok']
     known = [poll for poll in observations if poll['stale'] is not None]
+    resumed = [poll for poll in observations if poll['cronSuspend'] is not True]
     last_polls = '; '.join(poll_line(poll) for poll in observations[-4:])
     reached = observations[-1]['stale'] is True
-    if reached:
+    if resumed:
+        first = resumed[0]
+        report.fail('the suspended CronJob stays suspended while the Flux Kustomization is',
+                    'spec.suspend=%s at t+%.0fs, written by %s; %s'
+                    % ('unknown' if first['cronSuspend'] is None
+                       else str(first['cronSuspend']).lower(), first['elapsedSeconds'],
+                       ', '.join(first['managers']) or 'no manager names the field',
+                       last_polls))
+        reached = False
+    elif reached:
         report.pass_('the API adds the evictor line once its last run is older than two intervals',
                      'stale=true at t+%.0fs after %d poll(s), %d with no answer; %s'
                      % (observations[-1]['elapsedSeconds'], polls, len(unreadable), last_polls))
@@ -1323,6 +1508,11 @@ def suspend_case(report, options, loader, cluster):
         report.fail('the evictor is resumed', 'the patch was refused')
         return reached
     report.pass_('the evictor is resumed', 'CronJob %s suspend=false' % options.cronjob)
+    if not set_kustomization_suspend(cluster, options, False):
+        report.fail('the Flux Kustomization is resumed', 'the patch was refused')
+        return reached
+    report.pass_('the Flux Kustomization is resumed',
+                 '%s/%s spec.suspend=false' % (options.flux_namespace, options.kustomization))
 
     def fresh():
         return evictor_stale_of(loader.logs_status(*window())) is False
@@ -1629,7 +1819,7 @@ def run(report, options, loader, cluster, store, volume, state):
     # After the writer's lines are counted: the fill removes whole days through
     # the evictor, and those days are evidence the counting above needs.
     read_only_case(report, options, loader, cluster, store, volume)
-    suspend_case(report, options, loader, cluster)
+    suspend_case(report, options, loader, cluster, state)
     return True
 
 
@@ -1637,6 +1827,8 @@ def restore(report, options, loader, cluster, store, volume, state):
     """Restore the CronJob, delete the walk's pods and namespace, free its days."""
     restored = True
     restored = set_suspend(cluster, options, False) and restored
+    if state.get('flux_suspended'):
+        restored = set_kustomization_suspend(cluster, options, False) and restored
     for namespace, name in ((options.namespace, 'walk-evict-rm'),
                             (options.writer_namespace, 'walk-evict-writer')):
         try:
@@ -1675,22 +1867,26 @@ def restore(report, options, loader, cluster, store, volume, state):
             restored = False
     total, avail = volume.space()
     remaining = [day for day in volume.partitions() if day != day_of(now_ms())]
-    print('RESTORE evictor suspend=false, walk pods deleted%s, no filler on %s, %.2f GiB free '
+    print('RESTORE evictor suspend=false, Flux Kustomization %s/%s suspend=false, walk pods '
+          'deleted%s, no filler on %s, %.2f GiB free '
           'on %s, day partitions other than today: %s (today\'s records stay%s)'
-          % (', the walk\'s namespace deleted' if state.get('created_namespace') else '',
+          % (options.flux_namespace, options.kustomization,
+             ', the walk\'s namespace deleted' if state.get('created_namespace') else '',
              options.pv_path, avail / GIB, options.mount,
              ', '.join(remaining) if remaining else 'none',
              '; the stranded-days annotation keeps its ledger, including a day the case '
              'stranded' if state.get('stranded_day') else ''))
     if not restored:
-        print('RESTORE incomplete: check CronJob %s and the walk\'s pods by hand'
-              % options.cronjob)
+        print('RESTORE incomplete: check CronJob %s, Flux Kustomization %s/%s and the walk\'s '
+              'pods by hand' % (options.cronjob, options.flux_namespace, options.kustomization))
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='WALK-LOGS-EVICT (ADR-016 L16)')
     common_arguments(parser)
     parser.add_argument('--cronjob', default='logs-evictor')
+    parser.add_argument('--kustomization', default='platform-logs-store')
+    parser.add_argument('--flux-namespace', default='flux-system')
     parser.add_argument('--writer-namespace', default='lifemodel-logs-walk')
     parser.add_argument('--flood-seconds', type=int, default=300)
     parser.add_argument('--fill-bound', type=int, default=900)
@@ -1699,6 +1895,7 @@ def main(argv=None):
     parser.add_argument('--settle-seconds', type=int, default=120)
     parser.add_argument('--tail-bound', type=int, default=240)
     parser.add_argument('--stranded-bound', type=int, default=600)
+    parser.add_argument('--flush-bound', type=int, default=120)
     parser.add_argument('--writer-interval-ms', type=int, default=50)
     parser.add_argument('--quiet-seconds', type=int, default=150)
     parser.add_argument('--run-sample-seconds', type=int, default=10)

@@ -246,6 +246,8 @@ class FakeCluster:
         self.cronjob_times = fixture.get('cronjobTimes') or []
         self.cronjob_active = fixture.get('cronjobActive') or []
         self.cronjob_failures = fixture.get('cronjobFailures') or []
+        self.cronjob_suspend = fixture.get('cronjobSuspend') or []
+        self.cronjob_managers = fixture.get('cronjobManagers') or []
         self.cronjob_reads = 0
         # The logs-store Deployment's annotation maps and its pod, per read: the
         # stranded-day case counts both.
@@ -322,7 +324,8 @@ class FakeCluster:
             return {'items': self.pods(None)}
         if 'cronjob' in args:
             reads = max(len(self.cronjob_times), len(self.cronjob_active),
-                        len(self.cronjob_failures))
+                        len(self.cronjob_failures), len(self.cronjob_suspend),
+                        len(self.cronjob_managers))
             if reads == 0:
                 return None
             index = min(self.cronjob_reads, reads - 1)
@@ -336,7 +339,16 @@ class FakeCluster:
                     min(index, len(self.cronjob_times) - 1)]
             if self.cronjob_active:
                 status['active'] = self.cronjob_active[min(index, len(self.cronjob_active) - 1)]
-            return {'status': status}
+            body = {'status': status}
+            if self.cronjob_suspend:
+                body['spec'] = {'suspend': self.cronjob_suspend[
+                    min(index, len(self.cronjob_suspend) - 1)]}
+            if self.cronjob_managers:
+                managers = self.cronjob_managers[min(index, len(self.cronjob_managers) - 1)]
+                body['metadata'] = {'managedFields': [
+                    {'manager': manager, 'fieldsV1': {'f:spec': {'f:suspend': {}}}}
+                    for manager in managers]}
+            return body
         if 'jobs' in args:
             return {'items': json.loads(json.dumps(self.jobs))}
         return None
@@ -413,7 +425,9 @@ def options(**values):
         quiet_seconds=0, suspend_seconds=1, scratch_days_back=20,
         recover_bound=5, settle_seconds=0, cronjob='logs-evictor', writer_rate=5,
         run_sample_seconds=1, evictor_bound=5, read_only_bound=5, suspend_poll_seconds=1,
-        peak_bytes=0, index_poll=1, query_count=40, limit_ms=2500, page_limit=250,
+        flush_bound=5, kustomization='platform-logs-store', flux_namespace='flux-system',
+        poll_seconds=1, peak_bytes=0, index_poll=1, query_count=40, limit_ms=2500,
+        page_limit=250,
         filter_records=60,
         same_time_records=4, identical_records=2, window_minutes=60,
         ingest_mib_per_s=1, paging_minutes_back=3, keep_mib=0,
@@ -837,7 +851,8 @@ def evict_tail(base, first_sequence, first_offset=7000, count=EVICT_TAIL_LINES):
             for index in range(count)]
 
 
-def evict_writer_mode(walk, written, found, drops, logged_at, started=None, ended=None):
+def evict_writer_mode(walk, written, found, drops, logged_at, started=None, ended=None,
+                      counts=None):
     """Drive `collect_writer` with a fake node: the writer's log, its rows, the drops.
 
     `logged_at` is faked as the current time, so the tail's span is the fixture's
@@ -853,7 +868,10 @@ def evict_writer_mode(walk, written, found, drops, logged_at, started=None, ende
                                             'reason': 'below_threshold'}),
                      'fields': {'module': 'logs-evictor'}}
                     for drop in drops]
+    # The counts settle the flush wait, then the page and the evictor's lines.
+    counted = counts if counts is not None else [len(records)] * 3
     loader = FakeLoader({'logAnswers': [
+        *[{'state': 'ok', 'count': count, 'records': []} for count in counted],
         {'state': 'ok', 'count': len(records), 'records': records},
         {'state': 'ok', 'count': len(drop_records), 'records': drop_records},
     ]})
@@ -923,6 +941,68 @@ def evict_writer_late_drop(walk, fixture):
     found = {3} | {sequence for sequence, _moment in tail}
     drops = [{'time': base + 4000, 'day': walk.day_of(base + 1000)}]
     return evict_writer_mode(walk, written, found, drops, base + 300_000, ended=base + 3500)
+
+
+@mode('evict-writer-missing')
+def evict_writer_missing(walk, fixture):
+    """Lines missing from the middle of the tail stay a FAIL, with their ranges."""
+    base = evict_base()
+    tail = evict_tail(base, 6)
+    missing = {sequence for sequence, _moment in tail[60:76]}
+    found = {3, 4} | {sequence for sequence, _moment in tail if sequence not in missing}
+    written = [(1, base + 1000), (2, base + 2000), (3, base + 3000), (4, base + 4000)] + tail
+    drops = [{'time': base + 4500, 'day': walk.day_of(base + 2000)}]
+    return evict_writer_mode(walk, written, found, drops, base + 300_000)
+
+
+@mode('evict-writer-flush-late')
+def evict_writer_flush_late(walk, fixture):
+    """The store's count settles late: the walk waits for it and then passes."""
+    base = evict_base()
+    tail = evict_tail(base, 4, first_offset=5000)
+    written = [(1, base + 1000), (2, base + 2000), (3, base + 3000)] + tail
+    found = {3} | {sequence for sequence, _moment in tail}
+    drops = [{'time': base + 4000, 'day': walk.day_of(base + 1000)}]
+    counts = [100, len(found), len(found), len(found)]
+    return evict_writer_mode(walk, written, found, drops, base + 300_000,
+                             ended=base + 3500, counts=counts)
+
+
+@mode('evict-oldest-in-day')
+def evict_oldest_in_day(walk, fixture):
+    """The oldest row was inside the dropped day and the oldest moves forward."""
+    report = walk.Report()
+    base = evict_base()
+    result = {'oldestBefore': base + 2000, 'oldest': [base + 50_000]}
+    walk.check_oldest_moved(report, result, [{'day': walk.day_of(base + 2000)}])
+    return report
+
+
+@mode('evict-oldest-later')
+def evict_oldest_later(walk, fixture):
+    """The oldest row was in no dropped day: a NOTE, not a failure."""
+    report = walk.Report()
+    base = evict_base()
+    result = {'oldestBefore': base + 2000, 'oldest': [base + 2000]}
+    walk.check_oldest_moved(report, result, [{'day': walk.day_of(base - 86_400_000)}])
+    return report
+
+
+@mode('evict-suspend-reapplied')
+def evict_suspend_reapplied(walk, fixture):
+    """kustomize-controller put `suspend: false` back: its own FAIL, naming who did it."""
+    report = walk.Report()
+    first = walk.stamp(walk.now_ms() - 5_000)
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', evictor_stale=False),
+        status_answer('live', evictor_stale=False),
+    ]})
+    cluster = FakeCluster({'patchScript': [0, 0, 0, 0], 'cronjobTimes': [first],
+                           'cronjobSuspend': [True, True, False],
+                           'cronjobManagers': [[], [], ['kustomize-controller']]})
+    walk.suspend_case(report, evict_suspend_options(), loader, cluster, {})
+    print('PATCHES ' + json.dumps(cluster.patches))
+    return report
 
 
 @mode('evict-quiet')
@@ -1184,9 +1264,10 @@ def evict_suspend(walk, fixture):
         status_answer('live', evictor_stale=True),
         status_answer('live', evictor_stale=False),
     ]})
-    cluster = FakeCluster({'patchScript': [0, 0],
-                           'cronjobTimes': [walk.stamp(walk.now_ms() - 30_000)]})
-    walk.suspend_case(report, options(evictor_bound=1, suspend_seconds=1), loader, cluster)
+    cluster = FakeCluster({'patchScript': [0, 0, 0, 0],
+                           'cronjobTimes': [walk.stamp(walk.now_ms() - 30_000)],
+                           'cronjobSuspend': [True]})
+    walk.suspend_case(report, options(evictor_bound=1, suspend_seconds=1), loader, cluster, {})
     print('PATCHES ' + json.dumps(cluster.patches))
     return report
 
@@ -1197,7 +1278,7 @@ def evict_suspend_stale(walk, fixture):
     report = walk.Report()
     loader = FakeLoader({'statusAnswers': [status_answer('live', evictor_stale=True)]})
     walk.suspend_case(report, options(evictor_bound=1, suspend_seconds=1), loader,
-                      FakeCluster({'patchScript': [0, 0]}))
+                      FakeCluster({'patchScript': [0, 0, 0, 0]}), {})
     return report
 
 
@@ -1323,8 +1404,9 @@ def evict_suspend_unavailable_first(walk, fixture):
         # The resume's own poll: the next run made the line go away.
         status_answer('live', evictor_stale=False),
     ]})
-    cluster = FakeCluster({'patchScript': [0, 0], 'cronjobTimes': [first]})
-    walk.suspend_case(report, evict_suspend_options(), loader, cluster)
+    cluster = FakeCluster({'patchScript': [0, 0, 0, 0], 'cronjobTimes': [first],
+                           'cronjobSuspend': [True]})
+    walk.suspend_case(report, evict_suspend_options(), loader, cluster, {})
     print('POLLS ' + json.dumps(loader.status_calls))
     return report
 
@@ -1342,8 +1424,9 @@ def evict_suspend_unavailable_all(walk, fixture):
         # not-valid case of the line rather than a wrong-line failure.
         status_answer('live', evictor_stale=False),
     ]})
-    cluster = FakeCluster({'patchScript': [0, 0], 'cronjobTimes': [first]})
-    walk.suspend_case(report, evict_suspend_options(suspend_seconds=0.5), loader, cluster)
+    cluster = FakeCluster({'patchScript': [0, 0, 0, 0], 'cronjobTimes': [first],
+                           'cronjobSuspend': [True]})
+    walk.suspend_case(report, evict_suspend_options(suspend_seconds=0.5), loader, cluster, {})
     return report
 
 
@@ -1366,11 +1449,12 @@ def evict_suspend_running_job(walk, fixture):
         status_answer('live', evictor_stale=False),
     ]})
     cluster = FakeCluster({
-        'patchScript': [0, 0],
+        'patchScript': [0, 0, 0, 0],
         'cronjobTimes': [walk.stamp(now - 300_000), walk.stamp(now - 2_000)],
         'cronjobActive': [['logs-evictor-29000000'], []],
+        'cronjobSuspend': [True],
     })
-    walk.suspend_case(report, evict_suspend_options(), loader, cluster)
+    walk.suspend_case(report, evict_suspend_options(), loader, cluster, {})
     return report
 
 
@@ -1386,8 +1470,9 @@ def evict_suspend_never(walk, fixture):
         status_answer('live', evictor_stale=False),
         status_answer('live', evictor_stale=False),
     ]})
-    cluster = FakeCluster({'patchScript': [0, 0], 'cronjobTimes': [first]})
-    walk.suspend_case(report, evict_suspend_options(), loader, cluster)
+    cluster = FakeCluster({'patchScript': [0, 0, 0, 0], 'cronjobTimes': [first],
+                           'cronjobSuspend': [True]})
+    walk.suspend_case(report, evict_suspend_options(), loader, cluster, {})
     return report
 
 
