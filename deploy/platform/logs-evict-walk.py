@@ -216,9 +216,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from logs_walk_support import (  # noqa: E402
+    RECORD_PAYLOAD_BYTES,
     Cluster,
     Loader,
-    MARGIN_SHARE,
     Report,
     Volume,
     WalkError,
@@ -228,6 +228,9 @@ from logs_walk_support import (  # noqa: E402
     day_bounds,
     day_of,
     days_of,
+    refusal_windows,
+    threshold_bytes,
+    write_burst,
     fill_volume,
     margin_bytes,
     now_ms,
@@ -247,7 +250,6 @@ from logs_walk_support import (  # noqa: E402
 
 MIB = 1024 * 1024
 GIB = 1024 * MIB
-HEADROOM_BYTES = 768 * MIB
 EVICTION_INTERVAL_MS = 60_000
 EVICTOR_STALE_MS = 120_000
 # The loader reads the CronJob afresh per request, but the controller writes
@@ -260,7 +262,6 @@ REMOVER_MODULE = 'walk-evict-rm'
 FLOOD_MODULE = 'walk-evict'
 PARTITION_KEY_SECRET = 'lifemodel-logs-partition-key'
 WRITER_LINE = re.compile(r'walk-evict (\S+) seq=(\d+) t=(\d+)')
-RECORD_PAYLOAD_BYTES = 384
 BATCH_LINES = 2000
 # The tail after the last drop: at least two eviction intervals of lines, and at
 # least this many of them (10 s of the writer's 50 ms interval).
@@ -273,29 +274,6 @@ WRITER_SCRIPT = (
     "seq+=1;process.stdout.write('walk-evict '+run+' seq='+seq+' t='+Date.now()+' level=info\\n');"
     "},interval);"
 )
-
-
-def threshold_bytes(total_bytes):
-    """The evictor's threshold: the store's margin plus one minute of flood (ADR-016 §5)."""
-    return int(math.ceil(total_bytes * MARGIN_SHARE)) + HEADROOM_BYTES
-
-
-def refusal_windows(samples):
-    """Consecutive 429 answers as windows, in seconds, from (moment, status) samples."""
-    windows = []
-    opened = None
-    for moment, status in samples:
-        if status == 429 and opened is None:
-            opened = moment
-        elif status != 429 and opened is not None:
-            windows.append({'start': opened, 'end': moment,
-                            'seconds': max(0.0, (moment - opened) / 1000.0)})
-            opened = None
-    if opened is not None:
-        last = samples[-1][0] if samples else opened
-        windows.append({'start': opened, 'end': last,
-                        'seconds': max(0.0, (last - opened) / 1000.0)})
-    return windows
 
 
 def longest_gap(entries):
@@ -526,36 +504,6 @@ def evictor_stale_of(answer):
 def window(minutes=60):
     """The API status read's own range: the last `minutes`, named as the walk reads it."""
     return status_window(minutes * 60)
-
-
-def payload():
-    return base64.b64encode(os.urandom(RECORD_PAYLOAD_BYTES)).decode('ascii')
-
-
-def flood_batch(count, moment_ms, run_id, kind):
-    moment = stamp(moment_ms)
-    lines = []
-    for sequence in range(count):
-        lines.append({
-            'timestamp': moment,
-            'message': '%s %s %06d %s' % (run_id, kind, sequence, payload()),
-            'module': FLOOD_MODULE,
-            'namespace': 'walk',
-            'pod': 'walk-evict',
-            'container': 'walk',
-            'stream': 'stdout',
-            'level': 'info',
-            'untrusted': False,
-        })
-    return lines
-
-
-def write_burst(store, moment_ms, run_id, mib, kind):
-    """One insert of incompressible records; returns (status, lines)."""
-    count = max(1, int(mib * MIB) // (RECORD_PAYLOAD_BYTES + 220))
-    lines = flood_batch(count, moment_ms, run_id, kind)
-    status, _body = store.insert(lines)
-    return status, len(lines)
 
 
 def oldest_record_ms(store):

@@ -24,6 +24,7 @@ export const STAGE2_WALKS: readonly Walk[] = [
   { path: 'deploy/platform/logs-latency-walk.py', id: 'WALK-LOGS-LATENCY', browser: false },
   { path: 'deploy/platform/logs-failure-walk.py', id: 'WALK-LOGS-FAILURE', browser: false },
   { path: 'deploy/platform/logs-crash-walk.py', id: 'WALK-LOGS-CRASH', browser: false },
+  { path: 'deploy/platform/logs-volume-flood-walk.py', id: 'WALK-LOGS-VOLUME', browser: false },
   { path: 'deploy/platform/logs-page-walk.mjs', id: 'WALK-LOGS-PAGE', browser: true },
 ];
 

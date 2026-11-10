@@ -768,6 +768,64 @@ class Volume:
             return not os.path.exists(self.filler_dir)
 
 
+RECORD_PAYLOAD_BYTES = 384
+HEADROOM_BYTES = 768 * MIB
+
+
+def threshold_bytes(total_bytes):
+    """The evictor's threshold: the store's margin plus one minute of flood (ADR-016 §5)."""
+    import math
+    return int(math.ceil(total_bytes * MARGIN_SHARE)) + HEADROOM_BYTES
+
+
+def flood_batch(count, moment_ms, run_id, kind, module='walk-flood'):
+    """Incompressible records for one insert, shaped like the collector's own."""
+    import base64
+    import os
+    moment = stamp(moment_ms)
+    lines = []
+    for sequence in range(count):
+        lines.append({
+            'timestamp': moment,
+            'message': '%s %s %06d %s' % (run_id, kind, sequence,
+                                          base64.b64encode(os.urandom(RECORD_PAYLOAD_BYTES))
+                                          .decode('ascii')),
+            'module': module,
+            'namespace': 'walk',
+            'pod': 'walk-flood',
+            'container': 'walk',
+            'stream': 'stdout',
+            'level': 'info',
+            'untrusted': False,
+        })
+    return lines
+
+
+def write_burst(store, moment_ms, run_id, mib, kind, module='walk-flood'):
+    """One insert of incompressible records; returns (status, line count)."""
+    count = max(1, int(mib * MIB) // (RECORD_PAYLOAD_BYTES + 220))
+    status, _body = store.insert(flood_batch(count, moment_ms, run_id, kind, module))
+    return status, count
+
+
+def refusal_windows(samples):
+    """Consecutive 429 answers as windows, in seconds, from (moment, status) samples."""
+    windows = []
+    opened = None
+    for moment, status in samples:
+        if status == 429 and opened is None:
+            opened = moment
+        elif status != 429 and opened is not None:
+            windows.append({'start': opened, 'end': moment,
+                            'seconds': max(0.0, (moment - opened) / 1000.0)})
+            opened = None
+    if opened is not None:
+        last = samples[-1][0] if samples else opened
+        windows.append({'start': opened, 'end': last,
+                        'seconds': max(0.0, (last - opened) / 1000.0)})
+    return windows
+
+
 def window(seconds=3600):
     """The last `seconds` for a status read: the page's own cheap page range."""
     end = now_ms()
