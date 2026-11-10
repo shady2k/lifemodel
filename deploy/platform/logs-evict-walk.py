@@ -41,6 +41,15 @@ What it proves
    run` while the CronJob's last success is recent, and once the filler is
    removed writes are accepted again. The flood no longer reaches this state by
    itself when the evictor works, so the state is produced rather than awaited.
+   The verdict is a known one: the status and the CronJob are polled up to the
+   bound until `evictor.stale` is a boolean and the CronJob read answered, and
+   the polls with no value are reported; no known value at all within the bound
+   is its own result, not a blamed evictor. The page is then judged against the
+   evictor's real state at the poll: a last success within two intervals of the
+   answer must leave the line out, and an older one must add it together with
+   the failing run's own reason - with the filler in, the volume holds something
+   the evictor cannot remove, so its runs end `no_partition` (ADR-016 §5) and the
+   page is right to name it.
 6. The numbered lines of a real writer pod are counted per window through the
    API: written, found, dropped with its day and lost. The store partitions by
    `_time`'s day (ADR-016 §3) and the evictor removes a whole day, today's only
@@ -48,8 +57,17 @@ What it proves
    expected lost with that day, whichever window wrote it. A line in a day that
    was never dropped must be found, except one acknowledged inside a
    detach-to-remove window (the rows lost between detach and `rm`). Only a line
-   lost outside both is a failure. The longest gap of accepted new lines is
-   stated in seconds.
+   lost outside both is a failure. The drops are collected from the flood's
+   start up to the moment the lines are counted and frozen there, so a drop
+   after the flood window - today's day, removed by the next run when the
+   volume sat at the threshold, as a run across midnight does - is part of the
+   accounting too. The writer pod keeps writing past the flood, and the walk
+   waits (--tail-bound) until two eviction intervals have passed since the last
+   drop it sees, so the lines after that drop exist: every one of them must be
+   found (not lost, not dropped), there must be at least 200 of them, and the
+   longest gap of accepted new lines is stated from them. A run with no line
+   after the last drop, or no drop at all, is TEST NOT VALID with the reason,
+   never a pass.
 7. The evictor suspended (`suspend: true` on the CronJob) for two minutes: the
    line is absent while it runs, the API's status adds `the log evictor is
    failing or has not run` once its last success is older than two intervals,
@@ -90,6 +108,10 @@ Arguments (defaults are the test VM's)
   --settle-seconds N     how long the collector and the store may take to settle
                          after the flood before the writer's lines are counted
                          (default 120)
+  --tail-bound N         bound on waiting for two eviction intervals after the
+                         last drop before the writer's lines are counted; the
+                         writer pod keeps writing for the whole wait
+                         (default 240 s)
   --writer-interval-ms N the writer pod's line interval (default 50)
   --quiet-seconds N      the quiet window below the threshold (default 150)
   --run-sample-seconds N how often the CronJob's last successful run is read in
@@ -99,7 +121,8 @@ Arguments (defaults are the test VM's)
                          60 s) to finish and two intervals to pass after that
                          (default 360)
   --suspend-poll-seconds N  how often the status and the CronJob are read while
-                         the evictor is suspended (default 10)
+                         the evictor is suspended or its read-only verdict is
+                         settling (default 10)
   --evictor-bound N      bound on the evictor having a recent successful run
                          before the read-only state is produced (default 180)
   --fill-timeout N       bound on filling the volume below the store's margin
@@ -107,7 +130,8 @@ Arguments (defaults are the test VM's)
   --refuse-bound N       bound on the store refusing a write after the fill
                          (default 30)
   --read-only-bound N    bound on the API saying the store is read-only after
-                         the refusal (default 180)
+                         the refusal, and on a known evictor state while it is
+                         (default 180)
   --scratch-days-back N  the day of the partition the job-shaped pod removes;
                          it is inside the retention period, so the store accepts
                          the records and does not age them out (default 3)
@@ -200,6 +224,9 @@ PARTITION_KEY_SECRET = 'lifemodel-logs-partition-key'
 WRITER_LINE = re.compile(r'walk-evict (\S+) seq=(\d+) t=(\d+)')
 RECORD_PAYLOAD_BYTES = 384
 BATCH_LINES = 2000
+# The tail after the last drop: at least two eviction intervals of lines, and at
+# least this many of them (10 s of the writer's 50 ms interval).
+TAIL_MIN_LINES = 200
 
 WRITER_SCRIPT = (
     "const run=process.argv[1],seconds=Number(process.argv[2]),interval=Number(process.argv[3]);"
@@ -304,13 +331,71 @@ def dropped_with_its_day(written, found, found_times, drops):
     return dropped
 
 
+def collected_drops(loader, result):
+    """Every drop the evictor logged from the flood's start to now, one per line.
+
+    The evictor removes a whole day, today's only when nothing older is left
+    (ADR-016 §5), so a run that crosses midnight can have its only flood-window
+    drop name one day and the next run remove today's day - the one that held
+    every writer line - after the flood window. The day accounting needs every
+    drop up to the moment the lines are counted, not only those the flood saw.
+    """
+    drops = list(result['drops'])
+    seen = {(drop['time'], drop['day']) for drop in drops}
+    for record in evictor_records(loader, result['started']):
+        line = drop_line(record)
+        if line is None or (line['time'], line['day']) in seen:
+            continue
+        seen.add((line['time'], line['day']))
+        drops.append(line)
+    drops.sort(key=lambda drop: drop['time'])
+    return drops
+
+
+def wait_past_last_drop(report, options, loader, result):
+    """Wait until two eviction intervals have passed since the last drop seen.
+
+    The writer pod keeps writing for the whole walk (writer_seconds), so lines
+    exist after the last drop even when today's partition is removed after the
+    flood window; the walk waits for them, bounded by --tail-bound, and a drop
+    seen during the wait restarts the two intervals.
+    """
+    drops = collected_drops(loader, result)
+    if not drops:
+        report.note('the evictor logged no drop: there is no tail to wait for')
+        return drops
+    started = time.monotonic()
+    deadline = started + options.tail_bound
+    while now_ms() - drops[-1]['time'] < 2 * EVICTION_INTERVAL_MS:
+        if time.monotonic() >= deadline:
+            report.note('the wait for two intervals after the last drop ended at its bound '
+                        '(%d s), the last drop being %s at %s'
+                        % (options.tail_bound, drops[-1]['day'], stamp(drops[-1]['time'])))
+            break
+        time.sleep(max(1, options.poll_seconds))
+        drops = collected_drops(loader, result)
+    else:
+        report.pass_('the writer keeps storing for two intervals after the last drop',
+                     '%s at %s, %.0f s before the count'
+                     % (drops[-1]['day'], stamp(drops[-1]['time']),
+                        (now_ms() - drops[-1]['time']) / 1000.0))
+    return drops
+
+
 def evictor_stale(last_success_ms, now, stale_ms=EVICTOR_STALE_MS):
     return last_success_ms is None or now - last_success_ms > stale_ms
 
 
 def partition_refused(status, body):
-    """The store's own refusal text when no `authKey` is sent (ADR-016 §5)."""
-    return status != 200 and 'authkey' in (body or '').lower()
+    """The store's own refusal when no `authKey` is sent (ADR-016 §5).
+
+    The key now travels in a form body (a POST), so the refusal proves the
+    store requires the key at all rather than naming the URL form it used to
+    read. The pinned store answered 400 with `Expected to receive non-empty
+    authKey ...`; 401 is how `CheckAuthFlag` refuses a missing key in some
+    versions, so both are a refusal here, and the walk prints the status it got.
+    """
+    return status in (400, 401) and 'authkey' in (body or '').lower()
 
 
 def shorter_than_two_intervals(seconds):
@@ -403,6 +488,29 @@ def drop_line(record):
             'reason': body.get('reason')}
 
 
+def failure_line_of(record):
+    """One evictor failure line's time and reason, or None for any other line."""
+    try:
+        body = json.loads(record.get('message') or '')
+    except ValueError:
+        return None
+    if not isinstance(body, dict) or body.get('msg') != 'the log evictor removed nothing':
+        return None
+    return {'time': parse_ms(record.get('time')), 'reason': body.get('reason')}
+
+
+def latest_evictor_failure(loader, since_ms):
+    """The evictor's newest failure line at or after `since_ms`, or None."""
+    newest = None
+    for record in evictor_records(loader, since_ms):
+        failure = failure_line_of(record)
+        if failure is None or failure['time'] is None:
+            continue
+        if newest is None or failure['time'] > newest['time']:
+            newest = failure
+    return newest
+
+
 def collector_ready(cluster, options):
     """The collector's DaemonSet readiness: the numbered lines arrive through it."""
     body = cluster.json(['-n', options.collector_namespace, 'get', 'daemonset',
@@ -474,6 +582,8 @@ def poll_line(poll):
     parts.append('api last=%s' % (stamp(poll['apiLast']) if poll['apiLast'] else 'none'))
     parts.append('CronJob last=%s' % (stamp(poll['cronLast']) if poll['cronLast'] else 'none'))
     parts.append('active=%s' % active)
+    parts.append('readOnly=%s' % ('unknown' if poll['readOnly'] is None
+                                 else str(poll['readOnly']).lower()))
     return ' '.join(parts)
 
 
@@ -490,6 +600,23 @@ def staleness_due_ms(last_success_ms, now, active, cron_known=True):
     return last_success_ms + EVICTOR_STALE_MS + STALE_SLACK_MS - now
 
 
+def poll_evictor_state(loader, cluster, options, started):
+    """One status and CronJob read, kept whole: the answer and the object beside it."""
+    answer = loader.logs_status(*window())
+    cron = cronjob_state(cluster, options)
+    return {
+        'elapsedSeconds': time.monotonic() - started,
+        'state': answer.get('state') or 'unreadable',
+        'reason': answer.get('reason') or '',
+        'stale': evictor_stale_of(answer),
+        'apiLast': evictor_last_success_of(answer),
+        'cronLast': cron['lastSuccess'],
+        'cronKnown': cron['known'],
+        'active': cron['active'],
+        'readOnly': read_only_of(answer),
+    }
+
+
 def watch_suspension(loader, cluster, options):
     """Poll the status and the CronJob until the line appears, it is due, or the bound.
 
@@ -501,29 +628,40 @@ def watch_suspension(loader, cluster, options):
     hard_deadline = started + options.suspend_seconds
     last_seen = None
     while True:
-        answer = loader.logs_status(*window())
-        cron = cronjob_state(cluster, options)
-        api_last = evictor_last_success_of(answer)
-        seen = [moment for moment in (api_last, cron['lastSuccess']) if moment is not None]
+        poll = poll_evictor_state(loader, cluster, options, started)
+        seen = [moment for moment in (poll['apiLast'], poll['cronLast']) if moment is not None]
         if seen:
             last_seen = max(seen) if last_seen is None else max(last_seen, max(seen))
-        poll = {
-            'elapsedSeconds': time.monotonic() - started,
-            'state': answer.get('state') or 'unreadable',
-            'reason': answer.get('reason') or '',
-            'stale': evictor_stale_of(answer),
-            'apiLast': api_last,
-            'cronLast': cron['lastSuccess'],
-            'cronKnown': cron['known'],
-            'active': cron['active'],
-        }
         observations.append(poll)
         if poll['stale'] is True:
             break
-        due = staleness_due_ms(last_seen, now_ms(), cron['active'], cron['known'])
+        due = staleness_due_ms(last_seen, now_ms(), poll['active'], poll['cronKnown'])
         if due is not None and due <= 0:
             break
         if time.monotonic() >= hard_deadline:
+            break
+        time.sleep(max(0.2, options.suspend_poll_seconds))
+    return observations
+
+
+def watch_evictor_verdict(loader, cluster, options):
+    """Poll the status and the CronJob until both give a known evictor state.
+
+    The store at its margin sits on the node's root disk, so both the API server
+    and the loader can be slow at that moment: a failed CronJob read is
+    `evictor.stale: null` by design (ADR-016 §5), and kubectl can fail too. The
+    case judges only a known value and keeps every poll, so a run with none says
+    so instead of blaming an evictor it never heard about.
+    """
+    observations = []
+    started = time.monotonic()
+    deadline = started + options.read_only_bound
+    while True:
+        poll = poll_evictor_state(loader, cluster, options, started)
+        observations.append(poll)
+        if poll['stale'] is not None and poll['cronKnown']:
+            break
+        if time.monotonic() >= deadline:
             break
         time.sleep(max(0.2, options.suspend_poll_seconds))
     return observations
@@ -594,6 +732,17 @@ def ensure_namespace(report, cluster, options, state):
     return True
 
 
+def writer_seconds(options):
+    """How long the writer pod writes: the whole walk, past the tail's end.
+
+    The pod is deleted with the walk's namespace, so this only has to outlast
+    the fill, the flood, the settle and the wait for two intervals after the
+    last drop - today's partition can be removed after the flood window.
+    """
+    return (options.fill_bound + options.flood_seconds + options.settle_seconds
+            + options.tail_bound + 2 * EVICTION_INTERVAL_MS // 1000 + 120)
+
+
 def writer_manifest(image, options, run_id):
     return {
         'apiVersion': 'v1',
@@ -609,7 +758,7 @@ def writer_manifest(image, options, run_id):
                 'name': 'writer',
                 'image': image,
                 'command': ['node', '-e', WRITER_SCRIPT, run_id,
-                            str(options.flood_seconds + 180),
+                            str(writer_seconds(options)),
                             str(options.writer_interval_ms)],
                 'securityContext': {'readOnlyRootFilesystem': True,
                                     'allowPrivilegeEscalation': False,
@@ -920,14 +1069,49 @@ def read_only_case(report, options, loader, cluster, store, volume):
                                'the API says the store is refusing writes (read-only)',
                                options.read_only_bound, avail):
             return False
-        answer = loader.logs_status(*window())
-        stale = evictor_stale_of(answer)
-        last = cronjob_last_success(cluster, options)
-        report.check(stale is False and last is not None and not evictor_stale(last, now_ms()),
-                     'the page shows read-only without blaming the evictor while its last run '
-                     'is recent',
-                     'storeReadOnly=true, evictor.stale=%s, last success %s'
-                     % (stale, stamp(last) if last else 'never'))
+        observations = watch_evictor_verdict(loader, cluster, options)
+        polls = len(observations)
+        unknown = [poll for poll in observations
+                   if poll['stale'] is None or not poll['cronKnown']]
+        last = observations[-1]
+        last_polls = '; '.join(poll_line(poll) for poll in observations[-4:])
+        if last['stale'] is None or not last['cronKnown']:
+            report.fail('the API and the CronJob both answer the evictor\'s state while the '
+                        'store is read-only',
+                        'no poll in %d carried both a staleness and the CronJob\'s own last '
+                        'success: %s' % (polls, last_polls))
+            report.not_valid('no poll carried a known evictor state within %d s: the read-only '
+                             'line cannot be told apart from a failing evictor'
+                             % options.read_only_bound)
+        else:
+            # The page is judged against the evictor's real state at the poll: a
+            # recent success must not be blamed, and an old one must be, with the
+            # failing run's own reason (ADR-016 §5: with the filler in, the
+            # volume holds something the evictor cannot remove, so its runs end
+            # `no_partition` and the page is right to name it).
+            age = (now_ms() - last['cronLast']) / 1000.0 if last['cronLast'] else None
+            detail = ('storeReadOnly=%s, evictor.stale=%s, API last success %s, CronJob last '
+                      'success %s (%.0f s before the poll); %d poll(s), %d without a known value'
+                      % (str(last['readOnly']).lower(), str(last['stale']).lower(),
+                         stamp(last['apiLast']) if last['apiLast'] else 'none',
+                         stamp(last['cronLast']) if last['cronLast'] else 'never',
+                         age if age is not None else -1.0, polls, len(unknown)))
+            if age is not None and age * 1000 <= EVICTOR_STALE_MS:
+                report.check(
+                    last['stale'] is False and last['readOnly'] is True,
+                    'the page shows read-only without blaming the evictor: its last run is '
+                    'recent', detail)
+            else:
+                failure = latest_evictor_failure(
+                    loader, last['cronLast'] if last['cronLast'] else window()[0])
+                reason = failure['reason'] if failure else 'none'
+                report.check(
+                    last['stale'] is True and last['readOnly'] is True
+                    and reason == 'no_partition',
+                    'the page names the evictor only because its last success is older than two '
+                    'intervals, and the run says why',
+                    detail + ', latest failure reason %s at %s'
+                    % (reason, stamp(failure['time']) if failure else 'none'))
         return True
     finally:
         if not volume.clear_filler():
@@ -944,9 +1128,12 @@ def read_only_case(report, options, loader, cluster, store, volume):
 
 
 def collect_writer(report, options, loader, cluster, run_id, result, state):
-    """The writer's numbered lines, per window, and the longest gap."""
+    """The writer's numbered lines, per window, the tail after the last drop and its gap."""
     pod = 'walk-evict-writer'
     log = pod_log(cluster, options.writer_namespace, pod)
+    # The lines are counted up to the moment their log was read; a line written
+    # after that is not in the log and not in any window.
+    logged_at = now_ms()
     written = []
     for line in log.splitlines():
         match = WRITER_LINE.search(line)
@@ -982,11 +1169,23 @@ def collect_writer(report, options, loader, cluster, run_id, result, state):
         if len(records) < limit or (isinstance(expected, int) and offset + limit > expected):
             break
         offset += limit
-    bounds = [result['started']] + [drop['time'] for drop in result['drops']] + [result['ended']]
-    # A drop's own `_time` can sit a second before the walk's start (two clocks),
-    # so the boundaries are ordered and deduplicated, never trust in.
+    # Every drop up to this count, frozen here: a drop after the flood window can
+    # be the one that took the writer's lines (today's day, removed by the next
+    # run when the volume sat at the threshold).
+    drops = collected_drops(loader, result)
+    late = [drop for drop in drops if drop['time'] > result['ended']]
+    if late:
+        report.note('the evictor also removed %s after the flood window and before the writer\'s '
+                    'lines were counted'
+                    % ', '.join('%s at %s' % (drop['day'], stamp(drop['time'])) for drop in late))
+    # The windows run between the drops and end where the lines were counted, so
+    # the last one is the tail after the last drop - the lines the DONE WHEN's
+    # "new lines keep being stored" is shown on. A drop's own `_time` can sit a
+    # second before the walk's start (two clocks), so the boundaries are ordered
+    # and deduplicated, never trusted in.
+    bounds = [result['started']] + [drop['time'] for drop in drops] + [logged_at]
     bounds = sorted({moment for moment in bounds if moment})
-    dropped = dropped_with_its_day(written, found, found_times, result['drops'])
+    dropped = dropped_with_its_day(written, found, found_times, drops)
     windows = writer_windows(written, found, bounds, dropped)
     for index, window_result in enumerate(windows):
         report.note('writer window %d (drop after: %s): wrote %d, found %d, '
@@ -1005,18 +1204,46 @@ def collect_writer(report, options, loader, cluster, run_id, result, state):
                      % (window_result['written'], window_result['found'],
                         window_result['dropped'], window_result['lost'])
                      for window_result in windows))
-    gap = longest_gap([(sequence, moment) for sequence, moment in written
-                       if sequence in found])
-    if gap is None:
-        report.note('the longest gap of accepted new lines cannot be stated: fewer than two '
-                    'lines were found')
+    if not drops:
+        report.not_valid('the evictor dropped no day: the lines after a drop cannot be judged')
     else:
-        report.note('the longest gap of accepted new lines: %.1f s (after seq %d, before seq %d)'
-                    % (gap['seconds'], gap['afterSeq'], gap['beforeSeq']))
-        report.check(gap['seconds'] < 2 * EVICTION_INTERVAL_MS / 1000.0,
-                     'the longest gap of accepted new lines is shorter than two eviction intervals',
-                     '%.1f s' % gap['seconds'])
+        tail_after_drop(report, written, found, drops[-1], logged_at)
     return True
+
+
+def tail_after_drop(report, written, found, drop, logged_at):
+    """The lines written after the last drop: all found, enough of them, and their gap.
+
+    This is the DONE WHEN's "new lines keep being stored and found while the
+    oldest disappear": a run whose writer stopped before the last drop has no
+    such lines, and that is TEST NOT VALID with the reason, never a pass.
+    """
+    tail = [(sequence, moment) for sequence, moment in written if moment > drop['time']]
+    span = (logged_at - drop['time']) / 1000.0
+    if not tail:
+        report.not_valid('no writer line was written after the last drop (%s at %s, %.0f s '
+                         'before the count): the tail after the displacement cannot be judged'
+                         % (drop['day'], stamp(drop['time']), span))
+        return
+    missing = [sequence for sequence, _moment in tail if sequence not in found]
+    report.check(
+        not missing and len(tail) >= TAIL_MIN_LINES and logged_at - drop['time']
+        >= 2 * EVICTION_INTERVAL_MS,
+        'every line written after the last drop is found, and there are enough of them',
+        '%d line(s), %s, over %.0f s since %s at %s was removed'
+        % (len(tail), 'none lost' if not missing else '%d not found' % len(missing), span,
+           drop['day'], stamp(drop['time'])))
+    gap = longest_gap([(sequence, moment) for sequence, moment in tail if sequence in found])
+    if gap is None:
+        report.note('the longest gap of accepted new lines after the last drop cannot be '
+                    'stated: fewer than two lines were found after it')
+        return
+    report.note('the longest gap of accepted new lines after the last drop: %.1f s '
+                '(after seq %d, before seq %d)'
+                % (gap['seconds'], gap['afterSeq'], gap['beforeSeq']))
+    report.check(gap['seconds'] < 2 * EVICTION_INTERVAL_MS / 1000.0,
+                 'the longest gap of accepted new lines after the last drop is shorter than '
+                 'two eviction intervals', '%.1f s' % gap['seconds'])
 
 
 def suspend_case(report, options, loader, cluster):
@@ -1131,6 +1358,7 @@ def run(report, options, loader, cluster, store, volume, state):
     if result['filled']:
         evaluate_flood(report, options, result, loader, cluster, store, pod_before, state)
         time.sleep(options.settle_seconds)
+        wait_past_last_drop(report, options, loader, result)
         collect_writer(report, options, loader, cluster, state['run_id'], result, state)
     # After the writer's lines are counted: the fill removes whole days through
     # the evictor, and those days are evidence the counting above needs.
@@ -1190,6 +1418,7 @@ def main(argv=None):
     parser.add_argument('--burst-mib', type=int, default=4)
     parser.add_argument('--poll-seconds', type=int, default=5)
     parser.add_argument('--settle-seconds', type=int, default=120)
+    parser.add_argument('--tail-bound', type=int, default=240)
     parser.add_argument('--writer-interval-ms', type=int, default=50)
     parser.add_argument('--quiet-seconds', type=int, default=150)
     parser.add_argument('--run-sample-seconds', type=int, default=10)

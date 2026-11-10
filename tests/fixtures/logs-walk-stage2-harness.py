@@ -245,6 +245,7 @@ class FakeCluster:
         # Job objects can never show two runs (ADR-016 §5).
         self.cronjob_times = fixture.get('cronjobTimes') or []
         self.cronjob_active = fixture.get('cronjobActive') or []
+        self.cronjob_failures = fixture.get('cronjobFailures') or []
         self.cronjob_reads = 0
         self.jobs = fixture.get('jobs') or []
         self.calls = []
@@ -306,11 +307,15 @@ class FakeCluster:
         if 'pods' in args:
             return {'items': self.pods(None)}
         if 'cronjob' in args:
-            reads = max(len(self.cronjob_times), len(self.cronjob_active))
+            reads = max(len(self.cronjob_times), len(self.cronjob_active),
+                        len(self.cronjob_failures))
             if reads == 0:
                 return None
             index = min(self.cronjob_reads, reads - 1)
             self.cronjob_reads += 1
+            if self.cronjob_failures and self.cronjob_failures[
+                    min(index, len(self.cronjob_failures) - 1)]:
+                return None
             status = {}
             if self.cronjob_times:
                 status['lastSuccessfulTime'] = self.cronjob_times[
@@ -798,6 +803,48 @@ def evict_writer_record(walk, sequence, moment):
             'message': 'walk-evict %s seq=%d t=%d' % (EVICT_RUN_ID, sequence, moment)}
 
 
+EVICT_TAIL_LINES = 200
+
+
+def evict_tail(base, first_sequence, first_offset=7000, count=EVICT_TAIL_LINES):
+    """Lines written after the last drop, one second apart, all found.
+
+    The store answers `_time` in seconds, so the fixture's moments are whole
+    seconds: a fraction would be truncated on the way through the API and move a
+    window boundary onto a line.
+    """
+    return [(first_sequence + index, base + first_offset + index * 1000)
+            for index in range(count)]
+
+
+def evict_writer_mode(walk, written, found, drops, logged_at, started=None, ended=None):
+    """Drive `collect_writer` with a fake node: the writer's log, its rows, the drops.
+
+    `logged_at` is faked as the current time, so the tail's span is the fixture's
+    own arithmetic rather than the test's clock.
+    """
+    report = walk.Report()
+    base = evict_base()
+    walk.pod_log = lambda cluster, namespace, name: evict_writer_log(written)
+    records = [evict_writer_record(walk, sequence, moment)
+               for sequence, moment in written if sequence in found]
+    drop_records = [{'time': walk.stamp(drop['time']),
+                     'message': json.dumps({'day': drop['day'], 'freedBytes': 1_400_000_000,
+                                            'reason': 'below_threshold'}),
+                     'fields': {'module': 'logs-evictor'}}
+                    for drop in drops]
+    loader = FakeLoader({'logAnswers': [
+        {'state': 'ok', 'count': len(records), 'records': records},
+        {'state': 'ok', 'count': len(drop_records), 'records': drop_records},
+    ]})
+    walk.now_ms = lambda: logged_at
+    result = {'started': started if started is not None else base + 500,
+              'ended': ended if ended is not None else base + 5000,
+              'drops': []}
+    walk.collect_writer(report, options(), loader, FakeCluster({}), EVICT_RUN_ID, result, {})
+    return report
+
+
 @mode('evict-writer')
 def evict_writer(walk, fixture):
     """Today's day is dropped after lines were accepted in it (ADR-016 §5).
@@ -806,40 +853,56 @@ def evict_writer(walk, fixture):
     today's only when nothing older is left; the store re-creates today's day for
     the lines written after that drop. So window 1's lines 1 and 2 are lost with
     the day the first drop names, and line 5 is lost with the second drop's day,
-    while only lines 3 and 4 are found. The old accounting — found or lost, a
-    loss allowed only in a window that ended with a drop — would call window 1
-    (which ends with a drop, but has two lines lost with their day before it) a
-    failure and count line 5 lost as well.
+    while only lines 3 and 4 are found. The old accounting - found or lost, a
+    loss allowed only in a window that ended with a drop - would call window 1 a
+    failure and count line 5 lost as well. The tail after the last drop is 200
+    lines, all found, spanning two intervals: what the DONE WHEN's "new lines
+    keep being stored" is shown on.
     """
-    report = walk.Report()
     base = evict_base()
+    tail = evict_tail(base, 6)
     written = [(1, base + 1000), (2, base + 2000), (3, base + 3000), (4, base + 4000),
-               (5, base + 4500)]
-    walk.pod_log = lambda cluster, namespace, name: evict_writer_log(written)
-    records = [evict_writer_record(walk, 3, base + 3000),
-               evict_writer_record(walk, 4, base + 4000)]
-    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': len(records),
-                                         'records': records}]})
-    result = {'started': base + 500, 'ended': base + 5000,
-              'drops': [{'time': base + 3500, 'day': walk.day_of(base + 2000)},
-                        {'time': base + 4800, 'day': walk.day_of(base + 4500)}]}
-    walk.collect_writer(report, options(), loader, FakeCluster({}), EVICT_RUN_ID, result, {})
-    return report
+               (5, base + 5000)] + tail
+    found = {3, 4} | {sequence for sequence, _moment in tail}
+    drops = [{'time': base + 4500, 'day': walk.day_of(base + 2000)},
+             {'time': base + 6500, 'day': walk.day_of(base + 5000)}]
+    return evict_writer_mode(walk, written, found, drops, base + 300_000)
+
+
+@mode('evict-writer-no-tail')
+def evict_writer_no_tail(walk, fixture):
+    """Every line ends before the last drop: the gap after the displacement has no state."""
+    base = evict_base()
+    written = [(1, base + 1000), (2, base + 2000), (3, base + 3000)]
+    drops = [{'time': base + 4000, 'day': walk.day_of(base + 1000)}]
+    return evict_writer_mode(walk, written, {3}, drops, base + 300_000)
 
 
 @mode('evict-writer-lost')
 def evict_writer_lost(walk, fixture):
     """A line in a day no drop names, outside a detach window, is lost."""
-    report = walk.Report()
     base = evict_base()
     written = [(1, base + 1000), (2, base + 2000), (3, base + 3000)]
-    walk.pod_log = lambda cluster, namespace, name: evict_writer_log(written)
-    records = [evict_writer_record(walk, 3, base + 3000)]
-    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': len(records),
-                                         'records': records}]})
-    result = {'started': base + 500, 'ended': base + 3500, 'drops': []}
-    walk.collect_writer(report, options(), loader, FakeCluster({}), EVICT_RUN_ID, result, {})
-    return report
+    return evict_writer_mode(walk, written, {3}, [], base + 300_000)
+
+
+@mode('evict-writer-late-drop')
+def evict_writer_late_drop(walk, fixture):
+    """Today's partition is removed after the flood window, before the count.
+
+    The run crossed midnight: the volume sat at the threshold when the flood
+    ended, and the evictor's next run removed today's day (ADR-016 §5, today only
+    when nothing older is left), which held every writer line. The walk only saw
+    drops inside the flood window, so the two lines written before it read as
+    lost. With the drops collected up to the count, both are dropped with the day
+    the late drop names, and the 200 tail lines written after it are all found.
+    """
+    base = evict_base()
+    tail = evict_tail(base, 4, first_offset=5000)
+    written = [(1, base + 1000), (2, base + 2000), (3, base + 3000)] + tail
+    found = {3} | {sequence for sequence, _moment in tail}
+    drops = [{'time': base + 4000, 'day': walk.day_of(base + 1000)}]
+    return evict_writer_mode(walk, written, found, drops, base + 300_000, ended=base + 3500)
 
 
 @mode('evict-quiet')
@@ -922,6 +985,55 @@ def evict_read_only(walk, fixture):
     return report
 
 
+@mode('evict-read-only-unknown-first')
+def evict_read_only_unknown_first(walk, fixture):
+    """One poll without a known evictor state, then a known false: the case passes."""
+    report = walk.Report()
+    volume = FakeVolume({'totalBytes': 3 * 1024**3, 'availBytes': 2 * 1024**3,
+                         'availStepBytes': 64 * 1024**2, 'availFloorBytes': 700 * 1024**2})
+    store = evict_store_read_only(volume)
+    walk.read_store_flags = lambda *args, **kwargs: {'storage.minFreeDiskSpaceBytes': '805306368'}
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', read_only=True, evictor_stale=None),
+        status_answer('live', read_only=True, evictor_stale=None),
+        status_answer('live', read_only=True, evictor_stale=False),
+        status_answer('live', read_only=False, evictor_stale=False),
+    ]})
+    cluster = FakeCluster({
+        'cronjobTimes': [walk.stamp(walk.now_ms() - 30_000)],
+        # The pre-check reads the CronJob; the first verdict poll's read fails.
+        'cronjobFailures': [False, True, False],
+    })
+    walk.read_only_case(report, options(fill_timeout=5, refuse_bound=2, read_only_bound=3,
+                                        evictor_bound=2, recover_bound=2),
+                        loader, cluster, store, volume)
+    return report
+
+
+@mode('evict-read-only-unknown-all')
+def evict_read_only_unknown_all(walk, fixture):
+    """No poll carries a known evictor state: its own result, not a blamed evictor."""
+    report = walk.Report()
+    volume = FakeVolume({'totalBytes': 3 * 1024**3, 'availBytes': 2 * 1024**3,
+                         'availStepBytes': 64 * 1024**2, 'availFloorBytes': 700 * 1024**2})
+    store = evict_store_read_only(volume)
+    walk.read_store_flags = lambda *args, **kwargs: {'storage.minFreeDiskSpaceBytes': '805306368'}
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', read_only=True, evictor_stale=None),
+        status_answer('live', read_only=True, evictor_stale=None),
+        status_answer('live', read_only=True, evictor_stale=None),
+        status_answer('live', read_only=False, evictor_stale=None),
+    ]})
+    cluster = FakeCluster({
+        'cronjobTimes': [walk.stamp(walk.now_ms() - 30_000)],
+        'cronjobFailures': [False, True, True, True],
+    })
+    walk.read_only_case(report, options(fill_timeout=5, refuse_bound=2, read_only_bound=2,
+                                        evictor_bound=2, recover_bound=2),
+                        loader, cluster, store, volume)
+    return report
+
+
 @mode('evict-read-only-blames')
 def evict_read_only_blames(walk, fixture):
     """Read-only with a stale evictor is the state this case is not: the line appears."""
@@ -939,6 +1051,52 @@ def evict_read_only_blames(walk, fixture):
                                         evictor_bound=2, recover_bound=2),
                         loader, evict_read_only_cluster(walk), store, volume)
     return report
+
+
+def evict_failure_record(walk, moment, reason):
+    return {'time': walk.stamp(moment),
+            'message': json.dumps({'time': walk.stamp(moment), 'level': 'error',
+                                   'msg': 'the log evictor removed nothing', 'reason': reason}),
+            'fields': {'module': 'logs-evictor'}}
+
+
+def evict_read_only_stale(walk, failures):
+    """The evictor's last success is old and its runs fail for want of a partition."""
+    report = walk.Report()
+    now = walk.now_ms()
+    volume = FakeVolume({'totalBytes': 3 * 1024**3, 'availBytes': 2 * 1024**3,
+                         'availStepBytes': 64 * 1024**2, 'availFloorBytes': 700 * 1024**2})
+    store = evict_store_read_only(volume)
+    walk.read_store_flags = lambda *args, **kwargs: {'storage.minFreeDiskSpaceBytes': '805306368'}
+    loader = FakeLoader({
+        'statusAnswers': [
+            status_answer('live', read_only=True, evictor_stale=True),
+            status_answer('live', read_only=True, evictor_stale=True),
+            status_answer('live', read_only=False, evictor_stale=True),
+        ],
+        'logAnswers': failures,
+    })
+    cluster = FakeCluster({
+        # Recent for the pre-check, older than two intervals for the verdict poll.
+        'cronjobTimes': [walk.stamp(now - 30_000), walk.stamp(now - 300_000)],
+    })
+    walk.read_only_case(report, options(fill_timeout=5, refuse_bound=2, read_only_bound=3,
+                                        evictor_bound=2, recover_bound=2),
+                        loader, cluster, store, volume)
+    return report
+
+
+@mode('evict-read-only-stale-no-partition')
+def evict_read_only_stale_no_partition(walk, fixture):
+    """The filler leaves nothing to drop: the page is right to name the evictor."""
+    return evict_read_only_stale(walk, [{'state': 'ok', 'count': 1, 'records': [
+        evict_failure_record(walk, walk.now_ms() - 250_000, 'no_partition')]}])
+
+
+@mode('evict-read-only-stale-no-failure')
+def evict_read_only_stale_no_failure(walk, fixture):
+    """Stale with no failure line behind it: the reason cannot be given."""
+    return evict_read_only_stale(walk, [{'state': 'ok', 'count': 0, 'records': []}])
 
 
 @mode('evict-fill-never')
@@ -971,6 +1129,18 @@ def evict_partition(walk, fixture):
     report = walk.Report()
     store = FakeStore({'partitionListAnswers': [{
         'status': 400,
+        'body': 'Expected to receive non-empty authKey when -partitionManageAuthKey is set',
+    }]})
+    walk.check_partition_refusal(report, store, 'scripted-key')
+    return report
+
+
+@mode('evict-partition-unauthorized')
+def evict_partition_unauthorized(walk, fixture):
+    """A missing key refused with 401 is the same refusal as the pinned store's 400."""
+    report = walk.Report()
+    store = FakeStore({'partitionListAnswers': [{
+        'status': 401,
         'body': 'Expected to receive non-empty authKey when -partitionManageAuthKey is set',
     }]})
     walk.check_partition_refusal(report, store, 'scripted-key')

@@ -129,6 +129,25 @@ describe('a fake node for the evict walk', () => {
     expect(run.status).toBe(0);
   }, 30000);
 
+  it('states the tail after the last drop from lines that were all found', () => {
+    // The writer keeps running past the flood: 200 lines after the last drop,
+    // all found, over more than two eviction intervals.
+    const run = harness('evict-writer');
+    expect(run.passes.join('\n')).toContain(
+      'every line written after the last drop is found',
+    );
+    expect(run.passes.join('\n')).toContain('200 line(s), none lost');
+    expect(run.notes.join('\n')).toContain('the longest gap of accepted new lines after the last drop');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 30000);
+
+  it('marks a run with no line after the last drop as not valid, never a pass', () => {
+    const run = harness('evict-writer-no-tail');
+    expect(run.invalid.join('\n')).toContain('no writer line was written after the last drop');
+    expect(run.status).toBe(1);
+  }, 30000);
+
   it('counts a line in a day the evictor removed as dropped with its day', () => {
     const run = harness('evict-writer');
     const window = (index: number): string =>
@@ -140,6 +159,19 @@ describe('a fake node for the evict walk', () => {
     expect(window(1)).toContain('drop after: false');
     expect(window(2)).toContain('wrote 2, found 1, dropped with its day 1, lost 0');
     expect(run.passes.join('\n')).toContain('3 dropped with its day, 0 lost');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 30000);
+
+  it('counts a day dropped after the flood window but before the count', () => {
+    // The run crossed midnight and the evictor's next run removed today's day,
+    // which held every writer line; only the flood window's drops were read.
+    const run = harness('evict-writer-late-drop');
+    expect(run.notes.join('\n')).toContain(
+      'wrote 3, found 1, dropped with its day 2, lost 0',
+    );
+    expect(run.notes.join('\n')).toContain('after the flood window');
+    expect(run.passes.join('\n')).toContain('2 dropped with its day, 0 lost');
     expect(run.failures).toEqual([]);
     expect(run.status).toBe(0);
   }, 30000);
@@ -183,10 +215,43 @@ describe('a fake node for the evict walk', () => {
     expect(run.status).toBe(0);
   }, 60000);
 
+  it('judges the read-only line on a known evictor state after unreadable polls', () => {
+    const run = harness('evict-read-only-unknown-first');
+    const pass = run.passes.join('\n');
+    expect(pass).toContain('the page shows read-only without blaming the evictor');
+    expect(pass).toContain('without a known value');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 60000);
+
+  it('fails as its own result when no poll has a known evictor state', () => {
+    const run = harness('evict-read-only-unknown-all');
+    const failure = run.failures.join('\n');
+    expect(failure).toContain('the evictor\'s state while the store is read-only');
+    expect(failure).toContain('carried both a staleness and the CronJob');
+    expect(run.invalid.join('\n')).toContain('cannot be told apart from a failing evictor');
+    expect(run.status).toBe(1);
+  }, 60000);
+
+  it('passes a stale evictor only with the run\'s own no_partition reason', () => {
+    const run = harness('evict-read-only-stale-no-partition');
+    const pass = run.passes.join('\n');
+    expect(pass).toContain('the page names the evictor only because its last success is older');
+    expect(pass).toContain('no_partition');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 60000);
+
+  it('fails a stale evictor with no failure line behind it', () => {
+    const run = harness('evict-read-only-stale-no-failure');
+    expect(run.failures.join('\n')).toContain('latest failure reason none');
+    expect(run.status).toBe(1);
+  }, 60000);
+
   it('fails when the status read blames the evictor', () => {
     const run = harness('evict-read-only-blames');
     expect(run.failures.join('\n')).toContain(
-      'the page shows read-only without blaming the evictor while its last run is recent',
+      'the page shows read-only without blaming the evictor: its last run is recent',
     );
     expect(run.status).toBe(1);
   }, 60000);
@@ -206,6 +271,13 @@ describe('a fake node for the evict walk', () => {
   it('passes the store\'s refusal of an unauthenticated partition list', () => {
     const run = harness('evict-partition');
     expect(run.passes.join('\n')).toContain('authKey');
+    expect(run.status).toBe(0);
+  }, 30000);
+
+  it('accepts a missing key refused with 401 as the same refusal', () => {
+    const run = harness('evict-partition-unauthorized');
+    expect(run.passes.join('\n')).toContain('authKey');
+    expect(run.passes.join('\n')).toContain('answered 401');
     expect(run.status).toBe(0);
   }, 30000);
 
