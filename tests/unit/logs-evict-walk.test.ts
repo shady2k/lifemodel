@@ -73,6 +73,7 @@ describe('the evict walk\'s argument handling', () => {
       '--settle-seconds',
       '--quiet-seconds',
       '--run-sample-seconds',
+      '--stranded-bound',
       '--suspend-seconds',
       '--evictor-bound',
       '--fill-timeout',
@@ -91,7 +92,7 @@ describe('the evict walk\'s argument handling', () => {
 
 describe('the evict walk states every assertion of its row', () => {
   it('names the restart, the panic, the drop lines, the writer, the 429 window and the suspend', () => {
-    const header = readFileSync(WALK, 'utf8').split('\n').slice(0, 170).join('\n');
+    const header = readFileSync(WALK, 'utf8').split('\n').slice(0, 210).join('\n');
     expect(header).toContain('WALK-LOGS-EVICT');
     expect(header).toContain('ADR-016 L16');
     expect(header).toMatch(/restartCount/);
@@ -101,6 +102,8 @@ describe('the evict walk states every assertion of its row', () => {
     expect(header).toMatch(/suspend/);
     expect(header).toMatch(/partition/);
     expect(header).toMatch(/lastSuccessfulTime/);
+    expect(header).toMatch(/stranded_partition/);
+    expect(header).toMatch(/logs-stranded-days/);
     expect(header).toMatch(/dropped with its day/);
     expect(header).toMatch(/What it does not cover/);
   });
@@ -341,6 +344,35 @@ describe('a fake node for the evict walk', () => {
     expect(run.invalid.join('\n')).toContain('the evictor is not fresh before it is suspended');
     expect(run.status).toBe(1);
   }, 30000);
+
+  it('proves the stranded day from the failed run to the restarted drop', () => {
+    const run = harness('evict-stranded');
+    const pass = run.passes.join('\n');
+    expect(pass).toContain('stranded_partition for');
+    expect(pass).toContain("the day's directory is still on disk after that run");
+    expect(pass).toContain('stranded-days annotation once');
+    expect(pass).toContain('the store pod is replaced for that day');
+    expect(pass).toContain('lists the day as attached again');
+    expect(pass).toContain('drops the day with its usual drop line');
+    expect(pass).toContain('the ledger names the day exactly once across the case');
+    expect(pass).toContain('the store restarted exactly once for that day');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 60000);
+
+  it('fails when the loader restarts the store twice for one stranded day', () => {
+    const run = harness('evict-stranded-twice');
+    expect(run.failures.join('\n')).toContain('the store restarted exactly once for that day');
+    expect(run.failures.join('\n')).toContain('2 store pod(s) after the first');
+    expect(run.status).toBe(1);
+  }, 60000);
+
+  it('fails, and marks the rest not valid, when the loader never restarts', () => {
+    const run = harness('evict-stranded-never');
+    expect(run.failures.join('\n')).toContain('stranded-days annotation once');
+    expect(run.invalid.join('\n')).toContain('the annotation never named the day');
+    expect(run.status).toBe(1);
+  }, 60000);
 
   it('calls the evictor stale only past two intervals', () => {
     const run = harness('evict-stale');

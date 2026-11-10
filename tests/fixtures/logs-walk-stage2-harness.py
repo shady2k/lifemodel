@@ -247,6 +247,12 @@ class FakeCluster:
         self.cronjob_active = fixture.get('cronjobActive') or []
         self.cronjob_failures = fixture.get('cronjobFailures') or []
         self.cronjob_reads = 0
+        # The logs-store Deployment's annotation maps and its pod, per read: the
+        # stranded-day case counts both.
+        self.deployment_annotations = fixture.get('deploymentAnnotations') or []
+        self.deployment_annotation_reads = 0
+        self.store_pods = fixture.get('storePods') or []
+        self.store_pod_reads = 0
         self.jobs = fixture.get('jobs') or []
         self.calls = []
 
@@ -301,6 +307,14 @@ class FakeCluster:
             body['status']['desiredNumberScheduled'] = state.get('desired', 0)
             return body
         if 'deployment' in args:
+            if self.deployment_annotations:
+                index = min(self.deployment_annotation_reads,
+                            len(self.deployment_annotations) - 1)
+                self.deployment_annotation_reads += 1
+                annotations = self.deployment_annotations[index] or {}
+                return {'metadata': {'annotations': json.loads(json.dumps(annotations))},
+                        'spec': {'template': {'metadata': {
+                            'annotations': json.loads(json.dumps(annotations))}}}}
             index = min(self.deployment_reads, len(self.deployment_states) - 1)
             self.deployment_reads += 1
             return json.loads(json.dumps(self.deployment_states[index]))
@@ -331,6 +345,12 @@ class FakeCluster:
         return self.deployment_reads
 
     def pods(self, namespace, selector=None):
+        if selector and 'app.kubernetes.io/name=' in selector and self.store_pods:
+            index = min(self.store_pod_reads, len(self.store_pods) - 1)
+            self.store_pod_reads += 1
+            uid = self.store_pods[index]
+            return [{'metadata': {'name': 'logs-store-' + uid, 'uid': uid},
+                     'status': {'containerStatuses': [{'restartCount': 0}]}}]
         state = self.current_state()
         items = []
         for _ in range(state.get('readyPods', 0)):
@@ -1179,6 +1199,109 @@ def evict_suspend_stale(walk, fixture):
     walk.suspend_case(report, options(evictor_bound=1, suspend_seconds=1), loader,
                       FakeCluster({'patchScript': [0, 0]}))
     return report
+
+
+def evict_stranded_options(**values):
+    base = {'stranded_bound': 5, 'poll_seconds': 1, 'fill_timeout': 5}
+    base.update(values)
+    return options(**base)
+
+
+def evict_stranded_cluster(walk, annotations):
+    """A logs-store Deployment whose stranded-days ledger goes through `annotations`."""
+    return FakeCluster({'deploymentAnnotations': annotations,
+                        'storePods': ['uid-store-1', 'uid-store-2']})
+
+
+def evict_stranded_runtime(walk, fixture, annotations, store_pods, drops, stranded=True):
+    """Drive the stranded case over a fake volume, store, loader and cluster.
+
+    The fakes answer each step as the product would: the evictor's stranded line,
+    then its drop of the day; the ledger gaining the day; the store pod being
+    replaced; the list gaining the day after the restart. The fake store creates
+    the scratch day's directory when the walk writes it, and the fake evictor's
+    drop removes it.
+    """
+    report = walk.Report()
+    oldest = '20261109'
+    day = walk.day_of(walk.day_bounds(oldest)[0] - 86_400_000)
+    present = [oldest]
+    volume = FakeVolume({'totalBytes': 3 * 1024**3,
+                         'availBytes': walk.threshold_bytes(3 * 1024**3) + 200 * 1024**2,
+                         'availStepBytes': 64 * 1024**2, 'partitions': present})
+    volume.oldest = oldest
+    store = FakeStore({'partitionListAnswers': [{'status': 200, 'body': '[]'},
+                                                {'status': 200, 'body': json.dumps([day])}]})
+    insert = store.insert
+
+    def scripted_insert(lines, timeout=120):
+        answer = insert(lines, timeout=timeout)
+        if lines and 'stranded' in (lines[0].get('message') or '') and day not in volume.days:
+            volume.days.insert(0, day)
+        return answer
+
+    store.insert = scripted_insert
+    stranded_line = {'time': walk.stamp(walk.now_ms() - 20_000),
+                     'message': json.dumps({'time': walk.stamp(walk.now_ms() - 20_000),
+                                            'level': 'error',
+                                            'msg': 'the log evictor removed nothing',
+                                            'reason': 'stranded_partition', 'day': day}),
+                     'fields': {'module': 'logs-evictor'}}
+    drop_line = {'time': walk.stamp(walk.now_ms() - 5_000),
+                 'message': json.dumps({'time': walk.stamp(walk.now_ms() - 5_000),
+                                        'level': 'info',
+                                        'msg': 'the oldest log day was removed', 'day': day,
+                                        'freedBytes': 1_200_000_000,
+                                        'reason': 'below_threshold'}),
+                 'fields': {'module': 'logs-evictor'}}
+    answers = [{'state': 'ok', 'count': 0, 'records': []}]
+    if stranded:
+        answers.append({'state': 'ok', 'count': 1, 'records': [stranded_line]})
+    if drops:
+        answers.append({'state': 'ok', 'count': 2, 'records': [stranded_line, drop_line]})
+    loader = FakeLoader({'logAnswers': answers})
+    real_logs = loader.logs
+
+    def scripted_logs(params):
+        answer = real_logs(params)
+        if drops and answer and any('freedBytes' in (record.get('message') or '')
+                                    for record in answer.get('records') or []):
+            # The evictor's drop removed the day's directory from the volume.
+            volume.days = [present_day for present_day in volume.days if present_day != day]
+        return answer
+
+    loader.logs = scripted_logs
+    walk.read_store_flags = lambda *args, **kwargs: {'retentionPeriod': '14d'}
+    ledger = annotations if annotations is not None else (
+        [{}] + [{'lifemodel.dev/logs-stranded-days': day}] * 20)
+    cluster = evict_stranded_cluster(walk, ledger)
+    if store_pods is not None:
+        cluster.store_pods = store_pods
+    state = {'key': 'scripted-key', 'run_id': 'walk-evict-1'}
+    walk.stranded_case(report, evict_stranded_options(), loader, cluster, store, volume, state)
+    return report
+
+
+@mode('evict-stranded')
+def evict_stranded(walk, fixture):
+    """The stranded day: the line, the ledger, one restart, the re-attach and the drop."""
+    day = walk.day_of(walk.now_ms() - 6 * 86_400_000)
+    return evict_stranded_runtime(walk, {'day': day}, None, None, drops=True)
+
+
+@mode('evict-stranded-twice')
+def evict_stranded_twice(walk, fixture):
+    """The loader restarts the store twice for the day: the count says so."""
+    day = walk.day_of(walk.now_ms() - 6 * 86_400_000)
+    return evict_stranded_runtime(walk, {'day': day}, None,
+                                  ['uid-store-1', 'uid-store-2', 'uid-store-3'], drops=True)
+
+
+@mode('evict-stranded-never')
+def evict_stranded_never(walk, fixture):
+    """The loader never restarts: no annotation, and the later steps have no state."""
+    day = walk.day_of(walk.now_ms() - 6 * 86_400_000)
+    return evict_stranded_runtime(walk, {'day': day}, [{}], None, drops=False)
 
 
 def evict_suspend_options(**values):

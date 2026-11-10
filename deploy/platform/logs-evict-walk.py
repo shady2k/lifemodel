@@ -80,6 +80,18 @@ What it proves
    the walk saw AFTER the suspension, and no active Job ends the wait: a Job
    already running when the CronJob was suspended can still succeed and move
    `lastSuccessfulTime` forward.
+8. A stranded day (ADR-016 §5): the walk writes a day older than every partition
+   present (or strands the oldest one itself when that is already at the
+   retention edge), detaches it by hand through the store and leaves its
+   directory - exactly a lost detach answer - then fills the volume below the
+   evictor's threshold while staying above the store's own margin, so the store
+   keeps writing. Each step is bounded by --stranded-bound and asserted: the
+   evictor writes `stranded_partition` for that day and removes nothing; the
+   Deployment's `lifemodel.dev/logs-stranded-days` gains the day once in both
+   annotation maps; the store pod is replaced; the restarted store lists the day
+   as attached again; a later run drops it with its usual drop line (a detach
+   answered 200) and the directory is gone; and the ledger names the day once
+   and the store restarted once for it, both counted across the case.
 
 Arguments (defaults are the test VM's)
 -------------------------------------
@@ -112,6 +124,9 @@ Arguments (defaults are the test VM's)
                          last drop before the writer's lines are counted; the
                          writer pod keeps writing for the whole wait
                          (default 240 s)
+  --stranded-bound N     bound on each step of the stranded-day case: the failed
+                         run, the annotation, the store restart, the re-attach
+                         and the drop (default 600 s)
   --writer-interval-ms N the writer pod's line interval (default 50)
   --quiet-seconds N      the quiet window below the threshold (default 150)
   --run-sample-seconds N how often the CronJob's last successful run is read in
@@ -144,13 +159,15 @@ What it changes and restores
 ----------------------------
 It creates a namespace of its own and a writer pod in it, starts a pod in the
 store's namespace that lists and removes one day partition, writes today's and
-yesterday's records through the store's insert protocol, puts a uid-1000 filler
-beside `partitions/` until the store refuses writes and removes it again, and
-suspends the evictor's CronJob for two minutes. The `finally` restores the
-CronJob's `suspend`, deletes both pods and the namespace it created, removes its
-scratch day partition if it is still there (after the store detaches it), removes
-any filler it left, and prints a RESTORE line with the volume's free space and
-the day partitions that remain. Today's flood records stay: they are logs, and
+yesterday's records through the store's insert protocol, strands one day and
+lets the loader restart the store for it, puts a uid-1000 filler beside
+`partitions/` until the store refuses writes and removes it again, and suspends
+the evictor's CronJob for two minutes. The `finally` restores the
+CronJob's `suspend`, deletes both pods and the namespace it created, removes the
+scratch and stranded day partitions if they are still there (after the store
+detaches them), removes any filler it left, and prints a RESTORE line with the
+volume's free space and the day partitions that remain. The stranded-days
+annotation is the loader's ledger and keeps the day: RESTORE says so. Today's flood records stay: they are logs, and
 the evictor is what removes them. Yesterday's partition may also stay if the
 flood did not reach it; the evictor takes it on its next run.
 
@@ -189,7 +206,9 @@ from logs_walk_support import (  # noqa: E402
     check_read_only_gauge,
     common_arguments,
     connect_store,
+    day_bounds,
     day_of,
+    days_of,
     fill_volume,
     margin_bytes,
     now_ms,
@@ -496,7 +515,9 @@ def failure_line_of(record):
         return None
     if not isinstance(body, dict) or body.get('msg') != 'the log evictor removed nothing':
         return None
-    return {'time': parse_ms(record.get('time')), 'reason': body.get('reason')}
+    day = body.get('day')
+    return {'time': parse_ms(record.get('time')), 'reason': body.get('reason'),
+            'day': day if isinstance(day, str) else None}
 
 
 def latest_evictor_failure(loader, since_ms):
@@ -1311,11 +1332,252 @@ def suspend_case(report, options, loader, cluster):
                         'within %d s of the resume' % options.suspend_seconds)
 
 
+STRANDED_ANNOTATION = 'lifemodel.dev/logs-stranded-days'
+STRANDED_REASON = 'stranded_partition'
+
+
+def store_annotations(cluster, options):
+    """The store Deployment's annotation maps: the object's and the pod template's."""
+    body = cluster.json(['-n', options.namespace, 'get', 'deployment', options.store, '-o', 'json'])
+    if body is None:
+        return None
+    metadata = (body.get('metadata') or {}).get('annotations') or {}
+    template = ((((body.get('spec') or {}).get('template') or {}).get('metadata') or {})
+                .get('annotations') or {})
+    return {'object': metadata.get(STRANDED_ANNOTATION),
+            'template': template.get(STRANDED_ANNOTATION)}
+
+
+def stranded_days_of(annotations):
+    """The days the ledger names, or None when its two maps disagree (ADR-016 §5)."""
+    if annotations is None:
+        return None
+    object_days = annotations.get('object') or ''
+    template_days = annotations.get('template') or ''
+    if object_days != template_days:
+        return None
+    return [day for day in object_days.split(',') if day]
+
+
+def stranded_day(volume, now, retention_days):
+    """The day the case strands, and whether the walk creates it.
+
+    A day the walk writes must be older than every partition present, or the
+    evictor takes an older attached day first, and inside the store's retention,
+    or the store ages it out. When the oldest present day already sits at the
+    retention edge, the case strands that day itself: the lost detach answer is
+    the same, and a day it created could not be kept.
+    """
+    present = volume.partitions()
+    if not present:
+        return day_of(now - 5 * 86400 * 1000), True
+    start, _end = day_bounds(present[0])
+    candidate_ms = start - 86400 * 1000
+    if retention_days is not None \
+            and now - candidate_ms > (retention_days - 1) * 86400 * 1000:
+        return present[0], False
+    return day_of(candidate_ms), True
+
+
+def stranded_failure(loader, day, from_ms):
+    """The evictor's newest stranded_partition line for `day` since `from_ms`."""
+    newest = None
+    for record in evictor_records(loader, from_ms):
+        failure = failure_line_of(record)
+        if failure is None or failure['reason'] != STRANDED_REASON or failure['day'] != day:
+            continue
+        if failure['time'] is not None and (newest is None or failure['time'] > newest['time']):
+            newest = failure
+    return newest
+
+
+def drop_of(loader, day, from_ms):
+    """The evictor's newest drop line for `day` since `from_ms`, or None."""
+    newest = None
+    for record in evictor_records(loader, from_ms):
+        line = drop_line(record)
+        if line is None or line['day'] != day:
+            continue
+        if newest is None or line['time'] > newest['time']:
+            newest = line
+    return newest
+
+
+def attached_days(store, key):
+    """The store's attached days through the partition list, or None when it did not answer."""
+    try:
+        status, body = store.partition_list(key)
+    except WalkError:
+        return None
+    if status != 200:
+        return None
+    try:
+        days = json.loads(body)
+    except ValueError:
+        return None
+    return days if isinstance(days, list) else None
+
+
+def stranded_case(report, options, loader, cluster, store, volume, state):
+    """A hand-detached day is recovered by the loader's restart, then dropped (ADR-016 §5).
+
+    A lost detach answer leaves a day's directory on disk while the store no
+    longer lists it. ADR-016 §5's second rule is that such a day is never
+    removed on that absence: the run writes `stranded_partition` and exits 1,
+    the loader's 30 s reconcile adds the day to the Deployment's
+    `lifemodel.dev/logs-stranded-days` annotation once, the store restarts and
+    re-attaches the directory, and the next run detaches it with a 200 and
+    removes it. Every step is bounded by --stranded-bound, and the store pod is
+    counted so "restarted once" is measured, not assumed.
+    """
+    deadline = time.monotonic() + options.stranded_bound
+    started_ms = now_ms()
+    flags = read_store_flags(report, options, cluster, 'the store\'s retention')
+    retention = days_of((flags or {}).get('retentionPeriod'))
+    day, created = stranded_day(volume, now_ms(), retention)
+    report.note('the stranded day is %s (%s)'
+                % (day, 'a scratch day older than every partition present' if created
+                   else 'the oldest partition present, already at the retention edge'))
+    before = store_pod(cluster, options)
+    uids = {(before or {}).get('uid')} - {None}
+
+    def track_pod():
+        pod = store_pod(cluster, options)
+        uid = (pod or {}).get('uid')
+        if uid is not None:
+            uids.add(uid)
+        return uid
+
+    try:
+        if created:
+            moment = day_bounds(day)[0] + 12 * 3600 * 1000
+            try:
+                write_burst(store, moment, state['run_id'], 2, 'stranded')
+            except WalkError as error:
+                report.not_valid('a day to strand could not be written (%s)' % error)
+                return False
+            if not wait_until(min(deadline, time.monotonic() + 120), 3,
+                              lambda: day in volume.partitions()):
+                report.not_valid('the store never created the day %s partition' % day)
+                return False
+            report.pass_('the walk writes a day that holds records, older than the rest', day)
+        status, _body = store.detach(day, state.get('key', ''))
+        if not report.check(status == 200,
+                            'the day is detached by hand through the store and its directory '
+                            'is not removed',
+                            'detach answered %d; the lost answer leaves the directory on disk'
+                            % status):
+            return False
+        state['stranded_day'] = day
+        total = volume.space()[0]
+        threshold = threshold_bytes(total)
+        reached, avail, wanted = fill_volume(report, options, volume, store, threshold)
+        if not reached:
+            report.not_valid('the volume never went below the evictor\'s threshold: no run '
+                             'finds the stranded day (%d MiB free, %d MiB needed)'
+                             % (avail // MIB, wanted // MIB))
+            return False
+        report.pass_('the volume is below the evictor\'s threshold and above the store\'s '
+                     'margin', '%d MiB free; the filler stops at the evictor threshold, which '
+                     'is 768 MiB of headroom above the 25 %% store margin' % (avail // MIB))
+        status, _body = probe_write(store)
+        if not report.check(status in (200, 204),
+                            'the store still accepts writes at that fill',
+                            'probe answered %d: the filler is above the store\'s margin' % status):
+            return False
+
+        failure = wait_until(deadline, options.poll_seconds,
+                             lambda: stranded_failure(loader, day, started_ms))
+        report.check(failure is not None,
+                     'the evictor writes a stranded_partition line for the day and removes '
+                     'nothing',
+                     ('%s for %s at %s' % (failure['reason'], failure['day'],
+                                           stamp(failure['time']))
+                      if failure else 'no line for %s within %d s'
+                      % (day, options.stranded_bound)))
+        if failure is None:
+            report.not_valid('the stranded run never happened: the recovery has no state')
+            return False
+        report.check(day in volume.partitions(),
+                     'the day\'s directory is still on disk after that run', 'day %s' % day)
+
+        def annotated():
+            days = stranded_days_of(store_annotations(cluster, options))
+            return days if days is not None and days.count(day) == 1 else None
+
+        added = wait_until(deadline, options.poll_seconds, annotated)
+        report.check(added is not None,
+                     'the loader adds the day to the Deployment\'s stranded-days annotation once',
+                     ('%s in both maps' % ','.join(added)) if added is not None
+                     else 'no annotation naming %s within %d s'
+                     % (day, options.stranded_bound))
+        if added is None:
+            report.not_valid('the annotation never named the day: the restart and the drop '
+                             'have no state')
+            return False
+
+        def replaced():
+            uid = track_pod()
+            return uid if uid is not None and uid not in ((before or {}).get('uid'),) else None
+
+        replacement = wait_until(deadline, options.poll_seconds, replaced)
+        report.check(replacement is not None,
+                     'the store pod is replaced for that day',
+                     ('pod uid %s -> %s' % ((before or {}).get('uid'), replacement))
+                     if replacement is not None
+                     else 'pod uid %s still runs after %d s'
+                     % ((before or {}).get('uid'), options.stranded_bound))
+        if replacement is None:
+            report.not_valid('the store did not restart: the re-attach has no state')
+            return False
+
+        def reattached():
+            days = attached_days(store, state.get('key', ''))
+            return days if days is not None and day in days else None
+
+        attached = wait_until(deadline, options.poll_seconds, reattached)
+        report.check(attached is not None,
+                     'the restarted store lists the day as attached again',
+                     '%s in /internal/partition/list' % day
+                     if attached is not None
+                     else '%s absent from /internal/partition/list after %d s'
+                     % (day, options.stranded_bound))
+        if attached is None:
+            report.not_valid('the day was not re-attached: the acknowledged detach has no state')
+            return False
+
+        dropped = wait_until(deadline, options.poll_seconds,
+                             lambda: drop_of(loader, day, started_ms))
+        report.check(dropped is not None,
+                     'a later run drops the day with its usual drop line',
+                     ('%s at %s, %.1f MiB freed' % (dropped['day'], stamp(dropped['time']),
+                                                    dropped['freedBytes'] / MIB))
+                     if dropped else 'no drop line for %s within %d s'
+                     % (day, options.stranded_bound))
+        if dropped is None:
+            return False
+        report.check(day not in volume.partitions(),
+                     'the stranded day\'s directory is gone after the drop', 'day %s' % day)
+        track_pod()
+        days = stranded_days_of(store_annotations(cluster, options))
+        report.check(days is not None and days.count(day) == 1,
+                     'the ledger names the day exactly once across the case',
+                     'annotation %s' % (','.join(days) if days is not None
+                                        else 'unreadable or the two maps disagree'))
+        report.check(len(uids) - 1 == 1,
+                     'the store restarted exactly once for that day',
+                     '%d store pod(s) after the first: %s'
+                     % (len(uids) - 1, ', '.join(sorted(uids)) or 'none'))
+        return True
+    finally:
+        if not volume.clear_filler():
+            report.fail('the filler is removed from the volume', volume.filler_dir)
+
+
 def run(report, options, loader, cluster, store, volume, state):
     if not report.check(volume.mounted(), 'the log volume is mounted', options.mount):
         return False
-    pod_before = store_pod(cluster, options)
-    if pod_before is None:
+    if store_pod(cluster, options) is None:
         report.not_valid('the store has no pod: nothing to flood')
         return False
     # The partition key is read into a variable and never printed.
@@ -1332,6 +1594,10 @@ def run(report, options, loader, cluster, store, volume, state):
     state['run_id'] = 'walk-evict-%d' % now_ms()
     partition_evidence(report, options, cluster, store, volume, state['run_id'], state)
     quiet_case(report, options, loader, cluster, volume)
+    # The stranded case restarts the store by design; the flood's own
+    # "did not restart" baseline is taken after it.
+    stranded_case(report, options, loader, cluster, store, volume, state)
+    pod_before = store_pod(cluster, options)
     if not ensure_namespace(report, cluster, options, state):
         return False
     image = evictor_image(cluster, options)
@@ -1385,24 +1651,37 @@ def restore(report, options, loader, cluster, store, volume, state):
         restored = volume.clear_filler() and restored
     except OSError:
         restored = False
-    scratch = state.get('scratch_day')
-    if scratch and scratch in volume.partitions() and store is not None:
+    for name, day in (('scratch', state.get('scratch_day')),
+                      ('stranded', state.get('stranded_day'))):
+        if not day or day not in volume.partitions() or store is None:
+            continue
         try:
-            key = state.get('key', '')
-            status, _body = store.detach(scratch, key)
-            if status == 200:
-                volume.remove_day(scratch)
-            else:
-                restored = False
+            status, _body = store.detach(day, state.get('key', ''))
         except (WalkError, OSError):
+            status = None
+        if status == 200:
+            try:
+                volume.remove_day(day)
+            except OSError:
+                restored = False
+            continue
+        if name == 'stranded':
+            # A day the store no longer lists cannot be detached by hand, and its
+            # directory must not be removed without a 200 (ADR-016 §5): the
+            # ledger now names it, so the next run and a restart recover it.
+            print('RESTORE note: the stranded day %s stays on disk; the stranded-days ledger '
+                  'will restart the store for it' % day)
+        else:
             restored = False
     total, avail = volume.space()
     remaining = [day for day in volume.partitions() if day != day_of(now_ms())]
     print('RESTORE evictor suspend=false, walk pods deleted%s, no filler on %s, %.2f GiB free '
-          'on %s, day partitions other than today: %s (today\'s records stay)'
+          'on %s, day partitions other than today: %s (today\'s records stay%s)'
           % (', the walk\'s namespace deleted' if state.get('created_namespace') else '',
              options.pv_path, avail / GIB, options.mount,
-             ', '.join(remaining) if remaining else 'none'))
+             ', '.join(remaining) if remaining else 'none',
+             '; the stranded-days annotation keeps its ledger, including a day the case '
+             'stranded' if state.get('stranded_day') else ''))
     if not restored:
         print('RESTORE incomplete: check CronJob %s and the walk\'s pods by hand'
               % options.cronjob)
@@ -1419,6 +1698,7 @@ def main(argv=None):
     parser.add_argument('--poll-seconds', type=int, default=5)
     parser.add_argument('--settle-seconds', type=int, default=120)
     parser.add_argument('--tail-bound', type=int, default=240)
+    parser.add_argument('--stranded-bound', type=int, default=600)
     parser.add_argument('--writer-interval-ms', type=int, default=50)
     parser.add_argument('--quiet-seconds', type=int, default=150)
     parser.add_argument('--run-sample-seconds', type=int, default=10)
