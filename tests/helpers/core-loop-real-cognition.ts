@@ -103,10 +103,16 @@ export class RealCognitionFacade {
   readonly adapter: ReturnType<typeof createLLMAdapter>;
   readonly calls: { context: CognitionContext; done: Promise<CognitionResult> }[] = [];
 
-  constructor(processor: CognitionProcessor, provider: HangableScriptedLLM) {
+  constructor(
+    processor: CognitionProcessor,
+    provider: HangableScriptedLLM,
+    logger: Logger = noopLogger
+  ) {
     this.processor = processor;
     this.provider = provider;
-    this.adapter = createLLMAdapter(provider as never, noopLogger, { role: 'fast' });
+    // The adapter writes the turn's model-call lines with the same logger the
+    // processor uses, so a turn's model calls carry its trace and conversation.
+    this.adapter = createLLMAdapter(provider as never, logger, { role: 'fast' });
   }
 
   setDependencies(deps: CognitionProcessorDeps): void {
@@ -146,12 +152,24 @@ export class RealCognitionFacade {
  * The REAL cognition processor (agentic loop etc.) with a scripted fake LLM
  * provider - the container's construction, with only the provider scripted.
  */
+export interface RealCognitionOptions {
+  /**
+   * The logger the processor and the model adapter write with. Unset: nothing
+   * is written (the drain tests read the core loop's lines, not cognition's).
+   * The logs record-shape check sets it to read the turn's own lines
+   * (ADR-016 §9 point 4, check L02).
+   */
+  logger?: Logger;
+}
+
 export function createRealCognitionProcessor(
   _logger: Logger,
   _agent: unknown,
-  script: ScriptedResponse[]
+  script: ScriptedResponse[],
+  options: RealCognitionOptions = {}
 ): RealCognitionFacade {
   const provider = new HangableScriptedLLM(script);
-  const processor = new CognitionProcessor(noopLogger, {}, {} as CognitionProcessorDeps);
-  return new RealCognitionFacade(processor, provider);
+  const turnLogger = options.logger ?? noopLogger;
+  const processor = new CognitionProcessor(turnLogger, {}, {} as CognitionProcessorDeps);
+  return new RealCognitionFacade(processor, provider, turnLogger);
 }

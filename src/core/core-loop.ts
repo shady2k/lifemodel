@@ -64,7 +64,11 @@ import type { AlertnessMode } from '../types/agent/state.js';
 import type { SchedulerService } from './scheduler-service.js';
 import type { IRecipientRegistry } from './recipient-registry.js';
 import { runSleepMaintenance } from '../layers/cognition/soul/sleep-maintenance.js';
-import { getPrimaryRecipientId, setPrimaryRecipientId } from './globals.js';
+import {
+  createTurnTraceContext,
+  resolveTurnConversationId,
+} from '../layers/cognition/turn-context.js';
+import { setPrimaryRecipientId } from './globals.js';
 import { StatusUpdateService } from './status-update-service.js';
 import { DomainTrackerService } from './domain-trackers.js';
 import { IntentApplicator, type SendOutcome } from './intent-applicator.js';
@@ -1811,14 +1815,10 @@ export class CoreLoop {
         );
 
         const triggerSignal = aggregationResult.triggerSignals[0];
-        // The turn's own trace, and the trigger that woke it: the turn's model
-        // calls hang under it and record the trigger type (lifemodel-d4t8).
-        const traceContext = triggerSignal
-          ? createTraceContext(triggerSignal.id, {
-              correlationId: tickId,
-              triggerType: triggerSignal.type,
-            })
-          : tickCtx;
+        // The turn's own trace: the trigger that woke it, its kind
+        // (lifemodel-d4t8) and the conversation it runs for (ADR-016 §9
+        // point 4). Its model calls and every line it writes hang under it.
+        const traceContext = createTurnTraceContext(triggerSignal, tickId, tickCtx);
 
         this.startCognitionAsync(
           cognitionContext,
@@ -2712,15 +2712,7 @@ export class CoreLoop {
       // All proactive triggers route to the configured owner, just as
       // cognition does. Capture that owner so its send settles the bus entry in
       // the same snapshot as the answer, even after outbound dedup is trimmed.
-      recipientId: (() => {
-        const first = triggerSignals[0];
-        const data = first?.data as { recipientId?: unknown } | undefined;
-        return typeof data?.recipientId === 'string'
-          ? data.recipientId
-          : first?.type !== 'user_message'
-            ? getPrimaryRecipientId()
-            : undefined;
-      })(),
+      recipientId: resolveTurnConversationId(triggerSignals[0]),
       primaryTrigger: triggerSignal ?? context.triggerSignals[0] ?? undefined,
       absorbedSignals: [],
       traceContext,

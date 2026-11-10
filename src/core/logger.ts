@@ -103,7 +103,8 @@ function ensureLogDir(logDir: string): void {
 
 /**
  * Create Pino mixin that injects trace context.
- * Auto-injects traceId, correlationId, parentId, and spanId into ALL log entries.
+ * Auto-injects traceId, correlationId, parentId, spanId and the turn's
+ * conversation into ALL log entries.
  *
  * IMPORTANT: Explicit trace fields in log args take precedence over ALS values.
  * This allows developers to override trace IDs when needed.
@@ -123,6 +124,13 @@ function createTraceMixin(): () => Record<string, unknown> {
       if (ctx[key]) {
         result[key] = ctx[key];
       }
+    }
+    // The collector reads `conversation_id`, and it is a field, never a stream
+    // (ADR-016 §2). The name is explicit because the context key is camelCase
+    // and a camelCase field produces NO conversation_id in the collector
+    // (measured, §9 point 4).
+    if (ctx.conversationId) {
+      result['conversation_id'] = ctx.conversationId;
     }
     return result;
   };

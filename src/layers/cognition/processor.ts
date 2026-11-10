@@ -59,6 +59,7 @@ import {
 import type { PendingReflection } from '../../types/agent/soul.js';
 import { getPrimaryRecipientId } from '../../core/globals.js';
 import { withCaller } from '../../core/trace-context.js';
+import { resolveTurnConversationId } from './turn-context.js';
 import type { TaskService, TaskContextSnapshot } from '../../ports/tasks.js';
 import type { InterestGroup } from './soul/interest-compaction.js';
 
@@ -390,11 +391,10 @@ export class CognitionProcessor implements CognitionLayer {
     const signalData = triggerSignal.data as
       | { recipientId?: string; userId?: string; channel?: string }
       | undefined;
-    // For non-user-message triggers (plugin events, thresholds), fall back to primary recipient
-    // This allows proactive outreach to be routed to the configured primary user
-    const recipientId =
-      signalData?.recipientId ??
-      (triggerSignal.type !== 'user_message' ? getPrimaryRecipientId() : undefined);
+    // The conversation this turn runs for (turn-context.ts: a reply's own
+    // recipient, else the primary recipient); the turn's trace carries the
+    // same id to its log lines (ADR-016 §9 point 4).
+    const recipientId = resolveTurnConversationId(triggerSignal);
     const channel = signalData?.channel ?? 'telegram';
 
     // Log if recipientId is missing for non-user-message triggers
