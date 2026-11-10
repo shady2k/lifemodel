@@ -6,8 +6,11 @@ level is the request's outcome (ADR-016 L03, L04, §9 points 3-6).
 What it proves
 --------------
 1. A model failure planted **through the chat** (the web service's
-   `/api/messages`) ends in one final gateway record, found through the loader's
-   logs API by the failure's minute and its conversation: `module=model-gateway`,
+   `/api/messages`, reached straight on its own 8080 through a port-forward to
+   `svc/web` in `lifemodel` with `Origin: https://<web host>` - the path the VM's
+   own helper uses, not the forwardAuth ingress) ends in one final gateway
+   record, found through the loader's logs API by the failure's minute and its
+   conversation: `module=model-gateway`,
    `level=error`, `error_type`, `reason_check`/`reason_path`/`reason_got` where
    the failure has a reason, and the `conversation_id` the chat runs under. The
    same query by that `conversation_id` returns the record, and the core's own
@@ -16,16 +19,23 @@ What it proves
    the way the record is found.
 2. A 32-character random marker in a non-2xx upstream body and another in a
    refused 2xx body, driven through the real core and gateway, with the exchange
-   capture off and then on: a text search for each marker over the whole store
-   and over every module finds nothing with the capture off; with it on the
-   marker is only in the capture (read through `lifemodel doctor exchange`) and
-   never in the store. The failure line carries `error_type` and
+   capture off and then on: the capture's own answer is read back after every
+   PUT and must say off, then on; a text search for each marker over the whole
+   store and over every module finds nothing with the capture off; with it on
+   the marker is only in the capture (read through `lifemodel doctor exchange`)
+   and never in the store. Each marker is this run's own, so a capture hit
+   cannot be an older one. The failure line carries `error_type` and
    `reason_check`/`reason_path`/`reason_got`.
 3. The four L04 cases, judged on the final gateway record of each request, sent
    straight to the gateway's own API: primary 500 with no reserve ends `error`;
    primary 400 with a reserve configured ends `error` and the reserve is never
-   contacted; primary 500 then a reserve that succeeds gives one `warn` and no
-   terminal `error`; primary 500 then a reserve that fails ends `error`.
+   contacted; primary 500 then a reserve that succeeds gives one `warn`, no
+   terminal `error` and a 200 answer; primary 500 then a reserve that fails ends
+   `error`. Before each case the walk waits, bounded by --slot-bound, until a
+   probe request's stub counts show the gateway serving the new slots - a slot
+   write and the next request can race, and the previous configuration served
+   one request more on the VM. Every plant must show in the stub's counters
+   before anything is judged; without that the case is TEST NOT VALID.
 4. The gateway pod is restarted and its new pod's line is in the same query's
    answer: the store holds the previous pod's lines under the same `module`.
 
@@ -50,7 +60,13 @@ Arguments (defaults are the test VM's)
   --origin-host HOST     the host the loader answers on (default
                          boot-lifemodel.local)
   --ca-file PATH         verify the loader's certificate with this CA
-  --web-host HOST        the chat's host (default boot-lifemodel.local)
+  --web-host HOST        the host the chat's Origin names (default
+                         lifemodel.local)
+  --web-namespace NS     where the web Service lives (default lifemodel)
+  --web-service NAME     the web Service the walk forwards to (default web)
+  --web-port PORT        the web module's own port (default 8080)
+  --slot-bound N         bound on the gateway serving a slot change, proved by a
+                         probe request's stub counts (default 120 s)
   --kubectl COMMAND      default "k3s kubectl"
   --namespace NS         where the gateway and the core live (default
                          lifemodel-system); the chat is reached by its host
@@ -97,6 +113,7 @@ import json
 import os
 import re
 import secrets
+import urllib.parse
 import sys
 import time
 from pathlib import Path
@@ -372,8 +389,9 @@ def put_slot(loader, token, name, view):
 
 
 def delete_reserve(loader, token):
+    """Clear the reserve slot; the endpoint reads one empty JSON object."""
     status, _answer = loader.request(
-        'DELETE', '/api/model/reserve', b'',
+        'DELETE', '/api/model/reserve', b'{}',
         {'content-type': 'application/json',
          'origin': 'https://' + loader.origin_host,
          'x-csrf-token': token})
@@ -396,6 +414,37 @@ def put_capture(loader, token, body):
     except ValueError:
         decoded = None
     return status, decoded if isinstance(decoded, dict) else {'state': 'unreadable'}
+
+
+def capture_off(setting):
+    """True when the API's own answer says the capture is off."""
+    return isinstance(setting, dict) and setting.get('until') is None \
+        and setting.get('mode') != 'until-disabled'
+
+
+def capture_on(setting):
+    return isinstance(setting, dict) and setting.get('until') not in (None, '')
+
+
+def put_capture_checked(report, loader, token, body, what):
+    """PUT the capture setting, then read it back and judge the API's own answer."""
+    status, answer = put_capture(loader, token, body)
+    read = capture_setting(loader)
+    report.check(status == 200 and read is not None,
+                 'the capture setting is put (%s)' % what,
+                 'PUT answered %d, GET answered %s'
+                 % (status, 'yes' if read is not None else 'nothing'))
+    return read
+
+
+def capture_expected(saved, now):
+    """What the restored setting should read as: `on` only when it was really on."""
+    if not isinstance(saved, dict):
+        return 'off'
+    if saved.get('mode') == 'until-disabled':
+        return 'on'
+    until = parse_ms(saved.get('until'))
+    return 'on' if until is not None and until > now else 'off'
 
 
 def capture_restore_body(saved, now):
@@ -583,29 +632,72 @@ def exchange_hits(text, marker):
     return len(re.findall(re.escape(marker), text or ''))
 
 
-def chat_intake(web, options, text, bound):
-    """One owner message through the web service's own `/api/messages`."""
+def renew_web_forward(report, options, state, bound=90):
+    """A port-forward straight to the web Service: the path the VM's own helper uses.
+
+    The `web-private` ingress is behind the loader's forwardAuth, and reaching it
+    by its host name needs a session cookie for that host; the web module itself
+    accepts the owner's message on its own 8080 and checks the Origin header, so
+    the walk forwards to `svc/web` in `lifemodel` and sends
+    `Origin: https://<web host>` - the same shape as `/root/lmtest/chat.py`.
+    """
+    old = state.get('web_forward')
+    if old is not None:
+        old.close()
+    target = 'svc/' + options.web_service
+    forward = PortForward(options.kubectl, options.web_namespace, target,
+                          free_port(), options.web_port)
+    forward.start()
+    if not forward.wait_ready(bound):
+        report.fail('the web service answers a port-forward', forward.death or 'never ready')
+        forward.close(keep_log=True)
+        state['web_forward'] = None
+        state['web_port'] = None
+        return False
+    state['web_forward'] = forward
+    state['web_port'] = forward.local_port
+    return True
+
+
+def chat_intake(port, options, text, bound):
+    """One owner message through the web service's own `/api/messages`.
+
+    The URL, the status and - on a connection failure - the exception's type are
+    returned in the detail; a cookie is never printed.
+    """
     body = json.dumps({'id': new_uuid7(), 'text': text}).encode()
     deadline = time.monotonic() + bound
+    url = 'POST http://127.0.0.1:%s/api/messages' % port
+    error = ''
     while True:
+        connection = None
         try:
-            status, answer = web.request(
-                'POST', '/api/messages', body,
-                {'content-type': 'application/json',
-                 'origin': 'https://' + options.web_host})
-        except WalkError:
+            connection = http.client.HTTPConnection('127.0.0.1', port, timeout=30)
+            connection.request('POST', '/api/messages', body, {
+                'content-type': 'application/json',
+                'origin': 'https://' + options.web_host,
+            })
+            response = connection.getresponse()
+            answer = response.read(64 * 1024)
+            status = response.status
+        except (OSError, http.client.HTTPException) as failure:
             status, answer = None, b''
+            error = type(failure).__name__
+        finally:
+            if connection is not None:
+                connection.close()
         if status == 202:
             try:
                 value = json.loads(answer)
             except ValueError:
                 value = None
             stream = (value or {}).get('streamId') if isinstance(value, dict) else None
-            return True, stream if isinstance(stream, str) else None
+            return True, (stream if isinstance(stream, str) else url)
         if status is not None and status in (400, 403, 409, 429):
-            return False, 'chat refused %d' % status
+            return False, '%s answered %d' % (url, status)
         if time.monotonic() >= deadline:
-            return False, 'the chat did not accept the message (status %s)' % status
+            return False, '%s did not accept the message (status %s%s)' % (
+                url, status, (', last error %s' % error) if error else '')
         time.sleep(3)
 
 
@@ -648,6 +740,54 @@ def upstream_counts(options):
     return counts if isinstance(counts, dict) else {}
 
 
+def upstream_count(options, model):
+    return int(upstream_counts(options).get(model, 0))
+
+
+def wait_planted(report, options, model, before, bound, what):
+    """Wait until the stub's count for `model` rises: the plant reached it."""
+    reached = wait_until(time.monotonic() + bound, 2,
+                         lambda: upstream_count(options, model) > before)
+    report.check(bool(reached), 'the plant reached the stub (%s)' % what,
+                 'walk model %s: %d -> %d'
+                 % (model, before, upstream_count(options, model)))
+    if not reached:
+        report.not_valid('the %s never reached the stub: its log assertion has no state' % what)
+    return bool(reached)
+
+
+def wait_slots_live(report, options, state, expected, what):
+    """Wait until the gateway serves exactly these slots, proved by a probe request.
+
+    The gateway answers with the slots it read for that request; a write to the
+    slots and the next request can race, and the previous configuration can serve
+    one request more (measured on the VM). The probe is one gateway request with
+    its own session, and the stub's counters say which slot models it reached.
+    """
+    deadline = time.monotonic() + options.slot_bound
+    while True:
+        before = upstream_counts(options)
+        gateway_request(state['gateway_port'], chat_payload('walk slot probe'),
+                        'walk-probe-%d' % now_ms())
+        after = upstream_counts(options)
+        delta = {model: int(after.get(model, 0)) - int(before.get(model, 0))
+                 for model in set(before) | set(after)}
+        got = {model: count for model, count in delta.items() if count}
+        if got == expected:
+            report.pass_('the gateway serves the new slots (%s)' % what,
+                         ', '.join('%s=%d' % item for item in sorted(got.items())))
+            return True
+        if time.monotonic() >= deadline:
+            report.fail('the gateway serves the new slots (%s)' % what,
+                        'the probe reached %s, expected %s within %d s'
+                        % (', '.join('%s=%d' % item for item in sorted(got.items())) or 'none',
+                           ', '.join('%s=%d' % item for item in sorted(expected.items())),
+                           options.slot_bound))
+            report.not_valid('the new slots never served: the %s has no state' % what)
+            return False
+        time.sleep(5)
+
+
 def wait_record(loader, from_ms, conversation, expected_type, bound, module=GATEWAY_MODULE):
     """Wait until a gateway record with that error_type is in the answer, and return it."""
     def find():
@@ -666,10 +806,16 @@ def case_failure(report, options, loader, token, cluster, state):
     report.check(ok, 'the primary slot points at the walk\'s stub', detail)
     if not ok:
         return False
+    if not wait_slots_live(report, options, state, {'walk-500': 1}, 'the failure case'):
+        return False
+    before = upstream_count(options, 'walk-500')
     started = now_ms()
-    accepted, info = chat_intake(state['web'], options, 'walk failure %s' % secrets.token_hex(4),
-                                 options.chat_bound)
+    accepted, info = chat_intake(state['web_port'], options,
+                                 'walk failure %s' % secrets.token_hex(4), options.chat_bound)
     if not report.check(accepted, 'the chat accepts the owner message', info):
+        return False
+    if not wait_planted(report, options, 'walk-500', before, options.found_bound,
+                        'the chat\'s model call'):
         return False
     record = wait_record(loader, started, None, 'upstream_500', options.found_bound)
     report.check(record is not None,
@@ -786,9 +932,13 @@ def case_marker(report, options, loader, token, cluster, state):
     markers = [marker_a, marker_b]
     saved = capture_setting(loader)
     state['capture_saved'] = saved
-    status, answer = put_capture(loader, token, {'durationMs': None})
-    report.check(status == 200, 'the exchange capture is turned off before the marker is planted',
-                 'PUT /api/model-capture answered %d' % status)
+    read = put_capture_checked(report, loader, token, {'durationMs': None}, 'off')
+    if not report.check(capture_off(read),
+                        'the exchange capture reads back as off before the marker is planted',
+                        'GET /api/model-capture: %s'
+                        % (json.dumps(read) if read is not None else 'no answer')):
+        report.not_valid('the capture cannot be turned off: a marker could only be in the capture')
+        return False
     planted = []
     for label, model, expected in (('a non-2xx body', 'walk-500-marker', 'upstream_500'),
                                    ('a refused 2xx body', 'walk-bad2xx', 'bad_response')):
@@ -796,10 +946,16 @@ def case_marker(report, options, loader, token, cluster, state):
         report.check(ok, 'the primary slot answers with %s' % label, detail)
         if not ok:
             return False
+        if not wait_slots_live(report, options, state, {model: 1}, 'the marker case'):
+            continue
+        before = upstream_count(options, model)
         started = now_ms()
-        accepted, info = chat_intake(state['web'], options, 'walk marker %s' % secrets.token_hex(4),
+        accepted, info = chat_intake(state['web_port'], options,
+                                     'walk marker %s' % secrets.token_hex(4),
                                      options.chat_bound)
         if not report.check(accepted, 'the chat accepts the marker message (%s)' % label, info):
+            continue
+        if not wait_planted(report, options, model, before, options.found_bound, label):
             continue
         record = wait_record(loader, started, None, expected, options.found_bound)
         report.check(record is not None,
@@ -808,12 +964,11 @@ def case_marker(report, options, loader, token, cluster, state):
         if record is not None:
             planted.append((label, record, started))
     off_counts = store_counts_for(loader, markers, now_ms() - 3600_000)
-    off_hits = [marker_verdict(off_counts, 1, marker) for marker in markers]
-    for marker, verdict in zip(markers, off_hits):
+    for marker in markers:
         found = sum(count for name, count in off_counts.items() if name.endswith(':' + marker))
         report.check(found == 0,
                      'with the capture off, %s is in no stored log' % marker,
-                     verdict['detail'])
+                     '%d record(s) in %d search(es)' % (found, len(off_counts)))
     reason = next((record for label, record, _started in planted if label.startswith('a refused')),
                   None)
     if reason is not None:
@@ -824,64 +979,120 @@ def case_marker(report, options, loader, token, cluster, state):
                         field_of(reason, 'reason_path') or '-',
                         field_of(reason, 'reason_got') or '-'))
     # Capture on: plant both again, then the markers are only in the capture.
-    status, answer = put_capture(loader, token, {'durationMs': 15 * 60_000})
-    if not report.check(status == 200, 'the exchange capture is turned on for the second plant',
-                        'PUT /api/model-capture answered %d %s'
-                        % (status, answer.get('error', answer.get('state')))):
+    read = put_capture_checked(report, loader, token, {'durationMs': 15 * 60_000}, 'on')
+    if not report.check(capture_on(read), 'the exchange capture reads back as on',
+                        'GET /api/model-capture: %s'
+                        % (json.dumps(read) if read is not None else 'no answer')):
+        report.not_valid('the capture cannot be turned on: the marker cannot be read back')
         return False
     on_started = now_ms()
+    on_planted = 0
     for label, model, expected in (('a non-2xx body', 'walk-500-marker', 'upstream_500'),
                                    ('a refused 2xx body', 'walk-bad2xx', 'bad_response')):
-        ok, detail = point_slots(loader, token, options, model, None)
+        ok, _detail = point_slots(loader, token, options, model, None)
         if not ok:
-            report.check(ok, 'the primary slot answers with %s again' % label, detail)
             continue
-        chat_intake(state['web'], options, 'walk marker %s' % secrets.token_hex(4), options.chat_bound)
-        wait_record(loader, on_started, None, expected, options.found_bound)
+        if not wait_slots_live(report, options, state, {model: 1}, 'the marker case again'):
+            continue
+        before = upstream_count(options, model)
+        chat_intake(state['web_port'], options, 'walk marker %s' % secrets.token_hex(4),
+                    options.chat_bound)
+        if not wait_planted(report, options, model, before, options.found_bound,
+                            label + ' with the capture on'):
+            continue
+        if wait_record(loader, on_started, None, expected, options.found_bound) is not None:
+            on_planted += 1
+    if on_planted < 2:
+        report.not_valid('the second plant did not reach the store for both markers: the '
+                         'capture cannot be read back for them')
+        return False
     text = exchange_text(options, options.marker_bound)
     hits = [exchange_hits(text, marker) for marker in markers]
+    on_counts = store_counts_for(loader, markers, on_started)
     for marker, hit in zip(markers, hits):
         report.check(hit > 0, 'with the capture on, %s is in the capture' % marker,
-                     '%d hit(s) in the reader\'s answer' % hit)
-    on_counts = store_counts_for(loader, markers, on_started)
-    for marker in markers:
-        found = sum(count for name, count in on_counts.items() if name.endswith(':' + marker))
-        report.check(found == 0, 'even with the capture on, %s is in no stored log' % marker,
-                     '%d record(s) in %d searches' % (found, len(on_counts)))
+                     '%d hit(s) in the reader\'s answer; the marker is this run\'s own'
+                     % hit)
+        verdict = marker_verdict({'all:' + marker: sum(
+            count for name, count in on_counts.items() if name.endswith(':' + marker))},
+            hit, marker)
+        report.check(verdict['ok'], 'with the capture on, %s is only in the capture' % marker,
+                     verdict['detail'])
     return True
 
 
 def case_levels(report, options, loader, token, state):
     """The four L04 cases, judged on each request's final gateway record."""
     cases = [
-        ('primary 500 with no reserve ends error', 'walk-500', None, 'error'),
+        ('primary 500 with no reserve ends error', 'walk-500', None, 'error', 'error',
+         {'walk-500': 1}),
         ('primary 400 with a reserve ends error and never retries', 'walk-400', 'walk-ok',
-         'no-retry'),
+         'no-retry', 'error', {'walk-400': 1}),
         ('primary 500 then a reserve that succeeds gives one warn', 'walk-500', 'walk-ok',
-         'warn-then-success'),
-        ('primary 500 then a reserve that fails ends error', 'walk-500', 'walk-500', 'error'),
+         'warn-then-success', 'ok', {'walk-500': 1, 'walk-ok': 1}),
+        ('primary 500 then a reserve that fails ends error', 'walk-500', 'walk-500', 'error',
+         'error', {'walk-500': 2}),
     ]
-    for name, primary, reserve, expected in cases:
+    for name, primary, reserve, expected, outcome, live in cases:
         ok, detail = point_slots(loader, token, options, primary, reserve)
         if not report.check(ok, 'the slots are set for: ' + name, detail):
+            continue
+        if not wait_slots_live(report, options, state, live, name):
             continue
         before = upstream_counts(options)
         session = 'walk-level-%d-%d' % (now_ms(), len(state['level_sessions']))
         status, answer = gateway_request(state['gateway_port'],
                                          chat_payload('walk level case'), session)
-        report.check(status >= 400,
-                     'the gateway answers %s with an error' % name, 'status %d' % status)
+        report.check((status is not None and 200 <= status < 300) if outcome == 'ok'
+                     else (status is not None and status >= 400),
+                     'the gateway answers %s with %s' % (name, 'a model answer' if outcome == 'ok'
+                                                        else 'an error'),
+                     'status %s' % status)
+        if status is None:
+            report.not_valid('the gateway did not answer: the final record has no state')
+            continue
+        after = upstream_counts(options)
+        delta = {model: int(after.get(model, 0)) - int(before.get(model, 0))
+                 for model in set(before) | set(after)}
+        reached = {model: count for model, count in delta.items() if count}
+        if reached != live:
+            report.not_valid('the request did not reach the slots it was meant to (reached %s): '
+                             'the level has no state'
+                             % (', '.join('%s=%d' % item for item in sorted(reached.items()))
+                                or 'none'))
+            continue
         deadline = time.monotonic() + options.found_bound
         records = wait_until(deadline, 3, lambda: records_in_window(
             loader, now_ms() - 3600_000, module=GATEWAY_MODULE, conversation=session)
             or None) or []
-        after = upstream_counts(options)
-        delta = {model: int(after.get(model, 0)) - int(before.get(model, 0))
-                 for model in set(before) | set(after)}
         verdict = level_verdict(records, delta, expected)
         report.check(verdict['ok'], name, verdict['detail'])
         state['level_sessions'].append(session)
     return True
+
+
+def slot_fingerprint(view):
+    """What a slot can be compared by without reading a key or a header value."""
+    if not isinstance(view, dict):
+        return None
+    try:
+        host = urllib.parse.urlsplit(view.get('baseUrl') or '').hostname
+    except ValueError:
+        host = None
+    return {'kind': view.get('kind'), 'model': view.get('model'), 'host': host,
+            'keySet': bool(view.get('keySet'))}
+
+
+def slots_agree(saved, current):
+    """The parts of the two slot views that differ, by name."""
+    problems = []
+    for name in ('primary', 'reserve'):
+        before = slot_fingerprint(saved.get(name))
+        after = slot_fingerprint(current.get(name))
+        if before == after:
+            continue
+        problems.append('%s %s -> %s' % (name, json.dumps(before), json.dumps(after)))
+    return problems
 
 
 def restore(report, options, loader, token, cluster, state):
@@ -901,13 +1112,32 @@ def restore(report, options, loader, token, cluster, state):
                 restored = False
                 print('RESTORE incomplete: slot %s could not be written back (%d %s)'
                       % (name, status, answer.get('error', answer.get('state'))))
+    if saved is not None and loader is not None and token is not None:
+        current = model_slots(loader) or {}
+        problems = slots_agree({'primary': saved.get('primary'), 'reserve': saved.get('reserve')},
+                               {'primary': current.get('primary'),
+                                'reserve': current.get('reserve')})
+        if problems:
+            restored = False
+            print('RESTORE incomplete: the slots read back differ (%s)' % '; '.join(problems))
+        else:
+            print('RESTORE slots read back as saved: primary %s, reserve %s'
+                  % ('set' if saved.get('primary') else 'absent',
+                     'set' if saved.get('reserve') else 'absent'))
     capture_saved = state.get('capture_saved')
     if capture_saved is not None and loader is not None and token is not None:
         body = capture_restore_body(capture_saved, now_ms())
         status, answer = put_capture(loader, token, body)
-        if status != 200:
+        current = capture_setting(loader)
+        wanted = capture_expected(capture_saved, now_ms())
+        agreed = (capture_off(current) if wanted == 'off' else capture_on(current))
+        if status != 200 or not agreed:
             restored = False
-            print('RESTORE incomplete: the capture setting was not put back (%d)' % status)
+            print('RESTORE incomplete: the capture setting is %s, wanted %s (PUT %d, read %s)'
+                  % (json.dumps(current) if current is not None else 'unreadable', wanted,
+                     status, 'answered' if current is not None else 'unreadable'))
+        else:
+            print('RESTORE capture reads back as %s' % wanted)
     if state.get('created_namespace'):
         if cluster.run(['delete', 'namespace', options.stub_namespace,
                         '--wait=false']).returncode != 0:
@@ -926,6 +1156,8 @@ def run(report, options, loader, cluster, state):
     try:
         if not renew_gateway_forward(report, options, state):
             return False
+        if not renew_web_forward(report, options, state):
+            return False
         token = loader.csrf()
         if not report.check(bool(token), 'the loader answers a CSRF token', 'GET /api/state'):
             return False
@@ -940,15 +1172,20 @@ def run(report, options, loader, cluster, state):
         return case_marker(report, options, loader, token, cluster, state) \
             and case_levels(report, options, loader, token, state)
     finally:
-        if state.get('forward') is not None:
-            state['forward'].close()
-            state['forward'] = None
+        for name in ('forward', 'web_forward'):
+            if state.get(name) is not None:
+                state[name].close()
+                state[name] = None
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='WALK-LOGS-FAILURE (ADR-016 L03, L04)')
     common_arguments(parser)
-    parser.add_argument('--web-host', default='boot-lifemodel.local')
+    parser.add_argument('--web-host', default='lifemodel.local')
+    parser.add_argument('--web-namespace', default='lifemodel')
+    parser.add_argument('--web-service', default='web')
+    parser.add_argument('--web-port', type=int, default=8080)
+    parser.add_argument('--slot-bound', type=int, default=120)
     parser.add_argument('--stub-namespace', default='lifemodel-model-walk')
     parser.add_argument('--stub-port', type=int, default=18080)
     parser.add_argument('--node-address')
@@ -964,7 +1201,7 @@ def main(argv=None):
     report = Report()
     cluster = Cluster(options.kubectl)
     state = {'created_namespace': False, 'gateway_port': None, 'forward': None,
-             'slots': None, 'level_sessions': []}
+             'web_port': None, 'web_forward': None, 'slots': None, 'level_sessions': []}
     loader = None
     token = None
     try:
@@ -996,10 +1233,7 @@ def main(argv=None):
             if cluster.apply(manifest).returncode != 0:
                 report.fail('the stub is created', manifest['kind'])
                 return 1
-        web = Loader(options.web_host, options.loader_port, options.web_host, options.ca_file)
-        web.cookies = dict(loader.cookies)
-        state['web'] = web
-        run(report, options, loader, cluster, state)
+
     except WalkError as error:
         report.fail('the walk runs to its end', str(error))
     finally:

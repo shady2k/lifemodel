@@ -51,12 +51,16 @@ class FakeLoader:
     def json(self, path):
         return self.json_answers.get(path)
 
+    def logs_status(self, from_ms, to_ms):
+        return {'state': 'ok', 'status': {}}
+
     def csrf(self):
         return 'scripted-csrf'
 
     def request(self, method, path, body=None, headers=None):
         self.requests.append({'method': method, 'path': path,
-                              'body': (body or b'').decode('utf8', 'replace')})
+                              'body': (body or b'').decode('utf8', 'replace'),
+                              'headers': dict(headers or {})})
         if not self.request_answers:
             return 500, b''
         index = min(len(self.requests) - 1, len(self.request_answers) - 1)
@@ -133,6 +137,9 @@ def mode(name):
         MODES[name] = function
         return function
     return register
+
+
+MODE_OPTIONS = options()
 
 
 @mode('verdict-failure-pass')
@@ -226,24 +233,68 @@ def verdict_level_warn_with_error(walk, fixture):
     return report
 
 
-@mode('case-levels-wiring')
-def case_levels_wiring(walk, fixture):
-    """The four cases driven through a fake loader, chat and counts."""
+def level_plan(options):
+    """Cumulative stub counts from the requests sent so far, per case."""
+    plan = [[('walk-500', 1)], [('walk-400', 1)], [('walk-500', 1), ('walk-ok', 1)],
+            [('walk-500', 2)]]
+    sent = options['sent']
+    total = {'walk-500': 0, 'walk-400': 0, 'walk-ok': 0}
+    for step in range(sent):
+        for model, count in plan[min(step, len(plan) - 1)]:
+            total[model] += count
+    return total
+
+
+def case_levels_fixture(walk, statuses):
     report = walk.Report()
     loader = FakeLoader({'requestAnswers': [{'status': 200, 'body': {'ok': True}}] * 20})
-    walk.gateway_request = lambda port, payload, session: (500, '{"error":{}}')
-    # Before and after each case: one primary request, then the 400 with no retry,
-    # then a reserve success, then a reserve failure.
-    counts = [
-        {'walk-500': 1},
-        {'walk-500': 2},
-        {'walk-400': 1},
-        {'walk-400': 2},
-        {'walk-500': 2, 'walk-400': 2},
-        {'walk-500': 3, 'walk-400': 2, 'walk-ok': 1},
-        {'walk-500': 3, 'walk-400': 2, 'walk-ok': 1},
-        {'walk-500': 5, 'walk-400': 2, 'walk-ok': 1},
-    ]
+    marker = {'sent': 0}
+
+    def request(port, payload, session):
+        index = min(marker['sent'], len(statuses) - 1)
+        status = statuses[index]
+        marker['sent'] += 1
+        return status, ''
+
+    walk.gateway_request = request
+    walk.upstream_counts = lambda options: level_plan(marker)
+    walk.wait_slots_live = lambda report, options, state, expected, what: True
+    loader.log_answers = [
+        {'state': 'ok', 'count': 1, 'records': [record('error', 'upstream_500', 's1')]},
+        {'state': 'ok', 'count': 1, 'records': [record('error', 'upstream_400', 's2')]},
+        {'state': 'ok', 'count': 1, 'records': [record('warn', 'upstream_500', 's3')]},
+        {'state': 'ok', 'count': 2, 'records': [record('warn', 'upstream_500', 's4'),
+                                                record('error', 'upstream_500', 's4')]},
+    ] + [{'state': 'ok', 'count': 0, 'records': []}] * 20
+    state = {'gateway_port': 1234, 'level_sessions': []}
+    walk.case_levels(report, options(slot_bound=1), loader, 'token', state)
+    print('SESSIONS ' + json.dumps(state['level_sessions']))
+    return report
+
+
+@mode('case-levels-wiring')
+def case_levels_wiring(walk, fixture):
+    """The four cases driven through a fake loader, gateway and stub counts."""
+    return case_levels_fixture(walk, [500, 500, 200, 500])
+
+
+@mode('level-success-status')
+def level_success_status(walk, fixture):
+    """The reserve that succeeds answers 200 and the case expects it; 500 there fails."""
+    return case_levels_fixture(walk, [500, 500, 200, 500])
+
+
+@mode('level-success-wrong')
+def level_success_wrong(walk, fixture):
+    """The reserve that succeeds answering 500 is a failure of that case."""
+    return case_levels_fixture(walk, [500, 500, 500, 500])
+
+
+@mode('slots-live-pass')
+def slots_live_pass(walk, fixture):
+    """The probe shows the new slots on the third try: the wait passes."""
+    report = walk.Report()
+    counts = [{'walk-500': 1}, {'walk-500': 1}, {'walk-500': 1}, {'walk-500': 2}]
     reads = {'count': 0}
 
     def upstream(options):
@@ -252,26 +303,76 @@ def case_levels_wiring(walk, fixture):
         return dict(counts[index])
 
     walk.upstream_counts = upstream
-    answers = []
-    for session in ('s1', 's2', 's3', 's4'):
-        if session in ('s2',):
-            answers.append({'state': 'ok', 'count': 1,
-                            'records': [record('error', 'upstream_400', session)]})
-        elif session == 's3':
-            answers.append({'state': 'ok', 'count': 1,
-                            'records': [record('warn', 'upstream_500', session)]})
-        elif session == 's4':
-            answers.append({'state': 'ok', 'count': 2,
-                            'records': [record('warn', 'upstream_500', session),
-                                        record('error', 'upstream_500', session)]})
-        else:
-            answers.append({'state': 'ok', 'count': 1,
-                            'records': [record('error', 'upstream_500', session)]})
-    fallback = {'state': 'ok', 'count': 0, 'records': []}
-    loader.log_answers = answers + [fallback] * 20
-    state = {'gateway_port': 1234, 'level_sessions': []}
-    walk.case_levels(report, options(), loader, 'token', state)
-    print('SESSIONS ' + json.dumps(state['level_sessions']))
+    walk.gateway_request = lambda port, payload, session: (500, '')
+    state = {'gateway_port': 1234}
+    ok = walk.wait_slots_live(report, options(slot_bound=1), state, {'walk-500': 1}, 'case')
+    print('LIVE ' + json.dumps(ok))
+    return report
+
+
+@mode('slots-live-stale')
+def slots_live_stale(walk, fixture):
+    """The old slots keep serving: a FAIL and a not-valid, never a pass."""
+    report = walk.Report()
+    walk.upstream_counts = lambda options: {'walk-ok': 5}
+    walk.gateway_request = lambda port, payload, session: (200, '')
+    state = {'gateway_port': 1234}
+    ok = walk.wait_slots_live(report, options(slot_bound=1), state, {'walk-500': 1}, 'case')
+    print('LIVE ' + json.dumps(ok))
+    return report
+
+
+@mode('capture-readback')
+def capture_readback(walk, fixture):
+    """The capture is judged on the API's own answer after every PUT."""
+    report = walk.Report()
+    loader = FakeLoader({'requestAnswers': [{'status': 200, 'body': {'until': None}}],
+                         'jsonAnswers': {'/api/model-capture': {'until': None}}})
+    read = walk.put_capture_checked(report, loader, 'token', {'durationMs': None}, 'off')
+    print('CAPTURE ' + json.dumps({'off': walk.capture_off(read),
+                                   'on': walk.capture_on(read)}))
+    loader.json_answers['/api/model-capture'] = {'mode': 'until-disabled'}
+    read = walk.put_capture_checked(report, loader, 'token', {'durationMs': None}, 'off')
+    print('CAPTURE ' + json.dumps({'off': walk.capture_off(read),
+                                   'on': walk.capture_on(read)}))
+    return report
+
+
+@mode('delete-reserve')
+def delete_reserve(walk, fixture):
+    """The reserve is cleared with the endpoint's own content type and empty object."""
+    report = walk.Report()
+    loader = FakeLoader({'requestAnswers': [{'status': 200, 'body': {}}]})
+    status = walk.delete_reserve(loader, 'token')
+    print('DELETE ' + json.dumps({'status': status, 'request': loader.requests[0]}))
+    return report
+
+
+@mode('restore-compare')
+def restore_compare(walk, fixture):
+    """The read-back comparison names what differs, and passes when it does not."""
+    report = walk.Report()
+    saved = {'primary': {'kind': 'openai', 'baseUrl': 'http://192.168.0.122:18080/v1',
+                         'model': 'walk-500', 'keySet': True},
+             'reserve': None}
+    same = {'primary': {'kind': 'openai', 'baseUrl': 'https://api.example.com/v1',
+                        'model': 'gpt', 'keySet': True}, 'reserve': None}
+    other = {'primary': {'kind': 'openai', 'baseUrl': 'https://api.example.com/v1',
+                         'model': 'other', 'keySet': False},
+             'reserve': {'kind': 'openai', 'baseUrl': 'https://api.example.com/v1',
+                         'model': 'r', 'keySet': True}}
+    print('COMPARE ' + json.dumps({'same': walk.slots_agree(same, {
+        'primary': dict(same['primary']), 'reserve': None}),
+        'changed': walk.slots_agree(same, other)}))
+    return report
+
+
+@mode('chat-unreachable')
+def chat_unreachable(walk, fixture):
+    """A closed port names the URL and the exception type, never a silent status."""
+    report = walk.Report()
+    accepted, detail = walk.chat_intake(1, MODE_OPTIONS, 'walk message', 0)
+    print('CHAT ' + json.dumps({'accepted': accepted, 'detail': detail}))
     return report
 
 

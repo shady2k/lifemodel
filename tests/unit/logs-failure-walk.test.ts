@@ -118,6 +118,57 @@ describe('the failure walk states what it proves and how', () => {
 });
 
 describe('a fake node for the failure walk', () => {
+  it('names the chat URL and the exception type when the send never answers', () => {
+    const run = harness('chat-unreachable');
+    const value = jsonLine<{ accepted: boolean; detail: string }>(run, 'CHAT');
+    expect(value.accepted).toBe(false);
+    expect(value.detail).toContain('http://127.0.0.1:');
+    expect(value.detail).toContain('/api/messages');
+    expect(value.detail).toContain('ConnectionRefusedError');
+    expect(value.detail).not.toContain('cookie');
+  }, 30000);
+
+  it('waits for the gateway to serve a slot change before a case runs', () => {
+    const pass = harness('slots-live-pass');
+    expect(jsonLine<boolean>(pass, 'LIVE')).toBe(true);
+    expect(pass.passes.join('\n')).toContain('the gateway serves the new slots');
+    const stale = harness('slots-live-stale');
+    expect(jsonLine<boolean>(stale, 'LIVE')).toBe(false);
+    expect(stale.failures.join('\n')).toContain('the gateway serves the new slots');
+    expect(stale.invalid.join('\n')).toContain('the new slots never served');
+  }, 60000);
+
+  it('judges the capture on the API\'s own answer after every PUT', () => {
+    const run = harness('capture-readback');
+    const values = run.lines
+      .filter((line) => line.startsWith('CAPTURE '))
+      .map((line) => JSON.parse(line.slice(8)) as { off: boolean; on: boolean });
+    expect(values[0]).toEqual({ off: true, on: false });
+    expect(values[1]).toEqual({ off: false, on: false });
+  }, 30000);
+
+  it('clears the reserve with a JSON body and content type', () => {
+    const run = harness('delete-reserve');
+    const value = jsonLine<{
+      status: number;
+      request: { method: string; path: string; body: string; headers: Record<string, string> };
+    }>(run, 'DELETE');
+    expect(value.status).toBe(200);
+    expect(value.request.method).toBe('DELETE');
+    expect(value.request.path).toBe('/api/model/reserve');
+    expect(value.request.body).toBe('{}');
+    expect(value.request.headers['content-type']).toBe('application/json');
+  }, 30000);
+
+  it('compares the restored slots by model, host and key flag only', () => {
+    const run = harness('restore-compare');
+    const value = jsonLine<{ same: string[]; changed: string[] }>(run, 'COMPARE');
+    expect(value.same).toEqual([]);
+    expect(value.changed).toHaveLength(2);
+    expect(value.changed[0]).toContain('model');
+    expect(value.changed[1]).toContain('reserve');
+  }, 30000);
+
   it('passes the failure verdict when the record carries type and conversation', () => {
     const run = harness('verdict-failure-pass');
     expect(jsonLine<boolean>(run, 'VERDICT')).toBe(true);
@@ -187,5 +238,20 @@ describe('a fake node for the failure walk', () => {
     expect(run.passes.join('\n')).toContain('a reserve that succeeds gives one warn');
     expect(run.failures).toEqual([]);
     expect(jsonLine<string[]>(run, 'SESSIONS')).toHaveLength(4);
-  }, 30000);
+  }, 60000);
+
+  it('expects the reserve that succeeds to answer 200', () => {
+    const run = harness('level-success-status');
+    expect(run.passes.join('\n')).toContain('a reserve that succeeds gives one warn with a model answer');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 60000);
+
+  it('fails the same case when the reserve that succeeds answers 500', () => {
+    const run = harness('level-success-wrong');
+    expect(run.failures.join('\n')).toContain(
+      'a reserve that succeeds gives one warn with a model answer',
+    );
+    expect(run.status).toBe(1);
+  }, 60000);
 });
