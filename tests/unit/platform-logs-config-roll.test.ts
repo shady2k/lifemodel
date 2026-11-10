@@ -90,7 +90,7 @@ describe("the collector's configuration is rolled by its content hash", () => {
       {
         name: COLLECTOR,
         namespace: 'lifemodel-logs',
-        files: ['vector.yaml=config/vector.yaml'],
+        files: ['vector.yaml=config/vector.yaml', 'check-delivery.sh=config/check-delivery.sh'],
       },
     ]);
     // Turning the hash off would keep the name, and the pod, unchanged.
@@ -102,7 +102,10 @@ describe("the collector's configuration is rolled by its content hash", () => {
       apiVersion: 'v1',
       kind: 'ConfigMap',
       metadata: { name: generatedMap.name, namespace: 'lifemodel-logs' },
-      data: { 'vector.yaml': readFileSync(collectorConfig, 'utf8') },
+      data: {
+        'vector.yaml': readFileSync(collectorConfig, 'utf8'),
+        'check-delivery.sh': readFileSync(join(collectorStep, 'config/check-delivery.sh'), 'utf8'),
+      },
     });
   });
 
@@ -124,7 +127,9 @@ describe("the collector's configuration is rolled by its content hash", () => {
     // The only ConfigMap in the step is the generated one, so no fixed-name
     // object can be what the volume mounts while the hash moves.
     expect(
-      step.objects.filter((object) => object.kind === 'ConfigMap').map((object) => object.metadata.name)
+      step.objects
+        .filter((object) => object.kind === 'ConfigMap')
+        .map((object) => object.metadata.name)
     ).toEqual([name]);
   });
 
@@ -137,9 +142,10 @@ describe("the collector's configuration is rolled by its content hash", () => {
     const after = generated(changed, COLLECTOR).name;
     expect(after).toMatch(new RegExp(`^${COLLECTOR}-${HASH}$`));
     expect(after).not.toBe(before);
-    expect(
-      find(changed, 'DaemonSet', 'logs-collector').spec.template.spec.volumes
-    ).toContainEqual({ name: 'config', configMap: { name: after } });
+    expect(find(changed, 'DaemonSet', 'logs-collector').spec.template.spec.volumes).toContainEqual({
+      name: 'config',
+      configMap: { name: after },
+    });
   });
 });
 
@@ -194,7 +200,10 @@ describe('nothing else in the artifact pins either ConfigMap by its fixed name',
   it('names them only where the generator and the workload reference live', () => {
     // A resourceName, an admission policy or a mount that pinned the fixed name
     // would stop matching the generated object the moment its content changed.
-    expect(namers(COLLECTOR)).toEqual(['platform/logs/kustomization.yaml', 'platform/logs/vector.yaml']);
+    expect(namers(COLLECTOR)).toEqual([
+      'platform/logs/kustomization.yaml',
+      'platform/logs/vector.yaml',
+    ]);
     expect(namers(DEFAULTS)).toEqual([
       'platform/logs-store/kustomization.yaml',
       'platform/logs-store/logs-store.yaml',

@@ -124,7 +124,7 @@ function assertCollectorPodSecurity(podSpec: Record<string, any>): void {
     JSON.stringify(paths) !==
     JSON.stringify([
       ['pods', '/var/log/pods'],
-      ['checkpoints', '/var/lib/lifemodel-logs-collector'],
+      ['checkpoints', '/var/lib/lifemodel-logs/collector'],
     ])
   )
     throw new Error('collector must mount exactly the two host paths of ADR-016 §1');
@@ -218,7 +218,7 @@ describe('platform pod security (ADR-016 L13)', () => {
     expect(sink.framing).toEqual({ method: 'newline_delimited' });
     expect(sink.encoding).toEqual({ codec: 'json' });
     expect(sink.batch).toEqual({ max_events: 2000, timeout_secs: 1 });
-    expect(sink.buffer).toEqual({ type: 'memory', max_events: 500000, when_full: 'block' });
+    expect(sink.buffer).toEqual({ type: 'disk', max_size: 335544320, when_full: 'block' });
   });
 
   it('fails when a third host mount is added, and passes again once it is reverted', () => {

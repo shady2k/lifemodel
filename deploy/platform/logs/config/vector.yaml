@@ -175,9 +175,13 @@ sinks:
     batch:
       max_events: 2000
       timeout_secs: 1
+    # 320 MiB plus segment/ledger slack fits inside the evictor's 768 MiB
+    # headroom. data_dir is mounted from the dedicated log volume, not root.
+    # kubernetes_logs cannot acknowledge downstream delivery in Vector 0.61;
+    # disk persistence narrows the crash window, it does not eliminate it.
     buffer:
-      type: memory
-      max_events: 500000
+      type: disk
+      max_size: 335544320
       when_full: block
     request:
       headers:

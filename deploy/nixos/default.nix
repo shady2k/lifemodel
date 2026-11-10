@@ -196,6 +196,16 @@ in
       path = [ pkgs.coreutils pkgs.e2fsprogs pkgs.util-linux pkgs.gnugrep ];
       script = "exec ${logsVolumeScript} ${lib.escapeShellArg cfg.logsVolumeSize} ${lib.escapeShellArg logsVolumeImage} ${lib.escapeShellArg logsVolumeDir}";
     };
+    lifemodel-logs-collector-volume = {
+      description = "Prepare collector state inside the mounted lifemodel log volume";
+      wantedBy = [ "multi-user.target" "var-lib-lifemodel\\x2dlogs.mount" ];
+      requires = [ "var-lib-lifemodel\\x2dlogs.mount" ];
+      after = [ "var-lib-lifemodel\\x2dlogs.mount" ];
+      before = [ "k3s.service" ];
+      serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+      path = [ pkgs.coreutils pkgs.util-linux pkgs.gnugrep ];
+      script = "exec ${logsVolumeScript} prepare ${lib.escapeShellArg logsVolumeImage} ${lib.escapeShellArg logsVolumeDir}";
+    };
     lifemodel-k3s-resolv = {
       description = "Write the resolv.conf k3s gives the kubelet and CoreDNS";
       wantedBy = [ "multi-user.target" ];
