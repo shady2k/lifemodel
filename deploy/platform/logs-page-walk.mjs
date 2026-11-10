@@ -196,6 +196,9 @@ const proxy = net.createServer((client) => {
       client.pipe(up);
     });
     up.on('error', () => client.destroy());
+    client.on('error', () => up.destroy());
+    client.on('close', () => up.destroy());
+    up.on('close', () => client.destroy());
   });
 });
 await new Promise((ready) => proxy.listen(0, '127.0.0.1', ready));
