@@ -61,7 +61,8 @@ def options(**values):
         writer_namespace='lifemodel-logs-walk', metrics_port=9598, crictl='k3s crictl',
         fill_bound=2, recover_bound=2, writer_interval_ms=20, saturated_seconds=0,
         writer_pods=1, memory_limit_bytes=300 * 1024 * 1024,
-        unsaturated_lines=10, settle_seconds=0,
+        unsaturated_lines=10, settle_seconds=0, writer_rate=1700, max_load=8.0,
+        restore_bound=600,
     )
     for name, value in values.items():
         setattr(base, name, value)
@@ -306,8 +307,143 @@ def oom_before_full(walk, fixture):
     return report
 
 
+@mode('main-runtime-error')
+def main_runtime_error(walk, fixture):
+    """An ordinary unexpected exception still gets cleanup and a final verdict."""
+    walk.Cluster = lambda *_args: FakeCluster({})
+    walk.read_password = lambda _path: 'fixture-password'
+    walk.Loader = lambda *_args: types.SimpleNamespace(login=lambda _secret: 200)
+    walk.wait_until = lambda deadline, interval, probe: probe()
+    def broken_run(report, options, loader, cluster, state):
+        state.update(replicas=1, created_namespace=True)
+        raise RuntimeError('fixture stage failed')
+    walk.run = broken_run
+    walk.store_ready = lambda *_args: True
+    walk.collector_running = lambda *_args: True
+    status = walk.main(['--password-file', 'unused'])
+    print('MAIN ' + json.dumps({'status': status}))
+    raise SystemExit(status)
+
+
+@mode('restore-timeouts')
+def restore_timeouts(walk, fixture):
+    """A command timeout retries; exhaustion cannot skip the other restore steps."""
+    report = walk.Report()
+    calls = []
+    attempts = {}
+    timeouts = []
+    class RestoreCluster(FakeCluster):
+        def run(self, args, timeout=120, stdin=None):
+            if 'scale' in args:
+                name = 'scale'
+            elif 'delete' in args and 'pod' in args:
+                name = args[args.index('pod') + 1]
+            elif 'namespace' in args:
+                name = 'namespace'
+            else:
+                raise AssertionError('unexpected restore command: ' + ' '.join(args))
+            calls.append(name)
+            attempts[name] = attempts.get(name, 0) + 1
+            timeouts.append(timeout)
+            if name in ('scale', 'walk-crash-writer') and (
+                    fixture.get('exhausted') or attempts[name] == 1):
+                if fixture.get('interrupt'):
+                    raise KeyboardInterrupt('fixture restore interrupted')
+                if fixture.get('interrupt'):
+                    raise KeyboardInterrupt()
+                raise walk.WalkError('fixture kubectl timed out')
+            return Result()
+    def wait(deadline, interval, probe):
+        for _attempt in range(3):
+            if probe():
+                return True
+        return False
+    walk.wait_until = wait
+    walk.store_ready = lambda *_args: (calls.append('store-ready') or True)
+    walk.collector_running = lambda *_args: (calls.append('collector-ready') or True)
+    walk.restore(report, options(writer_pods=3), None, RestoreCluster({}),
+                 {'replicas': 1, 'created_namespace': True})
+    print('CLEANUP ' + json.dumps({'calls': calls, 'attempts': attempts,
+                                   'timeouts': timeouts}))
+    return report
+
+
+@mode('emitted-count')
+def emitted_count(walk, fixture):
+    report = walk.Report()
+    class Cluster:
+        def run(self, args, timeout=120):
+            name = args[args.index('logs') + 1]
+            index = walk.writer_names(options(writer_pods=3)).index(name)
+            return Result(stdout='walk-crash fixture seq=%d t=0\n' % (index * 50_000_000 + 567))
+    print('EMITTED ' + json.dumps(walk.emitted_count(Cluster(), options(writer_pods=3), 'fixture')))
+    return report
+
+
+@mode('writer-paced')
+def writer_paced(walk, fixture):
+    report = walk.Report()
+    manifests = [walk.writer_manifest('node-fixture', options(writer_pods=3),
+                                      'fixture', 60, index)
+                 for index in range(1, 4)]
+    print('COMMANDS ' + json.dumps([body['spec']['containers'][0]['command']
+                                   for body in manifests]))
+    return report
+
+
+@mode('watch-load')
+def watch_load(walk, fixture):
+    """Drive the background monitor without threads, elapsed time or real signals."""
+    report = walk.Report()
+    waits = []
+    signals = []
+    class Stop:
+        def wait(self, seconds):
+            waits.append(seconds)
+            return len(waits) > 1
+    walk.node_load = lambda: fixture.get('load', 9.0)
+    original_kill = walk.os.kill
+    try:
+        walk.os.kill = lambda pid, sig: signals.append({
+            'own_pid': pid == walk.os.getpid(), 'sigint': sig == walk.signal.SIGINT})
+        walk.watch_load(report, options(), Stop())
+    finally:
+        walk.os.kill = original_kill
+    print('WATCH ' + json.dumps({'waits': waits, 'signals': signals}))
+    return report
+
+
+@mode('load-unavailable')
+def load_unavailable(walk, fixture):
+    report = walk.Report()
+    def unavailable():
+        raise ValueError('fixture loadavg is not a float')
+    walk.node_load = unavailable
+    ok = walk.safe_load(report, options())
+    print('SAFE ' + json.dumps({'ok': ok}))
+    return report
+
+
+@mode('load-gate')
+def load_gate(walk, fixture):
+    report = walk.Report()
+    events = []
+    cluster = FakeCluster({})
+    cluster.apply = lambda body: (events.append('apply') or Result())
+    walk.node_load = lambda: fixture.get('load', 9.0)
+    walk.writer_image = lambda *_args: 'node-fixture'
+    walk.read_metrics = lambda *_args: ({}, '')
+    walk.wait_writer = lambda *_args: (events.append('writer-ready') or False)
+    walk.wait_until = lambda *_args: (events.append('wait') or False)
+    walk.crash_case(report, options(), None, cluster, {}, True)
+    print('LOAD ' + json.dumps(events))
+    return report
+
+
 def run_mode(mode_name, walk_path, fixture_path):
     walk = load(walk_path)
+    # The harness owns node conditions; never read its host's load average.
+    walk.node_load = lambda: 0.0
     with open(fixture_path, encoding='utf8') as handle:
         fixture = json.load(handle)
     if mode_name not in MODES:

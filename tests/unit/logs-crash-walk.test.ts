@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { runInNewContext } from 'node:vm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 const WALK = join('deploy', 'platform', 'logs-crash-walk.py');
@@ -58,6 +59,9 @@ describe("the crash walk's argument handling", () => {
       '--crictl',
       '--fill-bound',
       '--recover-bound',
+      '--restore-bound',
+      '--writer-rate',
+      '--max-load',
       '--saturated-seconds',
       '--unsaturated-lines',
     ]) {
@@ -96,7 +100,7 @@ describe('the crash walk states its rows and what it cannot prove', () => {
   it('picks the logs-store series by component_id, and says why a scrape failed', () => {
     const state = jsonLine<{ size: number; max: number; received: number }>(
       harness('metrics-component'),
-      'STATE',
+      'STATE'
     );
     expect(state).toEqual({ size: 0, max: 500000, received: 143 });
     const scraped = jsonLine<{ text: string }>(harness('metrics-scrape-fails'), 'GAP');
@@ -120,7 +124,7 @@ describe('the crash walk states its rows and what it cannot prove', () => {
     expect(value.detail).toContain('buffer 410000 of 500000');
     expect(value.counting).toContain('lost while still in the kubelet');
     expect(run.lines.join('\n')).toContain(
-      "the collector's buffer cannot reach its maximum inside its memory limit",
+      "the collector's buffer cannot reach its maximum inside its memory limit"
     );
     expect(run.status).toBe(1);
   }, 30000);
@@ -181,6 +185,165 @@ describe('the crash writer starts and explains an empty read', () => {
       ok: true,
       events: ['pod', 'logs'],
     });
+  });
+});
+
+describe('the crash walk stays bounded and restores after failures', () => {
+  it('prints RESTORE and a nonzero RESULT after an unexpected stage exception', () => {
+    const run = harness('main-runtime-error');
+    expect(run.status).toBe(1);
+    expect(jsonLine<{ status: number }>(run, 'MAIN').status).toBe(1);
+    const output = run.lines.join('\n');
+    expect(output).toContain('RESTORE');
+    expect(output).toContain('RESULT');
+    expect(output).toContain('FAIL');
+    expect(output.indexOf('RESTORE')).toBeLessThan(output.indexOf('RESULT'));
+  });
+
+  it.each([false, true])(
+    'retries kubectl timeouts and runs later cleanup even when exhausted=%s',
+    (exhausted) => {
+      const run = harness('restore-timeouts', { exhausted });
+      const cleanup = jsonLine<{
+        calls: string[];
+        attempts: Record<string, number>;
+        timeouts: number[];
+      }>(run, 'CLEANUP');
+      expect(cleanup.attempts.scale).toBe(exhausted ? 3 : 2);
+      expect(cleanup.attempts['walk-crash-writer']).toBe(exhausted ? 3 : 2);
+      for (const step of [
+        'store-ready',
+        'walk-crash-writer-2',
+        'walk-crash-writer-3',
+        'namespace',
+        'collector-ready',
+      ]) {
+        expect(cleanup.calls).toContain(step);
+      }
+      expect(cleanup.calls.indexOf('namespace')).toBeGreaterThan(
+        cleanup.calls.lastIndexOf('walk-crash-writer')
+      );
+      expect(cleanup.timeouts.every((timeout) => timeout > 120)).toBe(true);
+      expect(run.status).toBe(exhausted ? 1 : 0);
+      expect(run.lines.join('\n')).toContain('RESTORE');
+      if (exhausted) expect(run.lines.join('\n')).toContain('incomplete');
+    }
+  );
+
+  it('interrupts a blocked stage when the background load monitor sees excess load', () => {
+    const run = harness('watch-load', { load: 9.0 });
+    expect(run.status).toBe(1);
+    expect(jsonLine<{ waits: number[]; signals: object[] }>(run, 'WATCH')).toEqual({
+      waits: [1],
+      signals: [{ own_pid: true, sigint: true }],
+    });
+    expect(run.lines.join('\n')).toContain('TEST NOT VALID');
+  });
+
+  it('ends the load monitor when stopped without interrupting a safe stage', () => {
+    const run = harness('watch-load', { load: 1.0 });
+    expect(run.status).toBe(0);
+    expect(jsonLine<{ waits: number[]; signals: object[] }>(run, 'WATCH')).toEqual({
+      waits: [1, 1],
+      signals: [],
+    });
+  });
+
+  it('marks an unreadable load average invalid rather than letting the stage proceed', () => {
+    const run = harness('load-unavailable');
+    expect(run.status).toBe(1);
+    expect(jsonLine<{ ok: boolean }>(run, 'SAFE').ok).toBe(false);
+    expect(run.lines.join('\n')).toContain('TEST NOT VALID');
+    expect(run.lines.join('\n')).toContain('unavailable');
+  });
+
+  it('retries a KeyboardInterrupt during restore and still completes every step', () => {
+    const run = harness('restore-timeouts', { interrupt: true });
+    const cleanup = jsonLine<{ calls: string[]; attempts: Record<string, number> }>(run, 'CLEANUP');
+    expect(run.status).toBe(0);
+    expect(cleanup.attempts.scale).toBe(2);
+    expect(cleanup.attempts['walk-crash-writer']).toBe(2);
+    for (const step of [
+      'store-ready',
+      'walk-crash-writer-2',
+      'walk-crash-writer-3',
+      'namespace',
+      'collector-ready',
+    ]) {
+      expect(cleanup.calls).toContain(step);
+    }
+    expect(run.lines.join('\n')).toContain('RESTORE');
+  });
+
+  it('rejects excess node load before creating writers or waiting for a full buffer', () => {
+    const run = harness('load-gate', { load: 9.0 });
+    expect(run.status).toBe(1);
+    expect(jsonLine<string[]>(run, 'LOAD')).toEqual([]);
+    expect(run.lines.join('\n')).toContain('TEST NOT VALID');
+    expect(run.lines.join('\n').toLowerCase()).toContain('load');
+  });
+});
+
+describe('the crash writer has a paced aggregate target', () => {
+  it('measures emitted totals across sequence bases without retaining every log line', () => {
+    expect(jsonLine<number>(harness('emitted-count'), 'EMITTED')).toBe(1701);
+  });
+
+  it('splits 1700 lines/s across three pods in timed batches of at most twenty', () => {
+    const commands = jsonLine<string[][]>(harness('writer-paced'), 'COMMANDS');
+    expect(commands).toHaveLength(3);
+    const totals: number[] = [];
+    for (const command of commands) {
+      expect(command.slice(0, 2)).toEqual(['node', '-e']);
+      const script = command[2] ?? '';
+      expect(script).not.toContain('setImmediate');
+      let now = 0;
+      let written = 0;
+      let batch = 0;
+      const batches: number[] = [];
+      const timers: { at: number; callback: () => void }[] = [];
+      runInNewContext(
+        script,
+        {
+          process: {
+            argv: [command[0], ...command.slice(3)],
+            stdout: {
+              write: (line: string) => {
+                const lines = line.split('\n').length - 1;
+                written += lines;
+                batch += lines;
+                return true;
+              },
+            },
+          },
+          Date: { now: () => now },
+          setTimeout: (callback: () => void, delay: number) => {
+            expect(delay).toBeGreaterThan(0);
+            timers.push({ at: now + delay, callback });
+          },
+        },
+        { timeout: 1000 }
+      );
+      batches.push(batch);
+      // Virtual timers prove pacing without a wall-clock or Kubernetes wait.
+      for (let turns = 0; timers.length > 0 && turns < 10000; turns += 1) {
+        timers.sort((left, right) => left.at - right.at);
+        const timer = timers.shift();
+        if (!timer || timer.at >= 1000) break;
+        now = timer.at;
+        batch = 0;
+        timer.callback();
+        batches.push(batch);
+      }
+      expect(timers.length).toBeLessThan(10000);
+      expect(batches.every((size) => size <= 20)).toBe(true);
+      expect(written).toBeGreaterThan(540);
+      expect(written).toBeLessThan(600);
+      totals.push(written);
+    }
+    const total = totals.reduce((sum, value) => sum + value, 0);
+    expect(total).toBeGreaterThanOrEqual(1650);
+    expect(total).toBeLessThanOrEqual(1760);
   });
 });
 
