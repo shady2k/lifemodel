@@ -249,6 +249,11 @@ Created at runtime relative to the working directory; the root is `data/`
 (override with `DATA_PATH`; defaults live in `src/config/config-schema.ts`).
 `DATA_PATH` moves logs and plugin/runtime files, not durable application state. Configuration is stored in the core Postgres schema `core.settings`; `src/config/config-loader.ts` does not read or write a config file. `resolveConfigDir` and `data/config/agent.json` are removed.
 
+In the cluster every module's logs go to the log store on the machine's own
+volume and are read on the loader's logs page at
+`https://boot-<name>.local/logs` (ADR-016); the `data/logs/` files below are
+what a local development run writes.
+
 - `data/logs/agent-<timestamp>.log` — pino logs (pino-pretty formatted):
   system events, errors. Default level is `info`; the LLM request
   summaries, responses and `contentPreview` are `debug` — set

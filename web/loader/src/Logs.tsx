@@ -31,6 +31,7 @@ import {
 } from '../../../loader/src/logs-query.js';
 import type { LogsRecord } from '../../../loader/src/logs-store-adapter.js';
 import { LogsSettings } from './LogsSettings';
+import { formatMiB } from './logs-i18n';
 
 const ALL_MODULES = '__all__';
 const ALL_LEVELS = '__all__';
@@ -551,10 +552,10 @@ export function Logs() {
                         {t('logsEvictionNotice', {
                           date: noticeDate(notice.day ?? '', i18n.language),
                           time: new Date(notice.time).toLocaleString(i18n.language),
-                          bytes:
+                          size:
                             notice.freedBytes === null
                               ? ''
-                              : notice.freedBytes.toLocaleString(i18n.language),
+                              : formatMiB(notice.freedBytes, i18n.language),
                         })}
                       </li>
                     );
