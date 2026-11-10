@@ -400,6 +400,58 @@ def capture_restore(walk, fixture):
     return report
 
 
+def core_failure_record(conversation, message):
+    return {'time': '2026-11-10T09:37:02.000Z', 'message': message,
+            'fields': {'module': 'core', 'level': 'error', 'pod': 'core-0',
+                       'conversation_id': conversation}}
+
+
+def stored_core_line(conversation):
+    """The record as the collector stores it: the core's whole JSON line in `message`."""
+    return json.dumps({'level': 50, 'time': 1794241022000,
+                       'conversation_id': conversation, 'msg': 'COGNITION failed'})
+
+
+@mode('marker-turn')
+def marker_turn(walk, fixture):
+    """The stored line is JSON whose `msg` names the failure: the wait finds it."""
+    report = walk.Report()
+    loader = FakeLoader({})
+    loader.log_answers = [{'state': 'ok', 'count': 1,
+                           'records': [core_failure_record('rcpt_x', stored_core_line('rcpt_x'))]}]
+    found = walk.wait_marker_turn(report, options(core_bound=2), loader, 0,
+                                  {'fields': {'conversation_id': 'rcpt_x'}}, 'a marker')
+    print('TURN ' + json.dumps({'found': found, 'text': loader.log_calls[0].get('text')}))
+    return report
+
+
+@mode('marker-turn-other')
+def marker_turn_other(walk, fixture):
+    """A stored line whose msg is another event is not the final failure."""
+    report = walk.Report()
+    loader = FakeLoader({})
+    other = json.dumps({'level': 50, 'msg': 'LLM request failed'})
+    loader.log_answers = [{'state': 'ok', 'count': 1,
+                           'records': [core_failure_record('rcpt_x', other)]}]
+    found = walk.wait_marker_turn(report, options(core_bound=0), loader, 0,
+                                  {'fields': {'conversation_id': 'rcpt_x'}}, 'a marker')
+    print('TURN ' + json.dumps({'found': found}))
+    return report
+
+
+@mode('marker-turn-plain')
+def marker_turn_plain(walk, fixture):
+    """An older core logs plain text; the line is its own message."""
+    report = walk.Report()
+    loader = FakeLoader({})
+    loader.log_answers = [{'state': 'ok', 'count': 1,
+                           'records': [core_failure_record('rcpt_x', 'COGNITION failed')]}]
+    found = walk.wait_marker_turn(report, options(core_bound=2), loader, 0,
+                                  {'fields': {'conversation_id': 'rcpt_x'}}, 'a marker')
+    print('TURN ' + json.dumps({'found': found}))
+    return report
+
+
 @mode('late-core')
 def late_core(walk, fixture):
     """The core's lines arrive on a later poll: the wait finds them."""

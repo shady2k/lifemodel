@@ -991,18 +991,41 @@ def reason_complete(record):
     return all(field_of(record, name) for name in ('reason_check', 'reason_path', 'reason_got'))
 
 
+def message_of(record):
+    """A record's own `msg`.
+
+    The core's stdout is one JSON line per record (ADR-016 §9 point 2) and the
+    collector stores it as `_msg`, so the loader's `message` is that whole line,
+    not the text the process logged. The `msg` field is what names the event; a
+    plain-text line (an older core) is its own message.
+    """
+    raw = record.get('message')
+    if isinstance(raw, str):
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            value = None
+        if isinstance(value, dict) and isinstance(value.get('msg'), str):
+            return value['msg']
+        return raw
+    return field_of(record, 'msg')
+
+
 def wait_marker_turn(report, options, loader, started, record, label):
     """The final core failure must arrive through the collector before absence reads."""
     conversation = field_of(record, 'conversation_id')
+
     def final_failure():
         if not conversation:
             return None
+        # The text filter keeps the failure in the page even when the window
+        # holds more than the page's 100 lines under that conversation.
         lines = records_in_window(loader, started, module=CORE_MODULE,
-                                  conversation=conversation)
+                                  conversation=conversation, text='COGNITION failed')
         return next((line for line in lines or []
                      if field_of(line, 'conversation_id') == conversation
                      and field_of(line, 'level') == 'error'
-                     and line.get('message') in ('COGNITION failed', 'COGNITION failed (async)')),
+                     and message_of(line) in ('COGNITION failed', 'COGNITION failed (async)')),
                     None)
     final = wait_until(time.monotonic() + options.core_bound, 5, final_failure)
     if not report.check(final is not None, 'the final core failure reaches the collector (%s)'

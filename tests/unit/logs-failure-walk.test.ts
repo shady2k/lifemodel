@@ -258,6 +258,22 @@ describe('a fake node for the failure walk', () => {
     expect(values[1]).toEqual({ off: false, on: false });
   }, 30000);
 
+  it('matches the final core failure on the stored JSON line\'s msg', () => {
+    // The core's stdout is one JSON line (ADR-016 §9 point 2), so a record's
+    // `message` is the whole line; the walk must read its `msg`, and search by
+    // text so a window over 100 core lines cannot hide it.
+    const run = harness('marker-turn');
+    expect(jsonLine<{ found: boolean; text: string }>(run, 'TURN')).toEqual({
+      found: true,
+      text: 'COGNITION failed',
+    });
+    const other = harness('marker-turn-other');
+    expect(jsonLine<{ found: boolean }>(other, 'TURN').found).toBe(false);
+    expect(other.invalid.join('\n')).toContain('no delivered final core failure');
+    const plain = harness('marker-turn-plain');
+    expect(jsonLine<{ found: boolean }>(plain, 'TURN').found).toBe(true);
+  }, 60000);
+
   it('waits for the core\'s lines under the conversation after its retries', () => {
     const late = harness('late-core');
     const value = jsonLine<{ lines: number; polls: number }>(late, 'CORE');
