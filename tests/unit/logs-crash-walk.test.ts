@@ -31,9 +31,9 @@ function jsonLine<T>(run: Run, prefix: string): T {
 
 let directory = '';
 
-function harness(mode: string): Run {
+function harness(mode: string, value: object = {}): Run {
   const fixture = join(directory, mode + '.json');
-  writeFileSync(fixture, '{}');
+  writeFileSync(fixture, JSON.stringify(value));
   return python([HARNESS, mode, WALK, fixture]);
 }
 
@@ -45,7 +45,7 @@ afterAll(() => {
   rmSync(directory, { recursive: true, force: true });
 });
 
-describe('the crash walk\'s argument handling', () => {
+describe("the crash walk's argument handling", () => {
   it('prints its usage and exits 0 on --help', () => {
     const run = python([WALK, '--help']);
     expect(run.status).toBe(0);
@@ -107,15 +107,60 @@ describe('the crash walk states its rows and what it cannot prove', () => {
   });
 });
 
+describe('the crash writer starts and explains an empty read', () => {
+  it('uses the deployed evictor image with Node, not the collector image', () => {
+    expect(jsonLine<string>(harness('writer-image'), 'IMAGE')).toBe(
+      'loader-with-node@sha256:fixture'
+    );
+  });
+
+  it.each([
+    ['image', 'Pending', 'ImagePullBackOff', 'FailedPull'],
+    ['scheduling', 'Pending', 'unknown', 'FailedScheduling'],
+    ['admission', 'absent', 'unknown', 'FailedCreate restricted'],
+    ['exited', 'Failed', 'StartError', 'node executable missing'],
+    ['read', 'Running', 'running', 'Started'],
+    ['silent', 'Running', 'running', 'Started'],
+  ])('reports %s without claiming an empty writer succeeded', (cause, phase, reason, event) => {
+    const run = harness('writer-empty', { case: cause });
+    expect(run.status).toBe(1);
+    expect(jsonLine<{ ok: boolean }>(run, 'START').ok).toBe(false);
+    const output = run.lines.join('\n');
+    expect(output).toContain('phase=' + phase);
+    expect(output).toContain(reason);
+    expect(output).toContain(event);
+    expect(output).toContain('logs exit=' + (cause === 'silent' ? '0' : '1'));
+    expect(output).toContain('stderr=');
+    expect(output).not.toContain('PRIVATE_TOKEN');
+    expect(output).not.toContain('PRIVATE_VALUE');
+  });
+
+  it('never evaluates buffer saturation if writer startup fails', () => {
+    expect(jsonLine<string[]>(harness('writer-gates-buffer'), 'ORDER')).toEqual([
+      'buffer',
+      'writer-ready',
+    ]);
+  });
+
+  it('waits for Running and the first numbered line before allowing buffer reads', () => {
+    const run = harness('writer-start-order');
+    expect(run.status).toBe(0);
+    expect(jsonLine<{ ok: boolean; events: string[] }>(run, 'START')).toEqual({
+      ok: true,
+      events: ['pod', 'logs'],
+    });
+  });
+});
+
 describe('a fake node for the crash walk', () => {
-  it('passes when every line still in the kubelet\'s files was delivered', () => {
+  it("passes when every line still in the kubelet's files was delivered", () => {
     const run = harness('verdict-pass');
     const value = jsonLine<{ ok: boolean; detail: string }>(run, 'VERDICT');
     expect(value.ok).toBe(true);
     expect(value.detail).toContain('2 duplicated');
   });
 
-  it('fails a line lost while still in the kubelet\'s files, naming it', () => {
+  it("fails a line lost while still in the kubelet's files, naming it", () => {
     const run = harness('verdict-lost');
     const value = jsonLine<{ ok: boolean; detail: string }>(run, 'VERDICT');
     expect(value.ok).toBe(false);
