@@ -73,6 +73,10 @@ describe('the evict walk\'s argument handling', () => {
       '--settle-seconds',
       '--quiet-seconds',
       '--run-sample-seconds',
+      '--stranded-bound',
+      '--flush-bound',
+      '--kustomization',
+      '--flux-namespace',
       '--suspend-seconds',
       '--evictor-bound',
       '--fill-timeout',
@@ -91,7 +95,7 @@ describe('the evict walk\'s argument handling', () => {
 
 describe('the evict walk states every assertion of its row', () => {
   it('names the restart, the panic, the drop lines, the writer, the 429 window and the suspend', () => {
-    const header = readFileSync(WALK, 'utf8').split('\n').slice(0, 170).join('\n');
+    const header = readFileSync(WALK, 'utf8').split('\n').slice(0, 210).join('\n');
     expect(header).toContain('WALK-LOGS-EVICT');
     expect(header).toContain('ADR-016 L16');
     expect(header).toMatch(/restartCount/);
@@ -101,6 +105,10 @@ describe('the evict walk states every assertion of its row', () => {
     expect(header).toMatch(/suspend/);
     expect(header).toMatch(/partition/);
     expect(header).toMatch(/lastSuccessfulTime/);
+    expect(header).toMatch(/stranded_partition/);
+    expect(header).toMatch(/logs-stranded-days/);
+    expect(header).toMatch(/kustomize-controller/);
+    expect(header).toMatch(/flush/);
     expect(header).toMatch(/dropped with its day/);
     expect(header).toMatch(/What it does not cover/);
   });
@@ -174,6 +182,33 @@ describe('a fake node for the evict walk', () => {
     expect(run.passes.join('\n')).toContain('2 dropped with its day, 0 lost');
     expect(run.failures).toEqual([]);
     expect(run.status).toBe(0);
+  }, 30000);
+
+  it('waits for the store\'s count to settle before judging the tail', () => {
+    const run = harness('evict-writer-flush-late');
+    expect(run.notes.join('\n')).toContain('settled at 201');
+    expect(run.passes.join('\n')).toContain('200 line(s), none lost');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 60000);
+
+  it('names the missing sequences and their distance from the count', () => {
+    const run = harness('evict-writer-missing');
+    const failure = run.failures.join('\n');
+    expect(failure).toContain('16 not found: seq 66..81');
+    expect(failure).toContain('written -');
+    expect(failure).toContain('ms from the count');
+    expect(run.status).toBe(1);
+  }, 60000);
+
+  it('reads the oldest row over the whole retention, and says when no drop could move it', () => {
+    const moved = harness('evict-oldest-in-day');
+    expect(moved.passes.join('\n')).toContain('the oldest remaining row moves forward');
+    expect(moved.status).toBe(0);
+    const later = harness('evict-oldest-later');
+    expect(later.notes.join('\n')).toContain('was in none of the dropped days');
+    expect(later.failures).toEqual([]);
+    expect(later.status).toBe(0);
   }, 30000);
 
   it('fails a row lost in a day no drop names and outside a detach window', () => {
@@ -294,7 +329,8 @@ describe('a fake node for the evict walk', () => {
     expect(pass).toContain('the evictor is suspended');
     expect(pass).toContain('the API adds the evictor line');
     expect(pass).toContain('the evictor line goes away after the next successful run');
-    expect(jsonLine<string[]>(run, 'PATCHES')).toHaveLength(2);
+    // The Flux Kustomization is suspended first and resumed last, around the CronJob.
+    expect(jsonLine<string[]>(run, 'PATCHES')).toHaveLength(4);
     expect(run.status).toBe(0);
   }, 30000);
 
@@ -336,11 +372,48 @@ describe('a fake node for the evict walk', () => {
     expect(run.status).toBe(1);
   }, 60000);
 
+  it('fails as its own result when something puts suspend: false back, naming it', () => {
+    const run = harness('evict-suspend-reapplied');
+    const failure = run.failures.join('\n');
+    expect(failure).toContain('the suspended CronJob stays suspended');
+    expect(failure).toContain('kustomize-controller');
+    expect(run.status).toBe(1);
+  }, 60000);
+
   it('refuses to blame the suspension for a line that was already there', () => {
     const run = harness('evict-suspend-stale');
     expect(run.invalid.join('\n')).toContain('the evictor is not fresh before it is suspended');
     expect(run.status).toBe(1);
   }, 30000);
+
+  it('proves the stranded day from the failed run to the restarted drop', () => {
+    const run = harness('evict-stranded');
+    const pass = run.passes.join('\n');
+    expect(pass).toContain('stranded_partition for');
+    expect(pass).toContain("the day's directory is still on disk after that run");
+    expect(pass).toContain('stranded-days annotation once');
+    expect(pass).toContain('the store pod is replaced for that day');
+    expect(pass).toContain('lists the day as attached again');
+    expect(pass).toContain('drops the day with its usual drop line');
+    expect(pass).toContain('the ledger names the day exactly once across the case');
+    expect(pass).toContain('the store restarted exactly once for that day');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 60000);
+
+  it('fails when the loader restarts the store twice for one stranded day', () => {
+    const run = harness('evict-stranded-twice');
+    expect(run.failures.join('\n')).toContain('the store restarted exactly once for that day');
+    expect(run.failures.join('\n')).toContain('2 store pod(s) after the first');
+    expect(run.status).toBe(1);
+  }, 60000);
+
+  it('fails, and marks the rest not valid, when the loader never restarts', () => {
+    const run = harness('evict-stranded-never');
+    expect(run.failures.join('\n')).toContain('stranded-days annotation once');
+    expect(run.invalid.join('\n')).toContain('the annotation never named the day');
+    expect(run.status).toBe(1);
+  }, 60000);
 
   it('calls the evictor stale only past two intervals', () => {
     const run = harness('evict-stale');
