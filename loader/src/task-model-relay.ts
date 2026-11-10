@@ -3,7 +3,7 @@ import { createServer, type Server } from 'node:http';
 import { request } from 'node:https';
 import { readFile } from 'node:fs/promises';
 import type { Socket } from 'node:net';
-import { modelErrorExcerpt, MODEL_ERROR_BODY_LIMIT } from './model-error-excerpt.js';
+import { gatewayErrorCode, MODEL_ERROR_BODY_LIMIT } from './model-error-body.js';
 import {
   StartupConnectionRetry,
   connectionState,
@@ -20,7 +20,6 @@ export interface TaskModelRequest {
   status: number | null;
   failed: boolean;
   reasonCode?: string;
-  errorExcerpt: string;
 }
 
 export interface TaskModelRelayOptions {
@@ -65,15 +64,6 @@ export async function createTaskModelRelay(options: TaskModelRelayOptions): Prom
       outgoing.writeHead(404).end();
       return;
     }
-    // Inspect only a bounded copy; never delay/replay the streamed POST. If it
-    // exceeds the gateway's 1 MiB request limit, omit excerpts entirely.
-    let requestBytes = 0;
-    const requestChunks: Buffer[] = [];
-    const captureRequest = (chunk: Buffer) => {
-      requestBytes += chunk.length;
-      if (requestBytes <= 1_048_576) requestChunks.push(chunk);
-      else requestChunks.length = 0;
-    };
     const cancellation = new AbortController();
     const timeout = AbortSignal.timeout(options.timeoutMs ?? 300_000);
     const deadline = AbortSignal.any([timeout, cancellation.signal]);
@@ -101,6 +91,8 @@ export async function createTaskModelRelay(options: TaskModelRelayOptions): Prom
         failed = false;
         reasonCode = 'client_closed';
       }
+      if (!reasonCode && size <= MODEL_ERROR_BODY_LIMIT)
+        reasonCode = gatewayErrorCode(Buffer.concat(chunks).toString('utf8'));
       try {
         options.onRequest?.({
           startedAt,
@@ -112,14 +104,6 @@ export async function createTaskModelRelay(options: TaskModelRelayOptions): Prom
           status,
           failed,
           ...(reasonCode ? { reasonCode } : {}),
-          errorExcerpt:
-            size <= MODEL_ERROR_BODY_LIMIT && requestBytes <= 1_048_576
-              ? modelErrorExcerpt(
-                  Buffer.concat(chunks).toString('utf8'),
-                  [token],
-                  Buffer.concat(requestChunks).toString('utf8')
-                )
-              : '',
         });
       } catch {
         // Diagnostic callbacks never change the response or retry decision.
@@ -188,7 +172,6 @@ export async function createTaskModelRelay(options: TaskModelRelayOptions): Prom
                 // Only GET is replayable. Never buffer or resend a streamed completion.
                 if (method === 'GET') upstream.end();
                 else {
-                  incoming.on('data', captureRequest);
                   incoming.pipe(upstream);
                 }
               });
@@ -212,7 +195,7 @@ export async function createTaskModelRelay(options: TaskModelRelayOptions): Prom
         else
           outgoing
             .writeHead(502, { 'content-type': 'application/json' })
-            .end('{"error":{"message":"model_transport_failed"}}');
+            .end('{"error":{"type":"gateway_error","code":"model_transport_failed"}}');
       }
     })();
   });

@@ -17,8 +17,7 @@ export class GatewayError extends Error {
     readonly code: string,
     readonly status = 502,
     readonly reason?: RejectReason,
-    readonly upstreamStatus?: number,
-    readonly errorExcerpt = ''
+    readonly upstreamStatus?: number
   ) {
     super(code);
   }

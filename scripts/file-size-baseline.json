@@ -1,7 +1,7 @@
 {
   "files": {
     "loader/src/http.ts": 1427,
-    "loader/src/model-gateway-app.ts": 952,
+    "loader/src/model-gateway-app.ts": 945,
     "loader/src/storage-object-s3.ts": 821,
     "loader/src/storage-retention.ts": 861,
     "loader/src/storage-seal.ts": 947,

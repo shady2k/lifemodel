@@ -1179,7 +1179,7 @@ describe('task identity and model listener (real Postgres, TLS Kubernetes)', () 
             modelRoute: 'primary',
             slot: 'primary',
             reason: undefined,
-            errorExcerpt: 'Capacity exhausted',
+            error_type: 'upstream_503',
             taskId: f.task.id,
             traceId: f.task.traceId,
           },

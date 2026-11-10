@@ -146,7 +146,7 @@ describe('workbench launcher startup diagnostics and graph check', () => {
   it.each([
     'task-launcher.js',
     'task-launcher-http.js',
-    'model-error-excerpt.js',
+    'model-error-body.js',
     'task-transcript-bounds.mjs',
     'task-output-names.mjs',
     ...adapterModules,
@@ -254,23 +254,23 @@ describe('workbench launcher startup diagnostics and graph check', () => {
   });
 
   it('records a real startup import failure before a task can execute', () => {
-    expect(diagnostic(launch({ start: true, missing: 'model-error-excerpt.js' }))).toEqual({
+    expect(diagnostic(launch({ start: true, missing: 'model-error-body.js' }))).toEqual({
       code: 'launcher_start_failed',
       reasonCode: 'ERR_MODULE_NOT_FOUND',
-      module: 'model-error-excerpt.js',
+      module: 'model-error-body.js',
     });
   });
 
   it('keeps the original bounded stderr diagnostic when the termination file is unavailable', () => {
     const result = launch({
-      missing: 'model-error-excerpt.js',
+      missing: 'model-error-body.js',
       noTermination: true,
     });
     expect(result.status).toBe(1);
     expect(JSON.parse(result.stderr)).toEqual({
       code: 'launcher_start_failed',
       reasonCode: 'ERR_MODULE_NOT_FOUND',
-      module: 'model-error-excerpt.js',
+      module: 'model-error-body.js',
     });
     expect(result.stderr).not.toContain(CANARY);
     expect(result.termination).toBe('');

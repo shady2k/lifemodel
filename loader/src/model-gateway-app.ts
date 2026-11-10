@@ -26,7 +26,8 @@ import {
 import { modelEndpointUrl } from './model-url.js';
 import type { CaptureInput, ExchangeCapture } from './model-exchange-capture.js';
 import { SlotStorageUnavailableError } from './model-bao.js';
-import { readModelErrorExcerpt } from './model-error-excerpt.js';
+import { drainModelErrorBody } from './model-error-body.js';
+import { gatewayFailureFields } from './model-gateway-failure.js';
 import type { LoaderLogger } from './logger.js';
 import {
   badResponse,
@@ -128,7 +129,6 @@ function ownedError(res: ServerResponse, error: GatewayError, slot?: ModelSlotNa
     error: {
       type: 'gateway_error',
       code: error.code,
-      ...(error.errorExcerpt ? { message: error.errorExcerpt } : {}),
     },
   });
   if (res.destroyed || res.writableEnded) return;
@@ -433,7 +433,8 @@ export function createModelGateway(options: GatewayOptions) {
     signal: AbortSignal,
     session: { id: string; callerNamed: boolean },
     captureInput: Omit<CaptureInput, 'upstream' | 'slot'>,
-    authorizeTask?: (signal: AbortSignal) => Promise<void>
+    authorizeTask?: (signal: AbortSignal) => Promise<void>,
+    onSend?: () => void
   ): Promise<void> {
     const rendered = renderAttemptHeaders(slot, session.id);
     if (slot.key) retain(activeKeys, slot.key);
@@ -448,7 +449,8 @@ export function createModelGateway(options: GatewayOptions) {
         session,
         rendered.headers,
         captureInput,
-        authorizeTask
+        authorizeTask,
+        onSend
       );
     } finally {
       if (slot.key) release(activeKeys, slot.key);
@@ -465,7 +467,8 @@ export function createModelGateway(options: GatewayOptions) {
     session: { id: string; callerNamed: boolean },
     custom: Record<string, string>,
     captureInput: Omit<CaptureInput, 'upstream' | 'slot'>,
-    authorizeTask?: (signal: AbortSignal) => Promise<void>
+    authorizeTask?: (signal: AbortSignal) => Promise<void>,
+    onSend?: () => void
   ): Promise<void> {
     const startedAt = Date.now();
     const connectDeadline = startedAt + limits.connect;
@@ -568,6 +571,7 @@ export function createModelGateway(options: GatewayOptions) {
       const responsePromise = once(req, 'response', { signal: active }) as Promise<
         [IncomingMessage]
       >;
+      onSend?.();
       req.end(body);
       const [upstream] = await responsePromise;
       upstream.on('error', () => undefined);
@@ -580,13 +584,10 @@ export function createModelGateway(options: GatewayOptions) {
       if (status === 401 || status === 403) options.slots.invalidate(name);
       if (status < 200 || status >= 300) {
         rejectedStatus = status;
-        const excerpt = await wait(
-          readModelErrorExcerpt(upstream, inspectedKeys(), body ?? '', capture !== undefined),
-          active
-        );
+        await wait(drainModelErrorBody(upstream, capture !== undefined), active);
         if (capture && !upstream.readableEnded && !active.aborted) {
           // Do not hold rejection/failover behind optional capture intake. The
-          // existing 16 KiB excerpt boundary remains the caller's boundary.
+          // existing 16 KiB drain boundary remains the caller's boundary.
           captureDetached = true;
           // Detached debugging must not occupy an agent admission slot.
           const detachedSocket = upstream.socket;
@@ -620,8 +621,7 @@ export function createModelGateway(options: GatewayOptions) {
           status >= 400 ? `upstream_${String(status)}` : 'bad_response',
           status >= 400 && status < 500 ? status : 502,
           status >= 400 ? undefined : { check: 'upstream_status', path: '' },
-          status,
-          excerpt
+          status
         );
       }
       let first = true;
@@ -742,12 +742,13 @@ export function createModelGateway(options: GatewayOptions) {
     // The caller's session, read from this one inbound header and no other:
     // an id it names only when it is well formed, otherwise this process's own
     // fixed id (ADR-013, the custom-headers amendment).
-    const named = trustedTaskId ?? validSessionId(req.headers[SESSION_HEADER]);
+    const conversation =
+      trustedTaskId === undefined ? validSessionId(req.headers[SESSION_HEADER]) : undefined;
+    const named = trustedTaskId ?? conversation;
     const session = { id: named ?? processSessionId, callerNamed: named !== undefined };
     const requestStartedAt = new Date().toISOString();
-    // The slot whose read or attempt a recorded failure came from: a slot read
-    // that fails belongs to that slot, not to the last one attempted (ADR-013
-    // D4). Optional absence never records a failure and never moves this.
+    // Attribute failed reads to their slot, not the last attempt (ADR-013 D4).
+    // Optional absence never records a failure and never moves this.
     let failureSlot: ModelSlotName | undefined;
     const recordFailure = (
       name: ModelSlotName,
@@ -762,7 +763,7 @@ export function createModelGateway(options: GatewayOptions) {
       failureSlot = name;
     };
     let last = new GatewayError('not_configured');
-    let loggedFailure: GatewayError | undefined;
+    let retryFailure: GatewayError | undefined;
     let activeSlot: ModelSlotName = 'primary';
     let inboundBody = '';
     let attemptNumber = 0;
@@ -832,7 +833,17 @@ export function createModelGateway(options: GatewayOptions) {
                 body: inboundBody,
               },
             },
-            authorizeTask
+            authorizeTask,
+            () => {
+              if (retryFailure)
+                options.logger.warn(
+                  {
+                    ...gatewayFailureFields(retryFailure, failureSlot, conversation),
+                    ...taskContext,
+                  },
+                  'Model gateway upstream failed'
+                );
+            }
           );
           failureRevisions[name]++;
           outcomeRevision++;
@@ -847,19 +858,7 @@ export function createModelGateway(options: GatewayOptions) {
           if (last.code === 'client_disconnected' || last instanceof TaskAuthorizationError)
             throw last;
           recordFailure(name, last.code, identity);
-          options.logger.warn(
-            {
-              code: last.code,
-              status: last.upstreamStatus ?? last.status,
-              modelRoute: name,
-              slot: name,
-              reason: last.reason,
-              errorExcerpt: last.errorExcerpt,
-              ...taskContext,
-            },
-            'Model gateway upstream failed'
-          );
-          loggedFailure = last;
+          retryFailure = last;
           if (
             signal.aborted ||
             last.code === 'not_configured' ||
@@ -882,19 +881,13 @@ export function createModelGateway(options: GatewayOptions) {
         health.state = 'down';
         health.outageSince ??= new Date().toISOString();
         health.lastErrorCode = failure.code;
-        if (failure !== loggedFailure)
-          options.logger.warn(
-            {
-              code: failure.code,
-              status: failure.upstreamStatus ?? failure.status,
-              modelRoute: failureSlot ?? activeSlot,
-              errorExcerpt: failure.errorExcerpt,
-              slot: failureSlot ?? activeSlot,
-              reason: failure.reason,
-              ...taskContext,
-            },
-            'Model gateway request failed'
-          );
+        options.logger.error(
+          {
+            ...gatewayFailureFields(failure, failureSlot ?? activeSlot, conversation),
+            ...taskContext,
+          },
+          'Model gateway request failed'
+        );
       }
       if (callerOutcome && taskContext)
         options.logger.warn(

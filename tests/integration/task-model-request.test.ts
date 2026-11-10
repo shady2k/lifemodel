@@ -61,7 +61,7 @@ describe('model request failures are observations, not permanent task failure', 
   async function run(
     status: number,
     scenario: string,
-    error: unknown = { message: 'Capacity exhausted', type: 'overloaded', code: 'retry' }
+    error: unknown = { type: 'gateway_error', code: 'upstream_429' }
   ) {
     let attempts = 0;
     const upstream = createServer({ cert: certificate.cert, key: certificate.key }, (req, res) => {
@@ -135,7 +135,7 @@ describe('model request failures are observations, not permanent task failure', 
           path: '/v1/chat/completions',
           attempt: 1,
           severity: 'warn',
-          errorExcerpt: 'Capacity exhausted',
+          reasonCode: 'upstream_429',
           durationMs: expect.any(Number),
         },
       });
@@ -152,7 +152,7 @@ describe('model request failures are observations, not permanent task failure', 
       expect(spans.find((span) => span.spanId === result.failureSpanId)).toMatchObject({
         component: 'task.model.request',
         status: 'failed',
-        attrs: { status: 429, errorExcerpt: 'Capacity exhausted' },
+        attrs: { status: 429, reasonCode: 'upstream_429' },
       });
     }
   );
@@ -167,7 +167,6 @@ describe('model request failures are observations, not permanent task failure', 
         method: 'ACP',
         path: 'session/prompt',
         status: null,
-        errorExcerpt: '',
         reasonCode: 'acp_prompt_error',
       },
     });
@@ -246,59 +245,28 @@ describe('model request failures are observations, not permanent task failure', 
     }
   );
 
-  it('drops rejected prompt echoes in the relay excerpt and redacts masked keys', async () => {
-    const echoed = await run(500, 'prompt-error', {
-      message: `input_value='${PROMPT}'`,
-      type: 'validation_error',
-      code: 'invalid',
-    });
-    const masked = await run(500, 'prompt-error', { message: 'rejected sk-or-v1-ab…z and sk-…' });
-    expect(
-      echoed.spans.find((span) => span.component === 'task.model.request')!.attrs.errorExcerpt
-    ).toBe('validation_error; invalid');
-    expect(JSON.stringify(echoed.spans)).not.toContain(PROMPT);
-    expect(JSON.stringify(masked.spans)).not.toContain('sk-');
-    expect(
-      masked.spans.find((span) => span.component === 'task.model.request')!.attrs.errorExcerpt
-    ).toBe('rejected [redacted] and [redacted]');
-  });
-
-  it('bounds error fields and excludes headers, token text, prompts and raw ACP errors', async () => {
+  it('keeps only a gateway-owned code, never model fields or arbitrary codes', async () => {
     const { spans } = await run(500, 'prompt-error', {
-      message: '界'.repeat(500),
-      type: 'safe',
-      code: 'safe',
-      headers: AUTH,
-      prompt: PROMPT,
+      message: PROMPT,
+      type: 'gateway_error',
+      code: 'upstream_500',
     });
-    const request = spans.find((span) => span.component === 'task.model.request')!;
-    expect(Buffer.byteLength(String(request.attrs.errorExcerpt))).toBeLessThanOrEqual(300);
-    expect(String(request.attrs.errorExcerpt)).toBe('界'.repeat(100));
-    const unsafe = await run(500, 'prompt-error', {
-      message: `Authorization: Bearer ${AUTH}`,
-      type: `token=${TOKEN}`,
-      code: TOKEN,
+    expect(spans.find((span) => span.component === 'task.model.request')!.attrs).toMatchObject({
+      reasonCode: 'upstream_500',
     });
-    const serialized = JSON.stringify([...spans, ...unsafe.spans]);
-    for (const canary of [TOKEN, AUTH, PROMPT, 'Authorization', 'Bearer', 'RAW-ACP-ERROR-CANARY'])
-      expect(serialized).not.toContain(canary);
-    expect(
-      unsafe.spans.find((span) => span.component === 'task.model.request')!.attrs.errorExcerpt
-    ).toBe('[redacted]');
-  });
-
-  it.each(['non-json', 'oversized'] as const)('never excerpts a %s response body', async (mode) => {
-    const { spans } = await run(
-      500,
-      'prompt-error',
-      mode === 'non-json'
-        ? 'PRIVATE-RAW-BODY-CANARY'
-        : { message: 'PRIVATE-OVERSIZED-CANARY'.repeat(2000) }
-    );
-    expect(spans.find((span) => span.component === 'task.model.request')!.attrs.errorExcerpt).toBe(
-      ''
-    );
-    expect(JSON.stringify(spans)).not.toContain('CANARY');
+    for (const error of [
+      { message: PROMPT, type: 'gateway_error', code: TOKEN },
+      { message: PROMPT, type: 'validation_error', code: 'upstream_500' },
+      'PRIVATE-RAW-BODY-CANARY',
+      { message: 'PRIVATE-OVERSIZED-CANARY'.repeat(2000) },
+    ]) {
+      const result = await run(500, 'prompt-error', error);
+      const attrs = result.spans.find((span) => span.component === 'task.model.request')!.attrs;
+      expect(attrs).not.toHaveProperty('errorExcerpt');
+      expect(attrs.reasonCode).toBeUndefined();
+      expect(JSON.stringify(result.spans)).not.toContain('CANARY');
+    }
+    expect(JSON.stringify(spans)).not.toContain(PROMPT);
   });
 
   it.each(['transport', 'timeout', 'stream', 'client-close'] as const)(
@@ -357,7 +325,6 @@ describe('model request failures are observations, not permanent task failure', 
         expect(observations[0]).toMatchObject({
           failed: mode !== 'client-close',
           attempt: 1,
-          errorExcerpt: '',
           reasonCode:
             mode === 'client-close'
               ? 'client_closed'

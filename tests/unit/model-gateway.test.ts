@@ -196,7 +196,7 @@ async function fixture(
 }
 
 describe('model gateway failure diagnostics', () => {
-  it('warns on a failed upstream even when reserve recovers, with trusted task trace and bounded safe excerpt', async () => {
+  it('warns on a failed upstream even when reserve recovers, with trusted task trace and no response text', async () => {
     const f = await fixture();
     const traceId = 'task-trace-123';
     const taskId = 'trusted-task';
@@ -229,13 +229,13 @@ describe('model gateway failure diagnostics', () => {
         taskId,
         status: 500,
         modelRoute: 'primary',
-        errorExcerpt: '界'.repeat(100),
+        error_type: 'upstream_500',
       },
     });
     expect(JSON.stringify(f.lines)).not.toContain('CANARY');
   });
 
-  it('returns only a safe JSON error excerpt and warns for every non-2xx, including redirects', async () => {
+  it('returns only a code and records final failures, including redirects', async () => {
     const f = await fixture();
     f.slots.reserve = null;
     f.handlers.primary = (_req, res) => {
@@ -244,11 +244,11 @@ describe('model gateway failure diagnostics', () => {
     };
     const response = await f.post();
     expect(await response.json()).toEqual({
-      error: { type: 'gateway_error', code: 'upstream_429', message: 'Capacity exhausted' },
+      error: { type: 'gateway_error', code: 'upstream_429' },
     });
-    expect(f.lines.find((line) => line.message === 'Model gateway upstream failed')).toMatchObject({
-      level: 'warn',
-      fields: { status: 429, errorExcerpt: 'Capacity exhausted' },
+    expect(f.lines.find((line) => line.message === 'Model gateway request failed')).toMatchObject({
+      level: 'error',
+      fields: { status: 429, error_type: 'upstream_429' },
     });
     f.handlers.primary = (_req, res) => {
       res.writeHead(302);
@@ -256,7 +256,7 @@ describe('model gateway failure diagnostics', () => {
     };
     await f.post();
     expect(
-      f.lines.filter((line) => line.message === 'Model gateway upstream failed').at(-1)
+      f.lines.filter((line) => line.message === 'Model gateway request failed').at(-1)
     ).toMatchObject({ fields: { status: 302 } });
     expect(JSON.stringify(f.lines)).not.toContain('CANARY');
   });
@@ -278,10 +278,10 @@ describe('model gateway failure diagnostics', () => {
       messages: [{ role: 'user', content: prompt }],
     });
     expect(await response.json()).toMatchObject({
-      error: { message: 'validation_error; invalid' },
+      error: { type: 'gateway_error', code: 'upstream_400' },
     });
     expect(JSON.stringify(f.lines)).not.toContain(prompt);
-    expect(f.lines.filter((line) => line.level === 'warn')).toHaveLength(1);
+    expect(f.lines.filter((line) => line.level === 'error')).toHaveLength(1);
     f.handlers.primary = (_req, res) => {
       res.writeHead(400);
       res.end(JSON.stringify({ error: { message: 'rejected sk-or-v1-ab…z or sk-…' } }));
@@ -306,12 +306,12 @@ describe('model gateway failure diagnostics', () => {
       };
       const response = await f.post();
       expect(response.status).toBe(502);
-      expect(
-        f.lines.find((line) => line.message === 'Model gateway upstream failed')
-      ).toMatchObject({
-        fields: { code: 'timeout', status: 500, errorExcerpt: '' },
-      });
-      expect(f.lines.filter((line) => line.level === 'warn')).toHaveLength(1);
+      expect(f.lines.find((line) => line.message === 'Model gateway request failed')).toMatchObject(
+        {
+          fields: { code: 'timeout', status: 500, error_type: 'timeout' },
+        }
+      );
+      expect(f.lines.filter((line) => line.level === 'error')).toHaveLength(1);
       expect(await response.json()).toMatchObject({ error: { code: 'timeout' } });
     }
   );
@@ -335,9 +335,9 @@ describe('model gateway failure diagnostics', () => {
       req.socket.destroy();
     };
     await f.post();
-    const warnings = f.lines.filter((line) => line.message === 'Model gateway upstream failed');
+    const warnings = f.lines.filter((line) => line.message.startsWith('Model gateway '));
     expect(warnings).toHaveLength(2);
-    expect(warnings[0]!.fields.errorExcerpt).toBe('[redacted]');
+    expect(warnings[0]!.fields.error_type).toBe('upstream_500');
     expect(warnings[1]!.fields).toMatchObject({
       code: 'unreachable',
       status: 502,
@@ -2295,7 +2295,7 @@ describe('model gateway nullable response roles', () => {
       error: { type: 'gateway_error', code: 'bad_response' },
     });
     expect(f.attempts).toHaveLength(1);
-    const warnings = f.lines.filter((line) => line.message === 'Model gateway upstream failed');
+    const warnings = f.lines.filter((line) => line.message === 'Model gateway request failed');
     expect(warnings).toHaveLength(1);
     expect(warnings[0]?.fields).toMatchObject({
       code: 'bad_response',
@@ -2327,7 +2327,7 @@ describe('model gateway null tool_calls, slot attribution and safe reasons', () 
     model: 'upstream-model',
     choices: [{ index: 0, message, finish_reason: 'stop' }],
   });
-  const failed = 'Model gateway upstream failed';
+  const failed = 'Model gateway request failed';
 
   it('passes a buffered text answer whose tool_calls is null to the caller', async () => {
     const f = await fixture();
@@ -2422,7 +2422,7 @@ describe('model gateway null tool_calls, slot attribution and safe reasons', () 
     });
   });
 
-  it('names the primary in the warn line, the error and /status when it fails with no reserve', async () => {
+  it('names the primary in the final line, the error and /status when it fails with no reserve', async () => {
     const f = await fixture();
     f.slots.reserve = null;
     f.handlers.primary = (_req, res) =>
@@ -2491,8 +2491,8 @@ describe('model gateway null tool_calls, slot attribution and safe reasons', () 
 });
 
 describe('model gateway review round 2: safe reasons, stream positions, slot attribution', () => {
-  const failed = 'Model gateway upstream failed';
-  /** The fields of the one warn line a failed request leaves. */
+  const failed = 'Model gateway request failed';
+  /** The fields of the one final line a failed request leaves. */
   function failureOf(f: Awaited<ReturnType<typeof fixture>>): Record<string, unknown> {
     const warns = f.lines.filter((line) => line.message === failed).slice(-1);
     expect(warns).toHaveLength(1);
