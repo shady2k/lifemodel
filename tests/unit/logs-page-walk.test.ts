@@ -5,6 +5,8 @@
  */
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 
 const WALK = 'deploy/platform/logs-page-walk.mjs';
@@ -14,6 +16,53 @@ function source(): string {
 }
 
 describe('the browser walk', () => {
+  it.each(['client-error', 'client-close', 'up-error', 'up-close'])(
+    'cleans up both CONNECT peers on %s without an unhandled socket error',
+    (event) => {
+      const socket = () =>
+        Object.assign(new EventEmitter(), {
+          destroyed: false,
+          destroy() {
+            this.destroyed = true;
+          },
+          write() {},
+          pipe() {},
+        });
+      const client = socket();
+      const up = socket();
+      let accept!: (peer: typeof client) => void;
+      let connected!: () => void;
+      const text = source();
+      const proxy = text.slice(
+        text.indexOf('const proxy = net.createServer'),
+        text.indexOf('await new Promise((ready) => proxy.listen')
+      );
+      runInNewContext(proxy, {
+        HOST: 'boot-example.local',
+        TARGET: '127.0.0.1',
+        net: {
+          createServer(handler: typeof accept) {
+            accept = handler;
+          },
+          connect(_port: number, _host: string, ready: () => void) {
+            connected = ready;
+            return up;
+          },
+        },
+      });
+      accept(client);
+      client.emit('data', Buffer.from('CONNECT boot-example.local:443 HTTP/1.1\r\n\r\n'));
+      connected();
+      const [peer, kind] = event.split('-');
+      const emitter = peer === 'client' ? client : up;
+      const other = peer === 'client' ? up : client;
+      expect(() =>
+        emitter.emit(kind, Object.assign(new Error('connection reset'), { code: 'EPIPE' }))
+      ).not.toThrow();
+      expect(other.destroyed).toBe(true);
+    }
+  );
+
   it('parses as an ES module', () => {
     const result = spawnSync('node', ['--check', WALK], { encoding: 'utf8' });
     expect(result.stderr).toBe('');
@@ -82,7 +131,10 @@ describe('the browser walk', () => {
 
   it('treats an older core image as a NOTE, never as a page defect', () => {
     const text = source();
-    const section = text.slice(text.indexOf('module=core'), text.indexOf('The conversation filter'));
+    const section = text.slice(
+      text.indexOf('module=core'),
+      text.indexOf('The conversation filter')
+    );
     expect(section).toContain('unknown');
     expect(section).toMatch(/note\(/);
     expect(section).not.toMatch(/check\(coreLevels/);
@@ -90,7 +142,14 @@ describe('the browser walk', () => {
 
   it('awaits every page helper, so a locator is never read off its promise', () => {
     const lines = source().split('\n');
-    for (const name of ['api', 'fillFilter', 'submit', 'recordItems', 'countLine', 'messageTexts']) {
+    for (const name of [
+      'api',
+      'fillFilter',
+      'submit',
+      'recordItems',
+      'countLine',
+      'messageTexts',
+    ]) {
       for (const [index, line] of lines.entries()) {
         if (!line.includes(`${name}(`)) continue;
         if (new RegExp(`^\\s*(async )?function ${name}\\(`).test(line)) continue;
@@ -110,8 +169,9 @@ describe('the browser walk', () => {
 
   it('awaits every async locator method it calls', () => {
     const lines = source().split('\n');
-    const methods = 'count|textContent|isVisible|getAttribute|inputValue|innerText'
-      + '|allTextContents|evaluateAll';
+    const methods =
+      'count|textContent|isVisible|getAttribute|inputValue|innerText' +
+      '|allTextContents|evaluateAll';
     const call = new RegExp(`\\.(${methods})\\(`);
     for (const [index, line] of lines.entries()) {
       if (!call.test(line)) continue;
@@ -149,7 +209,7 @@ describe('the browser walk', () => {
     expect(found).toEqual([]);
   });
 
-  it('judges a second page by the API count and the page\'s own button', () => {
+  it("judges a second page by the API count and the page's own button", () => {
     const text = source();
     // The count line counts the records drawn - 200 on every full first page -
     // so it cannot say that the window holds more than one page.
@@ -157,7 +217,9 @@ describe('the browser walk', () => {
     expect(text).toContain("getByRole('button', { name: words.more");
     expect(text).toContain('more.isVisible()');
     // The window's own total comes from the API, with the window the page got.
-    expect(text).toMatch(/api\(page, `\/api\/logs\?from=\$\{wide\.from\}&to=\$\{wide\.to\}&limit=1`\)/);
+    expect(text).toMatch(
+      /api\(page, `\/api\/logs\?from=\$\{wide\.from\}&to=\$\{wide\.to\}&limit=1`\)/
+    );
     expect(text).toContain('the second page adds at most one page');
     expect(text).toContain('the count line follows the drawn records');
   });
@@ -174,9 +236,12 @@ describe('the browser walk', () => {
     expect(text).not.toMatch(/firstPage\.includes\(text\)/);
   });
 
-  it('judges the reload by the reloaded form\'s own first-page answer', () => {
+  it("judges the reload by the reloaded form's own first-page answer", () => {
     const text = source();
-    const section = text.slice(text.indexOf('let answered = null;'), text.indexOf('first-page-again'));
+    const section = text.slice(
+      text.indexOf('let answered = null;'),
+      text.indexOf('first-page-again')
+    );
     // The reload goes back to the default window, which ends now: newer records
     // have arrived, so the earlier page cannot be the comparison.
     expect(section).toContain('waitForResponse');
@@ -199,7 +264,7 @@ describe('the browser walk', () => {
     expect(text).toMatch(/of the \$\{moduleNames\.length\} modules/);
   });
 
-  it('reloads once before believing the retention card\'s read error', () => {
+  it("reloads once before believing the retention card's read error", () => {
     const text = source();
     expect(text).toMatch(/retentionErrorLine\(/);
     expect(text).toContain("unavailable: 'could not be read'");
@@ -222,7 +287,7 @@ describe('the browser walk', () => {
     expect(text).toContain('the stopped-store page ran');
   });
 
-  it('compares a filter count with the API over the page form\'s own window', () => {
+  it("compares a filter count with the API over the page form's own window", () => {
     const text = source();
     expect(text).toContain('pageWindow(');
     expect(text).toContain('formWindow(');

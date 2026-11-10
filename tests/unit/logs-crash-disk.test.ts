@@ -90,7 +90,19 @@ describe('crash walk disk-byte evidence', () => {
     const value = run({ mode: 'native-cri' });
     expect(value.pid).toBe(4242);
     expect(value.commands).toEqual([
-      ['k3s', 'crictl', 'ps', '--name', 'collector', '--output', 'json'],
+      [
+        'k3s',
+        'crictl',
+        'ps',
+        '--name',
+        'logs-collector',
+        '--label',
+        'io.kubernetes.pod.name=collector',
+        '--label',
+        'io.kubernetes.pod.namespace=logs',
+        '--output',
+        'json',
+      ],
       ['k3s', 'crictl', 'inspect', 'c'],
     ]);
   });
