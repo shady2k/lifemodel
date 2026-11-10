@@ -50,9 +50,19 @@
 //
 // What it changes and restores
 // ----------------------------
-// Nothing on the cluster: it logs in (a session cookie), reads, filters and
-// pages. The finally block prints a RESTORE line saying exactly that. Nothing is
-// written to the store, the setting is not changed, no pod is touched.
+// It logs in, reads, filters and pages. If no task record is available, the
+// shared preparation asks the core through chat to run a genuine task. The core
+// owns that task's pod lifecycle and cleanup, not the preparation helper. Its
+// marker logs remain in the store under normal retention. The store is scaled
+// temporarily to zero, then
+// restored to one and Ready; core and chat are temporarily stopped and restored
+// to their saved replica counts. The retention setting is never changed.
+//
+// All ordinary browser contexts enforce the loader's real CSP. Only an isolated
+// axe scan context uses bypassCSP: true so axe's inline instrumentation can run;
+// it copies the authenticated URL, cookies, local/session storage, locale, theme
+// and viewport from the ordinary page, then closes even if the scan fails. Its
+// screenshot and result are accessibility evidence, not CSP acceptance.
 //
 // What it does not cover
 // ----------------------
@@ -62,8 +72,10 @@
 // walk, so a page on a quiet instance usually shows applied; the walk asserts
 // whichever the API says and NOTE-s the other. The eviction notice inside the
 // list is drawn only after an evictor run; the page walk does not produce one
-// (WALK-LOGS-EVICT does) and does not assert it.
+// (WALK-LOGS-EVICT does); when present, its MiB label is checked.
 import { chromium, firefox } from 'playwright-core';
+import { findTaskRecord } from './logs-page-task.mjs';
+import { scanLogsAxe, observeUnavailableLogs } from './logs-page-browser.mjs';
 import net from 'node:net';
 import { readFileSync, mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -155,6 +167,7 @@ const secret = readFileSync(pwFile, 'utf8').trim();
 mkdirSync(OUT, { recursive: true });
 
 let failures = 0;
+let taskWriterRecord = null;
 const state = { storeScaled: false, coreScaled: false, webScaled: false };
 const check = (ok, what, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'} ${what}${detail ? ' - ' + detail : ''}`);
@@ -354,17 +367,17 @@ try {
       const lang = await page.evaluate(() => document.documentElement.lang);
       check(lang === language, `${tag}: language follows the browser (${lang})`);
       await page.screenshot({ path: shot('page') });
-      // axe-core, injected from the caller's npm copy: violations are failures,
-      // reported by rule id and count, never by page data.
+      // axe-core needs inline instrumentation; only its separate context bypasses CSP.
+      // The ordinary page above and every interaction below keep the real policy.
       if (!axeSource) {
-        notValid(`${tag}: axe-core is not readable at ${options.axeCore}: the page's accessibility cannot be judged`);
+        notValid(`${tag}: axe-core is not readable at ${AXE_CORE}: the page's accessibility cannot be judged`);
       } else {
-        await page.addScriptTag({ content: axeSource });
-        const results = await page.evaluate(async () => await window.axe.run(document));
+        const results = await scanLogsAxe(browser, page, {
+          ...variant, viewport: { width: 1280, height: 900 },
+        }, axeSource, shot('axe'));
         const summary = axeSummary(results);
         check(summary.length === 0, `${tag}: the page is axe-clean`,
           summary.map((rule) => `${rule.id} x${String(rule.count)}`).join(', ') || 'no violations');
-        await page.screenshot({ path: shot('axe') });
       }
 
       // The status area, tied to the API's own answer.
@@ -571,46 +584,59 @@ try {
         `${drawnEmpty} record(s) drawn`);
       await page.screenshot({ path: shot('empty-range') });
 
-      // A task record carrying `untrusted`, written if the window holds none.
-      let untrustedRecord = null;
-      const wide = windowSeconds(6);
-      const candidates = await api(page, `/api/logs?from=${wide.from}&to=${wide.to}&limit=200`);
-      untrustedRecord = (candidates.body?.records ?? []).find(
-        (record) => String(record.fields?.untrusted) === 'true'
-      );
-      if (!untrustedRecord) {
-        const line = `walk-untrusted-${tag}-${String(Date.now())}`;
-        const manifest = {
-          apiVersion: 'v1', kind: 'Pod',
-          metadata: { name: 'walk-untrusted', namespace: 'lifemodel-motor',
-                      labels: { 'app.kubernetes.io/name': 'walk-untrusted' } },
-          spec: {
-            restartPolicy: 'Never', automountServiceAccountToken: false,
-            containers: [{
-              name: 'writer', image: 'ghcr.io/shady2k/lifemodel-loader:release-placeholder',
-              command: ['node', '-e', `process.stdout.write(${JSON.stringify(line)}+'\\n')`],
-              resources: { requests: { cpu: '10m', memory: '16Mi' } },
-            }],
-          },
-        };
+      // A real task's record must be present in the loader, never fabricated.
+      const untrustedRecord = await findTaskRecord(async (task) => {
+        const wide = windowSeconds(6);
+        const filter = task
+          ? `&module=${encodeURIComponent(task.module)}&text=${encodeURIComponent(task.run_id)}` : '&module=task';
+        const answer = await api(page, `/api/logs?from=${wide.from}&to=${wide.to}&limit=200${filter}`);
+        return answer.body;
+      }, () => {
+        if (taskWriterRecord) return taskWriterRecord;
+        const runId = `walk-page-${Date.now()}`;
         try {
-          kubectl(['-n', 'lifemodel-motor', 'delete', 'pod', 'walk-untrusted', '--ignore-not-found', '--wait=false']);
-          kubectl(['apply', '-f', '-'], { input: JSON.stringify(manifest) });
+          const output = execFileSync('python3', [
+            resolve(import.meta.dirname, 'logs-task-writer-step.py'),
+            '--password-file', resolve(pwFile), '--loader-host', TARGET,
+            '--loader-port', '443', '--origin-host', HOST,
+            '--kubectl', KUBECTL.join(' '), '--web-namespace', APP_NAMESPACE,
+            '--web-deployment', WEB_DEPLOYMENT, '--run-id', runId,
+            '--rate', '5', '--seconds', '30', '--bound', '180',
+          ], { encoding: 'utf8', timeout: 240000, stdio: ['ignore', 'pipe', 'pipe'] });
+          const result = output.split('\n').find((line) => line.startsWith('TASK_WRITER_RESULT '));
+          if (result) taskWriterRecord = JSON.parse(result.slice('TASK_WRITER_RESULT '.length));
         } catch {
-          kubectl(['-n', 'lifemodel-motor', 'delete', 'pod', 'walk-untrusted', '--ignore-not-found', '--wait=false']);
+          note(`${tag}: core-chat task pre-step did not produce verified task evidence`);
         }
-        untrustedRecord = { message: line, fields: { untrusted: 'true' } };
-      }
+        return taskWriterRecord;
+      });
       if (!untrustedRecord) {
-        notValid(`${tag}: no task record in the window and none could be written: untrusted cannot be judged`);
+        notValid(`${tag}: no verified stored task record: untrusted cannot be judged`);
       } else {
-        await fillFilter(page, 'logs-text', (untrustedRecord.message ?? '').slice(0, 24));
+        await page.goto(`https://${HOST}/logs`, { waitUntil: 'networkidle' });
+        await listSettled(page);
+        const module = untrustedRecord.fields.module;
+        const marker = untrustedRecord.message.slice(0, 120);
+        const taskWindow = windowSeconds(6);
+        await page.locator('#logs-from').fill(toInput(new Date(taskWindow.from)));
+        await page.locator('#logs-to').fill(toInput(new Date(taskWindow.to + 60_000)));
+        await page.locator('#logs-module').click();
+        await page.getByRole('option', { name: module, exact: true }).click();
+        await fillFilter(page, 'logs-text', marker);
         await submit(page);
-        const text = (await page.locator('main').innerText()) ?? '';
-        check(text.includes(words.untrusted) || String(untrustedRecord.fields?.untrusted) !== 'true',
-          `${tag}: a task record shows untrusted`, untrustedRecord.message.slice(0, 40));
+        await listSettled(page);
+        const items = await recordItems(page);
+        const badges = await items.evaluateAll((nodes) => nodes.map((node) => ({
+          message: node.querySelector('p')?.textContent ?? '',
+          badges: [...node.querySelectorAll('[data-slot="badge"]')].map((badge) => badge.textContent),
+        })));
+        check(badges.some((record) => record.message.includes(marker)
+          && record.badges.includes(module) && record.badges.includes(words.untrusted)),
+          `${tag}: a task record shows untrusted`, `module ${module}`);
         await page.screenshot({ path: shot('untrusted') });
         await fillFilter(page, 'logs-text', '');
+        await page.locator('#logs-module').click();
+        await page.getByRole('option', { name: words.allModules, exact: true }).click();
         await submit(page);
       }
 
@@ -772,13 +798,13 @@ try {
         state.storeScaled = true;
         await scale(SYSTEM_NAMESPACE, 'deployment', ENGINE_STORES, 0);
         await waitReplicas(page, SYSTEM_NAMESPACE, 'deployment', ENGINE_STORES, 0);
-        await page.goto(`https://${HOST}/logs`, { waitUntil: 'networkidle' });
-        await page.waitForTimeout(2000);
-        const text = (await page.locator('main').innerText()) ?? '';
-        check(text.includes('unavailable') || text.includes('недоступно'),
-          `${name}: with the store stopped the page says unavailable`, text.slice(0, 80));
-        check(!text.includes('were removed') && !text.includes('удалены'),
-          `${name}: the stopped store never shows an empty list`);
+        const observed = await observeUnavailableLogs(page, `https://${HOST}/logs`, 'en');
+        check(observed.text.length > 0,
+          `${name}: with the store stopped the page says unavailable`,
+          `reason ${observed.reason}; seen "${observed.text}"`);
+        check(!observed.empty && observed.records === 0,
+          `${name}: the stopped store never shows an empty list`,
+          `${observed.records} record(s); empty-answer text visible ${String(observed.empty)}`);
         await page.screenshot({ path: `${OUT}/${name}-store-stopped.png` });
       } finally {
         await scale(SYSTEM_NAMESPACE, 'deployment', ENGINE_STORES, 1);
@@ -843,7 +869,7 @@ try {
 } finally {
   proxy.close();
   console.log(`RESTORE store scaled to 1 and Ready, core and chat back to their replica counts, `
-    + `a login session, the filters and the pages only`);
+    + `task preparation is core-owned; chat and marker records remain under normal retention`);
 }
 console.log(`RESULT ${failures} failed`);
 process.exit(failures ? 1 : 0);
