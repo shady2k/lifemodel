@@ -129,6 +129,25 @@ describe('a fake node for the evict walk', () => {
     expect(run.status).toBe(0);
   }, 30000);
 
+  it('states the tail after the last drop from lines that were all found', () => {
+    // The writer keeps running past the flood: 200 lines after the last drop,
+    // all found, over more than two eviction intervals.
+    const run = harness('evict-writer');
+    expect(run.passes.join('\n')).toContain(
+      'every line written after the last drop is found',
+    );
+    expect(run.passes.join('\n')).toContain('200 line(s), none lost');
+    expect(run.notes.join('\n')).toContain('the longest gap of accepted new lines after the last drop');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 30000);
+
+  it('marks a run with no line after the last drop as not valid, never a pass', () => {
+    const run = harness('evict-writer-no-tail');
+    expect(run.invalid.join('\n')).toContain('no writer line was written after the last drop');
+    expect(run.status).toBe(1);
+  }, 30000);
+
   it('counts a line in a day the evictor removed as dropped with its day', () => {
     const run = harness('evict-writer');
     const window = (index: number): string =>
@@ -214,10 +233,25 @@ describe('a fake node for the evict walk', () => {
     expect(run.status).toBe(1);
   }, 60000);
 
+  it('passes a stale evictor only with the run\'s own no_partition reason', () => {
+    const run = harness('evict-read-only-stale-no-partition');
+    const pass = run.passes.join('\n');
+    expect(pass).toContain('the page names the evictor only because its last success is older');
+    expect(pass).toContain('no_partition');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 60000);
+
+  it('fails a stale evictor with no failure line behind it', () => {
+    const run = harness('evict-read-only-stale-no-failure');
+    expect(run.failures.join('\n')).toContain('latest failure reason none');
+    expect(run.status).toBe(1);
+  }, 60000);
+
   it('fails when the status read blames the evictor', () => {
     const run = harness('evict-read-only-blames');
     expect(run.failures.join('\n')).toContain(
-      'the page shows read-only without blaming the evictor while its last run is recent',
+      'the page shows read-only without blaming the evictor: its last run is recent',
     );
     expect(run.status).toBe(1);
   }, 60000);
