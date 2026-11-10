@@ -46,7 +46,20 @@ afterAll(() => {
   rmSync(directory, { recursive: true, force: true });
 });
 
-describe('the volume flood walk\'s arguments and header', () => {
+describe('the volume flood writer image', () => {
+  it('resolves the deployed loader image before starting the walk', () => {
+    const run = harness('writer-image');
+    expect(run.status).toBe(0);
+    expect(jsonLine<string>(run, 'IMAGE')).toBe('deployed-loader@sha256:fixture');
+  });
+  it('is not valid before writes when no deployed image is available', () => {
+    const run = harness('missing-writer-image');
+    expect(run.status).toBe(1);
+    expect(run.lines.join('\n')).toContain('TEST NOT VALID');
+  });
+});
+
+describe("the volume flood walk's arguments and header", () => {
   it('prints its usage and exits 0 on --help', () => {
     const run = python([WALK, '--help']);
     expect(run.status).toBe(0);
@@ -85,7 +98,7 @@ describe('a fake node for the volume flood walk', () => {
   it('passes Postgres commits with no gap past the bound', () => {
     const value = jsonLine<{ ok: boolean; errors: number; longest: number }>(
       harness('commit-pass'),
-      'COMMIT',
+      'COMMIT'
     );
     expect(value.ok).toBe(true);
     expect(value.errors).toBe(0);
@@ -101,7 +114,7 @@ describe('a fake node for the volume flood walk', () => {
   it('fails a margin breach past 10 % of the volume, and allows one inside it', () => {
     const value = jsonLine<{ inside: boolean; outside: boolean; detail: string }>(
       harness('margin-breach'),
-      'MARGIN',
+      'MARGIN'
     );
     expect(value.inside).toBe(true);
     expect(value.outside).toBe(false);
@@ -117,7 +130,7 @@ describe('a fake node for the volume flood walk', () => {
   it('fails a trusted writer that lost a line, naming it', () => {
     const value = jsonLine<{ intact: boolean; lost: boolean; detail: string }>(
       harness('trusted-loss'),
-      'TRUSTED',
+      'TRUSTED'
     );
     expect(value.intact).toBe(true);
     expect(value.lost).toBe(false);
@@ -127,7 +140,7 @@ describe('a fake node for the volume flood walk', () => {
   it('judges the throttle windows and reports the rate as the limit it is', () => {
     const value = jsonLine<{ good: boolean; bad: boolean; detail: string }>(
       harness('throttle-windows'),
-      'THROTTLE',
+      'THROTTLE'
     );
     expect(value.good).toBe(true);
     expect(value.bad).toBe(false);
@@ -137,7 +150,7 @@ describe('a fake node for the volume flood walk', () => {
   it('fails the page when a status read answered nothing', () => {
     const value = jsonLine<{ ok: boolean; bad: boolean; detail: string }>(
       harness('readings'),
-      'READINGS',
+      'READINGS'
     );
     expect(value.ok).toBe(true);
     expect(value.bad).toBe(false);
