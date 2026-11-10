@@ -809,8 +809,14 @@ before the directory is gone; **removal happens only after `detach` returned
 v1.53.0 (`lib/logstorage/storage.go:282,296–299,585–606`); final flushes disable
 cancellation and have no enforced time bound (`datadb.go:576–580,1233–1248`).
 An absent oldest day is therefore left untouched with a failed Job and reason
-`stranded_partition`; recovery needs a store restart to re-attach the directory,
-then the next run's normal acknowledged detach. Measured:
+`stranded_partition`; the loader's existing 30-second logs-settings reconcile
+reads the evictor lines and automatically rolls the store once for that day,
+re-attaching it for the next run's normal acknowledged detach. The paired
+Deployment annotations `lifemodel.dev/logs-stranded-days` record every restarted
+day atomically with the roll (with a resource-version precondition), so a loader
+restart or a repeated failure cannot roll the same day again; a later drop clears
+the pending failure, not this durable receipt. Retention values and the partition
+key are untouched. Measured:
 detach + `rm` took 0.05, 0.12 and 0.13 s for three drops. When no partition is left
 and free space is still below the threshold — the volume holds something else —
 the run removes nothing and exits non-zero, so the state is a visible failed Job
