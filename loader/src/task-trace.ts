@@ -196,7 +196,6 @@ export class AcpTaskTrace {
           status: null,
           failed: true,
           reasonCode: 'acp_prompt_error',
-          errorExcerpt: '',
         },
         true
       );
