@@ -91,6 +91,7 @@ def flood_integration(walk, shared, data):
         opts.flood_seconds = 0
         replacements = {
             'prepare_flood': lambda *args: True,
+            'plant_past_days': lambda *args: True,
             'accounting_snapshot': lambda *args: {},
             'report_accounting': lambda *args: None,
             'shared_space': lambda: (100 * 1024**3, 90 * 1024**3),
@@ -215,6 +216,7 @@ def main():
                  'restarts': 1 if data.get('restart') else 0}
         replacements = {
             'prepare_flood': lambda *args: True,
+            'plant_past_days': lambda *args: True,
             'accounting_snapshot': lambda *args: {},
             'report_accounting': lambda *args: None,
             'FloodEvictorEvidence': lambda *args: SimpleNamespace(
@@ -252,6 +254,9 @@ def main():
         def burst(*args, **kwargs):
             raise AssertionError('a flood write must never precede the accounting baseline')
         with patch.object(walk, 'prepare_flood', prepared), \
+             patch.object(walk, 'plant_past_days', lambda *args: True), \
+             patch.object(walk, 'FloodEvictorEvidence', lambda *args: SimpleNamespace(
+                 poll=lambda: None, verified=lambda report: [])), \
              patch.object(walk, 'accounting_snapshot', baseline), \
              patch.object(walk, 'shared_space', return_value=(100 * 1024**3, 90 * 1024**3)), \
              patch.object(walk, 'loop_device', return_value=None), \

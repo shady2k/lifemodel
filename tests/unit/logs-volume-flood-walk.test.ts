@@ -32,10 +32,10 @@ function jsonLine<T>(run: Run, prefix: string): T {
 
 let directory = '';
 
-function harness(mode: string): Run {
-  const fixture = join(directory, mode + '.json');
-  writeFileSync(fixture, '{}');
-  return python([HARNESS, mode, WALK, fixture]);
+function harness(mode: string, fixture: object = {}): Run {
+  const path = join(directory, mode + '.json');
+  writeFileSync(path, JSON.stringify(fixture));
+  return python([HARNESS, mode, WALK, path]);
 }
 
 beforeAll(() => {
@@ -155,5 +155,86 @@ describe('a fake node for the volume flood walk', () => {
     expect(value.ok).toBe(true);
     expect(value.bad).toBe(false);
     expect(value.detail).toContain('timeout');
+  });
+});
+
+
+describe('a loader page of the walk\'s largest lines', () => {
+  it('stays well under the response limit and pages every record', () => {
+    const value = jsonLine<{
+      limit: number;
+      total: number;
+      collected: number | null;
+      max_bytes: number;
+      response_limit: number;
+      pages: Array<{ records: number; bytes: number }>;
+    }>(harness('loader-pages'), 'PAGES');
+    expect(value.limit).toBeGreaterThan(1);
+    expect(value.limit).toBeLessThan(1000);
+    expect(value.collected).toBe(value.total);
+    expect(value.max_bytes).toBeLessThan(value.response_limit);
+    expect(value.pages.length).toBeGreaterThan(1);
+    expect(value.pages[value.pages.length - 1]?.records).toBeLessThan(value.limit);
+  });
+
+  it('keeps the 1000-record cap for small lines and still pages past it', () => {
+    const value = jsonLine<{
+      limit: number;
+      total: number;
+      collected: number | null;
+      max_bytes: number;
+      response_limit: number;
+      pages: Array<{ records: number; bytes: number }>;
+    }>(harness('loader-pages', { line_bytes: 64, total: 1200 }), 'PAGES');
+    expect(value.limit).toBe(1000);
+    expect(value.collected).toBe(value.total);
+    expect(value.pages.map((page) => page.records)).toEqual([1000, 200]);
+    expect(value.max_bytes).toBeLessThan(value.response_limit);
+  });
+});
+
+describe('the past days the evictor needs', () => {
+  interface Plant {
+    ok: boolean;
+    writes: number;
+    days: string[] | null;
+    events: Array<{ kind: string; name: string }>;
+  }
+  it('plants two past days and requires both partitions', () => {
+    const value = jsonLine<Plant>(harness('plant'), 'PLANT');
+    expect(value.ok).toBe(true);
+    expect(value.writes).toBe(2);
+    expect(value.days).toHaveLength(2);
+    expect(value.events.some((event) => event.kind === 'pass')).toBe(true);
+  });
+
+  it('is not valid when a planted day partition never appears', () => {
+    const value = jsonLine<Plant>(harness('plant', { create: false }), 'PLANT');
+    expect(value.ok).toBe(false);
+    expect(
+      value.events.some(
+        (event) => event.kind === 'invalid' && event.name.includes('did not create')
+      )
+    ).toBe(true);
+  });
+
+  it('is not valid when retention leaves fewer than two past days', () => {
+    const value = jsonLine<Plant>(harness('plant', { retention: '2d' }), 'PLANT');
+    expect(value.ok).toBe(false);
+    expect(
+      value.events.some(
+        (event) => event.kind === 'invalid' && event.name.includes('fewer than 2 past days')
+      )
+    ).toBe(true);
+  });
+
+  it('is not valid when the store refuses the planted records', () => {
+    const value = jsonLine<Plant>(harness('plant', { insert_status: 429 }), 'PLANT');
+    expect(value.ok).toBe(false);
+    expect(
+      value.events.some(
+        (event) => event.kind === 'invalid' && event.name.includes('refused the planted records')
+      )
+    ).toBe(true);
   });
 });

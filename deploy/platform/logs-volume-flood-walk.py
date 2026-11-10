@@ -77,10 +77,13 @@ What it changes and restores
 ----------------------------
 It creates two namespaces (its own and `lifemodel-logs-walk` for the writer),
 a Postgres pod and writer pods, and a shared-filesystem directory with the
-Postgres data in it; it writes into the log volume. The `finally` deletes the
+Postgres data in it; it writes into the log volume and plants records on two
+past days inside the store's retention, so the evictor has a past day it can
+drop even when every older day was already evicted. The `finally` deletes the
 pods and namespaces it created and the shared directory, removes its filler and
 its flood files, waits for the store to be Ready and prints a RESTORE line with
-both filesystems' free space. Image content and snapshots, rotated container logs, Postgres data and walk
+both filesystems' free space; it removes no day it did not plant beyond what
+the evictor dropped. Image content and snapshots, rotated container logs, Postgres data and walk
 files consume shared root space. They are measured separately after pod startup;
 --postgres-bytes is a legacy planning value, not an enforced quota. The store
 flood stays inside its mounted log volume.
@@ -103,6 +106,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from logs_walk_support import (  # noqa: E402
     MIB,
     GIB,
+    RESPONSE_LIMIT,
     Cluster,
     Loader,
     PortForward,
@@ -111,6 +115,9 @@ from logs_walk_support import (  # noqa: E402
     WalkError,
     common_arguments,
     connect_store,
+    day_bounds,
+    day_of,
+    days_of,
     now_ms,
     quantity,
     read_password,
@@ -132,6 +139,39 @@ TRUSTED_MODULE = 'walk-trusted-writer'
 TASK_MODULE = 'walk-task-writer'
 COMMIT_LINE = re.compile(r'commit (\d+) (\d+) (ok|error)')
 COMMIT_ROW = 64
+# The large task writer's pad, and the space one stored record costs in an
+# answer beyond its message. A loader answer over RESPONSE_LIMIT cannot be read.
+LARGE_TASK_LINE_BYTES = 20 * 1024
+LOADER_PAGE_MAX = 1000
+RESPONSE_HEADROOM = 4 * MIB
+RECORD_OVERHEAD_BYTES = 4096
+# The past days the flood plants for the evictor; two are the smallest set whose
+# oldest day can be dropped before today's day is all that is left.
+PAST_DAYS = 2
+PLANT_RECORD_MIB = 2
+PLANT_BOUND_SECONDS = 60
+
+
+def loader_page_limit(line_bytes):
+    """Records per page that keep one loader answer well under RESPONSE_LIMIT."""
+    budget = RESPONSE_LIMIT - RESPONSE_HEADROOM
+    per_record = max(1, int(line_bytes) + RECORD_OVERHEAD_BYTES)
+    return max(1, min(LOADER_PAGE_MAX, budget // per_record))
+
+
+def loader_records(loader, query, limit):
+    """Every record of one loader query, paged; a short page ends the loop."""
+    offset = 0
+    collected = []
+    while True:
+        answer = loader.logs(dict(query, limit=str(limit), offset=str(offset)))
+        if not answer or answer.get('state') != 'ok':
+            return None
+        page = answer.get('records') or []
+        collected.extend(page)
+        if len(page) < limit:
+            return collected
+        offset += len(page)
 
 
 def walk_namespace(name):
@@ -493,10 +533,63 @@ def prepare_flood(report, options, cluster, state):
     return True
 
 
+def plant_past_days(report, options, cluster, store, volume, state, run_id):
+    """Write records on past days inside retention, so the evictor has a day to drop.
+
+    The evictor never removes the current day; a store whose older days were
+    already evicted gives it nothing. The walk creates the past days it depends
+    on through the store's own insert path and verifies both partitions appear.
+    A missing partition is TEST NOT VALID with the reason, never a pass.
+    """
+    flags = read_store_flags(report, options, cluster, 'the store\'s retention')
+    if flags is None:
+        return False
+    retention = days_of(flags.get('retentionPeriod'))
+    if retention is None:
+        report.not_valid('the store\'s retention period was not read: past days cannot be '
+                         'planted inside it')
+        return False
+    if retention < PAST_DAYS + 1:
+        report.not_valid('the store\'s retention (%d day(s)) leaves fewer than %d past days '
+                         'to plant' % (retention, PAST_DAYS))
+        return False
+    offset = 2 if retention >= PAST_DAYS + 2 else 1
+    days = [day_of(now_ms() - (offset + index) * 86400 * 1000)
+            for index in range(PAST_DAYS)]
+    for day in days:
+        moment = day_bounds(day)[0] + 12 * 3600 * 1000
+        status, _lines = write_burst(store, moment, run_id, PLANT_RECORD_MIB, 'planted',
+                                     module='walk-flood')
+        if status not in (200, 204):
+            report.not_valid('the store refused the planted records on %s (insert answered %s): '
+                             'the evictor has no past day to drop' % (day, status))
+            return False
+    def appeared():
+        present = set(volume.partitions())
+        return all(day in present for day in days)
+
+    if not wait_until(time.monotonic() + PLANT_BOUND_SECONDS, 2, appeared):
+        missing = [day for day in days if day not in set(volume.partitions())]
+        report.not_valid('the store did not create the planted past-day partition(s) %s: '
+                         'the evictor has no past day to drop' % ', '.join(missing))
+        return False
+    state['planted_days'] = days
+    report.pass_('the walk planted records on past days the evictor can drop',
+                 '%s (retention %d day(s))' % (', '.join(days), retention))
+    return True
+
+
 def flood_case(report, options, loader, cluster, store, volume, state):
     """The flood with Postgres committing beside it on the shared filesystem."""
     if not prepare_flood(report, options, cluster, state):
         return False
+    started = now_ms()
+    evidence = FloodEvictorEvidence(cluster, options, volume, started)
+    evidence.poll()
+    if not plant_past_days(report, options, cluster, store, volume, state,
+                          state['flood_run']):
+        return False
+    evidence.poll()
     baseline = accounting_snapshot(options, cluster)
     shared_before = shared_space()[1]
     device = loop_device(options.mount)
@@ -504,9 +597,7 @@ def flood_case(report, options, loader, cluster, store, volume, state):
                 'volume device %s, shared free %.2f GiB; Postgres data and container logs '
                 'are measured, not a quota' % (device or 'unknown', shared_before / GIB))
     pod_before = store_pod(cluster, options)
-    result = {'samples': [], 'statuses': [], 'started': now_ms()}
-    evidence = FloodEvictorEvidence(cluster, options, volume, result['started'])
-    evidence.poll()
+    result = {'samples': [], 'statuses': [], 'started': started}
     flood_start_ns = time.time_ns()
     start_mono = time.monotonic()
     io_before = diskstats_io_ms(device) if device else None
@@ -635,9 +726,12 @@ def throttle_case(report, options, loader, cluster, state):
     if fast is None:
         return False
     large = start_task_writer(report, options, loader, cluster, state['task_large'],
-                              20, seconds, size=20 * 1024, bound=launch_bound)
+                              20, seconds, size=LARGE_TASK_LINE_BYTES, bound=launch_bound)
     if large is None:
         return False
+    # The large writer's line is the largest the walk writes; a full page of
+    # 1000 of them exceeds the loader's 16 MiB answer limit.
+    page_limit = loader_page_limit(LARGE_TASK_LINE_BYTES)
     time.sleep(seconds + 2)
     intervals = []
     written = []
@@ -661,14 +755,10 @@ def throttle_case(report, options, loader, cluster, state):
             deadline = time.monotonic() + options.recover_bound
             while time.monotonic() < deadline:
                 stamps = []
-                offset, end = 0, str(now_ms())
-                while time.monotonic() < deadline:
-                    answer = loader.logs({'from': str(state['throttle_start']), 'to': end,
-                                          'module': module, 'text': run_id,
-                                          'limit': '1000', 'offset': str(offset)})
-                    if not answer or answer.get('state') != 'ok':
-                        break
-                    records = answer.get('records') or []
+                records = loader_records(loader, {
+                    'from': str(state['throttle_start']), 'to': str(now_ms()),
+                    'module': module, 'text': run_id}, page_limit)
+                if records is not None:
                     for record in records:
                         fields = record.get('fields') or {}
                         if (fields.get('module') == module and fields.get('pod') == pod
@@ -678,9 +768,6 @@ def throttle_case(report, options, loader, cluster, state):
                             stamp = parse_ms(record.get('time'))
                             if stamp is not None:
                                 stamps.append(stamp)
-                    if len(records) < 1000:
-                        break
-                    offset += len(records)
                 if len(set(stamps)) >= 2:
                     break
                 time.sleep(5)
@@ -724,20 +811,11 @@ def throttle_case(report, options, loader, cluster, state):
     found = []
     deadline = time.monotonic() + options.recover_bound
     while time.monotonic() < deadline:
-        found = []
-        offset = 0
-        end = str(now_ms())
-        while time.monotonic() < deadline:
-            answer = loader.logs({'from': str(state['throttle_start']), 'to': end,
-                                  'module': TRUSTED_MODULE, 'text': state['trusted_run'],
-                                  'limit': '1000', 'offset': str(offset)})
-            if not answer or answer.get('state') != 'ok':
-                break
-            records = answer.get('records') or []
-            found.extend(numbered(json.dumps(records), TRUSTED_MODULE, state['trusted_run']))
-            if len(records) < 1000:
-                break
-            offset += len(records)
+        records = loader_records(loader, {
+            'from': str(state['throttle_start']), 'to': str(now_ms()),
+            'module': TRUSTED_MODULE, 'text': state['trusted_run']}, page_limit)
+        found = [] if records is None else numbered(
+            json.dumps(records), TRUSTED_MODULE, state['trusted_run'])
         if set(written).issubset(found):
             break
         time.sleep(5)
@@ -768,10 +846,13 @@ def restore(report, options, loader, cluster, volume, state):
         restored = False
     total, avail = volume.space()
     shared_total, shared_avail = shared_space()
+    planted = state.get('planted_days') or []
     print('RESTORE pods and namespaces deleted=%s, %s removed, %.2f GiB free on %s, '
-          '%.2f GiB free on the shared filesystem, store %s'
+          '%.2f GiB free on the shared filesystem, store %s; planted past days: %s '
+          '(the evictor may have dropped them)'
           % (str(bool(state.get('namespaces'))).lower(), options.shared_path,
-             avail / GIB, options.mount, shared_avail / GIB, options.store))
+             avail / GIB, options.mount, shared_avail / GIB, options.store,
+             ', '.join(planted) if planted else 'none'))
     if state.get('store_ready') is False:
         restored = False
         print('RESTORE incomplete: the store is not Ready')
@@ -838,7 +919,7 @@ def main(argv=None):
     report = Report()
     cluster = Cluster(options.kubectl)
     volume = Volume(options.mount, options.pv_path)
-    state = {'namespaces': [], 'store_ready': None}
+    state = {'namespaces': [], 'store_ready': None, 'planted_days': []}
     loader = None
     store = None
     forwarding = None

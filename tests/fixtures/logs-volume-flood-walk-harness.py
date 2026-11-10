@@ -5,6 +5,8 @@ usage: logs-volume-flood-walk-harness.py <mode> <walk.py> <fixture.json>
 import importlib.util
 import json
 import sys
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 def load(path):
@@ -136,13 +138,107 @@ def readings(walk, fixture):
     return report
 
 
+@mode('loader-pages')
+def loader_pages(walk, fixture):
+    line = int(fixture.get('line_bytes', walk.LARGE_TASK_LINE_BYTES))
+    total = int(fixture.get('total', 1200))
+    limit = walk.loader_page_limit(line)
+    records = [{'time': '2026-11-10T12:00:00Z', 'message': 'x' * line,
+                'fields': {'module': 'walk-task-writer', 'pod': 'p'}}
+               for _ in range(total)]
+    pages = []
+
+    class Loader:
+        def logs(self, params):
+            size, offset = int(params['limit']), int(params['offset'])
+            page = records[offset:offset + size]
+            body = json.dumps({'state': 'ok', 'records': page})
+            if len(body) >= walk.RESPONSE_LIMIT:
+                raise walk.WalkError('response_too_large')
+            pages.append({'records': len(page), 'bytes': len(body)})
+            return {'state': 'ok', 'records': page}
+
+    collected = walk.loader_records(Loader(), {'from': '0', 'to': '1'}, limit)
+    print('PAGES ' + json.dumps({
+        'limit': limit, 'total': total,
+        'collected': None if collected is None else len(collected),
+        'max_bytes': max((page['bytes'] for page in pages), default=0),
+        'response_limit': walk.RESPONSE_LIMIT, 'pages': pages}))
+    return walk.Report()
+
+
+@mode('plant')
+def plant(walk, fixture):
+    class Recorder:
+        def __init__(self):
+            self.events = []
+
+        def pass_(self, name, detail=''):
+            self.events.append({'kind': 'pass', 'name': name, 'detail': detail})
+
+        def fail(self, name, detail=''):
+            self.events.append({'kind': 'fail', 'name': name, 'detail': detail})
+
+        def check(self, ok, name, detail=''):
+            (self.pass_ if ok else self.fail)(name, detail)
+            return ok
+
+        def note(self, text):
+            self.events.append({'kind': 'note', 'name': text})
+
+        def not_valid(self, text):
+            self.events.append({'kind': 'invalid', 'name': text})
+
+    report = Recorder()
+    options = SimpleNamespace(kubectl='kubectl', namespace='lifemodel-system',
+                              store='logs-store')
+    retention = fixture.get('retention', '14d')
+    create = fixture.get('create', True)
+    insert_status = fixture.get('insert_status', 200)
+    state = {}
+    days = set(fixture.get('partitions', []))
+    writes = []
+
+    class Store:
+        def insert(self, lines):
+            writes.append(lines)
+            return (insert_status, b'')
+
+    class Volume:
+        def partitions(self):
+            return sorted(days)
+
+    class Cluster:
+        pass
+
+    real_burst = walk.write_burst
+
+    def burst(store, moment, run_id, mib, kind, module='walk-flood'):
+        status, count = real_burst(store, moment, run_id, mib, kind, module)
+        if create and status in (200, 204):
+            days.add(walk.day_of(moment))
+        return status, count
+
+    with patch.object(walk, 'read_store_flags',
+                      lambda *args, **kwargs: {'retentionPeriod': retention}), \
+         patch.object(walk, 'write_burst', burst), \
+         patch.object(walk, 'wait_until',
+                      lambda deadline, interval, predicate: predicate()):
+        ok = walk.plant_past_days(report, options, Cluster(), Store(), Volume(), state,
+                                  'flood')
+    print('PLANT ' + json.dumps({'ok': ok, 'writes': len(writes),
+                                 'days': state.get('planted_days'),
+                                 'events': report.events}))
+    return walk.Report()
+
+
 def run_mode(mode_name, walk_path, fixture_path):
     walk = load(walk_path)
     with open(fixture_path, encoding='utf8') as handle:
-        json.load(handle)
+        data = json.load(handle)
     if mode_name not in MODES:
         raise SystemExit('unknown mode: ' + mode_name)
-    report = MODES[mode_name](walk, None)
+    report = MODES[mode_name](walk, data)
     return report.result()
 
 
