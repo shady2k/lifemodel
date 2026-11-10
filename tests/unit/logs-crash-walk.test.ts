@@ -93,6 +93,38 @@ describe('the crash walk states its rows and what it cannot prove', () => {
     expect(value.text).toContain('vector.yaml');
   });
 
+  it('picks the logs-store series by component_id, and says why a scrape failed', () => {
+    const state = jsonLine<{ size: number; max: number; received: number }>(
+      harness('metrics-component'),
+      'STATE',
+    );
+    expect(state).toEqual({ size: 0, max: 500000, received: 143 });
+    const scraped = jsonLine<{ text: string }>(harness('metrics-scrape-fails'), 'GAP');
+    expect(scraped.text).toContain('cannot be scraped');
+    expect(scraped.text).not.toContain('no exporter');
+    const series = jsonLine<{ text: string }>(harness('metrics-no-store-series'), 'GAP');
+    expect(series.text).toContain('none for component_id=\"logs-store\"');
+    expect(series.text).not.toContain('cannot be scraped');
+  }, 30000);
+
+  it('marks a writer that never fills the buffer as not valid', () => {
+    const value = jsonLine<{ saturated: boolean }>(harness('slow-writer'), 'SLOW');
+    expect(value.saturated).toBe(false);
+  }, 30000);
+
+  it('fails a collector that restarts before its buffer is full, and still counts', () => {
+    const run = harness('oom-before-full');
+    const value = jsonLine<{ ok: boolean; detail: string; counting: string }>(run, 'OOM');
+    expect(value.ok).toBe(false);
+    expect(value.detail).toContain('OOMKilled');
+    expect(value.detail).toContain('buffer 410000 of 500000');
+    expect(value.counting).toContain('lost while still in the kubelet');
+    expect(run.lines.join('\n')).toContain(
+      "the collector's buffer cannot reach its maximum inside its memory limit",
+    );
+    expect(run.status).toBe(1);
+  }, 30000);
+
   it('fails the kill when crictl reports pid 1', () => {
     const run = harness('not-valid-pid');
     const value = jsonLine<{ pid: number | null; detail: string }>(run, 'PID');
