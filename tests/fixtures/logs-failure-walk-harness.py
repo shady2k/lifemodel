@@ -103,7 +103,9 @@ def options(**values):
         origin_host='boot-lifemodel.local', ca_file=None, kubectl='k3s kubectl',
         namespace='lifemodel-system', store='logs-store', mount='/var/lib/lifemodel-logs',
         pv_path='/var/lib/lifemodel-logs/data', deadline_seconds=3600,
-        web_host='lifemodel.local', stub_namespace='lifemodel-model-walk',
+        web_host='lifemodel.local', web_namespace='lifemodel', web_service='web',
+        web_port=8080, slot_bound=2, stub_bound=2,
+        stub_namespace='lifemodel-model-walk',
         stub_port=18080, node_address='192.168.0.122', gateway='model-gateway',
         gateway_port=8080, doctor_command='lifemodel', found_bound=2, chat_bound=1,
         marker_bound=1, restart_bound=2, stub_image='loader:test',
@@ -374,6 +376,83 @@ def chat_unreachable(walk, fixture):
     accepted, detail = walk.chat_intake(1, MODE_OPTIONS, 'walk message', 0)
     print('CHAT ' + json.dumps({'accepted': accepted, 'detail': detail}))
     return report
+
+
+class FakeForward:
+    """A port-forward the mode scripts: it either answers or dies with kubectl's words."""
+
+    def __init__(self, ready, death='', local_port=34567):
+        self.ready = ready
+        self.death = death
+        self.local_port = local_port
+        self.log_path = 'harness-forward.log'
+        self.closed = False
+        self.started = False
+
+    def start(self):
+        self.started = True
+        return self
+
+    def wait_ready(self, timeout=90):
+        return self.ready
+
+    def log_tail(self, count=20):
+        return ['error: unable to forward port because pod is not running'] \
+            if not self.ready else []
+
+    def close(self, keep_log=False):
+        self.closed = True
+
+
+def early_exit_mode(walk, fixture):
+    """Drive `run` through an early exit the mode scripts, and report both outcomes."""
+    report = walk.Report()
+    mode = fixture['mode']
+    forwards = []
+    if mode == 'stub-never':
+        walk.stub_stats = lambda options: None
+    else:
+        walk.stub_stats = lambda options: {'counts': {}}
+
+    class Scripted:
+        def __call__(self, kubectl, namespace, target, local_port, remote_port):
+            index = len(forwards)
+            if mode == 'gateway-forward' and index == 0:
+                forwards.append(FakeForward(False, 'nothing accepted 127.0.0.1:34567 within 90 s'))
+            elif mode == 'web-forward' and index == 1:
+                forwards.append(FakeForward(False, 'nothing accepted 127.0.0.1:34567 within 90 s'))
+            else:
+                forwards.append(FakeForward(True))
+            return forwards[-1]
+
+    walk.PortForward = Scripted()
+    loader = FakeLoader({})
+    if mode == 'no-csrf':
+        loader.csrf = lambda: None
+    ran = walk.run(report, options(stub_bound=0), loader, FakeCluster({}), {})
+    print('RUN ' + json.dumps(ran))
+    print('EXIT ' + json.dumps(walk.exit_code(report, ran)))
+    return report
+
+
+@mode('stub-never')
+def stub_never(walk, fixture):
+    return early_exit_mode(walk, {**fixture, 'mode': 'stub-never'})
+
+
+@mode('gateway-forward')
+def gateway_forward(walk, fixture):
+    return early_exit_mode(walk, {**fixture, 'mode': 'gateway-forward'})
+
+
+@mode('web-forward')
+def web_forward(walk, fixture):
+    return early_exit_mode(walk, {**fixture, 'mode': 'web-forward'})
+
+
+@mode('no-csrf')
+def no_csrf(walk, fixture):
+    return early_exit_mode(walk, {**fixture, 'mode': 'no-csrf'})
 
 
 def run_mode(mode_name, walk_path, fixture_path):

@@ -118,6 +118,50 @@ describe('the failure walk states what it proves and how', () => {
 });
 
 describe('a fake node for the failure walk', () => {
+  it('reports why the walk stopped when the stub never answers', () => {
+    const run = harness('stub-never');
+    expect(jsonLine<boolean>(run, 'RUN')).toBe(false);
+    expect(jsonLine<number>(run, 'EXIT')).toBe(1);
+    expect(run.invalid.join('\n')).toContain("the walk did not reach its cases: the stub never answered");
+    expect(run.invalid.join('\n')).toContain('192.168.0.122:18080');
+    expect(run.status).toBe(1);
+  }, 30000);
+
+  it('reports the gateway forward\'s death and exits non-zero', () => {
+    const run = harness('gateway-forward');
+    expect(jsonLine<number>(run, 'EXIT')).toBe(1);
+    expect(run.invalid.join('\n')).toContain("the gateway's port-forward failed");
+    expect(run.failures.join('\n')).toContain('unable to forward port because pod is not running');
+    expect(run.status).toBe(1);
+  }, 30000);
+
+  it('reports the web forward\'s death and exits non-zero', () => {
+    const run = harness('web-forward');
+    expect(jsonLine<number>(run, 'EXIT')).toBe(1);
+    expect(run.invalid.join('\n')).toContain("the web service's port-forward failed");
+    expect(run.status).toBe(1);
+  }, 30000);
+
+  it('reports a missing CSRF token and exits non-zero', () => {
+    const run = harness('no-csrf');
+    expect(jsonLine<number>(run, 'EXIT')).toBe(1);
+    expect(run.invalid.join('\n')).toContain('the loader answered no CSRF token');
+    expect(run.status).toBe(1);
+  }, 30000);
+
+  it('runs its cases before it can report a pass', () => {
+    // The call itself: commit 39ecfa5d applied the stub and returned 0 without
+    // ever running a case.
+    const source = readFileSync(WALK, 'utf8');
+    const main = source.slice(source.indexOf('def main('));
+    expect(main).toContain('return run(report, options, loader, cluster, state)');
+    expect(main).toContain('ran = stage()');
+    expect(main).toContain('return exit_code(report, ran)');
+    expect(source).toContain('def exit_code(report, ran)');
+    const exit = source.slice(source.indexOf('def exit_code('));
+    expect(exit).toContain('the walk reached none of its cases');
+  });
+
   it('names the chat URL and the exception type when the send never answers', () => {
     const run = harness('chat-unreachable');
     const value = jsonLine<{ accepted: boolean; detail: string }>(run, 'CHAT');

@@ -67,6 +67,8 @@ Arguments (defaults are the test VM's)
   --web-port PORT        the web module's own port (default 8080)
   --slot-bound N         bound on the gateway serving a slot change, proved by a
                          probe request's stub counts (default 120 s)
+  --stub-bound N         bound on the stub answering its own counters on the
+                         node's LAN address (default 120 s)
   --kubectl COMMAND      default "k3s kubectl"
   --namespace NS         where the gateway and the core live (default
                          lifemodel-system); the chat is reached by its host
@@ -96,6 +98,11 @@ omitted field keeps them), turns the capture back to its saved setting, deletes
 the stub, its ConfigMap and the namespace it created, and prints a RESTORE line
 saying so. The gateway and the core are not restarted for the slots: each slot
 read is per request.
+
+A stage that never stands up is not a pass: when the stub does not answer, a
+port-forward dies or the loader gives no CSRF token, the walk prints the step and
+its own words (the stub's last answer, kubectl's tail) as TEST NOT VALID, and
+RESULT counts it, so a run that reached none of its cases exits non-zero.
 
 What it does not cover
 ----------------------
@@ -293,10 +300,15 @@ def stub_stats(options):
         connection.close()
 
 
-def wait_stub(report, options, bound=120):
-    ready = wait_until(time.monotonic() + bound, 3, lambda: stub_stats(options))
-    return report.check(bool(ready), 'the walk\'s stub answers on the node\'s LAN address',
-                        '%s:%d' % (options.node_address, options.stub_port))
+def wait_stub(report, options, bound=None):
+    """The stub's own answer on the node's LAN address, within --stub-bound."""
+    seconds = options.stub_bound if bound is None else bound
+    answer = wait_until(time.monotonic() + seconds, 3, lambda: stub_stats(options))
+    return report.check(
+        bool(answer), 'the walk\'s stub answers on the node\'s LAN address',
+        '%s:%d answered %s within %d s'
+        % (options.node_address, options.stub_port,
+           'its counters' if answer else 'nothing', seconds))
 
 
 def gateway_port(options):
@@ -336,8 +348,15 @@ def gateway_request(local_port, payload, session, timeout=60):
         connection.close()
 
 
+def forward_detail(forward):
+    """Why a forward never answered, with kubectl's own last lines, never a secret."""
+    tail = ' | '.join(forward.log_tail(5)) if forward.log_path is not None else ''
+    death = forward.death or 'never ready'
+    return death + (('; kubectl: ' + tail) if tail else '')
+
+
 def renew_gateway_forward(report, options, state, bound=90):
-    """A fresh forward after the gateway's pod is replaced; False when none answers.
+    """A fresh forward after the gateway's pod is replaced: (ok, detail).
 
     A port-forward is bound to the pod it resolved: the restart kills it.
     """
@@ -348,15 +367,15 @@ def renew_gateway_forward(report, options, state, bound=90):
                           free_port(), options.gateway_port)
     forward.start()
     if not forward.wait_ready(bound):
-        report.fail('the gateway answers a fresh port-forward',
-                    forward.death or 'never ready')
+        detail = forward_detail(forward)
+        report.fail('the gateway answers a fresh port-forward', detail)
         forward.close(keep_log=True)
         state['forward'] = None
         state['gateway_port'] = None
-        return False
+        return False, detail
     state['forward'] = forward
     state['gateway_port'] = forward.local_port
-    return True
+    return True, 'forward on 127.0.0.1:%d' % forward.local_port
 
 
 def chat_payload(text, stream=False):
@@ -649,14 +668,15 @@ def renew_web_forward(report, options, state, bound=90):
                           free_port(), options.web_port)
     forward.start()
     if not forward.wait_ready(bound):
-        report.fail('the web service answers a port-forward', forward.death or 'never ready')
+        detail = forward_detail(forward)
+        report.fail('the web service answers a port-forward', detail)
         forward.close(keep_log=True)
         state['web_forward'] = None
         state['web_port'] = None
-        return False
+        return False, detail
     state['web_forward'] = forward
     state['web_port'] = forward.local_port
-    return True
+    return True, 'forward on 127.0.0.1:%d' % forward.local_port
 
 
 def chat_intake(port, options, text, bound):
@@ -1149,18 +1169,28 @@ def restore(report, options, loader, token, cluster, state):
         print('RESTORE incomplete: check the model slots and the capture setting by hand')
 
 
+def stopped(report, step, detail):
+    """An early exit says why, and counts as a state the walk never reached."""
+    report.not_valid('the walk did not reach its cases: %s - %s' % (step, detail))
+    return False
+
+
 def run(report, options, loader, cluster, state):
     """The three cases, with the stub and the port-forward as the stage."""
     if not wait_stub(report, options):
-        return False
+        return stopped(report, 'the stub never answered',
+                       '%s:%d within %d s' % (options.node_address, options.stub_port,
+                                              options.stub_bound))
     try:
-        if not renew_gateway_forward(report, options, state):
-            return False
-        if not renew_web_forward(report, options, state):
-            return False
+        ok, detail = renew_gateway_forward(report, options, state)
+        if not ok:
+            return stopped(report, 'the gateway\'s port-forward failed', detail)
+        ok, detail = renew_web_forward(report, options, state)
+        if not ok:
+            return stopped(report, 'the web service\'s port-forward failed', detail)
         token = loader.csrf()
         if not report.check(bool(token), 'the loader answers a CSRF token', 'GET /api/state'):
-            return False
+            return stopped(report, 'the loader answered no CSRF token', 'GET /api/state')
         state['token'] = token
         saved = model_slots(loader) or {}
         state['slots'] = {'primary': saved.get('primary'), 'reserve': saved.get('reserve')}
@@ -1168,14 +1198,23 @@ def run(report, options, loader, cluster, state):
         report.note('the slots are saved for restore: primary %s, reserve %s'
                     % ('set' if saved.get('primary') else 'absent',
                        'set' if saved.get('reserve') else 'absent'))
-        case_failure(report, options, loader, token, cluster, state)
-        return case_marker(report, options, loader, token, cluster, state) \
-            and case_levels(report, options, loader, token, state)
+        failure = case_failure(report, options, loader, token, cluster, state)
+        marker = case_marker(report, options, loader, token, cluster, state) \
+            if failure else False
+        levels = case_levels(report, options, loader, token, state) if marker else False
+        return bool(failure and marker and levels)
     finally:
         for name in ('forward', 'web_forward'):
             if state.get(name) is not None:
                 state[name].close()
                 state[name] = None
+
+
+def exit_code(report, ran):
+    """RESULT and the exit status count a run that stopped before its cases."""
+    if ran is not True and report.failures == 0 and report.invalid == 0:
+        report.not_valid('the walk reached none of its cases')
+    return report.result()
 
 
 def main(argv=None):
@@ -1186,6 +1225,7 @@ def main(argv=None):
     parser.add_argument('--web-service', default='web')
     parser.add_argument('--web-port', type=int, default=8080)
     parser.add_argument('--slot-bound', type=int, default=120)
+    parser.add_argument('--stub-bound', type=int, default=120)
     parser.add_argument('--stub-namespace', default='lifemodel-model-walk')
     parser.add_argument('--stub-port', type=int, default=18080)
     parser.add_argument('--node-address')
@@ -1203,43 +1243,49 @@ def main(argv=None):
     state = {'created_namespace': False, 'gateway_port': None, 'forward': None,
              'web_port': None, 'web_forward': None, 'slots': None, 'level_sessions': []}
     loader = None
-    token = None
-    try:
+    ran = False
+
+    def stage():
+        """The stage and the three cases; False when it stopped early, with its reason."""
+        nonlocal loader
         try:
             secret = read_password(options.password_file)
         except WalkError as error:
             print('FAIL the credential file is readable - ' + str(error))
-            return 1
+            return False
         loader = Loader(options.loader_host, options.loader_port, options.origin_host,
                         options.ca_file)
         status = loader.login(secret)
         if not report.check(status == 200, 'the loader logs in',
                             'POST /api/login answered %d' % status):
-            return 1
+            return False
         address = options.node_address or node_address(cluster)
         if not report.check(bool(address), 'the node has a LAN address', address or 'none'):
-            return 1
+            return False
         options.node_address = address
         image = gateway_image(cluster, options)
         if not report.check(bool(image), 'the gateway names its image', options.gateway):
-            return 1
+            return False
         options.stub_image = image
         markers = {'non2xx': 'walk-marker-' + secrets.token_hex(16),
                    'refused': 'walk-marker-' + secrets.token_hex(16)}
         options.markers = markers
         if not ensure_stub_namespace(report, cluster, options, state):
-            return 1
+            return False
         for manifest in stub_manifest(options, markers):
             if cluster.apply(manifest).returncode != 0:
                 report.fail('the stub is created', manifest['kind'])
-                return 1
+                return False
+        return run(report, options, loader, cluster, state)
 
+    try:
+        ran = stage()
     except WalkError as error:
         report.fail('the walk runs to its end', str(error))
     finally:
         token = state.get('token')
         restore(report, options, loader, token, cluster, state)
-    return report.result()
+    return exit_code(report, ran)
 
 
 if __name__ == '__main__':
