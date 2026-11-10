@@ -13,6 +13,14 @@ describe('crash walk native CRI container lookup', () => {
       expect(result.status, result.stderr).toBe(0);
       const value = JSON.parse(result.stdout);
       expect(value.pid, value.pidReason).toBe(4242);
+      const statsArgs = value.commands.find((args: string[]) => args.includes('stats'));
+      expect(statsArgs?.slice(command.split(' ').length)).toEqual([
+        'stats',
+        '--output',
+        'json',
+        '6f14c887f015d',
+      ]);
+      // The CRI fixture reports 200 MiB usage but only 100 MiB working set.
       expect(value.memory, value.memoryReason).toBe(104857600);
       for (const args of value.commands.filter((args: string[]) => args.includes('ps'))) {
         expect(args[args.indexOf('--name') + 1]).toBe('logs-collector');

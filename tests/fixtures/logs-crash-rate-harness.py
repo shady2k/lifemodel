@@ -41,7 +41,10 @@ if fixture.get('mode') == 'fill-loop':
     walk.restore_step = lambda *_args: True
     ticks = iter(range(100))
     walk.time.monotonic = lambda: next(ticks)
-    readings = iter([1000, 1000, 1300])
+    readings = iter([1000, 1300])
+    walk.wait_source_pickup = lambda *_args: walk.source_rate_sample(
+        walk.parse_metrics('vector_component_received_events_total{component_id="kubernetes"} 1000',
+                           {walk.RECEIVED}))
 
     def read_metrics(*_args):
         count = next(readings)

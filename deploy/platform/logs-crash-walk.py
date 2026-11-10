@@ -245,6 +245,45 @@ def source_rate_report(report, before, current, elapsed, target):
     return rate
 
 
+SOURCE_PICKUP_BOUND = 120
+SOURCE_PICKUP_SECONDS = 3
+
+
+def wait_source_pickup(report, options, cluster, baseline, sample_memory):
+    """Allow the default 60 s file glob scan without charging the fill clock."""
+    target = math.ceil(options.writer_rate * SOURCE_PICKUP_SECONDS)
+    report.note('waiting for source pickup: bound=%d s, required counter rise=%d '
+                '(%.0f lines/s for %d s); product glob cooldown unchanged'
+                % (SOURCE_PICKUP_BOUND, target, options.writer_rate, SOURCE_PICKUP_SECONDS))
+    first = baseline['received']
+    if first is None:
+        report.not_valid('source pickup baseline unavailable: ' + baseline['status'])
+        return None
+    started = time.monotonic()
+    deadline = started + SOURCE_PICKUP_BOUND
+    while True:
+        if not safe_load(report, options) or not sample_memory():
+            return None
+        values, reason = read_metrics(options, cluster)
+        current = source_rate_sample(values, reason)
+        received = current['received']
+        elapsed = time.monotonic() - started
+        report.note('source pickup elapsed=%.0f s exporter=%s before=%s current=%s required=%d'
+                    % (elapsed, current['status'], first, received, target))
+        if received is not None and received < first:
+            report.not_valid('source pickup counter reset; cannot establish discovery')
+            return None
+        if received is not None and received - first >= target:
+            report.note('source picked up writer load after %.0f s; starting rate and saturation clocks'
+                        % elapsed)
+            return current
+        if time.monotonic() >= deadline:
+            report.not_valid('source pickup did not reach %d lines within %d s; exporter=%s'
+                             % (target, SOURCE_PICKUP_BOUND, current['status']))
+            return None
+        time.sleep(min(3, max(0, deadline - time.monotonic())))
+
+
 def buffer_state(values):
     """Disk bytes or memory events; never compare event totals with bytes.
 
@@ -569,7 +608,7 @@ def sequence_ranges(sequences):
 
 
 def collector_memory(cluster, options):
-    """The collector container's memory from crictl stats: (bytes, reason)."""
+    """The collector container's working set from crictl stats: (bytes, reason)."""
     pod = collector_pod_name(cluster, options)
     if not pod:
         return None, 'the collector has no pod'
@@ -588,7 +627,7 @@ def collector_memory(cluster, options):
                    if (container.get('metadata') or {}).get('name') == 'logs-collector'), None)
     if not target:
         return None, 'crictl ps lists no logs-collector container'
-    stats = node_run(shlex.split(options.crictl) + ['stats', target, '--output', 'json'])
+    stats = node_run(shlex.split(options.crictl) + ['stats', '--output', 'json', target])
     if stats.returncode != 0:
         return None, 'crictl stats refused'
     try:
@@ -598,14 +637,14 @@ def collector_memory(cluster, options):
     entries = value.get('stats') if isinstance(value.get('stats'), list) else [value]
     for entry in entries:
         memory = (entry or {}).get('memory') or {}
-        used = memory.get('usageBytes', memory.get('usage'))
+        used = memory.get('workingSetBytes')
         if isinstance(used, dict):
             used = used.get('value')
         if isinstance(used, str) and used.isdigit():
             used = int(used)
         if isinstance(used, int) and not isinstance(used, bool) and used > 0:
             return used, ''
-    return None, 'crictl stats carries no memory figure'
+    return None, 'crictl stats carries no working-set memory figure'
 
 
 def termination_reason(cluster, options):
@@ -682,7 +721,7 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
     if not image:
         report.not_valid('the evictor CronJob names no Node image: the writer cannot be created')
         return False
-    seconds = options.fill_bound + options.saturated_seconds + 120
+    seconds = options.fill_bound + options.saturated_seconds + 120 + SOURCE_PICKUP_BOUND
     applied = cluster.apply(writer_manifest(image, options, run_id, seconds))
     for index in range(2, (options.writer_pods or 1) + 1):
         if cluster.apply(writer_manifest(image, options, run_id, seconds,
@@ -703,21 +742,27 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
             report.not_valid('collector memory unavailable: ' + why)
             return False
         peak = max(peak, used)
-        report.note('collector cgroup usage current=%d peak-observed=%d limit=%d bytes'
+        report.note('collector working set current=%d peak-observed=%d limit=%d bytes'
                     % (used, peak, options.memory_limit_bytes))
         return report.check(used <= options.memory_limit_bytes,
                             'collector observed memory stays within limit')
     try:
         oom = None
         if saturated_case:
-            fill_deadline = time.monotonic() + options.fill_bound
             restarts_before = collector_restarts(cluster, options)
-            peak = 0
+            def pickup_safety():
+                if collector_restarts(cluster, options) != restarts_before:
+                    report.not_valid('collector restarted during source pickup')
+                    return False
+                return sample_memory()
+            source_before = wait_source_pickup(report, options, cluster,
+                                               source_rate_sample(metrics, reason), pickup_safety)
+            if source_before is None:
+                return False
+            fill_deadline = time.monotonic() + options.fill_bound
             last_memory = time.monotonic()
             emitted_before = emitted_count(cluster, options, run_id)
             started_fill = time.monotonic()
-            initial_metrics, initial_reason = read_metrics(options, cluster)
-            source_before = source_rate_sample(initial_metrics, initial_reason)
             while True:
                 if not safe_load(report, options):
                     return False

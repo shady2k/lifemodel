@@ -107,8 +107,8 @@ describe('crash walk disk-byte evidence', () => {
     ]);
   });
 
-  it('reads the CRI UInt64Value cgroup usage rather than the smaller working set', () => {
-    expect(run({ mode: 'cri-memory' }).memory).toBe(104857600);
+  it('reads the CRI UInt64Value working set rather than total usage', () => {
+    expect(run({ mode: 'cri-memory' }).memory).toBe(94371840);
   });
 
   it('fails measured memory above the limit even without a restart', () => {
