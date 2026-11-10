@@ -35,6 +35,14 @@ export interface TraceContext {
    * `lifemodel.trigger_type` (lifemodel-d4t8); a tick-level context has none.
    */
   triggerType?: string;
+  /**
+   * The conversation the turn runs for: the recipient cognition answers, by
+   * cognition's own rule (a reply's recipient, else the primary recipient). The
+   * logger emits it as `conversation_id` - the field the collector reads, which
+   * a camelCase key does not produce (ADR-016 §2, §9 point 4). A tick-level
+   * context has none, the same rule `triggerType` follows.
+   */
+  conversationId?: string;
 }
 
 const asyncLocalStorage = new AsyncLocalStorage<TraceContext>();
@@ -109,6 +117,7 @@ export function createTraceContext(
     parentId?: string;
     spanId?: string;
     triggerType?: string;
+    conversationId?: string;
   } = {}
 ): TraceContext {
   const result: TraceContext = {
@@ -123,6 +132,9 @@ export function createTraceContext(
   }
   if (options.triggerType !== undefined) {
     result.triggerType = options.triggerType;
+  }
+  if (options.conversationId !== undefined) {
+    result.conversationId = options.conversationId;
   }
   return result;
 }

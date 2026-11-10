@@ -354,6 +354,11 @@ export interface HarnessOptions {
   /** Record log lines on the instance (instance.recordedLogs) */
   recordLogs?: boolean;
   cognitionMode?: 'immediate' | 'hang' | 'real-scripted';
+  /**
+   * The logger the REAL cognition processor and its model adapter write with
+   * (default: nothing). The logs record-shape check reads the turn's own lines.
+   */
+  turnLogger?: Logger;
   /** Hold the fake LLM's next completion (the overrunning turn) */
   hang?: boolean;
   /** Script of fake-LLM responses for cognitionMode 'real-scripted' */
@@ -416,7 +421,12 @@ export async function startInstance(
   let cognition: FakeCognitionLayer | RealCognitionFacade;
   let cognitionDeps: Record<string, unknown> = {};
   if (opts.cognitionMode === 'real-scripted') {
-    const real = createRealCognitionProcessor(logger, agent as never, opts.script ?? []);
+    const real = createRealCognitionProcessor(
+      logger,
+      agent as never,
+      opts.script ?? [],
+      opts.turnLogger ? { logger: opts.turnLogger } : {}
+    );
     real.hang = opts.hang ?? false;
     cognition = real;
     cognitionDeps = {
