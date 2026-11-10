@@ -161,13 +161,13 @@ spec:
   validationActions: [Deny]
 ---
 # The log store's Deployment is the loader's to restart for a retention change
-# or a partition key it wrote, and for nothing else (ADR-016 §5, N6). Either
-# template annotation - the settings revision or the partition key revision,
-# which is a separate value and never the key - makes `Recreate` replace the
-# store's pod. The clamp compares the whole object, not a list of named fields:
+# or a partition key it wrote, or to finish a stranded partition detach
+# (ADR-016 §5, N6). The settings revision, partition key revision (never the
+# key itself), and stranded-day ledger annotations make `Recreate` replace
+# the store's pod. The clamp compares the whole object, not a list of named fields:
 # every key of the object's metadata, of the spec, of the pod template and of
 # its metadata must hold the same value as in `oldObject`, and every key of the
-# two annotation maps except the two revision keys must too. Only
+# two annotation maps except the three rollout keys must too. Only
 # `metadata.resourceVersion`, `managedFields` and `generation`, which the
 # apiserver rewrites, and `status` are left out, so a merge patch that carried
 # `spec.paused`, an unlisted spec field or another annotation key beside the
@@ -207,13 +207,13 @@ spec:
         oldObject.metadata.all(k,
           k in ['annotations', 'generation', 'resourceVersion', 'managedFields'] || (k in object.metadata && object.metadata[k] == oldObject.metadata[k])) &&
         object.metadata.annotations.all(k,
-          k in ['lifemodel.dev/logs-settings-revision', 'lifemodel.dev/logs-partition-key-revision'] || (has(oldObject.metadata.annotations) && k in oldObject.metadata.annotations && object.metadata.annotations[k] == oldObject.metadata.annotations[k])) &&
+          k in ['lifemodel.dev/logs-settings-revision', 'lifemodel.dev/logs-partition-key-revision', 'lifemodel.dev/logs-stranded-days'] || (has(oldObject.metadata.annotations) && k in oldObject.metadata.annotations && object.metadata.annotations[k] == oldObject.metadata.annotations[k])) &&
         (!has(oldObject.metadata.annotations) || oldObject.metadata.annotations.all(k,
-          k in ['lifemodel.dev/logs-settings-revision', 'lifemodel.dev/logs-partition-key-revision'] || (k in object.metadata.annotations && oldObject.metadata.annotations[k] == object.metadata.annotations[k]))) &&
+          k in ['lifemodel.dev/logs-settings-revision', 'lifemodel.dev/logs-partition-key-revision', 'lifemodel.dev/logs-stranded-days'] || (k in object.metadata.annotations && oldObject.metadata.annotations[k] == object.metadata.annotations[k]))) &&
         object.spec.template.metadata.annotations.all(k,
-          k in ['lifemodel.dev/logs-settings-revision', 'lifemodel.dev/logs-partition-key-revision'] || (has(oldObject.spec.template.metadata.annotations) && k in oldObject.spec.template.metadata.annotations && object.spec.template.metadata.annotations[k] == oldObject.spec.template.metadata.annotations[k])) &&
+          k in ['lifemodel.dev/logs-settings-revision', 'lifemodel.dev/logs-partition-key-revision', 'lifemodel.dev/logs-stranded-days'] || (has(oldObject.spec.template.metadata.annotations) && k in oldObject.spec.template.metadata.annotations && object.spec.template.metadata.annotations[k] == oldObject.spec.template.metadata.annotations[k])) &&
         (!has(oldObject.spec.template.metadata.annotations) || oldObject.spec.template.metadata.annotations.all(k,
-          k in ['lifemodel.dev/logs-settings-revision', 'lifemodel.dev/logs-partition-key-revision'] || (k in object.spec.template.metadata.annotations && oldObject.spec.template.metadata.annotations[k] == object.spec.template.metadata.annotations[k]))) &&
+          k in ['lifemodel.dev/logs-settings-revision', 'lifemodel.dev/logs-partition-key-revision', 'lifemodel.dev/logs-stranded-days'] || (k in object.spec.template.metadata.annotations && oldObject.spec.template.metadata.annotations[k] == object.spec.template.metadata.annotations[k]))) &&
         object.spec.all(k, k == 'template' || (k in oldObject.spec && object.spec[k] == oldObject.spec[k])) &&
         oldObject.spec.all(k, k == 'template' || (k in object.spec && oldObject.spec[k] == object.spec[k])) &&
         object.spec.template.all(k, k == 'metadata' || (k in oldObject.spec.template && object.spec.template[k] == oldObject.spec.template[k])) &&
@@ -222,12 +222,15 @@ spec:
         oldObject.spec.template.metadata.all(k, k == 'annotations' || (k in object.spec.template.metadata && oldObject.spec.template.metadata[k] == object.spec.template.metadata[k])) &&
         (('lifemodel.dev/logs-settings-revision' in object.metadata.annotations) == ('lifemodel.dev/logs-settings-revision' in object.spec.template.metadata.annotations)) &&
         (('lifemodel.dev/logs-partition-key-revision' in object.metadata.annotations) == ('lifemodel.dev/logs-partition-key-revision' in object.spec.template.metadata.annotations)) &&
-        (('lifemodel.dev/logs-settings-revision' in object.metadata.annotations) || ('lifemodel.dev/logs-partition-key-revision' in object.metadata.annotations)) &&
+        (('lifemodel.dev/logs-settings-revision' in object.metadata.annotations) || ('lifemodel.dev/logs-partition-key-revision' in object.metadata.annotations) || ('lifemodel.dev/logs-stranded-days' in object.metadata.annotations)) &&
         (!('lifemodel.dev/logs-settings-revision' in object.metadata.annotations) || (object.metadata.annotations['lifemodel.dev/logs-settings-revision'] ==
           object.spec.template.metadata.annotations['lifemodel.dev/logs-settings-revision'])) &&
         (!('lifemodel.dev/logs-partition-key-revision' in object.metadata.annotations) || (object.metadata.annotations['lifemodel.dev/logs-partition-key-revision'] ==
-          object.spec.template.metadata.annotations['lifemodel.dev/logs-partition-key-revision']))
-      message: the loader may only patch the logs settings and partition key revision annotations on the logs-store Deployment
+          object.spec.template.metadata.annotations['lifemodel.dev/logs-partition-key-revision'])) &&
+        (('lifemodel.dev/logs-stranded-days' in object.metadata.annotations) == ('lifemodel.dev/logs-stranded-days' in object.spec.template.metadata.annotations)) &&
+        (!('lifemodel.dev/logs-stranded-days' in object.metadata.annotations) || (object.metadata.annotations['lifemodel.dev/logs-stranded-days'] ==
+          object.spec.template.metadata.annotations['lifemodel.dev/logs-stranded-days']))
+      message: the loader may only patch the logs settings, partition key revision and stranded-day annotations on the logs-store Deployment
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

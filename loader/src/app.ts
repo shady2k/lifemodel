@@ -27,6 +27,7 @@ import { createLogsPartitionKeyBootstrap } from './logs-partition-key.js';
 import { createLogsSettings, observedFromStore, type LogsSettings } from './logs-settings.js';
 import { createLogsSettingsCluster } from './logs-settings-cluster.js';
 import { createLogsStore } from './logs-store-adapter.js';
+import { createLogsStrandedRecovery } from './logs-stranded-recovery.js';
 import type { LoaderLogger } from './logger.js';
 import { createLoaderState, describe, type LoaderState } from './state.js';
 import {
@@ -271,6 +272,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       cluster: logsCluster,
       flags: async () => observedFromStore(await logsStore.retentionFlags()),
     });
+  const logsStrandedRecovery = createLogsStrandedRecovery({ store: logsStore, logger });
   const readWorkbenchSource = async () =>
     (await bao.api.readWorkbenchSource()) ?? { ...DEFAULT_WORKBENCH_SOURCE };
   const workbenchTask =
@@ -316,7 +318,8 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
    * ADR-016 §5: a change reaches the store in three writes, so a crash between
    * two of them must reconcile from `logs.json` on the next start, and a
    * change the owner made while the Deployment was rolling out must converge
-   * without another click. Every pass is idempotent and never fatal.
+   * without another click. The same pass recovers stranded partitions without
+   * a page read or a new controller. Every pass is idempotent and never fatal.
    */
   async function reconcileLogsSettingsUntilStopped(): Promise<void> {
     while (!stopping) {
@@ -328,6 +331,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
           'the log store retention settings could not be reconciled'
         );
       }
+      await logsStrandedRecovery.reconcile();
       await Promise.race([clock.sleep(30_000), stopped]);
     }
   }

@@ -56,12 +56,10 @@ function decision(
   policyObject: any,
   context: { request: { operation?: string }; object: unknown; oldObject?: unknown }
 ): { matched: boolean; allowed: boolean } {
-  const operations: string[] =
-    policyObject.spec.matchConstraints.resourceRules[0].operations ?? [];
+  const operations: string[] = policyObject.spec.matchConstraints.resourceRules[0].operations ?? [];
   const conditions = (policyObject.spec.matchConditions ?? []) as { expression: string }[];
   const matched =
-    (context.request.operation === undefined ||
-      operations.includes(context.request.operation)) &&
+    (context.request.operation === undefined || operations.includes(context.request.operation)) &&
     conditions.every((condition) => Boolean(evaluate(condition.expression, context as never)));
   if (!matched) return { matched: false, allowed: false };
   return {
@@ -95,7 +93,11 @@ describe('the loader ConfigMap clamp admits the log settings projection (N6)', (
   it('admits its create and its update, in the store namespace, for the loader only', () => {
     const clamp = policy('loader-configmap-admission');
     const create = {
-      request: { operation: 'CREATE', namespace: 'lifemodel-system', userInfo: { username: LOADER } },
+      request: {
+        operation: 'CREATE',
+        namespace: 'lifemodel-system',
+        userInfo: { username: LOADER },
+      },
       object: settingsConfigMap,
     };
     expect(admits(clamp, create)).toBe(true);
@@ -127,25 +129,47 @@ describe('the loader ConfigMap clamp admits the log settings projection (N6)', (
     expect(
       admits(clamp, {
         request: { ...create.request, namespace: 'lifemodel' },
-        object: { ...settingsConfigMap, metadata: { ...settingsConfigMap.metadata, namespace: 'lifemodel' } },
+        object: {
+          ...settingsConfigMap,
+          metadata: { ...settingsConfigMap.metadata, namespace: 'lifemodel' },
+        },
       })
     ).toBe(false);
   });
 
   it('reserves the projection to the loader against every other identity', () => {
     const ownership = policy('platform-settings-ownership-admission');
-    expect(admits(ownership, {
-      request: { operation: 'CREATE', namespace: 'lifemodel-system', name: LOGS_SETTINGS_CONFIGMAP, userInfo: { username: LOADER } },
-      object: settingsConfigMap,
-    })).toBe(true);
-    expect(admits(ownership, {
-      request: { operation: 'UPDATE', namespace: 'lifemodel-system', name: LOGS_SETTINGS_CONFIGMAP, userInfo: { username: LOADER } },
-      object: settingsConfigMap,
-    })).toBe(true);
+    expect(
+      admits(ownership, {
+        request: {
+          operation: 'CREATE',
+          namespace: 'lifemodel-system',
+          name: LOGS_SETTINGS_CONFIGMAP,
+          userInfo: { username: LOADER },
+        },
+        object: settingsConfigMap,
+      })
+    ).toBe(true);
+    expect(
+      admits(ownership, {
+        request: {
+          operation: 'UPDATE',
+          namespace: 'lifemodel-system',
+          name: LOGS_SETTINGS_CONFIGMAP,
+          userInfo: { username: LOADER },
+        },
+        object: settingsConfigMap,
+      })
+    ).toBe(true);
     for (const operation of ['CREATE', 'UPDATE', 'DELETE']) {
       expect(
         admits(ownership, {
-          request: { operation, namespace: 'lifemodel-system', name: LOGS_SETTINGS_CONFIGMAP, userInfo: { username: CNPG } },
+          request: {
+            operation,
+            namespace: 'lifemodel-system',
+            name: LOGS_SETTINGS_CONFIGMAP,
+            userInfo: { username: CNPG },
+          },
           object: operation === 'DELETE' ? null : settingsConfigMap,
         }),
         `${operation} by the operator`
@@ -219,17 +243,18 @@ describe("the store Deployment's clamp (N6)", () => {
       ['another strategy', (next) => (next.spec.strategy = { type: 'RollingUpdate' })],
       ['another selector', (next) => (next.spec.selector.matchLabels.extra = 'x')],
       ['another image', (next) => (next.spec.template.spec.containers[0].image = 'other')],
-      ['another argument', (next) => next.spec.template.spec.containers[0].args.push('-retentionPeriod=9d')],
+      [
+        'another argument',
+        (next) => next.spec.template.spec.containers[0].args.push('-retentionPeriod=9d'),
+      ],
       ['another pod label', (next) => (next.spec.template.metadata.labels.extra = 'x')],
       ['another object label', (next) => (next.metadata.labels = { extra: 'x' })],
       ['another name', (next) => (next.metadata.name = 'logs-store-2')],
-      [
-        'an annotation on one map only',
-        (next) => delete next.spec.template.metadata.annotations,
-      ],
+      ['an annotation on one map only', (next) => delete next.spec.template.metadata.annotations],
       [
         'two different revisions',
-        (next) => (next.spec.template.metadata.annotations[LOGS_SETTINGS_REVISION_ANNOTATION] = '1-old'),
+        (next) =>
+          (next.spec.template.metadata.annotations[LOGS_SETTINGS_REVISION_ANNOTATION] = '1-old'),
       ],
     ];
     for (const [reason, mutate] of mutations) {
@@ -500,6 +525,38 @@ describe("the store Deployment's clamp compares the whole object (N6)", () => {
     expect(admits(clamp(), update(patched(), patched()))).toBe(true);
   });
 
+  it('admits the stranded-day ledger atomically with a rollout and resource version change', () => {
+    const annotation = 'lifemodel.dev/logs-stranded-days';
+    const next = patched();
+    next.metadata.annotations[annotation] = '20261109';
+    next.spec.template.metadata.annotations[annotation] = '20261109';
+    expect(admits(clamp(), update(next))).toBe(true);
+    expect(admits(clamp(), update(next, next))).toBe(true);
+    const appended = structuredClone(next);
+    appended.metadata.annotations[annotation] = '20261108,20261109';
+    appended.spec.template.metadata.annotations[annotation] = '20261108,20261109';
+    appended.metadata.resourceVersion = '9003';
+    expect(admits(clamp(), update(appended, next))).toBe(true);
+
+    for (const mutate of [
+      (object: typeof next) => delete object.metadata.annotations[annotation],
+      (object: typeof next) => delete object.spec.template.metadata.annotations[annotation],
+      (object: typeof next) => {
+        object.spec.template.metadata.annotations[annotation] = '20261108';
+      },
+      (object: typeof next) => {
+        object.spec.paused = true;
+      },
+      (object: typeof next) => {
+        object.metadata.annotations['lifemodel.dev/extra'] = 'x';
+      },
+    ]) {
+      const invalid = structuredClone(next);
+      mutate(invalid);
+      expect(admits(clamp(), update(invalid))).toBe(false);
+    }
+  });
+
   it('refuses spec.paused set in the same patch', () => {
     const paused = patched();
     paused.spec.paused = true;
@@ -515,19 +572,28 @@ describe("the store Deployment's clamp compares the whole object (N6)", () => {
     const mutations: [string, (next: ReturnType<typeof patched>) => void][] = [
       ['another minimum ready time', (next) => (next.spec.minReadySeconds = 5)],
       ['another revision history limit', (next) => (next.spec.revisionHistoryLimit = 2)],
-      ['a strategy that keeps the old pod', (next) => {
-        next.spec.strategy = { type: 'RollingUpdate' };
-      }],
-      ['another template field', (next) => {
-        (next.spec.template.spec as any).hostNetwork = true;
-      }],
-      ['another container beside the store', (next) => {
-        next.spec.template.spec.containers.push({
-          name: 'sidecar',
-          image: 'registry.example/sidecar@sha256:def',
-          args: [],
-        });
-      }],
+      [
+        'a strategy that keeps the old pod',
+        (next) => {
+          next.spec.strategy = { type: 'RollingUpdate' };
+        },
+      ],
+      [
+        'another template field',
+        (next) => {
+          (next.spec.template.spec as any).hostNetwork = true;
+        },
+      ],
+      [
+        'another container beside the store',
+        (next) => {
+          next.spec.template.spec.containers.push({
+            name: 'sidecar',
+            image: 'registry.example/sidecar@sha256:def',
+            args: [],
+          });
+        },
+      ],
     ];
     for (const [reason, mutate] of mutations) {
       const next = patched();
@@ -538,23 +604,38 @@ describe("the store Deployment's clamp compares the whole object (N6)", () => {
 
   it('refuses another annotation key, or another value under a kept key', () => {
     const mutations: [string, (next: ReturnType<typeof patched>) => void][] = [
-      ['an annotation added on the object', (next) => {
-        next.metadata.annotations['lifemodel.dev/extra'] = 'x';
-      }],
-      ['an annotation added on the pod template', (next) => {
-        next.spec.template.metadata.annotations['lifemodel.dev/extra'] = 'x';
-      }],
-      ['an annotation kept on the object alone', (next) => {
-        delete next.spec.template.metadata.annotations['lifemodel.dev/owner'];
-      }],
-      ['a changed value under another key', (next) => {
-        next.metadata.annotations['lifemodel.dev/owner'] = 'someone';
-        next.spec.template.metadata.annotations['lifemodel.dev/owner'] = 'someone';
-      }],
-      ['a removed annotation', (next) => {
-        delete next.metadata.annotations['lifemodel.dev/owner'];
-        delete next.spec.template.metadata.annotations['lifemodel.dev/owner'];
-      }],
+      [
+        'an annotation added on the object',
+        (next) => {
+          next.metadata.annotations['lifemodel.dev/extra'] = 'x';
+        },
+      ],
+      [
+        'an annotation added on the pod template',
+        (next) => {
+          next.spec.template.metadata.annotations['lifemodel.dev/extra'] = 'x';
+        },
+      ],
+      [
+        'an annotation kept on the object alone',
+        (next) => {
+          delete next.spec.template.metadata.annotations['lifemodel.dev/owner'];
+        },
+      ],
+      [
+        'a changed value under another key',
+        (next) => {
+          next.metadata.annotations['lifemodel.dev/owner'] = 'someone';
+          next.spec.template.metadata.annotations['lifemodel.dev/owner'] = 'someone';
+        },
+      ],
+      [
+        'a removed annotation',
+        (next) => {
+          delete next.metadata.annotations['lifemodel.dev/owner'];
+          delete next.spec.template.metadata.annotations['lifemodel.dev/owner'];
+        },
+      ],
     ];
     for (const [reason, mutate] of mutations) {
       const next = patched();
