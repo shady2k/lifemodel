@@ -546,17 +546,18 @@ export function Logs() {
                     return (
                       <li
                         key={`notice-${notice.time}-${String(position)}`}
-                        role="note"
                         className="bg-muted/40 px-4 py-3 text-sm text-muted-foreground"
                       >
-                        {t('logsEvictionNotice', {
-                          date: noticeDate(notice.day ?? '', i18n.language),
-                          time: new Date(notice.time).toLocaleString(i18n.language),
-                          size:
-                            notice.freedBytes === null
-                              ? ''
-                              : formatMiB(notice.freedBytes, i18n.language),
-                        })}
+                        <div role="note">
+                          {t('logsEvictionNotice', {
+                            date: noticeDate(notice.day ?? '', i18n.language),
+                            time: new Date(notice.time).toLocaleString(i18n.language),
+                            size:
+                              notice.freedBytes === null
+                                ? ''
+                                : formatMiB(notice.freedBytes, i18n.language),
+                          })}
+                        </div>
                       </li>
                     );
                   }
@@ -575,7 +576,11 @@ export function Logs() {
                           </Badge>
                         )}
                         {fieldOf(record, 'untrusted') === 'true' && (
-                          <Badge variant="destructive">{t('logsUntrusted')}</Badge>
+                          // The variant's 20% dark tint leaves this label at
+                          // 3.02:1; 5% keeps it at 4.87:1 (WCAG AA).
+                          <Badge variant="destructive" className="dark:bg-destructive/5">
+                            {t('logsUntrusted')}
+                          </Badge>
                         )}
                       </div>
                       <p className="mt-1 whitespace-pre-wrap break-words font-mono text-sm">
