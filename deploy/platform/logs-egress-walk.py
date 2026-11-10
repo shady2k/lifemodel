@@ -4,7 +4,8 @@
 Policy reachability is not confinement: ANY TCP 6443 is allowed, and cluster
 DNS can forward questions off-node. Separately observe real workload connections
 for 600 seconds of operator-provided normal work. No policy is changed. conntrack
-and tcpdump must be installed on the node; missing/lost evidence makes TEST NOT VALID.
+or proc snapshots provide connection evidence; tcpdump optionally corroborates it.
+Missing connection evidence or lost running capture makes TEST NOT VALID.
 Usage: sudo python3 deploy/platform/logs-egress-walk.py
 Requires deployed logs-evictor (its Node image runs all three temporary pods).
 The operator supplies ordinary application work throughout the stated window;
@@ -16,7 +17,6 @@ import ipaddress
 import json
 import re
 import subprocess
-import tempfile
 import time
 import uuid
 import sys
@@ -24,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from logs_walk_support import Cluster, Report, WalkError, wait_until
+from logs_egress_sources import collect
 
 OBSERVATION_SECONDS = 600
 POLICY_SETTLE_SECONDS = 5  # kube-router normally installs rules in about one second.
@@ -211,61 +212,9 @@ def observe(report, cluster, options, collector, store, permitted):
     network_before = network_snapshot(cluster, options)
     before = {(pod['metadata']['uid'], tuple(sorted(addresses([pod]))))
               for pod in collector + store}
-    # A baseline includes long-lived connections; events include short-lived ones.
-    # Files hold metadata only, not payloads, and are removed even after interruption.
-    with tempfile.TemporaryFile(mode='w+') as output, tempfile.TemporaryFile(mode='w+') as errors, \
-            tempfile.TemporaryFile(mode='w+') as packets, tempfile.TemporaryFile(mode='w+') as capture_errors:
-        try:
-            process = subprocess.Popen(['conntrack', '-E', '-o', 'extended'],
-                                       stdout=output, stderr=errors, text=True)
-        except OSError:
-            raise WalkError('conntrack_unavailable') from None
-        capture = None
-        try:
-            hosts = ' or '.join('host ' + str(ipaddress.ip_address(ip))
-                                for ip in sorted(addresses(collector) | addresses(store)))
-            capture = subprocess.Popen(['tcpdump', '-i', 'any', '-nn', '-q', '-l', '-s', '96',
-                                        '-c', '1000000', hosts], stdout=packets,
-                                       stderr=capture_errors, text=True)
-            time.sleep(1)
-            baseline = subprocess.run(['conntrack', '-L', '-o', 'extended'],
-                                      capture_output=True, text=True, timeout=30)
-            if baseline.returncode != 0 or process.poll() is not None or capture.poll() is not None:
-                raise WalkError('conntrack_capture_unavailable')
-            time.sleep(options.observation_seconds)
-            if process.poll() is not None or capture.poll() is not None:
-                raise WalkError('connection_capture_stopped')
-            final = subprocess.run(['conntrack', '-L', '-o', 'extended'],
-                                   capture_output=True, text=True, timeout=30)
-            if final.returncode:
-                raise WalkError('conntrack_final_unavailable')
-        finally:
-            if capture is not None:
-                capture.send_signal(2)
-                try:
-                    capture.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    capture.kill()
-                    capture.wait()
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-        errors.seek(0)
-        error_text = errors.read()
-        if any(line.strip() and not re.fullmatch(r'conntrack v[^:]+: \d+ flow events have been shown\.', line.strip())
-               for line in error_text.splitlines()):
-            raise WalkError('conntrack_evidence_lost')
-        output.seek(0)
-        evidence = baseline.stdout + '\n' + output.read() + '\n' + final.stdout
-        capture_errors.seek(0)
-        capture_status = capture_errors.read()
-        if capture.returncode not in (0, -2) or not re.search(r'\b0 packets dropped by kernel', capture_status):
-            raise WalkError('packet_capture_incomplete')
-        packets.seek(0)
-        packet_text = packets.read()
+    hosts = ' or '.join('host ' + str(ipaddress.ip_address(ip))
+                        for ip in sorted(addresses(collector) | addresses(store)))
+    evidence, packet_text = collect(report, options, hosts)
     fresh_collector = workloads(cluster, options.collector_namespace,
                                 'app.kubernetes.io/name=logs-collector')
     fresh_store = workloads(cluster, options.namespace, 'app.kubernetes.io/name=logs-store')
@@ -275,7 +224,8 @@ def observe(report, cluster, options, collector, store, permitted):
     if network_before != network_snapshot(cluster, options):
         raise WalkError('network_changed_during_observation')
     check_observation(report, evidence, addresses(collector), addresses(store), permitted)
-    check_packets(report, packet_text, evidence, addresses(collector), addresses(store))
+    if packet_text is not None:
+        check_packets(report, packet_text, evidence, addresses(collector), addresses(store))
 
 
 def run(report, cluster, options):
@@ -394,6 +344,11 @@ def run(report, cluster, options):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kubectl', default='k3s kubectl')
+    parser.add_argument('--conntrack-command', help='shell-like argv, not a shell command; '
+                        'default: PATH conntrack, then nix run nixpkgs#conntrack-tools')
+    parser.add_argument('--tcpdump-command', help='shell-like argv, not a shell command; '
+                        'default: PATH tcpdump, then nix run nixpkgs#tcpdump (optional)')
+    parser.add_argument('--nix-config', help='NIX_CONFIG for child tools only; never reported')
     parser.add_argument('--namespace', default='lifemodel-system')
     parser.add_argument('--collector-namespace', default='lifemodel-logs')
     parser.add_argument('--node', default='vm-lifemodel')
