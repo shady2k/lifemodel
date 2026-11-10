@@ -4,7 +4,7 @@
  *
  * A run reads the volume's free space and, while it is below the threshold,
  * detaches the oldest day partition in the store, removes that directory only
- * after a 200 detach or an attached list confirming its absence, then looks again,
+ * after a 200 detach, then looks again. An absent day fails as stranded,
  * because a directory the store still has open must not be removed. One line
  * per drop; nothing on a run that drops nothing. A detach no connection
  * answered is retried first (below); one that still fails removes nothing and
@@ -100,7 +100,7 @@ function failureLine(
   });
 }
 
-function dropLine(day: string, freedBytes: number, alreadyDetached: boolean): string {
+function dropLine(day: string, freedBytes: number): string {
   return JSON.stringify({
     time: new Date().toISOString(),
     level: 'info',
@@ -108,7 +108,6 @@ function dropLine(day: string, freedBytes: number, alreadyDetached: boolean): st
     day,
     freedBytes,
     reason: 'below_threshold',
-    ...(alreadyDetached ? { alreadyDetached: true } : {}),
   });
 }
 
@@ -175,16 +174,19 @@ export async function runLogEvictor(deps: LogEvictorDeps): Promise<number> {
       );
       return 1;
     }
-    const alreadyDetached = !attached.days.includes(day);
-    if (!alreadyDetached) {
-      const { result: detach, attempts } = await partitionCallWithRetry(
-        () => deps.store.detach(day),
-        retry
-      );
-      if (detach.state !== 'detached') {
-        deps.write(failureLine(detach.reason, space, { day, status: detach.status, attempts }));
-        return 1;
-      }
+    if (!attached.days.includes(day)) {
+      // List absence precedes drain completion in the store. Only a 200
+      // detach acknowledges that readers and final flushes have finished.
+      deps.write(failureLine('stranded_partition', space, { day }));
+      return 1;
+    }
+    const { result: detach, attempts } = await partitionCallWithRetry(
+      () => deps.store.detach(day),
+      retry
+    );
+    if (detach.state !== 'detached') {
+      deps.write(failureLine(detach.reason, space, { day, status: detach.status, attempts }));
+      return 1;
     }
     let freedBytes: number;
     try {
@@ -194,7 +196,7 @@ export async function runLogEvictor(deps: LogEvictorDeps): Promise<number> {
       deps.write(failureLine('remove_failed', space, { day }));
       return 1;
     }
-    deps.write(dropLine(day, freedBytes, alreadyDetached));
+    deps.write(dropLine(day, freedBytes));
     const next = await read();
     if (next === null) return 1;
     space = next;
