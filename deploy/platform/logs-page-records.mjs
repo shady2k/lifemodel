@@ -52,3 +52,24 @@ export function describeIdentity(entry) {
   const message = entry.message.length > 80 ? `${entry.message.slice(0, 77)}...` : entry.message;
   return `${entry.time} | ${entry.module} | ${message}`;
 }
+
+/** axe-core's violations as rule ids and counts, never any page data. */
+export function axeSummary(results) {
+  const violations = Array.isArray(results?.violations) ? results.violations : [];
+  return violations.map((rule) => ({
+    id: typeof rule?.id === 'string' ? rule.id : 'unknown',
+    count: Array.isArray(rule?.nodes) ? rule.nodes.length : 0,
+  }));
+}
+
+/** The modules a filter's option list is missing, by name. */
+export function missingModules(options, modules) {
+  const names = new Set(
+    (Array.isArray(options) ? options : [])
+      .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+      .filter((entry) => entry !== '')
+  );
+  return (Array.isArray(modules) ? modules : []).filter(
+    (module) => typeof module === 'string' && module !== '' && !names.has(module)
+  );
+}

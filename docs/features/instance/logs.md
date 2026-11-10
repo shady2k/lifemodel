@@ -41,7 +41,7 @@ minute). Each drop is shown in the list as a notice naming the day, the time and
 the space freed in MiB; that day's lines are gone from the store, including the
 ones that would explain a flood.
 
-## The three lines above the results, and what to do
+## The lines above the results, and what to do
 
 - `collection stopped N minutes ago; results may be incomplete` — the
   collector's heartbeat is older than 90 s. Check the collector's pod in

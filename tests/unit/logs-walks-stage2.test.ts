@@ -122,10 +122,9 @@ describe.each(STAGE2_WALKS)('$path', ({ path, id, browser }) => {
 
   it('uses k3s kubectl where it reaches the cluster', () => {
     const source = text(path);
-    if (browser) {
-      expect(source).not.toContain('kubectl');
-      return;
-    }
+    // The page walk stages the stopped store and the stopped core and chat with
+    // kubectl and finds nothing through it; the other walks reach the cluster
+    // the same way.
     expect(source).toContain('k3s kubectl');
   });
 });

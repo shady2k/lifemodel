@@ -29,13 +29,32 @@ describe('the browser walk', () => {
     expect(header).toMatch(/Firefox/);
   });
 
-  it('walks both engines in both languages', () => {
+  it('walks both engines in both languages and both themes', () => {
     const text = source();
     expect(text).toContain('chromium');
     expect(text).toContain('firefox');
     expect(text).toContain("locale: 'en-US'");
     expect(text).toContain("locale: 'ru-RU'");
     expect(text).toContain('colorScheme');
+    // Four variants per engine: en/ru in light and dark.
+    const variants = text.slice(text.indexOf('const variants'), text.indexOf('async function api'));
+    expect((variants.match(/colorScheme:/g) ?? []).length).toBe(4);
+    expect((variants.match(/'en-US'/g) ?? []).length).toBe(2);
+    expect((variants.match(/'ru-RU'/g) ?? []).length).toBe(2);
+  });
+
+  it('judges the page with axe, and the stopped store and the off case with kubectl', () => {
+    const text = source();
+    expect(text).toContain('axe-core');
+    expect(text).toContain('axeSummary(');
+    expect(text).toContain(': the page is axe-clean');
+    expect(text).toContain("'deployment', ENGINE_STORES, 0");
+    expect(text).toContain('CORE_STATEFULSET, 0');
+    expect(text).toContain("'/api/logs without a session refuses'");
+    expect(text).toContain('every module the API lists is in the filter');
+    expect(text).toContain('a range with no match shows an empty answer');
+    expect(text).toContain('one record expands to its fields');
+    expect(text).toContain('the eviction notice states the space in MiB');
   });
 
   it('takes a screenshot of every state it asserts', () => {

@@ -12,6 +12,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   PAGE_SIZE,
+  axeSummary,
+  missingModules,
   describeIdentity,
   identityOf,
   identityOfAnswer,
@@ -87,5 +89,30 @@ describe('the second page against the first', () => {
     const repeated = repeatedRecords(first, appended);
     expect(repeated).toHaveLength(1);
     expect(describeIdentity(repeated[0])).toBe('2026-11-09T21:00:01.000Z | core | collector heartbeat');
+  });
+});
+
+describe('the page walk\'s own checks', () => {
+  it('reports axe violations as rule ids and counts, never page data', () => {
+    const summary = axeSummary({
+      violations: [
+        { id: 'color-contrast', nodes: [{ target: ['main'] }, { target: ['p'] }] },
+        { id: 'label', nodes: [{}] },
+      ],
+    });
+    expect(summary).toEqual([
+      { id: 'color-contrast', count: 2 },
+      { id: 'label', count: 1 },
+    ]);
+    expect(axeSummary({ violations: [] })).toEqual([]);
+    expect(axeSummary(null)).toEqual([]);
+    expect(JSON.stringify(summary)).not.toContain('main');
+  });
+
+  it('names the modules a filter\'s options are missing', () => {
+    expect(missingModules(['core', 'model-gateway', 'All modules'], ['core', 'logs-evictor']))
+      .toEqual(['logs-evictor']);
+    expect(missingModules(['core'], ['core'])).toEqual([]);
+    expect(missingModules(null, ['core'])).toEqual(['core']);
   });
 });
