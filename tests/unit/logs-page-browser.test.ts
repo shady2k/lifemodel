@@ -80,6 +80,12 @@ describe('the stopped store is judged from its own answer and rendered status', 
     expect(run.result?.reason).toBe('connection_refused');
   });
 
+  it('navigates without waiting for the polling page to go idle', () => {
+    const run = harness('store');
+    const goto = run.events.filter(([event]) => event === 'goto').at(-1);
+    expect(goto?.[2]).toBe('domcontentloaded');
+  });
+
   it('does not accept a successful empty API answer as unavailable', () => {
     expect(harness('store-ok').error).toContain('unavailable');
   });

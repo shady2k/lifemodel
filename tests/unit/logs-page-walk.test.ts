@@ -224,6 +224,28 @@ describe('the browser walk', () => {
     expect(text).toContain('the count line follows the drawn records');
   });
 
+  it('judges a cross-page repeat against the store\'s own rows', () => {
+    const text = source();
+    expect(text).toContain('identityCounts(');
+    expect(text).toContain('storedIdentityCounts(');
+    expect(text).toContain('overDrawnIdentities(');
+    expect(text).toContain('windowRecords(page, pagedWindow)');
+    expect(text).toContain('drawn more times than stored');
+    expect(text).toContain('cross-page repeat(s) are backed by the store');
+  });
+
+  it('judges the freshness line from the status answer the page itself fetched', () => {
+    const text = source();
+    const section = text.slice(
+      text.indexOf('The status area, judged'), text.indexOf('The retention card, tied')
+    );
+    expect(section).toContain('statusResponse');
+    expect(section).toContain('the page\'s own status answer was not seen');
+    expect(section).not.toContain('api(page');
+    expect(text).toContain("target.searchParams.get('status') === '1'");
+    expect(text).not.toContain('/api/logs?from=${range.from}');
+  });
+
   it('compares pages by the record the page draws, never by message text', () => {
     const text = source();
     // A message text repeats every few seconds ("collector heartbeat"), so the

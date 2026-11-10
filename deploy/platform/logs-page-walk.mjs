@@ -85,11 +85,14 @@ import { resolve } from 'node:path';
 import {
   PAGE_SIZE,
   axeSummary,
+  identityCounts,
   missingModules,
   describeIdentity,
   identityOfAnswer,
+  overDrawnIdentities,
   repeatedRecords,
   sameIdentity,
+  storedIdentityCounts,
 } from './logs-page-records.mjs';
 
 function argument(name, fallback) {
@@ -284,6 +287,13 @@ async function pageWindow(page) {
   return formWindow(from, to);
 }
 
+/** The stored records in the window the page drew, for the duplicate check. */
+async function windowRecords(page, window) {
+  const answer = await api(page, `/api/logs?from=${window.from}&to=${window.to}&limit=1000`);
+  return answer.status === 200 && answer.body?.state === 'ok'
+    ? (answer.body.records ?? []) : null;
+}
+
 async function countLine(page) {
   const text = (await page.locator('section p').first().textContent()) ?? '';
   const match = /(\d+)/.exec(text.replace(/[\u00a0\u202f]/g, ' '));
@@ -365,7 +375,21 @@ try {
       ]);
       await page.waitForLoadState('networkidle');
       await page.waitForTimeout(1500);
+      // The page's own first-page answer carries the status it draws: under
+      // load collection can flap between that read and a second one.
+      const statusResponse = page
+        .waitForResponse(
+          (response) => {
+            const target = new URL(response.url());
+            return target.pathname === '/api/logs'
+              && target.searchParams.get('status') === '1'
+              && response.request().method() === 'GET';
+          },
+          { timeout: 30000 }
+        )
+        .catch(() => null);
       await gotoWithRetry(page, `https://${HOST}/logs`);
+      await statusResponse;
       await page.waitForTimeout(1500);
       const title = (await page.locator('h1').first().textContent())?.trim() ?? '';
       check(title === words.title, `${tag}: /logs shows its title ("${title}")`);
@@ -388,27 +412,32 @@ try {
             + rule.targets.join(', ')).join('; ') || 'no violations');
       }
 
-      // The status area, tied to the API's own answer.
-      const range = windowSeconds(1);
-      const statusAnswer = await api(page, `/api/logs?from=${range.from}&to=${range.to}&limit=1&status=1`);
-      const status = statusAnswer.body?.status ?? {};
+      // The status area, judged against the status answer the page itself
+      // fetched for the list it drew, never a second read taken later.
+      const statusAnswer = await statusResponse;
+      const status = (await statusAnswer?.json().catch(() => null))?.status ?? null;
       const pageText = async () => (await page.locator('main').innerText()) ?? '';
       const bodyText = await pageText();
-      const collection = status.collection?.state ?? 'unknown';
-      if (collection === 'stopped') {
-        check(bodyText.includes(words.stopped), `${tag}: the stopped-collector line is drawn`);
-      } else if (collection === 'unknown') {
-        check(bodyText.includes(words.unknown), `${tag}: the unknown-collection line is drawn`);
+      if (status === null) {
+        notValid(`${tag}: the page's own status answer was not seen: the freshness and `
+          + 'read-only lines cannot be judged');
       } else {
-        check(!bodyText.includes(words.stopped) && !bodyText.includes(words.unknown),
-          `${tag}: no freshness line is drawn while collection is live`);
+        const collection = status.collection?.state ?? 'unknown';
+        if (collection === 'stopped') {
+          check(bodyText.includes(words.stopped), `${tag}: the stopped-collector line is drawn`);
+        } else if (collection === 'unknown') {
+          check(bodyText.includes(words.unknown), `${tag}: the unknown-collection line is drawn`);
+        } else {
+          check(!bodyText.includes(words.stopped) && !bodyText.includes(words.unknown),
+            `${tag}: no freshness line is drawn while collection is live`);
+        }
+        const readOnly = status.storeReadOnly === true;
+        check(
+          readOnly ? bodyText.includes(words.readOnly) : !bodyText.includes(words.readOnly),
+          `${tag}: the read-only line follows the store's gauge (${String(readOnly)})`
+        );
+        note(`${tag}: status area read (collection ${collection}, storeReadOnly ${String(status.storeReadOnly)})`);
       }
-      const readOnly = status.storeReadOnly === true;
-      check(
-        readOnly ? bodyText.includes(words.readOnly) : !bodyText.includes(words.readOnly),
-        `${tag}: the read-only line follows the store's gauge (${String(readOnly)})`
-      );
-      note(`${tag}: status area read (collection ${collection}, storeReadOnly ${String(status.storeReadOnly)})`);
 
       // The retention card, tied to the settings answer. The loader's own read of
       // the store can fail for a moment - measured: Firefox ru-RU-dark drew the
@@ -683,6 +712,7 @@ try {
       let firstCount = 0;
       let windowCount = 0;
       let paged = false;
+      let pagedWindow = null;
       for (const hours of [6, 24, 24 * 7]) {
         const wide = windowSeconds(hours);
         await page.locator('#logs-from').fill(toInput(new Date(wide.from)));
@@ -695,6 +725,8 @@ try {
         const offered = await more.isVisible();
         if (windowCount > firstCount && firstCount > 0 && offered) {
           paged = true;
+          // The form holds the window the page actually queried, to the minute.
+          pagedWindow = await pageWindow(page);
           break;
         }
       }
@@ -733,6 +765,15 @@ try {
         const sharedTexts = appended.filter(
           (entry) => firstPage.some((held) => held.message === entry.message)
         ).length;
+        // The store itself may hold one record twice: the collector replays at
+        // least once after a crash (ADR-016 §6), and the page says byte-identical
+        // records cannot be told apart. A cross-page repeat is a page defect only
+        // when the page draws that identity more times than the store holds it.
+        const drawnIdentities = identityCounts([...firstPage, ...appended]);
+        const storedRecords = pagedWindow === null ? null : await windowRecords(page, pagedWindow);
+        const stored = storedRecords === null ? null : storedIdentityCounts(storedRecords);
+        const over = stored === null
+          ? null : overDrawnIdentities(drawnIdentities, repeats, stored);
         check(drawnAfter.length > firstPage.length, `${tag}: the second page is appended`,
           `${firstPage.length} -> ${drawnAfter.length}`);
         check(drawnAfter.length - firstPage.length <= PAGE_SIZE,
@@ -740,18 +781,28 @@ try {
           `${drawnAfter.length - firstPage.length} new record(s)`);
         check(grownLine.count === drawnAfter.length, `${tag}: the count line follows the drawn records`,
           `line ${grownLine.count}, ${drawnAfter.length} drawn`);
-        check(
-          appended.length > 0 && repeats.length === 0,
-          `${tag}: the second page holds records the first page did not`,
-          `${appended.length} appended record(s), each compared with the ${firstPage.length} drawn on `
-          + 'the first page by time, module and message'
-          + (sharedTexts > 0
-            ? `; ${sharedTexts} message text(s) repeat across the pages, and those records differ`
-            : '')
-          + (repeats.length > 0
-            ? `; drawn twice: ${repeats.slice(0, 3).map((entry) => describeIdentity(entry)).join('; ')}`
-            : '')
-        );
+        if (repeats.length > 0 && over === null) {
+          notValid(`${tag}: the store's rows for the drawn window were not read: the repeated `
+            + 'record cannot be judged');
+        } else {
+          check(
+            appended.length > 0 && (over === null || over.length === 0),
+            `${tag}: the second page holds records the first page did not`,
+            `${appended.length} appended record(s), each compared with the ${firstPage.length} drawn on `
+            + 'the first page by time, module and message'
+            + (sharedTexts > 0
+              ? `; ${sharedTexts} message text(s) repeat across the pages, and those records differ`
+              : '')
+            + (repeats.length > 0 && over !== null && over.length === 0
+              ? `; ${repeats.length} cross-page repeat(s) are backed by the store's rows`
+              : '')
+            + (over !== null && over.length > 0
+              ? `; drawn more times than stored: ${over.slice(0, 3).map((item) =>
+                `${describeIdentity(item.entry)} (page ${String(item.drawn)}, store ${String(item.stored)})`
+              ).join('; ')}`
+              : '')
+          );
+        }
         await page.screenshot({ path: shot('second-page') });
         // The reload returns to the default window, which ends now: newer records
         // have arrived, so the earlier page is not what the reload must draw. The

@@ -93,9 +93,11 @@ export async function observeUnavailableLogs(page, url, language, attempts = 3, 
         && target.searchParams.get('status') === '1'
         && response.request().method() === 'GET';
     }, { timeout: 30000 }).catch(() => null);
+    // The store being down makes the page poll, so `networkidle` never comes:
+    // load the document and wait for the page's own unavailable text below.
     const [response] = await Promise.all([
       waiting,
-      page.goto(url, { waitUntil: 'networkidle' }),
+      page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }),
     ]);
     if (response === null) throw new Error('the page answered no record request');
     const answer = await response.json();

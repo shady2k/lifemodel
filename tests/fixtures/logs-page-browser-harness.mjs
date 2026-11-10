@@ -55,8 +55,8 @@ if (mode.startsWith('axe')) {
       waiting = predicate;
       return new Promise((resolve) => { page.resolve = resolve; });
     },
-    goto: async (target) => {
-      events.push(['goto', target]);
+    goto: async (target, options) => {
+      events.push(['goto', target, options?.waitUntil]);
       if (mode === 'store-aborted' && !aborted) {
         aborted = true;
         throw new Error(`net::ERR_ABORTED at ${target}`);
