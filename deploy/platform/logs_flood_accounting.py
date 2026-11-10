@@ -6,9 +6,12 @@ containerd includes image content, unpacked snapshots and writable snapshots.
 Pod-log rotation is included. The shared walk tree excludes its Postgres tree.
 The log store's separate mounted volume is deliberately not a category here.
 
-A residual is unattributed root growth, never proof that all root loss was log
-flood data. Concurrent writes outside these trees and filesystem bookkeeping
-remain in that residual and are compared with the caller's stated allowance.
+A tree that cannot be read is recorded with its reason and left out of the
+accounting; only an unreadable free-space reading for `/` itself withholds the
+verdict. A residual is unattributed root growth, never proof that all root loss
+was log flood data. Concurrent writes outside these trees and filesystem
+bookkeeping remain in that residual and are compared with the caller's stated
+allowance.
 """
 import os
 from pathlib import Path
@@ -17,15 +20,23 @@ import stat
 IMAGE_PATH = Path('/var/lib/rancher/k3s/agent/containerd')
 CONTAINER_LOG_PATH = Path('/var/log/pods')
 CATEGORIES = ('images', 'container_logs', 'postgres', 'walk_files')
+LABELS = {
+    'images': 'images (containerd content, unpacked and writable snapshots)',
+    'container_logs': 'container_logs',
+    'postgres': 'postgres',
+    'walk_files': 'walk_files',
+}
 # POSIX st_blocks always counts 512-byte units, regardless of filesystem block size.
 ALLOCATED_BLOCK_BYTES = 512
+REASON_LIMIT = 200
 
 
 def allocated_tree(path, root_device, seen, excluded=None):
     """Count directory and file allocation once, without following symlinks.
 
-    A vanished or unreadable entry invalidates the tree instead of silently
-    returning a partial total. A different filesystem cannot explain root loss.
+    A vanished or unreadable entry leaves this tree unreadable as a whole. The
+    caller records that reason and judges the root growth on the trees it could
+    read. A different filesystem cannot explain root loss.
     """
     path = Path(path)
     top = path.lstat()
@@ -52,19 +63,29 @@ def allocated_tree(path, root_device, seen, excluded=None):
     return visit(path)
 
 
+def reason_of(error):
+    """One bounded reason for an unreadable tree or root reading."""
+    text = '%s: %s' % (type(error).__name__, error)
+    return text if len(text) <= REASON_LIMIT else text[:REASON_LIMIT - 3] + '...'
+
+
 def accounting_snapshot(options, cluster):
     """Read the local host only; cluster is kept in the walk helper interface.
 
     The machine running the walk must be the node. No shell, image-list command
     or Kubernetes object is used as a substitute for allocated host bytes.
+    Every tree is recorded as read (its allocated bytes) or unreadable with its
+    reason; an unreadable tree does not invalidate the other trees or the root.
     """
-    snapshot = {'root_free_bytes': None, 'allocated_bytes': {}, 'errors': []}
+    snapshot = {'root_free_bytes': None, 'root_error': None,
+                'allocated_bytes': {}, 'unreadable': {}}
+    root_device = None
     try:
         root_device = os.stat('/').st_dev
         usage = os.statvfs('/')
         snapshot['root_free_bytes'] = usage.f_bavail * usage.f_frsize
     except OSError as error:
-        snapshot['errors'].append('root filesystem: ' + type(error).__name__)
+        snapshot['root_error'] = reason_of(error)
         root_device = None
     shared = Path(os.path.abspath(options.shared_path))
     postgres = shared / 'pg'
@@ -79,7 +100,7 @@ def accounting_snapshot(options, cluster):
             snapshot['allocated_bytes'][category] = allocated_tree(
                 path, root_device, seen, postgres if category == 'walk_files' else None)
         except OSError as error:
-            snapshot['errors'].append(category + ': ' + type(error).__name__)
+            snapshot['unreadable'][category] = reason_of(error)
     return snapshot
 
 
@@ -87,46 +108,61 @@ def byte_count(value):
     return type(value) is int and value >= 0
 
 
-def valid_snapshot(value):
-    if not isinstance(value, dict) or value.get('errors') != []:
-        return False
-    categories = value.get('allocated_bytes')
-    return (byte_count(value.get('root_free_bytes')) and isinstance(categories, dict)
-            and all(byte_count(categories.get(name)) for name in CATEGORIES))
+def root_readable(value):
+    return isinstance(value, dict) and byte_count(value.get('root_free_bytes'))
 
 
 def report_accounting(report, before, after, allowance):
-    """Report exact evidence and judge only the unexplained positive residual.
+    """Report every tree, and judge the unexplained positive residual.
 
+    Only `/`'s own free-space reading withholds the verdict: a tree that could
+    not be read is printed with its reason and left out of the accounted growth.
     Signed category deltas are summed before clamping: a category shrinking
     cannot be ignored while another category's growth excuses root loss.
-    Missing evidence is TEST NOT VALID, never zero bytes or an allowance pass.
     """
-    if not valid_snapshot(before) or not valid_snapshot(after) or not byte_count(allowance):
-        report.not_valid('root filesystem accounting is missing or unreadable; '
-                         'no root-growth verdict is available')
+    reasons = []
+    for label, snapshot in (('before', before), ('after', after)):
+        if not root_readable(snapshot):
+            reason = (snapshot.get('root_error')
+                      if isinstance(snapshot, dict) else None)
+            reasons.append('%s: %s' % (label, reason or 'free space unreadable'))
+    if not byte_count(allowance):
+        reasons.append('allowance is not a byte count')
+    if reasons:
+        report.not_valid('root filesystem accounting has no free-space reading (%s); '
+                         'no root-growth verdict is available' % '; '.join(reasons))
         return None
     report.note('root free bytes %d -> %d (signed free-space change %+d)' % (
         before['root_free_bytes'], after['root_free_bytes'],
         after['root_free_bytes'] - before['root_free_bytes']))
-    deltas = {}
+    read = {}
     for name in CATEGORIES:
-        start, end = before['allocated_bytes'][name], after['allocated_bytes'][name]
-        deltas[name] = end - start
-        label = ('images (containerd content, unpacked and writable snapshots)'
-                 if name == 'images' else name)
+        start = (before.get('allocated_bytes') or {}).get(name)
+        end = (after.get('allocated_bytes') or {}).get(name)
+        if not byte_count(start) or not byte_count(end):
+            reason = ((after.get('unreadable') or {}).get(name)
+                      or (before.get('unreadable') or {}).get(name)
+                      or 'no reading')
+            report.note('%s: unreadable (%s); excluded from the root-growth accounting'
+                        % (LABELS[name], reason))
+            continue
+        read[name] = (start, end)
         report.note('%s allocated bytes %d -> %d (net delta %+d)' % (
-            label, start, end, deltas[name]))
-    total_before = sum(before['allocated_bytes'][name] for name in CATEGORIES)
-    total_after = sum(after['allocated_bytes'][name] for name in CATEGORIES)
+            LABELS[name], start, end, end - start))
+    deltas = {name: end - start for name, (start, end) in read.items()}
+    total_before = sum(start for start, _end in read.values())
+    total_after = sum(end for _start, end in read.values())
     accounted = max(0, sum(deltas.values()))
     dropped = max(0, before['root_free_bytes'] - after['root_free_bytes'])
     residual = max(0, dropped - accounted)
-    report.note('measured allocated total %d -> %d bytes (signed net delta %+d); '
-                'positive accounted growth %d bytes; positive root free-space drop %d bytes; '
-                'unattributed drop %d bytes; residual allowance %d bytes. '
-                'The root drop is not all attributed to the flood.' % (
+    excluded = [name for name in CATEGORIES if name not in read]
+    report.note('measured allocated total over the trees read %d -> %d bytes '
+                '(signed net delta %+d)%s; positive accounted growth %d bytes; '
+                'positive root free-space drop %d bytes; unattributed drop %d bytes; '
+                'residual allowance %d bytes. The root drop is not all attributed to '
+                'the flood.' % (
                     total_before, total_after, total_after - total_before,
+                    ('; excluded: ' + ', '.join(excluded)) if excluded else '',
                     accounted, dropped, residual, allowance))
     ok = residual <= allowance
     report.check(ok, 'unattributed root filesystem growth stays within the stated allowance',

@@ -15,7 +15,9 @@ What it proves
      loop device behind the mount;
    - the shared filesystem's free space moves only by what Postgres and the walk
      write there, never by the flood;
-   - the store answers 429 read from the response, with no panic and no restart
+   - the store answers 429 read from the response, or the evictor frees the
+     space first with a drop verified by its own line, the day's gone directory
+     and the moved oldest row; no panic and no restart
      (its restartCount and uid unchanged, its log clean);
    - reads keep answering through the loader's API;
    - the store's free space never falls more than 10 % of the volume below its
@@ -108,6 +110,7 @@ from logs_walk_support import (  # noqa: E402
     common_arguments,
     connect_store,
     now_ms,
+    oldest_record_ms,
     quantity,
     read_password,
     read_store_flags,
@@ -117,7 +120,7 @@ from logs_walk_support import (  # noqa: E402
 )
 
 from logs_flood_support import (  # noqa: E402
-    check_commits, create_pod, is_drop, pod_diagnostics, refusal_verdict, wait_running,
+    check_commits, create_pod, pod_diagnostics, refusal_verdict, verified_drops, wait_running,
 )
 from logs_flood_accounting import accounting_snapshot, report_accounting  # noqa: E402
 
@@ -499,8 +502,8 @@ def flood_case(report, options, loader, cluster, store, volume, state):
                 'volume device %s, shared free %.2f GiB; Postgres data and container logs '
                 'are measured, not a quota' % (device or 'unknown', shared_before / GIB))
     pod_before = store_pod(cluster, options)
-    result = {'samples': [], 'statuses': [], 'drops': [], 'seen': set(),
-              'started': now_ms(), 'throttled': False}
+    result = {'samples': [], 'statuses': [], 'started': now_ms(),
+              'oldestBefore': oldest_record_ms(store)}
     flood_start_ns = time.time_ns()
     start_mono = time.monotonic()
     io_before = diskstats_io_ms(device) if device else None
@@ -529,10 +532,6 @@ def flood_case(report, options, loader, cluster, store, volume, state):
             })
             if free is not None:
                 result.setdefault('free', []).append({'free': free, 'merges': merges})
-            epoch = wait_until(time.monotonic() + 1, 0.2,
-                               lambda: evictor_seen(loader, result))
-            if epoch:
-                result['throttled'] = True
     flood_end_ns = time.time_ns()
     accounting_after = accounting_snapshot(options, cluster)
     io_after = diskstats_io_ms(device) if device else None
@@ -558,6 +557,14 @@ def flood_case(report, options, loader, cluster, store, volume, state):
     report.check(reads is not None and reads.get('state') == 'ok',
                  'reads keep answering through the loader\'s API',
                  'state %s' % ((reads or {}).get('state')))
+    def recovered():
+        status = write_burst(store, now_ms(), state['flood_run'], 1, 'after',
+                             module='walk-flood')[0]
+        result['samples'].append((now_ms(), status))
+        return status in (200, 204)
+    accepted = wait_until(time.monotonic() + options.recover_bound, 10, recovered)
+    drops = verified_drops(report, loader, volume, result['started'],
+                           result.get('oldestBefore'), oldest_record_ms(store))
     low, read_only = page_lines(result['statuses'])
     if read_only:
         report.pass_('the page\'s status says the store is refusing writes', 'storeReadOnly=true '
@@ -565,18 +572,21 @@ def flood_case(report, options, loader, cluster, store, volume, state):
                                              if sample.get('readOnly')))
     elif low:
         report.note('the page said low volume but not read-only; verified evictor drops=%d '
-                    '(ADR-016 §5)' % len(result['drops']))
+                    '(ADR-016 §5)' % len(drops))
     else:
         report.note('the page said neither low volume nor read-only in %d sample(s): %s'
                     % (len(result['statuses']),
                        ', '.join(sorted({str(sample.get('state')) for sample in result['statuses']}))))
-    def recovered():
-        status = write_burst(store, now_ms(), state['flood_run'], 1, 'after',
-                             module='walk-flood')[0]
-        result['samples'].append((now_ms(), status))
-        return status in (200, 204)
-    accepted = wait_until(time.monotonic() + options.recover_bound, 10, recovered)
-    refusal_verdict(report, result['samples'], result['drops'])
+    free_samples = [sample['free'] for sample in result.get('free') or []
+                    if isinstance(sample.get('free'), int)]
+    lowest_free = min(free_samples) if free_samples else None
+    refusal_verdict(
+        report, result['samples'], drops,
+        state='%d write sample(s) answered with no 429, the lowest sampled store free space '
+              'was %s, and %d evictor drop line(s) were verified'
+              % (len(result['samples']),
+                 ('%.2f GiB' % (lowest_free / GIB)) if lowest_free is not None else 'not sampled',
+                 len(drops)))
     pod_after = store_pod(cluster, options)
     restarted = (pod_before is None or pod_after is None
                  or pod_before.get('uid') != pod_after.get('uid')
@@ -595,18 +605,6 @@ def flood_case(report, options, loader, cluster, store, volume, state):
     if not check_commits(report, records, flood_start_ns, flood_end_ns, options.commit_gap_bound):
         pod_diagnostics(report, cluster, options.shared_namespace, 'walk-flood-pg')
     return True
-
-
-def evictor_seen(loader, result):
-    answer = loader.logs({'from': str(result['started']), 'to': str(now_ms()),
-                          'module': 'logs-evictor', 'limit': '20'})
-    records = (answer or {}).get('records') or []
-    for record in records:
-        identity = '%s|%s' % (record.get('time'), record.get('message'))
-        if is_drop(record) and identity not in result['seen']:
-            result['seen'].add(identity)
-            result['drops'].append(record)
-    return bool(result['drops'])
 
 
 def throttle_case(report, options, loader, cluster, state):

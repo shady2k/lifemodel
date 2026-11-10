@@ -15,6 +15,8 @@ interface Outcome {
   events: Event[];
   namespace?: string;
   created?: boolean;
+  verified?: number;
+  queries?: Array<Record<string, string>>;
 }
 
 function harness<T = Outcome>(mode: string, input: unknown = {}): T {
@@ -89,39 +91,58 @@ describe('a refusal requires a real HTTP response or verified displacement', () 
   });
 
   it.each([
-    { drops: [] },
-    { drops: [{ ...drop, message: 'not JSON' }] },
-    { drops: [{ ...drop, module: 'untrusted-task' }] },
+    { name: 'no evictor line', record: null },
+    { name: 'a message that is not JSON', record: { ...drop, message: 'not JSON' } },
+    { name: 'another module', record: { ...drop, module: 'untrusted-task' } },
     {
-      drops: [
-        {
-          ...drop,
-          message: JSON.stringify({
-            msg: 'the log evictor removed nothing',
-            reason: 'no_partition',
-          }),
-        },
-      ],
+      name: 'a failure line',
+      record: {
+        ...drop,
+        message: JSON.stringify({
+          msg: 'the log evictor removed nothing',
+          reason: 'no_partition',
+        }),
+      },
     },
-  ])('does not accept absent or unverified drop evidence %#', ({ drops }) => {
-    expect(kinds(harness('refusal', { samples: [[0, 200]], drops }))).toContain('invalid');
+    { name: 'a directory still on the volume', record: drop, partitions: ['20261109', '20261110'] },
+  ])('does not accept $name as verified displacement %#', (input) => {
+    const outcome = harness('verified-drop', input);
+    expect(outcome.verified).toBe(0);
+    expect(kinds(outcome)).toContain('invalid');
+    expect(kinds(outcome)).not.toContain('note');
   });
 
-  it('notes verified displacement instead of claiming an unobserved 429', () => {
-    const outcome = harness('refusal', {
-      samples: [
-        [0, 200],
-        [300000, 200],
-      ],
-      drops: [drop],
+  it('does not verify a drop whose oldest row did not move', () => {
+    const outcome = harness('verified-drop', {
+      record: drop,
+      oldestAfter: '2026-11-09T12:00:00Z',
     });
+    expect(outcome.verified).toBe(0);
+    expect(kinds(outcome)).toContain('fail');
+    expect(kinds(outcome)).toContain('invalid');
+  });
+
+  it('notes a verified drop instead of claiming an unobserved 429', () => {
+    const outcome = harness('verified-drop', { record: drop });
+    expect(outcome.verified).toBe(1);
+    expect(outcome.queries?.[0]).toMatchObject({ module: 'logs-evictor' });
+    expect(kinds(outcome)).toContain('pass');
     expect(kinds(outcome)).toContain('note');
     expect(kinds(outcome)).not.toContain('invalid');
     expect(kinds(outcome)).not.toContain('fail');
+    expect(
+      outcome.events.some(
+        (event) =>
+          event.kind === 'pass' &&
+          /gone from the volume/.test(event.name) &&
+          /20261109/.test(event.detail ?? '')
+      )
+    ).toBe(true);
     // A separate zero-second longest-refusal check may pass.
     expect(
       outcome.events
         .filter((event) => event.kind === 'pass')
+        .filter((event) => !/gone from the volume|oldest remaining row/.test(event.name))
         .every((event) => /(?:bound|longest|window|120)/i.test(event.name + (event.detail ?? '')))
     ).toBe(true);
   });

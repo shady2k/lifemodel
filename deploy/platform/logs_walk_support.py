@@ -29,6 +29,7 @@ import base64
 import http.client
 import json
 import os
+import re
 import shlex
 import socket
 import ssl
@@ -152,6 +153,53 @@ def day_bounds(day):
     import calendar
     start = calendar.timegm(time.strptime(day, '%Y%m%d'))
     return start * 1000, start * 1000 + 86400 * 1000 - 1
+
+
+EVICTOR_MODULE = 'logs-evictor'
+
+
+def oldest_record_ms(store):
+    """The oldest stored `_time` over the whole retention, as one aggregation.
+
+    No lower bound: a dropped day can hold rows older than the walk's own
+    window - the latency walk plants rows an hour back, into the previous UTC
+    day - and a window that starts after them would never see the oldest row
+    move.
+    """
+    rows = store.query('* | stats min(_time)')
+    if len(rows) != 1:
+        return None
+    return parse_ms(rows[0].get('min(_time)'))
+
+
+def evictor_records(loader, from_ms):
+    """The evictor's own lines in a window, oldest first, through the API."""
+    answer = loader.logs({'from': str(from_ms), 'to': str(now_ms()),
+                          'module': EVICTOR_MODULE, 'limit': '50'})
+    if answer is None or answer.get('state') != 'ok':
+        return []
+    records = [record for record in (answer.get('records') or [])
+               if isinstance(record, dict) and isinstance(record.get('time'), str)]
+    records.sort(key=lambda record: record['time'])
+    return records
+
+
+def drop_line(record):
+    """One evictor line's day, bytes and reason, or None when it names no day."""
+    try:
+        body = json.loads(record.get('message') or '')
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    day = body.get('day')
+    freed = body.get('freedBytes')
+    if not isinstance(day, str) or not re.match(r'^\d{8}$', day):
+        return None
+    if not isinstance(freed, (int, float)) or freed <= 0:
+        return None
+    return {'time': parse_ms(record.get('time')), 'day': day, 'freedBytes': int(freed),
+            'reason': body.get('reason')}
 
 
 def wait_until(deadline, interval, predicate):
