@@ -59,6 +59,73 @@ afterAll(() => {
   rmSync(directory, { recursive: true, force: true });
 });
 
+
+describe('the failure walk refuses unsafe and unobserved cases', () => {
+  it('refuses an existing reserve without any writes, including restore', () => {
+    const run = harness('reserve-preflight');
+    expect(run.status).toBe(1);
+    expect(run.invalid.join('\n')).toContain('reserve');
+    expect(jsonLine<{ ok: boolean; writes: unknown[] }>(run, 'PREFLIGHT')).toEqual({
+      ok: false, writes: [], clusterWrites: [],
+    });
+  });
+
+  it('omits the primary key rather than clearing or replacing it', () => {
+    const run = harness('put-key-omitted');
+    expect(jsonLine<Record<string, unknown>>(run, 'BODY')).not.toHaveProperty('key');
+    const changed = jsonLine<{ changed: string[] }>(harness('restore-compare'), 'COMPARE');
+    expect(changed.changed.join(' ')).toContain('keySet');
+    expect(jsonLine<{ keyOnly: string[] }>(harness('restore-compare'), 'COMPARE')
+      .keyOnly).toHaveLength(1);
+  });
+
+  it('fails restoration if the read-back lost the saved primary keySet', () => {
+    const run = harness('restore-key-lost');
+    expect(run.status).toBe(1);
+    expect(run.failures.join('\n')).toContain('restored');
+  });
+
+  it('fails unavailable counts instead of proving absence with zero', () => {
+    const run = harness('store-unavailable');
+    expect(run.status).toBe(1);
+    expect(run.failures).not.toEqual([]);
+    expect(run.invalid).not.toEqual([]);
+    expect(jsonLine<{ counts: unknown }>(run, 'SEARCH').counts).toBeNull();
+  });
+
+  it('requires a module inventory before making any absence search', () => {
+    const fixture = join(directory, 'inventory-unavailable.json');
+    writeFileSync(fixture, JSON.stringify({ inventory: true }));
+    const run = python([HARNESS, 'inventory-unavailable', WALK, fixture]);
+    expect(run.status).toBe(1);
+    expect(run.invalid).not.toEqual([]);
+    expect(jsonLine<{ calls: number }>(run, 'SEARCH').calls).toBe(0);
+  });
+
+  it('waits past an intermediate error for the final core failure delivered by collector', () => {
+    const run = harness('marker-final-turn');
+    expect(run.status).toBe(0);
+    const turn = jsonLine<{ ok: boolean; calls: { conversation_id: string }[] }>(run, 'TURN');
+    expect(turn.ok).toBe(true);
+    expect(turn.calls).toHaveLength(2);
+    expect(turn.calls.every((call) => call.conversation_id === 'rcpt_x')).toBe(true);
+  });
+
+  it('waits for both final core turns before each capture-off/on absence search', () => {
+    const run = harness('marker-ordering');
+    expect(run.status).toBe(0);
+    expect(jsonLine<{ ok: boolean; events: string[] }>(run, 'ORDER')).toEqual({
+      ok: true,
+      events: ['gateway', 'core-final-turn-1', 'gateway', 'core-final-turn-2', 'search',
+        'gateway', 'core-final-turn-3', 'gateway', 'core-final-turn-4', 'search'],
+    });
+  });
+
+  it('requires reason_path and reason_got, not only reason_check', () => {
+    expect(jsonLine<boolean>(harness('marker-reason-fields'), 'REASON')).toBe(false);
+  });
+});
+
 describe('the failure walk\'s argument handling', () => {
   it('prints its usage and exits 0 on --help', () => {
     const run = python([WALK, '--help']);
