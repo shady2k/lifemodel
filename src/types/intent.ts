@@ -40,6 +40,8 @@ export interface IntentTrace {
   tickId?: string | undefined;
   /** Parent signal ID that triggered this intent (causal chain) */
   parentSignalId?: string | undefined;
+  /** Conversation settled for the turn that owns this intent. */
+  conversationId?: string | undefined;
   /** Tool call ID that produced this intent (if from tool execution) */
   toolCallId?: string | undefined;
 }

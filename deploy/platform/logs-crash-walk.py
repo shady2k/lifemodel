@@ -140,11 +140,12 @@ def writer_manifest(image, options, run_id, seconds):
     }
 
 
-def collector_image(cluster, options):
-    body = cluster.json(['-n', options.collector_namespace, 'get', 'daemonset',
-                         options.collector, '-o', 'json']) or {}
-    containers = ((((body.get('spec') or {}).get('template') or {}).get('spec') or {})
-                  .get('containers') or [])
+def writer_image(cluster, options):
+    """The deployed Node-based image used by the working eviction writer."""
+    body = cluster.json(['-n', options.namespace, 'get', 'cronjob', 'logs-evictor',
+                         '-o', 'json']) or {}
+    containers = (((body.get('spec') or {}).get('jobTemplate') or {}).get('spec') or {}) \
+        .get('template', {}).get('spec', {}).get('containers') or []
     return containers[0].get('image') if containers else None
 
 
@@ -324,18 +325,88 @@ def tail(text, count=160):
     return ' '.join((text or '').strip().splitlines()[-2:])[:count]
 
 
-def writer_lines(cluster, options, run_id):
-    """The numbered lines the writer pod's own log holds: [(seq, moment)]."""
+def diagnostic_tail(text):
+    """A bounded public-word tail: unknown words/values are always redacted."""
+    public = set(('error from server badrequest forbidden notfound unauthorized container pod '
+                  'writer walk-crash-writer is waiting to start running pending failed terminated '
+                  'image pull backoff imagepullbackoff errimagepull errimageneverpull '
+                  'containercreating podinitializing crashloopbackoff createcontainerconfigerror '
+                  'createcontainererror runcontainererror starterror oomkilled completed '
+                  'failedscheduling failedcreate failedpull failed restricted started scheduled '
+                  'pulled pulling backoff successfulcreate failedmount failedattachvolume '
+                  'node executable missing logs unavailable no such file or directory '
+                  'permission denied exec executable found in path unknown normal warning').split())
+    words = tail(text, 500).split()
+    return ' '.join(word if word.strip('.,:;()"').lower() in public else '[redacted]'
+                    for word in words) or '-'
+
+
+def writer_read(cluster, options, run_id):
+    """Keep kubectl's outcome alongside numbered lines so failures explain themselves."""
     result = cluster.run(['-n', options.writer_namespace, 'logs', 'walk-crash-writer',
                           '--tail=100000'], timeout=120)
-    if result.returncode != 0:
-        return []
     written = []
-    for line in result.stdout.splitlines():
-        match = WRITER_LINE.search(line)
-        if match and match.group(1) == run_id:
-            written.append(int(match.group(2)))
-    return written
+    if result.returncode == 0:
+        for line in result.stdout.splitlines():
+            match = WRITER_LINE.search(line)
+            if match and match.group(1) == run_id:
+                written.append(int(match.group(2)))
+    return written, result
+
+
+def writer_lines(cluster, options, run_id):
+    return writer_read(cluster, options, run_id)[0]
+
+
+def writer_diagnostics(report, cluster, options, pod, result):
+    status = (pod or {}).get('status') or {}
+    report.note('writer phase=%s' % status.get('phase', 'absent'))
+    statuses = status.get('containerStatuses') or []
+    for container in statuses:
+        state = container.get('state') or {}
+        kind = next((name for name in ('waiting', 'running', 'terminated') if name in state),
+                    'unknown')
+        detail = state.get(kind) or {}
+        report.note('writer container state=%s reason=%s exit=%s' % (
+            kind, diagnostic_tail(detail.get('reason')), detail.get('exitCode', '-')))
+    if not statuses:
+        report.note('writer container state=unknown reason=unknown')
+    events = cluster.run(['-n', options.writer_namespace, 'get', 'events',
+                          '--sort-by=.metadata.creationTimestamp', '-o', 'json'])
+    try:
+        items = json.loads(events.stdout).get('items', []) if events.returncode == 0 else []
+    except ValueError:
+        items = []
+    for event in items[-5:]:
+        report.note('writer namespace event reason=%s message=%s' % (
+            diagnostic_tail(event.get('reason')), diagnostic_tail(event.get('message'))))
+    if not items:
+        report.note('writer namespace events exit=%d tail=%s stderr=%s' % (
+            events.returncode, diagnostic_tail(events.stdout), diagnostic_tail(events.stderr)))
+    report.note('writer logs exit=%d stderr=%s' % (
+        result.returncode, diagnostic_tail(result.stderr)))
+
+
+def wait_writer(report, options, cluster, run_id):
+    """Do not inspect the buffer until a Running writer has produced a numbered line."""
+    observation = {'pod': None, 'read': None}
+    def started():
+        pod = cluster.pod(options.writer_namespace, 'walk-crash-writer')
+        observation['pod'] = pod
+        if ((pod or {}).get('status') or {}).get('phase') != 'Running':
+            return False
+        written, result = writer_read(cluster, options, run_id)
+        observation['read'] = result
+        return bool(written)
+    if wait_until(time.monotonic() + 180, 3, started):
+        report.pass_('the writer is Running and its first numbered line is readable')
+        return True
+    result = observation['read']
+    if result is None:
+        _written, result = writer_read(cluster, options, run_id)
+    writer_diagnostics(report, cluster, options, observation['pod'], result)
+    report.not_valid('the writer pod wrote no numbered line the walk could read')
+    return False
 
 
 def kubelet_lines(pod_name, options):
@@ -437,19 +508,16 @@ def crash_case(report, options, loader, cluster, state, saturated_case):
         state_ok = False
     run_id = 'walk-crash-%s-%d' % (label, now_ms())
     state['run_id'] = run_id
-    image = collector_image(cluster, options)
+    image = state.get('writer_image') or writer_image(cluster, options)
     if not image:
-        report.not_valid('the collector names no image: the writer pod cannot be created')
+        report.not_valid('the evictor CronJob names no Node image: the writer cannot be created')
         return False
     seconds = options.fill_bound + options.saturated_seconds + 120
     applied = cluster.apply(writer_manifest(image, options, run_id, seconds))
     if applied.returncode != 0:
         report.not_valid('the writer pod was not created: %s' % tail(applied.stderr))
         return False
-    deadline = time.monotonic() + 180
-    first = wait_until(deadline, 3, lambda: writer_lines(cluster, options, run_id))
-    if not first:
-        report.not_valid('the writer pod wrote no numbered line the walk could read')
+    if not wait_writer(report, options, cluster, run_id):
         return False
     started = now_ms()
     try:
@@ -569,8 +637,9 @@ def free_port():
 
 
 def run(report, options, loader, cluster, state):
-    if not report.check(bool(collector_image(cluster, options)), 'the collector names its image',
-                        options.collector):
+    state['writer_image'] = writer_image(cluster, options)
+    if not report.check(bool(state['writer_image']), 'the evictor names the Node writer image',
+                        'logs-evictor'):
         return False
     if not ensure_namespace(report, cluster, options, state):
         return False

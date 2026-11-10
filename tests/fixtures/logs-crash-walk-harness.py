@@ -41,6 +41,9 @@ class FakeCluster:
     def json(self, args, timeout=120):
         return self.fixture.get('json')
 
+    def pod(self, namespace, name):
+        return self.fixture.get('pod')
+
     def pods(self, namespace, selector=None):
         return self.fixture.get('pods') or []
 
@@ -145,6 +148,97 @@ def pid_real(walk, fixture):
     })
     pid, detail = walk.vector_pid(cluster, options())
     print('PID ' + json.dumps({'pid': pid, 'detail': detail}))
+    return report
+
+
+
+@mode('writer-image')
+def writer_image(walk, fixture):
+    report = walk.Report()
+    class Images(FakeCluster):
+        def json(self, args, timeout=120):
+            if 'cronjob' in args:
+                return {'spec': {'jobTemplate': {'spec': {'template': {'spec': {
+                    'containers': [{'image': 'loader-with-node@sha256:fixture'}]}}}}}}
+            return {'spec': {'template': {'spec': {'containers': [{'image': 'vector-no-node'}]}}}}
+    cluster = Images({})
+    manifests = []
+    cluster.apply = lambda body: (manifests.append(body) or Result())
+    walk.read_metrics = lambda *args: ({}, '')
+    walk.wait_until = lambda deadline, interval, probe: probe()
+    walk.crash_case(report, options(), None, cluster, {}, True)
+    print('IMAGE ' + json.dumps(manifests[0]['spec']['containers'][0]['image']))
+    return report
+
+
+@mode('writer-empty')
+def writer_empty(walk, fixture):
+    report = walk.Report()
+    case = fixture['case']
+    phase, state = {
+        'image': ('Pending', {'waiting': {'reason': 'ImagePullBackOff'}}),
+        'scheduling': ('Pending', {}),
+        'admission': ('Pending', {}),
+        'exited': ('Failed', {'terminated': {'reason': 'StartError', 'exitCode': 127}}),
+        'read': ('Running', {'running': {}}),
+        'silent': ('Running', {'running': {}}),
+    }[case]
+    class Writer(FakeCluster):
+        def pod(self, namespace, name):
+            return None if case == 'admission' else {'status': {
+                'phase': phase, 'containerStatuses': [{'name': 'writer', 'state': state}]}}
+        def run(self, args, timeout=120, stdin=None):
+            self.calls.append(' '.join(args))
+            if 'logs' in args:
+                return Result(0 if case == 'silent' else 1, '',
+                              '' if case == 'silent' else 'logs unavailable password is PRIVATE_TOKEN credential PRIVATE_VALUE')
+            if 'events' in args:
+                message = {
+                    'scheduling': 'FailedScheduling', 'admission': 'FailedCreate restricted',
+                    'image': 'FailedPull', 'exited': 'Failed node executable missing',
+                    'read': 'Started', 'silent': 'Started'}[case]
+                return Result(0, json.dumps({'items': [{'reason': 'Warning', 'message': message + ' credential PRIVATE_VALUE'}]}))
+            return Result()
+    cluster = Writer({})
+    # A bounded startup wait gets one observation here, not three real minutes.
+    walk.wait_until = lambda deadline, interval, probe: probe()
+    ok = walk.wait_writer(report, options(), cluster, 'fixture')
+    print('START ' + json.dumps({'ok': bool(ok), 'calls': cluster.calls}))
+    return report
+
+
+@mode('writer-start-order')
+def writer_start_order(walk, fixture):
+    report = walk.Report()
+    events = []
+    class Writer(FakeCluster):
+        def pod(self, namespace, name):
+            events.append('pod')
+            return {'status': {'phase': 'Running', 'containerStatuses': [
+                {'name': 'writer', 'state': {'running': {}}}]}}
+        def run(self, args, timeout=120, stdin=None):
+            if 'logs' in args:
+                events.append('logs')
+                return Result(0, 'walk-crash fixture seq=1 t=1\n')
+            return Result()
+    walk.wait_until = lambda deadline, interval, probe: probe()
+    ok = walk.wait_writer(report, options(), Writer({}), 'fixture')
+    print('START ' + json.dumps({'ok': bool(ok), 'events': events}))
+    return report
+
+
+
+@mode('writer-gates-buffer')
+def writer_gates_buffer(walk, fixture):
+    report = walk.Report()
+    events = []
+    cluster = FakeCluster({})
+    cluster.apply = lambda body: Result()
+    walk.writer_image = lambda *args: 'loader-with-node'
+    walk.wait_writer = lambda *args: (events.append('writer-ready') or False)
+    walk.read_metrics = lambda *args: (events.append('buffer') or ({}, ''))
+    walk.crash_case(report, options(), None, cluster, {}, True)
+    print('ORDER ' + json.dumps(events))
     return report
 
 

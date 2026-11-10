@@ -14,12 +14,8 @@
 #
 #   * deploy/platform/logs/ — the collector configuration whose normalize
 #     program is the record contract;
-#   * src/core/logger.ts, src/core/trace-context.ts, src/core/core-loop.ts and
-#     src/core/globals.ts — the logger the check reads real lines from, the
-#     trace context that carries the turn's conversation, where the turn's
-#     context is made, and the primary recipient the rule falls back to;
-#   * src/layers/cognition/ — the turn the seed drives: its processor, its
-#     recipient rule and its agentic loop;
+#   * src/ — the real turn and effect code the seed executes, including its
+#     transitive source dependencies;
 #   * loader/ — the loader image's own stdout logger and the fatal line, both
 #     fed through the program;
 #   * tests/fixtures/logs-vrl/ — the seeds that write the real lines and the
@@ -30,7 +26,8 @@
 #     scripts/logs-heartbeat-check.mjs — the check and the modules that build
 #     its cases and run them;
 #   * package.json and package-lock.json — the logger's own dependencies (pino
-#     writes the record) and the toolchain the seeds run under;
+#     writes the record) and the toolchain the seeds run under; .npmrc is the
+#     install policy copied into the check image;
 #   * docker/logs-vrl/ — the image the job runs the check in.
 #
 # A change to anything else cannot change what the check reads. No record at
@@ -53,7 +50,7 @@ while IFS= read -r line || [ -n "$line" ]; do
     esac
     read_any=true
     case "$path" in
-        deploy/platform/logs/*|src/core/logger.ts|src/core/trace-context.ts|src/core/core-loop.ts|src/core/globals.ts|src/layers/cognition/*|loader/*|tests/fixtures/logs-vrl/*|tests/helpers/*|scripts/check-logs-vrl.mjs|scripts/logs-record-shape.mjs|scripts/logs-vector-runner.mjs|scripts/logs-vrl-real-loggers.mjs|scripts/logs-heartbeat-check.mjs|package.json|package-lock.json|docker/logs-vrl/*)
+        deploy/platform/logs/*|src/*|loader/*|tests/fixtures/logs-vrl/*|tests/helpers/*|scripts/check-logs-vrl.mjs|scripts/logs-record-shape.mjs|scripts/logs-vector-runner.mjs|scripts/logs-vrl-real-loggers.mjs|scripts/logs-heartbeat-check.mjs|package.json|package-lock.json|.npmrc|docker/logs-vrl/*)
             selected=true ;;
     esac
 done

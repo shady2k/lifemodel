@@ -15,9 +15,10 @@ function selectProducerOutput(...paths: string[]): string {
 
 describe('collector record-contract CI path classification', () => {
   it.each([
-    ['the collector configuration whose remap program is the contract', [
-      'deploy/platform/logs/config/vector.yaml',
-    ]],
+    [
+      'the collector configuration whose remap program is the contract',
+      ['deploy/platform/logs/config/vector.yaml'],
+    ],
     ['the logger the record is written with', ['src/core/logger.ts']],
     ['the trace context that carries the turn conversation', ['src/core/trace-context.ts']],
     ['where the turn context is established', ['src/core/core-loop.ts']],
@@ -33,12 +34,16 @@ describe('collector record-contract CI path classification', () => {
     ['the heartbeat part of the check', ['scripts/logs-heartbeat-check.mjs']],
     ['the record contract fixtures', ['tests/fixtures/logs-vrl/cases.json']],
     ['the turn seed', ['tests/fixtures/logs-vrl/turn-record-lines.ts']],
-    ['the container-shaped harness the turn seed starts', [
-      'tests/helpers/core-loop-drain-harness.ts',
-    ]],
+    [
+      'the container-shaped harness the turn seed starts',
+      ['tests/helpers/core-loop-drain-harness.ts'],
+    ],
     ['the check image', ['docker/logs-vrl/Dockerfile']],
     ["the logger's own dependency declaration", ['package.json']],
     ['the resolved dependency tree', ['package-lock.json']],
+    ['the check image install policy', ['.npmrc']],
+    ['the effect code the turn executes', ['src/core/intent-applicator.ts']],
+    ['transitive source dependencies', ['src/models/user-model.ts']],
   ])('%s selects the check through the producer contract', (_name, changed) => {
     expect(selectProducerOutput(...changed)).toBe('logs_vrl_check=true');
   });
@@ -46,14 +51,7 @@ describe('collector record-contract CI path classification', () => {
     expect(selectProducerOutput('docs/architecture.md', 'README.md')).toBe('logs_vrl_check=false');
   });
   it('does not select the check for product changes it never reads', () => {
-    expect(
-      selectProducerOutput(
-        'src/core/agent.ts',
-        'src/layers/aggregation/processor.ts',
-        'web/app/src/App.tsx',
-        'src/models/user-model.ts'
-      )
-    ).toBe('logs_vrl_check=false');
+    expect(selectProducerOutput('web/app/src/App.tsx')).toBe('logs_vrl_check=false');
   });
   it('does not select the check for its own suite test, which pins its input only', () => {
     expect(selectProducerOutput('tests/unit/logs-record-shape.test.ts')).toBe(

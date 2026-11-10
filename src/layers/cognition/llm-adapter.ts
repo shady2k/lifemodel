@@ -20,6 +20,7 @@ import type {
   ToolCompletionResponse,
 } from './agentic-loop.js';
 import type { Message } from '../../llm/provider.js';
+import { modelErrorFields } from '../../llm/model-error.js';
 import type { LLMProvider as AppLLMProvider, ModelRole } from '../../llm/provider.js';
 
 /**
@@ -128,7 +129,7 @@ export class LLMAdapter implements CognitionLLM {
 
       return response.content ?? '';
     } catch (error) {
-      this.logger.error({ error, useSmart }, 'LLM simple completion failed');
+      this.logger.error({ ...modelErrorFields(error), useSmart }, 'LLM simple completion failed');
       throw error;
     }
   }
@@ -202,7 +203,6 @@ export class LLMAdapter implements CognitionLLM {
           finishReason: response.finishReason,
           duration,
           usage: response.usage,
-          ...(response.upstreamProvider && { upstreamProvider: response.upstreamProvider }),
         },
         'LLM completion with tools done'
       );
@@ -214,7 +214,10 @@ export class LLMAdapter implements CognitionLLM {
         finishReason: this.mapFinishReason(response.finishReason),
       };
     } catch (error) {
-      this.logger.error({ error, useSmart }, 'LLM completion with tools failed');
+      this.logger.error(
+        { ...modelErrorFields(error), useSmart },
+        'LLM completion with tools failed'
+      );
       throw error;
     }
   }

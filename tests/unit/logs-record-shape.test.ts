@@ -87,13 +87,21 @@ describe('a turn logs under the conversation it runs for (ADR-016 §9 point 4)',
       // recipient is settled, not on a separate line.
       expect(line.traceId).toBe(run.result.triggerSignalId);
     }
-    const turnLinesSet = new Set(turn);
+    // Immediate tool effects create their own spans, but remain in the turn's
+    // conversation. Assert the actual effect line, not just the loop around it.
+    const effects = run.lines.filter((line) => line.msg === 'Memory stored');
+    expect(effects).toHaveLength(1);
+    for (const line of effects) {
+      expect(line.traceId).toBe(run.result.triggerSignalId);
+      expect(line.conversation_id).toBe(run.result.conversationId);
+    }
+    const turnLinesSet = new Set([...turn, ...effects]);
     for (const line of run.lines.filter((candidate) => !turnLinesSet.has(candidate))) {
       expect(line.conversation_id).toBeUndefined();
     }
   });
 
-  it("a reply turn logs under its own recipient", () => {
+  it('a reply turn logs under its own recipient', () => {
     const run = runs.reply;
     const outcome = turnLines(run).find((line) => line.msg === '🔄 Agent turn complete');
     expect(outcome?.conversation_id).toBe(run.result.conversationId);
@@ -104,7 +112,7 @@ describe('a turn logs under the conversation it runs for (ADR-016 §9 point 4)',
     expect(outcome?.recipientId).toBe(run.result.conversationId);
   });
 
-  it("a recipient-less thought logs under the primary recipient, the rule cognition uses", () => {
+  it('a recipient-less thought logs under the primary recipient, the rule cognition uses', () => {
     const run = runs.thought;
     const outcome = turnLines(run).find((line) => line.msg === '🔄 Agent turn complete');
     expect(run.result.conversationId).toBe(run.result.primaryRecipientId);

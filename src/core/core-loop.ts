@@ -31,7 +31,12 @@ import type {
 import { createSignal, THOUGHT_LIMITS } from '../types/signal.js';
 import { awaitWithinDeadline } from './deadline.js';
 import { DurableEffectRegistry } from './durable-effect-registry.js';
-import { createTraceContext, withTraceContext, type TraceContext } from './trace-context.js';
+import {
+  createTraceContext,
+  getTraceContext,
+  withTraceContext,
+  type TraceContext,
+} from './trace-context.js';
 import type {
   AutonomicResult,
   AggregationResult,
@@ -2660,9 +2665,6 @@ export class CoreLoop {
     };
   }
 
-  /**
-   * Start COGNITION processing asynchronously (non-blocking).
-   */
   private startCognitionAsync(
     context: CognitionContext,
     triggerSignals: Signal[],
@@ -2753,23 +2755,19 @@ export class CoreLoop {
    * send would belong to NO turn: it would never report start or settle, the
    * turn would never reach an outcome, and its inbound entry would replay after
    * a GRACEFUL restart (a second answer). The turn is known HERE, so the trace
-   * is added here, for the intents that carry none; an intent that names its
-   * own turn keeps it.
+   * is added here for intents that carry none; existing trace IDs stay intact.
+   * Every result effect also carries this turn's settled conversation.
    */
   private attributedToTurn(intents: Intent[], turn: PendingCognition): Intent[] {
     const tickId = turn.tickId;
     const parentSignalId = turn.primaryTrigger?.id ?? turn.triggerSignals[0]?.id ?? '';
-    return intents.map((intent) =>
-      intent.trace === undefined
-        ? ({ ...intent, trace: { tickId, parentSignalId } } as Intent)
-        : intent
-    );
+    return intents.map((intent) => ({
+      ...intent,
+      trace: { tickId, parentSignalId, ...intent.trace, conversationId: turn.recipientId },
+    }));
   }
 
-  /**
-   * Check if pending COGNITION completed and return result.
-   * Returns null if still processing.
-   */
+  /** Return a completed COGNITION result, or null while still processing. */
   private async checkPendingCognition(): Promise<CognitionResult | null> {
     if (!this.pendingCognition) return null;
 
@@ -2866,12 +2864,14 @@ export class CoreLoop {
       return;
     }
 
-    // Create trace context from intent's trace info
     const trace = intent.trace;
+    const conversationId = getTraceContext()?.conversationId;
     let intentCtx: TraceContext;
     if (trace?.parentSignalId ?? trace?.tickId) {
       const traceId = trace.parentSignalId ?? trace.tickId ?? `intent_${String(Date.now())}`;
-      const options: { correlationId?: string; parentId?: string } = {};
+      const options: Parameters<typeof createTraceContext>[1] = {
+        ...(conversationId === undefined ? {} : { conversationId }),
+      };
       if (trace.tickId !== undefined) {
         options.correlationId = trace.tickId;
       }
@@ -2880,16 +2880,14 @@ export class CoreLoop {
       }
       intentCtx = createTraceContext(traceId, options);
     } else {
-      intentCtx = createTraceContext(`intent_${String(Date.now())}`);
+      intentCtx = createTraceContext(`intent_${String(Date.now())}`, {
+        ...(conversationId === undefined ? {} : { conversationId }),
+      });
     }
 
     this.intentApplicator.apply([intent], intentCtx);
   }
 
-  /**
-   * Apply intents from all layers.
-   * Delegates to IntentApplicator for the actual processing.
-   */
   private applyIntents(intents: Intent[], tickCtx: TraceContext): void {
     this.intentApplicator.apply(intents, tickCtx);
   }
