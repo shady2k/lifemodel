@@ -131,6 +131,7 @@ def not_valid_pid(walk, fixture):
             'inspect': json.dumps({'info': {'pid': 1}}),
         },
     })
+    walk.node_run = cluster.run
     pid, detail = walk.vector_pid(cluster, options())
     print('PID ' + json.dumps({'pid': pid, 'detail': detail}))
     return report
@@ -148,6 +149,7 @@ def pid_real(walk, fixture):
             'inspect': json.dumps({'info': {'pid': 4242}}),
         },
     })
+    walk.node_run = cluster.run
     pid, detail = walk.vector_pid(cluster, options())
     print('PID ' + json.dumps({'pid': pid, 'detail': detail}))
     return report
