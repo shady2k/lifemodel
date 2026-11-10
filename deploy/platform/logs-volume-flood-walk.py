@@ -16,8 +16,10 @@ What it proves
    - the shared filesystem's free space moves only by what Postgres and the walk
      write there, never by the flood;
    - the store answers 429 read from the response, or the evictor frees the
-     space first with a drop verified by its own line, the day's gone directory
-     and the moved oldest row; no panic and no restart
+     space first with a drop verified by its own Job pod stdout captured during
+     polling and the day's directory disappearing (or its inode replaced) under
+     the store PV; no loader log or oldest-row movement is needed for today's
+     self-erasing partition; no panic and no restart
      (its restartCount and uid unchanged, its log clean);
    - reads keep answering through the loader's API;
    - the store's free space never falls more than 10 % of the volume below its
@@ -110,7 +112,6 @@ from logs_walk_support import (  # noqa: E402
     common_arguments,
     connect_store,
     now_ms,
-    oldest_record_ms,
     quantity,
     read_password,
     read_store_flags,
@@ -120,9 +121,10 @@ from logs_walk_support import (  # noqa: E402
 )
 
 from logs_flood_support import (  # noqa: E402
-    check_commits, create_pod, pod_diagnostics, refusal_verdict, verified_drops, wait_running,
+    check_commits, create_pod, pod_diagnostics, refusal_verdict, wait_running,
 )
 from logs_flood_accounting import accounting_snapshot, report_accounting  # noqa: E402
+from logs_flood_evidence import FloodEvictorEvidence  # noqa: E402
 
 THROTTLE_EVENTS = 500
 TASKS_NAMESPACE = 'lifemodel-motor'
@@ -502,14 +504,15 @@ def flood_case(report, options, loader, cluster, store, volume, state):
                 'volume device %s, shared free %.2f GiB; Postgres data and container logs '
                 'are measured, not a quota' % (device or 'unknown', shared_before / GIB))
     pod_before = store_pod(cluster, options)
-    result = {'samples': [], 'statuses': [], 'started': now_ms(),
-              'oldestBefore': oldest_record_ms(store)}
+    result = {'samples': [], 'statuses': [], 'started': now_ms()}
+    evidence = FloodEvictorEvidence(cluster, options, volume, result['started'])
+    evidence.poll()
     flood_start_ns = time.time_ns()
     start_mono = time.monotonic()
     io_before = diskstats_io_ms(device) if device else None
     fill_deadline = time.monotonic() + options.fill_bound
     flood_end = None
-    free_before = shared_before
+    next_poll = start_mono + options.poll_seconds
     while True:
         moment = time.monotonic()
         if flood_end is not None and moment > flood_end:
@@ -521,7 +524,9 @@ def flood_case(report, options, loader, cluster, store, volume, state):
             flood_end = moment + options.flood_seconds
             report.note('observed HTTP 429; measuring sustained flood' if status == 429
                         else 'fill bound ended; refusal evidence will be judged separately')
-        if moment % max(1, options.poll_seconds) < 0.01 or len(result['samples']) % 8 == 0:
+        if moment >= next_poll:
+            next_poll = moment + options.poll_seconds
+            evidence.poll()
             free, merges = free_space(store)
             answer = loader.logs_status(*window())
             result['statuses'].append({
@@ -558,13 +563,14 @@ def flood_case(report, options, loader, cluster, store, volume, state):
                  'reads keep answering through the loader\'s API',
                  'state %s' % ((reads or {}).get('state')))
     def recovered():
+        evidence.poll()
         status = write_burst(store, now_ms(), state['flood_run'], 1, 'after',
                              module='walk-flood')[0]
         result['samples'].append((now_ms(), status))
         return status in (200, 204)
     accepted = wait_until(time.monotonic() + options.recover_bound, 10, recovered)
-    drops = verified_drops(report, loader, volume, result['started'],
-                           result.get('oldestBefore'), oldest_record_ms(store))
+    evidence.poll()
+    drops = evidence.verified(report)
     low, read_only = page_lines(result['statuses'])
     if read_only:
         report.pass_('the page\'s status says the store is refusing writes', 'storeReadOnly=true '

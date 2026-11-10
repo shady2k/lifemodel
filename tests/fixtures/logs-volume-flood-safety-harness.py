@@ -46,6 +46,76 @@ def options():
         recover_bound=300)
 
 
+def flood_integration(walk, shared, data):
+    """Run the real flood case with real PV scans and fake cluster transport."""
+    import tempfile
+    from contextlib import ExitStack
+    from pathlib import Path
+    report = Report()
+    with tempfile.TemporaryDirectory() as directory:
+        pv = Path(directory)
+        day = pv / 'partitions' / '20261110'
+        day.mkdir(parents=True)
+        writes = []
+        polls = []
+        moment = shared.parse_ms('2026-11-10T12:00:02Z')
+        class Cluster:
+            def json(self, args):
+                polls.append(len(writes))
+                return {'items': [{'metadata': {
+                    'name': 'evict-1', 'uid': 'job-uid',
+                    'creationTimestamp': '2026-11-10T12:00:02Z',
+                    'ownerReferences': [{'kind': 'CronJob', 'name': 'logs-evictor',
+                                         'uid': 'cron-uid'}]}}]}
+            def pods(self, namespace, selector):
+                return [{'metadata': {'name': 'evict-pod', 'uid': 'pod-uid',
+                         'labels': {'job-name': 'evict-1'},
+                         'ownerReferences': [{'kind': 'Job', 'name': 'evict-1',
+                                              'uid': 'job-uid'}]}}]
+            def run(self, args, **kwargs):
+                stdout = ''
+                if args[2:4] == ['logs', 'evict-pod'] and writes and not data.get('missingLog'):
+                    # Actual producer JSON has no module: collector adds it in storage.
+                    stdout = '2026-11-10T12:00:02Z ' + json.dumps({
+                        'msg': 'the oldest log day was removed', 'day': '20261110',
+                        'freedBytes': 4096, 'reason': 'below_threshold'})
+                return SimpleNamespace(returncode=0, stdout=stdout, stderr='')
+        def burst(*args, **kwargs):
+            writes.append(200)
+            if day.exists() and not data.get('keepDirectory'):
+                day.rmdir()
+            return 200, []
+        mono = iter([0, 0, 1, 400, 401, 402])
+        opts = options()
+        opts.fill_bound = 0
+        opts.flood_seconds = 0
+        replacements = {
+            'prepare_flood': lambda *args: True,
+            'accounting_snapshot': lambda *args: {},
+            'report_accounting': lambda *args: None,
+            'shared_space': lambda: (100 * 1024**3, 90 * 1024**3),
+            'loop_device': lambda *args: None,
+            'write_burst': burst,
+            'wait_until': lambda deadline, interval, predicate: predicate(),
+            'read_store_flags': lambda *args: {'storage.minFreeDiskSpaceBytes': '1GiB'},
+            'store_log': lambda *args: '',
+            'margin_verdict': lambda *args: {'ok': True, 'detail': 'fixture margin'},
+            'check_commits': lambda *args: True,
+            'now_ms': lambda: moment,
+        }
+        with ExitStack() as stack:
+            for name, replacement in replacements.items():
+                stack.enter_context(patch.object(walk, name, replacement))
+            stack.enter_context(patch.object(walk, 'store_pod', return_value={
+                'uid': 'same-store', 'restarts': 0}))
+            stack.enter_context(patch.object(walk.time, 'monotonic', side_effect=lambda: next(mono)))
+            loader = SimpleNamespace(logs=lambda *args: {'state': 'ok', 'records': []})
+            walk.flood_case(report, opts, loader, Cluster(), None,
+                            shared.Volume(directory, directory),
+                            {'trusted_run': 'trusted', 'flood_run': 'flood'})
+        print(json.dumps({'events': report.events, 'writes': writes, 'polls': polls}))
+
+
 def main():
     mode, walk_path = sys.argv[1:]
     data = json.load(sys.stdin)
@@ -147,8 +217,8 @@ def main():
             'prepare_flood': lambda *args: True,
             'accounting_snapshot': lambda *args: {},
             'report_accounting': lambda *args: None,
-            'oldest_record_ms': lambda *args: None,
-            'verified_drops': lambda *args: [],
+            'FloodEvictorEvidence': lambda *args: SimpleNamespace(
+                poll=lambda: None, verified=lambda report: []),
             'shared_space': lambda: (100 * 1024**3, 90 * 1024**3),
             'loop_device': lambda *args: None,
             'write_burst': burst,
