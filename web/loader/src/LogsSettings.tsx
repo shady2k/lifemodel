@@ -15,6 +15,7 @@ import { Button } from '@kit/components/ui/button';
 import { Card, CardContent } from '@kit/components/ui/card';
 import { Input } from '@kit/components/ui/input';
 import { Label } from '@kit/components/ui/label';
+import { formatMiB } from './logs-i18n';
 
 const MIB = 1024 * 1024;
 
@@ -60,10 +61,6 @@ interface InvalidAnswer {
 interface UnavailableAnswer {
   state: 'unavailable';
   reason: string;
-}
-
-function mib(bytes: number, language: string): string {
-  return `${(bytes / MIB).toLocaleString(language, { maximumFractionDigits: 2 })} MiB`;
 }
 
 /** The one line the form shows about the change, or null while it is applied. */
@@ -231,8 +228,8 @@ export function LogsSettings() {
           <Alert variant="destructive" role="alert">
             <AlertDescription>
               {t('logsRetentionDoesNotFit', {
-                asked: mib(status.maxBytes, language),
-                largest: largest === null ? '' : mib(largest, language),
+                asked: formatMiB(status.maxBytes, language),
+                largest: largest === null ? '' : formatMiB(largest, language),
               })}
             </AlertDescription>
           </Alert>
@@ -244,12 +241,12 @@ export function LogsSettings() {
               ? status.appliedAt === null
                 ? t('logsRetentionAppliedNow', {
                     days: status.days,
-                    size: mib(status.maxBytes, language),
+                    size: formatMiB(status.maxBytes, language),
                   })
                 : t('logsRetentionApplied', {
                     time: new Date(status.appliedAt).toLocaleString(language),
                     days: status.days,
-                    size: mib(status.maxBytes, language),
+                    size: formatMiB(status.maxBytes, language),
                   })
               : pendingText(t, status.pending ?? 'mismatch')}
           </p>
@@ -285,7 +282,7 @@ export function LogsSettings() {
             />
             {largest !== null && (
               <p className="text-xs text-muted-foreground">
-                {t('logsRetentionLargest', { size: mib(largest, language) })}
+                {t('logsRetentionLargest', { size: formatMiB(largest, language) })}
               </p>
             )}
           </div>
@@ -297,8 +294,8 @@ export function LogsSettings() {
           {refusal !== null && (
             <p role="alert" className="text-sm text-destructive sm:col-span-2">
               {t('logsRetentionRefused', {
-                asked: mib(refusal.maxBytes, language),
-                largest: mib(refusal.largestMaxBytes, language),
+                asked: formatMiB(refusal.maxBytes, language),
+                largest: formatMiB(refusal.largestMaxBytes, language),
               })}
             </p>
           )}

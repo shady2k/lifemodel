@@ -6,6 +6,7 @@ import '@testing-library/jest-dom/vitest';
 import i18n from '../../web/loader/src/i18n';
 import '../../web/loader/src/logs-i18n';
 import { Logs } from '../../web/loader/src/Logs';
+import { formatMiB } from '../../web/loader/src/logs-i18n';
 
 function records(count: number) {
   return Array.from({ length: count }, (_, index) => ({
@@ -350,7 +351,15 @@ describe('logs page freshness and notices (ADR-016 §4, §5)', () => {
       expect.stringContaining('yesterday line'),
     ]);
     expect(container.textContent?.match(/were removed/u)).toHaveLength(1);
+    // The space freed is stated in MiB, formatted for the page's language.
+    expect(container.textContent).toContain('117.74 MiB freed');
     expect(screen.queryByText(notice.message)).toBeNull();
+  });
+
+  it('formats the space freed in MiB for the page\'s language', () => {
+    // The retention card's own MiB form, reused for the eviction notice.
+    expect(formatMiB(123456789, 'en')).toBe('117.74 MiB');
+    expect(formatMiB(123456789, 'ru')).toBe('117,74 MiB');
   });
 
   it('shows an eviction notice for a window whose records were all displaced', async () => {
@@ -367,6 +376,7 @@ describe('logs page freshness and notices (ADR-016 §4, §5)', () => {
     // Nothing survives to put the notice above, so it is the whole list.
     const note = screen.getByRole('note');
     expect(note).toHaveTextContent('logs for Nov 7, 2026 were removed');
+    expect(note).toHaveTextContent('117.74 MiB freed');
     expect([...container.querySelectorAll('li')]).toEqual([note]);
     expect(screen.queryByText(notice.message)).toBeNull();
   });

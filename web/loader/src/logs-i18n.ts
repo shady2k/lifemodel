@@ -5,6 +5,13 @@
  */
 import i18n from './i18n';
 
+const MIB = 1024 * 1024;
+
+/** Bytes as MiB, formatted for the page's language (the retention card's own form). */
+export function formatMiB(bytes: number, language: string): string {
+  return `${(bytes / MIB).toLocaleString(language, { maximumFractionDigits: 2 })} MiB`;
+}
+
 const en = {
   logsTitle: 'Logs',
   logsDescription:
@@ -50,7 +57,7 @@ const en = {
     'collection stopped {{count}} minutes ago; results may be incomplete',
   logsStoreReadOnly: 'the store is refusing writes (read-only)',
   logsEvictorStale: 'the log evictor is failing or has not run',
-  logsEvictionNotice: 'logs for {{date}} were removed at {{time}}; {{bytes}} bytes freed',
+  logsEvictionNotice: 'logs for {{date}} were removed at {{time}}; {{size}} freed',
   logsRetentionTitle: 'Retention',
   logsRetentionDescription:
     'How long logs are kept, and how much space they may take before the oldest days are dropped.',
@@ -128,7 +135,7 @@ const ru = {
     'сбор логов остановился {{count}} минут назад; результаты могут быть неполными',
   logsStoreReadOnly: 'хранилище не принимает записи (только чтение)',
   logsEvictorStale: 'вытеснитель логов не работает или ещё не запускался',
-  logsEvictionNotice: 'логи за {{date}} удалены в {{time}}; освобождено {{bytes}} байт',
+  logsEvictionNotice: 'логи за {{date}} удалены в {{time}}; освобождено {{size}}',
   logsRetentionTitle: 'Хранение',
   logsRetentionDescription:
     'Сколько хранятся логи и сколько места они могут занять, прежде чем старые дни будут удалены.',
