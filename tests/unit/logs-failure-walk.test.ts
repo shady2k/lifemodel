@@ -191,6 +191,27 @@ describe('a fake node for the failure walk', () => {
     expect(values[1]).toEqual({ off: false, on: false });
   }, 30000);
 
+  it('waits for the core\'s lines under the conversation after its retries', () => {
+    const late = harness('late-core');
+    const value = jsonLine<{ lines: number; polls: number }>(late, 'CORE');
+    expect(value.lines).toBe(1);
+    expect(value.polls).toBeGreaterThan(1);
+    const never = harness('never-core');
+    expect(jsonLine<{ lines: number }>(never, 'CORE').lines).toBe(0);
+  }, 60000);
+
+  it('waits for the capture to hold the marker, and counts what it saw otherwise', () => {
+    const late = harness('late-capture');
+    const value = jsonLine<{ hits: number[]; polls: number }>(late, 'CAPTURE');
+    expect(value.hits).toEqual([1]);
+    expect(value.polls).toBeGreaterThan(1);
+    const never = harness('never-capture');
+    expect(jsonLine<{ hits: number[]; exchanges: number }>(never, 'CAPTURE')).toEqual({
+      hits: [0],
+      exchanges: 2,
+    });
+  }, 60000);
+
   it('compares the restored capture in the API\'s own shape, until-disabled included', () => {
     const run = harness('capture-restore');
     const value = jsonLine<Record<string, string | null>>(run, 'AGREE');

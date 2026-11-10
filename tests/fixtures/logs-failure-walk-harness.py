@@ -398,6 +398,65 @@ def capture_restore(walk, fixture):
     return report
 
 
+@mode('late-core')
+def late_core(walk, fixture):
+    """The core's lines arrive on a later poll: the wait finds them."""
+    report = walk.Report()
+    loader = FakeLoader({})
+    loader.log_answers = [
+        {'state': 'ok', 'count': 0, 'records': []},
+        {'state': 'ok', 'count': 0, 'records': []},
+        {'state': 'ok', 'count': 1,
+         'records': [record('error', conversation='rcpt_x', module='core', pod='core-0')]},
+    ]
+    lines = walk.wait_core_lines(loader, 0, 'rcpt_x', 20)
+    print('CORE ' + json.dumps({'lines': len(lines), 'polls': len(loader.log_calls)}))
+    return report
+
+
+@mode('never-core')
+def never_core(walk, fixture):
+    """The core never writes under the conversation: no lines, bounded."""
+    report = walk.Report()
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 0, 'records': []}]})
+    lines = walk.wait_core_lines(loader, 0, 'rcpt_x', 1)
+    print('CORE ' + json.dumps({'lines': len(lines), 'polls': len(loader.log_calls)}))
+    return report
+
+
+@mode('late-capture')
+def late_capture(walk, fixture):
+    """The reader holds the marker on a later poll: the wait finds it."""
+    report = walk.Report()
+    answers = ['exchange call=1 session=s time=t' + chr(10),
+               '/tmp/x exchange call=1 ... walk-marker-a' + chr(10)]
+    calls = {'count': 0}
+
+    def reader(options, bound):
+        index = min(calls['count'], len(answers) - 1)
+        calls['count'] += 1
+        return answers[index]
+
+    walk.exchange_text = reader
+    text, hits, exchanges = walk.wait_capture_text(options(marker_bound=20),
+                                                   ['walk-marker-a'], 20)
+    print('CAPTURE ' + json.dumps({'hits': hits, 'exchanges': exchanges,
+                                   'polls': calls['count']}))
+    return report
+
+
+@mode('never-capture')
+def never_capture(walk, fixture):
+    """The reader never holds the marker: the exchange count says what it saw."""
+    report = walk.Report()
+    walk.exchange_text = lambda options, bound: 'exchange call=1 session=s time=t\n' \
+        'exchange call=2 session=s time=t\n'
+    text, hits, exchanges = walk.wait_capture_text(options(marker_bound=0),
+                                                   ['walk-marker-a'], 0)
+    print('CAPTURE ' + json.dumps({'hits': hits, 'exchanges': exchanges}))
+    return report
+
+
 class FakeForward:
     """A port-forward the mode scripts: it either answers or dies with kubectl's words."""
 

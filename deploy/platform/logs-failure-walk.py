@@ -14,7 +14,9 @@ What it proves
    `level=error`, `error_type`, `reason_check`/`reason_path`/`reason_got` where
    the failure has a reason, and the `conversation_id` the chat runs under. The
    same query by that `conversation_id` returns the record, and the core's own
-   turn lines carry the same id (ADR-016 §9 point 4). `kubectl` sets the stage -
+   turn lines carry the same id (ADR-016 §9 point 4) - waited for, bounded by
+   --core-bound, because the core retries the failed model call before it gives
+   up (measured: 75 s between the gateway's record and five core lines). `kubectl` sets the stage -
    the stub, the slots, the gateway's port-forward, the restart - and is never
    the way the record is found.
 2. A 32-character random marker in a non-2xx upstream body and another in a
@@ -22,9 +24,11 @@ What it proves
    capture off and then on: the capture's own answer is read back after every
    PUT and must say off, then on; a text search for each marker over the whole
    store and over every module finds nothing with the capture off; with it on
-   the marker is only in the capture (read through `lifemodel doctor exchange`)
-   and never in the store. Each marker is this run's own, so a capture hit
-   cannot be an older one. The failure line carries `error_type` and
+   the marker is only in the capture (read through `lifemodel doctor exchange`,
+   waited for within --marker-bound) and never in the store; when the reader
+   never holds a marker the walk prints how many exchanges it answered, never
+   their content. Each marker is this run's own, so a capture hit cannot be an
+   older one. The failure line carries `error_type` and
    `reason_check`/`reason_path`/`reason_got`.
 3. The four L04 cases, judged on the final gateway record of each request, sent
    straight to the gateway's own API: primary 500 with no reserve ends `error`;
@@ -83,7 +87,11 @@ Arguments (defaults are the test VM's)
   --doctor-command CMD   the capture's own reader (default "lifemodel")
   --found-bound N        bound on finding the failure record (default 180 s)
   --chat-bound N         bound on the chat's answer (default 120 s)
-  --marker-bound N       bound on a marker search settling (default 120 s)
+  --marker-bound N       bound on the capture's reader holding both markers
+                         (default 240 s)
+  --core-bound N         bound on the core's own lines under the failure's
+                         conversation, which it may write after retrying the
+                         model call (default 240 s)
   --restart-bound N      bound on the gateway's pod being replaced and its line
                          arriving (default 240 s)
   --deadline-seconds N   the whole walk's bound (default 3600)
@@ -825,6 +833,39 @@ def wait_slots_live(report, options, state, expected, what):
         time.sleep(5)
 
 
+def wait_core_lines(loader, from_ms, conversation, bound):
+    """The core's own lines under the conversation, waiting for its retries.
+
+    The core retries the failed model call before it gives up - measured: 75 s
+    between the gateway's record and five core lines under the same
+    conversation - so the lines are waited for, bounded, not read once.
+    """
+    if not conversation:
+        return []
+    return wait_until(
+        time.monotonic() + bound, 5,
+        lambda: records_in_window(loader, from_ms, module=CORE_MODULE,
+                                  conversation=conversation) or None) or []
+
+
+def wait_capture_text(options, markers, bound):
+    """The capture's reader until it holds every marker, or its bound.
+
+    A marker arrives only after the capture's writer has stored the exchange;
+    the count of exchanges in the answer is printed when it never does, never
+    their content.
+    """
+    deadline = time.monotonic() + bound
+    while True:
+        text = exchange_text(options, 5)
+        hits = [exchange_hits(text, marker) for marker in markers]
+        if all(hit > 0 for hit in hits):
+            return text, hits, len(re.findall(r'exchange call=', text or ''))
+        if time.monotonic() >= deadline:
+            return text, hits, len(re.findall(r'exchange call=', text or ''))
+        time.sleep(5)
+
+
 def wait_record(loader, from_ms, conversation, expected_type, bound, module=GATEWAY_MODULE):
     """Wait until a gateway record with that error_type is in the answer, and return it."""
     def find():
@@ -875,9 +916,11 @@ def case_failure(report, options, loader, token, cluster, state):
     report.check(any(r.get('time') == record.get('time') for r in by_conversation),
                  'the same record is found by its conversation',
                  'conversation_id=%s, %d line(s)' % (conversation or '-', len(by_conversation)))
-    core_records = records_in_window(loader, started, module=CORE_MODULE,
-                                     conversation=conversation) if conversation else None
-    verdict = failure_verdict([record], core_records or [], 'upstream_500')
+    core_records = wait_core_lines(loader, started, conversation, options.core_bound)
+    if conversation and not core_records:
+        report.not_valid('the core wrote no line under the conversation %s within %d s: the '
+                         'failure cannot be tied to the chat' % (conversation, options.core_bound))
+    verdict = failure_verdict([record], core_records, 'upstream_500')
     report.check(verdict['ok'],
                  'the failure reads as field and type, under the chat\'s conversation',
                  verdict['detail'])
@@ -938,7 +981,7 @@ def exchange_text(options, bound):
             import subprocess
             result = subprocess.run(
                 [*options.doctor_command.split(), 'doctor', 'exchange', 'last', '20'],
-                capture_output=True, text=True, timeout=90)
+                capture_output=True, text=True, timeout=20)
             if result.returncode == 0 and result.stdout:
                 return result.stdout
         except (OSError, subprocess.SubprocessError):
@@ -1043,8 +1086,12 @@ def case_marker(report, options, loader, token, cluster, state):
         report.not_valid('the second plant did not reach the store for both markers: the '
                          'capture cannot be read back for them')
         return False
-    text = exchange_text(options, options.marker_bound)
-    hits = [exchange_hits(text, marker) for marker in markers]
+    text, hits, exchanges = wait_capture_text(options, markers, options.marker_bound)
+    if not all(hit > 0 for hit in hits):
+        report.fail('the capture holds both markers',
+                    'the reader answered %d exchange(s) in the window and %s hit(s) within %d s'
+                    % (exchanges, ', '.join('%d marker hit(s)' % hit for hit in hits),
+                       options.marker_bound))
     on_counts = store_counts_for(loader, markers, on_started)
     for marker, hit in zip(markers, hits):
         report.check(hit > 0, 'with the capture on, %s is in the capture' % marker,
@@ -1254,7 +1301,8 @@ def main(argv=None):
     parser.add_argument('--doctor-command', default='lifemodel')
     parser.add_argument('--found-bound', type=int, default=180)
     parser.add_argument('--chat-bound', type=int, default=120)
-    parser.add_argument('--marker-bound', type=int, default=120)
+    parser.add_argument('--marker-bound', type=int, default=240)
+    parser.add_argument('--core-bound', type=int, default=240)
     parser.add_argument('--restart-bound', type=int, default=240)
     options = parser.parse_args(argv)
 
