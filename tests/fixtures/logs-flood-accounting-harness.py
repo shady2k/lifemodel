@@ -32,9 +32,9 @@ class Report:
 
 
 def snapshot(free, images=0, container_logs=0, postgres=0, walk_files=0):
-    return {'root_free_bytes': free, 'allocated_bytes': {
+    return {'root_free_bytes': free, 'root_error': None, 'allocated_bytes': {
         'images': images, 'container_logs': container_logs,
-        'postgres': postgres, 'walk_files': walk_files}, 'errors': []}
+        'postgres': postgres, 'walk_files': walk_files}, 'unreadable': {}}
 
 
 def allocation(path, exclude=None):
@@ -121,9 +121,14 @@ def main():
         elif mode == 'freed':
             after = snapshot(11000, images=1000, container_logs=1000, postgres=1000, walk_files=1000)
         elif mode == 'errors':
-            after['errors'] = ['images: PermissionError']
+            after['allocated_bytes']['images'] = None
+            after['unreadable']['images'] = 'PermissionError: fixture'
         elif mode == 'root-unknown':
             after['root_free_bytes'] = None
+        elif mode == 'partial':
+            after['allocated_bytes']['container_logs'] = None
+            after['unreadable']['container_logs'] = 'PermissionError: fixture'
+            allowance = 800
         elif mode != 'explained':
             raise ValueError(mode)
         report = Report()

@@ -3,7 +3,7 @@ import json
 import re
 import time
 
-from logs_walk_support import wait_until
+from logs_walk_support import day_bounds, drop_line, evictor_records, stamp, wait_until
 
 
 def check_commits(report, commits, start_ns, end_ns, bound):
@@ -36,7 +36,59 @@ def is_drop(record):
             and body['freedBytes'] > 0)
 
 
-def refusal_verdict(report, samples, drops, bound=120):
+def verified_drops(report, loader, volume, since_ms, oldest_before, oldest_after):
+    """The evictor's drops that its line, the volume and the oldest row prove.
+
+    Each line comes through the loader's API, shaped as the evictor writes it
+    (`is_drop`). A drop is verified when the day's directory is gone from the
+    volume and, when the oldest stored row was inside one of the dropped days,
+    the oldest row has moved forward. A row in none of the dropped days could
+    not move, which is a NOTE, never a pass or a failure.
+    """
+    lines = []
+    for record in evictor_records(loader, since_ms):
+        if not is_drop(record):
+            continue
+        line = drop_line(record)
+        if line is not None:
+            lines.append(line)
+    if not lines:
+        return []
+    present = set(volume.partitions())
+    gone = []
+    for line in lines:
+        absent = line['day'] not in present
+        report.check(absent,
+                     'the evictor\'s dropped day is gone from the volume',
+                     '%s freed %d bytes (%s)' % (line['day'], line['freedBytes'],
+                                                 line['reason']))
+        if absent:
+            gone.append(line)
+    if not gone:
+        return []
+    moved = (oldest_before is not None and oldest_after is not None
+             and oldest_after > oldest_before)
+    held = [line['day'] for line in gone
+            if oldest_before is not None
+            and day_bounds(line['day'])[0] <= oldest_before <= day_bounds(line['day'])[1]]
+    if oldest_before is None:
+        report.note('the store held no readable row before the flood: the oldest row '
+                    'cannot show the drop')
+        return gone
+    if not held:
+        report.note('the oldest row %s was in none of the dropped days (%s), so no drop '
+                    'could move it' % (stamp(oldest_before),
+                                       ', '.join(line['day'] for line in gone)))
+        return gone
+    report.check(moved, 'the oldest remaining row moves forward at the drop',
+                 'oldest %s -> %s; the oldest row was in the dropped day %s'
+                 % (stamp(oldest_before),
+                    stamp(oldest_after) if oldest_after is not None else 'unreadable',
+                    ', '.join(held)))
+    return gone if moved else []
+
+
+def refusal_verdict(report, samples, drops, bound=120, state=''):
     longest = 0
     since = None
     refusals = 0
@@ -52,11 +104,13 @@ def refusal_verdict(report, samples, drops, bound=120):
     if refusals:
         report.pass_('the store refuses a write under the flood',
                      '%d observed HTTP 429 responses' % refusals)
-    elif any(is_drop(record) for record in drops):
+    elif drops:
         report.note('no HTTP 429 observed: evictor-first behavior; a verified oldest-day '
                     'drop freed space before a refusal was observed (ADR-016 §5)')
     else:
-        report.not_valid('no HTTP 429 or verified evictor drop: store refusal was not exercised')
+        report.not_valid('no HTTP 429 and no verified evictor drop: %s'
+                         % (state or 'store refusal was not exercised and the evictor '
+                            'freed nothing'))
         return False
     if since is not None:
         report.not_valid('the last observed HTTP 429 window has no confirmed successful end')

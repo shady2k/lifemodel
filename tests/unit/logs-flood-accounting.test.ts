@@ -7,7 +7,7 @@ interface Result {
   actual?: {
     root_free_bytes: number;
     allocated_bytes: Record<string, number | null>;
-    errors: string[];
+    unreadable: Record<string, string>;
   };
   expected?: Record<string, number>;
   verdict?: {
@@ -43,14 +43,40 @@ describe('root filesystem allocated-byte accounting', () => {
     const value = run('tree');
     expect(value.actual?.root_free_bytes).toBe(123 * 4096);
     expect(value.actual?.allocated_bytes).toEqual(value.expected);
-    expect(value.actual?.errors).toEqual([]);
+    expect(value.actual?.unreadable).toEqual({});
     expect(value.actual?.allocated_bytes.images).toBeLessThan(128 * 1024 * 1024);
   });
 
-  it.each(['missing', 'unreadable'])('does not turn a %s tree into zero evidence', (mode) => {
-    const value = run(mode);
-    expect(value.actual?.allocated_bytes.container_logs).toBeNull();
-    expect(value.actual?.errors.length).toBeGreaterThan(0);
+  it.each(['missing', 'unreadable'])(
+    'records a %s tree as unreadable with its reason',
+    (mode) => {
+      const value = run(mode);
+      expect(value.actual?.allocated_bytes.container_logs).toBeNull();
+      expect(value.actual?.unreadable.container_logs).toMatch(
+        mode === 'missing' ? /FileNotFoundError/ : /PermissionError/
+      );
+    }
+  );
+
+  it('judges the root growth on the trees that were read when one could not be', () => {
+    const value = run('partial');
+    expect(value.verdict).toMatchObject({
+      ok: true,
+      root_drop_bytes: 3000,
+      accounted_growth_bytes: 2200,
+      unattributed_drop_bytes: 800,
+      allowance_bytes: 800,
+    });
+    expect(value.verdict?.category_deltas).toEqual({
+      images: 1000,
+      postgres: 1000,
+      walk_files: 200,
+    });
+    expect(value.invalid).toEqual([]);
+    const notes = value.notes?.join('\n') ?? '';
+    expect(notes).toContain('container_logs');
+    expect(notes).toContain('PermissionError');
+    expect(value.checks?.map((check) => check.ok)).toEqual([true]);
   });
 
   it('subtracts measured image, container-log, Postgres and walk-file growth separately', () => {
@@ -107,13 +133,19 @@ describe('root filesystem allocated-byte accounting', () => {
     });
   });
 
-  it.each(['unknown', 'negative', 'errors', 'root-unknown'])(
-    'marks %s accounting evidence not valid instead of passing the allowance',
+  it.each(['unknown', 'negative', 'errors'])(
+    'judges the trees that were read when %s evidence is unusable',
     (mode) => {
       const value = run(mode);
-      expect(value.verdict).toBeNull();
-      expect(value.invalid?.length).toBeGreaterThan(0);
-      expect(value.checks).toEqual([]);
+      expect(value.verdict).not.toBeNull();
+      expect(value.invalid).toEqual([]);
     }
   );
+
+  it('marks an unreadable root filesystem not valid instead of guessing the drop', () => {
+    const value = run('root-unknown');
+    expect(value.verdict).toBeNull();
+    expect(value.invalid?.length).toBeGreaterThan(0);
+    expect(value.checks).toEqual([]);
+  });
 });

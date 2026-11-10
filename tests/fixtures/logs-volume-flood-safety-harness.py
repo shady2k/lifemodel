@@ -51,12 +51,43 @@ def main():
     data = json.load(sys.stdin)
     walk = load('flood_walk_under_test', walk_path)
     support = load('flood_safety_under_test', str(Path(walk_path).with_name('logs_flood_support.py')))
+    shared = load('flood_shared_under_test', str(Path(walk_path).with_name('logs_walk_support.py')))
     report = Report()
     result = {}
     if mode == 'commits':
         support.check_commits(report, data['commits'], data['start'], data['end'], data['bound'])
     elif mode == 'refusal':
         support.refusal_verdict(report, data['samples'], data.get('drops', []), data.get('bound', 120))
+    elif mode == 'verified-drop':
+        default_record = {
+            'module': 'logs-evictor',
+            'time': '2026-11-10T00:00:01Z',
+            'message': json.dumps({
+                'msg': 'the oldest log day was removed',
+                'day': '20261109',
+                'freedBytes': 4096,
+                'reason': 'below_threshold',
+            }),
+        }
+        record = data['record'] if 'record' in data else default_record
+        records = [] if record is None else [record]
+        queries = []
+        class Loader:
+            def logs(self, params):
+                queries.append(params)
+                assert params.get('module') == 'logs-evictor', params
+                return {'state': 'ok', 'records': records}
+        class Volume:
+            def partitions(self):
+                return list(data.get('partitions', ['20261110']))
+        oldest_before = shared.parse_ms(data.get('oldestBefore', '2026-11-09T12:00:00Z'))
+        oldest_after = shared.parse_ms(data.get('oldestAfter', '2026-11-10T00:00:01Z'))
+        verified = support.verified_drops(report, Loader(), Volume(), 0,
+                                          oldest_before, oldest_after)
+        result['verified'] = len(verified)
+        result['queries'] = queries
+        support.refusal_verdict(report, data.get('samples', [[0, 200], [300000, 200]]),
+                                verified)
     elif mode == 'create':
         class Cluster:
             def apply(self, manifest, **kwargs):
@@ -102,7 +133,7 @@ def main():
             return status, []
         def waiting(deadline, interval, predicate):
             return predicate() or predicate()
-        def refusal(_report, observed, drops, bound=120):
+        def refusal(_report, observed, drops, bound=120, state=''):
             samples.extend(observed)
         class Cluster:
             def run(self, *args, **kwargs):
@@ -116,6 +147,8 @@ def main():
             'prepare_flood': lambda *args: True,
             'accounting_snapshot': lambda *args: {},
             'report_accounting': lambda *args: None,
+            'oldest_record_ms': lambda *args: None,
+            'verified_drops': lambda *args: [],
             'shared_space': lambda: (100 * 1024**3, 90 * 1024**3),
             'loop_device': lambda *args: None,
             'write_burst': burst,
