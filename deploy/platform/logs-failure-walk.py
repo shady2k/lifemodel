@@ -1334,6 +1334,8 @@ def exit_code(report, ran):
 def main(argv=None):
     parser = argparse.ArgumentParser(description='WALK-LOGS-FAILURE (ADR-016 L03, L04)')
     common_arguments(parser)
+    # Runtime staging fills these before the failure cases read them.
+    parser.set_defaults(stub_image=None, markers=None)
     parser.add_argument('--web-host', default='lifemodel.local')
     parser.add_argument('--web-namespace', default='lifemodel')
     parser.add_argument('--web-service', default='web')
