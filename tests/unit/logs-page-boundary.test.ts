@@ -112,7 +112,12 @@ describe('a page whose boundary falls inside a group of ties', () => {
       const boundary = fullSortPage(model, { offset: page.offset + page.limit - 1, limit: 1 })[0];
       if (boundary === undefined) throw new Error('the fixture has no boundary record');
 
-      expect(model.queries.map(({ kind }) => kind)).toEqual(['count', 'query', 'query']);
+      expect(model.queries.map(({ kind }) => kind)).toEqual([
+        'count',
+        'query',
+        'query',
+        'count',
+      ]);
       expect(model.queries[0]?.logsql).toBe(buildCountQuery(FILTER));
       expect(model.queries[1]?.logsql).toBe(buildBoundaryQuery(FILTER, page));
       expect(model.queries[2]?.logsql).toBe(buildRecordsQuery(FILTER, page, boundary.time));
@@ -164,6 +169,7 @@ describe("a window smaller than the page's reach", () => {
     expect(model.queries.map(({ logsql }) => logsql)).toEqual([
       buildCountQuery(FILTER),
       buildRecordsQuery(FILTER, page),
+      buildCountQuery(FILTER),
     ]);
   });
 
@@ -183,6 +189,7 @@ describe("a window smaller than the page's reach", () => {
     expect(model.queries.map(({ logsql }) => logsql)).toEqual([
       buildCountQuery(FILTER),
       buildRecordsQuery(FILTER, page),
+      buildCountQuery(FILTER),
     ]);
   });
 
@@ -202,6 +209,7 @@ describe("a window smaller than the page's reach", () => {
     expect(model.queries.map(({ logsql }) => logsql)).toEqual([
       buildCountQuery(FILTER),
       buildRecordsQuery(FILTER, page),
+      buildCountQuery(FILTER),
     ]);
   });
 });
@@ -217,6 +225,7 @@ describe('a page of a window that holds one record', () => {
     expect(model.queries.map(({ logsql }) => logsql)).toEqual([
       buildCountQuery(FILTER),
       buildRecordsQuery(FILTER, { offset: 0, limit: 10 }),
+      buildCountQuery(FILTER),
     ]);
   });
 });

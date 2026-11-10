@@ -146,10 +146,12 @@ describe('the log store adapter against recorded responses', () => {
     expect(result.records.every((record) => record.fields['module'] === 'core')).toBe(true);
     // The phrase form module:"core" would also match the module core-web.
     expect(result.records.map((record) => record.fields['module'])).not.toContain('core-web');
-    // The window's count first, then the ordered window: the page's records.
+    // The window's count first, then the ordered window: the page's records,
+    // then the count again, after the records were read.
     expect(fixture.requests.map(({ query }) => query)).toEqual([
       buildCountQuery({ from: FROM, to: TO, module: 'core' }),
       buildRecordsQuery({ from: FROM, to: TO, module: 'core' }),
+      buildCountQuery({ from: FROM, to: TO, module: 'core' }),
     ]);
   });
 

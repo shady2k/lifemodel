@@ -69,15 +69,16 @@ export interface LogsPageRequest extends LogsPageBound {
 
 /**
  * One page of the window as of the first page. `incomplete` says the window's
- * count changed since then, so the offset may repeat or skip a record; the
- * answer never claims every record exactly once.
+ * count changed since then - or while this page read its records - so the
+ * offset may repeat or skip a record; the answer never claims every record
+ * exactly once.
  */
 export interface LogsPage {
   readonly state: 'ok';
   readonly records: readonly LogsRecord[];
   readonly offset: number;
   readonly limit: number;
-  /** The window's record count when this page was read. */
+  /** The window's record count as the page's last read saw it. */
   readonly count: number;
   readonly incomplete: boolean;
 }
@@ -243,25 +244,34 @@ export function createLogsQuery({ store }: { readonly store: LogsStore }): LogsQ
     async page(request) {
       const page: LogsPageBound = { offset: request.offset, limit: request.limit };
       // The window's count first: one aggregation over the window, cheap at any
-      // size (measured: 0.025 s over 1.68 million records), and it decides both
-      // what the page reports and how its records are read.
+      // size (measured: 0.025 s over 1.68 million records), and it decides how
+      // the page's records are read. The page reports the recount below.
       const count = await store.count(buildCountQuery(request.filter));
       if (count.state !== 'ok') return count;
       // A later page without the first page's count cannot tell whether
       // records arrived since, so it does not claim completeness either.
       const changed =
         request.expected === null ? request.offset > 0 : count.count !== request.expected;
-      const answer = (records: readonly LogsRecord[]): LogsPage => ({
+      const answer = (records: readonly LogsRecord[], latest: number): LogsPage => ({
         state: 'ok',
         records,
         offset: request.offset,
         limit: request.limit,
-        count: count.count,
-        incomplete: changed,
+        count: latest,
+        incomplete: changed || latest !== count.count,
       });
       const read = async (logsql: string): Promise<LogsPageAnswer> => {
         const records = await store.query(logsql);
-        return records.state === 'ok' ? answer(records.records) : records;
+        if (records.state !== 'ok') return records;
+        // The count above was read before these records, and a line that
+        // arrived in between moved every position after its own: this page can
+        // repeat a record and omit the window's oldest while that count still
+        // matches the first page's, so the answer would claim to be complete
+        // and offer no more. The recount after the read is what sees it - one
+        // more cheap aggregation, about what the first one cost.
+        const after = await store.count(buildCountQuery(request.filter));
+        if (after.state !== 'ok') return after;
+        return answer(records.records, after.count);
       };
       // Fewer records than the page reaches: the window as it is, in one read.
       // Its last position is the window's oldest record, which bounds nothing,

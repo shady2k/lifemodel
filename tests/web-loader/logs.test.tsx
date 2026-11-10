@@ -353,6 +353,44 @@ describe('logs page freshness and notices (ADR-016 §4, §5)', () => {
     expect(screen.queryByText(notice.message)).toBeNull();
   });
 
+  it('shows an eviction notice for a window whose records were all displaced', async () => {
+    const notice = {
+      time: '2026-11-08T09:55:00Z',
+      day: '20261107',
+      freedBytes: 123456789,
+      reason: 'below_threshold',
+      message: '{"msg":"the oldest log day was removed","day":"20261107"}',
+    };
+    stubFetch(page([], { status: status({ evictions: [notice] }) }));
+    const { container } = render(<Logs />);
+    expect(await screen.findByText('No records in this range.')).toBeInTheDocument();
+    // Nothing survives to put the notice above, so it is the whole list.
+    const note = screen.getByRole('note');
+    expect(note).toHaveTextContent('logs for Nov 7, 2026 were removed');
+    expect([...container.querySelectorAll('li')]).toEqual([note]);
+    expect(screen.queryByText(notice.message)).toBeNull();
+  });
+
+  it('says records arrived while the first page was read, and clears on refresh', async () => {
+    let first = true;
+    stubAnswers(() => {
+      const answer = page(records(2), { count: 3, incomplete: first });
+      first = false;
+      return answer;
+    });
+    render(<Logs />);
+    expect(
+      await screen.findByText(
+        'Incomplete: records arrived while you were scrolling. Refresh from the first page to read the window again.'
+      )
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh from the first page' }));
+    await waitFor(() => {
+      expect(screen.queryByText(/records arrived while you were scrolling/)).toBeNull();
+    });
+    expect(screen.getAllByRole('listitem')).toHaveLength(2);
+  });
+
   it('asks for the status with the first page only', async () => {
     const urls = stubAnswers((url) =>
       url.includes('offset=1')

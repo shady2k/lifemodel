@@ -164,9 +164,16 @@ spec:
 # or a partition key it wrote, and for nothing else (ADR-016 §5, N6). Either
 # template annotation - the settings revision or the partition key revision,
 # which is a separate value and never the key - makes `Recreate` replace the
-# store's pod; a change to any other field - replicas, strategy, selector, the
-# pod spec, labels, or the object's own name - is refused, and so is an
-# annotation that reaches one map without the other or disagrees between them.
+# store's pod. The clamp compares the whole object, not a list of named fields:
+# every key of the object's metadata, of the spec, of the pod template and of
+# its metadata must hold the same value as in `oldObject`, and every key of the
+# two annotation maps except the two revision keys must too. Only
+# `metadata.resourceVersion`, `managedFields` and `generation`, which the
+# apiserver rewrites, and `status` are left out, so a merge patch that carried
+# `spec.paused`, an unlisted spec field or another annotation key beside the
+# revision is refused. An annotation that reaches one map without the other, or
+# disagrees between them, is refused too; a store that never had annotations
+# takes the first one.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -191,36 +198,35 @@ spec:
       expression: request.namespace == 'lifemodel-system' && request.name == 'logs-store'
   validations:
     - expression: >-
-        object.metadata.name == oldObject.metadata.name &&
-        object.metadata.namespace == oldObject.metadata.namespace &&
-        ((!has(object.metadata.labels) && !has(oldObject.metadata.labels)) ||
-          (has(object.metadata.labels) && has(oldObject.metadata.labels) &&
-           object.metadata.labels == oldObject.metadata.labels)) &&
-        ((!has(object.metadata.finalizers) && !has(oldObject.metadata.finalizers)) ||
-          (has(object.metadata.finalizers) && has(oldObject.metadata.finalizers) &&
-           object.metadata.finalizers == oldObject.metadata.finalizers)) &&
-        ((!has(object.metadata.ownerReferences) && !has(oldObject.metadata.ownerReferences)) ||
-          (has(object.metadata.ownerReferences) && has(oldObject.metadata.ownerReferences) &&
-           object.metadata.ownerReferences == oldObject.metadata.ownerReferences)) &&
-        object.spec.replicas == oldObject.spec.replicas &&
-        object.spec.strategy == oldObject.spec.strategy &&
-        object.spec.selector == oldObject.spec.selector &&
-        object.spec.template.metadata.labels == oldObject.spec.template.metadata.labels &&
-        object.spec.template.spec == oldObject.spec.template.spec &&
+        object.apiVersion == oldObject.apiVersion &&
+        object.kind == oldObject.kind &&
         has(object.metadata.annotations) &&
         has(object.spec.template.metadata.annotations) &&
-        (('lifemodel.dev/logs-settings-revision' in object.metadata.annotations) ==
-          ('lifemodel.dev/logs-settings-revision' in object.spec.template.metadata.annotations)) &&
-        (('lifemodel.dev/logs-partition-key-revision' in object.metadata.annotations) ==
-          ('lifemodel.dev/logs-partition-key-revision' in object.spec.template.metadata.annotations)) &&
-        (('lifemodel.dev/logs-settings-revision' in object.metadata.annotations) ||
-          ('lifemodel.dev/logs-partition-key-revision' in object.metadata.annotations)) &&
-        (!('lifemodel.dev/logs-settings-revision' in object.metadata.annotations) ||
-          (object.metadata.annotations['lifemodel.dev/logs-settings-revision'] ==
-           object.spec.template.metadata.annotations['lifemodel.dev/logs-settings-revision'])) &&
-        (!('lifemodel.dev/logs-partition-key-revision' in object.metadata.annotations) ||
-          (object.metadata.annotations['lifemodel.dev/logs-partition-key-revision'] ==
-           object.spec.template.metadata.annotations['lifemodel.dev/logs-partition-key-revision']))
+        object.metadata.all(k,
+          k in ['annotations', 'generation', 'resourceVersion', 'managedFields'] || (k in oldObject.metadata && object.metadata[k] == oldObject.metadata[k])) &&
+        oldObject.metadata.all(k,
+          k in ['annotations', 'generation', 'resourceVersion', 'managedFields'] || (k in object.metadata && object.metadata[k] == oldObject.metadata[k])) &&
+        object.metadata.annotations.all(k,
+          k in ['lifemodel.dev/logs-settings-revision', 'lifemodel.dev/logs-partition-key-revision'] || (has(oldObject.metadata.annotations) && k in oldObject.metadata.annotations && object.metadata.annotations[k] == oldObject.metadata.annotations[k])) &&
+        (!has(oldObject.metadata.annotations) || oldObject.metadata.annotations.all(k,
+          k in ['lifemodel.dev/logs-settings-revision', 'lifemodel.dev/logs-partition-key-revision'] || (k in object.metadata.annotations && oldObject.metadata.annotations[k] == object.metadata.annotations[k]))) &&
+        object.spec.template.metadata.annotations.all(k,
+          k in ['lifemodel.dev/logs-settings-revision', 'lifemodel.dev/logs-partition-key-revision'] || (has(oldObject.spec.template.metadata.annotations) && k in oldObject.spec.template.metadata.annotations && object.spec.template.metadata.annotations[k] == oldObject.spec.template.metadata.annotations[k])) &&
+        (!has(oldObject.spec.template.metadata.annotations) || oldObject.spec.template.metadata.annotations.all(k,
+          k in ['lifemodel.dev/logs-settings-revision', 'lifemodel.dev/logs-partition-key-revision'] || (k in object.spec.template.metadata.annotations && oldObject.spec.template.metadata.annotations[k] == object.spec.template.metadata.annotations[k]))) &&
+        object.spec.all(k, k == 'template' || (k in oldObject.spec && object.spec[k] == oldObject.spec[k])) &&
+        oldObject.spec.all(k, k == 'template' || (k in object.spec && oldObject.spec[k] == object.spec[k])) &&
+        object.spec.template.all(k, k == 'metadata' || (k in oldObject.spec.template && object.spec.template[k] == oldObject.spec.template[k])) &&
+        oldObject.spec.template.all(k, k == 'metadata' || (k in object.spec.template && oldObject.spec.template[k] == object.spec.template[k])) &&
+        object.spec.template.metadata.all(k, k == 'annotations' || (k in oldObject.spec.template.metadata && object.spec.template.metadata[k] == oldObject.spec.template.metadata[k])) &&
+        oldObject.spec.template.metadata.all(k, k == 'annotations' || (k in object.spec.template.metadata && oldObject.spec.template.metadata[k] == object.spec.template.metadata[k])) &&
+        (('lifemodel.dev/logs-settings-revision' in object.metadata.annotations) == ('lifemodel.dev/logs-settings-revision' in object.spec.template.metadata.annotations)) &&
+        (('lifemodel.dev/logs-partition-key-revision' in object.metadata.annotations) == ('lifemodel.dev/logs-partition-key-revision' in object.spec.template.metadata.annotations)) &&
+        (('lifemodel.dev/logs-settings-revision' in object.metadata.annotations) || ('lifemodel.dev/logs-partition-key-revision' in object.metadata.annotations)) &&
+        (!('lifemodel.dev/logs-settings-revision' in object.metadata.annotations) || (object.metadata.annotations['lifemodel.dev/logs-settings-revision'] ==
+          object.spec.template.metadata.annotations['lifemodel.dev/logs-settings-revision'])) &&
+        (!('lifemodel.dev/logs-partition-key-revision' in object.metadata.annotations) || (object.metadata.annotations['lifemodel.dev/logs-partition-key-revision'] ==
+          object.spec.template.metadata.annotations['lifemodel.dev/logs-partition-key-revision']))
       message: the loader may only patch the logs settings and partition key revision annotations on the logs-store Deployment
 ---
 apiVersion: admissionregistration.k8s.io/v1
