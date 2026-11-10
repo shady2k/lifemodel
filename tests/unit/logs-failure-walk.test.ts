@@ -191,6 +191,18 @@ describe('a fake node for the failure walk', () => {
     expect(values[1]).toEqual({ off: false, on: false });
   }, 30000);
 
+  it('compares the restored capture in the API\'s own shape, until-disabled included', () => {
+    const run = harness('capture-restore');
+    const value = jsonLine<Record<string, string | null>>(run, 'AGREE');
+    // The saved until-disabled setting reads back as itself: no false alarm.
+    expect(value.untilDisabled).toBeNull();
+    expect(value.off).toBeNull();
+    expect(value.until).toBeNull();
+    expect(value.untilDisabledMismatch).toContain('wanted until-disabled');
+    expect(value.offMismatch).toContain('wanted off');
+    expect(value.untilMismatch).toContain('wanted a capture until');
+  }, 30000);
+
   it('clears the reserve with a JSON body and content type', () => {
     const run = harness('delete-reserve');
     const value = jsonLine<{

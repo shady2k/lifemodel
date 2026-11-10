@@ -378,6 +378,26 @@ def chat_unreachable(walk, fixture):
     return report
 
 
+@mode('capture-restore')
+def capture_restore(walk, fixture):
+    """The read-back is judged in the API's own shape, until-disabled included."""
+    report = walk.Report()
+    now = 1_794_240_000_000
+    cases = {
+        'untilDisabled': ({"mode": "until-disabled"}, {"mode": "until-disabled"}),
+        'untilDisabledMismatch': ({"mode": "until-disabled"}, {"until": None}),
+        'off': ({"until": None}, {"until": None}),
+        'offMismatch': ({"until": None}, {"mode": "until-disabled"}),
+        'until': ({"until": "2026-11-10T05:00:00.000Z"},
+                  {"until": "2026-11-10T05:00:01.000Z"}),
+        'untilMismatch': ({"until": "2026-11-10T05:00:00.000Z"}, {"until": None}),
+    }
+    print('AGREE ' + json.dumps({
+        name: walk.capture_agrees(saved, read, now) for name, (saved, read) in cases.items()
+    }))
+    return report
+
+
 class FakeForward:
     """A port-forward the mode scripts: it either answers or dies with kubectl's words."""
 

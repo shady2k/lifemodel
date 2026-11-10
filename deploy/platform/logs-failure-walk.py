@@ -456,14 +456,31 @@ def put_capture_checked(report, loader, token, body, what):
     return read
 
 
-def capture_expected(saved, now):
-    """What the restored setting should read as: `on` only when it was really on."""
-    if not isinstance(saved, dict):
-        return 'off'
-    if saved.get('mode') == 'until-disabled':
-        return 'on'
-    until = parse_ms(saved.get('until'))
-    return 'on' if until is not None and until > now else 'off'
+def capture_agrees(saved, current, now):
+    """Whether the read-back is the saved setting in the API's own shape.
+
+    The API answers `{mode: until-disabled}` for a capture that runs until
+    disabled, `{until: <time>}` for a timed one and `{until: null}` for off. The
+    read-back is compared in that shape, so a saved until-disabled setting reads
+    back as itself rather than as a derived word.
+    """
+    if not isinstance(current, dict):
+        return 'the API answered no setting'
+    if isinstance(saved, dict) and saved.get('mode') == 'until-disabled':
+        if current.get('mode') != 'until-disabled':
+            return 'wanted until-disabled, read %s' % json.dumps(current)
+        if isinstance(saved.get('session'), str) and saved.get('session') != current.get('session'):
+            return 'session %s -> %s' % (saved['session'], current.get('session'))
+        return None
+    until = parse_ms((saved or {}).get('until')) if isinstance(saved, dict) else None
+    if until is None:
+        return None if capture_off(current) else 'wanted off, read %s' % json.dumps(current)
+    read = parse_ms(current.get('until'))
+    if read is None:
+        return 'wanted a capture until %s, read %s' % (saved.get('until'), json.dumps(current))
+    if abs(read - until) > 5000:
+        return 'wanted until %s, read %s' % (saved.get('until'), current.get('until'))
+    return None
 
 
 def capture_restore_body(saved, now):
@@ -1149,15 +1166,18 @@ def restore(report, options, loader, token, cluster, state):
         body = capture_restore_body(capture_saved, now_ms())
         status, answer = put_capture(loader, token, body)
         current = capture_setting(loader)
-        wanted = capture_expected(capture_saved, now_ms())
-        agreed = (capture_off(current) if wanted == 'off' else capture_on(current))
-        if status != 200 or not agreed:
+        difference = capture_agrees(capture_saved, current, now_ms())
+        if status != 200 or difference is not None:
             restored = False
-            print('RESTORE incomplete: the capture setting is %s, wanted %s (PUT %d, read %s)'
-                  % (json.dumps(current) if current is not None else 'unreadable', wanted,
-                     status, 'answered' if current is not None else 'unreadable'))
+            print('RESTORE incomplete: the capture setting was not put back (PUT %d): %s'
+                  % (status, difference or 'the read-back differs'))
         else:
-            print('RESTORE capture reads back as %s' % wanted)
+            print('RESTORE capture reads back as saved (%s)'
+                  % ('until-disabled' if isinstance(capture_saved, dict)
+                     and capture_saved.get('mode') == 'until-disabled'
+                     else 'until %s' % capture_saved.get('until')
+                     if isinstance(capture_saved, dict) and capture_saved.get('until')
+                     else 'off'))
     if state.get('created_namespace'):
         if cluster.run(['delete', 'namespace', options.stub_namespace,
                         '--wait=false']).returncode != 0:
