@@ -45,6 +45,36 @@ describe('real task writer handshake', () => {
     expect(result.calls.filter((call) => call[0] === 'close')).toHaveLength(1);
     expect(result.output).not.toContain('PRIVATE');
   });
+  it('retries the request and succeeds on the second attempt', () => {
+    const result = run({ post_statuses: [403, 202] });
+    expect(result.result).toEqual(['task-new-pod', 'task']);
+    const posts = result.calls.filter((call) => call[0] === 'http' && call[1] === 'POST');
+    expect(posts).toHaveLength(2);
+    const prompts = posts.map((call) => (call[3] as { text: string }).text);
+    expect(prompts[0]).toContain('must run as a task, not be answered in chat');
+    expect(prompts[1]).toContain('Do not answer this message in chat');
+    expect(prompts[1]).toContain('/proc/1/fd/1');
+    expect(result.output).toContain('attempt 2');
+    expect(result.output).not.toContain('PRIVATE');
+  });
+
+  it('asks three times, reports each attempt, and stays not valid when none starts a task', () => {
+    const result = run({ post_statuses: [403, 403, 403] });
+    expect(result.result).toBeNull();
+    const posts = result.calls.filter((call) => call[0] === 'http' && call[1] === 'POST');
+    expect(posts).toHaveLength(3);
+    const prompts = posts.map((call) => (call[3] as { text: string }).text);
+    for (const prompt of prompts) {
+      expect(prompt).toContain('must run as a task, not be answered in chat');
+      expect(prompt).toContain('/proc/1/fd/1');
+      expect(prompt).toContain('run-test');
+    }
+    expect(prompts[2]).toContain('This is the last request');
+    for (const attempt of [1, 2, 3]) expect(result.output).toContain(`attempt ${attempt}`);
+    expect(result.output).toContain('not_valid');
+    expect(result.output).not.toContain('PRIVATE');
+  });
+
   it.each([{ no_pod: true }, { no_marker: true }, { post_status: 403 }, { no_forward: true }])(
     'invalidates a missing launch/collection instead of fabricating a task: %j',
     (fixture) => {
