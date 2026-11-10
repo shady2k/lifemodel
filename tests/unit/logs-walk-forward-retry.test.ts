@@ -77,6 +77,37 @@ describe("the store client survives the store's pod being replaced", () => {
     expect(targets.some((target) => target.startsWith('/internal/partition/list'))).toBe(true);
   });
 
+  it('sends every partition call in a form body, never in the URL', () => {
+    // The pinned store logs the full request URI on an error and masks form keys
+    // but not query keys (ADR-016 §5): a detach error must not carry the key.
+    const result = run('partition-body');
+    expect(result.status).toBe(0);
+    const requests = value<{ method: string; target: string; body: string }[]>(
+      result,
+      'PARTITION '
+    );
+    expect(requests).toHaveLength(3);
+    for (const request of requests) {
+      expect(request.method).toBe('POST');
+      expect(request.target).not.toContain('?');
+      expect(request.target).not.toContain('authKey');
+      expect(request.target).not.toContain('name=');
+      expect(request.body).not.toContain('?');
+    }
+    // The refusal check's call carries no key at all, and the store refuses it.
+    expect(requests[0]?.target).toBe('/internal/partition/list');
+    expect(requests[0]?.body).toBe('');
+    expect(requests[1]?.body).toContain('authKey=scripted-key');
+    expect(requests[2]?.target).toBe('/internal/partition/detach');
+    expect(requests[2]?.body).toContain('name=20261109');
+    expect(requests[2]?.body).toContain('authKey=scripted-key');
+    expect(value<Record<string, string>>(result, 'RESULTS ')).toEqual({
+      listWithoutKey: 'ok',
+      listWithKey: 'ok',
+      detach: 'ok',
+    });
+  });
+
   it("keeps the walk's error when even the new forward does not answer", () => {
     const result = run('forward-never-replaced');
     expect(result.status).toBe(0);

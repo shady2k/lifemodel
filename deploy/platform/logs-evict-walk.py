@@ -387,8 +387,15 @@ def evictor_stale(last_success_ms, now, stale_ms=EVICTOR_STALE_MS):
 
 
 def partition_refused(status, body):
-    """The store's own refusal text when no `authKey` is sent (ADR-016 §5)."""
-    return status != 200 and 'authkey' in (body or '').lower()
+    """The store's own refusal when no `authKey` is sent (ADR-016 §5).
+
+    The key now travels in a form body (a POST), so the refusal proves the
+    store requires the key at all rather than naming the URL form it used to
+    read. The pinned store answered 400 with `Expected to receive non-empty
+    authKey ...`; 401 is how `CheckAuthFlag` refuses a missing key in some
+    versions, so both are a refusal here, and the walk prints the status it got.
+    """
+    return status in (400, 401) and 'authkey' in (body or '').lower()
 
 
 def shorter_than_two_intervals(seconds):

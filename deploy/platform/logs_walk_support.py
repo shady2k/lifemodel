@@ -421,14 +421,37 @@ class Store:
         )
 
     def detach(self, day, key):
-        """The store's detach: it answers only after the readers of that day stop."""
-        query = 'name=' + day + ('&authKey=' + key if key else '')
-        status, data = self._http('POST', '/internal/partition/detach?' + query)
+        """The store's detach: it answers only after the readers of that day stop.
+
+        The day and the key travel in an `application/x-www-form-urlencoded`
+        POST body, never in the URL (ADR-016 §5): the store logs the full
+        request URI on an error, and its error logging masks form keys but not
+        query keys, so a refused detach would otherwise put the key into the
+        collected logs. The handlers read `r.FormValue`, which takes these
+        bodies.
+        """
+        fields = {'name': day} if not key else {'name': day, 'authKey': key}
+        status, data = self._http(
+            'POST',
+            '/internal/partition/detach',
+            urlencode(fields).encode(),
+            {'content-type': 'application/x-www-form-urlencoded'},
+        )
         return status, data.decode('utf8', 'replace')
 
     def partition_list(self, key=None):
-        query = '' if key is None else '?authKey=' + key
-        status, data = self._http('GET', '/internal/partition/list' + query)
+        """The store's day list, its key in a form body (ADR-016 §5).
+
+        A call with no key is the walk's refusal check: the store answers its
+        own refusal, and the call itself carries nothing in its URL.
+        """
+        fields = {} if key is None else {'authKey': key}
+        status, data = self._http(
+            'POST',
+            '/internal/partition/list',
+            urlencode(fields).encode(),
+            {'content-type': 'application/x-www-form-urlencoded'},
+        )
         return status, data.decode('utf8', 'replace')
 
     def close(self):

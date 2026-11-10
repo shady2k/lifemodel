@@ -1135,6 +1135,18 @@ def evict_partition(walk, fixture):
     return report
 
 
+@mode('evict-partition-unauthorized')
+def evict_partition_unauthorized(walk, fixture):
+    """A missing key refused with 401 is the same refusal as the pinned store's 400."""
+    report = walk.Report()
+    store = FakeStore({'partitionListAnswers': [{
+        'status': 401,
+        'body': 'Expected to receive non-empty authKey when -partitionManageAuthKey is set',
+    }]})
+    walk.check_partition_refusal(report, store, 'scripted-key')
+    return report
+
+
 @mode('evict-partition-open')
 def evict_partition_open(walk, fixture):
     report = walk.Report()

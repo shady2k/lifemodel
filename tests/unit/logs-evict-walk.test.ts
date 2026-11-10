@@ -274,6 +274,13 @@ describe('a fake node for the evict walk', () => {
     expect(run.status).toBe(0);
   }, 30000);
 
+  it('accepts a missing key refused with 401 as the same refusal', () => {
+    const run = harness('evict-partition-unauthorized');
+    expect(run.passes.join('\n')).toContain('authKey');
+    expect(run.passes.join('\n')).toContain('answered 401');
+    expect(run.status).toBe(0);
+  }, 30000);
+
   it('fails when the same list answers without a key', () => {
     const run = harness('evict-partition-open');
     expect(run.failures.join('\n')).toContain('authKey');

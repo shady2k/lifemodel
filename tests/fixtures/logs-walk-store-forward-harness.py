@@ -65,6 +65,7 @@ class FakeForward:
         self.death = None
         self.requests = 0
         self.targets = []
+        self.requests_detail = []
         self.stopped = False
         self.closed = False
         self.kept_log = False
@@ -107,9 +108,27 @@ class FakeForward:
         if not request:
             return
         self.requests += 1
-        parts = request.split(b'\r\n', 1)[0].split()
+        head, _, body = request.partition(b'\r\n\r\n')
+        parts = head.split(b'\r\n', 1)[0].split()
+        method = parts[0].decode('utf8', 'replace') if parts else ''
         target = parts[1].decode('utf8', 'replace') if len(parts) > 1 else ''
         self.targets.append(target)
+        # A form body is read in full, so the harness can say where the key went.
+        length = 0
+        for line in head.split(b'\r\n')[1:]:
+            name, _, value = line.partition(b':')
+            if name.strip().lower() == b'content-length':
+                try:
+                    length = int(value.strip())
+                except ValueError:
+                    length = 0
+        while length > 0 and len(body) < length:
+            chunk = connection.recv(4096)
+            if not chunk:
+                break
+            body += chunk
+        self.requests_detail.append({'method': method, 'target': target,
+                                     'body': body[:length or None].decode('utf8', 'replace')})
         if not target.startswith('/'):
             # `http.client` sends the path exactly as given, and the store
             # answers 400 to a request target that does not start with `/`.
@@ -314,6 +333,40 @@ def portforward_death(support):
     return 0
 
 
+def partition_body(support):
+    """Where each partition call puts its key: the URL or a form body (ADR-016 §5).
+
+    The pinned store logs the full request URI on an error and masks form keys
+    but not query keys, so a walk's detach error must not carry the key in its
+    URL. This mode runs the list without a key (the refusal check's call), the
+    list with one, and a detach, and prints each request's method, target and
+    body for the test to judge.
+    """
+    store, tunnel, factory = open_store(support, MODES['store-paths'])
+    if store is None:
+        return 1
+    results = {}
+    try:
+        for name, call in (
+            ('listWithoutKey', lambda: store.partition_list()),
+            ('listWithKey', lambda: store.partition_list('scripted-key')),
+            ('detach', lambda: store.detach('20261109', 'scripted-key')),
+        ):
+            try:
+                call()
+                results[name] = 'ok'
+            except support.WalkError as error:
+                results[name] = str(error)
+    finally:
+        store.close()
+        tunnel.close()
+    partition = [request for request in factory.forwards[0].requests_detail
+                 if '/internal/partition/' in request['target']]
+    print('PARTITION ' + json.dumps(partition))
+    print('RESULTS ' + json.dumps(results))
+    return 0
+
+
 def store_paths(support):
     store, tunnel, factory = open_store(support, MODES['store-paths'])
     if store is None:
@@ -349,6 +402,8 @@ def main(mode, support_path):
     support = load(support_path)
     if mode == 'store-paths':
         return store_paths(support)
+    if mode == 'partition-body':
+        return partition_body(support)
     if mode == 'forward-retried':
         return forward_retried(support)
     if mode == 'forward-death-detail':
