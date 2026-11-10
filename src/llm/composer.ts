@@ -1,5 +1,6 @@
 import type { AgentIdentity } from '../types/index.js';
 import type { LLMProvider, Message } from './provider.js';
+import { modelErrorMessage } from './model-error.js';
 
 /**
  * User state for classification context.
@@ -166,7 +167,7 @@ export class MessageComposer {
       return {
         message: '',
         success: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: modelErrorMessage(error),
       };
     }
   }
@@ -265,7 +266,7 @@ export class MessageComposer {
       return {
         canHandle: false,
         confidence: 0,
-        reasoning: `Classification failed: ${error instanceof Error ? error.message : String(error)}`,
+        reasoning: `Classification failed: ${modelErrorMessage(error)}`,
       };
     }
   }

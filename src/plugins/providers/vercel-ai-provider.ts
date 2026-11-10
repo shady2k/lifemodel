@@ -14,6 +14,7 @@ import type {
 } from '../../llm/provider.js';
 import { BaseLLMProvider, DEFAULT_ROLE_MODEL, LLMError } from '../../llm/provider.js';
 import { toStrictSchema } from '../../llm/tool-schema.js';
+import { modelErrorMessage } from '../../llm/model-error.js';
 import { resolveModelParams } from './model-params.js';
 import { compileTranscript, resolveTranscriptPolicy } from './transcript-compiler.js';
 import { proxyFetch } from '../../utils/proxy-fetch.js';
@@ -344,21 +345,6 @@ export class VercelAIProvider extends BaseLLMProvider {
             { availableHeaders: headerKeys },
             'No x-openrouter-provider in error response headers'
           );
-        }
-      }
-    }
-    // Also check responseBody for provider info (some error formats embed it)
-    if (error instanceof Error && 'responseBody' in error) {
-      const body = (error as { responseBody: string }).responseBody;
-      if (typeof body === 'string') {
-        try {
-          const parsed = JSON.parse(body) as Record<string, unknown>;
-          const metadata = parsed['metadata'] as Record<string, unknown> | undefined;
-          if (metadata?.['provider_name'] && typeof metadata['provider_name'] === 'string') {
-            return metadata['provider_name'];
-          }
-        } catch {
-          // not JSON, ignore
         }
       }
     }
@@ -931,11 +917,8 @@ export class VercelAIProvider extends BaseLLMProvider {
         );
       }
 
-      // Extract response body from AI SDK APICallError for debugging
-      const responseBody =
-        error instanceof Error && 'responseBody' in error
-          ? (error as { responseBody: string }).responseBody
-          : undefined;
+      const mapped = this.mapAIErrorToLLMError(error);
+      mapped.message = `${modelErrorMessage(mapped)}; providerError=${error instanceof Error ? error.name : 'Unknown'}`;
 
       // Extract response headers for debugging
       const responseHeaders =
@@ -952,13 +935,14 @@ export class VercelAIProvider extends BaseLLMProvider {
         {
           durationMs: duration,
           model: modelId,
-          error: error instanceof Error ? error.message : String(error),
+          requestId: call.callId,
+          retryable: mapped.retryable,
           errorName: error instanceof Error ? error.name : 'Unknown',
           statusCode:
             error instanceof Error && 'statusCode' in error
               ? (error as { statusCode: number }).statusCode
               : undefined,
-          responseBody: responseBody ? responseBody.slice(0, 1000) : undefined,
+          httpStatus: call.wire.httpStatus,
           responseHeaders,
           requestUrl,
           // Log message count and structure to help debug schema issues
@@ -1001,7 +985,6 @@ export class VercelAIProvider extends BaseLLMProvider {
 
       // Map AI SDK errors to LLMError
       this.pendingRawTools = null;
-      const mapped = this.mapAIErrorToLLMError(error);
       // The code, not the message: a span never carries provider text, which
       // can echo request values back.
       call.fail(
@@ -1141,14 +1124,9 @@ export class VercelAIProvider extends BaseLLMProvider {
     }
   }
 
-  /**
-   * Map AI SDK error to LLMError.
-   */
-  private mapAIErrorToLLMError(error: unknown): LLMError {
+  /** Preserve existing retry classification; this text never leaves the classifier. */
+  private errorClassificationText(error: unknown): string {
     const rawMessage = error instanceof Error ? error.message : String(error);
-
-    // Enrich error message with response body details when available
-    // AI SDK's APICallError.message is often just "Provider returned error" — useless without body
     let message = rawMessage;
     if (error instanceof Error && 'responseBody' in error) {
       const body = (error as { responseBody: string }).responseBody;
@@ -1201,6 +1179,17 @@ export class VercelAIProvider extends BaseLLMProvider {
       }
     }
 
+    return message;
+  }
+
+  /**
+   * Map AI SDK error to LLMError.
+   */
+  private mapAIErrorToLLMError(error: unknown): LLMError {
+    const rawMessage = this.errorClassificationText(error);
+
+    const message = modelErrorMessage(error);
+
     // AI SDK throws APICallError with structured statusCode — check it first
     const statusCode =
       error instanceof Error && 'statusCode' in error
@@ -1235,7 +1224,7 @@ export class VercelAIProvider extends BaseLLMProvider {
     }
 
     // Fallback: string matching for errors without structured status codes
-    if (message.includes('429') || message.toLowerCase().includes('rate limit')) {
+    if (rawMessage.includes('429') || rawMessage.toLowerCase().includes('rate limit')) {
       return new LLMError(`Rate limit: ${message}`, this.name, {
         statusCode: 429,
         retryable: true,
@@ -1252,7 +1241,7 @@ export class VercelAIProvider extends BaseLLMProvider {
     }
 
     // Check for 5xx errors in message text
-    const serverErrorMatch = /(5\d{2})/.exec(message);
+    const serverErrorMatch = /(5\d{2})/.exec(rawMessage);
     if (serverErrorMatch?.[1]) {
       return new LLMError(`Server error: ${message}`, this.name, {
         statusCode: parseInt(serverErrorMatch[1], 10),
