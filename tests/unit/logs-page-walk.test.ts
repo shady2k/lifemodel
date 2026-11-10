@@ -210,6 +210,36 @@ describe('the browser walk', () => {
     expect(text).toContain('the retention card reads the retention setting');
   });
 
+  it('retries an aborted navigation and keeps one engine from ending the run', () => {
+    const text = source();
+    expect(text).toContain('gotoWithRetry(');
+    // Every navigation goes through the bounded retry, never a bare page.goto.
+    expect(text).not.toMatch(/\bpage\.goto\(/);
+    // The stopped store's own navigation is retried inside its observer too.
+    expect(text).toContain('observeUnavailableLogs(');
+    // One engine's failure is a FAIL line and the next engine still runs.
+    expect(text).toContain('the engine walk ran');
+    expect(text).toContain('the stopped-store page ran');
+  });
+
+  it('compares a filter count with the API over the page form\'s own window', () => {
+    const text = source();
+    expect(text).toContain('pageWindow(');
+    expect(text).toContain('formWindow(');
+    expect(text).toContain('from=${held.from}&to=${held.to}');
+    // The module and conversation checks read the form after the submit, not
+    // the walk's own earlier range.
+    expect(text).not.toContain('from=${range.from}&to=${range.to}&module=');
+  });
+
+  it('reports an axe violation by rule id, impact and node selector', () => {
+    const text = source();
+    expect(text).toContain('rule.impact');
+    expect(text).toContain('rule.targets');
+    // The failure summary carries page text; it is never printed.
+    expect(text).not.toContain('failureSummary');
+  });
+
   it('prints a RESTORE line and exits on the failure count', () => {
     const text = source();
     expect(text).toMatch(/finally\s*\{/);

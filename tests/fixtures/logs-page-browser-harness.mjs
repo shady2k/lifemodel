@@ -42,6 +42,7 @@ if (mode.startsWith('axe')) {
 } else {
   let waiting;
   let rendered = false;
+  let aborted = false;
   const reason = mode === 'store-ru' ? 'соединение отклонено' : 'the connection was refused';
   const label = mode === 'store-ru' ? 'Хранилище логов не ответило. Причина:' : 'The log store did not answer. Reason:';
   const statusText = `${label} ${reason}.`;
@@ -56,6 +57,10 @@ if (mode.startsWith('axe')) {
     },
     goto: async (target) => {
       events.push(['goto', target]);
+      if (mode === 'store-aborted' && !aborted) {
+        aborted = true;
+        throw new Error(`net::ERR_ABORTED at ${target}`);
+      }
       for (const target of [
         'https://other.local/api/logs?status=1',
         'https://boot-example.local/api/logs/modules',

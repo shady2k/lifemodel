@@ -3,6 +3,8 @@ import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
+import { axe } from 'jest-axe';
+import 'jest-axe/extend-expect';
 import i18n from '../../web/loader/src/i18n';
 import '../../web/loader/src/logs-i18n';
 import { Logs } from '../../web/loader/src/Logs';
@@ -343,8 +345,9 @@ describe('logs page freshness and notices (ADR-016 §4, §5)', () => {
     const items = [...container.querySelectorAll('li')];
     const note = await screen.findByRole('note');
     // Today's line, then the notice that says the day below it is gone, then
-    // what is left of that day.
-    expect(items.indexOf(note)).toBe(1);
+    // what is left of that day. The note is the list item's own content.
+    expect(note.closest('li')).not.toBeNull();
+    expect(items.indexOf(note.closest('li') as HTMLLIElement)).toBe(1);
     expect(items.map((item) => item.textContent)).toEqual([
       expect.stringContaining('today line'),
       expect.stringContaining('logs for Nov 7, 2026 were removed'),
@@ -377,7 +380,8 @@ describe('logs page freshness and notices (ADR-016 §4, §5)', () => {
     const note = screen.getByRole('note');
     expect(note).toHaveTextContent('logs for Nov 7, 2026 were removed');
     expect(note).toHaveTextContent('117.74 MiB freed');
-    expect([...container.querySelectorAll('li')]).toEqual([note]);
+    expect([...container.querySelectorAll('li')]).toHaveLength(1);
+    expect(note.closest('li')).toBe(container.querySelector('li'));
     expect(screen.queryByText(notice.message)).toBeNull();
   });
 
@@ -418,5 +422,27 @@ describe('logs page freshness and notices (ADR-016 §4, §5)', () => {
     const logCalls = urls.filter((url) => url.startsWith('/api/logs?'));
     expect(logCalls[0]).toContain('status=1');
     expect(logCalls[1]).not.toContain('status=1');
+  });
+});
+
+
+describe('logs page accessibility', () => {
+  it('keeps the record list a list and the eviction notice a note', async () => {
+    const notice = {
+      time: '2026-11-08T09:55:00Z',
+      day: '20261107',
+      freedBytes: 123456789,
+      reason: 'below_threshold',
+      message: '{"msg":"the oldest log day was removed","day":"20261107"}',
+    };
+    const rows = [
+      { time: '2026-11-08T10:00:00.000Z', message: 'today line', fields: { module: 'core' } },
+      { time: notice.time, message: notice.message, fields: { module: 'logs-evictor' } },
+      { time: '2026-11-07T09:00:00.000Z', message: 'yesterday line', fields: { module: 'core' } },
+    ];
+    stubFetch(page(rows, { status: status({ evictions: [notice] }) }));
+    const { container } = render(<Logs />);
+    await screen.findByText('today line');
+    expect(await axe(container)).toHaveNoViolations();
   });
 });

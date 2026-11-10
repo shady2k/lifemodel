@@ -1,3 +1,27 @@
+/** Run one browser step at most `attempts` times; a stopping store can abort it. */
+export async function retry(operation, attempts = 3, pauseMs = 1500) {
+  let last;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation(attempt);
+    } catch (error) {
+      last = error;
+      if (attempt < attempts && pauseMs > 0) {
+        await new Promise((done) => setTimeout(done, pauseMs));
+      }
+    }
+  }
+  throw last;
+}
+
+/** Navigate with a bounded retry: the store or the chat going down aborts a load. */
+export async function gotoWithRetry(page, url, options = {}, attempts = 3, pauseMs = 1500) {
+  return retry(async (attempt) => {
+    await page.goto(url, { waitUntil: 'networkidle', ...options });
+    return attempt;
+  }, attempts, pauseMs);
+}
+
 /** A separate context permits axe's inline instrumentation without weakening the walk. */
 export async function scanLogsAxe(browser, page, variant, source, screenshot) {
   const url = page.url();
@@ -56,35 +80,43 @@ const UNAVAILABLE = {
 };
 
 /** Observe the navigation's own record answer before judging its rendered status. */
-export async function observeUnavailableLogs(page, url, language) {
+export async function observeUnavailableLogs(page, url, language, attempts = 3, pauseMs = 1500) {
   const origin = new URL(url).origin;
-  const [response] = await Promise.all([
-    page.waitForResponse((response) => {
+  const words = UNAVAILABLE[language];
+  return retry(async () => {
+    // A navigation that aborts leaves the response waiter pending; its own
+    // catch keeps that promise from rejecting unhandled after the retry.
+    const waiting = page.waitForResponse((response) => {
       const target = new URL(response.url());
       return target.origin === origin && target.pathname === '/api/logs'
         && target.searchParams.has('from') && target.searchParams.has('to')
         && target.searchParams.get('status') === '1'
         && response.request().method() === 'GET';
-    }, { timeout: 30000 }),
-    page.goto(url, { waitUntil: 'networkidle' }),
-  ]);
-  const answer = await response.json();
-  if (answer?.state !== 'unavailable' || typeof answer.reason !== 'string' || !answer.reason) {
-    throw new Error('the page did not receive an unavailable record answer with a reason');
-  }
-  const words = UNAVAILABLE[language];
-  const reasonText = words.reasons[answer.reason] ?? words.reasons.unreachable;
-  await page.waitForFunction(({ label, reason }) => {
-    const list = document.querySelector('section[aria-live="polite"]');
-    return list?.getAttribute('aria-busy') === 'false'
-      && [...document.querySelectorAll('[role="status"]')].some((node) => {
-        const text = node.textContent ?? '';
-        return text.includes(label) && text.includes(reason);
-      });
-  }, { label: words.label, reason: reasonText }, { timeout: 30000 });
-  const text = await page.getByRole('status').filter({ hasText: words.label }).first().innerText();
-  const list = page.locator('section[aria-live="polite"]');
-  const records = await page.locator('section[aria-live="polite"] ul li:not([role="note"])').count();
-  const empty = (await list.innerText()).includes(words.empty);
-  return { reason: answer.reason, text: text.trim(), records, empty };
+    }, { timeout: 30000 }).catch(() => null);
+    const [response] = await Promise.all([
+      waiting,
+      page.goto(url, { waitUntil: 'networkidle' }),
+    ]);
+    if (response === null) throw new Error('the page answered no record request');
+    const answer = await response.json();
+    if (answer?.state !== 'unavailable' || typeof answer.reason !== 'string' || !answer.reason) {
+      throw new Error('the page did not receive an unavailable record answer with a reason');
+    }
+    const reasonText = words.reasons[answer.reason] ?? words.reasons.unreachable;
+    await page.waitForFunction(({ label, reason }) => {
+      const list = document.querySelector('section[aria-live="polite"]');
+      return list?.getAttribute('aria-busy') === 'false'
+        && [...document.querySelectorAll('[role="status"]')].some((node) => {
+          const text = node.textContent ?? '';
+          return text.includes(label) && text.includes(reason);
+        });
+    }, { label: words.label, reason: reasonText }, { timeout: 30000 });
+    const text = await page.getByRole('status').filter({ hasText: words.label }).first().innerText();
+    const list = page.locator('section[aria-live="polite"]');
+    const records = await page
+      .locator('section[aria-live="polite"] ul li:not(:has([role="note"]))')
+      .count();
+    const empty = (await list.innerText()).includes(words.empty);
+    return { reason: answer.reason, text: text.trim(), records, empty };
+  }, attempts, pauseMs);
 }
