@@ -144,6 +144,19 @@ describe('a fake node for the evict walk', () => {
     expect(run.status).toBe(0);
   }, 30000);
 
+  it('counts a day dropped after the flood window but before the count', () => {
+    // The run crossed midnight and the evictor's next run removed today's day,
+    // which held every writer line; only the flood window's drops were read.
+    const run = harness('evict-writer-late-drop');
+    expect(run.notes.join('\n')).toContain(
+      'wrote 3, found 1, dropped with its day 2, lost 0',
+    );
+    expect(run.notes.join('\n')).toContain('after the flood window');
+    expect(run.passes.join('\n')).toContain('2 dropped with its day, 0 lost');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 30000);
+
   it('fails a row lost in a day no drop names and outside a detach window', () => {
     const run = harness('evict-writer-lost');
     expect(run.notes.join('\n')).toContain('dropped with its day 0, lost 2');
@@ -181,6 +194,24 @@ describe('a fake node for the evict walk', () => {
     expect(pass).toContain('the API says the store is not read-only after the filler is removed');
     expect(run.failures).toEqual([]);
     expect(run.status).toBe(0);
+  }, 60000);
+
+  it('judges the read-only line on a known evictor state after unreadable polls', () => {
+    const run = harness('evict-read-only-unknown-first');
+    const pass = run.passes.join('\n');
+    expect(pass).toContain('the page shows read-only without blaming the evictor');
+    expect(pass).toContain('without a known value');
+    expect(run.failures).toEqual([]);
+    expect(run.status).toBe(0);
+  }, 60000);
+
+  it('fails as its own result when no poll has a known evictor state', () => {
+    const run = harness('evict-read-only-unknown-all');
+    const failure = run.failures.join('\n');
+    expect(failure).toContain('the evictor\'s state while the store is read-only');
+    expect(failure).toContain('carried both a staleness and the CronJob');
+    expect(run.invalid.join('\n')).toContain('cannot be told apart from a failing evictor');
+    expect(run.status).toBe(1);
   }, 60000);
 
   it('fails when the status read blames the evictor', () => {
