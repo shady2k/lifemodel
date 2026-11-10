@@ -13,7 +13,11 @@ import { describe, expect, it } from 'vitest';
 import {
   PAGE_SIZE,
   axeSummary,
+  identityCounts,
+  identityKey,
   missingModules,
+  overDrawnIdentities,
+  storedIdentityCounts,
   describeIdentity,
   identityOf,
   identityOfAnswer,
@@ -89,6 +93,52 @@ describe('the second page against the first', () => {
     const repeated = repeatedRecords(first, appended);
     expect(repeated).toHaveLength(1);
     expect(describeIdentity(repeated[0])).toBe('2026-11-09T21:00:01.000Z | core | collector heartbeat');
+  });
+});
+
+describe('a record the store holds twice', () => {
+  const entry = drawn(
+    '2026-11-10T21:21:10.234443357Z',
+    'walk-crash-writer',
+    'walk-crash walk-crash-saturated-1794345636703 seq=100012417'
+  );
+
+  it('counts each drawn identity, and each stored row and full identity', () => {
+    expect(identityCounts([entry, entry]).get(identityKey(entry))).toBe(2);
+    const stored = storedIdentityCounts([
+      { time: entry.time, fields: { module: entry.module, pod: 'pod-a' }, message: ` ${entry.message} ` },
+      { time: entry.time, fields: { module: entry.module, pod: 'pod-a' }, message: entry.message },
+      { time: entry.time, fields: { module: entry.module, pod: 'pod-b' }, message: entry.message },
+    ]);
+    expect(stored.get(identityKey(entry))?.rows).toBe(3);
+    expect(
+      stored
+        .get(identityKey(entry))
+        ?.identities.get([entry.time, entry.module, 'pod-a', entry.message].join('\u0000'))
+    ).toBe(2);
+  });
+
+  it('passes a cross-page repeat the store holds twice and fails one it holds once', () => {
+    const counts = identityCounts([entry, entry]);
+    expect(
+      overDrawnIdentities(
+        counts,
+        [entry],
+        storedIdentityCounts([
+          { time: entry.time, fields: { module: entry.module, pod: 'pod-a' }, message: entry.message },
+          { time: entry.time, fields: { module: entry.module, pod: 'pod-a' }, message: entry.message },
+        ])
+      )
+    ).toEqual([]);
+    const over = overDrawnIdentities(
+      counts,
+      [entry],
+      storedIdentityCounts([
+        { time: entry.time, fields: { module: entry.module, pod: 'pod-a' }, message: entry.message },
+      ])
+    );
+    expect(over).toHaveLength(1);
+    expect(over[0]).toMatchObject({ drawn: 2, stored: 1 });
   });
 });
 
