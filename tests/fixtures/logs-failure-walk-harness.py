@@ -365,6 +365,8 @@ def restore_compare(walk, fixture):
                          'model': 'r', 'keySet': True}}
     print('COMPARE ' + json.dumps({'same': walk.slots_agree(same, {
         'primary': dict(same['primary']), 'reserve': None}),
+        'keyOnly': walk.slots_agree(same, {
+            'primary': {**same['primary'], 'keySet': False}, 'reserve': None}),
         'changed': walk.slots_agree(same, other)}))
     return report
 
@@ -395,6 +397,58 @@ def capture_restore(walk, fixture):
     print('AGREE ' + json.dumps({
         name: walk.capture_agrees(saved, read, now) for name, (saved, read) in cases.items()
     }))
+    return report
+
+
+def core_failure_record(conversation, message):
+    return {'time': '2026-11-10T09:37:02.000Z', 'message': message,
+            'fields': {'module': 'core', 'level': 'error', 'pod': 'core-0',
+                       'conversation_id': conversation}}
+
+
+def stored_core_line(conversation):
+    """The record as the collector stores it: the core's whole JSON line in `message`."""
+    return json.dumps({'level': 50, 'time': 1794241022000,
+                       'conversation_id': conversation, 'msg': 'COGNITION failed'})
+
+
+@mode('marker-turn')
+def marker_turn(walk, fixture):
+    """The stored line is JSON whose `msg` names the failure: the wait finds it."""
+    report = walk.Report()
+    loader = FakeLoader({})
+    loader.log_answers = [{'state': 'ok', 'count': 1,
+                           'records': [core_failure_record('rcpt_x', stored_core_line('rcpt_x'))]}]
+    found = walk.wait_marker_turn(report, options(core_bound=2), loader, 0,
+                                  {'fields': {'conversation_id': 'rcpt_x'}}, 'a marker')
+    print('TURN ' + json.dumps({'found': found, 'text': loader.log_calls[0].get('text')}))
+    return report
+
+
+@mode('marker-turn-other')
+def marker_turn_other(walk, fixture):
+    """A stored line whose msg is another event is not the final failure."""
+    report = walk.Report()
+    loader = FakeLoader({})
+    other = json.dumps({'level': 50, 'msg': 'LLM request failed'})
+    loader.log_answers = [{'state': 'ok', 'count': 1,
+                           'records': [core_failure_record('rcpt_x', other)]}]
+    found = walk.wait_marker_turn(report, options(core_bound=0), loader, 0,
+                                  {'fields': {'conversation_id': 'rcpt_x'}}, 'a marker')
+    print('TURN ' + json.dumps({'found': found}))
+    return report
+
+
+@mode('marker-turn-plain')
+def marker_turn_plain(walk, fixture):
+    """An older core logs plain text; the line is its own message."""
+    report = walk.Report()
+    loader = FakeLoader({})
+    loader.log_answers = [{'state': 'ok', 'count': 1,
+                           'records': [core_failure_record('rcpt_x', 'COGNITION failed')]}]
+    found = walk.wait_marker_turn(report, options(core_bound=2), loader, 0,
+                                  {'fields': {'conversation_id': 'rcpt_x'}}, 'a marker')
+    print('TURN ' + json.dumps({'found': found}))
     return report
 
 
@@ -532,6 +586,121 @@ def web_forward(walk, fixture):
 @mode('no-csrf')
 def no_csrf(walk, fixture):
     return early_exit_mode(walk, {**fixture, 'mode': 'no-csrf'})
+
+
+
+@mode('reserve-preflight')
+def reserve_preflight(walk, fixture):
+    report = walk.Report()
+    primary = {'kind': 'openai', 'baseUrl': 'https://owner.example/v1',
+               'model': 'owner', 'keySet': True}
+    loader = FakeLoader({'jsonAnswers': {'/api/model': {
+        'primary': primary, 'reserve': dict(primary)}}})
+    cluster = FakeCluster({})
+    walk.Loader = lambda *args: loader
+    walk.Cluster = lambda *args: cluster
+    walk.read_password = lambda path: 'fixture-only'
+    status = walk.main(['--password-file', 'fixture-only'])
+    print('PREFLIGHT ' + json.dumps({'ok': status == 0, 'writes': loader.requests,
+                                    'clusterWrites': cluster.calls}))
+    report.failures = int(status != 0)
+    return report
+
+
+@mode('put-key-omitted')
+def put_key_omitted(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({'requestAnswers': [{'status': 200}]})
+    walk.put_slot(loader, 'token', 'primary', {
+        'baseUrl': 'https://owner.example/v1', 'model': 'owner', 'keySet': True})
+    print('BODY ' + loader.requests[0]['body'])
+    return report
+
+
+@mode('store-unavailable')
+@mode('inventory-unavailable')
+def store_unavailable(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({'jsonAnswers': {'/api/logs/modules':
+        None if fixture.get('inventory') else {'state': 'ok', 'modules': ['core']}},
+        'logAnswers': [{'state': 'unavailable'}]})
+    counts = walk.store_counts_for(report, loader, ['marker'], 0)
+    print('SEARCH ' + json.dumps({'counts': counts, 'calls': len(loader.log_calls)}))
+    return report
+
+
+@mode('marker-final-turn')
+def marker_final_turn(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({})
+    calls = []
+    def logs(params):
+        calls.append(dict(params))
+        line = record('error', conversation=params.get('conversation_id'), module='core')
+        line['message'] = ('Agentic loop failed' if len(calls) == 1
+                           else 'COGNITION failed')
+        return {'state': 'ok', 'records': [line]}
+    loader.logs = logs
+    walk.time.sleep = lambda seconds: None
+    ok = walk.wait_marker_turn(report, options(core_bound=2), loader, 0,
+                               record('error', 'bad_response', 'rcpt_x'), 'marker')
+    print('TURN ' + json.dumps({'ok': ok, 'calls': calls}))
+    return report
+
+
+@mode('marker-reason-fields')
+def marker_reason_fields(walk, fixture):
+    report = walk.Report()
+    line = record('error', 'bad_response', 'rcpt_x', reason='array')
+    del line['fields']['reason_path']
+    print('REASON ' + json.dumps(walk.reason_complete(line)))
+    return report
+
+
+@mode('marker-ordering')
+def marker_ordering(walk, fixture):
+    report = walk.Report()
+    events = []
+    walk.capture_setting = lambda loader: {'until': None}
+    walk.put_capture_checked = lambda report, loader, token, body, what: (
+        {'until': None} if what == 'off' else {'until': 'future'})
+    walk.point_slots = lambda *args: (True, 'set')
+    walk.wait_slots_live = lambda *args: True
+    walk.upstream_count = lambda *args: 0
+    walk.chat_intake = lambda *args: (True, 'accepted')
+    walk.wait_planted = lambda *args: True
+    sequence = {'n': 0}
+    def gateway(loader, started, conversation, expected, bound):
+        sequence['n'] += 1
+        line = record('error', expected, 'turn-%d' % sequence['n'], reason='array')
+        events.append('gateway')
+        return line
+    walk.wait_record = gateway
+    def core(report, options, loader, started, line, label):
+        events.append('core-final-' + line['fields']['conversation_id'])
+        return True
+    walk.wait_marker_turn = core
+    def searches(report, loader, markers, started):
+        events.append('search')
+        return {'all:' + marker: 0 for marker in markers}
+    walk.store_counts_for = searches
+    walk.wait_capture_text = lambda *args: ('', [1, 1], 2)
+    ok = walk.case_marker(report, options(markers={'non2xx': 'a', 'refused': 'b'}),
+                          FakeLoader({}), 'token', FakeCluster({}), {'web_port': 1234})
+    print('ORDER ' + json.dumps({'ok': ok, 'events': events}))
+    return report
+
+@mode('restore-key-lost')
+def restore_key_lost(walk, fixture):
+    report = walk.Report()
+    primary = {'kind': 'openai', 'baseUrl': 'https://owner.example/v1',
+               'model': 'owner', 'keySet': True}
+    loader = FakeLoader({'requestAnswers': [{'status': 200}],
+        'jsonAnswers': {'/api/model': {'primary': {**primary, 'keySet': False},
+                                     'reserve': None}}})
+    walk.restore(report, options(), loader, 'token', FakeCluster({}),
+                 {'slots': {'primary': primary, 'reserve': None}, 'hadReserve': False})
+    return report
 
 
 def run_mode(mode_name, walk_path, fixture_path):

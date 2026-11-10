@@ -98,7 +98,9 @@ Arguments (defaults are the test VM's)
 
 What it changes and restores
 ----------------------------
-It creates a namespace of its own with a ConfigMap and a host-network pod,
+It refuses an initially configured reserve before any change, because its stored
+credentials cannot be recovered from the public view after deletion. Otherwise it
+creates a namespace of its own with a ConfigMap and a host-network pod,
 writes the model slots (primary and reserve) to point at the stub, and re-enables
 the exchange capture for its own session. The `finally` puts the slots back as
 they were read (the stored key and header values are never read or printed; an
@@ -397,8 +399,27 @@ def model_slots(loader):
     return answer if isinstance(answer, dict) else None
 
 
+def save_slots(report, loader, state):
+    """Refuse an existing reserve before any cluster or settings write."""
+    saved = model_slots(loader)
+    if not isinstance(saved, dict) or not isinstance(saved.get('primary'), dict):
+        report.not_valid('the model slots could not be saved; nothing changed')
+        return False
+    if saved.get('reserve') is not None:
+        report.not_valid('a reserve is already configured; nothing changed: its credentials '
+                         'cannot be restored after deletion')
+        return False
+    state['slots'] = {'primary': saved['primary'], 'reserve': None}
+    state['hadReserve'] = False
+    report.note('the slots are saved for restore: primary set, reserve absent')
+    return True
+
+
 def put_slot(loader, token, name, view):
-    """Write one slot; an omitted key and header list keep the stored ones."""
+    """PUT keeps key/headers via http.ts's merge before model-bao.writeSlot replaces KV.
+
+    Never include either credential field: this walk cannot read them back.
+    """
     body = {'kind': view.get('kind', 'openai'), 'baseUrl': view['baseUrl'],
             'model': view['model']}
     if view.get('reasoningEffort'):
@@ -576,53 +597,6 @@ def failure_verdict(gateway_records, core_records, expected_type):
         detail = '; '.join(problems) + ' (' + detail + ')'
     return {'ok': not problems, 'detail': detail, 'record': record,
             'conversation': conversation}
-
-
-def marker_verdict(store_counts, capture_hits, marker):
-    """Absent from the store with the capture off, only in the capture with it on."""
-    problems = []
-    if not isinstance(store_counts, dict) or not store_counts:
-        problems.append('the store was not searched')
-    else:
-        found = {name: count for name, count in store_counts.items() if count}
-        if found:
-            problems.append('%s found in the store: %s' % (marker, ', '.join(
-                '%s=%d' % item for item in sorted(found.items()))))
-    if not capture_hits:
-        problems.append('%s not found in the exchange capture' % marker)
-    detail = ('%s: %d module search(es), capture hit(s) %d'
-              % (marker, len(store_counts or {}), capture_hits))
-    if problems:
-        detail = '; '.join(problems) + ' (' + detail + ')'
-    return {'ok': not problems, 'detail': detail}
-
-
-def level_verdict(records, upstream, expected):
-    """The final gateway record's level for one request (ADR-016 §9 point 6)."""
-    levels = [field_of(record, 'level') for record in records]
-    errors = [level for level in levels if level == 'error']
-    warns = [level for level in levels if level == 'warn']
-    detail = ('%d gateway record(s): %s; upstream %s'
-              % (len(records), ', '.join(levels) if levels else 'none',
-                 ', '.join('%s=%d' % item for item in sorted(upstream.items())) or 'none'))
-    if expected == 'error':
-        ok = len(errors) == 1
-        if not ok:
-            detail = 'expected one final level=error record (' + detail + ')'
-    elif expected == 'warn-then-success':
-        ok = len(warns) == 1 and not errors
-        if not ok:
-            detail = ('expected one level=warn and no level=error ('
-                      + detail + ')')
-    elif expected == 'no-retry':
-        ok = len(errors) == 1 and upstream.get('walk-ok', 0) == 0
-        if not ok:
-            detail = ('expected one level=error and the reserve never contacted ('
-                      + detail + ')')
-    else:
-        ok = False
-        detail = 'unknown expectation ' + str(expected)
-    return {'ok': ok, 'detail': detail, 'levels': levels}
 
 
 def marker_verdict(store_counts, capture_hits, marker):
@@ -991,18 +965,74 @@ def exchange_text(options, bound):
         time.sleep(5)
 
 
-def store_counts_for(loader, markers, from_ms):
-    """How many records each marker has, over all modules and over each module."""
-    modules_answer = loader.json('/api/logs/modules')
-    modules = (modules_answer or {}).get('modules') if isinstance(modules_answer, dict) else []
-    modules = [name for name in (modules or []) if isinstance(name, str)]
+def store_counts_for(report, loader, markers, from_ms):
+    """Successful inventory and counts are required to claim absence."""
+    answer = loader.json('/api/logs/modules')
+    modules = answer.get('modules') if isinstance(answer, dict) else None
+    if (not isinstance(answer, dict) or answer.get('state') != 'ok'
+            or not isinstance(modules, list) or not modules
+            or any(not isinstance(name, str) for name in modules)):
+        report.fail('the module inventory answers before marker searches')
+        report.not_valid('no module inventory: absence cannot be judged')
+        return None
     counts = {}
     for marker in markers:
-        counts['all:' + marker] = record_count(loader, from_ms, text=marker) or 0
-        for name in modules:
-            counts[name + ':' + marker] = record_count(
-                loader, from_ms, text=marker, module=name) or 0
+        for module in [None, *modules]:
+            count = record_count(loader, from_ms, text=marker, module=module)
+            if count is None:
+                report.fail('the marker search answers', 'module=%s' % (module or 'all'))
+                report.not_valid('a marker search was unavailable: absence cannot be judged')
+                return None
+            counts[(module or 'all') + ':' + marker] = count
     return counts
+
+
+def reason_complete(record):
+    return all(field_of(record, name) for name in ('reason_check', 'reason_path', 'reason_got'))
+
+
+def message_of(record):
+    """A record's own `msg`.
+
+    The core's stdout is one JSON line per record (ADR-016 §9 point 2) and the
+    collector stores it as `_msg`, so the loader's `message` is that whole line,
+    not the text the process logged. The `msg` field is what names the event; a
+    plain-text line (an older core) is its own message.
+    """
+    raw = record.get('message')
+    if isinstance(raw, str):
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            value = None
+        if isinstance(value, dict) and isinstance(value.get('msg'), str):
+            return value['msg']
+        return raw
+    return field_of(record, 'msg')
+
+
+def wait_marker_turn(report, options, loader, started, record, label):
+    """The final core failure must arrive through the collector before absence reads."""
+    conversation = field_of(record, 'conversation_id')
+
+    def final_failure():
+        if not conversation:
+            return None
+        # The text filter keeps the failure in the page even when the window
+        # holds more than the page's 100 lines under that conversation.
+        lines = records_in_window(loader, started, module=CORE_MODULE,
+                                  conversation=conversation, text='COGNITION failed')
+        return next((line for line in lines or []
+                     if field_of(line, 'conversation_id') == conversation
+                     and field_of(line, 'level') == 'error'
+                     and message_of(line) in ('COGNITION failed', 'COGNITION failed (async)')),
+                    None)
+    final = wait_until(time.monotonic() + options.core_bound, 5, final_failure)
+    if not report.check(final is not None, 'the final core failure reaches the collector (%s)'
+                        % label, 'conversation_id=%s' % (conversation or '-')):
+        report.not_valid('no delivered final core failure: marker absence cannot be judged')
+        return False
+    return True
 
 
 def case_marker(report, options, loader, token, cluster, state):
@@ -1041,9 +1071,16 @@ def case_marker(report, options, loader, token, cluster, state):
         report.check(record is not None,
                      'the gateway records the failure of %s' % label,
                      'error_type=%s within %d s' % (expected, options.found_bound))
-        if record is not None:
-            planted.append((label, record, started))
-    off_counts = store_counts_for(loader, markers, now_ms() - 3600_000)
+        if record is None or not wait_marker_turn(
+                report, options, loader, started, record, label):
+            return False
+        planted.append((label, record, started))
+    if len(planted) != 2:
+        report.not_valid('both capture-off marker turns must finish before absence searches')
+        return False
+    off_counts = store_counts_for(report, loader, markers, now_ms() - 3600_000)
+    if off_counts is None:
+        return False
     for marker in markers:
         found = sum(count for name, count in off_counts.items() if name.endswith(':' + marker))
         report.check(found == 0,
@@ -1052,7 +1089,7 @@ def case_marker(report, options, loader, token, cluster, state):
     reason = next((record for label, record, _started in planted if label.startswith('a refused')),
                   None)
     if reason is not None:
-        report.check(field_of(reason, 'reason_check') != '',
+        report.check(reason_complete(reason),
                      'the refused 2xx failure carries reason_check/path/got',
                      'reason_check=%s path=%s got=%s'
                      % (field_of(reason, 'reason_check') or '-',
@@ -1075,13 +1112,21 @@ def case_marker(report, options, loader, token, cluster, state):
         if not wait_slots_live(report, options, state, {model: 1}, 'the marker case again'):
             continue
         before = upstream_count(options, model)
-        chat_intake(state['web_port'], options, 'walk marker %s' % secrets.token_hex(4),
-                    options.chat_bound)
+        started = now_ms()
+        accepted, info = chat_intake(state['web_port'], options,
+                                     'walk marker %s' % secrets.token_hex(4), options.chat_bound)
+        if not report.check(accepted, 'the chat accepts the capture-on marker', info):
+            continue
         if not wait_planted(report, options, model, before, options.found_bound,
                             label + ' with the capture on'):
             continue
-        if wait_record(loader, on_started, None, expected, options.found_bound) is not None:
-            on_planted += 1
+        record = wait_record(loader, started, None, expected, options.found_bound)
+        if record is None or not wait_marker_turn(
+                report, options, loader, started, record, label + ' with capture on'):
+            return False
+        if expected == 'bad_response':
+            report.check(reason_complete(record), 'the capture-on failure carries reason_check/path/got')
+        on_planted += 1
     if on_planted < 2:
         report.not_valid('the second plant did not reach the store for both markers: the '
                          'capture cannot be read back for them')
@@ -1092,7 +1137,9 @@ def case_marker(report, options, loader, token, cluster, state):
                     'the reader answered %d exchange(s) in the window and %s hit(s) within %d s'
                     % (exchanges, ', '.join('%d marker hit(s)' % hit for hit in hits),
                        options.marker_bound))
-    on_counts = store_counts_for(loader, markers, on_started)
+    on_counts = store_counts_for(report, loader, markers, on_started)
+    if on_counts is None:
+        return False
     for marker, hit in zip(markers, hits):
         report.check(hit > 0, 'with the capture on, %s is in the capture' % marker,
                      '%d hit(s) in the reader\'s answer; the marker is this run\'s own'
@@ -1181,6 +1228,9 @@ def slots_agree(saved, current):
 
 def restore(report, options, loader, token, cluster, state):
     """Put the slots, the capture and the stub back, and say what was done."""
+    if not state.get('slots') and not state.get('created_namespace'):
+        print('RESTORE nothing changed')
+        return
     restored = True
     saved = state.get('slots')
     if saved is not None and loader is not None and token is not None:
@@ -1232,6 +1282,7 @@ def restore(report, options, loader, token, cluster, state):
     print('RESTORE slots as they were read (a key and header values were never read or '
           'printed), capture back to its saved setting, stub namespace deleted=%s, gateway '
           'left running' % str(bool(state.get('created_namespace'))).lower())
+    report.check(restored, 'the saved settings are restored, including primary keySet')
     if not restored:
         print('RESTORE incomplete: check the model slots and the capture setting by hand')
 
@@ -1259,12 +1310,8 @@ def run(report, options, loader, cluster, state):
         if not report.check(bool(token), 'the loader answers a CSRF token', 'GET /api/state'):
             return stopped(report, 'the loader answered no CSRF token', 'GET /api/state')
         state['token'] = token
-        saved = model_slots(loader) or {}
-        state['slots'] = {'primary': saved.get('primary'), 'reserve': saved.get('reserve')}
-        state['hadReserve'] = saved.get('reserve') is not None
-        report.note('the slots are saved for restore: primary %s, reserve %s'
-                    % ('set' if saved.get('primary') else 'absent',
-                       'set' if saved.get('reserve') else 'absent'))
+        if state.get('slots') is None and not save_slots(report, loader, state):
+            return False
         failure = case_failure(report, options, loader, token, cluster, state)
         marker = case_marker(report, options, loader, token, cluster, state) \
             if failure else False
@@ -1326,6 +1373,8 @@ def main(argv=None):
         status = loader.login(secret)
         if not report.check(status == 200, 'the loader logs in',
                             'POST /api/login answered %d' % status):
+            return False
+        if not save_slots(report, loader, state):
             return False
         address = options.node_address or node_address(cluster)
         if not report.check(bool(address), 'the node has a LAN address', address or 'none'):
