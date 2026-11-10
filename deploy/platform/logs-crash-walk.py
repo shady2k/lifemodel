@@ -1,93 +1,42 @@
 #!/usr/bin/env python3
-"""WALK-LOGS-CRASH: what a collector crash loses, at the buffer's edge
-(ADR-016 L07, §6).
+"""WALK-LOGS-CRASH (ADR-016 L07, §6): measured collector crash losses.
 
 What it proves
 --------------
-1. The saturated crash: with the store scaled to zero (its Deployment), a writer
-   pod writes numbered lines with a run id until the sink's buffer is at its
-   configured maximum - `vector_buffer_size_events` read from the collector's own
-   exporter, with `vector_component_received_events_total` for the source well
-   above `vector_buffer_max_size_events` - and if that state is not reached
-   within --fill-bound the walk prints TEST NOT VALID and fails. The walk then
-   `kill -9`s the **vector process** by its host pid, read with
-   `k3s crictl inspect` for the collector's container: a pid of 1 (the pause
-   container, not vector) means nothing was killed, which also fails.
-2. Then the store returns, the collector recovers (bounded), and the walk counts
-   through the loader's logs API: lines written, delivered, missing, duplicated,
-   and the collector's restart count. Which numbered lines are still in the
-   kubelet's files under `/var/log/pods/<writer pod>/` is read on the node, so a
-   missing line is classed as "still in the kubelet's files" or "rotated away".
-3. The verdict is the one L07 states, not one judged afterwards: every line still
-   in the kubelet's files is delivered at least once, duplicates are allowed and
-   counted, and a line lost while still in those files is a FAIL whose detail
-   names its sequence numbers. Losing a line the kubelet has rotated away is
-   allowed and said so.
-4. The unsaturated crash - the same, with the buffer below its maximum - is a
-   separate NOTE block: informative, never a substitute.
+Store-down saturation uses the collector exporter on 127.0.0.1:9598 via a
+port-forward. Disk buffers expose vector_buffer_size_bytes and
+vector_buffer_max_size_bytes, vector_buffer_size_events, and received/sent
+buffer event totals with component_id="logs-store", buffer_type="disk".
+Vector 0.61 reserves 128 MiB of the configured 320 MiB for an outstanding
+segment: require at least 95% of the 192 MiB writable bound (182.4 MiB).
+Memory buffers retain vector_buffer_max_size_events and event-count saturation.
+No maximum, counters or measured saturation means TEST NOT VALID.
 
-How the buffer is read, and when it cannot be
----------------------------------------------
-This walk reads them from the collector's own Prometheus exporter
-(`--metrics-port`, default 9598), declared in `deploy/platform/logs/config/
-vector.yaml` as a `sources.internal_metrics` of type `internal_metrics` and a
-`sinks.metrics` of type `prometheus_exporter` on 127.0.0.1:9598 - the pod's
-loopback, read through a kubectl port-forward (ADR-016 §6). It never guesses: when
-nothing answers there, or the answer carries no buffer gauge, the walk prints
-TEST NOT VALID with the reason and fails; the unsaturated case still runs and is
-reported.
-
-Arguments (defaults are the test VM's)
--------------------------------------
-  --password-file PATH   the loader's login password, read from this file and
-                         never printed (required)
-  --loader-host HOST     where the walk connects (default boot-lifemodel.local)
-  --loader-port PORT     the loader's TLS port (default 443)
-  --origin-host HOST     the host the loader answers on (default
-                         boot-lifemodel.local)
-  --ca-file PATH         verify the loader's certificate with this CA
-  --kubectl COMMAND      default "k3s kubectl"
-  --namespace NS         the store's namespace (default lifemodel-system)
-  --store NAME           the store's Deployment (default logs-store)
-  --collector-namespace NS  the collector's namespace (default lifemodel-logs)
-  --collector NAME       the collector's DaemonSet (default logs-collector)
-  --writer-namespace NS  where the writer pod runs; its own namespace
-                         (default lifemodel-logs-walk)
-  --metrics-port PORT    the collector's Prometheus exporter (default 9598)
-  --fill-bound N         bound on reaching a full buffer (default 600 s)
-  --recover-bound N      bound on the collector and the store recovering
-                         (default 300 s)
-  --writer-pods N        paced writer pods (default 3)
-  --writer-rate N        total target lines/s (default/maximum 1700), about five
-                         minutes for 500,000 events; source achieved rate reported
-  --max-load N           stop if node /proc/loadavg one-minute load exceeds this
-                         finite positive bound; default max(baseline + 2 * CPUs,
-                         4 * CPUs), read before the watchdog and writers start;
-                         unavailable baseline or CPU count is not valid
-  --restore-bound N      retry bound per restore step (default 600 s), commands
-                         get 180 s, including after timeout or escaping exceptions
-  --memory-limit-bytes N the collector container's memory limit, the ceiling the
-                         buffer must fit in (default 300 MiB, the deployed limit)
-  --saturated-seconds N  how long the saturated writer keeps writing after the
-                         buffer is full before the kill (default 15)
-  --unsaturated-lines N  lines the unsaturated case writes (default 5000)
-  --settle-seconds N     how long the store may take to settle before counting
-                         (default 60)
-  --deadline-seconds N   the whole walk's bound (default 3600)
+Kill the actual Vector host pid with kill -9, never pid 1. Record cgroup memory
+during fill, immediately before the kill, and after restart. Separately restart
+the collector while the store stays down; observe its restart before bringing
+the store back. Count every numbered line still in current/rotated files under
+/var/log/pods for all writer pods and this run. Every retained line must arrive
+at least once; duplicates are allowed. Any observed gap is FAIL, not excused by
+the source's lack of acknowledgements. Passing a run does not prove a source
+replay guarantee. The unsaturated crash remains informative, not a substitute.
 
 What it changes and restores
 ----------------------------
-It creates a namespace of its own and a writer pod in it, scales the store's
-Deployment to zero and back, and kills the collector's vector process once or
-twice. The `finally` scales the store back to the replicas it read, waits for it
-to be Ready, deletes the writer pod and its namespace, waits for the collector to
-be Running again, and prints a RESTORE line saying so.
+The walk uses k3s kubectl for cluster changes, and node crictl for the host pid
+and memory. It connects to boot-lifemodel.local by default; --password-file
+names the credential file, whose contents are never printed.
+The workload is paced and bounded by node load, fill/recovery deadlines and the
+whole-walk deadline. A watchdog interrupts blocked work at excess load. Finally,
+retry deletion of writers, restore the original store replicas/readiness, delete
+the owned namespace and wait for the collector, even on exceptions/timeouts.
 
 What it does not cover
 ----------------------
-What the collector does while its own pod is being replaced by k3s (that is the
-restart count, read and reported); the kubelet's rotation policy is not changed,
-so a run whose files rotated faster than the kill is stated, not fixed.
+Pre-buffer or unsynchronized data is not inherently durable; this strict walk
+reports actual missing retained lines, not guaranteed checkpoint replay. It does
+not change kubelet rotation or recover files removed with a deleted writer pod.
+Use --help for arguments. Run on the node with crictl and kubelet-file access.
 """
 import argparse
 import http.client
@@ -99,6 +48,8 @@ import sys
 import time
 import signal
 import threading
+import shlex
+import subprocess
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -120,6 +71,13 @@ WRITER_LINE = re.compile(r'walk-crash (\S+) seq=(\d+)')
 BUFFER_SIZE = 'vector_buffer_size_events'
 BUFFER_MAX = 'vector_buffer_max_size_events'
 RECEIVED = 'vector_component_received_events_total'
+SENT = 'vector_component_sent_events_total'
+BUFFER_RECEIVED = 'vector_buffer_received_events_total'
+BUFFER_SENT = 'vector_buffer_sent_events_total'
+BUFFER_BYTES = 'vector_buffer_size_bytes'
+BUFFER_MAX_BYTES = 'vector_buffer_max_size_bytes'
+DISK_SEGMENT_RESERVATION = 128 * MIB
+DISK_FILL_FRACTION = 0.95
 WRITER_SCRIPT = (
     "const run=process.argv[1],seconds=Number(process.argv[2]),base=Number(process.argv[3]);"
     "const rate=Number(process.argv[4]),batch=Math.min(20,Math.max(1,Math.floor(rate/50)));"
@@ -200,6 +158,8 @@ def parse_metrics(text, names):
             value = float(sample[1])
         except ValueError:
             continue
+        if not math.isfinite(value) or value < 0:
+            continue
         labels = sample[0][len(name):]
         key = (name, labels)
         values[key] = values.get(key, 0.0) + value
@@ -217,8 +177,13 @@ def component_value(values, name, component):
     for (sample, labels), value in values.items():
         if sample != name:
             continue
-        if 'component_id="%s"' % component not in labels \
-                and "component_id='%s'" % component not in labels:
+        parsed = dict((key, double or single)
+                      for key, double, single in re.findall(
+                          r"([a-zA-Z_][a-zA-Z_0-9]*)=(?:\"([^\"]*)\"|'([^']*)')", labels))
+        if parsed.get('component_id') != component:
+            continue
+        if name in (BUFFER_BYTES, BUFFER_MAX_BYTES, BUFFER_RECEIVED, BUFFER_SENT) \
+                and parsed.get('buffer_type') != 'disk':
             continue
         return int(value)
     return None
@@ -247,17 +212,31 @@ def read_metrics(options, cluster):
             connection.close()
     finally:
         forward.close()
-    values = parse_metrics(body, {BUFFER_SIZE, BUFFER_MAX, RECEIVED})
-    if not any(sample == BUFFER_SIZE for sample, _labels in values):
-        return None, ('the exporter answered %d bytes but carries no %s'
-                      % (len(body), BUFFER_SIZE))
-    if component_value(values, BUFFER_SIZE, 'logs-store') is None:
-        return None, ('the exporter carries %s but none for component_id="logs-store"' % BUFFER_SIZE)
+    values = parse_metrics(body, {BUFFER_SIZE, BUFFER_MAX, BUFFER_BYTES, BUFFER_MAX_BYTES, RECEIVED, SENT, BUFFER_RECEIVED, BUFFER_SENT})
+    if (component_value(values, BUFFER_SIZE, 'logs-store') is None
+            and component_value(values, BUFFER_BYTES, 'logs-store') is None):
+        return None, 'the exporter carries no buffer gauge for component_id="logs-store"'
     return values, ''
 
 
 def buffer_state(values):
-    """The sink's buffer, its maximum and the source's received counter."""
+    """Disk bytes or memory events; never compare event totals with bytes.
+
+    Vector 0.61 disk_v2 reserves one 128 MiB segment from configured max_size
+    for the outstanding reader file (common.rs get_max_buffer_size). Exported
+    max_size remains the configured bound; size counts unacknowledged bytes.
+    """
+    maximum = component_value(values, BUFFER_MAX_BYTES, 'logs-store')
+    if maximum is not None:
+        return {
+            'size': component_value(values, BUFFER_BYTES, 'logs-store'),
+            'max': maximum, 'writable_max': maximum - DISK_SEGMENT_RESERVATION,
+            'unit': 'bytes',
+            'events': component_value(values, BUFFER_SIZE, 'logs-store'),
+            'received': component_value(values, BUFFER_RECEIVED, 'logs-store'),
+            'sent': component_value(values, BUFFER_SENT, 'logs-store'),
+            'source_received': component_value(values, RECEIVED, 'kubernetes'),
+        }
     return {
         'size': component_value(values, BUFFER_SIZE, 'logs-store'),
         'max': component_value(values, BUFFER_MAX, 'logs-store'),
@@ -266,8 +245,15 @@ def buffer_state(values):
 
 
 def saturated(state):
-    """The state L07 asks for: the buffer at its maximum, well fed."""
+    """Memory: full in events. Disk: within 5% of the writable byte bound."""
     size, maximum, received = state.get('size'), state.get('max'), state.get('received')
+    if state.get('unit') == 'bytes':
+        writable, sent = state.get('writable_max'), state.get('sent')
+        events = state.get('events')
+        return (size is not None and writable is not None and writable > 0
+                and size >= writable * DISK_FILL_FRACTION and size <= maximum
+                and received is not None and sent is not None and events is not None
+                and events > 0 and received > sent)
     return (size is not None and maximum is not None and received is not None
             and size >= maximum and maximum > 0 and received > maximum)
 
@@ -323,12 +309,20 @@ def collector_running(cluster, options):
                                                    (pod.get('metadata') or {}).get('name') or '')
 
 
+def node_run(args):
+    """Bounded node command, never routed through kubectl."""
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise WalkError('node_command_failed:' + type(error).__name__) from None
+
+
 def vector_pid(cluster, options):
     """The vector process's host pid from `k3s crictl inspect`: (pid, detail)."""
     pod = collector_pod_name(cluster, options)
     if not pod:
         return None, 'the collector has no pod'
-    listing = cluster.run([options.crictl, 'ps', '--name', pod, '--output', 'json'])
+    listing = node_run(shlex.split(options.crictl) + ['ps', '--name', pod, '--output', 'json'])
     if listing.returncode != 0:
         return None, 'crictl ps refused: %s' % tail(listing.stderr)
     try:
@@ -342,7 +336,7 @@ def vector_pid(cluster, options):
             target = container.get('id')
     if not target:
         return None, 'crictl ps lists no logs-collector container for %s' % pod
-    inspected = cluster.run([options.crictl, 'inspect', target])
+    inspected = node_run(shlex.split(options.crictl) + ['inspect', target])
     if inspected.returncode != 0:
         return None, 'crictl inspect refused: %s' % tail(inspected.stderr)
     try:
@@ -461,30 +455,26 @@ def wait_writer(report, options, cluster, run_id):
     return False
 
 
-def kubelet_lines(pod_name, options):
-    """The numbered lines still in the kubelet's files for the writer's pod."""
-    root = os.path.join('/var/log/pods', pod_name)
+def kubelet_lines(pod_name, options, run_id=None, root=Path('/var/log/pods')):
+    """Read current and rotated CRI files, scoped to namespace, pod and run."""
     sequences = set()
     try:
-        directories = [os.path.join(root, name) for name in os.listdir(root)]
+        pods = [path for path in Path(root).iterdir()
+                if path.name.startswith(options.writer_namespace + '_' + pod_name + '_')]
+        if not pods:
+            return None
+        for pod in pods:
+            for container in pod.iterdir():
+                for path in container.iterdir():
+                    if '.log' not in path.name:
+                        continue
+                    with path.open('r', encoding='utf8', errors='replace') as handle:
+                        for line in handle:
+                            match = WRITER_LINE.search(line)
+                            if match and (run_id is None or match.group(1) == run_id):
+                                sequences.add(int(match.group(2)))
     except OSError:
         return None
-    for directory in directories:
-        try:
-            files = [os.path.join(directory, name) for name in os.listdir(directory)]
-        except OSError:
-            continue
-        for path in files:
-            if not path.endswith('.log'):
-                continue
-            try:
-                with open(path, 'r', encoding='utf8', errors='replace') as handle:
-                    for line in handle:
-                        match = WRITER_LINE.search(line)
-                        if match:
-                            sequences.add(int(match.group(2)))
-            except OSError:
-                continue
     return sequences
 
 
@@ -553,7 +543,7 @@ def collector_memory(cluster, options):
     pod = collector_pod_name(cluster, options)
     if not pod:
         return None, 'the collector has no pod'
-    listing = cluster.run([options.crictl, 'ps', '--name', pod, '--output', 'json'])
+    listing = node_run(shlex.split(options.crictl) + ['ps', '--name', pod, '--output', 'json'])
     try:
         containers = json.loads(listing.stdout or '{}').get('containers') or []
     except ValueError:
@@ -563,7 +553,7 @@ def collector_memory(cluster, options):
                    == 'logs-collector'), None)
     if not target:
         return None, 'crictl ps lists no logs-collector container'
-    stats = cluster.run([options.crictl, 'stats', target, '--output', 'json'])
+    stats = node_run(shlex.split(options.crictl) + ['stats', target, '--output', 'json'])
     try:
         value = json.loads(stats.stdout or '{}')
     except ValueError:
@@ -572,7 +562,11 @@ def collector_memory(cluster, options):
     for entry in entries:
         memory = (entry or {}).get('memory') or {}
         used = memory.get('usageBytes', memory.get('usage'))
-        if isinstance(used, int) and used > 0:
+        if isinstance(used, dict):
+            used = used.get('value')
+        if isinstance(used, str) and used.isdigit():
+            used = int(used)
+        if isinstance(used, int) and not isinstance(used, bool) and used > 0:
             return used, ''
     return None, 'crictl stats carries no memory figure'
 
@@ -597,7 +591,8 @@ def memory_verdict(peak, limit, buffer_size, maximum, restarts_before, restarts_
                  buffer_size if buffer_size is not None else -1, maximum,
                  restarts_before, restarts_after,
                  (', last termination %s' % reason) if reason else ''))
-    return {'ok': not restarted, 'restarted': restarted, 'detail': detail}
+    return {'ok': not restarted and peak is not None and 0 < peak <= limit,
+            'restarted': restarted, 'detail': detail}
 
 
 def node_load():
@@ -632,11 +627,11 @@ def safe_load(report, options):
     return True
 
 
-def crash_case(report, options, loader, cluster, state, saturated_case):
+def crash_case(report, options, loader, cluster, state, saturated_case, store_down_restart=False):
     """One crash: write, kill, recover, count - saturated or informative."""
     if not safe_load(report, options):
         return False
-    label = 'saturated' if saturated_case else 'unsaturated'
+    label = 'store-down-restart' if store_down_restart else ('saturated' if saturated_case else 'unsaturated')
     metrics, reason = read_metrics(options, cluster) if saturated_case else (None, '')
     state_ok = True
     if saturated_case:
@@ -662,7 +657,19 @@ def crash_case(report, options, loader, cluster, state, saturated_case):
         return False
     if not wait_writer(report, options, cluster, run_id):
         return False
-    started = now_ms()
+    started = now_ms() - seconds * 1000
+    peak = 0
+    def sample_memory():
+        nonlocal peak
+        used, why = collector_memory(cluster, options)
+        if used is None:
+            report.not_valid('collector memory unavailable: ' + why)
+            return False
+        peak = max(peak, used)
+        report.note('collector cgroup usage current=%d peak-observed=%d limit=%d bytes'
+                    % (used, peak, options.memory_limit_bytes))
+        return report.check(used <= options.memory_limit_bytes,
+                            'collector observed memory stays within limit')
     try:
         oom = None
         if saturated_case:
@@ -684,6 +691,8 @@ def crash_case(report, options, loader, cluster, state, saturated_case):
                 report.note('achieved source rate %.0f lines/s; target %.0f lines/s total'
                             % (rate, options.writer_rate))
                 state_now = buffer_state(metrics) if metrics is not None else {}
+                if not sample_memory():
+                    return False
                 if metrics is not None and saturated(state_now):
                     elapsed = max(1.0, time.monotonic() - started_fill)
                     rate = ((state_now.get('received') or 0) - (received_before or 0)) / elapsed
@@ -691,10 +700,14 @@ def crash_case(report, options, loader, cluster, state, saturated_case):
                     report.note('achieved writer rate %.0f lines/s total; target %.0f'
                                 % (emitted / max(1, time.monotonic() - started_fill),
                                    options.writer_rate))
-                    report.pass_('the sink buffer is at its configured maximum',
-                                 'size %d, max %d, received %d, %.0f line(s)/s'
-                                 % (state_now['size'], state_now['max'],
-                                    state_now['received'] or 0, rate))
+                    report.pass_('the sink buffer reached its stated saturation margin',
+                                 json.dumps(state_now, sort_keys=True))
+                    if state_now.get('unit') == 'bytes':
+                        report.note('disk configured maximum=%d bytes; writable=%d bytes; '
+                                    '128 MiB segment reservation plus 5%% writable fill tolerance '
+                                    '(threshold=%.0f bytes), not 95%% of configured maximum'
+                                    % (state_now['max'], state_now['writable_max'],
+                                       state_now['writable_max'] * DISK_FILL_FRACTION))
                     break
                 if time.monotonic() - last_memory >= 10:
                     last_memory = time.monotonic()
@@ -715,8 +728,8 @@ def crash_case(report, options, loader, cluster, state, saturated_case):
                 if time.monotonic() >= fill_deadline:
                     report.not_valid(
                         'the sink buffer never reached its maximum within %d s at this write '
-                        'rate: the last reading was %s (%s); target 1700 line(s)/s total '
-                        'fills 500,000 events in about five minutes'
+                        'rate: the last reading was %s (%s); saturation is never inferred '
+                        'from writer totals'
                         % (options.fill_bound,
                            json.dumps(state_now) if state_now else 'none',
                            reason or 'the exporter answered'))
@@ -737,6 +750,12 @@ def crash_case(report, options, loader, cluster, state, saturated_case):
                 while time.monotonic() < until:
                     if not safe_load(report, options):
                         return False
+                    if not sample_memory():
+                        return False
+                    if collector_restarts(cluster, options) != restarts_before:
+                        report.fail('collector restarted during saturated dwell',
+                                    termination_reason(cluster, options))
+                        return False
                     time.sleep(min(3, max(0, until - time.monotonic())))
         else:
             deadline = time.monotonic() + 60
@@ -751,40 +770,65 @@ def crash_case(report, options, loader, cluster, state, saturated_case):
         if not safe_load(report, options):
             return False
         written = writer_lines(cluster, options, run_id)
+        if not sample_memory():
+            return False
+        restarts_at_kill = collector_restarts(cluster, options)
+        if saturated_case and oom is None and restarts_at_kill != restarts_before:
+            report.fail('collector restarted before the intentional crash',
+                        termination_reason(cluster, options))
+            return False
+        if store_down_restart and not wait_store_down(report, options, cluster):
+            return False
         if oom is None:
             pid, detail = vector_pid(cluster, options)
             if pid is None:
                 report.not_valid('nothing was killed: %s' % detail)
                 return False
-            killed = cluster.run(['kill', '-9', str(pid)]).returncode == 0
+            killed = node_run(['kill', '-9', str(pid)]).returncode == 0
             report.check(killed, 'the vector process is killed by its host pid', detail)
             if not killed:
                 return False
-        if not set_replicas(cluster, options, state['replicas']):
-            report.fail('the store is scaled back up', options.store)
+        if store_down_restart and not wait_until(time.monotonic() + options.recover_bound, 3,
+                lambda: require_safe_load(report, options)
+                and collector_restarts(cluster, options) > restarts_at_kill):
+            report.not_valid('no actual collector restart observed while the store stayed down')
             return False
-        if not wait_until(time.monotonic() + options.recover_bound, 5,
-                          lambda: require_safe_load(report, options) and collector_running(cluster, options)):
-            report.not_valid('the collector did not come back within %d s'
-                             % options.recover_bound)
+        if not recover_after_crash(report, options, cluster, state, store_down_restart):
             return False
-        report.check(wait_until(time.monotonic() + options.recover_bound, 5,
-                                lambda: require_safe_load(report, options) and store_ready(cluster, options)),
-                     'the store answers again', options.store)
+        if not sample_memory():
+            return False
+        # Freeze the evidence set before allowing backlog drain. Writers may
+        # continue; this verdict covers only the retained snapshot, not later lines.
+        written = writer_lines(cluster, options, run_id)
+        kubelet = set()
+        for name in writer_names(options):
+            retained = kubelet_lines(name, options, run_id)
+            if not retained:
+                report.not_valid('no retained numbered lines read for writer ' + name)
+                return False
+            kubelet.update(retained)
+        report.note('retained-kubelet snapshot taken before settling and delivery query')
         until = time.monotonic() + options.settle_seconds
         while time.monotonic() < until:
             require_safe_load(report, options)
             time.sleep(min(3, max(0, until - time.monotonic())))
-        delivered = delivered_lines(loader, started, run_id)
-        pod_name = None
-        pods = cluster.pods(options.writer_namespace, 'app.kubernetes.io/name=' + WRITER_MODULE)
-        if pods:
-            pod_name = (pods[0].get('metadata') or {}).get('name')
-        kubelet = kubelet_lines(pod_name, options) if pod_name else None
-        duplicated = sum(max(0, count - 1) for count in count_deliveries(
-            loader, started, run_id).values())
+        observation = {'counts': None}
+        def target_delivered():
+            require_safe_load(report, options)
+            counts = count_deliveries(loader, started, run_id)
+            observation['counts'] = counts
+            return counts is not None and kubelet.issubset(counts)
+        wait_until(time.monotonic() + options.recover_bound, 3, target_delivered)
+        counts = observation['counts']
+        if counts is None:
+            report.not_valid('delivery query unavailable or incomplete; no valid counts')
+            return False
+        delivered = set(counts)
+        duplicated = sum(max(0, count - 1) for count in counts.values())
         verdict = crash_verdict(written, delivered, kubelet, duplicated)
-        if saturated_case:
+        if saturated_case or store_down_restart:
+            report.note('retained-kubelet delivery is a measured strict verdict, not a source '
+                        'acknowledgement or replay guarantee')
             report.check(verdict['ok'],
                          'every line still in the kubelet\'s files is delivered at least once',
                          verdict['detail'])
@@ -794,7 +838,7 @@ def crash_case(report, options, loader, cluster, state, saturated_case):
             report.note('unsaturated crash (informative): %s; after the kill the collector '
                         'restarted %d time(s)'
                         % (verdict['detail'], collector_restarts(cluster, options)))
-        return True
+        return verdict['ok'] if saturated_case or store_down_restart else True
     finally:
         for name in writer_names(options):
             restore_step(report, 'delete ' + name, lambda name=name: cluster.run(
@@ -804,26 +848,59 @@ def crash_case(report, options, loader, cluster, state, saturated_case):
                 options.restore_bound)
 
 
+def recover_after_crash(report, options, cluster, state, store_down_restart=False):
+    def collector_ready():
+        return require_safe_load(report, options) and collector_running(cluster, options)
+    if store_down_restart:
+        if not wait_until(time.monotonic() + options.recover_bound, 3, collector_ready):
+            report.not_valid('collector did not restart while store remained down')
+            return False
+        report.pass_('collector restarted before restoring the unavailable store')
+    if not set_replicas(cluster, options, state['replicas']):
+        report.fail('the store is scaled back up')
+        return False
+    if not store_down_restart and not wait_until(
+            time.monotonic() + options.recover_bound, 3, collector_ready):
+        report.not_valid('collector did not recover')
+        return False
+    return report.check(wait_until(time.monotonic() + options.recover_bound, 3,
+        lambda: require_safe_load(report, options) and store_ready(cluster, options)),
+        'the store answers again')
+
+
 def count_deliveries(loader, from_ms, run_id):
-    """How many times the API returns each numbered line, paginated."""
+    """One fixed-window, complete pagination attempt; None means retry it."""
     counts = {}
     offset = 0
+    to_ms = str(now_ms())
+    expected = None
     while True:
-        answer = loader.logs({'from': str(from_ms), 'to': str(now_ms()),
-                              'module': WRITER_MODULE, 'text': run_id,
-                              'offset': str(offset), 'limit': '1000'})
-        if answer is None or answer.get('state') != 'ok':
-            break
+        query = {'from': str(from_ms), 'to': to_ms,
+                 'module': WRITER_MODULE, 'text': run_id,
+                 'offset': str(offset), 'limit': '1000'}
+        if expected is not None:
+            query['expected'] = str(expected)
+        answer = loader.logs(query)
+        if answer is None or answer.get('state') != 'ok' or answer.get('incomplete'):
+            return None
+        total = answer.get('count')
+        if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+            return None
+        if expected is None:
+            expected = total
+        elif expected != total:
+            return None
         records = answer.get('records') or []
         for record in records:
             match = WRITER_LINE.search(record.get('message') or '')
             if match and match.group(1) == run_id:
                 sequence = int(match.group(2))
                 counts[sequence] = counts.get(sequence, 0) + 1
-        if len(records) < 1000 or offset + 1000 > int(answer.get('count') or 0):
-            break
-        offset += 1000
-    return counts
+        offset += len(records)
+        if offset == total:
+            return counts
+        if len(records) != 1000 or offset > total:
+            return None
 
 
 def ensure_namespace(report, cluster, options, state):
@@ -843,6 +920,20 @@ def free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(('127.0.0.1', 0))
         return probe.getsockname()[1]
+
+
+def wait_store_down(report, options, cluster):
+    def stopped():
+        require_safe_load(report, options)
+        body = cluster.json(['-n', options.namespace, 'get', 'deployment', options.store,
+                             '-o', 'json'])
+        if body is None:
+            return False
+        return (int((body.get('spec') or {}).get('replicas', -1)) == 0
+                and int((body.get('status') or {}).get('replicas') or 0) == 0
+                and not cluster.pods(options.namespace, 'app.kubernetes.io/name=' + options.store))
+    return report.check(wait_until(time.monotonic() + options.recover_bound, 3, stopped),
+                        'the store has no running or terminating pods')
 
 
 def run(report, options, loader, cluster, state):
@@ -872,12 +963,20 @@ def run(report, options, loader, cluster, state):
     report.pass_('the store is scaled to zero', options.store)
     saturated_ok = crash_case(report, options, loader, cluster, state, True)
     if saturated_ok:
-        # A second, informative case with the buffer below its maximum.
+        # Separately restart while the store remains unavailable, then recover it.
         wait_until(time.monotonic() + 120, 3, lambda: not cluster.pods(
             options.writer_namespace, 'app.kubernetes.io/name=' + WRITER_MODULE))
         if not set_replicas(cluster, options, 0):
-            return saturated_ok
-        time.sleep(5)
+            return False
+        if not wait_store_down(report, options, cluster):
+            return False
+        if not crash_case(report, options, loader, cluster, state, False,
+                          store_down_restart=True):
+            return False
+        if not set_replicas(cluster, options, 0):
+            return False
+        if not wait_store_down(report, options, cluster):
+            return False
         crash_case(report, options, loader, cluster, state, False)
     return saturated_ok
 
