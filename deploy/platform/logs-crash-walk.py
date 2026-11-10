@@ -61,7 +61,9 @@ Arguments (defaults are the test VM's)
   --writer-rate N        total target lines/s (default/maximum 1700), about five
                          minutes for 500,000 events; source achieved rate reported
   --max-load N           stop if node /proc/loadavg one-minute load exceeds this
-                         bound (default/maximum 8); unavailable load is not valid
+                         finite positive bound; default max(baseline + 2 * CPUs,
+                         4 * CPUs), read before the watchdog and writers start;
+                         unavailable baseline or CPU count is not valid
   --restore-bound N      retry bound per restore step (default 600 s), commands
                          get 180 s, including after timeout or escaping exceptions
   --memory-limit-bytes N the collector container's memory limit, the ceiling the
@@ -90,6 +92,7 @@ so a run whose files rotated faster than the kill is stated, not fixed.
 import argparse
 import http.client
 import json
+import math
 import os
 import re
 import sys
@@ -940,7 +943,7 @@ def main(argv=None):
     parser.add_argument('--recover-bound', type=int, default=300)
     parser.add_argument('--writer-pods', type=int, default=3)
     parser.add_argument('--writer-rate', type=float, default=1700)
-    parser.add_argument('--max-load', type=float, default=8.0)
+    parser.add_argument('--max-load', type=float)
     parser.add_argument('--restore-bound', type=int, default=600)
     parser.add_argument('--memory-limit-bytes', type=int, default=300 * 1024 * 1024)
     parser.add_argument('--saturated-seconds', type=int, default=15)
@@ -948,11 +951,27 @@ def main(argv=None):
     parser.add_argument('--settle-seconds', type=int, default=60)
     options = parser.parse_args(argv)
     if (options.writer_pods < 1 or not 0 < options.writer_rate <= 1700
-            or not 0 < options.max_load <= 8 or options.restore_bound < 180):
+            or (options.max_load is not None and
+                (not math.isfinite(options.max_load) or options.max_load <= 0))
+            or options.restore_bound < 180):
         parser.error('require writer-pods >= 1, 0 < writer-rate <= 1700, '
-                     '0 < max-load <= 8 and restore-bound >= 180')
+                     'finite max-load > 0 and restore-bound >= 180')
 
     report = Report()
+    try:
+        baseline = node_load()
+        cpus = os.cpu_count()
+        if not math.isfinite(baseline) or baseline < 0:
+            raise ValueError('invalid baseline')
+        if not isinstance(cpus, int) or cpus <= 0:
+            raise ValueError('invalid CPU count')
+    except (OSError, ValueError, IndexError):
+        report.not_valid('node load baseline or CPU count unavailable; writers not started')
+        return report.result()
+    if options.max_load is None:
+        options.max_load = max(baseline + 2 * cpus, 4 * cpus)
+    report.note('node load baseline %.2f; CPUs %d; load bound %.2f'
+                % (baseline, cpus, options.max_load))
     cluster = Cluster(options.kubectl)
     state = {'created_namespace': False, 'replicas': None, 'run_id': None}
     loader = None
