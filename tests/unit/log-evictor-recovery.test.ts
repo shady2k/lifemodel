@@ -72,24 +72,34 @@ async function fixture(attachedInitially: boolean, detachStatus = 200) {
         lines.push(line);
       },
     });
-  return { directory, requests, events, lines, run, store };
+  return {
+    directory,
+    requests,
+    events,
+    lines,
+    run,
+    store,
+    restart: () => {
+      attached = true;
+    },
+  };
 }
 
-it('removes an already detached day without another detach and logs the drop', async () => {
+it('preserves a still-draining day absent from the list with no drain acknowledgement', async () => {
   const f = await fixture(false);
-  expect(await f.run()).toBe(0);
-  expect(existsSync(f.directory)).toBe(false);
-  expect(f.events).toEqual(['drop']);
+  expect(await f.run()).toBe(1);
+  expect(existsSync(f.directory)).toBe(true);
+  expect(f.requests.map((request) => request.url)).toEqual(['/internal/partition/list']);
+  expect(f.lines).toHaveLength(1);
   expect(JSON.parse(f.lines[0]!)).toMatchObject({
-    level: 'info',
+    level: 'error',
     day: DAY,
-    freedBytes: 4,
-    reason: 'below_threshold',
-    alreadyDetached: true,
+    reason: 'stranded_partition',
+    msg: 'the log evictor removed nothing',
   });
 });
 
-it('finishes the next run after interruption between detach and removal', async () => {
+it('requires a store restart after interruption, then uses a new acknowledged detach', async () => {
   const f = await fixture(true);
   // Simulate termination immediately after a successful store response: no
   // filesystem removal or evictor outcome can run in the terminated process.
@@ -104,10 +114,16 @@ it('finishes the next run after interruption between detach and removal', async 
   expect(f.events).toEqual(['detach']);
   f.lines.length = 0;
   f.events.length = 0;
+  expect(await f.run()).toBe(1);
+  expect(existsSync(f.directory)).toBe(true);
+  expect(JSON.parse(f.lines[0]!)).toMatchObject({ reason: 'stranded_partition', day: DAY });
+  f.restart();
+  f.events.length = 0;
+  f.lines.length = 0;
   expect(await f.run()).toBe(0);
-  expect(f.events).toEqual(['drop']);
+  expect(f.events).toEqual(['detach', 'drop']);
   expect(existsSync(f.directory)).toBe(false);
-  expect(JSON.parse(f.lines[0]!)).toMatchObject({ alreadyDetached: true, day: DAY });
+  expect(JSON.parse(f.lines[0]!)).toMatchObject({ level: 'info', day: DAY });
 });
 
 it('keeps a listed attached day on detach refusal and exposes no key in URLs, logs or diagnostics', async () => {

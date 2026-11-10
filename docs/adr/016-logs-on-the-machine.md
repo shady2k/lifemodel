@@ -805,10 +805,12 @@ newer one, and today's partition only when nothing older is left.
 have stopped, and a restart re-attaches a directory that is still on disk, so
 **removal directly follows detach in the same run** and the pod does not exit
 before the directory is gone; **removal happens only after `detach` returned
-200 or the attached list confirms the day is already detached**, because removing
-a directory the store still has open is unsafe. The latter finishes a lost detach
-answer or a run killed before removal on its next run, logging the usual drop
-with `alreadyDetached: true` and without another detach. Measured:
+200**, because list absence precedes reader drain and final flush completion in
+v1.53.0 (`lib/logstorage/storage.go:282,296–299,585–606`); final flushes disable
+cancellation and have no enforced time bound (`datadb.go:576–580,1233–1248`).
+An absent oldest day is therefore left untouched with a failed Job and reason
+`stranded_partition`; recovery needs a store restart to re-attach the directory,
+then the next run's normal acknowledged detach. Measured:
 detach + `rm` took 0.05, 0.12 and 0.13 s for three drops. When no partition is left
 and free space is still below the threshold — the volume holds something else —
 the run removes nothing and exits non-zero, so the state is a visible failed Job
@@ -873,9 +875,8 @@ v1.53.0's `app/vlstorage/main.go` partition handlers and its vendored
 `lib/httpserver/httpserver.go` `CheckAuthFlag` read `r.FormValue`, which accepts
 these bodies. Error logging masks form keys but not URL query keys, so the prior
 successful-detach measurement did not establish safety for an error. The job's own
-line carries only the day, the bytes freed, the reason and, when applicable, the
-already-detached marker. A roll of the key is a Secret update plus a store restart through the
-existing revision path (§ above).
+line carries only the day, the bytes freed and the reason. A roll of the key is a
+Secret update plus a store restart through the existing revision path (§ above).
 
 **The first key is the loader's to write.** The artifact ships the Secret empty,
 so a store that starts before a key exists requires no `authKey` and answers
