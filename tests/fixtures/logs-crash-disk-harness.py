@@ -127,7 +127,7 @@ elif mode == 'native-cri':
             raise AssertionError('kubectl must not execute node commands: ' + repr(args))
     def native(args):
         commands.append(args)
-        body = {'containers': [{'id': 'c', 'labels': {'io.kubernetes.container.name': 'logs-collector'}}]}
+        body = {'containers': [{'id': 'c', 'metadata': {'name': 'logs-collector'}}]}
         if 'inspect' in args:
             body = {'info': {'pid': 4242}}
         return types.SimpleNamespace(stdout=json.dumps(body), returncode=0)
@@ -140,15 +140,15 @@ elif mode == 'cri-memory':
     class Cluster:
         def run(self, args):
             if 'ps' in args:
-                body = {'containers': [{'id': 'c', 'labels': {
-                    'io.kubernetes.container.name': 'logs-collector'}}]}
+                body = {'containers': [{'id': 'c', 'metadata': {
+                    'name': 'logs-collector'}}]}
             else:
                 body = {'stats': [{'memory': {'usageBytes': {'value': '104857600'},
                     'workingSetBytes': {'value': '94371840'}}}]}
             return types.SimpleNamespace(stdout=json.dumps(body), returncode=0)
     cluster = Cluster()
     walk.node_run = cluster.run
-    memory, reason = walk.collector_memory(cluster, types.SimpleNamespace(crictl='crictl'))
+    memory, reason = walk.collector_memory(cluster, types.SimpleNamespace(crictl='crictl', collector_namespace='lifemodel-logs'))
     print(json.dumps({'memory': memory, 'reason': reason}))
 elif mode == 'memory':
     verdict = walk.memory_verdict(301 * walk.MIB, 300 * walk.MIB,

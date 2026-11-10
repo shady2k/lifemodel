@@ -127,7 +127,7 @@ def not_valid_pid(walk, fixture):
                   'status': {'phase': 'Running'}}],
         'crictl': {
             'ps': json.dumps({'containers': [
-                {'id': 'abc', 'labels': {'io.kubernetes.container.name': 'logs-collector'}}]}),
+                {'id': 'abc', 'metadata': {'name': 'logs-collector'}}]}),
             'inspect': json.dumps({'info': {'pid': 1}}),
         },
     })
@@ -145,7 +145,7 @@ def pid_real(walk, fixture):
                   'status': {'phase': 'Running'}}],
         'crictl': {
             'ps': json.dumps({'containers': [
-                {'id': 'abc', 'labels': {'io.kubernetes.container.name': 'logs-collector'}}]}),
+                {'id': 'abc', 'metadata': {'name': 'logs-collector'}}]}),
             'inspect': json.dumps({'info': {'pid': 4242}}),
         },
     })

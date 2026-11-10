@@ -216,7 +216,33 @@ def read_metrics(options, cluster):
     if (component_value(values, BUFFER_SIZE, 'logs-store') is None
             and component_value(values, BUFFER_BYTES, 'logs-store') is None):
         return None, 'the exporter carries no buffer gauge for component_id="logs-store"'
-    return values, ''
+    return values, 'HTTP 200'
+
+
+def source_rate_sample(values, reason=''):
+    """The Kubernetes source counter, separate from a backpressured sink buffer."""
+    return {'metric': RECEIVED, 'component': 'kubernetes',
+            'received': component_value(values, RECEIVED, 'kubernetes')
+                        if values is not None else None,
+            'status': (reason or 'HTTP 200') if values is not None
+                      else (reason or 'scrape unavailable')}
+
+
+def source_rate_report(report, before, current, elapsed, target):
+    first, last = before['received'], current['received']
+    report.note('source exporter before=%s current=%s; %s{component_id="%s"} '
+                'before=%s current=%s'
+                % (before['status'], current['status'], current['metric'],
+                   current['component'], first, last))
+    if first is None or last is None or last < first or elapsed <= 0:
+        report.note('achieved source rate unavailable; target %.0f lines/s total%s'
+                    % (target, '; counter reset' if first is not None
+                       and last is not None and last < first else ''))
+        return None
+    rate = (last - first) / elapsed
+    report.note('achieved source rate %.0f lines/s; target %.0f lines/s total'
+                % (rate, target))
+    return rate
 
 
 def buffer_state(values):
@@ -322,7 +348,11 @@ def vector_pid(cluster, options):
     pod = collector_pod_name(cluster, options)
     if not pod:
         return None, 'the collector has no pod'
-    listing = node_run(shlex.split(options.crictl) + ['ps', '--name', pod, '--output', 'json'])
+    listing = node_run(shlex.split(options.crictl) + [
+        'ps', '--name', 'logs-collector',
+        '--label', 'io.kubernetes.pod.name=' + pod,
+        '--label', 'io.kubernetes.pod.namespace=' + options.collector_namespace,
+        '--output', 'json'])
     if listing.returncode != 0:
         return None, 'crictl ps refused: %s' % tail(listing.stderr)
     try:
@@ -331,7 +361,7 @@ def vector_pid(cluster, options):
         return None, 'crictl ps answered no JSON'
     target = None
     for container in containers:
-        names = (container.get('labels') or {}).get('io.kubernetes.container.name')
+        names = (container.get('metadata') or {}).get('name')
         if names == 'logs-collector':
             target = container.get('id')
     if not target:
@@ -543,17 +573,24 @@ def collector_memory(cluster, options):
     pod = collector_pod_name(cluster, options)
     if not pod:
         return None, 'the collector has no pod'
-    listing = node_run(shlex.split(options.crictl) + ['ps', '--name', pod, '--output', 'json'])
+    listing = node_run(shlex.split(options.crictl) + [
+        'ps', '--name', 'logs-collector',
+        '--label', 'io.kubernetes.pod.name=' + pod,
+        '--label', 'io.kubernetes.pod.namespace=' + options.collector_namespace,
+        '--output', 'json'])
+    if listing.returncode != 0:
+        return None, 'crictl ps refused'
     try:
         containers = json.loads(listing.stdout or '{}').get('containers') or []
     except ValueError:
         return None, 'crictl ps answered no JSON'
     target = next((container.get('id') for container in containers
-                   if (container.get('labels') or {}).get('io.kubernetes.container.name')
-                   == 'logs-collector'), None)
+                   if (container.get('metadata') or {}).get('name') == 'logs-collector'), None)
     if not target:
         return None, 'crictl ps lists no logs-collector container'
     stats = node_run(shlex.split(options.crictl) + ['stats', target, '--output', 'json'])
+    if stats.returncode != 0:
+        return None, 'crictl stats refused'
     try:
         value = json.loads(stats.stdout or '{}')
     except ValueError:
@@ -679,23 +716,19 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
             last_memory = time.monotonic()
             emitted_before = emitted_count(cluster, options, run_id)
             started_fill = time.monotonic()
-            initial_metrics, _reason = read_metrics(options, cluster)
-            received_before = buffer_state(initial_metrics).get('received') if initial_metrics else None
+            initial_metrics, initial_reason = read_metrics(options, cluster)
+            source_before = source_rate_sample(initial_metrics, initial_reason)
             while True:
                 if not safe_load(report, options):
                     return False
                 metrics, reason = read_metrics(options, cluster)
                 elapsed = max(1.0, time.monotonic() - started_fill)
-                rate = ((buffer_state(metrics).get('received') or 0)
-                        - (received_before or 0)) / elapsed if metrics is not None else 0
-                report.note('achieved source rate %.0f lines/s; target %.0f lines/s total'
-                            % (rate, options.writer_rate))
+                source_rate_report(report, source_before, source_rate_sample(metrics, reason),
+                                   elapsed, options.writer_rate)
                 state_now = buffer_state(metrics) if metrics is not None else {}
                 if not sample_memory():
                     return False
                 if metrics is not None and saturated(state_now):
-                    elapsed = max(1.0, time.monotonic() - started_fill)
-                    rate = ((state_now.get('received') or 0) - (received_before or 0)) / elapsed
                     emitted = emitted_count(cluster, options, run_id) - emitted_before
                     report.note('achieved writer rate %.0f lines/s total; target %.0f'
                                 % (emitted / max(1, time.monotonic() - started_fill),
