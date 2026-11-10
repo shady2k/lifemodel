@@ -1059,5 +1059,11 @@ def read_store_flags(report, options, cluster, what='the /flags read'):
         forward.close()
 
 
+def start_task_writer(report, options, loader, cluster, run_id, rate, seconds, size=0, bound=180):
+    """Ask the real core to launch a writer and prove its first collected task line."""
+    from logs_task_writer import start_task_writer as launch
+    return launch(report, options, loader, cluster, run_id, rate, seconds, size, bound)
+
+
 def tail_lines(text, count):
     return '\n'.join(text.splitlines()[-count:])
