@@ -53,13 +53,24 @@ export function describeIdentity(entry) {
   return `${entry.time} | ${entry.module} | ${message}`;
 }
 
-/** axe-core's violations as rule ids and counts, never any page data. */
+/**
+ * axe-core's violations as rule id, impact and each node's CSS target selector.
+ * The node's `failureSummary` carries the page's text, and is never included.
+ */
 export function axeSummary(results) {
   const violations = Array.isArray(results?.violations) ? results.violations : [];
-  return violations.map((rule) => ({
-    id: typeof rule?.id === 'string' ? rule.id : 'unknown',
-    count: Array.isArray(rule?.nodes) ? rule.nodes.length : 0,
-  }));
+  return violations.map((rule) => {
+    const nodes = Array.isArray(rule?.nodes) ? rule.nodes : [];
+    return {
+      id: typeof rule?.id === 'string' ? rule.id : 'unknown',
+      impact: typeof rule?.impact === 'string' ? rule.impact : 'unknown',
+      count: nodes.length,
+      targets: nodes
+        .map((node) => (Array.isArray(node?.target) ? node.target.join(' >>> ') : ''))
+        .map((target) => target.trim())
+        .filter((target) => target !== ''),
+    };
+  });
 }
 
 /** The modules a filter's option list is missing, by name. */

@@ -20,8 +20,9 @@
 //     never three failures of numbers the card did not draw.
 //  4. The level, conversation and text filters narrow the list: every record
 //     drawn after a level filter carries that level chip, the record count
-//     equals the API's count for the same filter, and every message drawn after
-//     a text filter contains the searched words. A conversation id is found by
+//     equals the API's count over exactly the window the page's form holds, and
+//     every message drawn after a text filter contains the searched words. A
+//     conversation id is found by
 //     narrowing module by module, because the only records carrying one can be
 //     older than the newest page of the window.
 //  5. The level chips of the core's records carry a real level and never
@@ -75,7 +76,8 @@
 // (WALK-LOGS-EVICT does); when present, its MiB label is checked.
 import { chromium, firefox } from 'playwright-core';
 import { findTaskRecord } from './logs-page-task.mjs';
-import { scanLogsAxe, observeUnavailableLogs } from './logs-page-browser.mjs';
+import { gotoWithRetry, scanLogsAxe, observeUnavailableLogs } from './logs-page-browser.mjs';
+import { formWindow } from './logs-page-filters.mjs';
 import net from 'node:net';
 import { readFileSync, mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -251,8 +253,9 @@ async function api(page, path) {
   }, path);
 }
 
-function windowSeconds(hours) {
-  const to = Date.now();
+/** A window ending `backMs` before now, so live arrivals cannot change its count. */
+function windowSeconds(hours, backMs = 0) {
+  const to = Date.now() - backMs;
   return { from: to - hours * 3600_000, to };
 }
 
@@ -267,7 +270,15 @@ async function submit(page) {
 }
 
 async function recordItems(page) {
-  return page.locator('section ul li:not([role=note])');
+  // An eviction notice is a list item holding a note; it is not a record.
+  return page.locator('section ul li:not(:has([role=note]))');
+}
+
+/** The window the page's own form holds, as the API reads it. */
+async function pageWindow(page) {
+  const from = await page.locator('#logs-from').inputValue();
+  const to = await page.locator('#logs-to').inputValue();
+  return formWindow(from, to);
 }
 
 async function countLine(page) {
@@ -322,6 +333,7 @@ try {
     check(false, `${name}: the browser starts (${String(error.message).split('\n')[0].slice(0, 160)})`);
     continue;
   }
+  try {
   for (const variant of variants) {
     const language = variant.locale.slice(0, 2);
     const words = WORDS[language];
@@ -337,8 +349,8 @@ try {
     const errors = [];
     page.on('pageerror', (error) => errors.push(String(error.message).slice(0, 120)));
     try {
-      await page.goto(`https://${HOST}/`, { waitUntil: 'networkidle' });
-      await page.goto(`https://${HOST}/logs`, { waitUntil: 'networkidle' });
+      await gotoWithRetry(page, `https://${HOST}/`);
+      await gotoWithRetry(page, `https://${HOST}/logs`);
       check(
         (await page.locator('input[type=password]').count()) > 0,
         `${tag}: /logs without a session shows the login form`
@@ -350,15 +362,7 @@ try {
       ]);
       await page.waitForLoadState('networkidle');
       await page.waitForTimeout(1500);
-      for (let attempt = 0; ; attempt++) {
-        try {
-          await page.goto(`https://${HOST}/logs`, { waitUntil: 'networkidle' });
-          break;
-        } catch (error) {
-          if (attempt >= 2) throw error;
-          await page.waitForTimeout(1500);
-        }
-      }
+      await gotoWithRetry(page, `https://${HOST}/logs`);
       await page.waitForTimeout(1500);
       const title = (await page.locator('h1').first().textContent())?.trim() ?? '';
       check(title === words.title, `${tag}: /logs shows its title ("${title}")`);
@@ -377,7 +381,8 @@ try {
         }, axeSource, shot('axe'));
         const summary = axeSummary(results);
         check(summary.length === 0, `${tag}: the page is axe-clean`,
-          summary.map((rule) => `${rule.id} x${String(rule.count)}`).join(', ') || 'no violations');
+          summary.map((rule) => `${rule.id} (${rule.impact}) x${String(rule.count)}: `
+            + rule.targets.join(', ')).join('; ') || 'no violations');
       }
 
       // The status area, tied to the API's own answer.
@@ -416,7 +421,7 @@ try {
         if (cardError === null || attempt >= 1) break;
         note(`${tag}: the retention card shows its read error; reloading /logs once`);
         await page.waitForTimeout(5000);
-        await page.goto(`https://${HOST}/logs`, { waitUntil: 'networkidle' });
+        await gotoWithRetry(page, `https://${HOST}/logs`);
         await page.waitForTimeout(1500);
       }
       const settingsAnswer = await api(page, '/api/logs/settings');
@@ -472,7 +477,14 @@ try {
       // (measured on the VM: the latency walk's 60 records in the module
       // `walk-latency-filter` were), so each module the page's own select lists
       // is read newest-first and the first conversation id found is used.
-      const conversationRange = windowSeconds(6);
+      // The window ends two minutes ago: a record arriving while the page and
+      // the API are read would otherwise change only one of their counts. The
+      // form holds it to the minute, so the search uses that same rounded
+      // window and the record it finds is inside what the page will query.
+      const searchRange = windowSeconds(6, 120_000);
+      const conversationFrom = toInput(new Date(searchRange.from));
+      const conversationTo = toInput(new Date(searchRange.to));
+      const conversationRange = formWindow(conversationFrom, conversationTo);
       const modulesAnswer = await api(page, '/api/logs/modules');
       const moduleNames = modulesAnswer.body?.state === 'ok'
         ? (modulesAnswer.body.modules ?? []).filter((name) => typeof name === 'string')
@@ -497,16 +509,21 @@ try {
         notValid(`${tag}: none of the ${moduleNames.length} modules the API lists has a record with a conversation id in the last six hours: the conversation filter cannot be judged`);
       } else {
         note(`${tag}: the conversation record comes from module ${conversationModule}`);
-        const expected = await api(page, `/api/logs?from=${conversationRange.from}&to=${conversationRange.to}&conversation_id=${encodeURIComponent(conversationId)}&limit=1`);
-        await page.locator('#logs-from').fill(toInput(new Date(conversationRange.from)));
-        await page.locator('#logs-to').fill(toInput(new Date(conversationRange.to)));
+        await page.locator('#logs-from').fill(conversationFrom);
+        await page.locator('#logs-to').fill(conversationTo);
         await fillFilter(page, 'logs-conversation', conversationId);
         await submit(page);
-        const line = await countLine(page);
+        // The page reads its form to the minute; ask the API for exactly that
+        // window, both answers at the same moment and with nothing else allowed.
+        const held = await pageWindow(page);
+        const [line, expected] = await Promise.all([
+          await countLine(page),
+          await api(page, `/api/logs?from=${held.from}&to=${held.to}&conversation_id=${encodeURIComponent(conversationId)}&limit=1`),
+        ]);
         check(
           line.count !== null && line.count === expected.body?.count,
           `${tag}: the conversation filter narrows to the API's count`,
-          `page "${line.text}", API ${expected.body?.count}`
+          `page "${line.text}", API ${expected.body?.count}, window ${held.from}-${held.to}`
         );
         await page.screenshot({ path: shot('conversation-filter') });
         await fillFilter(page, 'logs-conversation', '');
@@ -550,11 +567,16 @@ try {
           await page.locator('#logs-module').click();
           await page.getByRole('option', { name: module, exact: true }).click();
           await submit(page);
-          const expected = await api(page, `/api/logs?from=${range.from}&to=${range.to}&module=${encodeURIComponent(module)}&limit=1`);
-          const line = await countLine(page);
+          // The form holds the window the page actually queried, whatever the
+          // earlier filters left there: the API is asked for that same window.
+          const held = await pageWindow(page);
+          const [line, expected] = await Promise.all([
+            await countLine(page),
+            await api(page, `/api/logs?from=${held.from}&to=${held.to}&module=${encodeURIComponent(module)}&limit=1`),
+          ]);
           check(line.count !== null && line.count === expected.body?.count,
             `${tag}: the module filter narrows to the API\'s count`,
-            `page "${line.text}", API ${expected.body?.count}`);
+            `page "${line.text}", API ${expected.body?.count}, window ${held.from}-${held.to}`);
           await page.screenshot({ path: shot('module-filter') });
           await page.locator('#logs-module').click();
           await page.getByRole('option', { name: words.allModules, exact: true }).click();
@@ -613,7 +635,7 @@ try {
       if (!untrustedRecord) {
         notValid(`${tag}: no verified stored task record: untrusted cannot be judged`);
       } else {
-        await page.goto(`https://${HOST}/logs`, { waitUntil: 'networkidle' });
+        await gotoWithRetry(page, `https://${HOST}/logs`);
         await listSettled(page);
         const module = untrustedRecord.fields.module;
         const marker = untrustedRecord.message.slice(0, 120);
@@ -740,7 +762,7 @@ try {
               { timeout: 30000 }
             )
             .catch(() => null),
-          page.goto(`https://${HOST}/logs`, { waitUntil: 'networkidle' }),
+          gotoWithRetry(page, `https://${HOST}/logs`),
         ]);
         await page.waitForTimeout(1500);
         if (reloadAnswer !== null) answered = await reloadAnswer.json().catch(() => null);
@@ -777,7 +799,7 @@ try {
       check(false, `${tag}: walk ran (${String(error.message).split('\n')[0].slice(0, 160)})`);
       await page.screenshot({ path: shot('error') }).catch(() => {});
     }
-    await context.close();
+    await context.close().catch(() => {});
   }
     // WALK-LOGS-OFF's store half: with the store scaled to zero the page answers
     // `unavailable` with its reason, never an empty list.
@@ -788,7 +810,7 @@ try {
       });
       const page = await context.newPage();
       try {
-        await page.goto(`https://${HOST}/logs`, { waitUntil: 'networkidle' });
+        await gotoWithRetry(page, `https://${HOST}/logs`);
         await page.locator('input[type=password]').first().fill(secret);
         await Promise.all([
           page.waitForResponse((response) => response.url().endsWith('/api/login')),
@@ -806,14 +828,21 @@ try {
           `${name}: the stopped store never shows an empty list`,
           `${observed.records} record(s); empty-answer text visible ${String(observed.empty)}`);
         await page.screenshot({ path: `${OUT}/${name}-store-stopped.png` });
+      } catch (error) {
+        check(false, `${name}: the stopped-store page ran (${String(error.message).split('\n')[0].slice(0, 160)})`);
+        await page.screenshot({ path: `${OUT}/${name}-store-stopped-error.png` }).catch(() => {});
       } finally {
         await scale(SYSTEM_NAMESPACE, 'deployment', ENGINE_STORES, 1);
         state.storeScaled = false;
         await waitReplicas(page, SYSTEM_NAMESPACE, 'deployment', ENGINE_STORES, 1);
-        await context.close();
+        await context.close().catch(() => {});
       }
     }
-    await browser.close();
+  } catch (error) {
+    check(false, `${name}: the engine walk ran (${String(error.message).split('\n')[0].slice(0, 160)})`);
+  } finally {
+    await browser.close().catch(() => {});
+  }
   }
   // WALK-LOGS-OFF: with the core and the chat scaled to zero the page still
   // answers, and without a session it refuses.
@@ -836,7 +865,7 @@ try {
       await scale(APP_NAMESPACE, 'deployment', WEB_DEPLOYMENT, 0);
       await waitReplicas(page, APP_NAMESPACE, 'statefulset', CORE_STATEFULSET, 0);
       await waitReplicas(page, APP_NAMESPACE, 'deployment', WEB_DEPLOYMENT, 0);
-      await page.goto(`https://${HOST}/logs`, { waitUntil: 'networkidle' });
+      await gotoWithRetry(page, `https://${HOST}/logs`);
       check((await page.locator('input[type=password]').count()) > 0,
         'off: /logs without a session shows the login while the core and the chat are stopped');
       const refused = await api(page, '/api/logs?from=0&to=1&limit=1');
@@ -847,7 +876,7 @@ try {
         page.waitForResponse((response) => response.url().endsWith('/api/login')),
         page.locator('input[type=password]').first().press('Enter'),
       ]);
-      await page.goto(`https://${HOST}/logs`, { waitUntil: 'networkidle' });
+      await gotoWithRetry(page, `https://${HOST}/logs`);
       await page.waitForTimeout(2000);
       const answer = await api(page, `/api/logs?from=${Date.now() - 3600_000}&to=${Date.now()}&limit=5&status=1`);
       check(answer.status === 200 && answer.body?.state === 'ok',

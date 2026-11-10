@@ -93,20 +93,36 @@ describe('the second page against the first', () => {
 });
 
 describe('the page walk\'s own checks', () => {
-  it('reports axe violations as rule ids and counts, never page data', () => {
+  it('reports each axe rule with its impact and each node\'s selector, never page text', () => {
     const summary = axeSummary({
       violations: [
-        { id: 'color-contrast', nodes: [{ target: ['main'] }, { target: ['p'] }] },
-        { id: 'label', nodes: [{}] },
+        {
+          id: 'color-contrast',
+          impact: 'serious',
+          nodes: [
+            {
+              target: ['main p.text-muted-foreground'],
+              failureSummary: 'Element has insufficient color contrast of 2.9:1. Expected 4.5:1 for normal text.',
+            },
+            { target: ['#logs-settings'] },
+          ],
+        },
+        { id: 'label', impact: 'moderate', nodes: [{}] },
       ],
     });
     expect(summary).toEqual([
-      { id: 'color-contrast', count: 2 },
-      { id: 'label', count: 1 },
+      {
+        id: 'color-contrast',
+        impact: 'serious',
+        count: 2,
+        targets: ['main p.text-muted-foreground', '#logs-settings'],
+      },
+      { id: 'label', impact: 'moderate', count: 1, targets: [] },
     ]);
     expect(axeSummary({ violations: [] })).toEqual([]);
     expect(axeSummary(null)).toEqual([]);
-    expect(JSON.stringify(summary)).not.toContain('main');
+    expect(JSON.stringify(summary)).toContain('main p.text-muted-foreground');
+    expect(JSON.stringify(summary)).not.toContain('insufficient color contrast');
   });
 
   it('names the modules a filter\'s options are missing', () => {

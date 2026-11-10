@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
+import { gotoWithRetry } from '../../deploy/platform/logs-page-browser.mjs';
 
 interface Run {
   result?: {
@@ -71,6 +72,14 @@ describe('the stopped store is judged from its own answer and rendered status', 
     }
   );
 
+  it('retries a navigation the stopping store aborts, then judges what it saw', () => {
+    const run = harness('store-aborted');
+    expect(run.error).toBeUndefined();
+    const gotos = run.events.filter(([event]) => event === 'goto');
+    expect(gotos).toHaveLength(2);
+    expect(run.result?.reason).toBe('connection_refused');
+  });
+
   it('does not accept a successful empty API answer as unavailable', () => {
     expect(harness('store-ok').error).toContain('unavailable');
   });
@@ -82,5 +91,36 @@ describe('the stopped store is judged from its own answer and rendered status', 
   it('exposes a wrongly drawn empty answer or remaining records', () => {
     expect(harness('store-empty').result?.empty).toBe(true);
     expect(harness('store-records').result?.records).toBe(1);
+  });
+});
+
+describe('a navigation a stopping store or chat aborts', () => {
+  it('is retried a bounded number of times, then reports the last abort', async () => {
+    let attempts = 0;
+    const page = {
+      goto: async () => {
+        attempts += 1;
+        if (attempts < 3) throw new Error('net::ERR_ABORTED');
+      },
+    };
+    await expect(gotoWithRetry(page, 'https://boot/logs', {}, 3, 0)).resolves.toBe(3);
+    expect(attempts).toBe(3);
+
+    let failing = 0;
+    await expect(
+      gotoWithRetry(
+        {
+          goto: async () => {
+            failing += 1;
+            throw new Error('net::ERR_ABORTED');
+          },
+        },
+        'https://boot/logs',
+        {},
+        2,
+        0
+      )
+    ).rejects.toThrow('ERR_ABORTED');
+    expect(failing).toBe(2);
   });
 });
