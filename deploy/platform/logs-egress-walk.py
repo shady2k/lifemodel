@@ -19,7 +19,10 @@ import subprocess
 import tempfile
 import time
 import uuid
+import sys
+from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from logs_walk_support import Cluster, Report, WalkError, wait_until
 
 OBSERVATION_SECONDS = 600

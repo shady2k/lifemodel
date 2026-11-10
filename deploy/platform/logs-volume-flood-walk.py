@@ -659,6 +659,15 @@ def restore(report, options, loader, cluster, volume, state):
 
 
 def run(report, options, loader, cluster, store, volume, state):
+    if options.writer_image is None:
+        body = cluster.json(['-n', options.namespace, 'get', 'cronjob', 'logs-evictor',
+                             '-o', 'json']) or {}
+        containers = (((body.get('spec') or {}).get('jobTemplate') or {}).get('spec') or {}) \
+            .get('template', {}).get('spec', {}).get('containers') or []
+        options.writer_image = containers[0].get('image') if containers else None
+    if not options.writer_image:
+        report.not_valid('the evictor CronJob names no Node image: the writers cannot start')
+        return False
     if not report.check(volume.mounted(), 'the log volume is mounted', options.mount):
         return False
     os.makedirs(os.path.join(options.shared_path, 'pg'), exist_ok=True)
@@ -683,6 +692,8 @@ def run(report, options, loader, cluster, store, volume, state):
 def main(argv=None):
     parser = argparse.ArgumentParser(description='WALK-LOGS-VOLUME-FLOOD (ADR-016 L05)')
     common_arguments(parser)
+    parser.add_argument('--writer-image', default=None,
+                        help='Node writer image; by default use the deployed logs-evictor image')
     parser.add_argument('--writer-namespace', default='lifemodel-logs-walk')
     parser.add_argument('--shared-namespace', default='lifemodel-logs-walk-pg')
     parser.add_argument('--shared-path', default='/var/lib/lifemodel-logs-walk-shared')

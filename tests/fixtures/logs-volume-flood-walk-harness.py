@@ -24,6 +24,40 @@ def mode(name):
     return register
 
 
+@mode('writer-image')
+def writer_image(walk, fixture):
+    from types import SimpleNamespace
+    report = walk.Report()
+    options = SimpleNamespace(writer_image=None, namespace='lifemodel-system', mount='/logs')
+    class Cluster:
+        def json(self, args):
+            assert args == ['-n', options.namespace, 'get', 'cronjob', 'logs-evictor', '-o', 'json']
+            return {'spec': {'jobTemplate': {'spec': {'template': {'spec': {
+                'containers': [{'image': 'deployed-loader@sha256:fixture'}]}}}}}}
+    class Volume:
+        def mounted(self):
+            return False
+    walk.run(report, options, None, Cluster(), None, Volume(), {})
+    manifest = walk.writer_manifest(options, 'walk', 'writer', 'module', 'run', 1, 1)
+    print('IMAGE ' + json.dumps(manifest['spec']['containers'][0]['image']))
+    return walk.Report()
+
+
+@mode('missing-writer-image')
+def missing_writer_image(walk, fixture):
+    from types import SimpleNamespace
+    report = walk.Report()
+    options = SimpleNamespace(writer_image=None, namespace='lifemodel-system')
+    class Cluster:
+        def json(self, args):
+            return None
+    class Volume:
+        def mounted(self):
+            raise AssertionError('must resolve image before the walk writes anything')
+    walk.run(report, options, None, Cluster(), None, Volume(), {})
+    return report
+
+
 @mode('commit-pass')
 def commit_pass(walk, fixture):
     report = walk.Report()
