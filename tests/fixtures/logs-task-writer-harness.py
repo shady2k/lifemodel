@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path('deploy/platform').resolve()))
 import logs_walk_support as public
 
 scenario = json.loads(Path(sys.argv[1]).read_text())
+post_statuses = list(scenario.get('post_statuses') or [])
 calls = []
 output = []
 pod = {'metadata': {'name': 'task-new-pod', 'uid': 'new',
@@ -52,7 +53,10 @@ class Forward:
     def close(self, **kwargs): calls.append(['close'])
 class Response:
     status = 200
-    def __init__(self, method): self.status = scenario.get('post_status', 202) if method == 'POST' else 200; self.method = method
+    def __init__(self, method):
+        self.status = (post_statuses.pop(0) if post_statuses
+                       else scenario.get('post_status', 202)) if method == 'POST' else 200
+        self.method = method
     def read(self, *args):
         if self.method == 'POST': return b'{"streamId":"1"}'
         return json.dumps({'cursor': '2', 'messages': [{'role': 'assistant',
