@@ -5,6 +5,7 @@ type Sample = {
   metric: string;
   component: string;
   received: number | null;
+  per_writer: Record<string, number | null>;
   status: string;
 };
 
@@ -56,9 +57,11 @@ describe('crash walk source-rate diagnostics', () => {
       metric: 'vector_component_received_events_total',
       component: observed.configured_source,
       received: 1000,
+      per_writer: { 'walk-crash-writer': 1000 },
       status: 'HTTP 200',
     });
     expect(observed.current.received).toBe(1300);
+    expect(observed.current.per_writer).toEqual({ 'walk-crash-writer': 1300 });
     expect(observed.rate).toBe(30);
     expect(output).toContain('vector_component_received_events_total');
     expect(output).toContain(observed.configured_source);
@@ -75,6 +78,10 @@ describe('crash walk source-rate diagnostics', () => {
     const { observed, output } = run(fixture);
     expect(observed.rate).toBeNull();
     expect([observed.before.received, observed.current.received]).toContain(null);
+    expect([
+      observed.before.per_writer['walk-crash-writer'],
+      observed.current.per_writer['walk-crash-writer'],
+    ]).toContain(null);
     expect(output).toMatch(/exporter.*HTTP 200/i);
     expect(output).toMatch(/source rate unavailable/i);
     expect(output).not.toMatch(/source rate 0(?:\.0+)? lines\/s/);
