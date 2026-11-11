@@ -68,12 +68,18 @@ requested with `reconcile.fluxcd.io/requestedAt`, each waited for Ready=True on
 the applied revision; a resume that fails is a RESTORE FAIL naming it, because a
 Kustomization left suspended stops all later deploys.
 The workload is paced and bounded by node load, fill/recovery deadlines and the
-whole-walk deadline. The writer total (1700 lines/s by default) is split so no
-writer pod exceeds 80 % of the collector's untrusted throttle - 500 events/s
-per pod in `deploy/platform/logs/config/vector.yaml`'s `untrusted-throttle`, so
-400 lines/s - and the pod count is derived from that; a pod measured above the
-cap is TEST NOT VALID before the crash. The load guard stops the walk's own
-writers on excess load,
+whole-walk deadline. The writer pods run in the collector's own trusted
+namespace (`lifemodel-logs`, on the positive trust list in
+`deploy/platform/logs/config/vector.yaml`), under walk-specific names and
+labels; the walk creates and always removes exactly the pods it created and
+never the namespace. Before any crash a small probe pod proves the store marks
+the walk's writer records trusted (`untrusted` absent); a record marked
+untrusted is TEST NOT VALID, because the collector's untrusted throttle would
+discard the writer's catch-up lines and the crash walk would read that as loss.
+The writer total (1700 lines/s by default) is split so no writer pod exceeds
+80 % of that throttle - 500 events/s per pod, so 400 lines/s - and the pod
+count is derived from that. The load guard stops the walk's own writers on
+excess load,
 and only that: the moment the intentional crash has happened it stands down, so
 the collector draining its buffer is a NOTE with the reading and the loss count
 still runs within its existing delivery bound. A load baseline within 2 of the
@@ -132,6 +138,11 @@ WRITER_MODULE = 'walk-crash-writer'
 # writer above 80 % of it would have its lines discarded and read as crash loss.
 UNTRUSTED_THROTTLE_EVENTS_PER_SECOND = 500
 WRITER_POD_RATE_CAP = int(UNTRUSTED_THROTTLE_EVENTS_PER_SECOND * 0.8)
+DEFAULT_WRITER_NAMESPACE = 'lifemodel-logs'
+TRUST_PROBE = 'walk-crash-trust'
+TRUST_PROBE_SECONDS = 120
+TRUST_PROBE_RATE = 10
+TRUST_PROBE_BOUND = 180
 WRITER_LINE = re.compile(r'walk-crash (\S+) seq=(\d+)')
 WRITER_LINE_PREFIX = 'walk-crash '
 BUFFER_SIZE = 'vector_buffer_size_events'
@@ -186,43 +197,19 @@ def writer_split(report, options):
                    UNTRUSTED_THROTTLE_EVENTS_PER_SECOND))
 
 
-def writer_pod_rates(before, current, elapsed):
-    """Each writer pod's measured source rate over the reporting window."""
-    rates = {}
-    if elapsed <= 0:
-        return rates
-    for pod, count in (current.get('per_writer') or {}).items():
-        prior = (before.get('per_writer') or {}).get(pod)
-        if count is None or prior is None:
-            continue
-        rates[pod] = (count - prior) / elapsed
-    return rates
-
-
-def check_writer_pod_rates(report, before, current, elapsed):
-    """Fail as not valid before the crash if a writer pod exceeds the throttle cap."""
-    over = {pod: rate for pod, rate in writer_pod_rates(before, current, elapsed).items()
-            if rate > WRITER_POD_RATE_CAP}
-    if not over:
-        return True
-    report.not_valid('writer pod(s) above the untrusted throttle cap of %d lines/s: %s; the '
-                     'collector would discard their lines and the crash walk would count them '
-                     'as loss' % (WRITER_POD_RATE_CAP,
-                                  ', '.join('%s %.0f lines/s' % item
-                                            for item in sorted(over.items()))))
-    return False
-
-
 def writer_names(options):
     return [writer_name(index) for index in range(1, (options.writer_pods or 1) + 1)]
 
 
-def writer_manifest(image, options, run_id, seconds, index=1, interval=20):
+def writer_manifest(image, options, run_id, seconds, index=1, interval=20, name=None,
+                    rate=None):
     return {
         'apiVersion': 'v1',
         'kind': 'Pod',
-        'metadata': {'name': writer_name(index), 'namespace': options.writer_namespace,
-                     'labels': {'app.kubernetes.io/name': WRITER_MODULE}},
+        'metadata': {'name': name or writer_name(index),
+                     'namespace': options.writer_namespace,
+                     'labels': {'app.kubernetes.io/name': WRITER_MODULE,
+                                'lifemodel.dev/walk': 'logs-crash'}},
         'spec': {
             'restartPolicy': 'Never',
             'automountServiceAccountToken': False,
@@ -233,7 +220,8 @@ def writer_manifest(image, options, run_id, seconds, index=1, interval=20):
                 'image': image,
                 'command': ['node', '-e', WRITER_SCRIPT, run_id, str(seconds),
                             str((index - 1) * 50_000_000),
-                            str(options.writer_rate / options.writer_pods)],
+                            str(rate if rate is not None
+                                else options.writer_rate / options.writer_pods)],
                 'securityContext': {'readOnlyRootFilesystem': True,
                                     'allowPrivilegeEscalation': False,
                                     'capabilities': {'drop': ['ALL']}},
@@ -1704,11 +1692,8 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                     return False
                 metrics, reason = read_metrics(options, cluster)
                 elapsed = max(1.0, time.monotonic() - started_fill)
-                current_source = source_rate_sample(metrics, reason, options)
-                source_rate_report(report, source_before, current_source, elapsed,
-                                   options.writer_rate)
-                if not check_writer_pod_rates(report, source_before, current_source, elapsed):
-                    return False
+                source_rate_report(report, source_before, source_rate_sample(metrics, reason, options),
+                                   elapsed, options.writer_rate)
                 state_now = buffer_state(metrics) if metrics is not None else {}
                 if not sample_memory():
                     return False
@@ -1911,16 +1896,88 @@ def recover_after_crash(report, options, cluster, state, store_down_restart=Fals
         'the store answers again')
 
 
-def ensure_namespace(report, cluster, options, state):
+def require_namespace(report, cluster, options):
+    """The writers run in the collector's trusted namespace, which the walk never creates."""
     body = cluster.json(['get', 'namespace', options.writer_namespace, '-o', 'json'])
     if body is not None:
         return True
-    state['created_namespace'] = True  # A timed-out create may still have succeeded.
-    result = cluster.run(['create', 'namespace', options.writer_namespace])
-    if result.returncode != 0:
-        report.not_valid('the walk\'s own namespace was not created: %s' % tail(result.stderr))
+    report.not_valid('the writer namespace %s does not exist; the walk creates no namespace'
+                     % options.writer_namespace)
+    return False
+
+
+def store_count(store, query):
+    """One LogsQL count answer."""
+    rows = store.query(query)
+    if len(rows) != 1:
+        raise WalkError('store_count_shape')
+    try:
+        return int(float(rows[0].get('n')))
+    except (TypeError, ValueError):
+        raise WalkError('store_count_value') from None
+
+
+def clear_walk_pods(options, cluster):
+    """Remove pods a previous aborted walk left under the walk's own names."""
+    for name in writer_names(options) + [TRUST_PROBE]:
+        cluster.run(['-n', options.writer_namespace, 'delete', 'pod', name,
+                     '--ignore-not-found', '--grace-period=1', '--wait=true',
+                     '--timeout=60s'], timeout=70)
+
+
+def trust_probe(report, options, cluster, state):
+    """Prove before any crash that the store marks the walk's writers trusted.
+
+    Task 7.7's collector throttle counts events as it processes them and only
+    trusts a positive list of platform namespaces; an untrusted writer would
+    have its catch-up lines discarded and read as crash loss. One small probe
+    pod in the writer namespace writes while the store is up, and the store
+    must hold its records with `untrusted` absent.
+    """
+    run_id = 'walk-crash-trust-%d' % now_ms()
+    applied = cluster.apply(writer_manifest(state.get('writer_image'), options, run_id,
+                                            TRUST_PROBE_SECONDS, 1, name=TRUST_PROBE,
+                                            rate=TRUST_PROBE_RATE))
+    state['probe_pod'] = TRUST_PROBE
+    if applied.returncode != 0:
+        report.not_valid('the trust probe pod was not created: %s' % tail(applied.stderr))
         return False
-    return True
+    started = now_ms()
+    window = (started, started + (TRUST_PROBE_BOUND + TRUST_PROBE_SECONDS) * 1000)
+    where = ('_time:[%s, %s] pod:="%s" namespace:="%s" "walk-crash %s"'
+             % (stamp(window[0]), stamp(window[1]), TRUST_PROBE,
+                options.writer_namespace, run_id))
+    store = forward = None
+    try:
+        store, forward, failure = open_log_store(options)
+        if store is None:
+            report.not_valid('the trust probe cannot read the store: ' + failure)
+            return False
+        deadline = time.monotonic() + TRUST_PROBE_BOUND
+        total = 0
+        while True:
+            total = store_count(store, where + ' | stats count() n')
+            if total >= 1 or time.monotonic() >= deadline:
+                break
+            time.sleep(5)
+        if total < 1:
+            report.not_valid('no record of the walk\'s trust probe (%s) reached the store '
+                             'within %d s' % (TRUST_PROBE, TRUST_PROBE_BOUND))
+            return False
+        untrusted = store_count(store, where + ' untrusted:true | stats count() n')
+        report.check(untrusted == 0, 'the store marks the walk\'s writer records trusted',
+                     '%d record(s) from %s, %d untrusted'
+                     % (total, TRUST_PROBE, untrusted))
+        return untrusted == 0
+    except WalkError as error:
+        report.not_valid('the trust probe could not be counted: %s'
+                         % (str(error) or type(error).__name__))
+        return False
+    finally:
+        if store is not None:
+            store.close()
+        if forward is not None:
+            forward.close()
 
 
 def free_port():
@@ -1971,7 +2028,11 @@ def run(report, options, loader, cluster, state):
     if not report.check(bool(state['writer_image']), 'the evictor names the Node writer image',
                         'logs-evictor'):
         return False
-    if not ensure_namespace(report, cluster, options, state):
+    if not require_namespace(report, cluster, options):
+        return False
+    clear_walk_pods(options, cluster)
+    state['step'] = 'the trusted writer check'
+    if not trust_probe(report, options, cluster, state):
         return False
     state['step'] = 'the store outage'
     if not stop_store(report, options, cluster, state):
@@ -2037,7 +2098,7 @@ def restore(report, options, loader, cluster, state):
     def command(args):
         return cluster.run(args, timeout=180).returncode == 0
     restored = True
-    for name in writer_names(options):
+    for name in writer_names(options) + ([state['probe_pod']] if state.get('probe_pod') else []):
         restored = restore_step(report, 'delete ' + name, lambda name=name: command(
             ['-n', options.writer_namespace, 'delete', 'pod', name,
              '--ignore-not-found', '--grace-period=1', '--wait=true',
@@ -2076,10 +2137,6 @@ def restore(report, options, loader, cluster, state):
                         'all later platform deploys stop until it is resumed: patch '
                         'spec.suspend=false and request a reconcile by hand')
         restored = ok and restored
-    if state.get('created_namespace'):
-        restored = restore_step(report, 'delete namespace', lambda: command(
-            ['delete', 'namespace', options.writer_namespace, '--ignore-not-found',
-             '--wait=true', '--timeout=170s']), bound) and restored
     restored = restore_step(report, 'collector Running',
                             lambda: collector_running(cluster, options), bound) and restored
     left = [owner for owner in state.get('held') or [] if owner not in resumed]
@@ -2101,7 +2158,7 @@ def main(argv=None):
     common_arguments(parser)
     parser.add_argument('--collector-namespace', default='lifemodel-logs')
     parser.add_argument('--collector', default='logs-collector')
-    parser.add_argument('--writer-namespace', default='lifemodel-logs-walk')
+    parser.add_argument('--writer-namespace', default=DEFAULT_WRITER_NAMESPACE)
     parser.add_argument('--metrics-port', type=int, default=9598)
     parser.add_argument('--crictl', default='k3s crictl')
     parser.add_argument('--fill-bound', type=int, default=600)
@@ -2147,7 +2204,7 @@ def main(argv=None):
     max_load_note(report, options, baseline, cpus)
     writer_split(report, options)
     cluster = Cluster(options.kubectl)
-    state = {'created_namespace': False, 'replicas': None, 'run_id': None,
+    state = {'replicas': None, 'run_id': None, 'probe_pod': None,
              'kustomizations': None, 'suspended': [], 'held': [], 'step': None,
              'restarts_before': None, 'buffer_at_crash': None, 'killed_at': None}
     loader = None

@@ -144,7 +144,7 @@ def options(**values):
         namespace='lifemodel-system', store='logs-store', mount='/var/lib/lifemodel-logs',
         pv_path='/var/lib/lifemodel-logs/data', deadline_seconds=3600,
         collector_namespace='lifemodel-logs', collector='logs-collector',
-        writer_namespace='lifemodel-logs-walk', metrics_port=9598, crictl='k3s crictl',
+        writer_namespace='lifemodel-logs', metrics_port=9598, crictl='k3s crictl',
         fill_bound=2, fill_ceiling=2400, drain_ceiling=900, recover_bound=2,
         writer_interval_ms=20,
         saturated_seconds=0, writer_pods=1, memory_limit_bytes=300 * 1024 * 1024,
@@ -379,7 +379,7 @@ def main_runtime_error(walk, fixture):
     walk.Loader = lambda *_args: types.SimpleNamespace(login=lambda _secret: 200)
     walk.wait_until = lambda deadline, interval, probe: probe()
     def broken_run(report, options, loader, cluster, state):
-        state.update(replicas=1, created_namespace=True)
+        state.update(replicas=1)
         state['step'] = fixture.get('step', 'the settle before the delivery query')
         if fixture.get('walk'):
             raise walk.WalkError(fixture.get('error', 'node_load_bound'))
@@ -429,7 +429,7 @@ def restore_timeouts(walk, fixture):
     walk.store_ready = lambda *_args: (calls.append('store-ready') or True)
     walk.collector_running = lambda *_args: (calls.append('collector-ready') or True)
     walk.restore(report, options(writer_pods=3), None, RestoreCluster({}),
-                 {'replicas': 1, 'created_namespace': True})
+                 {'replicas': 1, 'probe_pod': None})
     print('CLEANUP ' + json.dumps({'calls': calls, 'attempts': attempts,
                                    'timeouts': timeouts}))
     return report
@@ -711,7 +711,7 @@ def restore_resume(walk, fixture):
     # One probe per step: the retry path is what is under test, not a real wait.
     walk.wait_until = lambda deadline, interval, probe: probe()
     walk.restore(report, options(restore_bound=1), None, cluster,
-                 {'replicas': 1, 'created_namespace': False,
+                 {'replicas': 1,
                   'kustomizations': owners(names),
                   'suspended': owners(names), 'held': owners(names)})
     print('RESUMED ' + json.dumps({
@@ -959,62 +959,78 @@ def writer_split(walk, fixture):
     return report
 
 
-@mode('pod-rate')
-def pod_rate(walk, fixture):
-    """A writer pod above the cap is TEST NOT VALID; one at the cap is not."""
+
+
+@mode('writer-namespace')
+def writer_namespace(walk, fixture):
+    """The writers run as walk-specific pods in the collector's trusted namespace."""
     report = walk.Report()
-    before = {'per_writer': {'walk-crash-writer': 1000, 'walk-crash-writer-2': 1000}}
-    current = {'per_writer': {
-        'walk-crash-writer': 1000 + fixture.get('first', 5670),
-        'walk-crash-writer-2': 1000 + fixture.get('second', 3000)}}
-    ok = walk.check_writer_pod_rates(report, before, current, 10)
-    print('PODRATE ' + json.dumps({'ok': bool(ok), 'cap': walk.WRITER_POD_RATE_CAP}))
+    body = walk.writer_manifest('image', options(), 'run', 60, 1)
+    print('MANIFEST ' + json.dumps({
+        'namespace': body['metadata']['namespace'],
+        'name': body['metadata']['name'],
+        'labels': body['metadata']['labels'],
+        'rate': body['spec']['containers'][0]['command'][6]}))
     return report
 
 
-@mode('pod-rate-loop')
-def pod_rate_loop(walk, fixture):
-    """The real fill loop stops as not valid when a writer pod is over the cap."""
+class TrustStore:
+    """A store answering the trust probe's two counts."""
+
+    def __init__(self, total, untrusted=0):
+        self.total = total
+        self.untrusted = untrusted
+        self.queries = []
+
+    def query(self, logsql):
+        self.queries.append(logsql)
+        value = self.untrusted if 'untrusted:true' in logsql else self.total
+        return [{'n': str(value)}]
+
+    def close(self):
+        pass
+
+
+@mode('trust-probe')
+def trust_probe(walk, fixture):
+    """The probe passes only when the store holds its records with untrusted absent."""
     report = walk.Report()
-    opts = options(writer_pods=2, writer_rate=800, fill_bound=30, ceiling=60,
-                   drain_ceiling=1800, recover_bound=1, saturated_seconds=0,
-                   unsaturated_lines=1)
-    walk.safe_load = lambda *args: True
-    walk.require_store_down = lambda *args: True
-    walk.writer_image = lambda *args: 'image'
-    walk.wait_writer = lambda *args: True
-    walk.collector_memory = lambda *args: (100 * walk.MIB, '')
-    walk.collector_restarts = lambda *args: 0
-    walk.emitted_count = lambda *args: 0
-    walk.writer_lines = lambda *args: [1, 2]
-    walk.restore_step = lambda *args: True
-
-    def sample(value):
-        rows = ['vector_component_received_events_total{component_id="kubernetes",'
-                'pod_namespace="%s",pod_name="%s"} %d'
-                % (opts.writer_namespace, name, value) for name in walk.writer_names(opts)]
-        rows.extend([
-            'vector_buffer_max_size_bytes{component_id="logs-store",buffer_type="disk"} 335544320',
-            'vector_buffer_size_bytes{component_id="logs-store",buffer_type="disk"} 1000000',
-            'vector_buffer_size_events{component_id="logs-store"} 100'])
-        return walk.parse_metrics('\n'.join(rows),
-                                  {walk.RECEIVED, walk.BUFFER_MAX_BYTES,
-                                   walk.BUFFER_BYTES, walk.BUFFER_SIZE})
-
-    readings = iter([sample(0), sample(8000)])
-    walk.read_metrics = lambda *args: (next(readings, sample(8000)), '')
-    baseline = walk.source_rate_sample(sample(0), '', opts)
-    walk.wait_source_pickup = lambda *args: {'sample': baseline, 'rate': 800.0, 'elapsed': 3}
+    store = TrustStore(fixture.get('total', 5), fixture.get('untrusted', 0))
+    walk.open_log_store = lambda _options: (store, None, '')
+    walk.time.sleep = lambda _seconds: None
 
     class Cluster:
+        body = None
+
         def apply(self, body):
+            self.body = body
             return types.SimpleNamespace(returncode=0)
 
+    cluster = Cluster()
+    ok = walk.trust_probe(report, options(writer_namespace='lifemodel-logs'), cluster,
+                          {'writer_image': 'loader-with-node@sha256:fixture'})
+    print('TRUST ' + json.dumps({'ok': bool(ok),
+                                 'namespace': cluster.body['metadata']['namespace'],
+                                 'queries': store.queries}))
+    return report
+
+
+@mode('restore-pods')
+def restore_pods(walk, fixture):
+    """RESTORE deletes exactly the walk's pods, never the namespace."""
+    report = walk.Report()
+    calls = []
+
+    class Cluster:
         def run(self, args, timeout=120):
+            calls.append(' '.join(args))
             return types.SimpleNamespace(returncode=0)
 
-    ok = walk.crash_case(report, opts, None, Cluster(), {}, True)
-    print('PODRATE-LOOP ' + json.dumps({'ok': bool(ok)}))
+    walk.store_ready = lambda *args: True
+    walk.collector_running = lambda *args: True
+    walk.restore(report, options(writer_pods=2), None, Cluster(),
+                 {'replicas': 1, 'probe_pod': 'walk-crash-trust'})
+    print('PODS ' + json.dumps({'calls': calls}))
     return report
 
 
