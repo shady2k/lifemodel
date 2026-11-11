@@ -159,7 +159,20 @@ function parseRecords(body: string): LogsRecord[] | null {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
     const object = value as Record<string, unknown>;
     const time = object['_time'];
-    const message = object['_msg'];
+    const rawMessage = object['_msg'];
+    // Window records deliberately carry no message. Only the collector's
+    // bounded schema may omit it; normalized pod records always set untrusted.
+    const counterRecord =
+      object['module'] === 'throttle-window' &&
+      object['namespace'] === 'lifemodel-motor' &&
+      object['untrusted'] === undefined &&
+      typeof object['pod'] === 'string' &&
+      object['pod'] !== '' &&
+      (object['counter'] === 'input' || object['counter'] === 'accepted') &&
+      (typeof object['value'] === 'string' || typeof object['value'] === 'number') &&
+      typeof object['window_start'] === 'string' &&
+      typeof object['window_end'] === 'string';
+    const message = rawMessage === undefined && counterRecord ? '' : rawMessage;
     if (typeof time !== 'string' || typeof message !== 'string') return null;
     const fields: Record<string, string> = {};
     for (const [key, field] of Object.entries(object)) {
@@ -284,11 +297,18 @@ export function createLogsStore(options: LogsStoreOptions): LogsStore {
     init: RequestInit = {}
   ): Promise<{ state: 'ok'; body: string } | LogsUnavailable> {
     try {
-      const response = await fetch(target, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      const response = await fetch(target, {
+        ...init,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
       if (response.status === 429)
         return { state: 'unavailable', reason: 'read_only', status: 429 };
       if (!response.ok)
-        return { state: 'unavailable', reason: 'http_error', status: response.status };
+        return {
+          state: 'unavailable',
+          reason: 'http_error',
+          status: response.status,
+        };
       return { state: 'ok', body: await response.text() };
     } catch (error) {
       return { state: 'unavailable', reason: failureReason(error) };

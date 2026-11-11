@@ -40,6 +40,7 @@ import {
 import { vectorRunner } from './logs-vector-runner.mjs';
 import { realLoggerCases } from './logs-vrl-real-loggers.mjs';
 import { checkCollectorHeartbeat } from './logs-heartbeat-check.mjs';
+import { checkCollectorThrottle } from '../tests/fixtures/logs-vrl/throttle-check.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fixturePath = join(root, 'tests', 'fixtures', 'logs-vrl', 'cases.json');
@@ -73,6 +74,7 @@ function main() {
   // The heartbeat is proved by running the committed source, not by reading
   // it: its record's fields and cadence, and the read-back line through the
   // program the pod records use (ADR-016 §4, check L14).
+  checkCollectorThrottle({ runner });
   checkCollectorHeartbeat({ normalizeProgram: program, runner });
   return 0;
 }

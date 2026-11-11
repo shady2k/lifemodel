@@ -717,7 +717,12 @@ describe('the collector heartbeat (ADR-016 §4, check L14)', () => {
       interval: 30,
     });
     expect(config.transforms['collector-heartbeat'].inputs).toEqual(['heartbeat']);
-    expect(config.sinks['logs-store'].inputs).toEqual(['normalize', 'collector-heartbeat']);
+    expect(config.sinks['logs-store'].inputs).toEqual([
+      'pod-route.trusted',
+      'accepted-record',
+      'throttle-window-records',
+      'collector-heartbeat',
+    ]);
     // The record the store holds names its own module and says which copy it is.
     const program: string = config.transforms['collector-heartbeat'].source;
     for (const field of ['collector-heartbeat', 'heartbeat', 'namespace']) {

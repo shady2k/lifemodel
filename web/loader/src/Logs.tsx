@@ -31,6 +31,8 @@ import {
 } from '../../../loader/src/logs-query.js';
 import type { LogsRecord } from '../../../loader/src/logs-store-adapter.js';
 import { LogsSettings } from './LogsSettings';
+import { LogsThrottleStatus } from './LogsThrottleStatus';
+import type { LogsThrottle } from '../../../loader/src/logs-throttle.js';
 import { formatMiB } from './logs-i18n';
 
 const ALL_MODULES = '__all__';
@@ -103,7 +105,10 @@ interface EvictionNotice {
 
 /** The freshness, store alarm and eviction notices the first page carries. */
 interface PageStatus {
-  collection: { state: 'live' | 'stopped' | 'unknown'; stoppedForMs: number | null };
+  collection: {
+    state: 'live' | 'stopped' | 'unknown';
+    stoppedForMs: number | null;
+  };
   storeReadOnly: boolean | null;
   evictor: { lastSuccessAt: string | null; stale: boolean | null };
   evictions: EvictionNotice[];
@@ -117,6 +122,7 @@ interface PageAnswer {
   count: number;
   incomplete: boolean;
   status?: PageStatus;
+  throttle?: LogsThrottle;
 }
 
 /** One request's place in the window; a first page names none of it. */
@@ -191,6 +197,7 @@ export function Logs() {
   const [incomplete, setIncomplete] = useState(false);
   /** The window's freshness, store alarm and eviction notices. */
   const [status, setStatus] = useState<PageStatus | null>(null);
+  const [throttle, setThrottle] = useState<LogsThrottle | null>(null);
 
   const load = useCallback(async (filter: PageFilter, place: PagePlace, append: boolean) => {
     setBusy(true);
@@ -212,7 +219,9 @@ export function Logs() {
       if (!append) params.set('status', '1');
       const response = await fetch(`/api/logs?${params.toString()}`);
       if (response.status === 400) {
-        const value = (await response.json().catch(() => null)) as { field?: string } | null;
+        const value = (await response.json().catch(() => null)) as {
+          field?: string;
+        } | null;
         setInvalid(value?.field ?? 'filter');
         setRecords(null);
         setUnavailable(null);
@@ -229,6 +238,22 @@ export function Logs() {
         append && current !== null ? [...current, ...value.records] : value.records
       );
       if (value.status !== undefined) setStatus(value.status);
+      setThrottle((current) => {
+        const next = value.throttle ?? {
+          state: 'unknown' as const,
+          windows: [],
+        };
+        if (!append || current === null) return next;
+        const windows = new Map(
+          current.windows.map((window) => [
+            JSON.stringify([window.pod, window.start, window.end]),
+            window,
+          ])
+        );
+        for (const window of next.windows)
+          windows.set(JSON.stringify([window.pod, window.start, window.end]), window);
+        return { state: next.state, windows: [...windows.values()] };
+      });
       setWindowCount(value.count);
       setNextOffset(value.offset + value.limit);
       setPageLimit(value.limit);
@@ -267,7 +292,10 @@ export function Logs() {
     try {
       const response = await fetch('/api/logs/modules');
       if (!response.ok) return;
-      const value = (await response.json()) as { state: string; modules?: string[] };
+      const value = (await response.json()) as {
+        state: string;
+        modules?: string[];
+      };
       if (value.state === 'ok' && Array.isArray(value.modules)) setModules(value.modules);
     } catch {
       // The record answer carries the unavailable reason.
@@ -332,7 +360,14 @@ export function Logs() {
       setInvalid('range');
       return;
     }
-    void first({ from: fromMs, to: toMs, module: moduleName, level, conversation, text });
+    void first({
+      from: fromMs,
+      to: toMs,
+      module: moduleName,
+      level,
+      conversation,
+      text,
+    });
   }
 
   return (
@@ -527,6 +562,8 @@ export function Logs() {
             <AlertDescription>{t('logsEvictorStale')}</AlertDescription>
           </Alert>
         )}
+
+        {records !== null && throttle !== null && <LogsThrottleStatus value={throttle} />}
 
         <section aria-live="polite" aria-busy={busy}>
           {records !== null && records.length === 0 && (

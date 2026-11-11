@@ -58,6 +58,25 @@ ones that would explain a flood.
 - `unavailable — <reason>` — the store did not answer; the page says why instead
   of showing an empty list.
 
+## Task pod throttling
+
+Above the records, the page shows discarded **events per pod and paired
+6-second window**, over the chosen time range, independently of message
+filters. The collector stores two counters under `module=throttle-window`:
+`input` before throttling and `accepted` after it. For exactly one valid pair
+with matching pod and window boundaries, discarded is `input - accepted`.
+Equal counters mean no events discarded; input alone never means loss.
+Missing, invalid or duplicate counters show **discarded count unknown**,
+never zero. A store failure or a truncated counter read is unknown too.
+A task pod visible in the current page with no counters is shown as unknown;
+when neither counters nor task records are available the overall result is
+unknown. No total is inferred for windows with no evidence.
+
+The limit counts events, not bytes: long lines can still use substantial disk
+space. Counters are collector-owned fields, not parsed task message text.
+Normalized task records always carry `untrusted` and cannot supply a counter,
+even if their pod label says `throttle-window`.
+
 ## Nothing leaves the machine
 
 The collector reads this node's pod log files, the store keeps them on a volume

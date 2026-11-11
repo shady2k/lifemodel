@@ -70,8 +70,10 @@ function assertWiring(config) {
   const store = config.sinks?.['logs-store'];
   if (!(store?.inputs ?? []).includes('collector-heartbeat'))
     fail('the store sink does not carry the heartbeat');
-  if (!(store?.inputs ?? []).includes('normalize'))
-    fail('the store sink no longer carries the pod records');
+  for (const input of ['pod-route.trusted', 'accepted-record', 'throttle-window-records']) {
+    if (!(store?.inputs ?? []).includes(input))
+      fail(`the store sink no longer carries ${input}`);
+  }
 
   const canary = config.sinks?.['heartbeat-canary'];
   if (canary?.type !== 'console') fail('the heartbeat has no console sink');

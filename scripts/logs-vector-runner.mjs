@@ -42,7 +42,7 @@ function binaryRunner(binary) {
       const child = spawn(binary, ['--config', join(directory, configName)], {
         cwd: directory,
         env: { ...process.env, ...env },
-        stdio: 'ignore',
+        stdio: ['ignore', 'ignore', 'inherit'],
       });
       return () => {
         child.kill('SIGTERM');

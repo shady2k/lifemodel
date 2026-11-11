@@ -32,6 +32,7 @@ describe('collector record-contract CI path classification', () => {
     ['the pinned binary runner', ['scripts/logs-vector-runner.mjs']],
     ['the real-logger seed harness', ['scripts/logs-vrl-real-loggers.mjs']],
     ['the heartbeat part of the check', ['scripts/logs-heartbeat-check.mjs']],
+    ['the throttle part of the check', ['tests/fixtures/logs-vrl/throttle-check.mjs']],
     ['the record contract fixtures', ['tests/fixtures/logs-vrl/cases.json']],
     ['the turn seed', ['tests/fixtures/logs-vrl/turn-record-lines.ts']],
     [

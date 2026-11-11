@@ -76,13 +76,45 @@ def create_pod(report, cluster, manifest):
 walk.create_pod = create_pod
 walk.writer_manifest = lambda options, namespace, *args, **kwargs: {'metadata': {'namespace': namespace}}
 walk.wait_running = lambda *args: True
-walk.metrics_text = lambda *args: '' if mode == 'empty' else '\n'.join(
-    'walk_throttle_window_' + kind + '{pod="' + pod + '"} 10'
-    for pod in ['task-fast', 'task-large'] for kind in ['input', 'accepted'])
-walk.throttle_windows = lambda text: ([{'pod': 'someone-else', 'input': 20, 'accepted': 10}]
-    if mode == 'unrelated' else [] if mode == 'empty' else [
-        {'pod': 'task-fast', 'input': 3000, 'accepted': 1500},
-        {'pod': 'task-large', 'input': 60, 'accepted': 60}])
+class Store:
+    def query(self, query):
+        assert 'module:"throttle-window"' in query
+        assert 'task-fast' in query and 'task-large' in query
+        if mode == 'empty':
+            return []
+        records = [
+            {'module': 'throttle-window', 'namespace': 'lifemodel-motor',
+             'pod': pod if mode != 'unrelated' else 'someone-else',
+             'counter': kind, 'value': str(3000 if kind == 'input' else 1500),
+             'window_start': '2026-11-10T00:00:00Z',
+             'window_end': '2026-11-10T00:00:06Z',
+             '_time': '2026-11-10T00:00:06Z'}
+            for pod in ['task-fast', 'task-large'] for kind in ['input', 'accepted']]
+        if mode == 'missing':
+            records.pop()
+        if mode == 'duplicate':
+            records.append(dict(records[-1]))
+        if mode == 'different-window':
+            records[-1].update(window_start='2026-11-10T00:00:06Z',
+                               window_end='2026-11-10T00:00:12Z')
+        if mode == 'forged':
+            for record in records:
+                record['untrusted'] = 'true'
+        if mode == 'message-only':
+            records = [{'module': 'throttle-window', 'pod': 'task-fast',
+                        '_msg': json.dumps(records)}]
+        if mode == 'bad-count':
+            records[-1]['value'] = '4000'
+        if mode == 'no-throttle':
+            for record in records:
+                record['value'] = '3000'
+        if mode == 'malformed-duplicate':
+            records.append(dict(records[-1], value='not-a-count'))
+        if mode == 'missing-window':
+            for record in records:
+                record.update(window_start='2026-11-09T23:59:54Z',
+                              window_end='2026-11-10T00:00:00Z')
+        return records
 class Cluster:
     def run(self, args, **kwargs):
         if '--timestamps' in args:
@@ -118,7 +150,7 @@ class Loader:
         return answer if status == 200 else None
 report = walk.Report()
 state = {'trusted_run': 'trusted', 'task_fast': 'fast', 'task_large': 'large', 'throttle_start': 0}
-ok = walk.throttle_case(report, options, Loader(), Cluster(), state)
+ok = walk.throttle_case(report, options, Loader(), Cluster(), Store(), state)
 print('INTEGRATION ' + json.dumps({'ok': ok, 'calls': calls, 'created': created,
                                   'elapsed': clock[0], 'validated': validated}))
 sys.exit(report.result())

@@ -14,6 +14,7 @@ import { sameOrigin, verifyCsrf, type PasswordRecord } from './auth.js';
 import { CSP, redirect, sendText } from './http-responses.js';
 import { createLogsQuery, parseLogsPageQuery } from './logs-query.js';
 import { createLogsStore } from './logs-store-adapter.js';
+import { readLogsThrottle } from './logs-throttle.js';
 import { createLogsStatus, type LogsStatusQuery } from './logs-status.js';
 import { createLogsEvictorStatus } from './logs-evictor-status.js';
 import type { LogsSettings, LogsSettingsStatus } from './logs-settings.js';
@@ -64,7 +65,11 @@ export function createLogsHandlers(deps: LogsHandlerDeps): LogsHandlers {
   const logs = createLogsQuery({ store });
   const status =
     deps.logsStatus ??
-    createLogsStatus({ store, evictor: createLogsEvictorStatus(), now: Date.now });
+    createLogsStatus({
+      store,
+      evictor: createLogsEvictorStatus(),
+      now: Date.now,
+    });
 
   async function logsPage({ req, res }: RouteRequest): Promise<void> {
     const record = await deps.state.readAuth();
@@ -97,7 +102,11 @@ export function createLogsHandlers(deps: LogsHandlerDeps): LogsHandlers {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const parsed = parseLogsPageQuery(url.searchParams);
     if (parsed.state === 'invalid') {
-      sendJson(res, 400, { state: 'invalid', reason: 'filter', field: parsed.field });
+      sendJson(res, 400, {
+        state: 'invalid',
+        reason: 'filter',
+        field: parsed.field,
+      });
       return;
     }
     const result = await logs.page(parsed.request);
@@ -108,13 +117,17 @@ export function createLogsHandlers(deps: LogsHandlerDeps): LogsHandlers {
     // The page asks for the status with its first page; later pages keep the
     // answer they were given, so one window costs one status read.
     if (url.searchParams.get('status') !== '1') {
-      sendJson(res, 200, result);
+      sendJson(res, 200, {
+        ...result,
+        throttle: await readLogsThrottle(store, parsed.request.filter, result.records),
+      });
       return;
     }
     const window = parsed.request.filter;
     sendJson(res, 200, {
       ...result,
       status: await status.read({ from: window.from, to: window.to }),
+      throttle: await readLogsThrottle(store, window, result.records),
     });
   }
 
@@ -217,5 +230,11 @@ export function createLogsHandlers(deps: LogsHandlerDeps): LogsHandlers {
     unavailable(res, result.state);
   }
 
-  return { logsPage, logsQuery, logsModules, logsSettingsRead, logsSettingsWrite };
+  return {
+    logsPage,
+    logsQuery,
+    logsModules,
+    logsSettingsRead,
+    logsSettingsWrite,
+  };
 }

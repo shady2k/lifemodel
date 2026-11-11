@@ -177,7 +177,17 @@ describe('the logs API', () => {
     expect(body.records).toHaveLength(4);
     expect(body.records.every((record) => record.fields['module'] === 'core')).toBe(true);
     expect(body.records.some((record) => record.fields['module'] === 'core-web')).toBe(false);
-    expect(fixture.requests.at(-1)?.query).toContain('module:="core"');
+    const counters = fixture.requests.find((request) =>
+      request.query?.includes('module:="throttle-window"')
+    );
+    expect(counters?.query).toContain('namespace:="lifemodel-motor" NOT untrusted:*');
+    expect(counters?.query).not.toContain('module:="core"');
+    expect(JSON.parse(response.body)).toHaveProperty('throttle.state');
+    expect(
+      fixture.requests.find((request) =>
+        request.query?.includes('| sort by (_time desc, _msg desc, pod desc)')
+      )?.query
+    ).toContain('module:="core"');
   });
 
   it('returns the modules seen by the store', async () => {
@@ -318,5 +328,68 @@ describe('the logs page status route (ADR-016 §4, §5)', () => {
       state: 'unavailable',
       reason: 'connection_refused',
     });
+  });
+});
+
+describe('the logs API collector counter response', () => {
+  it.each([
+    { accepted: 60, duplicate: false, discarded: 240 },
+    { accepted: 300, duplicate: false, discarded: 0 },
+    { accepted: null, duplicate: false, discarded: null },
+    { accepted: 60, duplicate: true, discarded: null },
+  ])('reports the exact pair or unknown: %j', async ({ accepted, duplicate, discarded }) => {
+    const counter = (kind: string, value: number) => ({
+      _time: '2026-11-07T10:00:06Z',
+      module: 'throttle-window',
+      namespace: 'lifemodel-motor',
+      pod: 'task-a',
+      counter: kind,
+      value,
+      window_start: '2026-11-07T10:00:00Z',
+      window_end: '2026-11-07T10:00:06Z',
+    });
+    const rows = [counter('input', 300)];
+    if (accepted !== null) rows.push(counter('accepted', accepted));
+    if (duplicate && accepted !== null) rows.push(counter('accepted', accepted));
+    const store = createServer(async (req, res) => {
+      let body = '';
+      for await (const chunk of req) body += String(chunk);
+      const query = new URLSearchParams(body).get('query') ?? '';
+      res.setHeader('content-type', 'application/json');
+      if (query.includes('module:="throttle-window"'))
+        res.end(rows.map((row) => JSON.stringify(row)).join('\n'));
+      else if (query.includes('| stats count()')) res.end(JSON.stringify({ 'count(*)': 0 }));
+      else res.end('');
+    });
+    await new Promise<void>((resolve) => store.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = store.address();
+      if (address === null || typeof address === 'string') throw new Error('store did not bind');
+      const loader = await start(`http://127.0.0.1:${String(address.port)}`);
+      const response = await loader.get(
+        `/api/logs?from=${String(FROM)}&to=${String(TO)}&module=core&text=filtered`
+      );
+      expect(response.status).toBe(200);
+      expect(JSON.parse(response.body)).toMatchObject({
+        state: 'ok',
+        records: [],
+        throttle: {
+          state: 'ok',
+          windows: [
+            {
+              pod: 'task-a',
+              start: '2026-11-07T10:00:00.000Z',
+              end: '2026-11-07T10:00:06.000Z',
+              discarded,
+            },
+          ],
+        },
+      });
+    } finally {
+      store.closeAllConnections();
+      await new Promise<void>((resolve, reject) =>
+        store.close((error) => (error ? reject(error) : resolve()))
+      );
+    }
   });
 });

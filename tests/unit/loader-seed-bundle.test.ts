@@ -278,6 +278,7 @@ describe('loader image release seed bundle', () => {
       'loader/src/workbench-status.ts',
       'loader/src/logs-store-adapter.ts',
       'loader/src/logs-query.ts',
+      'loader/src/logs-throttle.ts',
     ]);
   });
 

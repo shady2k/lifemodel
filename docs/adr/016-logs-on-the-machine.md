@@ -1025,8 +1025,27 @@ produced windows of 300 input with 69 accepted, and 299 with 60. So
 is exact only inside one window pair; the two counters are separate windows, so a
 pod whose two windows do not both exist, whose records were dropped by their own
 sink, or whose count has not arrived yet is shown as `unknown`, never as zero.
-The record carries only the pod, the two counters and the window's start and end
-time — no message text, no metadata — so a flood cannot inflate it.
+The collector stamps a fixed, epoch-aligned six-second window before branching
+into the throttle. A native `reduce` transform sums input and accepted seeds
+from before and after it, grouped by Kubernetes pod, namespace and that same
+window, then emits one record per counter. A zero-valued accepted seed from the
+input branch makes a
+fully discarded window observable as zero accepted, not an invented zero from
+a missing record. The reducer retains a group for twelve seconds of inactivity before flushing
+it (checked every second); its output is not an immediate per-line loss notice.
+
+Each record carries only `module="throttle-window"`, the Kubernetes pod and
+namespace, `counter` (`input` or `accepted`), `value`, `window_start`,
+`window_end`, and the store timestamp — no message text or other metadata.
+The normalizer rebuilds every pod-log record from an allowlist and never
+promotes `counter`, `value` or window fields from a line. It always adds
+`untrusted`, including when a pod's label says `throttle-window`. Readers require
+the collector-only counter schema and the absence of `untrusted`; they never
+parse a message to find counters. Thus an imitation task line remains a task
+record, not evidence of collection. Missing, duplicate or invalid pairs are
+`unknown`; only a complete pair with `0 <= accepted <= input` supplies a loss
+count for that pod and window. The page does not sum unmatched windows into a
+reconciled total.
 
 ### 6. Bounds and failure behaviour, measured
 
@@ -1624,7 +1643,7 @@ Docker with the same pinned images on a named volume on a real disk.
 | The margin and what a merge does to it | a store with `-storage.minFreeDiskSpaceBytes` set from the filesystem's free space, an incompressible flood, 1 s samples of free space plus `vl_active_merges`, `vl_merges_total`, `vl_pending_rows`, `vl_storage_rows`, and the store's size on disk every 5 s; on the cluster, a real Postgres pod committing every 200 ms on the same filesystem |
 | Retention: byte bound, day partitions, canary | a store with a 300 MiB byte bound; a flood of today's records; a 200-record canary 10 days old; per-day `stats by (_time:1d)` |
 | Displacement, and why the deletion API is rejected | loop-mounted ext4 images (3 GiB, 1 GiB), the pinned store at `--memory=1g` and `2g`; pino-like JSON lines (564-byte records, 6.49× compression); a 1 s sampler of `statvfs` free space, the container's RSS and `vl_storage_is_read_only`; `POST /internal/partition/detach?name=…&authKey=…` followed by `rm -rf partitions/<day>`; `POST /delete/run_task` with cutoffs chosen from `stats by (_time:1m)`/`(_time:10s) count()`, `docker inspect` for `RestartCount`/`OOMKilled`, and a `seq` field counted with `seq:range[lo,hi]` for what is acknowledged between detach and remove |
-| The throttle and its per-pod gap | a task pod writing 300,000 lines at full speed, a trusted pod beside it; `vector_component_discarded_events_total{component_id="throttle"}`; a `reduce` window per pod written to the store as `module="collector-window"` |
+| The throttle and its per-pod gap | a task pod writing 300,000 lines at full speed, a trusted pod beside it; `vector_component_discarded_events_total{component_id="throttle"}`; a prototype `reduce` window per pod written to the store as `module="collector-window"` (the product uses the paired `module="throttle-window"` records described above) |
 | The env mapping | the same ConfigMap through `envFrom` in three configurations, read from the process's own `/flags` endpoint |
 | Egress: observed and permitted | `tcpdump` on the node for 10 minutes without a policy; then the permit list applied, a witness pod outside it, and a probe pod carrying the collector's labels |
 | Paging with tied timestamps | 5,000 records at one timestamp and 300 byte-identical lines, paged with the adapter's query form in 250-record pages, quiet and with ingest running |
