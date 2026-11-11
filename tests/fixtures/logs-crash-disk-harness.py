@@ -45,6 +45,7 @@ elif mode == 'recovery':
 elif mode == 'run-order':
     events = []
     walk.safe_load = lambda *args: True
+    walk.collector_restarts = lambda *args: 0
     walk.writer_image = lambda *args: 'image'
     walk.ensure_namespace = lambda *args: True
     walk.wait_store_down = lambda *args: True
