@@ -1,4 +1,9 @@
 data_dir: /var/lib/lifemodel-logs-collector
+# Keep idle buffer usage/delivery series while an outage fills and blocks the
+# disk buffer. Vector's default 300s registry expiry otherwise removes them;
+# the exporter then drops them even though internal_metrics keeps scraping.
+# Negative disables registry expiry in the pinned Vector (null means default).
+expire_metrics_secs: -1
 sources:
   kubernetes:
     type: kubernetes_logs

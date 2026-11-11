@@ -1198,8 +1198,27 @@ collector exports Vector's internal metrics (`sources.internal_metrics` of type
 the kubelet's stream, not pod networking - and nothing else in the cluster can,
 so no Service, no container port and no NetworkPolicy rule is added and the
 permitted egress set of L10 is unchanged; the sink's buffer gauges
-(`vector_buffer_size_events`, `vector_buffer_max_size_events`) and the source's
-received counter are what `WALK-LOGS-CRASH` reads there for L07.
+(`vector_buffer_size_events`, `vector_buffer_size_bytes`,
+`vector_buffer_max_size_bytes`) and the source's received counter are what
+`WALK-LOGS-CRASH` reads there for L07.
+
+The pinned Vector's internal registry normally expires metrics after 300 seconds
+without an update. A blocked disk buffer can stop updating its usage gauges and
+delivery counters while `internal_metrics` and the exporter remain healthy; the
+exporter then expires the missing series too. The collector sets
+`expire_metrics_secs: -1` to retain those idle observations for the process
+lifetime (null would restore the default, not disable expiry). This applies to
+all internal metric series, so metric cardinality can accumulate until restart;
+it does not cache an exporter response or claim new delivery progress. The
+current file source and throttle keep their default per-file/per-key metric tags
+disabled; enabling dynamic metric labels requires reviewing this retention.
+The native contract check fills the unchanged blocking disk buffer against a closed
+HTTP port, reproduces idle-series expiry with shortened timers, and proves the
+committed configuration retains usage and delivery evidence through the stall.
+Vector reserves one 128 MiB disk segment from the configured 320 MiB bound;
+its logical usage gauge therefore reaches backpressure near 192 MiB, not 320
+MiB. The native regression checks that effective limit. This does not replace
+the VM crash/delivery acceptance evidence required by L07.
 
 **Ingest is `glob_minimum_cooldown_ms: 1000` and this is a product setting.** The
 source rescans for new files once a second; that delay is also how long a new

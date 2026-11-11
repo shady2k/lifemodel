@@ -23,6 +23,8 @@ describe('the collector\'s internal metrics exporter', () => {
   it('takes Vector\'s internal metrics and exports them on the loopback only', () => {
     const parsed = config();
     expect(parsed.sources.internal_metrics).toEqual({ type: 'internal_metrics' });
+    // A full, blocked disk buffer must not lose its idle usage/delivery series.
+    expect(parsed.expire_metrics_secs).toBe(-1);
     const exporter = parsed.sinks.metrics;
     expect(exporter.type).toBe('prometheus_exporter');
     expect(exporter.inputs).toEqual(['internal_metrics']);

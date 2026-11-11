@@ -44,8 +44,15 @@ function binaryRunner(binary) {
         env: { ...process.env, ...env },
         stdio: ['ignore', 'ignore', 'inherit'],
       });
-      return () => {
-        child.kill('SIGTERM');
+      return (signal = 'SIGTERM') => {
+        if (signal === 'SIGKILL') {
+          return new Promise((resolve) => {
+            if (child.exitCode !== null || child.signalCode !== null) return resolve();
+            child.once('exit', resolve);
+            child.kill(signal);
+          });
+        }
+        child.kill(signal);
       };
     },
   };
@@ -62,7 +69,7 @@ function dockerRunner() {
         ['run', '--rm', '-v', `${directory}:/work:ro`, PINNED_VECTOR_IMAGE, 'test', `/work/${name}`],
         { encoding: 'utf8', timeout: 300_000 }
       ),
-    startCollector: ({ directory, configName, containerName, env }) => {
+    startCollector: ({ directory, configName, containerName, env, hostNetwork = false }) => {
       const start = spawnSync(
         'docker',
         [
@@ -70,6 +77,7 @@ function dockerRunner() {
           '-d',
           '--name',
           containerName,
+          ...(hostNetwork ? ['--network', 'host'] : []),
           ...Object.entries(env).flatMap(([key, value]) => ['-e', `${key}=${value}`]),
           '-v',
           `${directory}:/work`,
