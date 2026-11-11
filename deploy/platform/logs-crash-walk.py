@@ -112,6 +112,7 @@ from logs_walk_support import (  # noqa: E402
     WalkError,
     common_arguments,
     now_ms,
+    parse_ms,
     read_password,
     stamp,
     wait_until,
@@ -144,6 +145,8 @@ DRAIN_HEADROOM = 1.5
 DRAIN_MARGIN_SECONDS = 30
 DRAIN_IDLE_BYTES = MIB
 DRAIN_CEILING = 900
+ACCEPTED_CRASH_WINDOW_SECONDS = 1.0
+ACCEPTED_CRASH_LOOKBACK_SECONDS = 60
 SATURATION_HEADROOM = 1.1
 SATURATION_MARGIN_SECONDS = 60
 WRITER_SCRIPT = (
@@ -1012,7 +1015,8 @@ def seq_stats(store, options, writer, run_id, lo, hi, window):
     """One writer's stored records over a seq range: record count, distinct seqs, range."""
     query = ('_time:[%s, %s] pod:="%s" namespace:="%s" "walk-crash %s" '
              '| extract "seq=<seq> " | filter seq:range[%d, %d] '
-             '| stats count() n, count_uniq(seq) uniq, min(seq) lo, max(seq) hi'
+             '| stats count() n, count_uniq(seq) uniq, min(seq) lo, max(seq) hi, '
+             'min(_time) first, max(_time) last'
              % (stamp(window[0]), stamp(window[1]), writer, options.writer_namespace,
                 run_id, lo, hi))
     rows = store.query(query)
@@ -1029,8 +1033,13 @@ def seq_stats(store, options, writer, run_id, lo, hi, window):
         except (TypeError, ValueError):
             raise WalkError('store_stats_value:' + field) from None
 
+    def moment(field):
+        value = row.get(field)
+        return parse_ms(value) if isinstance(value, str) else None
+
     return {'n': number('n'), 'uniq': number('uniq'),
-            'lo': number('lo', True), 'hi': number('hi', True)}
+            'lo': number('lo', True), 'hi': number('hi', True),
+            'first': moment('first'), 'last': moment('last')}
 
 
 def missing_retained(store, options, writer, run_id, retained, window,
@@ -1055,6 +1064,9 @@ def missing_retained(store, options, writer, run_id, retained, window,
             root_uniq = stats['uniq']
         if stats['uniq'] >= right - left + 1:
             continue
+        if stats['uniq'] == 0:
+            missing.extend(value for value in range(left, right + 1) if value in retained)
+            continue
         if left == right:
             if left in retained:
                 missing.append(left)
@@ -1066,14 +1078,76 @@ def missing_retained(store, options, writer, run_id, retained, window,
             'rootUniq': root_uniq}
 
 
+def clock_text(milliseconds):
+    """A UTC wall clock with milliseconds, for a block's written-at range."""
+    if milliseconds is None:
+        return 'unknown'
+    return time.strftime('%H:%M:%S', time.gmtime(milliseconds / 1000)) \
+        + '.%03d' % (milliseconds % 1000)
+
+
+def contiguous_blocks(sequences):
+    """Sorted sequences grouped where each follows the previous one."""
+    blocks = []
+    for value in sorted(sequences):
+        if blocks and value == blocks[-1][-1] + 1:
+            blocks[-1].append(value)
+        else:
+            blocks.append([value])
+    return blocks
+
+
+def crash_block(store, options, writer, run_id, block, full, written, window, killed_at):
+    """One missing block measured against the accepted hard-kill window."""
+    span = ((full['last'] - full['first']) / 1000.0
+            if full['first'] is not None and full['last'] is not None else 0.0)
+    present_span = (full['hi'] - full['lo']
+                    if full['hi'] is not None and full['lo'] is not None else 0)
+    rate = present_span / span if span > 0 else None
+    allowed = int(math.ceil(rate * ACCEPTED_CRASH_WINDOW_SECONDS)) if rate else 0
+    around = seq_stats(store, options, writer, run_id, block[0] - 1, block[-1] + 1, window)
+    written_from = around['first']
+    written_to = around['last']
+    within = (written_from is not None and written_to is not None and killed_at is not None
+              and written_from >= killed_at - ACCEPTED_CRASH_LOOKBACK_SECONDS * 1000
+              and written_to <= killed_at)
+    block_info = {'writer': writer, 'first': block[0], 'last': block[-1],
+                  'count': len(block), 'writtenFrom': written_from,
+                  'writtenTo': written_to,
+                  'secondsBeforeKill': ((killed_at - written_to) / 1000.0
+                                        if killed_at is not None and written_to is not None
+                                        else None),
+                  'rate': rate, 'allowed': allowed, 'withinLookback': within}
+    if rate is None:
+        return block_info, False, 'the writer\'s write rate could not be measured'
+    if len(block) > allowed:
+        return block_info, False, ('the block is %d lines, larger than the %d allowed by one '
+                                   'second at %.0f lines/s' % (len(block), allowed, rate))
+    if not within:
+        return block_info, False, ('the block was not written in the %d s before the '
+                                   'intentional kill' % ACCEPTED_CRASH_LOOKBACK_SECONDS)
+    return block_info, True, ''
+
+
+def block_text(info):
+    return ('%s seq %d..%d (%d lines, written %s..%s, %s s before the kill; measured '
+            '%.0f lines/s, allowed %d)'
+            % (info['writer'], info['first'], info['last'], info['count'],
+               clock_text(info['writtenFrom']), clock_text(info['writtenTo']),
+               'unknown' if info['secondsBeforeKill'] is None
+               else '%.1f' % info['secondsBeforeKill'],
+               info['rate'] or 0, info['allowed']))
+
+
 def writer_store_counts(report, options, store, run_id, name, index, last_seq, retained,
-                        window):
+                        window, killed_at=None):
     """One writer's store-side counts against its retained-kubelet snapshot."""
     base = index * 50_000_000
     written = max(0, last_seq - base)
     if written <= 0:
         return {'writer': name, 'written': 0, 'retained': len(retained), 'n': 0, 'uniq': 0,
-                'duplicated': 0, 'missing': [], 'rotatedMissing': 0, 'complete': True}
+                'duplicated': 0, 'missing': [], 'rotatedMissing': 0, 'complete': True,
+                'accepted': True, 'rejection': '', 'block': None}
     full = seq_stats(store, options, name, run_id, base + 1, last_seq, window)
     retained_lo, retained_hi = min(retained), max(retained)
     root = full if (retained_lo, retained_hi) == (base + 1, last_seq) else None
@@ -1082,6 +1156,20 @@ def writer_store_counts(report, options, store, run_id, name, index, last_seq, r
     rotated_size = max(0, written - len(retained))
     rotated_present = max(0, full['uniq'] - (search['rootUniq'] or 0))
     rotated_missing = max(0, rotated_size - rotated_present)
+    block, accepted, rejection = None, True, ''
+    if search['missing']:
+        if not search['complete']:
+            accepted, rejection = False, 'the bounded gap search did not resolve every range'
+        elif len(contiguous_blocks(search['missing'])) > 1:
+            accepted = False
+            rejection = ('%d separate blocks were lost'
+                         % len(contiguous_blocks(search['missing'])))
+        elif killed_at is None:
+            accepted, rejection = False, 'no intentional kill time was recorded'
+        else:
+            block, accepted, rejection = crash_block(
+                store, options, name, run_id, contiguous_blocks(search['missing'])[0],
+                full, written, window, killed_at)
     if search['complete']:
         # The two missing figures account for every absent line exactly.
         rotated_missing = max(0, absent - len(search['missing']))
@@ -1096,7 +1184,8 @@ def writer_store_counts(report, options, store, run_id, name, index, last_seq, r
               'n': full['n'], 'uniq': full['uniq'], 'absent': absent,
               'duplicated': max(0, full['n'] - full['uniq']),
               'missing': search['missing'], 'rotatedMissing': rotated_missing,
-              'unresolved': unresolved, 'complete': search['complete']}
+              'unresolved': unresolved, 'complete': search['complete'],
+              'accepted': accepted, 'rejection': rejection, 'block': block}
     report.note('writer %s: written=%d retained=%d stored=%d uniq=%d duplicates=%d %s%s'
                 % (name, counts['written'], counts['retained'], counts['n'], counts['uniq'],
                    counts['duplicated'], arithmetic,
@@ -1106,22 +1195,39 @@ def writer_store_counts(report, options, store, run_id, name, index, last_seq, r
 
 
 def delivery_verdict(per_writer):
-    """L07's verdict from store counts: nothing still in the kubelet's files may be lost."""
+    """L07's verdict: nothing still in the kubelet's files may be lost outside the window.
+
+    A hard kill may lose the lines the collector had read but not yet buffered;
+    the owner accepted at most about one second of each writer's lines, in one
+    contiguous block written just before the intentional kill. Everything else
+    is a loss with the strict wording.
+    """
     still = sum(len(writer['missing']) for writer in per_writer)
     rotated = sum(writer['rotatedMissing'] for writer in per_writer)
-    detail = ('%d written, %d delivered, %d duplicated, %d missing of which %d are still in '
-              'the kubelet\'s files, %d rotated away'
-              % (sum(writer['written'] for writer in per_writer),
-                 sum(writer['uniq'] for writer in per_writer),
-                 sum(writer['duplicated'] for writer in per_writer),
-                 still + rotated, still, rotated))
-    named = ['%s seq %s%s' % (writer['writer'], sequence_ranges(writer['missing'][:8]),
-                              ' ...' if len(writer['missing']) > 8 else '')
-             for writer in per_writer if writer['missing']]
-    if named:
-        detail = ('lost while still in the kubelet\'s files: %s (%s)'
-                  % ('; '.join(named), detail))
-    return {'ok': not still, 'detail': detail,
+    base_detail = ('%d written, %d delivered, %d duplicated, %d missing of which %d are still '
+                   'in the kubelet\'s files, %d rotated away'
+                   % (sum(writer['written'] for writer in per_writer),
+                      sum(writer['uniq'] for writer in per_writer),
+                      sum(writer['duplicated'] for writer in per_writer),
+                      still + rotated, still, rotated))
+    refused = [writer for writer in per_writer if writer['missing'] and not writer['accepted']]
+    accepted = [writer for writer in per_writer if writer['missing'] and writer['accepted']]
+    if still and not refused:
+        detail = ('the only retained lines missing are inside the accepted hard-kill window: '
+                  '%s (%s)' % ('; '.join(block_text(writer['block']) for writer in accepted),
+                               base_detail))
+    elif still:
+        named = ['%s seq %s%s' % (writer['writer'],
+                                  sequence_ranges(writer['missing'][:8]),
+                                  ' ...' if len(writer['missing']) > 8 else '')
+                 for writer in refused]
+        reasons = '; '.join('%s: %s' % (writer['writer'], writer['rejection'])
+                            for writer in refused if writer['rejection'])
+        detail = ('lost while still in the kubelet\'s files: %s%s (%s)'
+                  % ('; '.join(named), (' - ' + reasons) if reasons else '', base_detail))
+    else:
+        detail = '%s; no retained line is missing' % base_detail
+    return {'ok': still == 0 or not refused, 'detail': detail,
             'complete': all(writer['complete'] for writer in per_writer),
             'missing': [seq for writer in per_writer for seq in writer['missing']]}
 
@@ -1150,17 +1256,17 @@ def drain_sample(options, cluster, store, run_id, last_seqs, window):
 
 def wait_for_drain(report, options, cluster, store, run_id, last_seqs, window,
                    buffered_at_crash=None, sample=None):
-    """Wait until the restarted collector read out what it held at the crash.
+    """Wait until the restarted collector read out the disk buffer it held at the crash.
 
-    The verdict is only meaningful once the records buffered at the crash have
-    reached the store: a query during the drain sees lines still in transit. The
-    collector also carries every other pod's traffic, so the buffer never sits
-    exactly empty while that flows; the finish condition is therefore that the
-    events backlogged at the first reading have been sent (the sent total has
-    reached the received total captured then) and each writer's stored distinct
-    count is unchanged across two consecutive readings. A buffer that really is
-    empty is equally sufficient. The clock is derived from the events backlogged
-    at the start and the sent total's growth, with a stated ceiling.
+    The restart resets the buffer's received/sent counters to zero while the
+    disk buffer still holds what the collector had not sent, so the received
+    total says nothing about the backlog. The backlog is the disk buffer's own
+    content at the first reading - its events (or bytes) - and the drain is done
+    when that content has been read out: the buffer is back at its idle floor, or
+    the sent total has grown by at least the backlog. The per-writer store counts
+    must also be unchanged across two consecutive readings, because the
+    collector keeps carrying every other pod's traffic. The clock is the events
+    backlog over the sent total's growth, with headroom and a stated ceiling.
     """
     sample = sample or (lambda: drain_sample(options, cluster, store, run_id,
                                              last_seqs, window))
@@ -1178,40 +1284,40 @@ def wait_for_drain(report, options, cluster, store, run_id, last_seqs, window,
         size, events = sink.get('size'), sink.get('events')
         received, sent = sink.get('received'), sink.get('sent')
         if baseline is None:
-            baseline = {'time': now, 'received': received, 'sent': sent, 'size': size}
-        backlog = None
-        if baseline['received'] is not None and baseline['sent'] is not None:
-            backlog = max(0, baseline['received'] - baseline['sent'])
+            baseline = {'time': now, 'size': size, 'events': events, 'sent': sent,
+                        'received': received}
+        backlog_events = baseline['events']
         if rate is None and now > baseline['time']:
-            if backlog is not None and sent is not None and baseline['sent'] is not None \
-                    and sent > baseline['sent']:
+            if backlog_events is not None and sent is not None \
+                    and baseline['sent'] is not None and sent > baseline['sent']:
                 rate = (sent - baseline['sent']) / (now - baseline['time'])
-                seconds = backlog / rate
+                seconds = backlog_events / rate
                 bound = min(options.drain_ceiling,
                             int(math.ceil(seconds * DRAIN_HEADROOM))
                             + DRAIN_MARGIN_SECONDS)
                 deadline = now + bound
-                report.note('drain bound: %d events backlogged at the start (buffer received '
-                            '%s, sent %s), measured drain %.0f events/s, expected %.0f s -> '
-                            '%d s (headroom %.1f, margin %d s, ceiling %d s)'
-                            % (backlog, baseline['received'], baseline['sent'], rate,
-                               seconds, bound, DRAIN_HEADROOM, DRAIN_MARGIN_SECONDS,
-                               options.drain_ceiling))
-            elif backlog is None and size is not None and baseline['size'] is not None \
+                report.note('drain bound: %d events in the disk buffer at the first reading '
+                            '(sent %s -> %s), measured drain %.0f events/s, expected %.0f s '
+                            '-> %d s (headroom %.1f, margin %d s, ceiling %d s)'
+                            % (backlog_events, baseline['sent'], sent, rate, seconds, bound,
+                               DRAIN_HEADROOM, DRAIN_MARGIN_SECONDS, options.drain_ceiling))
+            elif backlog_events is None and size is not None and baseline['size'] is not None \
                     and size < baseline['size']:
                 rate = (baseline['size'] - size) / (now - baseline['time'])
-                seconds = max(0, (buffered_at_crash or baseline['size']) - size) / rate
+                seconds = max(0, baseline['size'] - DRAIN_IDLE_BYTES) / rate
                 bound = min(options.drain_ceiling,
                             int(math.ceil(seconds * DRAIN_HEADROOM))
                             + DRAIN_MARGIN_SECONDS)
                 deadline = now + bound
-                report.note('drain bound: the buffer carries no event totals; %d bytes '
-                            'buffered at the crash, measured drain %.0f bytes/s, expected '
-                            '%.0f s -> %d s (headroom %.1f, margin %d s, ceiling %d s)'
-                            % (buffered_at_crash or baseline['size'], rate, seconds, bound,
-                               DRAIN_HEADROOM, DRAIN_MARGIN_SECONDS, options.drain_ceiling))
-        backlog_read = (backlog is not None and sent is not None
-                        and sent >= baseline['received'])
+                report.note('drain bound: the buffer carries no event gauge; %d bytes '
+                            'buffered at the first reading, measured drain %.0f bytes/s, '
+                            'expected %.0f s -> %d s (headroom %.1f, margin %d s, ceiling '
+                            '%d s)' % (baseline['size'], rate, seconds, bound,
+                                       DRAIN_HEADROOM, DRAIN_MARGIN_SECONDS,
+                                       options.drain_ceiling))
+        sent_growth = (0 if sent is None or baseline['sent'] is None
+                       else max(0, sent - baseline['sent']))
+        backlog_read = (backlog_events is not None and sent_growth >= backlog_events)
         empty = buffer_drained(sink)
         stable = previous_counts is not None and counts == previous_counts
         if stable and stable_since is None:
@@ -1219,18 +1325,19 @@ def wait_for_drain(report, options, cluster, store, run_id, last_seqs, window,
         elif not stable:
             stable_since = None
         stable_for = 0 if stable_since is None else now - stable_since
-        report.note('drain: buffer size=%s events=%s received=%s sent=%s; backlog read out=%s; '
+        report.note('drain: buffer size=%s events=%s sent=%s (+%d); backlog read out=%s; '
                     'per-writer unique counts=%s%s'
-                    % (size, events, received, sent, str(backlog_read).lower(),
+                    % (size, events, sent, sent_growth, str(backlog_read).lower(),
                        ', '.join(str(value) for value in counts),
                        (' (stable for %d s)' % stable_for) if stable else ' (rising)'))
         if (backlog_read or empty) and stable:
-            report.pass_('the collector read out the backlog it held before the delivery verdict',
-                         '%d events backlogged at the start%s; size=%s events=%s; per-writer '
-                         'unique counts=%s stable for %d s'
-                         % (backlog if backlog is not None else 0,
-                            ' (sent %s reached received %s)' % (sent, baseline['received'])
-                            if backlog_read else ' (the buffer is empty)',
+            report.pass_('the collector read out the disk buffer it held before the delivery '
+                         'verdict',
+                         '%s events in the disk buffer at the first reading%s; size=%s '
+                         'events=%s; per-writer unique counts=%s stable for %d s'
+                         % (backlog_events if backlog_events is not None else 0,
+                            ' (sent grew by %d)' % sent_growth if backlog_read
+                            else ' (the buffer is back at its idle floor)',
                             size, events, ', '.join(str(value) for value in counts),
                             stable_for))
             return True
@@ -1239,10 +1346,11 @@ def wait_for_drain(report, options, cluster, store, run_id, last_seqs, window,
         if now >= deadline:
             report.not_valid(
                 'the drain did not finish within %d s: last buffer size=%s events=%s '
-                'received=%s sent=%s (the %s-event backlog it started with %s read out); '
-                'per-writer unique counts=%s; writer counts %s; no loss verdict is given'
-                % (deadline - started, size, events, received, sent,
-                   backlog if backlog is not None else 0,
+                'sent=%s (+%d since the first reading); the %s-event disk backlog it started '
+                'with %s read out; per-writer unique counts=%s; writer counts %s; no loss '
+                'verdict is given'
+                % (deadline - started, size, events, sent, sent_growth,
+                   backlog_events if backlog_events is not None else 0,
                    'was' if backlog_read else 'was not',
                    ', '.join(str(value) for value in counts),
                    ('stable for %d s' % stable_for) if stable_since is not None
@@ -1260,7 +1368,7 @@ def restarts_since_start(state, cluster, options):
 
 
 def store_delivery(report, options, cluster, run_id, retained_by_writer, last_seqs, from_ms,
-                   buffered_at_crash=None):
+                   buffered_at_crash=None, killed_at=None):
     """The verdict from the store's own counts; None when it cannot be reached or is incomplete.
 
     The loader's API refuses deep offsets, so a paged read can never count a
@@ -1283,7 +1391,8 @@ def store_delivery(report, options, cluster, run_id, retained_by_writer, last_se
                 return None
             per_writer = [
                 writer_store_counts(report, options, store, run_id, name, index,
-                                    last_seqs[index], retained_by_writer[name], window)
+                                    last_seqs[index], retained_by_writer[name], window,
+                                    killed_at)
                 for index, name in enumerate(writer_names(options))]
             verdict = delivery_verdict(per_writer)
             if verdict['missing'] or verdict['complete']:
@@ -1466,6 +1575,7 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
     """One crash: write, kill, recover, count - saturated or informative."""
     guard_writers_writing()
     state['step'] = 'the writer start'
+    state['killed_at'] = None
     if not safe_load(report, options):
         return False
     label = 'store-down-restart' if store_down_restart else ('saturated' if saturated_case else 'unsaturated')
@@ -1645,6 +1755,8 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                 report.not_valid('nothing was killed: %s' % detail)
                 return False
             killed = node_run(['kill', '-9', str(pid)]).returncode == 0
+            if killed:
+                state['killed_at'] = now_ms()
             report.check(killed, 'the vector process is killed by its host pid', detail)
             if not killed:
                 return False
@@ -1684,15 +1796,15 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
         state['step'] = 'the delivery query'
         verdict = store_delivery(report, options, cluster, run_id, retained_by_writer,
                                  emitted_seqs(cluster, options, run_id), started,
-                                 state.get('buffer_at_crash'))
+                                 state.get('buffer_at_crash'), state.get('killed_at'))
         if verdict is None:
             return False
         if saturated_case or store_down_restart:
             report.note('retained-kubelet delivery is a measured strict verdict, not a source '
                         'acknowledgement or replay guarantee')
             report.check(verdict['ok'],
-                         'every line still in the kubelet\'s files is delivered at least once',
-                         verdict['detail'])
+                         'no line still in the kubelet\'s files is lost outside the accepted '
+                         'hard-kill window', verdict['detail'])
             restarts = restarts_since_start(state, cluster, options)
             report.note('the collector restarted %s time(s) since the walk started '
                         '(restartCount %s -> %d); the intentional kill is one of them'
@@ -1974,7 +2086,7 @@ def main(argv=None):
     cluster = Cluster(options.kubectl)
     state = {'created_namespace': False, 'replicas': None, 'run_id': None,
              'kustomizations': None, 'suspended': [], 'held': [], 'step': None,
-             'restarts_before': None, 'buffer_at_crash': None}
+             'restarts_before': None, 'buffer_at_crash': None, 'killed_at': None}
     loader = None
     ran = False
 

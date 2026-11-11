@@ -58,6 +58,11 @@ ones that would explain a flood.
 - `unavailable — <reason>` — the store did not answer; the page says why instead
   of showing an empty list.
 
+## If the collector is killed hard
+
+If the log collector is killed hard, the page can miss up to about a second of
+lines written just before the kill; nothing else is lost.
+
 ## Nothing leaves the machine
 
 The collector reads this node's pod log files, the store keeps them on a volume
