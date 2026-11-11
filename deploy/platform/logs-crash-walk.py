@@ -27,18 +27,24 @@ The walk uses k3s kubectl for cluster changes, and node crictl for the host pid
 and memory. It connects to boot-lifemodel.local by default; --password-file
 names the credential file, whose contents are never printed.
 Flux owns the store Deployment and re-applies it every ten minutes, which puts
-`replicas: 1` back and ends the outage the walk needs. Before scaling the store
-to zero the walk therefore finds the owning Kustomization from the Deployment's
-`kustomize.toolkit.fluxcd.io/name` and `kustomize.toolkit.fluxcd.io/namespace`
-labels (the --kustomization/--flux-namespace defaults only when the labels are
-absent), patches `spec.suspend: true`, verifies it, and says so. While the store
-must stay down every reading checks that the Deployment still has 0 replicas and
-no store pod exists: one that came back is TEST NOT VALID naming who restored it
-(the Deployment's managedFields and events), never a pass. RESTORE resumes the
-Kustomization (only if the walk suspended it), verifies `spec.suspend` is false
-or absent, forces a reconcile with `reconcile.fluxcd.io/requestedAt`, and waits
-for Ready=True on the applied revision; a resume that fails is a RESTORE FAIL,
-because a Kustomization left suspended stops all later deploys.
+`replicas: 1` back and ends the outage the walk needs. Suspending only the
+Deployment's direct owner is not enough: the root reapplies that owner's object
+and clears its `spec.suspend`. The walk therefore reads the whole ownership
+chain upward from the Deployment's `kustomize.toolkit.fluxcd.io/name` and
+`.../namespace` labels (the --kustomization/--flux-namespace defaults only when
+the Deployment labels are absent; each Kustomization carries its own parent's
+labels), refusing a loop or a chain deeper than CHAIN_DEPTH_LIMIT. Before
+scaling the store to zero it suspends every level from the top down and verifies
+each. While the store must stay down every reading checks that the Deployment
+still has 0 replicas and no store pod exists, and that every suspended
+Kustomization still reads `spec.suspend: true`: one that came back is TEST NOT
+VALID naming it (for the Deployment, its managedFields read with
+`--show-managed-fields`, and its events), never a pass. RESTORE resumes each
+Kustomization the walk suspended, child first and then its parent so the
+parent's reapply finds the child unsuspended, each verified, each reconcile
+requested with `reconcile.fluxcd.io/requestedAt`, each waited for Ready=True on
+the applied revision; a resume that fails is a RESTORE FAIL naming it, because a
+Kustomization left suspended stops all later deploys.
 The workload is paced and bounded by node load, fill/recovery deadlines and the
 whole-walk deadline. The saturation clock is derived from the achieved source
 rate and the writer line size when the fixed --fill-bound cannot reach the
@@ -102,6 +108,7 @@ DEFAULT_KUSTOMIZATION = 'platform-logs-store'
 DEFAULT_FLUX_NAMESPACE = 'flux-system'
 REQUESTED_AT = 'reconcile.fluxcd.io/requestedAt'
 SATURATION_CEILING = 2400
+CHAIN_DEPTH_LIMIT = 6
 SATURATION_HEADROOM = 1.1
 SATURATION_MARGIN_SECONDS = 60
 WRITER_SCRIPT = (
@@ -356,7 +363,7 @@ def saturation_note(plan):
     return ('the %d-byte writable max %s; %s' % (plan['writableMax'] or 0, reach, used))
 
 
-def wait_source_pickup(report, options, cluster, baseline, sample_memory):
+def wait_source_pickup(report, options, cluster, baseline, sample_memory, state=None):
     """Allow the default 60 s file glob scan without charging the fill clock."""
     target = math.ceil(options.writer_rate * SOURCE_PICKUP_SECONDS)
     report.note('waiting for source pickup: bound=%d s, required counter rise=%d '
@@ -371,7 +378,7 @@ def wait_source_pickup(report, options, cluster, baseline, sample_memory):
     while True:
         if not safe_load(report, options) or not sample_memory():
             return None
-        if not require_store_down(report, options, cluster):
+        if not require_store_down(report, options, cluster, state):
             return None
         values, reason = read_metrics(options, cluster)
         current = source_rate_sample(values, reason, options)
@@ -446,29 +453,75 @@ def collectors_metrics_gap(reason):
     return ("the exporter answered but the sink's buffer is not in it: %s; the buffer state is "
             'not guessed' % (reason or 'no reason'))
 
+def deployment_args(options):
+    return ['-n', options.namespace, 'get', 'deployment', options.store,
+            '--show-managed-fields', '-o', 'json']
+
+
 def deployment_body(cluster, options):
-    return cluster.json(['-n', options.namespace, 'get', 'deployment', options.store,
-                         '-o', 'json']) or {}
+    """The store Deployment with managedFields: kubectl omits them without the flag."""
+    return cluster.json(deployment_args(options)) or {}
+
+
+def flux_label_owner(body, options):
+    """The Kustomization named by an object's Flux owner labels, or None."""
+    labels = ((body or {}).get('metadata') or {}).get('labels') or {}
+    name = labels.get(FLUX_NAME_LABEL)
+    namespace = labels.get(FLUX_NAMESPACE_LABEL)
+    if not isinstance(name, str) or not name:
+        return None
+    return {'namespace': namespace if isinstance(namespace, str) and namespace
+                          else options.flux_namespace,
+            'name': name}
 
 
 def flux_owner(cluster, options):
-    """The Flux Kustomization that owns the store Deployment: namespace, name, why.
+    """The Kustomization that applies the store Deployment.
 
     The Deployment's `kustomize.toolkit.fluxcd.io/name` and `.../namespace`
     labels are the ownership record Flux writes; the arguments are only defaults
     for a Deployment that carries neither, and the caller says which one it used.
     """
-    labels = (deployment_body(cluster, options).get('metadata') or {}).get('labels') or {}
-    name = labels.get(FLUX_NAME_LABEL)
-    namespace = labels.get(FLUX_NAMESPACE_LABEL)
-    if isinstance(name, str) and name:
-        return {'namespace': (namespace if isinstance(namespace, str) and namespace
-                              else options.flux_namespace),
-                'name': name,
-                'source': 'the store Deployment\'s %s label' % FLUX_NAME_LABEL}
+    owner = flux_label_owner(deployment_body(cluster, options), options)
+    if owner is not None:
+        owner['source'] = 'the store Deployment\'s %s label' % FLUX_NAME_LABEL
+        return owner
     return {'namespace': options.flux_namespace, 'name': options.kustomization,
             'source': 'the --kustomization/--flux-namespace defaults; the store Deployment '
                       'carries no %s label' % FLUX_NAME_LABEL}
+
+
+def flux_chain(cluster, options):
+    """The ownership chain from the store Deployment up to the root: child first.
+
+    Every object Flux applies carries the labels of the Kustomization that
+    applies it, so the chain is read upward until an object has no owner label.
+    Suspending only the direct owner is not enough: the root reapplies the
+    child's object and clears `spec.suspend`. A loop, an unreadable object or a
+    chain deeper than CHAIN_DEPTH_LIMIT is an error, never a guess.
+    """
+    owners = [flux_owner(cluster, options)]
+    seen = {(owners[0]['namespace'], owners[0]['name'])}
+    while True:
+        current = owners[-1]
+        body = kustomization_json(cluster, current)
+        if body is None:
+            return {'owners': owners,
+                    'error': 'the Kustomization %s could not be read' % owner_label(current)}
+        parent = flux_label_owner(body, options)
+        if parent is None:
+            return {'owners': owners, 'error': None}
+        if len(owners) >= CHAIN_DEPTH_LIMIT:
+            return {'owners': owners,
+                    'error': 'the Flux ownership chain is deeper than %d levels; refusing to '
+                             'follow it' % CHAIN_DEPTH_LIMIT}
+        key = (parent['namespace'], parent['name'])
+        if key in seen:
+            return {'owners': owners,
+                    'error': 'the Flux ownership chain loops back to %s' % owner_label(parent)}
+        parent['source'] = 'the %s label on %s' % (FLUX_NAME_LABEL, owner_label(current))
+        seen.add(key)
+        owners.append(parent)
 
 
 def kustomization_json(cluster, owner):
@@ -513,35 +566,31 @@ def owner_label(owner):
     return '%s/%s' % (owner['namespace'], owner['name'])
 
 
-def suspend_store_owner(report, options, cluster, state):
-    """Hold the store's Flux owner still, before anything scales the store down.
+def chain_label(owners):
+    return ' <- '.join(owner_label(owner) for owner in owners)
 
-    A suspended Kustomization applies nothing, so the store stays at the
-    replicas the walk sets instead of being re-applied at its ten-minute
-    interval. The suspension is recorded for RESTORE only when the walk made it.
-    """
-    owner = flux_owner(cluster, options)
-    state['kustomization'] = owner
-    report.note('the store Deployment\'s Flux owner is %s, read from %s'
-                % (owner_label(owner), owner['source']))
+
+def suspend_one(report, options, cluster, owner, state):
+    """Suspend one Kustomization from the chain, verify it, record what the walk changed."""
     before = kustomization_state(cluster, owner)
     if not before['known']:
-        report.fail('the Flux Kustomization that owns the store is readable', owner_label(owner))
-        report.not_valid('the store cannot be held scaled to zero: no Kustomization to suspend')
+        report.fail('the Flux Kustomization %s is readable' % owner_label(owner),
+                    'the read was refused')
+        report.not_valid('the store cannot be held scaled to zero: %s could not be read, so '
+                         'the chain is not known to be suspended' % owner_label(owner))
         return False
     if before['suspend'] is True:
-        state['flux_suspended'] = False
-        report.pass_('the Flux Kustomization that owns the store is already suspended',
-                     '%s spec.suspend=true before the walk; the walk will not resume it'
-                     % owner_label(owner))
+        state['held'].append(owner)
+        report.note('%s is already suspended before the walk; the walk will not resume it'
+                    % owner_label(owner))
         return True
     if not set_kustomization_suspend(cluster, owner, True):
-        report.fail('the Flux Kustomization that owns the store is suspended',
-                    '%s spec.suspend=true was refused' % owner_label(owner))
-        report.not_valid('the store cannot be held scaled to zero: the next reconcile would '
-                         'scale it back and no outage would be measured')
+        report.fail('the Flux Kustomization %s is suspended' % owner_label(owner),
+                    'spec.suspend=true was refused')
+        report.not_valid('the store cannot be held scaled to zero: the chain is not suspended')
         return False
-    state['flux_suspended'] = True
+    state['suspended'].append(owner)
+    state['held'].append(owner)
 
     def suspended():
         return kustomization_state(cluster, owner)['suspend'] is True
@@ -549,16 +598,40 @@ def suspend_store_owner(report, options, cluster, state):
     bound = min(60, options.recover_bound)
     if not wait_until(time.monotonic() + bound, 3, suspended):
         current = kustomization_state(cluster, owner)
-        report.fail('the Flux Kustomization that owns the store is suspended',
-                    '%s spec.suspend=%s after the patch'
-                    % (owner_label(owner),
-                       'unknown' if current['suspend'] is None
+        report.fail('the Flux Kustomization %s is suspended' % owner_label(owner),
+                    'spec.suspend=%s after the patch'
+                    % ('unknown' if current['suspend'] is None
                        else str(current['suspend']).lower()))
-        report.not_valid('the store cannot be held scaled to zero: the suspension is not verified')
+        report.not_valid('the store cannot be held scaled to zero: %s is not verified suspended'
+                         % owner_label(owner))
         return False
-    report.pass_('the Flux Kustomization that owns the store is suspended',
-                 '%s spec.suspend=true; RESTORE resumes it and reconciles it'
-                 % owner_label(owner))
+    report.pass_('the Flux Kustomization %s that leads to the store is suspended'
+                 % owner_label(owner),
+                 'spec.suspend=true; RESTORE resumes it and reconciles it')
+    return True
+
+
+def suspend_store_owner(report, options, cluster, state):
+    """Hold the store's whole Flux ownership chain still, top down.
+
+    A suspended Kustomization applies nothing, so the store stays at the
+    replicas the walk sets. The chain is suspended from the root down: a parent
+    that reconciles after its child was suspended would reapply the child's
+    object and clear `spec.suspend`, which is exactly how run r36 lost the
+    outage. Only the suspensions the walk made are recorded for RESTORE.
+    """
+    chain = flux_chain(cluster, options)
+    state['kustomizations'] = chain['owners']
+    if chain['error']:
+        report.fail('the Flux ownership chain above the store is known', chain['error'])
+        report.not_valid('the store cannot be held scaled to zero: its Flux ownership chain '
+                         'is unknown')
+        return False
+    owners = chain['owners']
+    report.note('the store\'s Flux ownership chain, child first: %s' % chain_label(owners))
+    for owner in reversed(owners):
+        if not suspend_one(report, options, cluster, owner, state):
+            return False
     return True
 
 
@@ -623,8 +696,7 @@ def store_restorer(cluster, options):
 
 def store_down_state(cluster, options):
     """Whether the store is down now, and the reading that says so."""
-    body = cluster.json(['-n', options.namespace, 'get', 'deployment', options.store,
-                         '-o', 'json'])
+    body = cluster.json(deployment_args(options))
     if body is None:
         return {'known': False, 'down': False, 'detail': 'the store Deployment could not be read'}
     replicas = (body.get('spec') or {}).get('replicas')
@@ -638,25 +710,37 @@ def store_down_state(cluster, options):
                       % (replicas, status, ', '.join(pods) or 'none')}
 
 
-def require_store_down(report, options, cluster):
-    """Every reading during the outage: the store is still down, or say who came back.
+def require_store_down(report, options, cluster, state=None):
+    """Every reading during the outage: the store is down and every hold still holds.
 
     A store that Flux scaled back to one ends the outage the case needs: the
-    sink drains and the crash measures nothing. That is TEST NOT VALID, with the
-    Deployment's field managers and events named, never a pass and never a wait.
+    sink drains and the crash measures nothing. A Kustomization in the chain
+    that no longer reads `spec.suspend=true` is the same loss one step earlier.
+    Either is TEST NOT VALID naming what came back, never a pass and never a wait.
     """
-    state = store_down_state(cluster, options)
-    if state['down']:
-        return True
-    restorer = store_restorer(cluster, options)
-    report.not_valid(
-        'the store came back while it had to stay down: %s; the outage never lasted, so '
-        'nothing measured against it is valid. Put back by %s%s'
-        % (state['detail'],
-           ', '.join(restorer['managers']) or 'no field manager names spec.replicas',
-           ('; latest Deployment event ' + '; '.join(restorer['events']))
-           if restorer['events'] else ''))
-    return False
+    down = store_down_state(cluster, options)
+    if not down['down']:
+        restorer = store_restorer(cluster, options)
+        report.not_valid(
+            'the store came back while it had to stay down: %s; the outage never lasted, so '
+            'nothing measured against it is valid. Put back by %s%s'
+            % (down['detail'],
+               ', '.join(restorer['managers']) or 'no field manager names spec.replicas',
+               ('; latest Deployment event ' + '; '.join(restorer['events']))
+               if restorer['events'] else ''))
+        return False
+    for owner in (state or {}).get('held') or []:
+        current = kustomization_state(cluster, owner)
+        if current['suspend'] is not True:
+            report.not_valid(
+                'the Flux Kustomization %s no longer reads spec.suspend=true (%s) while the '
+                'store must stay down: its reconcile can scale the store back, so nothing '
+                'measured against this outage is valid'
+                % (owner_label(owner),
+                   'unreadable' if not current['known']
+                   else str(current['suspend']).lower()))
+            return False
+    return True
 
 
 def store_replicas(cluster, options):
@@ -1085,7 +1169,7 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
             pickup = wait_source_pickup(report, options, cluster,
                                         source_rate_sample(metrics, reason, options,
                                                            before_writers=True),
-                                        pickup_safety)
+                                        pickup_safety, state)
             if pickup is None:
                 return False
             source_before = pickup['sample']
@@ -1102,7 +1186,7 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
             while True:
                 if not safe_load(report, options):
                     return False
-                if not require_store_down(report, options, cluster):
+                if not require_store_down(report, options, cluster, state):
                     return False
                 metrics, reason = read_metrics(options, cluster)
                 elapsed = max(1.0, time.monotonic() - started_fill)
@@ -1166,7 +1250,7 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                 while time.monotonic() < until:
                     if not safe_load(report, options):
                         return False
-                    if not require_store_down(report, options, cluster):
+                    if not require_store_down(report, options, cluster, state):
                         return False
                     if not sample_memory():
                         return False
@@ -1180,7 +1264,7 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
             while len(writer_lines(cluster, options, run_id)) < options.unsaturated_lines:
                 if not safe_load(report, options):
                     return False
-                if not require_store_down(report, options, cluster):
+                if not require_store_down(report, options, cluster, state):
                     return False
                 if time.monotonic() >= deadline:
                     break
@@ -1197,7 +1281,7 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
             report.fail('collector restarted before the intentional crash',
                         termination_reason(cluster, options))
             return False
-        if store_down_restart and not wait_store_down(report, options, cluster):
+        if store_down_restart and not wait_store_down(report, options, cluster, state):
             return False
         if oom is None:
             pid, detail = vector_pid(cluster, options)
@@ -1213,7 +1297,7 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                 and collector_restarts(cluster, options) > restarts_at_kill):
             report.not_valid('no actual collector restart observed while the store stayed down')
             return False
-        if store_down_restart and not require_store_down(report, options, cluster):
+        if store_down_restart and not require_store_down(report, options, cluster, state):
             return False
         if not recover_after_crash(report, options, cluster, state, store_down_restart):
             return False
@@ -1277,7 +1361,7 @@ def recover_after_crash(report, options, cluster, state, store_down_restart=Fals
         if not wait_until(time.monotonic() + options.recover_bound, 3, collector_ready):
             report.not_valid('collector did not restart while store remained down')
             return False
-        if not require_store_down(report, options, cluster):
+        if not require_store_down(report, options, cluster, state):
             return False
         report.pass_('collector restarted before restoring the unavailable store')
     if not set_replicas(cluster, options, state['replicas']):
@@ -1346,7 +1430,7 @@ def free_port():
         return probe.getsockname()[1]
 
 
-def wait_store_down(report, options, cluster):
+def wait_store_down(report, options, cluster, state=None):
     """Wait for 0 replicas and no pod; a store that came back is TEST NOT VALID."""
     def stopped():
         require_safe_load(report, options)
@@ -1354,14 +1438,14 @@ def wait_store_down(report, options, cluster):
     if wait_until(time.monotonic() + options.recover_bound, 3, stopped):
         report.pass_('the store has no running or terminating pods')
         return True
-    return require_store_down(report, options, cluster)
+    return require_store_down(report, options, cluster, state)
 
 
 def stop_store(report, options, cluster, state):
-    """Hold the owning Kustomization still, scale the store to zero, and verify it.
+    """Suspend the whole Flux chain, scale the store to zero, and verify it.
 
-    The suspension comes first: a reconcile between the scale-down and the
-    suspension would scale the store straight back, and the outage the walk
+    The suspension comes first and top down: a reconcile of any level after the
+    scale-down would scale the store straight back, and the outage the walk
     needs would never begin.
     """
     state['replicas'] = store_replicas(cluster, options)
@@ -1371,7 +1455,7 @@ def stop_store(report, options, cluster, state):
     if not set_replicas(cluster, options, 0):
         report.not_valid('the store could not be scaled to zero: the sink never fills')
         return False
-    if not wait_store_down(report, options, cluster):
+    if not wait_store_down(report, options, cluster, state):
         return False
     report.pass_('the store is scaled to zero', options.store)
     return True
@@ -1397,14 +1481,14 @@ def run(report, options, loader, cluster, state):
             options.writer_namespace, 'app.kubernetes.io/name=' + WRITER_MODULE))
         if not set_replicas(cluster, options, 0):
             return False
-        if not wait_store_down(report, options, cluster):
+        if not wait_store_down(report, options, cluster, state):
             return False
         if not crash_case(report, options, loader, cluster, state, False,
                           store_down_restart=True):
             return False
         if not set_replicas(cluster, options, 0):
             return False
-        if not wait_store_down(report, options, cluster):
+        if not wait_store_down(report, options, cluster, state):
             return False
         crash_case(report, options, loader, cluster, state, False)
     return saturated_ok
@@ -1449,43 +1533,50 @@ def restore(report, options, loader, cluster, state):
              '--replicas=%d' % state['replicas']]), bound) and restored
         restored = restore_step(report, 'store Ready', lambda: store_ready(cluster, options),
                                 bound) and restored
-    resumed = None
-    if state.get('flux_suspended'):
-        owner = state.get('kustomization') or flux_owner(cluster, options)
-        stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-        resumed = restore_step(
+    # Child first, then its parent: the parent's reapply must find the child
+    # already unsuspended, or it writes the child's old `spec.suspend` back.
+    suspended = state.get('suspended') or []
+    order = [owner for owner in state.get('kustomizations') or [] if owner in suspended]
+    order += [owner for owner in suspended if owner not in order]
+    resumed, failed = [], []
+    stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    for owner in order:
+        ok = restore_step(
             report, 'resume the Flux Kustomization %s and wait for Ready=True on the applied '
                     'revision' % owner_label(owner),
-            lambda: resumed_kustomization(cluster, owner, stamp), bound)
-        if resumed:
+            lambda owner=owner: resumed_kustomization(cluster, owner, stamp), bound)
+        if ok:
             final = kustomization_state(cluster, owner)
-            report.pass_('the Flux Kustomization that owns the store is resumed and reconciled',
-                         '%s spec.suspend=%s Ready=%s revision=%s'
-                         % (owner_label(owner),
-                            'absent' if final['suspend'] is None else str(final['suspend']).lower(),
+            report.pass_('the Flux Kustomization %s is resumed and reconciled'
+                         % owner_label(owner),
+                         'spec.suspend=%s Ready=%s revision=%s'
+                         % ('absent' if final['suspend'] is None
+                            else str(final['suspend']).lower(),
                             final['ready'], final['appliedRevision']))
+            resumed.append(owner)
         else:
+            failed.append(owner)
             report.fail('RESTORE the Flux Kustomization %s is still suspended'
                         % owner_label(owner),
                         'all later platform deploys stop until it is resumed: patch '
                         'spec.suspend=false and request a reconcile by hand')
-        restored = resumed and restored
+        restored = ok and restored
     if state.get('created_namespace'):
         restored = restore_step(report, 'delete namespace', lambda: command(
             ['delete', 'namespace', options.writer_namespace, '--ignore-not-found',
              '--wait=true', '--timeout=170s']), bound) and restored
     restored = restore_step(report, 'collector Running',
                             lambda: collector_running(cluster, options), bound) and restored
-    owner = state.get('kustomization')
-    if owner and resumed is True:
-        flux_line = ', Flux Kustomization %s resumed and reconciled' % owner_label(owner)
-    elif owner and resumed is False:
-        flux_line = (', Flux Kustomization %s NOT RESUMED: resume it by hand' %
-                     owner_label(owner))
-    elif owner:
-        flux_line = ', Flux Kustomization %s left as it was found' % owner_label(owner)
-    else:
-        flux_line = ''
+    left = [owner for owner in state.get('held') or [] if owner not in resumed]
+    parts = []
+    if resumed:
+        parts.append('resumed and reconciled: ' + ', '.join(owner_label(o) for o in resumed))
+    if failed:
+        parts.append('NOT RESUMED, resume by hand: ' + ', '.join(owner_label(o) for o in failed))
+    left = [owner for owner in left if owner not in failed]
+    if left:
+        parts.append('left suspended as found: ' + ', '.join(owner_label(o) for o in left))
+    flux_line = (', Flux Kustomizations ' + '; '.join(parts)) if parts else ''
     print('RESTORE complete=%s store replicas=%s%s; writer cleanup and readiness checked'
           % (str(restored).lower(), state.get('replicas'), flux_line))
 
@@ -1538,7 +1629,7 @@ def main(argv=None):
                 % (baseline, cpus, options.max_load))
     cluster = Cluster(options.kubectl)
     state = {'created_namespace': False, 'replicas': None, 'run_id': None,
-             'kustomization': None, 'flux_suspended': False}
+             'kustomizations': None, 'suspended': [], 'held': []}
     loader = None
     ran = False
 
