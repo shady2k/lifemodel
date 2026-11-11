@@ -22,8 +22,14 @@ the source's lack of acknowledgements. Passing a run does not prove a source
 replay guarantee. The unsaturated crash remains informative, not a substitute.
 The delivery verdict is counted in the store itself, never by paging the
 loader's API: the API refuses deep offsets, and a writer's hundreds of thousands
-of records can never be paged. Through a port-forward to the store Deployment,
-each writer's retained range is asked in one LogsQL query
+of records can never be paged. Before it is computed the walk waits for the
+restarted collector to finish draining its buffer - the sink buffer empty,
+everything received sent and the per-writer store counts stable across two
+consecutive readings - with a bound derived from the bytes buffered at the crash
+and the drain rate seen at first, headroom and a stated ceiling; a drain that
+does not finish is TEST NOT VALID, never a loss verdict. A line is lost only if
+it is still missing after the drain finished. Through a port-forward to the store
+Deployment, each writer's retained range is asked in one LogsQL query
 (`extract "seq=<seq> " | filter seq:range[lo, hi] | stats count() n,
 count_uniq(seq) uniq`, over the run's window, pod and namespace), duplicates are
 `n - uniq`, and a gap is located by halving the incomplete ranges within a
@@ -130,6 +136,11 @@ SATURATION_CEILING = 2400
 CHAIN_DEPTH_LIMIT = 6
 MISSING_SEARCH_BUDGET = 64
 STORE_QUERY_RETRY_SECONDS = 5
+DRAIN_POLL_SECONDS = 10
+DRAIN_HEADROOM = 1.5
+DRAIN_MARGIN_SECONDS = 30
+DRAIN_IDLE_BYTES = MIB
+DRAIN_CEILING = 900
 SATURATION_HEADROOM = 1.1
 SATURATION_MARGIN_SECONDS = 60
 WRITER_SCRIPT = (
@@ -1064,18 +1075,28 @@ def writer_store_counts(report, options, store, run_id, name, index, last_seq, r
     retained_lo, retained_hi = min(retained), max(retained)
     root = full if (retained_lo, retained_hi) == (base + 1, last_seq) else None
     search = missing_retained(store, options, name, run_id, retained, window, root=root)
+    absent = max(0, written - full['uniq'])
     rotated_size = max(0, written - len(retained))
     rotated_present = max(0, full['uniq'] - (search['rootUniq'] or 0))
     rotated_missing = max(0, rotated_size - rotated_present)
+    if search['complete']:
+        # The two missing figures account for every absent line exactly.
+        rotated_missing = max(0, absent - len(search['missing']))
+        unresolved = 0
+        arithmetic = ('missing-retained=%d missing-rotated=%d'
+                      % (len(search['missing']), rotated_missing))
+    else:
+        unresolved = max(0, absent - len(search['missing']) - rotated_missing)
+        arithmetic = ('unresolved=%d missing-found=%d missing-rotated=%d'
+                      % (unresolved, len(search['missing']), rotated_missing))
     counts = {'writer': name, 'written': written, 'retained': len(retained),
-              'n': full['n'], 'uniq': full['uniq'],
+              'n': full['n'], 'uniq': full['uniq'], 'absent': absent,
               'duplicated': max(0, full['n'] - full['uniq']),
               'missing': search['missing'], 'rotatedMissing': rotated_missing,
-              'complete': search['complete']}
-    report.note('writer %s: written=%d retained=%d stored=%d uniq=%d duplicates=%d '
-                'missing-retained=%d missing-rotated=%d%s'
+              'unresolved': unresolved, 'complete': search['complete']}
+    report.note('writer %s: written=%d retained=%d stored=%d uniq=%d duplicates=%d %s%s'
                 % (name, counts['written'], counts['retained'], counts['n'], counts['uniq'],
-                   counts['duplicated'], len(counts['missing']), rotated_missing,
+                   counts['duplicated'], arithmetic,
                    '' if search['complete']
                    else ' (gap search bounded at %d queries)' % MISSING_SEARCH_BUDGET))
     return counts
@@ -1102,7 +1123,111 @@ def delivery_verdict(per_writer):
             'missing': [seq for writer in per_writer for seq in writer['missing']]}
 
 
-def store_delivery(report, options, cluster, run_id, retained_by_writer, last_seqs, from_ms):
+def buffer_drained(sink):
+    """The sink buffer is empty and everything it received has been sent."""
+    size, events = sink.get('size'), sink.get('events')
+    empty = events == 0 if events is not None else (
+        size is not None and size <= DRAIN_IDLE_BYTES)
+    if not empty and size is not None and size <= DRAIN_IDLE_BYTES:
+        empty = True
+    sent, received = sink.get('sent'), sink.get('received')
+    return empty and sent is not None and received is not None and sent >= received
+
+
+def drain_sample(options, cluster, store, run_id, last_seqs, window):
+    """One reading of the sink buffer and each writer's stored distinct sequences."""
+    values, reason = read_metrics(options, cluster)
+    if values is None:
+        raise WalkError(reason or 'the collector metrics are unavailable')
+    counts = [seq_stats(store, options, name, run_id, index * 50_000_000 + 1,
+                        last_seqs[index], window)['uniq']
+              for index, name in enumerate(writer_names(options))]
+    return {'sink': buffer_state(values), 'counts': counts}
+
+
+def wait_for_drain(report, options, cluster, store, run_id, last_seqs, window,
+                   buffered_at_crash=None, sample=None):
+    """Wait until the restarted collector finished draining its buffer; None if it does not.
+
+    The verdict is only meaningful once every buffered record has reached the
+    store: a query during the drain sees lines that are still in transit. The
+    wait ends when the sink buffer is empty and everything it received has been
+    sent, and the per-writer store counts stop rising across two consecutive
+    readings. Its clock is derived from the bytes buffered at the crash and the
+    drain rate seen over the first readings, with a stated ceiling.
+    """
+    sample = sample or (lambda: drain_sample(options, cluster, store, run_id,
+                                             last_seqs, window))
+    started = time.monotonic()
+    first = None
+    rate = None
+    buffered = buffered_at_crash
+    deadline = None
+    previous_counts = None
+    while True:
+        reading = sample()
+        sink, counts = reading['sink'], reading['counts']
+        now = time.monotonic()
+        size = sink.get('size')
+        if size is not None:
+            if first is None:
+                first = (now, size)
+                if buffered is None:
+                    buffered = size
+            elif rate is None and now > first[0]:
+                rate = max(0.0, (first[1] - size) / (now - first[0]))
+                if rate > 0 and buffered:
+                    seconds = buffered / rate
+                    bound = min(options.drain_ceiling,
+                                int(math.ceil(seconds * DRAIN_HEADROOM))
+                                + DRAIN_MARGIN_SECONDS)
+                    deadline = now + bound
+                    report.note('drain bound: %d bytes buffered at the crash, measured drain '
+                                '%.0f bytes/s, expected %.0f s -> %d s (headroom %.1f, margin '
+                                '%d s, ceiling %d s)'
+                                % (buffered, rate, seconds, bound, DRAIN_HEADROOM,
+                                   DRAIN_MARGIN_SECONDS, options.drain_ceiling))
+                else:
+                    deadline = started + options.drain_ceiling
+                    report.note('drain bound: no drain rate measured from %d bytes buffered; '
+                                'using the %d s ceiling' % (buffered or 0,
+                                                            options.drain_ceiling))
+        if deadline is None:
+            deadline = started + options.drain_ceiling
+        stable = previous_counts is not None and counts == previous_counts
+        report.note('drain: buffer size=%s events=%s received=%s sent=%s; per-writer unique '
+                    'counts=%s%s'
+                    % (sink.get('size'), sink.get('events'), sink.get('received'),
+                       sink.get('sent'), ', '.join(str(value) for value in counts),
+                       ' (stable)' if stable else ' (rising)'))
+        if buffer_drained(sink) and stable:
+            report.pass_('the collector drained its buffer before the delivery verdict',
+                         'size=%s events=%s; per-writer unique counts=%s'
+                         % (sink.get('size'), sink.get('events'),
+                            ', '.join(str(value) for value in counts)))
+            return True
+        previous_counts = counts
+        if now >= deadline:
+            report.not_valid(
+                'the drain did not finish within %d s: last buffer size=%s events=%s '
+                'received=%s sent=%s; per-writer unique counts=%s; no loss verdict is given'
+                % (deadline - started, sink.get('size'), sink.get('events'),
+                   sink.get('received'), sink.get('sent'),
+                   ', '.join(str(value) for value in counts)))
+            return None
+        time.sleep(DRAIN_POLL_SECONDS)
+
+
+def restarts_since_start(state, cluster, options):
+    """The collector's restart delta over this walk, not its lifetime total."""
+    before = state.get('restarts_before')
+    now = collector_restarts(cluster, options)
+    return {'before': before, 'now': now,
+            'delta': None if before is None else max(0, now - before)}
+
+
+def store_delivery(report, options, cluster, run_id, retained_by_writer, last_seqs, from_ms,
+                   buffered_at_crash=None):
     """The verdict from the store's own counts; None when it cannot be reached or is incomplete.
 
     The loader's API refuses deep offsets, so a paged read can never count a
@@ -1120,6 +1245,9 @@ def store_delivery(report, options, cluster, run_id, retained_by_writer, last_se
             store, forward, failure = open_log_store(options)
             if store is None:
                 raise WalkError(failure or 'the store answers no port-forward')
+            if not wait_for_drain(report, options, cluster, store, run_id, last_seqs,
+                                  window, buffered_at_crash):
+                return None
             per_writer = [
                 writer_store_counts(report, options, store, run_id, name, index,
                                     last_seqs[index], retained_by_writer[name], window)
@@ -1392,6 +1520,7 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                     report.note('achieved writer rate %.0f lines/s total; target %.0f'
                                 % (emitted / max(1, time.monotonic() - started_fill),
                                    options.writer_rate))
+                    state['buffer_at_crash'] = state_now.get('size')
                     report.pass_('the sink buffer reached its stated saturation margin',
                                  json.dumps(state_now, sort_keys=True))
                     if state_now.get('unit') == 'bytes':
@@ -1521,7 +1650,8 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
             time.sleep(min(3, max(0, until - time.monotonic())))
         state['step'] = 'the delivery query'
         verdict = store_delivery(report, options, cluster, run_id, retained_by_writer,
-                                 emitted_seqs(cluster, options, run_id), started)
+                                 emitted_seqs(cluster, options, run_id), started,
+                                 state.get('buffer_at_crash'))
         if verdict is None:
             return False
         if saturated_case or store_down_restart:
@@ -1530,12 +1660,17 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
             report.check(verdict['ok'],
                          'every line still in the kubelet\'s files is delivered at least once',
                          verdict['detail'])
-            report.note('the collector restarted %d time(s) across the crash'
-                        % collector_restarts(cluster, options))
+            restarts = restarts_since_start(state, cluster, options)
+            report.note('the collector restarted %s time(s) since the walk started '
+                        '(restartCount %s -> %d); the intentional kill is one of them'
+                        % (restarts['delta'], restarts['before'], restarts['now']))
         else:
-            report.note('unsaturated crash (informative): %s; after the kill the collector '
-                        'restarted %d time(s)'
-                        % (verdict['detail'], collector_restarts(cluster, options)))
+            restarts = restarts_since_start(state, cluster, options)
+            report.note('unsaturated crash (informative): %s; the collector restarted %s '
+                        'time(s) since the walk started (restartCount %s -> %d) and the '
+                        'intentional kill is one of them'
+                        % (verdict['detail'], restarts['delta'], restarts['before'],
+                           restarts['now']))
         return verdict['ok'] if saturated_case or store_down_restart else True
     finally:
         state['step'] = 'the writer cleanup'
@@ -1624,6 +1759,7 @@ def run(report, options, loader, cluster, state):
         return False
     report.note('writers target %.0f lines/s total across %d pods; node load bound %.2f'
                 % (options.writer_rate, options.writer_pods, options.max_load))
+    state['restarts_before'] = collector_restarts(cluster, options)
     state['writer_image'] = writer_image(cluster, options)
     if not report.check(bool(state['writer_image']), 'the evictor names the Node writer image',
                         'logs-evictor'):
@@ -1763,6 +1899,7 @@ def main(argv=None):
     parser.add_argument('--crictl', default='k3s crictl')
     parser.add_argument('--fill-bound', type=int, default=600)
     parser.add_argument('--fill-ceiling', type=int, default=SATURATION_CEILING)
+    parser.add_argument('--drain-ceiling', type=int, default=DRAIN_CEILING)
     parser.add_argument('--recover-bound', type=int, default=300)
     parser.add_argument('--writer-pods', type=int, default=3)
     parser.add_argument('--writer-rate', type=float, default=1700)
@@ -1779,10 +1916,11 @@ def main(argv=None):
             or (options.max_load is not None and
                 (not math.isfinite(options.max_load) or options.max_load <= 0))
             or options.restore_bound < 180
-            or options.fill_bound < 60 or options.fill_ceiling < 60):
+            or options.fill_bound < 60 or options.fill_ceiling < 60
+            or options.drain_ceiling < 60):
         parser.error('require writer-pods >= 1, 0 < writer-rate <= 1700, '
-                     'finite max-load > 0, restore-bound >= 180, fill-bound >= 60 '
-                     'and fill-ceiling >= 60')
+                     'finite max-load > 0, restore-bound >= 180, fill-bound >= 60, '
+                     'fill-ceiling >= 60 and drain-ceiling >= 60')
 
     report = Report()
     try:
@@ -1802,7 +1940,8 @@ def main(argv=None):
     max_load_note(report, options, baseline, cpus)
     cluster = Cluster(options.kubectl)
     state = {'created_namespace': False, 'replicas': None, 'run_id': None,
-             'kustomizations': None, 'suspended': [], 'held': [], 'step': None}
+             'kustomizations': None, 'suspended': [], 'held': [], 'step': None,
+             'restarts_before': None, 'buffer_at_crash': None}
     loader = None
     ran = False
 

@@ -144,7 +144,8 @@ def options(**values):
         pv_path='/var/lib/lifemodel-logs/data', deadline_seconds=3600,
         collector_namespace='lifemodel-logs', collector='logs-collector',
         writer_namespace='lifemodel-logs-walk', metrics_port=9598, crictl='k3s crictl',
-        fill_bound=2, fill_ceiling=2400, recover_bound=2, writer_interval_ms=20,
+        fill_bound=2, fill_ceiling=2400, drain_ceiling=900, recover_bound=2,
+        writer_interval_ms=20,
         saturated_seconds=0, writer_pods=1, memory_limit_bytes=300 * 1024 * 1024,
         unsaturated_lines=10, settle_seconds=0, writer_rate=1700, max_load=8.0,
         restore_bound=600, kustomization='platform-logs-store', flux_namespace='flux-system',
@@ -777,7 +778,7 @@ def crash_load_release(walk, fixture):
         def run(self, args, timeout=120):
             return types.SimpleNamespace(returncode=0)
 
-    state = {'replicas': 1, 'suspended': [], 'held': []}
+    state = {'replicas': 1, 'suspended': [], 'held': [], 'restarts_before': 0}
     ok = walk.crash_case(report, options(unsaturated_lines=1), None, Cluster(), state, False)
     print('CRASH ' + json.dumps({'ok': bool(ok), 'step': state.get('step')}))
     return report
@@ -834,6 +835,11 @@ def store_delivery(walk, fixture):
                      error=walk.WalkError, refuse=fixture.get('refuse', 0))
     walk.open_log_store = lambda _options: (store, None, '')
     walk.time.sleep = lambda _seconds: None
+    walk.wait_for_drain = lambda *args, **kwargs: True
+    if fixture.get('unresolved'):
+        walk.missing_retained = lambda *args, **kwargs: {
+            'missing': [], 'queries': walk.MISSING_SEARCH_BUDGET,
+            'complete': False, 'rootUniq': 9}
     verdict = walk.store_delivery(report, opts, None, 'walk-crash-fixture',
                                   kept_by_writer, last, 0)
     print('DELIVERY ' + json.dumps({'verdict': verdict, 'queries': len(store.queries),
@@ -849,6 +855,65 @@ def max_load_note(walk, fixture):
                        fixture.get('baseline', 15.0), fixture.get('cpus', 4))
     print('LOAD-NOTE ' + json.dumps({'baseline': fixture.get('baseline', 15.0),
                                      'bound': fixture.get('bound', 16.0)}))
+    return report
+
+
+@mode('drain')
+def drain(walk, fixture):
+    """The drain wait ends on an empty buffer and stable counts, or on its bound."""
+    report = walk.Report()
+    clock = [0.0]
+    walk.time.monotonic = lambda: clock[0]
+    walk.time.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    schedule = fixture['readings']
+    index = {'value': 0}
+
+    def sample():
+        entry = schedule[min(index['value'], len(schedule) - 1)]
+        index['value'] += 1
+        return {'sink': {'unit': 'bytes', 'size': entry['size'], 'events': entry['events'],
+                         'max': 335544320, 'writable_max': 201326592,
+                         'received': entry['received'], 'sent': entry['sent']},
+                'counts': [entry['uniq']]}
+
+    ok = walk.wait_for_drain(report, options(drain_ceiling=fixture.get('ceiling', 60)),
+                             None, None, 'run', [10], (0, 1),
+                             fixture.get('buffered', 1000), sample=sample)
+    print('DRAIN ' + json.dumps({'ok': bool(ok), 'seconds': clock[0],
+                                 'samples': index['value']}))
+    return report
+
+
+@mode('drain-late')
+def drain_late(walk, fixture):
+    """A line still in the drain is counted only after the drain finished."""
+    report = walk.Report()
+    opts = options(writer_pods=1, recover_bound=0)
+    retained = {'walk-crash-writer': set(range(1, 11))}
+    present = set(range(1, 11)) - {3}
+    store = SeqStore(present)
+    walk.open_log_store = lambda _options: (store, None, '')
+    walk.time.sleep = lambda _seconds: None
+
+    def drain(*args, **kwargs):
+        present.add(3)
+        store.present = sorted(present)
+        return True
+
+    walk.wait_for_drain = drain
+    verdict = walk.store_delivery(report, opts, None, 'walk-crash-fixture', retained, [10], 0)
+    print('LATE ' + json.dumps({'verdict': verdict}))
+    return report
+
+
+@mode('restart-delta')
+def restart_delta(walk, fixture):
+    """Restarts are the delta over this walk, not the collector's lifetime count."""
+    report = walk.Report()
+    walk.collector_restarts = lambda *args: fixture.get('now', 4)
+    value = walk.restarts_since_start({'restarts_before': fixture.get('before', 1)},
+                                      None, options())
+    print('RESTARTS ' + json.dumps(value))
     return report
 
 
