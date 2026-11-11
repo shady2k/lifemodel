@@ -257,12 +257,77 @@ describe('the crash walk stays bounded and restores after failures', () => {
     });
   });
 
+  it('stands the load monitor down once the crash has happened', () => {
+    const run = harness('watch-load', { load: 9.0, released: true });
+    expect(run.status).toBe(0);
+    expect(jsonLine<{ waits: number[]; signals: object[] }>(run, 'WATCH')).toEqual({
+      waits: [1, 1],
+      signals: [],
+    });
+  });
+
+  it('stops the writers on excess load before the crash and only notes it after', () => {
+    const run = harness('load-phase');
+    expect(run.status).toBe(1);
+    const value = jsonLine<{ before: boolean; after: boolean; again: boolean; back: boolean }>(
+      run,
+      'LOAD'
+    );
+    expect(value).toEqual({ before: false, after: true, again: true, back: true });
+    const output = run.lines.join('\n');
+    expect(output).toContain('TEST NOT VALID node one-minute load 9.00 exceeds bound 8.00; stopping writers');
+    expect(output).toContain('after the crash; the collector is draining what it buffered');
+    expect(output).toContain('is back within bound 8.00');
+    expect(output.match(/exceeds bound/g)).toHaveLength(2);
+  });
+
+  it('keeps the loss count after the crash when the drain lifts the load', () => {
+    const run = harness('crash-load-release');
+    expect(run.status).toBe(0);
+    expect(jsonLine<{ ok: boolean }>(run, 'CRASH').ok).toBe(true);
+    const output = run.lines.join('\n');
+    expect(output).toContain('the crash is over');
+    expect(output).toContain('after the crash; the collector is draining what it buffered');
+    expect(output).not.toContain('TEST NOT VALID');
+    expect(output).not.toContain('stopping writers');
+  });
+
+  it('still stops the writers when the load is already high before the crash', () => {
+    const run = harness('crash-load-release', { early: true });
+    expect(run.status).toBe(1);
+    expect(jsonLine<{ ok: boolean }>(run, 'CRASH').ok).toBe(false);
+    const output = run.lines.join('\n');
+    expect(output).toContain('TEST NOT VALID node one-minute load 9.00 exceeds bound 8.00');
+    expect(output).toContain('stopping writers');
+  });
+
   it('marks an unreadable load average invalid rather than letting the stage proceed', () => {
     const run = harness('load-unavailable');
     expect(run.status).toBe(1);
     expect(jsonLine<{ ok: boolean }>(run, 'SAFE').ok).toBe(false);
     expect(run.lines.join('\n')).toContain('TEST NOT VALID');
     expect(run.lines.join('\n')).toContain('unavailable');
+  });
+
+  it('prints a WalkError\'s message and the step it came from, never a bare class name', () => {
+    const run = harness('main-runtime-error', {
+      walk: true,
+      error: 'writer_rate_unavailable',
+      step: 'the fill',
+    });
+    expect(run.status).toBe(1);
+    const output = run.lines.join('\n');
+    expect(output).toContain('FAIL the walk runs to its end - writer_rate_unavailable at the fill');
+    expect(output).not.toContain('- WalkError');
+    expect(jsonLine<{ status: number }>(run, 'MAIN').status).toBe(1);
+  });
+
+  it('names the step on an unexpected exception too', () => {
+    const run = harness('main-runtime-error', { step: 'the delivery query' });
+    expect(run.status).toBe(1);
+    expect(run.lines.join('\n')).toContain(
+      'FAIL the walk runs to its end - RuntimeError at the delivery query'
+    );
   });
 
   it('retries a KeyboardInterrupt during restore and still completes every step', () => {
