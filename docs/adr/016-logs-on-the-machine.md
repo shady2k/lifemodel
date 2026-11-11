@@ -241,12 +241,12 @@ line happens in the collector, once, and nowhere else (F5).
 | Field | Source | Rule |
 | --- | --- | --- |
 | `module` | Kubernetes pod label | `app.kubernetes.io/name`, else `app`, else `k8s-app`, else `cnpg.io/cluster`, else `unknown`. Never the line. Every platform workload carries one of these (*inherited*: core, web, loader, model-gateway, storage-module, zot, gitea, openbao, seaweedfs, traefik use `app.kubernetes.io/name`; valkey uses `app`; the CNPG instance's pods use `cnpg.io/cluster`, *inherited* from CNPG's convention; k3s's CoreDNS uses `k8s-app`, *inherited* from the k3s manifest) |
-| `namespace`, `pod`, `container`, `node` | Kubernetes metadata | as the API gives them |
+| `namespace`, `pod`, `container`, `node` | Kubernetes metadata; kubelet-owned file path fallback | namespace, pod and container use API metadata when available, otherwise `/var/log/pods/<namespace>_<pod>_<uid>/<container>/N.log`; node uses API metadata. Missing identity remains empty, never inferred from message text |
 | `stream` | the kubelet's CRI stream | `stdout` or `stderr`, taken from the source's own `stream` field *before* it is defaulted; measured `stream="stderr"` and `stream="stdout"` on the stored records (the earlier `"unknown"` was a bug: the default overwrote the value) |
 | `level` | the line, unified | pino numbers 10–60 → `trace`/`debug`/`info`/`warn`/`error`/`fatal`; text words `trace|debug|info|warn|warning|error|err|fatal|critical|panic` → the same set; anything else, and any line without a level, is `unknown`. Both maps are equal for structured and unstructured lines |
 | `conversation_id` | the line, when present | the JSON field `conversation_id`; unset otherwise. It is a field, never a stream, so it does not multiply streams |
-| `untrusted` | Kubernetes metadata | `true` for `namespace == lifemodel-motor` (ADR-014: the whole task pod is one untrusted zone), `false` otherwise |
-| `error_type`, `reason_check`, `reason_path`, `reason_got` | the line, **trusted namespaces only** | promoted from a failure line's `error_type` and `reason {check, path, got}` so the page can filter on them without parsing. In the task namespace they are left inside the message: a task line cannot create a promoted field (§9 point 5) |
+| `untrusted` | collector policy over source-owned namespace | `false` only for the known platform namespaces: `lifemodel`, `lifemodel-system`, `lifemodel-state`, `lifemodel-logs`, `lifemodel-git`, `lifemodel-releases`, `openbao`, `cnpg-system`, `flux-system`, `kube-system`. Every other namespace, including missing identity and the motor namespaces, is `true` and throttled (§5 N5) |
+| `error_type`, `reason_check`, `reason_path`, `reason_got` | the line, **trusted namespaces only** | promoted from a failure line's `error_type` and `reason {check, path, got}` so the page can filter on them without parsing. In every untrusted namespace they are left inside the message: a task line cannot create a promoted field (§9 point 5) |
 | `message` | the line | with ANSI escape codes stripped, so a pino-pretty line is readable as text and searchable |
 | `_time` | the kubelet's CRI timestamp | the record's time; the line's own time field is left in the message text |
 
@@ -1023,12 +1023,14 @@ loss — a pod under the limit has `input == accepted`. Measured in Docker: a
 produced windows of 300 input with 69 accepted, and 299 with 60. So
 `discarded = input − accepted` **per pod and per window**. The two counters
 use matching epoch-aligned 6-second boundaries but are separate stored records,
-so an exact result requires exactly one of each, the same pod and boundaries,
+so an exact result requires exactly one of each, the same namespace, pod and boundaries,
 and the same collector process start (`collector_start`, RFC3339). Input must
 be at least accepted. A missing, invalid or duplicate counter is `unknown`,
 never zero. A window beginning before its collector process started is partial
-and unknown. Missing whole windows between the pod's first and last evidenced
-windows are shown as unknown intervals. Any such uncertainty makes the overall
+and unknown. Counters exist only for windows with input. Gaps within one
+collector process are idle stretches, not unknown loss. A gap between evidenced
+windows from different collector processes is shown as an unknown interval.
+Any such uncertainty makes the overall
 status unknown; valid pairs still show their own exact values.
 
 A collector crash can lose in-memory counts. Completely missing leading or
@@ -1048,6 +1050,12 @@ The normalizer rebuilds pod records from an allowlist and always adds
 `untrusted`. Readers require collector counter fields without `untrusted`,
 never a counter parsed from message text, even for a pod labelled
 `throttle-window`.
+
+The throttle budget and counter identity use namespace and pod together, so
+equal pod names in different namespaces do not share a quota. Records with
+completely missing identity necessarily share one unknown-identity budget.
+The page reports collector counters for every throttled namespace, not only
+`lifemodel-motor`.
 
 Trust requires a known platform namespace. Missing namespace and pod metadata
 fall back to the kubelet-owned `/var/log/pods/<namespace>_<pod>_<uid>/` path;

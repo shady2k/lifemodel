@@ -10,8 +10,10 @@ export function LogsThrottleStatus({ value }: { value: LogsThrottle }) {
       <p className="text-xs text-muted-foreground">{t('logsThrottleHelp')}</p>
       {value.state === 'unknown' && <p role="status">{t('logsThrottleUnknown')}</p>}
       {value.windows.map((window, index) => (
-        <p key={`${window.pod}-${String(index)}`}>
-          <span className="font-mono">{window.pod}</span>
+        <p key={`${window.namespace}-${window.pod}-${String(index)}`}>
+          <span className="font-mono">
+            {window.namespace || '?'}/{window.pod || '?'}
+          </span>
           {' · '}
           {window.start !== null && window.end !== null && (
             <>

@@ -180,7 +180,8 @@ describe('the logs API', () => {
     const counters = fixture.requests.find((request) =>
       request.query?.includes('module:="throttle-window"')
     );
-    expect(counters?.query).toContain('namespace:="lifemodel-motor" NOT untrusted:*');
+    expect(counters?.query).toContain('NOT untrusted:*');
+    expect(counters?.query).not.toContain('namespace:=');
     expect(counters?.query).not.toContain('module:="core"');
     expect(JSON.parse(response.body)).toHaveProperty('throttle.state');
     expect(

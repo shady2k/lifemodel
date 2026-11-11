@@ -67,7 +67,9 @@ describe('collector window loss', () => {
     ]);
     expect(answer).toEqual({
       state: 'unknown',
-      windows: [{ pod: 'missing', start: null, end: null, discarded: null }],
+      windows: [
+        { namespace: 'lifemodel-motor', pod: 'missing', start: null, end: null, discarded: null },
+      ],
     });
     expect(query.mock.calls[0]?.[0]).toContain('NOT untrusted:*');
     expect(
@@ -103,7 +105,11 @@ describe('incomplete collector lifetimes and missing windows', () => {
     ).toBeNull();
   });
   it('shows a whole missing pair between evidenced windows as unknown', async () => {
-    const later = { window_start: '2026-11-11T12:00:18Z', window_end: '2026-11-11T12:00:24Z' };
+    const later = {
+      collector_start: '2026-11-11T12:00:17Z',
+      window_start: '2026-11-11T12:00:18Z',
+      window_end: '2026-11-11T12:00:24Z',
+    };
     const records = [
       input,
       accepted,
@@ -117,6 +123,7 @@ describe('incomplete collector lifetimes and missing windows', () => {
     );
     expect(result.state).toBe('unknown');
     expect(result.windows).toContainEqual({
+      namespace: 'lifemodel-motor',
       pod: 'task-a',
       start: '2026-11-11T12:00:06.000Z',
       end: '2026-11-11T12:00:18.000Z',
@@ -125,7 +132,11 @@ describe('incomplete collector lifetimes and missing windows', () => {
     expect(result.windows.filter((window) => window.discarded === 240)).toHaveLength(2);
   });
   it('keeps gap work bounded even for very distant observations', () => {
-    const later = { window_start: '2036-11-11T12:00:00Z', window_end: '2036-11-11T12:00:06Z' };
+    const later = {
+      collector_start: '2036-11-11T11:59:59Z',
+      window_start: '2036-11-11T12:00:00Z',
+      window_end: '2036-11-11T12:00:06Z',
+    };
     const windows = pairThrottleWindows([
       input,
       accepted,
@@ -134,5 +145,64 @@ describe('incomplete collector lifetimes and missing windows', () => {
     ]);
     expect(windows).toHaveLength(3);
     expect(windows[2]?.discarded).toBeNull();
+  });
+});
+
+describe('all untrusted namespace identities', () => {
+  it('keeps a visible empty untrusted identity unknown without counters', async () => {
+    const answer = await readLogsThrottle(
+      { query: async () => ({ state: 'ok', records: [] }) },
+      { from: 0, to: 6000 },
+      [counter('input', '1', { namespace: '', pod: '', untrusted: 'true' })]
+    );
+    expect(answer).toEqual({
+      state: 'unknown',
+      windows: [{ namespace: '', pod: '', start: null, end: null, discarded: null }],
+    });
+  });
+
+  it('does not mix equal pod names from different namespaces', () => {
+    const records = [input, counter('accepted', '60', { namespace: 'other' })];
+    expect(pairThrottleWindows(records)).toHaveLength(2);
+    expect(pairThrottleWindows(records).every((window) => window.discarded === null)).toBe(true);
+    expect(
+      pairThrottleWindows([
+        counter('input', '3', { namespace: '', pod: '' }),
+        counter('accepted', '3', { namespace: '', pod: '' }),
+      ])
+    ).toMatchObject([{ namespace: '', pod: '', discarded: 0 }]);
+  });
+  it('does not turn same-process idle windows into unknown loss for a 10-second writer', async () => {
+    const records = [
+      counter('input', '1'),
+      counter('accepted', '1'),
+      counter('input', '1', {
+        window_start: '2026-11-11T12:00:12Z',
+        window_end: '2026-11-11T12:00:18Z',
+      }),
+      counter('accepted', '1', {
+        window_start: '2026-11-11T12:00:12Z',
+        window_end: '2026-11-11T12:00:18Z',
+      }),
+    ];
+    const answer = await readLogsThrottle(
+      { query: async () => ({ state: 'ok', records }) },
+      { from: 0, to: Date.parse('2026-11-11T12:01:00Z') },
+      []
+    );
+    expect(answer.state).toBe('ok');
+    expect(answer.windows).toHaveLength(2);
+    expect(answer.windows.every((window) => window.discarded === 0)).toBe(true);
+  });
+  it('reports a visible untrusted pod without counters in any namespace as unknown', async () => {
+    const answer = await readLogsThrottle(
+      { query: async () => ({ state: 'ok', records: [] }) },
+      { from: 0, to: 6000 },
+      [counter('input', '1', { namespace: 'external', untrusted: 'true' })]
+    );
+    expect(answer).toMatchObject({
+      state: 'unknown',
+      windows: [{ namespace: 'external', pod: 'task-a', discarded: null }],
+    });
   });
 });

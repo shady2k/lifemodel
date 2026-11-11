@@ -6,6 +6,7 @@ const WINDOW_MS = 6_000;
 const MAX_COUNTERS = 20_000;
 
 export interface LogsThrottleWindow {
+  readonly namespace: string;
   readonly pod: string;
   readonly start: string | null;
   readonly end: string | null;
@@ -35,6 +36,7 @@ export function pairThrottleWindows(records: readonly LogsRecord[]): LogsThrottl
   const groups = new Map<
     string,
     {
+      namespace: string;
       pod: string;
       start: string | null;
       end: string | null;
@@ -48,16 +50,22 @@ export function pairThrottleWindows(records: readonly LogsRecord[]): LogsThrottl
     const f = record.fields;
     if (
       f['module'] !== 'throttle-window' ||
-      f['namespace'] !== 'lifemodel-motor' ||
+      typeof f['namespace'] !== 'string' ||
       f['untrusted'] !== undefined ||
-      !f['pod']
+      typeof f['pod'] !== 'string'
     )
       continue;
     const start = aligned(f['window_start']);
     const end = aligned(f['window_end']);
     const validWindow = start !== null && end !== null && end - start === WINDOW_MS;
-    const key = JSON.stringify([f['pod'], start ?? f['window_start'], end ?? f['window_end']]);
+    const key = JSON.stringify([
+      f['namespace'],
+      f['pod'],
+      start ?? f['window_start'],
+      end ?? f['window_end'],
+    ]);
     const group = groups.get(key) ?? {
+      namespace: f['namespace'],
       pod: f['pod'],
       start: validWindow ? new Date(start).toISOString() : null,
       end: validWindow ? new Date(end).toISOString() : null,
@@ -89,32 +97,55 @@ export function pairThrottleWindows(records: readonly LogsRecord[]): LogsThrottl
       accepted !== undefined &&
       accepted <= input;
     return {
+      namespace: group.namespace,
       pod: group.pod,
+      collector: group.collectors.size === 1 ? [...group.collectors][0] : undefined,
       start: group.start,
       end: group.end,
       discarded: known ? input - accepted : null,
     };
   });
-  // A missing whole pair is visible only between evidenced windows. Emit one
-  // unknown interval per gap instead of looping across potentially years.
-  const byPod = new Map<string, LogsThrottleWindow[]>();
+  // A process change can hide a whole pair; gaps within one process may be
+  // idle pods. Emit one interval per restart gap without iterating over time.
+  const byPod = new Map<string, typeof windows>();
   for (const window of windows) {
     if (window.start === null || window.end === null) continue;
-    const list = byPod.get(window.pod) ?? [];
+    const identity = JSON.stringify([window.namespace, window.pod]);
+    const list = byPod.get(identity) ?? [];
     list.push(window);
-    byPod.set(window.pod, list);
+    byPod.set(identity, list);
   }
   const gaps: LogsThrottleWindow[] = [];
-  for (const [pod, list] of byPod) {
+  for (const list of byPod.values()) {
     list.sort((a, b) => Date.parse(a.start ?? '') - Date.parse(b.start ?? ''));
     for (let index = 1; index < list.length; index++) {
       const previous = list[index - 1];
       const current = list[index];
-      if (previous?.end && current?.start && Date.parse(current.start) > Date.parse(previous.end))
-        gaps.push({ pod, start: previous.end, end: current.start, discarded: null });
+      if (
+        previous?.end &&
+        current?.start &&
+        previous.collector !== current.collector &&
+        Date.parse(current.start) > Date.parse(previous.end)
+      )
+        gaps.push({
+          namespace: current.namespace,
+          pod: current.pod,
+          start: previous.end,
+          end: current.start,
+          discarded: null,
+        });
     }
   }
-  return [...windows, ...gaps];
+  return [
+    ...windows.map((window) => ({
+      namespace: window.namespace,
+      pod: window.pod,
+      start: window.start,
+      end: window.end,
+      discarded: window.discarded,
+    })),
+    ...gaps,
+  ];
 }
 
 /** Independent of text/level/module filters: those fields do not exist on counters. */
@@ -123,7 +154,7 @@ export async function readLogsThrottle(
   window: { from: number; to: number },
   pageRecords: readonly LogsRecord[]
 ): Promise<LogsThrottle> {
-  const query = `_time:[${new Date(window.from).toISOString()}, ${new Date(window.to).toISOString()}] module:="throttle-window" namespace:="lifemodel-motor" NOT untrusted:* | limit ${String(MAX_COUNTERS + 1)}`;
+  const query = `_time:[${new Date(window.from).toISOString()}, ${new Date(window.to).toISOString()}] module:="throttle-window" NOT untrusted:* | limit ${String(MAX_COUNTERS + 1)}`;
   const result = await store.query(query);
   const complete = result.state === 'ok' && result.records.length <= MAX_COUNTERS;
   const windows =
@@ -132,14 +163,22 @@ export async function readLogsThrottle(
           complete ? entry : { ...entry, discarded: null }
         )
       : [];
-  const pods = new Set(windows.map((entry) => entry.pod));
+  const pods = new Set(windows.map((entry) => JSON.stringify([entry.namespace, entry.pod])));
   for (const record of pageRecords) {
     const pod = record.fields['pod'];
-    if (record.fields['namespace'] === 'lifemodel-motor' && pod && !pods.has(pod)) {
-      windows.push({ pod, start: null, end: null, discarded: null });
-      pods.add(pod);
+    const namespace = record.fields['namespace'];
+    const identity = JSON.stringify([namespace, pod]);
+    if (
+      record.fields['untrusted'] === 'true' &&
+      typeof pod === 'string' &&
+      typeof namespace === 'string' &&
+      !pods.has(identity)
+    ) {
+      windows.push({ namespace, pod, start: null, end: null, discarded: null });
+      pods.add(identity);
     }
   }
+
   return {
     state:
       complete && windows.length > 0 && windows.every((entry) => entry.discarded !== null)

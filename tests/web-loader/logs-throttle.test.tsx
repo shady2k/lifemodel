@@ -17,14 +17,22 @@ describe('per-pod discarded windows', () => {
         value={{
           state: 'ok',
           windows: [
-            { pod: 'unknown-pod', start: null, end: null, discarded: null },
             {
+              namespace: 'lifemodel-motor',
+              pod: 'unknown-pod',
+              start: null,
+              end: null,
+              discarded: null,
+            },
+            {
+              namespace: 'lifemodel-motor',
               pod: 'under-limit',
               start: '2026-11-11T12:00:00Z',
               end: '2026-11-11T12:00:06Z',
               discarded: 0,
             },
             {
+              namespace: 'lifemodel-motor',
               pod: 'flood',
               start: '2026-11-11T12:00:00Z',
               end: '2026-11-11T12:00:06Z',
@@ -34,13 +42,13 @@ describe('per-pod discarded windows', () => {
         }}
       />
     );
-    expect(screen.getByText('unknown-pod').parentElement).toHaveTextContent(
+    expect(screen.getByText('lifemodel-motor/unknown-pod').parentElement).toHaveTextContent(
       i18n.t('logsThrottleUnknown')
     );
-    expect(screen.getByText('under-limit').parentElement).toHaveTextContent(
+    expect(screen.getByText('lifemodel-motor/under-limit').parentElement).toHaveTextContent(
       i18n.t('logsThrottleNoLoss')
     );
-    expect(screen.getByText('flood').parentElement).toHaveTextContent(
+    expect(screen.getByText('lifemodel-motor/flood').parentElement).toHaveTextContent(
       i18n.t('logsThrottleDiscarded', { count: 240 })
     );
     expect(container.textContent).not.toContain('{{');

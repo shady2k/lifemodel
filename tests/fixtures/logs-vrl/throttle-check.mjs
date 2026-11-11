@@ -15,7 +15,7 @@ export function checkCollectorThrottle({ runner }) {
   mkdirSync(join(directory, 'data'));
   assert.equal(committed.transforms['untrusted-throttle'].threshold, 500);
   assert.equal(committed.transforms['untrusted-throttle'].window_secs, 1);
-  assert.equal(committed.transforms['untrusted-throttle'].key_field, '{{ pod }}');
+  assert.equal(committed.transforms['untrusted-throttle'].key_field, '{{ namespace }}/{{ pod }}');
   const base = runner.basePath(directory);
   const path = (name) => join(base, name);
   const records = [];
@@ -45,6 +45,10 @@ export function checkCollectorThrottle({ runner }) {
   appendMissing('missing-trusted', 'lifemodel-system', 1600);
   appendMissing('', '', 1600, false);
   append('future-namespace', 'future-namespace', 1600);
+  for (const namespace of ['untrusted-a', 'untrusted-b']) {
+    append('same-pod', namespace, 1600);
+    append('', namespace, 1600);
+  }
   writeFileSync(join(directory, 'input.jsonl'), records.map(JSON.stringify).join('\n') + '\n');
   const transforms = structuredClone(committed.transforms);
   delete transforms['collector-heartbeat'];
@@ -82,12 +86,17 @@ export function checkCollectorThrottle({ runner }) {
       for (const key of ['counter', 'value', 'window_start', 'window_end', 'collector_start', 'collector_counter'])
         assert.equal(Object.hasOwn(log, key), false, `normalizer strips forged ${key}`);
     }
-    for (const pod of ['flood-a', 'flood-b', 'quiet', 'zero', 'missing-motor', '', 'future-namespace']) {
+    const identities = ['flood-a', 'flood-b', 'quiet', 'zero', 'missing-motor', '', 'future-namespace']
+      .map((pod) => ({ pod, namespace: pod === '' ? '' : pod === 'future-namespace' ? 'future-namespace' : 'lifemodel-motor' }));
+    for (const namespace of ['untrusted-a', 'untrusted-b']) {
+      identities.push({ pod: 'same-pod', namespace }, { pod: '', namespace });
+    }
+    for (const { pod, namespace } of identities) {
       const pairs = new Map();
-      for (const row of counters.filter((row) => row.pod === pod)) {
+      for (const row of counters.filter((row) => row.pod === pod && row.namespace === namespace)) {
         assert.deepEqual(Object.keys(row).sort(), ['collector_start','counter','module','namespace','pod','timestamp','value','window_end','window_start'].sort());
         assert.equal(row.module, 'throttle-window');
-        assert.equal(row.namespace, pod === '' ? '' : pod === 'future-namespace' ? 'future-namespace' : 'lifemodel-motor');
+        assert.equal(row.namespace, namespace);
         assert.equal(row.collector_start, collectorStart);
         assert.equal(Date.parse(row.window_end) - Date.parse(row.window_start), 6000);
         assert.equal(Date.parse(row.window_start) % 6000, 0);
@@ -107,8 +116,8 @@ export function checkCollectorThrottle({ runner }) {
         accepted += pair.accepted;
       }
       assert.equal(input, pod === 'zero' ? 1 : pod === 'quiet' ? 20 : 1600);
-      assert.equal(accepted, logs.filter((row) => row.pod === pod).length);
-      if (pod.startsWith('flood') || ['missing-motor', '', 'future-namespace'].includes(pod)) {
+      assert.equal(accepted, logs.filter((row) => row.pod === pod && row.namespace === namespace).length);
+      if (pod.startsWith('flood') || ['missing-motor', '', 'future-namespace', 'same-pod'].includes(pod)) {
         assert.ok(accepted >= 500, `${pod} has its own quota`);
         assert.ok(accepted < input, `${pod} flood is limited`);
       }

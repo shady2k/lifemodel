@@ -78,7 +78,7 @@ transforms:
       if container == "" { container = string(file_identity.container) ?? "" }
       # Trust is a positive list of platform namespaces. Missing identity and
       # future namespaces fail closed; motor and motor-releases are never trusted.
-      trusted = includes(["lifemodel", "lifemodel-system", "lifemodel-state", "lifemodel-logs", "lifemodel-git", "lifemodel-releases", "openbao", "cnpg-system", "flux-system", "kube-system", "gateway-system"], namespace)
+      trusted = includes(["lifemodel", "lifemodel-system", "lifemodel-state", "lifemodel-logs", "lifemodel-git", "lifemodel-releases", "openbao", "cnpg-system", "flux-system", "kube-system"], namespace)
       untrusted = !trusted
       node = string(.kubernetes.pod_node_name) ?? ""
       stream = string(.stream) ?? "unknown"
@@ -153,7 +153,9 @@ transforms:
     inputs: [throttle-window-stamp]
     threshold: 500
     window_secs: 1
-    key_field: '{{ pod }}'
+    # Kubernetes names contain no slash. Distinct namespaces keep distinct
+    # quotas even with a missing pod; fully unknown identities share one quota.
+    key_field: '{{ namespace }}/{{ pod }}'
   accepted-record:
     type: remap
     inputs: [untrusted-throttle]

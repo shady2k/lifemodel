@@ -328,6 +328,19 @@ describe('collector counters without message text', () => {
     window_start: '2026-11-11T12:00:00Z',
     window_end: '2026-11-11T12:00:06Z',
   };
+  it.each([
+    ['default', 'task-a'],
+    ['lifemodel-motor-releases', 'task-a'],
+    ['', ''],
+  ])('accepts collector-owned counters for namespace %j and pod %j', async (namespace, pod) => {
+    const url = await listen((_req, res) => {
+      res.end(JSON.stringify({ ...record, namespace, pod }));
+    });
+    expect(await createLogsStore({ url }).query('*')).toMatchObject({
+      state: 'ok',
+      records: [{ fields: { namespace, pod } }],
+    });
+  });
   it('accepts a collector window with no _msg', async () => {
     const url = await listen((_req, res) => {
       res.end(JSON.stringify(record));

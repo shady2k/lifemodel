@@ -164,10 +164,9 @@ function parseRecords(body: string): LogsRecord[] | null {
     // bounded schema may omit it; normalized pod records always set untrusted.
     const counterRecord =
       object['module'] === 'throttle-window' &&
-      object['namespace'] === 'lifemodel-motor' &&
+      typeof object['namespace'] === 'string' &&
       object['untrusted'] === undefined &&
       typeof object['pod'] === 'string' &&
-      object['pod'] !== '' &&
       (object['counter'] === 'input' || object['counter'] === 'accepted') &&
       (typeof object['value'] === 'string' || typeof object['value'] === 'number') &&
       typeof object['collector_start'] === 'string' &&

@@ -707,6 +707,29 @@ describe("the loader grant on the evictor's CronJob (ADR-016 §5)", () => {
   });
 });
 
+describe('collector namespace trust', () => {
+  it('trusts only deployed platform namespaces or explicit cluster bootstrap namespaces', () => {
+    const program: string = collectorConfig().transforms.normalize.source;
+    const match = program.match(/trusted = includes\((\[[^\n]+\]), namespace\)/);
+    expect(match).not.toBeNull();
+    const trusted = JSON.parse(match![1]!) as string[];
+    const deployed = new Set(
+      platformObjects()
+        .filter(({ object }) => object.kind === 'Namespace')
+        .map(({ object }) => object.metadata.name as string)
+    );
+    // Kubernetes creates kube-system; the installer creates and labels flux-system.
+    const bootstrapNamespaces = new Set(['kube-system', 'flux-system']);
+    for (const namespace of trusted) {
+      expect(deployed.has(namespace) || bootstrapNamespaces.has(namespace), namespace).toBe(true);
+    }
+    expect(trusted).not.toContain('lifemodel-motor');
+    expect(trusted).not.toContain('lifemodel-motor-releases');
+    const installer = readFileSync(new URL('../../scripts/install.sh', import.meta.url), 'utf8');
+    expect(installer).toContain("'  name: flux-system'");
+  });
+});
+
 describe('the collector heartbeat (ADR-016 §4, check L14)', () => {
   it('beats every 30 s and travels the store sink the pod records use', () => {
     const config = collectorConfig();
