@@ -12,7 +12,10 @@ def start_task_writer(report, options, loader, cluster, run_id, rate, seconds, s
     if mode == 'denied':
         report.not_valid('the core did not launch a task writer')
         return None
-    return ('task-fast' if rate == 1000 else 'task-large', 'task')
+    pod = 'task-fast' if rate == 1000 else 'task-large'
+    start = '05' if mode == 'no-overlap' and pod == 'task-large' else '00'
+    first = walk_support.parse_ms('2026-11-10T00:00:' + start + 'Z')
+    return (pod, 'task', run_id + '-a2', first)
 helper.start_task_writer = start_task_writer
 sys.modules['logs_task_writer'] = helper
 spec = importlib.util.spec_from_file_location('flood_walk', path)
@@ -56,25 +59,25 @@ class Cluster:
                 '2026-11-10T00:00:' + end + 'Z ' + prefix + ' seq=2'))
         return types.SimpleNamespace(returncode=0, stdout='walk-trusted-writer trusted seq=1')
 class Loader:
-    def logs(self, params):
+    def logs_page(self, params):
         if params.get('module') == 'task':
-            run_id = params['text']
-            pod = 'task-fast' if run_id == 'fast' else 'task-large'
-            start, end = ('00', '03') if mode != 'no-overlap' or pod != 'task-large' else ('05', '08')
-            return {'state': 'ok', 'records': [
-                {'time': '2026-11-10T00:00:' + start + 'Z',
-                 'message': 'walk-task-writer ' + run_id + ' seq=1',
-                 'fields': {'module': 'task', 'pod': pod, 'namespace': 'lifemodel-motor',
-                            'untrusted': 'true'}},
+            run_id = params.get('text') or ''
+            pod = 'task-fast' if run_id.startswith('fast') else 'task-large'
+            end = '08' if mode == 'no-overlap' and pod == 'task-large' else '03'
+            return 200, {'state': 'ok', 'records': [
                 {'time': '2026-11-10T00:00:' + end + 'Z',
                  'message': 'walk-task-writer ' + run_id + ' seq=2',
                  'fields': {'module': 'task', 'pod': pod, 'namespace': 'lifemodel-motor',
                             'untrusted': 'true'}},
             ]}
-        return {'state': 'ok', 'records': [
+        return 200, {'state': 'ok', 'records': [
             {'message': 'walk-trusted-writer trusted seq=1'},
             {'message': 'walk-trusted-writer trusted seq=2'},
         ]}
+
+    def logs(self, params):
+        status, answer = self.logs_page(params)
+        return answer if status == 200 else None
 report = walk.Report()
 state = {'trusted_run': 'trusted', 'task_fast': 'fast', 'task_large': 'large', 'throttle_start': 0}
 ok = walk.throttle_case(report, options, Loader(), Cluster(), state)

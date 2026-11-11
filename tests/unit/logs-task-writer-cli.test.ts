@@ -23,7 +23,7 @@ describe('the browser task writer CLI result contract', () => {
         JSON.stringify({
           pod: 'task-owned-123',
           module: 'task',
-          run_id: 'browser-proof',
+          run_id: 'browser-proof-a1',
         })
           .replaceAll(':', ': ')
           .replaceAll(',', ', ')

@@ -8,7 +8,7 @@ import shlex
 import time
 import uuid
 
-from logs_walk_support import PortForward, WalkError, free_port, now_ms
+from logs_walk_support import PortForward, WalkError, free_port, now_ms, parse_ms
 
 TASK_NAMESPACE = 'lifemodel-motor'
 
@@ -98,26 +98,50 @@ def task_prompt(attempt, command):
 
 def attempt_seen(attempt, state):
     """What one attempt saw, without any text of the agent's reply."""
-    text = ('attempt %d: chat_accepted=%s reply_names_task=%s new_task_pod=%s '
+    text = ('attempt %d run=%s: chat_accepted=%s reply_names_task=%s new_task_pod=%s '
             'first_collected_marker=%s'
-            % (attempt, bool(state.get('accepted')), bool(state.get('reply_names_task')),
-               bool(state.get('new_task_pod')), bool(state.get('marker'))))
+            % (attempt, str(state.get('run_id') or '-'), bool(state.get('accepted')),
+               bool(state.get('reply_names_task')), bool(state.get('new_task_pod')),
+               bool(state.get('marker'))))
     if state.get('transport'):
         text += ' transport=' + str(state['transport'])
+    if state.get('refused'):
+        text += ' refused=HTTP %s' % state['refused']
     return text
+
+
+def attempt_run_id(run_id, attempt):
+    """A run id no other attempt can write, so a late attempt is never mistaken."""
+    return '%s-a%d' % (run_id, attempt)
+
+
+def stop_abandoned(report, cluster, attempt, state, keep=None):
+    """Delete the task pods an abandoned attempt started, and say which."""
+    for name in state.get('pods') or []:
+        if name == keep:
+            continue
+        result = cluster.run(['-n', TASK_NAMESPACE, 'delete', 'pod', name,
+                              '--ignore-not-found', '--wait=false'], timeout=60)
+        if result.returncode == 0:
+            report.note('task writer attempt %d: stopped abandoned task pod %s'
+                        % (attempt, name))
+        else:
+            report.note('task writer attempt %d: could not stop abandoned task pod %s '
+                        '(exit %s)' % (attempt, name, result.returncode))
 
 
 def task_writer_attempt(report, options, loader, cluster, forward, origin, before,
                         run_id, command, attempt, bound):
     """One chat request and its bounded wait for a new task pod and its first line.
 
-    Returns (result or None, what was seen). The reply's text is never printed:
-    only whether it named a task is recorded.
+    `run_id` is this attempt's own id. Returns ((pod, module, run_id, first_ms) or
+    None, what was seen). The reply's text is never printed: only whether it named
+    a task is recorded. A refused page records its HTTP status.
     """
     deadline = time.monotonic() + bound
     started = now_ms()
-    state = {'accepted': False, 'reply_names_task': False,
-             'new_task_pod': False, 'marker': False}
+    state = {'run_id': run_id, 'accepted': False, 'reply_names_task': False,
+             'new_task_pod': False, 'marker': False, 'pods': []}
     status, baseline = web_request(forward.local_port, 'GET', '/api/transcript?limit=1',
                                    origin, timeout=max(1, min(20, deadline-time.monotonic())))
     cursor = baseline.get('cursor') if status == 200 else None
@@ -142,11 +166,14 @@ def task_writer_attempt(report, options, loader, cluster, forward, origin, befor
         candidates = {item['metadata']['name']: item for item in cluster.pods(TASK_NAMESPACE)
                       if task_pod(item) and item['metadata']['uid'] not in before}
         state['new_task_pod'] = state['new_task_pod'] or bool(candidates)
+        state['pods'] = sorted(set(state['pods']) | set(candidates))
         if candidates:
-            answer = loader.logs({'from': str(started), 'to': str(now_ms()),
-                                  'module': 'task',
-                                  'text': 'walk-task-writer ' + run_id + ' seq=1 ',
-                                  'limit': '1000'})
+            status, answer = loader.logs_page({
+                'from': str(started), 'to': str(now_ms()), 'module': 'task',
+                'text': 'walk-task-writer ' + run_id + ' seq=1 ', 'limit': '1000'})
+            if status != 200:
+                state['refused'] = status
+                return None, state
             for record in (answer or {}).get('records') or []:
                 fields = record.get('fields') or {}
                 if (fields.get('pod') in candidates and fields.get('module') == 'task'
@@ -155,11 +182,13 @@ def task_writer_attempt(report, options, loader, cluster, forward, origin, befor
                         and fields.get('untrusted') == 'true'
                         and marker.match(record.get('message') or '')):
                     state['marker'] = True
+                    first_ms = parse_ms(record.get('time'))
                     report.pass_('real task writer reached the collector',
-                                 'attempt=%d pod=%s module=task untrusted=true '
+                                 'attempt=%d run=%s pod=%s module=task untrusted=true '
                                  'reply_names_task=%s'
-                                 % (attempt, fields['pod'], bool(state['reply_names_task'])))
-                    return (fields['pod'], 'task'), state
+                                 % (attempt, run_id, fields['pod'],
+                                    bool(state['reply_names_task'])))
+                    return (fields['pod'], 'task', run_id, first_ms), state
         time.sleep(min(1, max(0, deadline - time.monotonic())))
     return None, state
 
@@ -181,7 +210,6 @@ def start_task_writer(report, options, loader, cluster, run_id, rate, seconds, s
             or not isinstance(bound, (int, float)) or not math.isfinite(bound) or not 1 <= bound <= 600):
         report.not_valid('task writer arguments are outside the bounded walk limits')
         return None
-    command = writer_command(run_id, rate, seconds, size)
     states = []
     result = None
     forward = PortForward(options.kubectl, getattr(options, 'web_namespace', 'lifemodel'),
@@ -199,20 +227,25 @@ def start_task_writer(report, options, loader, cluster, run_id, rate, seconds, s
                 states.append((attempt, state))
                 report.note('task writer ' + attempt_seen(attempt, state))
                 continue
+            attempt_run = attempt_run_id(run_id, attempt)
+            command = writer_command(attempt_run, rate, seconds, size)
             try:
                 result, state = task_writer_attempt(
                     report, options, loader, cluster, forward, origin, before,
-                    run_id, command, attempt, bound)
+                    attempt_run, command, attempt, bound)
             except (OSError, http.client.HTTPException, WalkError) as error:
-                state = {'accepted': False, 'reply_names_task': False,
-                         'new_task_pod': False, 'marker': False,
+                state = {'run_id': attempt_run, 'accepted': False,
+                         'reply_names_task': False, 'new_task_pod': False,
+                         'marker': False, 'pods': [],
                          'transport': type(error).__name__}
                 report.note('task writer attempt %d transport failed: %s'
                             % (attempt, type(error).__name__))
             states.append((attempt, state))
             report.note('task writer ' + attempt_seen(attempt, state))
             if result is not None:
+                stop_abandoned(report, cluster, attempt, state, keep=result[0])
                 return result
+            stop_abandoned(report, cluster, attempt, state)
     except (OSError, http.client.HTTPException, WalkError) as error:
         report.note('task writer transport failed: ' + type(error).__name__)
     finally:

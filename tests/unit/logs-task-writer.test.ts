@@ -20,7 +20,7 @@ function run(fixture: object = {}) {
   const line = result.stdout.split('\n').find((value) => value.startsWith('SUMMARY '));
   expect(line, result.stderr).toBeDefined();
   return JSON.parse(line!.slice(8)) as {
-    result: [string, string] | null;
+    result: [string, string, string, number | null] | null;
     calls: unknown[][];
     output: string;
   };
@@ -28,13 +28,14 @@ function run(fixture: object = {}) {
 describe('real task writer handshake', () => {
   it('submits an owner message and proves a new pod and first collected container line', () => {
     const result = run();
-    expect(result.result).toEqual(['task-new-pod', 'task']);
+    expect(result.result?.slice(0, 3)).toEqual(['task-pod-1', 'task', 'run-test-a1']);
+    expect(typeof result.result?.[3]).toBe('number');
     const post = result.calls.find((call) => call[0] === 'http' && call[1] === 'POST');
     expect(post?.[2]).toBe('/api/messages');
     const text = (post?.[3] as { text: string }).text;
     expect(text).toContain('/proc/1/fd/1');
     expect(text).toContain('walk-task-writer');
-    expect(text).toContain('run-test');
+    expect(text).toContain('run-test-a1');
     expect(text).toContain('20480');
     expect(
       result.calls.some(
@@ -47,12 +48,14 @@ describe('real task writer handshake', () => {
   });
   it('retries the request and succeeds on the second attempt', () => {
     const result = run({ post_statuses: [403, 202] });
-    expect(result.result).toEqual(['task-new-pod', 'task']);
+    expect(result.result?.slice(0, 3)).toEqual(['task-pod-2', 'task', 'run-test-a2']);
     const posts = result.calls.filter((call) => call[0] === 'http' && call[1] === 'POST');
     expect(posts).toHaveLength(2);
     const prompts = posts.map((call) => (call[3] as { text: string }).text);
     expect(prompts[0]).toContain('must run as a task, not be answered in chat');
+    expect(prompts[0]).toContain('run-test-a1');
     expect(prompts[1]).toContain('Do not answer this message in chat');
+    expect(prompts[1]).toContain('run-test-a2');
     expect(prompts[1]).toContain('/proc/1/fd/1');
     expect(result.output).toContain('attempt 2');
     expect(result.output).not.toContain('PRIVATE');
@@ -64,13 +67,33 @@ describe('real task writer handshake', () => {
     const posts = result.calls.filter((call) => call[0] === 'http' && call[1] === 'POST');
     expect(posts).toHaveLength(3);
     const prompts = posts.map((call) => (call[3] as { text: string }).text);
-    for (const prompt of prompts) {
+    for (const [index, prompt] of prompts.entries()) {
       expect(prompt).toContain('must run as a task, not be answered in chat');
       expect(prompt).toContain('/proc/1/fd/1');
-      expect(prompt).toContain('run-test');
+      expect(prompt).toContain(`run-test-a${index + 1}`);
     }
     expect(prompts[2]).toContain('This is the last request');
     for (const attempt of [1, 2, 3]) expect(result.output).toContain(`attempt ${attempt}`);
+    expect(result.output).toContain('not_valid');
+    expect(result.output).not.toContain('PRIVATE');
+  });
+
+
+  it('stops an abandoned attempt and gives the next attempt its own run id', () => {
+    const result = run({ late_marker: true });
+    expect(result.result?.slice(0, 3)).toEqual(['task-pod-2', 'task', 'run-test-a2']);
+    const deletes = result.calls.filter(
+      (call) => call[0] === 'run' && call[3] === 'delete' && call[4] === 'pod'
+    );
+    expect(deletes.map((call) => call[5])).toContain('task-pod-1');
+    expect(result.output).toContain('stopped abandoned task pod task-pod-1');
+    expect(result.output).not.toContain('PRIVATE');
+  });
+
+  it('reports a refused marker page with its HTTP status, never as an empty answer', () => {
+    const result = run({ refuse: 503 });
+    expect(result.result).toBeNull();
+    expect(result.output).toContain('refused=HTTP 503');
     expect(result.output).toContain('not_valid');
     expect(result.output).not.toContain('PRIVATE');
   });

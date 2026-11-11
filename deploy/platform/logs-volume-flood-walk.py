@@ -160,17 +160,23 @@ def loader_page_limit(line_bytes):
 
 
 def loader_records(loader, query, limit):
-    """Every record of one loader query, paged; a short page ends the loop."""
+    """Every record of one loader query, paged; a short page ends the loop.
+
+    Returns (records, HTTP status). A refused page keeps its status, so a caller
+    can say TEST NOT VALID with it instead of treating the answer as empty.
+    """
     offset = 0
     collected = []
     while True:
-        answer = loader.logs(dict(query, limit=str(limit), offset=str(offset)))
-        if not answer or answer.get('state') != 'ok':
-            return None
+        status, answer = loader.logs_page(dict(query, limit=str(limit), offset=str(offset)))
+        if status != 200:
+            return None, status
+        if not isinstance(answer, dict) or answer.get('state') != 'ok':
+            return None, status
         page = answer.get('records') or []
         collected.extend(page)
         if len(page) < limit:
-            return collected
+            return collected, status
         offset += len(page)
 
 
@@ -735,11 +741,11 @@ def throttle_case(report, options, loader, cluster, state):
     time.sleep(seconds + 2)
     intervals = []
     written = []
-    for namespace, pod, prefix, run_id, module in (
+    for namespace, pod, prefix, run_id, module, first_ms in (
         (options.writer_namespace, 'walk-trusted-writer', TRUSTED_MODULE,
-         state['trusted_run'], TRUSTED_MODULE),
-        (TASKS_NAMESPACE, fast[0], TASK_MODULE, state['task_fast'], fast[1]),
-        (TASKS_NAMESPACE, large[0], TASK_MODULE, state['task_large'], large[1]),
+         state['trusted_run'], TRUSTED_MODULE, None),
+        (TASKS_NAMESPACE, fast[0], TASK_MODULE, fast[2], fast[1], fast[3]),
+        (TASKS_NAMESPACE, large[0], TASK_MODULE, large[2], large[1], large[3]),
     ):
         if namespace == options.writer_namespace:
             result = cluster.run(['-n', namespace, 'logs', pod, '--timestamps',
@@ -749,33 +755,31 @@ def throttle_case(report, options, loader, cluster, state):
                       if numbered(line, prefix, run_id)]
             written = numbered(result.stdout if result.returncode == 0 else '',
                                TRUSTED_MODULE, state['trusted_run'])
-        else:
-            # Core owns task cleanup: its completed pod may already be gone.
-            stamps = []
-            deadline = time.monotonic() + options.recover_bound
-            while time.monotonic() < deadline:
-                stamps = []
-                records = loader_records(loader, {
-                    'from': str(state['throttle_start']), 'to': str(now_ms()),
-                    'module': module, 'text': run_id}, page_limit)
-                if records is not None:
-                    for record in records:
-                        fields = record.get('fields') or {}
-                        if (fields.get('module') == module and fields.get('pod') == pod
-                                and fields.get('namespace') == TASKS_NAMESPACE
-                                and fields.get('untrusted') == 'true'
-                                and numbered(record.get('message'), prefix, run_id)):
-                            stamp = parse_ms(record.get('time'))
-                            if stamp is not None:
-                                stamps.append(stamp)
-                if len(set(stamps)) >= 2:
-                    break
-                time.sleep(5)
-        stamps = [stamp for stamp in stamps if stamp is not None]
-        if len(set(stamps)) < 2:
-            report.not_valid('a writer has fewer than two timestamped numbered lines: ' + pod)
+            stamps = [stamp for stamp in stamps if stamp is not None]
+            if len(set(stamps)) < 2:
+                report.not_valid('a writer has fewer than two timestamped numbered lines: ' + pod)
+                return False
+            intervals.append((min(stamps), max(stamps)))
+            continue
+        # The task writer's first line is the marker the helper collected; its
+        # last line is the newest record of that attempt's own run id. One record
+        # at offset 0 never reads a deep page.
+        if first_ms is None:
+            report.not_valid('writer %s has no first collected line timestamp' % pod)
             return False
-        intervals.append((min(stamps), max(stamps)))
+        status, answer = loader.logs_page({
+            'from': str(first_ms), 'to': str(now_ms()), 'module': module,
+            'text': run_id, 'limit': '1'})
+        if status != 200:
+            report.not_valid('the loader refused the last-line read for %s (HTTP %d)'
+                             % (pod, status))
+            return False
+        records = (answer or {}).get('records') or []
+        last_ms = parse_ms(records[0].get('time')) if records else None
+        if last_ms is None:
+            report.not_valid('writer %s has no readable last line' % pod)
+            return False
+        intervals.append((first_ms, last_ms))
     overlap = min(end for _, end in intervals) - max(start for start, _ in intervals)
     if overlap <= 0:
         report.not_valid('timestamped writer records prove no common task/trusted writer overlap')
@@ -811,11 +815,13 @@ def throttle_case(report, options, loader, cluster, state):
     found = []
     deadline = time.monotonic() + options.recover_bound
     while time.monotonic() < deadline:
-        records = loader_records(loader, {
+        records, status = loader_records(loader, {
             'from': str(state['throttle_start']), 'to': str(now_ms()),
             'module': TRUSTED_MODULE, 'text': state['trusted_run']}, page_limit)
-        found = [] if records is None else numbered(
-            json.dumps(records), TRUSTED_MODULE, state['trusted_run'])
+        if records is None:
+            report.not_valid('the loader refused the trusted writer page (HTTP %d)' % status)
+            return False
+        found = numbered(json.dumps(records), TRUSTED_MODULE, state['trusted_run'])
         if set(written).issubset(found):
             break
         time.sleep(5)
