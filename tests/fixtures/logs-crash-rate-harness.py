@@ -14,7 +14,8 @@ config = Path(sys.argv[1]).parent / 'logs' / 'config' / 'vector.yaml'
 source = re.search(r'^  ([\w-]+):\n    type: kubernetes_logs$',
                    config.read_text(), re.MULTILINE).group(1)
 options = SimpleNamespace(writer_namespace='walk', writer_pods=1,
-    writer_rate=1700, fill_bound=30, saturated_seconds=0, restore_bound=180)
+    writer_rate=1700, fill_bound=30, fill_ceiling=2400, saturated_seconds=0,
+    restore_bound=180)
 
 
 def source_metrics(value):
@@ -52,10 +53,12 @@ if fixture.get('mode') == 'fill-loop':
     walk.collector_restarts = lambda *_args: 0
     walk.collector_memory = lambda *_args: (None, 'fixture stops after rate diagnostic')
     walk.restore_step = lambda *_args: True
+    walk.require_store_down = lambda *_args: True
     ticks = iter(range(100))
     walk.time.monotonic = lambda: next(ticks)
     readings = iter([1000, 1300])
-    walk.wait_source_pickup = lambda *_args: sample({'source': 1000})
+    walk.wait_source_pickup = lambda *_args: {
+        'sample': sample({'source': 1000}), 'rate': 1700.0, 'elapsed': 60}
 
     def read_metrics(*_args):
         count = next(readings)

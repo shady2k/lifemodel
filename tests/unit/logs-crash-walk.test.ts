@@ -47,6 +47,14 @@ afterAll(() => {
 });
 
 describe("the crash walk's argument handling", () => {
+  it('names the Flux owner lookup, the reconcile annotation and the saturation ceiling', () => {
+    const header = readFileSync(WALK, 'utf8').split('\n').slice(0, 220).join('\n');
+    expect(header).toContain('kustomize.toolkit.fluxcd.io/name');
+    expect(header).toContain('reconcile.fluxcd.io/requestedAt');
+    expect(header).toContain('spec.suspend');
+    expect(header).toContain('--fill-ceiling');
+  });
+
   it('prints its usage and exits 0 on --help', () => {
     const run = python([WALK, '--help']);
     expect(run.status).toBe(0);
@@ -344,6 +352,133 @@ describe('the crash writer has a paced aggregate target', () => {
     const total = totals.reduce((sum, value) => sum + value, 0);
     expect(total).toBeGreaterThanOrEqual(1650);
     expect(total).toBeLessThanOrEqual(1760);
+  });
+});
+
+describe('the crash walk holds the store outage against Flux', () => {
+  it('suspends the owning Kustomization before it scales the store to zero', () => {
+    const run = harness('stop-store');
+    const value = jsonLine<{
+      ok: boolean;
+      calls: string[];
+      fluxSuspended: boolean | null;
+      specSuspend: boolean | null;
+    }>(run, 'STOP');
+    expect(value.ok).toBe(true);
+    const patch = value.calls.findIndex((call) => call.includes('patch kustomization'));
+    const scale = value.calls.findIndex((call) => call.includes('scale deployment'));
+    expect(patch).toBeGreaterThanOrEqual(0);
+    expect(scale).toBeGreaterThan(patch);
+    expect(value.fluxSuspended).toBe(true);
+    expect(value.specSuspend).toBe(true);
+    expect(run.lines.join('\n')).toContain('spec.suspend=true');
+  });
+
+  it('never scales the store down when the suspension is refused', () => {
+    const run = harness('stop-store', { refuseSuspend: true });
+    const value = jsonLine<{ ok: boolean; calls: string[] }>(run, 'STOP');
+    expect(value.ok).toBe(false);
+    expect(value.calls.some((call) => call.includes('scale deployment'))).toBe(false);
+    expect(run.lines.join('\n')).toContain('TEST NOT VALID');
+  });
+
+  it('reads the owning Kustomization from the Deployment labels, with defaults only otherwise', () => {
+    const labels = {
+      'kustomize.toolkit.fluxcd.io/name': 'platform-logs-store',
+      'kustomize.toolkit.fluxcd.io/namespace': 'flux-system',
+    };
+    const labelled = jsonLine<{ namespace: string; name: string; source: string }>(
+      harness('flux-owner', { labels }),
+      'OWNER'
+    );
+    expect(labelled).toEqual({
+      namespace: 'flux-system',
+      name: 'platform-logs-store',
+      source: "the store Deployment's kustomize.toolkit.fluxcd.io/name label",
+    });
+    const defaulted = jsonLine<{ namespace: string; name: string; source: string }>(
+      harness('flux-owner'),
+      'OWNER'
+    );
+    expect(defaulted.namespace).toBe('flux-system');
+    expect(defaulted.name).toBe('platform-logs-store');
+    expect(defaulted.source).toContain('defaults');
+  });
+
+  it('marks a store restored mid-outage TEST NOT VALID and names who restored it', () => {
+    const run = harness('store-restored');
+    const value = jsonLine<{ ok: boolean; managers: string[] }>(run, 'DOWN');
+    expect(value.ok).toBe(false);
+    expect(value.managers).toContain('kustomize-controller');
+    const output = run.lines.join('\n');
+    expect(output).toContain('TEST NOT VALID the store came back while it had to stay down');
+    expect(output).toContain('kustomize-controller');
+    expect(output).toContain('outage never lasted');
+    expect(output).not.toMatch(/^PASS /m);
+    expect(run.status).toBe(1);
+  });
+
+  it('derives the saturation clock from the measured rate and line size', () => {
+    const run = harness('saturation-plan');
+    const value = jsonLine<{
+      line: number;
+      bound: number;
+      neededSeconds: number;
+      reachable: boolean;
+      note: string;
+    }>(run, 'PLAN');
+    expect(value.line).toBeGreaterThan(40);
+    expect(value.bound).toBeGreaterThan(600);
+    expect(value.bound).toBeLessThanOrEqual(2400);
+    expect(value.neededSeconds).toBeGreaterThan(600);
+    expect(value.note).toContain('201326592');
+    expect(value.note).toContain('derives');
+    expect(value.note).toContain('ceiling');
+  });
+
+  it('keeps the configured clock when it already covers the arithmetic', () => {
+    const value = jsonLine<{ bound: number; fromConfigured: boolean }>(
+      harness('saturation-plan', { rate: 20000 }),
+      'PLAN'
+    );
+    expect(value.bound).toBe(600);
+    expect(value.fromConfigured).toBe(true);
+  });
+});
+
+describe('RESTORE resumes the suspended Flux Kustomization', () => {
+  it('resumes, verifies and reconciles even after the store step failed', () => {
+    const run = harness('restore-resume');
+    expect(run.status).toBe(1);
+    const value = jsonLine<{ calls: string[]; suspend: boolean | null; handled: boolean }>(
+      run,
+      'RESUMED'
+    );
+    expect(value.suspend).toBe(false);
+    expect(value.handled).toBe(true);
+    expect(
+      value.calls.some(
+        (call) =>
+          call.includes('annotate kustomization') &&
+          call.includes('reconcile.fluxcd.io/requestedAt')
+      )
+    ).toBe(true);
+    const output = run.lines.join('\n');
+    expect(output).toContain('FAIL RESTORE store Ready');
+    expect(output).toContain('resumed and reconciled');
+    expect(output.indexOf('FAIL RESTORE store Ready')).toBeLessThan(
+      output.indexOf('resumed and reconciled')
+    );
+  });
+
+  it('reports a resume that fails as a loud RESTORE FAIL', () => {
+    const run = harness('restore-resume', { resumeRefused: true });
+    expect(run.status).toBe(1);
+    const output = run.lines.join('\n');
+    expect(output).toContain('FAIL RESTORE resume the Flux Kustomization');
+    expect(output).toContain('still suspended');
+    expect(output).toContain('NOT RESUMED');
+    expect(jsonLine<{ suspend: boolean | null }>(run, 'RESUMED').suspend).toBe(true);
   });
 });
 

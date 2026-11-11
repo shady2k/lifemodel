@@ -51,6 +51,75 @@ class FakeCluster:
         return True
 
 
+class FluxCluster(FakeCluster):
+    """A fake cluster that answers the store Deployment, its Kustomization and events.
+
+    `json` routes by the object in the arguments, so one fake serves the store
+    scale-down, the Kustomization read/patch and the collector pod list. A patch
+    to the Kustomization's suspend flag changes the object it answers next, the
+    way the API server would.
+    """
+
+    def __init__(self, fixture):
+        super().__init__(fixture)
+        self.deployment = fixture.get('deployment')
+        self.kustomization = fixture.get('kustomization')
+        self.store_pods = list(fixture.get('storePods') or [])
+
+    def json(self, args, timeout=120):
+        if 'pods' in args:
+            selector = args[args.index('-l') + 1] if '-l' in args else ''
+            if (self.fixture.get('store') or 'logs-store') in selector:
+                return {'items': self.store_pods}
+            return {'items': self.fixture.get('pods') or []}
+        if 'kustomization' in args:
+            return self.kustomization
+        if 'deployment' in args:
+            return self.deployment
+        return self.fixture.get('json')
+
+    def pods(self, namespace, selector=None):
+        if selector and 'logs-store' in selector:
+            return self.store_pods
+        return super().pods(namespace, selector)
+
+    def run(self, args, timeout=120, stdin=None):
+        if 'patch' in args and 'kustomization' in args:
+            self.calls.append(' '.join(args))
+            payload = json.loads(args[args.index('-p') + 1])
+            suspend = payload['spec']['suspend']
+            if (suspend is True and self.fixture.get('suspendRefused')) or (
+                    suspend is False and self.fixture.get('resumeRefused')):
+                return Result(1, '', 'refused')
+            if self.kustomization is not None:
+                self.kustomization.setdefault('spec', {})['suspend'] = suspend
+                if suspend is False:
+                    self.kustomization.setdefault('status', {})[
+                        'lastAppliedRevision'] = 'main@sha256:fixture'
+            return Result()
+        if 'annotate' in args and 'kustomization' in args:
+            self.calls.append(' '.join(args))
+            if self.fixture.get('annotateRefused'):
+                return Result(1)
+            stamp = args[args.index('--overwrite') - 1].split('=', 1)[1]
+            self.kustomization.setdefault('status', {})['lastHandledReconcileAt'] = stamp
+            return Result()
+        if 'events' in args:
+            self.calls.append(' '.join(args))
+            return Result(0, json.dumps({'items': self.fixture.get('events') or []}))
+        if 'scale' in args and 'deployment' in args:
+            self.calls.append(' '.join(args))
+            replicas = int(next(entry for entry in args
+                                if entry.startswith('--replicas=')).split('=')[1])
+            if self.deployment is not None:
+                self.deployment.setdefault('spec', {})['replicas'] = replicas
+                self.deployment.setdefault('status', {})['replicas'] = replicas
+                self.store_pods = ([] if replicas == 0
+                                   else [{'metadata': {'name': 'logs-store-abc'}}])
+            return Result()
+        return super().run(args, timeout=timeout, stdin=stdin)
+
+
 def options(**values):
     base = types.SimpleNamespace(
         password_file='', loader_host='boot-lifemodel.local', loader_port=443,
@@ -59,10 +128,10 @@ def options(**values):
         pv_path='/var/lib/lifemodel-logs/data', deadline_seconds=3600,
         collector_namespace='lifemodel-logs', collector='logs-collector',
         writer_namespace='lifemodel-logs-walk', metrics_port=9598, crictl='k3s crictl',
-        fill_bound=2, recover_bound=2, writer_interval_ms=20, saturated_seconds=0,
-        writer_pods=1, memory_limit_bytes=300 * 1024 * 1024,
+        fill_bound=2, fill_ceiling=2400, recover_bound=2, writer_interval_ms=20,
+        saturated_seconds=0, writer_pods=1, memory_limit_bytes=300 * 1024 * 1024,
         unsaturated_lines=10, settle_seconds=0, writer_rate=1700, max_load=8.0,
-        restore_bound=600,
+        restore_bound=600, kustomization='platform-logs-store', flux_namespace='flux-system',
     )
     for name, value in values.items():
         setattr(base, name, value)
@@ -439,6 +508,134 @@ def load_gate(walk, fixture):
     walk.wait_until = lambda *_args: (events.append('wait') or False)
     walk.crash_case(report, options(), None, cluster, {}, True)
     print('LOAD ' + json.dumps(events))
+    return report
+
+
+def flux_labels():
+    return {'kustomize.toolkit.fluxcd.io/name': 'platform-logs-store',
+            'kustomize.toolkit.fluxcd.io/namespace': 'flux-system'}
+
+
+def ready_deployment(replicas=1, ready=True):
+    return {
+        'metadata': {
+            'labels': flux_labels(),
+            'managedFields': [
+                {'manager': 'kustomize-controller',
+                 'fieldsV1': {'f:spec': {'f:replicas': {}}}},
+                {'manager': 'k3s-kubectl-scale',
+                 'fieldsV1': {'f:spec': {'f:replicas': {}}}},
+            ],
+        },
+        'spec': {'replicas': replicas},
+        'status': {'replicas': replicas,
+                   'readyReplicas': replicas if ready else 0,
+                   'availableReplicas': replicas if ready else 0,
+                   'observedGeneration': 1},
+        'metadata_generation': 1,
+    }
+
+
+def ready_kustomization(suspend=None):
+    body = {
+        'metadata': {'name': 'platform-logs-store', 'namespace': 'flux-system', 'generation': 4},
+        'spec': {},
+        'status': {'conditions': [{'type': 'Ready', 'status': 'True'}],
+                   'observedGeneration': 4, 'lastAppliedRevision': 'main@sha256:fixture'},
+    }
+    if suspend is not None:
+        body['spec']['suspend'] = suspend
+    return body
+
+
+@mode('flux-owner')
+def flux_owner(walk, fixture):
+    """The owning Kustomization comes from the Deployment labels, defaults otherwise."""
+    report = walk.Report()
+    deployment = {'metadata': {'labels': fixture.get('labels') or {}}}
+    owner = walk.flux_owner(FluxCluster({'deployment': deployment}), options())
+    print('OWNER ' + json.dumps(owner))
+    return report
+
+
+@mode('stop-store')
+def stop_store(walk, fixture):
+    """Suspend before scale-down; a refused suspension never scales the store."""
+    report = walk.Report()
+    deployment = ready_deployment()
+    cluster = FluxCluster({'deployment': deployment,
+                           'kustomization': ready_kustomization(),
+                           'suspendRefused': fixture.get('refuseSuspend')})
+    state = {}
+    ok = walk.stop_store(report, options(), cluster, state)
+    print('STOP ' + json.dumps({'ok': bool(ok), 'calls': cluster.calls,
+                                'fluxSuspended': state.get('flux_suspended'),
+                                'specSuspend': (cluster.kustomization.get('spec') or {})
+                                .get('suspend')}))
+    return report
+
+
+@mode('store-restored')
+def store_restored(walk, fixture):
+    """A store that came back mid-outage is TEST NOT VALID, naming who restored it."""
+    report = walk.Report()
+    deployment = ready_deployment()
+    cluster = FluxCluster({
+        'deployment': deployment,
+        'storePods': [{'metadata': {'name': 'logs-store-abc'}}],
+        'events': [{'reason': 'ScalingReplicaSet',
+                    'message': 'Scaled up replica set logs-store-abc to 1'}],
+    })
+    walk.wait_until = lambda deadline, interval, probe: probe()
+    ok = walk.wait_store_down(report, options(), cluster)
+    print('DOWN ' + json.dumps({'ok': bool(ok),
+                                'managers': walk.store_replica_managers(cluster, options())}))
+    return report
+
+
+@mode('saturation-plan')
+def saturation_plan(walk, fixture):
+    """The clock is derived from the measured rate and line size when 600 s cannot reach."""
+    report = walk.Report()
+    opts = options(writer_pods=3, writer_rate=1700,
+                   fill_bound=fixture.get('configuredBound', 600),
+                   fill_ceiling=fixture.get('ceiling', 2400))
+    line = walk.writer_line_bytes('walk-crash-saturated-1762812345678', 2120, opts)
+    plan = walk.saturation_plan(fixture.get('rate', 1480), line,
+                                fixture.get('writableMax', 201326592),
+                                opts.fill_bound, opts.fill_ceiling)
+    print('PLAN ' + json.dumps({'line': line, 'bound': plan['bound'],
+                                'fromConfigured': plan['fromConfigured'],
+                                'neededSeconds': plan['neededSeconds'],
+                                'reachable': plan['reachable'],
+                                'note': walk.saturation_note(plan)}))
+    return report
+
+
+@mode('restore-resume')
+def restore_resume(walk, fixture):
+    """Resume runs even after a store step failed, and is verified and reconciled."""
+    report = walk.Report()
+    deployment = ready_deployment(ready=False)
+    cluster = FluxCluster({
+        'deployment': deployment,
+        'kustomization': ready_kustomization(suspend=True),
+        'pods': [{'metadata': {'name': 'logs-collector-abc'},
+                  'status': {'phase': 'Running'}}],
+        'resumeRefused': fixture.get('resumeRefused'),
+    })
+    # One probe per step: the retry path is what is under test, not a real wait.
+    walk.wait_until = lambda deadline, interval, probe: probe()
+    walk.restore(report, options(restore_bound=1), None, cluster,
+                 {'replicas': 1, 'created_namespace': False,
+                  'kustomization': {'namespace': 'flux-system',
+                                    'name': 'platform-logs-store'},
+                  'flux_suspended': True})
+    print('RESUMED ' + json.dumps({'calls': cluster.calls,
+                                    'suspend': (cluster.kustomization.get('spec') or {})
+                                    .get('suspend'),
+                                    'handled': bool((cluster.kustomization.get('status') or {})
+                                                    .get('lastHandledReconcileAt'))}))
     return report
 
 
