@@ -68,7 +68,12 @@ requested with `reconcile.fluxcd.io/requestedAt`, each waited for Ready=True on
 the applied revision; a resume that fails is a RESTORE FAIL naming it, because a
 Kustomization left suspended stops all later deploys.
 The workload is paced and bounded by node load, fill/recovery deadlines and the
-whole-walk deadline. The load guard stops the walk's own writers on excess load,
+whole-walk deadline. The writer total (1700 lines/s by default) is split so no
+writer pod exceeds 80 % of the collector's untrusted throttle - 500 events/s
+per pod in `deploy/platform/logs/config/vector.yaml`'s `untrusted-throttle`, so
+400 lines/s - and the pod count is derived from that; a pod measured above the
+cap is TEST NOT VALID before the crash. The load guard stops the walk's own
+writers on excess load,
 and only that: the moment the intentional crash has happened it stands down, so
 the collector draining its buffer is a NOTE with the reading and the loss count
 still runs within its existing delivery bound. A load baseline within 2 of the
@@ -122,6 +127,11 @@ from logs_walk_support import (  # noqa: E402
 )
 
 WRITER_MODULE = 'walk-crash-writer'
+# deploy/platform/logs/config/vector.yaml's `untrusted-throttle` caps every pod
+# outside the trusted platform namespaces at this many events per second; a
+# writer above 80 % of it would have its lines discarded and read as crash loss.
+UNTRUSTED_THROTTLE_EVENTS_PER_SECOND = 500
+WRITER_POD_RATE_CAP = int(UNTRUSTED_THROTTLE_EVENTS_PER_SECOND * 0.8)
 WRITER_LINE = re.compile(r'walk-crash (\S+) seq=(\d+)')
 WRITER_LINE_PREFIX = 'walk-crash '
 BUFFER_SIZE = 'vector_buffer_size_events'
@@ -163,6 +173,44 @@ WRITER_SCRIPT = (
 
 def writer_name(index):
     return 'walk-crash-writer' if index == 1 else 'walk-crash-writer-%d' % index
+
+
+def writer_split(report, options):
+    """Split the total rate so no writer pod reaches the untrusted throttle's cap."""
+    needed = max(1, int(math.ceil(options.writer_rate / WRITER_POD_RATE_CAP)))
+    options.writer_pods = max(options.writer_pods or 1, needed)
+    report.note('writers: %.0f lines/s total split over %d pod(s), at most %.0f lines/s each; '
+                'the cap is %d lines/s, 80%% of the collector\'s %d events/s untrusted throttle'
+                % (options.writer_rate, options.writer_pods,
+                   options.writer_rate / options.writer_pods, WRITER_POD_RATE_CAP,
+                   UNTRUSTED_THROTTLE_EVENTS_PER_SECOND))
+
+
+def writer_pod_rates(before, current, elapsed):
+    """Each writer pod's measured source rate over the reporting window."""
+    rates = {}
+    if elapsed <= 0:
+        return rates
+    for pod, count in (current.get('per_writer') or {}).items():
+        prior = (before.get('per_writer') or {}).get(pod)
+        if count is None or prior is None:
+            continue
+        rates[pod] = (count - prior) / elapsed
+    return rates
+
+
+def check_writer_pod_rates(report, before, current, elapsed):
+    """Fail as not valid before the crash if a writer pod exceeds the throttle cap."""
+    over = {pod: rate for pod, rate in writer_pod_rates(before, current, elapsed).items()
+            if rate > WRITER_POD_RATE_CAP}
+    if not over:
+        return True
+    report.not_valid('writer pod(s) above the untrusted throttle cap of %d lines/s: %s; the '
+                     'collector would discard their lines and the crash walk would count them '
+                     'as loss' % (WRITER_POD_RATE_CAP,
+                                  ', '.join('%s %.0f lines/s' % item
+                                            for item in sorted(over.items()))))
+    return False
 
 
 def writer_names(options):
@@ -1656,8 +1704,11 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                     return False
                 metrics, reason = read_metrics(options, cluster)
                 elapsed = max(1.0, time.monotonic() - started_fill)
-                source_rate_report(report, source_before, source_rate_sample(metrics, reason, options),
-                                   elapsed, options.writer_rate)
+                current_source = source_rate_sample(metrics, reason, options)
+                source_rate_report(report, source_before, current_source, elapsed,
+                                   options.writer_rate)
+                if not check_writer_pod_rates(report, source_before, current_source, elapsed):
+                    return False
                 state_now = buffer_state(metrics) if metrics is not None else {}
                 if not sample_memory():
                     return False
@@ -2094,6 +2145,7 @@ def main(argv=None):
     report.note('node load baseline %.2f; CPUs %d; load bound %.2f'
                 % (baseline, cpus, options.max_load))
     max_load_note(report, options, baseline, cpus)
+    writer_split(report, options)
     cluster = Cluster(options.kubectl)
     state = {'created_namespace': False, 'replicas': None, 'run_id': None,
              'kustomizations': None, 'suspended': [], 'held': [], 'step': None,
