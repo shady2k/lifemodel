@@ -22,7 +22,7 @@ def main(argv=None):
     parser.add_argument('--run-id', required=True)
     parser.add_argument('--rate', type=int, default=5)
     parser.add_argument('--seconds', type=int, default=30)
-    parser.add_argument('--bound', type=int, default=180)
+    parser.add_argument('--bound', type=int, default=360)
     options = parser.parse_args(argv)
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', options.run_id):
         parser.error('--run-id must be 1-100 ASCII letters, digits, underscores or hyphens')

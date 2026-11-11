@@ -655,8 +655,8 @@ try {
             '--loader-port', '443', '--origin-host', HOST,
             '--kubectl', KUBECTL.join(' '), '--web-namespace', APP_NAMESPACE,
             '--web-deployment', WEB_DEPLOYMENT, '--run-id', runId,
-            '--rate', '5', '--seconds', '30', '--bound', '180',
-          ], { encoding: 'utf8', timeout: 240000, stdio: ['ignore', 'pipe', 'pipe'] });
+            '--rate', '5', '--seconds', '30', '--bound', '360',
+          ], { encoding: 'utf8', timeout: 900000, stdio: ['ignore', 'pipe', 'pipe'] });
           const result = output.split('\n').find((line) => line.startsWith('TASK_WRITER_RESULT '));
           if (result) taskWriterRecord = JSON.parse(result.slice('TASK_WRITER_RESULT '.length));
         } catch {
