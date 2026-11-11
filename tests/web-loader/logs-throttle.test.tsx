@@ -60,6 +60,33 @@ describe('per-pod discarded windows', () => {
     );
     expect(container.textContent).not.toContain('{{');
   });
+  it.each(['en', 'ru'])('orders namespaces, pods and times oldest first, including unknown gaps in %s', async (language) => {
+    await i18n.changeLanguage(language);
+    const window = (namespace: string, pod: string, start: string | null, end: string | null, discarded: number | null) => ({ namespace, pod, start, end, discarded });
+    const windows = [
+      window('b', 'a', '2026-11-11T23:00:00Z', '2026-11-11T23:00:06Z', 1),
+      window('a', 'b', '2026-11-11T23:00:00Z', '2026-11-11T23:00:06Z', 2),
+      window('a', 'a', '2026-11-11T23:01:00Z', '2026-11-11T23:01:06Z', 3),
+      window('a', 'a', null, null, null),
+      window('a', 'a', '2026-11-11T23:00:12Z', '2026-11-11T23:00:18Z', 4),
+      window('a', 'a', '2026-11-11T23:00:06Z', '2026-11-11T23:00:12Z', null),
+      window('a', 'a', '2026-11-11T23:00:00Z', '2026-11-11T23:00:06Z', 5),
+    ];
+    const original = [...windows];
+    const { container, rerender } = render(<LogsThrottleStatus value={{ state: 'unknown', windows }} />);
+    const rows = () => [...container.querySelectorAll('p')].filter((row) => row.querySelector('.font-mono'));
+    const expected = [windows[6], windows[5], windows[4], windows[2], windows[3], windows[1], windows[0]];
+    for (const [index, entry] of expected.entries()) {
+      expect(rows()[index]).toHaveTextContent(`${entry!.namespace}/${entry!.pod}`);
+      if (entry!.start !== null) expect(rows()[index]).toHaveTextContent(new Date(entry!.start!).toLocaleString(i18n.language));
+      expect(rows()[index]).toHaveTextContent(entry!.discarded === null ? i18n.t('logsThrottleUnknown') : i18n.t('logsThrottleDiscarded', { count: entry!.discarded! }));
+    }
+    const first = rows().map((row) => row.textContent);
+    rerender(<LogsThrottleStatus value={{ state: 'unknown', windows: [...windows].reverse() }} />);
+    expect(rows().map((row) => row.textContent)).toEqual(first);
+    expect(windows).toEqual(original);
+  });
+
   it('does not turn missing records into no loss', async () => {
     await i18n.changeLanguage('en');
     render(<LogsThrottleStatus value={{ state: 'unknown', windows: [] }} />);
