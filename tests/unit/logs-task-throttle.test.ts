@@ -35,6 +35,34 @@ describe('the throttle uses admitted core task writers', () => {
     expect(result.status, result.stdout + result.stderr).toBe(0);
     expect(result.stdout).toContain('"ok": true');
   });
+  it('judges each pod in its own processing-time windows, not the writers\' overlap', () => {
+    const result = run('processing-windows');
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain('"ok": true');
+    const detail = result.stdout.split('\n').find((line) => line.includes('input and accepted'));
+    expect(detail).toContain('task-fast: 37 window(s), input 370000, accepted 110260');
+    expect(detail).toContain('task-large: 5 window(s), input 600, accepted 600');
+    expect(result.stdout).toContain('7000 ms common timestamp interval');
+  });
+  it('allows a counter gap inside one collector process only when the pod wrote nothing then', () => {
+    const idle = run('gap-idle');
+    expect(idle.status, idle.stdout + idle.stderr).toBe(0);
+    expect(idle.stdout).toContain('"ok": true');
+    expect(idle.stdout).toContain('task-fast: 36 window(s)');
+    const written = run('gap-with-line');
+    expect(written.status).toBe(1);
+    expect(written.stdout).toContain('TEST NOT VALID');
+    expect(written.stdout).toContain('task-fast: window 2026-11-10T15:52:00Z is missing');
+  });
+  it.each([
+    ['two-collectors', 'task-fast: counter windows name 2 collector processes'],
+    ['stored-mismatch', 'task-fast: accepted total 110260 differs from 110261 stored line(s)'],
+  ])('names the pod and the windows that do not reconcile: %s', (mode, detail) => {
+    const result = run(mode);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('TEST NOT VALID');
+    expect(result.stdout).toContain(detail);
+  });
   it.each([60, 120])(
     'the throttle case\'s own writer arguments pass the validator at --throttle-seconds %i',
     (seconds) => {
@@ -58,7 +86,15 @@ describe('the throttle uses admitted core task writers', () => {
       expect(result.stdout).not.toContain('arguments are outside the bounded walk limits');
     }
   );
-  it.each(['bad-count', 'no-throttle', 'untrusted-writer'])('fails unreconciled or unthrottled evidence: %s', (mode) => {
+  it('names an input below accepted in its own window', () => {
+    const result = run('bad-count');
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('TEST NOT VALID');
+    expect(result.stdout).toContain(
+      'task-large: window 2026-11-10T00:00:00Z has input 3000 below accepted 4000'
+    );
+  });
+  it.each(['no-throttle', 'untrusted-writer'])('fails unthrottled or untrusted evidence: %s', (mode) => {
     const result = run(mode);
     expect(result.status).toBe(1);
     expect(result.stdout).toContain('FAIL');
@@ -74,10 +110,10 @@ describe('the throttle uses admitted core task writers', () => {
     'forged',
     'message-only',
     'malformed-duplicate',
-    'missing-window',
     'partial-window',
     'mixed-instance',
     'missing-instance',
+    'bad-count',
   ]) {
     it(`does not pass without actual task-specific counters: ${mode}`, () => {
       const result = run(mode);
