@@ -1112,9 +1112,12 @@ def read_store_flags(report, options, cluster, what='the /flags read'):
         forward.close()
 
 
-def start_task_writer(report, options, loader, cluster, run_id, rate, seconds, size=0, bound=180):
+def start_task_writer(report, options, loader, cluster, run_id, rate, seconds, size=0,
+                      bound=None):
     """Ask the real core to launch a writer and prove its first collected task line."""
-    from logs_task_writer import start_task_writer as launch
+    from logs_task_writer import TASK_WRITER_BOUND, start_task_writer as launch
+    if bound is None:
+        bound = TASK_WRITER_BOUND
     return launch(report, options, loader, cluster, run_id, rate, seconds, size, bound)
 
 

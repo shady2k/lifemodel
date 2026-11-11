@@ -81,6 +81,11 @@ TASK_WRITER_STOP_BOUND = 60
 # A started chat can still create its task pod late; look for it for this long
 # after the last abandoned Job was removed before declaring the cleanup quiet.
 TASK_WRITER_SETTLE = 20
+# The longest owner request the walk makes is the throttle case's fast writer:
+# its burst seconds (at most 120) plus the launch bound. The accepted seconds
+# limit adds that burst again as margin, so raising the bound raises it too.
+THROTTLE_SECONDS_MAX = 120
+TASK_WRITER_SECONDS_MAX = THROTTLE_SECONDS_MAX + TASK_WRITER_BOUND + THROTTLE_SECONDS_MAX
 
 
 def task_prompt(attempt, command):
@@ -299,7 +304,8 @@ def start_task_writer(report, options, loader, cluster, run_id, rate, seconds, s
     if (not isinstance(run_id, str) or re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}', run_id) is None
             or not isinstance(rate, (int, float)) or not math.isfinite(rate) or not 1 <= rate <= 2000
             or not isinstance(seconds, (int, float)) or not math.isfinite(seconds)
-            or not 1 <= seconds <= 300 or not isinstance(size, int) or not 0 <= size <= 20480
+            or not 1 <= seconds <= TASK_WRITER_SECONDS_MAX \
+            or not isinstance(size, int) or not 0 <= size <= 20480
             or not isinstance(bound, (int, float)) or not math.isfinite(bound) or not 1 <= bound <= 600):
         report.not_valid('task writer arguments are outside the bounded walk limits')
         return None

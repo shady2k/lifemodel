@@ -5,8 +5,12 @@ import sys
 import types
 
 mode, path = sys.argv[1:3]
+real_helper_path = sys.argv[3] if len(sys.argv) > 3 else None
 helper = types.ModuleType('logs_task_writer')
 calls = []
+validated = []
+
+
 def start_task_writer(report, options, loader, cluster, run_id, rate, seconds, size=0, bound=180):
     calls.append({'run': run_id, 'rate': rate, 'size': size})
     if mode == 'denied':
@@ -24,10 +28,44 @@ spec.loader.exec_module(walk)
 walk.start_task_writer = start_task_writer
 walk_support = sys.modules['logs_walk_support']
 walk_support.start_task_writer = start_task_writer
+if real_helper_path:
+    real_spec = importlib.util.spec_from_file_location('logs_task_writer_real', real_helper_path)
+    real = importlib.util.module_from_spec(real_spec)
+    real_spec.loader.exec_module(real)
+    helper.THROTTLE_SECONDS_MAX = real.THROTTLE_SECONDS_MAX
+    helper.TASK_WRITER_BOUND = real.TASK_WRITER_BOUND
+if mode.startswith('args'):
+    class Validated(Exception):
+        pass
+
+    def stop_at_forward(*args, **kwargs):
+        raise Validated()
+
+    real.PortForward = stop_at_forward
+
+    def checked_start(report, options, loader, cluster, run_id, rate, seconds, size=0,
+                      bound=None):
+        if bound is None:
+            bound = real.TASK_WRITER_BOUND
+        try:
+            outcome = real.start_task_writer(report, options, loader, cluster, run_id,
+                                             rate, seconds, size, bound)
+        except Validated:
+            outcome = 'validated'
+        validated.append({'run': run_id, 'rate': rate, 'seconds': seconds,
+                          'bound': bound, 'validated': outcome == 'validated'})
+        if outcome != 'validated':
+            return None
+        return start_task_writer(report, options, loader, cluster, run_id, rate,
+                                 seconds, size, bound)
+
+    walk_support.start_task_writer = checked_start
+    walk.start_task_writer = checked_start
 clock = [0]
 walk.time.monotonic = lambda: clock[0]
 walk.time.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
-options = types.SimpleNamespace(throttle_seconds=3, recover_bound=10,
+throttle_seconds = int(mode.split('-', 1)[1]) if mode.startswith('args-') else 3
+options = types.SimpleNamespace(kubectl='true', throttle_seconds=throttle_seconds, recover_bound=10,
                                writer_namespace='trusted', trusted_interval_ms=20)
 created = []
 def create_pod(report, cluster, manifest):
@@ -82,5 +120,5 @@ report = walk.Report()
 state = {'trusted_run': 'trusted', 'task_fast': 'fast', 'task_large': 'large', 'throttle_start': 0}
 ok = walk.throttle_case(report, options, Loader(), Cluster(), state)
 print('INTEGRATION ' + json.dumps({'ok': ok, 'calls': calls, 'created': created,
-                                  'elapsed': clock[0]}))
+                                  'elapsed': clock[0], 'validated': validated}))
 sys.exit(report.result())
