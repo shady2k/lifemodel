@@ -357,6 +357,61 @@ describe('the crash walk stays bounded and restores after failures', () => {
   });
 });
 
+describe('the crash writers stay under the untrusted throttle', () => {
+  it('splits 1700 lines/s over five pods at most 340 lines/s each', () => {
+    const run = harness('writer-split');
+    const split = jsonLine<{ pods: number; rate: number; cap: number; throttle: number }>(
+      run,
+      'SPLIT'
+    );
+    expect(split).toEqual({ pods: 5, rate: 1700, cap: 400, throttle: 500 });
+    expect(run.lines.join('\n')).toContain(
+      'writers: 1700 lines/s total split over 5 pod(s), at most 340 lines/s each; ' +
+        "the cap is 400 lines/s, 80% of the collector's 500 events/s untrusted throttle"
+    );
+  });
+
+  it('keeps a total that already fits below the cap on fewer pods', () => {
+    const atThree = jsonLine<{ pods: number }>(
+      harness('writer-split', { rate: 1200 }),
+      'SPLIT'
+    );
+    expect(atThree.pods).toBe(3);
+    const atTwo = jsonLine<{ pods: number }>(
+      harness('writer-split', { rate: 800, pods: 1 }),
+      'SPLIT'
+    );
+    expect(atTwo.pods).toBe(2);
+  });
+
+  it('fails not valid when a writer pod is above the cap and names it', () => {
+    const run = harness('pod-rate');
+    expect(run.status).toBe(1);
+    expect(jsonLine<{ ok: boolean; cap: number }>(run, 'PODRATE')).toEqual({ ok: false, cap: 400 });
+    const output = run.lines.join('\n');
+    expect(output).toContain(
+      'TEST NOT VALID writer pod(s) above the untrusted throttle cap of 400 lines/s: ' +
+        'walk-crash-writer 567 lines/s'
+    );
+    expect(output).not.toContain('walk-crash-writer-2 300 lines/s');
+  });
+
+  it('accepts a writer pod exactly at the cap', () => {
+    const run = harness('pod-rate', { first: 4000, second: 4000 });
+    expect(run.status).toBe(0);
+    expect(jsonLine<{ ok: boolean }>(run, 'PODRATE').ok).toBe(true);
+  });
+
+  it('stops the real fill loop as not valid when a pod is measured above the cap', () => {
+    const run = harness('pod-rate-loop');
+    expect(run.status).toBe(1);
+    expect(jsonLine<{ ok: boolean }>(run, 'PODRATE-LOOP').ok).toBe(false);
+    const output = run.lines.join('\n');
+    expect(output).toContain('TEST NOT VALID writer pod(s) above the untrusted throttle cap');
+    expect(output).toContain('walk-crash-writer 8000 lines/s, walk-crash-writer-2 8000 lines/s');
+  });
+});
+
 describe('the crash writer has a paced aggregate target', () => {
   it('measures emitted totals across sequence bases without retaining every log line', () => {
     expect(jsonLine<number>(harness('emitted-count'), 'EMITTED')).toBe(1701);

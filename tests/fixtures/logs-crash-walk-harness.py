@@ -947,6 +947,77 @@ def restart_delta(walk, fixture):
     return report
 
 
+@mode('writer-split')
+def writer_split(walk, fixture):
+    """The total rate is split so each writer pod stays below the untrusted throttle cap."""
+    report = walk.Report()
+    opts = options(writer_pods=fixture.get('pods', 1), writer_rate=fixture.get('rate', 1700))
+    walk.writer_split(report, opts)
+    print('SPLIT ' + json.dumps({'pods': opts.writer_pods, 'rate': opts.writer_rate,
+                                 'cap': walk.WRITER_POD_RATE_CAP,
+                                 'throttle': walk.UNTRUSTED_THROTTLE_EVENTS_PER_SECOND}))
+    return report
+
+
+@mode('pod-rate')
+def pod_rate(walk, fixture):
+    """A writer pod above the cap is TEST NOT VALID; one at the cap is not."""
+    report = walk.Report()
+    before = {'per_writer': {'walk-crash-writer': 1000, 'walk-crash-writer-2': 1000}}
+    current = {'per_writer': {
+        'walk-crash-writer': 1000 + fixture.get('first', 5670),
+        'walk-crash-writer-2': 1000 + fixture.get('second', 3000)}}
+    ok = walk.check_writer_pod_rates(report, before, current, 10)
+    print('PODRATE ' + json.dumps({'ok': bool(ok), 'cap': walk.WRITER_POD_RATE_CAP}))
+    return report
+
+
+@mode('pod-rate-loop')
+def pod_rate_loop(walk, fixture):
+    """The real fill loop stops as not valid when a writer pod is over the cap."""
+    report = walk.Report()
+    opts = options(writer_pods=2, writer_rate=800, fill_bound=30, ceiling=60,
+                   drain_ceiling=1800, recover_bound=1, saturated_seconds=0,
+                   unsaturated_lines=1)
+    walk.safe_load = lambda *args: True
+    walk.require_store_down = lambda *args: True
+    walk.writer_image = lambda *args: 'image'
+    walk.wait_writer = lambda *args: True
+    walk.collector_memory = lambda *args: (100 * walk.MIB, '')
+    walk.collector_restarts = lambda *args: 0
+    walk.emitted_count = lambda *args: 0
+    walk.writer_lines = lambda *args: [1, 2]
+    walk.restore_step = lambda *args: True
+
+    def sample(value):
+        rows = ['vector_component_received_events_total{component_id="kubernetes",'
+                'pod_namespace="%s",pod_name="%s"} %d'
+                % (opts.writer_namespace, name, value) for name in walk.writer_names(opts)]
+        rows.extend([
+            'vector_buffer_max_size_bytes{component_id="logs-store",buffer_type="disk"} 335544320',
+            'vector_buffer_size_bytes{component_id="logs-store",buffer_type="disk"} 1000000',
+            'vector_buffer_size_events{component_id="logs-store"} 100'])
+        return walk.parse_metrics('\n'.join(rows),
+                                  {walk.RECEIVED, walk.BUFFER_MAX_BYTES,
+                                   walk.BUFFER_BYTES, walk.BUFFER_SIZE})
+
+    readings = iter([sample(0), sample(8000)])
+    walk.read_metrics = lambda *args: (next(readings, sample(8000)), '')
+    baseline = walk.source_rate_sample(sample(0), '', opts)
+    walk.wait_source_pickup = lambda *args: {'sample': baseline, 'rate': 800.0, 'elapsed': 3}
+
+    class Cluster:
+        def apply(self, body):
+            return types.SimpleNamespace(returncode=0)
+
+        def run(self, args, timeout=120):
+            return types.SimpleNamespace(returncode=0)
+
+    ok = walk.crash_case(report, opts, None, Cluster(), {}, True)
+    print('PODRATE-LOOP ' + json.dumps({'ok': bool(ok)}))
+    return report
+
+
 def run_mode(mode_name, walk_path, fixture_path):
     walk = load(walk_path)
     # The harness owns node conditions; never read its host's load average.
