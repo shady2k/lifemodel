@@ -1034,6 +1034,57 @@ def restore_pods(walk, fixture):
     return report
 
 
+def vector_metrics_body(components, extra_lines=0):
+    lines = ['# HELP vector_buffer_size_events buffer_size_events',
+             '# TYPE vector_buffer_size_events gauge']
+    for component in components:
+        labels = ('{buffer_id="%s",buffer_type="disk",component_id="%s",component_kind="sink",'
+                  'component_type="http",host="h",stage="0"}' % (component, component))
+        lines.append('vector_buffer_size_events' + labels + ' 10')
+        lines.append('vector_buffer_max_size_bytes' + labels + ' 335544320')
+        lines.append('vector_buffer_size_bytes' + labels + ' 1000')
+    for index in range(extra_lines):
+        lines.append('vector_component_received_events_total{component_id="kubernetes",'
+                     'pod_name="p%d"} %d' % (index, index))
+    return '\n'.join(lines) + '\n'
+
+
+@mode('metrics-body')
+def metrics_body(walk, fixture):
+    """A real gauge is found in a large body; a wrong or partial body says what it had."""
+    report = walk.Report()
+    kind = fixture.get('kind', 'real')
+    if kind == 'no-vector':
+        body = '\n'.join('vl_storage_rows_total %d' % index for index in range(50)) + '\n'
+    elif kind == 'no-gauge':
+        body = vector_metrics_body(['metrics', 'out'])
+    else:
+        body = vector_metrics_body(['metrics', 'out', 'logs-store'],
+                                   extra_lines=fixture.get('extraLines', 2300))
+    values = walk.parse_metrics(body, {walk.BUFFER_SIZE, walk.BUFFER_MAX, walk.BUFFER_BYTES,
+                                       walk.BUFFER_MAX_BYTES, walk.RECEIVED, walk.SENT,
+                                       walk.BUFFER_RECEIVED, walk.BUFFER_SENT})
+    print('BODY ' + json.dumps({
+        'state': walk.buffer_state(values),
+        'reason': walk.metrics_reason(body, 'logs-collector-x'),
+        'report': walk.metrics_body_report(body)}))
+    return report
+
+
+@mode('collector-pod')
+def collector_pod(walk, fixture):
+    """The collector pod is chosen even when a walk pod comes first in the namespace."""
+    report = walk.Report()
+
+    class Cluster:
+        def pods(self, namespace, selector=None):
+            return fixture.get('pods') or []
+
+    pod = walk.collector_pod(Cluster(), options())
+    print('POD ' + json.dumps({'name': ((pod or {}).get('metadata') or {}).get('name')}))
+    return report
+
+
 def run_mode(mode_name, walk_path, fixture_path):
     walk = load(walk_path)
     # The harness owns node conditions; never read its host's load average.
