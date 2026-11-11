@@ -266,7 +266,7 @@ def parse_metrics(text, names):
         line = raw.strip()
         if line == '' or line.startswith('#'):
             continue
-        sample = line.split(' ')
+        sample = line.split()
         if len(sample) < 2:
             continue
         name = sample[0].split('{')[0]
@@ -292,31 +292,39 @@ def component_value(values, name, component):
     sink's gauge is the one whose `component_id` names it, never the first
     sample with that name.
     """
+    candidates = []
     for (sample, labels), value in values.items():
         if sample != name:
             continue
         parsed = dict((key, double or single)
                       for key, double, single in re.findall(
                           r"([a-zA-Z_][a-zA-Z_0-9]*)=(?:\"([^\"]*)\"|'([^']*)')", labels))
-        if parsed.get('component_id') != component:
+        if component not in (parsed.get('component_id'), parsed.get('buffer_id')):
             continue
-        if name in (BUFFER_BYTES, BUFFER_MAX_BYTES, BUFFER_RECEIVED, BUFFER_SENT) \
-                and parsed.get('buffer_type') != 'disk':
-            continue
-        return int(value)
-    return None
+        candidates.append((parsed.get('buffer_type') == 'disk', value))
+    if not candidates:
+        return None
+    # A component may hold both a memory and a disk buffer; the sink's disk
+    # series is the one that has been measured all along.
+    disk = [value for is_disk, value in candidates if is_disk]
+    if disk:
+        return int(max(disk))
+    if name in (BUFFER_BYTES, BUFFER_MAX_BYTES, BUFFER_RECEIVED, BUFFER_SENT):
+        return None
+    return int(candidates[0][1])
 
 
 def metrics_body_report(text):
     """What a metrics response actually carried, for a failure that names it."""
     families = set()
     buffer_components = set()
+    sink_families = set()
     vector_lines = 0
     for raw in (text or '').splitlines():
         line = raw.strip()
         if line == '' or line.startswith('#'):
             continue
-        sample = line.split(' ')
+        sample = line.split()
         if len(sample) < 2:
             continue
         name = sample[0].split('{')[0]
@@ -329,9 +337,14 @@ def metrics_body_report(text):
             component = re.search(r'component_id="([^"]*)"', sample[0])
             if component is not None:
                 buffer_components.add(component.group(1))
+            if 'logs-store' in sample[0]:
+                buffer_type = re.search(r'buffer_type="([^"]*)"', sample[0])
+                sink_families.add('%s[%s]' % (name, buffer_type.group(1)
+                                              if buffer_type is not None else '?'))
     return {'bytes': len(text or ''), 'lines': len((text or '').splitlines()),
             'families': len(families), 'vectorLines': vector_lines,
-            'bufferComponents': sorted(buffer_components)}
+            'bufferComponents': sorted(buffer_components),
+            'sinkFamilies': sorted(sink_families)}
 
 
 def metrics_reason(text, pod, status=200):
@@ -342,9 +355,11 @@ def metrics_reason(text, pod, status=200):
                 'vector_ metric: this is not the collector\'s exporter'
                 % (pod, status, report['bytes'], report['lines']))
     return ('GET /metrics on pod %s answered %d with %d vector lines, but no buffer gauge '
-            'for component_id="logs-store"; buffer component ids seen: %s'
+            'for component_id="logs-store"; buffer component ids seen: %s; the sink\'s '
+            'buffer families seen: %s'
             % (pod, status, report['vectorLines'],
-               ', '.join(report['bufferComponents']) or 'none'))
+               ', '.join(report['bufferComponents']) or 'none',
+               ', '.join(report['sinkFamilies']) or 'none'))
 
 
 def read_metrics(options, cluster):
