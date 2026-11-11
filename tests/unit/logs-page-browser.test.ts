@@ -49,6 +49,23 @@ describe('the axe-only browser context', () => {
     expect(run.events.at(-1)).toEqual(['close']);
   });
 
+  it('prepares the settled scan page before injecting axe', () => {
+    const run = harness('axe-prepare');
+    const position = (name: string) => run.events.findIndex(([event]) => event === name);
+    expect(run.error).toBeUndefined();
+    expect(position('prepare')).toBeGreaterThan(position('settled'));
+    expect(position('prepare')).toBeLessThan(position('inject'));
+    expect(run.result?.violations).toHaveLength(1);
+    expect(run.events.at(-1)).toEqual(['close']);
+  });
+
+  it('closes the bypass context without injecting axe when preparation fails', () => {
+    const run = harness('axe-prepare-error');
+    expect(run.error).toBe('prepare failed');
+    expect(run.events.some(([event]) => event === 'inject')).toBe(false);
+    expect(run.events.at(-1)).toEqual(['close']);
+  });
+
   it('closes the bypass context even when the scanner throws', () => {
     const run = harness('axe-error');
     expect(run.error).toBe('axe failed');

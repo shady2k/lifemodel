@@ -23,7 +23,7 @@ export async function gotoWithRetry(page, url, options = {}, attempts = 3, pause
 }
 
 /** A separate context permits axe's inline instrumentation without weakening the walk. */
-export async function scanLogsAxe(browser, page, variant, source, screenshot) {
+export async function scanLogsAxe(browser, page, variant, source, screenshot, prepare) {
   const url = page.url();
   const storageState = await page.context().storageState();
   const values = await page.evaluate(() => Object.fromEntries(Object.entries(sessionStorage)));
@@ -42,6 +42,7 @@ export async function scanLogsAxe(browser, page, variant, source, screenshot) {
     const scan = await context.newPage();
     await scan.goto(url, { waitUntil: 'networkidle' });
     await scan.locator('section[aria-busy="false"]').waitFor({ timeout: 30000 });
+    if (prepare) await prepare(scan);
     await scan.addScriptTag({ content: source });
     const results = await scan.evaluate(async () => await window.axe.run(document));
     await scan.screenshot({ path: screenshot });

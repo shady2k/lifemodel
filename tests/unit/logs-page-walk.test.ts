@@ -243,7 +243,7 @@ describe('the browser walk', () => {
     expect(section).toContain('the page\'s own status answer was not seen');
     expect(section).not.toContain('api(page');
     expect(text).toContain("target.searchParams.get('status') === '1'");
-    expect(text).not.toContain('/api/logs?from=${range.from}');
+    expect(section).not.toContain('/api/logs?from=${range.from}');
   });
 
   it('compares pages by the record the page draws, never by message text', () => {

@@ -34,7 +34,11 @@ if (mode.startsWith('axe')) {
   try {
     const result = await scanLogsAxe(browser, page, {
       locale: 'ru-RU', colorScheme: 'dark', viewport: { width: 1280, height: 900 },
-    }, 'axe fixture', 'axe.png');
+    }, 'axe fixture', 'axe.png', mode.startsWith('axe-prepare') ? async (target) => {
+      if (target !== scanPage) throw new Error('prepared wrong page');
+      events.push(['prepare']);
+      if (mode === 'axe-prepare-error') throw new Error('prepare failed');
+    } : undefined);
     console.log(JSON.stringify({ result, events }));
   } catch (error) {
     console.log(JSON.stringify({ error: error.message, events }));
