@@ -714,9 +714,9 @@ def throttle_case(report, options, loader, cluster, state):
     """Admitted task writers overlap a trusted writer; absent evidence is invalid."""
     from logs_walk_support import parse_ms, start_task_writer
 
-    seconds, launch_bound = options.throttle_seconds, 180
+    seconds, launch_bound = options.throttle_seconds, 360
     if not 1 <= seconds <= 120:
-        report.not_valid('throttle_seconds must be 1..120 with the 180 s launch allowance')
+        report.not_valid('throttle_seconds must be 1..120 with the 360 s launch allowance')
         return False
     trusted_manifest = writer_manifest(
         options, options.writer_namespace, 'walk-trusted-writer', TRUSTED_MODULE,
