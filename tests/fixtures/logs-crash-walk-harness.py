@@ -6,6 +6,7 @@ import importlib.util
 import json
 import re
 import sys
+import time
 import types
 
 
@@ -361,7 +362,9 @@ def oom_before_full(walk, fixture):
                  value['detail'])
     counting = walk.delivery_verdict([{
         'writer': 'walk-crash-writer', 'written': 10, 'uniq': 8, 'duplicated': 0,
-        'missing': [9, 10], 'rotatedMissing': 0, 'complete': True}])
+        'missing': [9, 10], 'rotatedMissing': 0, 'complete': True,
+        'accepted': False, 'rejection': 'no intentional kill time was recorded',
+        'block': None}])
     report.note('still counting the unplanned crash: %s' % counting['detail'])
     print('OOM ' + json.dumps({'ok': value['ok'], 'detail': value['detail'],
                                'counting': counting['detail']}))
@@ -784,14 +787,22 @@ def crash_load_release(walk, fixture):
     return report
 
 
+def iso_ms(milliseconds):
+    """A store-style RFC 3339 timestamp with milliseconds."""
+    seconds = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(milliseconds / 1000))
+    millis = int(round(milliseconds)) % 1000
+    return seconds + '.%03dZ' % millis
+
+
 class SeqStore:
     """A store answering the walk's per-writer LogsQL from a set of present seqs."""
 
-    def __init__(self, present, duplicates=0, error=None, refuse=0):
+    def __init__(self, present, duplicates=0, error=None, refuse=0, times=None):
         self.present = sorted(present)
         self.duplicates = duplicates
         self.error = error
         self.refuse = refuse
+        self.times = times or {}
         self.queries = []
 
     def query(self, logsql):
@@ -802,10 +813,13 @@ class SeqStore:
         match = re.search(r'filter seq:range\[(\d+), (\d+)\]', logsql)
         lo, hi = int(match.group(1)), int(match.group(2))
         inside = [seq for seq in self.present if lo <= seq <= hi]
+        stamps = sorted(self.times[seq] for seq in inside if seq in self.times)
         return [{'n': str(len(inside) * (1 + self.duplicates)),
                  'uniq': str(len(inside)),
                  'lo': str(inside[0]) if inside else None,
-                 'hi': str(inside[-1]) if inside else None}]
+                 'hi': str(inside[-1]) if inside else None,
+                 'first': iso_ms(stamps[0]) if stamps else None,
+                 'last': iso_ms(stamps[-1]) if stamps else None}]
 
     def close(self):
         pass
@@ -818,21 +832,31 @@ def store_delivery(walk, fixture):
     opts = options(writer_pods=fixture.get('writers', 1), recover_bound=0)
     kept_by_writer = {}
     present = set()
+    times = {}
     last = []
+    kill = 1_763_000_000_000
+    rate = fixture.get('rate', 500)
+    interval = 1000.0 / rate
+    before = fixture.get('beforeKillMs', 2000)
     for index, name in enumerate(walk.writer_names(opts)):
         base = index * 50_000_000
         lines = fixture.get('lines', 10)
-        emitted = set(range(base + 1, base + lines + 1))
-        kept = set(sorted(emitted)[-5:]) if fixture.get('rotated') else emitted
+        emitted = sorted(range(base + 1, base + lines + 1))
+        for offset, seq in enumerate(emitted):
+            times[seq] = kill - before - (lines - 1 - offset) * interval
+        kept = set(emitted[-5:]) if fixture.get('rotated') else set(emitted)
         kept_by_writer[name] = kept
-        present |= emitted
+        present |= set(emitted)
         last.append(base + lines)
-        if fixture.get('gap') and name == 'walk-crash-writer':
-            present.discard(min(kept) + 2)
-        if fixture.get('rotatedGap') and name == 'walk-crash-writer':
-            present.discard(min(kept) - 1)
+        if name == 'walk-crash-writer':
+            for offset in fixture.get('missing') or []:
+                present.discard(base + offset)
+            if fixture.get('gap'):
+                present.discard(min(kept) + 2)
+            if fixture.get('rotatedGap'):
+                present.discard(min(kept) - 1)
     store = SeqStore(present, duplicates=fixture.get('duplicates', 0),
-                     error=walk.WalkError, refuse=fixture.get('refuse', 0))
+                     error=walk.WalkError, refuse=fixture.get('refuse', 0), times=times)
     walk.open_log_store = lambda _options: (store, None, '')
     walk.time.sleep = lambda _seconds: None
     walk.wait_for_drain = lambda *args, **kwargs: True
@@ -840,8 +864,9 @@ def store_delivery(walk, fixture):
         walk.missing_retained = lambda *args, **kwargs: {
             'missing': [], 'queries': walk.MISSING_SEARCH_BUDGET,
             'complete': False, 'rootUniq': 9}
+    killed_at = kill if fixture.get('window') else None
     verdict = walk.store_delivery(report, opts, None, 'walk-crash-fixture',
-                                  kept_by_writer, last, 0)
+                                  kept_by_writer, last, 0, None, killed_at)
     print('DELIVERY ' + json.dumps({'verdict': verdict, 'queries': len(store.queries),
                                     'sql': store.queries[:2]}))
     return report

@@ -56,6 +56,7 @@ describe('the delivery verdict is counted in the store itself', () => {
     expect(value.verdict.ok).toBe(true);
     expect(value.verdict.detail).toContain('10 written, 10 delivered, 0 duplicated');
     expect(value.verdict.detail).toContain("0 missing of which 0 are still in the kubelet's files");
+    expect(value.verdict.detail).toContain('no retained line is missing');
     expect(value.sql[0]).toContain('pod:="walk-crash-writer"');
     expect(value.sql[0]).toContain('namespace:="lifemodel-logs-walk"');
     expect(value.sql[0]).toContain('extract "seq=<seq> "');
@@ -120,10 +121,12 @@ describe('the delivery verdict is counted in the store itself', () => {
     });
     const output = run.lines.join('\n');
     expect(output).toContain(
-      'drain bound: 20 events backlogged at the start (buffer received 100, sent 80), ' +
-        'measured drain 2 events/s, expected 10 s -> 45 s'
+      'drain bound: 3 events in the disk buffer at the first reading (sent 80 -> 100), ' +
+        'measured drain 2 events/s, expected 2 s -> 33 s'
     );
-    expect(output).toContain('the collector read out the backlog it held before the delivery verdict');
+    expect(output).toContain(
+      'the collector read out the disk buffer it held before the delivery verdict'
+    );
     expect(output).toContain('per-writer unique counts=7 (stable for 10 s)');
   });
 
@@ -144,7 +147,26 @@ describe('the delivery verdict is counted in the store itself', () => {
     const output = run.lines.join('\n');
     expect(output).toContain('backlog read out=true');
     expect(output).toContain('size=7000 events=70');
-    expect(output).toContain('sent 1000 reached received 1000');
+    expect(output).toContain('sent grew by 100');
+    expect(output).not.toContain('TEST NOT VALID');
+  });
+
+  it('takes the backlog from the disk buffer, not the counters the restart reset', () => {
+    const run = harness('drain', {
+      readings: [
+        { size: 400000, events: 100, received: 5, sent: 0, uniq: 5 },
+        { size: 300000, events: 60, received: 9, sent: 40, uniq: 7 },
+        { size: 100000, events: 20, received: 14, sent: 120, uniq: 7 },
+      ],
+    });
+    expect(run.status).toBe(0);
+    expect(jsonLine<{ ok: boolean; seconds: number }>(run, 'DRAIN')).toMatchObject({
+      ok: true,
+      seconds: 20,
+    });
+    const output = run.lines.join('\n');
+    expect(output).toContain('drain bound: 100 events in the disk buffer at the first reading');
+    expect(output).toContain('sent grew by 120');
     expect(output).not.toContain('TEST NOT VALID');
   });
 
@@ -162,8 +184,8 @@ describe('the delivery verdict is counted in the store itself', () => {
     expect(jsonLine<{ ok: boolean }>(run, 'DRAIN').ok).toBe(false);
     const output = run.lines.join('\n');
     expect(output).toContain('TEST NOT VALID the drain did not finish within 30 s');
-    expect(output).toContain('last buffer size=1000 events=3 received=120 sent=80');
-    expect(output).toContain('the 20-event backlog it started with was not read out');
+    expect(output).toContain('last buffer size=1000 events=3 sent=80 (+0 since the first reading)');
+    expect(output).toContain('the 3-event disk backlog it started with was not read out');
     expect(output).toContain('per-writer unique counts=7');
     expect(output).toContain('writer counts stable for 20 s');
     expect(output).not.toMatch(/^FAIL /m);
@@ -214,6 +236,63 @@ describe('the delivery verdict is counted in the store itself', () => {
     expect(output).not.toContain('missing-retained=');
   });
 
+  it('accepts one small block written just before the intentional kill', () => {
+    const value = jsonLine<{ verdict: { ok: boolean; detail: string } }>(
+      harness('store-delivery', {
+        window: true,
+        lines: 1000,
+        beforeKillMs: 12000,
+        missing: Array.from({ length: 200 }, (_, index) => 401 + index),
+      }),
+      'DELIVERY'
+    );
+    expect(value.verdict.ok).toBe(true);
+    expect(value.verdict.detail).toContain('inside the accepted hard-kill window');
+    expect(value.verdict.detail).toMatch(
+      /walk-crash-writer seq 401\.\.600 \(200 lines, written \d{2}:\d{2}:\d{2}\.\d{3}\.\.\d{2}:\d{2}:\d{2}\.\d{3}, 12\.8 s before the kill; measured 500 lines\/s, allowed 500\)/
+    );
+  });
+
+  it('fails two separate blocks even when each is small and near the kill', () => {
+    const value = jsonLine<{ verdict: { ok: boolean; detail: string } }>(
+      harness('store-delivery', { window: true, lines: 1000, missing: [100, 500] }),
+      'DELIVERY'
+    );
+    expect(value.verdict.ok).toBe(false);
+    expect(value.verdict.detail).toContain('lost while still in the kubelet');
+    expect(value.verdict.detail).toContain('2 separate blocks were lost');
+  });
+
+  it('fails a block larger than one second at the writer rate', () => {
+    const value = jsonLine<{ verdict: { ok: boolean; detail: string } }>(
+      harness('store-delivery', {
+        window: true,
+        lines: 1000,
+        beforeKillMs: 12000,
+        missing: Array.from({ length: 600 }, (_, index) => 401 + index),
+      }),
+      'DELIVERY'
+    );
+    expect(value.verdict.ok).toBe(false);
+    expect(value.verdict.detail).toContain('larger than the 500 allowed by one second at 500 lines/s');
+  });
+
+  it('fails a block written outside the 60 s before the kill', () => {
+    const value = jsonLine<{ verdict: { ok: boolean; detail: string } }>(
+      harness('store-delivery', {
+        window: true,
+        lines: 1000,
+        beforeKillMs: 120000,
+        missing: Array.from({ length: 200 }, (_, index) => 401 + index),
+      }),
+      'DELIVERY'
+    );
+    expect(value.verdict.ok).toBe(false);
+    expect(value.verdict.detail).toContain(
+      'the block was not written in the 60 s before the intentional kill'
+    );
+  });
+
   it('marks a refused store query TEST NOT VALID with its HTTP status', () => {
     const run = harness('store-delivery', { refuse: 1 });
     expect(run.status).toBe(1);
@@ -223,7 +302,7 @@ describe('the delivery verdict is counted in the store itself', () => {
     expect(output).toContain('TEST NOT VALID delivery query unavailable or incomplete');
     expect(output).toContain('the store answered HTTP 500');
     expect(output).not.toContain(
-      "PASS every line still in the kubelet's files is delivered at least once"
+      "PASS no line still in the kubelet's files is lost outside the accepted hard-kill window"
     );
   });
 });
