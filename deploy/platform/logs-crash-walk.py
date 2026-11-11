@@ -46,7 +46,12 @@ requested with `reconcile.fluxcd.io/requestedAt`, each waited for Ready=True on
 the applied revision; a resume that fails is a RESTORE FAIL naming it, because a
 Kustomization left suspended stops all later deploys.
 The workload is paced and bounded by node load, fill/recovery deadlines and the
-whole-walk deadline. The saturation clock is derived from the achieved source
+whole-walk deadline. The load guard stops the walk's own writers on excess load,
+and only that: the moment the intentional crash has happened it stands down, so
+the collector draining its buffer is a NOTE with the reading and the loss count
+still runs within its existing delivery bound. Any WalkError that reaches the
+walk's end prints its message and the step it came from, never a bare class
+name. The saturation clock is derived from the achieved source
 rate and the writer line size when the fixed --fill-bound cannot reach the
 writable byte bound (with --fill-ceiling as the stated ceiling), and a NOTE says
 which bound is used. A watchdog interrupts blocked work at excess load. Finally,
@@ -1086,9 +1091,36 @@ def node_load():
     return float(Path('/proc/loadavg').read_text().split()[0])
 
 
+# The load guard protects the node from the walk's own writers, and once the
+# crash has happened what remains is the loss count: the collector's drain is
+# the product doing its work, so above-bound load is then reported, not fatal.
+LOAD_GUARD = {'writers': True, 'above': False}
+
+
+def guard_writers_writing():
+    """Each crash case guards the node again until its own crash has happened."""
+    LOAD_GUARD['writers'] = True
+    LOAD_GUARD['above'] = False
+
+
+def guard_writers_stopped(report=None):
+    """Release the load guard: the writers are no longer the walk's to stop."""
+    if LOAD_GUARD['writers'] and report is not None:
+        report.note('the crash is over: the walk\'s writers are no longer what the load guard can '
+                    'protect the node from, so a load above the bound is a NOTE from here and the '
+                    'walk waits for delivery within its existing bound')
+    LOAD_GUARD['writers'] = False
+
+
 def watch_load(report, options, stop):
-    """Interrupt even a blocked staged command; main owns all restoration."""
+    """Interrupt even a blocked staged command; main owns all restoration.
+
+    It never interrupts the loss count: after the crash the drain's load is
+    expected, so the monitor stands down with the guard.
+    """
     while not stop.wait(1):
+        if not LOAD_GUARD['writers']:
+            continue
         if not safe_load(report, options):
             os.kill(os.getpid(), signal.SIGINT)
             return
@@ -1101,20 +1133,34 @@ def require_safe_load(report, options):
 
 
 def safe_load(report, options):
+    """Before the crash an excess load stops the writers; after it, it is a NOTE."""
     try:
         load = node_load()
     except (OSError, ValueError, IndexError):
         report.not_valid('node load average unavailable; stop writers to protect the VM')
         return False
     if not 0 <= load <= options.max_load:
+        if not LOAD_GUARD['writers']:
+            if not LOAD_GUARD['above']:
+                LOAD_GUARD['above'] = True
+                report.note('node one-minute load %.2f exceeds bound %.2f after the crash; the '
+                            'collector is draining what it buffered, so the walk reports it and '
+                            'keeps waiting for delivery' % (load, options.max_load))
+            return True
         report.not_valid('node one-minute load %.2f exceeds bound %.2f; stopping writers'
                          % (load, options.max_load))
         return False
+    if LOAD_GUARD['above']:
+        LOAD_GUARD['above'] = False
+        report.note('node one-minute load %.2f is back within bound %.2f'
+                    % (load, options.max_load))
     return True
 
 
 def crash_case(report, options, loader, cluster, state, saturated_case, store_down_restart=False):
     """One crash: write, kill, recover, count - saturated or informative."""
+    guard_writers_writing()
+    state['step'] = 'the writer start'
     if not safe_load(report, options):
         return False
     label = 'store-down-restart' if store_down_restart else ('saturated' if saturated_case else 'unsaturated')
@@ -1166,6 +1212,7 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                     report.not_valid('collector restarted during source pickup')
                     return False
                 return sample_memory()
+            state['step'] = 'the source pickup'
             pickup = wait_source_pickup(report, options, cluster,
                                         source_rate_sample(metrics, reason, options,
                                                            before_writers=True),
@@ -1181,6 +1228,7 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
             report.note(saturation_note(plan))
             fill_deadline = time.monotonic() + plan['bound']
             last_memory = time.monotonic()
+            state['step'] = 'the fill'
             emitted_before = emitted_count(cluster, options, run_id)
             started_fill = time.monotonic()
             while True:
@@ -1246,6 +1294,7 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                             'that follows is the unplanned one')
             else:
                 # Keep writing past the full buffer, so the lines behind it are real.
+                state['step'] = 'the saturated dwell'
                 until = time.monotonic() + options.saturated_seconds
                 while time.monotonic() < until:
                     if not safe_load(report, options):
@@ -1260,6 +1309,7 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                         return False
                     time.sleep(min(3, max(0, until - time.monotonic())))
         else:
+            state['step'] = 'the unsaturated write'
             deadline = time.monotonic() + 60
             while len(writer_lines(cluster, options, run_id)) < options.unsaturated_lines:
                 if not safe_load(report, options):
@@ -1271,6 +1321,7 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                 time.sleep(3)
             report.note('the unsaturated case wrote %d line(s) with the buffer below its maximum'
                         % len(writer_lines(cluster, options, run_id)))
+        state['step'] = 'the intentional crash'
         if not safe_load(report, options):
             return False
         written = writer_lines(cluster, options, run_id)
@@ -1292,6 +1343,12 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
             report.check(killed, 'the vector process is killed by its host pid', detail)
             if not killed:
                 return False
+        # The crash has happened. From here the loss count is the goal: the
+        # collector's drain is the product doing its work, so the load guard
+        # must not turn it into TEST NOT VALID or interrupt it.
+        guard_writers_stopped(report)
+        state['step'] = 'the collector restart while the store is down' if store_down_restart \
+            else 'the recovery after the crash'
         if store_down_restart and not wait_until(time.monotonic() + options.recover_bound, 3,
                 lambda: require_safe_load(report, options)
                 and collector_restarts(cluster, options) > restarts_at_kill):
@@ -1305,6 +1362,7 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
             return False
         # Freeze the evidence set before allowing backlog drain. Writers may
         # continue; this verdict covers only the retained snapshot, not later lines.
+        state['step'] = 'the retained-kubelet snapshot'
         written = writer_lines(cluster, options, run_id)
         kubelet = set()
         for name in writer_names(options):
@@ -1314,11 +1372,13 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                 return False
             kubelet.update(retained)
         report.note('retained-kubelet snapshot taken before settling and delivery query')
+        state['step'] = 'the settle before the delivery query'
         until = time.monotonic() + options.settle_seconds
         while time.monotonic() < until:
             require_safe_load(report, options)
             time.sleep(min(3, max(0, until - time.monotonic())))
         observation = {'counts': None}
+        state['step'] = 'the delivery query'
         def target_delivered():
             require_safe_load(report, options)
             counts = count_deliveries(loader, started, run_id)
@@ -1346,6 +1406,7 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                         % (verdict['detail'], collector_restarts(cluster, options)))
         return verdict['ok'] if saturated_case or store_down_restart else True
     finally:
+        state['step'] = 'the writer cleanup'
         for name in writer_names(options):
             restore_step(report, 'delete ' + name, lambda name=name: cluster.run(
                 ['-n', options.writer_namespace, 'delete', 'pod', name,
@@ -1472,8 +1533,10 @@ def run(report, options, loader, cluster, state):
         return False
     if not ensure_namespace(report, cluster, options, state):
         return False
+    state['step'] = 'the store outage'
     if not stop_store(report, options, cluster, state):
         return False
+    state['step'] = 'the saturated crash'
     saturated_ok = crash_case(report, options, loader, cluster, state, True)
     if saturated_ok:
         # Separately restart while the store remains unavailable, then recover it.
@@ -1483,6 +1546,7 @@ def run(report, options, loader, cluster, state):
             return False
         if not wait_store_down(report, options, cluster, state):
             return False
+        state['step'] = 'the store-down restart crash'
         if not crash_case(report, options, loader, cluster, state, False,
                           store_down_restart=True):
             return False
@@ -1490,6 +1554,7 @@ def run(report, options, loader, cluster, state):
             return False
         if not wait_store_down(report, options, cluster, state):
             return False
+        state['step'] = 'the informative crash'
         crash_case(report, options, loader, cluster, state, False)
     return saturated_ok
 
@@ -1629,7 +1694,7 @@ def main(argv=None):
                 % (baseline, cpus, options.max_load))
     cluster = Cluster(options.kubectl)
     state = {'created_namespace': False, 'replicas': None, 'run_id': None,
-             'kustomizations': None, 'suspended': [], 'held': []}
+             'kustomizations': None, 'suspended': [], 'held': [], 'step': None}
     loader = None
     ran = False
 
@@ -1642,6 +1707,7 @@ def main(argv=None):
             return False
         loader = Loader(options.loader_host, options.loader_port, options.origin_host,
                         options.ca_file)
+        state['step'] = 'the loader login'
         status = loader.login(secret)
         if not report.check(status == 200, 'the loader logs in',
                             'POST /api/login answered %d' % status):
@@ -1653,8 +1719,14 @@ def main(argv=None):
     try:
         monitor.start()
         ran = stage()
+    except WalkError as error:
+        report.fail('the walk runs to its end',
+                    '%s at %s' % (str(error) or type(error).__name__,
+                                  state.get('step') or 'no recorded step'))
     except BaseException as error:
-        report.fail('the walk runs to its end', type(error).__name__)
+        report.fail('the walk runs to its end',
+                    '%s at %s' % (type(error).__name__,
+                                  state.get('step') or 'no recorded step'))
     finally:
         stop_monitor.set()
         try:

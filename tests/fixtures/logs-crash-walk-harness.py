@@ -402,6 +402,9 @@ def main_runtime_error(walk, fixture):
     walk.wait_until = lambda deadline, interval, probe: probe()
     def broken_run(report, options, loader, cluster, state):
         state.update(replicas=1, created_namespace=True)
+        state['step'] = fixture.get('step', 'the settle before the delivery query')
+        if fixture.get('walk'):
+            raise walk.WalkError(fixture.get('error', 'node_load_bound'))
         raise RuntimeError('fixture stage failed')
     walk.run = broken_run
     walk.store_ready = lambda *_args: True
@@ -487,6 +490,9 @@ def watch_load(walk, fixture):
         def wait(self, seconds):
             waits.append(seconds)
             return len(waits) > 1
+    walk.guard_writers_writing()
+    if fixture.get('released'):
+        walk.guard_writers_stopped()
     walk.node_load = lambda: fixture.get('load', 9.0)
     original_kill = walk.os.kill
     try:
@@ -735,6 +741,63 @@ def restore_resume(walk, fixture):
         'suspend': {name: (bodies[name].get('spec') or {}).get('suspend') for name in names},
         'handled': {name: bool((bodies[name].get('status') or {})
                                .get('lastHandledReconcileAt')) for name in names}}))
+    return report
+
+
+@mode('load-phase')
+def load_phase(walk, fixture):
+    """Before the crash an excess load stops the writers; after it, it is a NOTE."""
+    report = walk.Report()
+    walk.node_load = lambda: fixture.get('load', 9.0)
+    walk.guard_writers_writing()
+    before = walk.safe_load(report, options())
+    walk.guard_writers_stopped(report)
+    after = walk.safe_load(report, options())
+    again = walk.safe_load(report, options())
+    walk.node_load = lambda: 1.0
+    back = walk.safe_load(report, options())
+    print('LOAD ' + json.dumps({'before': before, 'after': after, 'again': again, 'back': back}))
+    return report
+
+
+@mode('crash-load-release')
+def crash_load_release(walk, fixture):
+    """The drain's load after the crash is a NOTE, and the loss count still runs."""
+    report = walk.Report()
+    walk.guard_writers_writing()
+    walk.node_load = lambda: 9.0 if fixture.get('early') else 1.0
+    walk.writer_image = lambda *args: 'image'
+    walk.wait_writer = lambda *args: True
+    walk.writer_lines = lambda *args: [1, 2]
+    walk.collector_memory = lambda *args: (100 * walk.MIB, '')
+    walk.require_store_down = lambda *args: True
+    walk.set_replicas = lambda *args: True
+    walk.recover_after_crash = lambda *args: True
+    walk.store_ready = lambda *args: True
+    walk.collector_restarts = lambda *args: 1
+    walk.vector_pid = lambda *args: (42, 'pid 42')
+    walk.kubelet_lines = lambda *args: {1, 2}
+    walk.count_deliveries = lambda *args: {1: 2, 2: 1}
+    walk.wait_until = lambda deadline, interval, probe: probe()
+    walk.restore_step = lambda *args: True
+
+    def node_run(args):
+        if args[:1] == ['kill']:
+            walk.node_load = lambda: fixture.get('load', 9.0)
+        return types.SimpleNamespace(returncode=0)
+
+    walk.node_run = node_run
+
+    class Cluster:
+        def apply(self, body):
+            return types.SimpleNamespace(returncode=0)
+
+        def run(self, args, timeout=120):
+            return types.SimpleNamespace(returncode=0)
+
+    state = {'replicas': 1, 'suspended': [], 'held': []}
+    ok = walk.crash_case(report, options(unsaturated_lines=1), None, Cluster(), state, False)
+    print('CRASH ' + json.dumps({'ok': bool(ok), 'step': state.get('step')}))
     return report
 
 
