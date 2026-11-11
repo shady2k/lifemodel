@@ -49,6 +49,7 @@ COPY loader/src/workbench-status.ts ./loader/src/workbench-status.ts
 COPY loader/src/logs-store-adapter.ts ./loader/src/logs-store-adapter.ts
 # The logs page filters by the collector's closed level set, which the adapter's query file owns.
 COPY loader/src/logs-query.ts ./loader/src/logs-query.ts
+COPY loader/src/logs-throttle.ts ./loader/src/logs-throttle.ts
 RUN npm run build:loader-ui -- --emptyOutDir
 
 # Compile the TypeScript loader with its isolated manifests.

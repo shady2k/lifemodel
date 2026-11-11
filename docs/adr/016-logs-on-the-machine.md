@@ -241,12 +241,12 @@ line happens in the collector, once, and nowhere else (F5).
 | Field | Source | Rule |
 | --- | --- | --- |
 | `module` | Kubernetes pod label | `app.kubernetes.io/name`, else `app`, else `k8s-app`, else `cnpg.io/cluster`, else `unknown`. Never the line. Every platform workload carries one of these (*inherited*: core, web, loader, model-gateway, storage-module, zot, gitea, openbao, seaweedfs, traefik use `app.kubernetes.io/name`; valkey uses `app`; the CNPG instance's pods use `cnpg.io/cluster`, *inherited* from CNPG's convention; k3s's CoreDNS uses `k8s-app`, *inherited* from the k3s manifest) |
-| `namespace`, `pod`, `container`, `node` | Kubernetes metadata | as the API gives them |
+| `namespace`, `pod`, `container`, `node` | Kubernetes metadata; kubelet-owned file path fallback | namespace, pod and container use API metadata when available, otherwise `/var/log/pods/<namespace>_<pod>_<uid>/<container>/N.log`; node uses API metadata. Missing identity remains empty, never inferred from message text |
 | `stream` | the kubelet's CRI stream | `stdout` or `stderr`, taken from the source's own `stream` field *before* it is defaulted; measured `stream="stderr"` and `stream="stdout"` on the stored records (the earlier `"unknown"` was a bug: the default overwrote the value) |
 | `level` | the line, unified | pino numbers 10–60 → `trace`/`debug`/`info`/`warn`/`error`/`fatal`; text words `trace|debug|info|warn|warning|error|err|fatal|critical|panic` → the same set; anything else, and any line without a level, is `unknown`. Both maps are equal for structured and unstructured lines |
 | `conversation_id` | the line, when present | the JSON field `conversation_id`; unset otherwise. It is a field, never a stream, so it does not multiply streams |
-| `untrusted` | Kubernetes metadata | `true` for `namespace == lifemodel-motor` (ADR-014: the whole task pod is one untrusted zone), `false` otherwise |
-| `error_type`, `reason_check`, `reason_path`, `reason_got` | the line, **trusted namespaces only** | promoted from a failure line's `error_type` and `reason {check, path, got}` so the page can filter on them without parsing. In the task namespace they are left inside the message: a task line cannot create a promoted field (§9 point 5) |
+| `untrusted` | collector policy over source-owned namespace | `false` only for the known platform namespaces: `lifemodel`, `lifemodel-system`, `lifemodel-state`, `lifemodel-logs`, `lifemodel-git`, `lifemodel-releases`, `openbao`, `cnpg-system`, `flux-system`, `kube-system`. Every other namespace, including missing identity and the motor namespaces, is `true` and throttled (§5 N5) |
+| `error_type`, `reason_check`, `reason_path`, `reason_got` | the line, **trusted namespaces only** | promoted from a failure line's `error_type` and `reason {check, path, got}` so the page can filter on them without parsing. In every untrusted namespace they are left inside the message: a task line cannot create a promoted field (§9 point 5) |
 | `message` | the line | with ANSI escape codes stripped, so a pino-pretty line is readable as text and searchable |
 | `_time` | the kubelet's CRI timestamp | the record's time; the line's own time field is left in the message text |
 
@@ -1021,12 +1021,48 @@ loss — a pod under the limit has `input == accepted`. Measured in Docker: a
 50/s writer under a 100/s threshold produced windows of 299 and 300 input with
 299 and 300 accepted (nothing discarded); a 50/s writer under a 10/s threshold
 produced windows of 300 input with 69 accepted, and 299 with 60. So
-`discarded = input − accepted` **per pod and per window**. `discarded = input − accepted`
-is exact only inside one window pair; the two counters are separate windows, so a
-pod whose two windows do not both exist, whose records were dropped by their own
-sink, or whose count has not arrived yet is shown as `unknown`, never as zero.
-The record carries only the pod, the two counters and the window's start and end
-time — no message text, no metadata — so a flood cannot inflate it.
+`discarded = input − accepted` **per pod and per window**. The two counters
+use matching epoch-aligned 6-second boundaries but are separate stored records,
+so an exact result requires exactly one of each, the same namespace, pod and boundaries,
+and the same collector process start (`collector_start`, RFC3339). Input must
+be at least accepted. A missing, invalid or duplicate counter is `unknown`,
+never zero. A window beginning before its collector process started is partial
+and unknown. Counters exist only for windows with input. Gaps within one
+collector process are idle stretches, not unknown loss. A gap between evidenced
+windows from different collector processes is shown as an unknown interval.
+Any such uncertainty makes the overall
+status unknown; valid pairs still show their own exact values.
+
+A collector crash can lose in-memory counts. Completely missing leading or
+trailing windows cannot be detected without evidence; these counters are not a
+durable audit or a proof of all activity in the selected range. The page reads
+counters once with its first page and preserves that snapshot while paging.
+The records carry only pod, namespace, counter, value, window boundaries,
+collector process start, module and timestamp — no message text or task
+metadata — so a flood cannot inflate them.
+
+The collector stamps the window before branching and uses native `reduce` to
+sum input and accepted seeds under that same key. Input seeds include accepted
+zero, so a fully rejected window still emits both records. Groups expire after
+12 seconds of inactivity, checked every second. The container exports its
+process start immediately before executing Vector; task text cannot set it.
+The normalizer rebuilds pod records from an allowlist and always adds
+`untrusted`. Readers require collector counter fields without `untrusted`,
+never a counter parsed from message text, even for a pod labelled
+`throttle-window`.
+
+The throttle budget and counter identity use namespace and pod together, so
+equal pod names in different namespaces do not share a quota. Records with
+completely missing identity necessarily share one unknown-identity budget.
+The page reports collector counters for every throttled namespace, not only
+`lifemodel-motor`.
+
+Trust requires a known platform namespace. Missing namespace and pod metadata
+fall back to the kubelet-owned `/var/log/pods/<namespace>_<pod>_<uid>/` path;
+missing or unrecognized identity is untrusted and throttled. Deleted-pod
+metadata is retained for 30 minutes (`delay_deletion_ms=1800000`). This covers
+stalls up to that duration, not an unbounded store outage: source-path recovery
+and fail-closed trust remain necessary after metadata expires.
 
 ### 6. Bounds and failure behaviour, measured
 
@@ -1629,7 +1665,7 @@ Docker with the same pinned images on a named volume on a real disk.
 | The margin and what a merge does to it | a store with `-storage.minFreeDiskSpaceBytes` set from the filesystem's free space, an incompressible flood, 1 s samples of free space plus `vl_active_merges`, `vl_merges_total`, `vl_pending_rows`, `vl_storage_rows`, and the store's size on disk every 5 s; on the cluster, a real Postgres pod committing every 200 ms on the same filesystem |
 | Retention: byte bound, day partitions, canary | a store with a 300 MiB byte bound; a flood of today's records; a 200-record canary 10 days old; per-day `stats by (_time:1d)` |
 | Displacement, and why the deletion API is rejected | loop-mounted ext4 images (3 GiB, 1 GiB), the pinned store at `--memory=1g` and `2g`; pino-like JSON lines (564-byte records, 6.49× compression); a 1 s sampler of `statvfs` free space, the container's RSS and `vl_storage_is_read_only`; `POST /internal/partition/detach?name=…&authKey=…` followed by `rm -rf partitions/<day>`; `POST /delete/run_task` with cutoffs chosen from `stats by (_time:1m)`/`(_time:10s) count()`, `docker inspect` for `RestartCount`/`OOMKilled`, and a `seq` field counted with `seq:range[lo,hi]` for what is acknowledged between detach and remove |
-| The throttle and its per-pod gap | a task pod writing 300,000 lines at full speed, a trusted pod beside it; `vector_component_discarded_events_total{component_id="throttle"}`; a `reduce` window per pod written to the store as `module="collector-window"` |
+| The throttle and its per-pod gap | a task pod writing 300,000 lines at full speed, a trusted pod beside it; `vector_component_discarded_events_total{component_id="throttle"}`; a prototype `reduce` window per pod written to the store as `module="collector-window"` (the product uses the paired `module="throttle-window"` records described above) |
 | The env mapping | the same ConfigMap through `envFrom` in three configurations, read from the process's own `/flags` endpoint |
 | Egress: observed and permitted | `tcpdump` on the node for 10 minutes without a policy; then the permit list applied, a witness pod outside it, and a probe pod carrying the collector's labels |
 | Paging with tied timestamps | 5,000 records at one timestamp and 300 byte-identical lines, paged with the adapter's query form in 250-record pages, quiet and with ingest running |

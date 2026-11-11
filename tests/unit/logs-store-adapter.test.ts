@@ -134,7 +134,9 @@ describe('the log store adapter against recorded responses', () => {
 
   it('narrows by module through the store filter', async () => {
     const fixture = await recorded();
-    const logs = createLogsQuery({ store: createLogsStore({ url: fixture.url }) });
+    const logs = createLogsQuery({
+      store: createLogsStore({ url: fixture.url }),
+    });
     const result = await logs.page({
       filter: { from: FROM, to: TO, module: 'core' },
       offset: 0,
@@ -157,7 +159,9 @@ describe('the log store adapter against recorded responses', () => {
 
   it('narrows by time through the store range', async () => {
     const fixture = await recorded();
-    const logs = createLogsQuery({ store: createLogsStore({ url: fixture.url }) });
+    const logs = createLogsQuery({
+      store: createLogsStore({ url: fixture.url }),
+    });
     const result = await logs.page({
       filter: { from: FROM, to: MID },
       offset: 0,
@@ -204,8 +208,14 @@ describe('the log store adapter reads the window count', () => {
     const store = createLogsStore({ url: fixture.url });
     const range = (from: number, to: number) =>
       `_time:[${new Date(from).toISOString()}, ${new Date(to).toISOString()}] | stats count()`;
-    expect(await store.count(range(FROM, TO))).toEqual({ state: 'ok', count: 9 });
-    expect(await store.count(range(FROM, MID))).toEqual({ state: 'ok', count: 7 });
+    expect(await store.count(range(FROM, TO))).toEqual({
+      state: 'ok',
+      count: 9,
+    });
+    expect(await store.count(range(FROM, MID))).toEqual({
+      state: 'ok',
+      count: 7,
+    });
     expect(
       await store.count(
         `${range(FROM, TO).replace(' | stats count()', '')} module:="core" | stats count()`
@@ -215,10 +225,13 @@ describe('the log store adapter reads the window count', () => {
 
   it('says unavailable instead of zero when the count cannot be read', async () => {
     const port = await closedPort();
-    const result = await createLogsStore({ url: `http://127.0.0.1:${String(port)}` }).count(
-      '* | stats count()'
-    );
-    expect(result).toEqual({ state: 'unavailable', reason: 'connection_refused' });
+    const result = await createLogsStore({
+      url: `http://127.0.0.1:${String(port)}`,
+    }).count('* | stats count()');
+    expect(result).toEqual({
+      state: 'unavailable',
+      reason: 'connection_refused',
+    });
   });
 
   it('says unavailable with invalid_response for a body that is not a count', async () => {
@@ -236,8 +249,13 @@ describe('the log store adapter reads the window count', () => {
 describe('the log store adapter when the store does not answer', () => {
   it('says unavailable with connection_refused', async () => {
     const port = await closedPort();
-    const result = await createLogsStore({ url: `http://127.0.0.1:${String(port)}` }).query('*');
-    expect(result).toEqual({ state: 'unavailable', reason: 'connection_refused' });
+    const result = await createLogsStore({
+      url: `http://127.0.0.1:${String(port)}`,
+    }).query('*');
+    expect(result).toEqual({
+      state: 'unavailable',
+      reason: 'connection_refused',
+    });
   });
 
   it('says unavailable with timeout', async () => {
@@ -254,7 +272,11 @@ describe('the log store adapter when the store does not answer', () => {
       res.end('storage error');
     });
     const result = await createLogsStore({ url }).query('*');
-    expect(result).toEqual({ state: 'unavailable', reason: 'http_error', status: 500 });
+    expect(result).toEqual({
+      state: 'unavailable',
+      reason: 'http_error',
+      status: 500,
+    });
   });
 
   it('says unavailable with read_only on 429', async () => {
@@ -263,7 +285,11 @@ describe('the log store adapter when the store does not answer', () => {
       res.end('cannot add rows into storage in read-only mode');
     });
     const result = await createLogsStore({ url }).query('*');
-    expect(result).toEqual({ state: 'unavailable', reason: 'read_only', status: 429 });
+    expect(result).toEqual({
+      state: 'unavailable',
+      reason: 'read_only',
+      status: 429,
+    });
   });
 
   it('says unavailable with invalid_response instead of an empty list', async () => {
@@ -272,12 +298,69 @@ describe('the log store adapter when the store does not answer', () => {
       res.end('not a json object\n');
     });
     const result = await createLogsStore({ url }).query('*');
-    expect(result).toEqual({ state: 'unavailable', reason: 'invalid_response' });
+    expect(result).toEqual({
+      state: 'unavailable',
+      reason: 'invalid_response',
+    });
   });
 
   it('never turns a failed module query into an empty module list', async () => {
     const port = await closedPort();
-    const result = await createLogsStore({ url: `http://127.0.0.1:${String(port)}` }).modules();
-    expect(result).toEqual({ state: 'unavailable', reason: 'connection_refused' });
+    const result = await createLogsStore({
+      url: `http://127.0.0.1:${String(port)}`,
+    }).modules();
+    expect(result).toEqual({
+      state: 'unavailable',
+      reason: 'connection_refused',
+    });
+  });
+});
+
+describe('collector counters without message text', () => {
+  const record = {
+    _time: '2026-11-11T12:00:06Z',
+    module: 'throttle-window',
+    namespace: 'lifemodel-motor',
+    pod: 'task-a',
+    counter: 'input',
+    value: 300,
+    collector_start: '2026-11-11T11:59:59Z',
+    window_start: '2026-11-11T12:00:00Z',
+    window_end: '2026-11-11T12:00:06Z',
+  };
+  it.each([
+    ['default', 'task-a'],
+    ['lifemodel-motor-releases', 'task-a'],
+    ['', ''],
+  ])('accepts collector-owned counters for namespace %j and pod %j', async (namespace, pod) => {
+    const url = await listen((_req, res) => {
+      res.end(JSON.stringify({ ...record, namespace, pod }));
+    });
+    expect(await createLogsStore({ url }).query('*')).toMatchObject({
+      state: 'ok',
+      records: [{ fields: { namespace, pod } }],
+    });
+  });
+  it('accepts a collector window with no _msg', async () => {
+    const url = await listen((_req, res) => {
+      res.end(JSON.stringify(record));
+    });
+    expect(await createLogsStore({ url }).query('*')).toMatchObject({
+      state: 'ok',
+      records: [{ message: '', fields: { counter: 'input', value: '300' } }],
+    });
+  });
+  it.each([
+    { ...record, untrusted: true },
+    { ...record, module: 'core' },
+    { ...record, counter: undefined },
+  ])('still refuses missing _msg on non-collector records', async (invalid) => {
+    const url = await listen((_req, res) => {
+      res.end(JSON.stringify(invalid));
+    });
+    expect(await createLogsStore({ url }).query('*')).toEqual({
+      state: 'unavailable',
+      reason: 'invalid_response',
+    });
   });
 });

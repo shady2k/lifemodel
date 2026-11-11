@@ -37,8 +37,8 @@ What it proves
    speed concurrently with a trusted writer (a pod in the walk's own namespace),
    plus a task pod writing 20 KB lines. Asserted: the trusted writer loses no
    line; each throttled pod's `input` and `accepted` counters reconcile per
-   window (read from the collector's own Prometheus exporter on its loopback,
-   `127.0.0.1:9598`, through a port-forward as `logs-crash-walk.py` does); and
+   exact six-second window (collector-made `throttle-window` records queried
+   through the store read interface; missing or duplicate pairs are unknown); and
    the event rate is reported as the limit it is (500 events per second per pod).
 
 Arguments (defaults are the test VM's)
@@ -67,16 +67,14 @@ Arguments (defaults are the test VM's)
   --poll-seconds N       sampling interval (default 5)
   --recover-bound N      bound on writes being accepted again (default 300)
   --commit-gap-bound N   bound on the longest Postgres commit gap (default 10 s)
-  --collector-namespace NS / --collector NAME   default lifemodel-logs/logs-collector
-  --metrics-port PORT    the collector's loopback exporter (default 9598)
   --throttle-seconds N   the concurrent throttle burst (default 60 s)
   --trusted-interval-ms N the trusted writer's line interval (default 20)
   --deadline-seconds N   the whole walk's bound (default 3600)
 
 What it changes and restores
 ----------------------------
-It creates two namespaces (its own and `lifemodel-logs-walk` for the writer),
-a Postgres pod and writer pods, and a shared-filesystem directory with the
+It creates one walk-owned namespace for Postgres and writer pods, including
+trusted writers in the existing `lifemodel-system` namespace, and a shared-filesystem directory with the
 Postgres data in it; it writes into the log volume and plants records on two
 past days inside the store's retention, so the evictor has a past day it can
 drop even when every older day was already evicted. The `finally` deletes the
@@ -109,7 +107,6 @@ from logs_walk_support import (  # noqa: E402
     RESPONSE_LIMIT,
     Cluster,
     Loader,
-    PortForward,
     Report,
     Volume,
     WalkError,
@@ -374,12 +371,12 @@ def throttle_verdict(windows):
     rates = []
     for entry in windows:
         given, accepted = entry.get('input'), entry.get('accepted')
-        if not isinstance(given, int) or not isinstance(accepted, int) or accepted > given:
+        if not isinstance(given, int) or not isinstance(accepted, int) or given < 0 or accepted < 0 or accepted > given:
             problems.append('%s: input %s accepted %s' % (entry.get('pod'), given, accepted))
             continue
         rates.append({'pod': entry.get('pod'), 'input': given, 'accepted': accepted,
                       'discarded': given - accepted})
-    return {'ok': not problems, 'rates': rates,
+    return {'ok': bool(rates) and not problems, 'rates': rates,
             'detail': ('%d window(s): %s; the limit is %d events per second per pod'
                        % (len(rates),
                           ', '.join('%s %d/%d' % (rate['pod'], rate['input'],
@@ -419,51 +416,61 @@ def numbered(text, module, run_id):
     return [int(match.group(1)) for match in pattern.finditer(text or '')]
 
 
-def metrics_text(options, cluster):
-    """The collector's loopback exporter, read through a port-forward."""
-    pods = cluster.pods(options.collector_namespace,
-                        'app.kubernetes.io/name=' + options.collector)
-    if not pods:
-        return None
-    name = (pods[0].get('metadata') or {}).get('name')
-    forward = PortForward(options.kubectl, options.collector_namespace, 'pod/' + name,
-                          free_port(), options.metrics_port)
-    forward.start()
-    try:
-        if not forward.wait_ready(20):
-            return None
-        import http.client
-        connection = http.client.HTTPConnection('127.0.0.1', forward.local_port, timeout=15)
-        try:
-            connection.request('GET', '/metrics')
-            response = connection.getresponse()
-            return response.read(4 * 1024 * 1024).decode('utf8', 'replace')
-        finally:
-            connection.close()
-    finally:
-        forward.close()
+def throttle_windows(records, task_pods, start_ms, end_ms):
+    """Pair collector-only records by exact pod and aligned six-second window.
 
+    Store fields are strings. Task normalization never promotes these fields and
+    always sets untrusted, even for a pod labelled throttle-window. Missing or
+    repeated counters stay unknown; a missing accepted sample is not zero.
+    """
+    from logs_walk_support import parse_ms
 
-def throttle_windows(text):
-    """The throttle-window records' input and accepted counts, per pod and window."""
     windows = {}
-    for raw in (text or '').splitlines():
-        line = raw.strip()
-        if not line.startswith('walk_throttle_window_'):
+    for record in records or []:
+        if (record.get('module') != 'throttle-window'
+                or record.get('namespace') != TASKS_NAMESPACE
+                or record.get('pod') not in task_pods or 'untrusted' in record):
             continue
-        sample = line.split(' ')
-        if len(sample) < 2:
+        kind = record.get('counter')
+        first, last = (parse_ms(record.get(field))
+                       for field in ('window_start', 'window_end'))
+        stamp = parse_ms(record.get('_time'))
+        if (first is None or last is None or stamp is None
+                or first % 6000 != 0 or last - first != 6000
+                or first >= end_ms or last <= start_ms):
             continue
-        try:
-            value = int(float(sample[1]))
-        except ValueError:
+        raw = record.get('value')
+        key = (record['pod'], first, last)
+        entry = windows.setdefault(key, {'pod': key[0], 'window_start': first,
+                                        'window_end': last, 'input': None, 'accepted': None})
+        collector_start = parse_ms(record.get('collector_start'))
+        instances = entry.setdefault('collector_starts', set())
+        if collector_start is not None:
+            instances.add(collector_start)
+        if (collector_start is None or first < collector_start
+                or kind not in ('input', 'accepted') or isinstance(raw, bool)
+                or not re.fullmatch(r'\d+', str(raw))):
+            entry['invalid'] = True
             continue
-        pod = re.search(r'pod="([^"]+)"', sample[0])
-        key = pod.group(1) if pod else 'unknown'
-        kind = 'input' if '_input' in sample[0] else 'accepted'
-        windows.setdefault(key, {})[kind] = windows.setdefault(key, {}).get(kind, 0) + value
-    return [{'pod': pod, 'input': values.get('input', 0),
-             'accepted': values.get('accepted', 0)} for pod, values in windows.items()]
+        seen = entry.setdefault('seen', {})
+        seen[kind] = seen.get(kind, 0) + 1
+        entry[kind] = int(raw) if seen[kind] == 1 else None
+    instances = set().union(*(entry['collector_starts'] for entry in windows.values()))
+    if len(instances) > 1:
+        for entry in windows.values():
+            entry['invalid'] = True
+    return list(windows.values())
+
+
+def throttle_records(store, task_pods, start_ms, end_ms):
+    """Read collector records directly: the loader intentionally hides internals."""
+    from logs_walk_support import stamp
+
+    pods = ' OR '.join('pod:=' + json.dumps(pod) for pod in sorted(task_pods))
+    # Include the containing windows. Their timestamps can be emitted after
+    # writer overlap ends; filtering the window bounds happens during pairing.
+    return store.query('module:"throttle-window" namespace:"lifemodel-motor" '
+                       '(%s) _time:[%s, %s]' % (pods, stamp(start_ms - 6000), stamp(end_ms + 12000)))
 
 
 def reading_verdict(samples):
@@ -494,13 +501,6 @@ def shared_space(path='/'):
     """The shared root filesystem's (total, free) bytes."""
     stats = os.statvfs(path)
     return stats.f_bsize * stats.f_blocks, stats.f_bsize * stats.f_bavail
-
-
-def free_port():
-    import socket
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(('127.0.0.1', 0))
-        return probe.getsockname()[1]
 
 
 def ensure_namespace(report, cluster, name, state):
@@ -710,7 +710,7 @@ def flood_case(report, options, loader, cluster, store, volume, state):
     return True
 
 
-def throttle_case(report, options, loader, cluster, state):
+def throttle_case(report, options, loader, cluster, store, state):
     """Admitted task writers overlap a trusted writer; absent evidence is invalid."""
     from logs_task_writer import THROTTLE_SECONDS_MAX, TASK_WRITER_BOUND
     from logs_walk_support import parse_ms, start_task_writer
@@ -791,29 +791,33 @@ def throttle_case(report, options, loader, cluster, state):
     windows = []
     deadline = time.monotonic() + options.recover_bound
     task_pods = {fast[0], large[0]}
+    overlap_start = max(start for start, _ in intervals)
+    overlap_end = min(end for _, end in intervals)
     while time.monotonic() < deadline:
-        text = metrics_text(options, cluster)
-        paired = set()
-        for pod in task_pods:
-            samples = [line for line in (text or '').splitlines()
-                       if 'pod="' + pod + '"' in line]
-            if (any(line.startswith('walk_throttle_window_input') for line in samples)
-                    and any(line.startswith('walk_throttle_window_accepted') for line in samples)):
-                paired.add(pod)
-        windows = [entry for entry in throttle_windows(text)
-                   if entry['pod'] in paired and entry['pod'] in task_pods]
-        if {entry['pod'] for entry in windows if entry['input'] > 0} == task_pods:
+        records = throttle_records(store, task_pods, overlap_start, overlap_end)
+        windows = throttle_windows(records, task_pods, overlap_start, overlap_end)
+        expected = {(pod, first) for pod in task_pods
+                    for first in range(overlap_start // 6000 * 6000, overlap_end, 6000)}
+        observed = {(entry['pod'], entry['window_start']) for entry in windows}
+        complete = expected == observed and all(
+            not entry.get('invalid') and isinstance(entry.get('input'), int)
+            and isinstance(entry.get('accepted'), int) for entry in windows)
+        present = {entry['pod'] for entry in windows if (entry.get('input') or 0) > 0}
+        if complete and present == task_pods:
             break
         time.sleep(5)
-    if {entry['pod'] for entry in windows if entry['input'] > 0} != task_pods:
-        report.not_valid('no nonempty input/accepted throttle-window evidence for both actual '
-                         'task pods; unrelated pods cannot prove this burst')
+    if not windows or not complete or present != task_pods:
+        report.not_valid('unknown input/accepted throttle-window evidence for both actual '
+                         'task pods: missing, duplicate or unpaired counters in overlapping windows')
         return False
-    report.note('counter evidence identifies these task pods, not a timestamped common '
-                'window; timestamped writer records prove overlap separately')
     verdict = throttle_verdict(windows)
     report.check(verdict['ok'], "each throttled pod's input and accepted counters reconcile",
                  verdict['detail'])
+    fast_windows = [entry for entry in windows if entry['pod'] == fast[0]]
+    throttled = sum(entry['accepted'] for entry in fast_windows) < sum(
+        entry['input'] for entry in fast_windows)
+    report.check(throttled, 'the fast task writer actually crosses the throttle limit',
+                 'accepted must be less than input in the paired windows')
     found = []
     deadline = time.monotonic() + options.recover_bound
     while time.monotonic() < deadline:
@@ -823,14 +827,18 @@ def throttle_case(report, options, loader, cluster, state):
         if records is None:
             report.not_valid('the loader refused the trusted writer page (HTTP %d)' % status)
             return False
-        found = numbered(json.dumps(records), TRUSTED_MODULE, state['trusted_run'])
+        trusted_records = [record for record in records
+                           if (record.get('fields') or {}).get('namespace') == options.writer_namespace
+                           and (record.get('fields') or {}).get('pod') == 'walk-trusted-writer'
+                           and (record.get('fields') or {}).get('untrusted') == 'false']
+        found = numbered(json.dumps(trusted_records), TRUSTED_MODULE, state['trusted_run'])
         if set(written).issubset(found):
             break
         time.sleep(5)
     trusted = trusted_verdict(written, found)
     report.check(trusted['ok'], 'the trusted writer loses no line under the throttle',
                  trusted['detail'])
-    return verdict['ok'] and trusted['ok']
+    return verdict['ok'] and throttled and trusted['ok']
 
 
 def restore(report, options, loader, cluster, volume, state):
@@ -882,7 +890,11 @@ def run(report, options, loader, cluster, store, volume, state):
         return False
     os.makedirs(os.path.join(options.shared_path, 'pg'), exist_ok=True)
     os.chown(os.path.join(options.shared_path, 'pg'), 999, 999)
-    if not ensure_namespace(report, cluster, options.writer_namespace, state):
+    if options.writer_namespace != 'lifemodel-system':
+        report.not_valid('the trusted writer must use the known trusted lifemodel-system namespace')
+        return False
+    if cluster.json(['get', 'namespace', options.writer_namespace, '-o', 'json']) is None:
+        report.not_valid('the trusted writer namespace lifemodel-system is not installed')
         return False
     if not ensure_namespace(report, cluster, options.shared_namespace, state):
         return False
@@ -896,7 +908,7 @@ def run(report, options, loader, cluster, store, volume, state):
     state['throttle_start'] = now_ms()
     if not flood_case(report, options, loader, cluster, store, volume, state):
         return False
-    throttle_case(report, options, loader, cluster, state)
+    throttle_case(report, options, loader, cluster, store, state)
     return True
 
 
@@ -905,7 +917,7 @@ def main(argv=None):
     common_arguments(parser)
     parser.add_argument('--writer-image', default=None,
                         help='Node writer image; by default use the deployed logs-evictor image')
-    parser.add_argument('--writer-namespace', default='lifemodel-logs-walk')
+    parser.add_argument('--writer-namespace', default='lifemodel-system')
     parser.add_argument('--shared-namespace', default='lifemodel-logs-walk-pg')
     parser.add_argument('--shared-path', default='/var/lib/lifemodel-logs-walk-shared')
     parser.add_argument('--postgres-image', default='docker.io/library/postgres:17-bookworm')
@@ -917,9 +929,6 @@ def main(argv=None):
     parser.add_argument('--poll-seconds', type=int, default=5)
     parser.add_argument('--recover-bound', type=int, default=300)
     parser.add_argument('--commit-gap-bound', type=int, default=10)
-    parser.add_argument('--collector-namespace', default='lifemodel-logs')
-    parser.add_argument('--collector', default='logs-collector')
-    parser.add_argument('--metrics-port', type=int, default=9598)
     parser.add_argument('--throttle-seconds', type=int, default=60)
     parser.add_argument('--trusted-interval-ms', type=int, default=20)
     options = parser.parse_args(argv)

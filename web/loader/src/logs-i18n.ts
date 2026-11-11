@@ -13,6 +13,13 @@ export function formatMiB(bytes: number, language: string): string {
 }
 
 const en = {
+  logsThrottleTitle: 'Task pod throttling',
+  logsThrottleHelp:
+    'Discarded events per pod and paired 6-second window, independent of the message filters. This is an event-count limit, not a byte limit. Missing counters are unknown.',
+  logsThrottleUnknown: 'discarded count unknown',
+  logsThrottleNoLoss: 'no events discarded',
+  logsThrottleDiscarded_one: '{{count}} event discarded',
+  logsThrottleDiscarded_other: '{{count}} events discarded',
   logsTitle: 'Logs',
   logsDescription:
     'Every module’s lines on this machine. Filter by time, module, level, conversation and text.',
@@ -84,6 +91,15 @@ const en = {
 };
 
 const ru = {
+  logsThrottleTitle: 'Ограничение логов подов задач',
+  logsThrottleHelp:
+    'Отброшенные события по подам и парным 6-секундным окнам, независимо от фильтров сообщений. Это предел числа событий, не байтов. Без счётчиков результат неизвестен.',
+  logsThrottleUnknown: 'число отброшенных событий неизвестно',
+  logsThrottleNoLoss: 'нет отброшенных событий',
+  logsThrottleDiscarded_one: '{{count}} событие отброшено',
+  logsThrottleDiscarded_few: '{{count}} события отброшено',
+  logsThrottleDiscarded_many: '{{count}} событий отброшено',
+  logsThrottleDiscarded_other: '{{count}} события отброшено',
   logsTitle: 'Логи',
   logsDescription:
     'Строки всех модулей на этой машине. Фильтруйте по времени, модулю, уровню, беседе и тексту.',

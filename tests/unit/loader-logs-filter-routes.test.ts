@@ -125,7 +125,11 @@ describe('the logs API refuses a filter that cannot be queried', () => {
     ['a level outside the closed set', 'level=warning', 'level'],
     ['a level in the wrong case', 'level=WARN', 'level'],
     ['a module longer than its bound', `module=${'m'.repeat(129)}`, 'module'],
-    ['a conversation longer than its bound', `conversation_id=${'c'.repeat(129)}`, 'conversation_id'],
+    [
+      'a conversation longer than its bound',
+      `conversation_id=${'c'.repeat(129)}`,
+      'conversation_id',
+    ],
     ['a text search longer than its bound', `text=${'t'.repeat(257)}`, 'text'],
     ['a module holding a control character', 'module=core%0A', 'module'],
     ['a text search holding a control character', 'text=needle%00', 'text'],
@@ -173,7 +177,11 @@ describe('the logs API passes each new filter to the store', () => {
     };
     expect(body.records).toHaveLength(3);
     expect(body.records.every((record) => record.fields['level'] === 'warn')).toBe(true);
-    expect(fixture.requests.at(-1)?.query).toContain('level:="warn"');
+    expect(
+      fixture.requests.find((request) =>
+        request.query?.includes('| sort by (_time desc, _msg desc, pod desc)')
+      )?.query
+    ).toContain('level:="warn"');
   });
 
   it('narrows by conversation alone', async () => {
@@ -187,7 +195,11 @@ describe('the logs API passes each new filter to the store', () => {
     expect(body.records.every((record) => record.fields['conversation_id'] === 'conv_1')).toBe(
       true
     );
-    expect(fixture.requests.at(-1)?.query).toContain('conversation_id:="conv_1"');
+    expect(
+      fixture.requests.find((request) =>
+        request.query?.includes('| sort by (_time desc, _msg desc, pod desc)')
+      )?.query
+    ).toContain('conversation_id:="conv_1"');
   });
 
   it('narrows by text search alone', async () => {
@@ -199,7 +211,11 @@ describe('the logs API passes each new filter to the store', () => {
       'needle in the second bucket',
       'needle in the first bucket',
     ]);
-    expect(fixture.requests.at(-1)?.query).toContain('_msg:"needle"');
+    expect(
+      fixture.requests.find((request) =>
+        request.query?.includes('| sort by (_time desc, _msg desc, pod desc)')
+      )?.query
+    ).toContain('_msg:"needle"');
   });
 
   it('narrows by every filter together', async () => {
@@ -211,8 +227,6 @@ describe('the logs API passes each new filter to the store', () => {
     const body = JSON.parse(response.body) as {
       records: { time: string; message: string }[];
     };
-    expect(body.records.map((record) => record.message)).toEqual([
-      'needle in the second bucket',
-    ]);
+    expect(body.records.map((record) => record.message)).toEqual(['needle in the second bucket']);
   });
 });

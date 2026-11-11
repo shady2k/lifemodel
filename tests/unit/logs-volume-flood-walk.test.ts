@@ -71,7 +71,6 @@ describe("the volume flood walk's arguments and header", () => {
       '--commit-interval-ms',
       '--flood-seconds',
       '--commit-gap-bound',
-      '--metrics-port',
       '--throttle-seconds',
     ]) {
       expect(help).toContain(name);
@@ -83,7 +82,7 @@ describe("the volume flood walk's arguments and header", () => {
     expect(header).toContain('WALK-LOGS-VOLUME-FLOOD');
     expect(header).toMatch(/ADR-016 L05/);
     expect(header).toContain('10 %');
-    expect(header).toContain('127.0.0.1:9598');
+    expect(header).toContain('throttle-window');
     expect(header).toContain('lifemodel-motor');
     expect(header).toMatch(/What it does not cover/);
   });

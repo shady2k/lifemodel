@@ -123,7 +123,11 @@ describe("the collector's configuration is rolled by its content hash", () => {
       readOnly: true,
     });
     // Vector reads the file once: no watch, so the roll is what applies a change.
-    expect(container.args).toEqual(['--config', '/etc/vector/vector.yaml']);
+    expect(container.command).toEqual(['/bin/bash', '-ec']);
+    expect(container.args).toHaveLength(1);
+    expect(container.args[0]).toContain('export VECTOR_COLLECTOR_START=$(date -u');
+    expect(container.args[0]).toContain('exec vector --config /etc/vector/vector.yaml');
+    expect(container.args[0]).not.toContain('--watch-config');
     // The only ConfigMap in the step is the generated one, so no fixed-name
     // object can be what the volume mounts while the hash moves.
     expect(

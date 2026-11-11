@@ -41,9 +41,13 @@ spec:
         - name: logs-collector
           image: docker.io/timberio/vector@sha256:f6c23b5a7e16fb2838d33619ef7acf4bad2289a7cf22bc90efc2371f520c4ea2
           imagePullPolicy: IfNotPresent
+          # Process start, not Pod creation: a container restart makes its first
+          # aligned counter window partial and readers must not call it exact.
+          command: ['/bin/bash', '-ec']
           args:
-            - --config
-            - /etc/vector/vector.yaml
+            - |
+              export VECTOR_COLLECTOR_START=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
+              exec vector --config /etc/vector/vector.yaml
           env:
             - name: VECTOR_SELF_NODE_NAME
               valueFrom:

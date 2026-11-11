@@ -58,6 +58,39 @@ ones that would explain a flood.
 - `unavailable — <reason>` — the store did not answer; the page says why instead
   of showing an empty list.
 
+## Task pod throttling
+
+Above the records, the page shows discarded **events per namespace/pod and paired
+6-second window**, over the chosen time range, independently of message
+filters. The collector stores two counters under `module=throttle-window`:
+`input` before throttling and `accepted` after it. For exactly one valid pair
+with matching pod and window boundaries, discarded is `input - accepted`.
+Equal counters mean no events discarded; input alone never means loss.
+Missing, invalid or duplicate counters show **discarded count unknown**,
+never zero. Counter records include the collector process's `collector_start`.
+A window that starts before that process started is partial and unknown;
+counters from different processes cannot form an exact pair. Missing whole
+windows between a pod's first and last evidenced windows appear as unknown
+intervals only when the collector process changed across the gap. A gap in
+one collector process can simply be an idle pod and is not called loss. One unknown pair or interval makes the overall status unknown,
+while valid pairs still show their own exact loss. A store failure or a
+truncated counter read is unknown too.
+
+The first page reads the counter snapshot once; older pages preserve it.
+Any untrusted pod visible in the first page with no counters is shown as unknown,
+including pods outside the motor namespace. The namespace and pod together
+identify the quota and the displayed counter; empty identities are shown as `?`.
+When neither counters nor task records are available the overall result is
+unknown. Completely missing leading or trailing windows cannot be detected
+without evidence; no total is inferred for them. Separate input and accepted
+records can arrive at different times, and a crash can lose their in-memory
+counts. These counters are not a durable audit of every event.
+
+The limit counts events, not bytes: long lines can still use substantial disk
+space. Counters are collector-owned fields, not parsed task message text.
+Normalized task records always carry `untrusted` and cannot supply a counter,
+even if their pod label says `throttle-window`.
+
 ## If the collector is killed hard
 
 If the log collector is killed hard, the page can miss up to about a second of
