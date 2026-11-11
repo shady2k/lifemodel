@@ -832,16 +832,20 @@ def flood_case(report, options, loader, cluster, store, volume, state):
 def throttle_case(report, options, loader, cluster, store, state):
     """Admitted task writers overlap a trusted writer; absent evidence is invalid."""
     from logs_task_writer import THROTTLE_SECONDS_MAX, TASK_WRITER_BOUND
-    from logs_walk_support import parse_ms, start_task_writer
+    from logs_walk_support import parse_ms, stamp, start_task_writer
 
     seconds, launch_bound = options.throttle_seconds, TASK_WRITER_BOUND
     if not 1 <= seconds <= THROTTLE_SECONDS_MAX:
         report.not_valid('throttle_seconds must be 1..%d with the %d s launch allowance'
                          % (THROTTLE_SECONDS_MAX, TASK_WRITER_BOUND))
         return False
+    # Both task writers run through the other's whole launch allowance, so a
+    # slow agent start moves their shared window instead of closing it. The
+    # trusted writer covers both launches and the longer task run.
+    task_seconds = seconds + launch_bound
     trusted_manifest = writer_manifest(
         options, options.writer_namespace, 'walk-trusted-writer', TRUSTED_MODULE,
-        state['trusted_run'], seconds + 2 * launch_bound + 20,
+        state['trusted_run'], 2 * launch_bound + task_seconds + 20,
         options.trusted_interval_ms)
     if not create_pod(report, cluster, trusted_manifest):
         return False
@@ -853,62 +857,80 @@ def throttle_case(report, options, loader, cluster, store, state):
     if fast is None:
         return False
     large = start_task_writer(report, options, loader, cluster, state['task_large'],
-                              20, seconds, size=LARGE_TASK_LINE_BYTES, bound=launch_bound)
+                              20, task_seconds, size=LARGE_TASK_LINE_BYTES,
+                              bound=launch_bound)
     if large is None:
         return False
     # The large writer's line is the largest the walk writes; a full page of
     # 1000 of them exceeds the loader's 16 MiB answer limit.
     page_limit = loader_page_limit(LARGE_TASK_LINE_BYTES)
     time.sleep(seconds + 2)
-    intervals = []
-    written = []
-    task_info = {}
-    for namespace, pod, prefix, run_id, module, first_ms in (
-        (options.writer_namespace, 'walk-trusted-writer', TRUSTED_MODULE,
-         state['trusted_run'], TRUSTED_MODULE, None),
-        (TASKS_NAMESPACE, fast[0], TASK_MODULE, fast[2], fast[1], fast[3]),
-        (TASKS_NAMESPACE, large[0], TASK_MODULE, large[2], large[1], large[3]),
-    ):
-        if namespace == options.writer_namespace:
-            result = cluster.run(['-n', namespace, 'logs', pod, '--timestamps',
-                                  '--tail=200000'], timeout=120)
-            lines = result.stdout.splitlines() if result.returncode == 0 else []
-            stamps = [parse_ms(line.split(' ', 1)[0]) for line in lines
-                      if numbered(line, prefix, run_id)]
-            written = numbered(result.stdout if result.returncode == 0 else '',
-                               TRUSTED_MODULE, state['trusted_run'])
-            stamps = [stamp for stamp in stamps if stamp is not None]
-            if len(set(stamps)) < 2:
-                report.not_valid('a writer has fewer than two timestamped numbered lines: ' + pod)
-                return False
-            intervals.append((min(stamps), max(stamps)))
-            continue
-        # The task writer's first line is the marker the helper collected; its
-        # last line is the newest record of that attempt's own run id. One record
-        # at offset 0 never reads a deep page.
-        if first_ms is None:
+    task_info = {fast[0]: {'run_id': fast[2], 'module': fast[1], 'first_ms': fast[3]},
+                 large[0]: {'run_id': large[2], 'module': large[1], 'first_ms': large[3]}}
+    for pod, info in task_info.items():
+        if info['first_ms'] is None:
             report.not_valid('writer %s has no first collected line timestamp' % pod)
             return False
-        status, answer = loader.logs_page({
-            'from': str(first_ms), 'to': str(now_ms()), 'module': module,
-            'text': run_id, 'limit': '1'})
-        if status != 200:
-            report.not_valid('the loader refused the last-line read for %s (HTTP %d)'
-                             % (pod, status))
+    # The task writers run long enough that their line timestamps overlap for
+    # the whole burst; the collector's read lag only delays seeing it, so poll
+    # until the required window is evidenced or the recover bound ends.
+    required = seconds * 1000
+    deadline = time.monotonic() + options.recover_bound
+    intervals = []
+    overlap = None
+    while time.monotonic() < deadline:
+        result = cluster.run(['-n', options.writer_namespace, 'logs',
+                              'walk-trusted-writer', '--timestamps', '--tail=200'],
+                             timeout=120)
+        stamps = [parse_ms(line.split(' ', 1)[0])
+                  for line in (result.stdout.splitlines() if result.returncode == 0 else [])
+                  if numbered(line, TRUSTED_MODULE, state['trusted_run'])]
+        stamps = [value for value in stamps if value is not None]
+        if not stamps:
+            report.not_valid('the trusted writer has no timestamped numbered line')
             return False
-        records = (answer or {}).get('records') or []
-        last_ms = parse_ms(records[0].get('time')) if records else None
-        if last_ms is None:
-            report.not_valid('writer %s has no readable last line' % pod)
-            return False
-        task_info[pod] = {'run_id': run_id, 'first_ms': first_ms}
-        intervals.append((first_ms, last_ms))
-    overlap = min(end for _, end in intervals) - max(start for start, _ in intervals)
-    if overlap <= 0:
-        report.not_valid('timestamped writer records prove no common task/trusted writer overlap')
+        # The trusted writer is created and Running before the task chats, so
+        # its start never bounds the common window; only its current end does.
+        intervals = [{'name': 'walk-trusted-writer', 'start': 0, 'end': max(stamps)}]
+        for pod, info in task_info.items():
+            # The task writer's first line is the marker the helper collected;
+            # its last line is the newest record of that attempt's own run id.
+            # One record at offset 0 never reads a deep page.
+            status, answer = loader.logs_page({
+                'from': str(info['first_ms']), 'to': str(now_ms()), 'module': info['module'],
+                'text': info['run_id'], 'limit': '1'})
+            if status != 200:
+                report.not_valid('the loader refused the last-line read for %s (HTTP %d)'
+                                 % (pod, status))
+                return False
+            records = (answer or {}).get('records') or []
+            last_ms = parse_ms(records[0].get('time')) if records else None
+            if last_ms is None:
+                report.not_valid('writer %s has no readable last line' % pod)
+                return False
+            intervals.append({'name': pod, 'start': info['first_ms'], 'end': last_ms})
+        overlap = (min(entry['end'] for entry in intervals)
+                   - max(entry['start'] for entry in intervals))
+        if overlap >= required:
+            break
+        time.sleep(5)
+    if overlap is None or overlap < required:
+        late = max(intervals, key=lambda entry: entry['start'])
+        report.not_valid(
+            'the three writers overlap for %d ms by line timestamps, %d ms short of the '
+            'required %d s; %s started last at %s'
+            % (overlap, required - overlap, seconds, late['name'], stamp(late['start'])))
         return False
-    report.pass_('both task writers actually overlap the trusted writer',
-                 '%d ms common timestamp interval' % overlap)
+    report.pass_('all three writers overlap by line timestamps',
+                 '%d ms common timestamp interval, at least %d s required'
+                 % (overlap, seconds))
+    result = cluster.run(['-n', options.writer_namespace, 'logs', 'walk-trusted-writer',
+                          '--timestamps', '--tail=200000'], timeout=120)
+    written = numbered(result.stdout if result.returncode == 0 else '',
+                       TRUSTED_MODULE, state['trusted_run'])
+    if len(set(written)) < 2:
+        report.not_valid('the trusted writer wrote fewer than two timestamped numbered lines')
+        return False
     task_pods = set(task_info)
     first_bound = min(info['first_ms'] for info in task_info.values())
     counter = None

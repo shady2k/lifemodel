@@ -23,12 +23,42 @@ describe('the throttle uses admitted core task writers', () => {
     const line = result.stdout.split('\n').find((value) => value.startsWith('INTEGRATION '));
     const value = JSON.parse((line ?? '').slice('INTEGRATION '.length));
     expect(value.ok).toBe(true);
-    expect(value.calls).toEqual([
-      { run: 'fast', rate: 1000, size: 0 },
-      { run: 'large', rate: 20, size: 20 * 1024 },
-    ]);
+    const [fast, large] = value.calls;
+    expect(fast.run).toBe('fast');
+    expect(fast.rate).toBe(1000);
+    expect(fast.size).toBe(0);
+    expect(large.run).toBe('large');
+    expect(large.rate).toBe(20);
+    expect(large.size).toBe(20 * 1024);
+    expect(fast.seconds).toBe(3 + fast.bound);
+    expect(large.seconds).toBe(3 + large.bound);
     expect(value.created).toEqual(['trusted']);
     expect(value.elapsed).toBeGreaterThanOrEqual(3);
+    expect(result.stdout).toContain('all three writers overlap by line timestamps');
+    expect(result.stdout).toContain('at least 3 s required');
+  });
+  it('lets both task writers run through the other launch and covers both with the trusted writer', () => {
+    const result = run('valid');
+    const value = JSON.parse(
+      (result.stdout.split('\n').find((line) => line.startsWith('INTEGRATION ')) ?? '').slice(
+        'INTEGRATION '.length
+      )
+    ) as {
+      calls: { seconds: number; bound: number }[];
+      manifests: { name: string; seconds: number }[];
+    };
+    const bound = value.calls[0].bound;
+    for (const call of value.calls) expect(call.seconds).toBe(3 + bound);
+    expect(value.manifests).toEqual([
+      { name: 'walk-trusted-writer', seconds: 3 + 3 * bound + 20 },
+    ]);
+  });
+  it('says how short the overlap was and which writer started last', () => {
+    const result = run('no-overlap');
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('TEST NOT VALID');
+    expect(result.stdout).toContain('5000 ms short of the required 3 s');
+    expect(result.stdout).toContain('task-large started last');
   });
   it('uses durable task timestamps after the core deletes completed pods', () => {
     const result = run('deleted-pods');
@@ -94,7 +124,7 @@ describe('the throttle uses admitted core task writers', () => {
       expect(fast.rate).toBe(1000);
       expect(large.run).toBe('large');
       expect(large.rate).toBe(20);
-      expect(large.seconds).toBe(seconds);
+      expect(large.seconds).toBe(seconds + large.bound);
       expect(fast.seconds).toBe(seconds + fast.bound);
       for (const call of value.validated) expect(call.validated).toBe(true);
       expect(result.stdout).not.toContain('arguments are outside the bounded walk limits');

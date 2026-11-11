@@ -25,7 +25,8 @@ def realistic():
 
 
 def start_task_writer(report, options, loader, cluster, run_id, rate, seconds, size=0, bound=180):
-    calls.append({'run': run_id, 'rate': rate, 'size': size})
+    calls.append({'run': run_id, 'rate': rate, 'size': size, 'seconds': seconds,
+                  'bound': bound})
     if mode == 'denied':
         report.not_valid('the core did not launch a task writer')
         return None
@@ -91,7 +92,16 @@ def create_pod(report, cluster, manifest):
         raise AssertionError('direct task pod creation bypasses core ownership')
     return True
 walk.create_pod = create_pod
-walk.writer_manifest = lambda options, namespace, *args, **kwargs: {'metadata': {'namespace': namespace}}
+manifests = []
+
+
+def writer_manifest(options, namespace, name, module, run_id, seconds, interval, *args,
+                    **kwargs):
+    manifests.append({'name': name, 'seconds': seconds})
+    return {'metadata': {'namespace': namespace}}
+
+
+walk.writer_manifest = writer_manifest
 walk.wait_running = lambda *args: True
 
 
@@ -204,6 +214,8 @@ class Cluster:
                 'walk-task-writer fast' if name == 'task-fast' else 'walk-task-writer large')
             if realistic():
                 start, end = '2026-11-10T15:49:00Z', '2026-11-10T15:56:30Z'
+            elif mode.startswith('args'):
+                start, end = '2026-11-09T23:59:00Z', '2026-11-10T00:11:00Z'
             else:
                 first, last = ('00', '03') if mode != 'no-overlap' or name != 'task-large' else ('05', '08')
                 start, end = '2026-11-10T00:00:' + first + 'Z', '2026-11-10T00:00:' + last + 'Z'
@@ -217,6 +229,8 @@ class Loader:
             pod = 'task-fast' if run_id.startswith('fast') else 'task-large'
             if realistic():
                 end = '2026-11-10T15:55:19Z' if pod == 'task-fast' else '2026-11-10T15:56:22Z'
+            elif mode.startswith('args'):
+                end = '2026-11-10T00:10:00Z'
             else:
                 end = '2026-11-10T00:00:' + (
                     '08' if mode == 'no-overlap' and pod == 'task-large' else '03') + 'Z'
@@ -242,5 +256,6 @@ report = walk.Report()
 state = {'trusted_run': 'trusted', 'task_fast': 'fast', 'task_large': 'large', 'throttle_start': 0}
 ok = walk.throttle_case(report, options, Loader(), Cluster(), Store(), state)
 print('INTEGRATION ' + json.dumps({'ok': ok, 'calls': calls, 'created': created,
-                                  'elapsed': clock[0], 'validated': validated}))
+                                  'elapsed': clock[0], 'validated': validated,
+                                  'manifests': manifests}))
 sys.exit(report.result())
