@@ -65,6 +65,12 @@
 // and viewport from the ordinary page, then closes even if the scan fails. Its
 // screenshot and result are accessibility evidence, not CSP acceptance.
 //
+// Throttle proof: one core-owned 1000 lines/s task runs for 30 s. The API must
+// expose a complete positive-discard window within 180 s after the launch step
+// returns (the launch itself is bounded at 360 s). Each browser/theme captures
+// that fixed range, verifies the exact API count on screen and saves throttle
+// PNG/JSON plus a separate axe screenshot. Missing evidence is TEST NOT VALID.
+//
 // What it does not cover
 // ----------------------
 // PRA-001 asks for every state the feature document claims; the ADR's "built so
@@ -76,10 +82,11 @@
 // (WALK-LOGS-EVICT does); when present, its MiB label is checked.
 import { chromium, firefox } from 'playwright-core';
 import { findTaskRecord } from './logs-page-task.mjs';
+import { prepareThrottle, proveThrottle } from './logs-page-throttle-browser.mjs';
 import { gotoWithRetry, scanLogsAxe, observeUnavailableLogs } from './logs-page-browser.mjs';
 import { formWindow } from './logs-page-filters.mjs';
 import net from 'node:net';
-import { readFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import {
@@ -173,6 +180,7 @@ mkdirSync(OUT, { recursive: true });
 
 let failures = 0;
 let taskWriterRecord = null;
+let throttleEvidence;
 const state = { storeScaled: false, coreScaled: false, webScaled: false };
 const check = (ok, what, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'} ${what}${detail ? ' - ' + detail : ''}`);
@@ -295,7 +303,7 @@ async function windowRecords(page, window) {
 }
 
 async function countLine(page) {
-  const text = (await page.locator('section p').first().textContent()) ?? '';
+  const text = (await page.locator('section[aria-busy] p').first().textContent()) ?? '';
   const match = /(\d+)/.exec(text.replace(/[\u00a0\u202f]/g, ' '));
   return { text: text.trim(), count: match ? Number(match[1]) : null };
 }
@@ -700,6 +708,50 @@ try {
         const noticeText = await page.locator('[role=note]').first().innerText();
         check(noticeText.includes('MiB'), `${tag}: the eviction notice states the space in MiB`, noticeText.slice(0, 80));
         await page.screenshot({ path: shot('eviction-notice') });
+      }
+
+      // One genuine high-rate task supplies all engines/languages/themes. No
+      // synthetic records or mocked responses can satisfy this proof.
+      if (throttleEvidence === undefined) {
+        throttleEvidence = await prepareThrottle(async (range, remaining) => {
+          return page.evaluate(async ({ range, remaining }) => {
+            const response = await fetch(`/api/logs?from=${range.from}&to=${range.to}&limit=200`, {
+              cache: 'no-store', signal: AbortSignal.timeout(Math.max(1, remaining)),
+            });
+            return response.ok ? response.json() : null;
+          }, { range, remaining });
+        }, () => {
+          try {
+            const output = execFileSync('python3', [
+              resolve(import.meta.dirname, 'logs-task-writer-step.py'),
+              '--password-file', resolve(pwFile), '--loader-host', TARGET,
+              '--loader-port', '443', '--origin-host', HOST,
+              '--kubectl', KUBECTL.join(' '), '--web-namespace', APP_NAMESPACE,
+              '--web-deployment', WEB_DEPLOYMENT, '--run-id', `walk-throttle-${Date.now()}`,
+              '--rate', '1000', '--seconds', '30', '--bound', '360',
+            ], { encoding: 'utf8', timeout: 900000, stdio: ['ignore', 'pipe', 'pipe'] });
+            const result = output.split('\n').find((line) => line.startsWith('TASK_WRITER_RESULT '));
+            return result ? JSON.parse(result.slice('TASK_WRITER_RESULT '.length)) : null;
+          } catch {
+            return null;
+          }
+        });
+      }
+      if (!throttleEvidence.window) {
+        notValid(`${tag}: throttle display: ${throttleEvidence.reason}; `
+          + 'no complete positive-discard window within 180 s of verified task launch');
+      } else {
+        try {
+          const observed = await proveThrottle(browser, page, {
+            url: `https://${HOST}/logs`, evidence: throttleEvidence, language,
+            variant, axeSource, screenshot: shot('throttle'),
+          });
+          writeFileSync(shot('throttle').replace(/\.png$/, '.json'), JSON.stringify(observed, null, 2));
+          check(true, `${tag}: throttle count matches the API and is axe/contrast-clean`,
+            `${observed.window.namespace}/${observed.window.pod}: ${observed.window.discarded}`);
+        } catch (error) {
+          notValid(`${tag}: throttle display: ${String(error.message).slice(0, 500)}`);
+        }
       }
 
       // Paging: a window wide enough for a second page, then back to the first.
