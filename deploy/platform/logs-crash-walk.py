@@ -241,9 +241,17 @@ def writer_image(cluster, options):
 
 
 def collector_pod(cluster, options):
+    """One running, Ready collector pod; a walk pod in the same namespace is never it."""
     pods = cluster.pods(options.collector_namespace,
                         'app.kubernetes.io/name=' + options.collector)
-    return pods[0] if pods else None
+    usable = [pod for pod in pods
+              if not ((pod.get('metadata') or {}).get('name') or '').startswith('walk-crash-')]
+    usable.sort(key=lambda pod: (
+        (pod.get('status') or {}).get('phase') != 'Running',
+        not any(condition.get('type') == 'Ready' and condition.get('status') == 'True'
+                for condition in ((pod.get('status') or {}).get('conditions') or [])),
+        (pod.get('metadata') or {}).get('creationTimestamp') or ''))
+    return usable[0] if usable else None
 
 
 def collector_pod_name(cluster, options):
@@ -299,34 +307,93 @@ def component_value(values, name, component):
     return None
 
 
+def metrics_body_report(text):
+    """What a metrics response actually carried, for a failure that names it."""
+    families = set()
+    buffer_components = set()
+    vector_lines = 0
+    for raw in (text or '').splitlines():
+        line = raw.strip()
+        if line == '' or line.startswith('#'):
+            continue
+        sample = line.split(' ')
+        if len(sample) < 2:
+            continue
+        name = sample[0].split('{')[0]
+        if name == '':
+            continue
+        families.add(name)
+        if name.startswith('vector_'):
+            vector_lines += 1
+        if name.startswith('vector_buffer_'):
+            component = re.search(r'component_id="([^"]*)"', sample[0])
+            if component is not None:
+                buffer_components.add(component.group(1))
+    return {'bytes': len(text or ''), 'lines': len((text or '').splitlines()),
+            'families': len(families), 'vectorLines': vector_lines,
+            'bufferComponents': sorted(buffer_components)}
+
+
+def metrics_reason(text, pod, status=200):
+    """Why a metrics response cannot be used, with the body's own evidence."""
+    report = metrics_body_report(text)
+    if report['vectorLines'] == 0:
+        return ('GET /metrics on pod %s answered %d with %d bytes / %d lines but no '
+                'vector_ metric: this is not the collector\'s exporter'
+                % (pod, status, report['bytes'], report['lines']))
+    return ('GET /metrics on pod %s answered %d with %d vector lines, but no buffer gauge '
+            'for component_id="logs-store"; buffer component ids seen: %s'
+            % (pod, status, report['vectorLines'],
+               ', '.join(report['bufferComponents']) or 'none'))
+
+
 def read_metrics(options, cluster):
-    """The collector's exporter, read through a port-forward: (values, reason)."""
+    """The collector's exporter, read through a port-forward: (values, reason).
+
+    A reading that answers but carries no gauge is retried once on a fresh
+    port-forward; when it still fails, the reason names the pod, the HTTP status
+    and what the body did carry, so a wrong endpoint or a partial body is never
+    reported as a silently missing buffer.
+    """
     pod = collector_pod_name(cluster, options)
     if not pod:
         return None, 'the collector has no pod'
-    forward = PortForward(options.kubectl, options.collector_namespace, 'pod/' + pod,
-                          free_port(), options.metrics_port)
-    forward.start()
-    try:
-        if not forward.wait_ready(20):
-            return None, ('nothing answered port %d on %s (%s)'
-                          % (options.metrics_port, pod, forward.death or 'never ready'))
-        connection = http.client.HTTPConnection('127.0.0.1', forward.local_port, timeout=15)
+    reason = ''
+    for _attempt in range(2):
+        forward = PortForward(options.kubectl, options.collector_namespace, 'pod/' + pod,
+                              free_port(), options.metrics_port)
+        forward.start()
         try:
-            connection.request('GET', '/metrics')
-            response = connection.getresponse()
-            body = response.read(4 * 1024 * 1024).decode('utf8', 'replace')
-            if response.status != 200:
-                return None, 'GET /metrics answered %d' % response.status
+            if not forward.wait_ready(20):
+                reason = ('nothing answered port %d on %s (%s)'
+                          % (options.metrics_port, pod,
+                             forward.death or 'never ready'))
+                continue
+            connection = http.client.HTTPConnection('127.0.0.1', forward.local_port,
+                                                    timeout=60)
+            try:
+                connection.request('GET', '/metrics')
+                response = connection.getresponse()
+                body = response.read().decode('utf8', 'replace')
+                status = response.status
+            except (OSError, http.client.HTTPException) as error:
+                reason = ('GET /metrics on pod %s failed: %s'
+                          % (pod, type(error).__name__))
+                continue
+            finally:
+                connection.close()
         finally:
-            connection.close()
-    finally:
-        forward.close()
-    values = parse_metrics(body, {BUFFER_SIZE, BUFFER_MAX, BUFFER_BYTES, BUFFER_MAX_BYTES, RECEIVED, SENT, BUFFER_RECEIVED, BUFFER_SENT})
-    if (component_value(values, BUFFER_SIZE, 'logs-store') is None
-            and component_value(values, BUFFER_BYTES, 'logs-store') is None):
-        return None, 'the exporter carries no buffer gauge for component_id="logs-store"'
-    return values, 'HTTP 200'
+            forward.close()
+        if status != 200:
+            return None, 'GET /metrics on pod %s answered %d' % (pod, status)
+        values = parse_metrics(body, {BUFFER_SIZE, BUFFER_MAX, BUFFER_BYTES,
+                                      BUFFER_MAX_BYTES, RECEIVED, SENT,
+                                      BUFFER_RECEIVED, BUFFER_SENT})
+        if (component_value(values, BUFFER_SIZE, 'logs-store') is not None
+                or component_value(values, BUFFER_BYTES, 'logs-store') is not None):
+            return values, 'HTTP 200'
+        reason = metrics_reason(body, pod, status)
+    return None, reason or 'the exporter answered nothing readable'
 
 
 def source_rate_sample(values, reason, options, before_writers=False):
@@ -1730,13 +1797,18 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                                'reason': termination_reason(cluster, options)}
                         break
                 if time.monotonic() >= fill_deadline:
-                    report.not_valid(
-                        'the sink buffer never reached its maximum within the %d s saturation '
-                        'clock at this write rate: the last reading was %s (%s); saturation is '
-                        'never inferred from writer totals'
-                        % (plan['bound'],
-                           json.dumps(state_now) if state_now else 'none',
-                           reason or 'the exporter answered'))
+                    if metrics is None:
+                        report.not_valid(
+                            'the sink buffer could not be read within the %d s saturation '
+                            'clock: the last read failed: %s; saturation is never inferred '
+                            'from writer totals'
+                            % (plan['bound'], reason or 'no reason given'))
+                    else:
+                        report.not_valid(
+                            'the sink buffer never reached its maximum within the %d s '
+                            'saturation clock at this write rate: the last reading was %s; '
+                            'saturation is never inferred from writer totals'
+                            % (plan['bound'], json.dumps(state_now)))
                     return False
                 time.sleep(3)
             if oom is not None:

@@ -44,20 +44,34 @@ describe('the throttle uses admitted core task writers', () => {
     expect(detail).toContain('task-large: 5 window(s), input 600, accepted 600');
     expect(result.stdout).toContain('7000 ms common timestamp interval');
   });
-  it('allows a counter gap inside one collector process only when the pod wrote nothing then', () => {
-    const idle = run('gap-idle');
-    expect(idle.status, idle.stdout + idle.stderr).toBe(0);
-    expect(idle.stdout).toContain('"ok": true');
-    expect(idle.stdout).toContain('task-fast: 36 window(s)');
-    const written = run('gap-with-line');
-    expect(written.status).toBe(1);
-    expect(written.stdout).toContain('TEST NOT VALID');
-    expect(written.stdout).toContain('task-fast: window 2026-11-10T15:52:00Z is missing');
+  it('notes a processing-time gap without comparing it with the lines\' write time (r53)', () => {
+    const result = run('processing-gap');
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain('"ok": true');
+    expect(result.stdout).toContain('NOTE');
+    expect(result.stdout).toContain(
+      'task-fast: 1 window(s) without counters inside a collector process'
+    );
+    expect(result.stdout).toContain('2026-11-10T15:52:00Z');
+  });
+  it('judges windows per collector process and notes the handover', () => {
+    const result = run('two-collectors');
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain('"ok": true');
+    expect(result.stdout).toContain('task-fast: counter windows come from 2 collector processes');
+  });
+  it('fails a stored-line mismatch and names the pod', () => {
+    const result = run('stored-mismatch');
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('TEST NOT VALID');
+    expect(result.stdout).toContain(
+      'task-fast: accepted total 110260 differs from 110261 stored line(s)'
+    );
   });
   it.each([
-    ['two-collectors', 'task-fast: counter windows name 2 collector processes'],
-    ['stored-mismatch', 'task-fast: accepted total 110260 differs from 110261 stored line(s)'],
-  ])('names the pod and the windows that do not reconcile: %s', (mode, detail) => {
+    ['duplicate', 'task-large: window 2026-11-10T00:00:00Z has 2 accepted records'],
+    ['missing', 'task-large: window 2026-11-10T00:00:00Z has no complete counter pair'],
+  ])('fails a duplicate or unpaired counter and names the window: %s', (mode, detail) => {
     const result = run(mode);
     expect(result.status).toBe(1);
     expect(result.stdout).toContain('TEST NOT VALID');
