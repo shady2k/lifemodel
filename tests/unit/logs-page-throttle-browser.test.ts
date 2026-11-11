@@ -52,7 +52,7 @@ describe('proving the same filtered state in the axe context', () => {
     const result = run('prove');
     expect(result.error).toBeUndefined();
     const index = (name: string, event: string) => result.events.findIndex((entry) => entry[0] === name && entry[1] === event);
-    expect(index('ordinary', 'screenshot')).toBeLessThan(index('ordinary', 'hover'));
+    expect(index('ordinary', 'hover')).toBeLessThan(index('ordinary', 'screenshot'));
     expect(index('ordinary', 'hover')).toBeLessThan(index('scan', 'goto'));
     expect(index('scan', 'visible')).toBeLessThan(index('scan', 'inject'));
     expect(result.events.at(-1)).toEqual(['close']);
