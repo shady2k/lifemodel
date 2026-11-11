@@ -47,7 +47,9 @@ elif mode == 'run-order':
     walk.safe_load = lambda *args: True
     walk.collector_restarts = lambda *args: 0
     walk.writer_image = lambda *args: 'image'
-    walk.ensure_namespace = lambda *args: True
+    walk.require_namespace = lambda *args: True
+    walk.clear_walk_pods = lambda *args: None
+    walk.trust_probe = lambda *args: True
     walk.wait_store_down = lambda *args: True
     walk.store_replicas = lambda *args: 1
     walk.set_replicas = lambda *args: True

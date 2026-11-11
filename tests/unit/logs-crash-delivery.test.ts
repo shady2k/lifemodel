@@ -58,7 +58,7 @@ describe('the delivery verdict is counted in the store itself', () => {
     expect(value.verdict.detail).toContain("0 missing of which 0 are still in the kubelet's files");
     expect(value.verdict.detail).toContain('no retained line is missing');
     expect(value.sql[0]).toContain('pod:="walk-crash-writer"');
-    expect(value.sql[0]).toContain('namespace:="lifemodel-logs-walk"');
+    expect(value.sql[0]).toContain('namespace:="lifemodel-logs"');
     expect(value.sql[0]).toContain('extract "seq=<seq> "');
     expect(value.sql[0]).toContain('filter seq:range[');
     expect(value.sql[0]).toContain('stats count() n, count_uniq(seq) uniq');
