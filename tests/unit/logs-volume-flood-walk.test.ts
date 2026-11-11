@@ -143,9 +143,26 @@ describe('a fake node for the volume flood walk', () => {
     );
     expect(value.good).toBe(true);
     expect(value.bad).toBe(false);
-    expect(value.detail).toContain('500 events per second per pod');
+    expect(value.detail).toContain('task-fast: 2 window(s), input 700, accepted 120, stored 120');
   });
 
+  it('counts each pod\'s stored lines with its own run id, over exact windows', () => {
+    const value = jsonLine<{
+      total: number;
+      window: number;
+      bad: string | null;
+      queries: string[];
+    }>(harness('stored-counts'), 'COUNTS');
+    expect(value.total).toBe(42);
+    expect(value.window).toBe(42);
+    expect(value.bad).toBe('store_count_value');
+    expect(value.queries[0]).toContain('module:"task" namespace:"lifemodel-motor"');
+    expect(value.queries[0]).toContain('pod:="task-fast"');
+    expect(value.queries[0]).toContain('_msg:"fast-a2"');
+    expect(value.queries[0]).toContain('| stats count(*)');
+    expect(value.queries[0]).toContain('_time:[1970-01-01T00:00:00.000Z, 1970-01-01T00:00:06.000Z]');
+    expect(value.queries[1]).toContain('_time:[1970-01-01T00:00:00.000Z, 1970-01-01T00:00:05.999Z]');
+  });
   it('fails the page when a status read answered nothing', () => {
     const value = jsonLine<{ ok: boolean; bad: boolean; detail: string }>(
       harness('readings'),
