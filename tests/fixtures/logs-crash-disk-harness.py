@@ -71,6 +71,7 @@ elif mode == 'case-order':
     walk.wait_writer = lambda *args: True
     walk.wait_store_down = lambda *args: True
     walk.writer_lines = lambda *args: [1, 2]
+    walk.read_metrics = lambda *args: (None, 'fixture has no collector metrics')
     walk.collector_memory = lambda *args: (100 * walk.MIB, '')
     restarts = iter([0, 1, 1, 1])
     walk.collector_restarts = lambda *args: next(restarts, 1)

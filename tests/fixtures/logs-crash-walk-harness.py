@@ -747,6 +747,7 @@ def crash_load_release(walk, fixture):
     walk.writer_image = lambda *args: 'image'
     walk.wait_writer = lambda *args: True
     walk.writer_lines = lambda *args: [1, 2]
+    walk.read_metrics = lambda *args: (None, 'fixture has no collector metrics')
     walk.collector_memory = lambda *args: (100 * walk.MIB, '')
     walk.require_store_down = lambda *args: True
     walk.set_replicas = lambda *args: True
@@ -901,9 +902,13 @@ def drain(walk, fixture):
                          'received': entry['received'], 'sent': entry['sent']},
                 'counts': [entry['uniq']]}
 
-    ok = walk.wait_for_drain(report, options(drain_ceiling=fixture.get('ceiling', 60)),
-                             None, None, 'run', [10], (0, 1),
-                             fixture.get('buffered', 1000), sample=sample)
+    crash = {'events': fixture.get('backlogEvents'),
+             'size': fixture.get('backlogBytes')}
+    if fixture.get('backlogEvents') is None and fixture.get('backlogBytes') is None:
+        crash = {'events': 1000, 'size': None}
+    ok = walk.wait_for_drain(report, options(drain_ceiling=fixture.get('ceiling', 1800)),
+                             None, None, 'run', fixture.get('written', [10]), (0, 1),
+                             crash, sample=sample)
     print('DRAIN ' + json.dumps({'ok': bool(ok), 'seconds': clock[0],
                                  'samples': index['value']}))
     return report
