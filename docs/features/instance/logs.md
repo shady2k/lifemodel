@@ -91,6 +91,11 @@ space. Counters are collector-owned fields, not parsed task message text.
 Normalized task records always carry `untrusted` and cannot supply a counter,
 even if their pod label says `throttle-window`.
 
+## If the collector is killed hard
+
+If the log collector is killed hard, the page can miss up to about a second of
+lines written just before the kill; nothing else is lost.
+
 ## Nothing leaves the machine
 
 The collector reads this node's pod log files, the store keeps them on a volume
