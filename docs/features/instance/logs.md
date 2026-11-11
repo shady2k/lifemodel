@@ -58,6 +58,15 @@ ones that would explain a flood.
 - `unavailable — <reason>` — the store did not answer; the page says why instead
   of showing an empty list.
 
+## Collector metrics during a store outage
+
+The collector keeps its fixed buffer metrics and delivery-liveness counter for
+up to 30 idle days. Other internal metrics, including changing pod/file series,
+keep the 300-second idle expiry. Vector 0.61 cannot disable expiry for just one
+metric set, so outages longer than 30 days can lose this diagnostic evidence.
+This retention does not mean records were delivered or change the disk-buffer
+limit; the logs page still uses the stored heartbeat to report freshness.
+
 ## Task pod throttling
 
 Above the records, the page shows discarded **events per namespace/pod and paired
