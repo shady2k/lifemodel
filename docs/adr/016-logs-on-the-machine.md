@@ -1198,8 +1198,38 @@ collector exports Vector's internal metrics (`sources.internal_metrics` of type
 the kubelet's stream, not pod networking - and nothing else in the cluster can,
 so no Service, no container port and no NetworkPolicy rule is added and the
 permitted egress set of L10 is unchanged; the sink's buffer gauges
-(`vector_buffer_size_events`, `vector_buffer_max_size_events`) and the source's
-received counter are what `WALK-LOGS-CRASH` reads there for L07.
+(`vector_buffer_size_events`, `vector_buffer_size_bytes`,
+`vector_buffer_max_size_bytes`) and the source's received counter are what
+`WALK-LOGS-CRASH` reads there for L07.
+
+The pinned Vector's internal registry normally expires metrics after 300 seconds
+without an update. A blocked disk buffer can stop updating its usage gauges and
+delivery counters while `internal_metrics` and the exporter remain healthy; the
+exporter then expires the missing series too. Global expiry stays explicitly at
+300 seconds so changing pod/file series are reclaimed. Only internal `buffer_*`
+series with `component_id="logs-store"`, and that sink's
+`component_sent_events_total` (read by `check-delivery.sh`), get a 30-day idle
+expiry through `expire_metrics_per_metric_set`. Names in that option precede
+the exporter's `vector_` prefix. These series describe a fixed sink and buffer,
+not pod/file identities.
+
+Vector 0.61 supports per-set name and label matching, but requires a positive
+`expire_secs`; it cannot disable expiry for just one set. The 30-day value
+(2,592,000 seconds) is a finite outage-observation limit, not permanent evidence:
+a longer idle outage can lose the series. No metric has unbounded retention.
+The native contract keeps the three full-buffer outage cases and additionally
+creates and removes 64 synthetic pod-file identities, proving those dynamic
+internal series disappear after their ordinary expiry while buffer evidence
+stays. Measured with the pinned binary: 64 file identities become zero in the
+same exporter while 37 selected sink series remain (the regression caps them at
+40, including histogram bucket series). This bounds the retained set independently
+of task-pod lifetimes; it is not a claim about peak RSS or every metric family.
+Test-only expiry clocks are shortened to 15 and 120 seconds; production uses
+300 seconds and 30 days. This does not cache an exporter response or claim new delivery progress.
+Vector reserves one 128 MiB disk segment from the configured 320 MiB bound;
+its logical usage gauge therefore reaches backpressure near 192 MiB, not 320
+MiB. The native regression checks that effective limit. This does not replace
+the VM crash/delivery acceptance evidence required by L07.
 
 **Ingest is `glob_minimum_cooldown_ms: 1000` and this is a product setting.** The
 source rescans for new files once a second; that delay is also how long a new

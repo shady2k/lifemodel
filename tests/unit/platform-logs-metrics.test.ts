@@ -23,6 +23,26 @@ describe('the collector\'s internal metrics exporter', () => {
   it('takes Vector\'s internal metrics and exports them on the loopback only', () => {
     const parsed = config();
     expect(parsed.sources.internal_metrics).toEqual({ type: 'internal_metrics' });
+    // Dynamic pod/file series expire; only the fixed buffer series live longer.
+    expect(parsed.expire_metrics_secs).toBe(300);
+    expect(parsed.expire_metrics_per_metric_set).toEqual([
+      {
+        name: { type: 'regex', pattern: '^buffer_' },
+        labels: {
+          type: 'all',
+          matchers: [{ type: 'exact', key: 'component_id', value: 'logs-store' }],
+        },
+        expire_secs: 30 * 24 * 60 * 60,
+      },
+      {
+        name: { type: 'exact', value: 'component_sent_events_total' },
+        labels: {
+          type: 'all',
+          matchers: [{ type: 'exact', key: 'component_id', value: 'logs-store' }],
+        },
+        expire_secs: 30 * 24 * 60 * 60,
+      },
+    ]);
     const exporter = parsed.sinks.metrics;
     expect(exporter.type).toBe('prometheus_exporter');
     expect(exporter.inputs).toEqual(['internal_metrics']);
