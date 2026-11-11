@@ -120,12 +120,44 @@ def trusted_loss(walk, fixture):
 @mode('throttle-windows')
 def throttle_windows(walk, fixture):
     report = walk.Report()
-    good = walk.throttle_verdict([{'pod': 'task-fast', 'input': 400, 'accepted': 60},
-                                  {'pod': 'task-large', 'input': 30, 'accepted': 30}])
-    bad = walk.throttle_verdict([{'pod': 'task-fast', 'input': 30, 'accepted': 40}])
+    good_entries = [
+        {'pod': 'task-fast', 'window_start': 0, 'window_end': 6000, 'input': 400,
+         'accepted': 60, 'collector_starts': {0}},
+        {'pod': 'task-fast', 'window_start': 6000, 'window_end': 12000, 'input': 300,
+         'accepted': 60, 'collector_starts': {0}},
+    ]
+    good = walk.throttle_counter_verdict(good_entries, {'task-fast': 120},
+                                         lambda pod, first: 0)
+    bad = walk.throttle_counter_verdict(
+        [dict(good_entries[0], input=30, accepted=40)], {'task-fast': 40},
+        lambda pod, first: 0)
     print('THROTTLE ' + json.dumps({'good': good['ok'], 'bad': bad['ok'],
                                     'detail': good['detail']}))
     return report
+
+
+@mode('stored-counts')
+def stored_counts(walk, fixture):
+    queries = []
+
+    class Store:
+        def query(self, query):
+            queries.append(query)
+            return [{'count(*)': fixture.get('count', '42')}]
+
+    total = walk.stored_task_lines(Store(), 'task-fast', 'fast-a2', 0, 6000)
+    window = walk.stored_window_count(Store(), 'task-fast', 'fast-a2', 0)
+    bad = None
+    class Bad:
+        def query(self, query):
+            return [{'count(*)': 'nope'}]
+    try:
+        walk.stored_task_lines(Bad(), 'task-fast', 'fast-a2', 0, 6000)
+    except walk.WalkError as error:
+        bad = str(error)
+    print('COUNTS ' + json.dumps({'total': total, 'window': window, 'bad': bad,
+                                  'queries': queries}))
+    return walk.Report()
 
 
 @mode('readings')

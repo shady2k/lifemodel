@@ -365,24 +365,91 @@ def shared_verdict(before, after, allowance):
                       % (before or 0, after or 0, dropped, allowance)}
 
 
-def throttle_verdict(windows):
-    """Each throttled pod's input and accepted counters reconcile, per window."""
+def throttle_pod_verdict(pod, entries, stored_lines, count_in_window):
+    """One task pod's counter windows reconcile with the lines the store holds.
+
+    A pod is judged from its first to its last counter window in the
+    collector's processing time: every aligned six-second window has exactly one
+    complete input/accepted pair from one collector process, input is at least
+    accepted, and the accepted total equals the pod's stored lines. A window
+    with no counters is an idle stretch only when the pod stored no line in it.
+    The processing-time windows are never tied to the writers' write timestamps.
+    """
+    from logs_walk_support import stamp
+
+    def label(first):
+        return stamp(first) if isinstance(first, int) else 'unknown'
+
+    if not entries:
+        return {'ok': False, 'pod': pod, 'windows': 0, 'input': 0, 'accepted': 0,
+                'stored': stored_lines, 'discarded': 0,
+                'detail': '%s: no input/accepted counter windows' % pod}
     problems = []
-    rates = []
-    for entry in windows:
+    by_start = {}
+    for entry in entries:
+        by_start.setdefault(entry.get('window_start'), []).append(entry)
+    for first, group in sorted(by_start.items(), key=lambda item: (item[0] or 0)):
+        if not isinstance(first, int) or len(group) != 1:
+            problems.append('%s: window %s has %d counter pairs'
+                            % (pod, label(first), len(group)))
+    starts = set().union(*(entry.get('collector_starts') or set() for entry in entries))
+    if len(starts) != 1:
+        problems.append('%s: counter windows name %d collector processes: %s'
+                        % (pod, len(starts),
+                           ', '.join(sorted(label(value) for value in starts)) or 'none'))
+    given_total = accepted_total = 0
+    for entry in entries:
+        first = entry.get('window_start')
         given, accepted = entry.get('input'), entry.get('accepted')
-        if not isinstance(given, int) or not isinstance(accepted, int) or given < 0 or accepted < 0 or accepted > given:
-            problems.append('%s: input %s accepted %s' % (entry.get('pod'), given, accepted))
+        if entry.get('invalid') or not isinstance(given, int) or not isinstance(accepted, int):
+            problems.append('%s: window %s %s'
+                            % (pod, label(first),
+                               entry.get('problem') or 'has no complete counter pair'))
             continue
-        rates.append({'pod': entry.get('pod'), 'input': given, 'accepted': accepted,
-                      'discarded': given - accepted})
-    return {'ok': bool(rates) and not problems, 'rates': rates,
-            'detail': ('%d window(s): %s; the limit is %d events per second per pod'
-                       % (len(rates),
-                          ', '.join('%s %d/%d' % (rate['pod'], rate['input'],
-                                                  rate['accepted']) for rate in rates) or 'none',
-                          THROTTLE_EVENTS))
-            if not problems else '; '.join(problems)}
+        if accepted > given:
+            problems.append('%s: window %s has input %d below accepted %d'
+                            % (pod, label(first), given, accepted))
+            continue
+        given_total += given
+        accepted_total += accepted
+    starts_ms = [entry['window_start'] for entry in entries
+                 if isinstance(entry.get('window_start'), int)]
+    ends_ms = [entry['window_end'] for entry in entries
+               if isinstance(entry.get('window_end'), int)]
+    if not starts_ms or not ends_ms:
+        problems.append('%s: counter windows have no readable boundaries' % pod)
+    else:
+        for first in range(min(starts_ms), max(ends_ms), 6000):
+            if first in by_start:
+                continue
+            stored = count_in_window(first)
+            if stored:
+                problems.append('%s: window %s is missing but %d stored line(s) fall in it'
+                                % (pod, label(first), stored))
+    if accepted_total != stored_lines:
+        problems.append('%s: accepted total %d differs from %d stored line(s)'
+                        % (pod, accepted_total, stored_lines))
+    detail = ('%s: %d window(s), input %d, accepted %d, stored %d, discarded %d'
+              % (pod, len(entries), given_total, accepted_total, stored_lines,
+                 given_total - accepted_total))
+    if problems:
+        detail += '; ' + '; '.join(problems)
+    return {'ok': not problems, 'pod': pod, 'windows': len(entries),
+            'input': given_total, 'accepted': accepted_total,
+            'stored': stored_lines, 'discarded': given_total - accepted_total,
+            'detail': detail}
+
+
+def throttle_counter_verdict(windows, stored, count_in_window):
+    """Every task pod's own counter windows reconcile with its stored lines."""
+    pods = sorted(set(stored) | {entry['pod'] for entry in windows})
+    verdicts = {pod: throttle_pod_verdict(
+        pod, [entry for entry in windows if entry['pod'] == pod],
+        stored.get(pod, 0),
+        lambda first, pod=pod: count_in_window(pod, first)) for pod in pods}
+    return {'ok': bool(verdicts) and all(value['ok'] for value in verdicts.values()),
+            'pods': verdicts,
+            'detail': '; '.join(value['detail'] for value in verdicts.values()) or 'no pods'}
 
 
 def trusted_verdict(written, found):
@@ -416,16 +483,24 @@ def numbered(text, module, run_id):
     return [int(match.group(1)) for match in pattern.finditer(text or '')]
 
 
-def throttle_windows(records, task_pods, start_ms, end_ms):
+def throttle_windows(records, task_pods):
     """Pair collector-only records by exact pod and aligned six-second window.
 
     Store fields are strings. Task normalization never promotes these fields and
     always sets untrusted, even for a pod labelled throttle-window. Missing or
-    repeated counters stay unknown; a missing accepted sample is not zero.
+    repeated counters stay unknown; a missing accepted sample is not zero. The
+    windows are the collector's processing time, so no caller range is applied.
     """
     from logs_walk_support import parse_ms
 
     windows = {}
+
+    def entry_for(record, first, last):
+        key = (record['pod'], first, last)
+        return windows.setdefault(key, {
+            'pod': key[0], 'window_start': first, 'window_end': last,
+            'input': None, 'accepted': None, 'collector_starts': set()})
+
     for record in records or []:
         if (record.get('module') != 'throttle-window'
                 or record.get('namespace') != TASKS_NAMESPACE
@@ -435,30 +510,43 @@ def throttle_windows(records, task_pods, start_ms, end_ms):
         first, last = (parse_ms(record.get(field))
                        for field in ('window_start', 'window_end'))
         stamp = parse_ms(record.get('_time'))
-        if (first is None or last is None or stamp is None
-                or first % 6000 != 0 or last - first != 6000
-                or first >= end_ms or last <= start_ms):
+        if first is None or last is None or stamp is None:
             continue
-        raw = record.get('value')
-        key = (record['pod'], first, last)
-        entry = windows.setdefault(key, {'pod': key[0], 'window_start': first,
-                                        'window_end': last, 'input': None, 'accepted': None})
+        entry = entry_for(record, first, last)
+        if first % 6000 != 0 or last - first != 6000:
+            entry['invalid'] = True
+            entry.setdefault('problem', 'is not one aligned six-second window')
+            continue
         collector_start = parse_ms(record.get('collector_start'))
-        instances = entry.setdefault('collector_starts', set())
         if collector_start is not None:
-            instances.add(collector_start)
-        if (collector_start is None or first < collector_start
-                or kind not in ('input', 'accepted') or isinstance(raw, bool)
-                or not re.fullmatch(r'\d+', str(raw))):
+            entry['collector_starts'].add(collector_start)
+        raw = record.get('value')
+        if collector_start is None:
             entry['invalid'] = True
-            continue
-        seen = entry.setdefault('seen', {})
-        seen[kind] = seen.get(kind, 0) + 1
-        entry[kind] = int(raw) if seen[kind] == 1 else None
-    instances = set().union(*(entry['collector_starts'] for entry in windows.values()))
-    if len(instances) > 1:
-        for entry in windows.values():
+            entry.setdefault('problem', 'has no collector process start')
+        elif first < collector_start:
             entry['invalid'] = True
+            entry.setdefault('problem', 'begins before its collector process started')
+        elif kind not in ('input', 'accepted'):
+            entry['invalid'] = True
+            entry.setdefault('problem', 'has an unknown counter')
+        elif isinstance(raw, bool) or not re.fullmatch(r'\d+', str(raw)):
+            entry['invalid'] = True
+            entry.setdefault('problem', 'has a non-numeric %s value' % kind)
+        else:
+            seen = entry.setdefault('seen', {})
+            seen[kind] = seen.get(kind, 0) + 1
+            if seen[kind] > 1:
+                entry['invalid'] = True
+                entry.setdefault('problem', 'has %d %s records' % (seen[kind], kind))
+                entry[kind] = None
+            else:
+                entry[kind] = int(raw)
+    for entry in windows.values():
+        if len(entry['collector_starts']) > 1:
+            entry['invalid'] = True
+            entry.setdefault('problem', 'mixes %d collector processes'
+                             % len(entry['collector_starts']))
     return list(windows.values())
 
 
@@ -467,10 +555,43 @@ def throttle_records(store, task_pods, start_ms, end_ms):
     from logs_walk_support import stamp
 
     pods = ' OR '.join('pod:=' + json.dumps(pod) for pod in sorted(task_pods))
-    # Include the containing windows. Their timestamps can be emitted after
-    # writer overlap ends; filtering the window bounds happens during pairing.
+    # Include the containing windows. Their timestamps can be emitted after the
+    # writers finish; the pod's own first and last window bound the judgement.
     return store.query('module:"throttle-window" namespace:"lifemodel-motor" '
                        '(%s) _time:[%s, %s]' % (pods, stamp(start_ms - 6000), stamp(end_ms + 12000)))
+
+
+def exact_stamp(milliseconds):
+    """RFC 3339 with milliseconds, so the last fraction of a window is included."""
+    return '%s.%03dZ' % (time.strftime('%Y-%m-%dT%H:%M:%S',
+                                       time.gmtime(milliseconds / 1000)),
+                         milliseconds % 1000)
+
+
+def task_record_query(pod, run_id, first_ms, last_ms):
+    """The store query for one task pod's own numbered lines."""
+    return ('module:"task" namespace:"lifemodel-motor" pod:=%s _msg:%s _time:[%s, %s]'
+            % (json.dumps(pod), json.dumps(run_id), exact_stamp(first_ms),
+               exact_stamp(last_ms)))
+
+
+def stored_count(store, query):
+    """A LogSQL count the store must answer with one numeric row."""
+    rows = store.query(query + ' | stats count(*)')
+    try:
+        return int(rows[0]['count(*)'])
+    except (IndexError, KeyError, TypeError, ValueError):
+        raise WalkError('store_count_value') from None
+
+
+def stored_task_lines(store, pod, run_id, first_ms, to_ms):
+    """How many of the pod's numbered lines the store holds for its run."""
+    return stored_count(store, task_record_query(pod, run_id, first_ms, to_ms))
+
+
+def stored_window_count(store, pod, run_id, first_ms):
+    """How many of the pod's lines were written inside that six-second window."""
+    return stored_count(store, task_record_query(pod, run_id, first_ms, first_ms + 5999))
 
 
 def reading_verdict(samples):
@@ -743,6 +864,7 @@ def throttle_case(report, options, loader, cluster, store, state):
     time.sleep(seconds + 2)
     intervals = []
     written = []
+    task_info = {}
     for namespace, pod, prefix, run_id, module, first_ms in (
         (options.writer_namespace, 'walk-trusted-writer', TRUSTED_MODULE,
          state['trusted_run'], TRUSTED_MODULE, None),
@@ -781,6 +903,7 @@ def throttle_case(report, options, loader, cluster, store, state):
         if last_ms is None:
             report.not_valid('writer %s has no readable last line' % pod)
             return False
+        task_info[pod] = {'run_id': run_id, 'first_ms': first_ms}
         intervals.append((first_ms, last_ms))
     overlap = min(end for _, end in intervals) - max(start for start, _ in intervals)
     if overlap <= 0:
@@ -788,36 +911,36 @@ def throttle_case(report, options, loader, cluster, store, state):
         return False
     report.pass_('both task writers actually overlap the trusted writer',
                  '%d ms common timestamp interval' % overlap)
-    windows = []
+    task_pods = set(task_info)
+    first_bound = min(info['first_ms'] for info in task_info.values())
+    counter = None
     deadline = time.monotonic() + options.recover_bound
-    task_pods = {fast[0], large[0]}
-    overlap_start = max(start for start, _ in intervals)
-    overlap_end = min(end for _, end in intervals)
     while time.monotonic() < deadline:
-        records = throttle_records(store, task_pods, overlap_start, overlap_end)
-        windows = throttle_windows(records, task_pods, overlap_start, overlap_end)
-        expected = {(pod, first) for pod in task_pods
-                    for first in range(overlap_start // 6000 * 6000, overlap_end, 6000)}
-        observed = {(entry['pod'], entry['window_start']) for entry in windows}
-        complete = expected == observed and all(
-            not entry.get('invalid') and isinstance(entry.get('input'), int)
-            and isinstance(entry.get('accepted'), int) for entry in windows)
-        present = {entry['pod'] for entry in windows if (entry.get('input') or 0) > 0}
-        if complete and present == task_pods:
+        records = throttle_records(store, task_pods, first_bound, now_ms())
+        windows = throttle_windows(records, task_pods)
+        stored = {pod: stored_task_lines(store, pod, info['run_id'],
+                                         info['first_ms'], now_ms())
+                  for pod, info in task_info.items()}
+        counter = throttle_counter_verdict(
+            windows, stored,
+            lambda pod, first: stored_window_count(store, pod,
+                                                   task_info[pod]['run_id'], first))
+        if counter['ok']:
             break
         time.sleep(5)
-    if not windows or not complete or present != task_pods:
-        report.not_valid('unknown input/accepted throttle-window evidence for both actual '
-                         'task pods: missing, duplicate or unpaired counters in overlapping windows')
+    if counter is None or not counter['ok']:
+        report.not_valid('throttle-window counters do not reconcile for both actual task '
+                         'pods: ' + (counter['detail'] if counter else 'no counter read'))
         return False
-    verdict = throttle_verdict(windows)
-    report.check(verdict['ok'], "each throttled pod's input and accepted counters reconcile",
-                 verdict['detail'])
-    fast_windows = [entry for entry in windows if entry['pod'] == fast[0]]
-    throttled = sum(entry['accepted'] for entry in fast_windows) < sum(
-        entry['input'] for entry in fast_windows)
+    report.pass_("each throttled pod's input and accepted counters reconcile",
+                 counter['detail'])
+    fast_totals = counter['pods'][fast[0]]
+    throttled = fast_totals['accepted'] < fast_totals['input']
     report.check(throttled, 'the fast task writer actually crosses the throttle limit',
-                 'accepted must be less than input in the paired windows')
+                 '%s: accepted %d of input %d in %d window(s); the limit is %d events '
+                 'per second per pod'
+                 % (fast[0], fast_totals['accepted'], fast_totals['input'],
+                    fast_totals['windows'], THROTTLE_EVENTS))
     found = []
     deadline = time.monotonic() + options.recover_bound
     while time.monotonic() < deadline:
@@ -838,7 +961,7 @@ def throttle_case(report, options, loader, cluster, store, state):
     trusted = trusted_verdict(written, found)
     report.check(trusted['ok'], 'the trusted writer loses no line under the throttle',
                  trusted['detail'])
-    return verdict['ok'] and throttled and trusted['ok']
+    return counter['ok'] and throttled and trusted['ok']
 
 
 def restore(report, options, loader, cluster, volume, state):
