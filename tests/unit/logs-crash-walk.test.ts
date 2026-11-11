@@ -223,14 +223,11 @@ describe('the crash walk stays bounded and restores after failures', () => {
         'store-ready',
         'walk-crash-writer-2',
         'walk-crash-writer-3',
-        'namespace',
         'collector-ready',
       ]) {
         expect(cleanup.calls).toContain(step);
       }
-      expect(cleanup.calls.indexOf('namespace')).toBeGreaterThan(
-        cleanup.calls.lastIndexOf('walk-crash-writer')
-      );
+      expect(cleanup.calls.some((call) => call.includes('namespace'))).toBe(false);
       expect(cleanup.timeouts.every((timeout) => timeout > 120)).toBe(true);
       expect(run.status).toBe(exhausted ? 1 : 0);
       expect(run.lines.join('\n')).toContain('RESTORE');
@@ -340,11 +337,11 @@ describe('the crash walk stays bounded and restores after failures', () => {
       'store-ready',
       'walk-crash-writer-2',
       'walk-crash-writer-3',
-      'namespace',
       'collector-ready',
     ]) {
       expect(cleanup.calls).toContain(step);
     }
+    expect(cleanup.calls.some((call) => call.includes('namespace'))).toBe(false);
     expect(run.lines.join('\n')).toContain('RESTORE');
   });
 
@@ -384,31 +381,45 @@ describe('the crash writers stay under the untrusted throttle', () => {
     expect(atTwo.pods).toBe(2);
   });
 
-  it('fails not valid when a writer pod is above the cap and names it', () => {
-    const run = harness('pod-rate');
-    expect(run.status).toBe(1);
-    expect(jsonLine<{ ok: boolean; cap: number }>(run, 'PODRATE')).toEqual({ ok: false, cap: 400 });
-    const output = run.lines.join('\n');
-    expect(output).toContain(
-      'TEST NOT VALID writer pod(s) above the untrusted throttle cap of 400 lines/s: ' +
-        'walk-crash-writer 567 lines/s'
-    );
-    expect(output).not.toContain('walk-crash-writer-2 300 lines/s');
+  it('writes as walk-named pods in the collector\'s trusted namespace', () => {
+    const value = jsonLine<{
+      namespace: string;
+      name: string;
+      labels: Record<string, string>;
+      rate: string;
+    }>(harness('writer-namespace'), 'MANIFEST');
+    expect(value.namespace).toBe('lifemodel-logs');
+    expect(value.name).toBe('walk-crash-writer');
+    expect(value.labels).toEqual({
+      'app.kubernetes.io/name': 'walk-crash-writer',
+      'lifemodel.dev/walk': 'logs-crash',
+    });
+    expect(value.rate).toBe('1700.0');
   });
 
-  it('accepts a writer pod exactly at the cap', () => {
-    const run = harness('pod-rate', { first: 4000, second: 4000 });
-    expect(run.status).toBe(0);
-    expect(jsonLine<{ ok: boolean }>(run, 'PODRATE').ok).toBe(true);
+  it('passes only when the store marks the walk\'s records trusted', () => {
+    const ok = harness('trust-probe');
+    expect(ok.status).toBe(0);
+    expect(jsonLine<{ ok: boolean; namespace: string }>(ok, 'TRUST')).toMatchObject({
+      ok: true,
+      namespace: 'lifemodel-logs',
+    });
+    expect(ok.lines.join('\n')).toContain('the store marks the walk\'s writer records trusted');
+    const bad = harness('trust-probe', { untrusted: 2 });
+    expect(bad.status).toBe(1);
+    expect(jsonLine<{ ok: boolean }>(bad, 'TRUST').ok).toBe(false);
+    expect(bad.lines.join('\n')).toContain('2 untrusted');
   });
 
-  it('stops the real fill loop as not valid when a pod is measured above the cap', () => {
-    const run = harness('pod-rate-loop');
-    expect(run.status).toBe(1);
-    expect(jsonLine<{ ok: boolean }>(run, 'PODRATE-LOOP').ok).toBe(false);
-    const output = run.lines.join('\n');
-    expect(output).toContain('TEST NOT VALID writer pod(s) above the untrusted throttle cap');
-    expect(output).toContain('walk-crash-writer 8000 lines/s, walk-crash-writer-2 8000 lines/s');
+  it('deletes exactly the walk\'s pods in restore, never a namespace', () => {
+    const run = harness('restore-pods');
+    const value = jsonLine<{ calls: string[] }>(run, 'PODS');
+    const podDeletes = value.calls.filter((call) => call.includes('delete pod'));
+    expect(podDeletes).toHaveLength(3);
+    for (const name of ['walk-crash-writer ', 'walk-crash-writer-2 ', 'walk-crash-trust ']) {
+      expect(podDeletes.some((call) => call.includes('delete pod ' + name))).toBe(true);
+    }
+    expect(value.calls.some((call) => call.includes('delete namespace'))).toBe(false);
   });
 });
 
