@@ -26,10 +26,27 @@ What it changes and restores
 The walk uses k3s kubectl for cluster changes, and node crictl for the host pid
 and memory. It connects to boot-lifemodel.local by default; --password-file
 names the credential file, whose contents are never printed.
+Flux owns the store Deployment and re-applies it every ten minutes, which puts
+`replicas: 1` back and ends the outage the walk needs. Before scaling the store
+to zero the walk therefore finds the owning Kustomization from the Deployment's
+`kustomize.toolkit.fluxcd.io/name` and `kustomize.toolkit.fluxcd.io/namespace`
+labels (the --kustomization/--flux-namespace defaults only when the labels are
+absent), patches `spec.suspend: true`, verifies it, and says so. While the store
+must stay down every reading checks that the Deployment still has 0 replicas and
+no store pod exists: one that came back is TEST NOT VALID naming who restored it
+(the Deployment's managedFields and events), never a pass. RESTORE resumes the
+Kustomization (only if the walk suspended it), verifies `spec.suspend` is false
+or absent, forces a reconcile with `reconcile.fluxcd.io/requestedAt`, and waits
+for Ready=True on the applied revision; a resume that fails is a RESTORE FAIL,
+because a Kustomization left suspended stops all later deploys.
 The workload is paced and bounded by node load, fill/recovery deadlines and the
-whole-walk deadline. A watchdog interrupts blocked work at excess load. Finally,
-retry deletion of writers, restore the original store replicas/readiness, delete
-the owned namespace and wait for the collector, even on exceptions/timeouts.
+whole-walk deadline. The saturation clock is derived from the achieved source
+rate and the writer line size when the fixed --fill-bound cannot reach the
+writable byte bound (with --fill-ceiling as the stated ceiling), and a NOTE says
+which bound is used. A watchdog interrupts blocked work at excess load. Finally,
+retry deletion of writers, restore the original store replicas/readiness and the
+Kustomization, delete the owned namespace and wait for the collector, even on
+exceptions/timeouts.
 
 What it does not cover
 ----------------------
@@ -68,6 +85,7 @@ from logs_walk_support import (  # noqa: E402
 
 WRITER_MODULE = 'walk-crash-writer'
 WRITER_LINE = re.compile(r'walk-crash (\S+) seq=(\d+)')
+WRITER_LINE_PREFIX = 'walk-crash '
 BUFFER_SIZE = 'vector_buffer_size_events'
 BUFFER_MAX = 'vector_buffer_max_size_events'
 RECEIVED = 'vector_component_received_events_total'
@@ -78,6 +96,14 @@ BUFFER_BYTES = 'vector_buffer_size_bytes'
 BUFFER_MAX_BYTES = 'vector_buffer_max_size_bytes'
 DISK_SEGMENT_RESERVATION = 128 * MIB
 DISK_FILL_FRACTION = 0.95
+FLUX_NAME_LABEL = 'kustomize.toolkit.fluxcd.io/name'
+FLUX_NAMESPACE_LABEL = 'kustomize.toolkit.fluxcd.io/namespace'
+DEFAULT_KUSTOMIZATION = 'platform-logs-store'
+DEFAULT_FLUX_NAMESPACE = 'flux-system'
+REQUESTED_AT = 'reconcile.fluxcd.io/requestedAt'
+SATURATION_CEILING = 2400
+SATURATION_HEADROOM = 1.1
+SATURATION_MARGIN_SECONDS = 60
 WRITER_SCRIPT = (
     "const run=process.argv[1],seconds=Number(process.argv[2]),base=Number(process.argv[3]);"
     "const rate=Number(process.argv[4]),batch=Math.min(20,Math.max(1,Math.floor(rate/50)));"
@@ -272,6 +298,64 @@ SOURCE_PICKUP_BOUND = 120
 SOURCE_PICKUP_SECONDS = 3
 
 
+def writer_line_bytes(run_id, seconds, options):
+    """One numbered writer line with its newline, at this run's largest sequence."""
+    largest = (int(options.writer_rate / options.writer_pods * seconds)
+               + (options.writer_pods - 1) * 50_000_000 + 1)
+    return (len(WRITER_LINE_PREFIX) + len(run_id) + len(' seq=') + len(str(largest))
+            + len(' t=') + len(str(now_ms())) + 1)
+
+
+def saturation_plan(rate, line_bytes, writable_max, configured_bound,
+                    ceiling=SATURATION_CEILING):
+    """Seconds the writable byte bound needs at a measured rate, and the clock used.
+
+    The writer's own line is what the collector buffers, so the byte rate is
+    lines/s times the line's length. When the configured bound cannot cover the
+    arithmetic, the bound is derived from it with headroom and a stated ceiling;
+    the walk never waits past the ceiling either.
+    """
+    rate = max(0.0, float(rate or 0.0))
+    needed = None
+    if rate > 0 and line_bytes > 0 and isinstance(writable_max, int) and writable_max > 0:
+        needed = writable_max / (rate * line_bytes)
+    derived = None if needed is None else int(math.ceil(needed * SATURATION_HEADROOM)) \
+        + SATURATION_MARGIN_SECONDS
+    if derived is None:
+        bound = min(configured_bound, ceiling)
+    elif needed * SATURATION_HEADROOM + SATURATION_MARGIN_SECONDS <= configured_bound:
+        bound = min(configured_bound, ceiling)
+    else:
+        bound = min(derived, ceiling)
+    return {'rate': rate, 'lineBytes': line_bytes, 'writableMax': writable_max,
+            'neededSeconds': needed, 'derivedBound': derived, 'bound': bound,
+            'ceiling': ceiling, 'fromConfigured': derived is None or bound == configured_bound,
+            'reachable': needed is not None and needed <= bound}
+
+
+def saturation_note(plan):
+    """The arithmetic in one NOTE: could the writable bound fill within the clock?"""
+    if plan['neededSeconds'] is None:
+        return ('saturation arithmetic unavailable (rate %.0f lines/s, %d bytes per line, '
+                'writable bound %s); the %d s clock is used'
+                % (plan['rate'], plan['lineBytes'], plan['writableMax'], plan['bound']))
+    if plan['neededSeconds'] <= plan['ceiling']:
+        reach = ('can be reached: %.0f s at %.0f lines/s and %d bytes per line, within the '
+                 '%d s ceiling' % (plan['neededSeconds'], plan['rate'], plan['lineBytes'],
+                                   plan['ceiling']))
+    else:
+        reach = ('cannot be reached within the %d s ceiling: %.0f s at %.0f lines/s and %d bytes '
+                 'per line' % (plan['ceiling'], plan['neededSeconds'], plan['rate'],
+                               plan['lineBytes']))
+    used = ('the configured %d s bound already covers it' % plan['bound']
+            if plan['fromConfigured']
+            else ('the fixed bound does not, so the walk derives %d s from the rate and line '
+                  'size (headroom %.1f, margin %d s, ceiling %d s)'
+                  % (plan['bound'], SATURATION_HEADROOM, SATURATION_MARGIN_SECONDS,
+                     plan['ceiling'])))
+    return ('the %d-byte writable max %s; %s' % (plan['writableMax'] or 0, reach, used))
+
+
 def wait_source_pickup(report, options, cluster, baseline, sample_memory):
     """Allow the default 60 s file glob scan without charging the fill clock."""
     target = math.ceil(options.writer_rate * SOURCE_PICKUP_SECONDS)
@@ -287,6 +371,8 @@ def wait_source_pickup(report, options, cluster, baseline, sample_memory):
     while True:
         if not safe_load(report, options) or not sample_memory():
             return None
+        if not require_store_down(report, options, cluster):
+            return None
         values, reason = read_metrics(options, cluster)
         current = source_rate_sample(values, reason, options)
         received = current['received']
@@ -299,9 +385,10 @@ def wait_source_pickup(report, options, cluster, baseline, sample_memory):
             report.not_valid('source pickup counter reset; cannot establish discovery')
             return None
         if received is not None and received - first >= target:
-            report.note('source picked up writer load after %.0f s; starting rate and saturation clocks'
-                        % elapsed)
-            return current
+            rate = (received - first) / max(0.001, elapsed)
+            report.note('source picked up writer load after %.0f s at %.0f lines/s; starting rate '
+                        'and saturation clocks' % (elapsed, rate))
+            return {'sample': current, 'rate': rate, 'elapsed': elapsed}
         if time.monotonic() >= deadline:
             report.not_valid('source pickup did not reach %d lines within %d s; exporter=%s'
                              % (target, SOURCE_PICKUP_BOUND, current['status']))
@@ -358,6 +445,219 @@ def collectors_metrics_gap(reason):
                 'not guessed.' % reason)
     return ("the exporter answered but the sink's buffer is not in it: %s; the buffer state is "
             'not guessed' % (reason or 'no reason'))
+
+def deployment_body(cluster, options):
+    return cluster.json(['-n', options.namespace, 'get', 'deployment', options.store,
+                         '-o', 'json']) or {}
+
+
+def flux_owner(cluster, options):
+    """The Flux Kustomization that owns the store Deployment: namespace, name, why.
+
+    The Deployment's `kustomize.toolkit.fluxcd.io/name` and `.../namespace`
+    labels are the ownership record Flux writes; the arguments are only defaults
+    for a Deployment that carries neither, and the caller says which one it used.
+    """
+    labels = (deployment_body(cluster, options).get('metadata') or {}).get('labels') or {}
+    name = labels.get(FLUX_NAME_LABEL)
+    namespace = labels.get(FLUX_NAMESPACE_LABEL)
+    if isinstance(name, str) and name:
+        return {'namespace': (namespace if isinstance(namespace, str) and namespace
+                              else options.flux_namespace),
+                'name': name,
+                'source': 'the store Deployment\'s %s label' % FLUX_NAME_LABEL}
+    return {'namespace': options.flux_namespace, 'name': options.kustomization,
+            'source': 'the --kustomization/--flux-namespace defaults; the store Deployment '
+                      'carries no %s label' % FLUX_NAME_LABEL}
+
+
+def kustomization_json(cluster, owner):
+    return cluster.json(['-n', owner['namespace'], 'get', 'kustomization',
+                         owner['name'], '-o', 'json'])
+
+
+def kustomization_state(cluster, owner):
+    """The Kustomization's suspend flag and applied revision, or `known` False."""
+    body = kustomization_json(cluster, owner)
+    if body is None:
+        return {'known': False, 'suspend': None, 'ready': None, 'appliedRevision': None,
+                'generation': None, 'observedGeneration': None, 'handledAt': None}
+    spec = body.get('spec') or {}
+    status = body.get('status') or {}
+    metadata = body.get('metadata') or {}
+    suspend = spec.get('suspend') if isinstance(spec.get('suspend'), bool) else None
+    ready = next((condition.get('status') for condition in status.get('conditions') or []
+                  if condition.get('type') == 'Ready'), None)
+    return {'known': True, 'suspend': suspend, 'ready': ready,
+            'appliedRevision': status.get('lastAppliedRevision'),
+            'generation': metadata.get('generation'),
+            'observedGeneration': status.get('observedGeneration'),
+            'handledAt': status.get('lastHandledReconcileAt')}
+
+
+def set_kustomization_suspend(cluster, owner, suspend):
+    return cluster.run([
+        '-n', owner['namespace'], 'patch', 'kustomization', owner['name'],
+        '--type=merge', '-p', json.dumps({'spec': {'suspend': suspend}}),
+    ]).returncode == 0
+
+
+def annotate_kustomization(cluster, owner, stamp):
+    return cluster.run([
+        '-n', owner['namespace'], 'annotate', 'kustomization', owner['name'],
+        REQUESTED_AT + '=' + stamp, '--overwrite',
+    ]).returncode == 0
+
+
+def owner_label(owner):
+    return '%s/%s' % (owner['namespace'], owner['name'])
+
+
+def suspend_store_owner(report, options, cluster, state):
+    """Hold the store's Flux owner still, before anything scales the store down.
+
+    A suspended Kustomization applies nothing, so the store stays at the
+    replicas the walk sets instead of being re-applied at its ten-minute
+    interval. The suspension is recorded for RESTORE only when the walk made it.
+    """
+    owner = flux_owner(cluster, options)
+    state['kustomization'] = owner
+    report.note('the store Deployment\'s Flux owner is %s, read from %s'
+                % (owner_label(owner), owner['source']))
+    before = kustomization_state(cluster, owner)
+    if not before['known']:
+        report.fail('the Flux Kustomization that owns the store is readable', owner_label(owner))
+        report.not_valid('the store cannot be held scaled to zero: no Kustomization to suspend')
+        return False
+    if before['suspend'] is True:
+        state['flux_suspended'] = False
+        report.pass_('the Flux Kustomization that owns the store is already suspended',
+                     '%s spec.suspend=true before the walk; the walk will not resume it'
+                     % owner_label(owner))
+        return True
+    if not set_kustomization_suspend(cluster, owner, True):
+        report.fail('the Flux Kustomization that owns the store is suspended',
+                    '%s spec.suspend=true was refused' % owner_label(owner))
+        report.not_valid('the store cannot be held scaled to zero: the next reconcile would '
+                         'scale it back and no outage would be measured')
+        return False
+    state['flux_suspended'] = True
+
+    def suspended():
+        return kustomization_state(cluster, owner)['suspend'] is True
+
+    bound = min(60, options.recover_bound)
+    if not wait_until(time.monotonic() + bound, 3, suspended):
+        current = kustomization_state(cluster, owner)
+        report.fail('the Flux Kustomization that owns the store is suspended',
+                    '%s spec.suspend=%s after the patch'
+                    % (owner_label(owner),
+                       'unknown' if current['suspend'] is None
+                       else str(current['suspend']).lower()))
+        report.not_valid('the store cannot be held scaled to zero: the suspension is not verified')
+        return False
+    report.pass_('the Flux Kustomization that owns the store is suspended',
+                 '%s spec.suspend=true; RESTORE resumes it and reconciles it'
+                 % owner_label(owner))
+    return True
+
+
+def resumed_kustomization(cluster, owner, stamp):
+    """Resume, force a reconcile, and require Ready=True on the applied revision."""
+    current = kustomization_state(cluster, owner)
+    if not current['known']:
+        return False
+    if current['suspend'] is True:
+        if not set_kustomization_suspend(cluster, owner, False):
+            raise WalkError('kustomization_resume_refused')
+        current = kustomization_state(cluster, owner)
+        if not current['known'] or current['suspend'] is True:
+            return False
+    if not annotate_kustomization(cluster, owner, stamp):
+        return False
+    current = kustomization_state(cluster, owner)
+    if not current['known'] or current['suspend'] is True:
+        return False
+    if current['ready'] != 'True' or not current['appliedRevision']:
+        return False
+    if current['handledAt'] != stamp:
+        return False
+    try:
+        return int(current['observedGeneration'] or 0) >= int(current['generation'] or 0)
+    except (TypeError, ValueError):
+        return False
+
+
+def store_replica_managers(cluster, options):
+    """The field managers whose managedFields write `spec.replicas`."""
+    body = deployment_body(cluster, options)
+    managers = []
+    for entry in (body.get('metadata') or {}).get('managedFields') or []:
+        if not isinstance(entry, dict) or entry.get('subresource'):
+            continue
+        if 'replicas' not in json.dumps(entry.get('fieldsV1') or {}):
+            continue
+        manager = entry.get('manager')
+        if isinstance(manager, str) and manager not in managers:
+            managers.append(manager)
+    return managers
+
+
+def store_restorer(cluster, options):
+    """Who put the store back: replica field managers and recent Deployment events."""
+    managers = store_replica_managers(cluster, options)
+    events = []
+    result = cluster.run(['-n', options.namespace, 'get', 'events',
+                          '--field-selector',
+                          'involvedObject.kind=Deployment,involvedObject.name=' + options.store,
+                          '--sort-by=.metadata.creationTimestamp', '-o', 'json'])
+    try:
+        items = json.loads(result.stdout).get('items', []) if result.returncode == 0 else []
+    except ValueError:
+        items = []
+    for event in items[-3:]:
+        events.append('reason=%s message=%s' % (
+            diagnostic_tail(event.get('reason')), diagnostic_tail(event.get('message'))))
+    return {'managers': managers, 'events': events}
+
+
+def store_down_state(cluster, options):
+    """Whether the store is down now, and the reading that says so."""
+    body = cluster.json(['-n', options.namespace, 'get', 'deployment', options.store,
+                         '-o', 'json'])
+    if body is None:
+        return {'known': False, 'down': False, 'detail': 'the store Deployment could not be read'}
+    replicas = (body.get('spec') or {}).get('replicas')
+    status = int((body.get('status') or {}).get('replicas') or 0)
+    pods = [((pod.get('metadata') or {}).get('name') or '-')
+            for pod in cluster.pods(options.namespace,
+                                    'app.kubernetes.io/name=' + options.store)]
+    return {'known': True,
+            'down': replicas == 0 and status == 0 and not pods,
+            'detail': 'spec.replicas=%s status.replicas=%d pod(s)=%s'
+                      % (replicas, status, ', '.join(pods) or 'none')}
+
+
+def require_store_down(report, options, cluster):
+    """Every reading during the outage: the store is still down, or say who came back.
+
+    A store that Flux scaled back to one ends the outage the case needs: the
+    sink drains and the crash measures nothing. That is TEST NOT VALID, with the
+    Deployment's field managers and events named, never a pass and never a wait.
+    """
+    state = store_down_state(cluster, options)
+    if state['down']:
+        return True
+    restorer = store_restorer(cluster, options)
+    report.not_valid(
+        'the store came back while it had to stay down: %s; the outage never lasted, so '
+        'nothing measured against it is valid. Put back by %s%s'
+        % (state['detail'],
+           ', '.join(restorer['managers']) or 'no field manager names spec.replicas',
+           ('; latest Deployment event ' + '; '.join(restorer['events']))
+           if restorer['events'] else ''))
+    return False
+
 
 def store_replicas(cluster, options):
     body = cluster.json(['-n', options.namespace, 'get', 'deployment', options.store,
@@ -458,7 +758,8 @@ def diagnostic_tail(text):
                   'failedscheduling failedcreate failedpull failed restricted started scheduled '
                   'pulled pulling backoff successfulcreate failedmount failedattachvolume '
                   'node executable missing logs unavailable no such file or directory '
-                  'permission denied exec executable found in path unknown normal warning').split())
+                  'permission denied exec executable found in path unknown normal warning '
+                  'scalingreplicaset scaled up down replica set to').split())
     words = tail(text, 500).split()
     return ' '.join(word if word.strip('.,:;()"').lower() in public else '[redacted]'
                     for word in words) or '-'
@@ -746,7 +1047,8 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
     if not image:
         report.not_valid('the evictor CronJob names no Node image: the writer cannot be created')
         return False
-    seconds = options.fill_bound + options.saturated_seconds + 120 + SOURCE_PICKUP_BOUND
+    seconds = (max(options.fill_bound, options.fill_ceiling) + options.saturated_seconds
+               + 120 + SOURCE_PICKUP_BOUND)
     applied = cluster.apply(writer_manifest(image, options, run_id, seconds))
     for index in range(2, (options.writer_pods or 1) + 1):
         if cluster.apply(writer_manifest(image, options, run_id, seconds,
@@ -780,17 +1082,27 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                     report.not_valid('collector restarted during source pickup')
                     return False
                 return sample_memory()
-            source_before = wait_source_pickup(report, options, cluster,
-                                               source_rate_sample(metrics, reason, options, before_writers=True),
-                                               pickup_safety)
-            if source_before is None:
+            pickup = wait_source_pickup(report, options, cluster,
+                                        source_rate_sample(metrics, reason, options,
+                                                           before_writers=True),
+                                        pickup_safety)
+            if pickup is None:
                 return False
-            fill_deadline = time.monotonic() + options.fill_bound
+            source_before = pickup['sample']
+            initial = buffer_state(metrics) if metrics is not None else {}
+            plan = saturation_plan(pickup.get('rate') or options.writer_rate,
+                                   writer_line_bytes(run_id, seconds, options),
+                                   initial.get('writable_max'),
+                                   options.fill_bound, options.fill_ceiling)
+            report.note(saturation_note(plan))
+            fill_deadline = time.monotonic() + plan['bound']
             last_memory = time.monotonic()
             emitted_before = emitted_count(cluster, options, run_id)
             started_fill = time.monotonic()
             while True:
                 if not safe_load(report, options):
+                    return False
+                if not require_store_down(report, options, cluster):
                     return False
                 metrics, reason = read_metrics(options, cluster)
                 elapsed = max(1.0, time.monotonic() - started_fill)
@@ -831,10 +1143,10 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                         break
                 if time.monotonic() >= fill_deadline:
                     report.not_valid(
-                        'the sink buffer never reached its maximum within %d s at this write '
-                        'rate: the last reading was %s (%s); saturation is never inferred '
-                        'from writer totals'
-                        % (options.fill_bound,
+                        'the sink buffer never reached its maximum within the %d s saturation '
+                        'clock at this write rate: the last reading was %s (%s); saturation is '
+                        'never inferred from writer totals'
+                        % (plan['bound'],
                            json.dumps(state_now) if state_now else 'none',
                            reason or 'the exporter answered'))
                     return False
@@ -854,6 +1166,8 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                 while time.monotonic() < until:
                     if not safe_load(report, options):
                         return False
+                    if not require_store_down(report, options, cluster):
+                        return False
                     if not sample_memory():
                         return False
                     if collector_restarts(cluster, options) != restarts_before:
@@ -865,6 +1179,8 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
             deadline = time.monotonic() + 60
             while len(writer_lines(cluster, options, run_id)) < options.unsaturated_lines:
                 if not safe_load(report, options):
+                    return False
+                if not require_store_down(report, options, cluster):
                     return False
                 if time.monotonic() >= deadline:
                     break
@@ -896,6 +1212,8 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                 lambda: require_safe_load(report, options)
                 and collector_restarts(cluster, options) > restarts_at_kill):
             report.not_valid('no actual collector restart observed while the store stayed down')
+            return False
+        if store_down_restart and not require_store_down(report, options, cluster):
             return False
         if not recover_after_crash(report, options, cluster, state, store_down_restart):
             return False
@@ -958,6 +1276,8 @@ def recover_after_crash(report, options, cluster, state, store_down_restart=Fals
     if store_down_restart:
         if not wait_until(time.monotonic() + options.recover_bound, 3, collector_ready):
             report.not_valid('collector did not restart while store remained down')
+            return False
+        if not require_store_down(report, options, cluster):
             return False
         report.pass_('collector restarted before restoring the unavailable store')
     if not set_replicas(cluster, options, state['replicas']):
@@ -1027,17 +1347,34 @@ def free_port():
 
 
 def wait_store_down(report, options, cluster):
+    """Wait for 0 replicas and no pod; a store that came back is TEST NOT VALID."""
     def stopped():
         require_safe_load(report, options)
-        body = cluster.json(['-n', options.namespace, 'get', 'deployment', options.store,
-                             '-o', 'json'])
-        if body is None:
-            return False
-        return (int((body.get('spec') or {}).get('replicas', -1)) == 0
-                and int((body.get('status') or {}).get('replicas') or 0) == 0
-                and not cluster.pods(options.namespace, 'app.kubernetes.io/name=' + options.store))
-    return report.check(wait_until(time.monotonic() + options.recover_bound, 3, stopped),
-                        'the store has no running or terminating pods')
+        return store_down_state(cluster, options)['down']
+    if wait_until(time.monotonic() + options.recover_bound, 3, stopped):
+        report.pass_('the store has no running or terminating pods')
+        return True
+    return require_store_down(report, options, cluster)
+
+
+def stop_store(report, options, cluster, state):
+    """Hold the owning Kustomization still, scale the store to zero, and verify it.
+
+    The suspension comes first: a reconcile between the scale-down and the
+    suspension would scale the store straight back, and the outage the walk
+    needs would never begin.
+    """
+    state['replicas'] = store_replicas(cluster, options)
+    report.note('the store runs %d replica(s) before the crash' % state['replicas'])
+    if not suspend_store_owner(report, options, cluster, state):
+        return False
+    if not set_replicas(cluster, options, 0):
+        report.not_valid('the store could not be scaled to zero: the sink never fills')
+        return False
+    if not wait_store_down(report, options, cluster):
+        return False
+    report.pass_('the store is scaled to zero', options.store)
+    return True
 
 
 def run(report, options, loader, cluster, state):
@@ -1051,20 +1388,8 @@ def run(report, options, loader, cluster, state):
         return False
     if not ensure_namespace(report, cluster, options, state):
         return False
-    state['replicas'] = store_replicas(cluster, options)
-    report.note('the store runs %d replica(s) before the crash' % state['replicas'])
-    if not set_replicas(cluster, options, 0):
-        report.not_valid('the store could not be scaled to zero: the sink never fills')
+    if not stop_store(report, options, cluster, state):
         return False
-    if not wait_until(time.monotonic() + 120, 3,
-                      lambda: cluster.json(['-n', options.namespace, 'get', 'deployment',
-                                            options.store, '-o', 'json']) is not None
-                      and int(((cluster.json(['-n', options.namespace, 'get', 'deployment',
-                                              options.store, '-o', 'json']) or {})
-                               .get('status') or {}).get('replicas') or 0) == 0):
-        report.not_valid('the store did not scale to zero')
-        return False
-    report.pass_('the store is scaled to zero', options.store)
     saturated_ok = crash_case(report, options, loader, cluster, state, True)
     if saturated_ok:
         # Separately restart while the store remains unavailable, then recover it.
@@ -1124,14 +1449,45 @@ def restore(report, options, loader, cluster, state):
              '--replicas=%d' % state['replicas']]), bound) and restored
         restored = restore_step(report, 'store Ready', lambda: store_ready(cluster, options),
                                 bound) and restored
+    resumed = None
+    if state.get('flux_suspended'):
+        owner = state.get('kustomization') or flux_owner(cluster, options)
+        stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        resumed = restore_step(
+            report, 'resume the Flux Kustomization %s and wait for Ready=True on the applied '
+                    'revision' % owner_label(owner),
+            lambda: resumed_kustomization(cluster, owner, stamp), bound)
+        if resumed:
+            final = kustomization_state(cluster, owner)
+            report.pass_('the Flux Kustomization that owns the store is resumed and reconciled',
+                         '%s spec.suspend=%s Ready=%s revision=%s'
+                         % (owner_label(owner),
+                            'absent' if final['suspend'] is None else str(final['suspend']).lower(),
+                            final['ready'], final['appliedRevision']))
+        else:
+            report.fail('RESTORE the Flux Kustomization %s is still suspended'
+                        % owner_label(owner),
+                        'all later platform deploys stop until it is resumed: patch '
+                        'spec.suspend=false and request a reconcile by hand')
+        restored = resumed and restored
     if state.get('created_namespace'):
         restored = restore_step(report, 'delete namespace', lambda: command(
             ['delete', 'namespace', options.writer_namespace, '--ignore-not-found',
              '--wait=true', '--timeout=170s']), bound) and restored
     restored = restore_step(report, 'collector Running',
                             lambda: collector_running(cluster, options), bound) and restored
-    print('RESTORE complete=%s store replicas=%s; writer cleanup and readiness checked'
-          % (str(restored).lower(), state.get('replicas')))
+    owner = state.get('kustomization')
+    if owner and resumed is True:
+        flux_line = ', Flux Kustomization %s resumed and reconciled' % owner_label(owner)
+    elif owner and resumed is False:
+        flux_line = (', Flux Kustomization %s NOT RESUMED: resume it by hand' %
+                     owner_label(owner))
+    elif owner:
+        flux_line = ', Flux Kustomization %s left as it was found' % owner_label(owner)
+    else:
+        flux_line = ''
+    print('RESTORE complete=%s store replicas=%s%s; writer cleanup and readiness checked'
+          % (str(restored).lower(), state.get('replicas'), flux_line))
 
 
 def main(argv=None):
@@ -1143,6 +1499,7 @@ def main(argv=None):
     parser.add_argument('--metrics-port', type=int, default=9598)
     parser.add_argument('--crictl', default='k3s crictl')
     parser.add_argument('--fill-bound', type=int, default=600)
+    parser.add_argument('--fill-ceiling', type=int, default=SATURATION_CEILING)
     parser.add_argument('--recover-bound', type=int, default=300)
     parser.add_argument('--writer-pods', type=int, default=3)
     parser.add_argument('--writer-rate', type=float, default=1700)
@@ -1152,13 +1509,17 @@ def main(argv=None):
     parser.add_argument('--saturated-seconds', type=int, default=15)
     parser.add_argument('--unsaturated-lines', type=int, default=5000)
     parser.add_argument('--settle-seconds', type=int, default=60)
+    parser.add_argument('--kustomization', default=DEFAULT_KUSTOMIZATION)
+    parser.add_argument('--flux-namespace', default=DEFAULT_FLUX_NAMESPACE)
     options = parser.parse_args(argv)
     if (options.writer_pods < 1 or not 0 < options.writer_rate <= 1700
             or (options.max_load is not None and
                 (not math.isfinite(options.max_load) or options.max_load <= 0))
-            or options.restore_bound < 180):
+            or options.restore_bound < 180
+            or options.fill_bound < 60 or options.fill_ceiling < 60):
         parser.error('require writer-pods >= 1, 0 < writer-rate <= 1700, '
-                     'finite max-load > 0 and restore-bound >= 180')
+                     'finite max-load > 0, restore-bound >= 180, fill-bound >= 60 '
+                     'and fill-ceiling >= 60')
 
     report = Report()
     try:
@@ -1176,7 +1537,8 @@ def main(argv=None):
     report.note('node load baseline %.2f; CPUs %d; load bound %.2f'
                 % (baseline, cpus, options.max_load))
     cluster = Cluster(options.kubectl)
-    state = {'created_namespace': False, 'replicas': None, 'run_id': None}
+    state = {'created_namespace': False, 'replicas': None, 'run_id': None,
+             'kustomization': None, 'flux_suspended': False}
     loader = None
     ran = False
 

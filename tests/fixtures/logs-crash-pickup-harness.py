@@ -8,7 +8,8 @@ walk = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(walk)
 mode = sys.argv[2]
 options = SimpleNamespace(writer_namespace='walk', writer_pods=3, writer_rate=1700,
-    fill_bound=4, saturated_seconds=0, memory_limit_bytes=300 * walk.MIB, restore_bound=180)
+    fill_bound=4, fill_ceiling=2400, saturated_seconds=0,
+    memory_limit_bytes=300 * walk.MIB, restore_bound=180)
 
 
 def source_metrics(value):
@@ -25,6 +26,7 @@ clock = [0]
 walk.time.monotonic = lambda: clock[0]
 walk.time.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
 walk.safe_load = lambda *_args: True
+walk.require_store_down = lambda *_args: True
 calls = []
 def read(*args):
     calls.append(clock[0])
@@ -57,5 +59,6 @@ if mode == 'integration':
     result = walk.crash_case(walk.Report(), options, None, cluster,
                             {'writer_image': 'offline-only'}, True)
 else:
-    result = walk.wait_source_pickup(walk.Report(), options, None, baseline, lambda: True)
+    pickup = walk.wait_source_pickup(walk.Report(), options, None, baseline, lambda: True)
+    result = pickup['sample'] if pickup is not None else None
 print('OBSERVED ' + json.dumps({'result': result, 'seconds': clock[0], 'calls': len(calls)}))

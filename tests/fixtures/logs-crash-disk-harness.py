@@ -37,6 +37,7 @@ elif mode == 'recovery':
     walk.store_ready = lambda *args: (events.append('store-ready') or True)
     walk.set_replicas = lambda *args: (events.append('store-up') or True)
     walk.wait_until = lambda deadline, interval, predicate: predicate()
+    walk.require_store_down = lambda *args: True
     options = types.SimpleNamespace(recover_bound=3)
     ok = walk.recover_after_crash(walk.Report(), options, None, {'replicas': 1},
                                   store_down_restart=True)
@@ -49,6 +50,7 @@ elif mode == 'run-order':
     walk.wait_store_down = lambda *args: True
     walk.store_replicas = lambda *args: 1
     walk.set_replicas = lambda *args: True
+    walk.stop_store = lambda *args: True
     walk.wait_until = lambda *args: True
     walk.time.sleep = lambda *args: None
     def case(report, options, loader, cluster, state, saturated_case, store_down_restart=False):
@@ -96,10 +98,11 @@ elif mode == 'case-order':
         def run(self, args):
             events.append('kill')
             return types.SimpleNamespace(returncode=0)
+    walk.require_store_down = lambda *args: True
     options = types.SimpleNamespace(writer_namespace='walk', writer_pods=2,
-        writer_rate=1700, fill_bound=1, saturated_seconds=0, unsaturated_lines=1,
-        memory_limit_bytes=300 * walk.MIB, recover_bound=1, settle_seconds=0,
-        restore_bound=180)
+        writer_rate=1700, fill_bound=1, fill_ceiling=2400, saturated_seconds=0,
+        unsaturated_lines=1, memory_limit_bytes=300 * walk.MIB, recover_bound=1,
+        settle_seconds=0, restore_bound=180)
     report = walk.Report()
     cluster = Cluster()
     walk.node_run = cluster.run
